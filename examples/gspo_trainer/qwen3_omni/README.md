@@ -1,6 +1,6 @@
 # Qwen3-Omni Thinker GSPO recipes
 
-Last updated: 09/29/2026
+Last updated: 10/09/2026
 
 This directory contains both FSDP2 and Megatron recipes. For non-Megatron
 setup, data preparation and training instructions, see the
@@ -19,6 +19,7 @@ defaults and accept CLI overrides.
 | NExT-QA full-parameter | FSDP2 / NPU | [NExT-QA NPU](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_npu_nextqa_v1.sh) |
 | AudioMCQ full-parameter, separate-async | Megatron / GPU | [AudioMCQ](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/qwen3_omni/run_qwen3_omni_megatron_audiomcq_separate_async.sh) |
 | AVQA image+audio full-parameter, separate-async | Megatron / GPU | [AVQA](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/qwen3_omni/run_qwen3_omni_megatron_avqa_separate_async.sh) |
+| Original AVQA video+audio full-parameter, separate-async | Megatron / GPU | [AVQA video](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/qwen3_omni/run_qwen3_omni_megatron_avqa_video_separate_async.sh) |
 
 The following sections describe the **Megatron AudioMCQ** and **AVQA** recipes,
 their dependency prerequisites and validation limits. For model-adapter development, see the
@@ -285,3 +286,68 @@ python -m pytest -q tests/utils/test_avqa_data_process_on_cpu.py \
   tests/utils/test_avqa_strict_on_cpu.py \
   tests/trainer/omni/test_avqa_megatron_config_on_cpu.py
 ```
+
+## Original AVQA video and soundtrack with Megatron
+
+The experimental [GPU video launcher](run_qwen3_omni_megatron_avqa_video_separate_async.sh)
+composes the shared `omni_megatron_trainer.yaml` directly, without a Geo3K shell
+dependency. It reuses the merged `NextQARLHFDataset` video/soundtrack loader,
+`Qwen3OmniVideoProcessor` and choice reward. The loader's public name is NExT-QA;
+its input contract is a video column and option-labelled prompt, also used here.
+The adapter forwards `video_second_per_grid` for temporal M-RoPE and rejects
+video grids with a missing sampled clock. Separate soundtrack items use
+`use_audio_in_video=false`; interleaved audio-in-video normalization is separate.
+
+Use the [original AVQA annotations and MP4 clips](https://github.com/AlyssaYoung/AVQA).
+AVQA-R1-6K supplies image/audio pairs and cannot substitute for these videos.
+Preserve the official train/validation splits and clip names. The converter
+expects `<video_name>.mp4` under `video_root`; every clip must have a decodable
+audio stream. FFmpeg must be on every Ray worker's PATH for soundtrack
+extraction. Video decoding also needs a supported native reader (TorchCodec
+compatible with PyTorch and its FFmpeg shared libraries, or Decord); the
+FFmpeg executable alone does not establish that video decoding works. Test
+both frames and audio through the actual dataset before scheduling RL.
+Conversion validates
+annotation identities, four choices, zero-based answers, media paths and
+kept/dropped counts; actual video/soundtrack decoding occurs in the loader.
+The manifest records annotation SHA256 hashes and source video-name overlap.
+Duplicate question IDs are rejected within and across splits before media
+filtering. Shared clip names are reported while retaining the official splits;
+this is not a clip-disjoint repartition. Duplicate answer options are dropped
+with an explicit reason. Inspect the manifest before comparing validation runs.
+
+```bash
+python examples/gspo_trainer/data_process/avqa_video.py \
+  --train_json /data/AVQA/train_qa.json \
+  --validation_json /data/AVQA/val_qa.json \
+  --video_root /data/AVQA/videos --output_dir /data/avqa-video-prepared
+MODEL_PATH=/models/Qwen3-Omni-30B-A3B-Instruct \
+TRAIN_FILE=/data/avqa-video-prepared/train.parquet \
+VAL_FILE=/data/avqa-video-prepared/validation.parquet \
+OUTPUT_DIR=/persistent/avqa-video \
+bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_megatron_avqa_video_separate_async.sh
+```
+
+Default topology is eight GPUs: four TP4/EP4 actor GPUs plus four TP4 rollout GPUs.
+`ROLLOUT_GPUS=2 ROLLOUT_TP=2 NUM_GPUS=6` selects six GPUs. An explicit
+`NUM_GPUS` must match the combined actor and rollout pools. Towers stay frozen. GSPO uses
+four prompts with four samples, 8192/1024 token limits, 20 updates, full
+validation every 10 updates and no checkpoints. Check these length limits
+against actual clips before scheduling GPU training. The shared Megatron
+dependency prerequisites above apply.
+
+The rollout context and default prefill token budget are both 9216 tokens;
+the recipe does not depend on chunked prefill to admit its maximum prompt.
+CLI overrides remain last, including shorter test horizons and resource settings.
+
+Frontend multimodal caching is disabled with the native `mm_processor_cache_gb=0`
+option. The tested Omni runtime clears the receiver cache at sleep/weight-sync
+boundaries; keeping frontend entries can cause hash-only media requests to miss
+their receiver data. The video recipe resends media across these boundaries.
+
+CPU checks cover annotations, clock transport, missing-clock rejection,
+tiny-model forward/gradient parity and six/eight-GPU configuration composition.
+They do not establish a real-video optimizer update or quality gain. Before GPU
+acceptance, compare actor/rollout prompt IDs, sampled video clock, gradients,
+weight synchronization and official reward on real clips. Image/audio training
+results are not video acceptance evidence.

@@ -1,0 +1,154 @@
+#!/usr/bin/env bash
+# Thinker language-model RL on original AVQA video and a separate soundtrack.
+# Default: four actor GPUs and four TP4 rollout GPUs; towers stay frozen.
+set -euo pipefail
+
+REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
+: "${MODEL_PATH:?Set MODEL_PATH to a Qwen3-Omni checkpoint}"
+: "${TRAIN_FILE:?Set TRAIN_FILE to prepared original AVQA video train.parquet}"
+: "${VAL_FILE:?Set VAL_FILE to prepared original AVQA video validation.parquet}"
+ROLLOUT_GPUS=${ROLLOUT_GPUS:-4}
+ROLLOUT_TP=${ROLLOUT_TP:-4}
+for value in "$ROLLOUT_GPUS" "$ROLLOUT_TP"; do
+  [[ $value =~ ^[1-9][0-9]*$ ]] || { echo "Expected a positive GPU count" >&2; exit 2; }
+done
+(( ROLLOUT_GPUS % ROLLOUT_TP == 0 )) || { echo "Rollout GPUs must be divisible by TP" >&2; exit 2; }
+NUM_GPUS=${NUM_GPUS:-$((4 + ROLLOUT_GPUS))}
+[[ $NUM_GPUS =~ ^[1-9][0-9]*$ ]] || { echo "NUM_GPUS must be a positive GPU count" >&2; exit 2; }
+(( NUM_GPUS == 4 + ROLLOUT_GPUS )) || { echo "NUM_GPUS must equal four actor GPUs plus ROLLOUT_GPUS" >&2; exit 2; }
+OUTPUT_DIR=${OUTPUT_DIR:-$(mktemp -d "${TMPDIR:-/tmp}/avqa_video-run.XXXXXX")}
+mkdir -p "${OUTPUT_DIR}"
+OUTPUT_DIR=$(cd "${OUTPUT_DIR}" && pwd)
+# Each invocation gets a separate log and resolved configuration.
+RUN_DIR=$(mktemp -d "${OUTPUT_DIR}/run.XXXXXX")
+echo "original AVQA video artifacts: ${RUN_DIR}"
+export VERL_USE_EXTERNAL_MODULES=verl_omni
+export TENSORBOARD_DIR="${RUN_DIR}/tensorboard"
+export CUDA_DEVICE_MAX_CONNECTIONS=${CUDA_DEVICE_MAX_CONNECTIONS:-1}
+export RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO=0
+export PYTHONUNBUFFERED=1
+cd "${REPO_ROOT}"
+
+args=(
+  --config-name omni_megatron_trainer
+  "actor_rollout_ref.model.path=${MODEL_PATH}"
+  "data.train_files=${TRAIN_FILE}"
+  "data.val_files=${VAL_FILE}"
+  data.custom_cls.path=pkg://verl_omni.utils.dataset.nextqa_rl_dataset
+  data.custom_cls.name=NextQARLHFDataset
+  ++data.mm_processor_kwargs.use_audio_in_video=false
+  ++data.mm_processor_kwargs.sampling_rate=16000
+  data.truncation=error
+  data.val_max_samples=-1
+  data.train_batch_size=4
+  data.max_prompt_length=8192
+  data.max_response_length=1024
+  data.filter_overlong_prompts=true
+  actor_rollout_ref.model.model_type=omni_model
+  actor_rollout_ref.model.use_remove_padding=false
+  actor_rollout_ref.actor.ppo_mini_batch_size=4
+  actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1
+  actor_rollout_ref.actor.use_dynamic_bsz=false
+  actor_rollout_ref.actor.policy_loss.loss_mode=gspo
+  actor_rollout_ref.actor.loss_agg_mode=seq-mean-token-mean
+  actor_rollout_ref.actor.clip_ratio_low=0.0003
+  actor_rollout_ref.actor.clip_ratio_high=0.0004
+  actor_rollout_ref.actor.clip_ratio_c=10.0
+  actor_rollout_ref.actor.optim.lr=1e-6
+  actor_rollout_ref.actor.optim.lr_warmup_steps=-1
+  actor_rollout_ref.actor.optim.lr_warmup_steps_ratio=0.0
+  actor_rollout_ref.actor.use_kl_loss=false
+  actor_rollout_ref.actor.kl_loss_coef=0.001
+  actor_rollout_ref.actor.kl_loss_type=low_var_kl
+  actor_rollout_ref.actor.optim.weight_decay=0.1
+  actor_rollout_ref.actor.optim.use_precision_aware_optimizer=true
+  # Offload FP32 Adam states and use precision-aware updates for the four-GPU actor.
+  '+actor_rollout_ref.actor.optim.override_optimizer_config={optimizer_cpu_offload:true,optimizer_offload_fraction:1.0,overlap_cpu_optimizer_d2h_h2d:false}'
+  actor_rollout_ref.actor.megatron.use_remove_padding=false
+  actor_rollout_ref.actor.megatron.tensor_model_parallel_size=4
+  actor_rollout_ref.actor.megatron.pipeline_model_parallel_size=1
+  actor_rollout_ref.actor.megatron.context_parallel_size=1
+  actor_rollout_ref.actor.megatron.expert_model_parallel_size=4
+  actor_rollout_ref.actor.megatron.expert_tensor_parallel_size=1
+  actor_rollout_ref.actor.megatron.param_offload=true
+  actor_rollout_ref.actor.megatron.optimizer_offload=true
+  actor_rollout_ref.actor.megatron.grad_offload=true
+  # Match the checkpoint: train/eval log-probs must not differ due to dropout.
+  +actor_rollout_ref.actor.megatron.override_transformer_config.attention_dropout=0.0
+  +actor_rollout_ref.actor.megatron.override_transformer_config.hidden_dropout=0.0
+  +actor_rollout_ref.actor.megatron.override_transformer_config.moe_router_load_balancing_type=none
+  +actor_rollout_ref.actor.megatron.override_transformer_config.moe_aux_loss_coeff=0.0
+  +actor_rollout_ref.actor.megatron.override_transformer_config.gradient_accumulation_fusion=false
+  +actor_rollout_ref.actor.megatron.override_transformer_config.freeze_language_model=false
+  +actor_rollout_ref.actor.megatron.override_transformer_config.freeze_vision_model=true
+  +actor_rollout_ref.actor.megatron.override_transformer_config.freeze_audio_model=true
+  actor_rollout_ref.actor.megatron.override_transformer_config.recompute_granularity=full
+  actor_rollout_ref.actor.megatron.override_transformer_config.recompute_method=uniform
+  actor_rollout_ref.actor.megatron.override_transformer_config.recompute_num_layers=1
+  actor_rollout_ref.ref.log_prob_use_dynamic_bsz=false
+  actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=1
+  'actor_rollout_ref.ref.megatron.override_transformer_config={gradient_accumulation_fusion:false,attention_dropout:0.0,hidden_dropout:0.0}'
+  actor_rollout_ref.rollout.n=4
+  actor_rollout_ref.rollout.temperature=1.0
+  actor_rollout_ref.rollout.top_p=1.0
+  actor_rollout_ref.rollout.val_kwargs.temperature=0
+  actor_rollout_ref.rollout.val_kwargs.n=1
+  actor_rollout_ref.rollout.nnodes=1
+  "actor_rollout_ref.rollout.n_gpus_per_node=${ROLLOUT_GPUS}"
+  "actor_rollout_ref.rollout.tensor_model_parallel_size=${ROLLOUT_TP}"
+  actor_rollout_ref.rollout.load_format=safetensors
+  actor_rollout_ref.rollout.max_model_len=9216
+  actor_rollout_ref.rollout.max_num_seqs=32
+  actor_rollout_ref.rollout.max_num_batched_tokens=9216
+  actor_rollout_ref.rollout.gpu_memory_utilization=0.6
+  actor_rollout_ref.rollout.enable_prefix_caching=false
+  actor_rollout_ref.rollout.logprobs_mode=raw_logprobs
+  actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=false
+  actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1
+  actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=256
+  +actor_rollout_ref.rollout.engine_kwargs.vllm_omni.pipeline_name=qwen3_omni_moe
+  +actor_rollout_ref.rollout.engine_kwargs.vllm_omni.pipeline_mode=thinker_only
+  +actor_rollout_ref.rollout.engine_kwargs.vllm_omni.limit_mm_per_prompt.audio=1
+  +actor_rollout_ref.rollout.engine_kwargs.vllm_omni.limit_mm_per_prompt.image=0
+  +actor_rollout_ref.rollout.engine_kwargs.vllm_omni.limit_mm_per_prompt.video=1
+  # Resend media after receiver caches are cleared at sleep/weight-sync boundaries.
+  +actor_rollout_ref.rollout.engine_kwargs.vllm_omni.mm_processor_cache_gb=0
+  reward.custom_reward_function.path=pkg://verl_omni.utils.reward_score.choice_reward
+  reward.custom_reward_function.name=compute_score
+  algorithm.adv_estimator=grpo
+  algorithm.use_kl_in_reward=false
+  algorithm.rollout_correction.bypass_mode=false
+  +ray_kwargs.ray_init.runtime_env.env_vars.VERL_USE_EXTERNAL_MODULES=verl_omni
+  '+ray_kwargs.ray_init.runtime_env.env_vars.TENSORBOARD_DIR=${oc.env:TENSORBOARD_DIR}'
+  '+ray_kwargs.ray_init.runtime_env.env_vars.CUDA_DEVICE_MAX_CONNECTIONS=${oc.env:CUDA_DEVICE_MAX_CONNECTIONS,1}'
+  '+ray_kwargs.ray_init.runtime_env.env_vars.RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO="0"'
+  '+ray_kwargs.ray_init.runtime_env.env_vars.PYTHONUNBUFFERED="1"'
+  trainer.v1.trainer_mode=omni_separate_async
+  trainer.v1.separate_async.parameter_sync_step=1
+  trainer.v1.sampler.max_off_policy_threshold=1
+  trainer.v1.sampler.max_off_policy_strategy=drop
+  trainer.nnodes=1
+  trainer.n_gpus_per_node=4
+  trainer.total_training_steps=20
+  trainer.val_before_train=true
+  trainer.save_freq=-1
+  trainer.test_freq=10
+  trainer.resume_mode=disable
+  'trainer.logger=[console,tensorboard]'
+  trainer.project_name=qwen3_omni_avqa_video
+  trainer.experiment_name=megatron_separate_async
+  "trainer.default_local_dir=${RUN_DIR}/checkpoints"
+  "trainer.rollout_data_dir=${RUN_DIR}/rollouts"
+  "trainer.validation_data_dir=${RUN_DIR}/validation"
+  "$@"
+)
+printf '%q ' "${PYTHON:-python3}" -m verl_omni.trainer.main_omni "${args[@]}" > "${RUN_DIR}/command.txt"
+printf '\n' >> "${RUN_DIR}/command.txt"
+git rev-parse HEAD > "${RUN_DIR}/commit.txt"
+VLLM_LOGGING_STREAM=ext://sys.stderr "${PYTHON:-python3}" -m verl_omni.trainer.main_omni "${args[@]}" \
+  --cfg job --resolve > "${RUN_DIR}/config.yaml" 2> >(tee "${RUN_DIR}/config.log" >&2)
+# Let CPU regression tests exercise the launcher's exact Hydra composition.
+if [[ ${AVQA_VIDEO_CONFIG_ONLY:-0} == 1 ]]; then
+  exit 0
+fi
+"${PYTHON:-python3}" -m verl_omni.trainer.main_omni "${args[@]}" 2>&1 | tee "${RUN_DIR}/train.log"
