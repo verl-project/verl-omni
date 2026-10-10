@@ -74,7 +74,6 @@ from verl_omni.trainer.diffusion.diffusion_trainer_utils import (
     old_policy_decay,
     track_nonfinite_grad_streak,
     validate_distillation_config,
-    worker_group_port_ranges,
 )
 from verl_omni.trainer.diffusion.ray_diffusion_trainer import (
     BaseRayDiffusionTrainer,
@@ -99,6 +98,7 @@ from verl_omni.trainer.diffusion.v1.tq_utils import (
     put_dataproto_fields_to_tq,
     sort_diffusion_tq_keys,
 )
+from verl_omni.utils.net_utils import worker_group_port_ranges
 from verl_omni.workers.config.reward import (
     reward_is_enabled,
     reward_pool_is_separate,

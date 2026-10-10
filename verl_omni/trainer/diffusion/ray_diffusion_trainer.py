@@ -77,7 +77,6 @@ from verl_omni.trainer.diffusion.diffusion_trainer_utils import (
     old_policy_decay,
     track_nonfinite_grad_streak,
     validate_distillation_config,
-    worker_group_port_ranges,
 )
 from verl_omni.trainer.diffusion.rollout_correction import (
     apply_bypass_mode_to_diffusion_batch,
@@ -86,6 +85,7 @@ from verl_omni.trainer.diffusion.rollout_correction import (
     rollout_correction_enabled,
 )
 from verl_omni.trainer.diffusion.teacher_manager import DiffusionTeacherManager
+from verl_omni.utils.net_utils import worker_group_port_ranges
 from verl_omni.utils.tracking import (
     _export_video,
     batch_items,

@@ -118,14 +118,14 @@ class TestWorkerGroupPortRanges:
         assert compose_cfg([]).trainer.ray_master_port_range is None
 
     def test_null_range_gives_no_range_per_group(self):
-        from verl_omni.trainer.diffusion.diffusion_trainer_utils import worker_group_port_ranges
+        from verl_omni.utils.net_utils import worker_group_port_ranges
 
         assert worker_group_port_ranges(None, 3) == [None, None, None]
 
     def test_range_is_sliced_disjointly_per_group(self):
         from omegaconf import OmegaConf
 
-        from verl_omni.trainer.diffusion.diffusion_trainer_utils import worker_group_port_ranges
+        from verl_omni.utils.net_utils import worker_group_port_ranges
 
         ranges = worker_group_port_ranges(OmegaConf.create({"r": [20000, 20010]}).r, 3)
         assert len(ranges) == 3
@@ -136,7 +136,7 @@ class TestWorkerGroupPortRanges:
             assert lo >= prev_hi
 
     def test_range_too_small_raises(self):
-        from verl_omni.trainer.diffusion.diffusion_trainer_utils import worker_group_port_ranges
+        from verl_omni.utils.net_utils import worker_group_port_ranges
 
         with pytest.raises(ValueError, match="ray_master_port_range"):
             worker_group_port_ranges([20000, 20002], 3)

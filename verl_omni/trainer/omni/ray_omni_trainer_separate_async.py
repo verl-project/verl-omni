@@ -16,16 +16,19 @@
 import ray
 from verl.trainer.ppo.utils import Role
 from verl.trainer.ppo.v1.trainer_base import register_trainer
-from verl.trainer.ppo.v1.trainer_separate_async import PPOTrainerSeparateAsync
+from verl.trainer.ppo.v1.trainer_separate_async import HybridEngineMode, PPOTrainerSeparateAsync
 from verl.utils.config import omega_conf_to_dataclass
+from verl.workers.rollout.llm_server import LLMServerManager
+from verl.workers.rollout.utils import update_prometheus_config
 
+from verl_omni.trainer.omni.trainer_base import OmniPPOTrainer
 from verl_omni.workers.checkpoint_engine import OmniCheckpointEngineManager
 from verl_omni.workers.config import OmniModelConfig
 from verl_omni.workers.omni_engine_workers import OmniDetachActorWorker
 
 
 @register_trainer("omni_separate_async")
-class OmniPPOTrainerSeparateAsync(PPOTrainerSeparateAsync):
+class OmniPPOTrainerSeparateAsync(OmniPPOTrainer, PPOTrainerSeparateAsync):
     """``PPOTrainerSeparateAsync`` with omni tokenizer/processor wiring and LoRA-aware weight sync."""
 
     def __init__(self, config):
@@ -49,12 +52,32 @@ class OmniPPOTrainerSeparateAsync(PPOTrainerSeparateAsync):
         self.role_worker_mapping[actor_role] = ray.remote(OmniDetachActorWorker)
 
     def _setup(self):
+        # Faithful copy of verl's PPOTrainerSeparateAsync._setup; super() lands on
+        # OmniPPOTrainer._setup (rendezvous port ranges) instead of PPOTrainer._setup.
         super()._setup()
-        # LoRA-aware manager: pushes the actor's peft_config so replicas apply
-        # adapter deltas via add_lora.
+
+        # initialize standalone rollout
+        # TODO: make initialization parallel with super().init()
+        hybrid_num_replicas = len(self.llm_server_manager.rollout_replicas)
+        self.standalone_server_manager: LLMServerManager = LLMServerManager.create(
+            config=self.config, start_rank=hybrid_num_replicas
+        )
+        rollout_config = self.config.actor_rollout_ref.rollout
+        if rollout_config.prometheus.enable:
+            server_addresses = (
+                self.llm_server_manager.server_addresses + self.standalone_server_manager.server_addresses
+            )
+            update_prometheus_config(rollout_config.prometheus, server_addresses, rollout_config.name)
+
+        # create checkpoint engine manager for trainer and standalone rollout
         checkpoint_engine_config = omega_conf_to_dataclass(self.config.actor_rollout_ref.rollout.checkpoint_engine)
+        # DIFF vs upstream: LoRA-aware manager pushes peft_config so replicas add_lora.
         self.standalone_checkpoint_manager = OmniCheckpointEngineManager(
             config=checkpoint_engine_config,
             actor_wg=self.actor_rollout_wg,
             replicas=self.standalone_server_manager.get_replicas(),
         )
+
+        # hybrid engine is in rollout mode after initialization
+        self.current_mode = HybridEngineMode.ROLLOUT
+        self.add_replicas_to_balancer()
