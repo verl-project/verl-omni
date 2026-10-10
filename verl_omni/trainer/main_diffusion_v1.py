@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import logging
 import os
 from pprint import pprint
@@ -26,6 +27,7 @@ from verl.utils.import_utils import load_class_from_fqn
 from verl_omni.utils.config import validate_config
 from verl_omni.utils.diffusion_attention import validate_attention_consistency
 from verl_omni.utils.rl_insight import enable_rl_insight
+from verl_omni.workers.config.reward import get_streaming_reward_config, streaming_reward_enabled
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
@@ -40,6 +42,7 @@ def run_diffusion_v1(config, task_runner_class=None) -> None:
                 settings, model paths, and training hyperparameters.
         task_runner_class: For recipe to change TaskRunner.
     """
+    streaming_reward_enabled(config)
     # TransferQueue is required for v1; force-enable it before ray.init() so
     # TRANSFER_QUEUE_ENABLE is exported to every worker through the runtime env.
     config.transfer_queue.enable = True
@@ -131,7 +134,23 @@ class DiffusionTaskRunnerV1:
             self.init_agent_loop_manager()
             self.trainer.fit(self.agent_loop_manager)
         finally:
+            if get_streaming_reward_config(self.config).enabled:
+                self._close_reward_streaming()
             tq.close()
+
+    def _close_reward_streaming(self):
+        if self.agent_loop_manager is not None:
+            requests = []
+            try:
+                for worker in self.agent_loop_manager.agent_loop_workers:
+                    requests.append(worker.close_reward_streaming.remote())
+            finally:
+                if requests:
+                    ray.wait(requests, num_returns=len(requests))
+            ray.get(requests)
+        reward_loop_manager = getattr(self.trainer, "reward_loop_manager", None)
+        if reward_loop_manager is not None:
+            asyncio.run(reward_loop_manager.multi_reward_model_manager.close_native_models())
 
 
 @hydra.main(config_path="./config", config_name="diffusion_trainer", version_base=None)

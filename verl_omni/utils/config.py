@@ -75,6 +75,11 @@ def _validate_delta_sharded(config: Any) -> None:
 
 def validate_config(config: Any) -> None:
     """Validate configuration values that otherwise trigger silent fallbacks."""
+    if _select(config, "reward.streaming") is not None:
+        from verl_omni.workers.config.reward import streaming_reward_enabled
+
+        streaming_reward_enabled(config)
+
     if _select(config, "actor_rollout_ref.actor.enable_timestep_staging", False):
         sp_size = _select(config, "actor_rollout_ref.actor.fsdp_config.ulysses_sequence_parallel_size", 1)
         if sp_size != 1:

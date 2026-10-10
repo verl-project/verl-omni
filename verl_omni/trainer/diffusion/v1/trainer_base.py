@@ -1045,9 +1045,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         return self.llm_server_manager.get_client()
 
     def get_reward_handles(self):
-        if self.enable_agent_reward_loop:
-            return self.reward_loop_manager.reward_loop_workers
-        return None
+        return self.reward_loop_manager.reward_loop_worker_handles
 
     def _fetch_one_gen_batch(self):
         if self.train_dataloader_it is None:

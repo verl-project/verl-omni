@@ -17,10 +17,12 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from math import isfinite
 from typing import Any
 
 from omegaconf import OmegaConf
 from verl.base_config import BaseConfig
+from verl.utils.config import omega_conf_to_dataclass
 
 __all__ = [
     "EngineRewardModelConfig",
@@ -29,8 +31,10 @@ __all__ = [
     "RewardModelConfig",
     "RewardModelPlacementConfig",
     "RewardModelSpec",
+    "StreamingRewardConfig",
     "accelerator_workers_enabled",
     "get_reward_model_entries",
+    "get_streaming_reward_config",
     "has_engine_reward_models",
     "has_native_reward_models",
     "has_reward_models",
@@ -48,6 +52,36 @@ __all__ = [
 
 _ENGINE_BACKENDS = {"engine"}
 _NATIVE_BACKENDS = {"native"}
+
+
+@dataclass
+class StreamingRewardConfig(BaseConfig):
+    """Bound named reward submissions from each diffusion agent worker."""
+
+    # Opt in to named-model streaming on a dedicated resident deployment.
+    enabled: bool = False
+    # Maximum samples generating or scoring per agent worker, including draining requests.
+    max_inflight: int = 8
+    # Per-sample deadline in seconds from the start of scoring; null disables it.
+    timeout: float | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.enabled, bool):
+            raise ValueError("reward.streaming.enabled must be a boolean")
+        _validate_positive_int(self.max_inflight, "reward.streaming.max_inflight")
+        if self.timeout is not None and (
+            isinstance(self.timeout, bool)
+            or not isinstance(self.timeout, int | float)
+            or not isfinite(self.timeout)
+            or self.timeout <= 0
+        ):
+            raise ValueError("reward.streaming.timeout must be a finite positive number or null")
+
+
+def get_streaming_reward_config(config) -> StreamingRewardConfig:
+    """Read the validated streaming settings, including legacy config defaults."""
+    value = config["reward"].get("streaming")
+    return StreamingRewardConfig() if value is None else omega_conf_to_dataclass(value)
 
 
 @dataclass
@@ -274,7 +308,7 @@ def to_mapping(value) -> dict[str, Any]:
 
 def get_reward_model_entries(config):
     """Return configured named reward models."""
-    return config.reward.get("models", {}) or {}
+    return config["reward"].get("models", {}) or {}
 
 
 def has_reward_models(config) -> bool:
@@ -324,27 +358,42 @@ def validate_reward_model_terms(config) -> None:
 
 def reward_is_enabled(config) -> bool:
     """Return whether either the legacy or named-model reward path is enabled."""
-    reward_model = config.reward.get("reward_model", {})
+    reward_model = config["reward"].get("reward_model", {})
     return bool(reward_model.get("enable", False) or has_reward_models(config))
 
 
 def reward_role_required(config) -> bool:
     """Whether the reward loop needs the trainer-selected parent resource pool."""
-    return bool(config.reward.reward_model.get("enable", False) or has_reward_models(config))
+    return reward_is_enabled(config)
 
 
 def reward_pool_is_separate(config) -> bool:
     """Return whether reward models use the dedicated parent resource pool."""
-    return bool(config.reward.reward_model.get("enable_resource_pool", False))
+    return bool(config["reward"].get("reward_model", {}).get("enable_resource_pool", False))
 
 
 def streaming_reward_enabled(config) -> bool:
     """Whether the current reward path can run inside streaming rollout workers."""
+    streaming = get_streaming_reward_config(config)
+    if streaming.enabled and not has_reward_models(config):
+        raise ValueError("reward.streaming.enabled requires named reward.models")
+    if streaming.enabled:
+        trainer = config.get("trainer", {})
+        if not trainer.get("use_v1", False) or trainer.get("v1", {}).get("trainer_mode") != "sync":
+            raise ValueError("Named reward streaming requires V1 synchronous diffusion training")
+        if any(model.get("backend") != "native" for model in get_reward_model_entries(config).values()):
+            raise ValueError("Named reward streaming currently supports only native reward models")
     if not reward_is_enabled(config):
         return True
-    if has_engine_reward_models(config) or has_native_reward_models(config):
-        return False
-    return bool(config.reward.reward_model.get("enable_resource_pool", False))
+    if has_reward_models(config):
+        if not streaming.enabled:
+            return False
+        if not reward_pool_is_separate(config):
+            raise ValueError("Named reward streaming requires reward.reward_model.enable_resource_pool=true")
+        if any(model.get("offload", True) is not False for model in get_reward_model_entries(config).values()):
+            raise ValueError("Named reward streaming requires offload=false on every reward model")
+        return True
+    return reward_pool_is_separate(config)
 
 
 def accelerator_workers_enabled(config) -> bool:
