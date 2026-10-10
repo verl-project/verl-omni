@@ -1,6 +1,6 @@
 # Named Reward Models
 
-Last updated: 10/08/2026
+Last updated: 10/10/2026
 
 This guide describes how to configure and extend named model-backed rewards
 under `reward.models` in `verl-omni`. For the general Reward Loop interface and
@@ -471,7 +471,59 @@ the default native lifecycle still closes and reconstructs the model. CPU
 retention keeps the same model and processor, and inference is rejected while
 asleep. Call `await multi_reward_model_manager.close_native_models()` for final
 native teardown when the caller owns the manager. This does not close engine
-models. No automatic trainer teardown hook is provided for this opt-in.
+models. Automatic native teardown is provided by the V1 named streaming path
+below; other callers own their final teardown.
+
+## Sample-level streaming
+
+V1 synchronous diffusion training can score each completed sample on every named
+reward worker group while other samples are being generated. This is opt-in:
+
+```yaml
+reward:
+  streaming:
+    enabled: true
+    max_inflight: 8
+    timeout: null
+  reward_model:
+    enable_resource_pool: true
+  models:
+    pickscore:
+      # Keep the rest of the model and term configuration as usual.
+      offload: false
+```
+
+All named models must use the native backend, `offload: false`, and a dedicated
+reward resource pool. Other trainers, engine-backed rewards, and shared pools
+are rejected before worker allocation. Models are woken when the reward manager
+starts and remain resident. Native and function-only groups use their existing
+workers and scorers; weights, raw term diagnostics,
+and `required` failure handling are unchanged. The group merge is shared with
+batch scoring. The trainer still collects a full scored batch before updating.
+
+`max_inflight` bounds samples generating or scoring **per agent worker**,
+including canceled requests that are draining. Admission happens before
+generation, so completed media cannot accumulate in an unbounded local queue.
+With A agent workers and G reward groups, at most A * max_inflight sample
+fan-outs, or A * max_inflight * G group RPCs, are admitted. This is not a global
+replica scheduler or a bound on scored trajectories retained by prompt groups
+and replay buffers. Existing backend batching remains in charge of execution.
+
+`timeout` is an optional scoring deadline in seconds; it starts when scoring
+begins, after generation and admission. Cancellation or timeout discards the
+result. Accepted group RPCs settle before their slot is released or the error
+returns. The deadline therefore does not bound cleanup time: a hung backend
+requires its existing backend/worker termination policy. There are no automatic
+retries. Optional scorer failures still contribute zero with their existing
+diagnostics; required failures follow the trainer's existing failed-sample
+policy, including replay-buffer replacement only when configured.
+
+Generation dispatch waits for every accepted agent RPC, including on error, so
+late prompt registration cannot escape shutdown. The V1 task runner cancels
+unfinished prompts, fences new scoring, and collects all agent close results.
+Native models and TransferQueue close only after confirmed drain. A failed close
+RPC fails the job; unconfirmed work is left to job termination. Shared GPU
+sleep/wake coordination belongs to the trainer/serving lifecycle.
 
 ## PickScore validation recipe
 
@@ -527,9 +579,10 @@ workload benefits.
 - CPU-native placement is not supported.
 - Native routing defaults to a static even split; optional microbatch dispatch
   balances available work, without preempting or stealing an active batch.
-- Named models do not participate in streaming reward computation.
+- Named-model streaming supports V1 synchronous diffusion training with dedicated,
+  resident native models and function-only groups.
 - vLLM-Omni reward serving is not implemented.
 
 Automatic migration of every existing reward implementation and a unified
-streaming/FSDP design remain follow-up work. The configuration migration and
+shared GPU streaming/FSDP design remain follow-up work. The configuration migration and
 extension contracts supported by this change are documented above.

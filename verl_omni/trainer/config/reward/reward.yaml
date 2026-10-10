@@ -13,6 +13,19 @@ defaults:
 # we launch num_workers reward managers to parallelize the reward computation
 num_workers: 8
 
+# Named reward streaming on dedicated resident models.
+streaming:
+  _target_: verl_omni.workers.config.reward.StreamingRewardConfig
+
+  # Preserve full-batch named reward scoring unless explicitly enabled.
+  enabled: false
+
+  # Bound samples generating or scoring per diffusion agent worker, including draining work.
+  max_inflight: 8
+
+  # Per-sample deadline in seconds from the start of scoring; null disables it.
+  timeout: null
+
 # custom reward function definition
 custom_reward_function:
   # The path to the file containing your customized reward function.
