@@ -40,7 +40,6 @@ def prepare_record(record: dict, tokenizer, max_prompt_length: int, split: str, 
     return {
         "data_source": "alphagrpo/dvreward",
         "prompt": [{"role": "user", "content": caption}],
-        "negative_prompt": [{"role": "user", "content": " "}],
         "prompt_token_ids": prompt_ids,
         "ability": "dvreward",
         "reward_model": {"style": "model", "ground_truth": caption},

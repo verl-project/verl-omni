@@ -7,6 +7,9 @@ bash "$recipe_dir/run_bagel_dvreward_lora.sh" \
     actor_rollout_ref.model.algorithm=alphagrpo \
     actor_rollout_ref.model.model_type=diffusion_alphagrpo_model \
     actor_rollout_ref.actor.strategy=fsdp2 \
+    actor_rollout_ref.model.attn_backend=native \
+    actor_rollout_ref.rollout.rollout_attn_backend=TORCH_SDPA \
+    actor_rollout_ref.rollout.load_format=auto \
     algorithm.trainer_type=policy_gradient \
     algorithm.adv_estimator=flow_grpo \
     actor_rollout_ref.model.lora_rank=32 \
