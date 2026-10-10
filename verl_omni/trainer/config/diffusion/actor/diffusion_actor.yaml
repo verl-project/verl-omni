@@ -32,6 +32,15 @@ diffusion_loss:
   # PPO clip ratio
   clip_ratio: 0.0001
 
+  # AlphaGRPO lower text ratio clipping range
+  text_clip_ratio: 0.2
+
+  # AlphaGRPO upper text ratio clipping range
+  text_clip_ratio_high: 0.28
+
+  # AlphaGRPO text objective weight, independent of image timestep count
+  text_loss_weight: 1.0
+
   # Maximum value to clamp advantages before computing policy loss
   adv_clip_max: 5.0
 

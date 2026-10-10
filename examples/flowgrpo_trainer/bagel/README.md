@@ -1,6 +1,6 @@
 # BAGEL-7B-MoT FlowGRPO training
 
-Last updated: 09/07/2026
+Last updated: 10/09/2026
 
 [BAGEL-7B-MoT](https://github.com/ByteDance-Seed/BAGEL) is a
 Mixture-of-Transformers model supporting both image understanding and
@@ -144,3 +144,88 @@ wrapper replacement but simply has ``requires_grad=False`` set by the
 
 - [How to Integrate a Non-Diffusers Model for FlowGRPO Training](../../../docs/contributing/integrating_a_non_diffusers_model.md) — full integration guide using BAGEL as the worked example
 - [vLLM-Omni BAGEL docs](https://docs.vllm.ai/projects/vllm-omni/en/latest/user_guide/examples/online_serving/bagel/)
+
+## AlphaGRPO
+
+The experimental single-turn [AlphaGRPO](https://github.com/huangrh99/AlphaGRPO)
+GPU recipe trains BAGEL thinking and image generation together. It combines a clipped
+sequence-ratio text objective with image FlowGRPO, DVReward and the thinking-tag
+format reward. Multi-turn self-reflective refinement and image editing are not
+supported by this adapter.
+
+A 128px native BAGEL smoke run verified FSDP2 joint LoRA updates and merged weight
+sync using controlled advantages. The full recipe with the 30B judge and quality
+comparisons has not been validated.
+
+### Data and training
+
+Use the official `alphagrpo20k` train/test JSONL files or your own question-decomposed
+prompts. Each record contains `prompt`, `semantic_questions`, and `quality_questions`.
+Questions can be strings or dictionaries with a `question` field. Obtain the
+official files with Git LFS; LFS pointer files are not datasets.
+
+From the repository root:
+
+```bash
+python examples/flowgrpo_trainer/data_process/bagel_dvreward.py \
+  --model_path /path/to/BAGEL-7B-MoT \
+  --input_dir /path/to/alphagrpo20k \
+  --output_dir /path/to/dvreward
+
+DATA_DIR=/path/to/dvreward \
+  bash examples/flowgrpo_trainer/bagel/run_bagel_alphagrpo_lora.sh \
+  actor_rollout_ref.model.path=/path/to/BAGEL-7B-MoT \
+  actor_rollout_ref.model.tokenizer_path=/path/to/BAGEL-7B-MoT
+```
+
+Use `run_bagel_dvreward_lora.sh` for image-only FlowGRPO with DVReward.
+
+The AlphaGRPO wrapper trains both understanding and generation LoRA projections
+with FSDP2. It inherits the existing four-GPU OCR recipe, including reward-model
+placement. It selects the official launcher's Qwen3-VL-30B-A3B-Instruct judge.
+This resource layout has not yet been validated with DVReward. A smaller judge
+can be selected by a trailing `reward.reward_model.model_path=...` override;
+that changes the reward model and is not the official reward setup.
+
+For each question, the scorer uses first-token top-5 log-probabilities to compute
+`P(yes) / (P(yes) + P(no))`. Semantic and quality questions are averaged separately,
+then combined as `sqrt(semantic_score * quality_score)`. Both component scores are
+returned as metrics. HTTP failures propagate; they are not converted into zero rewards.
+
+### Gotchas
+
+- Both question groups must be non-empty. This avoids assigning perfect scores
+  to absent questions. Question records are scored in order, without filtering
+  `is_valid`, matching the official scorer's behavior.
+- Prompts exceeding the token limit are rejected rather than truncated, so the
+  image condition still matches the questions used to score it.
+- Unlike the reference's JPEG transport, this scorer uses the repository's PNG
+  data-URI helper. When neither yes nor no appears in top-5 tokens, a literal
+  yes/no answer is used; any other answer is rejected rather than treated as no.
+- AlphaGRPO uses the reference planning system prompt. Its three image contexts
+  are system + prompt + thinking, system only, and system + prompt. Replay uses
+  exact native token IDs; decoding is used only for reward scoring and logging.
+- Text likelihoods use the configured temperature before nucleus filtering,
+  matching the reference likelihood convention. Sequence ratios stay paired with
+  each sample's own advantage; broadcasting them into a cross-sample matrix would
+  cancel or mix group-relative learning signals.
+- Only sampled thinking actions enter the text loss. A forced end token after
+  reaching the thinking budget conditions the image but is excluded from the
+  text loss. The text objective runs once per micro-batch, with image-step-count
+  compensation before the shared gradient-accumulation division.
+- Native BAGEL records log-probs only for noisy SDE steps. Window slicing applies
+  to the full latent and timestep trajectories; slicing log-probs again drops
+  training steps when the window starts after zero.
+- The single-turn reward adds `1` when thinking starts with `<think>` and ends
+  with `</think>`, matching the reference T2I task. `dvreward`, component scores
+  and `thinking_format_score` are logged separately.
+- Rollout currently requires TP=CFG=SP=1 and full-request execution. Actor
+  sequence parallelism and timestep staging are unsupported. Merged LoRA sync
+  routes the language head separately from the transformer body.
+- `pipeline.max_sequence_length` must hold the system prompt, native prompt and
+  `max_think_tokens + 2` framing budget. Overflow is rejected. Negative prompts
+  are unsupported because text CFG uses the planning system context.
+- Image-only DVReward uses the original FlowGRPO adapter; enabling its upstream
+  `think=true` path would not provide joint text training or matching replay. Use
+  `model.algorithm=alphagrpo` and the AlphaGRPO recipe for thinking. This is an
+  integration, not evidence of a stable quality or speed improvement.

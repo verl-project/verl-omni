@@ -649,6 +649,8 @@ def _map_checkpoint_to_training(state_dict: dict[str, Tensor], config: BagelTrai
         dst_key: str | None = None
         if src_key.startswith("language_model.model."):
             dst_key = src_key[len("language_model.model.") :]
+        elif src_key.startswith("language_model.lm_head."):
+            dst_key = src_key[len("language_model.") :]
         elif src_key.startswith("language_model."):
             continue
         elif src_key.startswith(("time_embedder.", "vae2llm.", "llm2vae.", "latent_pos_embed.")):

@@ -65,6 +65,9 @@ class DiffusionPipelineConfig(BaseConfig):
     output_type: str = "image"
     true_cfg_scale: float = 1.0
     max_sequence_length: int = 512
+    max_think_tokens: int = 512
+    think_temperature: float = 1.0
+    think_top_p: float = 0.8
     guidance_scale: Optional[float] = None
     reference_image_short_edge: Optional[int] = None
 
