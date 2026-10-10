@@ -1,6 +1,6 @@
 # NPU Smoke Tests
 
-Last updated: 09/24/2026.
+Last updated: 10/10/2026.
 
 我们在 verl-omni 上增加基于华为昇腾设备的CI用例添加指导。
 
@@ -18,6 +18,7 @@ GitHub Actions 入口为
 |---|---|---|---:|---|
 | 0 | vLLM-Omni rollout + sleep/wake-up | `tests/workers/rollout/rollout_vllm/test_vllm_omni_generate_npu.py` | 8 | 启用 |
 | 1 | Qwen-Image FlowGRPO trainer e2e | `tests/special_e2e/run_flowgrpo_qwen_image_npu.sh` | 8 | 暂时跳过 |
+| 2 | Wan2.2 DanceGRPO trainer e2e | `tests/special_e2e/run_dancegrpo_wan22_npu.sh` | 8 | 启用 |
 
 Test 1 仍保留在 runner 和 workflow 中，但
 `run_npu_smoke_tests.sh` 当前通过 `RUN_TEST[1]=0` 强制将其标记为
@@ -217,7 +218,7 @@ ASCEND_RT_VISIBLE_DEVICES=0,2,4,6 NUM_NPUS=4 \
 bash tests/npu_smoke/run_npu_smoke_tests.sh --num-npus 8 1
 ```
 
-新增 Test 2 后，可以单独运行：
+单独运行 Test 2：
 
 ```bash
 bash tests/npu_smoke/run_npu_smoke_tests.sh --num-npus 8 2
@@ -244,15 +245,17 @@ workflow 在相关文件发生变化时响应以下事件：
 
 PR 标签与请求范围：
 
-| 标签 | 模式 | 请求的测试 |
-|---|---|---|
-| `ready-for-ci` | all | Test 0、Test 1 |
-| `ci-npu` | all | Test 0、Test 1 |
-| `ci-npu-rollout` | rollout | Test 0 |
-| `ci-npu-flowgrpo` | flowgrpo | Test 1 |
+| 标签 | 模式 | 请求的测试 | 用途 |
+|---|---|---|---|
+| `ready-for-ci` | all | Test 0、1、2 | 全面 PR CI 验证入口 |
+| `ci-npu` | all | Test 0、1、2 | 全部 L2 NPU smoke tests |
+| `ci-npu-core` | ci-npu-core | Test 0 | 单模块 NPU smoke test；目前覆盖 rollout |
+| `ci-npu-e2e` | ci-npu-e2e | Test 1、2 | Qwen-Image + FlowGRPO 和 Wan2.2 + DanceGRPO 端到端测试 |
 
-Test 1 暂时禁用期间，即使 workflow 请求 Test 1，runner 也会将其报告为
-`SKIP`。
+当前 runner 仍通过 `RUN_TEST[1]=0` 暂时禁用 Test 1。因此，
+`ready-for-ci`、`ci-npu` 或 `ci-npu-e2e` 请求 Test 1 时，
+Test 1 会报告为 `SKIP`，Test 2 正常执行。删除该临时设置后，
+Test 1 才会恢复实际执行。
 
 ## 运行环境
 

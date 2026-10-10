@@ -55,6 +55,7 @@ Usage:
 Tests:
   0  vllm-omni rollout + sleep/wake_up
   1  FlowGRPO trainer e2e
+  2  DanceGRPO Wan2.2 trainer e2e
 EOF
             exit 0
             ;;
@@ -156,7 +157,7 @@ run_selected_test() {
     fi
 }
 
-declare -A RUN_TEST=([0]=1 [1]=1)
+declare -A RUN_TEST=([0]=1 [1]=1 [2]=1)
 
 if [[ "${#CLI_TEST_IDS[@]}" -gt 0 ]]; then
     for k in "${!RUN_TEST[@]}"; do RUN_TEST[$k]=0; done
@@ -203,6 +204,11 @@ cleanup_runtime
 run_selected_test 1 "FlowGRPO trainer e2e" \
     env ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES}" NUM_NPUS="${NUM_NPUS}" \
     bash tests/special_e2e/run_flowgrpo_qwen_image_npu.sh
+
+cleanup_runtime
+run_selected_test 2 "DanceGRPO Wan2.2 trainer e2e" \
+    env ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES}" NUM_NPUS="${NUM_NPUS}" \
+    bash tests/special_e2e/run_dancegrpo_wan22_npu.sh
 
 sep | tee "${SUMMARY_LOG}"
 echo "  SMOKE TEST SUMMARY" | tee -a "${SUMMARY_LOG}"
