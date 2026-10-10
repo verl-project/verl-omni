@@ -18,7 +18,7 @@ from pathlib import Path
 
 import torch
 import torch.distributed as dist
-from peft import LoraConfig, get_peft_model
+from peft import LoraConfig, get_peft_model, get_peft_model_state_dict
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp import ShardingStrategy
 
@@ -61,5 +61,52 @@ def test_no_shard_repeated_lora_sync(tmp_path):
             assert all(torch.equal(params[k], expected[k]) for k in params)
             assert all(v.device.type == "cpu" and torch.isfinite(v).all() for v in params.values())
         assert any(not torch.equal(before[k], params[k]) for k in params)
+    finally:
+        dist.destroy_process_group()
+
+
+class Block(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.attn = torch.nn.Linear(8, 8)
+
+    def forward(self, x):
+        return self.attn(x)
+
+
+class Blocks(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.transformer_blocks = torch.nn.ModuleList([Block(), Block()])
+
+    def forward(self, x):
+        for block in self.transformer_blocks:
+            x = block(x)
+        return x
+
+
+def test_no_shard_lora_sync_drops_nested_fsdp_wrapper_names(tmp_path):
+    """Per-block auto wrap puts ``_fsdp_wrapped_module`` inside LoRA names; rollout binding needs clean names."""
+    from torch.distributed.fsdp.wrap import ModuleWrapPolicy
+
+    path = Path(__file__).resolve().parents[2] / "verl_omni/utils/fsdp_utils.py"
+    spec = importlib.util.spec_from_file_location("fsdp_utils_under_test_nested", path)
+    assert spec is not None and spec.loader is not None
+    fsdp_utils = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fsdp_utils)
+    dist.init_process_group("gloo", init_method=f"file://{tmp_path}/rendezvous", rank=0, world_size=1)
+    try:
+        torch.manual_seed(0)
+        model = get_peft_model(Blocks(), LoraConfig(r=2, target_modules=["attn"], init_lora_weights=False))
+        expected = {key: value.clone() for key, value in get_peft_model_state_dict(model).items()}
+        wrapped = FSDP(
+            model, device_id=torch.device("cpu"), use_orig_params=True, auto_wrap_policy=ModuleWrapPolicy({Block})
+        )
+        assert wrapped.sharding_strategy == ShardingStrategy.NO_SHARD
+        assert len(FSDP.fsdp_modules(wrapped)) == 3
+        params = fsdp_utils.collect_lora_params(wrapped, layered_summon=True, base_sync_done=True)
+        assert len(expected) == 4
+        assert params.keys() == expected.keys()
+        assert all(torch.equal(params[key], expected[key]) for key in params)
     finally:
         dist.destroy_process_group()
