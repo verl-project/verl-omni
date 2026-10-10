@@ -13,6 +13,7 @@
 # limitations under the License.
 """Input-agnostic multi-reward execution and weighted aggregation."""
 
+import asyncio
 import inspect
 import logging
 from abc import ABC, abstractmethod
@@ -72,6 +73,11 @@ class MultiRewardManager(RewardManagerBase, ABC):
 
         self._engine_reward_executors = {}
         self._native_reward_executors = {}
+        concurrency = config.reward.get("multi_reward_concurrency", 1)
+        if isinstance(concurrency, bool) or not isinstance(concurrency, int) or concurrency <= 0:
+            raise ValueError("reward.multi_reward_concurrency must be a positive integer")
+        self._multi_reward_concurrency = concurrency
+        self._multi_reward_semaphore = asyncio.Semaphore(concurrency) if concurrency > 1 else None
 
         reward_functions_cfg = config.reward.reward_functions
         reward_models_cfg = get_reward_model_entries(config)
@@ -80,7 +86,7 @@ class MultiRewardManager(RewardManagerBase, ABC):
 
         self._sub_rewards = []
         total_weight = 0.0
-        _reserved_keys = {"path", "name", "weight", "required", "model", "use_rollout_sampling_params"}
+        _reserved_keys = {"path", "name", "weight", "required", "model", "independent", "use_rollout_sampling_params"}
         for key, entry in reward_functions_cfg.items():
             model_name = resolve_reward_model_name(key, entry, reward_models_cfg)
             use_rollout_sampling_params = entry.get("use_rollout_sampling_params", False)
@@ -109,6 +115,9 @@ class MultiRewardManager(RewardManagerBase, ABC):
                 required = required_value
             else:
                 raise TypeError(f"required must be a boolean, got {type(required_value).__name__}")
+            independent = entry.get("independent", False)
+            if not isinstance(independent, bool):
+                raise TypeError(f"Reward function {key!r} independent must be a boolean")
             total_weight += weight
 
             # Collect non-manager fields to pass to compute_score.
@@ -117,6 +126,14 @@ class MultiRewardManager(RewardManagerBase, ABC):
             fn = load_extern_object(path, name) if path is not None else None
             sig = inspect.signature(fn) if fn is not None else None
             is_async = inspect.iscoroutinefunction(fn) if fn is not None else True
+            if independent and (
+                not is_async
+                or (model_name is not None and reward_models_cfg.get(model_name, {}).get("backend") != "engine")
+            ):
+                raise ValueError(
+                    f"Reward function {key!r} independent requires an async scorer with no named model "
+                    "or an engine-backed model"
+                )
 
             self._sub_rewards.append(
                 {
@@ -124,6 +141,7 @@ class MultiRewardManager(RewardManagerBase, ABC):
                     "fn": fn,
                     "weight": weight,
                     "required": required,
+                    "independent": independent,
                     "sig": sig,
                     "is_async": is_async,
                     "extra_args": extra_args,
@@ -159,14 +177,10 @@ class MultiRewardManager(RewardManagerBase, ABC):
         """Execute configured reward terms and preserve their weighted outputs."""
         combined_score = 0.0
         reward_extra_info = {}
+        admitted_tasks = []
 
-        for sub in self._sub_rewards:
-            key = sub["key"]
-            fn = sub["fn"]
-            weight = sub["weight"]
-            required = sub["required"]
+        def prepare_term(sub):
             sig = sub["sig"]
-            is_async = sub["is_async"]
             extra_args = sub["extra_args"]
             model_name = sub["model"]
 
@@ -191,34 +205,113 @@ class MultiRewardManager(RewardManagerBase, ABC):
                 if reward_kwargs is None:
                     raise RuntimeError(f"Reward model {model_name!r} cannot be used with a reward function")
                 filtered_kwargs = _filter_kwargs({**sub_kwargs, **reward_kwargs()}, sig)
+            return filtered_kwargs
 
-            try:
-                if is_async:
-                    result = await fn(**filtered_kwargs)
+        async def run_term(sub, filtered_kwargs):
+            fn = sub["fn"]
+
+            async def invoke():
+                if sub["is_async"]:
+                    return await fn(**filtered_kwargs)
+                future = self.loop.run_in_executor(None, lambda f=fn, kw=filtered_kwargs: f(**kw))
+                try:
+                    return await asyncio.shield(future)
+                except asyncio.CancelledError:
+                    # The thread keeps running after its await is cancelled.
+                    # Retain ownership (and any semaphore permit) until it exits.
+                    settled = asyncio.gather(future, return_exceptions=True)
+                    while not settled.done():
+                        try:
+                            await asyncio.shield(settled)
+                        except asyncio.CancelledError:
+                            pass
+                    raise
+
+            if self._multi_reward_semaphore is None:
+                return await invoke()
+            async with self._multi_reward_semaphore:
+                return await invoke()
+
+        async def drain_tasks():
+            for task in admitted_tasks:
+                task.cancel()
+            if admitted_tasks:
+                settled = asyncio.gather(*admitted_tasks, return_exceptions=True)
+                while not settled.done():
+                    try:
+                        await asyncio.shield(settled)
+                    except asyncio.CancelledError:
+                        # Repeated caller cancellation must not release accepted tasks.
+                        for task in admitted_tasks:
+                            task.cancel()
+
+        try:
+            index = 0
+            while index < len(self._sub_rewards):
+                sub = self._sub_rewards[index]
+                if sub["independent"]:
+                    window = []
+                    while (
+                        index < len(self._sub_rewards)
+                        and self._sub_rewards[index]["independent"]
+                        and len(window) < self._multi_reward_concurrency
+                    ):
+                        window.append(self._sub_rewards[index])
+                        index += 1
+                    prepared = [prepare_term(term) for term in window]
+                    admitted_tasks = []
+                    for term, kwargs in zip(window, prepared, strict=True):
+                        admitted_tasks.append(asyncio.create_task(run_term(term, kwargs)))
+                    results = await asyncio.gather(*admitted_tasks, return_exceptions=True)
+                    admitted_tasks = []
                 else:
-                    result = await self.loop.run_in_executor(None, lambda f=fn, kw=filtered_kwargs: f(**kw))
+                    window = [sub]
+                    index += 1
+                    filtered_kwargs = prepare_term(sub)
+                    try:
+                        results = [await run_term(sub, filtered_kwargs)]
+                    except Exception as exc:
+                        results = [exc]
 
-                if isinstance(result, dict):
-                    score = float(result["score"])
-                    for rk, rv in result.items():
-                        if rk == "score":
-                            continue
-                        reward_extra_info[f"reward/{key}/{rk}"] = rv
-                else:
-                    score = float(result)
-            except Exception as e:
-                if required:
-                    raise RuntimeError(f"Required sub-reward '{key}' failed: {e}") from e
-                logger.exception(
-                    "Sub-reward '%s' raised an exception: %s. Contributing 0 to weighted sum.",
-                    key,
-                    e,
-                )
-                reward_extra_info[f"reward/{key}/errors"] = 1
-                score = 0.0
-
-            reward_extra_info[f"reward/{key}"] = score
-            combined_score += weight * score
+                for term, result in zip(window, results, strict=True):
+                    key = term["key"]
+                    if isinstance(result, BaseException):
+                        if not isinstance(result, Exception):
+                            raise result
+                        if term["required"]:
+                            raise RuntimeError(f"Required sub-reward '{key}' failed: {result}") from result
+                        logger.error(
+                            "Sub-reward '%s' raised an exception: %s. Contributing 0 to weighted sum.",
+                            key,
+                            result,
+                            exc_info=(type(result), result, result.__traceback__),
+                        )
+                        reward_extra_info[f"reward/{key}/errors"] = 1
+                        score = 0.0
+                    else:
+                        try:
+                            if isinstance(result, dict):
+                                score = float(result["score"])
+                                for rk, rv in result.items():
+                                    if rk != "score":
+                                        reward_extra_info[f"reward/{key}/{rk}"] = rv
+                            else:
+                                score = float(result)
+                        except Exception as exc:
+                            if term["required"]:
+                                raise RuntimeError(f"Required sub-reward '{key}' failed: {exc}") from exc
+                            logger.exception(
+                                "Sub-reward '%s' raised an exception: %s. Contributing 0 to weighted sum.",
+                                key,
+                                exc,
+                            )
+                            reward_extra_info[f"reward/{key}/errors"] = 1
+                            score = 0.0
+                    reward_extra_info[f"reward/{key}"] = score
+                    combined_score += term["weight"] * score
+        except BaseException:
+            await drain_tasks()
+            raise
 
         reward_extra_info["reward/combined"] = combined_score
         return {"reward_score": combined_score, "reward_extra_info": reward_extra_info}

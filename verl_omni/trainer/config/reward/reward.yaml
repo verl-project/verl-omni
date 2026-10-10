@@ -34,6 +34,12 @@ accelerator_workers:
 # Each entry: path (str), name (str), weight (float).
 reward_functions: {}
 
+# At values above 1, maximum concurrent sub-reward calls per reward worker
+# across all samples. The default preserves legacy per-sample sequential
+# execution and cross-sample concurrency. A term must opt in with
+# independent: true to overlap with adjacent eligible terms.
+multi_reward_concurrency: 1
+
 # Named reward models. See docs/algo/named_reward_models.md for configuration
 # and extension instructions.
 models: {}

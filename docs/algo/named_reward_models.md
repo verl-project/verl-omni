@@ -239,6 +239,42 @@ final_reward = sum(term.weight * term.score)
 error and contributes zero. Model setup and lifecycle failures are always
 fatal.
 
+## Concurrent independent reward terms
+
+By default, reward terms run in configuration order within each sample, while
+separate samples retain their existing concurrency. To overlap independent
+terms, set a worker-wide cap above one and opt in each term:
+
+```yaml
+reward:
+  multi_reward_concurrency: 2
+  reward_functions:
+    first:
+      path: pkg://my_package.rewards
+      name: score_first
+      independent: true
+    second:
+      path: pkg://my_package.rewards
+      name: score_second
+      independent: true
+```
+
+`independent` must be a boolean and defaults to `false`. Eligible terms use
+coroutine score functions with no named model (for example, an external HTTP
+scorer) or an `engine` named model. Native model terms and synchronous score
+functions cannot opt in. Opting in asserts that score functions treat sample
+inputs as read-only, do not share mutable state, and have no dependencies on
+other reward terms. The manager passes the same input objects to each scorer;
+it does not copy large image or other payloads.
+
+Adjacent independent terms execute in windows of at most
+`multi_reward_concurrency`; any other term is an ordering barrier for its
+sample. When the cap is above one, it bounds active scorer calls across all
+samples handled by one reward worker. Scores, diagnostics,
+and required/optional error handling remain in configuration order. The cap
+limits active scorer calls, not the number of reward workers or engine-side
+requests. Increasing it does not establish a throughput improvement by itself.
+
 ## Use engine only
 
 This example serves one model with two-way tensor parallelism:

@@ -923,6 +923,7 @@ reward:
   accelerator_workers:
     enabled: false
   reward_functions: {}
+  multi_reward_concurrency: 1
   models: {}
   aggregation: weighted_sum
   reward_manager:
