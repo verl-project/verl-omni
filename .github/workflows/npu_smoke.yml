@@ -35,19 +35,18 @@ permissions:
 jobs:
   setup_runner:
     # Pull requests run only after a CI label is applied:
-    #   ready-for-ci / ci-npu           -> tests 0, 1, and 2
-    #   ci-npu-rollout                  -> test 0
-    #   ci-npu-flowgrpo                 -> test 1
-    #   ci-npu-dancegrpo                -> test 2
+    #   ready-for-ci                    -> all NPU tests as part of full PR validation
+    #   ci-npu                         -> all NPU tests for targeted NPU validation
+    #   ci-npu-core                   -> test 0
+    #   ci-npu-e2e                    -> tests 1 and 2
     # Pushes to main and release branches run the full suite.
     if: >-
       github.repository_owner == 'verl-project' &&
       (github.event_name != 'pull_request' ||
        contains(github.event.pull_request.labels.*.name, 'ready-for-ci') ||
        contains(github.event.pull_request.labels.*.name, 'ci-npu') ||
-       contains(github.event.pull_request.labels.*.name, 'ci-npu-rollout') ||
-       contains(github.event.pull_request.labels.*.name, 'ci-npu-flowgrpo') ||
-       contains(github.event.pull_request.labels.*.name, 'ci-npu-dancegrpo'))
+       contains(github.event.pull_request.labels.*.name, 'ci-npu-core') ||
+       contains(github.event.pull_request.labels.*.name, 'ci-npu-e2e'))
     runs-on: linux-aarch64-a2b4-8
     timeout-minutes: 120
     container:
@@ -79,12 +78,10 @@ jobs:
             mode="all"
           elif [[ ",${pr_labels}," == *",ci-npu,"* ]]; then
             mode="all"
-          elif [[ ",${pr_labels}," == *",ci-npu-rollout,"* ]]; then
-            mode="rollout"
-          elif [[ ",${pr_labels}," == *",ci-npu-flowgrpo,"* ]]; then
-            mode="flowgrpo"
-          elif [[ ",${pr_labels}," == *",ci-npu-dancegrpo,"* ]]; then
-            mode="dancegrpo"
+          elif [[ ",${pr_labels}," == *",ci-npu-core,"* ]]; then
+            mode="ci-npu-core"
+          elif [[ ",${pr_labels}," == *",ci-npu-e2e,"* ]]; then
+            mode="ci-npu-e2e"
           else
             mode="none"
           fi
@@ -102,7 +99,7 @@ jobs:
             python tests/special_e2e/build_qwen_image_tiny_random.py --output-dir "${MODEL_PATH}"
           fi
       - name: Prepare tiny Wan2.2 checkpoint
-        if: steps.resolve-mode.outputs.mode == 'all' || steps.resolve-mode.outputs.mode == 'dancegrpo'
+        if: steps.resolve-mode.outputs.mode == 'all' || steps.resolve-mode.outputs.mode == 'ci-npu-e2e'
         run: |
           MODEL_PATH="${HOME}/.cache/models/tiny-random/Wan2.2-TI2V-5B-Diffusers"
           python tests/special_e2e/build_wan22_tiny_random.py \
@@ -131,24 +128,17 @@ jobs:
               "num_npus": 8,
               "runner_size": 8
             }'
-          elif [[ "${mode}" == "rollout" ]]; then
+          elif [[ "${mode}" == "ci-npu-core" ]]; then
             plan_json='{
               "test_ids": ["0"],
               "group_count": 1,
               "num_npus": 8,
               "runner_size": 8
             }'
-          elif [[ "${mode}" == "flowgrpo" ]]; then
+          elif [[ "${mode}" == "ci-npu-e2e" ]]; then
             plan_json='{
-              "test_ids": ["1"],
-              "group_count": 1,
-              "num_npus": 8,
-              "runner_size": 8
-            }'
-          elif [[ "${mode}" == "dancegrpo" ]]; then
-            plan_json='{
-              "test_ids": ["2"],
-              "group_count": 1,
+              "test_ids": ["1", "2"],
+              "group_count": 2,
               "num_npus": 8,
               "runner_size": 8
             }'
