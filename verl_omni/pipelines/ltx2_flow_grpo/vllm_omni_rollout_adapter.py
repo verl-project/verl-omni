@@ -17,7 +17,7 @@
 from __future__ import annotations
 
 import math
-from typing import Any
+from typing import Any, Iterable
 
 import torch
 from vllm_omni.diffusion.data import DiffusionOutput, OmniDiffusionConfig
@@ -40,7 +40,7 @@ from verl_omni.pipelines.rollout_media import DiffusionIOSpec, MediaSpec
 from verl_omni.pipelines.rollout_request import prompt_ids_from_payload
 from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
 
-from .common import normalize_ltx_output_type
+from .common import normalize_ltx_output_type, remap_veomni_to_diffusers_key
 
 __all__ = ["LTX23PipelineWithLogProb"]
 
@@ -69,6 +69,18 @@ class LTX23PipelineWithLogProb(LTX2Pipeline):
         primary=MediaSpec("video"),
         auxiliary=(MediaSpec("audio", sample_rate=24000),),
     )
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        """Remap VeOmni-style checkpoint keys to diffusers naming before loading.
+
+        The pretrained checkpoint may use VeOmni parameter names (e.g.
+        ``adaln_single``, ``patchify_proj``, ``q_norm``) while the vLLM-Omni
+        rollout model expects diffusers names (``time_embed``, ``proj_in``,
+        ``norm_q``).  Remap here so both initial safetensors loading and
+        training-time weight sync load into the correct parameters.
+        """
+        remapped = ((remap_veomni_to_diffusers_key(name), tensor) for name, tensor in weights)
+        return super().load_weights(remapped)
 
     def __init__(self, *, od_config: OmniDiffusionConfig, prefix: str = "") -> None:
         super().__init__(od_config=od_config, prefix=prefix)
