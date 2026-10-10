@@ -54,7 +54,7 @@ def _get_npu_memory_allocator():
 
 
 # ---------------------------------------------------------------------------
-# Permanent patch: suppress diffusers empty-cache calls on NPU
+# Context manager: suppress diffusers empty-cache calls on NPU
 # ---------------------------------------------------------------------------
 
 _empty_cache_patch_applied = False
@@ -190,9 +190,6 @@ def _npu_sleep_tags_only(allocator, offload_tags: tuple[str, ...], unmap_tags: s
             acl_memcpy(cpu_ptr, dest_max, ptr, size_in_bytes, ACL_MEMCPY_DEVICE_TO_HOST)
             data.cpu_backup_tensor = cpu_backup_tensor
         unmap_and_release(handle)
-
-    gc.collect()
-    torch.npu.empty_cache()
 
 
 # ---------------------------------------------------------------------------
