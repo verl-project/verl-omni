@@ -86,6 +86,7 @@ GROUP_PATTERNS = {
         "tests/gpu_smoke/run_gpu_smoke_diffusion_e2e.sh",
         "tests/special_e2e/*diffusion*",
         "tests/special_e2e/*dpo*",
+        "tests/special_e2e/*dgpo*",
         "tests/special_e2e/*flowgrpo*",
         "tests/special_e2e/build_minimax_h3_tiny_random.py",
         "tests/special_e2e/create_dummy_h3_data.py",

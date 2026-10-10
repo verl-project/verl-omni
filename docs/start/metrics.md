@@ -1,7 +1,7 @@
 (metrics)=
 # Training Metrics
 
-Last updated: 09/28/2026
+Last updated: 10/10/2026
 
 Metrics are logged each step to your configured backend (console / W&B). The diffusion RL
 trainers share the group-statistic metrics, and each objective adds its own block below. Names
@@ -77,3 +77,28 @@ largest residuals.
 - $A$ — `adv_clip_max`
 - $\lambda$ — `ref_kl_coef`
 - $t$ — flow time
+
+## DGPO
+
+DGPO consumes the same rollouts and group statistics as DiffusionNFT, but weights each sample's
+flow-matching error by a sigmoid of its whole group's preference score. With
+$d_i = \mathrm{mean}\left((v - v_\theta)^2\right)$ the per-sample error against the target velocity
+$v$, and $d_i^{\mathrm{ref}}$, $d_i^{\mathrm{old}}$ the same error under the reference and rollout
+policies, the group score is $s_G = \tfrac{\beta}{|G|}\sum_{i \in G} A_i (d_i - d_i^{\mathrm{ref}})$
+and the group weight is $w_G = \sigma(s_G)$.
+
+| Metric | Definition | Interpretation |
+|--------|------------|----------------|
+| total_loss | $\text{policy loss} + \lambda \cdot \text{ref KL loss}$ | The objective actually backpropagated. |
+| policy_loss | $\overline{w_G A_i d_i}$ | The group-weighted fit that drives learning. Its sign follows which samples dominate the batch and is not itself a progress measure; read the reward curves. |
+| dsm_loss | $\overline{d_i}$ | Mean flow-matching error of the trained policy on the rollout samples. |
+| ref_dsm_loss | $\overline{d_i^{\mathrm{ref}}}$ | The same error under the reference policy; `dsm_loss - ref_dsm_loss` is what the group score is built from. |
+| old_dsm_loss | $\overline{d_i^{\mathrm{old}}}$ | The same error under the rollout policy, used by the clip. |
+| group_weight_mean | $\overline{w_G}$ | Mean group weight. Exactly $0.5$ while the policy equals the reference (before the first optimizer update of a fresh LoRA). |
+| group_weight_dev | $\overline{\lvert w_G - 0.5 \rvert}$ | How far groups have moved from the neutral weight. Near $0$ means the policy barely differs from the reference on these samples; near $0.5$ means the weights saturate and `dgpo_beta` may be too large. |
+| clip_frac | fraction of samples with $\exp(d_i^{\mathrm{old}} - d_i)$ outside $[1 - \epsilon_c, 1 + \epsilon_c]$ in the direction of $A_i$ | Share of samples whose error was detached by the clip. A value climbing toward $1$ means the update outruns the rollout policy. |
+| ref_kl_loss | $\overline{(v_\theta - v_\mathrm{ref})^2}$ | Deviation from the reference policy, implemented as a mean squared difference. |
+
+**Variables.** $A_i$ — clipped group-normalized advantage; $\beta$ — `dgpo_beta`; $\epsilon_c$ —
+`dgpo_clip_range`; $\lambda$ — `ref_kl_coef`; $v_\theta$, $v_\mathrm{ref}$ — velocities of the
+trained and reference policies.
