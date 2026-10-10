@@ -190,6 +190,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             self._loss_fn = None
             self._has_old_adapter = False
         # DPO needs trainer-side ref noise preds even when KL is disabled.
+        self.use_critic = False  # Diffusion has no critic worker group.
         self.use_reference_policy = need_reference_policy(config) or (loss_mode == "dpo")
         self.use_rm = reward_is_enabled(config)
         self.use_teacher_policy = is_distillation_enabled(config.get("distillation"))
@@ -247,6 +248,91 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             self.actor_rollout_wg.copy_adapter(source="default", target="old")
         self.on_init_end()
 
+    def _rollout_server_managers(self) -> list:
+        """LLM server managers whose inference engines take part in rollout profiling.
+
+        Subclasses owning additional replicas (e.g. the standalone rollout of separate-async
+        training) extend this list so those engines are profiled as well.
+        """
+        managers = [getattr(self, "llm_server_manager", None)]
+        return [manager for manager in managers if manager is not None]
+
+    def _start_rollout_profiling(self) -> None:
+        """Start rollout profiling."""
+        for manager in self._rollout_server_managers():
+            manager.start_profile()
+
+    def _stop_rollout_profiling(self) -> None:
+        """Stop rollout profiling."""
+        for manager in self._rollout_server_managers():
+            manager.stop_profile()
+
+    def _start_profiling(self) -> None:
+        """Start profiling for all worker groups if profiling is enabled."""
+        do_profile = (
+            not self.prev_step_profile and self.curr_step_profile
+            if self.config.global_profiler.profile_continuous_steps
+            else self.curr_step_profile
+        )
+
+        if do_profile:
+            # "train", not "e2e": this window only holds what the training worker itself runs
+            # (log-prob forwards and the actor update). Generation happens in the inference
+            # engines below, which write their own traces.
+            #
+            # In the hybrid engine, actor/rollout and the (colocated) reference -- and sometimes the
+            # critic -- share ONE worker group object, so ref_policy_wg / critic_wg can alias
+            # actor_rollout_wg. Each start/stop_profile round-trips to every rank and, on stop, runs
+            # the finish hook (e.g. the user's trace-upload command); driving the same physical
+            # workers more than once would fire that hook once per alias and upload the same trace
+            # file multiple times. Drive each distinct worker group exactly once.
+            self.actor_rollout_wg.start_profile(role="train", profile_step=self.global_steps)
+            seen = {id(self.actor_rollout_wg)}
+            if self.use_reference_policy and id(self.ref_policy_wg) not in seen:
+                seen.add(id(self.ref_policy_wg))
+                self.ref_policy_wg.start_profile(profile_step=self.global_steps)
+            if self.use_critic and id(self.critic_wg) not in seen:
+                seen.add(id(self.critic_wg))
+                self.critic_wg.start_profile(profile_step=self.global_steps)
+            self._start_rollout_profiling()
+
+    def _stop_profiling(self) -> None:
+        """Stop profiling for all worker groups if profiling is enabled."""
+        this_step_profile = self.curr_step_profile
+        self.next_step_profile = (
+            self.global_steps + 1 in self.config.global_profiler.steps
+            if self.config.global_profiler.steps is not None
+            else False
+        )
+        do_profile = (
+            self.curr_step_profile and not self.next_step_profile
+            if self.config.global_profiler.profile_continuous_steps
+            else self.curr_step_profile
+        )
+        self.prev_step_profile = self.curr_step_profile
+        self.curr_step_profile = self.next_step_profile
+
+        if do_profile:
+            # Run the finish command (e.g. the trace upload) only once, on the last profiled step, so
+            # a command that uploads the whole save_path sends each trace once instead of re-uploading
+            # the accumulating directory every step. "Last" is the largest configured step, or the
+            # run's final step if it ends earlier on a profiled step.
+            profiled_steps = self.config.global_profiler.steps
+            is_last_step = self.global_steps >= self.total_training_steps
+            run_command = bool(
+                this_step_profile and profiled_steps and (self.global_steps == max(profiled_steps) or is_last_step)
+            )
+            # See _start_profiling: skip aliased worker groups so the finish hook (and any trace
+            # upload it triggers) fires exactly once per distinct process, not once per role alias.
+            self.actor_rollout_wg.stop_profile(run_command=run_command)
+            seen = {id(self.actor_rollout_wg)}
+            if self.use_reference_policy and id(self.ref_policy_wg) not in seen:
+                seen.add(id(self.ref_policy_wg))
+                self.ref_policy_wg.stop_profile(run_command=run_command)
+            if self.use_critic and id(self.critic_wg) not in seen:
+                seen.add(id(self.critic_wg))
+                self.critic_wg.stop_profile(run_command=run_command)
+
     def fit(self, agent_loop_manager: AgentLoopManager):
         """Run the v1 training loop, mirroring upstream ``PPOTrainer.fit``."""
         self.agent_loop_manager = agent_loop_manager
@@ -283,6 +369,14 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         self.global_steps += 1
         SkipManager.set_step(self.global_steps)
         self._reissue_inflight_prompts()
+        self.prev_step_profile = False
+        self.curr_step_profile = (
+            self.global_steps in self.config.global_profiler.steps
+            if self.config.global_profiler.steps is not None
+            else False
+        )
+        self.next_step_profile = False
+
         self.on_train_begin()
         last_val_metrics = None
         while current_epoch < self.config.trainer.total_epochs and self.global_steps <= self.total_training_steps:
@@ -291,7 +385,9 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             self.timing_raw: dict = {}
             with marked_timer("step", self.timing_raw):
                 self.on_step_begin()
+                self._start_profiling()
                 batch = self.step(metrics, self.timing_raw)
+                self._stop_profiling()
                 if self.config.trainer.save_freq > 0 and (
                     is_last_step or self.global_steps % self.config.trainer.save_freq == 0
                 ):
@@ -969,7 +1065,19 @@ class PolicyGradientDiffusionTrainerV1(ABC):
                 }
 
         all_wg = {}
-        wg_kwargs = {"device_name": self.config.trainer.device}
+        wg_kwargs = {}  # Setting up kwargs for RayWorkerGroup
+        if OmegaConf.select(self.config.global_profiler, "steps") is not None:
+            wg_kwargs["profile_steps"] = OmegaConf.select(self.config.global_profiler, "steps")
+            # Only require nsight worker options when tool is nsys
+            if OmegaConf.select(self.config.global_profiler, "tool") == "nsys":
+                assert (
+                    OmegaConf.select(self.config.global_profiler.global_tool_config.nsys, "worker_nsight_options")
+                    is not None
+                ), "worker_nsight_options must be set when using nsys with profile_steps"
+                wg_kwargs["worker_nsight_options"] = OmegaConf.to_container(
+                    OmegaConf.select(self.config.global_profiler.global_tool_config.nsys, "worker_nsight_options")
+                )
+        wg_kwargs["device_name"] = self.config.trainer.device
         pools = [(pool, class_dict) for pool, class_dict in self.resource_pool_to_cls.items() if class_dict]
         master_port_range = OmegaConf.select(self.config.trainer, "ray_master_port_range")
         port_ranges = worker_group_port_ranges(master_port_range, len(pools))
