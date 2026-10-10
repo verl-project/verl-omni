@@ -300,6 +300,24 @@ parameter and optimizer offload. It sources the Ascend toolkit and ATB
 environments from `ASCEND_HOME_PATH`, which defaults to
 `/usr/local/Ascend/ascend-toolkit`.
 
+For two eight-device FSDP groups on a 16-NPU node, explicitly enable the
+FSDP2 CPU-offload policy:
+
+```bash
+MODEL_PATH="$MODEL_ROOT/FL2VA" \
+DATA_DIR=/path/to/t2va/verl_omni \
+IMAGEBIND_MODEL_PATH=/path/to/imagebind_huge.pth \
+NUM_GPUS=16 ROLLOUT_TP=4 TEXT_ENCODER_TP=4 \
+bash examples/flowgrpo_trainer/minimax_h3/run_minimax_h3_t2va_lora_npu.sh \
+  actor_rollout_ref.actor.fsdp_config.fsdp_size=8 \
+  actor_rollout_ref.actor.fsdp_config.offload_policy=True \
+  actor_rollout_ref.actor.fsdp_config.reshard_after_forward=True
+```
+
+`fsdp_size` is the shard-group size, not the total number of devices.
+This uses two replicas of eight shards; rollout TP remains four. The
+existing FlowGRPO reward and SDE-window defaults are unchanged.
+
 Both launchers default to online W&B logging. Set `WANDB_MODE=offline` to keep
 metrics local. Checkpoints and logs are written under
 `outputs/<launcher-name>/` unless `OUTPUT_DIR` is set.

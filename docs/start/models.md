@@ -1,6 +1,6 @@
 # Supported Models
 
-Last updated: 09/29/2026.
+Last updated: 10/08/2026.
 
 VeRL-Omni supports RL post-training for generative models across image, video,
 audio, and omni modalities. This page catalogues every model with a ready-to-run
@@ -188,6 +188,7 @@ data prep, and Diffusers pin, see
 | Flow-GRPO (T2VA LoRA, V1 sync — default) | `examples/flowgrpo_trainer/minimax_h3/run_minimax_h3_t2va_lora_v1.sh` | 8×GPU (TP=2) |
 | Flow-GRPO (FL2VA LoRA, V1 sync — default) | `examples/flowgrpo_trainer/minimax_h3/run_minimax_h3_fl2va_lora_v1.sh` | 8×GPU (TP=4) |
 | DiffusionNFT (T2VA LoRA) | `examples/diffusionnft_trainer/minimax_h3/run_minimax_h3_t2va_lora.sh` | 8×GPU (TP=2) |
+| DiffusionNFT (T2VA LoRA, Ascend NPU) | `examples/diffusionnft_trainer/minimax_h3/run_minimax_h3_t2va_lora_npu.sh` | 16×NPU (FSDP=8, TP=4, CPU offload) |
 | DiffusionNFT (FL2VA LoRA) | `examples/diffusionnft_trainer/minimax_h3/run_minimax_h3_fl2va_lora.sh` | 8×GPU (TP=4) |
 
 **Reward models:** CLAP and ImageBind (audio-video alignment), same pair as LTX-2.3.
@@ -329,7 +330,7 @@ trainer's README in `examples/`.
 | Mix-GRPO | NPU ✅<br>GPU ✅ | — | — | — | — | — | — | — | — |
 | DanceGRPO | — | — | — | NPU ✅<br>GPU ✅ | — | — | — | — | — |
 | DPO | NPU ✅<br>GPU ✅ | — | GPU ✅ | — | — | — | — | GPU ✅ | — |
-| DiffusionNFT | NPU ✅<br>GPU ✅ | — | — | — | — | GPU ✅ | — | — | — |
+| DiffusionNFT | NPU ✅<br>GPU ✅ | — | — | — | — | NPU ✅ (T2VA)<br>GPU ✅ | — | — | — |
 | [DiffusionOPD](../algo/diffusion_opd.md) (incl. MOPD) | — | — | GPU ✅ | — | — | — | — | — | — |
 | GSPO (incl. OPD) | — | — | — | — | — | — | — | NPU ✅<br>GPU ✅ | — |
 

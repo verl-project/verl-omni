@@ -89,7 +89,12 @@ class LoRAAdapterMixin:
         is_fsdp_module = fsdp_version(self.module) in (1, 2)
         is_offload_param = getattr(self, "_is_offload_param", False)
         origin_module_device = next(self.module.parameters()).device.type
-        if is_fsdp_module and (is_offload_param or origin_module_device == "cpu"):
+        # FSDP2 CPUOffloadPolicy owns shard placement. A manual model.to(device)
+        # can change a DTensor's device metadata while its local shard stays on
+        # CPU, breaking the next state_dict()/LoRA export. Adapter copy/EMA can
+        # operate on the policy-managed CPU shards without moving the model.
+        uses_cpu_offload_policy = getattr(self, "_uses_fsdp2_cpu_offload_policy", False)
+        if is_fsdp_module and (is_offload_param or origin_module_device == "cpu") and not uses_cpu_offload_policy:
             load_fsdp_model_to_gpu(self.module)
 
         ctx = fsdp_summon_full_params(self.module, writeback=True) if is_fsdp_module else nullcontext()
