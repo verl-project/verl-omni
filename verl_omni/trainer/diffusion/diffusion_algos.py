@@ -22,7 +22,7 @@ from typing import Any, Callable, Optional
 import numpy as np
 import torch
 import torch.nn.functional as F
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 from tensordict import TensorDict
 from verl import DataProto
 from verl.utils import tensordict_utils as tu
@@ -121,6 +121,19 @@ class DiffusionLossFn(ABC):
         rollouts and rewards into loss-specific actor tensors.
         """
         return batch
+
+    @staticmethod
+    def validate_trainer_config(config: Any) -> None:
+        """Fail at trainer start on settings this loss cannot honour.
+
+        Called by the direct-preference trainers at start. Only DGPO consumes ``algorithm.train_timestep_range``
+        and ``algorithm.train_timestep_count``, so the other direct-preference losses reject them instead of
+        silently ignoring them.
+        """
+        algorithm_cfg = config.algorithm
+        for key in ("train_timestep_range", "train_timestep_count"):
+            if getattr(algorithm_cfg, key, None) is not None:
+                raise ValueError(f"algorithm.{key} is only used by the dgpo loss.")
 
 
 DIFFUSION_LOSS_REGISTRY: dict[str, DiffusionLossFn] = {}
@@ -1035,6 +1048,267 @@ class DiffusionNFTLoss(DiffusionLossFn):
         batch.batch["reward_prob"] = reward_prob
         batch.batch["returns"] = batch.batch["advantages"]
         batch.batch["sample_level_rewards"] = reward_tensor[:, None].expand(-1, train_timesteps.shape[1])
+        return batch
+
+
+@register_diffusion_loss("dgpo")
+class DGPOLoss(DiffusionLossFn):
+    """DGPO group-level direct preference objective (Luo et al., arXiv:2510.08425).
+
+    Every rollout group (one prompt, ``n`` images) shares its forward noise and timestep.
+    Per sample ``i`` in group ``g`` with advantage ``A_i`` and flow-matching error
+    ``dsm_i = ||v - v_theta(x_t)||^2`` (``ref_dsm_i`` under the reference model)::
+
+        s_g  = sum_{i in g} A_i * beta * (dsm_i - ref_dsm_i) / |g|      (detached)
+        loss = mean_i( sigmoid(s_g) * A_i * dsm_i )
+
+    ``dsm_i`` is detached where the old-policy ratio ``exp(old_dsm_i - dsm_i)`` leaves
+    ``[1 - clip_range, 1 + clip_range]`` in the direction of ``A_i``. The group sum is
+    computed locally, so each micro batch must hold whole groups; the loss raises otherwise.
+    """
+
+    required_model_output_keys = (
+        "forward_prediction",
+        "old_prediction",
+        "ref_forward_prediction",
+        "x0",
+        "xt",
+        "t_expanded",
+    )
+    required_data_keys = ("advantages", "group_index", "group_size")
+
+    @classmethod
+    def compute_loss(
+        cls,
+        *,
+        forward_prediction: torch.Tensor,
+        old_prediction: torch.Tensor,
+        ref_forward_prediction: torch.Tensor,
+        x0: torch.Tensor,
+        xt: torch.Tensor,
+        t_expanded: torch.Tensor,
+        advantages: torch.Tensor,
+        group_index: torch.Tensor,
+        group_size: torch.Tensor,
+        config: DiffusionActorConfig,
+    ) -> tuple[torch.Tensor, dict[str, Any]]:
+        """Compute the DGPO loss for one micro batch of whole groups at one shared timestep."""
+        loss_cfg = config.diffusion_loss
+        reduce_dims = tuple(range(1, x0.ndim))
+        # xt = (1 - t) * x0 + t * noise, so the flow-matching target noise - x0 is (xt - x0) / t.
+        target = ((xt.float() - x0.float()) / t_expanded.float()).detach()
+        advantages = advantages.to(device=x0.device, dtype=torch.float32)
+        if advantages.ndim > 1:
+            advantages = advantages.flatten(1).mean(dim=1)
+        advantages = advantages.clamp(-loss_cfg.adv_clip_max, loss_cfg.adv_clip_max)
+
+        dsm = ((target - forward_prediction.float()) ** 2).mean(dim=reduce_dims)
+        with torch.no_grad():
+            ref_dsm = ((target - ref_forward_prediction.detach().float()) ** 2).mean(dim=reduce_dims)
+            old_dsm = ((target - old_prediction.detach().float()) ** 2).mean(dim=reduce_dims)
+
+            group_index = group_index.to(device=x0.device).long().flatten()
+            group_size = group_size.to(device=x0.device).long().flatten()
+            groups, inverse = torch.unique(group_index, return_inverse=True)
+            counts = torch.bincount(inverse, minlength=groups.numel())
+            expected = torch.zeros_like(counts).scatter_(0, inverse, group_size)
+            if not torch.equal(counts, expected):
+                raise ValueError(
+                    "DGPO needs every rollout group whole inside one micro batch; got group sizes "
+                    f"{counts.tolist()} where {expected.tolist()} were expected. Use a micro batch size that is a "
+                    "multiple of actor_rollout_ref.rollout.n and keep actor shuffling off."
+                )
+
+            per_sample = advantages * loss_cfg.dgpo_beta * (dsm.detach() - ref_dsm) / group_size.float()
+            group_sums = torch.zeros(groups.numel(), device=x0.device, dtype=torch.float32)
+            group_sums.index_add_(0, inverse, per_sample)
+            group_weights = torch.sigmoid(group_sums)
+            weights = group_weights[inverse]
+
+            if loss_cfg.dgpo_clip_range > 0:
+                ratio = torch.exp(old_dsm - dsm.detach())
+                should_clip = torch.where(
+                    advantages > 0, ratio > 1.0 + loss_cfg.dgpo_clip_range, ratio < 1.0 - loss_cfg.dgpo_clip_range
+                )
+            else:
+                should_clip = torch.zeros_like(dsm, dtype=torch.bool)
+
+        clipped_dsm = torch.where(should_clip, dsm.detach(), dsm)
+        policy_loss = (weights * advantages * clipped_dsm).mean()
+        ref_kl_loss = ((forward_prediction.float() - ref_forward_prediction.detach().float()) ** 2).mean()
+        loss = policy_loss + loss_cfg.ref_kl_coef * ref_kl_loss
+
+        metrics = {
+            "actor/policy_loss": policy_loss.detach().item(),
+            "actor/dsm_loss": dsm.detach().mean().item(),
+            "actor/ref_dsm_loss": ref_dsm.mean().item(),
+            "actor/old_dsm_loss": old_dsm.mean().item(),
+            "actor/group_weight_mean": group_weights.mean().item(),
+            # Mean distance from the neutral weight 0.5; stays meaningful when metrics are averaged across ranks.
+            "actor/group_weight_dev": (group_weights - 0.5).abs().mean().item(),
+            "actor/clip_frac": should_clip.float().mean().item(),
+            "actor/ref_kl_loss": ref_kl_loss.detach().item(),
+            "actor/total_loss": loss.detach().item(),
+        }
+        return loss, metrics
+
+    def __call__(
+        self,
+        *,
+        config: DiffusionActorConfig,
+        model_output: dict[str, Any],
+        data: TensorDict,
+    ) -> DiffusionLossResult:
+        loss, metrics = self.compute_loss(
+            forward_prediction=model_output["forward_prediction"],
+            old_prediction=model_output["old_prediction"],
+            ref_forward_prediction=model_output["ref_forward_prediction"],
+            x0=model_output["x0"],
+            xt=model_output["xt"],
+            t_expanded=model_output["t_expanded"],
+            advantages=data["advantages"],
+            group_index=data["group_index"],
+            group_size=data["group_size"],
+            config=config,
+        )
+        return DiffusionLossResult(loss=loss, metrics=metrics)
+
+    @staticmethod
+    def validate_trainer_config(config: Any) -> None:
+        """Fail at trainer start on configs DGPO cannot train, instead of after the first rollout.
+
+        Each rank receives a contiguous ``batch * n / dp`` slice of the update batch and of every mini batch and
+        cuts it into contiguous micro batches, so groups stay whole only when every division is exact in units
+        of ``n``. The loss also needs the LoRA ``old`` adapter for rollout and the reference forward, complete
+        groups from the v1 sampler, and the unstaged NFT engine path.
+        """
+        actor_cfg = config.actor_rollout_ref.actor
+        model_cfg = config.actor_rollout_ref.model
+        rollout_cfg = config.actor_rollout_ref.rollout
+        n = int(rollout_cfg.n)
+        micro = actor_cfg.get("ppo_micro_batch_size_per_gpu", None)
+        sp_size = OmegaConf.select(actor_cfg, "fsdp_config.ulysses_sequence_parallel_size", default=1) or 1
+        dp_size = int(config.trainer.n_gpus_per_node) * int(config.trainer.nnodes) // int(sp_size)
+        use_v1 = bool(OmegaConf.select(config, "trainer.use_v1", default=False))
+        update_prompts = int(config.data.train_batch_size)
+        if use_v1:
+            mode = OmegaConf.select(config, "trainer.v1.trainer_mode", default="sync")
+            update_prompts //= int(OmegaConf.select(config, f"trainer.v1.{mode}.parameter_sync_step", default=1) or 1)
+        problems = []
+        if micro is None or int(micro) % n != 0:
+            problems.append(f"ppo_micro_batch_size_per_gpu={micro} must be a multiple of rollout.n={n}")
+        if int(actor_cfg.ppo_mini_batch_size) % dp_size != 0:
+            mini = actor_cfg.ppo_mini_batch_size
+            problems.append(f"ppo_mini_batch_size={mini} must be divisible by dp size {dp_size}")
+        if update_prompts % dp_size != 0:
+            problems.append(f"the {update_prompts} prompts per actor update must be divisible by dp size {dp_size}")
+        if actor_cfg.get("use_dynamic_bsz", False):
+            problems.append("use_dynamic_bsz must be False")
+        if not int(model_cfg.get("lora_rank", 0) or 0) > 0:
+            problems.append("actor_rollout_ref.model.lora_rank must be > 0 (DGPO trains LoRA adapters)")
+        if "old" not in tuple(model_cfg.get("policy_state_adapters", ("default",))):
+            problems.append('actor_rollout_ref.model.policy_state_adapters must include "old"')
+        if rollout_cfg.get("rollout_adapter", None) != "old":
+            problems.append("actor_rollout_ref.rollout.rollout_adapter must be old")
+        if actor_cfg.get("use_kl_loss", False):
+            problems.append("actor_rollout_ref.actor.use_kl_loss must be False (use diffusion_loss.ref_kl_coef)")
+        if actor_cfg.get("enable_timestep_staging", False):
+            problems.append("actor_rollout_ref.actor.enable_timestep_staging must be False")
+        if use_v1 and not OmegaConf.select(config, "trainer.v1.sampler.drop_incomplete_groups", default=False):
+            problems.append("trainer.v1.sampler.drop_incomplete_groups must be True so groups arrive complete")
+        if problems:
+            raise ValueError("DGPO config is not supported: " + "; ".join(problems) + ".")
+
+    @staticmethod
+    def _first_appearance_index(uid: np.ndarray) -> np.ndarray:
+        """Number groups 0, 1, ... in the order their uid first appears."""
+        _, first, inverse = np.unique(uid, return_index=True, return_inverse=True)
+        rank = np.empty_like(first)
+        rank[np.argsort(first, kind="stable")] = np.arange(first.size)
+        return rank[inverse.reshape(-1)]
+
+    @staticmethod
+    def _select_shared_timesteps(
+        schedule: torch.Tensor,
+        timestep_range: Optional[list[int]],
+        count: Optional[int],
+        timestep_fraction: float,
+        generator: Optional[torch.Generator] = None,
+    ) -> torch.Tensor:
+        """Draw schedule indices once and apply them to every row, so groups share timesteps."""
+        if schedule.ndim != 2:
+            raise ValueError(f"DGPO rollout timesteps must have shape [B, T], got {tuple(schedule.shape)}.")
+        if not torch.equal(schedule, schedule[:1].expand_as(schedule)):
+            raise ValueError("DGPO shares timesteps across the batch, so every rollout must use the same schedule.")
+        start, end = (
+            (0, schedule.shape[1]) if timestep_range is None else (int(timestep_range[0]), int(timestep_range[1]))
+        )
+        end = min(end, schedule.shape[1])
+        if not 0 <= start < end:
+            raise ValueError(f"train_timestep_range {timestep_range} is empty for a {schedule.shape[1]}-step schedule.")
+        width = end - start
+        count = max(1, int(width * timestep_fraction)) if count is None else min(int(count), width)
+        index = torch.randperm(width, generator=generator)[:count] + start
+        selected = schedule[:, index.to(schedule.device)].long()
+        # The engine recovers the velocity target as (x_t - x_0) / t, so t must stay positive after flooring.
+        if (selected < 1).any():
+            raise ValueError("DGPO training timesteps must be >= 1; narrow train_timestep_range to skip the last step.")
+        return selected
+
+    @staticmethod
+    def prepare_actor_batch(
+        batch: DataProto,
+        reward_tensor: torch.Tensor,
+        config: Any,
+    ) -> DataProto:
+        """Turn ODE rollouts into DGPO actor tensors: advantages, groups, shared timesteps and noise."""
+        algorithm_cfg = config.algorithm
+        if "uid" not in batch.non_tensor_batch:
+            raise ValueError("DGPO actor batch requires `uid` in non_tensor_batch.")
+        if "latents_clean" not in batch.batch.keys():
+            raise ValueError("DGPO actor batch requires `latents_clean` from rollout.")
+        timestep_key = next((key for key in ("train_timesteps", "all_timesteps") if key in batch.batch.keys()), None)
+        if timestep_key is None:
+            raise ValueError("DGPO actor batch requires `train_timesteps` or `all_timesteps` from rollout.")
+
+        # Micro batches are contiguous slices, so groups must be contiguous. Rollouts usually are already
+        # (prompts repeated n times in place); only then is the batch left in its original order.
+        group_index = DGPOLoss._first_appearance_index(batch.non_tensor_batch["uid"])
+        if np.any(np.diff(group_index) < 0):
+            order = np.argsort(group_index, kind="stable")
+            batch.reorder(torch.from_numpy(order))
+            reward_tensor = reward_tensor[torch.from_numpy(order).to(reward_tensor.device)]
+            group_index = group_index[order]
+
+        uid = batch.non_tensor_batch["uid"]
+        counts = np.bincount(group_index)
+        group_size = torch.from_numpy(counts[group_index]).long()
+        group_index = torch.from_numpy(group_index).long()
+
+        advantages = DiffusionNFTLoss._compute_group_advantages(
+            rewards=reward_tensor,
+            uid=uid,
+            norm_by_std=algorithm_cfg.norm_adv_by_std_in_grpo,
+            global_std=algorithm_cfg.global_std,
+        )
+        train_timesteps = DGPOLoss._select_shared_timesteps(
+            batch.batch[timestep_key],
+            timestep_range=getattr(algorithm_cfg, "train_timestep_range", None),
+            count=getattr(algorithm_cfg, "train_timestep_count", None),
+            timestep_fraction=algorithm_cfg.timestep_fraction,
+        )
+        latents = batch.batch["latents_clean"]
+        num_steps = train_timesteps.shape[1]
+        group_noise = torch.randn(int(counts.size), num_steps, *latents.shape[1:], dtype=torch.float32)
+        forward_noise = group_noise[group_index]
+
+        batch.batch["train_timesteps"] = train_timesteps
+        batch.batch["forward_noise"] = forward_noise
+        batch.batch["group_index"] = group_index
+        batch.batch["group_size"] = group_size
+        batch.batch["advantages"] = advantages[:, None].expand(-1, num_steps)
+        batch.batch["returns"] = batch.batch["advantages"]
+        batch.batch["sample_level_rewards"] = reward_tensor[:, None].expand(-1, num_steps)
         return batch
 
 

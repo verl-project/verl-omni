@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ci-e2e-diffusion GPU smoke tests (4-GPU): end-to-end diffusion training paths.
 # Models with a landed v1 recipe run on the V1 sync trainer (Qwen-Image-Edit,
-# FlowGRPO, online DPO, DiffusionNFT, MiniMax-H3 T2VA) and the async V1
+# FlowGRPO, online DPO, DiffusionNFT, DGPO, MiniMax-H3 T2VA) and the async V1
 # trainers keep their dedicated tests (FlowGRPO separate_async, two-teacher
 # OPD). Bagel PickScore stays on v0 until its v1 recipe lands (#511); the
 # sync-separate smoke keeps the deprecated v0 distributed path covered
@@ -77,5 +77,9 @@ run_test 9 "Diffusion OPD v1 separate_async standalone teachers e2e" \
 run_test 10 "Boogu-Image DiffusionNFT trainer e2e" \
     env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" \
     bash tests/special_e2e/run_diffusionnft_boogu_image.sh "${diffusion_trainer_args[@]}"
+
+run_test 11 "SD3.5 DGPO v1 sync trainer e2e" \
+    env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" \
+    bash tests/special_e2e/run_dgpo_sd35.sh "${diffusion_trainer_args[@]}"
 
 gpu_smoke_summary

@@ -38,6 +38,8 @@ class DiffusionAlgoConfig(BaseConfig):
     old_policy_decay: Optional[float] = None
     old_policy_update_interval: int = 1
     timestep_fraction: float = 1.0
+    train_timestep_range: Optional[list[int]] = None
+    train_timestep_count: Optional[int] = None
     adv_mode: str = "continuous"
     paired_preference: bool = False  # True for pair-based algorithms (e.g. DPO)
     rollout_correction: RolloutCorrectionConfig = field(default_factory=RolloutCorrectionConfig)
@@ -57,6 +59,16 @@ class DiffusionAlgoConfig(BaseConfig):
             raise ValueError(f"old_policy_update_interval must be positive, got {self.old_policy_update_interval}.")
         if not 0 < self.timestep_fraction <= 1:
             raise ValueError(f"timestep_fraction must be in (0, 1], got {self.timestep_fraction}.")
+        if self.train_timestep_range is not None:
+            if (
+                len(self.train_timestep_range) != 2
+                or not 0 <= self.train_timestep_range[0] < self.train_timestep_range[1]
+            ):
+                raise ValueError(
+                    f"train_timestep_range must be [start, end) with 0 <= start < end, got {self.train_timestep_range}."
+                )
+        if self.train_timestep_count is not None and self.train_timestep_count <= 0:
+            raise ValueError(f"train_timestep_count must be positive, got {self.train_timestep_count}.")
 
 
 @dataclass

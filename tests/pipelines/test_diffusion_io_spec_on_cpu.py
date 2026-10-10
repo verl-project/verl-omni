@@ -51,6 +51,7 @@ _PRIMARY_MODALITY = [
         "image",
     ),
     ("verl_omni.pipelines.sd3_flow_grpo.vllm_omni_rollout_adapter", "StableDiffusion3Pipeline", "flow_grpo", "image"),
+    ("verl_omni.pipelines.sd3_dgpo.vllm_omni_rollout_adapter", "StableDiffusion3Pipeline", "dgpo", "image"),
     ("verl_omni.pipelines.flux_dance_grpo.vllm_omni_rollout_adapter", "FluxPipeline", "dance_grpo", "image"),
     ("verl_omni.pipelines.wan22_dance_grpo.vllm_omni_rollout_adapter", "WanPipeline", "dance_grpo", "video"),
     ("verl_omni.pipelines.ltx2_flow_grpo.vllm_omni_rollout_adapter", "LTX2Pipeline", "flow_grpo", "video"),

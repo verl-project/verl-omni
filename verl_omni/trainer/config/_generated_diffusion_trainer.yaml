@@ -89,6 +89,8 @@ actor_rollout_ref:
       dpo_beta: 2000.0
       kl_mask_threshold: 1.0e-05
       add_kl_coefficient: true
+      dgpo_beta: 100.0
+      dgpo_clip_range: 0.01
     rollout_correction:
       _target_: verl.trainer.config.algorithm.RolloutCorrectionConfig
       bypass_mode: ${oc.select:algorithm.rollout_correction.bypass_mode,false}
@@ -591,6 +593,8 @@ algorithm:
   old_policy_decay: null
   old_policy_update_interval: 1
   timestep_fraction: 1.0
+  train_timestep_range: null
+  train_timestep_count: null
   adv_mode: continuous
   paired_preference: false
   rollout_correction:

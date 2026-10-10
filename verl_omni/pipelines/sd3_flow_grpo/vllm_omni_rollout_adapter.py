@@ -192,6 +192,8 @@ class StableDiffusion3PipelineWithLogProb(SD3TokenIdPromptMixin, StableDiffusion
     """
 
     supports_request_batch = True
+    #: Also return the final latents as ``latents_clean`` when the output type is not ``both``.
+    emit_clean_latents = False
 
     #: Declares the primary rollout media stream so downstream consumers read
     #: the modality from the adapter instead of inferring it from tensor rank.
@@ -525,7 +527,7 @@ class StableDiffusion3PipelineWithLogProb(SD3TokenIdPromptMixin, StableDiffusion
         self._current_timestep = None
         output = self._decode_latents(latents, output_type)
         rl = {}
-        if output_type == "both":
+        if output_type == "both" or self.emit_clean_latents:
             rl["latents_clean"] = latents.float()
 
         result = rollout_output(
