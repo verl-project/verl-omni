@@ -181,6 +181,16 @@ def test_lora_checkpoint_config_override(overrides, expected):
     assert config.actor_rollout_ref.actor.checkpoint.save_lora_only is expected
 
 
+@pytest.mark.parametrize("config_name", ["diffusion_trainer", "omni_trainer"])
+@pytest.mark.parametrize("override,expected", [(None, False), ("true", True)])
+def test_lora_only_checkpoint_config_per_family(config_name, override, expected):
+    config_dir = Path(__file__).parents[2] / "verl_omni/trainer/config"
+    overrides = [] if override is None else [f"actor_rollout_ref.actor.checkpoint.save_lora_only={override}"]
+    with initialize_config_dir(config_dir=str(config_dir), version_base=None):
+        config = compose(config_name=config_name, overrides=overrides)
+    assert config.actor_rollout_ref.actor.checkpoint.save_lora_only is expected
+
+
 @pytest.mark.parametrize("normalized", [False, True])
 @pytest.mark.parametrize("replica_delta", [0, 1])
 def test_legacy_export_keeps_metadata_configuration(api, case, normalized, replica_delta):

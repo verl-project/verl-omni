@@ -58,6 +58,12 @@ actor_rollout_ref:
     # Shuffle training data across PPO epochs.
     shuffle: false
 
+    # Checkpoint config.
+    checkpoint:
+
+      # Save only LoRA model weights with the FSDP checkpoint saver.
+      save_lora_only: false
+
 # Trainer configuration.
 trainer:
 
