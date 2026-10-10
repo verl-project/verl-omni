@@ -317,13 +317,17 @@ class LTX23PipelineWithLogProb(LTX2Pipeline):
             denoise_ctx,
         )
         video_policy_mask = self._video_policy_mask(state, denoise_ctx)
-        condition_count = int((~video_policy_mask).sum().item())
-        if state.video.shape[1] % int(forward_ctx.latent_num_frames):
+        video_rows = state.video.shape[1]
+        if video_rows % int(forward_ctx.latent_num_frames):
             raise ValueError("LTX-2.3 packed video rows do not divide into latent frames.")
-        rows_per_frame = state.video.shape[1] // int(forward_ctx.latent_num_frames)
-        if condition_count not in (0, rows_per_frame) or (
-            condition_count and video_policy_mask[:condition_count].any()
-        ):
+        rows_per_frame = video_rows // int(forward_ctx.latent_num_frames)
+        # Fuse the TI2VA row-count and prefix-layout reductions into one
+        # device round-trip instead of a sync each. "The first
+        # `condition_count` rows hold no update rows" is equivalent to the
+        # boolean mask having no True->False adjacency.
+        prefix_only = (video_policy_mask[:-1] & ~video_policy_mask[1:]).any().logical_not()
+        condition_count, prefix_ok = torch.stack(((~video_policy_mask).sum(), prefix_only.to(torch.long))).tolist()
+        if condition_count not in (0, rows_per_frame) or (condition_count and not prefix_ok):
             raise ValueError("LTX-2.3 TI2VA supports exactly one fixed first latent frame.")
         audio_length = int(forward_ctx.original_audio_num_frames)
         if not 0 < audio_length <= state.audio.shape[1]:
