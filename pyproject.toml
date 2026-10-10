@@ -45,6 +45,7 @@ dependencies = [
     "fastapi",
     "latex2sympy2_extended",
     "math_verify",
+    "mathruler",
     "tensorboard",
     "TransferQueue==0.1.9",
     "vllm==0.30.0",
