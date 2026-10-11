@@ -43,6 +43,7 @@ from .reward_model_executor import (
     build_engine_reward_executors,
     build_native_reward_executors,
 )
+from .streaming import merge_reward_outputs
 
 logger = logging.getLogger(__name__)
 
@@ -139,6 +140,7 @@ class OmniRewardLoopManager(RewardLoopManager):
     def __init__(self, config, rm_resource_pool=None, accelerator_resource_pool=None):
         self._score_lock = asyncio.Lock()
         self.accelerator_resource_pool = accelerator_resource_pool
+        enable_streaming = streaming_reward_enabled(config)
         named_reward_manager_cls = None
         if has_reward_models(config):
             validate_reward_model_terms(config)
@@ -164,11 +166,15 @@ class OmniRewardLoopManager(RewardLoopManager):
             self._init_reward_loop_workers()
         else:
             super().__init__(config=config, rm_resource_pool=rm_resource_pool)
+        if self.multi_reward_model_manager.models and enable_streaming:
+            asyncio.run(self.multi_reward_model_manager.wake_up())
 
     @property
     def reward_loop_worker_handles(self):
         if not streaming_reward_enabled(self.config):
             return None
+        if self.multi_reward_model_manager.models:
+            return {name: tuple(workers) for name, workers in self._reward_worker_groups.items()}
         return super().reward_loop_worker_handles
 
     def _init_reward_loop_workers(self):
@@ -347,20 +353,9 @@ class OmniRewardLoopManager(RewardLoopManager):
         merged_scores = []
         merged_infos = []
         for index in range(len(data)):
-            total = 0.0
-            info = {}
-            for outputs in group_outputs.values():
-                item = outputs[index]
-                total += float(item["reward_score"])
-                for key, value in item.get("reward_extra_info", {}).items():
-                    if key == "reward/combined":
-                        continue
-                    if key in info:
-                        raise ValueError(f"Duplicate reward extra-info key {key!r} across worker groups")
-                    info[key] = value
-            info["reward/combined"] = total
-            merged_scores.append(total)
-            merged_infos.append(info)
+            result = merge_reward_outputs([outputs[index] for outputs in group_outputs.values()])
+            merged_scores.append(result["reward_score"])
+            merged_infos.append(result["reward_extra_info"])
 
         rm_scores = self.reward_manager_cls.assemble_rm_scores(data, merged_scores)
         batch = TensorDict({"rm_scores": rm_scores}, batch_size=len(data))

@@ -1,7 +1,7 @@
 (async_reward)=
 # Async Reward for Diffusion Training
 
-Last updated: 07/17/2026
+Last updated: 10/10/2026
 
 Async reward lets VeRL-Omni score completed rollout samples through reward-loop
 workers while other samples are still being generated. It is useful when reward
@@ -106,24 +106,21 @@ The base reward config documents these fields in
 ## How it plugs in
 
 Async reward is enabled by passing reward-loop worker handles into the rollout
-agent loop. This happens when either there is no reward model, or when the reward
-model has its own resource pool:
+agent loop. The reward manager owns the eligibility decision. Legacy reward
+functions stream when there is no reward model, or when the legacy model has its
+own pool. Named models additionally require the explicit streaming opt-in and
+dedicated resident placement described in
+[Named Reward Models](named_reward_models.md#sample-level-streaming).
 
 ```python
-enable_agent_reward_loop = (
-    not self.use_rm or self.config.reward.reward_model.enable_resource_pool
-)
-reward_loop_worker_handles = (
-    self.reward_loop_manager.reward_loop_workers
-    if enable_agent_reward_loop
-    else None
-)
+reward_loop_worker_handles = self.reward_loop_manager.reward_loop_worker_handles
 ```
 
 The diffusion agent loop runs one async task per rollout sample. After a sample
 finishes generation, `_compute_score` builds a one-sample `DataProto` containing
 the prompt, visual response, and reward metadata, then sends it to a reward-loop
-worker:
+worker. The legacy path chooses one replica; the named path sends the sample to
+one replica from each group and combines their already weighted results:
 
 ```python
 selected_reward_loop_worker_handle = random.choice(

@@ -1141,6 +1141,39 @@ async def test_named_model_groups_merge_scores_and_extra_info():
     assert result.meta_info["reward_extra_keys"] == ["reward/ocr", "reward/pickscore", "reward/combined"]
 
 
+def test_named_batch_accepts_score_only_results_with_streaming_disabled():
+    class _ScoreOnlyRewardManager(MultiVisualRewardManager):
+        async def run_single(self, data):
+            return {"reward_score": float(data.batch["responses"].item()) + 0.25}
+
+    config = _config({"quality": {"backend": "native"}})
+    assert not streaming_reward_enabled(config)
+    worker = object.__new__(OmniRewardLoopWorker)
+    worker.config = config
+    worker.reward_manager = object.__new__(_ScoreOnlyRewardManager)
+
+    manager = object.__new__(OmniRewardLoopManager)
+    manager.config = config
+    manager._score_lock = asyncio.Lock()
+    manager.reward_manager_cls = _ScoreOnlyRewardManager
+    manager.multi_reward_model_manager = SimpleNamespace(
+        models={"quality": object()}, wake_up=AsyncMock(), sleep=AsyncMock()
+    )
+    manager._reward_worker_groups = {
+        "quality": [SimpleNamespace(compute_score_batch=SimpleNamespace(remote=worker.compute_score_batch))]
+    }
+    manager._reward_dispatch_batch_sizes = {}
+    data = DataProto.from_dict(tensors={"responses": torch.tensor([[0], [1]])})
+
+    result = manager.compute_rm_score(data)
+
+    assert torch.equal(result.batch["rm_scores"], torch.tensor([[0.25], [1.25]]))
+    assert result.non_tensor_batch["reward/combined"].tolist() == [0.25, 1.25]
+    assert result.meta_info["reward_extra_keys"] == ["reward/combined"]
+    manager.multi_reward_model_manager.wake_up.assert_awaited_once_with()
+    manager.multi_reward_model_manager.sleep.assert_awaited_once_with()
+
+
 @pytest.mark.asyncio
 async def test_mixed_group_failure_drains_all_sample_work_before_lifecycle_sleep():
     calls = []

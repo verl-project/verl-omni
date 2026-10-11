@@ -22,6 +22,7 @@ import torch
 import transfer_queue as tq
 from tensordict import NonTensorData, NonTensorStack, TensorDict
 from verl.experimental.agent_loop import get_trajectory_info
+from verl.trainer.ppo.v1 import AgentLoopManagerTQ
 from verl.utils.ray_utils import auto_await
 from verl.utils.tensordict_utils import list_of_dict_to_tensordict
 
@@ -31,6 +32,7 @@ from verl_omni.agent_loop.diffusion_agent_loop import (
     _InternalDiffusionAgentLoopOutput,
 )
 from verl_omni.agent_loop.utils import _derive_rollout_seed
+from verl_omni.reward_loop.reward_model_executor import _await_owned
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
@@ -44,6 +46,14 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
         super().__init__(*args, **kwargs)
         tq.init()
         self.background_tasks = set()
+
+    async def close_reward_streaming(self) -> None:
+        """Cancel unfinished prompts and drain accepted reward work before teardown."""
+        tasks = tuple(self.background_tasks)
+        for task in tasks:
+            task.cancel()
+        await super().close_reward_streaming()
+        await _await_owned(asyncio.gather(*tasks, return_exceptions=True))
 
     async def generate_sequences(self, batch: TensorDict) -> None:
         """Spawn diffusion agent loops for each prompt in the batch without waiting."""
@@ -300,12 +310,27 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
             )
 
 
+class DiffusionAgentLoopManagerTQ(AgentLoopManagerTQ):
+    """Wait for all prompt registrations before returning dispatch failures."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.agent_loop_workers_class = DiffusionAgentLoopWorkerTQ
+
+    def generate_sequences(self, prompts: TensorDict) -> None:
+        """Dispatch prompts and settle accepted RPCs before returning or raising."""
+        chunks = prompts.chunk(len(self.agent_loop_workers))
+        requests = []
+        try:
+            for worker, chunk in zip(self.agent_loop_workers, chunks, strict=False):
+                requests.append(worker.generate_sequences.remote(chunk))
+        finally:
+            if requests:
+                ray.wait(requests, num_returns=len(requests))
+        ray.get(requests)
+
+
 @auto_await
 async def create_diffusion_agent_loop_manager(*args, **kwargs):
-    """Build verl's ``AgentLoopManagerTQ`` wired with ``DiffusionAgentLoopWorkerTQ``."""
-    from verl.trainer.ppo.v1 import AgentLoopManagerTQ
-
-    manager = AgentLoopManagerTQ(*args, **kwargs)
-    manager.agent_loop_workers_class = DiffusionAgentLoopWorkerTQ
-    await manager._init_agent_loop_workers()
-    return manager
+    """Build the TQ manager wired with diffusion agent workers."""
+    return await DiffusionAgentLoopManagerTQ.create(*args, **kwargs)

@@ -916,6 +916,11 @@ reward:
     nnodes: 0
     model_path: null
   num_workers: 8
+  streaming:
+    _target_: verl_omni.workers.config.reward.StreamingRewardConfig
+    enabled: false
+    max_inflight: 8
+    timeout: null
   custom_reward_function:
     path: null
     name: compute_score
