@@ -639,13 +639,13 @@ class BagelForSFT(BagelForTraining):
         valid_mask[:, response_start:] = response_mask
 
         position_ids = torch.zeros(batch_size, sequence_length, dtype=torch.long, device=sequence.device)
-        for batch_index in range(batch_size):
-            prefix_tokens = int(prefix_mask[batch_index].sum().item())
-            position_ids[batch_index, :prefix_length] = torch.arange(prefix_length, device=sequence.device)
-            position_ids[batch_index, image_start : image_end + 1] = prefix_tokens
-            position_ids[batch_index, response_start:] = (
-                prefix_tokens + 1 + torch.arange(response_length, device=sequence.device)
-            )
+        # Batched row lengths: no per-row host sync.
+        prefix_tokens = prefix_mask.sum(dim=1, dtype=torch.long)
+        prefix_arange = torch.arange(prefix_length, device=sequence.device)
+        response_arange = torch.arange(response_length, device=sequence.device)
+        position_ids[:, :prefix_length] = prefix_arange.unsqueeze(0)
+        position_ids[:, image_start : image_end + 1] = prefix_tokens.unsqueeze(1)
+        position_ids[:, response_start:] = (prefix_tokens + 1).unsqueeze(1) + response_arange.unsqueeze(0)
 
         segments = [
             (0, image_start, "causal"),
@@ -796,16 +796,16 @@ class BagelForSFT(BagelForTraining):
         text_mask[latent_mask] = False
 
         position_ids = torch.zeros(batch_size, target_block_end, dtype=torch.long, device=sequence.device)
-        for batch_index in range(batch_size):
-            prompt_tokens = int(prompt_mask[batch_index].sum().item())
-            edit_tokens = int(edit_mask[batch_index].sum().item())
-            position_ids[batch_index, :prompt_length] = torch.arange(prompt_length, device=sequence.device)
-            position_ids[batch_index, clean_block_start:clean_block_end] = prompt_tokens
-            position_ids[batch_index, vision_block_start:vision_block_end] = prompt_tokens + 1
-            position_ids[batch_index, edit_start : edit_start + edit_length] = (
-                prompt_tokens + 2 + torch.arange(edit_length, device=sequence.device)
-            )
-            position_ids[batch_index, target_block_start:target_block_end] = prompt_tokens + 2 + edit_tokens
+        # Batched row lengths: no per-row host sync.
+        prompt_tokens = prompt_mask.sum(dim=1, dtype=torch.long)
+        edit_tokens = edit_mask.sum(dim=1, dtype=torch.long)
+        prompt_arange = torch.arange(prompt_length, device=sequence.device)
+        edit_arange = torch.arange(edit_length, device=sequence.device)
+        position_ids[:, :prompt_length] = prompt_arange.unsqueeze(0)
+        position_ids[:, clean_block_start:clean_block_end] = prompt_tokens.unsqueeze(1)
+        position_ids[:, vision_block_start:vision_block_end] = (prompt_tokens + 1).unsqueeze(1)
+        position_ids[:, edit_start : edit_start + edit_length] = (prompt_tokens + 2).unsqueeze(1) + edit_arange
+        position_ids[:, target_block_start:target_block_end] = (prompt_tokens + 2 + edit_tokens).unsqueeze(1)
 
         segments = [
             (0, prompt_length, "causal"),
@@ -1055,9 +1055,11 @@ def _validate_response_shift(
     end_labels = labels.gather(1, (lengths - 1).unsqueeze(1)).squeeze(1)
     if not bool((end_labels == config.text_end_id).all()):
         raise ValueError("the final supervised response label must be BAGEL text_end_id")
-    for batch_index, length in enumerate(lengths.tolist()):
-        if not torch.equal(input_ids[batch_index, 1:length], labels[batch_index, : length - 1]):
-            raise ValueError("response_input_ids and response_labels must be one-token shifted")
+    # Batched shift check: one device round-trip instead of a sync per row.
+    shifted_equal = input_ids[:, 1:] == labels[:, :-1]
+    supervised_columns = torch.arange(1, input_ids.shape[1], device=input_ids.device).unsqueeze(0)
+    if not bool((shifted_equal | (supervised_columns >= lengths.unsqueeze(1))).all()):
+        raise ValueError("response_input_ids and response_labels must be one-token shifted")
     return mask
 
 
