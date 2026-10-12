@@ -303,22 +303,22 @@ def _is_empty_audio_features(value: Any) -> bool:
         return value.numel() == 0
     if isinstance(value, np.ndarray):
         return value.size == 0
-    if isinstance(value, (list, tuple)):
+    if isinstance(value, (list | tuple)):
         return len(value) == 0 or all(_is_empty_audio_features(item) for item in value)
     return False
 
 
 def _one_sample_audio_feature_lens(sample: Any, device: torch.device) -> torch.Tensor:
-    if sample is None or (isinstance(sample, (list, tuple)) and not sample):
+    if sample is None or (isinstance(sample, (list | tuple)) and not sample):
         return torch.zeros(0, dtype=torch.long, device=device)
     if isinstance(sample, torch.Tensor):
         return sample.to(device=device, dtype=torch.long).reshape(-1).contiguous()
     if isinstance(sample, np.ndarray):
         return torch.as_tensor(sample, dtype=torch.long, device=device).reshape(-1).contiguous()
-    if isinstance(sample, (list, tuple)):
-        if len(sample) == 1 and isinstance(sample[0], (list, tuple, torch.Tensor, np.ndarray)):
+    if isinstance(sample, (list | tuple)):
+        if len(sample) == 1 and isinstance(sample[0], (list | tuple | torch.Tensor | np.ndarray)):
             return _one_sample_audio_feature_lens(sample[0], device)
-        if sample and not isinstance(sample[0], (int, float, np.integer, np.floating)):
+        if sample and not isinstance(sample[0], (int | float | np.integer | np.floating)):
             return torch.cat([_one_sample_audio_feature_lens(item, device) for item in sample], dim=0)
         return torch.as_tensor(sample, dtype=torch.long, device=device).reshape(-1).contiguous()
     return torch.as_tensor(sample, dtype=torch.long, device=device).reshape(-1).contiguous()
@@ -330,7 +330,7 @@ def _batch_audio_feature_lens(value: Any, device: torch.device) -> list[torch.Te
         return []
     if isinstance(value, torch.Tensor) and value.ndim <= 1:
         return [_one_sample_audio_feature_lens(value, device)]
-    if isinstance(value, (list, tuple)):
+    if isinstance(value, (list | tuple)):
         return [_one_sample_audio_feature_lens(sample, device) for sample in value]
     return [_one_sample_audio_feature_lens(value, device)]
 
@@ -345,7 +345,7 @@ def _normalize_audio_features(value: Any) -> torch.Tensor | list:
         return value.contiguous()
     if isinstance(value, np.ndarray):
         return _normalize_audio_features(torch.as_tensor(value))
-    if isinstance(value, (list, tuple)):
+    if isinstance(value, (list | tuple)):
         clips: list[torch.Tensor] = []
         for item in value:
             if _is_empty_audio_features(item):
@@ -389,11 +389,11 @@ def _sample_pixel_slices(pixel_values: Any) -> list[torch.Tensor]:
         return [pixel_values.contiguous()]
     if isinstance(pixel_values, np.ndarray):
         return _sample_pixel_slices(torch.as_tensor(pixel_values))
-    if isinstance(pixel_values, (list, tuple)):
+    if isinstance(pixel_values, (list | tuple)):
         if not pixel_values:
             return []
         first = pixel_values[0]
-        if isinstance(first, (list, tuple)):
+        if isinstance(first, (list | tuple)):
             if len(pixel_values) == 1:
                 return _sample_pixel_slices(first)
             slices: list[torch.Tensor] = []
@@ -407,7 +407,7 @@ def _sample_pixel_slices(pixel_values: Any) -> list[torch.Tensor]:
 def _sample_tgt_sizes(tgt_sizes: Any, *, n_slices: int, device: torch.device) -> torch.Tensor:
     if tgt_sizes is None or (isinstance(tgt_sizes, (list | tuple)) and not tgt_sizes):
         return torch.zeros(0, 2, dtype=torch.int32, device=device)
-    if isinstance(tgt_sizes, (list, tuple)) and len(tgt_sizes) == 1 and not isinstance(tgt_sizes[0], (int, float)):
+    if isinstance(tgt_sizes, (list | tuple)) and len(tgt_sizes) == 1 and not isinstance(tgt_sizes[0], (int | float)):
         inner = tgt_sizes[0]
         if isinstance(inner, (list | tuple | np.ndarray | torch.Tensor)):
             return _sample_tgt_sizes(inner, n_slices=n_slices, device=device)
@@ -419,6 +419,46 @@ def _sample_tgt_sizes(tgt_sizes: Any, *, n_slices: int, device: torch.device) ->
     return sizes.reshape(-1, 2).contiguous()
 
 
+def _unwrap_tokenizer_sequence(value: Any) -> list[Any]:
+    """One sequence from a tokenizer return, including a batch of size 1."""
+
+    if isinstance(value, torch.Tensor):
+        value = value.tolist()
+    if not isinstance(value, list) or not value:
+        return list(value or [])
+    first = value[0]
+    if isinstance(first, list):
+        return list(first)
+    return list(value)
+
+
+def _drop_listen_alignment(
+    token_ids: Sequence[int],
+    offsets: Sequence[tuple[int, int]],
+    listen_token_id: int | None,
+    *,
+    max_length: int | None = None,
+) -> tuple[list[int], list[tuple[int, int]]]:
+    """Drop ``<|listen|>`` from ids and offsets together, then apply ``max_length``.
+
+    ``MiniCPMOProcessor._convert`` removes that token from ``input_ids``. Character
+    offsets have to lose the same positions or the assistant mask is applied one
+    slot to the right of every later token.
+    """
+
+    kept_ids: list[int] = []
+    kept_offsets: list[tuple[int, int]] = []
+    for token_id, offset in zip(token_ids, offsets, strict=True):
+        if listen_token_id is not None and int(token_id) == listen_token_id:
+            continue
+        kept_ids.append(int(token_id))
+        kept_offsets.append((int(offset[0]), int(offset[1])))
+    if max_length is not None:
+        kept_ids = kept_ids[:max_length]
+        kept_offsets = kept_offsets[:max_length]
+    return kept_ids, kept_offsets
+
+
 def _encode_like_processor(tokenizer, text: str, *, max_length: int | None = None) -> list[int]:
     """Mirror ``MiniCPMOProcessor._convert`` tokenization (drop ``<|listen|>``)."""
 
@@ -428,15 +468,13 @@ def _encode_like_processor(tokenizer, text: str, *, max_length: int | None = Non
         raw_ids = [int(token) for token in encode(text)]
     else:
         result = tokenizer(text, add_special_tokens=False)
-        raw_ids = [int(token) for token in result["input_ids"]]
-
-    token_ids: list[int] = []
-    for token in raw_ids:
-        if listen_token_id is not None and token == listen_token_id:
-            continue
-        token_ids.append(token)
-    if max_length is not None:
-        token_ids = token_ids[:max_length]
+        raw_ids = [int(token) for token in _unwrap_tokenizer_sequence(result["input_ids"])]
+    token_ids, _offsets = _drop_listen_alignment(
+        raw_ids,
+        [(0, 0)] * len(raw_ids),
+        listen_token_id,
+        max_length=max_length,
+    )
     return token_ids
 
 
@@ -611,11 +649,30 @@ def _final_assistant_token_mask(
         )
 
     tokenized = tokenizer(expanded_rendered, return_offsets_mapping=True)
+    raw_ids = tokenized.get("input_ids")
     offsets = tokenized.get("offset_mapping")
-    if offsets is None:
+    if raw_ids is None or offsets is None:
         raise ValueError("MiniCPM tokenizer must provide offset_mapping to build final-assistant DPO labels.")
+    raw_ids = _unwrap_tokenizer_sequence(raw_ids)
+    offsets = _unwrap_tokenizer_sequence(offsets)
+    if len(raw_ids) != len(offsets):
+        raise ValueError(
+            "MiniCPM tokenizer offset_mapping does not line up with input_ids; "
+            f"lengths {len(offsets)} vs {len(raw_ids)}."
+        )
+    aligned_ids, aligned_offsets = _drop_listen_alignment(
+        raw_ids,
+        offsets,
+        _convert_token_to_id(tokenizer, "<|listen|>"),
+        max_length=max_length,
+    )
+    if aligned_ids != processor_ids:
+        raise ValueError(
+            "MiniCPM offset alignment does not match processor input_ids after dropping <|listen|>; "
+            f"lengths {len(aligned_ids)} vs {len(processor_ids)}."
+        )
 
-    for token_i, (token_start, token_end) in enumerate(offsets[: len(processor_ids)]):
+    for token_i, (token_start, token_end) in enumerate(aligned_offsets):
         if token_start == token_end:
             continue
         if token_start < assistant_char_end and token_end > assistant_char_start:
@@ -632,9 +689,13 @@ def _empty_bound(device: torch.device) -> torch.Tensor:
 
 
 def _sample_bound(value: Any, device: torch.device) -> torch.Tensor:
-    if value is None or (isinstance(value, (list, tuple)) and not value):
+    if value is None or (isinstance(value, (list | tuple)) and not value):
         return _empty_bound(device)
-    if isinstance(value, (list, tuple)) and len(value) == 1 and isinstance(value[0], (torch.Tensor, np.ndarray, list)):
+    if (
+        isinstance(value, (list | tuple))
+        and len(value) == 1
+        and isinstance(value[0], (torch.Tensor | np.ndarray | list | tuple))
+    ):
         return _sample_bound(value[0], device)
     bound = torch.as_tensor(value, dtype=torch.long, device=device)
     if bound.numel() == 0:
