@@ -1,6 +1,6 @@
 # Governance
 
-Last updated: 09/09/2026
+Last updated: 10/12/2026
 
 VeRL-Omni is an open-source project. Committer status is earned through contribution, maintenance, and stewardship — not purchased or assigned by company affiliation.
 
@@ -38,6 +38,7 @@ Committers have write access and merge rights. They typically have deep expertis
 - [@chenyingshu](https://github.com/chenyingshu) (Susan, Yingshu Chen): Trainer and algorithm core; Reward system; Pipeline and model adaptation; Datasets and examples
 - [@cr-gao](https://github.com/cr-gao) (Chenrui Gao): Workers and training engines
 - [@knlnguyen1802](https://github.com/knlnguyen1802) (Long Nguyen): Rollout and agent loop; Pipeline and model adaptation
+- [@mengchengTang](https://github.com/mengchengTang) (Mengcheng Tang): Ascend NPU adaptation; Profiling and observability
 - [@NancyFyong](https://github.com/NancyFyong) (Zhiyong Feng): Trainer and algorithm core; Rollout and agent loop; Pipeline and model adaptation; Datasets and examples
 - [@ruihanglix](https://github.com/ruihanglix) (Ruihang Li): Reward system
 - [@Sky-Trigger](https://github.com/Sky-Trigger) (Mengbo Wang): Rollout and agent loop; Reward system
@@ -59,6 +60,8 @@ Directory rules cover the whole tree unless a more specific path below overrides
 | `verl_omni/pipelines/` | [@chenyingshu](https://github.com/chenyingshu), [@NancyFyong](https://github.com/NancyFyong), [@ZihaoW123](https://github.com/ZihaoW123), [@knlnguyen1802](https://github.com/knlnguyen1802) |
 | `verl_omni/utils/dataset/` <br> `examples/` | [@chenyingshu](https://github.com/chenyingshu), [@NancyFyong](https://github.com/NancyFyong) |
 | `tests/` <br> `.github/` <br> `scripts/` <br> `docker/` <br> `docs/` <br> `.agents/` | [@wtomin](https://github.com/wtomin) |
+| `docker/Dockerfile.a2.npu` <br> `docker/Dockerfile.a3.npu` <br> `.github/workflows/npu_smoke.yml` <br> `tests/npu_smoke/` <br> `docs/start/install_npu.md` <br> `docs/start/flowgrpo_quickstart_npu.md` <br> `docs/contributing/npu_smoke_tests.md` | [@mengchengTang](https://github.com/mengchengTang) |
+| `docs/perf/` <br> `docs/start/rl_insight.md` <br> `.agents/skills/profile/` <br> `.agents/skills/train-infer-consistency/` <br> `verl_omni/utils/rl_insight.py` | [@mengchengTang](https://github.com/mengchengTang) |
 
 `verl_omni/workers/rollout/` overrides `verl_omni/workers/` for reviewer routing. Unlisted paths fall back to the default owner in [`.github/CODEOWNERS`](https://github.com/verl-project/verl-omni/blob/main/.github/CODEOWNERS).
 
