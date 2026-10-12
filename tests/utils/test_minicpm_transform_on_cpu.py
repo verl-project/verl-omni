@@ -152,6 +152,16 @@ def test_inject_processor_media_slots_rewrites_image_and_audio_markers():
     assert audio_injected.count(_MINICPM_AUDIO_SLOT) == 1
     assert "<audio>" not in audio_injected.replace(_MINICPM_AUDIO_SLOT, "")
 
+    dropped = _inject_processor_media_slots(
+        "<|im_start|>user\nWhat sound?\n<|im_start|>assistant\nanswer",
+        image_count=0,
+        audio_count=1,
+        video_count=0,
+        use_audio_in_video=False,
+    )
+    assert dropped.endswith(_MINICPM_AUDIO_SLOT)
+    assert dropped.count(_MINICPM_AUDIO_SLOT) == 1
+
 
 class _RecordingMiniCPMProcessor(_MiniCPMProcessor):
     def __init__(self):
@@ -271,5 +281,50 @@ def test_minicpm_transform_labels_skip_expanded_audio_placeholder(monkeypatch):
         for token_id, label in zip(output["input_ids"].tolist(), output["labels"].tolist(), strict=True)
         if label != IGNORE_INDEX
     )
+    assert labelled_chars == "preferred"
+    assert "U" not in labelled_chars
+
+
+def test_minicpm_labels_follow_slot_appended_after_template_drops_it(monkeypatch):
+    """Labels use the string the processor tokenizes, including a slot restored at the end."""
+
+    monkeypatch.setattr(
+        minicpm_transform,
+        "_fetch_minicpm_audios",
+        lambda sample, **kwargs: [np.zeros(1600, dtype=np.float32)],
+    )
+
+    class _DroppingTokenizer(_CharTokenizer):
+        def apply_chat_template(self, messages, tokenize=False, **kwargs):
+            rendered = super().apply_chat_template(messages, tokenize=tokenize, **kwargs)
+            return rendered.replace(_MINICPM_AUDIO_SLOT, "").replace(_MINICPM_IMAGE_SLOT, "")
+
+    class _DroppingProcessor(_ExpandingMiniCPMProcessor):
+        def __init__(self):
+            super().__init__()
+            self.tokenizer = _DroppingTokenizer()
+            self.seen_text = None
+
+        def __call__(self, text, audios=None, images=None, **kwargs):
+            self.seen_text = text
+            return super().__call__(text, audios=audios, images=images, **kwargs)
+
+    sample = {
+        "conversations": [
+            ["user", ("audio", None), ("text", "what is this")],
+            ["assistant", ("text", "preferred")],
+        ],
+        "audios": ["/tmp/dummy.wav"],
+    }
+    processor = _DroppingProcessor()
+    output = process_minicpm_sample(sample, processor=processor)[0]
+    labelled_chars = "".join(
+        chr(token_id)
+        for token_id, label in zip(output["input_ids"].tolist(), output["labels"].tolist(), strict=True)
+        if label != IGNORE_INDEX
+    )
+
+    assert processor.seen_text.endswith(_MINICPM_AUDIO_SLOT)
+    assert _MINICPM_AUDIO_SLOT not in processor.seen_text[: -len(_MINICPM_AUDIO_SLOT)]
     assert labelled_chars == "preferred"
     assert "U" not in labelled_chars

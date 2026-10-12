@@ -15,9 +15,11 @@
 
 The transform consumes the same intermediate conversation format as
 ``OfflineMLLMDPODataset``.  Parquet rows should keep compact semantic markers
-(``<image>``, ``<video>``, ``<audio>``) in prompt text; this module rewrites
-them to MiniCPM processor slots (``<image>./</image>``, ``<audio>./</audio>``)
-after chat-template rendering and before calling ``MiniCPMOProcessor``.
+(``<image>``, ``<video>``, ``<audio>``).  This module writes MiniCPM processor
+slots (``<image>./</image>``, ``<audio>./</audio>``) into the message before
+``apply_chat_template``.  If the template drops a slot, the missing
+slot is appended to the rendered text before the processor call, and assistant
+labels are aligned to that same string.
 
 Training should use two batch kinds only:
 
@@ -51,9 +53,9 @@ _MINICPM_IMAGE_SLOT = "<image>./</image>"
 _MINICPM_AUDIO_SLOT = "<audio>./</audio>"
 
 _MODALITY_PLACEHOLDERS = {
-    "image": "<image>",
+    "image": _MINICPM_IMAGE_SLOT,
     "video": "<video>",
-    "audio": "<audio>",
+    "audio": _MINICPM_AUDIO_SLOT,
 }
 
 
@@ -140,10 +142,25 @@ def _render_chat(messages: list[dict[str, Any]], processor, **kwargs) -> str:
 
 def _replace_bare_media_tokens(text: str, modality: str, slot: str) -> str:
     token = f"<{modality}>"
-    if slot in text:
-        return text
     pattern = re.compile(rf"{re.escape(token)}(?!\./</{modality}>)")
     return pattern.sub(slot, text)
+
+
+def _match_slot_count(text: str, slot: str, expected: int, name: str) -> str:
+    """Append slots the template dropped, and refuse a text that invented extra ones.
+
+    This mirrors ``prompt_parity._parity_normalize_text``: the processor tokenizes
+    the repaired string, so assistant labels must be built from this same string.
+    """
+
+    found = text.count(slot)
+    if found > expected:
+        raise ValueError(
+            f"MiniCPM rendered text has {found} {name} slot(s) but only {expected} {name}(s) were provided."
+        )
+    if found < expected:
+        text += slot * (expected - found)
+    return text
 
 
 def _inject_processor_media_slots(
@@ -154,23 +171,19 @@ def _inject_processor_media_slots(
     video_count: int = 0,
     use_audio_in_video: bool = False,
 ) -> str:
-    """Rewrite bare ``<image>`` / ``<video>`` / ``<audio>`` markers into MiniCPM processor slots."""
+    """Turn leftover bare markers into slots, then match the processor's media counts.
+
+    Slots are already written into the message before the chat template.  This
+    pass repairs a template that dropped them by appending the missing slots, which
+    is the string ``MiniCPMOProcessor`` (and the GSPO parity wrapper) will tokenize.
+    """
 
     if use_audio_in_video and video_count > 0:
         text = _replace_bare_media_tokens(text, "video", _MINICPM_AUDIO_SLOT)
     text = _replace_bare_media_tokens(text, "image", _MINICPM_IMAGE_SLOT)
     text = _replace_bare_media_tokens(text, "audio", _MINICPM_AUDIO_SLOT)
-
-    if image_count and text.count(_MINICPM_IMAGE_SLOT) != image_count:
-        raise ValueError(
-            f"MiniCPM processor expects {image_count} {_MINICPM_IMAGE_SLOT!r} slot(s) in text, "
-            f"found {text.count(_MINICPM_IMAGE_SLOT)} after chat-template rendering."
-        )
-    if audio_count and text.count(_MINICPM_AUDIO_SLOT) != audio_count:
-        raise ValueError(
-            f"MiniCPM processor expects {audio_count} {_MINICPM_AUDIO_SLOT!r} slot(s) in text, "
-            f"found {text.count(_MINICPM_AUDIO_SLOT)} after chat-template rendering."
-        )
+    text = _match_slot_count(text, _MINICPM_IMAGE_SLOT, image_count, "image")
+    text = _match_slot_count(text, _MINICPM_AUDIO_SLOT, audio_count, "audio")
     return text
 
 
