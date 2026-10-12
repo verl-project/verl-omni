@@ -30,4 +30,10 @@ run_test 3 "Qwen3-TTS Talker full-parameter GRPO e2e" \
     env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS=2 \
     bash tests/special_e2e/run_qwen3_tts_grpo_smoke.sh "${omni_trainer_args[@]}"
 
+# MiniCPM-o 4.5 thinker, collocated sync: tiny random remote-code checkpoint; the
+# frozen vpm/apm towers stay in the graph via exclude_modules + FSDP2 ignored params.
+run_test 4 "MiniCPM-o 4.5 Thinker GSPO LoRA e2e (collocated sync, V1)" \
+    env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS=2 \
+    bash tests/special_e2e/run_gspo_minicpmo_thinker_lora_v1_smoke.sh "${omni_trainer_args[@]}"
+
 gpu_smoke_summary

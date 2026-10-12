@@ -44,6 +44,20 @@ def test_qwen3_tts_smoke_files_select_only_omni_e2e_group():
     assert selected == ["ci-e2e-omni"]
 
 
+def test_minicpmo_smoke_files_select_only_omni_e2e_group():
+    selector = _load_selector()
+
+    selected = selector.select_group_names(
+        [
+            "tests/special_e2e/build_minicpmo_tiny_random.py",
+            "tests/special_e2e/create_dummy_minicpmo_avqa_data.py",
+            "tests/special_e2e/run_gspo_minicpmo_thinker_lora_v1_smoke.sh",
+        ]
+    )
+
+    assert selected == ["ci-e2e-omni"]
+
+
 def test_shared_omni_veomni_engine_and_adapters_select_omni_smoke():
     selector = _load_selector()
     for path in (

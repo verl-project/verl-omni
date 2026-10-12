@@ -72,6 +72,7 @@ GROUP_PATTERNS = {
         "tests/pipelines/test_qwen3_tts*",
         "tests/special_e2e/*omni*",
         "tests/special_e2e/*qwen3_tts*",
+        "tests/special_e2e/*minicpm*",
         "verl_omni/pipelines/qwen3_tts/**",
         "verl_omni/workers/engine/veomni/omni_impl.py",
         "verl_omni/pipelines/qwen3_omni/**",
