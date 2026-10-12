@@ -55,6 +55,33 @@ def test_audio_reaches_model_and_autograd_while_vision_is_preserved():
     assert not model._forward_pre_hooks
 
 
+def test_video_sampling_clock_reaches_thinker_for_mrope():
+    model = RecordingModel()
+    video = torch.randn(4, 3)
+    grid = torch.tensor([[2, 2, 2]])
+    seconds_per_grid = torch.tensor([3.75])
+    qwen3_omni_forward_model_engine(
+        model,
+        _nested_ids([1, 2, 3, 4]),
+        {
+            "pixel_values_videos": video,
+            "video_grid_thw": grid,
+            "video_second_per_grid": seconds_per_grid,
+        },
+    )
+    assert model.seen["pixel_values_videos"] is video
+    assert model.seen["video_grid_thw"] is grid
+    assert model.seen["video_second_per_grid"] is seconds_per_grid
+    assert model.seen["position_ids"] is None
+
+
+def test_video_without_sampling_clock_fails_before_model_forward():
+    model = RecordingModel()
+    with pytest.raises(ValueError, match="video_second_per_grid"):
+        qwen3_omni_forward_model_engine(model, _nested_ids([1, 2, 3]), {"video_grid_thw": torch.tensor([[2, 2, 2]])})
+    assert not hasattr(model, "seen")
+
+
 def test_direct_forward_matches_pinned_bshd_text_and_gradients():
     model_forward = pytest.importorskip("verl.models.mcore.model_forward")
 
