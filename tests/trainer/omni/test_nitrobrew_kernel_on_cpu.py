@@ -60,6 +60,17 @@ def _naive_reverse_kl(z, w, s, temperature=1.0):
     return (ps * (log_ps - log_pt)).sum(dim=-1)
 
 
+def _naive_clamped_forward_kl(z, w, s, temperature=1.0, clamp=-10.0):
+    """Naive reference for the clamped forward: KL(p_T || p_S) with student
+    log-probs floored at ``clamp``."""
+    zt = (z @ w.T).float() / temperature
+    s = s.float() / temperature
+    log_pt = F.log_softmax(zt, dim=-1)
+    log_ps = F.log_softmax(s, dim=-1)
+    pt = log_pt.exp()
+    return (pt * (log_pt - log_ps.clamp_min(clamp))).sum(dim=-1)
+
+
 def _make_inputs(seed=0, n=4, v=32, d=8):
     g = torch.Generator().manual_seed(seed)
     z = torch.randn(n, d, generator=g)
@@ -71,7 +82,7 @@ def _make_inputs(seed=0, n=4, v=32, d=8):
 class TestSingleTeacher:
     def test_forward_matches_naive(self):
         z, w, s = _make_inputs()
-        kl_chunked, _, _ = _chunked_kl_forward(z, w, s, chunk_V=4)
+        kl_chunked, _, _, _ = _chunked_kl_forward(z, w, s, chunk_V=4)
         kl_naive = _naive_forward_kl(z, w, s)
         assert torch.allclose(kl_chunked, kl_naive, atol=1e-5, rtol=1e-4)
 
@@ -83,7 +94,7 @@ class TestSingleTeacher:
 
     def test_forward_with_temperature(self):
         z, w, s = _make_inputs(seed=2)
-        kl_chunked, _, _ = _chunked_kl_forward(z, w, s, chunk_V=8, temperature=0.7)
+        kl_chunked, _, _, _ = _chunked_kl_forward(z, w, s, chunk_V=8, temperature=0.7)
         kl_naive = _naive_forward_kl(z, w, s, temperature=0.7)
         assert torch.allclose(kl_chunked, kl_naive, atol=1e-5, rtol=1e-4)
 
@@ -105,6 +116,26 @@ class TestSingleTeacher:
         s_naive = s.clone().requires_grad_(True)
         kl_chunked = _NitrobrewReverseKL.apply(z, w, s_chunked, 4, 1.0)
         kl_naive = _naive_reverse_kl(z, w, s_naive)
+        grad_out = torch.randn_like(kl_chunked)
+        kl_chunked.backward(grad_out)
+        kl_naive.backward(grad_out)
+        assert torch.allclose(s_chunked.grad, s_naive.grad, atol=1e-5, rtol=1e-4)
+
+    def test_clamped_forward_backward_match_autograd(self):
+        # Push some student logits far down so the -10 log-prob floor binds:
+        # the backward must differentiate the clamped loss, not the exact KL.
+        clamp = -10.0
+        z, w, s = _make_inputs(seed=12)
+        s[1, 3] = -50.0
+        s[3, 7] = -60.0
+        assert (F.log_softmax(s, dim=-1)[[1, 3], [3, 7]] < clamp).all()  # floor binds
+
+        s_chunked = s.clone().requires_grad_(True)
+        s_naive = s.clone().requires_grad_(True)
+        kl_chunked = _NitrobrewKL.apply(z, w, s_chunked, 4, 1.0, clamp)
+        kl_naive = _naive_clamped_forward_kl(z, w, s_naive, clamp=clamp)
+        assert torch.allclose(kl_chunked, kl_naive, atol=1e-5, rtol=1e-4)
+
         grad_out = torch.randn_like(kl_chunked)
         kl_chunked.backward(grad_out)
         kl_naive.backward(grad_out)
@@ -167,3 +198,26 @@ class TestMultiTeacherGrouping:
         out = compute_nitrobrew_multi_kl(s[None], z[None], key_ids, {0: w}, cfg, "thd")
         expected = _naive_forward_kl(z, w, s, temperature=0.7)
         assert torch.allclose(out["distillation_losses"][0], expected, atol=1e-5, rtol=1e-4)
+
+
+class TestUlyssesSharding:
+    def test_key_ids_shard_with_hidden_states(self, monkeypatch):
+        # Under sequence parallelism the hidden states are sliced to the local
+        # rank in _unpack_hidden_states; the full-length key ids must be sliced
+        # on the same boundary or the row-count assert fires.
+        import verl_omni.trainer.distillation.nitrobrew_loss as nl
+
+        monkeypatch.setattr(nl, "get_ulysses_sequence_parallel_world_size", lambda: 2)
+
+        def _fake_slice(x, dim, padding=True):
+            return x.narrow(dim, 0, x.size(dim) // 2)
+
+        monkeypatch.setattr(nl, "slice_input_tensor", _fake_slice)
+
+        z, w, s = _make_inputs(seed=14, n=4)
+        key_ids = torch.tensor([0, 0, 1, 1])  # full-packed ids; rank-0 shard keeps 0,0
+        cfg = type("C", (), {"distillation_loss": _LossConfig()})()
+        out = nl.compute_nitrobrew_multi_kl(s[:2][None], z[None], key_ids, {0: w, 1: w * 1.1}, cfg, "thd")
+        kl = out["distillation_losses"][0]
+        expected = _naive_clamped_forward_kl(z[:2], w, s[:2], clamp=_LossConfig().log_prob_min_clamp)
+        assert torch.allclose(kl, expected, atol=1e-5, rtol=1e-4)
