@@ -40,6 +40,7 @@ from verl.utils.torch_dtypes import PrecisionType
 from verl.workers.engine.base import BaseEngine, BaseEngineCtx, EngineRegistry
 from verl.workers.engine.utils import enable_full_determinism, prepare_micro_batches
 
+from verl_omni.pipelines.model_base import DiffusionModelBase
 from verl_omni.pipelines.utils import build_scheduler, forward_and_sample_previous_step, prepare_model_inputs
 from verl_omni.workers.config import (
     DiffusionModelConfig,
@@ -54,7 +55,7 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 device_name = get_device_name()
 
 
-@EngineRegistry.register(model_type="diffusion_model", backend=["veomni"], device=["cuda"])
+@EngineRegistry.register(model_type="diffusion_model", backend=["veomni"], device=["cuda", "npu"])
 class VeOmniDiffusionEngine(BaseEngine):
     """VeOmni-backed diffusion training engine for verl-omni RL loops."""
 
@@ -77,6 +78,11 @@ class VeOmniDiffusionEngine(BaseEngine):
         self.checkpoint_config = checkpoint_config
         self.mode = None
         self.rank = torch.distributed.get_rank()
+
+        # Bind the engine backend onto model_config so that
+        # ``DiffusionModelBase.get_class`` can resolve a backend-specific adapter
+        # when one is registered (e.g. LTX-2.3 has separate fsdp/veomni adapters).
+        self.model_config.backend = engine_config.strategy
 
         self._init_device_mesh()
 
@@ -474,6 +480,17 @@ class VeOmniDiffusionEngine(BaseEngine):
             loss = torch.tensor(1.0, device=device_name)
             metrics = {}
 
+        if forward_only:
+            # Eval passes run under torch.enable_grad() (see
+            # forward_backward_batch) so FSDP2 behaviour matches train mode.
+            # Detach outputs here to release the autograd graph that
+            # enable_grad() would otherwise retain across timesteps.
+            loss = loss.detach()
+            model_output = {
+                k: v.detach() if isinstance(v, torch.Tensor) else v
+                for k, v in model_output.items()
+            }
+
         output = {
             "model_output": model_output,
             "loss": loss.detach().item(),
@@ -495,7 +512,17 @@ class VeOmniDiffusionEngine(BaseEngine):
 
         gradient_accumulation_steps = len(micro_batches) * num_timesteps
         output_lst = []
-        ctx = torch.no_grad() if forward_only else nullcontext()
+        # Use enable_grad() (instead of no_grad()) for eval passes so that
+        # FSDP2 sees the same gradient-enabled state as in train mode.  When
+        # gradient checkpointing is active, train-mode forward runs each block
+        # inside reentrant checkpoint (which internally uses no_grad()), while
+        # eval-mode forward under no_grad() takes the direct path.  The
+        # resulting FSDP2 unshard/reshard timing divergence produces a
+        # systematic forward-output mismatch that inflates the PPO ratio.
+        # Running eval under enable_grad() makes both modes take the identical
+        # checkpointed forward path.  forward_step() detaches outputs after
+        # each eval step so the autograd graph does not accumulate.
+        ctx = torch.enable_grad() if forward_only else nullcontext()
 
         for micro_batch in micro_batches:
             micro_batch = micro_batch.to(get_device_id())
@@ -695,6 +722,9 @@ class VeOmniDiffusionEngine(BaseEngine):
         if self._is_offload_param:
             offload_model_to_cpu(self.module)
 
+        params = self.module.state_dict(keep_vars=True)
+        model_cls = DiffusionModelBase.get_class(self.model_config)
+
         device = get_device_id()
         export_dtype = PrecisionType.to_dtype(self.engine_config.model_dtype)
 
@@ -704,7 +734,8 @@ class VeOmniDiffusionEngine(BaseEngine):
                 tensor = tensor.to(device, non_blocking=True)
                 if tensor.is_floating_point() and tensor.dtype != export_dtype:
                     tensor = tensor.to(export_dtype, non_blocking=True)
-                yield f"transformer.{name}", tensor
+                export_name = model_cls.convert_export_key(f"transformer.{name}")
+                yield export_name, tensor
 
         return param_generator(), peft_config_dict
 
@@ -739,10 +770,29 @@ class EngineEvalModeCtx(BaseEngineCtx):
         assert isinstance(self.engine, VeOmniDiffusionEngine)
         super().__enter__()
         self.engine.module.eval()
+        # VeOmni's LTX2.3 gates gradient checkpointing on
+        # ``self.gradient_checkpointing and self.training``.  ``module.eval()``
+        # sets ``training=False`` on every submodule, which would disable
+        # checkpointing in eval mode and produce a forward-output mismatch
+        # with train mode (which uses checkpointing).  Setting
+        # ``inner.training=True`` re-activates the checkpoint path so eval
+        # forward matches train forward, while ``module.eval()`` still
+        # disables dropout/batchnorm on inner blocks (their ``training``
+        # stays ``False``).  See ``LTX23FlowGRPOVeOmni.configure_train_mode``
+        # for the full rationale.
+        inner = self.engine.module.module if hasattr(self.engine.module, "module") else self.engine.module
+        if hasattr(inner, "gradient_checkpointing") and inner.gradient_checkpointing:
+            inner.training = True
 
     def __exit__(self, exc_type, exc_value, traceback):
         assert isinstance(self.engine, VeOmniDiffusionEngine)
-        if self.engine.engine_config.fsdp_size > 1 and hasattr(self.engine.module, "reshard"):
+        # Eval-mode forward runs under ``torch.enable_grad()`` (see
+        # ``forward_backward_batch``) so that FSDP2 unshard/reshard timing
+        # matches train mode.  Because no ``backward()`` is called, FSDP2
+        # may leave parameters unsharded.  Explicitly reshard to release
+        # the gathered parameter memory before the context offloads the
+        # model back to CPU.
+        if hasattr(self.engine.module, "reshard"):
             self.engine.module.reshard()
         super().__exit__(exc_type, exc_value, traceback)
 
@@ -755,6 +805,7 @@ class EngineTrainModeCtx(BaseEngineCtx):
         assert isinstance(self.engine, VeOmniDiffusionEngine)
         super().__enter__()
         self.engine.module.train()
+        DiffusionModelBase.get_class(self.engine.model_config).configure_train_mode(self.engine.module)
 
     def __exit__(self, exc_type, exc_value, traceback):
         assert isinstance(self.engine, VeOmniDiffusionEngine)
