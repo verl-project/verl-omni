@@ -81,6 +81,9 @@ def test_smoke_wires_the_minicpm_path():
         line.startswith('python3 "${REPO_ROOT}/tests/special_e2e/create_dummy_minicpmo_avqa_data.py"')
         for line in settings
     )
+    # Both splits gate the rebuild: the trainer constructs the val dataset at
+    # setup even with val_before_train=false.
+    assert 'if [ ! -f "${DATA_DIR}/train.parquet" ] || [ ! -f "${DATA_DIR}/validation.parquet" ]; then' in settings
 
 
 def test_smoke_keeps_upstream_sampling_defaults():

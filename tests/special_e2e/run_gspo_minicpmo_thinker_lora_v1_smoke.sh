@@ -38,8 +38,10 @@ MODEL_PATH="${MODEL_PATH:-${HOME}/models/tiny-random/MiniCPM-o-4_5}"
 python3 "${REPO_ROOT}/tests/special_e2e/build_minicpmo_tiny_random.py" \
     --output-dir "${MODEL_PATH}" --force
 
-# ── Build dummy AVQA data (image + audio -> text) if not present ─────────────
-if [ ! -f "${DATA_DIR}/train.parquet" ]; then
+# ── Build dummy AVQA data (image + audio -> text) ────────────────────────────
+# The trainer builds the val dataset at setup even with val_before_train=false,
+# so the rebuild must trigger when either split is missing.
+if [ ! -f "${DATA_DIR}/train.parquet" ] || [ ! -f "${DATA_DIR}/validation.parquet" ]; then
     python3 "${REPO_ROOT}/tests/special_e2e/create_dummy_minicpmo_avqa_data.py" \
         --output-dir "${DATA_DIR}"
 fi
