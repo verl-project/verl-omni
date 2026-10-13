@@ -1,6 +1,6 @@
 # Qwen3-Omni On-Policy Distillation
 
-Last updated: 09/18/2026.
+Last updated: 10/13/2026.
 
 ## Background
 
@@ -168,6 +168,12 @@ routing semantics.
 - `topk` (int) — top-k size for `forward_kl_topk`.
 - `kd_temperature` (float) — softens both distributions before the KL in the
   full-vocabulary modes. Default: `1.0`.
+- `log_prob_min_clamp` (float) — floors the student's per-token log-probs in the
+  forward KL (`nitrobrew` only), capping each token's loss when the student
+  assigns near-zero probability to teacher mass. The backward differentiates
+  the floored loss, matching the top-k path's autograd behaviour. `None`
+  disables it; the default `-10.0` caps a token's KL contribution at 10 nats
+  from the student side. The reverse KL is not clamped.
 
 ## Full-Vocabulary OPD (nitrobrew)
 
@@ -238,10 +244,15 @@ directly rather than folded into the policy-gradient reward.
   `prompt_length + response_length`, since the teacher scores it in one forward
   pass. Everything else from the teacher's `inference.*` block above applies
   unchanged.
+- **Sequence parallelism.** Not supported on the NPU backend — keep the
+  rollout's sequence-parallel size at 1. The loss itself shards
+  `teacher_key_ids` on the same Ulysses boundary as the hidden states, so the
+  path stays correct if the backend grows support, but it has no end-to-end
+  validation.
 
 ### Recipe
 
-[`run_qwen3_omni_thinker_gspo_lora_mmk12_v1_nitrobrew_opd_npu.sh`](../examples/gspo_trainer/README.md#mmk12-full-vocabulary-on-policy-distillation-nitrobrew)
+[`run_qwen3_omni_thinker_gspo_lora_mmk12_v1_nitrobrew_opd_npu.sh`](../../examples/gspo_trainer/README.md#mmk12-full-vocabulary-on-policy-distillation-nitrobrew)
 is the MMK12 OPD recipe switched to the full-vocabulary loss: same student
 (25 % weight noise), same teacher, same 2 × Ascend 910C topology,
 `loss_mode=nitrobrew` with `use_policy_gradient=false`.

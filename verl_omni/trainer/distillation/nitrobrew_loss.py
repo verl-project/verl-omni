@@ -57,8 +57,9 @@ def _fwd_chunk_update(
     st: torch.Tensor,  # (N,) sum exp(zt - mt)
     tt: torch.Tensor,  # (N,) sum exp(zt - mt) * zt
     ut: torch.Tensor,  # (N,) sum exp(zt - mt) * zs_clamped
+    tc: torch.Tensor,  # (N,) sum exp(zt - mt) * 1{zs > s_min}
     s_min: torch.Tensor,  # (N, 1) floor for student logits
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Online-softmax update for one teacher vocab chunk."""
     zt = z_f @ W_chunk.T
     tile_mt = zt.max(dim=1).values
@@ -69,7 +70,9 @@ def _fwd_chunk_update(
     tt = tt * alpha + (pt * zt).sum(dim=1)
     zs_clamped = torch.maximum(zs_chunk, s_min)
     ut = ut * alpha + (pt * zs_clamped).sum(dim=1)
-    return new_mt, st, tt, ut
+    # teacher mass on unclamped vocab, for the clamped backward below
+    tc = tc * alpha + (pt * (zs_chunk > s_min)).sum(dim=1)
+    return new_mt, st, tt, ut, tc
 
 
 def _chunked_kl_forward(
@@ -79,14 +82,20 @@ def _chunked_kl_forward(
     chunk_V: int = _CHUNK_V,
     temperature: float = 1.0,
     log_prob_min_clamp: float | None = None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Single-pass chunked forward. Returns (kl, t_lse, s_lse) all (N,) float32."""
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Single-pass chunked forward.
+
+    Returns (kl, t_lse, s_lse, t_unc) all (N,) float32. ``t_unc`` is the teacher
+    mass on unclamped vocabulary, kept for the clamped backward; with no clamp
+    it equals 1 exactly.
+    """
     N = z.shape[0]
     V = W.shape[0]
     device = z.device
 
     z_f = z.float()
-    W_f = W.to(device=device, dtype=torch.float32)
+    # native dtype on device; the fp32 cast happens per chunk slice below
+    W_dev = W.to(device=device)
     inv_T = 1.0 / temperature if temperature != 0.0 else 1.0
     if inv_T != 1.0:
         z_f = z_f * inv_T
@@ -103,29 +112,37 @@ def _chunked_kl_forward(
     st = torch.zeros(N, dtype=torch.float32, device=device)
     tt = torch.zeros(N, dtype=torch.float32, device=device)
     ut = torch.zeros(N, dtype=torch.float32, device=device)
+    tc = torch.zeros(N, dtype=torch.float32, device=device)
 
     for v in range(0, V, chunk_V):
         s_chunk = student_logits[:, v : v + chunk_V].float()
         if inv_T != 1.0:
             s_chunk = s_chunk * inv_T
-        mt, st, tt, ut = _fwd_chunk_update(
+        mt, st, tt, ut, tc = _fwd_chunk_update(
             z_f,
-            W_f[v : v + chunk_V],
+            W_dev[v : v + chunk_V].float(),
             s_chunk,
             mt,
             st,
             tt,
             ut,
+            tc,
             s_min,
         )
 
     t_lse = mt + st.log()
     kl = tt / st - t_lse - ut / st + s_lse
-    return kl, t_lse, s_lse
+    t_unc = tc / st
+    return kl, t_lse, s_lse, t_unc
 
 
 # ---------------------------------------------------------------------------
-# Backward: standard d(KL)/d(zs_v) = p_S(v) - p_T(v)
+# Backward: unclamped d(KL)/d(zs_v) = p_S(v) - p_T(v); with the forward's
+# log_prob_min_clamp floor active it becomes
+#     d/dzs_v = p_S(v) * U - p_T(v) * 1{zs_v > s_lse + clamp}
+# where U is the teacher mass on unclamped vocabulary (saved by the forward):
+# the floor freezes the teacher-weighted term where it binds, and the student
+# term keeps scaling with U because s_lse still couples every logit.
 # ---------------------------------------------------------------------------
 
 
@@ -136,12 +153,16 @@ def _bwd_chunk(
     t_lse: torch.Tensor,  # (N,)
     s_lse: torch.Tensor,  # (N,)
     grad: torch.Tensor,  # (N,)
+    t_unc: torch.Tensor | None = None,  # (N,) teacher mass above the floor
+    s_min: torch.Tensor | None = None,  # (N, 1) floor for student logits
 ) -> torch.Tensor:
     """d(KL)/d(student_logits) for one vocab chunk. Returns (N, C)."""
     zt = z_f @ W_chunk.T
     p_T = (zt - t_lse.unsqueeze(1)).exp()
     p_S = (zs_chunk - s_lse.unsqueeze(1)).exp()
-    return (p_S - p_T) * grad.unsqueeze(1)
+    if t_unc is None:
+        return (p_S - p_T) * grad.unsqueeze(1)
+    return (p_S * t_unc.unsqueeze(1) - p_T * (zs_chunk > s_min)) * grad.unsqueeze(1)
 
 
 # ---------------------------------------------------------------------------
@@ -154,7 +175,7 @@ class _NitrobrewKL(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, z, W, student_logits, chunk_V, temperature=1.0, log_prob_min_clamp=None):
-        kl, t_lse, s_lse = _chunked_kl_forward(
+        kl, t_lse, s_lse, t_unc = _chunked_kl_forward(
             z,
             W,
             student_logits,
@@ -162,25 +183,32 @@ class _NitrobrewKL(torch.autograd.Function):
             temperature,
             log_prob_min_clamp,
         )
-        ctx.save_for_backward(z, W, student_logits, t_lse, s_lse)
+        ctx.save_for_backward(z, W, student_logits, t_lse, s_lse, t_unc)
         ctx.chunk_V = chunk_V
         ctx.temperature = temperature
+        ctx.log_prob_min_clamp = log_prob_min_clamp
         return kl
 
     @staticmethod
     def backward(ctx, grad_output):
-        z, W, student_logits, t_lse, s_lse = ctx.saved_tensors
+        z, W, student_logits, t_lse, s_lse, t_unc = ctx.saved_tensors
         chunk_V = ctx.chunk_V
         temperature = ctx.temperature
+        clamp = ctx.log_prob_min_clamp
         N, V = student_logits.shape
         device = z.device
 
         z_f = z.float()
-        W_f = W.to(device=device, dtype=torch.float32)
+        # native dtype on device; the fp32 cast happens per chunk slice below
+        W_dev = W.to(device=device)
         inv_T = 1.0 / temperature if temperature != 0.0 else 1.0
         if inv_T != 1.0:
             z_f = z_f * inv_T
         grad = grad_output.float()
+        if clamp is not None:
+            s_min = (s_lse + clamp).unsqueeze(1)
+        else:
+            t_unc, s_min = None, None
 
         grad_s = torch.empty(N, V, dtype=student_logits.dtype, device=device)
         for v in range(0, V, chunk_V):
@@ -189,11 +217,13 @@ class _NitrobrewKL(torch.autograd.Function):
                 s_chunk = s_chunk * inv_T
             g_chunk = _bwd_chunk(
                 z_f,
-                W_f[v : v + chunk_V],
+                W_dev[v : v + chunk_V].float(),
                 s_chunk,
                 t_lse,
                 s_lse,
                 grad,
+                t_unc,
+                s_min,
             )
 
             if inv_T != 1.0:
@@ -245,7 +275,8 @@ def _chunked_reverse_kl_forward(
     device = z.device
 
     z_f = z.float()
-    W_f = W.to(device=device, dtype=torch.float32)
+    # native dtype on device; the fp32 cast happens per chunk slice below
+    W_dev = W.to(device=device)
     inv_T = 1.0 / temperature if temperature != 0.0 else 1.0
     if inv_T != 1.0:
         z_f = z_f * inv_T
@@ -264,7 +295,7 @@ def _chunked_reverse_kl_forward(
             s_chunk = s_chunk * inv_T
         mt, st, ut, et = _rev_fwd_chunk(
             z_f,
-            W_f[v : v + chunk_V],
+            W_dev[v : v + chunk_V].float(),
             s_chunk,
             s_lse,
             mt,
@@ -314,7 +345,8 @@ class _NitrobrewReverseKL(torch.autograd.Function):
         N, V = student_logits.shape
 
         z_f = z.float()
-        W_f = W.to(device=z.device, dtype=torch.float32)
+        # native dtype on device; the fp32 cast happens per chunk slice below
+        W_dev = W.to(device=z.device)
         inv_T = 1.0 / temperature if temperature != 0.0 else 1.0
         if inv_T != 1.0:
             z_f = z_f * inv_T
@@ -327,7 +359,7 @@ class _NitrobrewReverseKL(torch.autograd.Function):
                 s_chunk = s_chunk * inv_T
             g_chunk = _rev_bwd_chunk(
                 z_f,
-                W_f[v : v + chunk_V],
+                W_dev[v : v + chunk_V].float(),
                 s_chunk,
                 t_lse,
                 s_lse,
@@ -400,7 +432,9 @@ def _grouped_nitrobrew_kl(
     Args:
         student_logits: [N, V] full student logits (rmpad).
         teacher_hidden_states: nested [bsz, S, D] or flat [N, D].
-        teacher_key_ids: [T] int teacher id per packed token.
+        teacher_key_ids: [T] int teacher id per packed token, over the full
+            packed length; sharded to the local Ulysses slice here when
+            sequence parallelism is active.
         teacher_unembeds: id -> unembedding [V, D] (keyed by config key order).
         config: DistillationConfig whose ``distillation_loss`` carries the
             omni loss settings (``kd_temperature``, ``log_prob_min_clamp``).
@@ -418,6 +452,11 @@ def _grouped_nitrobrew_kl(
     out = torch.full((T_sp,), float("nan"), dtype=torch.float32, device=device)
 
     key_ids = teacher_key_ids.to(device=device, dtype=torch.long)
+    if get_ulysses_sequence_parallel_world_size() > 1:
+        # ``z`` was sharded to the local Ulysses slice in _unpack_hidden_states,
+        # but the key ids were built over the full packed length — shard them
+        # with the same boundaries before the row-count check.
+        key_ids = slice_input_tensor(key_ids.unsqueeze(0), dim=1).squeeze(0)
     assert key_ids.shape[0] == T_sp, f"teacher_key_ids rows ({key_ids.shape[0]}) != tokens ({T_sp})"
 
     fn = _NitrobrewReverseKL if reverse else _NitrobrewKL
@@ -425,24 +464,30 @@ def _grouped_nitrobrew_kl(
         mask = key_ids == int(kid)
         if not mask.any():
             continue
+        if bool(mask.all()):
+            # Single group covering every token: boolean indexing would copy
+            # the full [T, V] student logits for nothing — index directly.
+            z_g, s_g, out_mask = z_flat, s_flat, slice(None)
+        else:
+            z_g, s_g, out_mask = z_flat[mask], s_flat[mask], mask
         if reverse:
             kl = fn.apply(
-                z_flat[mask],
+                z_g,
                 W.to(device=device),
-                s_flat[mask],
+                s_g,
                 _CHUNK_V,
                 loss_config.kd_temperature,
             )
         else:
             kl = fn.apply(
-                z_flat[mask],
+                z_g,
                 W.to(device=device),
-                s_flat[mask],
+                s_g,
                 _CHUNK_V,
                 loss_config.kd_temperature,
                 loss_config.log_prob_min_clamp,
             )
-        out[mask] = kl
+        out[out_mask] = kl
 
     missing = torch.isnan(out).sum().item()
     if missing:

@@ -50,9 +50,11 @@ def _iter_lm_head_candidates(folder: str, keys: tuple[str, ...]) -> Iterator[tup
     """Yield (key, tensor) for each candidate key present in the checkpoint.
 
     Handles sharded safetensors (``model.safetensors.index.json``) and
-    single-file safetensors.
+    single-file safetensors. Reads only the candidate tensors via
+    ``safe_open`` — ``load_file`` would materialize the whole shard (for a
+    single-file checkpoint, the whole teacher model) in CPU memory.
     """
-    from safetensors.torch import load_file
+    from safetensors import safe_open
 
     index_path = os.path.join(folder, "model.safetensors.index.json")
     if os.path.exists(index_path):
@@ -64,14 +66,15 @@ def _iter_lm_head_candidates(folder: str, keys: tuple[str, ...]) -> Iterator[tup
         for k in present:
             shard_to_keys.setdefault(weight_map[k], []).append(k)
         for shard, shard_keys in shard_to_keys.items():
-            tensors = load_file(os.path.join(folder, shard))
-            for k in shard_keys:
-                yield k, tensors[k]
+            with safe_open(os.path.join(folder, shard), framework="pt", device="cpu") as f:
+                for k in shard_keys:
+                    yield k, f.get_tensor(k)
     else:
-        tensors = load_file(os.path.join(folder, "model.safetensors"))
-        for k in keys:
-            if k in tensors:
-                yield k, tensors[k]
+        with safe_open(os.path.join(folder, "model.safetensors"), framework="pt", device="cpu") as f:
+            available = set(f.keys())
+            for k in keys:
+                if k in available:
+                    yield k, f.get_tensor(k)
 
 
 def load_lm_head_weight(

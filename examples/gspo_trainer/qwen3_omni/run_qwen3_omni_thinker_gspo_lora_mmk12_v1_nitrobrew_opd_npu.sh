@@ -110,14 +110,14 @@ python3 -m verl_omni.trainer.main_omni \
     trainer.logger='["console","tensorboard"]' \
     trainer.project_name=gspo \
     trainer.experiment_name=qwen3_omni_thinker_lora_mmk12_opd_nitrobrew_npu \
-    trainer.n_gpus_per_node=${N_GPUS_PER_NODE} \
+    trainer.n_gpus_per_node="${N_GPUS_PER_NODE}" \
     trainer.nnodes=1 \
     trainer.save_freq=50 \
     trainer.test_freq=10 \
     trainer.total_epochs=10 \
     distillation.enabled=true \
     distillation.nnodes=1 \
-    distillation.n_gpus_per_node=${TEACHER_N_GPUS_PER_NODE} \
+    distillation.n_gpus_per_node="${TEACHER_N_GPUS_PER_NODE}" \
     distillation.teacher_models.teacher_model.model_path="${TEACHER_MODEL}" \
     distillation.teacher_models.teacher_model.inference.name=vllm_omni \
     distillation.teacher_models.teacher_model.inference.tensor_model_parallel_size=2 \
