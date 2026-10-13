@@ -1,6 +1,6 @@
 # GPU Smoke Tests
 
-Last updated: 10/12/2026.
+Last updated: 10/13/2026.
 
 GPU smoke tests validate GPU-only trainer, rollout, worker, reward, and
 agent-loop paths with small workloads. They are intentionally lightweight: use
@@ -213,8 +213,8 @@ The mapping is intentionally conservative:
 | Changed paths | Selected group |
 |---|---|
 | `verl_omni/workers/**`, `verl_omni/agent_loop/**`, `verl_omni/reward_loop/**`, matching GPU tests | `ci-core` |
-| `verl_omni/trainer/omni/**`, `verl_omni/trainer/config/omni/**`, `qwen3_omni_thinker.py`, omni e2e scripts | `ci-e2e-omni` |
-| `verl_omni/trainer/diffusion/**`, `verl_omni/trainer/config/diffusion/**`, `verl_omni/pipelines/**`, diffusion e2e scripts | `ci-e2e-diffusion` |
+| `verl_omni/trainer/omni/**`, `verl_omni/trainer/config/omni/**`, `qwen3_omni_thinker.py`, `verl_omni/pipelines/qwen3_omni/**`, `verl_omni/pipelines/minicpm/**`, omni e2e scripts | `ci-e2e-omni` |
+| `verl_omni/trainer/diffusion/**`, `verl_omni/trainer/config/diffusion/**`, `verl_omni/pipelines/**` (qwen3_omni/minicpm changes also select `ci-e2e-omni`), diffusion e2e scripts | `ci-e2e-diffusion` |
 | shared CI/test helpers, package metadata, shared trainer config, or unknown GPU-smoke paths | all groups |
 
 Pushes to `main` and `v0.*` still run all groups. If future group definitions

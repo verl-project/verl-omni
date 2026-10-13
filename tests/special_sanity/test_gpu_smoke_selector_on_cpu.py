@@ -58,6 +58,19 @@ def test_minicpmo_smoke_files_select_only_omni_e2e_group():
     assert selected == ["ci-e2e-omni"]
 
 
+def test_minicpm_pipeline_changes_select_omni_e2e_group():
+    selector = _load_selector()
+
+    for path in (
+        "verl_omni/pipelines/minicpm/thinker_training_adapter.py",
+        "verl_omni/pipelines/minicpm/omni_rollout_adapter.py",
+        "verl_omni/pipelines/minicpm/media_inputs.py",
+        "verl_omni/pipelines/minicpm/prompt_parity.py",
+        "verl_omni/pipelines/minicpm/reward_decode.py",
+    ):
+        assert "ci-e2e-omni" in selector.select_group_names([path]), path
+
+
 def test_shared_omni_veomni_engine_and_adapters_select_omni_smoke():
     selector = _load_selector()
     for path in (
