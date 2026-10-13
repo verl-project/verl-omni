@@ -16,6 +16,8 @@
 
 import asyncio
 import json
+import logging
+import os
 import re
 from typing import Optional
 
@@ -25,6 +27,9 @@ import torch
 from openai.types.chat import ChatCompletion
 from PIL import Image
 from transformers import PreTrainedTokenizer
+
+logger = logging.getLogger(__file__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 DEFAULT_UNIFIED_REWARD_MODEL_PATH = "CodeGoat24/UnifiedReward-2.0-qwen3vl-2b"
 DEFAULT_UNIFIED_REWARD_SAMPLING_PARAMS = {"temperature": 0.0, "top_p": 1.0, "max_tokens": 512}
@@ -154,6 +159,11 @@ async def _score_single_image(
     unified_reward_response = result.choices[0].message.content or ""
     axis_scores = _parse_unified_reward_scores(unified_reward_response)
     if not axis_scores:
+        logger.warning(
+            "UnifiedReward failed to parse response for caption %r: %s",
+            caption,
+            unified_reward_response,
+        )
         return None
     normalized_score, raw_score = _aggregate_unified_reward_scores(axis_scores)
     return normalized_score, raw_score, unified_reward_response
@@ -204,15 +214,20 @@ async def compute_score_unified_reward(
 
     valid_results = [result for result in frame_results if result is not None]
     malformed_frames = len(frame_results) - len(valid_results)
-    reward_extra_info = {}
-    if malformed_frames:
-        reward_extra_info["malformed_frames"] = malformed_frames
-        extra_info["unified_reward/malformed_frames"] = malformed_frames
+    # Always return this same schema. A raise is recorded by MultiVisualRewardManager
+    # as ``reward/dit/errors`` and omits these keys, so workers that saw a bad reply
+    # cannot be concatenated with workers that did not.
     if not valid_results:
-        raise ValueError(
-            "UnifiedReward returned malformed output for every frame; expected all three labeled axes "
+        logger.warning(
+            "UnifiedReward returned malformed output for every frame, using score 0.0; expected all three labeled axes "
             "(Alignment, Coherence, Style) with scores in [1, 5]."
         )
+        return {
+            "score": 0.0,
+            "raw_score": 0.0,
+            "response": "",
+            "malformed_frames": malformed_frames,
+        }
 
     normalized_scores = [result[0] for result in valid_results]
     raw_scores = [result[1] for result in valid_results]
@@ -224,5 +239,5 @@ async def compute_score_unified_reward(
         "score": score,
         "raw_score": raw_score,
         "response": unified_reward_response,
-        "reward_extra_info": reward_extra_info,
+        "malformed_frames": malformed_frames,
     }

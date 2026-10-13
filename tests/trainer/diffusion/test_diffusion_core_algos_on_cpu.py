@@ -159,6 +159,99 @@ def test_compute_policy_loss_flow_grpo() -> None:
         assert "actor/pg_clipfrac_lower" in pg_metrics
 
 
+def _dual_grpo_actor_config():
+    from verl_omni.workers.config.diffusion.actor import FSDPDiffusionActorConfig
+
+    return FSDPDiffusionActorConfig(
+        rollout_n=1,
+        ppo_micro_batch_size_per_gpu=1,
+        clip_ratio=0.2,
+        clip_ratio_low=0.2,
+        clip_ratio_high=0.28,
+        clip_ratio_c=10.0,
+    )
+
+
+def test_dual_grpo_dit_matches_flow_grpo() -> None:
+    from tensordict import TensorDict
+
+    config = _dual_grpo_actor_config()
+    old_log_prob = torch.tensor([0.1, -0.2, 0.3, 0.0])
+    log_prob = torch.tensor([0.12, -0.1, 0.3, 0.05])
+    advantages = torch.tensor([1.0, -1.5, 0.2, -0.4])
+    data = TensorDict(
+        {"old_log_probs": old_log_prob, "advantages": advantages},
+        batch_size=[old_log_prob.shape[0]],
+    )
+    model_output = {
+        "log_probs": log_prob,
+        "prev_sample_mean": torch.zeros(4, 2),
+    }
+    dual = diffusion_algos.get_diffusion_loss_fn("dual_grpo")
+    flow = diffusion_algos.get_diffusion_loss_fn("flow_grpo")
+    dual_result = dual(config=config, model_output=model_output, data=data)
+    flow_result = flow(config=config, model_output=model_output, data=data)
+
+    torch.testing.assert_close(dual_result.loss, flow_result.loss)
+    assert dual_result.metrics["actor/ppo_kl"] == pytest.approx(flow_result.metrics["actor/ppo_kl"])
+
+
+def test_dual_grpo_ar_matches_vanilla_and_caps_negative_ratio() -> None:
+    """A huge token ratio on a negative advantage is capped by clip_ratio_c."""
+    from tensordict import TensorDict
+    from verl.trainer.ppo.core_algos import get_policy_loss_fn
+
+    config = _dual_grpo_actor_config()
+    old_log_prob = torch.zeros(1, 4)
+    log_prob = torch.tensor([[5.0, 0.0, 0.0, 8.0]], requires_grad=True)
+    advantages = torch.tensor([[-2.0, -2.0, 1.0, -2.0]])
+    response_mask = torch.tensor([[1, 1, 1, 0]])
+    data = TensorDict(
+        {
+            "old_log_probs": old_log_prob,
+            "advantages": advantages,
+            "response_mask": response_mask,
+            "responses": torch.tensor([[11, 12, 13, 0]]),
+        },
+        batch_size=[1],
+    )
+    model_output = {"log_probs": log_prob}
+    result = diffusion_algos.get_diffusion_loss_fn("dual_grpo")(config=config, model_output=model_output, data=data)
+    vanilla_loss, _ = get_policy_loss_fn("vanilla")(
+        old_log_prob=old_log_prob,
+        log_prob=log_prob,
+        advantages=advantages,
+        response_mask=response_mask.bool(),
+        loss_agg_mode=config.loss_agg_mode,
+        config=config,
+    )
+
+    torch.testing.assert_close(result.loss, vanilla_loss)
+    # Token 0 would contribute 2 * exp(5) without the dual-clip cap. clip_ratio_c=10
+    # limits it to 20. Token 3 is padding and must not enter the mean.
+    assert result.loss.item() == pytest.approx((20.0 + 2.0 - 1.0) / 3.0)
+    assert "actor/pg_clipfrac" in result.metrics
+    result.loss.backward()
+    assert log_prob.grad is not None
+    assert log_prob.grad[0, 3].item() == pytest.approx(0.0)
+
+
+def test_dual_grpo_rejects_ambiguous_log_prob() -> None:
+    from tensordict import TensorDict
+
+    config = _dual_grpo_actor_config()
+    data = TensorDict(
+        {"old_log_probs": torch.zeros(2), "advantages": torch.ones(2)},
+        batch_size=[2],
+    )
+    with pytest.raises(ValueError, match="could not tell an AR token forward"):
+        diffusion_algos.get_diffusion_loss_fn("dual_grpo")(
+            config=config,
+            model_output={"log_probs": torch.zeros(2)},
+            data=data,
+        )
+
+
 def test_flow_grpo_loss_with_zeroed_pad_rows() -> None:
     """Pad rows zeroed by the v1 sync trainer must not bias the FlowGRPO objective (#561).
 
