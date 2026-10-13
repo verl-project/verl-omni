@@ -237,13 +237,14 @@ trainer:
   # V1 trainer mode configs (mirrors verl/trainer/config/ppo_trainer.yaml `trainer.v1`).
   v1:
 
-    # Trainer mode: "sync", "separate_async".
+    # Trainer mode: "sync", "colocate_async", "separate_async".
     trainer_mode: sync
 
     # Synchronous diffusion trainer (colocated rollout, no partial rollout).
     sync: {}
 
-    # Asynchronous diffusion trainer with colocated trainer and rollout (not implemented yet).
+    # Asynchronous FlowGRPO with colocated actor/rollout and whole-sample retries.
+    # One weight sync per trainer step; actor PPO mini-batches are unchanged.
     colocate_async:
 
       # Number of warmup batches to add before the training loop starts.

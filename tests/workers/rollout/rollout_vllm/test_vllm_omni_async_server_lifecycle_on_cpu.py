@@ -60,6 +60,7 @@ class _FakeAsyncOmni:
         self.sleep_calls: list[dict] = []
         self.wake_calls: list[dict] = []
         self.resumed = 0
+        self.sleeping_tags = set()
         # Real-shaped handle: the frontend multimodal cache lives on the
         # renderer, so the fake must expose clear_mm_cache_async there.
         self.mm_clears = 0
@@ -84,17 +85,22 @@ class _FakeAsyncOmni:
         self.pause_calls.append(kwargs)
 
     async def sleep(self, stage_ids=None, level=2, mode="abort"):
+        self.sleeping_tags = {"weights", "kv_cache"}
         self.calls.append("sleep")
         self.sleep_calls.append({"stage_ids": stage_ids, "level": level, "mode": mode})
         return self.sleep_acks
 
     async def wake_up(self, stage_ids=None, tags=None):
+        self.sleeping_tags.difference_update(tags or {"weights", "kv_cache"})
         self.calls.append("wake_up")
         self.wake_calls.append({"stage_ids": stage_ids, "tags": tags})
         return self.wake_acks
 
     async def resume_generation(self, stage_ids=None):
         self.resumed += 1
+
+    async def is_sleeping(self):
+        return bool(self.sleeping_tags)
 
 
 def _make_server(engine, rollout_mode=RolloutMode.HYBRID, node_rank=0, free_cache_engine=True):
@@ -493,6 +499,17 @@ async def test_wake_up_resumes_engine_admission():
     await server.wake_up()
 
     assert engine.wake_calls == [{"stage_ids": None, "tags": ["kv_cache", "weights"]}]
+    assert engine.resumed == 1
+
+
+async def test_actor_weight_sync_keeps_admission_closed_until_full_wake():
+    engine = _FakeAsyncOmni()
+    server = _make_server(engine)
+    await server.sleep()
+    await server.wake_up(tags=["weights"])
+    assert engine.resumed == 0
+    assert engine.sleeping_tags == {"kv_cache"}
+    await server.wake_up(tags=["kv_cache"])
     assert engine.resumed == 1
 
 

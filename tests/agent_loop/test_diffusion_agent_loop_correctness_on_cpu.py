@@ -22,6 +22,7 @@ import torch
 from tensordict import NonTensorData, NonTensorStack, TensorDict
 from verl.experimental.agent_loop.agent_loop import AgentLoopMetrics
 from verl.protocol import DataProto
+from verl.trainer.ppo.v1.replay_buffer import ReplayBufferAsync
 from verl.utils import tensordict_utils as tu
 
 from verl_omni.agent_loop import diffusion_agent_loop_tq
@@ -335,6 +336,91 @@ async def test_tq_writer_batches_group_sessions_and_partitions_field_sets(monkey
     assert all(tag["gen_batch_seq"] == 5 for put in puts for tag in put["tags"])
 
 
+@pytest.mark.asyncio
+async def test_tq_writer_uses_each_completed_samples_actual_version(monkeypatch):
+    worker_cls = DiffusionAgentLoopWorkerTQ.__ray_metadata__.modified_class
+    worker = object.__new__(worker_cls)
+    rows, tags = [], []
+
+    async def put(**kwargs):
+        rows.extend(kwargs["fields"])
+        tags.extend(kwargs["tags"])
+
+    monkeypatch.setattr(diffusion_agent_loop_tq, "list_of_dict_to_tensordict", lambda value: value)
+    monkeypatch.setattr(diffusion_agent_loop_tq.tq, "async_kv_batch_put", put)
+    outputs = [
+        (
+            i,
+            SimpleNamespace(
+                prompt_ids=torch.tensor([[1, 2]]),
+                response_diffusion_output=torch.zeros(1, 3, 2, 2),
+                response_logprobs=None,
+                reward_score=None,
+                num_turns=1,
+                extra_fields={"global_steps": step, "min_global_steps": step, "max_global_steps": step},
+            ),
+        )
+        for i, step in enumerate([2, 4])
+    ]
+    await worker._write_trajectories_to_tq(outputs, uid="sample", trajectory={"step": 1}, validate=False)
+    assert [tag["global_steps"] for tag in tags] == [2, 4]
+    for row, tag, step in zip(rows, tags, [2, 4], strict=True):
+        assert row["extra_fields"]["min_global_steps"] == tag["min_global_steps"] == step
+        assert row["extra_fields"]["max_global_steps"] == tag["max_global_steps"] == step
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "versions, threshold, expected_count", [([4, 4], 1, 1), ([3, 4], 1, 0), ([3, 4], 2, 1), ([2, 4], 2, 0)]
+)
+async def test_retried_group_freshness_uses_oldest_completed_sample(monkeypatch, versions, threshold, expected_count):
+    worker_cls = DiffusionAgentLoopWorkerTQ.__ray_metadata__.modified_class
+    worker = object.__new__(worker_cls)
+    worker.rollout_config = SimpleNamespace(n=2, val_kwargs=SimpleNamespace(n=2))
+    tags = {"sample": {"is_prompt": True, "status": "pending", "global_steps": 1}}
+
+    async def put(*, key, partition_id, tag):
+        assert partition_id == "train"
+        tags.setdefault(key, {}).update(tag)
+
+    async def batch_put(*, keys, tags: list[dict], **kwargs):
+        for key, tag in zip(keys, tags, strict=True):
+            await put(key=key, partition_id=kwargs["partition_id"], tag=tag)
+
+    async def run_agent_loop(sampling_params, *, session_id, **kwargs):
+        version = versions[session_id]
+        return SimpleNamespace(
+            prompt_ids=torch.tensor([[1, 2]]),
+            response_diffusion_output=torch.zeros(1, 3, 2, 2),
+            response_logprobs=None,
+            reward_score=None,
+            num_turns=1,
+            extra_fields={"global_steps": version, "min_global_steps": version, "max_global_steps": version},
+        )
+
+    monkeypatch.setattr(diffusion_agent_loop_tq.tq, "async_kv_put", put)
+    monkeypatch.setattr(diffusion_agent_loop_tq.tq, "async_kv_batch_put", batch_put)
+    monkeypatch.setattr(diffusion_agent_loop_tq.tq, "kv_list", lambda: {"train": tags})
+    monkeypatch.setattr(diffusion_agent_loop_tq, "list_of_dict_to_tensordict", lambda value: value)
+    worker._run_agent_loop = run_agent_loop
+    await worker._run_prompt(
+        prompt={"uid": "sample"},
+        sampling_params={"global_steps": 1},
+        trajectory={"step": 1, "validate": False},
+        prompt_index=0,
+    )
+
+    replay = ReplayBufferAsync(
+        trainer_mode="colocate_async",
+        trainer_config={},
+        max_off_policy_threshold=threshold,
+        max_off_policy_strategy="drop",
+        sampler_kwargs={},
+    )
+    assert replay.get_sampleable_count(global_steps=5, partition_id="train") == expected_count
+    assert tags["sample"] == {"is_prompt": True, "status": "finished", "global_steps": min(versions) + 1}
+
+
 def test_tq_batch_restores_non_tensor_trajectory_metadata(monkeypatch):
     img_shapes = [
         [(1, 32, 32), (1, 64, 64)],
@@ -406,7 +492,8 @@ async def test_run_prompt_publishes_failure_after_siblings_settle(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_generate_sequences_seeds_from_global_prompt_index(monkeypatch):
+@pytest.mark.parametrize("per_prompt_seed", [False, True])
+async def test_generate_sequences_seeds_from_global_prompt_index(monkeypatch, per_prompt_seed):
     """Per-request rollout seeds must derive from the global batch index (#561).
 
     Each agent worker only sees a chunk of the batch, so seeding from the
@@ -444,7 +531,9 @@ async def test_generate_sequences_seeds_from_global_prompt_index(monkeypatch):
             {
                 "index": torch.tensor(global_indices),
                 "uid": NonTensorStack(*uids),
-                "rollout_seed": NonTensorData(42),
+                "rollout_seed": torch.tensor([42 + i // 2 for i in global_indices])
+                if per_prompt_seed
+                else NonTensorData(42),
                 "global_steps": NonTensorData(1),
             },
             batch_size=[len(global_indices)],
@@ -458,6 +547,11 @@ async def test_generate_sequences_seeds_from_global_prompt_index(monkeypatch):
 
     assert len(captured_seeds) == 4 * 2  # 4 prompts x rollout.n=2
     assert len(set(captured_seeds)) == 4 * 2  # no duplicated noise across workers
+    assert sorted(captured_seeds) == sorted(
+        diffusion_agent_loop_tq._derive_rollout_seed(42 + (i // 2 if per_prompt_seed else 0), i * 2 + session_id)
+        for i in range(4)
+        for session_id in range(2)
+    )
 
 
 @pytest.mark.asyncio

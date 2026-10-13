@@ -59,7 +59,6 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
             "logprobs": config.calculate_log_probs,
         }
 
-        rollout_base_seed = None
         global_steps = batch["global_steps"] if "global_steps" in batch else None
         if isinstance(global_steps, NonTensorData):
             global_steps = global_steps.data
@@ -77,11 +76,6 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
                 sampling_params["global_steps"] = global_steps
         else:
             sampling_params["global_steps"] = global_steps
-            rollout_seed_meta = batch.get("rollout_seed")
-            if rollout_seed_meta is not None:
-                rollout_base_seed = int(
-                    rollout_seed_meta.data if isinstance(rollout_seed_meta, NonTensorData) else rollout_seed_meta
-                )
 
         # by default, we assume it's a single turn agent
         if "agent_name" not in batch:
@@ -93,13 +87,14 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
 
         for i in range(len(batch)):
             prompt = self._extract_prompt(batch, i)
+            seed = prompt.get("rollout_seed")
             task = asyncio.create_task(
                 self._run_prompt(
                     prompt,
                     sampling_params,
                     trajectory=trajectory_info[i],
                     prompt_index=int(index[i]),
-                    rollout_base_seed=rollout_base_seed,
+                    rollout_base_seed=int(seed) if not validate and seed is not None else None,
                 )
             )
             self.background_tasks.add(task)
@@ -171,7 +166,7 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
             # replay buffer waits for the whole group anyway, so per-session
             # puts serialize the gen tail (64 -> 16 puts at rollout.n=4).
             if successes:
-                await self._write_trajectories_to_tq(
+                group_version = await self._write_trajectories_to_tq(
                     successes,
                     uid=uid,
                     trajectory=trajectory,
@@ -179,8 +174,9 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
                     global_steps=sampling_params.get("global_steps"),
                     **{k: v for k, v in prompt.items() if k not in {"uid", "global_steps"}},
                 )
-            status = "failure" if errors else "finished"
-            await tq.async_kv_put(key=uid, partition_id=partition_id, tag={"status": status})
+            # Replay counts training iterations: model version v is current at step v + 1.
+            tag = {"status": "failure"} if errors else {"status": "finished", "global_steps": group_version + 1}
+            await tq.async_kv_put(key=uid, partition_id=partition_id, tag=tag)
         except Exception as e:
             logger.exception(f"Error in _run_prompt for uid={uid}: {e}")
             if tasks:
@@ -213,8 +209,8 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
         validate: bool,
         global_steps: int | None = None,
         **kwargs,
-    ) -> None:
-        """Write the finished sessions of one prompt as batched TransferQueue rows."""
+    ) -> int:
+        """Write a prompt's finished sessions and return their oldest model version."""
         partition_id = "val" if validate else "train"
         # Track the rollout model version this trajectory was generated against.
         step = trajectory["step"] if trajectory else global_steps
@@ -239,6 +235,11 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
                 field["rm_scores"] = torch.tensor([internal.reward_score], dtype=torch.float32)
 
             extra = internal.extra_fields
+            # Whole-sample retries may finish on a newer model than the prompt
+            # submission. Each row carries the version of its actual sample.
+            sample_step = extra.get("global_steps", step)
+            min_step = extra.get("min_global_steps", sample_step)
+            max_step = extra.get("max_global_steps", sample_step)
             for extra_key, value in extra.items():
                 if isinstance(value, torch.Tensor):
                     field[extra_key] = value.squeeze(0) if value.dim() >= 1 and value.shape[0] == 1 else value
@@ -263,8 +264,8 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
                 media_value = extra.get(media_key)
                 if media_value is not None and not isinstance(media_value, torch.Tensor):
                     extra_fields_out[media_key] = media_value
-            extra_fields_out["min_global_steps"] = step
-            extra_fields_out["max_global_steps"] = step
+            extra_fields_out["min_global_steps"] = min_step
+            extra_fields_out["max_global_steps"] = max_step
             field["extra_fields"] = extra_fields_out
 
             prompt_len = int(internal.prompt_ids.shape[-1])
@@ -274,9 +275,9 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
                 "response_len": 1,
                 "response_shape": tuple(int(dim) for dim in field["responses"].shape),
                 "seq_len": prompt_len + 1,
-                "global_steps": step,
-                "min_global_steps": step,
-                "max_global_steps": step,
+                "global_steps": sample_step,
+                "min_global_steps": min_step,
+                "max_global_steps": max_step,
             }
             # Identity of the prompt group for the trainer's v0 prompt-major
             # row reordering: position inside its generation batch plus the
@@ -298,6 +299,7 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
                 tags=[tag for _key, _field, tag in group_rows],
                 partition_id=partition_id,
             )
+        return min(tag["min_global_steps"] for group_rows in rows.values() for _key, _field, tag in group_rows)
 
 
 @auto_await

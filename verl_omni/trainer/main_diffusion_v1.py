@@ -26,6 +26,7 @@ from verl.utils.import_utils import load_class_from_fqn
 from verl_omni.utils.config import validate_config
 from verl_omni.utils.diffusion_attention import validate_attention_consistency
 from verl_omni.utils.rl_insight import enable_rl_insight
+from verl_omni.workers.config.reward import reward_determinism_env
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
@@ -66,6 +67,7 @@ def run_diffusion_v1(config, task_runner_class=None) -> None:
     # TRANSFER_QUEUE_ENABLE is exported to every worker through the runtime env.
     config.transfer_queue.enable = True
     enable_rl_insight(config)
+    os.environ.update(reward_determinism_env(config))
 
     if not ray.is_initialized():
         default_runtime_env = get_ppo_ray_runtime_env()

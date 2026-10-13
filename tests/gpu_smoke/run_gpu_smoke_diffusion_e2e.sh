@@ -78,4 +78,18 @@ run_test 10 "Boogu-Image DiffusionNFT trainer e2e" \
     env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" BOOGU_REQUIRED=1 \
     bash tests/special_e2e/run_diffusionnft_boogu_image.sh "${diffusion_trainer_args[@]}"
 
+run_sd3_colocate_async_e2e() {
+    local model_path="${SD3_MODEL_PATH:-${HOME}/models/tiny-random/sd3-colocate-async}"
+    if ! python tests/special_e2e/build_sd3_tiny_random.py \
+        --output-dir "${model_path}" --hidden-size 64 --dtype bfloat16; then
+        return 1
+    fi
+    env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST%%,*}" MODEL_PATH="${model_path}" \
+        OUTPUT_DIR="${LOG_DIR}/sd3_colocate_async" \
+        bash tests/special_e2e/run_flowgrpo_sd35_v1_colocate_async.sh "${diffusion_trainer_args[@]}"
+}
+
+run_test 11 "SD3 FlowGRPO v1 colocate_async trainer e2e" \
+    run_sd3_colocate_async_e2e
+
 gpu_smoke_summary

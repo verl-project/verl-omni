@@ -75,11 +75,30 @@ def test_offline_dpo_v0_launch_stays_silent():
     assert config.trainer.use_v1 is False
 
 
-def test_run_diffusion_v1_force_enables_transfer_queue_before_ray_init(monkeypatch):
+@pytest.mark.parametrize("entrypoint", ["v0", "v1"])
+@pytest.mark.parametrize("reward_path", ["legacy", "named"])
+@pytest.mark.parametrize("reward_enabled, full_determinism", [(False, True), (True, False), (True, True)])
+def test_diffusion_ray_runtime_env_matches_reward_config(
+    monkeypatch, entrypoint, reward_path, reward_enabled, full_determinism
+):
+    import verl_omni.trainer.main_diffusion as main_v0
     import verl_omni.trainer.main_diffusion_v1 as main_v1
 
     config = compose_diffusion_config()
     assert config.transfer_queue.enable is False
+    config.reward.reward_model.enable = reward_enabled if reward_path == "legacy" else False
+    config.reward.custom_reward_function.path = "verl_omni/utils/reward_score/genrm_ocr.py"
+    OmegaConf.update(config, "reward.reward_model.rollout.full_determinism", full_determinism, force_add=True)
+    OmegaConf.update(config, "reward.reward_model.rollout.seed", 17, force_add=True)
+    if reward_path == "named" and reward_enabled:
+        OmegaConf.update(
+            config,
+            "reward.models.ocr",
+            {"backend": "engine", "model_path": "ocr", "rollout": {"full_determinism": full_determinism, "seed": 17}},
+            force_add=True,
+        )
+    for key in ("VERL_FULL_DETERMINISM", "VLLM_BATCH_INVARIANT", "PYTHONHASHSEED"):
+        monkeypatch.delenv(key, raising=False)
 
     captured = {}
 
@@ -105,8 +124,20 @@ def test_run_diffusion_v1_force_enables_transfer_queue_before_ray_init(monkeypat
     monkeypatch.setattr(main_v1.ray, "init", fake_ray_init)
     monkeypatch.setattr(main_v1.ray, "get", lambda handle: None)
 
-    main_v1.run_diffusion_v1(config, task_runner_class=FakeRunner)
+    if entrypoint == "v0":
+        with pytest.warns(DeprecationWarning, match="legacy \\(v0\\) diffusion trainer"):
+            main_v0.run_diffusion(config, task_runner_class=FakeRunner)
+    else:
+        main_v1.run_diffusion_v1(config, task_runner_class=FakeRunner)
 
-    assert config.transfer_queue.enable is True
     env_vars = captured["runtime_env"]["env_vars"]
-    assert env_vars.get("TRANSFER_QUEUE_ENABLE") == "1"
+    if entrypoint == "v1":
+        assert config.transfer_queue.enable is True
+        assert env_vars.get("TRANSFER_QUEUE_ENABLE") == "1"
+    expected = "1" if reward_enabled and full_determinism else "0"
+    assert env_vars["VERL_FULL_DETERMINISM"] == expected
+    assert env_vars["VLLM_BATCH_INVARIANT"] == expected
+    if expected == "1":
+        assert env_vars["PYTHONHASHSEED"] == "17"
+    else:
+        assert "PYTHONHASHSEED" not in env_vars

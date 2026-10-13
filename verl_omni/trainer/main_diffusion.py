@@ -34,7 +34,7 @@ from verl_omni.trainer.diffusion.ray_diffusion_trainer import (
 from verl_omni.utils.config import validate_config
 from verl_omni.utils.diffusion_attention import validate_attention_consistency
 from verl_omni.utils.rl_insight import enable_rl_insight
-from verl_omni.workers.config.reward import reward_pool_is_separate, reward_role_required
+from verl_omni.workers.config.reward import reward_determinism_env, reward_pool_is_separate, reward_role_required
 
 
 def _count_controller_capture_ranges(profile_steps: list[int], profile_continuous_steps: bool) -> int:
@@ -70,19 +70,6 @@ def main(config):
     validate_config(config)
     validate_attention_consistency(config)
     run_diffusion(config)
-
-
-def _determinism_requested(config) -> bool:
-    """Whether reward inference determinism is requested."""
-    rm_rollout = config.reward.reward_model.rollout
-    return bool(config.reward.reward_model.get("enable", False) and rm_rollout.get("full_determinism", False))
-
-
-def _export_full_determinism_env(config) -> None:
-    """Set determinism switch env vars before ray.init() so actors inherit them."""
-    os.environ["VERL_FULL_DETERMINISM"] = "1"
-    os.environ["VLLM_BATCH_INVARIANT"] = "1"
-    os.environ["PYTHONHASHSEED"] = str(config.reward.reward_model.rollout.get("seed", 42))
 
 
 def _validate_grm_reward_function(config) -> None:
@@ -141,8 +128,7 @@ def run_diffusion(config, task_runner_class=None) -> None:
     enable_rl_insight(config)
     _validate_grm_reward_function(config)
     # Before ray.init() so actors inherit these via runtime_env.
-    if _determinism_requested(config):
-        _export_full_determinism_env(config)
+    os.environ.update(reward_determinism_env(config))
 
     # Check if Ray is not initialized
     if not ray.is_initialized():

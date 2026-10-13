@@ -38,6 +38,7 @@ __all__ = [
     "parse_reward_model_placement",
     "parse_reward_model_config",
     "resolve_reward_model_name",
+    "reward_determinism_env",
     "reward_is_enabled",
     "reward_pool_is_separate",
     "reward_role_required",
@@ -48,6 +49,24 @@ __all__ = [
 
 _ENGINE_BACKENDS = {"engine"}
 _NATIVE_BACKENDS = {"native"}
+
+
+def reward_determinism_env(config) -> dict[str, str]:
+    """Return worker environment flags requested by deterministic reward inference."""
+    legacy = config.reward.reward_model
+    models = [legacy] if legacy.get("enable", False) else []
+    models.extend(
+        model for model in get_reward_model_entries(config).values() if is_engine_backend(model.get("backend"))
+    )
+    for model in models:
+        rollout = model.get("rollout", {})
+        if rollout.get("full_determinism", False):
+            return {
+                "VERL_FULL_DETERMINISM": "1",
+                "VLLM_BATCH_INVARIANT": "1",
+                "PYTHONHASHSEED": str(rollout.get("seed", 42)),
+            }
+    return {}
 
 
 @dataclass

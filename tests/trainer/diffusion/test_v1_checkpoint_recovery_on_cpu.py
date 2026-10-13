@@ -58,11 +58,12 @@ def test_transfer_queue_checkpoint_guard(monkeypatch):
     assert trainer_base_module._tq_supports_checkpoint() is False
 
 
-def test_async_checkpoint_saves_and_loads_transfer_queue(monkeypatch, tmp_path, caplog):
+@pytest.mark.parametrize("trainer_mode", ["separate_async", "colocate_async"])
+def test_async_checkpoint_saves_and_loads_transfer_queue(monkeypatch, tmp_path, caplog, trainer_mode):
     trainer = object.__new__(PolicyGradientDiffusionTrainerV1SeparateAsync)
     checkpoint_dir = tmp_path / "global_step_4"
     trainer.global_steps = 4
-    trainer.trainer_mode = "separate_async"
+    trainer.trainer_mode = trainer_mode
     trainer.config = OmegaConf.create(
         {
             "trainer": {
@@ -116,7 +117,8 @@ def test_async_checkpoint_saves_and_loads_transfer_queue(monkeypatch, tmp_path, 
     assert "TransferQueue checkpoint recovery is unavailable" in caplog.text
 
 
-def test_reissue_restarts_only_inflight_prompt_groups(monkeypatch):
+@pytest.mark.parametrize("trainer_mode", ["separate_async", "colocate_async"])
+def test_reissue_restarts_only_inflight_prompt_groups(monkeypatch, trainer_mode):
     pending = "pending"
     running = "running"
     finished = "finished"
@@ -127,6 +129,7 @@ def test_reissue_restarts_only_inflight_prompt_groups(monkeypatch):
         f"{pending}_0_0": {"is_prompt": False, "global_steps": 2},
         f"{running}_0_0": {"is_prompt": False, "global_steps": 2},
         f"{finished}_0_0": {"is_prompt": False, "global_steps": 2},
+        "consumed_0_0": {"is_prompt": False, "global_steps": 2},
     }
     prompt_batch = tu.get_tensordict(
         {
@@ -163,12 +166,12 @@ def test_reissue_restarts_only_inflight_prompt_groups(monkeypatch):
     )
 
     trainer = object.__new__(PolicyGradientDiffusionTrainerV1SeparateAsync)
-    trainer.trainer_mode = "separate_async"
+    trainer.trainer_mode = trainer_mode
     trainer.global_steps = 8
     trainer.agent_loop_manager = SimpleNamespace(generate_sequences=submitted.append)
 
     assert trainer._reissue_inflight_prompts() == 2
-    assert set(cleared) == {f"{pending}_0_0", f"{running}_0_0"}
+    assert set(cleared) == {f"{pending}_0_0", f"{running}_0_0", "consumed_0_0"}
     assert f"{finished}_0_0" not in cleared
     assert len(updated) == 1
     assert updated[0]["keys"] == [pending, running]
@@ -181,7 +184,8 @@ def test_reissue_restarts_only_inflight_prompt_groups(monkeypatch):
 
 
 @requires_tq_checkpoint
-def test_transfer_queue_checkpoint_roundtrip_and_reissue(initialized_tq, tmp_path):
+@pytest.mark.parametrize("trainer_mode", ["separate_async", "colocate_async"])
+def test_transfer_queue_checkpoint_roundtrip_and_reissue(initialized_tq, tmp_path, monkeypatch, trainer_mode):
     partition_id = f"test-{uuid.uuid4().hex}"
     pending, finished = uuid.uuid4().hex, uuid.uuid4().hex
     prompt_batch = tu.get_tensordict(
@@ -191,10 +195,27 @@ def test_transfer_queue_checkpoint_roundtrip_and_reissue(initialized_tq, tmp_pat
             "index": torch.tensor([0, 1]),
         }
     )
+    trainer = object.__new__(PolicyGradientDiffusionTrainerV1SeparateAsync)
+    trainer.trainer_mode = trainer_mode
+    trainer.global_steps = 3
+    trainer.config = OmegaConf.create(
+        {
+            "data": {"train_batch_size": 2, "gen_batch_size": 1},
+            "trainer": {"v1": {"sampler": {"drop_incomplete_groups": False}}},
+            "actor_rollout_ref": {"rollout": {"seed": 42}},
+        }
+    )
+    chunks = iter(prompt_batch.split(1))
+    trainer._fetch_one_gen_batch = lambda: next(chunks)
+    prompt_batch = trainer._next_train_batch()
+    trainer.agent_loop_manager = SimpleNamespace(generate_sequences=lambda batch: None)
+    real_put = tq.kv_batch_put
+    with monkeypatch.context() as patch:
+        patch.setattr(tq, "kv_batch_put", lambda **kwargs: real_put(**{**kwargs, "partition_id": partition_id}))
+        assert trainer._submit_batch_to_rollout(prompt_batch) == 2
     tq.kv_batch_put(
         keys=[pending, finished],
         partition_id=partition_id,
-        fields=prompt_batch,
         tags=[
             {"is_prompt": True, "status": "running", "global_steps": 3},
             {"is_prompt": True, "status": "finished", "global_steps": 3},
@@ -202,7 +223,8 @@ def test_transfer_queue_checkpoint_roundtrip_and_reissue(initialized_tq, tmp_pat
     )
     pending_trajectory = f"{pending}_0_0"
     finished_trajectory = f"{finished}_0_0"
-    for key in (pending_trajectory, finished_trajectory):
+    consumed_trajectory = f"{uuid.uuid4().hex}_0_0"
+    for key in (pending_trajectory, finished_trajectory, consumed_trajectory):
         tq.kv_put(
             key=key,
             partition_id=partition_id,
@@ -216,8 +238,6 @@ def test_transfer_queue_checkpoint_roundtrip_and_reissue(initialized_tq, tmp_pat
     tq.load_checkpoint(checkpoint_dir)
 
     submitted = []
-    trainer = object.__new__(PolicyGradientDiffusionTrainerV1SeparateAsync)
-    trainer.trainer_mode = "separate_async"
     trainer.global_steps = 4
     trainer.agent_loop_manager = SimpleNamespace(generate_sequences=submitted.append)
     try:
@@ -226,14 +246,17 @@ def test_transfer_queue_checkpoint_roundtrip_and_reissue(initialized_tq, tmp_pat
         assert items[pending]["status"] == "pending"
         assert items[finished]["status"] == "finished"
         assert pending_trajectory not in items
+        assert consumed_trajectory not in items
         assert finished_trajectory in items
         assert list(submitted[0]["uid"]) == [pending]
         assert list(submitted[0]["raw_prompt"]) == ["pending prompt"]
         assert int(submitted[0]["global_steps"]) == 4
+        assert int(submitted[0]["rollout_seed"][0]) == 44
         persisted_prompt = tq.kv_batch_get(keys=[pending], partition_id=partition_id)
         assert list(persisted_prompt["uid"]) == [pending]
         assert list(persisted_prompt["raw_prompt"]) == ["pending prompt"]
         assert int(persisted_prompt["index"][0]) == 0
+        assert int(persisted_prompt["rollout_seed"][0]) == 44
     finally:
         tq.kv_clear(keys=list(tq.kv_list(partition_id)[partition_id]), partition_id=partition_id)
 

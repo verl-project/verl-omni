@@ -73,19 +73,22 @@ def test_colocate_reward_keeps_trajectory_fields(monkeypatch):
     assert checkpoint_calls == []
 
 
-def test_colocate_reward_keeps_rollout_asleep_through_actor_update(monkeypatch):
-    """In sync mode the colocated-RM block must not wake the rollout engine.
+@pytest.mark.parametrize("trainer_mode", ["sync", "colocate_async"])
+def test_colocate_reward_keeps_rollout_asleep_through_actor_update(monkeypatch, trainer_mode):
+    """Both colocated modes keep rollout asleep through the actor update.
 
     ``update_weights`` resumes the rollout replicas' GPU weights (~55GB for
     Qwen-Image at rollout TP=1). If it runs between the reward phase and the
     actor update, every training phase (old log-prob, ref, advantage, actor
-    update) executes next to the resident rollout weights and OOMs. In sync
-    mode, waking and weight-syncing belongs to ``on_step_end``, after the
+    update) executes next to the resident rollout weights and OOMs. In both
+    colocated modes, waking and weight-syncing belongs to ``on_step_end``, after the
     actor update.
     """
-    from verl_omni.trainer.diffusion.v1.trainer_sync import PolicyGradientDiffusionTrainerV1Sync
+    from verl_omni.trainer.diffusion.v1 import get_diffusion_trainer_cls
 
-    trainer = PolicyGradientDiffusionTrainerV1Sync(compose_cfg(["reward.reward_model.enable=true"]))
+    trainer = get_diffusion_trainer_cls(trainer_mode)(
+        compose_cfg(["reward.reward_model.enable=true", f"trainer.v1.trainer_mode={trainer_mode}"])
+    )
     assert trainer.use_rm
 
     data = DataProto.from_tensordict(tu.get_tensordict({"all_timesteps": torch.zeros(2, 4)}))
@@ -125,13 +128,12 @@ def test_colocate_reward_keeps_rollout_asleep_through_actor_update(monkeypatch):
 
 
 def test_colocate_reward_wakes_rollout_mid_cycle_in_async_mode(monkeypatch):
-    """Async modes keep the mid-cycle ``update_weights`` after the colocated RM.
+    """Separate-async keeps the mid-cycle weight sync after the colocated RM.
 
     separate_async's ``on_step_end`` only weight-syncs the standalone rollout;
-    the colocated replicas are woken by ``switch_to_rollout``, which is not
-    guaranteed to fire (``should_switch_to_rollout`` is still a TODO and the
-    direct ``sleep_replicas`` here does not set ``_colocated_slept``). Without
-    the mid-cycle wake+sync, colocated generation stalls on stale weights.
+    the colocated replicas can be woken by ``switch_to_rollout``, but hybrid
+    switching is optional. The shared reward block preserves the existing
+    colocated weight sync independently of that switch policy.
     The sync subclass is used as a lightweight CPU harness for the shared
     base; only ``trainer_mode`` differs.
     """
