@@ -1,6 +1,6 @@
 # Named Reward Models
 
-Last updated: 10/06/2026
+Last updated: 10/13/2026
 
 This guide describes how to configure and extend named model-backed rewards
 under `reward.models` in `verl-omni`. For the general Reward Loop interface and
@@ -35,6 +35,50 @@ reward:
 Consolidating audio, text, and other input contracts behind the shared manager
 is separate follow-up work. Until then, modality-specific managers and their
 existing recipes remain unchanged.
+
+## Native replica scheduling
+
+Named models use static padded splitting by default: each worker receives one
+equal-sized chunk. For native models whose sample costs or replica speeds vary,
+set `reward.models.<name>.dispatch_batch_size` to a positive integer to enable
+completion-driven dispatch:
+
+```yaml
+reward:
+  models:
+    pickscore:
+      backend: native
+      placement:
+        devices: [0, 1]
+      executor:
+        model: verl_omni.utils.reward_score.pickscore_reward:PickScoreNativeModel
+      dispatch_batch_size: 8
+```
+
+Keep the model's executor arguments and reward function configured as described
+below. Each placement entry still owns one complete model replica. Each replica
+receives at most one scoring RPC at a time and takes the next contiguous batch
+when it finishes. The final batch may be smaller; no duplicate padding is added.
+Results are restored to input order before existing per-model score aggregation.
+Omit this field or set it to `null` to keep static splitting. Engine models reject
+this option; their internal scheduling and parallelism remain engine-owned.
+
+Choose a batch size large enough for efficient model batching but small enough
+to leave work available for faster replicas. It caps the in-flight samples per
+replica, so it also limits how many single-sample requests can be waiting for a
+model consumer. For PickScore, whose native consumer caps each forward at 16,
+one inference per sample and `dispatch_batch_size: 8` can coalesce at most eight
+requests. Values above 16 can reduce RPC count but cannot raise that forward
+batch cap; an actual forward can still be smaller. Opt in only when samples can
+be scored independently: batch-sensitive or replica-local random scorers can
+change scores when batch boundaries or replica assignments change.
+
+On a dispatched scoring failure or caller cancellation, no new batches are
+submitted once the dispatcher observes it. Already submitted RPCs are drained
+before the error is raised and models sleep, including across mixed engine/native
+groups. There is no automatic retry, actor recovery, speculative execution,
+autoscaling or streaming-trainer support. A stuck RPC can therefore delay drain;
+this option does not introduce a timeout or health-check policy.
 
 ## Backend selection
 
@@ -195,6 +239,22 @@ final_reward = sum(term.weight * term.score)
 error and contributes zero. Model setup and lifecycle failures are always
 fatal.
 
+## Component rewards and consumer support
+
+`reward.aggregation` defaults to `weighted_sum`. This reward-only change prepares
+component assembly but rejects `preserve_components` at initialization, before
+reward workers start. No current trainer supports component rewards; the
+companion OmniNFT integration (#664) will enable the mode alongside its consumer
+and compatibility checks. Setting an OmniNFT loss name alone does not enable it.
+
+For a supporting consumer, component mode returns `rm_scores` with shape `[B, K]`.
+Columns follow the sorted reward-function names in `meta_info["reward_names"]`.
+Every term must have `required: true` and `weight: 1.0`; missing or non-finite
+components are rejected before actor update. Per-term `reward/<name>` metrics
+remain available. Summing the columns produces an unweighted diagnostic total,
+not a modality-weighted training objective. `routing_weights` is reserved for
+the companion OmniNFT consumer and is not forwarded to scorers.
+
 ## Use engine only
 
 This example serves one model with two-way tensor parallelism:
@@ -274,6 +334,69 @@ share one deployment through their `model` field. In this PR, every
 Future FSDP support will need an explicit replica-group schema because a flat
 device list cannot distinguish full replicas from ranks within one sharded
 replica.
+
+For native CLAP, AudioBox, and DeSync scorers, a single-sample `batch` supplies
+`audio`, `audio_sample_rate`, and optional `audio_layout` in preference to
+`extra_info`. Without `batch`, the scorers read `extra_info`.
+
+AudioBox and DeSync require an explicit positive integer source sample rate.
+Mono `(T,)` audio is accepted directly; two-dimensional audio requires
+`audio_layout: CT` in the scorer config or metadata and is interpreted as
+`(channels, samples)`. Channels-last `TC`, empty waveforms, and non-finite
+samples are rejected.
+
+CLAP preserves its existing defaults: an absent sample-rate key means 48 kHz,
+and two-dimensional audio is interpreted as `(channels, samples)` without a
+new config field. An explicit source sample rate still takes precedence, so
+24 kHz LTX and 32 kHz MiniMax audio are resampled from their actual rates.
+Existing CLAP recipes do not need an `audio_layout` setting. CLAP shares the
+empty/non-finite input checks, and accepts an explicit layout when supplied.
+
+HPSv3 and VideoAlign accept uint8 frames or finite floating-point frames in
+`[0, 1]`; values outside that range are rejected. HPSv3 applies the same pixel
+validation to interval and uniform sampling.
+
+### Configure native audio/video scorers
+
+Use `pkg://verl_omni.utils.reward_score.<module>` paths for the new AudioBox,
+DeSync, and VideoAlign scorers. Bind a native model through `model:` (or a
+matching model/term name) with `executor.model` set to `module:Class`:
+`audiobox:AudioBoxModel`, `desync:DeSyncModel`, or `videoalign:VideoAlignModel`,
+using the full `verl_omni.utils.reward_score` module prefix. DeSync additionally
+requires `source_root` in `executor.kwargs`; VideoAlign requires `base_model_path`.
+
+DeSync and VideoAlign require `fps` in each reward-function config. Set it to the
+actual generated frame rate, including fractional rates; there is no inferred
+or checkpoint-default FPS. For scorers that require a native `reward_model`,
+missing required arguments are configuration errors and fail before optional
+reward-error handling, even with `required: false`. If such a scorer also requires
+`fps`, the manager rejects null, boolean, non-numeric, non-finite, zero, and negative
+values before calling it. Positive fractional rates and numeric strings remain
+supported. Optional model inference failures still contribute zero and record an
+error; existing scorers retain their optional failure behavior.
+For example, with a configured native `desync` model:
+
+```yaml
+reward_functions:
+  desync:
+    path: pkg://verl_omni.utils.reward_score.desync
+    name: compute_score
+    model: desync
+    fps: 24.0  # Must match the generated video.
+    audio_layout: CT
+    required: true
+```
+
+VideoAlign requires a non-empty prompt from `ground_truth` or `prompt_key`.
+DeSync currently requires uint8 RGB `[T, C, H, W]` video. HPSv3 and VideoAlign
+also accept finite floating-point pixels in `[0, 1]`; this does not imply support
+for arbitrary layouts. Normalize decoded video to TCHW at the caller boundary.
+
+DeSync loads Python code from `source_root`, so use a **trusted checkout**. The
+reference OmniNFT revision is `fb9237f6e74edf0d0f2a683f4d975b79fde588fe`; record
+local modifications separately. Path checks do not authenticate source contents.
+The existing loader and AST compatibility lookup use the upstream package
+namespace; replacing only the entry-file import would not isolate that package.
 
 ### Wrap a Transformers model for native mode
 
@@ -413,8 +536,9 @@ whose size is controlled by `reward.reward_model.n_gpus_per_node` and `nnodes`.
 - `false`: keep the model resident across training steps.
 
 Independent named models are woken, scored, and slept concurrently. Native
-batches are padded and split evenly across the workers assigned to that model.
-There is currently no dynamic load balancing or work stealing.
+batches are padded and split evenly across the workers assigned to that model
+by default. Native deployments can opt into completion-driven microbatch dispatch
+with `dispatch_batch_size`; see [Native replica scheduling](#native-replica-scheduling).
 
 The reward loop exposes `async_compute_rm_score()` for asynchronous callers and
 keeps `compute_rm_score()` as the synchronous compatibility entrypoint used by
@@ -446,13 +570,42 @@ PickScore = logit_scale * cosine(text_embedding, image_embedding) / 26
 The configured `logit_scale` is already exponentiated and must not be passed
 through `exp()` again.
 
+### Replica scheduling benchmark
+
+The opt-in two-GPU benchmark compares static splitting with dynamic microbatches
+of 4 and 16 on the same pretrained PickScore replicas:
+
+```bash
+python tests/reward_loop/benchmark_replica_dispatch.py \
+  --model-path /path/to/PickScore_v1 \
+  --processor-path /path/to/clip_processor \
+  --output /path/to/benchmark-results.json
+```
+
+It warms each configuration and records six paired rounds of 128 samples,
+alternating execution order and the slow replica. The synthetic delay is one
+`coefficient * len(sample_ids)` sleep per RPC before that RPC queues concurrent
+single-sample scoring; it occupies that replica's sole in-flight RPC and is not
+an independent per-sample scoring delay. It demonstrates conditional load
+redistribution under this imposed imbalance, not a general scoring speedup or
+natural model latency. Every arm checks score parity, ordering, exact-once
+dispatch and bounded concurrency.
+
+Timings cover dispatch and scoring with resident models and actor-cached images.
+They exclude model loading, offloading and full image-payload transfer, and are
+not end-to-end training measurements. Small microbatches can reduce batching
+efficiency: with one inference per sample, a size of 4 underfills PickScore's
+16-request consumer cap. Retain the static default unless a representative
+workload benefits.
+
 ## Current limitations
 
 - Named-model aggregation currently uses the visual input contract implemented
   by `MultiVisualRewardManager`; the aggregation core itself is modality-neutral.
 - Native models are replicated; FSDP and tensor parallelism are not supported.
 - CPU-native placement is not supported.
-- Native routing uses a static even split rather than dynamic load balancing.
+- Native routing defaults to a static even split; optional microbatch dispatch
+  balances available work, without preempting or stealing an active batch.
 - Named models do not participate in streaming reward computation.
 - vLLM-Omni reward serving is not implemented.
 

@@ -13,6 +13,7 @@
 # limitations under the License.
 import argparse
 import asyncio
+import json
 import logging
 import os
 from dataclasses import asdict
@@ -34,7 +35,7 @@ from verl.workers.rollout.vllm_rollout.utils import (
 )
 from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMHttpServer, vLLMReplica
 from vllm.entrypoints.openai.api_server import build_app
-from vllm_omni.engine.arg_utils import OmniEngineArgs, orchestrator_field_names
+from vllm_omni.engine.arg_utils import OmniEngineArgs, OrchestratorArgs, orchestrator_field_names
 from vllm_omni.entrypoints import AsyncOmni
 from vllm_omni.entrypoints.openai.api_server import omni_init_app_state
 from vllm_omni.lora.request import LoRARequest
@@ -50,7 +51,59 @@ logger = logging.getLogger(__file__)
 logger.setLevel(logging.INFO)
 
 # Sentinel: ``None`` is a valid cached value (LoRA not loaded).
+# TODO: Move LoRA request cache resolution/invalidation upstream to AsyncOmni.
 _LORA_REQUEST_CACHE_MISS = object()
+
+# Lazily-computed upstream argument defaults, used to forward only explicitly
+# set engine arguments (see ``_drop_defaulted_engine_args``; tracked in vllm-omni#8503).
+_ENGINE_ARGS_DEFAULTS: dict | None = None
+
+
+def _is_defaulted_value(key: str, value: Any, default: Any) -> bool:
+    """Return True if *value* matches the upstream default for *key*."""
+    if value == default:
+        if isinstance(value, bool) != isinstance(default, bool):
+            return False
+        return True
+    if default is None and value in ("", {}, []):
+        return True
+    if isinstance(default, str) and isinstance(value, dict | list):
+        try:
+            return json.loads(default) == value
+        except (ValueError, TypeError):
+            return False
+    if isinstance(value, str) and isinstance(default, dict | list):
+        try:
+            return json.loads(value) == default
+        except (ValueError, TypeError):
+            return False
+    return False
+
+
+def _restore_raw_compilation_config(engine_args: dict, args: Any) -> None:
+    """Restore the raw user ``compilation_config`` dict to pass strict stage validation."""
+    raw_compilation_config = getattr(args, "compilation_config", None)
+    if raw_compilation_config is None:
+        engine_args.pop("compilation_config", None)
+    else:
+        if isinstance(raw_compilation_config, str):
+            raw_compilation_config = json.loads(raw_compilation_config)
+        engine_args["compilation_config"] = raw_compilation_config
+
+
+def _drop_defaulted_engine_args(engine_args: dict) -> dict:
+    """Keep only explicitly-set engine arguments, dropping upstream defaults."""
+    global _ENGINE_ARGS_DEFAULTS
+    if _ENGINE_ARGS_DEFAULTS is None:
+        defaults = asdict(OmniEngineArgs(model=""))
+        defaults.update(asdict(OrchestratorArgs()))
+        _ENGINE_ARGS_DEFAULTS = defaults
+    defaults = _ENGINE_ARGS_DEFAULTS
+    return {
+        key: value
+        for key, value in engine_args.items()
+        if key == "model" or key not in defaults or not _is_defaulted_value(key, value, defaults[key])
+    }
 
 
 class vLLMOmniHttpServer(vLLMHttpServer):
@@ -150,7 +203,6 @@ class vLLMOmniHttpServer(vLLMHttpServer):
     async def run_server(self, args: argparse.Namespace):
         engine_args = OmniEngineArgs.from_cli_args(args)
         engine_args = asdict(engine_args)
-        engine_args["log_stats"] = not self.config.disable_log_stats
 
         # TODO (mike): drop this patch once vllm-omni strips the serialized default
         # fault_tolerance_config at its kwargs boundary, or vLLM defaults it to None —
@@ -165,6 +217,15 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             value = getattr(args, key, None)
             if value is not None:
                 engine_args[key] = value
+
+        # Restore raw user mapping so compilation runtime fields do not fail stage config validation.
+        _restore_raw_compilation_config(engine_args, args)
+
+        # Forward only explicitly-set engine args; stage config rejects unowned defaults.
+        engine_args = _drop_defaulted_engine_args(engine_args)
+        # This rollout setting is explicit even when its value matches the
+        # OmniEngineArgs default, so restore it after default filtering.
+        engine_args["log_stats"] = not self.config.disable_log_stats
 
         deploy_config = getattr(args, "deploy_config", None)
         if deploy_config:
@@ -278,14 +339,6 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             self._invalidate_lora_request_cache()
         await super().set_global_steps(global_steps)
 
-    async def _reset_frontend_mm_cache(self) -> None:
-        """Clear the frontend multimodal cache; EngineCore.sleep wipes only the engine-side copy."""
-        # Diffusion-only engines build no InputProcessor, so renderer is None.
-        # TODO (mike): drop after vllm-omni fixes AsyncOmni.reset_mm_cache.
-        renderer = self.engine.renderer
-        if renderer is not None:
-            await renderer.clear_mm_cache_async()
-
     async def sleep(self):
         if self.node_rank != 0 or not self.config.free_cache_engine:
             return
@@ -295,7 +348,6 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         with RLInsightLogger.trace_state("vllm_sleep", state_lane_id=f"replica_{self.replica_rank}"):
             acks = await self.engine.sleep(level=self._resolve_sleep_level())
             self._validate_acks("sleep", acks)
-            await self._reset_frontend_mm_cache()
             self._invalidate_lora_request_cache()
 
     async def release_kv_cache(self):
@@ -313,7 +365,6 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         with RLInsightLogger.trace_state("vllm_release_kv_cache", state_lane_id=f"replica_{self.replica_rank}"):
             acks = await self.engine.sleep(level=self._resolve_sleep_level())
             self._validate_acks("sleep", acks)
-            await self._reset_frontend_mm_cache()
             self._invalidate_lora_request_cache()
             acks = await self.engine.wake_up(tags=["weights"])
             self._validate_acks("wake_up", acks)
@@ -435,7 +486,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         in_flight: list[tuple[str, str, Any]] = []
         seen: set[str] = set()
         for state in engine.request_states.values():
-            if state.external_request_id in seen:
+            if not state.external_request_id or state.external_request_id in seen:
                 continue
             seen.add(state.external_request_id)
             in_flight.append((state.request_id, state.external_request_id, state))
@@ -444,10 +495,6 @@ class vLLMOmniHttpServer(vLLMHttpServer):
 
         aborted = False
         try:
-            # TODO (mike): multi-stage AR abort is broken upstream — the engine's
-            # abort fallback terminal is stage_id=0 and the consume loop breaks on
-            # finished non-final messages, so generate() exits empty. Single-stage /
-            # thinker-only is correct here; needs a vllm-omni fix + pin bump.
             await asyncio.wait_for(
                 engine.abort(request_ids), timeout=float(os.getenv("VERL_OMNI_ABORT_ACK_TIMEOUT_S", "120"))
             )
@@ -457,18 +504,13 @@ class vLLMOmniHttpServer(vLLMHttpServer):
                 mode="abort", wait_for_inflight_requests=False, clear_cache=reset_prefix_cache
             )
         except Exception:
-            # Nothing engine-side enqueued terminals — synthesize them so
-            # generate() cannot hang on queue.get.
+            # If the engine abort RPC fails or times out, upstream has not
+            # delivered terminals to waiting generator coroutines. Enqueue
+            # synthetic abort outputs so active generators unblock and exit.
             if not aborted:
                 for internal_id, _, state in in_flight:
                     self._enqueue_abort_output(internal_id, state)
             raise
-
-        if reset_prefix_cache:
-            # pause_generation(clear_cache=True) wiped the engine-side mm cache;
-            # drop the frontend copy too, or hash-only follow-ups finish empty.
-            # TODO (mike): drop after vllm-omni fixes AsyncOmni.reset_mm_cache.
-            await self._reset_frontend_mm_cache()
 
         logger.info("Aborted %d request(s): %s", len(request_ids), request_ids)
         return {"aborted_count": len(request_ids), "request_ids": request_ids}
@@ -476,11 +518,8 @@ class vLLMOmniHttpServer(vLLMHttpServer):
     def _enqueue_abort_output(self, internal_id: str, req_state: Any) -> None:
         """Synthesize a terminal abort OutputMessage and put it into a per-request queue.
 
-        ``_process_orchestrator_results`` reads from ``req_state.queue`` and
-        expects ``OutputMessage`` (or ``ErrorMessage``) objects. We build a
-        minimal ``OmniRequestOutput`` with ``finish_reason="abort"`` so that
-        ``_process_single_result`` yields it and the active generation strategy maps it
-        to ``stop_reason="aborted"``.
+        Ensures active generators in ``_process_orchestrator_results`` unblock from
+        ``queue.get()`` and clean up if the orchestrator abort RPC raises or times out.
         """
         from vllm.outputs import CompletionOutput
         from vllm_omni.engine.messages import OutputMessage
@@ -509,7 +548,9 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             engine_outputs=omni_output,
             finished=True,
         )
-        req_state.queue.put_nowait(msg)
+        queue = getattr(req_state, "queue", None)
+        if queue is not None:
+            queue.put_nowait(msg)
 
     async def abort_request(self, request_id: str, reset_prefix_cache: bool = True) -> dict[str, Any]:
         """Abort a single in-flight request on the AsyncOmni engine."""

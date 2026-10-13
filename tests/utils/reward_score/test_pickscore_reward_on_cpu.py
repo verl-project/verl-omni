@@ -16,10 +16,15 @@
 import asyncio
 import importlib.util
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
 from PIL import Image
+from verl.protocol import DataProto
+
+from verl_omni.reward_loop.replica_dispatch import dispatch_reward_groups
+from verl_omni.reward_loop.reward_loop import OmniRewardLoopWorker
 
 
 def _load_module():
@@ -150,6 +155,64 @@ async def test_native_model_batches_inference_and_closes_instance_consumer(monke
     await model.close()
     assert not model._consumer_task
     assert not hasattr(model, "_inferencer")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("dispatch_batch_size", "expected_rpc_sizes", "expected_infer_batch_sizes"),
+    [
+        (None, [40], [16, 16, 8]),
+        (4, [4] * 10, [4] * 10),
+        (8, [8] * 5, [8] * 5),
+        (16, [16, 16, 8], [16, 16, 8]),
+        (32, [32, 8], [16, 16, 8]),
+    ],
+)
+async def test_replica_dispatch_reaches_native_pickscore_consumer_with_batch_cap(
+    monkeypatch, dispatch_batch_size, expected_rpc_sizes, expected_infer_batch_sizes
+):
+    """Keep reward dispatch and PickScore's native forward cap independently covered."""
+    inferencer = _FakeInferencer()
+    monkeypatch.setattr(pickscore_reward, "_PickScoreInferencer", lambda **_kwargs: inferencer)
+    model = pickscore_reward.PickScoreNativeModel(model_path="/models/pickscore", device="cpu")
+    worker = object.__new__(OmniRewardLoopWorker)
+    rpc_sample_ids = []
+
+    async def compute_score(data):
+        sample_id = int(data.batch["sample_id"].item())
+        score = await pickscore_reward.compute_score_pickscore_native(
+            data_source="test",
+            solution_image=Image.new("L", (1, 1), sample_id),
+            ground_truth=f"prompt-{sample_id}",
+            extra_info={},
+            reward_model=model,
+        )
+        return {"reward_score": score["score"], "reward_extra_info": {"sample_id": sample_id}}
+
+    worker.compute_score = compute_score
+
+    async def compute_score_batch(data):
+        rpc_sample_ids.append(data.batch["sample_id"].tolist())
+        return await OmniRewardLoopWorker.compute_score_batch(worker, data)
+
+    remote_worker = SimpleNamespace(compute_score_batch=SimpleNamespace(remote=compute_score_batch))
+    data = DataProto.from_dict(tensors={"sample_id": torch.arange(40, dtype=torch.int64)})
+    batch_sizes = {} if dispatch_batch_size is None else {"pickscore": dispatch_batch_size}
+
+    try:
+        outputs = (await dispatch_reward_groups(data, {"pickscore": [remote_worker]}, batch_sizes))["pickscore"]
+    finally:
+        await model.close()
+
+    expected_sample_ids = list(range(40))
+    assert [item["reward_extra_info"]["sample_id"] for item in outputs] == expected_sample_ids
+    dispatched_ids = [sample_id for rpc in rpc_sample_ids for sample_id in rpc]
+    assert dispatched_ids == expected_sample_ids
+    assert [len(rpc) for rpc in rpc_sample_ids] == expected_rpc_sizes
+    infer_batch_sizes = [len(prompts) for prompts, _ in inferencer.batches]
+    assert infer_batch_sizes == expected_infer_batch_sizes
+    max_batch_size = 16 if dispatch_batch_size is None else min(dispatch_batch_size, 16)
+    assert all(size <= max_batch_size for size in infer_batch_sizes)
 
 
 @pytest.mark.asyncio

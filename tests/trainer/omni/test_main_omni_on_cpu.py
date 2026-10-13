@@ -13,6 +13,7 @@
 # limitations under the License.
 """CPU tests for omni training entrypoint routing."""
 
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -182,3 +183,26 @@ class TestLoadTokenizerAndProcessor:
 
         assert tokenizer == "tokenizer"
         assert processor == "processor"
+
+
+class TestRayMasterPortRangeSchema:
+    """The gpu-smoke runner overrides trainer.ray_master_port_range without the append prefix."""
+
+    def test_default_is_null(self):
+        from hydra import compose, initialize_config_dir
+
+        config_dir = str(Path(__file__).parents[3] / "verl_omni" / "trainer" / "config")
+        with initialize_config_dir(version_base=None, config_dir=config_dir):
+            cfg = compose(config_name="omni_trainer")
+        assert cfg.trainer.ray_master_port_range is None
+
+    def test_plain_override_composes(self):
+        from hydra import compose, initialize_config_dir
+
+        config_dir = str(Path(__file__).parents[3] / "verl_omni" / "trainer" / "config")
+        with initialize_config_dir(version_base=None, config_dir=config_dir):
+            cfg = compose(
+                config_name="omni_trainer",
+                overrides=["trainer.ray_master_port_range=[21000,22000]"],
+            )
+        assert list(cfg.trainer.ray_master_port_range) == [21000, 22000]

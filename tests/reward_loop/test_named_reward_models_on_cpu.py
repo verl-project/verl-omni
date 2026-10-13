@@ -20,11 +20,14 @@ import os
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import numpy as np
 import pytest
 import torch
 from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
 from verl.protocol import DataProto
+from verl.trainer.ppo.metric_utils import process_validation_metrics
+from verl.trainer.ppo.reward import extract_reward
 
 from verl_omni.reward_loop import reward_model as reward_model_module
 from verl_omni.reward_loop import reward_model_executor as executor_module
@@ -69,6 +72,45 @@ def _config(models=None):
 
 def _parsed_models(config):
     return [(name, parse_reward_model_config(name, model)) for name, model in config.reward.models.items()]
+
+
+@pytest.mark.asyncio
+async def test_component_rewards_publish_standard_reward_extras():
+    data = DataProto.from_dict(tensors={"responses": torch.zeros(2, 3, 2, 2, dtype=torch.uint8)})
+
+    class Worker:
+        def __init__(self, name, scores):
+            async def compute(chunk):
+                return [
+                    {"reward_score": score, "reward_extra_info": {f"reward/{name}": score}}
+                    for score in scores[: len(chunk)]
+                ]
+
+            self.compute_score_batch = SimpleNamespace(remote=compute)
+
+    manager = object.__new__(OmniRewardLoopManager)
+    manager._preserve_reward_components = True
+    manager._reward_dispatch_batch_sizes = {}
+    manager.config = SimpleNamespace(reward=SimpleNamespace(reward_functions={"video_align": {}, "audiobox": {}}))
+    manager._reward_worker_groups = {
+        "video_align": [Worker("video_align", [0.25, 0.5])],
+        "audiobox": [Worker("audiobox", [0.75, 1.0])],
+    }
+    result = await manager._compute_named_model_scores(data)
+    reward_tensor, reward_extras = extract_reward(result)
+
+    torch.testing.assert_close(reward_tensor, torch.tensor([[0.75, 0.25], [1.0, 0.5]]))
+    assert result.meta_info["reward_names"] == ["audiobox", "video_align"]
+    assert set(result.meta_info["reward_extra_keys"]) == {"reward/audiobox", "reward/video_align", "reward/combined"}
+    assert reward_extras["reward/audiobox"].tolist() == pytest.approx([0.75, 1.0])
+    assert reward_extras["reward/video_align"].tolist() == pytest.approx([0.25, 0.5])
+    validation_metrics = process_validation_metrics(
+        np.asarray(["omninft", "omninft"], dtype=object),
+        ["prompt-0", "prompt-1"],
+        {"reward": reward_tensor.sum(dim=1).tolist(), **reward_extras},
+    )
+    assert validation_metrics["omninft"]["reward/audiobox"]["mean@1"] == pytest.approx(0.875)
+    assert validation_metrics["omninft"]["reward/video_align"]["mean@1"] == pytest.approx(0.375)
 
 
 def test_engine_models_require_parent_pool():
@@ -281,6 +323,7 @@ def test_named_model_entries_parse_to_backend_specific_base_configs():
                 "backend": "native",
                 "placement": {"devices": [0]},
                 "executor": {"model": "tests.fake:Model", "kwargs": {"threshold": 0.5}},
+                "dispatch_batch_size": 3,
             }
         ),
     )
@@ -288,6 +331,23 @@ def test_named_model_entries_parse_to_backend_specific_base_configs():
     assert isinstance(engine, EngineRewardModelConfig)
     assert isinstance(native, NativeRewardModelConfig)
     assert native.executor.kwargs == {"threshold": 0.5}
+    assert native.dispatch_batch_size == 3
+
+
+@pytest.mark.parametrize("dispatch_batch_size", [0, -1, True, 1.5, "2"])
+def test_native_model_rejects_invalid_dispatch_batch_size(dispatch_batch_size):
+    with pytest.raises(ValueError, match="dispatch_batch_size must be a positive integer"):
+        parse_reward_model_config(
+            "quality",
+            OmegaConf.create(
+                {
+                    "backend": "native",
+                    "placement": {"devices": [0]},
+                    "executor": {"model": "tests.fake:Model"},
+                    "dispatch_batch_size": dispatch_batch_size,
+                }
+            ),
+        )
 
 
 @pytest.mark.parametrize(
@@ -295,6 +355,7 @@ def test_named_model_entries_parse_to_backend_specific_base_configs():
     [
         ({"backend": "engine", "replicas": 0}, "replicas must be a positive integer"),
         ({"backend": "engine", "n_gpus_per_node": 1}, "must set both n_gpus_per_node and nnodes"),
+        ({"backend": "engine", "dispatch_batch_size": 1}, "unsupported fields: dispatch_batch_size"),
         ({"backend": "native", "placement": {"devices": [0]}}, "requires executor.model"),
         (
             {
@@ -571,6 +632,7 @@ def test_native_models_create_isolated_worker_groups(monkeypatch):
                 "backend": "native",
                 "executor": {"model": "tests.fake:Model"},
                 "placement": {"devices": [0, 1]},
+                "dispatch_batch_size": 2,
             },
             "hpsv3": {
                 "backend": "native",
@@ -640,6 +702,7 @@ def test_native_models_create_isolated_worker_groups(monkeypatch):
         ("pickscore", ["native_reward_loop_worker_pickscore-worker"]),
         ("hpsv3", ["native_reward_loop_worker_hpsv3-worker"]),
     ]
+    assert manager._reward_dispatch_batch_sizes == {"pickscore": 2}
 
 
 def test_engine_config_fills_the_default_rollout_name():
@@ -1000,6 +1063,43 @@ async def test_worker_exposes_native_model_lifecycle():
     executor.sleep.assert_awaited_once_with()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "native_reward_executors",
+    [{}, {"native": object()}],
+    ids=["shared", "native"],
+)
+async def test_worker_batch_failure_waits_for_active_sibling_sample(native_reward_executors):
+    sibling_entered = asyncio.Event()
+    release_sibling = asyncio.Event()
+    calls = []
+    worker = object.__new__(OmniRewardLoopWorker)
+    worker.native_reward_executors = native_reward_executors
+
+    async def compute_score(data):
+        sample_id = data.batch["id"].item()
+        calls.append(("enter", sample_id))
+        if sample_id == 0:
+            await sibling_entered.wait()
+            raise RuntimeError("sample failed")
+        sibling_entered.set()
+        await release_sibling.wait()
+        calls.append(("exit", sample_id))
+        return {"reward_score": float(sample_id)}
+
+    worker.compute_score = compute_score
+    task = asyncio.create_task(worker.compute_score_batch(DataProto.from_dict(tensors={"id": torch.arange(2)})))
+    await sibling_entered.wait()
+    await asyncio.sleep(0)
+
+    assert not task.done()
+    release_sibling.set()
+    with pytest.raises(RuntimeError, match="sample failed"):
+        await task
+
+    assert calls == [("enter", 0), ("enter", 1), ("exit", 1)]
+
+
 def test_model_manager_rejects_existing_and_named_models():
     config = _config({"quality": {"backend": "native", "executor": {"model": "tests.fake:Model"}}})
     config.reward.reward_model.enable = True
@@ -1028,9 +1128,12 @@ async def test_named_model_groups_merge_scores_and_extra_info():
     class _Worker:
         def __init__(self, outputs):
             self._outputs = outputs
+            self._offset = 0
 
             async def compute(data):
-                return self._outputs[: len(data)]
+                start = self._offset
+                self._offset += len(data)
+                return self._outputs[start : self._offset]
 
             self.compute_score_batch = SimpleNamespace(remote=compute)
 
@@ -1046,6 +1149,8 @@ async def test_named_model_groups_merge_scores_and_extra_info():
     )
     manager = object.__new__(OmniRewardLoopManager)
     manager.reward_manager_cls = _RewardManager
+    manager._preserve_reward_components = False
+    manager._reward_dispatch_batch_sizes = {"pickscore": 1}
     manager._reward_worker_groups = {
         "shared": [
             _Worker(
@@ -1080,6 +1185,71 @@ async def test_named_model_groups_merge_scores_and_extra_info():
 
 
 @pytest.mark.asyncio
+async def test_mixed_group_failure_drains_all_sample_work_before_lifecycle_sleep():
+    calls = []
+    shared_sibling_entered = asyncio.Event()
+    native_entered = asyncio.Event()
+    release_shared_sibling = asyncio.Event()
+    release_native = asyncio.Event()
+
+    shared_worker = object.__new__(OmniRewardLoopWorker)
+    shared_worker.native_reward_executors = {}
+
+    async def compute_shared_sample(data):
+        sample_id = data.batch["id"].item()
+        calls.append(("shared_enter", sample_id))
+        if sample_id == 0:
+            await asyncio.gather(shared_sibling_entered.wait(), native_entered.wait())
+            raise RuntimeError("shared sample failed")
+        shared_sibling_entered.set()
+        await release_shared_sibling.wait()
+        calls.append(("shared_exit", sample_id))
+        return {"reward_score": 1.0}
+
+    async def compute_native_batch(data):
+        calls.append(("native_enter", len(data)))
+        native_entered.set()
+        await release_native.wait()
+        calls.append(("native_exit", len(data)))
+        return [{"reward_score": 2.0} for _ in range(len(data))]
+
+    async def wake_up():
+        calls.append("wake_up")
+
+    async def sleep():
+        calls.append("sleep")
+
+    shared_worker.compute_score = compute_shared_sample
+    shared_handle = SimpleNamespace(
+        compute_score_batch=SimpleNamespace(remote=shared_worker.compute_score_batch),
+    )
+    native_handle = SimpleNamespace(
+        compute_score_batch=SimpleNamespace(remote=compute_native_batch),
+    )
+    manager = object.__new__(OmniRewardLoopManager)
+    manager._score_lock = asyncio.Lock()
+    manager._reward_dispatch_batch_sizes = {"native": 2}
+    manager._reward_worker_groups = {"shared": [shared_handle], "native": [native_handle]}
+    manager.multi_reward_model_manager = SimpleNamespace(
+        models={"engine": object(), "native": object()},
+        wake_up=wake_up,
+        sleep=sleep,
+    )
+    task = asyncio.create_task(manager.async_compute_rm_score(DataProto.from_dict(tensors={"id": torch.arange(2)})))
+    await asyncio.gather(shared_sibling_entered.wait(), native_entered.wait())
+
+    release_native.set()
+    await asyncio.sleep(0)
+    assert "sleep" not in calls
+    release_shared_sibling.set()
+    with pytest.raises(RuntimeError, match="shared sample failed"):
+        await task
+
+    assert calls.index(("native_exit", 2)) < calls.index("sleep")
+    assert calls.index(("shared_exit", 1)) < calls.index("sleep")
+
+
+@pytest.mark.asyncio
 async def test_named_model_groups_score_concurrently():
     entered = set()
     all_entered = asyncio.Event()
@@ -1108,6 +1278,8 @@ async def test_named_model_groups_score_concurrently():
     )
     manager = object.__new__(OmniRewardLoopManager)
     manager.reward_manager_cls = _RewardManager
+    manager._preserve_reward_components = False
+    manager._reward_dispatch_batch_sizes = {}
     manager._reward_worker_groups = {
         "engine": [_Worker("engine", 0.25)],
         "native": [_Worker("native", 0.75)],
@@ -1186,3 +1358,339 @@ async def test_async_compute_rm_score_serializes_lifecycle_brackets():
     release_first_score.set()
     assert await asyncio.gather(first, second) == ["first", "second"]
     assert calls == ["wake_up", "score:first", "sleep", "wake_up", "score:second", "sleep"]
+
+
+@pytest.mark.parametrize(
+    "trainer_type, loss_mode",
+    [
+        ("direct_preference", "dpo"),
+        ("policy_gradient", "flow_grpo"),
+        ("direct_preference", "diffusion_nft"),
+        ("direct_preference", "omni_nft"),
+    ],
+)
+def test_component_rewards_are_unavailable_before_consumer_integration(monkeypatch, trainer_type, loss_mode):
+    from verl_omni.reward_loop import reward_loop as loop_module
+
+    config = _config({"quality": {"backend": "engine"}})
+    config.reward.aggregation = "preserve_components"
+    config.algorithm.trainer_type = trainer_type
+    config.actor_rollout_ref.actor.diffusion_loss.loss_mode = loss_mode
+
+    def unexpected_setup(*args, **kwargs):
+        pytest.fail("Unsupported component rewards must fail before allocating model resources")
+
+    monkeypatch.setattr(loop_module, "MultiRewardModelManager", unexpected_setup)
+    with pytest.raises(ValueError, match="preserve_components.*weighted_sum"):
+        OmniRewardLoopManager(config)
+
+
+def test_component_rewards_are_unavailable_without_named_models():
+    config = _config()
+    config.reward.aggregation = "preserve_components"
+    with pytest.raises(ValueError, match="preserve_components.*not supported yet"):
+        OmniRewardLoopManager(config)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "extra, message",
+    [
+        ({}, "Missing required component"),
+        ({"reward/quality": float("nan")}, "must be finite"),
+        ({"reward/quality": float("inf")}, "must be finite"),
+    ],
+)
+async def test_component_rewards_reject_missing_or_nonfinite_scores(extra, message):
+    data = DataProto.from_dict(tensors={"responses": torch.zeros(1, 3, 2, 2, dtype=torch.uint8)})
+    manager = object.__new__(OmniRewardLoopManager)
+    manager._preserve_reward_components = True
+    manager._reward_dispatch_batch_sizes = {}
+    manager.config = SimpleNamespace(reward=SimpleNamespace(reward_functions={"quality": {}}))
+    compute = AsyncMock(return_value=[{"reward_score": 0.0, "reward_extra_info": extra}])
+    manager._reward_worker_groups = {"quality": [SimpleNamespace(compute_score_batch=SimpleNamespace(remote=compute))]}
+    with pytest.raises(ValueError, match=message):
+        await manager._compute_named_model_scores(data)
+
+
+def test_reward_manager_accepts_scalar_default(monkeypatch):
+    from verl_omni.reward_loop import reward_loop as loop_module
+
+    config = _config({"quality": {"backend": "engine"}})
+    config.reward.aggregation = "weighted_sum"
+    config.reward.reward_manager.name = "MultiVisualRewardManager"
+    config.reward.reward_functions = OmegaConf.create({"quality": {"path": "unused", "name": "compute_score"}})
+    monkeypatch.setattr(
+        loop_module, "MultiRewardModelManager", lambda *args, **kwargs: SimpleNamespace(models={"quality": object()})
+    )
+    initialized = []
+    monkeypatch.setattr(OmniRewardLoopManager, "_init_reward_loop_workers", lambda self: initialized.append(self))
+    manager = OmniRewardLoopManager(config)
+    assert initialized == [manager]
+    assert manager._preserve_reward_components is False
+
+
+@pytest.mark.asyncio
+async def test_named_model_failure_drains_active_rpc_before_lifecycle_sleep():
+    calls = []
+    slow_entered = asyncio.Event()
+    release_slow = asyncio.Event()
+
+    async def fail(data):
+        calls.append(("fail_enter", len(data)))
+        await slow_entered.wait()
+        raise RuntimeError("reward failed")
+
+    async def slow(data):
+        calls.append(("slow_enter", len(data)))
+        slow_entered.set()
+        await release_slow.wait()
+        calls.append(("slow_exit", len(data)))
+        return [{"reward_score": 1.0} for _ in range(len(data))]
+
+    async def wake_up():
+        calls.append("wake_up")
+
+    async def sleep():
+        calls.append("sleep")
+
+    manager = object.__new__(OmniRewardLoopManager)
+    manager._score_lock = asyncio.Lock()
+    manager._reward_dispatch_batch_sizes = {"native": 1}
+    manager._reward_worker_groups = {
+        "native": [
+            SimpleNamespace(compute_score_batch=SimpleNamespace(remote=fail)),
+            SimpleNamespace(compute_score_batch=SimpleNamespace(remote=slow)),
+        ]
+    }
+    manager.multi_reward_model_manager = SimpleNamespace(
+        models={"native": object()},
+        wake_up=wake_up,
+        sleep=sleep,
+    )
+    task = asyncio.create_task(manager.async_compute_rm_score(DataProto.from_dict(tensors={"id": torch.arange(2)})))
+    await slow_entered.wait()
+    await asyncio.sleep(0)
+
+    assert "sleep" not in calls
+    release_slow.set()
+    with pytest.raises(RuntimeError, match="reward failed"):
+        await task
+
+    assert calls.index(("slow_exit", 1)) < calls.index("sleep")
+
+
+@pytest.mark.asyncio
+async def test_named_model_repeated_cancellation_drains_active_rpcs_before_lifecycle_sleep():
+    calls = []
+    entered = [asyncio.Event(), asyncio.Event()]
+    release = asyncio.Event()
+
+    def blocking_worker(index):
+        async def compute(data):
+            calls.append((f"remote_{index}_enter", len(data)))
+            entered[index].set()
+            await release.wait()
+            calls.append((f"remote_{index}_exit", len(data)))
+            return [{"reward_score": float(index)} for _ in range(len(data))]
+
+        return SimpleNamespace(compute_score_batch=SimpleNamespace(remote=compute))
+
+    async def wake_up():
+        calls.append("wake_up")
+
+    async def sleep():
+        calls.append("sleep")
+
+    manager = object.__new__(OmniRewardLoopManager)
+    manager._score_lock = asyncio.Lock()
+    manager._reward_dispatch_batch_sizes = {"native": 1}
+    manager._reward_worker_groups = {"native": [blocking_worker(0), blocking_worker(1)]}
+    manager.multi_reward_model_manager = SimpleNamespace(
+        models={"native": object()},
+        wake_up=wake_up,
+        sleep=sleep,
+    )
+    task = asyncio.create_task(manager.async_compute_rm_score(DataProto.from_dict(tensors={"id": torch.arange(2)})))
+    await asyncio.gather(*(event.wait() for event in entered))
+
+    task.cancel()
+    await asyncio.sleep(0)
+    task.cancel()
+    await asyncio.sleep(0)
+    assert "sleep" not in calls
+
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert calls.index(("remote_0_exit", 1)) < calls.index("sleep")
+    assert calls.index(("remote_1_exit", 1)) < calls.index("sleep")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["wake_up", "sleep"])
+async def test_cancellation_during_lifecycle_drains_before_releasing_score_lock(phase):
+    calls = []
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    completed = asyncio.Event()
+    rpc_cancelled = []
+
+    async def lifecycle(method):
+        calls.append(method)
+        if method == phase and not completed.is_set():
+            entered.set()
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                rpc_cancelled.append(method)
+                raise
+            completed.set()
+
+    models = object.__new__(MultiRewardModelManager)
+    models.models = {
+        "native": SimpleNamespace(
+            name="native",
+            wake_up=lambda: lifecycle("wake_up"),
+            sleep=lambda: lifecycle("sleep"),
+        )
+    }
+    manager = object.__new__(OmniRewardLoopManager)
+    manager._score_lock = asyncio.Lock()
+    manager.multi_reward_model_manager = models
+
+    async def score(data):
+        calls.append(f"score:{data}")
+        return data
+
+    manager._compute_named_model_scores = score
+    first = asyncio.create_task(manager.async_compute_rm_score("first"))
+    second = None
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        second = asyncio.create_task(manager.async_compute_rm_score("second"))
+        for _ in range(2):
+            assert first.cancel()
+            await asyncio.sleep(0)
+            assert not first.done()
+            assert manager._score_lock.locked()
+            assert rpc_cancelled == []
+        assert calls.count("wake_up") == 1
+        assert "score:second" not in calls
+        if phase == "wake_up":
+            assert "sleep" not in calls
+            assert "score:first" not in calls
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(asyncio.shield(first), timeout=5)
+        assert completed.is_set()
+        assert await asyncio.wait_for(second, timeout=5) == "second"
+        assert rpc_cancelled == []
+        assert not manager._score_lock.locked()
+        assert calls.count("sleep") == 2
+    finally:
+        release.set()
+        tasks = [first] if second is None else [first, second]
+        await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=5)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["wake_up", "sleep"])
+@pytest.mark.parametrize("synchronous", [False, True], ids=["async-failure", "submission-failure"])
+async def test_native_lifecycle_failure_drains_accepted_worker_before_return(phase, synchronous):
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    completed = asyncio.Event()
+    rpc_tasks = []
+
+    async def peer(name):
+        await release.wait()
+        completed.set()
+
+    def submit_peer(name):
+        entered.set()
+        rpc = asyncio.create_task(peer(name))
+        rpc_tasks.append(rpc)
+        return rpc
+
+    async def fail(name):
+        await entered.wait()
+        raise RuntimeError("lifecycle failed")
+
+    def submit_failure(name):
+        assert entered.is_set()
+        raise RuntimeError("lifecycle failed")
+
+    model = NativeManagedRewardModel(
+        "native",
+        OmegaConf.create(
+            {"backend": "native", "executor": {"model": "tests.fake:Model"}, "placement": {"devices": [0]}}
+        ),
+    )
+    method = f"{phase}_reward_model"
+    model.bind_workers(
+        [
+            SimpleNamespace(**{method: SimpleNamespace(remote=submit_peer)}),
+            SimpleNamespace(**{method: SimpleNamespace(remote=submit_failure if synchronous else fail)}),
+        ]
+    )
+    model._resident = phase == "sleep"
+    task = asyncio.create_task(getattr(model, phase)())
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        done, _ = await asyncio.wait({task}, timeout=0.05)
+        assert not done
+        release.set()
+        with pytest.raises(RuntimeError, match="lifecycle failed"):
+            await asyncio.wait_for(asyncio.shield(task), timeout=5)
+        assert completed.is_set()
+        assert model._resident == (phase == "sleep")
+    finally:
+        release.set()
+        await asyncio.wait_for(asyncio.gather(task, *rpc_tasks, return_exceptions=True), timeout=5)
+
+
+@pytest.mark.asyncio
+async def test_model_wake_failure_drains_other_model_before_sleep():
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    completed = asyncio.Event()
+    calls = []
+
+    async def slow_wake():
+        entered.set()
+        await release.wait()
+        completed.set()
+
+    async def fail_wake():
+        await entered.wait()
+        raise RuntimeError("wake failed")
+
+    async def sleep():
+        assert completed.is_set()
+        calls.append("sleep")
+
+    models = object.__new__(MultiRewardModelManager)
+    models.models = {
+        "slow": SimpleNamespace(name="slow", wake_up=slow_wake, sleep=sleep),
+        "fail": SimpleNamespace(name="fail", wake_up=fail_wake, sleep=sleep),
+    }
+    manager = object.__new__(OmniRewardLoopManager)
+    manager._score_lock = asyncio.Lock()
+    manager.multi_reward_model_manager = models
+    manager._compute_named_model_scores = AsyncMock()
+    task = asyncio.create_task(manager.async_compute_rm_score("unused"))
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        done, _ = await asyncio.wait({task}, timeout=0.05)
+        assert not done
+        assert calls == []
+        release.set()
+        with pytest.raises(RuntimeError, match="wake failed"):
+            await asyncio.wait_for(asyncio.shield(task), timeout=5)
+        assert calls == ["sleep", "sleep"]
+        manager._compute_named_model_scores.assert_not_awaited()
+    finally:
+        release.set()
+        await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), timeout=5)

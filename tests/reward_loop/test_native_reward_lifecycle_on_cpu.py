@@ -230,3 +230,58 @@ async def test_failed_lifecycle_drains_accepted_peer_before_unlocking(synchronou
     finally:
         release.set()
         await asyncio.gather(waking, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method", ["wake_up", "sleep", "close"])
+@pytest.mark.parametrize("cancel_caller", [False, True])
+async def test_submission_failure_stops_admission_and_drains_before_next_lifecycle(method, cancel_caller):
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    finished = asyncio.Event()
+    calls = []
+
+    def remote(index, operation):
+        calls.append((index, operation))
+        if index == 1 and operation == method:
+            raise OSError("submission failed")
+
+        async def run():
+            if index == 0 and operation == method:
+                entered.set()
+                await release.wait()
+                finished.set()
+                raise ValueError("accepted worker failed")
+
+        return run()
+
+    model = _model([_worker(lambda operation, i=i: remote(i, operation)) for i in range(3)])
+    active = asyncio.create_task(getattr(model, method)())
+    following = None
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        following = asyncio.create_task(model.close())
+        await asyncio.wait_for(model._lifecycle_lock.waiting.wait(), 2)
+        if cancel_caller:
+            active.cancel()
+            active.cancel()
+        assert calls == [(0, method), (1, method)]
+        assert model._lifecycle_lock.locked()
+        assert not active.done() and not following.done()
+        release.set()
+        if cancel_caller:
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(active, 2)
+        else:
+            with pytest.raises(OSError, match="submission failed"):
+                await asyncio.wait_for(active, 2)
+        assert finished.is_set()
+        if method == "close":
+            with pytest.raises(OSError, match="submission failed"):
+                await asyncio.wait_for(following, 2)
+        else:
+            await asyncio.wait_for(following, 2)
+        assert not model._lifecycle_lock.locked()
+    finally:
+        release.set()
+        await asyncio.gather(*(task for task in (active, following) if task is not None), return_exceptions=True)

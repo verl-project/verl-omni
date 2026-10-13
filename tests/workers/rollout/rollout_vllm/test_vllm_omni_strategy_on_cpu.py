@@ -735,13 +735,23 @@ def test_diffusion_strategy_preserves_engine_argument_preparation(monkeypatch):
         model_config=SimpleNamespace(architecture="Architecture", algorithm="Algorithm"),
     )
     strategy = DiffusionStrategy(server)
-    engine_args = {"max_num_seqs": 4}
+    engine_args = {
+        "max_num_seqs": 4,
+        # vLLM LLM-only fields must not reach diffusion ingress (upstream
+        # rejects unowned fields); diffusion-owned keys survive.
+        "block_size": 16,
+        "enable_lora": True,
+        "max_loras": 2,
+        "dtype": "bfloat16",
+    }
 
     strategy.prepare_engine_args(engine_args, Namespace())
 
     assert imported == [["extension"]]
     assert engine_args == {
         "max_num_seqs": 1,
+        # text_encoder_tp_size is diffusion-owned so it survives the ingress
+        # allowlist; enable_dummy_pipeline is rejected upstream and dropped.
         "tensor_parallel_size": 4,
         "ulysses_degree": 1,
         "ring_degree": 1,
@@ -752,10 +762,10 @@ def test_diffusion_strategy_preserves_engine_argument_preparation(monkeypatch):
         "vae_parallel_mode": "tile",
         "vae_use_tiling": False,
         "text_encoder_tp_size": 1,
-        "enable_dummy_pipeline": True,
         "custom_pipeline_args": {"pipeline_class": "package.Adapter"},
         "enable_prompt_embed_cache": True,
         "prompt_embed_cache_size": 16,
+        "dtype": "bfloat16",
     }
 
 
@@ -963,3 +973,171 @@ async def test_strategy_preserves_mode_specific_engine_call(strategy_cls, priori
     assert engine.kwargs["request_id"] == "request-1"
     assert engine.kwargs["sampling_params_list"] == ["params"]
     assert set(engine.kwargs) - {"prompt", "request_id", "sampling_params_list"} == expected_extra_keys
+
+
+def test_drop_defaulted_engine_args_keeps_only_explicit_overrides():
+    """Only explicitly-set engine args may reach AsyncOmni (12e9280+)."""
+    from dataclasses import asdict
+
+    from vllm_omni.engine.arg_utils import OmniEngineArgs
+
+    defaults = asdict(OmniEngineArgs(model=""))
+    engine_args = dict(defaults)
+    engine_args["model"] = "some-model"
+    engine_args["tensor_parallel_size"] = 2
+
+    filtered = server_module._drop_defaulted_engine_args(engine_args)
+
+    # Defaulted values (including private runtime internals) are dropped ...
+    assert "_api_process_count" not in filtered
+    assert "_api_process_rank" not in filtered
+    assert "convert" not in filtered
+    # ... including OrchestratorArgs parser defaults (the ownership check
+    # flags every non-None value, even False).
+    engine_args["ulysses_mode"] = "strict"
+    engine_args["cache_backend"] = "none"
+    engine_args["step_execution"] = False
+    filtered = server_module._drop_defaulted_engine_args(engine_args)
+    assert "ulysses_mode" not in filtered
+    assert "cache_backend" not in filtered
+    assert "step_execution" not in filtered
+    # ... while identity and real overrides survive.
+    assert filtered["model"] == "some-model"
+    assert filtered["tensor_parallel_size"] == 2
+    # Keys unknown to OmniEngineArgs (orchestrator extras) are preserved.
+    engine_args["custom_orchestrator_flag"] = True
+    assert server_module._drop_defaulted_engine_args(engine_args)["custom_orchestrator_flag"] is True
+
+    # Strict type checks prevent bool/int cross-equality (e.g. 0 == False)
+    assert not server_module._is_defaulted_value("max_num_seqs", False, 0)
+    assert not server_module._is_defaulted_value("enforce_eager", 0, False)
+    assert server_module._is_defaulted_value("max_num_seqs", 0, 0)
+    assert server_module._is_defaulted_value("enforce_eager", False, False)
+
+    # Parser-level normalizations count as defaults: argparse applies
+    # type=json.loads to string defaults (dict {} vs "{}"), and some string
+    # flags default to "" in the CLI while the dataclass default is None.
+    engine_args["diffusers_load_kwargs"] = {}
+    engine_args["reasoning_parser_plugin"] = ""
+    filtered = server_module._drop_defaulted_engine_args(engine_args)
+    assert "diffusers_load_kwargs" not in filtered
+    assert "reasoning_parser_plugin" not in filtered
+    # ... but non-empty values still travel.
+    engine_args["diffusers_load_kwargs"] = {"use_safetensors": True}
+    engine_args["reasoning_parser_plugin"] = "openai"
+    filtered = server_module._drop_defaulted_engine_args(engine_args)
+    assert filtered["diffusers_load_kwargs"] == {"use_safetensors": True}
+    assert filtered["reasoning_parser_plugin"] == "openai"
+
+
+def test_ar_deploy_config_omits_text_encoder_tp_size_on_ar_stages(tmp_path, monkeypatch):
+    """text_encoder_tp_size is diffusion-only; upstream rejects it on AR stages."""
+    import yaml
+    from vllm_omni.config.stage_config import StageExecutionType
+
+    from verl_omni.pipelines.model_base import OmniRolloutPipelineBase
+
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
+
+    def _stage(stage_id, execution_type):
+        return SimpleNamespace(
+            stage_id=stage_id,
+            execution_type=execution_type,
+            final_output=False,
+            final_output_type=None,
+            sampling_constraints={},
+        )
+
+    class _Adapter:
+        combine_engine_outputs = OmniRolloutPipelineBase.combine_engine_outputs
+
+        @staticmethod
+        def ensure_pipeline_registered(pipeline_mode):
+            return None
+
+        @staticmethod
+        def build_stage_configs(pipeline_mode=None):
+            return [
+                _stage(0, StageExecutionType.LLM_AR),
+                _stage(1, StageExecutionType.DIFFUSION),
+            ]
+
+        @staticmethod
+        def policy_stage_id(pipeline_mode=None):
+            return 0
+
+        @staticmethod
+        def weight_sync_stage_ids(pipeline_mode=None):
+            return None
+
+        @staticmethod
+        def get_pipeline_id(pipeline_mode=None):
+            return "test-pipeline"
+
+        @staticmethod
+        def get_stage_engine_extras(stage_id, pipeline_mode=None):
+            return {}
+
+    server = SimpleNamespace(
+        config=SimpleNamespace(tensor_model_parallel_size=2, text_encoder_tp_size=1),
+    )
+    strategy = ARStrategy(server)
+    engine_kwargs: dict = {}
+    strategy._write_deploy_config(engine_kwargs, "test-pipeline", _Adapter, "thinker_only")
+    try:
+        with open(engine_kwargs["deploy_config"]) as file:
+            deploy = yaml.safe_load(file)
+    finally:
+        server._temp_deploy_ctx.cleanup()
+
+    stages = {stage["stage_id"]: stage for stage in deploy["stages"]}
+    assert "text_encoder_tp_size" not in stages[0]
+    assert stages[1]["text_encoder_tp_size"] == 1
+
+
+def test_restore_raw_compilation_config_keeps_user_mapping():
+    """Only the raw user mapping may travel; expanded objects are rejected."""
+    from dataclasses import asdict
+
+    from vllm.config import CompilationConfig
+
+    # A JSON string (as parsed from the CLI) stays a minimal mapping.
+    engine_args = {"compilation_config": asdict(CompilationConfig())}
+    server_module._restore_raw_compilation_config(
+        engine_args, SimpleNamespace(compilation_config='{"cudagraph_mode": "FULL_AND_PIECEWISE"}')
+    )
+    assert engine_args["compilation_config"] == {"cudagraph_mode": "FULL_AND_PIECEWISE"}
+
+    # An absent user value drops the expanded object entirely.
+    engine_args = {"compilation_config": asdict(CompilationConfig())}
+    server_module._restore_raw_compilation_config(engine_args, SimpleNamespace(compilation_config=None))
+    assert "compilation_config" not in engine_args
+
+
+def test_diffusion_ingress_allowed_fields_includes_pinned_frontend_fields():
+    allowed = diffusion_strategy_module._diffusion_ingress_allowed_fields()
+
+    assert isinstance(allowed, frozenset)
+    assert "enable_flash_late_interaction" in allowed
+    assert "height" in allowed or "num_inference_steps" in allowed or "dtype" in allowed
+
+
+def test_diffusion_ingress_allowed_fields_supports_npu_frontend_path(monkeypatch):
+    import sys
+    from dataclasses import dataclass
+    from types import ModuleType
+
+    @dataclass
+    class NpuFrontendArgs:
+        host: str | None = None
+
+    monkeypatch.setitem(sys.modules, "vllm.entrypoints.launchers", None)
+    monkeypatch.setitem(sys.modules, "vllm.entrypoints.launchers.cli_args", None)
+    npu_cli_args = ModuleType("vllm.entrypoints.openai.cli_args")
+    npu_cli_args.FrontendArgs = NpuFrontendArgs
+    monkeypatch.setitem(sys.modules, "vllm.entrypoints.openai.cli_args", npu_cli_args)
+
+    allowed = diffusion_strategy_module._diffusion_ingress_allowed_fields()
+
+    assert isinstance(allowed, frozenset)
+    assert "host" in allowed

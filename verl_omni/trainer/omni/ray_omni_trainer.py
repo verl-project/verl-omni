@@ -49,15 +49,14 @@ from verl_omni.trainer.diffusion.diffusion_metric_utils import (
     compute_throughput_metrics_diffusion,
     compute_timing_metrics_diffusion,
 )
-from verl_omni.trainer.diffusion.diffusion_trainer_utils import (
-    NoOpCheckpointManager,
-    worker_group_port_ranges,
-)
+from verl_omni.trainer.diffusion.diffusion_trainer_utils import NoOpCheckpointManager
 from verl_omni.trainer.omni.omni_algos import (
     get_omni_loss_fn,
 )
+from verl_omni.trainer.omni.trainer_base import OmniPPOTrainer
 from verl_omni.utils.dataset.offline_mllm_dpo_dataset import get_batch_modality
 from verl_omni.utils.metrics_utils import GroupedMetricMean
+from verl_omni.utils.net_utils import worker_group_port_ranges
 from verl_omni.workers.config import OmniModelConfig
 
 sys_logger = logging.getLogger(__name__)
@@ -66,7 +65,7 @@ __all__ = ["OmniPPOTrainerSync", "OmniDirectPreferenceRayTrainer"]
 
 
 @register_trainer("omni_sync")
-class OmniPPOTrainerSync(PPOTrainerSync):
+class OmniPPOTrainerSync(OmniPPOTrainer, PPOTrainerSync):
     """``PPOTrainerSync`` subclass that wires tokenizer/processor from ``OmniModelConfig``."""
 
     def _init_tokenizer(self):
@@ -293,11 +292,10 @@ class OmniDirectPreferenceRayTrainer:
                 wg_kwargs["worker_nsight_options"] = OmegaConf.to_container(worker_nsight_options)
         wg_kwargs["device_name"] = self.device_name
 
+        pools = [(pool, class_dict) for pool, class_dict in self.resource_pool_to_cls.items() if class_dict]
         master_port_range = OmegaConf.select(self.config.trainer, "ray_master_port_range")
-        port_ranges = worker_group_port_ranges(master_port_range, len(self.resource_pool_to_cls))
-        for (resource_pool, class_dict), port_range in zip(self.resource_pool_to_cls.items(), port_ranges, strict=True):
-            if not class_dict:
-                continue
+        port_ranges = worker_group_port_ranges(master_port_range, len(pools))
+        for (resource_pool, class_dict), port_range in zip(pools, port_ranges, strict=True):
             if port_range is not None:
                 wg_kwargs["master_port_range"] = port_range
             worker_dict_cls = create_colocated_worker_cls(class_dict=class_dict)

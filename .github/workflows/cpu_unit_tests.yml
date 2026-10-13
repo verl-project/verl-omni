@@ -63,7 +63,7 @@ jobs:
             .github/verl_pin.txt
       - name: Install dependencies
         run: |
-          pip install --extra-index-url https://download.pytorch.org/whl/cpu "https://github.com/vllm-project/vllm/releases/download/v0.28.0/vllm-0.28.0+cpu-cp38-abi3-manylinux_2_34_x86_64.whl"
+          pip install --extra-index-url https://download.pytorch.org/whl/cpu "https://github.com/vllm-project/vllm/releases/download/v0.30.0/vllm-0.30.0+cpu-cp38-abi3-manylinux_2_39_x86_64.whl"
           pip install uv
           uv pip install --python "$(command -v python)" -e ".[omni,dev,ocr]"
           pip install --no-deps \

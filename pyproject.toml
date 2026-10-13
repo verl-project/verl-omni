@@ -45,10 +45,11 @@ dependencies = [
     "fastapi",
     "latex2sympy2_extended",
     "math_verify",
+    "mathruler",
     "tensorboard",
     "TransferQueue==0.1.9",
-    "vllm==0.28.0",
-    "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@ded8934626aaad1a3e816c3a1d9d742efc012d93",
+    "vllm==0.30.0",
+    "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@12e9280010afc41ce5c6a1f46900fc329cf08377",
     "verl @ git+https://github.com/verl-project/verl.git@fefb080262e1c015a0ea05f958822a6a512dc795",
 ]
 
@@ -86,12 +87,6 @@ dev = [
 ocr = [
     "Levenshtein",
 ]
-
-# vLLM loads every `vllm.general_plugins` entry point at startup in each
-# engine process; see verl_omni/pipelines/minicpm/vllm_plugin.py.
-# TODO (mike): drop this entry point at the next vllm-omni pin bump, together with vllm_plugin.py.
-[project.entry-points."vllm.general_plugins"]
-verl_omni_minicpmo_embed_multimodal = "verl_omni.pipelines.minicpm.vllm_plugin:register"
 
 # -------------------------------
 # tool.ruff - Linting configuration

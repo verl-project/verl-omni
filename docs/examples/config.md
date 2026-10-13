@@ -1,6 +1,6 @@
 # Config Explanation
 
-Last updated: 09/25/2026
+Last updated: 10/10/2026
 
 VeRL-Omni builds on [verl](https://github.com/verl-project/verl) and reuses the
 same Hydra config surface for shared RL trainer fields (`data`, FSDP actor /
@@ -55,6 +55,8 @@ algorithm:
   old_policy_decay: null
   old_policy_update_interval: 1
   timestep_fraction: 1.0
+  train_timestep_range: null
+  train_timestep_count: null
   adv_mode: continuous
   paired_preference: false
   rollout_correction: { ... }   # mirrors upstream RolloutCorrectionConfig
@@ -65,10 +67,12 @@ algorithm:
 - `algorithm.adv_estimator`: Advantage estimator name; defaults to `actor_rollout_ref.model.algorithm` (e.g. `flow_grpo`).
 - `algorithm.norm_adv_by_std_in_grpo`: Normalize advantages by within-group std (GRPO-style).
 - `algorithm.global_std`: Use a global (cross-group) std for advantage normalization.
-- `algorithm.old_policy_decay_schedule`: DiffusionNFT old-policy EMA schedule. One of `copy`, `linear_to_0_5`, `delayed_linear_to_0_999`.
+- `algorithm.old_policy_decay_schedule`: DiffusionNFT/DGPO old-policy EMA schedule. One of `copy`, `linear_to_0_5`, `linear_to_0_3`, `delayed_linear_to_0_999`.
 - `algorithm.old_policy_decay`: Fixed old-policy EMA decay in `[0, 1]`. When set, overrides `old_policy_decay_schedule`.
 - `algorithm.old_policy_update_interval`: DiffusionNFT optimizer steps between old-policy adapter refreshes (must be `> 0`).
 - `algorithm.timestep_fraction`: Fraction of rollout timesteps used for forward-process training, in `(0, 1]`.
+- `algorithm.train_timestep_range`: DGPO only. Rollout schedule indices `[start, end)` that training timesteps are drawn from; `null` uses the whole schedule.
+- `algorithm.train_timestep_count`: DGPO only. Number of schedule indices drawn per step and shared by the batch; `null` applies `timestep_fraction`.
 - `algorithm.adv_mode`: Advantage mapping before reward-probability scaling. One of `continuous`, `positive_only`, `negative_only`, `one_only`, `binary`.
 - `algorithm.paired_preference`: `true` for pair-based algorithms (e.g. offline DPO); doubles actor batch size and disables shuffle.
 - `algorithm.rollout_correction.*`: Experimental IS / RS correction. Schema mirrors upstream verl; see {doc}`../algo/rollout_correction` and [verl Rollout Correction](https://verl.readthedocs.io/en/latest/algo/rollout_corr.html).
@@ -167,7 +171,7 @@ actor_rollout_ref:
 
 - `actor_rollout_ref.model.model_type`: Dispatch key; must be `diffusion_model` for the diffusion agent loop.
 - `actor_rollout_ref.model.path`: HuggingFace / local diffusion pipeline root.
-- `actor_rollout_ref.model.algorithm`: RL algorithm name (also drives default `diffusion_loss.loss_mode` / `adv_estimator`). Examples: `flow_grpo`, `mix_grpo`, `flow_dppo`, `diffusion_nft`, `dpo`, `dance_grpo`.
+- `actor_rollout_ref.model.algorithm`: RL algorithm name (also drives default `diffusion_loss.loss_mode` / `adv_estimator`). Examples: `flow_grpo`, `mix_grpo`, `flow_dppo`, `diffusion_nft`, `dgpo`, `dpo`, `dance_grpo`.
 - `actor_rollout_ref.model.tokenizer_path`: Optional tokenizer path if not under `path` (falls back to `<path>/tokenizer` or `path`).
 - `actor_rollout_ref.model.config_path`: Optional transformer config path. If null, backends use `<path>/<transformer_subfolder>`.
 - `actor_rollout_ref.model.transformer_subfolder`: Subfolder with diffusion transformer weights/config (default `transformer`).
@@ -202,6 +206,8 @@ actor_rollout_ref:
       ref_kl_coef: 0.0
       adaptive_weight_min: 1e-5
       dpo_beta: 2000.0
+      dgpo_beta: 100.0
+      dgpo_clip_range: 0.01
       kl_mask_threshold: 1e-5
       add_kl_coefficient: true
     loss_scale_factor: null
@@ -214,13 +220,15 @@ actor_rollout_ref:
 
 #### `diffusion_loss` — `DiffusionLossConfig`
 
-- `actor_rollout_ref.actor.diffusion_loss.loss_mode`: Loss registry key. One of `flow_grpo`, `flow_dppo`, `grpo_guard`, `diffusion_nft`, `dpo`, `dance_grpo`, `distill_kl`, `distill_fm_mse`.
+- `actor_rollout_ref.actor.diffusion_loss.loss_mode`: Loss registry key. One of `flow_grpo`, `flow_dppo`, `grpo_guard`, `diffusion_nft`, `dgpo`, `dpo`, `dance_grpo`, `distill_kl`, `distill_fm_mse`.
 - `actor_rollout_ref.actor.diffusion_loss.clip_ratio`: PPO-style clip ratio for diffusion policy loss (FlowGRPO default is very small, e.g. `1e-4`).
 - `actor_rollout_ref.actor.diffusion_loss.adv_clip_max`: Max absolute advantage before computing the policy loss (must be `> 0`).
 - `actor_rollout_ref.actor.diffusion_loss.mix_beta`: DiffusionNFT β for positive / implicit-negative prediction mixing (must be `> 0`).
 - `actor_rollout_ref.actor.diffusion_loss.ref_kl_coef`: DiffusionNFT prediction-space reference MSE coefficient.
 - `actor_rollout_ref.actor.diffusion_loss.adaptive_weight_min`: DiffusionNFT minimum adaptive denominator for x0 reconstruction losses (must be `> 0`).
 - `actor_rollout_ref.actor.diffusion_loss.dpo_beta`: DPO inverse temperature for pairwise flow-matching preference loss.
+- `actor_rollout_ref.actor.diffusion_loss.dgpo_beta`: DGPO β in the group preference score (must be `> 0`).
+- `actor_rollout_ref.actor.diffusion_loss.dgpo_clip_range`: DGPO old-policy ratio clip range; `0` disables clipping (must be `>= 0`).
 - `actor_rollout_ref.actor.diffusion_loss.kl_mask_threshold`: Flow-DPPO divergence threshold for masking high-KL updates (must be `> 0`).
 - `actor_rollout_ref.actor.diffusion_loss.add_kl_coefficient`: Whether Flow-DPPO normalizes mean drift by the scheduler SDE noise scale.
 

@@ -103,7 +103,7 @@ step_execution: False
 enable_chunked_prefill: True
 
 # Prefix caching kv-cache blocks is a popular optimization in LLM inference to avoid redundant prompt computations.
-enable_prefix_caching: True
+enable_prefix_caching: False
 
 # logprobs mode for rollout logprobs
 logprobs_mode: processed_logprobs

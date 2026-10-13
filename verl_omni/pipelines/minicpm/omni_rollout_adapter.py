@@ -25,7 +25,6 @@ from vllm_omni.config.pipeline_registry import register_pipeline
 from vllm_omni.config.stage_config import PipelineConfig
 from vllm_omni.model_executor.models.minicpmo_4_5.pipeline import MINICPMO_4_5_PIPELINE
 
-from verl_omni.pipelines.minicpm.vllm_plugin import assert_entry_point_installed
 from verl_omni.pipelines.model_base import OmniRolloutPipelineBase
 
 MINICPMO_4_5_THINKER_ONLY_PIPELINE = PipelineConfig(
@@ -94,14 +93,7 @@ class MiniCPMORolloutAdapter(OmniRolloutPipelineBase):
 
     @classmethod
     def ensure_pipeline_registered(cls, pipeline_mode: str = "thinker_only") -> None:
-        """Register the runtime-cloned thinker-only pipeline in vLLM-Omni.
-
-        The entry-point assertion runs first, before the engine cores spawn, so a
-        stale plugin install is reported here rather than downstream.
-        """
-        # TODO (mike): drop with the vllm_plugin module at the pin bump — the guard
-        # fails once the plugin entry point is legitimately gone.
-        assert_entry_point_installed()
+        """Register the runtime-cloned thinker-only pipeline in vLLM-Omni."""
         register_pipeline(MINICPMO_4_5_THINKER_ONLY_PIPELINE)
 
     @classmethod

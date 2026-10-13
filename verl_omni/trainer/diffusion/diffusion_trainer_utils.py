@@ -14,7 +14,6 @@
 """Shared helpers for diffusion Ray trainers."""
 
 import math
-from collections.abc import Sequence
 from typing import Any, Optional
 
 from verl import DataProto
@@ -30,6 +29,7 @@ def _to_diffusion_worker_tensordict(batch: DataProto):
 
 OLD_POLICY_DECAY_SCHEDULES = {
     "copy": (0, 0.0, 0.0),
+    "linear_to_0_3": (0, 0.001, 0.3),
     "linear_to_0_5": (0, 0.001, 0.5),
     "delayed_linear_to_0_999": (75, 0.0075, 0.999),
 }
@@ -41,30 +41,14 @@ def old_policy_decay(step: int, schedule: str) -> float:
     The decay is used as ``old <- decay * old + (1 - decay) * current`` when refreshing
     the rollout adapter. The schedules mirror the reference DiffusionNFT ``return_decay``
     helper: ``copy`` hard-copies the current adapter, ``linear_to_0_5`` ramps from 0 to
-    0.5, and ``delayed_linear_to_0_999`` waits 75 steps before ramping to 0.999.
+    0.5 (``linear_to_0_3``, the DGPO reference EMA, stops at 0.3), and
+    ``delayed_linear_to_0_999`` waits 75 steps before ramping to 0.999.
     """
     if schedule in OLD_POLICY_DECAY_SCHEDULES:
         warmup_steps, ramp_rate, max_decay = OLD_POLICY_DECAY_SCHEDULES[schedule]
     else:
         raise ValueError(f"Unsupported old_policy_decay_schedule: {schedule}")
     return 0.0 if step < warmup_steps else min((step - warmup_steps) * ramp_rate, max_decay)
-
-
-def worker_group_port_ranges(master_port_range: Optional[Sequence[int]], num_groups: int) -> list[Optional[list[int]]]:
-    """Slice a rendezvous port range into one disjoint sub-range per worker group.
-
-    Ports are only bound at ``init_model``, after every group has been spawned, so groups
-    sharing a range would all pick its first free port.
-    """
-    if master_port_range is None:
-        return [None] * num_groups
-    lo, hi = (int(port) for port in master_port_range)
-    stride = (hi - lo) // num_groups
-    if stride < 1:
-        raise ValueError(
-            f"trainer.ray_master_port_range={master_port_range} has fewer ports than worker groups ({num_groups})."
-        )
-    return [[lo + i * stride, hi if i == num_groups - 1 else lo + (i + 1) * stride] for i in range(num_groups)]
 
 
 def track_nonfinite_grad_streak(streak: int, grad_norm: Optional[float]) -> int:

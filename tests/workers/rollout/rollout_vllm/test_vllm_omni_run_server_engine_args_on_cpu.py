@@ -64,15 +64,18 @@ async def _run_server_capture(monkeypatch, engine_args):
     return captured
 
 
+@pytest.mark.asyncio
 async def test_run_server_strips_default_fault_tolerance_config(monkeypatch):
     captured = await _run_server_capture(monkeypatch, server_module.OmniEngineArgs(model="m"))
     assert "fault_tolerance_config" not in captured
-    assert captured["enable_fault_tolerance"] is False
+    assert "enable_fault_tolerance" not in captured
 
 
+@pytest.mark.asyncio
 async def test_run_server_keeps_fault_tolerance_when_explicitly_enabled(monkeypatch):
     engine_args = server_module.OmniEngineArgs(model="m")
     engine_args.enable_fault_tolerance = True
+    engine_args.fault_tolerance_config = {"max_retries": 3}
     captured = await _run_server_capture(monkeypatch, engine_args)
-    assert isinstance(captured["fault_tolerance_config"], dict)
     assert captured["enable_fault_tolerance"] is True
+    assert captured["fault_tolerance_config"] == {"max_retries": 3}

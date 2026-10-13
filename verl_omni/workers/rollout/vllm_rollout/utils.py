@@ -92,6 +92,15 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
         # 1. patch for Lora
         VLLMOmniHijack.hijack()
 
+        vllm_config = kwargs.get("vllm_config")
+        if vllm_config is not None and any(
+            architecture in {"Qwen3OmniMoeForConditionalGeneration", "Qwen3OmniMoeThinkerForConditionalGeneration"}
+            for architecture in vllm_config.model_config.architectures
+        ):
+            from verl_omni.utils.vllm_omni.patch import patch_qwen3_omni_thinker_forward
+
+            patch_qwen3_omni_thinker_forward()
+
         return super().__new__(cls)
 
     def set_pending_lora_peft_config(self, peft_config: dict | None = None):

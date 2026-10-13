@@ -16,11 +16,18 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Literal
 
 import torch
 from vllm_omni.diffusion.models.minimax_h3.time_request import minimax_h3_time_shift_sigmas
 
+from verl_omni.pipelines.minimax_h3_diffusion_nft.common import (
+    AUDIO_ROW_WIDTH,
+    VIDEO_ROW_WIDTH,
+    pack_video_audio_rows,
+    unpack_video_audio_rows,
+)
 from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
 
 H3_VIDEO_SHIFT = 12.0
@@ -28,8 +35,8 @@ H3_AUDIO_SHIFT = 3.0
 H3_VIDEO_LOG_PROB_WEIGHT = 0.5
 H3_AUDIO_LOG_PROB_WEIGHT = 0.5
 
-H3_VIDEO_WIDTH = 96
-H3_AUDIO_WIDTH = 32
+H3_VIDEO_WIDTH = VIDEO_ROW_WIDTH
+H3_AUDIO_WIDTH = AUDIO_ROW_WIDTH
 
 
 def h3_sigma_schedules(
@@ -38,10 +45,36 @@ def h3_sigma_schedules(
     audio_shift: float = H3_AUDIO_SHIFT,
 ) -> tuple[list[float], list[float]]:
     """Call vLLM-Omni's H3 time-shift function for the video and audio schedules."""
-    return (
-        minimax_h3_time_shift_sigmas(num_steps=num_steps, shift_scale=video_shift),
-        minimax_h3_time_shift_sigmas(num_steps=num_steps, shift_scale=audio_shift),
-    )
+    video_sigmas = minimax_h3_time_shift_sigmas(num_steps=num_steps, shift_scale=video_shift)
+    audio_sigmas = minimax_h3_time_shift_sigmas(num_steps=num_steps, shift_scale=audio_shift)
+    h3_transition_count(video_sigmas, audio_sigmas)
+    return video_sigmas, audio_sigmas
+
+
+def h3_transition_count(video_sigmas: Sequence[float], audio_sigmas: Sequence[float]) -> int:
+    """Return the number of denoiser transitions in a sigma schedule, validating its shape.
+
+    The count is always taken from the schedule itself (``len - 1``) rather than from
+    ``num_inference_steps``: whether a schedule holds ``num_steps`` or ``num_steps + 1``
+    boundaries is an upstream convention that has changed between vLLM-Omni releases.
+    Rollout and Actor replay must walk the same grid down to sigma 0, otherwise the sample
+    is left partly noisy.
+    """
+    if len(video_sigmas) != len(audio_sigmas):
+        raise RuntimeError(
+            f"MiniMax H3 video/audio sigma schedules differ in length: {len(video_sigmas)} vs {len(audio_sigmas)}."
+        )
+    if len(video_sigmas) < 2:
+        raise RuntimeError("MiniMax H3 sigma schedule needs at least two boundaries.")
+    for name, sigmas in (("video", video_sigmas), ("audio", audio_sigmas)):
+        values = [float(value) for value in sigmas]
+        if abs(values[0] - 1.0) > 1e-6 or abs(values[-1]) > 1e-6:
+            raise RuntimeError(
+                f"MiniMax H3 {name} sigma schedule must run from 1.0 to 0.0, got {values[0]} -> {values[-1]}."
+            )
+        if any(nxt >= cur for cur, nxt in zip(values, values[1:], strict=False)):
+            raise RuntimeError(f"MiniMax H3 {name} sigma schedule must be strictly decreasing.")
+    return len(video_sigmas) - 1
 
 
 def configure_flow_scheduler(
@@ -103,7 +136,7 @@ def flatten_joint_latents(video: torch.Tensor, audio: torch.Tensor) -> torch.Ten
     """Encode unequal H3 row widths as one Engine-compatible row."""
     if video.shape[0] != audio.shape[0]:
         raise ValueError("MiniMax H3 video and audio batch sizes must match.")
-    return torch.cat([video.flatten(1), audio.flatten(1)], dim=1).unsqueeze(1)
+    return pack_video_audio_rows(video.flatten(1).unsqueeze(1), audio.flatten(1).unsqueeze(1)).unsqueeze(1)
 
 
 def split_joint_latents(
@@ -123,7 +156,4 @@ def split_joint_latents(
             f"MiniMax H3 joint width {joint.shape[-1]} does not match video/audio metadata "
             f"({video_numel} + {audio_numel})."
         )
-    return (
-        joint[:, :video_numel].reshape(joint.shape[0], video_rows, H3_VIDEO_WIDTH),
-        joint[:, video_numel:].reshape(joint.shape[0], audio_rows, H3_AUDIO_WIDTH),
-    )
+    return unpack_video_audio_rows(joint, video_rows, audio_rows)

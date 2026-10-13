@@ -24,6 +24,7 @@ import yaml
 from omegaconf import OmegaConf
 from verl.utils.device import get_visible_devices_keyword
 from verl.workers.rollout import utils as verl_rollout_utils
+from vllm_omni.config.stage_config import StageExecutionType
 
 from verl_omni.pipelines.model_base import OmniRolloutPipelineBase
 from verl_omni.workers.config import DiffusionRolloutConfig
@@ -46,6 +47,7 @@ def _run_write_deploy_config(
             return [
                 types.SimpleNamespace(
                     stage_id=0,
+                    execution_type=StageExecutionType.DIFFUSION,
                     final_output=True,
                     final_output_type="audio",
                     sampling_constraints={},

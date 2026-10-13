@@ -26,6 +26,7 @@ from verl.workers.rollout.replica import TokenOutput
 from verl.workers.rollout.vllm_rollout.utils import extract_prompt_logprobs
 from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMHttpServer
 from vllm import SamplingParams
+from vllm_omni.config.stage_config import StageExecutionType
 from vllm_omni.lora.request import LoRARequest
 
 from verl_omni.pipelines.model_base import OmniRolloutPipelineBase
@@ -187,16 +188,21 @@ class ARStrategy(OmniStrategyBase):
         if visible_devices:
             device_count = len([device for device in visible_devices.split(",") if device.strip()])
             devices = ",".join(str(device_id) for device_id in range(device_count))
-            stage_ids = [stage.stage_id for stage in stages]
+            text_encoder_tp_size = getattr(self.server.config, "text_encoder_tp_size", 1)
             deploy_dict["stages"] = [
                 {
-                    "stage_id": stage_id,
+                    "stage_id": stage.stage_id,
                     "devices": devices,
                     "tensor_parallel_size": tp_size,
-                    "text_encoder_tp_size": getattr(self.server.config, "text_encoder_tp_size", 1),
-                    "engine_extras": stage_extras[stage_id],
+                    # Only diffusion stages own text_encoder_tp_size.
+                    **(
+                        {"text_encoder_tp_size": text_encoder_tp_size}
+                        if getattr(stage, "execution_type", None) == StageExecutionType.DIFFUSION
+                        else {}
+                    ),
+                    "engine_extras": stage_extras[stage.stage_id],
                 }
-                for stage_id in stage_ids
+                for stage in stages
             ]
         else:
             raise RuntimeError(
@@ -217,6 +223,10 @@ class ARStrategy(OmniStrategyBase):
         engine_kwargs["deploy_config"] = deploy_path
 
     def prepare_engine_args(self, engine_args: dict[str, Any], args: Namespace) -> None:
+        if engine_args.get("enable_lora"):
+            from verl_omni.utils.vllm_omni.patch import patch_vllm_omni_lora_config
+
+            patch_vllm_omni_lora_config()
         if self._rollout_output_modalities is not None:
             # The generated per-stage deploy config owns model_stage for
             # multi-output pipelines.

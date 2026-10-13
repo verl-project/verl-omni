@@ -36,7 +36,7 @@ Build context is controlled by the repo-root [`.dockerignore`](https://github.co
 | ------------------- | ---------------------------------------------- | ------------------------------------------- |
 | `BASE_IMAGE`        | `verlai/verl:rocm7.14_torch2.12_release_0724`  | ROCm PyTorch stack, vLLM checkout, hipcc    |
 | `PYTORCH_ROCM_ARCH` | `gfx942;gfx950`                                | GPU architectures to compile vLLM kernels for |
-| `VLLM_VERSION`      | `v0.28.0`                                      | vLLM tag built from source                  |
+| `VLLM_VERSION`      | `v0.30.0`                                      | vLLM tag built from source                  |
 | `VERL_GIT_REF`      | [`.github/verl_pin.txt`](../../.github/verl_pin.txt) | verl commit to install                |
 
 ## Optional Dependencies

@@ -103,7 +103,10 @@ class MultiRewardModelManager:
 
     async def wake_up(self) -> None:
         """Wake independent reward models concurrently."""
-        await asyncio.gather(*(model.wake_up() for model in self.models.values()))
+        results = await asyncio.gather(*(model.wake_up() for model in self.models.values()), return_exceptions=True)
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
 
     async def sleep(self) -> None:
         """Attempt to sleep every model and report the first lifecycle error."""

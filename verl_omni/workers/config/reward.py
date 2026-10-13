@@ -216,6 +216,8 @@ class NativeRewardModelConfig(RewardModelConfig):
 
     placement: RewardModelPlacementConfig | None = None
     executor: NativeRewardModelExecutorConfig | None = None
+    # Null preserves static splitting; a positive size enables completion-driven dispatch.
+    dispatch_batch_size: int | None = None
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -225,11 +227,13 @@ class NativeRewardModelConfig(RewardModelConfig):
             raise ValueError(f"Native reward model {self.name!r} requires placement.devices")
         if not isinstance(self.executor, NativeRewardModelExecutorConfig):
             raise ValueError(f"Native reward model {self.name!r} requires executor.model")
+        if self.dispatch_batch_size is not None:
+            _validate_positive_int(self.dispatch_batch_size, f"Native reward model {self.name!r} dispatch_batch_size")
 
     @classmethod
     def from_mapping(cls, name: str, value) -> NativeRewardModelConfig:
         model = to_mapping(value)
-        allowed = {"backend", "offload", "model_path", "placement", "executor"}
+        allowed = {"backend", "offload", "model_path", "placement", "executor", "dispatch_batch_size"}
         _reject_unknown_fields(name, model, allowed)
         return cls(
             name=name,
@@ -238,6 +242,7 @@ class NativeRewardModelConfig(RewardModelConfig):
             model_path=model.get("model_path"),
             placement=RewardModelPlacementConfig.from_mapping(name, model.get("placement")),
             executor=NativeRewardModelExecutorConfig.from_mapping(name, model.get("executor")),
+            dispatch_batch_size=model.get("dispatch_batch_size"),
         )
 
 

@@ -55,3 +55,14 @@ def test_shared_omni_veomni_engine_and_adapters_select_omni_smoke():
         "tests/pipelines/test_qwen3_omni_veomni_on_cpu.py",
     ):
         assert "ci-e2e-omni" in selector.select_group_names([path]), path
+
+
+def test_omni_e2e_runner_forwards_trainer_args_to_every_run_test():
+    # A run_test that drops the trainer args silently loses the configured
+    # rendezvous port range, so every launched command must forward them.
+    script = Path(__file__).parents[1] / "gpu_smoke/run_gpu_smoke_omni_e2e.sh"
+    blocks = script.read_text().split("run_test ")[1:]
+    assert blocks, "no run_test blocks found in the omni e2e runner"
+    for block in blocks:
+        commands = [line for line in block.splitlines() if not line.lstrip().startswith("#")]
+        assert any('"${omni_trainer_args[@]}"' in line for line in commands), block.splitlines()[0]

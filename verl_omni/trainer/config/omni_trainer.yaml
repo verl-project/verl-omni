@@ -61,6 +61,10 @@ actor_rollout_ref:
 # Trainer configuration.
 trainer:
 
+  # Port range for torch distributed rendezvous, sliced per worker group. Leave null for ephemeral
+  # ports; set it only to isolate concurrent training jobs on one machine.
+  ray_master_port_range: null
+
   # V1 trainer settings.
   v1:
 

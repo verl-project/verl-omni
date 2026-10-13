@@ -20,6 +20,7 @@ import logging
 import os
 from typing import Any, Literal
 
+import PIL.Image
 import torch
 import torch.nn.functional as F
 from vllm_omni.diffusion.data import DiffusionOutput, OmniDiffusionConfig
@@ -51,7 +52,7 @@ from .common import (
     apply_boogu_text_cfg,
     boogu_timestep_from_scheduler,
     configure_boogu_sde_timesteps,
-    get_boogu_freqs_cis,
+    get_boogu_freqs_real,
     lora_engine_module_names,
     lora_module_name,
     rename_boogu_lora_name,
@@ -276,25 +277,35 @@ class BooguImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, BooguImagePipel
         prompt_embeds_mask: torch.Tensor | None = None,
         max_sequence_length: int = 1280,
         condition_images: list | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Encode pre-tokenised prompt IDs into padded ``(B, L, D)`` embeddings.
-
-        Replaces the upstream text-based ``encode_prompt``; the agent loop ships
-        token IDs produced by the data preprocessor, whose chat template must
-        match the upstream Boogu system prompts exactly.
-        """
-        if prompt_embeds is None:
+        do_classifier_free_guidance: bool = True,
+        negative_prompt: str | list[str] | None = None,
+        device: torch.device | None = None,
+        negative_prompt_embeds: torch.Tensor | None = None,
+        prompt_attention_mask: torch.Tensor | None = None,
+        negative_prompt_attention_mask: torch.Tensor | None = None,
+        truncate_instruction_sequence: bool = False,
+        input_images: list[list[PIL.Image.Image] | None] | None = None,
+    ):
+        """Encode pre-tokenised prompt IDs (RL) or dispatch text prompts (warmup/dummy run)."""
+        if isinstance(prompt_ids, str | list) and (not prompt_ids or isinstance(prompt_ids[0], str)):
+            input_pil_images = (
+                [[img] if img is not None else None for img in condition_images] if condition_images else input_images
+            )
+            prompt_embeds, prompt_embeds_mask = self._get_instruction_feature_embeds(
+                instruction=prompt_ids,
+                input_pil_images=input_pil_images,
+                device=device or self.device,
+                max_sequence_length=max_sequence_length,
+                truncate_instruction_sequence=truncate_instruction_sequence,
+            )
+        elif prompt_embeds is None:
             prompt_embeds, prompt_embeds_mask = self._get_boogu_prompt_embeds(
                 prompt_ids, attention_mask, condition_images=condition_images
             )
-        return super().encode_prompt(
-            prompt_ids,
-            attention_mask,
-            num_images_per_prompt,
-            prompt_embeds,
-            prompt_embeds_mask,
-            max_sequence_length,
+        _, _, prompt_embeds, prompt_embeds_mask = self._reshape_embeds_and_mask(
+            prompt_embeds, prompt_embeds_mask, num_images_per_prompt
         )
+        return prompt_embeds, prompt_embeds_mask
 
     def _tokenize_text_prompt(self, text: str | list[str]) -> tuple[torch.Tensor, torch.Tensor]:
         """Tokenize raw text with the upstream chat template (dummy-run fallback)."""
@@ -618,11 +629,12 @@ class BooguImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, BooguImagePipel
         ref_image_hidden_states = None
         condition_image_latents = None
         if has_reference:
+            ref_generators = [generator] if isinstance(generator, torch.Generator) else generator
             ref_image_hidden_states = self._build_ref_latents(
                 preprocessed_images,
                 num_images_per_prompt,
                 self.device,
-                generator,
+                ref_generators,
             )
             # Transport shape (B, C, H, W): one reference latent per output.
             condition_image_latents = torch.stack([sample_latents[0] for sample_latents in ref_image_hidden_states])
@@ -659,7 +671,7 @@ class BooguImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, BooguImagePipel
             device=self.device,
         )
 
-        freqs_cis = get_boogu_freqs_cis(self.transformer.axes_dim_rope, self.transformer.axes_lens)
+        freqs_cis = get_boogu_freqs_real(self.transformer.axes_dim_rope, self.transformer.axes_lens)
 
         latents, all_latents, all_log_probs, all_timesteps = self.diffuse(
             prompt_embeds,

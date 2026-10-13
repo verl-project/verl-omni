@@ -26,7 +26,7 @@ from verl_omni.pipelines.boogu_image_flow_grpo.common import (
     apply_boogu_text_cfg,
     boogu_timestep_from_scheduler,
     configure_boogu_sde_timesteps,
-    get_boogu_freqs_cis,
+    get_boogu_freqs_real,
 )
 from verl_omni.pipelines.boogu_image_flow_grpo.vllm_omni_rollout_adapter import BooguImagePipelineWithLogProb
 from verl_omni.pipelines.diffusion_rollout_output import rollout_output
@@ -156,11 +156,12 @@ class BooguImageDiffusionNFTPipeline(BooguImagePipelineWithLogProb):
         ref_image_hidden_states = None
         condition_image_latents = None
         if has_reference:
+            ref_generators = [generator] if isinstance(generator, torch.Generator) else generator
             ref_image_hidden_states = self._build_ref_latents(
                 preprocessed_images,
                 num_images_per_prompt,
                 self.device,
-                generator,
+                ref_generators,
             )
             # Transport shape (B, C, H, W): one reference latent per output.
             condition_image_latents = torch.stack([sample_latents[0] for sample_latents in ref_image_hidden_states])
@@ -188,7 +189,7 @@ class BooguImageDiffusionNFTPipeline(BooguImagePipelineWithLogProb):
         )
         timesteps = self.scheduler.timesteps
 
-        freqs_cis = get_boogu_freqs_cis(self.transformer.axes_dim_rope, self.transformer.axes_lens)
+        freqs_cis = get_boogu_freqs_real(self.transformer.axes_dim_rope, self.transformer.axes_lens)
         self.scheduler.set_begin_index(0)
         num_train_timesteps = self.scheduler.config.num_train_timesteps
 

@@ -19,8 +19,9 @@ defaults and accept CLI overrides.
 | NExT-QA full-parameter | FSDP2 / NPU | [NExT-QA NPU](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_npu_nextqa_v1.sh) |
 | AudioMCQ full-parameter, separate-async | Megatron / GPU | [AudioMCQ](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/qwen3_omni/run_qwen3_omni_megatron_audiomcq_separate_async.sh) |
 | AVQA image+audio full-parameter, separate-async | Megatron / GPU | [AVQA](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/qwen3_omni/run_qwen3_omni_megatron_avqa_separate_async.sh) |
+| Geo3K full-parameter, separate-async | Megatron / GPU | [Geo3K](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/qwen3_omni/run_qwen3_omni_megatron_geo3k_separate_async.sh) |
 
-The following sections describe the **Megatron AudioMCQ** and **AVQA** recipes,
+The following sections describe the **Megatron AudioMCQ**, **AVQA**, and **Geo3K** recipes,
 their dependency prerequisites and validation limits. For model-adapter development, see the
 [Megatron integration notes](../../../docs/contributing/integrating_an_omni_model.md#21-megatron-training-adapters).
 
@@ -285,3 +286,51 @@ python -m pytest -q tests/utils/test_avqa_data_process_on_cpu.py \
   tests/utils/test_avqa_strict_on_cpu.py \
   tests/trainer/omni/test_avqa_megatron_config_on_cpu.py
 ```
+
+## Geo3K image-conditioned Megatron separate-async
+
+The [standalone Geo3K launcher](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/qwen3_omni/run_qwen3_omni_megatron_geo3k_separate_async.sh)
+reuses `verl_omni/trainer/config/omni_megatron_trainer.yaml` and the existing
+Qwen3-Omni Megatron adapter. It trains the Thinker language model with frozen
+vision/audio towers. The dependency prerequisites and BSHD/PP1/CP1 limitations
+in the AudioMCQ section also apply.
+
+Prepare [Geometry3K](https://huggingface.co/datasets/hiyouga/geometry3k) with the
+converter below. Check the dataset card and original Geometry3K license before
+use. The converter preserves encoded image bytes and source question whitespace,
+validates image-placeholder counts, and records the original split and row index.
+It explicitly requests `<think>...</think>\boxed{...}`, as consumed by verl's
+built-in `hiyouga/geometry3k` reward (90% answer accuracy, 10% strict format).
+
+```bash
+python examples/gspo_trainer/data_process/geo3k.py --local_save_dir /data/geo3k
+MODEL_PATH=/models/Qwen3-Omni-30B-A3B-Instruct \
+TRAIN_FILE=/data/geo3k/train.parquet VAL_FILE=/data/geo3k/test.parquet \
+OUTPUT_DIR=/outputs/geo3k \
+bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_megatron_geo3k_separate_async.sh
+```
+
+Defaults use eight GPUs: four TP4/EP4 actor GPUs and four TP4 rollout GPUs,
+GRPO advantages with GSPO clipping (`0.0003`/`0.0004`), LR `1e-6`, and 16 prompts
+with 8 samples each. Prompt/response limits are 1024/3072 tokens; old-policy and
+actor microbatches are both one. Dynamic batching, remove padding, reference KL
+and LR warmup are disabled. Precision-aware optimization offloads FP32 optimizer
+states to CPU; the trajectory-lag threshold is one. The launcher requests 150
+updates, full validation before training and every 10 updates, and no checkpoints.
+Each launch retains its command, resolved configuration, TensorBoard, log and
+generations in a unique directory. CLI overrides remain last; preprocessing
+requires `--overwrite` to replace existing parquet files.
+
+An eight-H800 development run completed 129 optimizer updates before a user-requested
+stop (exit `-15`). Full 601-question validation ran at steps 0/30/60/90/120.
+Validation reward increased from `0.614309` to `0.679035`: correct answers rose
+from 361 to 393 and strict-format answers from 443 to 544. Official reward
+regrading had zero mismatches. The English-only figure shows unsmoothed validation
+reward (90% answer accuracy, 10% strict format) and its two components.
+
+![H800 Geo3K validation reward and answer/format accuracy](https://raw.githubusercontent.com/hbhflw2000/verl-omni/41d2d43f06ec100ec95be88e7f664ba901901987/docs/evidence/geo3k/lag1-val-core-final-english-20261001.png)
+
+See the [full TensorBoard metrics](https://raw.githubusercontent.com/hbhflw2000/verl-omni/41d2d43f06ec100ec95be88e7f664ba901901987/docs/evidence/geo3k/lag1-tb-matrix-final-english-20261001.png)
+for training-batch reward and other diagnostics. This run used an earlier entry
+point, development dependencies and recorded overrides; it does not establish
+exact-head reproduction of the final launcher with unchanged public pins.

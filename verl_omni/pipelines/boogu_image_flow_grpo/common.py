@@ -97,16 +97,11 @@ def apply_boogu_text_cfg(
 
 
 _FREQS_CIS_CACHE: dict[tuple, Any] = {}
+_FREQS_REAL_CACHE: dict[tuple, Any] = {}
 
 
 def get_boogu_freqs_cis(axes_dim_rope, axes_lens, theta: int = 10000):
-    """Build (and cache) the rotary tables the Boogu transformer consumes.
-
-    Prefers the canonical implementation from the installed boogu-image
-    package (the training-side transformer is the canonical class, so its
-    rope tables must come from the same code); falls back to the verbatim
-    vllm-omni port, which the rollout-side transformer uses.
-    """
+    """Build (and cache) the complex rotary tables the canonical Boogu transformer consumes."""
     key = (tuple(axes_dim_rope), tuple(axes_lens), theta)
     if key in _FREQS_CIS_CACHE:
         return _FREQS_CIS_CACHE[key]
@@ -121,6 +116,21 @@ def get_boogu_freqs_cis(axes_dim_rope, axes_lens, theta: int = 10000):
     freqs_cis = _Rope.get_freqs_cis(list(axes_dim_rope), list(axes_lens), theta=theta)
     _FREQS_CIS_CACHE[key] = freqs_cis
     return freqs_cis
+
+
+def get_boogu_freqs_real(axes_dim_rope, axes_lens, theta: int = 10000):
+    """Build (and cache) the real rotary tables the vllm-omni Boogu transformer consumes."""
+    key = (tuple(axes_dim_rope), tuple(axes_lens), theta)
+    if key in _FREQS_REAL_CACHE:
+        return _FREQS_REAL_CACHE[key]
+
+    from vllm_omni.diffusion.models.boogu_image.boogu_image_transformer import (
+        BooguImageDoubleStreamRotaryPosEmbed,
+    )
+
+    freqs_real = BooguImageDoubleStreamRotaryPosEmbed.get_freqs_real(list(axes_dim_rope), list(axes_lens), theta=theta)
+    _FREQS_REAL_CACHE[key] = freqs_real
+    return freqs_real
 
 
 def resolve_text_guidance_scale(guidance_scale: Optional[float]) -> float:
@@ -226,6 +236,14 @@ def lora_module_name(tensor_name: str) -> str:
 #: component-qualified even though ``component.named_modules()`` is not.
 _LORA_COMPONENT_NAMES: tuple[str, ...] = ("transformer", "transformer_2", "dit", "bagel", "unet")
 
+#: Packed submodules for Boogu-Image fused projections in vllm-omni.
+_BOOGU_PACKED_SUBMODULES: dict[str, tuple[str, ...]] = {
+    "to_qkv": ("to_q", "to_k", "to_v"),
+    "img_to_qkv": ("img_to_q", "img_to_k", "img_to_v"),
+    "instruct_to_qkv": ("instruct_to_q", "instruct_to_k", "instruct_to_v"),
+    "gate_up_proj": ("linear_1", "linear_3"),
+}
+
 
 def lora_engine_module_names(pipeline) -> list[str]:
     """Engine-side module names a vllm-omni LoRA delta can be looked up by.
@@ -246,7 +264,13 @@ def lora_engine_module_names(pipeline) -> list[str]:
         if not isinstance(component, torch.nn.Module):
             continue
         for module_name, _ in component.named_modules(remove_duplicate=False):
-            names.append(f"{component_name}.{module_name}" if module_name else component_name)
+            full_name = f"{component_name}.{module_name}" if module_name else component_name
+            names.append(full_name)
+            leaf = module_name.rsplit(".", 1)[-1]
+            if leaf in _BOOGU_PACKED_SUBMODULES:
+                prefix = full_name.rsplit(".", 1)[0]
+                for sub in _BOOGU_PACKED_SUBMODULES[leaf]:
+                    names.append(f"{prefix}.{sub}")
     return names
 
 

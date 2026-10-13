@@ -14,7 +14,6 @@
 """CPU tests for CLAP burst batching."""
 
 import asyncio
-import importlib.util
 import sys
 import threading
 from pathlib import Path
@@ -22,18 +21,22 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 import torch
+from verl.utils.import_utils import load_extern_object, load_module
 
 
 def _load_scorer_module():
     module_path = Path(__file__).parents[3] / "verl_omni/utils/reward_score/clap.py"
-    spec = importlib.util.spec_from_file_location("clap_reward_under_test", module_path)
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(module)
-    return module
+    return load_module(str(module_path))
 
 
 clap = _load_scorer_module()
+
+
+@pytest.mark.parametrize("prefix", ["", "file://"])
+def test_clap_loads_through_production_file_entrypoint(prefix):
+    module_path = Path(__file__).parents[3] / "verl_omni/utils/reward_score/clap.py"
+    scorer = load_extern_object(prefix + str(module_path), "compute_score")
+    assert asyncio.iscoroutinefunction(scorer)
 
 
 def test_get_audio_normalizes_batch_and_channels():
@@ -292,3 +295,19 @@ async def test_consumer_isolates_invalid_audio_and_resamples_valid_requests(monk
     assert resample_calls == [(24_000, 48_000)]
     assert len(processor.batches) == 1
     assert len(processor.batches[0][0]) == 2
+
+
+@pytest.mark.parametrize("shape", [(16,), (1, 16), (2, 16), (1, 2, 16)])
+def test_legacy_clap_keeps_rate_and_channel_defaults(shape):
+    info = {"audio": torch.ones(shape)}
+    audio, rate = clap._get_audio(info)
+    assert audio.shape == (16,)
+    assert rate == 48000
+    assert set(info) == {"audio"}
+
+
+@pytest.mark.parametrize("rate", [24000, 32000, torch.tensor([24000])])
+def test_legacy_clap_preserves_explicit_source_rate(rate):
+    audio, actual_rate = clap._get_audio({"audio": torch.ones(2, 16), "audio_sample_rate": rate})
+    assert audio.shape == (16,)
+    assert actual_rate == int(rate)
