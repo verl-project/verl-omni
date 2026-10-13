@@ -79,6 +79,11 @@ def diffusion_loss(config: DiffusionActorConfig, model_output, data: TensorDict,
 
     # Rollout Correction bypass mode only applies to log-prob policy-gradient losses.
     if "log_probs" in loss_func.required_model_output_keys:
+        if model_output["log_probs"].is_nested:  # for trainable AR
+            from verl.workers.utils.padding import no_padding_2_padding
+
+            model_output["log_probs"] = no_padding_2_padding(model_output["log_probs"], data)
+
         log_prob = model_output["log_probs"]
         old_log_prob = data["old_log_probs"]
         rc_cfg = config.rollout_correction
@@ -120,7 +125,8 @@ def diffusion_loss(config: DiffusionActorConfig, model_output, data: TensorDict,
         metrics["distill_coef"] = config.distill_loss_coef
 
     gradient_accumulation_steps = tu.get_non_tensor_data(data, "gradient_accumulation_steps", default=None)
-    loss_value = loss_value / gradient_accumulation_steps
+    if gradient_accumulation_steps:  # diffusion only
+        loss_value = loss_value / gradient_accumulation_steps
 
     sp_size = tu.get_non_tensor_data(data, "sp_size", default=None)
     if sp_size > 1:
