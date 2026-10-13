@@ -20,6 +20,7 @@ from hydra import compose, initialize_config_dir
 
 
 def test_minimax_h3_ascend_recipe(tmp_path):
+    """Check the composed NPU configuration and rejection of invalid device counts."""
     root = Path(__file__).resolve().parents[2]
     toolkit = tmp_path / "ascend-toolkit"
     toolkit.mkdir()

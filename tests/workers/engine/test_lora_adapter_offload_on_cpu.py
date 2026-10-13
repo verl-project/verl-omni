@@ -22,20 +22,27 @@ from verl_omni.workers.engine.lora_adapter_mixin import LoRAAdapterMixin
 
 
 class AdapterModule(torch.nn.Module):
+    """Model two named adapters with small CPU tensors."""
+
     def __init__(self):
+        """Initialize the source adapter and an empty old-policy adapter."""
         super().__init__()
         self.default = torch.nn.Parameter(torch.full((2, 4), 3.0))
         self.old = torch.nn.Parameter(torch.zeros(2, 4), requires_grad=False)
         self.active = "default"
 
     def set_adapter(self, name):
+        """Select the active adapter and update its trainable parameters."""
         self.active = name
         self.default.requires_grad_(name == "default")
         self.old.requires_grad_(name == "old")
 
 
 class Engine(LoRAAdapterMixin):
+    """Expose adapter lifecycle helpers without creating a distributed engine."""
+
     def __init__(self, policy):
+        """Set the offload policy, leaving the attribute absent for legacy engines."""
         self.module = AdapterModule()
         self._is_offload_param = False
         if policy is not None:
@@ -44,6 +51,7 @@ class Engine(LoRAAdapterMixin):
 
 @pytest.mark.parametrize("policy", [None, False, True])
 def test_copy_and_ema_respect_cpu_offload_policy(monkeypatch, policy):
+    """Check copy and EMA values, adapter restoration, and manual-load policy guards."""
     import verl.utils.fsdp_utils as upstream
 
     import verl_omni.utils.fsdp_utils as local
