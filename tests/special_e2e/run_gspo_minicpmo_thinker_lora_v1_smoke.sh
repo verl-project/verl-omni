@@ -62,6 +62,7 @@ python3 -m verl_omni.trainer.main_omni \
     +data.apply_chat_template_kwargs.enable_thinking=false \
     actor_rollout_ref.model.path="${MODEL_PATH}" \
     actor_rollout_ref.model.trust_remote_code=True \
+    +actor_rollout_ref.model.override_config.attn_implementation=sdpa \
     actor_rollout_ref.model.lora_rank=8 \
     actor_rollout_ref.model.lora_alpha=16 \
     actor_rollout_ref.model.lora_dtype=float32 \

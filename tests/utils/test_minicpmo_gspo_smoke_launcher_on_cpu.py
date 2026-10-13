@@ -14,7 +14,8 @@
 """Launcher contract test for the MiniCPM-o 4.5 thinker GSPO collocated-sync smoke.
 
 Pins the wiring the smoke shares with the production recipe
-(examples/gspo_trainer/minicpm/run_minicpmo_4_5_thinker_gspo_lora_avqa_v1.sh),
+(examples/gspo_trainer/minicpm/run_minicpmo_4_5_thinker_gspo_lora_avqa_v1.sh)
+plus the deviations the GPU CI environment forces (the sdpa attention pin),
 not the tunable hyperparameters.
 """
 
@@ -40,7 +41,10 @@ def test_smoke_wires_the_minicpm_path():
     settings = _active_settings()
 
     # Model and rollout: remote-code load, the AR pipeline, and its engine stack.
+    # GPU CI ships no flash-attn while OmniModelConfig defaults the actor attention
+    # to flash_attention_2, so the smoke pins sdpa like the Qwen3-Omni smoke.
     assert "actor_rollout_ref.model.trust_remote_code=True" in settings
+    assert "+actor_rollout_ref.model.override_config.attn_implementation=sdpa" in settings
     assert '+actor_rollout_ref.rollout.engine_kwargs.vllm_omni.pipeline_name="minicpmo_4_5"' in settings
     assert '+actor_rollout_ref.rollout.engine_kwargs.vllm_omni.output_mode="ar"' in settings
     assert "actor_rollout_ref.rollout.load_format=safetensors" in settings
@@ -79,13 +83,10 @@ def test_smoke_wires_the_minicpm_path():
     )
 
 
-def test_smoke_keeps_recipe_config_invariants():
+def test_smoke_keeps_upstream_sampling_defaults():
+    """The smoke overrides no non-val sampling settings."""
     settings = _active_settings()
 
-    # sdpa broke train/rollout consistency on Qwen3-Omni; the config invariants
-    # live in the adapter's from_pretrained, so recipe-level lines are dead config.
-    assert not any("attn_implementation" in line or "sdpa" in line for line in settings)
-    assert not any("override_config" in line for line in settings)
     # Upstream sampling defaults keep the training/engine logprob division bit-exact;
     # val_kwargs sampling stays free to differ.
     assert not any(
