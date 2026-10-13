@@ -58,6 +58,7 @@ from verl.workers.rollout.vllm_rollout.bucketed_weight_transfer import BucketedW
 from verl.workers.utils.losses import ppo_loss
 
 from verl_omni.pipelines.utils import build_scheduler
+from verl_omni.utils.config import resolve_lora_config
 from verl_omni.utils.mfu import (
     DiffusionFlopsCounter,
     allgather_diffusion_flops_meta,
@@ -548,6 +549,7 @@ def build_teacher_training_config(
         path=teacher_model_config.model_path,
         lora_rank=0,
         lora_adapter_path=None,
+        lora={},
         load_tokenizer=False,
         tokenizer=None,
         processor=None,
@@ -869,7 +871,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         self.layered_summon = self.config.rollout.get("layered_summon", False)
         # diffusion-only dual-adapter knob; the omni rollout config has no such field
         self.rollout_adapter: str = self.config.rollout.get("rollout_adapter", "default")
-        self.peft_merge: bool = model_config.lora.get("merge", False)
+        self.peft_merge: bool = resolve_lora_config(model_config).merge
         self._zmq_update_seq = 0
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="ref"))

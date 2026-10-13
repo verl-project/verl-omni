@@ -129,14 +129,19 @@ def test_separate_trainer_rejects_missing_reference_mapping(separate_config):
 
 
 @pytest.mark.parametrize(
-    ("path", "value"),
+    ("path", "value", "match"),
     [
-        ("actor_rollout_ref.model.lora.rank", 8),
-        ("actor_rollout_ref.model.lora_rank", 8),
-        ("actor_rollout_ref.model.lora_adapter_path", "/tmp/adapter"),
+        # Nested-only rank is rejected by the resolver before the separate-mode check.
+        ("actor_rollout_ref.model.lora.rank", 8, "set actor_rollout_ref.model.lora_rank"),
+        ("actor_rollout_ref.model.lora_rank", 8, "Separate mode currently supports full finetuning only"),
+        (
+            "actor_rollout_ref.model.lora_adapter_path",
+            "/tmp/adapter",
+            "Separate mode currently supports full finetuning only",
+        ),
     ],
 )
-def test_lora_separate_fails_before_ray_initialization(monkeypatch, separate_config, path, value):
+def test_lora_separate_fails_before_ray_initialization(monkeypatch, separate_config, path, value, match):
     config = copy.deepcopy(separate_config)
     OmegaConf.update(config, path, value, force_add=True)
     monkeypatch.setattr(
@@ -145,7 +150,7 @@ def test_lora_separate_fails_before_ray_initialization(monkeypatch, separate_con
         lambda: pytest.fail("Ray must not be inspected before separate LoRA validation"),
     )
 
-    with pytest.raises(ValueError, match="Separate mode currently supports full finetuning only"):
+    with pytest.raises(ValueError, match=match):
         main_diffusion.run_diffusion(config)
 
 

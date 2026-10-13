@@ -14,6 +14,7 @@
 
 import torch
 
+from verl_omni.utils.config import resolve_lora_config
 from verl_omni.workers.config import DiffusionModelConfig
 
 # veomni.lora implements Kaiming-uniform A / zero B only; other PEFT spellings are ignored.
@@ -22,7 +23,7 @@ _VEOMNI_SUPPORTED_LORA_INIT = ("true", "kaiming")
 
 def _validate_veomni_lora_support(model_config: DiffusionModelConfig) -> None:
     """Reject LoRA settings that ``veomni.lora`` would silently ignore."""
-    if model_config.lora.get("merge", False):
+    if resolve_lora_config(model_config).merge:
         raise NotImplementedError(
             "VeOmni diffusion backend does not support model.lora.merge=True yet; "
             "use adapter-only sync (model.lora.merge=False)."

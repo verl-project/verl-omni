@@ -234,11 +234,9 @@ def setup_backend(model_config, engine_config) -> None:
         raise NotImplementedError("Qwen3-Omni Thinker with VeOmni requires ulysses_parallel_size=1.")
     if not model_config.use_remove_padding:
         raise NotImplementedError("Qwen3-Omni Thinker with VeOmni requires use_remove_padding=True.")
-    if (
-        model_config.lora_rank > 0
-        or model_config.lora.get("rank", 0) > 0
-        or getattr(model_config, "lora_adapter_path", None) is not None
-    ):
+    from verl_omni.utils.config import resolve_lora_config
+
+    if resolve_lora_config(model_config).enabled:
         raise NotImplementedError(
             "Qwen3-Omni Thinker with VeOmni supports full-parameter training only; "
             "LoRA ranks and lora_adapter_path are not supported."
