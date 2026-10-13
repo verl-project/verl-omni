@@ -606,6 +606,7 @@ distillation:
       key: null
       model_path: null
       world_size: 0
+      guidance_scale: null
   teacher_key: data_source
   scheduler: inline
 dmd:

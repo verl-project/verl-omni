@@ -91,6 +91,16 @@ def validate_distillation_config(config) -> None:
             "A distillation loss is active but no teacher is configured; set distillation.enabled=true "
             "and distillation.teacher_models.teacher_model.model_path."
         )
+    if enabled:
+        student_guidance_scale = config.actor_rollout_ref.rollout.pipeline.get("guidance_scale") or 0.0
+        for name, teacher in config.distillation.teacher_models.items():
+            teacher_guidance_scale = teacher.get("guidance_scale")
+            if teacher_guidance_scale is not None and teacher_guidance_scale > 1.0 and student_guidance_scale <= 1.0:
+                raise ValueError(
+                    f"distillation.teacher_models.{name}.guidance_scale={teacher_guidance_scale} needs negative "
+                    "prompt embeds, which the rollout only produces with "
+                    "actor_rollout_ref.rollout.pipeline.guidance_scale > 1."
+                )
     if enabled and actor.use_distill_loss and actor.distill_loss_mode != "distill_kl":
         raise NotImplementedError(
             f"The teacher runtime produces teacher_prev_sample_mean, which only distill_kl consumes, "

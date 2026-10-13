@@ -79,6 +79,50 @@ class TestDistillKLLoss:
 
         assert loss_large.item() > loss_small.item()
 
+    def test_zero_std_uses_unit_variance_surrogate(self):
+        """ODE steps (std_dev_t == 0) give 0.5 * ||d||^2 with a finite gradient."""
+        mean = torch.zeros(4, 16, 3, requires_grad=True)
+        teacher_mean = torch.full((4, 16, 3), 3.0)
+        std_dev_t = torch.zeros(4, 1, 1)
+
+        loss, _ = self.loss_fn.compute_loss(
+            prev_sample_mean=mean,
+            teacher_prev_sample_mean=teacher_mean,
+            std_dev_t=std_dev_t,
+        )
+        loss.backward()
+
+        assert loss.item() == pytest.approx(4.5, rel=1e-5)
+        assert torch.isfinite(mean.grad).all()
+
+    def test_tiny_std_is_floored(self):
+        """A positive std below 1e-4 is clamped to variance 1e-8 instead of blowing up."""
+        mean = torch.zeros(2, 16, 3)
+        teacher_mean = mean + 1e-3
+        std_dev_t = torch.full((2, 1, 1), 1e-6)
+
+        loss, _ = self.loss_fn.compute_loss(
+            prev_sample_mean=mean,
+            teacher_prev_sample_mean=teacher_mean,
+            std_dev_t=std_dev_t,
+        )
+
+        assert loss.item() == pytest.approx(1e-6 / (2 * 1e-8), rel=1e-4)
+
+    def test_mixed_zero_and_positive_std_rows(self):
+        """Rows with std 0 use the surrogate; the others keep ||d||^2 / (2 std^2)."""
+        mean = torch.zeros(2, 16, 3)
+        teacher_mean = mean + 1.0
+        std_dev_t = torch.tensor([[[0.0]], [[0.5]]])
+
+        loss, _ = self.loss_fn.compute_loss(
+            prev_sample_mean=mean,
+            teacher_prev_sample_mean=teacher_mean,
+            std_dev_t=std_dev_t,
+        )
+
+        assert loss.item() == pytest.approx((0.5 + 2.0) / 2, rel=1e-5)
+
     def test_output_is_scalar_and_nonnegative(self):
         loss, _ = self.loss_fn.compute_loss(
             prev_sample_mean=torch.randn(2, 8, 4),

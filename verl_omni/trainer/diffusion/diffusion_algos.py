@@ -1465,14 +1465,17 @@ class DistillKLLoss(DiffusionLossFn):
     ) -> tuple[torch.Tensor, dict[str, Any]]:
         """Compute KL divergence given student and teacher previous sample means.
 
+        Deterministic (ODE) steps have ``std_dev_t == 0``; there the loss is the
+        unit-variance surrogate ``0.5 * ||mu - mu_teacher||^2``. Elsewhere the
+        variance is floored at ``1e-8``.
+
         Args:
             prev_sample_mean: (torch.Tensor) shape is (bs, s, c)
             teacher_prev_sample_mean: (torch.Tensor) shape is (bs, s, c)
             std_dev_t: (torch.Tensor) shape is (bs, 1, 1)
         """
-        kl_loss = ((prev_sample_mean - teacher_prev_sample_mean) ** 2).mean(dim=(1, 2), keepdim=True) / (
-            2 * std_dev_t**2
-        )
+        variance = torch.where(std_dev_t > 0, std_dev_t**2, torch.ones_like(std_dev_t)).clamp(min=1e-8)
+        kl_loss = ((prev_sample_mean - teacher_prev_sample_mean) ** 2).mean(dim=(1, 2), keepdim=True) / (2 * variance)
         metrics = {"actor/distill_kl_loss": kl_loss.mean().detach().item()}
         return kl_loss.mean(), metrics
 
