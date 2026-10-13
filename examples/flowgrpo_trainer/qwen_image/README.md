@@ -8,7 +8,7 @@ reward-model setup.
 ## VeOmni LoRA
 
 VeOmni 0.1.12 or newer is required for native LoRA injection and adapter-to-rollout synchronization. Install it
-as described in [Installing VeOmni alongside vLLM 0.28.0](../../../docs/start/install.md#installing-veomni-alongside-vllm-0280):
+as described in [Installing VeOmni alongside vLLM 0.30.0](../../../docs/start/engine_backends.md#installing-veomni-alongside-vllm-0300):
 
 ```bash
 bash examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora_veomni.sh

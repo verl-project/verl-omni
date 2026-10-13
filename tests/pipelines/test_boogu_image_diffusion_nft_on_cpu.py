@@ -146,7 +146,7 @@ def test_rollout_returns_clean_latents_with_deterministic_cfg_steps(adapters, pa
     ]
     with (
         patch.object(rollout_module, "configure_boogu_sde_timesteps"),
-        patch.object(rollout_module, "get_boogu_freqs_cis", return_value=None),
+        patch.object(rollout_module, "get_boogu_freqs_real", return_value=None),
     ):
         result = pipeline.forward(DiffusionRequestBatch(requests=requests) if packed else requests[0])
 
@@ -208,7 +208,7 @@ def test_rollout_raises_when_cfg_active_without_negative_prompt_ids(adapters):
     )
     with (
         patch.object(rollout_module, "configure_boogu_sde_timesteps"),
-        patch.object(rollout_module, "get_boogu_freqs_cis", return_value=None),
+        patch.object(rollout_module, "get_boogu_freqs_real", return_value=None),
         pytest.raises(ValueError, match="negative_prompt_ids"),
     ):
         pipeline.forward(request)

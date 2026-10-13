@@ -1546,7 +1546,20 @@ class NFTDiffusersFSDPEngine(DiffusersFSDPEngine):
         )
 
         if loss_function is not None:
-            data = tu.get_tensordict({"reward_prob": micro_batch["reward_prob"][:, step]})
+            # Per-timestep loss inputs are sliced to this step; per-sample group fields pass through.
+            loss_inputs = {
+                key: micro_batch[key][:, step]
+                for key in ("reward_prob", "advantages")
+                if micro_batch.get(key, None) is not None
+            }
+            loss_inputs.update(
+                {
+                    key: micro_batch[key]
+                    for key in ("group_index", "group_size")
+                    if micro_batch.get(key, None) is not None
+                }
+            )
+            data = tu.get_tensordict(loss_inputs)
             tu.assign_non_tensor(
                 data,
                 gradient_accumulation_steps=tu.get_non_tensor_data(

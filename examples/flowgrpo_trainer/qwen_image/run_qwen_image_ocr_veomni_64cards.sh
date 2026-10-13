@@ -10,7 +10,7 @@
 #
 # Requires VeOmni installed alongside the verl-omni base environment; see
 # docs/start/engine_backends.md for the install workaround
-# (veomni 0.1.12's `[gpu]` extra pins torch 2.11 and conflicts with vllm 0.28.0).
+# (veomni 0.1.12's `[gpu]` extra pins torch 2.11 and conflicts with vllm 0.30.0).
 set -x
 
 # Set WORKSPACE to any writable directory; defaults to $HOME

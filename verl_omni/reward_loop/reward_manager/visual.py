@@ -24,6 +24,14 @@ from verl_omni.utils.reward_score import default_compute_score_image
 from .media import _reward_extra_info
 
 
+def _sampling_params_from_rollout(rollout_config) -> dict:
+    """Build the OCR-compatible generation overrides from a rollout config."""
+    params = {"max_tokens": rollout_config.get("response_length") or 4096}
+    if rollout_config.get("full_determinism", False):
+        params["seed"] = rollout_config.get("seed", 42)
+    return params
+
+
 def _validate_visual_response(response_visual, config, *, is_validate: bool) -> None:
     rollout_config = config.actor_rollout_ref.rollout
     pipeline_config = rollout_config.val_kwargs.pipeline if is_validate else rollout_config.pipeline
@@ -73,10 +81,8 @@ class VisualRewardManager(RewardManagerBase):
         extra_info["rollout_reward_scores"] = rollout_reward_scores
 
         rm_rollout = self.config.reward.reward_model.rollout
-        # Only forward max_tokens and the determinism seed; keep the scorer's own sampling defaults.
-        sampling_params = {"max_tokens": getattr(rm_rollout, "response_length", None) or 4096}
-        if rm_rollout.get("full_determinism", False):
-            sampling_params["seed"] = rm_rollout.get("seed", 42)
+        # Keep the scorer's own sampling defaults and only override the length/seed.
+        sampling_params = _sampling_params_from_rollout(rm_rollout)
 
         extra_reward_kwargs = (
             {

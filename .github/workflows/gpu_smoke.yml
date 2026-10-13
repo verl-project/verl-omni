@@ -17,6 +17,7 @@ on:
       - .github/qwen_tts_pin.txt
       - .github/vllm_omni_pin.txt
       - .github/verl_pin.txt
+      - .github/boogu_image_pin.txt
       - .github/actions/gpu-smoke-prepare/**
       - .github/actions/gpu-smoke-upload-logs/**
   pull_request:
@@ -36,6 +37,7 @@ on:
       - .github/qwen_tts_pin.txt
       - .github/vllm_omni_pin.txt
       - .github/verl_pin.txt
+      - .github/boogu_image_pin.txt
       - .github/actions/gpu-smoke-prepare/**
       - .github/actions/gpu-smoke-upload-logs/**
 

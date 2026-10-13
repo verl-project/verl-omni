@@ -308,6 +308,7 @@ def test_on_step_end_syncs_every_outer_step():
     trainer = object.__new__(PolicyGradientDiffusionTrainerV1SeparateAsync)
     events = []
     trainer.global_steps = 1
+    trainer.prev_step_profile = False
     trainer.timing_raw = {}
     trainer.hybrid_rollout_config = HybridRolloutSwitchConfig(enable_switch=False)
     trainer.standalone_checkpoint_manager = SimpleNamespace(

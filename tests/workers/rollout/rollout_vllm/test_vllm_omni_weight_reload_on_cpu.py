@@ -156,7 +156,11 @@ def test_dense_omni_reload_preserves_auxiliary_buffers_and_post_load_hook(monkey
         _get_zmq_handle=lambda: "test-dense-reload",
         _get_standard_weight_model_and_config=lambda: (
             model,
-            SimpleNamespace(dtype=torch.float32, quantization=None),
+            SimpleNamespace(
+                dtype=torch.float32,
+                quantization=None,
+                word_embeddings_untied_by_checkpoint=False,
+            ),
         ),
     )
     for step, value in enumerate((3.0, 5.0), 1):

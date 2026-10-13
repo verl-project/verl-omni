@@ -11,9 +11,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""CPU tests for MultiVisualRewardManager."""
+"""CPU tests for modality-neutral multi-reward aggregation."""
 
+import inspect
 import os
+import re
+from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -22,7 +26,7 @@ from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
 from verl import DataProto
 
-from verl_omni.reward_loop.reward_manager.multi import MultiVisualRewardManager, _filter_kwargs
+from verl_omni.reward_loop.reward_manager.multi import MultiRewardManager, MultiVisualRewardManager, _filter_kwargs
 from verl_omni.reward_loop.reward_manager.visual import VisualRewardManager
 
 # Path to this file — load_extern_object will import dummy functions from here.
@@ -30,7 +34,7 @@ DUMMY_REWARDS_PATH = "tests/reward_loop/test_multi_reward_manager_on_cpu.py"
 
 
 # ---------------------------------------------------------------------------
-# Dummy reward functions (loaded by MultiVisualRewardManager via load_extern_object)
+# Dummy reward functions (loaded by MultiRewardManager via load_extern_object)
 # ---------------------------------------------------------------------------
 
 
@@ -71,6 +75,38 @@ async def reward_uses_named_engine_router(reward_router_address, model_name):
     assert reward_router_address == "engine-router"
     assert model_name == "ocr-model"
     return {"score": 0.6, "backend": "engine-function"}
+
+
+async def reward_captures_ocr_request(
+    data_source,
+    solution_image,
+    ground_truth,
+    extra_info,
+    reward_router_address,
+    model_name,
+    sampling_params,
+    reward_model_tokenizer=None,
+):
+    del data_source, solution_image, ground_truth, extra_info, reward_model_tokenizer
+    return {
+        "score": 0.5,
+        "request": {
+            "reward_router_address": reward_router_address,
+            "model_name": model_name,
+            "sampling_params": sampling_params,
+        },
+    }
+
+
+async def reward_captures_sampling_params(**kwargs):
+    return {"score": 0.5, "has_sampling_params": "sampling_params" in kwargs}
+
+
+async def reward_uses_legacy_router(reward_router_address, model_name, sampling_params):
+    assert reward_router_address == "legacy-router"
+    assert model_name == "legacy-model"
+    assert sampling_params == {"max_tokens": 321, "seed": 17}
+    return 0.65
 
 
 async def reward_uses_native_model(reward_model, ground_truth, solution_image):
@@ -190,7 +226,7 @@ class TestFilterKwargs:
 
 
 # ---------------------------------------------------------------------------
-# MultiVisualRewardManager.run_single
+# MultiRewardManager.run_single
 # ---------------------------------------------------------------------------
 
 
@@ -206,7 +242,230 @@ class TestVisualRewardManagerDefaults:
         assert result["reward_extra_info"]["acc"] == pytest.approx(result["reward_score"])
 
 
-class TestMultiVisualRewardManagerRunSingle:
+class TestMultiRewardManagerRunSingle:
+    @pytest.mark.parametrize("deterministic", [False, True])
+    @pytest.mark.parametrize("explicit_sampling", [None, {"max_tokens": 17, "seed": 9, "temperature": 0.2}])
+    def test_fallback_ocr_preserves_upstream_sampling_and_explicit_overrides(
+        self, monkeypatch, deterministic, explicit_sampling
+    ):
+        from verl_omni.utils.reward_score import genrm_ocr
+
+        requests = []
+
+        async def chat_complete(router_address, chat_complete_request):
+            assert router_address == "engine-router"
+            requests.append(chat_complete_request)
+            return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="hello"))])
+
+        monkeypatch.setenv("GENRM_OCR_SEED", "777")
+        monkeypatch.delenv("GENRM_OCR_MAX_TOKENS", raising=False)
+        monkeypatch.setattr(genrm_ocr, "_chat_complete", chat_complete)
+        entry = {"path": "pkg://verl_omni.utils.reward_score.genrm_ocr", "name": "compute_score_ocr"}
+        if explicit_sampling is not None:
+            entry["sampling_params"] = explicit_sampling
+        config = _make_config({"ocr": entry})
+        config.reward.reward_model.enable = True
+        config.reward.reward_model.model_path = "ocr-model"
+        config.reward.reward_model.rollout.response_length = 2048
+        config.reward.reward_model.rollout.full_determinism = deterministic
+        config.reward.reward_model.rollout.seed = 42
+        manager = MultiVisualRewardManager(
+            config, MagicMock(), compute_score=None, reward_router_address="engine-router"
+        )
+        data = _make_single_data()
+
+        expected_sampling = {"max_tokens": 2048}
+        if deterministic:
+            expected_sampling["seed"] = 42
+        if explicit_sampling is not None:
+            expected_sampling = explicit_sampling
+        previous = manager.loop.run_until_complete(
+            genrm_ocr.compute_score_ocr(
+                data_source="test_source",
+                solution_image=data[0].batch["responses"],
+                ground_truth="hello",
+                extra_info={},
+                reward_router_address="engine-router",
+                model_name="ocr-model",
+                sampling_params=expected_sampling,
+            )
+        )
+        current = manager.loop.run_until_complete(manager.run_single(data))
+
+        assert len(requests) == 2
+        assert requests[1] == requests[0]
+        assert requests[0]["max_tokens"] == (2048 if explicit_sampling is None else 17)
+        if explicit_sampling is not None:
+            assert requests[0]["seed"] == 9
+        elif deterministic:
+            assert requests[0]["seed"] == 42
+        else:
+            assert "seed" not in requests[0]
+        assert current["reward_score"] == previous["score"] == 1.0
+
+    @pytest.mark.parametrize("deterministic", [False, True])
+    @pytest.mark.parametrize("inherit", [False, True])
+    def test_existing_named_ocr_preserves_scorer_defaults_unless_recipe_opts_in(
+        self, monkeypatch, deterministic, inherit
+    ):
+        from verl_omni.utils.reward_score import genrm_ocr
+
+        requests = []
+
+        async def chat_complete(router_address, chat_complete_request):
+            requests.append(chat_complete_request)
+            return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="test"))])
+
+        monkeypatch.setenv("GENRM_OCR_SEED", "777")
+        monkeypatch.delenv("GENRM_OCR_MAX_TOKENS", raising=False)
+        monkeypatch.setattr(genrm_ocr, "_chat_complete", chat_complete)
+        entry = {"path": "pkg://verl_omni.utils.reward_score.genrm_ocr", "name": "compute_score_ocr"}
+        if inherit:
+            entry["use_rollout_sampling_params"] = True
+        config = _make_config({"ocr": entry})
+        config.reward.reward_model.rollout.response_length = 2048
+        config.reward.reward_model.rollout.full_determinism = deterministic
+        config.reward.reward_model.rollout.seed = 42
+        config.reward.models = OmegaConf.create({"ocr": {"backend": "engine"}})
+        manager = MultiVisualRewardManager(config, MagicMock(), compute_score=None)
+        manager.set_reward_executors({"ocr": _EngineRouterClient()}, None)
+        data = _make_single_data()
+
+        # The original named path passed router/model only, leaving sampling to the scorer.
+        item = data[0]
+        manager.loop.run_until_complete(
+            genrm_ocr.compute_score_ocr(
+                data_source="test",
+                solution_image=item.batch["responses"],
+                ground_truth="test",
+                extra_info={},
+                reward_router_address="engine-router",
+                model_name="ocr-model",
+            )
+        )
+        manager.loop.run_until_complete(manager.run_single(data))
+        previous, current = requests
+        assert previous["max_tokens"] == 4096
+        assert previous["seed"] == 777
+        if not inherit:
+            assert current == previous
+        else:
+            assert current["max_tokens"] == 2048
+            if deterministic:
+                assert current["seed"] == 42
+            else:
+                assert "seed" not in current
+
+    def test_named_engine_preserves_explicit_scorer_sampling_params(self):
+        explicit = {"max_tokens": 7, "temperature": 0.2}
+        config = _make_config(
+            {
+                "ocr": {
+                    "path": DUMMY_REWARDS_PATH,
+                    "name": "reward_captures_ocr_request",
+                    "sampling_params": explicit,
+                    "use_rollout_sampling_params": True,
+                }
+            }
+        )
+        config.reward.models = OmegaConf.create(
+            {"ocr": {"backend": "engine", "rollout": {"response_length": 321, "full_determinism": True}}}
+        )
+        manager = MultiVisualRewardManager(config, MagicMock(), compute_score=None)
+        manager.set_reward_executors({"ocr": _EngineRouterClient()}, None)
+
+        result = manager.loop.run_until_complete(manager.run_single(_make_single_data()))
+
+        assert result["reward_extra_info"]["reward/ocr/request"]["sampling_params"] == explicit
+
+    def test_named_engine_sampling_resolves_config_interpolations(self):
+        config = _make_config(
+            {
+                "ocr": {
+                    "path": DUMMY_REWARDS_PATH,
+                    "name": "reward_captures_ocr_request",
+                    "use_rollout_sampling_params": True,
+                }
+            }
+        )
+        config.reward.reward_model.rollout.response_length = "${data.max_response_length}"
+        config.reward.models = OmegaConf.create(
+            {"ocr": {"backend": "engine", "rollout": {"full_determinism": True, "seed": "${data.seed}"}}}
+        )
+        manager = MultiVisualRewardManager(config, MagicMock(), compute_score=None)
+        manager.set_reward_executors({"ocr": _EngineRouterClient()}, None)
+
+        result = manager.loop.run_until_complete(manager.run_single(_make_single_data()))
+
+        assert result["reward_extra_info"]["reward/ocr/request"]["sampling_params"] == {
+            "max_tokens": config.data.max_response_length,
+            "seed": config.data.seed,
+        }
+
+    def test_named_engine_ocr_request_matches_legacy_sampling_contract(self):
+        legacy_config = _make_config({})
+        legacy_config.reward.reward_model.enable = True
+        legacy_config.reward.reward_model.model_path = "ocr-model"
+        legacy_config.reward.reward_model.rollout.response_length = 32
+        legacy_config.reward.reward_model.rollout.full_determinism = True
+        legacy_config.reward.reward_model.rollout.seed = 123
+        legacy_manager = VisualRewardManager(
+            legacy_config,
+            MagicMock(),
+            reward_captures_ocr_request,
+            reward_router_address="engine-router",
+        )
+
+        named_config = _make_config(
+            {
+                "ocr": {
+                    "model": "ocr_engine",
+                    "use_rollout_sampling_params": True,
+                    "path": DUMMY_REWARDS_PATH,
+                    "name": "reward_captures_ocr_request",
+                }
+            }
+        )
+        named_config.reward.models = OmegaConf.create(
+            {
+                "ocr_engine": {
+                    "backend": "engine",
+                    "model_path": "ocr-model",
+                    "rollout": {"response_length": 32, "full_determinism": True, "seed": 123},
+                }
+            }
+        )
+        named_config.reward.reward_model.rollout.response_length = 64
+        named_config.reward.reward_model.rollout.full_determinism = True
+        named_config.reward.reward_model.rollout.seed = 777
+        named_manager = MultiVisualRewardManager(named_config, MagicMock(), compute_score=None)
+        named_manager.set_reward_executors({"ocr_engine": _EngineRouterClient()}, None)
+
+        legacy_result = legacy_manager.loop.run_until_complete(legacy_manager.run_single(_make_single_data()))
+        named_result = named_manager.loop.run_until_complete(named_manager.run_single(_make_single_data()))
+
+        assert named_result["reward_score"] == legacy_result["reward_score"]
+        assert named_result["reward_extra_info"]["reward/ocr"] == legacy_result["reward_score"]
+        assert named_result["reward_extra_info"]["reward/ocr/request"] == legacy_result["reward_extra_info"]["request"]
+
+    def test_named_native_scorer_does_not_receive_engine_sampling_params(self):
+        config = _make_config(
+            {
+                "quality": {
+                    "model": "quality_model",
+                    "path": DUMMY_REWARDS_PATH,
+                    "name": "reward_captures_sampling_params",
+                }
+            }
+        )
+        config.reward.models = OmegaConf.create({"quality_model": {"backend": "native"}})
+        manager = MultiVisualRewardManager(config, MagicMock(), compute_score=None)
+        manager.set_reward_executors(None, {"quality_model": MagicMock(reward_kwargs=MagicMock(return_value={}))})
+
+        result = manager.loop.run_until_complete(manager.run_single(_make_single_data()))
+
+        assert result["reward_extra_info"]["reward/quality/has_sampling_params"] is False
+
     @pytest.mark.parametrize("manager_factory", [_build_visual_latent_manager, _build_latent_multi_manager])
     def test_float_latent_response_is_forwarded_to_reward(self, manager_factory):
         manager = manager_factory()
@@ -248,7 +507,7 @@ class TestMultiVisualRewardManagerRunSingle:
         )
         manager.compute_score = reward_asserts_float_latent_contract
         manager.is_async_reward_score = True
-        if isinstance(manager, MultiVisualRewardManager):
+        if isinstance(manager, MultiRewardManager):
             manager._sub_rewards[0]["fn"] = reward_asserts_float_latent_contract
             manager._sub_rewards[0]["is_async"] = True
 
@@ -424,8 +683,32 @@ class TestMultiVisualRewardManagerRunSingle:
 
         assert result["reward_score"] == pytest.approx(128)
 
+    def test_legacy_visual_router_preserves_sampling_params(self):
+        config = _make_config(
+            {"legacy": {"path": DUMMY_REWARDS_PATH, "name": "reward_uses_legacy_router", "weight": 1.0}}
+        )
+        config.reward.reward_model.model_path = "legacy-model"
+        config.reward.reward_model.rollout.response_length = 321
+        config.reward.reward_model.rollout.full_determinism = True
+        config.reward.reward_model.rollout.seed = 17
+        manager = MultiVisualRewardManager(
+            config,
+            MagicMock(),
+            compute_score=None,
+            reward_router_address="legacy-router",
+            reward_model_tokenizer=MagicMock(),
+        )
 
-class TestMultiVisualRewardManagerInit:
+        result = manager.loop.run_until_complete(manager.run_single(_make_single_data()))
+
+        assert result["reward_score"] == pytest.approx(0.65)
+
+
+class TestMultiRewardManagerInit:
+    def test_shared_manager_is_an_input_agnostic_base(self):
+        assert inspect.isabstract(MultiRewardManager)
+        assert issubclass(MultiVisualRewardManager, MultiRewardManager)
+
     def test_empty_reward_functions_raises(self):
         with pytest.raises(ValueError, match="non-empty"):
             _build_manager({})
@@ -469,3 +752,196 @@ class TestMultiVisualRewardManagerInit:
                     }
                 }
             )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("weight, required", [(0.5, True), (1.0, False)])
+async def test_component_rewards_require_unit_weight_and_required_terms(weight, required):
+    config = _make_config(
+        {"quality": {"path": DUMMY_REWARDS_PATH, "name": "reward_fixed_score", "weight": weight, "required": required}}
+    )
+    config.reward.aggregation = "preserve_components"
+    with pytest.raises(ValueError, match="required=true and weight=1.0"):
+        MultiVisualRewardManager(config, MagicMock(), compute_score=None)
+
+
+async def reward_explicit_batch(batch, **kwargs):
+    assert len(batch) == 1
+    assert batch[0].non_tensor_batch["reward_model"]["ground_truth"] == "hello"
+    return {"score": float(batch.batch["audio"].mean())}
+
+
+async def reward_kwargs_without_batch(**kwargs):
+    assert "batch" not in kwargs
+    return {"score": 0.25}
+
+
+@pytest.mark.asyncio
+async def test_batch_injection_is_signature_gated():
+    manager = _build_manager(
+        {
+            "explicit": {"path": DUMMY_REWARDS_PATH, "name": "reward_explicit_batch", "required": True},
+            "legacy": {"path": DUMMY_REWARDS_PATH, "name": "reward_kwargs_without_batch", "required": True},
+        }
+    )
+    data = _make_single_data()
+    data.batch["audio"] = torch.full((1, 1, 8), 0.5)
+    result = await manager.run_single(data)
+    assert result["reward_score"] == pytest.approx(0.75)
+    assert result["reward_extra_info"]["reward/explicit"] == pytest.approx(0.5)
+    assert result["reward_extra_info"]["reward/legacy"] == pytest.approx(0.25)
+
+
+def _native_av_manager(scorer, *, fps=24.0, include_fps=True, bind_model=True):
+    from unittest.mock import AsyncMock
+
+    entry = {
+        "path": f"pkg://verl_omni.utils.reward_score.{scorer}",
+        "name": "compute_score",
+        "required": False,
+        "audio_layout": "CT",
+    }
+    if include_fps:
+        entry["fps"] = fps
+    if bind_model:
+        entry["model"] = "av_model"
+    config = _make_config({"av": entry})
+    config.reward.models = OmegaConf.create({"av_model": {"backend": "native"}} if bind_model else {})
+    manager = MultiVisualRewardManager(config, MagicMock(), compute_score=None)
+    logits = torch.zeros((2, 1, 21) if scorer == "desync" else (1, 3))
+    if scorer == "desync":
+        logits[:, :, 10] = 1
+    model = SimpleNamespace(infer=AsyncMock(return_value=logits))
+    manager.set_reward_executors(None, {"av_model": SimpleNamespace(reward_kwargs=lambda: {"reward_model": model})})
+    data = DataProto.from_dict(
+        tensors={
+            "responses": torch.zeros(1, 4, 3, 4, 4, dtype=torch.uint8),
+            "audio": torch.ones(1, 1, 480),
+            "audio_sample_rate": torch.tensor([24000]),
+        },
+        non_tensors={"data_source": ["test"], "reward_model": [{"ground_truth": "a video"}], "extra_info": [{}]},
+    )
+    return manager, model, data
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scorer", ["desync", "videoalign"])
+@pytest.mark.parametrize("fps", [24, 23.976, "23.976"])
+async def test_av_fps_config_reaches_real_manager_without_rollout_fps(scorer, fps):
+    manager, model, data = _native_av_manager(scorer, fps=fps)
+    assert "fps" not in data.batch and "fps" not in data.non_tensor_batch
+    result = await manager.run_single(data)
+    assert model.infer.await_count == 1
+    assert "reward/av/errors" not in result["reward_extra_info"]
+    assert isinstance(result["reward_score"], float)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scorer", ["desync", "videoalign"])
+async def test_missing_fps_config_is_fatal_even_for_optional_av_reward(scorer):
+    manager, model, data = _native_av_manager(scorer, include_fps=False)
+    with pytest.raises(ValueError, match="Invalid arguments.*fps"):
+        await manager.run_single(data)
+    model.infer.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scorer", ["desync", "videoalign"])
+@pytest.mark.parametrize(
+    "fps", [None, 0, -1, float("nan"), float("inf"), -float("inf"), "invalid", True, False, [], {}]
+)
+async def test_invalid_fps_config_is_fatal_even_for_optional_av_reward(scorer, fps):
+    manager, model, data = _native_av_manager(scorer, fps=fps)
+    with pytest.raises(ValueError, match="Invalid arguments.*av.*fps.*finite and positive"):
+        await manager.run_single(data)
+    model.infer.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scorer", ["desync", "videoalign"])
+async def test_optional_av_inference_failure_still_contributes_zero(scorer):
+    manager, model, data = _native_av_manager(scorer)
+    model.infer.side_effect = RuntimeError("model inference failed")
+
+    result = await manager.run_single(data)
+
+    model.infer.assert_awaited_once()
+    assert result["reward_score"] == 0.0
+    assert result["reward_extra_info"]["reward/av/errors"] == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scorer", ["desync", "videoalign", "audiobox"])
+async def test_missing_native_model_binding_reports_configuration_error(scorer):
+    manager, model, data = _native_av_manager(scorer, bind_model=False)
+    with pytest.raises(ValueError, match="Invalid arguments.*reward_model"):
+        await manager.run_single(data)
+    model.infer.assert_not_awaited()
+
+
+async def reward_missing_legacy_argument(custom_option):
+    return float(custom_option)
+
+
+async def reward_legacy_fps(fps):
+    return float(fps)
+
+
+@pytest.mark.asyncio
+async def test_legacy_scorer_fps_argument_keeps_existing_semantics():
+    manager = _build_manager({"legacy": {"path": DUMMY_REWARDS_PATH, "name": "reward_legacy_fps", "fps": -1}})
+    result = await manager.run_single(_make_single_data())
+    assert result["reward_score"] == -1.0
+    assert "reward/legacy/errors" not in result["reward_extra_info"]
+
+
+@pytest.mark.asyncio
+async def test_legacy_optional_scorer_missing_argument_still_contributes_zero():
+    manager = _build_manager({"legacy": {"path": DUMMY_REWARDS_PATH, "name": "reward_missing_legacy_argument"}})
+    result = await manager.run_single(_make_single_data())
+    assert result["reward_score"] == 0.0
+    assert result["reward_extra_info"]["reward/legacy/errors"] == 1
+
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_CLAP_RECIPES = [
+    path for path in sorted((_REPO_ROOT / "examples").rglob("*.sh")) if "reward_score/clap.py" in path.read_text()
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("recipe", _CLAP_RECIPES, ids=lambda path: str(path.relative_to(_REPO_ROOT)))
+async def test_existing_clap_recipe_config_accepts_stereo_without_layout(recipe, monkeypatch):
+    entry = dict(re.findall(r"reward\.reward_functions\.clap\.(\w+)=([^'\"\s]+)", recipe.read_text()))
+    assert "audio_layout" not in entry
+    entry["path"] = entry["path"].replace("$repo_root", str(_REPO_ROOT))
+    entry["device"] = "cpu"
+    manager = _build_manager({"clap": entry})
+    scorer_globals = manager._sub_rewards[0]["fn"].__globals__
+    captured_audio = []
+
+    def processor(*, audio, sampling_rate, **kwargs):
+        assert sampling_rate == 48000
+        captured_audio.extend(audio)
+        return {"features": torch.ones(len(audio), 2)}
+
+    def model(*, features):
+        return SimpleNamespace(audio_embeds=features, text_embeds=features)
+
+    monkeypatch.setitem(scorer_globals, "_load_clap", lambda *args: (model, processor))
+    source_rate = 24000 if "ltx2" in str(recipe) else 32000
+    data = _make_single_data()
+    data.batch["audio"] = torch.ones(1, 2, 480)
+    data.batch["audio_sample_rate"] = torch.tensor([source_rate])
+    try:
+        result = await manager.run_single(data)
+        assert result["reward_score"] == pytest.approx(1.0)
+        assert "reward/clap/errors" not in result["reward_extra_info"]
+        assert len(captured_audio) == 1
+        assert captured_audio[0].shape == (480 * 48000 // source_rate,)
+        assert result["reward_extra_info"]["reward/clap/source_sample_rate"] == source_rate
+    finally:
+        state = scorer_globals["_get_batching_state"]()
+        if state.consumer_task is not None:
+            state.queue.put_nowait((None, None, None, None, None))
+            await state.consumer_task

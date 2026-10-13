@@ -580,6 +580,23 @@ def collect_lora_params(
         adapter_name: LoRA adapter name (usually ``"default"``).
         layer_prefixes: FSDP layer name prefixes (``["transformer_blocks."]``
     """
+    # A single-rank FSDP1 actor uses NO_SHARD. The upstream layered
+    # collector's fallback summons with offload_to_cpu=True, which PyTorch
+    # rejects for NO_SHARD. Materialize on device and copy the adapter tensors
+    # to CPU through our non-layered collector instead. Nested block wraps leave
+    # ``_fsdp_wrapped_module`` inside those names, so clean them like the other paths.
+    from torch.distributed.fsdp import ShardingStrategy
+
+    if (
+        layered_summon
+        and base_sync_done
+        and fsdp_version(module) == 1
+        and getattr(module, "sharding_strategy", None) == ShardingStrategy.NO_SHARD
+    ):
+        peft_model = getattr(module, "_fsdp_wrapped_module", module)
+        params = _collect_lora_params_non_layered(module, peft_model, adapter_name, base_sync_done=True)
+        return _clean_lora_param_names(params, adapter_name)
+
     use_diffusers_layered = is_diffusers and layered_summon and fsdp_version(module) > 0
     if adapter_name == "default" and not use_diffusers_layered and fsdp_version(module) != 2:
         params = _upstream_collect_lora_params(module, layered_summon=layered_summon, base_sync_done=base_sync_done)

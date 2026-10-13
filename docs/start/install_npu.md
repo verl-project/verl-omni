@@ -26,7 +26,7 @@ source .venv/bin/activate
 2. Install the platform backend
 
 ```bash
-uv pip install vllm==0.28.0
+uv pip install vllm==0.30.0
 uv pip install "vllm-ascend @ git+https://github.com/vllm-project/vllm-ascend.git@$(cat .github/vllm_ascend_pin.txt)"
 ```
 

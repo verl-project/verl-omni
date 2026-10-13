@@ -1,12 +1,12 @@
 # Optional Engine Backends
 
-Last updated: 09/24/2026
+Last updated: 10/07/2026
 
 VeRL-Omni defaults to **FSDP2** as the training engine for the policy and reference models. The diffusion trainer and Qwen3-Omni Thinker can alternatively use [**VeOmni**](https://github.com/ByteDance-Seed/VeOmni). The engine is selected at the Hydra command line — see [`examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_veomni.sh`](https://github.com/verl-project/verl-omni/blob/main/examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_veomni.sh) for a complete recipe.
 
-## Installing VeOmni alongside vLLM 0.28.0
+## Installing VeOmni alongside vLLM 0.30.0
 
-VeOmni 0.1.12's `gpu` extra pins `torch==2.11.0+cu130`, which conflicts with the `torch==2.13.0` pulled in by `vllm==0.28.0`. A plain `uv pip install veomni[gpu]==0.1.12` therefore fails dependency resolution.
+VeOmni 0.1.12's `gpu` extra pins `torch==2.11.0+cu130`, which conflicts with the `torch==2.13.0` pulled in by `vllm==0.30.0`. A plain `uv pip install veomni[gpu]==0.1.12` therefore fails dependency resolution.
 
 Install the base VeOmni package without dependency resolution so the existing
 torch/vLLM stack is preserved, then add its media runtime dependencies
@@ -28,7 +28,7 @@ python -c "from veomni.distributed.offloading import load_model_to_gpu, load_opt
 ```
 
 The two-GPU Thinker backend check and two-step V1 smoke pass with torch 2.13
-and vLLM 0.28, including forward, backward, optimizer updates, EP weight export
+and vLLM 0.30, including forward, backward, optimizer updates, EP weight export
 and full-weight rollout synchronization. These checks use tiny random weights;
 they do not validate the full 30B checkpoint or convergence. The base
 import/offloading checks above do not exercise these training paths.

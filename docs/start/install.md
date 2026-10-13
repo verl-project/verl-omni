@@ -50,7 +50,7 @@ source .venv/bin/activate
 2. Install vLLM
 
 ```bash
-uv pip install vllm==0.28.0 --torch-backend=auto
+uv pip install vllm==0.30.0 --torch-backend=auto
 ```
 
 3. Install the rollout engine and training stack

@@ -178,7 +178,8 @@ class TestInstallLoraLayout:
         mixin = _make_mixin()
         mixin._install_lora_layout()
         assert mixin.transformer.stacked_params_mapping == _LORA_STACKED_PARAMS_MAPPING
-        # Idempotent: a pre-existing mapping is not clobbered.
-        mixin.transformer.stacked_params_mapping = ["custom"]
+        # A complete mapping, including unrelated entries, is left intact.
+        custom = [(".custom", ".custom_adapter", "0"), *_LORA_STACKED_PARAMS_MAPPING]
+        mixin.transformer.stacked_params_mapping = custom
         mixin._install_lora_layout()
-        assert mixin.transformer.stacked_params_mapping == ["custom"]
+        assert mixin.transformer.stacked_params_mapping is custom

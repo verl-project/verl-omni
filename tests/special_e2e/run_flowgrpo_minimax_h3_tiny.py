@@ -207,6 +207,8 @@ def _hydra_overrides(
         f"actor_rollout_ref.actor.fsdp_config.ulysses_sequence_parallel_size={actor_sp}",
         # rollout
         "actor_rollout_ref.rollout.name=vllm_omni",
+        # Only rollout loads the local tiny VAE's checkpoint-shipped modeling code.
+        "+actor_rollout_ref.rollout.engine_kwargs.vllm_omni.trust_remote_code=True",
         "actor_rollout_ref.rollout.max_num_seqs=1",
         "actor_rollout_ref.rollout.rollout_attn_backend=TORCH_SDPA",
         f"actor_rollout_ref.rollout.tensor_model_parallel_size={rollout_tp}",

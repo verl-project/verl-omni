@@ -61,6 +61,10 @@ actor_rollout_ref:
       all_ranks: false
       ranks: []
       save_path: ${oc.select:global_profiler.save_path,outputs/profile}
+      relocate_results: ${oc.select:global_profiler.relocate_results,false}
+      finish_hook_cmd: ${oc.select:global_profiler.finish_hook_cmd,null}
+      finish_hook_all_ranks: ${oc.select:global_profiler.finish_hook_all_ranks,false}
+      finish_hook_ranks: ${oc.select:global_profiler.finish_hook_ranks,[]}
       tool_config:
         npu:
           _target_: verl.utils.profiler.config.NPUToolConfig
@@ -101,6 +105,8 @@ actor_rollout_ref:
       dpo_beta: 2000.0
       kl_mask_threshold: 1.0e-05
       add_kl_coefficient: true
+      dgpo_beta: 100.0
+      dgpo_clip_range: 0.01
     rollout_correction:
       _target_: verl.trainer.config.algorithm.RolloutCorrectionConfig
       bypass_mode: ${oc.select:algorithm.rollout_correction.bypass_mode,false}
@@ -187,6 +193,10 @@ actor_rollout_ref:
       all_ranks: false
       ranks: []
       save_path: ${oc.select:global_profiler.save_path,outputs/profile}
+      relocate_results: ${oc.select:global_profiler.relocate_results,false}
+      finish_hook_cmd: ${oc.select:global_profiler.finish_hook_cmd,null}
+      finish_hook_all_ranks: ${oc.select:global_profiler.finish_hook_all_ranks,false}
+      finish_hook_ranks: ${oc.select:global_profiler.finish_hook_ranks,[]}
       tool_config:
         npu:
           _target_: verl.utils.profiler.config.NPUToolConfig
@@ -220,6 +230,10 @@ actor_rollout_ref:
       all_ranks: false
       ranks: []
       save_path: ${oc.select:global_profiler.save_path,outputs/profile}
+      relocate_results: ${oc.select:global_profiler.relocate_results,false}
+      finish_hook_cmd: ${oc.select:global_profiler.finish_hook_cmd,null}
+      finish_hook_all_ranks: ${oc.select:global_profiler.finish_hook_all_ranks,false}
+      finish_hook_ranks: ${oc.select:global_profiler.finish_hook_ranks,[]}
       tool_config:
         npu:
           _target_: verl.utils.profiler.config.NPUToolConfig
@@ -272,7 +286,7 @@ actor_rollout_ref:
     max_num_seqs: 1024
     step_execution: false
     enable_chunked_prefill: true
-    enable_prefix_caching: true
+    enable_prefix_caching: false
     logprobs_mode: processed_logprobs
     scheduling_policy: fcfs
     load_format: dummy
@@ -482,6 +496,10 @@ reward:
         all_ranks: false
         ranks: []
         save_path: ${oc.select:global_profiler.save_path,outputs/profile}/reward_model
+        relocate_results: ${oc.select:global_profiler.relocate_results,false}
+        finish_hook_cmd: ${oc.select:global_profiler.finish_hook_cmd,null}
+        finish_hook_all_ranks: ${oc.select:global_profiler.finish_hook_all_ranks,false}
+        finish_hook_ranks: ${oc.select:global_profiler.finish_hook_ranks,[]}
         tool_config:
           npu:
             _target_: verl.utils.profiler.config.NPUToolConfig
@@ -630,6 +648,8 @@ algorithm:
   old_policy_decay: null
   old_policy_update_interval: 1
   timestep_fraction: 1.0
+  train_timestep_range: null
+  train_timestep_count: null
   adv_mode: continuous
   paired_preference: false
   rollout_correction:
@@ -707,6 +727,10 @@ global_profiler:
   steps: null
   profile_continuous_steps: false
   save_path: outputs/profile
+  relocate_results: false
+  finish_hook_cmd: null
+  finish_hook_all_ranks: false
+  finish_hook_ranks: []
   global_tool_config:
     nsys:
       _target_: verl.utils.profiler.config.NsightToolConfig

@@ -23,8 +23,9 @@ Layout mirrors ``Boogu/Boogu-Image-0.1-Base``:
                     which a diffusers ConfigMixin round-trip would drop)
     vae/           (tiny AutoencoderKL, 16 latent channels)
 
-Requires the ``boogu-image`` package (canonical transformer class) and a
-locally cached source checkpoint for the processor/scheduler files.
+Requires the ``boogu-image`` package (canonical transformer class). The
+processor/scheduler files come from the source checkpoint: a local directory,
+the Hugging Face cache, or a pinned download of just those two subfolders.
 """
 
 import argparse
@@ -37,6 +38,9 @@ import torch
 
 DEFAULT_OUTPUT_DIR = os.path.expanduser("~/models/tiny-random/Boogu-Image")
 DEFAULT_SOURCE_MODEL = "Boogu/Boogu-Image-0.1-Base"
+DEFAULT_SOURCE_REVISION = "334ad7e5c6343d33308b306127e047b133e86926"
+_SOURCE_ENDPOINT = "https://huggingface.co"
+_SOURCE_ASSET_PATTERNS = ["processor/*", "scheduler/*"]
 
 # The checkpoint's transformer_boogu.py shim, reproduced verbatim so the tiny
 # checkpoint loads through the same AutoModel + trust_remote_code path as the
@@ -144,17 +148,25 @@ def get_dummy_components(*, hidden_size: int = 16, seed: int = 42) -> dict[str, 
 
 
 def _resolve_source_dir(source_model: str) -> str:
-    """Resolve ``source_model`` to a local directory (offline; never downloads weights)."""
+    """Resolve ``source_model`` to a local directory holding processor/ and scheduler/.
+
+    Uses the local Hugging Face cache when possible and otherwise downloads only
+    those two subfolders (a few MB of tokenizer/config files, never weights).
+    """
     local = os.path.expanduser(source_model)
     if os.path.isdir(local):
         return local
     from huggingface_hub import snapshot_download
+    from huggingface_hub.errors import LocalEntryNotFoundError
 
-    return snapshot_download(
-        source_model,
-        local_files_only=True,
-        allow_patterns=["processor/*", "scheduler/*"],
-    )
+    kwargs = {"allow_patterns": _SOURCE_ASSET_PATTERNS}
+    if source_model == DEFAULT_SOURCE_MODEL:
+        kwargs["revision"] = DEFAULT_SOURCE_REVISION
+    try:
+        return snapshot_download(source_model, local_files_only=True, **kwargs)
+    except LocalEntryNotFoundError:
+        endpoint = _SOURCE_ENDPOINT if source_model == DEFAULT_SOURCE_MODEL else None
+        return snapshot_download(source_model, endpoint=endpoint, **kwargs)
 
 
 def _copy_pretrained_assets(source_model: str, output_dir: str) -> None:
@@ -227,7 +239,7 @@ def main() -> None:
     parser.add_argument(
         "--source-model",
         default=DEFAULT_SOURCE_MODEL,
-        help="Cached checkpoint to copy processor/scheduler from (local_files_only).",
+        help="Local dir or HF repo to copy processor/scheduler from (downloaded if not cached).",
     )
     parser.add_argument("--hidden-size", type=int, default=16)
     parser.add_argument("--seed", type=int, default=42)

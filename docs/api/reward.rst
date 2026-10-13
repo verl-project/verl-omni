@@ -6,17 +6,21 @@ Last updated: |today| (API docstrings are auto-generated).
 VeRL-Omni reward pipelines support both rule-based scoring (e.g. JPEG
 compressibility) and model-based generative reward models (e.g. OCR via a
 vision-language model served behind an OpenAI-compatible router). Reward
-computation is dispatched per sample by modality-specific reward managers,
-including :class:`~verl_omni.reward_loop.reward_manager.VisualRewardManager`
-and :class:`~verl_omni.reward_loop.reward_manager.AudioRewardManager`, which
-plugs into :class:`~verl_omni.reward_loop.reward_loop.OmniRewardLoopManager` —
-verl's :class:`~verl.experimental.reward_loop.RewardLoopManager` extended with
+computation is dispatched per sample by reward managers. The input-agnostic
+:class:`~verl_omni.reward_loop.reward_manager.MultiRewardManager` provides the
+shared named-term dispatch, per-term outputs, failure handling, and weighted
+aggregation used by input-specific subclasses. Modality-specific managers include
+:class:`~verl_omni.reward_loop.reward_manager.VisualRewardManager` and
+:class:`~verl_omni.reward_loop.reward_manager.AudioRewardManager`. They plug
+into :class:`~verl_omni.reward_loop.reward_loop.OmniRewardLoopManager` — verl's
+:class:`~verl.experimental.reward_loop.RewardLoopManager` extended with
 profiler control over the reward-model rollout servers.
 
 .. autosummary::
    :nosignatures:
 
    verl_omni.reward_loop.reward_loop.OmniRewardLoopManager
+   verl_omni.reward_loop.reward_manager.MultiRewardManager
    verl_omni.reward_loop.reward_manager.VisualRewardManager
    verl_omni.reward_loop.reward_manager.AudioRewardManager
    verl_omni.utils.reward_score.default_compute_score_image
@@ -32,6 +36,9 @@ Reward Loop Manager
 
 Reward Manager
 ~~~~~~~~~~~~~~~~~
+
+.. autoclass:: verl_omni.reward_loop.reward_manager.MultiRewardManager
+   :members: __init__, run_single
 
 .. autoclass:: verl_omni.reward_loop.reward_manager.VisualRewardManager
    :members: __init__, run_single

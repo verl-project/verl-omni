@@ -13,11 +13,12 @@
 #
 # Requires: vllm-omni (>= Boogu support), the `boogu-image` package (canonical
 #   transformer for the training side; the checkpoint's transformer_boogu.py
-#   is a re-export shim), and a locally cached Boogu/Boogu-Image-0.1-Base --
-#   the tiny checkpoint is built from it below (processor/scheduler are
-#   copied verbatim). Base and Edit share the pipeline architecture, so one
-#   tiny checkpoint serves both modes. Point SOURCE_MODEL at a local
-#   directory when the base checkpoint is not in the Hugging Face cache.
+#   is a re-export shim). The tiny checkpoint is built below with
+#   processor/scheduler copied verbatim from Boogu/Boogu-Image-0.1-Base
+#   (taken from the Hugging Face cache, or downloaded on a cache miss; only
+#   those subfolders, no weights). Base and Edit share the pipeline
+#   architecture, so one tiny checkpoint serves both modes. Point SOURCE_MODEL
+#   at a local directory to skip the Hub entirely.
 set -euo pipefail
 
 # Preserve worker diagnostics, including failures before the ready pipe is sent.
@@ -85,11 +86,14 @@ dummy_test_path=${VAL_FILES:-${DATA_DIR}/test.parquet}
 
 ENGINE=vllm_omni
 
-# boogu-image is an optional third-party dependency. Exit 5 (SKIP) rather than
-# fail so its absence does not redden the shared smoke suite for everyone.
 if ! python3 -c 'import boogu' >/dev/null 2>&1; then
     echo "SKIP: the boogu-image package is required for the training-side transformer."
-    echo "Install it with: pip install 'boogu-image @ git+https://github.com/boogu-project/Boogu-Image.git'"
+    echo "Install it with: pip install 'boogu-image @ git+https://github.com/boogu-project/Boogu-Image.git@\$(cat .github/boogu_image_pin.txt)'"
+    if [[ "${BOOGU_REQUIRED:-0}" == "1" ]]; then
+        echo "FAIL: BOOGU_REQUIRED=1 but the boogu-image package is not importable."
+        echo "Check the boogu-image install step in .github/actions/gpu-smoke-prepare/action.yml."
+        exit 1
+    fi
     exit 5
 fi
 

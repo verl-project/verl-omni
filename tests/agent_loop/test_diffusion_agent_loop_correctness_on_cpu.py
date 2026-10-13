@@ -16,6 +16,7 @@ import asyncio
 from types import MethodType, SimpleNamespace
 from unittest.mock import AsyncMock
 
+import numpy as np
 import pytest
 import torch
 from tensordict import NonTensorData, NonTensorStack, TensorDict
@@ -125,6 +126,46 @@ async def test_single_turn_agent_forwards_all_multimodal_inputs():
     assert call["video_data"] == ["video"]
     assert call["audio_data"] == ["audio"]
     assert call["mm_processor_kwargs"] == {"fps": 24}
+
+
+@pytest.mark.asyncio
+async def test_single_turn_agent_accepts_numpy_negative_prompt():
+    agent_loop = object.__new__(DiffusionSingleTurnAgentLoop)
+    agent_loop.rollout_config = SimpleNamespace(
+        enable_prompt_embed_cache=False,
+        enable_prompt_embed_cache_routing_affinity=False,
+    )
+    agent_loop.extra_tokenizer_map = {"text_encoder": object()}
+    agent_loop.mm_processor_kwargs = {}
+    agent_loop.processor = None
+    agent_loop.process_multi_modal_info = AsyncMock(return_value={})
+    agent_loop.ct_build_initial_tokens = AsyncMock(return_value=[1, 2, 3])
+    agent_loop._tokenize_per_encoder = AsyncMock(return_value={"text_encoder": [1, 2, 3]})
+    agent_loop._assert_mm_supported = lambda _: None
+    agent_loop.server_manager = SimpleNamespace(
+        generate=AsyncMock(
+            return_value=SimpleNamespace(
+                diffusion_output=torch.zeros(1),
+                log_probs=None,
+                num_preempted=None,
+                extra_fields={},
+            )
+        )
+    )
+    raw_prompt = [{"role": "user", "content": "prompt"}]
+    raw_negative_prompt = np.array(
+        [
+            {"role": "system", "content": "negative"},
+            {"role": "user", "content": "blurry"},
+        ]
+    )
+
+    await agent_loop.run({}, raw_prompt=raw_prompt, raw_negative_prompt=raw_negative_prompt)
+
+    assert agent_loop.ct_build_initial_tokens.await_count == 2
+    assert agent_loop.ct_build_initial_tokens.await_args_list[1].args[0] is raw_negative_prompt
+    assert agent_loop._tokenize_per_encoder.await_count == 2
+    assert agent_loop._tokenize_per_encoder.await_args_list[1].args[0] is raw_negative_prompt
 
 
 @pytest.mark.parametrize(

@@ -85,25 +85,60 @@ _SELF_ATTENTION_ENGINE_LEAVES = ("to_q", "to_k", "to_v", "to_out")
 _FEED_FORWARD_ENGINE_LEAVES = ("linear_1", "linear_2", "linear_3")
 
 
-def _engine_leaf_modules(leaves) -> nn.Module:
+def _engine_leaf_modules(leaves, hidden: int = HIDDEN) -> nn.Module:
     module = nn.Module()
     for leaf in leaves:
-        setattr(module, leaf, nn.Linear(HIDDEN, HIDDEN, bias=False))
+        setattr(module, leaf, nn.Linear(hidden, hidden, bias=False))
     return module
+
+
+def _actor_base_block(hidden: int = 32) -> nn.Module:
+    block = nn.Module()
+    block.attn = _engine_leaf_modules(_SELF_ATTENTION_ENGINE_LEAVES, hidden=hidden)
+    block.feed_forward = _engine_leaf_modules(_FEED_FORWARD_ENGINE_LEAVES, hidden=hidden)
+    return block
+
+
+def _actor_double_stream_block(hidden: int = 32) -> nn.Module:
+    block = nn.Module()
+    block.img_self_attn = _engine_leaf_modules(_SELF_ATTENTION_ENGINE_LEAVES, hidden=hidden)
+    block.img_instruct_attn = _engine_leaf_modules((*JOINT_ATTENTION_ENGINE_LEAVES, "to_out"), hidden=hidden)
+    block.img_feed_forward = _engine_leaf_modules(_FEED_FORWARD_ENGINE_LEAVES, hidden=hidden)
+    block.instruct_feed_forward = _engine_leaf_modules(_FEED_FORWARD_ENGINE_LEAVES, hidden=hidden)
+    return block
 
 
 def _engine_base_block() -> nn.Module:
     block = nn.Module()
-    block.attn = _engine_leaf_modules(_SELF_ATTENTION_ENGINE_LEAVES)
-    block.feed_forward = _engine_leaf_modules(_FEED_FORWARD_ENGINE_LEAVES)
+    block.attn = nn.Module()
+    block.attn.to_qkv = nn.Linear(HIDDEN, HIDDEN * 3, bias=False)
+    block.attn.to_out = nn.Linear(HIDDEN, HIDDEN, bias=False)
+    block.feed_forward = nn.Module()
+    block.feed_forward.gate_up_proj = nn.Linear(HIDDEN, HIDDEN * 2, bias=False)
+    block.feed_forward.linear_2 = nn.Linear(HIDDEN, HIDDEN, bias=False)
     return block
 
 
 def _engine_double_stream_block() -> nn.Module:
     block = nn.Module()
-    block.img_self_attn = _engine_leaf_modules(_SELF_ATTENTION_ENGINE_LEAVES)
-    block.img_instruct_attn = _engine_leaf_modules((*JOINT_ATTENTION_ENGINE_LEAVES, "to_out"))
-    block.img_feed_forward = _engine_leaf_modules(_FEED_FORWARD_ENGINE_LEAVES)
+    block.img_self_attn = nn.Module()
+    block.img_self_attn.to_qkv = nn.Linear(HIDDEN, HIDDEN * 3, bias=False)
+    block.img_self_attn.to_out = nn.Linear(HIDDEN, HIDDEN, bias=False)
+
+    block.img_instruct_attn = nn.Module()
+    block.img_instruct_attn.img_to_qkv = nn.Linear(HIDDEN, HIDDEN * 3, bias=False)
+    block.img_instruct_attn.instruct_to_qkv = nn.Linear(HIDDEN, HIDDEN * 3, bias=False)
+    block.img_instruct_attn.img_out = nn.Linear(HIDDEN, HIDDEN, bias=False)
+    block.img_instruct_attn.instruct_out = nn.Linear(HIDDEN, HIDDEN, bias=False)
+    block.img_instruct_attn.to_out = nn.Linear(HIDDEN, HIDDEN, bias=False)
+
+    block.img_feed_forward = nn.Module()
+    block.img_feed_forward.gate_up_proj = nn.Linear(HIDDEN, HIDDEN * 2, bias=False)
+    block.img_feed_forward.linear_2 = nn.Linear(HIDDEN, HIDDEN, bias=False)
+
+    block.instruct_feed_forward = nn.Module()
+    block.instruct_feed_forward.gate_up_proj = nn.Linear(HIDDEN, HIDDEN * 2, bias=False)
+    block.instruct_feed_forward.linear_2 = nn.Linear(HIDDEN, HIDDEN, bias=False)
     return block
 
 
@@ -623,11 +658,20 @@ def boogu_manager(monkeypatch):
         pipeline = object.__new__(BooguImagePipelineWithLogProb)
         torch.nn.Module.__init__(pipeline)
         pipeline.transformer = transformer
+        standin = nn.Module()
+        standin.context_refiner = nn.ModuleList([_actor_base_block() for _ in transformer.context_refiner])
+        standin.noise_refiner = nn.ModuleList([_actor_base_block() for _ in transformer.noise_refiner])
+        standin.ref_image_refiner = nn.ModuleList([_actor_base_block() for _ in transformer.ref_image_refiner])
+        standin.double_stream_layers = nn.ModuleList(
+            [_actor_double_stream_block() for _ in transformer.double_stream_layers]
+        )
+        standin.single_stream_layers = nn.ModuleList([_actor_base_block() for _ in transformer.single_stream_layers])
+
         params = {}
         matched_targets = set()
         # Use real runtime sizes with actor names documented by Boogu's load_weights.
         # This models exported tensors, not a real Boogu actor/checkpoint export.
-        for name, module in transformer.named_modules():
+        for name, module in standin.named_modules():
             actor_name = name
             if name.rsplit(".", 1)[-1] in JOINT_ATTENTION_ENGINE_LEAVES:
                 actor_name = name.replace(".img_instruct_attn.", ".img_instruct_attn.processor.")
@@ -641,8 +685,9 @@ def boogu_manager(monkeypatch):
             prefix = f"transformer.{actor_name}"
             params[f"{prefix}.lora_A.weight"] = torch.full((4, in_features), 0.125)
             params[f"{prefix}.lora_B.weight"] = torch.full((out_features, 4), 0.25)
+        params = {k: v for k, v in params.items() if not (".img_self_attn." in k or ".img_feed_forward." in k)}
         assert matched_targets == set(RECIPE_TARGETS)
-        assert len(params) == 88  # 44 module paths across all blocks and refiners.
+        assert len(params) == 74  # 37 module paths across all blocks and refiners.
         assert sum(".processor." in name for name in params) == 16
         config = {"r": 4, "lora_alpha": 8, "target_modules": RECIPE_TARGETS}
         manager = DiffusionLoRAManager(pipeline, device=torch.device("cpu"), dtype=torch.float32)
@@ -656,6 +701,13 @@ def test_boogu_load_bind_activate_contract(boogu_manager, monkeypatch, case):
     manager, params, config = boogu_manager
     if case == "unmapped":
         monkeypatch.setattr(manager.pipeline, "map_lora_update_to_engine", lambda tensors, config: (tensors, config))
+        with pytest.raises(ValueError, match="binding is incomplete"):
+            manager.set_active_adapter(
+                OmniTensorLoRARequest(
+                    lora_name="boogu", lora_int_id=1, lora_path="in-memory", lora_tensors=params, peft_config=config
+                )
+            )
+        return
     elif case == "output_rename_only":
         # Reproduce the old mapper: output projections bind, processor projections do not.
         monkeypatch.setattr(
@@ -666,6 +718,13 @@ def test_boogu_load_bind_activate_contract(boogu_manager, monkeypatch, case):
                 {**config, "target_modules": ["to_out" if t == "to_out.0" else t for t in config["target_modules"]]},
             ),
         )
+        with pytest.raises(ValueError, match="binding is incomplete"):
+            manager.set_active_adapter(
+                OmniTensorLoRARequest(
+                    lora_name="boogu", lora_int_id=1, lora_path="in-memory", lora_tensors=params, peft_config=config
+                )
+            )
+        return
     elif case == "zero_init":
         params = {name: torch.zeros_like(tensor) if ".lora_B." in name else tensor for name, tensor in params.items()}
     elif case == "output_only":
@@ -681,27 +740,29 @@ def test_boogu_load_bind_activate_contract(boogu_manager, monkeypatch, case):
         )
     )
     assert manager._active_adapter_id == 1
-    loaded = manager._registered_adapters[1]
-    bound = {name for name in manager._lora_modules if manager._get_lora_weights(loaded, name) is not None}
-    if case == "unmapped":
-        assert len(bound) == 30  # Six output and eight processor projections stay unbound.
-        assert any(name.endswith(".to_out.0") for name in loaded.loras)
+    if case == "zero_init":
+        for name, layer in manager._lora_modules.items():
+            assert all(torch.count_nonzero(t) == 0 for t in layer.lora_b_stacked)
         return
-    if case == "output_rename_only":
-        assert len(manager._lora_modules) == 44 and len(bound) == 36
-        missing = set(manager._lora_modules) - bound
-        assert missing == {
-            f"transformer.double_stream_layers.0.img_instruct_attn.{t}" for t in JOINT_ATTENTION_ENGINE_LEAVES
-        }
-        for name in missing:
-            layer = manager._lora_modules[name]
-            assert all(torch.count_nonzero(t) == 0 for t in (*layer.lora_a_stacked, *layer.lora_b_stacked))
+    if case == "output_only":
+        assert len(manager._registered_adapters[1].loras) == 5
+        for name, layer in manager._lora_modules.items():
+            assert name.endswith(".to_out")
         return
 
-    assert len(bound) == len(manager._lora_modules) == len(params) // 2
-    assert any(name.endswith(".to_out") for name in bound)
+    assert any(name.endswith(".to_out") for name in manager._lora_modules)
+    bound = 0
     for name, layer in manager._lora_modules.items():
-        expected_a = mapped[f"{name}.lora_A.weight"]
-        expected_b = mapped[f"{name}.lora_B.weight"] * 2
-        torch.testing.assert_close(layer.lora_a_stacked[0][0, 0, :4], expected_a, rtol=0, atol=0)
-        torch.testing.assert_close(layer.lora_b_stacked[0][0, 0, :, :4], expected_b, rtol=0, atol=0)
+        prefix, _, suffix = name.rpartition(".")
+        sublayers = manager._packed_modules_mapping.get(suffix, [suffix])
+        for index, sublayer in enumerate(sublayers):
+            key = f"{prefix}.{sublayer}"
+            if f"{key}.lora_A.weight" in mapped:
+                expected_a = mapped[f"{key}.lora_A.weight"].float()
+                expected_b = mapped[f"{key}.lora_B.weight"].float() * 2
+                in_dim = expected_a.shape[1]
+                out_dim = expected_b.shape[0]
+                torch.testing.assert_close(layer.lora_a_stacked[index][0, 0, :4, :in_dim], expected_a, rtol=0, atol=0)
+                torch.testing.assert_close(layer.lora_b_stacked[index][0, 0, :out_dim, :4], expected_b, rtol=0, atol=0)
+                bound += 1
+    assert bound == len(mapped) // 2

@@ -16,7 +16,7 @@ and differs in the model path, the LoRA targets and FSDP layer prefixes, the gui
 On top of the [standard install](../../../docs/start/install.md):
 
 ```bash
-pip install "boogu-image @ git+https://github.com/boogu-project/Boogu-Image.git"
+pip install "boogu-image @ git+https://github.com/boogu-project/Boogu-Image.git@$(cat .github/boogu_image_pin.txt)"
 ```
 
 The training engine loads the checkpoint's canonical `BooguImageTransformer2DModel` through

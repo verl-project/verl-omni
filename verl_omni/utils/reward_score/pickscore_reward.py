@@ -16,6 +16,7 @@ import asyncio
 import gc
 import logging
 import os
+from contextlib import nullcontext
 
 import aiohttp
 import numpy as np
@@ -36,6 +37,28 @@ _score_queue = asyncio.Queue()
 _consumer_task = None
 _consumer_started = False
 _consumer_lock = asyncio.Lock()
+
+
+async def _await_owned(awaitable):
+    """Finish an accepted transition before reporting caller cancellation."""
+    task = asyncio.ensure_future(awaitable)
+    cancelled = False
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if asyncio.current_task().cancelling():
+                cancelled = True
+        except BaseException:
+            if not task.done():
+                raise
+    if cancelled:
+        try:
+            task.result()
+        except BaseException:
+            pass
+        raise asyncio.CancelledError
+    return task.result()
 
 
 def _feature_tensor(features):
@@ -134,9 +157,16 @@ class PickScoreNativeModel:
         processor_path: str = _PROCESSOR_PATH,
         device=None,
         dtype=torch.float32,
+        retain_weights_on_cpu: bool = False,
     ):
+        if type(retain_weights_on_cpu) is not bool:
+            raise TypeError("retain_weights_on_cpu must be a bool")
+        target_device = torch.device(device) if device is not None else torch.device(get_device_name(), get_device_id())
+        if retain_weights_on_cpu and target_device.type != "cuda":
+            raise ValueError("retain_weights_on_cpu requires a CUDA device")
+        self.supports_cpu_offload = retain_weights_on_cpu
         self._inferencer = _PickScoreInferencer(
-            device=device,
+            device=target_device,
             dtype=dtype,
             model_path=model_path,
             processor_path=processor_path,
@@ -144,23 +174,24 @@ class PickScoreNativeModel:
         self._score_queue = asyncio.Queue()
         self._consumer_task = None
         self._consumer_lock = asyncio.Lock()
+        self._lifecycle_lock = asyncio.Lock()
         self._closed = False
+        self._asleep = False
+        self._target_device = target_device
 
-    async def _ensure_consumer(self):
-        if self._closed:
-            raise RuntimeError("PickScore native model is closed")
+    def _ensure_consumer_locked(self):
+        if self._closed or self._asleep:
+            raise RuntimeError("PickScore native model is closed or asleep")
         if self._consumer_task is not None and not self._consumer_task.done():
             return
-        async with self._consumer_lock:
-            if self._closed:
-                raise RuntimeError("PickScore native model is closed")
-            if self._consumer_task is None or self._consumer_task.done():
-                self._consumer_task = asyncio.create_task(self._consumer_loop())
+        self._consumer_task = asyncio.create_task(self._consumer_loop())
 
     def _infer_requests(self, requests):
         prompts = [prompt for prompt, _, _ in requests]
         images = [image for _, image, _ in requests]
-        output = self._inferencer.infer(prompts, images)
+        device_context = torch.cuda.device(self._target_device) if self._target_device.type == "cuda" else nullcontext()
+        with device_context:
+            output = self._inferencer.infer(prompts, images)
         return [
             {
                 "text_embeddings": output["text_embeddings"][index],
@@ -208,28 +239,95 @@ class PickScoreNativeModel:
         images = list(images)
         if len(prompts) != len(images):
             raise ValueError("PickScore prompts and images must have the same length")
-        await self._ensure_consumer()
         loop = asyncio.get_running_loop()
         futures = []
-        for prompt, image in zip(prompts, images, strict=True):
-            future = loop.create_future()
-            futures.append(future)
-            await self._score_queue.put((prompt, image, future))
+        async with self._consumer_lock:
+            self._ensure_consumer_locked()
+            for prompt, image in zip(prompts, images, strict=True):
+                future = loop.create_future()
+                futures.append(future)
+                self._score_queue.put_nowait((prompt, image, future))
         return await asyncio.gather(*futures)
 
+    async def sleep(self):
+        await _await_owned(self._sleep())
+
+    async def _sleep(self):
+        if not self.supports_cpu_offload:
+            raise RuntimeError("PickScore CPU retention is not enabled")
+        async with self._lifecycle_lock:
+            async with self._consumer_lock:
+                if self._closed:
+                    return
+                if self._asleep:
+                    return
+                self._asleep = True
+                consumer = self._consumer_task
+                if consumer is not None and not consumer.done():
+                    self._score_queue.put_nowait((None, None, None))
+            try:
+                if consumer is not None:
+                    await consumer
+                self._consumer_task = None
+                await asyncio.to_thread(self._inferencer.model.to, "cpu")
+                self._inferencer.device = torch.device("cpu")
+            except BaseException:
+                try:
+                    await self._terminal_close()
+                except BaseException:
+                    pass
+                raise
+
+    async def wake_up(self):
+        await _await_owned(self._wake_up())
+
+    async def _wake_up(self):
+        if not self.supports_cpu_offload:
+            raise RuntimeError("PickScore CPU retention is not enabled")
+        async with self._lifecycle_lock:
+            if self._closed:
+                raise RuntimeError("PickScore native model is closed")
+            if not self._asleep:
+                return
+            try:
+                await asyncio.to_thread(self._inferencer.model.to, self._target_device)
+                self._inferencer.device = self._target_device
+                async with self._consumer_lock:
+                    self._asleep = False
+            except BaseException:
+                try:
+                    await self._terminal_close()
+                except BaseException:
+                    pass
+                raise
+
     async def close(self):
-        self._closed = True
-        if self._consumer_task is not None and not self._consumer_task.done():
-            await self._score_queue.put((None, None, None))
-            await self._consumer_task
-        self._consumer_task = None
-        if hasattr(self, "_inferencer"):
-            del self._inferencer
-        gc.collect()
-        accelerator = getattr(torch, get_device_name(), None)
-        empty_cache = getattr(accelerator, "empty_cache", None)
-        if callable(empty_cache) and getattr(accelerator, "is_available", lambda: False)():
-            empty_cache()
+        await _await_owned(self._close())
+
+    async def _close(self):
+        async with self._lifecycle_lock:
+            await self._terminal_close()
+
+    async def _terminal_close(self):
+        async with self._consumer_lock:
+            if self._closed:
+                return
+            self._closed = True
+            consumer = self._consumer_task
+            if consumer is not None and not consumer.done():
+                self._score_queue.put_nowait((None, None, None))
+        try:
+            if consumer is not None:
+                await consumer
+        finally:
+            self._consumer_task = None
+            if hasattr(self, "_inferencer"):
+                del self._inferencer
+            gc.collect()
+            accelerator = getattr(torch, get_device_name(), None)
+            empty_cache = getattr(accelerator, "empty_cache", None)
+            if callable(empty_cache) and getattr(accelerator, "is_available", lambda: False)():
+                empty_cache()
 
 
 def _to_pil_hwc(image) -> Image.Image:

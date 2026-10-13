@@ -1636,15 +1636,17 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
         if self._has_old_adapter:
             self._validate_old_adapter_config()
         self._loss_fn = get_diffusion_loss_fn(loss_mode)
+        self._loss_fn.validate_trainer_config(config)
 
     def _validate_old_adapter_config(self):
         rollout_cfg = self.config.actor_rollout_ref.rollout
         actor_loss_cfg = self.config.actor_rollout_ref.actor.diffusion_loss
         if rollout_cfg.rollout_adapter != "old":
             raise ValueError("Old-adapter algorithms require actor_rollout_ref.rollout.rollout_adapter=old.")
-        if actor_loss_cfg.loss_mode != "diffusion_nft":
+        if not get_diffusion_loss_fn(actor_loss_cfg.loss_mode).uses_old_adapter:
             raise ValueError(
-                "Old-adapter algorithms require actor_rollout_ref.actor.diffusion_loss.loss_mode=diffusion_nft."
+                "Old-adapter algorithms require an actor_rollout_ref.actor.diffusion_loss.loss_mode that trains "
+                f"against the old adapter, got {actor_loss_cfg.loss_mode}."
             )
 
     def init_workers(self):
@@ -1677,10 +1679,13 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
         ppo_epochs = self.config.actor_rollout_ref.actor.ppo_epochs
         seed = self.config.actor_rollout_ref.actor.data_loader_seed
         shuffle = self.config.actor_rollout_ref.actor.shuffle
-        if paired and shuffle:
+        loss_mode = OmegaConf.select(self.config, "actor_rollout_ref.actor.diffusion_loss.loss_mode")
+        keep_groups = paired or (loss_mode is not None and get_diffusion_loss_fn(loss_mode).requires_whole_groups)
+        if keep_groups and shuffle:
             sys_logger.warning(
                 "Shuffle is not supported for direct preference during actor update."
-                "This is to prevent the chosen/rejected pairs from being split across different micro batches."
+                "This is to prevent chosen/rejected pairs and rollout groups from being split across "
+                "different micro batches."
                 "Setting shuffle to False."
             )
             shuffle = False

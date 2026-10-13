@@ -80,3 +80,49 @@ def test_pil_image_to_base64_roundtrips_to_the_same_image():
     decoded = Image.open(BytesIO(base64.b64decode(uri.split(",", 1)[1])))
     assert decoded.format == "PNG"
     assert np.array_equal(np.asarray(decoded), np.asarray(image))
+
+
+@pytest.mark.parametrize("rate", [24000, 24000.0, torch.tensor(24000)])
+def test_audio_requires_explicit_rate_and_normalizes_declared_channels(rate):
+    audio, sample_rate = _MODULE.get_audio(
+        {
+            "audio": torch.tensor([[1.0, 0.0, 1.0], [0.0, 1.0, 0.0]]),
+            "audio_sample_rate": rate,
+            "audio_layout": "CT",
+        }
+    )
+    torch.testing.assert_close(audio, torch.full((3,), 0.5))
+    assert sample_rate == 24000
+
+
+def test_audio_rejects_missing_sample_rate():
+    with pytest.raises(KeyError, match="audio_sample_rate"):
+        _MODULE.get_audio({"audio": torch.ones(8)})
+
+
+@pytest.mark.parametrize("rate", [None, 0, -1, 24000.5, float("nan"), float("inf"), True, "24000"])
+def test_audio_rejects_invalid_rates(rate):
+    with pytest.raises((KeyError, ValueError), match="sample.rate|sample_rate"):
+        _MODULE.get_audio({"audio": torch.ones(8), "audio_sample_rate": rate})
+
+
+@pytest.mark.parametrize(
+    "audio", [torch.empty(0), torch.empty(0, 8), torch.tensor([float("nan")]), torch.tensor([float("inf")])]
+)
+def test_audio_rejects_empty_or_nonfinite_input(audio):
+    with pytest.raises(ValueError, match="non-empty audio containing only finite"):
+        _MODULE.get_audio({"audio": audio, "audio_sample_rate": 24000})
+
+
+@pytest.mark.parametrize("shape", [(8, 2), (2, 8), (1, 2, 8)])
+def test_audio_does_not_guess_two_dimensional_layout(shape):
+    with pytest.raises(ValueError, match="explicit audio_layout='CT'"):
+        _MODULE.get_audio({"audio": torch.ones(shape), "audio_sample_rate": 24000})
+
+
+def test_audio_rejects_channels_last_and_conflicting_layouts():
+    info = {"audio": torch.ones(8, 2), "audio_sample_rate": 24000, "audio_layout": "TC"}
+    with pytest.raises(ValueError, match="channels-last audio is not supported"):
+        _MODULE.get_audio(info)
+    with pytest.raises(ValueError, match="Conflicting audio_layout"):
+        _MODULE.get_audio(info, audio_layout="CT")

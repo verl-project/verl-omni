@@ -38,6 +38,52 @@ _GPU_WORKER_EXTENSION = "verl_omni.workers.rollout.vllm_rollout.utils.vLLMOmniCo
 _NPU_WORKER_EXTENSION = "verl_omni.workers.rollout.vllm_rollout.npu_utils.vLLMOmniNPUColocateWorkerExtension"
 
 
+def _diffusion_ingress_allowed_fields() -> frozenset[str]:
+    """Mirror vllm-omni's diffusion ingress allowlist.
+
+    TODO (vllm-omni): Clean up OmniEngineArgs boundary; tracked in
+    https://github.com/vllm-project/vllm-omni/issues/8503.
+    """
+    from dataclasses import fields
+    from typing import Any, cast
+
+    import vllm_omni.config.omni_config as omni_config_mod
+    from vllm_omni.config import VllmOmniOrchestratorConfig
+    from vllm_omni.diffusion.data import OmniDiffusionConfig
+    from vllm_omni.engine.arg_utils import orchestrator_field_names
+
+    try:
+        from vllm.entrypoints.launchers.cli_args import FrontendArgs
+    except ModuleNotFoundError as error:
+        if error.name not in {"vllm.entrypoints.launchers", "vllm.entrypoints.launchers.cli_args"}:
+            raise
+        # The Ascend NPU smoke image can expose frontend args at the
+        # pre-launchers path even though the GPU v0.30 wheel uses launchers.
+        from vllm.entrypoints.openai.cli_args import FrontendArgs
+
+    frontend_fields = {f.name for f in fields(FrontendArgs)}
+
+    def _get_fields(attr: str) -> set[str]:
+        return set(getattr(omni_config_mod, attr, ()))
+
+    stage_fields = (
+        {f.name for f in fields(OmniDiffusionConfig)}
+        | _get_fields("_DIFFUSION_OWNED_STAGE_ENGINE_FIELDS")
+        | _get_fields("_STAGE_DEPLOY_ENGINE_FIELDS")
+        | _get_fields("_PIPELINE_DEPLOY_CLI_FIELDS")
+        | _get_fields("_DIFFUSION_STAGE_METADATA_FIELDS")
+        | _get_fields("_DIFFUSION_DEFAULT_FACTORY_FIELDS")
+    )
+    infra_fields = (
+        _get_fields("_DIFFUSION_SHARED_ONLY_ENGINE_FIELDS")
+        | _get_fields("_NON_STAGE_ENGINE_CLI_FIELDS")
+        | frontend_fields
+        | {f.name for f in fields(cast(Any, VllmOmniOrchestratorConfig))}
+        | orchestrator_field_names()
+    )
+    return frozenset(stage_fields | infra_fields)
+
+
 def _diffusion_output_type(sampling_params: dict[str, Any]) -> str:
     output_type = sampling_params.get("output_type")
     if output_type is None:
@@ -149,7 +195,8 @@ class DiffusionStrategy(OmniStrategyBase):
                 parallel_config[key] = value
             engine_args[key] = value
 
-        # TODO(vllm-omni#7564): Drop this pin-compat shim; tracked in verl-omni#445.
+        # Upstream vllm-omni#7652 resolved vllm-omni#7564 (tracked in verl-omni#445 P31);
+        # text_encoder_tp_size is now preserved natively in OmniEngineArgs.
         text_encoder_tp = config.text_encoder_tp_size
         cli_text_encoder_tp = getattr(args, "text_encoder_tp_size", None)
         if cli_text_encoder_tp is not None:
@@ -191,7 +238,6 @@ class DiffusionStrategy(OmniStrategyBase):
         )
         # TODO (mike): read custom_pipeline from engine_args.
         if pipeline_path is not None:
-            engine_args["enable_dummy_pipeline"] = True
             engine_args["custom_pipeline_args"] = {"pipeline_class": pipeline_path}
 
             pipeline_cls = VllmOmniPipelineBase.get_class(
@@ -213,6 +259,15 @@ class DiffusionStrategy(OmniStrategyBase):
 
         engine_args["enable_prompt_embed_cache"] = self.server.config.enable_prompt_embed_cache
         engine_args["prompt_embed_cache_size"] = self.server.config.prompt_embed_cache_size
+
+        # Strip LLM-only fields from OmniEngineArgs before passing to diffusion ingress.
+        # Tracked upstream in https://github.com/vllm-project/vllm-omni/issues/8503.
+        allowed = _diffusion_ingress_allowed_fields()
+        dropped = sorted(key for key in engine_args if key not in allowed)
+        for key in dropped:
+            del engine_args[key]
+        if dropped:
+            logger.info("Dropping LLM-only engine args rejected by diffusion ingress: %s", dropped)
 
     def preprocess_input(
         self,
