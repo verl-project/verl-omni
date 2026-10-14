@@ -159,9 +159,9 @@ Visit our [documentation](https://verl-omni.readthedocs.io/en/latest/index.html)
     <td>✅</td>
   </tr>
   <tr>
-    <td rowspan="4">SD3.5</td>
-    <td rowspan="4">Diffusion generator</td>
-    <td rowspan="4">Text → Image</td>
+    <td rowspan="5">SD3.5</td>
+    <td rowspan="5">Diffusion generator</td>
+    <td rowspan="5">Text → Image</td>
     <td>DPO</td>
     <td>✅</td>
   </tr>
@@ -175,6 +175,10 @@ Visit our [documentation](https://verl-omni.readthedocs.io/en/latest/index.html)
   </tr>
   <tr>
     <td><a href="docs/algo/diffusion_opd.md">DiffusionOPD</a> (incl. MOPD)</td>
+    <td>✅</td>
+  </tr>
+  <tr>
+    <td><a href="docs/algo/dgpo.md">DGPO</a></td>
     <td>✅</td>
   </tr>
   <tr>

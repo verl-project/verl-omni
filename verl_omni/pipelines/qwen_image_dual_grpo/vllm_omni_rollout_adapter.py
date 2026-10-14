@@ -24,7 +24,7 @@ from vllm_omni.diffusion.data import DiffusionOutput
 from vllm_omni.diffusion.request import OmniDiffusionRequest
 from vllm_omni.diffusion.worker.request_batch import DiffusionRequestBatch
 
-from verl_omni.pipelines.diffusion_rollout_output import rollout_output
+from verl_omni.pipelines.diffusion_rollout_output import rollout_output, with_visual_artifacts
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
 from verl_omni.pipelines.qwen_image_flow_grpo.common import build_img_shapes, coalesce_not_none
 from verl_omni.pipelines.qwen_image_flow_grpo.vllm_omni_rollout_adapter import QwenImagePipelineWithLogProb
@@ -34,6 +34,7 @@ from verl_omni.pipelines.request_batch import (
 from verl_omni.pipelines.request_batch import (
     collate_prompt_rows as _collate_prompt_rows,
 )
+from verl_omni.pipelines.request_batch import requested_outputs_for_batch
 from verl_omni.pipelines.request_batch import (
     sample_per_sample_sde_windows as _sample_per_sample_sde_windows,
 )
@@ -246,6 +247,7 @@ class QwenImagePipelineWithDualLogProb(QwenImagePipelineWithLogProb):
         )
 
         sampling_params = request_batch.sampling_params_list[0]
+        requested_outputs = requested_outputs_for_batch(request_batch)
         height = sampling_params.height or self.default_sample_size * self.vae_scale_factor
         width = sampling_params.width or self.default_sample_size * self.vae_scale_factor
         num_inference_steps = sampling_params.num_inference_steps or num_inference_steps
@@ -375,8 +377,9 @@ class QwenImagePipelineWithDualLogProb(QwenImagePipelineWithLogProb):
         )
 
         self._current_timestep = None
-        if output_type == "latent":
-            image = latents
+        native_latents = latents
+        if output_type == "latent" and "image_preview" not in requested_outputs:
+            image = None
         else:
             latents = self._unpack_latents(latents, height, width, self.vae_scale_factor)
             latents = latents.to(self.vae.dtype)
@@ -431,6 +434,15 @@ class QwenImagePipelineWithDualLogProb(QwenImagePipelineWithLogProb):
                 "text_encoder_responses": text_encoder_responses,
             },
             to_cpu=True,
+        )
+        result = with_visual_artifacts(
+            result,
+            decoded=image,
+            latents=native_latents,
+            latent_layout="LC",
+            output_type=output_type,
+            context=f"pipeline={type(self).__name__}, request_id={[r.request_id for r in request_batch.requests]}",
+            requested=requested_outputs,
         )
         outputs = _split_diffusion_output_by_request(
             result,

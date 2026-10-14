@@ -1,6 +1,6 @@
 # Diffusion On-Policy Distillation
 
-Last updated: 08/31/2026.
+Last updated: 10/12/2026.
 
 ## Background
 
@@ -180,6 +180,13 @@ The distillation losses and their switches live under
 - `use_distill_loss`, `distill_loss_mode`, `distill_loss_coef` — add the
   distillation term on top of the main objective (e.g. `flow_grpo`), the same
   shape as `use_kl_loss`/`kl_loss_coef` for the reference-KL term.
+
+With `loss_mode=distill_kl` the actor update reads no log-probs, so the
+trainer skips the `old_log_prob` recompute stage and the batch carries no
+`old_log_probs` at all; `timing_s/old_log_prob` disappears from the step
+metrics, and a loss that does read log-probs fails input validation naming the
+missing key instead of training on stale values. The stage stays on whenever the loss reads log-probs or
+rollout correction is enabled.
 
 Enabling the teacher without an active distillation loss (or vice versa) is
 rejected at startup. The teacher runtime produces `teacher_prev_sample_mean`,

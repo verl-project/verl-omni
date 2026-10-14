@@ -720,3 +720,5 @@ examples/gspo_trainer/
 │   └── run_minicpmo_4_5_thinker_gspo_lora_avqa_separate_async_v1.sh ← V1 launch script (same, disaggregated 2+2 GPUs)
 └── README.md                                         ← (this file)
 ```
+
+For the GPU Megatron Geo3K image-conditioned recipe, see the [Qwen3-Omni guide](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/qwen3_omni/README.md#geo3k-image-conditioned-megatron-separate-async).

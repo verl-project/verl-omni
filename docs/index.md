@@ -1,6 +1,6 @@
 # Welcome to VeRL-Omni's documentation!
 
-Last updated: 10/06/2026
+Last updated: 10/10/2026
 
 [VeRL-Omni](https://github.com/verl-project/verl-omni) is a general RL training framework focused on multimodal generative models, built on top of [verl](https://github.com/verl-project/verl). It originated from the multi-modal generation RL effort in `verl`, and now has a dedicated home so it can evolve in a more focused way.
 
@@ -49,6 +49,7 @@ examples/config.md
 :maxdepth: 1
 :caption: Advanced Features
 
+advanced/diffusion_media_artifacts.md
 algo/async_reward.md
 algo/named_reward_models.md
 algo/rollout_correction.md
@@ -66,6 +67,7 @@ algo/flowgrpo.md
 algo/flowdppo.md
 algo/diffusion_dpo.md
 algo/diffusionnft.md
+algo/dgpo.md
 algo/grpo_guard.md
 algo/mixgrpo.md
 algo/diffusion_opd.md
@@ -91,6 +93,7 @@ examples/flux1/dancegrpo_trainer_flux1.md
 examples/grpoguard_trainer.md
 examples/mixgrpo_trainer.md
 examples/diffusionnft_trainer.md
+examples/dgpo_trainer.md
 examples/diffusionopd_trainer.md
 examples/flowgrpo_trainer_sd35_drm.md
 examples/qwen_image/flowgrpo_trainer_qwen_image.md

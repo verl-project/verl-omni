@@ -78,4 +78,8 @@ run_test 10 "Boogu-Image DiffusionNFT trainer e2e" \
     env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" BOOGU_REQUIRED=1 \
     bash tests/special_e2e/run_diffusionnft_boogu_image.sh "${diffusion_trainer_args[@]}"
 
+run_test 11 "Named image previews and MiniMax-H3 offload placeholders" \
+    env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" \
+    pytest -q tests/trainer/diffusion/test_artifact_preview_dump.py tests/pipelines/test_minimax_h3_meta_output.py
+
 gpu_smoke_summary

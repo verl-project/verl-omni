@@ -76,6 +76,7 @@ def diffusion_loss(config: DiffusionActorConfig, model_output, data: TensorDict,
 
     loss_mode = config.diffusion_loss.get("loss_mode", "flow_grpo")
     loss_func = get_diffusion_loss_fn(loss_mode)
+    loss_func.validate_inputs(loss_name=loss_mode, model_output=model_output, data=data)
 
     # Rollout Correction bypass mode only applies to log-prob policy-gradient losses.
     if "log_probs" in loss_func.required_model_output_keys:
@@ -87,7 +88,6 @@ def diffusion_loss(config: DiffusionActorConfig, model_output, data: TensorDict,
         if rc_cfg.bypass_mode:
             _apply_bypass_rc(log_prob, old_log_prob, rc_cfg, data, metrics)
 
-    loss_func.validate_inputs(loss_name=loss_mode, model_output=model_output, data=data)
     loss_result = loss_func(config=config, model_output=model_output, data=data)
     loss_value = loss_result.loss
     metrics_values = loss_result.metrics

@@ -6,8 +6,8 @@ paths:
 
 # Reward Rules
 
-- `verl_omni/utils/reward_score/` — the **scorers**, one reward per file (9 plus
-  `reward_utils.py`). Scorers own their own I/O, including HTTP and model loading.
+- `verl_omni/utils/reward_score/` — the **scorers**, one reward per file plus shared
+  `reward_utils.py`. Scorers own their own I/O, including HTTP and model loading.
 - `verl_omni/reward_loop/reward_manager/{visual,multi}.py` — the **managers**, which
   resolve the configured scorer, feed it one sample at a time, and turn its return
   value into `rm_scores` + metrics.
@@ -17,7 +17,7 @@ paths:
 The `default_compute_score_image` dispatcher in `reward_score/__init__.py` is a
 **fallback with a single branch** (`jpeg_compressibility`). It runs only when
 `reward.custom_reward_function.path` is unset. Adding a branch there is *not* how a
-reward gets wired up — all nine other scorers are selected from the run config:
+reward gets wired up — other scorers are selected from the run config:
 
 ```bash
 # single reward
@@ -34,9 +34,10 @@ reward.reward_manager.name=MultiVisualRewardManager
 ```
 
 `path` accepts a file path or a `pkg://` module. Under `reward_functions.<key>`,
-`{path, name, weight, required}` are reserved and **every other key is forwarded to
+`{path, name, model, weight, required, routing_weights}` are reserved and **every other key is forwarded to
 the scorer as a keyword argument** — that is how `server_url` and `noise_level`
-arrive. `data.reward_fn_key` (default `data_source`) names the dataset column that
+arrive. `model` selects a named reward model; `routing_weights` is reserved for
+component-reward consumers. `data.reward_fn_key` (default `data_source`) names the dataset column that
 becomes the `data_source` argument.
 
 The surrounding config — reward-model resource pools, worker counts, how the reward
@@ -69,34 +70,32 @@ async def compute_score_<name>(
 
 ## Input contract
 
-The manager validates `responses` against the active training or validation
-`output_type`, then forwards it without dtype conversion. Follow the
-[rollout response contract](../../docs/contributing/integrating_a_diffusion_model.md#41-rollout-response-contract):
+The manager checks that `responses` matches the explicitly selected primary
+artifact, then forwards it without dtype conversion. Follow the
+[named media contract](../../docs/advanced/diffusion_media_artifacts.md#consumers-and-failure-policy):
 
-- Pixel-valued `solution_image` is `torch.uint8` in `[0, 255]`; do not multiply
-  it by 255 again. Convert with `.float() / 255.0` only when the reward model
-  requires normalized input.
-- A single image arrives as `(C, H, W)`, while a video arrives as
-  `(T, C, H, W)` and can be frame-subsampled via
-  `extra_info["frame_interval"]`.
-- `latent_http_scorer_client` receives a model-native floating-point latent when
-  `output_type=latent`. With `output_type=both`, the latent is carried separately
-  in `extra_info["latents_clean"]`.
-- Generated audio is separate from `solution_image` and retains its original
-  floating-point dtype.
-
-Don't assume more than that:
-
-- Channels-last is accepted by some scorers (`hpsv3`, `pickscore` sniff
-  `shape[-1] in (1, 3)`).
-- `extra_info` is mutated by the manager before the scorer sees it.
+- `extra_info["media_artifacts"]` carries named tensors and their modality,
+  representation and layout; `primary_artifact` and `preview_artifact` are explicit
+  selectors. Never choose a stream from tuple position, rank or channel size.
+- Pixel scorers select the decoded preview: uint8 `CHW` images or `TCHW` videos.
+  A latent primary is not a pixel fallback. Legacy pixel inputs still require
+  an explicit `media_kind`; video also requires FPS. Convert pixels with
+  `.float() / 255.0` only when the reward model requires normalized input.
+- Latent scorers select the required named latent and validate its native layout.
+  The SD3 HTTP scorer uses `image_latent` (`CHW`), not `latents_clean` or a decoded
+  response. Prompt embeddings remain aligned with that rollout.
+- Generated audio is a separate floating-point `CT` artifact with an explicit
+  sample rate. Video frame subsampling uses `extra_info["frame_interval"]`.
+- The manager adds turn and rollout-reward metadata to `extra_info` before scoring.
 
 ## Failure and heavy state
 
-- **Raising is allowed.** `MultiVisualRewardManager` catches per-sub-reward and
-  substitutes `0.0` unless that entry sets `required: true`. `VisualRewardManager`
-  has no try/except, so a raise there propagates — raise only when the run genuinely
-  cannot continue (`latent_http_scorer_client` does this after exhausting retries).
+- **Contract errors are fatal.** `ArtifactContractError` propagates even for
+  optional sub-rewards; invalid or missing artifacts must not become a zero score.
+  Other operational scorer failures contribute `0.0` in `MultiVisualRewardManager`
+  unless `required: true`; `VisualRewardManager` propagates scorer failures.
+- Scorers requiring a native `reward_model` validate required call arguments
+  before optional error handling. DeSync and VideoAlign require an explicit `fps` kwarg.
 - **Network calls belong in the scorer**, not the manager — every `aiohttp` call in
   the repo is scorer-side. Managers only forward `reward_router_address` /
   `model_name` down.
@@ -109,8 +108,7 @@ Don't assume more than that:
 ## Tests
 
 Scorer tests live in `tests/utils/reward_score/test_<module>_on_cpu.py`, manager
-tests in `tests/reward_loop/`. Three of nine scorers are covered; a rule-based
-scorer should be deterministic and CPU-testable with a synthetic tensor
-([testing.md](testing.md)).
+tests in `tests/reward_loop/`. Use explicit artifact declarations and deterministic
+synthetic tensors; mock model inference and external services ([testing.md](testing.md)).
 
 Adding a scorer: [add-reward-score](../skills/add-reward-score/SKILL.md).

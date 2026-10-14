@@ -1,6 +1,6 @@
 # Named Reward Models
 
-Last updated: 10/08/2026
+Last updated: 10/13/2026
 
 This guide describes how to configure and extend named model-backed rewards
 under `reward.models` in `verl-omni`. For the general Reward Loop interface and
@@ -239,6 +239,22 @@ final_reward = sum(term.weight * term.score)
 error and contributes zero. Model setup and lifecycle failures are always
 fatal.
 
+## Component rewards and consumer support
+
+`reward.aggregation` defaults to `weighted_sum`. This reward-only change prepares
+component assembly but rejects `preserve_components` at initialization, before
+reward workers start. No current trainer supports component rewards; the
+companion OmniNFT integration (#664) will enable the mode alongside its consumer
+and compatibility checks. Setting an OmniNFT loss name alone does not enable it.
+
+For a supporting consumer, component mode returns `rm_scores` with shape `[B, K]`.
+Columns follow the sorted reward-function names in `meta_info["reward_names"]`.
+Every term must have `required: true` and `weight: 1.0`; missing or non-finite
+components are rejected before actor update. Per-term `reward/<name>` metrics
+remain available. Summing the columns produces an unweighted diagnostic total,
+not a modality-weighted training objective. `routing_weights` is reserved for
+the companion OmniNFT consumer and is not forwarded to scorers.
+
 ## Use engine only
 
 This example serves one model with two-way tensor parallelism:
@@ -318,6 +334,69 @@ share one deployment through their `model` field. In this PR, every
 Future FSDP support will need an explicit replica-group schema because a flat
 device list cannot distinguish full replicas from ranks within one sharded
 replica.
+
+For native CLAP, AudioBox, and DeSync scorers, a single-sample `batch` supplies
+`audio`, `audio_sample_rate`, and optional `audio_layout` in preference to
+`extra_info`. Without `batch`, the scorers read `extra_info`.
+
+AudioBox and DeSync require an explicit positive integer source sample rate.
+Mono `(T,)` audio is accepted directly; two-dimensional audio requires
+`audio_layout: CT` in the scorer config or metadata and is interpreted as
+`(channels, samples)`. Channels-last `TC`, empty waveforms, and non-finite
+samples are rejected.
+
+CLAP preserves its existing defaults: an absent sample-rate key means 48 kHz,
+and two-dimensional audio is interpreted as `(channels, samples)` without a
+new config field. An explicit source sample rate still takes precedence, so
+24 kHz LTX and 32 kHz MiniMax audio are resampled from their actual rates.
+Existing CLAP recipes do not need an `audio_layout` setting. CLAP shares the
+empty/non-finite input checks, and accepts an explicit layout when supplied.
+
+HPSv3 and VideoAlign accept uint8 frames or finite floating-point frames in
+`[0, 1]`; values outside that range are rejected. HPSv3 applies the same pixel
+validation to interval and uniform sampling.
+
+### Configure native audio/video scorers
+
+Use `pkg://verl_omni.utils.reward_score.<module>` paths for the new AudioBox,
+DeSync, and VideoAlign scorers. Bind a native model through `model:` (or a
+matching model/term name) with `executor.model` set to `module:Class`:
+`audiobox:AudioBoxModel`, `desync:DeSyncModel`, or `videoalign:VideoAlignModel`,
+using the full `verl_omni.utils.reward_score` module prefix. DeSync additionally
+requires `source_root` in `executor.kwargs`; VideoAlign requires `base_model_path`.
+
+DeSync and VideoAlign require `fps` in each reward-function config. Set it to the
+actual generated frame rate, including fractional rates; there is no inferred
+or checkpoint-default FPS. For scorers that require a native `reward_model`,
+missing required arguments are configuration errors and fail before optional
+reward-error handling, even with `required: false`. If such a scorer also requires
+`fps`, the manager rejects null, boolean, non-numeric, non-finite, zero, and negative
+values before calling it. Positive fractional rates and numeric strings remain
+supported. Optional model inference failures still contribute zero and record an
+error; existing scorers retain their optional failure behavior.
+For example, with a configured native `desync` model:
+
+```yaml
+reward_functions:
+  desync:
+    path: pkg://verl_omni.utils.reward_score.desync
+    name: compute_score
+    model: desync
+    fps: 24.0  # Must match the generated video.
+    audio_layout: CT
+    required: true
+```
+
+VideoAlign requires a non-empty prompt from `ground_truth` or `prompt_key`.
+DeSync currently requires uint8 RGB `[T, C, H, W]` video. HPSv3 and VideoAlign
+also accept finite floating-point pixels in `[0, 1]`; this does not imply support
+for arbitrary layouts. Normalize decoded video to TCHW at the caller boundary.
+
+DeSync loads Python code from `source_root`, so use a **trusted checkout**. The
+reference OmniNFT revision is `fb9237f6e74edf0d0f2a683f4d975b79fde588fe`; record
+local modifications separately. Path checks do not authenticate source contents.
+The existing loader and AST compatibility lookup use the upstream package
+namespace; replacing only the entry-file import would not isolate that package.
 
 ### Wrap a Transformers model for native mode
 

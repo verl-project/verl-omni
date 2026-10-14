@@ -5,6 +5,9 @@
 # for a standalone TP=1 rollout replica, NCCL checkpoint engine, and LoRA
 # adapter-only weight sync (lora.merge=False). Follows
 # run_gspo_qwen3_omni_thinker_lora_v1_smoke.sh with separate-async overrides.
+# parameter_sync_step=2 with param_offload=true runs the decoupled-PPO snapshot
+# dance (save n -> restore 0 -> compute -> restore n) on CPU-resident parameters
+# every global step.
 #
 # Requires: verl, verl-omni, vllm-omni installed; 2 GPUs.
 #
@@ -46,7 +49,7 @@ fi
 python3 -m verl_omni.trainer.main_omni \
     data.train_files="${DATA_DIR}/train.parquet" \
     data.val_files="${DATA_DIR}/test.parquet" \
-    data.train_batch_size=4 \
+    data.train_batch_size=8 \
     data.max_prompt_length=256 \
     data.max_response_length=512 \
     data.val_max_samples=4 \
@@ -111,7 +114,7 @@ python3 -m verl_omni.trainer.main_omni \
     reward.reward_manager.name=naive \
     trainer.v1.trainer_mode=omni_separate_async \
     trainer.v1.separate_async.num_warmup_batches=1 \
-    trainer.v1.separate_async.parameter_sync_step=1 \
+    trainer.v1.separate_async.parameter_sync_step=2 \
     trainer.val_before_train=false \
     trainer.balance_batch=True \
     trainer.critic_warmup=0 \

@@ -17,11 +17,7 @@ from types import SimpleNamespace
 import torch
 from vllm_omni.diffusion.data import DiffusionOutput
 
-from verl_omni.pipelines.diffusion_rollout_output import (
-    rollout_output,
-    with_rollout_data,
-    wrap_rollout_postprocessor,
-)
+from verl_omni.pipelines.diffusion_rollout_output import rollout_output, with_rollout_data, wrap_rollout_postprocessor
 from verl_omni.pipelines.request_batch import split_diffusion_output_by_request
 
 

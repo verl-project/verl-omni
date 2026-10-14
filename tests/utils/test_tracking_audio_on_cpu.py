@@ -34,12 +34,20 @@ def _load_tracking_module(monkeypatch):
 
     # Avoid importing the package root, whose optional rollout dependencies are
     # intentionally absent from this focused utility-test environment.
-    package_names = ("verl_omni", "verl_omni.utils", "verl_omni.utils.reward_score")
+    package_names = ("verl_omni", "verl_omni.pipelines", "verl_omni.utils", "verl_omni.utils.reward_score")
     for name in package_names:
         package = types.ModuleType(name)
         package.__path__ = []
         monkeypatch.setitem(sys.modules, name, package)
     monkeypatch.setitem(sys.modules, "verl_omni.utils.reward_score.reward_utils", reward_utils)
+
+    media_name = "verl_omni.pipelines.rollout_media"
+    if media_name not in sys.modules:
+        media_spec = importlib.util.spec_from_file_location(media_name, root / "verl_omni/pipelines/rollout_media.py")
+        media_module = importlib.util.module_from_spec(media_spec)
+        monkeypatch.setitem(sys.modules, media_name, media_module)
+        assert media_spec.loader is not None
+        media_spec.loader.exec_module(media_module)
 
     module_path = root / "verl_omni/utils/tracking.py"
     spec = importlib.util.spec_from_file_location("tracking_under_test", module_path)
@@ -101,7 +109,7 @@ def test_export_video_encodes_rgb_and_audio_in_one_ffmpeg_invocation(monkeypatch
 
 
 @pytest.mark.parametrize("layout", ["tchw", "cthw", "thwc"])
-def test_video_tensor_to_rgb24_normalizes_supported_layouts(monkeypatch, layout):
+def test_video_tensor_to_rgb24_requires_canonical_or_declared_layout(monkeypatch, layout):
     tracking = _load_tracking_module(monkeypatch)
     canonical = torch.arange(2 * 3 * 4 * 5, dtype=torch.uint8).reshape(2, 3, 4, 5)
     video = {
@@ -110,7 +118,14 @@ def test_video_tensor_to_rgb24_normalizes_supported_layouts(monkeypatch, layout)
         "thwc": canonical.permute(0, 2, 3, 1),
     }[layout]
 
-    frames, width, height = tracking._video_tensor_to_rgb24(video)
+    from verl_omni.pipelines.rollout_media import MediaArtifact, MediaSpec
+
+    if layout != "tchw":
+        with pytest.raises(ValueError, match="T, 3, H, W"):
+            tracking._video_tensor_to_rgb24(video)
+    declared = MediaArtifact(MediaSpec("video", "decoded", layout.upper(), fps=24), video)
+    canonical_artifact = declared.normalized(context="adapter", name="video_preview")
+    frames, width, height = tracking._video_tensor_to_rgb24(canonical_artifact)
 
     assert (width, height) == (5, 4)
     assert frames.tobytes() == canonical.permute(0, 2, 3, 1).contiguous().numpy().tobytes()
@@ -152,10 +167,11 @@ def test_wandb_wrapper_forwards_audio_to_video_export(monkeypatch):
         captured.append((output, path, kwargs))
 
     monkeypatch.setattr(tracking, "_export_video", fake_export)
-    clip = torch.zeros(5, 3, 8, 10)
+    clip = torch.zeros(5, 3, 8, 10, dtype=torch.uint8)
     audio = torch.zeros(1, 800)
     wrapped, temp_dir, media_to_log = tracking.wrap_val_samples_for_wandb(
         [("prompt", clip, 0.5, audio, 48_000)],
+        media_kinds=["video"],
         fps=24,
     )
 
@@ -183,6 +199,8 @@ def test_wandb_wrapper_skips_media_failure_and_continues(monkeypatch, tmp_path):
     clip = torch.zeros(5, 3, 8, 10, dtype=torch.uint8)
     wrapped, temp_dir, media_to_log = tracking.wrap_val_samples_for_wandb(
         [("first", clip, 0.5), ("second", clip, 0.6)],
+        media_kinds=["video", "video"],
+        fps=24,
         output_dir=str(tmp_path),
     )
 
@@ -204,3 +222,53 @@ def test_wandb_media_is_logged_as_a_top_level_payload(monkeypatch):
     tracking.log_wandb_media(media, step=7)
 
     assert calls == [(media, 7, False)]
+
+
+def test_write_wav_preserves_canonical_channel_time_layout(monkeypatch, tmp_path):
+    tracking = _load_tracking_module(monkeypatch)
+    waveform = torch.tensor([[-0.25, 0.5]]).expand(9, 2)
+    output_path = tmp_path / "nine-channel.wav"
+
+    tracking._write_wav(waveform, 48_000, output_path)
+
+    with wave.open(str(output_path), "rb") as wav_file:
+        assert wav_file.getnchannels() == 1
+        assert wav_file.getnframes() == 2
+        assert wav_file.getframerate() == 48_000
+        pcm = torch.frombuffer(bytearray(wav_file.readframes(2)), dtype=torch.int16)
+    torch.testing.assert_close(pcm, torch.tensor([-8192, 16384], dtype=torch.int16))
+
+
+@pytest.mark.parametrize("audio_form", ["none", "list", "tensor", "numpy", "single"])
+@pytest.mark.parametrize("tensor_rate", [False, True])
+def test_validate_audio_batch_preserves_optional_and_broadcast_values(monkeypatch, audio_form, tensor_rate):
+    tracking = _load_tracking_module(monkeypatch)
+    count = 1 if audio_form == "single" else 2
+    waveform = torch.zeros(2, 8)
+    audios = {
+        "none": None,
+        "list": [waveform, waveform],
+        "tensor": torch.stack([waveform, waveform]),
+        "numpy": torch.stack([waveform, waveform]).numpy(),
+        "single": waveform,
+    }[audio_form]
+    rate = torch.tensor(32_000) if tensor_rate else 32_000
+
+    paired_audio, paired_rates = tracking.validate_audio_batch(audios, rate, count, context="generation dump")
+
+    assert len(paired_audio) == len(paired_rates) == count
+    assert all(item is rate for item in paired_rates)
+    for audio in paired_audio:
+        if audio_form == "none":
+            assert audio is None
+        else:
+            torch.testing.assert_close(torch.as_tensor(audio), waveform)
+
+
+def test_validate_audio_batch_preserves_absent_audio_and_rates(monkeypatch):
+    tracking = _load_tracking_module(monkeypatch)
+
+    assert tracking.validate_audio_batch(None, None, 2, context="generation dump") == (
+        [None, None],
+        [None, None],
+    )

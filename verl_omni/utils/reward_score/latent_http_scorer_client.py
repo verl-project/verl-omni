@@ -50,9 +50,14 @@ def _serialize_request(
     noise_level: float,
     noise_seed: int | None,
 ) -> bytes:
-    latents = extra_info.get("latents_clean")
-    if latents is None and isinstance(solution_image, torch.Tensor) and solution_image.shape[-3] == 16:
-        latents = solution_image
+    from verl_omni.pipelines.rollout_media import ArtifactContractError, select_artifact
+
+    artifact = select_artifact(
+        extra_info.get("media_artifacts", {}), name="image_latent", modality="image", representation="latent"
+    )
+    if artifact.spec.layout != "CHW":
+        raise ArtifactContractError(f"SD3 latent scorer expects native CHW, got {artifact.spec.layout}")
+    latents = artifact.data
 
     tensors = {
         "latents": _batched_tensor(latents, "latents_clean", expected_rank=4),
@@ -132,9 +137,8 @@ async def compute_score(
 ) -> dict:
     """Score one SD3.5 clean latent with an external DRM server.
 
-    With ``output_type=latent``, the clean latent is provided through
-    ``solution_image``. With ``output_type=both``, it is read from
-    ``extra_info["latents_clean"]``. Prompt embeddings are reused from the
+    The clean latent is selected from the named ``image_latent`` artifact in
+    ``extra_info["media_artifacts"]``. Prompt embeddings are reused from the
     rollout and remain exactly aligned with generation.
     """
     del ground_truth, kwargs

@@ -96,7 +96,8 @@ def test_rollout_inherits_boogu_pipeline_and_media_contract(adapters):
 
 @pytest.mark.parametrize("packed", [False, True])
 @pytest.mark.parametrize("guidance_scale", [1.0, 4.0])
-def test_rollout_returns_clean_latents_with_deterministic_cfg_steps(adapters, packed, guidance_scale):
+@pytest.mark.parametrize("output_mode", ["latent", "decoded", "latent_preview"])
+def test_rollout_returns_clean_latents_with_deterministic_cfg_steps(adapters, packed, guidance_scale, output_mode):
     from vllm_omni.diffusion.request import OmniDiffusionRequest
     from vllm_omni.diffusion.worker.request_batch import DiffusionRequestBatch
     from vllm_omni.inputs.data import OmniDiffusionSamplingParams
@@ -113,6 +114,11 @@ def test_rollout_returns_clean_latents_with_deterministic_cfg_steps(adapters, pa
     mask = torch.ones(batch_size, 3, dtype=torch.bool)
     pipeline.encode_prompt = MagicMock(side_effect=[(embeds, mask), (embeds * 0, mask)])
     pipeline.prepare_latents = MagicMock(return_value=torch.zeros(batch_size, 3, 2, 2))
+    pipeline.vae = SimpleNamespace(
+        dtype=torch.float32,
+        config=SimpleNamespace(scaling_factor=None, shift_factor=None),
+        decode=MagicMock(return_value=(torch.zeros(batch_size, 3, 2, 2),)),
+    )
     positive = torch.full((batch_size, 3, 2, 2), 2.0, dtype=torch.bfloat16)
     negative = torch.ones_like(positive)
     pipeline.predict = MagicMock(side_effect=[positive, negative] * 2 if guidance_scale > 1 else [positive] * 2)
@@ -138,7 +144,10 @@ def test_rollout_returns_clean_latents_with_deterministic_cfg_steps(adapters, pa
                 width=16,
                 num_inference_steps=2,
                 guidance_scale=guidance_scale,
-                output_type="latent",
+                output_type="pt" if output_mode == "decoded" else "latent",
+                extra_args={"requested_outputs": ["image_preview"]}
+                if output_mode == "latent_preview" and index == batch_size - 1
+                else {},
                 seed=index,
             ),
         )
@@ -159,8 +168,23 @@ def test_rollout_returns_clean_latents_with_deterministic_cfg_steps(adapters, pa
         rl = output.output["metadata"]["rl"]
         torch.testing.assert_close(rl["latents_clean"], torch.full((1, 3, 2, 2), expected))
         torch.testing.assert_close(rl["train_timesteps"], torch.tensor([[750.0, 250.0]]))
+        declaration = output.output["metadata"]["media_artifacts"]
+        assert declaration["primary"] == ("image_preview" if output_mode == "decoded" else "image_latent")
+        assert declaration["specs"]["image_latent"]["layout"] == "CHW"
+        payload = output.output["payload"]["image"][0]
+        torch.testing.assert_close(payload["image_latent"], torch.full((3, 2, 2), expected))
+        if output_mode == "latent":
+            assert declaration["preview"] is None
+            assert set(payload) == {"image_latent"}
+        else:
+            assert declaration["preview"] == "image_preview"
+            torch.testing.assert_close(payload["image_preview"], torch.full((3, 2, 2), 128, dtype=torch.uint8))
         assert output.trajectory_latents is None
         assert output.trajectory_log_probs is None
+    if output_mode == "latent":
+        pipeline.vae.decode.assert_not_called()
+    else:
+        pipeline.vae.decode.assert_called_once()
     times = [args.args[0].item() for args in pipeline.predict.call_args_list]
     assert times == ([0.25, 0.25, 0.75, 0.75] if guidance_scale > 1 else [0.25, 0.75])
 
