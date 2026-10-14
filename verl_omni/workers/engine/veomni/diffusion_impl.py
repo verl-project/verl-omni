@@ -40,6 +40,7 @@ from verl.utils.torch_dtypes import PrecisionType
 from verl.workers.engine.base import BaseEngine, BaseEngineCtx, EngineRegistry
 from verl.workers.engine.utils import enable_full_determinism, prepare_micro_batches
 
+from verl_omni.pipelines.model_base import DiffusionModelBase
 from verl_omni.pipelines.utils import build_scheduler, forward_and_sample_previous_step, prepare_model_inputs
 from verl_omni.workers.config import (
     DiffusionModelConfig,
@@ -54,7 +55,7 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 device_name = get_device_name()
 
 
-@EngineRegistry.register(model_type="diffusion_model", backend=["veomni"], device=["cuda"])
+@EngineRegistry.register(model_type="diffusion_model", backend=["veomni"], device=["cuda", "npu"])
 class VeOmniDiffusionEngine(BaseEngine):
     """VeOmni-backed diffusion training engine for verl-omni RL loops."""
 
@@ -77,6 +78,7 @@ class VeOmniDiffusionEngine(BaseEngine):
         self.checkpoint_config = checkpoint_config
         self.mode = None
         self.rank = torch.distributed.get_rank()
+        self.model_config.backend = engine_config.strategy
 
         self._init_device_mesh()
 
@@ -474,6 +476,17 @@ class VeOmniDiffusionEngine(BaseEngine):
             loss = torch.tensor(1.0, device=device_name)
             metrics = {}
 
+        if forward_only:
+            # Eval passes run under torch.enable_grad() (see
+            # forward_backward_batch) so FSDP2 behaviour matches train mode.
+            # Detach outputs here to release the autograd graph that
+            # enable_grad() would otherwise retain across timesteps.
+            loss = loss.detach()
+            model_output = {
+                k: v.detach() if isinstance(v, torch.Tensor) else v
+                for k, v in model_output.items()
+            }
+
         output = {
             "model_output": model_output,
             "loss": loss.detach().item(),
@@ -677,23 +690,22 @@ class VeOmniDiffusionEngine(BaseEngine):
                 if "lora_" not in name
             }
 
-        return convert_weight_keys(params, peft_model), lora_config.to_peft_dict()
+        return params, lora_config.to_peft_dict()
 
     def get_per_tensor_param(self, **kwargs):
-        load_model_to_gpu(self.module, get_device_id())
-
         peft_config_dict = None
+        model_cls = DiffusionModelBase.get_class(self.model_config)
+
         if self._is_lora:
+            load_model_to_gpu(self.module, get_device_id())
             params, peft_config_dict = self._lora_per_tensor_param(
                 base_sync_done=kwargs.get("base_sync_done", False),
                 adapter_name=kwargs.get("adapter_name"),
             )
+            if self._is_offload_param:
+                offload_model_to_cpu(self.module)
         else:
             params = self.module.state_dict()
-            params = convert_weight_keys(params, getattr(self.module, "_fsdp_wrapped_module", self.module))
-
-        if self._is_offload_param:
-            offload_model_to_cpu(self.module)
 
         device = get_device_id()
         export_dtype = PrecisionType.to_dtype(self.engine_config.model_dtype)
@@ -704,7 +716,10 @@ class VeOmniDiffusionEngine(BaseEngine):
                 tensor = tensor.to(device, non_blocking=True)
                 if tensor.is_floating_point() and tensor.dtype != export_dtype:
                     tensor = tensor.to(export_dtype, non_blocking=True)
-                yield f"transformer.{name}", tensor
+                export_name = f"transformer.{name}"
+                if model_cls.convert_export_key is not DiffusionModelBase.convert_export_key:
+                    export_name = model_cls.convert_export_key(export_name)
+                yield export_name, tensor
 
         return param_generator(), peft_config_dict
 
@@ -739,10 +754,13 @@ class EngineEvalModeCtx(BaseEngineCtx):
         assert isinstance(self.engine, VeOmniDiffusionEngine)
         super().__enter__()
         self.engine.module.eval()
+        inner = self.engine.module.module if hasattr(self.engine.module, "module") else self.engine.module
+        if hasattr(inner, "gradient_checkpointing") and inner.gradient_checkpointing:
+            inner.training = True
 
     def __exit__(self, exc_type, exc_value, traceback):
         assert isinstance(self.engine, VeOmniDiffusionEngine)
-        if self.engine.engine_config.fsdp_size > 1 and hasattr(self.engine.module, "reshard"):
+        if hasattr(self.engine.module, "reshard"):
             self.engine.module.reshard()
         super().__exit__(exc_type, exc_value, traceback)
 
@@ -755,6 +773,7 @@ class EngineTrainModeCtx(BaseEngineCtx):
         assert isinstance(self.engine, VeOmniDiffusionEngine)
         super().__enter__()
         self.engine.module.train()
+        DiffusionModelBase.get_class(self.engine.model_config).configure_train_mode(self.engine.module)
 
     def __exit__(self, exc_type, exc_value, traceback):
         assert isinstance(self.engine, VeOmniDiffusionEngine)
