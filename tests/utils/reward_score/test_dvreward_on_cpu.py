@@ -1,0 +1,128 @@
+# Copyright 2026 Bytedance Ltd. and/or its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""CPU coverage for DVReward named-image selection and HTTP scoring."""
+
+import asyncio
+import base64
+import math
+from io import BytesIO
+
+import numpy as np
+import pytest
+import torch
+from aiohttp import web
+from PIL import Image
+
+from verl_omni.pipelines.rollout_media import ArtifactContractError, MediaArtifact, MediaSpec
+from verl_omni.utils.reward_score.dvreward import compute_score_dvreward
+
+
+def image_info():
+    return {"semantic_questions": ["Is there a cat?"], "quality_questions": ["Is it clear?"]}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("named", [True, False])
+async def test_scores_selected_image_with_latent_primary(named):
+    pixels = torch.full((3, 8, 8), 73, dtype=torch.uint8)
+    latent = torch.zeros(4, 16)
+    info = image_info()
+    if named:
+        info.update(
+            media_artifacts={
+                "image_latent": MediaArtifact(MediaSpec("image", "latent", "LC"), latent),
+                "unused_image": MediaArtifact(MediaSpec("image", "decoded", "CHW"), torch.zeros_like(pixels)),
+                "chosen_image": MediaArtifact(MediaSpec("image", "decoded", "CHW"), pixels),
+            },
+            primary_artifact="image_latent",
+            preview_artifact="chosen_image",
+        )
+    else:
+        info["media_kind"] = "image"
+    seen = []
+
+    async def handler(request):
+        body = await request.json()
+        encoded = body["messages"][1]["content"][0]["image_url"]["url"]
+        with Image.open(BytesIO(base64.b64decode(encoded.split(",", 1)[1]))) as image:
+            np.testing.assert_array_equal(np.asarray(image), pixels.permute(1, 2, 0).numpy())
+        seen.append(body)
+        return web.json_response(
+            {
+                "choices": [
+                    {
+                        "logprobs": {
+                            "content": [
+                                {
+                                    "top_logprobs": [
+                                        {"token": "yes", "logprob": math.log(0.8)},
+                                        {"token": "no", "logprob": math.log(0.2)},
+                                    ]
+                                }
+                            ]
+                        },
+                        "message": {"content": "yes"},
+                    }
+                ]
+            }
+        )
+
+    app = web.Application()
+    app.router.add_post("/v1/chat/completions", handler)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = site._server.sockets[0].getsockname()[1]
+    try:
+        result = await compute_score_dvreward(
+            "test", latent if named else pixels, "cat", info, f"127.0.0.1:{port}", "judge"
+        )
+    finally:
+        await runner.cleanup()
+    assert result["score"] == pytest.approx(0.8)
+    assert len(seen) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", ["absent", "none", "latent", "video", "hwc", "float_pixels", "unlabelled"])
+async def test_invalid_selection_fails_before_http(case):
+    pixels = torch.zeros(3, 8, 8, dtype=torch.uint8)
+    preview = MediaArtifact(MediaSpec("image", "decoded", "CHW"), pixels)
+    if case == "latent":
+        preview = MediaArtifact(MediaSpec("image", "latent", "LC"), torch.zeros(4, 16))
+    elif case == "video":
+        preview = MediaArtifact(MediaSpec("video", "decoded", "TCHW", fps=24), pixels.unsqueeze(0))
+    elif case == "hwc":
+        preview = MediaArtifact(MediaSpec("image", "decoded", "HWC"), pixels.permute(1, 2, 0))
+    elif case == "float_pixels":
+        preview = MediaArtifact(MediaSpec("image", "decoded", "CHW"), pixels.float())
+    info = image_info()
+    if case != "unlabelled":
+        info.update(
+            media_artifacts={"preview": preview},
+            preview_artifact=None if case == "none" else "missing" if case == "absent" else "preview",
+        )
+    with pytest.raises(ArtifactContractError):
+        await asyncio.wait_for(compute_score_dvreward("test", pixels, "cat", info, "unreachable", "judge"), 1)
+
+
+@pytest.mark.asyncio
+async def test_empty_legacy_image_fails_before_http():
+    info = {**image_info(), "media_kind": "image"}
+    with pytest.raises(ArtifactContractError):
+        await compute_score_dvreward(
+            "test", torch.empty(3, 0, 8, dtype=torch.uint8), "cat", info, "unreachable", "judge"
+        )
