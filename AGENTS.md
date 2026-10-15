@@ -32,6 +32,13 @@ Do not open one-off PRs for tiny edits (single typo, isolated style change, one 
   - Test commands run and results.
   - Clear statement that AI assistance was used.
 
+### Protected surfaces
+
+Never edit CI or repository infrastructure — `.github/workflows/`,
+`.github/actions/`, `.github/CODEOWNERS`, and PR/issue templates — unless the
+user explicitly asks for that exact change in the current session. If a task seems
+to require it, stop and ask instead.
+
 ### Fail-closed behavior
 
 If work is duplicate/trivial busywork, **do not proceed**. Return a short explanation of what is missing.
@@ -99,6 +106,13 @@ change and explain why**.
 - **Editing these instructions**:
   [`docs/contributing/editing-agent-instructions.md`](docs/contributing/editing-agent-instructions.md)
   — Rules for modifying AGENTS.md or any domain-specific guide it references.
+- **Path-scoped rules**: [`.agents/rules/`](.agents/rules/) — invariants whose
+  `paths:` frontmatter names the files they govern. Some harnesses auto-load them;
+  whatever harness you run in, **read the rule file(s) covering a path before editing
+  it**.
+- **Shared training core** (`verl_omni/trainer/`, `verl_omni/workers/`,
+  `verl_omni/agent_loop/`): [`.agents/rules/trainer.md`](.agents/rules/trainer.md)
+  — the core stays model- and algorithm-agnostic; extend via registries, not forks.
 
 ## Acknowledgements
 
