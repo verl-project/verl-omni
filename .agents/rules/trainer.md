@@ -26,7 +26,7 @@ are the default; the v0 diffusion path (`main_diffusion.py`) is deprecated.
 
 | You are adding                 | Register at                                                              | Dispatch key                     |
 | ------------------------------ | ------------------------------------------------------------------------ | -------------------------------- |
-| Loss / advantage estimator     | `register_diffusion_loss` / `register_diffusion_adv_est` in `trainer/diffusion/diffusion_algos.py`; `register_omni_loss` in `trainer/omni/omni_algos.py` | (architecture, algorithm) |
+| Loss / advantage estimator     | `register_diffusion_loss` / `register_diffusion_adv_est` in `trainer/diffusion/diffusion_algos.py`; `register_omni_loss` in `trainer/omni/omni_algos.py` | name, e.g. `flow_grpo` / `dpo` |
 | Model or rollout adapter       | `DiffusionModelBase.register` / `VllmOmniPipelineBase.register` / `OmniModelBase.register` in `pipelines/model_base.py` | (architecture, algorithm) / (architecture, stage) |
 | Agent-loop behavior            | the agent loop stays model-agnostic — prefer fixing or extending the existing worker(s) in `agent_loop/` over registering a new one | — |
 | Rollout engine                 | **vllm-omni only** — ask the maintainer before supporting another engine  | —                                |
