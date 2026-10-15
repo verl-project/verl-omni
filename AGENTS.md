@@ -39,6 +39,11 @@ Never edit CI or repository infrastructure — `.github/workflows/`,
 user explicitly asks for that exact change in the current session. If a task seems
 to require it, stop and ask instead.
 
+The agent-instruction layer itself — `AGENTS.md`/`CLAUDE.md` and `.agents/`
+(rules and skills) — follows the same rule: edit it only when the user explicitly
+asks for that change, then follow
+[`docs/contributing/editing-agent-instructions.md`](docs/contributing/editing-agent-instructions.md).
+
 ### Fail-closed behavior
 
 If work is duplicate/trivial busywork, **do not proceed**. Return a short explanation of what is missing.
