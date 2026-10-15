@@ -11,6 +11,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""PickScore scoring functions (frozen legacy module — bug fixes only).
+
+New stateful scorers live under ``utils/reward_score/scorers/``; the
+class-based PickScore port is ``scorers/pickscore.py`` and imports this
+module's math.
+"""
 
 import asyncio
 import gc
@@ -24,6 +30,7 @@ from PIL import Image
 from transformers import CLIPModel, CLIPProcessor
 from verl.utils.device import get_device_id, get_device_name
 
+from verl_omni.utils.asyncio_utils import await_owned
 from verl_omni.utils.reward_score.image_preference_utils import clip_feature_tensor, decoded_reward_image, to_rgb_image
 
 logger = logging.getLogger(__name__)
@@ -38,28 +45,6 @@ _score_queue = asyncio.Queue()
 _consumer_task = None
 _consumer_started = False
 _consumer_lock = asyncio.Lock()
-
-
-async def _await_owned(awaitable):
-    """Finish an accepted transition before reporting caller cancellation."""
-    task = asyncio.ensure_future(awaitable)
-    cancelled = False
-    while not task.done():
-        try:
-            await asyncio.shield(task)
-        except asyncio.CancelledError:
-            if asyncio.current_task().cancelling():
-                cancelled = True
-        except BaseException:
-            if not task.done():
-                raise
-    if cancelled:
-        try:
-            task.result()
-        except BaseException:
-            pass
-        raise asyncio.CancelledError
-    return task.result()
 
 
 def _pairwise_pickscore(
@@ -77,6 +62,14 @@ def _pairwise_pickscore(
 
 
 class _PickScoreInferencer:
+    """Legacy PickScore inferencer — superseded by ``scorers/pickscore.py``.
+
+    Dropped from this module at post-window cleanup (#723 Q4) together with its
+    legacy consumers (the DIY-local queue path, ``PickScoreNativeModel``): the
+    class-based port already constructs it, and the migrated copy derives input
+    placement from model parameters instead of the cached device flag.
+    """
+
     def __init__(
         self,
         device: str | torch.device | None = None,
@@ -240,7 +233,7 @@ class PickScoreNativeModel:
         return await asyncio.gather(*futures)
 
     async def sleep(self):
-        await _await_owned(self._sleep())
+        await await_owned(self._sleep())
 
     async def _sleep(self):
         if not self.supports_cpu_offload:
@@ -269,7 +262,7 @@ class PickScoreNativeModel:
                 raise
 
     async def wake_up(self):
-        await _await_owned(self._wake_up())
+        await await_owned(self._wake_up())
 
     async def _wake_up(self):
         if not self.supports_cpu_offload:
@@ -292,7 +285,7 @@ class PickScoreNativeModel:
                 raise
 
     async def close(self):
-        await _await_owned(self._close())
+        await await_owned(self._close())
 
     async def _close(self):
         async with self._lifecycle_lock:
