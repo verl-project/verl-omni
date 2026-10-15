@@ -156,6 +156,7 @@ contributing/integrating_a_new_direct_preference_algorithm_for_diffusion_model.m
 contributing/gpu_smoke_tests.md
 contributing/npu_smoke_tests.md
 contributing/common_pitfalls.md
+contributing/tuning_diffusion_rl_convergence.md
 ```
 
 ```{toctree}

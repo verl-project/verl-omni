@@ -130,7 +130,8 @@ into the recipe:
   though `positive_loss` looks like it is improving. That collapse was measured with text CFG
   active and an incomplete LoRA sync; the rebalanced objective holds the baseline but has not
   been shown to improve it. The preference recipe below converges with the Qwen-Image values
-  and CFG-free training.
+  and CFG-free training — see
+  [Debugging a Diffusion RL Run That Does Not Converge](../../../docs/contributing/tuning_diffusion_rl_convergence.md).
 
 ### Preference reward (HPSv2.1 + PickScore + CLIPScore)
 
