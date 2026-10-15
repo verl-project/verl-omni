@@ -1,8 +1,12 @@
 # SD3.5 OCR LoRA v1 L4 precision job
 
 Runs the production SD3.5-Medium LoRA OCR recipe on **real** SD3.5 / Qwen2.5-VL
-weights and the real OCR parquet for 100 steps on **8 GPUs** (6 actor+rollout, 2
-reward). There is **no baseline** compare. Timing is written into the report only.
+weights and the real OCR parquet for 100 steps on **8 devices** (6
+actor+rollout, 2 reward). There is **no baseline** compare. Timing is written
+into the report only.
+
+Runs on NVIDIA GPU by default and on Ascend NPU via the `_npu.sh` wrapper
+(`DEVICE=npu`; attention switches to `_native_npu`).
 
 This L4 case uses **Route A (memory-first sync)**:
 
@@ -10,8 +14,9 @@ This L4 case uses **Route A (memory-first sync)**:
 - FSDP param/optimizer offload and smaller micro-batches
 - Larger `train_batch_size=16` and `rollout.n=16` for faster convergence
 
-Attention is pinned to ordinary PyTorch SDPA (`attn_backend=native`,
-`rollout_attn_backend=TORCH_SDPA`), not Flash Attention.
+Attention is pinned to ordinary PyTorch SDPA (`attn_backend=native` on GPU /
+`_native_npu` on NPU, `rollout_attn_backend=TORCH_SDPA` in both cases), not
+Flash Attention.
 
 Reference example:
 `examples/flowgrpo_trainer/sd35/run_sd35_medium_ocr_lora_v1.sh`
@@ -69,7 +74,9 @@ step-100 val floor only.
 
 ## Requirements
 
-- 8 GPUs (`NUM_GPUS_ACTOR_ROLLOUT=6`, `NUM_GPUS_REWARD=2`)
+- 8 accelerators (`NUM_GPUS_ACTOR_ROLLOUT=6`, `NUM_GPUS_REWARD=2`) — NVIDIA
+  GPUs or Ascend NPUs (CANN under `/usr/local/Ascend`, overridable via
+  `ASCEND_HOME_PATH`)
 - `stabilityai/stable-diffusion-3.5-medium` (`MODEL_PATH`) or a local copy
 - `Qwen/Qwen2.5-VL-3B-Instruct` (`REWARD_MODEL_PATH`) or a local copy
 - `$WORKSPACE/data/ocr/sd3/{train,test}.parquet`
@@ -85,8 +92,17 @@ python3 examples/flowgrpo_trainer/data_process/sd3_ocr.py \
 
 ## Run
 
+GPU:
+
 ```bash
 bash tests/convergence/sd35_medium_ocr_lora_v1/run_sd35_medium_ocr_lora_v1.sh
+```
+
+NPU (Ascend; sources CANN env, sets `DEVICE=npu`, artifacts under
+`sd35_medium_ocr_lora_v1_npu`):
+
+```bash
+bash tests/convergence/sd35_medium_ocr_lora_v1/run_sd35_medium_ocr_lora_v1_npu.sh
 ```
 
 Hydra overrides can be appended after the script. Validation runs every

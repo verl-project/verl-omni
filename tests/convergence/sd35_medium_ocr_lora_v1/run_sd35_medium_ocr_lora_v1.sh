@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
 # L4 precision job: real SD3.5-Medium + Qwen2.5-VL GenRM OCR weights, real OCR parquet,
-# 8 GPUs (6 actor+rollout, 2 reward), 100 FlowGRPO steps on the v1 sync trainer.
+# 8 accelerators (6 actor+rollout, 2 reward), 100 FlowGRPO steps on the v1 sync trainer.
+#
+# Runs on NVIDIA GPU by default; set DEVICE=npu (or use the run_*_npu.sh wrapper)
+# to run the same job on Ascend NPU.
 #
 # Route A (memory-first sync): TP-sharded rollout/reward, FSDP offload, smaller
 # micro-batches, and a larger train batch + rollout.n for faster convergence.
 #
 # Fail closed on:
-#   - visible GPU count < REQUIRED_GPUS (NUM_GPUS_ACTOR_ROLLOUT + NUM_GPUS_REWARD)
+#   - visible device count < REQUIRED_GPUS (NUM_GPUS_ACTOR_ROLLOUT + NUM_GPUS_REWARD)
 #   - rollout_prob_diff_mean > ROLLOUT_PROB_DIFF_MEAN_MAX (default 1e-4)
 #   - non-finite actor/grad_norm
 #   - step-100 val-core reward/mean below VAL_REWARD_MIN
@@ -16,9 +19,37 @@
 # Reference recipe:
 #   examples/flowgrpo_trainer/sd35/run_sd35_medium_ocr_lora_v1.sh
 set -xeuo pipefail
-export FLASHINFER_DISABLE_VERSION_CHECK=1
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd -- "${SCRIPT_DIR}/../../.." && pwd)
+
+# Device selection: gpu (default) or npu. Auto-detect when DEVICE=auto.
+DEVICE=${DEVICE:-auto}
+if [ "${DEVICE}" = "auto" ]; then
+    if command -v npu-smi >/dev/null 2>&1 && npu-smi info >/dev/null 2>&1; then
+        DEVICE=npu
+    elif command -v nvidia-smi >/dev/null 2>&1; then
+        DEVICE=gpu
+    else
+        echo "No accelerator detected (npu-smi/nvidia-smi unavailable); set DEVICE=gpu or DEVICE=npu explicitly." >&2
+        exit 1
+    fi
+fi
+case "${DEVICE}" in
+    gpu|cuda) DEVICE=gpu; TRAINER_DEVICE=cuda ;;
+    npu) TRAINER_DEVICE=npu ;;
+    *)
+        echo "Unsupported DEVICE=${DEVICE} (expected gpu|cuda|npu|auto)." >&2
+        exit 1
+        ;;
+esac
+
+if [ "${DEVICE}" = "npu" ]; then
+    export DEVICE_NAME=npu
+    export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=${RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES:-1}
+    export VERL_DATAPROTO_SERIALIZATION_METHOD=${VERL_DATAPROTO_SERIALIZATION_METHOD:-numpy}
+else
+    export FLASHINFER_DISABLE_VERSION_CHECK=1
+fi
 
 WORKSPACE=${OCR_WORKSPACE:-${WORKSPACE:-$HOME}}
 NUM_GPUS_ACTOR_ROLLOUT=${NUM_GPUS_ACTOR_ROLLOUT:-4}
@@ -45,8 +76,12 @@ VAL_FILES=${VAL_FILES:-${OCR_DATA_DIR}/test.parquet}
 
 ENGINE=vllm_omni
 REWARD_ENGINE=vllm
-ATTN_BACKEND=native
-ROLLOUT_ATTN_BACKEND=TORCH_SDPA
+if [ "${DEVICE}" = "npu" ]; then
+    ATTN_BACKEND=${ATTN_BACKEND:-_native_npu}
+else
+    ATTN_BACKEND=${ATTN_BACKEND:-native}
+fi
+ROLLOUT_ATTN_BACKEND=${ROLLOUT_ATTN_BACKEND:-TORCH_SDPA}
 CUSTOM_CHAT_TEMPLATE='{% for message in messages %}{% if message['\''role'\''] == '\''user'\'' %}{{ message['\''content'\''] }}{% endif %}{% endfor %}'
 
 L4_TEST_CASE=${L4_TEST_CASE:-sd35_medium_ocr_lora_v1}
@@ -63,7 +98,25 @@ ROLLOUT_PROB_DIFF_MEAN_MAX=${ROLLOUT_PROB_DIFF_MEAN_MAX:-1e-4}
 # Floor for val-core/*/reward/mean@* at step TOTAL_TRAIN_STEPS.
 VAL_REWARD_MIN=${VAL_REWARD_MIN:-0.8}
 
-count_visible_gpus() {
+count_visible_devices() {
+    if [ "${DEVICE}" = "npu" ]; then
+        if [[ -n "${ASCEND_RT_VISIBLE_DEVICES:-}" ]]; then
+            local csv="${ASCEND_RT_VISIBLE_DEVICES// /}"
+            if [[ -z "${csv}" ]]; then
+                echo 0
+                return
+            fi
+            local IFS=,
+            local -a ids=(${csv})
+            echo "${#ids[@]}"
+            return
+        fi
+        # Fallback: count Ascend device nodes (/dev/davinci0..N, excluding the manager).
+        local n
+        n=$(ls -1 /dev/davinci* 2>/dev/null | grep -vc 'manager' || true)
+        echo "${n:-0}"
+        return
+    fi
     if [[ -n "${CUDA_VISIBLE_DEVICES:-}" ]]; then
         local csv="${CUDA_VISIBLE_DEVICES// /}"
         if [[ -z "${csv}" ]]; then
@@ -89,10 +142,11 @@ print_l4_thresholds() {
 ================================================================================
 [L4] sd35_medium_ocr_lora_v1 precision gates
 ================================================================================
-  GPUs required           : ${REQUIRED_GPUS} (${NUM_GPUS_ACTOR_ROLLOUT} actor+rollout + ${NUM_GPUS_REWARD} reward)
+  Device                   : ${DEVICE}
+  Accelerators required    : ${REQUIRED_GPUS} (${NUM_GPUS_ACTOR_ROLLOUT} actor+rollout + ${NUM_GPUS_REWARD} reward)
   Rollout TP / Reward TP  : ${ROLLOUT_TP} / ${REWARD_TP}
   Train batch / rollout.n : ${TRAIN_BATCH_SIZE} / ${ROLLOUT_N}
-  PPO mini / micro (GPU)  : ${PPO_MINI_BATCH_SIZE} / ${PPO_MICRO_BATCH_SIZE}
+  PPO mini / micro         : ${PPO_MINI_BATCH_SIZE} / ${PPO_MICRO_BATCH_SIZE}
   max_num_seqs            : ${MAX_NUM_SEQS}
   FSDP offload            : param + optimizer enabled
   Training steps (gate)   : ${MIN_TRAIN_STEPS}
@@ -113,9 +167,9 @@ if [ "${TRAIN_BATCH_SIZE}" -lt "${PPO_MINI_BATCH_SIZE}" ] || [ $((TRAIN_BATCH_SI
     exit 1
 fi
 
-VISIBLE_GPUS=$(count_visible_gpus)
-if [[ "${VISIBLE_GPUS}" -lt "${REQUIRED_GPUS}" ]]; then
-    echo "L4 SD3.5 OCR LoRA v1 requires at least ${REQUIRED_GPUS} GPUs (visible=${VISIBLE_GPUS})." >&2
+VISIBLE_DEVICES=$(count_visible_devices)
+if [[ "${VISIBLE_DEVICES}" -lt "${REQUIRED_GPUS}" ]]; then
+    echo "L4 SD3.5 OCR LoRA v1 requires at least ${REQUIRED_GPUS} ${DEVICE} accelerators (visible=${VISIBLE_DEVICES})." >&2
     exit 1
 fi
 
@@ -222,9 +276,10 @@ python3 "${SCRIPT_DIR}/run.py" \
     reward.reward_model.rollout.enforce_eager=False \
     reward.custom_reward_function.path=verl_omni/utils/reward_score/genrm_ocr.py \
     reward.custom_reward_function.name=compute_score_ocr \
+    trainer.device="${TRAINER_DEVICE}" \
     trainer.logger=console \
     trainer.project_name=verl-l4 \
-    trainer.experiment_name=sd35_medium_ocr_lora_v1 \
+    trainer.experiment_name="${L4_TEST_CASE}" \
     trainer.log_val_generations=0 \
     trainer.val_before_train=False \
     trainer.n_gpus_per_node="${NUM_GPUS_ACTOR_ROLLOUT}" \
