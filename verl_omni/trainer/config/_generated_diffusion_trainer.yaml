@@ -95,6 +95,14 @@ actor_rollout_ref:
       add_kl_coefficient: true
       dgpo_beta: 100.0
       dgpo_clip_range: 0.01
+      art_guidance_gain: 1.0
+      art_loss_space: velocity_linear_sigma
+      art_mask_metric: sde_kl
+      art_mask_threshold: 1.0e-05
+      art_reference_noise_level: 0.8
+      art_corrective_mask_enabled: true
+      art_video_weight: 1.0
+      art_audio_weight: 1.0
       video_weight: 1.0
       audio_weight: 1.0
       video_ref_kl_coef: 0.0
@@ -619,6 +627,11 @@ algorithm:
   train_timestep_range: null
   train_timestep_count: null
   adv_mode: continuous
+  art_pairwise_reward: false
+  art_exclude_final_step: true
+  art_log_rollout_velocity_gap: false
+  art_modality_reward_weights: null
+  art_sample_log_dir: null
   paired_preference: false
   rollout_correction:
     _target_: verl.trainer.config.algorithm.RolloutCorrectionConfig

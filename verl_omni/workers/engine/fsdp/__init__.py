@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from .diffusers_impl import (  # noqa: F401
+    ARTDiffusersFSDPEngine,
     DiffusersFSDPEngine,
     DPODiffusersFSDPEngine,
     NFTDiffusersFSDPEngine,
@@ -22,6 +23,7 @@ from .omni_impl import OmniFSDPEngine  # noqa: F401
 # TODO(andy): unify DPO and NFT engines later.
 __all__ = [
     "PPODiffusersFSDPEngine",
+    "ARTDiffusersFSDPEngine",
     "DPODiffusersFSDPEngine",
     "NFTDiffusersFSDPEngine",
     "DiffusersFSDPEngine",

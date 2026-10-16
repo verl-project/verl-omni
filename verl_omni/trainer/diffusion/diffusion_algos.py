@@ -13,6 +13,10 @@
 # limitations under the License.
 """Diffusion-specific loss functions and KL penalties."""
 
+import json
+import logging
+import os
+import zlib
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
@@ -28,7 +32,10 @@ from tensordict import TensorDict
 from verl import DataProto
 from verl.utils import tensordict_utils as tu
 
+from verl_omni.trainer.diffusion.diffusion_art import art_guidance, art_loss, art_pairwise_labels, group_index_from_uid
 from verl_omni.workers.config import DiffusionActorConfig
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -1576,11 +1583,8 @@ class DGPOLoss(DiffusionLossFn):
 
     @staticmethod
     def _first_appearance_index(uid: np.ndarray) -> np.ndarray:
-        """Number groups 0, 1, ... in the order their uid first appears."""
-        _, first, inverse = np.unique(uid, return_index=True, return_inverse=True)
-        rank = np.empty_like(first)
-        rank[np.argsort(first, kind="stable")] = np.arange(first.size)
-        return rank[inverse.reshape(-1)]
+        """Number groups 0, 1, ... in the order their uid first appears (shared with DiffusionART)."""
+        return group_index_from_uid(uid)[0].numpy()
 
     @staticmethod
     def _select_shared_timesteps(
@@ -1664,6 +1668,712 @@ class DGPOLoss(DiffusionLossFn):
         batch.batch["advantages"] = advantages[:, None].expand(-1, num_steps)
         batch.batch["returns"] = batch.batch["advantages"]
         batch.batch["sample_level_rewards"] = reward_tensor[:, None].expand(-1, num_steps)
+        return batch
+
+
+@register_diffusion_loss("diffusion_art")
+class DiffusionARTLoss(DiffusionLossFn):
+    """DiffusionART: aggregation-first reward tilting (Wan et al., arXiv:2610.12572).
+
+    Per prompt, the rewards and clean endpoints of its ``n`` ODE rollouts are aggregated into one
+    unit-RMS guidance direction ``G(c)`` (the reward-endpoint covariance, ``art_guidance``). Every
+    ODE state ``s_t`` the rollouts visited then regresses the current velocity toward the frozen
+    target ``v_old(s_t) - G(c)`` (``v = noise - x0`` convention; the paper writes ``v_old + G``)
+    with weight ``t``, and a trust-region mask drops items whose drift from ``v_old`` is both large
+    and outward (``art_loss``). Splitting each rollout batch into two optimizer steps
+    (``ppo_mini_batch_size = data.train_batch_size / 2``) gives the paper's second, drift-restoring
+    update: the second mini batch sees ``v_theta`` after the first step while its target still comes
+    from ``v_old``. There are no likelihoods, no differentiable reward, no EMA and no KL term.
+
+    Audio-video pipelines keep one unified token sequence ``[video | audio]`` split at
+    ``video_seq_len``. Guidance, mask and MSE are then computed per modality, each from its own
+    reward route (``algorithm.art_modality_reward_weights`` or ``reward_functions.*.routing_weights``)
+    and with its own unit RMS, and combined with ``art_video_weight`` / ``art_audio_weight``.
+    """
+
+    uses_old_adapter = True
+    required_model_output_keys = ("forward_prediction", "old_prediction", "t_expanded")
+    required_data_keys = ("art_guidance", "sigma_next")
+    optional_data_keys = ("video_seq_len", "art_anchor", "rollout_velocity", "segment_sigma", "segment_sigma_next")
+    #: Replicated per-sample tensors carrying whole-rollout scalars that the loss reports as ``actor/<name>``:
+    #: OmniNFT's ``reward/<name>/{mean,std,min,max}`` and ``reward/sum/{mean,std}`` (same channel and
+    #: semantics) plus ART's per-modality guidance statistics.
+    batch_metric_prefix = "_art_metric::"
+
+    @staticmethod
+    def _segments(width: int, video_seq_len: Optional[torch.Tensor]) -> list[tuple[str, slice]]:
+        """Token ranges along dim 1: the whole latent, or ``[video | audio]`` split at ``video_seq_len``."""
+        if video_seq_len is None:
+            return [("", slice(0, width))]
+        values = video_seq_len.reshape(-1)
+        split = int(values[0].item())
+        if not torch.all(values == split) or not 0 < split < width:
+            raise ValueError(f"video_seq_len must be one shared value in (0, {width}), got {values.tolist()}.")
+        return [("video", slice(0, split)), ("audio", slice(split, width))]
+
+    @classmethod
+    def compute_loss(
+        cls,
+        *,
+        forward_prediction: torch.Tensor,
+        old_prediction: torch.Tensor,
+        t_expanded: torch.Tensor,
+        art_guidance: torch.Tensor,
+        sigma_next: torch.Tensor,
+        config: DiffusionActorConfig,
+        video_seq_len: Optional[torch.Tensor] = None,
+        art_anchor: Optional[torch.Tensor] = None,
+        rollout_velocity: Optional[torch.Tensor] = None,
+        segment_sigma: Optional[torch.Tensor] = None,
+        segment_sigma_next: Optional[torch.Tensor] = None,
+    ) -> tuple[torch.Tensor, dict[str, Any]]:
+        """Masked frozen-target MSE averaged over the micro batch (paper Algorithm 1, step 5).
+
+        Masked and inactive items contribute zero but stay in the denominator, as in the paper's
+        ``1/|B|`` average. With ``video_seq_len`` the loss is the ``art_video_weight`` /
+        ``art_audio_weight`` average of the two modality losses. ``rollout_velocity`` (the Euler
+        velocity implied by consecutive rollout states) is only used for the ``old_rollout_gap`` metric.
+        ``segment_sigma`` / ``segment_sigma_next`` ``(B, n_segments)`` give each modality its own flow
+        time when a pipeline denoises the modalities on different sigma grids (the pipeline adapter
+        supplies them); without them every segment uses ``t_expanded`` / ``sigma_next``.
+        """
+        loss_cfg = config.diffusion_loss
+        sigma = t_expanded.reshape(t_expanded.shape[0], -1)[:, 0]
+        segments = cls._segments(forward_prediction.shape[1], video_seq_len)
+        for name, value in (("segment_sigma", segment_sigma), ("segment_sigma_next", segment_sigma_next)):
+            if value is not None and tuple(value.shape) != (sigma.shape[0], len(segments)):
+                raise ValueError(
+                    f"{name} must have shape (batch, {len(segments)}) for {len(segments)} segment(s), "
+                    f"got {tuple(value.shape)}."
+                )
+        if (segment_sigma is None) != (segment_sigma_next is None):
+            raise ValueError("segment_sigma and segment_sigma_next must be given together.")
+        segment_weights = {
+            "": 1.0,
+            "video": float(loss_cfg.art_video_weight),
+            "audio": float(loss_cfg.art_audio_weight),
+        }
+        total_weight = sum(segment_weights[name] for name, _ in segments)
+        per_item_loss = torch.zeros_like(sigma, dtype=torch.float32)
+        metrics: dict[str, Any] = {}
+        for index, (name, rows) in enumerate(segments):
+            anchor = None
+            if art_anchor is not None:
+                anchor = art_anchor if art_anchor.ndim == 1 else art_anchor[:, index]
+            segment_t = sigma if segment_sigma is None else segment_sigma[:, index].float()
+            segment_t_next = sigma_next if segment_sigma_next is None else segment_sigma_next[:, index].float()
+            terms = art_loss(
+                forward_prediction[:, rows],
+                old_prediction[:, rows],
+                art_guidance[:, rows],
+                segment_t,
+                segment_t_next,
+                guidance_gain=loss_cfg.art_guidance_gain,
+                loss_space=loss_cfg.art_loss_space,
+                mask_metric=loss_cfg.art_mask_metric,
+                mask_threshold=loss_cfg.art_mask_threshold,
+                reference_noise_level=loss_cfg.art_reference_noise_level,
+                corrective_mask_enabled=loss_cfg.art_corrective_mask_enabled,
+                restore_anchor=anchor,
+            )
+            per_item_loss = per_item_loss + (segment_weights[name] / total_weight) * terms["per_item_loss"]
+            prefix = f"actor/{name}/" if name else "actor/"
+            gap_velocity = None if rollout_velocity is None else rollout_velocity[:, rows]
+            metrics.update(
+                cls._segment_metrics(prefix, terms, art_guidance[:, rows], old_prediction[:, rows], gap_velocity)
+            )
+            if name:
+                metrics[f"{prefix}policy_loss"] = terms["per_item_loss"].detach().mean().item()
+            metrics.update(cls._bucket_metrics(prefix, terms, segment_t))
+        loss = per_item_loss.mean()
+        metrics["actor/policy_loss"] = loss.detach().item()
+        metrics["actor/total_loss"] = loss.detach().item()
+        return loss, metrics
+
+    @staticmethod
+    def _segment_metrics(
+        prefix: str,
+        terms: dict[str, torch.Tensor],
+        guidance: torch.Tensor,
+        old_prediction: torch.Tensor,
+        rollout_velocity: Optional[torch.Tensor],
+    ) -> dict[str, float]:
+        """Per-segment diagnostics; fractions are over active items so constant-reward batches stay readable."""
+        with torch.no_grad():
+            active = terms["active"]
+            num_active = active.sum().clamp_min(1).float()
+            metrics = {
+                f"{prefix}unmasked_loss": ((terms["per_item_mse"] * active).sum() / num_active).item(),
+                f"{prefix}active_frac": active.float().mean().item(),
+                f"{prefix}anchor_frac": terms["anchor"].float().mean().item(),
+                f"{prefix}mask_frac": (terms["masked"].float().sum() / num_active).item(),
+                f"{prefix}outward_frac": (
+                    ((terms["outward_alignment"] > 0) & active).float().sum() / num_active
+                ).item(),
+                f"{prefix}old_deviate": terms["movement_energy"].mean().item(),
+                f"{prefix}movement_score": terms["movement_score"].mean().item(),
+                f"{prefix}guidance_rms": guidance.float().flatten(1).square().mean(dim=1).sqrt().mean().item(),
+            }
+            if rollout_velocity is not None:
+                gap = (old_prediction.float() - rollout_velocity.float()).square().flatten(1).mean(dim=1)
+                metrics[f"{prefix}old_rollout_gap"] = gap.mean().item()
+        return metrics
+
+    @staticmethod
+    def _bucket_metrics(prefix: str, terms: dict[str, torch.Tensor], sigma: torch.Tensor) -> dict[str, float]:
+        """Trust-region drift and mask rate per flow-time bucket (``t_high`` >= 2/3, ``t_mid``, ``t_low`` < 1/3).
+
+        Every key is emitted on every call (``0.0`` for an empty bucket) together with ``n_items_<bucket>``, the
+        number of active items it averaged over: the dp aggregation requires an identical key set and value count
+        on every micro batch and rank, so no key may be conditional.
+        """
+        metrics: dict[str, float] = {}
+        with torch.no_grad():
+            active = terms["active"]
+            buckets = (
+                ("t_high", sigma >= 2.0 / 3.0),
+                ("t_mid", (sigma >= 1.0 / 3.0) & (sigma < 2.0 / 3.0)),
+                ("t_low", sigma < 1.0 / 3.0),
+            )
+            for name, in_bucket in buckets:
+                selected = active & in_bucket
+                count = int(selected.sum().item())
+                metrics[f"{prefix}n_items_{name}"] = float(count)
+                if count:
+                    metrics[f"{prefix}movement_score_{name}"] = terms["movement_score"][selected].mean().item()
+                    metrics[f"{prefix}mask_frac_{name}"] = terms["masked"][selected].float().mean().item()
+                else:
+                    metrics[f"{prefix}movement_score_{name}"] = 0.0
+                    metrics[f"{prefix}mask_frac_{name}"] = 0.0
+        return metrics
+
+    def __call__(
+        self,
+        *,
+        config: DiffusionActorConfig,
+        model_output: dict[str, Any],
+        data: TensorDict,
+    ) -> DiffusionLossResult:
+        self.validate_inputs(loss_name="diffusion_art", model_output=model_output, data=data)
+        optional = {key: data[key] for key in self.optional_data_keys if key in data.keys()}
+        loss, metrics = self.compute_loss(
+            forward_prediction=model_output["forward_prediction"],
+            old_prediction=model_output["old_prediction"],
+            t_expanded=model_output["t_expanded"],
+            art_guidance=data["art_guidance"],
+            sigma_next=data["sigma_next"],
+            config=config,
+            **optional,
+        )
+        metrics.update(self.collect_batch_metrics(data))
+        return DiffusionLossResult(loss=loss, metrics=metrics)
+
+    @classmethod
+    def collect_batch_metrics(cls, data: TensorDict) -> dict[str, float]:
+        """``actor/<name>`` from the replicated whole-rollout scalars attached by ``prepare_actor_batch``."""
+        metrics = {}
+        for key in data.keys():
+            if isinstance(key, str) and key.startswith(cls.batch_metric_prefix):
+                name = key[len(cls.batch_metric_prefix) :]
+                metrics[f"actor/{name}"] = data[key].detach().float().mean().item()
+        return metrics
+
+    @classmethod
+    def _attach_batch_metrics(cls, batch: DataProto, values: dict[str, Any], batch_size: int) -> None:
+        """Replicate whole-rollout scalars per sample so every micro batch / rank reports the same value."""
+        for name, value in values.items():
+            scalar = torch.as_tensor(value, dtype=torch.float32).detach().reshape(())
+            batch.batch[f"{cls.batch_metric_prefix}{name}"] = scalar.expand(batch_size).clone()
+
+    @staticmethod
+    def reward_summaries(scores: torch.Tensor, reward_names: list[str]) -> dict[str, torch.Tensor]:
+        """OmniNFT's whole-rollout reward summaries on the raw (un-normalised) components.
+
+        ``reward/sum/{mean,std}`` of the unweighted column sum and ``reward/<name>/{mean,std,min,max}`` per
+        component, population std.
+        """
+        combined = scores.sum(dim=1)
+        summaries = {"reward/sum/mean": combined.mean(), "reward/sum/std": combined.std(correction=0)}
+        for index, name in enumerate(reward_names):
+            column = scores[:, index]
+            summaries.update(
+                {
+                    f"reward/{name}/mean": column.mean(),
+                    f"reward/{name}/std": column.std(correction=0),
+                    f"reward/{name}/min": column.min(),
+                    f"reward/{name}/max": column.max(),
+                }
+            )
+        return summaries
+
+    @staticmethod
+    def write_sample_records(directory: str, step: Any, rows: list[dict[str, Any]], seed: Optional[int] = None) -> str:
+        """Write one JSON line per rollout sample to ``<directory>/step_<step>.jsonl`` and return the path.
+
+        Also appends ``{"step", "seed", "file", "n_rows"}`` to ``<directory>/index.jsonl`` so files can be ordered
+        post hoc even when ``step`` had to fall back to the uid-hash key.
+        """
+        os.makedirs(directory, exist_ok=True)
+        filename = f"step_{step}.jsonl"
+        path = os.path.join(directory, filename)
+        with open(path, "w", encoding="utf-8") as handle:
+            for row in rows:
+                handle.write(json.dumps(row, sort_keys=True) + "\n")
+        with open(os.path.join(directory, "index.jsonl"), "a", encoding="utf-8") as handle:
+            entry = {
+                "step": step if isinstance(step, int) else None,
+                "step_key": str(step),
+                "seed": seed,
+                "file": filename,
+                "n_rows": len(rows),
+            }
+            handle.write(json.dumps(entry, sort_keys=True) + "\n")
+        return path
+
+    @staticmethod
+    def _component_matrix(batch: DataProto) -> Optional[tuple[torch.Tensor, list[str]]]:
+        """Raw per-component scores ``(B, K)`` and their names from the ``reward/<name>`` extra infos the
+        weighted-sum reward manager attaches; ``None`` when the batch carries no component scores."""
+        names = sorted(
+            key[len("reward/") :]
+            for key in batch.non_tensor_batch
+            if isinstance(key, str) and key.startswith("reward/") and key.count("/") == 1 and key != "reward/combined"
+        )
+        if not names:
+            return None
+        columns = [torch.as_tensor(np.asarray(batch.non_tensor_batch[f"reward/{n}"], dtype=np.float32)) for n in names]
+        return torch.stack(columns, dim=1), names
+
+    @staticmethod
+    def validate_trainer_config(config: Any) -> None:
+        """Fail at trainer start on settings under which the run would no longer be DiffusionART.
+
+        The rollout policy must be the exact old policy (hard-copied ``old`` adapter, no EMA), each
+        visited state is used once per rollout (``ppo_epochs=1``), the guidance is a per-prompt
+        covariance (``rollout.n >= 2``), the rollout is an ODE, ``v_old`` is recomputed by the
+        training forward, so the training-side CFG must equal the rollout CFG, and the per-rank mini
+        batch (``ppo_mini_batch_size * n / dp`` samples) must be divisible by
+        ``ppo_micro_batch_size_per_gpu``, which the engine otherwise asserts only after the first rollout.
+        The paper's two-update restoration follows from ``ppo_mini_batch_size`` splitting the rollout batch
+        in two; any other split only logs a warning so ablations stay possible.
+        """
+        DiffusionLossFn.validate_trainer_config(config)
+        algorithm_cfg = config.algorithm
+        actor_cfg = config.actor_rollout_ref.actor
+        model_cfg = config.actor_rollout_ref.model
+        rollout_cfg = config.actor_rollout_ref.rollout
+        problems = []
+        if not int(model_cfg.get("lora_rank", 0) or 0) > 0:
+            problems.append("actor_rollout_ref.model.lora_rank must be > 0 (DiffusionART trains LoRA adapters)")
+        if "old" not in tuple(model_cfg.get("policy_state_adapters", ("default",))):
+            problems.append('actor_rollout_ref.model.policy_state_adapters must include "old"')
+        if rollout_cfg.get("rollout_adapter", None) != "old":
+            problems.append("actor_rollout_ref.rollout.rollout_adapter must be old")
+        if algorithm_cfg.get("old_policy_decay_schedule", "copy") != "copy":
+            problems.append(
+                "algorithm.old_policy_decay_schedule must be copy (the rollout policy is the exact old policy)"
+            )
+        if algorithm_cfg.get("old_policy_decay", None) not in (None, 0, 0.0):
+            problems.append("algorithm.old_policy_decay must be null or 0.0 (no EMA)")
+        if int(algorithm_cfg.get("old_policy_update_interval", 1)) != 1:
+            problems.append("algorithm.old_policy_update_interval must be 1")
+        if int(actor_cfg.get("ppo_epochs", 1)) != 1:
+            problems.append(
+                "actor_rollout_ref.actor.ppo_epochs must be 1 (each visited state is used once per rollout)"
+            )
+        if int(rollout_cfg.n) < 2:
+            problems.append("actor_rollout_ref.rollout.n must be >= 2 (the guidance is a per-prompt covariance)")
+        noise_level = OmegaConf.select(rollout_cfg, "algo.noise_level", default=None)
+        if noise_level is not None and float(noise_level) != 0.0:
+            problems.append("actor_rollout_ref.rollout.algo.noise_level must be 0.0 (DiffusionART rolls out an ODE)")
+        if actor_cfg.get("use_kl_loss", False):
+            problems.append("actor_rollout_ref.actor.use_kl_loss must be False (DiffusionART has no KL term)")
+        if actor_cfg.get("enable_timestep_staging", False):
+            problems.append("actor_rollout_ref.actor.enable_timestep_staging must be False")
+        if bool(algorithm_cfg.get("paired_preference", False)):
+            problems.append(
+                "algorithm.paired_preference must be False (the trainers double the mini batch for it, which the "
+                "per-rank micro-batching check below does not model; DiffusionART's pairwise variant is "
+                "algorithm.art_pairwise_reward)"
+            )
+        for key in ("guidance_scale", "true_cfg_scale", "video_cfg_scale", "audio_cfg_scale"):
+            model_value = OmegaConf.select(config, f"actor_rollout_ref.model.pipeline.{key}", default=None)
+            rollout_value = OmegaConf.select(config, f"actor_rollout_ref.rollout.pipeline.{key}", default=None)
+            if model_value is None and rollout_value is None:
+                continue
+            if float(model_value if model_value is not None else 1.0) != float(
+                rollout_value if rollout_value is not None else 1.0
+            ):
+                problems.append(
+                    f"actor_rollout_ref.model.pipeline.{key}={model_value} must equal "
+                    f"actor_rollout_ref.rollout.pipeline.{key}={rollout_value} "
+                    "(v_old is recomputed by the training forward)"
+                )
+        # The training rollout may only use CFG: the training adapter recomputes v_old with CFG alone, so STG,
+        # modality and rescale guidance must stay neutral there (validation rollouts are free to use them).
+        for key, neutral in (
+            ("video_stg_scale", 0.0),
+            ("audio_stg_scale", 0.0),
+            ("video_modality_scale", 1.0),
+            ("audio_modality_scale", 1.0),
+            ("video_rescale_scale", 0.0),
+            ("audio_rescale_scale", 0.0),
+        ):
+            value = OmegaConf.select(config, f"actor_rollout_ref.rollout.pipeline.{key}", default=None)
+            if value is not None and float(value) != neutral:
+                problems.append(
+                    f"actor_rollout_ref.rollout.pipeline.{key}={value} must be {neutral} for the training rollout "
+                    "(only CFG is reproduced when v_old is recomputed); set it in rollout.val_kwargs.pipeline instead"
+                )
+        # Micro-batching: each rank receives ppo_mini_batch_size * n / dp samples per mini batch and the engine
+        # (verl prepare_micro_batches, force_group_size defaults to 1) asserts that this count is divisible by
+        # ppo_micro_batch_size_per_gpu -- after the first rollout, so check it here. ART guidance is per sample, so
+        # micro batches need not hold whole rollout groups.
+        n = int(rollout_cfg.n)
+        micro = actor_cfg.get("ppo_micro_batch_size_per_gpu", None)
+        sp_size = int(OmegaConf.select(actor_cfg, "fsdp_config.ulysses_sequence_parallel_size", default=1) or 1)
+        dp_size = max(int(config.trainer.n_gpus_per_node) * int(config.trainer.nnodes) // sp_size, 1)
+        mini_samples = int(actor_cfg.ppo_mini_batch_size) * n
+        if mini_samples % dp_size:
+            problems.append(
+                f"ppo_mini_batch_size * rollout.n = {mini_samples} samples must be divisible by the dp size {dp_size}"
+            )
+        elif micro is not None and (mini_samples // dp_size) % int(micro):
+            per_gpu = mini_samples // dp_size
+            problems.append(
+                f"each rank gets {per_gpu} samples per mini batch (ppo_mini_batch_size "
+                f"{actor_cfg.ppo_mini_batch_size} x rollout.n {n} / dp {dp_size}), which must be divisible by "
+                f"ppo_micro_batch_size_per_gpu={micro}; set it to a divisor of {per_gpu} or raise ppo_mini_batch_size"
+            )
+        if problems:
+            raise ValueError("DiffusionART config is not supported: " + "; ".join(problems) + ".")
+
+        update_prompts = int(config.data.train_batch_size)
+        if bool(OmegaConf.select(config, "trainer.use_v1", default=False)):
+            mode = OmegaConf.select(config, "trainer.v1.trainer_mode", default="sync")
+            update_prompts //= int(OmegaConf.select(config, f"trainer.v1.{mode}.parameter_sync_step", default=1) or 1)
+        mini = int(actor_cfg.ppo_mini_batch_size)
+        if update_prompts != 2 * mini:
+            logger.warning(
+                "DiffusionART (paper Sec. 4.2) applies two disjoint updates per rollout batch, i.e. "
+                "ppo_mini_batch_size = prompts per update / 2; got ppo_mini_batch_size=%d for %d prompts.",
+                mini,
+                update_prompts,
+            )
+
+    @staticmethod
+    def _sample_records(
+        batch: DataProto,
+        reward_tensor: torch.Tensor,
+        group_index: torch.Tensor,
+        components: Optional[tuple[torch.Tensor, list[str]]],
+        standardized: Optional[tuple[torch.Tensor, list[str]]],
+        records: dict[str, torch.Tensor],
+        anchors: list[torch.Tensor],
+    ) -> list[dict[str, Any]]:
+        """One JSON-serialisable row per rollout sample: identity, raw and standardised reward components, routed
+        per-modality rewards (and pairwise labels / anchors), group index and whether its group had guidance."""
+        uid = batch.non_tensor_batch["uid"]
+        extra_info = batch.non_tensor_batch.get("extra_info")
+        rows = []
+        for i in range(len(uid)):
+            row: dict[str, Any] = {
+                "sample": i,
+                "uid": str(uid[i]),
+                "group_index": int(group_index[i]),
+                "reward": float(reward_tensor[i]),
+            }
+            if extra_info is not None and isinstance(extra_info[i], dict) and "index" in extra_info[i]:
+                row["prompt_index"] = extra_info[i]["index"]
+            if components is not None:
+                scores, names = components
+                row["reward_raw"] = {name: float(scores[i, k]) for k, name in enumerate(names)}
+            if standardized is not None:
+                scores, names = standardized
+                row["reward_standardized"] = {name: float(scores[i, k]) for k, name in enumerate(names)}
+            for key, values in records.items():
+                row[key] = float(values[i]) if values.dtype.is_floating_point else bool(values[i])
+            row["anchor"] = bool(anchors[0][i]) if len(anchors) == 1 else [bool(a[i]) for a in anchors]
+            rows.append(row)
+        return rows
+
+    @staticmethod
+    def _global_step(batch: DataProto) -> Optional[int]:
+        """The trainer step of this rollout, if the batch carries it.
+
+        The rollout strategy stamps ``global_steps`` per sample into the batch (non-tensor or tensor field);
+        ``meta_info`` is honoured too but must never be *written* by trainers: ``DataProto.to_tensordict`` folds
+        ``meta_info`` into the worker TensorDict and asserts that no key collides with a batch field.
+        """
+        value = batch.meta_info.get("global_steps")
+        if value is None and "global_steps" in batch.non_tensor_batch:
+            value = np.asarray(batch.non_tensor_batch["global_steps"]).reshape(-1)[0]
+        if value is None and "global_steps" in batch.batch.keys():
+            value = batch.batch["global_steps"].reshape(-1)[0].item()
+        return None if value is None else int(value)
+
+    @classmethod
+    def _step_seed(cls, batch: DataProto, base_seed: int) -> int:
+        """Deterministic per-rollout seed: ``data_loader_seed + global_steps``, or a hash of the ``uid``s when the
+        batch carries no step (uids are fresh every rollout)."""
+        global_steps = cls._global_step(batch)
+        if global_steps is not None:
+            return base_seed + global_steps
+        return base_seed + zlib.crc32("".join(map(str, batch.non_tensor_batch["uid"])).encode())
+
+    @staticmethod
+    def _trajectory(batch: DataProto) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Return ``(states, next_states, timesteps)`` with ``T`` entries each, for both rollout layouts.
+
+        Image rollouts emit ``all_latents`` ``(B, T + 1, ...)`` whose last entry is the clean endpoint;
+        audio-video pipelines emit ``all_latents`` ``(B, T, ...)`` plus ``all_next_latents``.
+        """
+        all_latents = batch.batch["all_latents"]
+        all_timesteps = batch.batch["all_timesteps"]
+        batch_size, num_steps = all_timesteps.shape
+        if "all_next_latents" in batch.batch.keys():
+            next_states = batch.batch["all_next_latents"]
+            if (
+                all_latents.ndim < 3
+                or all_latents.shape[:2] != (batch_size, num_steps)
+                or next_states.shape != all_latents.shape
+            ):
+                raise ValueError(
+                    "DiffusionART needs the full ODE trajectory: `all_latents` and `all_next_latents` must both have "
+                    f"shape (B, T, ...) for T timesteps; got {tuple(all_latents.shape)} / {tuple(next_states.shape)}."
+                )
+            return all_latents, next_states, all_timesteps
+        if all_latents.ndim < 3 or all_latents.shape[:2] != (batch_size, num_steps + 1):
+            raise ValueError(
+                "DiffusionART needs the full ODE trajectory: `all_latents` must have shape (B, T + 1, ...) for "
+                f"`all_timesteps` of shape (B, T); got {tuple(all_latents.shape)} and {tuple(all_timesteps.shape)}."
+            )
+        return all_latents[:, :-1], all_latents[:, 1:], all_timesteps
+
+    @staticmethod
+    def _component_scores(batch: DataProto, name: str) -> torch.Tensor:
+        """Per-sample score of one named reward from the reward-manager ``reward/<name>`` extra infos."""
+        key = f"reward/{name}"
+        if key in batch.non_tensor_batch:
+            return torch.as_tensor(np.asarray(batch.non_tensor_batch[key], dtype=np.float32)).reshape(-1)
+        raise ValueError(
+            f"DiffusionART modality routing needs per-component scores for reward {name!r}: `reward/{name}` in the "
+            "batch extra infos (the weighted-sum reward manager attaches them)."
+        )
+
+    @classmethod
+    def _modality_rewards(
+        cls, batch: DataProto, reward_tensor: torch.Tensor, config: Any, modalities: list[str]
+    ) -> tuple[dict[str, torch.Tensor], Optional[tuple[torch.Tensor, list[str]]]]:
+        """Route named reward components to the video/audio latents (OmniNFT-style), or share the scalar reward.
+
+        Returns the routed reward per modality and, when components were routed, the standardised component
+        matrix ``(B, K)`` with its names (for the per-sample records).
+
+        Components are centred per prompt and scaled like DiffusionNFT advantages
+        (``algorithm.norm_adv_by_std_in_grpo`` / ``global_std``) before the weighted sum, so routing
+        weights act on comparable scales; the guidance itself is invariant to per-prompt affine reward
+        changes, so only the relative component scales matter.
+        """
+        rewards = reward_tensor.detach().float().cpu()
+        if modalities == [""]:
+            return {"": rewards}, None
+        algorithm_cfg = config.algorithm
+        routing = algorithm_cfg.get("art_modality_reward_weights", None)
+        if routing is None:
+            routing = {}
+            reward_cfg = getattr(config, "reward", None)
+            reward_functions = reward_cfg.get("reward_functions", None) if hasattr(reward_cfg, "get") else None
+            if reward_functions is not None:
+                for name, entry in reward_functions.items():
+                    weights = entry.get("routing_weights", None)
+                    if weights is None:
+                        continue
+                    for modality in modalities:
+                        value = float(weights.get(modality, 0.0) or 0.0)
+                        if value > 0:
+                            routing.setdefault(modality, {})[name] = value
+        if not routing:
+            return {modality: rewards for modality in modalities}, None
+        names = sorted({name for weights in routing.values() for name in weights})
+        uid = batch.non_tensor_batch["uid"]
+        components = torch.stack(
+            [
+                DiffusionNFTLoss._compute_group_advantages(
+                    rewards=cls._component_scores(batch, name),
+                    uid=uid,
+                    norm_by_std=algorithm_cfg.norm_adv_by_std_in_grpo,
+                    global_std=algorithm_cfg.global_std,
+                )
+                for name in names
+            ],
+            dim=1,
+        )
+        routed = {}
+        for modality in modalities:
+            weights = dict(routing.get(modality) or {})
+            if not weights:
+                raise ValueError(
+                    f"DiffusionART has no reward routed to the {modality} latents; set "
+                    f"algorithm.art_modality_reward_weights.{modality} or "
+                    f"reward_functions.*.routing_weights.{modality}."
+                )
+            vector = torch.tensor([float(weights.get(name, 0.0)) for name in names])
+            routed[modality] = components @ vector
+        return routed, (components, names)
+
+    @classmethod
+    def prepare_actor_batch(
+        cls,
+        batch: DataProto,
+        reward_tensor: torch.Tensor,
+        config: Any,
+    ) -> DataProto:
+        """Turn ODE rollouts into DiffusionART actor tensors: cached states, schedule and per-prompt guidance.
+
+        Requires the full trajectory from a ``diffusion_art`` rollout adapter (see ``_trajectory``).
+        ``reward_tensor`` is the ``(B,)`` scalar reward of the weighted-sum reward manager; per-component scores
+        for the modality routing and the ``reward/<name>`` summaries come from its ``reward/<name>`` extra infos.
+        Writes ``train_latents`` ``(B, S, *latent)``, ``train_timesteps`` / ``train_timesteps_next``
+        ``(B, S)`` (``S`` states per rollout drawn from the first ``T - 1`` ODE positions by default,
+        ``algorithm.art_exclude_final_step``, times ``algorithm.timestep_fraction``, reseeded per rollout
+        with ``data_loader_seed + global_steps``), ``art_guidance``
+        ``(B, *latent)`` shared by all rows of a prompt (per modality for audio-video latents), the
+        pairwise ``art_anchor`` flags, optionally ``train_latents_next`` for the rollout-velocity
+        diagnostic, ``advantages`` / ``returns`` / ``sample_level_rewards`` for logging, and replicated
+        whole-rollout scalars (``batch_metric_prefix``) that the loss reports as ``actor/<name>``: OmniNFT's
+        ``reward/<name>/{mean,std,min,max}`` and ``reward/sum/{mean,std}`` when raw components are available,
+        plus per-modality ``covariance_rms``, ``inactive_group_frac`` and ``routed_reward_{mean,std}``. With
+        ``algorithm.art_sample_log_dir`` one JSON line per sample is written to ``<dir>/step_<N>.jsonl``. The raw
+        trajectory tensors are dropped afterwards so the worker batch stays as small as DiffusionNFT's.
+        """
+        algorithm_cfg = config.algorithm
+        actor_cfg = config.actor_rollout_ref.actor
+        if "uid" not in batch.non_tensor_batch:
+            raise ValueError("DiffusionART actor batch requires `uid` in non_tensor_batch.")
+        for key in ("all_latents", "all_timesteps"):
+            if key not in batch.batch.keys():
+                raise ValueError(f"DiffusionART actor batch requires `{key}` from the diffusion_art rollout adapter.")
+        batch_metrics: dict[str, Any] = {}
+        if reward_tensor.ndim != 1:
+            raise ValueError(f"DiffusionART expects a (B,) reward tensor, got {tuple(reward_tensor.shape)}.")
+        components = cls._component_matrix(batch)
+        if components is not None:
+            batch_metrics.update(cls.reward_summaries(*components))
+        states, next_states, all_timesteps = cls._trajectory(batch)
+        batch_size, num_steps = all_timesteps.shape
+        endpoints = next_states[:, -1].float()
+        segments = cls._segments(endpoints.shape[1], batch.batch.get("video_seq_len", None))
+
+        uid = batch.non_tensor_batch["uid"]
+        group_index, num_groups = group_index_from_uid(uid)
+        modality_rewards, standardized = cls._modality_rewards(
+            batch, reward_tensor, config, [name for name, _ in segments]
+        )
+        pairwise = bool(algorithm_cfg.get("art_pairwise_reward", False))
+        step_seed = cls._step_seed(batch, int(actor_cfg.data_loader_seed))
+
+        guidance = torch.zeros_like(endpoints)
+        anchors = []
+        any_active = False
+        records: dict[str, torch.Tensor] = {}
+        for name, rows in segments:
+            rewards = modality_rewards[name]
+            label = name or "reward"
+            records[f"{label}_routed"] = rewards
+            anchor = torch.zeros(batch_size, dtype=torch.bool)
+            decided = torch.ones(batch_size, dtype=torch.bool)
+            if pairwise:
+                rewards = art_pairwise_labels(
+                    rewards, group_index, num_groups, torch.Generator().manual_seed(step_seed)
+                )
+                decided = rewards != 0.5
+                anchor = ~decided & bool(decided.any())  # paper App. C.3: ties restore toward v_old
+                records[f"{label}_pairwise_label"] = rewards
+            direction, active, covariance_rms = art_guidance(
+                endpoints[:, rows], rewards, group_index, num_groups, return_covariance_rms=True
+            )
+            row_direction = direction[group_index] * decided.view(-1, *([1] * (direction.ndim - 1))).float()
+            guidance[:, rows] = row_direction
+            anchors.append(anchor)
+            any_active |= bool(active.any())
+            records[f"{label}_group_active"] = active[group_index]
+            metric_prefix = f"{name}/" if name else ""
+            batch_metrics[f"{metric_prefix}inactive_group_frac"] = 1.0 - active.float().mean()
+            batch_metrics[f"{metric_prefix}covariance_rms"] = (
+                covariance_rms[active].mean() if bool(active.any()) else torch.tensor(0.0)
+            )
+            batch_metrics[f"{metric_prefix}routed_reward_mean"] = modality_rewards[name].mean()
+            batch_metrics[f"{metric_prefix}routed_reward_std"] = modality_rewards[name].std(correction=0)
+        if not any_active:
+            logger.warning(
+                "DiffusionART: every prompt group in this batch has constant rewards; the update is a no-op."
+            )
+        cls._attach_batch_metrics(batch, batch_metrics, batch_size)
+        sample_log_dir = algorithm_cfg.get("art_sample_log_dir", None)
+        if sample_log_dir:
+            global_steps = cls._global_step(batch)
+            try:
+                cls.write_sample_records(
+                    str(sample_log_dir),
+                    global_steps if global_steps is not None else f"uid{step_seed}",
+                    cls._sample_records(batch, reward_tensor, group_index, components, standardized, records, anchors),
+                    seed=step_seed,
+                )
+            except OSError as exc:  # diagnostics must never abort a training step
+                logger.warning("DiffusionART: could not write per-sample records to %s: %s", sample_log_dir, exc)
+
+        pool = num_steps - 1 if algorithm_cfg.get("art_exclude_final_step", True) and num_steps > 1 else num_steps
+        # Fresh random subset of ODE positions per rollout batch (paper Algorithm 1); DiffusionNFT reseeds the same
+        # helper with the fixed data_loader_seed every step, which would train the same positions each step.
+        step_index = DiffusionNFTLoss._select_train_timesteps(
+            torch.arange(pool).expand(batch_size, -1),
+            timestep_fraction=algorithm_cfg.timestep_fraction,
+            seed=step_seed,
+        )
+        num_train = step_index.shape[1]
+        next_timesteps = torch.cat([all_timesteps[:, 1:], torch.zeros_like(all_timesteps[:, :1])], dim=1)
+        latent_index = step_index.view(batch_size, num_train, *([1] * (states.ndim - 2))).expand(
+            -1, -1, *states.shape[2:]
+        )
+
+        advantages = DiffusionNFTLoss._compute_group_advantages(
+            rewards=reward_tensor,
+            uid=uid,
+            norm_by_std=algorithm_cfg.norm_adv_by_std_in_grpo,
+            global_std=algorithm_cfg.global_std,
+        )
+        batch.batch["train_latents"] = states.gather(1, latent_index)
+        if algorithm_cfg.get("art_log_rollout_velocity_gap", False):
+            batch.batch["train_latents_next"] = next_states.gather(1, latent_index)
+        batch.batch["train_timesteps"] = all_timesteps.gather(1, step_index)
+        batch.batch["train_timesteps_next"] = next_timesteps.gather(1, step_index)
+        segment_timesteps = batch.batch.get("all_segment_timesteps", None)
+        if segment_timesteps is not None:
+            # (B, T, K) per-segment flow times (modalities on different sigma grids); same gather as above.
+            if segment_timesteps.shape[:2] != all_timesteps.shape or segment_timesteps.ndim != 3:
+                raise ValueError(
+                    "all_segment_timesteps must have shape (B, T, n_segments) matching all_timesteps, got "
+                    f"{tuple(segment_timesteps.shape)} vs {tuple(all_timesteps.shape)}."
+                )
+            if segment_timesteps.shape[-1] != len(segments):
+                raise ValueError(
+                    f"all_segment_timesteps has {segment_timesteps.shape[-1]} columns for {len(segments)} segment(s)."
+                )
+            segment_next = torch.cat([segment_timesteps[:, 1:], torch.zeros_like(segment_timesteps[:, :1])], dim=1)
+            segment_index = step_index.unsqueeze(-1).expand(-1, -1, segment_timesteps.shape[-1])
+            batch.batch["train_segment_timesteps"] = segment_timesteps.gather(1, segment_index)
+            batch.batch["train_segment_timesteps_next"] = segment_next.gather(1, segment_index)
+        batch.batch["art_guidance"] = guidance
+        if pairwise:
+            batch.batch["art_anchor"] = anchors[0] if len(anchors) == 1 else torch.stack(anchors, dim=1)
+        batch.batch["latents_clean"] = endpoints
+        batch.batch["advantages"] = advantages[:, None].expand(-1, num_train)
+        batch.batch["returns"] = batch.batch["advantages"]
+        batch.batch["sample_level_rewards"] = reward_tensor[:, None].expand(-1, num_train)
+        for key in ("all_latents", "all_next_latents", "all_log_probs", "all_segment_timesteps"):
+            if key in batch.batch.keys():
+                del batch.batch[key]
         return batch
 
 

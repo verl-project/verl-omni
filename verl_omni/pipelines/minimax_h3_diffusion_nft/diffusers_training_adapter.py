@@ -141,6 +141,8 @@ class MiniMaxH3DiffusionNFT(DiffusionModelBase):
         encoder_hidden_states = model_inputs["encoder_hidden_states"]
         encoder_mask = model_inputs["encoder_mask"]
         timestep = model_inputs["timestep"]
+        # Optional per-sample audio timestep (DiffusionART: audio denoises on its own sigma grid); default = video.
+        audio_timestep = model_inputs.get("audio_timestep", None)
         meta = model_inputs["latent_meta"]
         sp_size = model_inputs.get("_h3_sp_size", 1)
         device = video_rows.device
@@ -197,6 +199,7 @@ class MiniMaxH3DiffusionNFT(DiffusionModelBase):
             full_video_rows = torch.cat([sample_video_condition, video_rows[index]], dim=0).unsqueeze(0)
             full_audio_rows = torch.cat([sample_audio_condition, audio_rows[index]], dim=0).unsqueeze(0)
             video_t = float(timestep[index])
+            audio_t = video_t if audio_timestep is None else float(audio_timestep[index])
             unique_timesteps, timestep_indices = build_row_timesteps(
                 video_indices,
                 audio_indices,
@@ -204,9 +207,9 @@ class MiniMaxH3DiffusionNFT(DiffusionModelBase):
                 num_cond_audio,
                 num_text_tokens,
                 video_timestep=video_t,
-                audio_timestep=video_t,
+                audio_timestep=audio_t,
                 condition_video_timestep=max(video_t, 0.999),
-                condition_audio_timestep=1.0 if ref_block_meta is not None else video_t,
+                condition_audio_timestep=1.0 if ref_block_meta is not None else audio_t,
             )
             result = h3_ulysses_forward(
                 module,

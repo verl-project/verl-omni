@@ -128,6 +128,21 @@ def _tiny_patch_environment(tiny_model_dir: str, task: str) -> dict[str, str]:
     return env
 
 
+def _rollout_n(task: str) -> int:
+    # The Ref2VA rollout path requires exactly one output per request, while
+    # T2VA and FL2VA use two responses to exercise grouped advantages.
+    return 1 if task == "ref2va" else 2
+
+
+def _train_batch_size(num_gpus: int, task: str, algorithm: str, micro_bsz_per_gpu: int = 1) -> int:
+    """Prompts per rollout batch; the dummy parquet must hold at least this many rows.
+
+    DiffusionART applies two disjoint updates per rollout batch, so its batch is two mini batches of prompts.
+    """
+    mini_bsz = max(1, num_gpus * micro_bsz_per_gpu)
+    return mini_bsz * _rollout_n(task) * (2 if algorithm == "diffusion_art" else 1)
+
+
 def _hydra_overrides(
     *,
     tiny_model_dir: str,
@@ -146,15 +161,18 @@ def _hydra_overrides(
     width: int,
     num_frames: int,
     num_inference_steps: int,
+    algorithm: str = "flow_grpo",
 ) -> list[str]:
-    """Build a minimal task-specific MiniMax H3 FlowGRPO Hydra invocation."""
+    """Build a minimal task-specific MiniMax H3 Hydra invocation (FlowGRPO, or DiffusionART for t2va)."""
     _validate_actor_sp(num_gpus, actor_sp)
+    if algorithm not in ("flow_grpo", "diffusion_art"):
+        raise ValueError(f"unsupported algorithm {algorithm!r}")
+    if algorithm == "diffusion_art" and task != "t2va":
+        raise ValueError("the MiniMax-H3 DiffusionART adapter supports text-to-audio-video only")
     micro_bsz_per_gpu = 1
-    # The Ref2VA rollout path requires exactly one output per request, while
-    # T2VA and FL2VA use two responses to exercise grouped advantages.
-    n_resp_per_prompt = 1 if task == "ref2va" else 2
+    n_resp_per_prompt = _rollout_n(task)
     mini_bsz = max(1, num_gpus * micro_bsz_per_gpu)
-    train_batch_size = mini_bsz * n_resp_per_prompt
+    train_batch_size = _train_batch_size(num_gpus, task, algorithm, micro_bsz_per_gpu)
     partition_dir = "Ref2VA" if task == "ref2va" else "FL2VA"
     rollout_model = f"{tiny_model_dir}/{partition_dir}"
     actor_transformer = f"{tiny_model_dir}/transformer"
@@ -169,7 +187,7 @@ def _hydra_overrides(
         "data.max_prompt_length=256",
         "data.truncation=error",
         "data.seed=42",
-        # FlowGRPO policy-gradient dispatch.
+        # FlowGRPO policy-gradient dispatch (replaced below for DiffusionART).
         "algorithm.trainer_type=policy_gradient",
         "algorithm.sample_source=online",
         "algorithm.adv_estimator=flow_grpo",
@@ -259,7 +277,7 @@ def _hydra_overrides(
         # trainer
         "trainer.logger=console",
         "trainer.project_name=verl-test",
-        f"trainer.experiment_name=flowgrpo-minimax-h3-tiny-v1-{task}",
+        f"trainer.experiment_name={algorithm.replace('_', '')}-minimax-h3-tiny-v1-{task}",
         f"trainer.default_local_dir={output_dir}/checkpoints",
         f"trainer.validation_data_dir={output_dir}/validation_data",
         f"trainer.rollout_data_dir={output_dir}/rollout_data",
@@ -286,12 +304,48 @@ def _hydra_overrides(
         )
     elif task == "ref2va":
         overrides.append("actor_rollout_ref.rollout.pipeline.reference_image_short_edge=256")
+    if algorithm == "diffusion_art":
+        # Same tiny model, data, reward stub and trainer; only the algorithm (and what it requires) changes:
+        # old-adapter rollout with hard copies, an ODE rollout with every state kept, no log-probs, ART loss.
+        replaced = {
+            "algorithm.trainer_type",
+            "algorithm.adv_estimator",
+            "actor_rollout_ref.model.algorithm",
+            "actor_rollout_ref.actor.diffusion_loss.loss_mode",
+            "actor_rollout_ref.rollout.calculate_log_probs",
+            "actor_rollout_ref.rollout.algo.noise_level",
+            "actor_rollout_ref.rollout.algo.sde_type",
+            "actor_rollout_ref.rollout.algo.sde_window_size",
+            "actor_rollout_ref.rollout.algo.sde_window_range",
+            "actor_rollout_ref.rollout.algo.sde_contiguous",
+            "actor_rollout_ref.rollout.algo.sde_window_seed",
+        }
+        overrides = [o for o in overrides if o.split("=", 1)[0].lstrip("+") not in replaced]
+        overrides.extend(
+            [
+                "algorithm.trainer_type=direct_preference",
+                "algorithm.timestep_fraction=1.0",
+                "algorithm.old_policy_decay_schedule=copy",
+                "algorithm.old_policy_update_interval=1",
+                "algorithm.norm_adv_by_std_in_grpo=true",
+                "algorithm.art_exclude_final_step=true",
+                "actor_rollout_ref.model.algorithm=diffusion_art",
+                "actor_rollout_ref.model.model_type=diffusion_art_model",
+                "actor_rollout_ref.model.policy_state_adapters=['default','old']",
+                "actor_rollout_ref.actor.ppo_epochs=1",
+                "actor_rollout_ref.actor.diffusion_loss.loss_mode=diffusion_art",
+                "actor_rollout_ref.rollout.calculate_log_probs=False",
+                "actor_rollout_ref.rollout.rollout_adapter=old",
+                "actor_rollout_ref.rollout.algo.noise_level=0.0",
+            ]
+        )
     return overrides
 
 
 def run_smoke(
     *,
     task: str,
+    algorithm: str = "flow_grpo",
     tiny_model_dir: str,
     data_dir: str,
     output_dir: str,
@@ -320,11 +374,9 @@ def run_smoke(
     ensure_tiny_minimax_h3_checkpoint(tiny_model_dir, skip_if_exists=not force_rebuild)
 
     _validate_actor_sp(num_gpus, actor_sp)
-    micro_bsz_per_gpu = 1
-    # Match the rollout n in ``_hydra_overrides``: Ref2VA supports one output per
-    # request, while T2VA and FL2VA sample two responses per prompt.
-    n_resp_per_prompt = 1 if task == "ref2va" else 2
-    train_batch_size = max(1, num_gpus * micro_bsz_per_gpu) * n_resp_per_prompt
+    # Must match ``data.train_batch_size`` in ``_hydra_overrides`` (DiffusionART doubles it): a smaller parquet
+    # gives an empty dataloader and ``steps_per_epoch == 0``.
+    train_batch_size = _train_batch_size(num_gpus, task, algorithm)
     print(f"[2/3] ensuring dummy {task} parquet at {data_dir}", flush=True)
     if task == "t2va":
         train_parquet, val_parquet = build_dummy_h3_t2va_data(
@@ -360,6 +412,7 @@ def run_smoke(
     os.environ.setdefault("RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO", "0")
 
     overrides = _hydra_overrides(
+        algorithm=algorithm,
         tiny_model_dir=tiny_model_dir,
         train_parquet=train_parquet,
         val_parquet=val_parquet,
@@ -421,6 +474,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--num-frames", type=int, default=97)
     parser.add_argument("--num-inference-steps", type=int, default=4)
     parser.add_argument("--force-rebuild", action="store_true")
+    parser.add_argument(
+        "--algorithm",
+        choices=("flow_grpo", "diffusion_art"),
+        default="flow_grpo",
+        help="diffusion_art runs the MiniMax-H3 DiffusionART adapter pair (t2va only) with the same tiny assets",
+    )
     return parser.parse_args()
 
 
@@ -429,9 +488,10 @@ def main() -> None:
     _require_minimax_h3_diffusers()
     tasks = ("t2va", "fl2va", "ref2va") if args.task == "all" else (args.task,)
     for index, task in enumerate(tasks, start=1):
-        print(f"===== MiniMax-H3 FlowGRPO {task.upper()} smoke ({index}/{len(tasks)}) =====", flush=True)
+        print(f"===== MiniMax-H3 {args.algorithm} {task.upper()} smoke ({index}/{len(tasks)}) =====", flush=True)
         rc = run_smoke(
             task=task,
+            algorithm=args.algorithm,
             tiny_model_dir=args.tiny_model_dir,
             data_dir=os.path.join(args.data_dir, task),
             output_dir=os.path.join(args.output_dir, task),
@@ -450,7 +510,7 @@ def main() -> None:
         if rc != 0:
             sys.exit(rc)
     completed_tasks = " + ".join(task.upper() for task in tasks)
-    print(f"MiniMax-H3 tiny FlowGRPO {completed_tasks} smoke PASSED.")
+    print(f"MiniMax-H3 tiny {args.algorithm} {completed_tasks} smoke PASSED.")
 
 
 if __name__ == "__main__":

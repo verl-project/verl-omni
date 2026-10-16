@@ -59,6 +59,30 @@ diffusion_loss:
   # DGPO clip range on the old-policy denoising-loss ratio; 0 disables clipping
   dgpo_clip_range: 0.01
 
+  # DiffusionART multiplier on the unit-RMS guidance direction G(c)
+  art_guidance_gain: 1.0
+
+  # DiffusionART MSE weighting: velocity_linear_sigma (weight t, paper) or velocity_uniform
+  art_loss_space: velocity_linear_sigma
+
+  # DiffusionART trust-region drift metric: sde_kl (reference-SDE KL proxy, paper) or fixed_mse
+  art_mask_metric: sde_kl
+
+  # DiffusionART drift threshold delta above which outward updates are masked
+  art_mask_threshold: 1e-5
+
+  # DiffusionART reference-SDE noise level nu used by the sde_kl drift metric
+  art_reference_noise_level: 0.8
+
+  # Whether DiffusionART applies the trust-region mask; false ablates it
+  art_corrective_mask_enabled: true
+
+  # DiffusionART weight of the video-token loss in audio-video models (unused for single-modality latents)
+  art_video_weight: 1.0
+
+  # DiffusionART weight of the audio-token loss in audio-video models (unused for single-modality latents)
+  art_audio_weight: 1.0
+
   # OmniNFT video loss weight
   video_weight: 1.0
 

@@ -99,6 +99,21 @@ algorithm:
   # DiffusionNFT advantage mapping mode before reward-probability scaling
   adv_mode: continuous
 
+  # DiffusionART-Pairwise: replace scalar rewards by random disjoint-pair win/lose labels in the guidance covariance
+  art_pairwise_reward: false
+
+  # DiffusionART: drop the last ODE position from the trainable state pool (the paper's recipes do)
+  art_exclude_final_step: true
+
+  # DiffusionART: also ship the next ODE state so the actor logs mean((v_old - v_rollout)^2); doubles state memory
+  art_log_rollout_velocity_gap: false
+
+  # DiffusionART audio-video routing {video: {reward_name: weight}, audio: {...}}; null reads reward_functions.*.routing_weights
+  art_modality_reward_weights: null
+
+  # DiffusionART per-sample training records (uid, raw/standardised reward components, routed rewards, group) as <dir>/step_<N>.jsonl; null disables
+  art_sample_log_dir: null
+
   # True for pair-based algorithms (e.g. offline DPO); doubles actor batch size and disables shuffle
   paired_preference: false
 

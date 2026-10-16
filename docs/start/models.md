@@ -49,6 +49,7 @@ requirements.
 | Mix-GRPO | `examples/mixgrpo_trainer/qwen_image/run_qwen_image_ocr_lora_mixgrpo.sh` | 4×GPU |
 | Diffusion-DPO (V1 sync — default) | `examples/dpo_trainer/qwen_image/run_qwen_image_online_dpo_lora_v1.sh` | 4×GPU |
 | DiffusionNFT (V1 sync — default) | `examples/diffusionnft_trainer/qwen_image/run_qwen_image_ocr_lora_v1.sh` | 4×GPU |
+| [DiffusionART](../algo/diffusionart.md) (LoRA, V1 sync; GPU smoke e2e) | `examples/diffusionart_trainer/qwen_image/run_qwen_image_ocr_lora.sh` | 4×GPU (planned) |
 
 **Reward model:** `Qwen/Qwen3-VL-8B-Instruct` (OCR VLM judge, TP=4 colocated).
 
@@ -333,6 +334,7 @@ trainer's README in `examples/`.
 | DPO | NPU ✅<br>GPU ✅ | — | GPU ✅ | — | — | — | — | GPU ✅ | — |
 | DiffusionNFT | NPU ✅<br>GPU ✅ | — | — | — | — | NPU ✅ (T2VA)<br>GPU ✅ | — | — | — |
 | [DGPO](../algo/dgpo.md) | — | — | GPU ✅ | — | — | — | — | — | — |
+| [DiffusionART](../algo/diffusionart.md) | WIP | — | — | — | WIP | WIP | — | — | — |
 | [DiffusionOPD](../algo/diffusion_opd.md) (incl. MOPD) | — | — | GPU ✅ | — | — | — | — | — | — |
 | GSPO (incl. OPD) | — | — | — | — | — | — | — | NPU ✅<br>GPU ✅ | — |
 
