@@ -927,7 +927,7 @@ def _fsdp2_engine(omni_impl, module, ignored_names, strategy="fsdp2"):
     engine.model_config = _make_mock_model_config()
     engine.model_config.enable_activation_offload = False
     engine.model_config.enable_gradient_checkpointing = False
-    engine.device_mesh = None
+    engine.device_mesh = types.SimpleNamespace(device_type="cpu", size=lambda: 1)
     adapter_cls = MagicMock()
     adapter_cls.get_fsdp_ignored_module_names.return_value = ignored_names or []
     engine.model_adapter_cls = adapter_cls
@@ -963,6 +963,41 @@ class _FrozenTowerModule(torch.nn.Module):
         self.llm = torch.nn.Module()
         self.llm.layer = torch.nn.Linear(4, 4)
         self._no_split_modules = ["DecoderLayer"]
+
+
+@pytest.mark.parametrize("device_type", ["cuda", "npu"])
+@pytest.mark.parametrize("offload_policy,forward_only", [(False, False), (True, False), (False, True)])
+def test_build_fsdp_module_guards_transfers_before_loading_state(
+    monkeypatch, device_type, offload_policy, forward_only
+):
+    omni_impl = _get_omni_impl_module()
+    module = _FrozenTowerModule()
+    engine = _fsdp2_engine(omni_impl, module, [])
+    engine.device_mesh = types.SimpleNamespace(device_type=device_type, size=lambda: 2)
+    engine.engine_config.offload_policy = offload_policy
+    engine.engine_config.forward_only = forward_only
+    _patch_process_group_and_mesh_helpers(monkeypatch, omni_impl)
+    calls = []
+
+    def wrap(target, *args, **kwargs):
+        assert target is module
+        calls.append("wrap")
+
+    def guard(target, backend, *, pin_memory):
+        assert target is module and backend == device_type
+        assert pin_memory == (offload_policy or forward_only)
+        calls.append("guard")
+        return True
+
+    def load(target, state, mesh, policy):
+        assert target is module and mesh is engine.device_mesh
+        calls.append("load")
+
+    monkeypatch.setattr(omni_impl, "apply_fsdp2", wrap)
+    monkeypatch.setattr(omni_impl, "install_fsdp2_cpu_transfer_guard", guard)
+    monkeypatch.setattr(omni_impl, "fsdp2_load_full_state_dict", load)
+    assert engine._build_fsdp_module(module) is module
+    assert calls == ["wrap", "guard", "load"]
 
 
 def test_build_fsdp_module_injects_ignored_params_on_root_only(monkeypatch):
