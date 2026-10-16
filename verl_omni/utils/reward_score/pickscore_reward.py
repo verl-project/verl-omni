@@ -82,7 +82,8 @@ def _pairwise_pickscore(
     """Compute paired PickScore values from text and image embeddings."""
     if score_divisor == 0:
         raise ValueError("PickScore score_divisor must be non-zero")
-    cosine = torch.nn.functional.cosine_similarity(text_embeddings, image_embeddings, dim=-1)
+    # In bf16 the cosine rounds to ~4e-3 after scaling, a third of the within-group reward spread.
+    cosine = torch.nn.functional.cosine_similarity(text_embeddings.float(), image_embeddings.float(), dim=-1)
     return torch.as_tensor(logit_scale, device=cosine.device, dtype=cosine.dtype) * cosine / score_divisor
 
 
