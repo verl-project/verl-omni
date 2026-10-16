@@ -92,8 +92,6 @@ class DiffusionTeacherManager:
     def dispatch_prev_sample_mean(self, batch: DataProto):
         """Send ``batch`` to its teachers without waiting; returns a handle for ``collect_prev_sample_mean``."""
         routing_keys = self._resolve_teacher_keys(batch)
-        if len(self.teacher_model_configs) == 1:
-            return None, [(self._infer(batch, routing_keys[0]), 0)]
         # dispatch per teacher from the driver so every DP rank of a teacher sees a non-empty shard
         # that splits evenly into forward micro-batches
         order, pending = [], []

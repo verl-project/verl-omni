@@ -60,6 +60,9 @@ if [ "$DEVICE" = "npu" ]; then
     source $ASCEND_HOME_PATH/set_env.sh
     source $ASCEND_HOME_PATH/../nnal/atb/set_env.sh
 
+    # Ascend cannot unpickle the default DataProto payloads across Ray actors.
+    export VERL_DATAPROTO_SERIALIZATION_METHOD=numpy
+
     NUM_GPUS=${NUM_GPUS:-16}
     ROLLOUT_TP=${ROLLOUT_TP:-4}
     REWARD_DEVICE="npu"
@@ -68,6 +71,7 @@ if [ "$DEVICE" = "npu" ]; then
     FSDP_STRATEGY="fsdp"
     ATTN_BACKEND="native"
     ROLLOUT_ATTN_BACKEND="TORCH_SDPA"
+    RESUME_MODE=disable
 else
     DETECTED_GPUS=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | wc -l)
     NUM_GPUS=${NUM_GPUS:-${DETECTED_GPUS:-8}}
@@ -78,6 +82,7 @@ else
     FSDP_STRATEGY="fsdp2"
     ATTN_BACKEND="_flash_3_varlen_hub"
     ROLLOUT_ATTN_BACKEND="FLASH_ATTN_3_HUB"
+    RESUME_MODE=auto
 fi
 
 CLAP_MODEL_PATH=${CLAP_MODEL_PATH:-laion/larger_clap_general}
@@ -179,6 +184,7 @@ python3 -m verl_omni.trainer.main_diffusion_v1 \
     trainer.val_before_train=True \
     trainer.n_gpus_per_node=$NUM_GPUS \
     trainer.nnodes=1 \
+    trainer.resume_mode=$RESUME_MODE \
     trainer.save_freq=20 \
     trainer.test_freq=20 \
     trainer.total_epochs=15 \

@@ -19,6 +19,11 @@ logger = logging.getLogger(__name__)
 with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "version/version")) as f:
     __version__ = f.read().strip()
 
+from verl_omni.utils.npu_rmsnorm_patch import patch_diffusers_npu_rmsnorm  # noqa: E402
+
+# Affine-less RMSNorm (e.g. LTX-2.x blocks with weight=None) crashes diffusers'
+# NPU branch; patch it before any engine forward. No-op on other backends.
+patch_diffusers_npu_rmsnorm()
 
 # Apply model patches and auto-register agent loops / pipelines / rollout / reward loop / engines
 import verl_omni.agent_loop  # noqa: E402, F401

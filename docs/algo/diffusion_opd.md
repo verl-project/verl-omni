@@ -1,6 +1,6 @@
 # Diffusion On-Policy Distillation
 
-Last updated: 10/12/2026.
+Last updated: 10/14/2026.
 
 ## Background
 
@@ -218,6 +218,16 @@ A complete working recipe is
 SD3.5-Medium distills from an OCR-tuned teacher while the OCR reward is
 monitored only, showing the student reach the teacher's reward level through
 distillation alone.
+
+Distillation is not restricted to images. Any pipeline whose training adapter
+returns `prev_sample_mean` can be distilled, because the teacher runs the same
+forward the reference policy does.
+[`examples/diffusionopd_trainer/ltx2/run_ltx2_3_t2av_opd_npu.sh`](../examples/ltx2/diffusionopd_trainer_ltx2.md)
+distills LTX-2.3 on text-to-audio-video with CLAP and ImageBind monitored only.
+LTX-2.3 carries video and audio in one flat latent trajectory, so its
+`prev_sample_mean` covers both modalities and the KL averages over their
+concatenated rows — the two are weighted by row count, and there is no
+per-modality weighting.
 
 Pure distillation — the student imitates the teacher, task reward is only
 monitored:

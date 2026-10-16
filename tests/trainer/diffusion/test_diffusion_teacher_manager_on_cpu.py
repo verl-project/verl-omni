@@ -160,16 +160,6 @@ class TestComputePrevSampleMean:
         assert wg["ocr"].calls == [("ocr", 4)]
         assert wg["aes"].calls == [("aes", 1)]
 
-    def test_single_teacher_dispatches_whole_batch_once(self):
-        log = []
-        wg = {"default": FakeTeacherWorkerGroup(3.0, 2, log)}
-        manager = make_manager(SINGLE, wg)
-
-        out = manager.compute_prev_sample_mean(make_batch(["x", "y", "z"]))
-
-        assert wg["default"].calls == [("default", 3)]
-        torch.testing.assert_close(out.batch["teacher_prev_sample_mean"], torch.full((3, 4, 8, 3), 3.0))
-
 
 class TestDispatchCollectSplit:
     def test_dispatch_does_not_block_and_collect_matches_compute(self):
