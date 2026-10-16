@@ -12,7 +12,6 @@
 
 set -x
 
-export VLLM_ASCEND_ENABLE_NZ=0
 # Make verl_omni available to Ray workers
 export VERL_USE_EXTERNAL_MODULES=verl_omni
 
@@ -66,6 +65,7 @@ python3 -m verl_omni.trainer.main_omni \
     actor_rollout_ref.rollout.enable_prefix_caching=False \
     +actor_rollout_ref.rollout.engine_kwargs.vllm_omni.output_mode="ar" \
     +actor_rollout_ref.rollout.engine_kwargs.vllm_omni.pipeline_name="qwen3_omni_moe" \
+    +actor_rollout_ref.rollout.engine_kwargs.vllm_omni.additional_config='{weight_nz_mode: 0}' \
     actor_rollout_ref.rollout.val_kwargs.n=1 \
     actor_rollout_ref.rollout.val_kwargs.temperature=1.0 \
     actor_rollout_ref.rollout.val_kwargs.top_p=0.7 \
