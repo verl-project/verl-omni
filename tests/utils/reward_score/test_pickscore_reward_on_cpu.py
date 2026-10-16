@@ -109,6 +109,7 @@ def test_score_encodes_duplicate_prompts_once_and_preserves_pairing():
 class _FakeInferencer:
     def __init__(self):
         self.batches = []
+        self.processor = SimpleNamespace(tokenizer=SimpleNamespace(backend_tokenizer=SimpleNamespace()))
 
     def score(self, prompts, images):
         self.batches.append((list(prompts), list(images)))
@@ -213,6 +214,33 @@ async def test_replica_dispatch_reaches_native_pickscore_consumer_with_batch_cap
     assert infer_batch_sizes == expected_infer_batch_sizes
     max_batch_size = 16 if dispatch_batch_size is None else min(dispatch_batch_size, 16)
     assert all(size <= max_batch_size for size in infer_batch_sizes)
+
+
+@pytest.mark.parametrize("mode", ["wrapped", "unwrapped", "slow"])
+async def test_native_model_close_releases_native_tokenizer_decode_wrapper(monkeypatch, mode):
+    from tokenizers import Tokenizer
+    from tokenizers.models import WordLevel
+
+    backend = Tokenizer(WordLevel({"[UNK]": 0, "hello": 1}, unk_token="[UNK]"))
+    original_decode = backend.decode
+    if mode == "wrapped":
+
+        def decode(*args, **kwargs):
+            return original_decode(*args, **kwargs)
+
+        backend.decode = decode
+    inferencer = _FakeInferencer()
+    if mode == "slow":
+        inferencer.processor.tokenizer = SimpleNamespace()
+    else:
+        inferencer.processor.tokenizer.backend_tokenizer = backend
+    monkeypatch.setattr(pickscore_reward, "_PickScoreInferencer", lambda **kwargs: inferencer)
+    model = pickscore_reward.PickScoreNativeModel(device="cpu")
+    await model.close()
+    await model.close()
+    assert "decode" not in vars(backend)
+    assert backend.decode([1]) == "hello"
+    assert not hasattr(model, "_inferencer")
 
 
 @pytest.mark.asyncio
