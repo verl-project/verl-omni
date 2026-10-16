@@ -13,10 +13,12 @@ from verl.workers.engine.base import EngineRegistry
 from verl.workers.engine.megatron.transformer_impl import MegatronEngineWithLMHead
 
 from verl_omni.pipelines.model_base import OmniModelBase
+from verl_omni.workers.utils.parameter_revision import ParameterTrackingMixin
+from verl_omni.workers.utils.training_output import detach_microbatch_outputs
 
 
 @EngineRegistry.register(model_type="omni_model", backend="megatron")
-class OmniMegatronEngine(MegatronEngineWithLMHead):
+class OmniMegatronEngine(ParameterTrackingMixin, MegatronEngineWithLMHead):
     """Use verl's LM flow with the registered pipeline's Megatron model call."""
 
     def __init__(self, model_config, engine_config, optimizer_config, checkpoint_config):
@@ -24,6 +26,14 @@ class OmniMegatronEngine(MegatronEngineWithLMHead):
         model_config = self.model_adapter_cls.prepare_megatron_config(model_config, engine_config)
         self.model_forward = self.model_adapter_cls.get_megatron_forward()
         super().__init__(model_config, engine_config, optimizer_config, checkpoint_config)
+
+    def postprocess_micro_batch_func(self, output, data, forward_only, loss_function, local_cp_size=None):
+        result = super().postprocess_micro_batch_func(
+            output, data, forward_only, loss_function, local_cp_size=local_cp_size
+        )
+        if not forward_only and tu.get_non_tensor_data(data, "return_model_output", default=False):
+            return detach_microbatch_outputs(result)
+        return result
 
     def forward_step(self, batch_iter, model, logits_processor_func, postprocess_micro_batch_func):
         """Use verl's non-fused LM flow, selecting Omni's direct BSHD model call."""
