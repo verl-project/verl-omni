@@ -264,8 +264,9 @@ async def test_tq_writer_preserves_allowlisted_non_tensor_trajectory_metadata(mo
 
     monkeypatch.setattr(diffusion_agent_loop_tq, "list_of_dict_to_tensordict", lambda rows: rows)
 
-    async def fake_kv_batch_put(*, keys, fields, tags, partition_id):
-        captured.update(keys=keys, fields=fields, tags=tags, partition_id=partition_id)
+    async def fake_kv_batch_put(*, keys, fields=None, tags=None, partition_id=None):
+        if fields is not None:  # the payload put; the tag-only completion put is skipped
+            captured.update(keys=keys, fields=fields, tags=tags, partition_id=partition_id)
 
     monkeypatch.setattr(diffusion_agent_loop_tq.tq, "async_kv_batch_put", fake_kv_batch_put)
 
@@ -309,7 +310,7 @@ async def test_tq_writer_batches_group_sessions_and_partitions_field_sets(monkey
 
     monkeypatch.setattr(diffusion_agent_loop_tq, "list_of_dict_to_tensordict", lambda rows: rows)
 
-    async def fake_kv_batch_put(*, keys, fields, tags, partition_id):
+    async def fake_kv_batch_put(*, keys, fields=None, tags=None, partition_id=None):
         puts.append({"keys": keys, "fields": fields, "tags": tags, "partition_id": partition_id})
 
     monkeypatch.setattr(diffusion_agent_loop_tq.tq, "async_kv_batch_put", fake_kv_batch_put)
@@ -325,15 +326,19 @@ async def test_tq_writer_batches_group_sessions_and_partitions_field_sets(monkey
         gen_batch_seq=5,
     )
 
-    assert [put["keys"] for put in puts] == [["sample_0_0", "sample_2_0"], ["sample_1_0"]]
-    assert "rm_scores" in puts[1]["fields"][0]
-    assert all("rm_scores" not in put["fields"][0] for put in puts[:1])
-    assert all(tag["global_steps"] == 7 for put in puts for tag in put["tags"])
+    payload_puts = [put for put in puts if put["fields"] is not None]
+    completion_puts = [put for put in puts if put["fields"] is None]
+    assert [put["keys"] for put in payload_puts] == [["sample_0_0", "sample_2_0"], ["sample_1_0"]]
+    assert "rm_scores" in payload_puts[1]["fields"][0]
+    assert all("rm_scores" not in put["fields"][0] for put in payload_puts[:1])
+    # Each payload put is followed by a tag-only completion put for the same rows.
+    assert [put["keys"] for put in completion_puts] == [["sample_0_0", "sample_2_0"], ["sample_1_0"]]
+    assert all(tag["global_steps"] == 7 for put in payload_puts for tag in put["tags"])
     # The prompt identity rides in the tags so the trainer can restore the
     # v0 prompt-major row order: batch-local position plus the per-run
     # generation-batch number.
-    assert all(tag["prompt_index"] == 3 for put in puts for tag in put["tags"])
-    assert all(tag["gen_batch_seq"] == 5 for put in puts for tag in put["tags"])
+    assert all(tag["prompt_index"] == 3 for put in payload_puts for tag in put["tags"])
+    assert all(tag["gen_batch_seq"] == 5 for put in payload_puts for tag in put["tags"])
 
 
 def test_tq_batch_restores_non_tensor_trajectory_metadata(monkeypatch):

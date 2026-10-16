@@ -15,6 +15,7 @@
 import asyncio
 import logging
 import os
+import time
 from typing import Any
 
 import ray
@@ -299,11 +300,36 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
                 tag["gen_batch_seq"] = int(gen_batch_seq)
             rows.setdefault(tuple(field.keys()), []).append((key, field, tag))
 
+        # Rollout-side transfer accounting (issue #712): payload bytes and the
+        # put's start time must ride the payload put itself -- anything stamped
+        # only into these local dicts after that call never reaches the
+        # TransferQueue controller. The completed put's wall time follows as a
+        # tag-only update, the queue's documented tag-merge path; it is split
+        # evenly across the rows of its put. Aggregation happens in
+        # aggregate_tq_write_stats on the trainer side.
+        from verl_omni.trainer.diffusion.v1.async_profiling import (
+            TQ_PAYLOAD_BYTES_TAG,
+            TQ_PUT_AT_TAG,
+            TQ_PUT_SECONDS_TAG,
+        )
+
         for group_rows in rows.values():
+            for _key, field, tag in group_rows:
+                tag[TQ_PAYLOAD_BYTES_TAG] = sum(
+                    value.nbytes for value in field.values() if isinstance(value, torch.Tensor)
+                )
+                tag[TQ_PUT_AT_TAG] = time.time()
+            put_start = time.perf_counter()
             await tq.async_kv_batch_put(
                 keys=[key for key, _field, _tag in group_rows],
                 fields=list_of_dict_to_tensordict([field for _key, field, _tag in group_rows]),
                 tags=[tag for _key, _field, tag in group_rows],
+                partition_id=partition_id,
+            )
+            put_seconds = time.perf_counter() - put_start
+            await tq.async_kv_batch_put(
+                keys=[key for key, _field, _tag in group_rows],
+                tags=[{TQ_PUT_SECONDS_TAG: put_seconds / len(group_rows)}] * len(group_rows),
                 partition_id=partition_id,
             )
 

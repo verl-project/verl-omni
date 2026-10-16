@@ -12,6 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from verl_omni.trainer.diffusion.v1.async_profiling import (
+    ProfiledReplayBufferAsync,
+    aggregate_tq_write_stats,
+    tensordict_payload_bytes,
+)
 from verl_omni.trainer.diffusion.v1.tq_utils import (
     diffusion_tq_batch_to_dataproto,
     put_dataproto_fields_to_tq,
@@ -33,6 +38,9 @@ __all__ = [
     "PolicyGradientDiffusionTrainerV1",
     "PolicyGradientDiffusionTrainerV1SeparateAsync",
     "PolicyGradientDiffusionTrainerV1Sync",
+    "ProfiledReplayBufferAsync",
+    "aggregate_tq_write_stats",
+    "tensordict_payload_bytes",
     "get_diffusion_trainer_cls",
     "register_diffusion_trainer",
     "diffusion_tq_batch_to_dataproto",

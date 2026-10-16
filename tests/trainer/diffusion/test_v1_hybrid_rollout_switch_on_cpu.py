@@ -271,7 +271,7 @@ def test_setup_leaves_hybrid_in_rollout_mode_and_registered(monkeypatch):
     )
     monkeypatch.setattr(
         trainer_module,
-        "OmniCheckpointEngineManager",
+        "TimedOmniCheckpointEngineManager",
         lambda **kwargs: SimpleNamespace(backend=kwargs["config"].backend),
     )
     trainer.add_replicas_to_balancer = lambda: events.append("add")

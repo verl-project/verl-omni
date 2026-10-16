@@ -196,6 +196,7 @@ def test_metrics_fetches_only_metric_fields_and_preserves_outputs(monkeypatch, c
         _get_n_gpus_for_throughput=lambda: 2,
         _is_direct_preference=not policy_gradient,
         _nonfinite_grad_streak=0,
+        trainer_mode="separate_async",
     )
     batch_meta = SimpleNamespace(
         keys=["prompt_0_0", "prompt_1_0"],
@@ -274,6 +275,7 @@ def test_metrics_keeps_training_when_response_shape_telemetry_is_unavailable(mon
         _get_n_gpus_for_throughput=lambda: 1,
         _is_direct_preference=True,
         _nonfinite_grad_streak=0,
+        trainer_mode="separate_async",
     )
     tags = []
     for response_shape in response_shapes:
@@ -319,6 +321,7 @@ def test_metrics_ignores_padding_without_response_shape(monkeypatch, caplog):
         _get_n_gpus_for_throughput=lambda: 1,
         _is_direct_preference=True,
         _nonfinite_grad_streak=0,
+        trainer_mode="separate_async",
     )
     batch_meta = SimpleNamespace(
         keys=["sample_0_0", "padding_0_0"],
