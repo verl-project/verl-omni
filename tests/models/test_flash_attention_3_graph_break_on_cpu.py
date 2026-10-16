@@ -13,27 +13,30 @@
 # limitations under the License.
 """CPU tests for the intentional FA3 varlen metadata graph break.
 
-The workaround addresses two failures at the boundary between Diffusers and
-FA3. These tests keep that boundary observable without requiring FA3 or CUDA:
+The workaround sits at the boundary between Diffusers and FA3. These tests keep
+that boundary observable without requiring FA3 or CUDA:
 
-* Capturing Diffusers' data-dependent ``seqlens_k.max().item()`` produces an
+* With a mask, Diffusers' data-dependent ``seqlens_k.max().item()`` produces an
   unbacked ``max_seqlen_k`` that FA3 fake backward cannot use in Python control
   flow. A custom op records the value seen at the real Diffusers dispatch
-  boundary without requiring FA3.
+  boundary without requiring FA3. Without a mask, Diffusers 0.41 passes plain
+  sequence lengths instead.
 * The same probe after installing the workaround verifies that the eager
   boundary materializes the value before tracing resumes.
-* Independently, Inductor's ``pointless_cumsum_replacement`` cannot lower the
-  dynamic ``full(..., seq_len_q).cumsum()`` expression used for dense queries.
-  A real-Inductor canary preserves that failure evidence.
+* Diffusers 0.40 built dense-query offsets with ``full(..., seq_len_q).cumsum()``,
+  which Inductor's ``pointless_cumsum_replacement`` cannot lower under dynamic
+  shapes. Diffusers 0.41 builds them with ``arange``, so a real-Inductor test
+  now guards that the unpatched helpers compile.
 
 Failure triage:
 
-* If an unpatched canary starts passing, verify the real masked and unmasked
-  FA3 paths. This single eager boundary protects against both failures, so
-  keep it while either remains. If only one was fixed, update that rationale
-  and its canary; remove the workaround only if neither failure remains.
-* If a patched-path assertion fails while its unpatched canary still fails,
-  update the workaround for the new Diffusers/PyTorch behavior.
+* If the unpatched Inductor test fails with a ``FakeTensor``/``Node`` error,
+  the cumsum failure is back; the eager boundary covers it again.
+* If the unbacked-symbol assertion for the masked path starts failing, verify
+  the real masked FA3 path. Remove the workaround only if neither this nor the
+  cumsum failure remains.
+* If a patched-path assertion fails, update the workaround for the new
+  Diffusers/PyTorch behavior.
 * If a private helper disappears, port both the workaround and these behavior
   tests to its replacement. A renamed helper alone does not make the
   workaround obsolete.
@@ -44,7 +47,6 @@ from types import SimpleNamespace
 import pytest
 import torch
 from diffusers.models import attention_dispatch
-from torch._inductor.exc import InductorError
 from torch.fx.experimental.symbolic_shapes import has_free_unbacked_symbols
 
 from verl_omni.utils.diffusion_compile import _keep_varlen_attention_metadata_eager
@@ -115,11 +117,16 @@ def test_diffusers_varlen_preparation_passes_unbacked_max_to_fa3(monkeypatch, or
         torch._dynamo.reset()
 
     assert _FA3_MAX_SEQLEN_K_VALUES, "The Diffusers varlen path no longer reaches the FA3 kernel interface."
-    assert all(has_free_unbacked_symbols(value) for value in _FA3_MAX_SEQLEN_K_VALUES), (
-        "Diffusers no longer passes an unbacked max_seqlen_k to FA3 when scalar outputs are captured; "
-        "retest the real FA3 path and remove only this rationale if FA3 now succeeds. The independent Inductor "
-        "cumsum failure may still require the eager boundary."
-    )
+    if with_mask:
+        assert all(has_free_unbacked_symbols(value) for value in _FA3_MAX_SEQLEN_K_VALUES), (
+            "Diffusers no longer passes an unbacked max_seqlen_k to FA3 for masked inputs when scalar outputs are "
+            "captured; retest the real masked FA3 path and remove only this rationale if FA3 now succeeds."
+        )
+    else:
+        assert not any(has_free_unbacked_symbols(value) for value in _FA3_MAX_SEQLEN_K_VALUES), (
+            "Diffusers passes an unbacked max_seqlen_k to FA3 for unmasked inputs again; the eager boundary "
+            "covers it, so revalidate the unmasked FA3 path and update this probe."
+        )
 
 
 def test_eager_boundary_materializes_max_before_fa3(monkeypatch, original_helpers):
@@ -191,9 +198,11 @@ def test_fa3_varlen_preparation_runs_outside_compiled_region(monkeypatch, origin
     torch.testing.assert_close(output, query)
 
 
-def test_unpatched_varlen_path_still_needs_eager_boundary(monkeypatch, original_helpers):
+@pytest.mark.parametrize("with_mask", [False, True])
+def test_unpatched_varlen_path_compiles_in_inductor(monkeypatch, original_helpers, with_mask):
     # Use the real Inductor backend here: aot_eager exercises the symbolic
-    # interface above but cannot reproduce the faulty cumsum lowering pass.
+    # interface above but cannot reproduce the cumsum lowering pass that
+    # Diffusers 0.40 tripped over.
     backend = attention_dispatch.AttentionBackendName._FLASH_3_VARLEN_HUB
     monkeypatch.setitem(
         attention_dispatch._HUB_KERNELS_REGISTRY,
@@ -208,22 +217,14 @@ def test_unpatched_varlen_path_still_needs_eager_boundary(monkeypatch, original_
         dynamic=True,
     )
     query = torch.ones((1, 4, 1, 8))
+    mask = torch.tensor([[True, False, True, False]]) if with_mask else None
 
     try:
-        compiled_backend(query, query, query)
-    except InductorError as error:
-        assert "FakeTensor" in str(error) and "Node" in str(error), (
-            "The unpatched Diffusers varlen path now fails differently. Determine whether the cumsum bug changed "
-            "or a new regression masks it, then update the workaround or canary accordingly."
-        )
-    else:
-        pytest.fail(
-            "The unpatched Diffusers varlen path now passes the Inductor cumsum canary. Revalidate the real "
-            "masked and unmasked FA3 paths. Keep the shared eager boundary if the unbacked-symbol failure "
-            "remains, and remove it only if both failures are fixed."
-        )
+        output = compiled_backend(query, query, query, attn_mask=mask)
     finally:
         torch._dynamo.reset()
+
+    torch.testing.assert_close(output, query)
 
 
 def test_varlen_preparation_wrappers_are_installed_once(original_helpers):

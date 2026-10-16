@@ -27,11 +27,14 @@ logger = logging.getLogger(__name__)
 def _keep_varlen_attention_metadata_eager() -> None:
     """Keep data-dependent varlen-attention metadata out of compiled graphs.
 
-    This avoids an Inductor symbolic-cumsum lowering failure and prevents
-    unbacked maximum sequence lengths from reaching FA3 fake backward. Remove
-    the boundary only after both paths work, then revalidate masked and
-    unmasked FA3 with ``fullgraph=True``. The patched Diffusers helper names
-    are private and must be rechecked when Diffusers changes.
+    This prevents the unbacked ``max_seqlen_k`` that the masked helper derives
+    from ``.item()`` from reaching FA3 fake backward. Diffusers 0.41 already
+    builds the dense-query offsets with ``arange``, which fixed the Inductor
+    symbolic-cumsum lowering failure that 0.40 had. Remove the boundary only
+    after the masked path no longer produces an unbacked length, then
+    revalidate masked and unmasked FA3 with ``fullgraph=True``. The patched
+    Diffusers helper names are private and must be rechecked when Diffusers
+    changes.
     """
     for helper_name in (
         "_prepare_for_flash_attn_or_sage_varlen_with_mask",

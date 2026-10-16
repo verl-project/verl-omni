@@ -23,7 +23,7 @@ dependencies = [
     "cachetools",
     "codetiming",
     "datasets>=2.20.0",
-    "diffusers>=0.40.0",
+    "diffusers>=0.41.0",
     "dill",
     "hydra-core",
     "imageio[ffmpeg]>=2.37.2",

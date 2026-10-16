@@ -160,7 +160,7 @@ def _h3_masked_forward(
     return_dict: bool = True,
     attention_mask: torch.Tensor | None = None,
 ):
-    """Diffusers 0.40 ``MiniMaxH3Transformer3DModel.forward`` plus a block attention mask."""
+    """Diffusers 0.40/0.41 ``MiniMaxH3Transformer3DModel.forward`` plus a block attention mask."""
     from diffusers.models.modeling_utils import get_parameter_dtype
     from diffusers.models.transformers.transformer_minimax_h3 import (
         MINIMAX_H3_MODALITY_NUM,
@@ -218,7 +218,7 @@ def _install_h3_attention_mask_forward(module: torch.nn.Module) -> None:
     block_params = tuple(inspect.signature(MiniMaxH3TransformerBlock.forward).parameters)
     if forward_params != _H3_FORWARD_PARAMETERS or block_params != _H3_BLOCK_FORWARD_PARAMETERS:
         raise RuntimeError(
-            "MiniMax H3 SP padding was validated against the Diffusers 0.40 transformer forward; "
+            "MiniMax H3 SP padding was validated against the Diffusers 0.40 and 0.41 transformer forward; "
             f"found forward={forward_params} and block={block_params}. Revalidate the masked forward."
         )
     module.forward = types.MethodType(apply_lora_scale("attention_kwargs")(_h3_masked_forward), module)
