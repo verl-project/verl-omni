@@ -29,9 +29,54 @@ from verl_omni.utils.fs import resolve_model_local_dir
 
 from .rollout import DiffusionPipelineConfig, DiffusionRolloutAlgoConfig
 
-__all__ = ["DiffusionModelConfig"]
+__all__ = ["DiffusionModelAROptimizerConfig", "DiffusionModelARConfig", "DiffusionModelConfig"]
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class DiffusionModelAROptimizerConfig(BaseConfig):
+    # Partial overlay on the DiT optimizer. None inherits that field from actor.optim.
+
+    # Learning rate. None inherits actor.optim.lr.
+    lr: Optional[float] = None
+
+    # Weight decay. None inherits actor.optim.weight_decay.
+    weight_decay: Optional[float] = None
+
+    # Adam betas. None inherits actor.optim.betas.
+    betas: Optional[tuple[float, float]] = None
+
+    # Gradient clip norm. None inherits actor.optim.clip_grad.
+    clip_grad: Optional[float] = None
+
+    # Warmup steps ratio. None inherits actor.optim.lr_warmup_steps_ratio.
+    lr_warmup_steps_ratio: Optional[float] = None
+
+    # Warmup steps. None inherits actor.optim.lr_warmup_steps.
+    lr_warmup_steps: Optional[int] = None
+
+    # Scheduler type ("constant" or "cosine"). None inherits actor.optim.lr_scheduler_type.
+    lr_scheduler_type: Optional[str] = None
+
+    # Minimum LR ratio for cosine schedule. None inherits actor.optim.min_lr_ratio.
+    min_lr_ratio: Optional[float] = None
+
+    # Number of cosine cycles. None inherits actor.optim.num_cycles.
+    num_cycles: Optional[float] = None
+
+    # Extra kwargs forwarded to the optimizer constructor. None inherits actor.optim.override_optimizer_config.
+    override_optimizer_config: Optional[dict] = None
+
+
+@dataclass
+class DiffusionModelARConfig(BaseConfig):
+    # LoRA configs reuse diffusion model's
+
+    override_config: dict[str, Any] = field(default_factory=dict)
+
+    # Partial optimizer overlay. Unset fields inherit actor.optim.
+    optim: DiffusionModelAROptimizerConfig = field(default_factory=DiffusionModelAROptimizerConfig)
 
 
 @dataclass
@@ -83,6 +128,9 @@ class DiffusionModelConfig(BaseConfig):
     # custom chat template for the model
     custom_chat_template: Optional[str] = None
 
+    # AR use only
+    use_remove_padding: bool = False
+
     external_lib: Optional[str] = None
 
     enable_gradient_checkpointing: bool = True
@@ -131,8 +179,14 @@ class DiffusionModelConfig(BaseConfig):
     # ``<local_path>/<transformer_subfolder>``.
     config_path: Optional[str] = None
 
+    # Subfolder containing the diffusion text encoder weights/config.
+    text_encoder_subfolder: str = "text_encoder"
+
     # Subfolder containing the diffusion transformer weights/config.
     transformer_subfolder: str = "transformer"
+
+    # Trainable AR config
+    ar: DiffusionModelARConfig = field(default_factory=DiffusionModelARConfig)
 
     def __post_init__(self):
         import_external_libs(self.external_lib)

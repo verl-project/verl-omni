@@ -157,6 +157,8 @@ def wrap_rollout_postprocessor(postprocess: Callable[..., Any]) -> Callable[...,
         metadata = dict(data.get("metadata") or {})
         if "media_artifacts" in metadata:
             return data  # Named tensors are already decoded/normalized by the adapter.
+        if not payload:
+            return data  # Token-only metadata has no media for the native processor.
         if len(payload) != 1:
             raise ValueError("A media-only postprocessor cannot consume multiple payload keys; use named artifacts.")
         (media_key,) = payload

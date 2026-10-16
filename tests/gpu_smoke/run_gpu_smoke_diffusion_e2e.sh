@@ -82,4 +82,8 @@ run_test 11 "Named image previews and MiniMax-H3 offload placeholders" \
     env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" \
     pytest -q tests/trainer/diffusion/test_artifact_preview_dump.py tests/pipelines/test_minimax_h3_meta_output.py
 
+run_test 12 "Qwen-Image DualGRPO async reward e2e" \
+    env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" \
+    bash tests/special_e2e/run_dual_grpo_qwen_image_async_reward.sh "${diffusion_trainer_args[@]}"
+
 gpu_smoke_summary
