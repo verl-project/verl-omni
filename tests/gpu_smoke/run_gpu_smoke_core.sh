@@ -51,4 +51,8 @@ run_test 8 "trainable FSDP2 snapshot restore" \
     env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" REQUIRE_TRAINABLE_SNAPSHOT_GPU=1 \
     python3 -m pytest -s tests/workers/test_trainable_snapshot_gpu.py
 
+run_test 9 "diffusion composite FSDP engine" \
+    env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" \
+    python3 -m pytest -s tests/workers/test_composite_fsdp_engine.py
+
 gpu_smoke_summary
