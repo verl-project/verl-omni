@@ -146,6 +146,7 @@ contributing/editing-agent-instructions.md
 contributing/ci_cd.md
 contributing/testing_guide.md
 contributing/integrating_prompt_embedding_cache.md
+contributing/integrating_a_reward_scorer.md
 contributing/integrating_an_omni_model.md
 contributing/integrating_a_diffusion_model.md
 contributing/integrating_an_i2i_diffusion_model.md

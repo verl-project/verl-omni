@@ -11,6 +11,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""PickScore scoring functions (frozen legacy module — bug fixes only).
+
+New stateful scorers live under ``utils/reward_score/scorers/``; the
+class-based PickScore port is ``scorers/pickscore.py`` and imports this
+module's math.
+"""
 
 import asyncio
 import gc
@@ -87,6 +93,14 @@ def _pairwise_pickscore(
 
 
 class _PickScoreInferencer:
+    """Legacy PickScore inferencer — superseded by ``scorers/pickscore.py``.
+
+    Dropped from this module at post-window cleanup (#723 Q4) together with its
+    legacy consumers (the DIY-local queue path, ``PickScoreNativeModel``): the
+    class-based port already constructs it, and the migrated copy derives input
+    placement from model parameters instead of the cached device flag.
+    """
+
     def __init__(
         self,
         device: str | torch.device | None = None,
