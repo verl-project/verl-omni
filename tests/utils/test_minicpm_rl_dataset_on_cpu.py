@@ -73,6 +73,23 @@ def test_minicpm_loader_reads_image_and_hop_pads_audio(tmp_path):
     assert audios[0].dtype == np.float32
 
 
+def test_minicpm_loader_accepts_images_decoded_from_inline_bytes():
+    from io import BytesIO
+
+    from PIL import Image
+
+    buffer = BytesIO()
+    Image.new("L", (6, 4), color=7).save(buffer, format="PNG")
+    # What verl's _build_messages produces from an inline {"bytes": ...} image row (MMK12).
+    block = {"type": "image", "bytes": buffer.getvalue(), "image": Image.open(BytesIO(buffer.getvalue()))}
+    messages = [{"role": "user", "content": [block, {"type": "text", "text": "Solve it."}]}]
+
+    images, _, audios = MiniCPMORLHFDataset._process_multi_modal_info(messages, image_patch_size=14, config=None)
+
+    assert len(images) == 1 and images[0].mode == "RGB" and images[0].size == (6, 4)
+    assert audios == []
+
+
 def test_minicpm_loader_rejects_video_blocks():
     messages = [{"role": "user", "content": [{"type": "video", "video": "/tmp/clip.mp4"}]}]
     with pytest.raises(ValueError, match="does not support video rows"):

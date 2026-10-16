@@ -108,6 +108,7 @@ examples/gspo_trainer.md
 examples/qwen3_omni/gspo_trainer_qwen3_omni.md
 examples/dapo_trainer.md
 examples/qwen3_tts/grpo_trainer_qwen3_tts.md
+examples/minicpm_o/opd_trainer_minicpm_o.md
 ```
 
 ```{toctree}

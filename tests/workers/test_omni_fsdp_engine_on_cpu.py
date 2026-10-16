@@ -328,21 +328,29 @@ def test_prepare_model_inputs_applies_registered_adapter_hook():
     assert output_args == {"base": True}
 
 
-def test_weight_sync_casts_floating_dtensor_to_bfloat16():
+@pytest.mark.parametrize(
+    ("mixed_precision", "expected_dtype"),
+    [(None, torch.bfloat16), ({"param_dtype": "bf16"}, torch.bfloat16), ({"param_dtype": "fp32"}, torch.float32)],
+)
+def test_weight_sync_uses_actor_compute_dtype(mixed_precision, expected_dtype):
     omni_impl = _get_omni_impl_module()
-    tensor = torch.tensor([1.25], dtype=torch.float32)
+    engine = object.__new__(omni_impl.OmniFSDPEngine)
+    engine.engine_config = types.SimpleNamespace(mixed_precision=mixed_precision)
+    tensor = torch.tensor([1.0001], dtype=torch.float32)
 
-    synced = omni_impl.OmniFSDPEngine._cast_dtensor_weight_for_sync(tensor)
+    synced = engine._cast_dtensor_weight_for_sync(tensor)
 
-    assert synced.dtype is torch.bfloat16
-    assert synced.item() == pytest.approx(1.25)
+    assert synced.dtype is expected_dtype
+    torch.testing.assert_close(synced, tensor.to(expected_dtype), atol=0, rtol=0)
 
 
 def test_weight_sync_keeps_integer_dtensor_buffers():
     omni_impl = _get_omni_impl_module()
     tensor = torch.tensor([1, 2], dtype=torch.int64)
 
-    synced = omni_impl.OmniFSDPEngine._cast_dtensor_weight_for_sync(tensor)
+    engine = object.__new__(omni_impl.OmniFSDPEngine)
+    engine.engine_config = types.SimpleNamespace(mixed_precision=None)
+    synced = engine._cast_dtensor_weight_for_sync(tensor)
 
     assert synced is tensor
     assert synced.dtype is torch.int64

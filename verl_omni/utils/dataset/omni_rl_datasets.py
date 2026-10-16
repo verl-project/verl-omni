@@ -137,6 +137,9 @@ def _load_minicpm_media(messages: list[dict], sampling_rate: int) -> tuple[list[
                 continue
             kind = block.get("type")
             if kind == "image":
+                if isinstance(block.get("image"), Image.Image):  # verl decodes inline-bytes rows itself
+                    images.append(block["image"].convert("RGB"))
+                    continue
                 with Image.open(_media_ref(block, "image")) as image:  # convert() returns a new image; close the handle
                     images.append(image.convert("RGB"))
             elif kind == "audio":

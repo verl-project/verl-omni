@@ -15,8 +15,9 @@
 
 An RL prompt reaches the trainer as agent-loop ids, the engine as its own prompt,
 and the actor as text re-fed to the processor — each wanting the media in a
-different form. ``bind_minicpm_processor`` rewrites between them and
-``resolve_media_tokens`` exposes the marker vocabulary they are written in.
+different form. ``bind_minicpm_processor`` rewrites the processor-facing forms,
+and ``resolve_media_tokens`` exposes the marker vocabulary plus the id-space
+collapse the rollout adapter applies to engine prompts.
 """
 
 from __future__ import annotations
@@ -69,8 +70,8 @@ def bind_minicpm_processor(processor: Any) -> Any:
         processor: The processor loaded by the training adapter.
 
     Returns:
-        The same processor instance, with ``__call__``, ``apply_chat_template``,
-        and ``dedup_pad_tokens`` rebound.
+        The same processor instance, with ``__call__`` and ``apply_chat_template``
+        rebound.
     """
     parity_cls = type(
         "MiniCPMOParityProcessor",
@@ -79,7 +80,6 @@ def bind_minicpm_processor(processor: Any) -> Any:
             "_parity_tokens": resolve_media_tokens(processor),
             "__call__": _parity_call,
             "apply_chat_template": _parity_apply_chat_template,
-            "dedup_pad_tokens": _parity_dedup_pad_tokens,
         },
     )
     processor.__class__ = parity_cls
@@ -136,15 +136,20 @@ class MiniCPMMediaTokens:
             text.count(MINICPM_AUDIO_SLOT),
         )
 
-    def collapse_ids_to_slots(self, input_ids: list[int]) -> list[int]:
-        """Replace the ids' expanded media spans with vLLM-Omni's parenthesized slots.
+    def collapse_ids_to_slots(self, input_ids: list[int], *, num_images: int, num_audios: int) -> list[int]:
+        """Replace the request's expanded media spans with vLLM-Omni's parenthesized slots.
 
         Args:
-            input_ids: Agent-loop prompt ids carrying expanded media spans.
+            input_ids: Processor-expanded prompt ids, optionally followed by the
+                response ids a teacher scores.
+            num_images: Images attached to the request.
+            num_audios: Audio clips attached to the request.
 
         Returns:
-            The prompt ids with each span replaced by its engine slot, every other
-            id untouched; malformed marker leftovers raise rather than yielding a
+            The ids with the first ``num_images`` image spans and ``num_audios``
+            audio spans replaced by engine slots. Ids after the last of them pass
+            through verbatim, so media markers a student samples stay part of the
+            response; malformed markers before it raise rather than yielding a
             mismatched prompt.
         """
         # Splicing in id space avoids a decode -> text -> re-encode round trip, which
@@ -155,8 +160,9 @@ class MiniCPMMediaTokens:
         image_id_open = self._image_id_ids[0]
 
         out: list[int] = []
+        images_left, audios_left = num_images, num_audios
         i = 0
-        while i < len(ids):
+        while i < len(ids) and (images_left or audios_left):
             token = ids[i]
             if token in self._orphan_markers:
                 raise ValueError(
@@ -166,14 +172,26 @@ class MiniCPMMediaTokens:
             if token == image_id_open:
                 i = self._consume_image_id_prefix(ids, i, out)
             elif token == marker["im_start"]:
+                if not images_left:
+                    raise ValueError(f"MiniCPM prompt ids carry more image spans than the {num_images} images given.")
                 i = self._consume_image_unit(ids, i)
                 out.extend(self._engine_image_slot_ids)
+                images_left -= 1
             elif token == marker["audio_start"]:
+                if not audios_left:
+                    raise ValueError(f"MiniCPM prompt ids carry more audio spans than the {num_audios} audios given.")
                 i = self._consume_audio_chunks(ids, i)
                 out.extend(self._engine_audio_slot_ids)
+                audios_left -= 1
             else:
                 out.append(token)
                 i += 1
+        if images_left or audios_left:
+            raise ValueError(
+                f"MiniCPM prompt ids carry {num_images - images_left} of {num_images} image spans and "
+                f"{num_audios - audios_left} of {num_audios} audio spans the request's media need."
+            )
+        out.extend(ids[i:])
         return out
 
     def derive_media_bounds(self, input_ids_1d: torch.Tensor) -> tuple[list[list[int]], list[list[int]]]:
@@ -399,17 +417,6 @@ def _parity_apply_chat_template(self, messages, **kwargs):
         "tokenizer_config.json (or a chat_template.json next to it) — without it "
         "every prompt render fails."
     )
-
-
-def _parity_dedup_pad_tokens(self, input_ids: list[int]) -> list[int]:
-    """Collapse the agent-loop ids' expanded media spans into vLLM's engine slots."""
-    # Collapse happens entirely in id space: re-encoding decoded text risks
-    # BPE drift that would silently desync the engine prompt from the
-    # training ids. Text-only prompts come back byte-identical.
-    tokens: MiniCPMMediaTokens = self._parity_tokens
-    if not tokens.has_media_tokens(torch.tensor(input_ids)):
-        return list(input_ids)
-    return tokens.collapse_ids_to_slots(list(input_ids))
 
 
 def _scalar_tree(value: Any) -> bool:
