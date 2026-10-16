@@ -25,7 +25,9 @@ the key ``"teacher_hidden_states"``, so no new wire fields are needed:
 
 Chunked prefill is not supported (a request with unscheduled prompt tokens
 raises). With the omni prefix cache enabled, requests resuming from a cached
-prefix get their full-prompt hidden states rebuilt from the cache.
+prefix get their full-prompt hidden states rebuilt from the cache. Graph-mode
+and sequence-parallel tail padding is stripped before the hidden states are
+validated and sliced.
 """
 
 import logging
@@ -81,13 +83,24 @@ def _is_step_hidden_states(hidden_states, scheduler_output) -> bool:
     return hidden_states.shape[0] == total
 
 
+def _strip_padding(hidden_states, scheduler_output) -> torch.Tensor:
+    """Trim graph-mode / sequence-parallel tail padding back to the scheduled rows.
+
+    Padding rows are appended after the last real request, so the scheduled
+    tokens occupy rows [0, total).
+    """
+    total = sum(int(n) for n in scheduler_output.num_scheduled_tokens.values())
+    return hidden_states[:total]
+
+
 def _patch_npu_runner() -> None:
     """Patch the Ascend AR runner, which builds OmniModelRunnerOutput inline.
 
     NPUARModelRunner.sample_tokens clears ``execute_model_state`` and returns
     either an OmniModelRunnerOutput or an AsyncGPUModelRunnerOutput wrapper.
-    We peek the state first, call the original, then attach the per-request
-    hidden payloads to the inner model_runner_output.
+    We peek the state first (passing through when the engine did not opt in),
+    call the original, then attach the per-request hidden payloads to the
+    inner model_runner_output.
     """
     try:
         from vllm_omni.platforms.npu.worker.npu_ar_model_runner import NPUARModelRunner
@@ -101,15 +114,25 @@ def _patch_npu_runner() -> None:
         if state is None:
             return original_sample(self, grammar_output)
 
+        # Pass through unless this engine opted into hidden-state output (the
+        # flag is uniform per engine), so ordinary requests are never affected.
         scheduler_output = getattr(state, "scheduler_output", None)
+        if (
+            scheduler_output is None
+            or not scheduler_output.num_scheduled_tokens
+            or not request_wants_hidden_states(self, next(iter(scheduler_output.num_scheduled_tokens)))
+        ):
+            return original_sample(self, grammar_output)
+
         hidden_states = getattr(state, "hidden_states", None)
-        if scheduler_output is None or hidden_states is None:
+        if hidden_states is None:
             raise RuntimeError(
                 "vllm_omni hidden-states patch: execute_model_state lacks the expected "
-                f"scheduler_output / hidden_states fields (got {type(state).__name__}); "
-                "the NPU AR runner's state layout changed — update the patch for the new "
-                "vllm-omni pin."
+                f"hidden_states field (got {type(state).__name__}); the NPU AR runner's "
+                "state layout changed — update the patch for the new vllm-omni pin."
             )
+        if isinstance(hidden_states, torch.Tensor):
+            hidden_states = _strip_padding(hidden_states, scheduler_output)
         if not _is_step_hidden_states(hidden_states, scheduler_output):
             raise RuntimeError(
                 "vllm_omni hidden-states patch: execute_model_state.hidden_states is not the expected "
