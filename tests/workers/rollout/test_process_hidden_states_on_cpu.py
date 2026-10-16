@@ -34,6 +34,7 @@ from verl_omni.workers.rollout.vllm_rollout.process_hidden_states import (
     _collect_hidden_states_payloads,
     _is_step_hidden_states,
     _merge_into_multimodal_outputs,
+    _strip_padding,
     extract_hidden_states,
     request_wants_hidden_states,
 )
@@ -154,6 +155,21 @@ class TestStepHiddenStatesValidation:
         assert not _is_step_hidden_states(torch.zeros(4, 4), self._sched({"r0": 5}))  # wrong row count
         assert not _is_step_hidden_states([5, 4], self._sched({"r0": 5}))  # not a tensor
         assert not _is_step_hidden_states(torch.zeros(2, 5, 4), self._sched({"r0": 5}))  # wrong ndim
+
+    def test_strip_padding_trims_tail_rows(self):
+        # Graph mode / SP append padding rows after the scheduled tokens.
+        hidden = torch.randn(8, 4)
+        stripped = _strip_padding(hidden, self._sched({"r0": 5}))
+        assert torch.equal(stripped, hidden[:5])
+
+    def test_strip_padding_noop_without_padding(self):
+        hidden = torch.randn(5, 4)
+        assert torch.equal(_strip_padding(hidden, self._sched({"r0": 3, "r1": 2})), hidden)
+
+    def test_strip_padding_then_validation_accepts_padded_step(self):
+        hidden = torch.randn(8, 4)  # 5 scheduled, 3 padding rows
+        stripped = _strip_padding(hidden, self._sched({"r0": 5}))
+        assert _is_step_hidden_states(stripped, self._sched({"r0": 5}))
 
 
 class TestPatchInstallIsolation:

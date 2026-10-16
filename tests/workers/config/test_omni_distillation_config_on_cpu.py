@@ -156,3 +156,17 @@ class TestOmniHiddenStateLossConfig:
         tm = obj.teacher_models["default"]
         tm._validate_topk_logprobs(use_topk=False, topk=None)
         assert tm.inference.engine_kwargs["vllm_omni"].get("max_logprobs") == 8  # untouched, from overrides
+
+    def test_kd_temperature_is_overridable_via_hydra(self):
+        # kd_temperature must be declared in omni_trainer.yaml, otherwise a
+        # normal Hydra override fails with "key not found".
+        from verl_omni.workers.config.omni.distillation import OmniDistillationLossConfig
+
+        overrides = OPD_OVERRIDES + [
+            "distillation.distillation_loss.loss_mode=nitrobrew",
+            "distillation.distillation_loss.use_policy_gradient=false",
+            "distillation.distillation_loss.kd_temperature=2.0",
+        ]
+        obj: DistillationConfig = _materialize_distillation(overrides)
+        assert isinstance(obj.distillation_loss, OmniDistillationLossConfig)
+        assert obj.distillation_loss.kd_temperature == 2.0

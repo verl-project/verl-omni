@@ -941,6 +941,7 @@ distillation:
   enabled: false
   distillation_loss:
     _target_: verl_omni.workers.config.omni.distillation.OmniDistillationLossConfig
+    kd_temperature: 1.0
     loss_mode: k3
     topk: 32
     use_task_rewards: true
