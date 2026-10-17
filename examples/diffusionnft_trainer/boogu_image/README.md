@@ -1,6 +1,6 @@
 # Train Boogu-Image with DiffusionNFT
 
-Last updated: 09/24/2026
+Last updated: 10/15/2026
 
 RL post-training for [Boogu-Image-0.1-Base](https://huggingface.co/Boogu/Boogu-Image-0.1-Base)
 (text-to-image) with the DiffusionNFT trainer, using a `vllm-omni` rollout and
@@ -126,8 +126,49 @@ into the recipe:
 - The objective is rebalanced away from the config defaults: `mix_beta=0.1`,
   `ref_kl_coef=10.0`, `adv_clip_max=1.0`, `clip_ratio=1e-5` (defaults are `0.5`, `0.0`, `5.0`,
   `1e-4`). With the defaults the reward term is compressed by the advantage clip while the
-  reward-free contraction dominates the reported loss, and the graded reward collapses even
-  though `positive_loss` looks like it is improving.
+  reward-free contraction dominates the reported loss, and the graded   reward collapses even
+  though `positive_loss` looks like it is improving. That collapse was measured with text CFG
+  active and an incomplete LoRA sync; the rebalanced objective holds the baseline but has not
+  been shown to improve it. The preference recipe below converges with the Qwen-Image values
+  and CFG-free training.
+
+### Preference reward (HPSv2.1 + PickScore + CLIPScore)
+
+```bash
+python examples/flowgrpo_trainer/data_process/boogu_image_pickapic.py
+HPSV2_PRETRAINED_PATH=/path/to/open_clip_pytorch_model.bin \
+CUSTOM_REWARD_MODEL_PATH=/path/to/HPS_v2.1_compressed.pt \
+bash examples/diffusionnft_trainer/boogu_image/run_boogu_image_pickapic_preference_lora_v1.sh
+```
+
+The recipe trains on 5,760 Pick-a-Pic v1 prompts and validates on 256 fixed prompts with a
+fixed seed. It differs from the OCR recipe in two ways that both matter for convergence:
+
+- `pipeline.guidance_scale=1.0` (CFG-free, as in DiffusionNFT). With text CFG active the
+  training forward regresses the guided velocity `v_u + s * (v_c - v_u)` onto the policy's own
+  samples. That extrapolated velocity is not the flow of any data distribution, so the update
+  erodes the guidance: at `guidance_scale=4.0` the 40-step validation reward fell from 1.811 to
+  1.745 within 10 steps and the images washed out. CFG-free also halves rollout and training
+  cost.
+- `ref_kl_coef=1e-4`, `actor.optim.lr=3e-4`, `adv_clip_max=5.0` (the Qwen-Image values). With
+  `ref_kl_coef=10.0` and `lr=1e-4` the reference anchor dominates the gradient and the policy
+  stays at the reference: 80 steps left the validation reward flat (1.812 -> 1.808).
+
+Measured on 4 GPUs with the V1 sync trainer (24 prompts x 16 images per update, 10 rollout
+steps, 512px):
+
+| Step | Validation reward | HPSv2.1 | PickScore / 26 | CLIPScore | Paired win rate vs step 0 |
+|------|-------------------|---------|----------------|-----------|---------------------------|
+| 0    | 1.593             | 0.218   | 0.763          | 0.612     | -                         |
+| 10   | 1.737             | 0.257   | 0.802          | 0.679     | 88%                       |
+| 30   | 1.801             | 0.278   | 0.822          | 0.702     | 96%                       |
+| 60   | 1.829             | 0.287   | 0.837          | 0.705     | 98%                       |
+
+At step 60 the CFG-free policy also beats the CFG-4 base model on the same prompts and seeds
+(1.829 vs 1.811, paired 95% CI of the difference [+0.003, +0.033]). A training step takes
+about 8 minutes and a validation pass (256 prompts, 40 steps) about 4 minutes. The same recipe
+on the deprecated V0 trainer gives a bit-identical step-0 validation and reaches 1.844 at step
+60; that gap comes from single runs and has not been separated from run-to-run variance.
 
 ## Tests
 
