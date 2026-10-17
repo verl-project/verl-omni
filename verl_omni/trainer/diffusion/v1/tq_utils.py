@@ -32,12 +32,65 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 def diffusion_persisted_tq_fields(
     algorithm: Literal["policy_gradient", "direct_preference"],
 ) -> list[str]:
-    """Return trainer-computed fields persisted after a diffusion update."""
+    """Return trainer-computed fields persisted after a diffusion update.
+
+    ``old_log_probs`` is not persisted: every consumer recomputes it from the
+    actor (or falls back to ``rollout_log_probs`` in bypass mode), so writing
+    the [batch, num_timesteps] tensor back would be dead TQ traffic.
+    """
     if algorithm == "policy_gradient":
-        return ["old_log_probs", "advantages", "returns", "sample_level_scores", "sample_level_rewards"]
+        return ["advantages", "returns", "sample_level_scores", "sample_level_rewards"]
     if algorithm == "direct_preference":
         return ["sample_level_scores", "sample_level_rewards"]
     raise ValueError(f"Unsupported diffusion trainer algorithm: {algorithm}")
+
+
+# Artifact names an in-tree rollout adapter can declare (see each adapter's
+# ``diffusion_io_spec``). Their tensors ride top-level
+# ``media_artifact__<name>`` TransferQueue fields (the
+# ``rollout_media.ARTIFACT_PREFIX`` spelling) while the non-tensor
+# declarations ride the ``extra_fields`` envelope, so the dump projection
+# below must carry the tensors too: ``validate_artifacts`` raises on any
+# declared artifact whose tensor is missing from the read. The prefix is
+# spelled literally to keep this core trainer module free of the pipeline
+# package's import graph; ``test_v1_tq_field_projection_on_cpu.py`` enforces
+# that these names cover every artifact an in-tree adapter declares.
+DUMP_MEDIA_ARTIFACT_NAMES = (
+    "image_preview",
+    "image_latent",
+    "video_preview",
+    "video_latent",
+    "audio",
+    "audio_latent",
+)
+
+# Fields consumed by the post-step rollout-dump read. Selecting them
+# explicitly keeps the dump from re-pulling the trainer-only compute payloads
+# (all_latents, prompt_embeds, ...) which dominate row size. Absent optional
+# fields are silently skipped by TransferQueue's field selection:
+# ``sample_level_scores`` is persisted by the colocated-reward trainer before
+# the dump (its preferred scores source), while async-reward rows carry only
+# ``rm_scores`` and keep that fallback.
+DIFFUSION_DUMP_TQ_FIELDS = (
+    "prompts",
+    "responses",
+    "rm_scores",
+    "sample_level_scores",
+    "reward_model",
+    "data_source",
+    "extra_info",
+    "raw_prompt",
+    "__num_turns__",
+    "uid",
+    "extra_fields",
+    "tool_extra_fields",
+    "image",
+    "video",
+    "output",
+    "audio",
+    "audio_sample_rate",
+    "media_kind",
+) + tuple(f"media_artifact__{name}" for name in DUMP_MEDIA_ARTIFACT_NAMES)
 
 
 def diffusion_metric_tq_fields(

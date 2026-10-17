@@ -291,6 +291,56 @@ async def test_tq_writer_preserves_allowlisted_non_tensor_trajectory_metadata(mo
 
 
 @pytest.mark.asyncio
+async def test_run_prompt_batches_prompt_group_into_one_put(monkeypatch):
+    """All of a prompt's session rows must land in a single batched TQ put."""
+    worker_cls = DiffusionAgentLoopWorkerTQ.__ray_metadata__.modified_class
+    worker = object.__new__(worker_cls)
+    worker.rollout_config = SimpleNamespace(n=2, val_kwargs=SimpleNamespace(n=2))
+
+    def make_output(*, with_log_probs: bool):
+        return SimpleNamespace(
+            prompt_ids=torch.tensor([[1, 2]]),
+            response_diffusion_output=torch.zeros(1, 3, 2, 2),
+            response_logprobs=torch.zeros(1, 4) if with_log_probs else None,
+            reward_score=0.5,
+            num_turns=1,
+            extra_fields={"media_kind": "image"},
+        )
+
+    captured = {}
+
+    async def fake_run_agent_loop(self, sampling_params, *, session_id, **kwargs):
+        del self, sampling_params, kwargs
+        return make_output(with_log_probs=True)
+
+    async def fake_kv_batch_put(*, keys, fields, tags, partition_id):
+        captured.update(keys=keys, fields=fields, tags=tags, partition_id=partition_id)
+
+    async def fake_kv_put(*, key, partition_id, tag):
+        del key, partition_id, tag
+
+    worker._run_agent_loop = MethodType(fake_run_agent_loop, worker)
+    monkeypatch.setattr(diffusion_agent_loop_tq.tq, "async_kv_batch_put", fake_kv_batch_put)
+    monkeypatch.setattr(diffusion_agent_loop_tq.tq, "async_kv_put", fake_kv_put)
+
+    await worker._run_prompt(
+        prompt={"uid": "sample", "agent_name": "diffusion_single_turn_agent"},
+        sampling_params={"global_steps": 3},
+        trajectory={"validate": False, "step": 3},
+        prompt_index=0,
+    )
+
+    assert captured["keys"] == ["sample_0_0", "sample_1_0"]
+    assert captured["partition_id"] == "train"
+    assert len(captured["tags"]) == 2
+    assert all(tag["status"] == "success" for tag in captured["tags"])
+    # One batched put call: the real list_of_dict_to_tensordict stacks the rows.
+    assert captured["fields"].batch_size == (2,)
+    assert "rollout_log_probs" in captured["fields"].keys()
+    assert "rm_scores" in captured["fields"].keys()
+
+
+@pytest.mark.asyncio
 async def test_tq_writer_batches_group_sessions_and_partitions_field_sets(monkeypatch):
     worker_cls = DiffusionAgentLoopWorkerTQ.__ray_metadata__.modified_class
     worker = object.__new__(worker_cls)
