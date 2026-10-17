@@ -31,6 +31,11 @@ if [[ -n "$cuda13_lib" ]]; then
     export LD_LIBRARY_PATH=$cuda13_lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
 fi
 
+# Ray workers inherit this. Uncapped, every reward and actor worker spawns one CPU
+# thread per core and they oversubscribe the host: reward scoring took 87-157 s per
+# step instead of ~4 s, and the CPU-offloaded optimizer step slowed by ~6%.
+export OMP_NUM_THREADS=${OMP_NUM_THREADS:-8}
+
 WORKSPACE=${WORKSPACE:-$HOME}
 TRAIN_FILES=${TRAIN_FILES:-$WORKSPACE/data/pickapic_v1/boogu_image/train.parquet}
 VAL_FILES=${VAL_FILES:-$WORKSPACE/data/pickapic_v1/boogu_image/test.parquet}

@@ -192,7 +192,7 @@ See the [Metrics Documentation](../../docs/start/metrics.md) for a full descript
 | `examples/diffusionnft_trainer/qwen_image/run_qwen_image_ocr_lora.sh` | Qwen-Image | DiffusionNFT | True | 4 (NVIDIA) | qwenvl-ocr-vllm | 4 | 4 | 0 (sync)                | 24 | 16 | 3e-4 | 1k (full set) | 24×16=384 | 12 | 0.166                        | 570 |
 | `examples/diffusionnft_trainer/qwen_image/run_qwen_image_ocr_lora_npu.sh` | Qwen-Image | DiffusionNFT | True | 16 (NPU) | qwenvl-ocr-vllm | 16 | 16 | 0 (sync)               | 24 | 16 | 3e-4 | 1k (full set) | 24×16=384 | 12 | 0.049                      | 490 |
 | `examples/diffusionnft_trainer/boogu_image/run_boogu_image_ocr_lora.sh` | Boogu-Image | DiffusionNFT | True | 4 (H800) | qwenvl-ocr-vllm | 4 | 4 | 0 (sync)                | 24 | 16 | 1e-4 | 256 (subset) | 24×16=384 | 12 | 0.114                      | 839 |
-| `examples/diffusionnft_trainer/boogu_image/run_boogu_image_pickapic_preference_lora_v1.sh` | Boogu-Image | DiffusionNFT | True | 4 (L20X) | HPSv2.1 + PickScore + CLIPScore | 4 | 4 | 0 (sync)                | 24 | 16 | 3e-4 | 256 (subset) | 24×16=384 | 12 | 0.196                      | 490 |
+| `examples/diffusionnft_trainer/boogu_image/run_boogu_image_pickapic_preference_lora_v1.sh` | Boogu-Image | DiffusionNFT | True | 4 (L20X) | HPSv2.1 + PickScore + CLIPScore | 4 | 4 | 0 (sync)                | 24 | 16 | 3e-4 | 256 (subset) | 24×16=384 | 12 | 0.239                      | 402 |
 
 <table align="center" style="border: none;">
   <tr style="border: none;">
