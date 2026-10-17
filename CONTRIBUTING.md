@@ -96,6 +96,7 @@ Additional guides:
 - [GPU Smoke Tests](docs/contributing/gpu_smoke_tests.md)
 - [CI/CD Layers](docs/contributing/ci_cd.md)
 - [Common Pitfalls](docs/contributing/common_pitfalls.md)
+- [Debugging a Diffusion RL Run That Does Not Converge](docs/contributing/tuning_diffusion_rl_convergence.md)
 
 ## Governance
 
