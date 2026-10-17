@@ -1,6 +1,6 @@
 # NPU Smoke Tests
 
-Last updated: 10/16/2026.
+Last updated: 10/17/2026.
 
 This guide explains how to add CI test cases for Huawei Ascend devices in verl-omni.
 
@@ -19,6 +19,27 @@ into these runners:
 | 0 | core | vLLM-Omni rollout + sleep/wake-up | tests/workers/rollout/rollout_vllm/test_vllm_omni_generate_npu.py | 8 |
 | 1 | e2e | Qwen-Image FlowGRPO trainer | tests/special_e2e/run_flowgrpo_qwen_image_npu.sh | 8 |
 | 2 | e2e | Wan2.2 DanceGRPO trainer | tests/special_e2e/run_dancegrpo_wan22_npu.sh | 8 |
+| 3 | core | Diffusers FSDP engine inference and training | tests/workers/test_diffusers_fsdp_engine_npu.py | 8 |
+
+Test 3 ports the `fsdp` case of `tests/workers/test_diffusers_fsdp_engine.py`
+(GPU core ID 2). It reuses the GPU test's synthetic trajectories and engine
+inference/training exercise, with `_native_npu` attention and sequence parallel
+size 1. It requires at least two visible NPUs and a local tiny Qwen-Image model.
+FSDP2 and sequence-parallel execution are not covered by this NPU case.
+The test checks finite inference log probabilities, training loss, and gradient
+norm; it does not establish GPU/NPU numerical parity or model convergence.
+
+Run only the migrated case from the repository root after sourcing CANN/ATB:
+
+```bash
+DEVICE_NAME=npu NUM_NPUS=2 \
+MODEL_PATH="${HOME}/.cache/modelscope/hub/models/tiny-random/Qwen-Image" \
+python3 -m pytest -v -s tests/workers/test_diffusers_fsdp_engine_npu.py
+```
+
+The same case runs through `run_npu_smoke_core.sh` and the combined
+`run_npu_smoke_tests.sh` entry point. Missing hardware or model files fail
+explicitly rather than producing an all-skipped smoke success.
 
 ## Add a New NPU Smoke Test
 
