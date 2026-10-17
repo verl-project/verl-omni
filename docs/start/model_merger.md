@@ -204,6 +204,14 @@ export just the adapter; `--base_model` identifies the original model and does
 not need to be available locally. To verify the adapter files, run the `test`
 command with `--test_hf_dir "$OUTPUT/lora_adapter"`.
 
+Omni actors (for example a Qwen3-Omni thinker trained with `omni_trainer`) can
+also save LoRA-only checkpoints with
+`actor_rollout_ref.actor.checkpoint.save_lora_only=true`. When the actor's
+`huggingface/config.json` is a transformers config, the adapter is exported with
+`task_type: CAUSAL_LM` so it loads with `PeftModel.from_pretrained` on the
+original model. Diffusion adapters keep `task_type: null`. `--fuse-lora` and full
+model export remain diffusers-only.
+
 Pass `--fuse-lora` to publish a complete model instead. The selected adapter is
 folded into its base weights as `W + (lora_alpha / r) * B @ A`, computed in fp32
 and cast back to the base weight dtype before the `--dtype` policy. The sum is
