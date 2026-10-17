@@ -133,10 +133,28 @@ def _is_missing(value: Any) -> bool:
 
 
 def _append_media_path(media: dict[str, list[Any]], key: str, value: Any) -> None:
-    if _is_missing(value):
-        return
-    if value not in media[key]:
-        media[key].append(value)
+    # One entry per media token; None marks a reference without its own path.
+    media[key].append(None if _is_missing(value) else value)
+
+
+def _resolve_media_order(declared: list[Any], refs: list[Any]) -> list[Any]:
+    """Return media paths in prompt token order.
+
+    An inline path that is also declared at the top level claims that entry, so it counts once.
+    References without a path take the remaining top-level entries in order.
+    """
+    unclaimed = list(declared)
+    for path in refs:
+        if path is not None and path in unclaimed:
+            unclaimed.remove(path)
+    resolved = []
+    for path in refs:
+        if path is not None:
+            resolved.append(path)
+        elif unclaimed:
+            resolved.append(unclaimed.pop(0))
+    # Leftover top-level entries are kept so alignment validation reports the mismatch.
+    return resolved + unclaimed
 
 
 def _normalise_media_list(value: Any) -> list[Any]:
@@ -188,13 +206,14 @@ def _content_to_text(content: Any) -> str:
     return str(content)
 
 
-def _append_string_content(conversation: list[Any], content: str) -> None:
+def _append_string_content(conversation: list[Any], content: str, media: dict[str, list[Any]]) -> None:
     cursor = 0
     for match in _MEDIA_TOKEN_PATTERN.finditer(content):
         text = content[cursor : match.start()]
         if text:
             conversation.append(("text", text))
         conversation.append((match.group(1), None))
+        _append_media_path(media, f"{match.group(1)}s", None)
         cursor = match.end()
     remaining = content[cursor:]
     if remaining:
@@ -204,7 +223,7 @@ def _append_string_content(conversation: list[Any], content: str) -> None:
 def _append_content(conversation: list[Any], content: Any, media: dict[str, list[Any]]) -> None:
     content = _as_python(content)
     if isinstance(content, str):
-        _append_string_content(conversation, content)
+        _append_string_content(conversation, content, media)
         return
 
     for item in content or []:
@@ -252,6 +271,7 @@ def _validate_media_alignment(conversations: Sequence[Sequence[Any]], media: dic
 def _build_preference_branch(sample: dict[str, Any], answer: Any) -> dict[str, Any]:
     prompt = _as_python(sample.get("prompt", []))
     media = _initial_media(sample)
+    media_refs: dict[str, list[Any]] = {key: [] for key in media}
     conversations: list[list[Any]] = []
 
     for message in prompt:
@@ -262,9 +282,11 @@ def _build_preference_branch(sample: dict[str, Any], answer: Any) -> dict[str, A
         if role == "system":
             continue
         conversation = [role or "user"]
-        _append_content(conversation, message.get("content", ""), media)
+        _append_content(conversation, message.get("content", ""), media_refs)
         if len(conversation) > 1:
             conversations.append(conversation)
+
+    media = {key: _resolve_media_order(media[key], media_refs[key]) for key in media}
 
     _validate_media_alignment(conversations, media)
     conversations.append(["assistant", ("text", _answer_text(answer))])
