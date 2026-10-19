@@ -68,6 +68,8 @@ new pipeline config field in **both** `diffusion_rollout.yaml` and
 `docs/contributing/common_pitfalls.md` is symptom-first: fp32 latent/scheduler
 precision loss, RoPE sequence-length mismatch, per-request vs per-GPU SDE seeding.
 Check it before debugging a reward curve that trains but diverges from diffusers.
+If the numerics match but the reward stays flat or degrades, use
+[debug-rl-convergence](../debug-rl-convergence/SKILL.md).
 
 ## Step 4 — Test, then open the PR
 

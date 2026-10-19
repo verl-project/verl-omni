@@ -88,13 +88,30 @@ class _HPSv2Scorer:
         self.device = device
         logger.info("HPSv2.1 scorer loaded on %s", device)
 
-    def score(self, image: Image.Image, prompt: str) -> float:
-        image_input = self.preprocess(image).unsqueeze(0).to(self.device)
-        text_input = self.tokenizer([prompt]).to(self.device)
+    def infer(self, images: list[Image.Image], prompts: list[str]) -> dict[str, torch.Tensor]:
+        """Encode a paired image/prompt batch while deduplicating repeated prompts."""
+        if len(images) != len(prompts):
+            raise ValueError("HPSv2 images and prompts must have the same length")
+        unique_prompts = list(dict.fromkeys(prompts))
+        prompt_to_index = {prompt: index for index, prompt in enumerate(unique_prompts)}
+        prompt_indices = [prompt_to_index[prompt] for prompt in prompts]
+
+        image_input = torch.stack([self.preprocess(image) for image in images]).to(self.device)
+        text_input = self.tokenizer(unique_prompts).to(self.device)
         with torch.inference_mode(), torch.autocast(device_type=self.device.type):
             output = self.model(image_input, text_input)
-            raw_score = torch.diagonal(output["image_features"] @ output["text_features"].T)
-        return float(raw_score.item())
+        return {
+            "image_embeddings": output["image_features"],
+            "text_embeddings": output["text_features"][prompt_indices],
+        }
+
+    def score_batch(self, images: list[Image.Image], prompts: list[str]) -> torch.Tensor:
+        output = self.infer(images, prompts)
+        # The encoders run under autocast; a half-precision product rounds the score.
+        return (output["image_embeddings"].float() * output["text_embeddings"].float()).sum(dim=-1)
+
+    def score(self, image: Image.Image, prompt: str) -> float:
+        return float(self.score_batch([image], [prompt]).item())
 
 
 def _get_hpsv2_scorer(device: str | torch.device | None = None) -> _HPSv2Scorer:
