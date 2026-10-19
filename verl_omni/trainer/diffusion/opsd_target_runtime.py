@@ -28,6 +28,7 @@ module in CPU contexts costs nothing. Target math itself lives in ``opsd_targets
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import Callable, Sequence
 
 import torch
@@ -96,9 +97,10 @@ class OPSDTargetRuntime:
         model_path = getattr(model_config, "local_path", None) or model_config.path
         vae = _load_vae(model_path, device)
         tokenizer = _load_prompt_tokenizer(model_config)
+        reward_path = loss_config.opsd_reward_model_path or _PICKSCORE_MODEL_PATH
         reward_model = _DifferentiablePickScore(
-            model_path=loss_config.opsd_reward_model_path or _PICKSCORE_MODEL_PATH,
-            processor_path=_PICKSCORE_PROCESSOR_PATH,
+            model_path=reward_path,
+            processor_path=_resolve_processor_path(reward_path),
             dtype=getattr(torch, loss_config.opsd_reward_dtype),
             device=device,
         )
@@ -241,6 +243,19 @@ def _unwrap_clip_features(features) -> torch.Tensor:
     from verl_omni.utils.reward_score.image_preference_utils import clip_feature_tensor
 
     return clip_feature_tensor(features)
+
+
+def _resolve_processor_path(reward_path: str) -> str:
+    """Pick the CLIP processor that matches the reward checkpoint.
+
+    A local checkpoint directory normally ships its own ``preprocessor_config.json``
+    (real PickScore exports and the tiny e2e checkpoint both do). Using it keeps the
+    differentiable preprocessing and the model's expected input size in sync; only when the
+    checkpoint is a bare Hub id do we fall back to the canonical PickScore processor.
+    """
+    if os.path.isdir(reward_path) and os.path.isfile(os.path.join(reward_path, "preprocessor_config.json")):
+        return reward_path
+    return _PICKSCORE_PROCESSOR_PATH
 
 
 class _DifferentiablePickScore:
