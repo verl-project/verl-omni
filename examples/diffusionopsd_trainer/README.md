@@ -16,13 +16,16 @@ This is the paper-v1 configuration: 512×512, 10 deterministic CFG-free rollout
 steps, query noise `sigma*=0.278`, `rho=0.10`, `M_tgt=2`, `beta=1.0`, and
 `c_adv=5`.
 
-> **Status: GPU smoke validated.** A 30-step SD3.5-Medium run on two A100-80GB
-> GPUs (one actor/rollout, one native reward, 256x256, batch 2, group size 2)
-> raised the endpoint PickScore reward from 0.707 to 0.899 (+27%), at a median
-> 8.9 s per step after warm-up and 30.2 GB peak VRAM on the actor/rollout GPU.
-> The differentiable target reward matched the native endpoint reward within
-> 0.22%. This validates the plumbing and the learning signal; a paper-scale run
-> (512x512, group 24, 48 prompts/update, 100+ steps) is still pending.
+> **Status: GPU validated at 512×512.** The main evidence run uses the paper's
+> resolution on two A100-80GB GPUs (one actor/rollout, one native reward): 100
+> optimizer steps, group size 8, 4 prompts per update. The endpoint PickScore
+> reward rose from **0.797 to 1.122 (+41%)**, peaking at 1.184, at 39.8 s per
+> step after warm-up and **61.6 GB peak VRAM** on the actor/rollout GPU.
+> `opsd_target_displacement_rel` stayed in [0.0688, 0.0718], inside the
+> trust-region bound, with no non-finite gradients. Earlier 256×256 30-step and
+> 512×512 45-step runs show the same trend. The differentiable target reward
+> matched the native endpoint reward within 0.22%. Deviations from the paper:
+> group size 8 instead of 24 and 4 prompts per update instead of 48.
 
 DiffusionOPSD is **not** [DiffusionOPD](../../docs/algo/diffusion_opd.md)
 (on-policy teacher distillation) and **not**
@@ -188,9 +191,10 @@ constructed target set (`M_fit=1`).
 
 ## Tested configuration
 
-Validated with a 30-step smoke run on a public 8xA100-80GB server; only two
-GPUs were used (one actor/rollout, one native reward). This is a
-plumbing/learning-signal check, not a paper-scale reproduction.
+Validated on a public 8xA100-80GB server; only two GPUs were used (one
+actor/rollout, one native reward). The main evidence run is 512×512 with 100
+optimizer steps; a 256×256 30-step smoke run and a 512×512 45-step run are
+consistent with it.
 
 | Item | Value |
 | --- | --- |
@@ -198,21 +202,20 @@ plumbing/learning-signal check, not a paper-scale reproduction.
 | Software | Python 3.10, torch 2.13.0+cu130, vllm 0.31.0, diffusers 0.40.0, transformers 5.14.1, peft 0.21.2 |
 | Backbone | `stabilityai/stable-diffusion-3.5-medium` (local diffusers dir, LoRA r32/a64) |
 | Trainer | v1 `sync`, `direct_preference` + `online` |
-| Run config | 256x256, 10 deterministic CFG-free rollout steps, batch 2 prompts, group size 2, 30 steps, seed 42 |
+| Main run | **512×512, group 8, 4 prompts per update, 100 steps**, 10 deterministic CFG-free rollout steps, seed 42 |
 | Target construction | `sigma*=0.278`, `rho=0.10`, `M_tgt=2`, `beta=1.0`, `c_adv=5`, `opsd_target_micro_batch=6` |
 | Endpoint reward | PickScore v1 native named model, same checkpoint as the target reward |
-| Reward curve | 0.707 -> 0.899 (+27%); mean of first 5 steps 0.775, last 5 steps 0.944 |
-| Step time | 71.6 s first step (warm-up), then median 8.9 s |
-| Peak VRAM | 30.2 GB actor/rollout GPU, 4.5 GB reward GPU |
-| Metrics | `opsd_query_sigma=0.2780`; `opsd_target_displacement_rel` in [0.0706, 0.0733]; `opsd_reward_prob_mean=0.5000`; 0 non-finite-gradient steps |
+| Reward curve | **0.797 → 1.122 (+41%), peak 1.184**; 256² smoke: 0.707 → 0.899; 512² 45 steps: 0.797 → 1.066 |
+| Step time | 120 s first step (warm-up), then 39.8 s average |
+| Peak VRAM | **61.6 GB actor/rollout GPU**, 4.8 GB reward GPU |
+| Metrics | `opsd_query_sigma=0.2780`; `opsd_target_displacement_rel` in [0.0688, 0.0718] (inside `(0, rho]`); 0 non-finite-gradient steps |
 
-Runtime knobs of the smoke run: `OPSD_MODEL_PATH` and `PICKSCORE_MODEL_PATH`
-pointed at local directories, `trainer.logger='["console"]'`,
-`save_freq=-1`, `test_freq=-1`, `HF_HUB_DISABLE_XET=1` and the pyproject-pinned
-verl commit `fefb080262e1c015a0ea05f958822a6a512dc795`.
+Runtime knobs of the validation runs: `OPSD_MODEL_PATH` and
+`PICKSCORE_MODEL_PATH` pointed at local directories,
+`trainer.logger='["console"]'`, `save_freq=-1`, `test_freq=-1`,
+`HF_HUB_DISABLE_XET=1` and the pyproject-pinned verl commit
+`fefb080262e1c015a0ea05f958822a6a512dc795`.
 
-The validation run deliberately deviates from the paper v1 recipe in
-budget-driven ways: group size 2 instead of 24, 2 prompts per update instead of
-48, 256x256 instead of 512x512, and 30 steps. A paper-scale run still needs a
-larger GPU window; the reward curve and the target-displacement trace above are
-the smoke-scale evidence.
+The validation runs deviate from the paper v1 recipe in budget-driven ways:
+group size 8 instead of 24 and 4 prompts per update instead of 48. The paper's
+8-GPU, 48-group schedule remains the setting for paper-comparable numbers.

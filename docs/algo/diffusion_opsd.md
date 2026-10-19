@@ -411,25 +411,25 @@ comes from a reward gradient, not from a model score difference.
   SD3.5-Medium 10-step schedule). Widening the window or changing the requested
   $\sigma^\star$ beyond `opsd_query_sigma_tolerance` fails at startup of the
   first batch rather than silently changing the query level.
-- **Validation status:** validated with a 30-step SD3.5-Medium smoke run on two
-  A100-80GB GPUs (one actor/rollout, one native reward): 256x256, batch 2, group
-  size 2. The endpoint PickScore reward rose from 0.707 to 0.899 (+27%), with a
-  median 8.9 s per step after warm-up, 30.2 GB peak VRAM on the actor/rollout GPU
-  and 4.5 GB on the reward GPU, `opsd_target_displacement_rel` in [0.0706,
-  0.0733] and no non-finite gradients. This is a plumbing/learning-signal smoke
-  run, not a paper-scale reproduction: 512x512, the paper's group size
-  ($K = 24$), 48 prompts per update and 100+ steps still need a larger GPU budget.
-- **Recipe fidelity:** the example uses a smaller rollout group than the paper's
-  $K = 24$ and is not a reproduction of the paper's reported numbers.
+- **Validation status:** validated on two A100-80GB GPUs (one actor/rollout, one
+  native reward) at 512x512 with 100 optimizer steps, group size 8 and 4 prompts
+  per update. The endpoint PickScore reward rose from **0.797 to 1.122 (+41%)**,
+  peaking at 1.184, with `opsd_target_displacement_rel` in [0.0688, 0.0718]
+  (inside the trust region), 39.8 s per step after warm-up, **61.6 GB peak VRAM**
+  on the actor/rollout GPU and 4.8 GB on the reward GPU, and no non-finite
+  gradients. A 30-step 256x256 smoke run (0.707 -> 0.899) and a 45-step 512x512
+  run (0.797 -> 1.066) are consistent with it.
+- **Recipe fidelity:** the example still uses a smaller rollout group than the
+  paper's $K = 24$ (8 instead of 24) and 4 prompts per update instead of 48, so
+  the absolute numbers are not comparable to the paper's reported scores.
 
-![DiffusionOPSD SD3.5-Medium 30-step smoke run](../assets/diffusion_opsd_smoke_30step.png)
+![DiffusionOPSD SD3.5-Medium reward curves](../assets/diffusion_opsd_512_100step_curve.png)
 
-Thirty-step smoke run on two A100-80GB GPUs (256×256, batch 2, group 2). The
-endpoint PickScore reward rises from 0.707 to 0.899; the lower panels show the
-actor loss, the positive-branch weight $\omega$ and the relative target
-displacement $\lVert \bar y_\pm - y_0\rVert_2 / \lVert y_0\rVert_2$, which stays
-inside the trust region $(0, \rho]$. This is a plumbing and learning-signal
-check, not a paper-scale reproduction.
+Endpoint reward, actor loss, relative target displacement and step time for the
+256×256 30-step smoke run, the 512×512 45-step run and the 512×512 100-step run.
+The reward rises throughout training while the relative target displacement
+stays just under $\rho = 0.10$, which is the intended trust-region behaviour:
+the targets stay bounded and the policy keeps fitting them.
 
 ## Reference Example
 
