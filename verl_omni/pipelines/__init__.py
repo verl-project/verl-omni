@@ -34,6 +34,7 @@ from . import (
     sd3_dgpo,
     sd3_dpo,
     sd3_flow_grpo,
+    sd3_opsd,
     wan22_dance_grpo,
 )
 from .bagel_flow_grpo import *  # noqa: F401, F403
@@ -57,6 +58,7 @@ from .sd3_awm import *  # noqa: F401, F403
 from .sd3_dgpo import *  # noqa: F401, F403
 from .sd3_dpo import *  # noqa: F401, F403
 from .sd3_flow_grpo import *  # noqa: F401, F403
+from .sd3_opsd import *  # noqa: F401, F403
 from .wan22_dance_grpo import *  # noqa: F401, F403
 
 __all__ = list(qwen3_omni.__all__)
@@ -74,6 +76,7 @@ __all__ += list(sd3_awm.__all__)
 __all__ += list(sd3_dgpo.__all__)
 __all__ += list(sd3_dpo.__all__)
 __all__ += list(sd3_flow_grpo.__all__)
+__all__ += list(sd3_opsd.__all__)
 __all__ += list(wan22_dance_grpo.__all__)
 __all__ += list(qwen_image_dpo.__all__)
 __all__ += list(qwen_image_dual_grpo.__all__)

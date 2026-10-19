@@ -223,6 +223,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
             "diffusion_composite_model",
             "diffusion_dpo_model",
             "diffusion_nft_model",
+            "diffusion_opsd_model",
         ):
             self.flops_counter = DiffusionFlopsCounter(
                 architecture=getattr(self.model_config, "architecture", None),
@@ -682,6 +683,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             "diffusion_composite_model",
             "diffusion_dpo_model",
             "diffusion_nft_model",
+            "diffusion_opsd_model",
         )
 
         # 1. build reference model
@@ -824,6 +826,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             self.actor = TrainingWorker(config=actor_training_config)
             self.actor.reset()
             self.actor.set_loss_fn(self.loss_fn)
+            if is_diffusion and self.config.actor.diffusion_loss.get("loss_mode", "flow_grpo") == "opsd":
+                self.actor.engine.configure_opsd_runtime(loss_config=self.config.actor.diffusion_loss)
             self.set_dispatch_collect(mesh_name="actor", **self.actor.get_dispatch_collect())
 
         # 2.5 build frozen teachers for diffusion on-policy distillation

@@ -171,7 +171,7 @@ actor_rollout_ref:
 
 - `actor_rollout_ref.model.model_type`: Dispatch key; must be `diffusion_model` for the diffusion agent loop.
 - `actor_rollout_ref.model.path`: HuggingFace / local diffusion pipeline root.
-- `actor_rollout_ref.model.algorithm`: RL algorithm name (also drives default `diffusion_loss.loss_mode` / `adv_estimator`). Examples: `flow_grpo`, `mix_grpo`, `flow_dppo`, `diffusion_nft`, `dgpo`, `awm`, `dpo`, `dance_grpo`.
+- `actor_rollout_ref.model.algorithm`: RL algorithm name (also drives default `diffusion_loss.loss_mode` / `adv_estimator`). Examples: `flow_grpo`, `mix_grpo`, `flow_dppo`, `diffusion_nft`, `dgpo`, `opsd`, `awm`, `dpo`, `dance_grpo`.
 - `actor_rollout_ref.model.tokenizer_path`: Optional tokenizer path if not under `path` (falls back to `<path>/tokenizer` or `path`).
 - `actor_rollout_ref.model.config_path`: Optional transformer config path. If null, backends use `<path>/<transformer_subfolder>`.
 - `actor_rollout_ref.model.transformer_subfolder`: Subfolder with diffusion transformer weights/config (default `transformer`).
@@ -255,7 +255,7 @@ actor_rollout_ref:
 
 #### `diffusion_loss` — `DiffusionLossConfig`
 
-- `actor_rollout_ref.actor.diffusion_loss.loss_mode`: Loss registry key. One of `flow_grpo`, `flow_dppo`, `grpo_guard`, `diffusion_nft`, `omni_nft`, `dgpo`, `awm`, `dpo`, `dmd2`, `dance_grpo`, `distill_kl`, `distill_fm_mse`.
+- `actor_rollout_ref.actor.diffusion_loss.loss_mode`: Loss registry key. One of `flow_grpo`, `flow_dppo`, `grpo_guard`, `diffusion_nft`, `omni_nft`, `dgpo`, `opsd`, `awm`, `dpo`, `dmd2`, `dance_grpo`, `distill_kl`, `distill_fm_mse`.
 - `actor_rollout_ref.actor.diffusion_loss.clip_ratio`: PPO-style clip ratio for diffusion policy loss (FlowGRPO default is very small, e.g. `1e-4`).
 - `actor_rollout_ref.actor.diffusion_loss.adv_clip_max`: Max absolute advantage before computing the policy loss (must be `> 0`).
 - `actor_rollout_ref.actor.diffusion_loss.mix_beta`: DiffusionNFT β for positive / implicit-negative prediction mixing (must be `> 0`).
@@ -268,6 +268,7 @@ actor_rollout_ref:
 - `actor_rollout_ref.actor.diffusion_loss.awm_kl_coef`: AWM coefficient of the velocity-space MSE toward the EMA (`old`) adapter (must be `>= 0`).
 - `actor_rollout_ref.actor.diffusion_loss.kl_mask_threshold`: Flow-DPPO divergence threshold for masking high-KL updates (must be `> 0`).
 - `actor_rollout_ref.actor.diffusion_loss.add_kl_coefficient`: Whether Flow-DPPO normalizes mean drift by the scheduler SDE noise scale.
+- `actor_rollout_ref.actor.diffusion_loss.opsd_*`: DiffusionOPSD target-construction and fit knobs — `opsd_rho`, `opsd_n_ascent`, `opsd_eta`, `opsd_branch_beta`, `opsd_query_sigma`, `opsd_query_sigma_tolerance`, `opsd_num_train_timesteps`, `opsd_eps_gamma`, `opsd_reward_kind`, `opsd_reward_model_path`, `opsd_reward_dtype`, `opsd_target_micro_batch`. The endpoint-reward weight reuses `adv_clip_max`; see [DiffusionOPSD](../algo/diffusion_opsd.md).
 
 #### Actor-level extras
 
