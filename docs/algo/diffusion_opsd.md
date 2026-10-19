@@ -422,6 +422,15 @@ comes from a reward gradient, not from a model score difference.
 - **Recipe fidelity:** the example uses a smaller rollout group than the paper's
   $K = 24$ and is not a reproduction of the paper's reported numbers.
 
+![DiffusionOPSD SD3.5-Medium 30-step smoke run](../assets/diffusion_opsd_smoke_30step.png)
+
+Thirty-step smoke run on two A100-80GB GPUs (256×256, batch 2, group 2). The
+endpoint PickScore reward rises from 0.707 to 0.899; the lower panels show the
+actor loss, the positive-branch weight $\omega$ and the relative target
+displacement $\lVert \bar y_\pm - y_0\rVert_2 / \lVert y_0\rVert_2$, which stays
+inside the trust region $(0, \rho]$. This is a plumbing and learning-signal
+check, not a paper-scale reproduction.
+
 ## Reference Example
 
 [`examples/diffusionopsd_trainer/sd35/run_sd35_medium_opsd_lora_v1.sh`](https://github.com/verl-project/verl-omni/blob/main/examples/diffusionopsd_trainer/sd35/run_sd35_medium_opsd_lora_v1.sh)
