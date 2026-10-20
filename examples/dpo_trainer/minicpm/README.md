@@ -42,7 +42,7 @@ The MiniCPM transform rewrites them to processor slots (`<image>./</image>`,
 ## Training
 
 ```bash
-DATASET_ROOT="$HOME/Omni-Preference" \
+DATASET_ROOT="$HOME/Omni-Preference"
 DATA_DIR="$DATASET_ROOT/parquet_dpo" \
 MODEL_PATH=openbmb/MiniCPM-o-4_5 \
 bash examples/dpo_trainer/minicpm/run_minicpm_omni_preference_lora.sh
