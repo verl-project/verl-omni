@@ -1,5 +1,7 @@
 # MiniCPM Offline DPO
 
+Last updated: 10/20/2026
+
 This example trains MiniCPM multimodal understanding with offline DPO through
 `verl_omni.trainer.main_omni`.  It uses turn-based preference rows and keeps the
 training path simplex: vision/audio understanding modules and the AR language
