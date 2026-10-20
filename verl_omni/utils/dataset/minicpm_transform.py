@@ -749,7 +749,7 @@ def _fill_minicpm_forward_fields(model_inputs: dict[str, Any], input_ids: torch.
     model_inputs["image_bound"] = _sample_bound(model_inputs.get("image_bound"), input_ids.device)
     model_inputs["audio_bounds"] = _sample_bound(model_inputs.get("audio_bounds"), input_ids.device)
     audio_features = _normalize_audio_features(model_inputs.get("audio_features"))
-    if audio_features == []:
+    if isinstance(audio_features, list):
         model_inputs.pop("audio_features", None)
         model_inputs.pop("audio_feature_lens", None)
     else:
