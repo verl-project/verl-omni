@@ -124,6 +124,7 @@ perf/tuning_guide.md
 perf/diffusion_mfu.md
 perf/profiler.md
 perf/diffusion_consistency.md
+perf/stage_skip.md
 ```
 
 ```{toctree}
