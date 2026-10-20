@@ -1379,9 +1379,16 @@ class NFTDiffusersFSDPEngine(DiffusersFSDPEngine):
     ):
         DiffusionModelBase.get_class(model_config).validate_engine_config(engine_config)
         super().__init__(model_config, engine_config, optimizer_config, checkpoint_config)
+        # Let the registered adapter attach any algorithm-specific runtime state. Adapters that
+        # do not need it inherit the base no-op.
+        self.configure_engine()
 
     def _configure_gradient_checkpointing(self, module):
         DiffusionModelBase.get_class(self.model_config).configure_gradient_checkpointing(module, self.engine_config)
+
+    def configure_engine(self) -> None:
+        """Run the pipeline adapter's engine hook (no algorithm knowledge in the worker)."""
+        DiffusionModelBase.get_class(self.model_config).configure_engine(self, self.engine_config)
 
     def forward_backward_batch(
         self, data: TensorDict, loss_function: Callable, forward_only: bool = False
@@ -1522,13 +1529,16 @@ class OPSDDiffusersFSDPEngine(NFTDiffusersFSDPEngine):
     forward is skipped because the canonical OPSD objective has no reference KL term.
 
     Target construction lives in ``verl_omni.trainer.diffusion.opsd_target_runtime`` and is
-    configured by the actor worker with the ``diffusion_loss.opsd_*`` fields.
+    configured from the ``diffusion_loss.opsd_*`` fields by the registered pipeline adapter's
+    ``configure_engine`` hook, so the shared worker carries no OPSD-specific code.
     """
 
     def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+        # Initialized before ``super().__init__()``: the parent constructor runs the adapter's
+        # ``configure_engine`` hook, which stores the loss config on this instance.
         self._opsd_runtime = None
         self._opsd_loss_config = None
+        super().__init__(*args, **kwargs)
 
     def configure_opsd_runtime(self, loss_config) -> None:
         """Attach the loss config used to lazily build the frozen VAE + reward runtime."""

@@ -2317,6 +2317,13 @@ class OPSDLoss(DiffusionLossFn):
         batch.batch["advantages"] = advantages[:, None]
         batch.batch["returns"] = batch.batch["advantages"]
         batch.batch["sample_level_rewards"] = reward_tensor[:, None].expand(-1, 1)
+        # The differentiable reward needs the prompt that produced each query state. The v1
+        # actor batch already carries ``prompts`` token ids (used by validation decode), so hand
+        # them to the engine under the key it reads instead of re-plumbing raw strings.
+        prompts = batch.batch.get("prompts", None)
+        if prompts is None:
+            raise ValueError("DiffusionOPSD requires `prompts` token ids in the actor batch for its reward model.")
+        batch.batch["opsd_prompt_ids"] = prompts
         return batch
 
     @staticmethod

@@ -252,10 +252,24 @@ def _resolve_processor_path(reward_path: str) -> str:
     (real PickScore exports and the tiny e2e checkpoint both do). Using it keeps the
     differentiable preprocessing and the model's expected input size in sync; only when the
     checkpoint is a bare Hub id do we fall back to the canonical PickScore processor.
+
+    ``CLIPProcessor`` needs both an image processor and a tokenizer, so a directory that
+    carries only ``preprocessor_config.json`` is not self-sufficient and falls back as well.
     """
-    if os.path.isdir(reward_path) and os.path.isfile(os.path.join(reward_path, "preprocessor_config.json")):
-        return reward_path
-    return _PICKSCORE_PROCESSOR_PATH
+    if not os.path.isdir(reward_path):
+        return _PICKSCORE_PROCESSOR_PATH
+    if not os.path.isfile(os.path.join(reward_path, "preprocessor_config.json")):
+        return _PICKSCORE_PROCESSOR_PATH
+    if not _has_tokenizer_files(reward_path):
+        return _PICKSCORE_PROCESSOR_PATH
+    return reward_path
+
+
+def _has_tokenizer_files(path: str) -> bool:
+    """Return True when ``path`` holds tokenizer assets ``CLIPProcessor`` can load."""
+    return any(
+        os.path.isfile(os.path.join(path, name)) for name in ("tokenizer.json", "vocab.json", "tokenizer_config.json")
+    )
 
 
 class _DifferentiablePickScore:

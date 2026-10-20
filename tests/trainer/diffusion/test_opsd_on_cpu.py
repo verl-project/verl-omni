@@ -399,7 +399,13 @@ def make_rollout_batch(uid, *, latents=None, timesteps=None):
     if latents is None:
         latents = torch.randn(batch_size, all_timesteps.shape[1] + 1, C, H, W)
     return DataProto.from_dict(
-        tensors={"all_latents": latents, "all_timesteps": all_timesteps},
+        tensors={
+            "all_latents": latents,
+            "all_timesteps": all_timesteps,
+            # The v1 actor batch always carries tokenized prompts for validation decode, and
+            # OPSD forwards them to the engine as ``opsd_prompt_ids``.
+            "prompts": torch.zeros(batch_size, 8, dtype=torch.long),
+        },
         non_tensors={"uid": np.array(uid, dtype=object)},
     )
 
@@ -485,6 +491,24 @@ class TestPrepareActorBatch:
         result = OPSDLoss.prepare_actor_batch(batch, torch.tensor([0.1, 0.9]), make_prepare_config())
         torch.testing.assert_close(result.batch["reward_prob"], torch.full((2, 1), 0.5))
         torch.testing.assert_close(result.batch["advantages"], torch.zeros(2, 1))
+
+    def test_forwards_prompt_ids_to_the_target_runtime(self):
+        batch = make_rollout_batch(["a", "a"])
+        prompts = torch.arange(16, dtype=torch.long).reshape(2, 8)
+        batch.batch["prompts"] = prompts.clone()
+
+        result = OPSDLoss.prepare_actor_batch(batch, torch.tensor([0.2, 0.8]), make_prepare_config())
+
+        torch.testing.assert_close(result.batch["opsd_prompt_ids"], prompts)
+
+    def test_rejects_an_actor_batch_without_prompts(self):
+        # The differentiable reward needs the prompt behind each query state; without it the
+        # engine cannot decode prompts and would fail deeper inside target construction.
+        batch = make_rollout_batch(["a", "a"])
+        del batch.batch["prompts"]
+
+        with pytest.raises(ValueError, match="requires `prompts` token ids"):
+            OPSDLoss.prepare_actor_batch(batch, torch.tensor([0.2, 0.8]), make_prepare_config())
 
     def test_rejects_missing_rollout_fields(self):
         uid = ["a", "a"]

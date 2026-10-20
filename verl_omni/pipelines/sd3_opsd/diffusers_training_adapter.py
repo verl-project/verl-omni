@@ -42,6 +42,22 @@ class StableDiffusion3OPSD(StableDiffusion3DGPO):
     """
 
     @classmethod
+    def configure_engine(cls, engine, engine_config) -> None:
+        """Give the OPSD engine the ``diffusion_loss`` block it builds targets from.
+
+        The engine only receives ``DiffusionModelConfig`` and ``EngineConfig``, so the loss
+        configuration reaches it through this adapter hook instead of a branch in the shared
+        worker.
+        """
+        algorithm_config = getattr(engine_config, "algorithm_config", None)
+        if algorithm_config is None:
+            raise ValueError(
+                "DiffusionOPSD engine requires the actor's diffusion_loss configuration; "
+                "engine_config.algorithm_config was not set."
+            )
+        engine.configure_opsd_runtime(loss_config=algorithm_config)
+
+    @classmethod
     def prepare_training_inputs(
         cls, micro_batch: TensorDict, step: int, scheduler
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:

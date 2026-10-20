@@ -152,7 +152,7 @@ and the targets therefore refer to the same reward signal.
 
 | Knob | Recipe value | Meaning |
 |---|---|---|
-| `opsd_rho` | `0.10` | Relative L2 trust-region radius; per-sample budget `rho * ||y0||_2`. |
+| `opsd_rho` | `0.10` | Relative L2 trust-region radius; per-sample budget `rho * \|\|y0\|\|_2`. |
 | `opsd_n_ascent` | `2` | Reward-gradient steps per branch (`M_tgt`). |
 | `opsd_eta` | `1.0` | Fraction of the budget per ascent step before projection. |
 | `opsd_branch_beta` | `1.0` | `beta` in the implicit positive/negative velocities. |

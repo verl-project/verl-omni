@@ -731,23 +731,6 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         }
         return DataProto.from_tensordict(tu.get_tensordict(ref_output))
 
-    def _attach_opsd_prompt_ids(self, data: DataProto) -> DataProto:
-        """Expose the tokenized prompts to the OPSD engine's differentiable reward.
-
-        The reward model needs the prompt text that produced each query state. The v1 batch
-        already carries ``prompts`` token ids (used by validation decode), so the OPSD engine
-        decodes them with the model tokenizer instead of re-plumbing raw strings through the
-        transfer queue.
-        """
-        loss_mode = self.config.actor_rollout_ref.actor.diffusion_loss.get("loss_mode", "flow_grpo")
-        if loss_mode != "opsd":
-            return data
-        prompts = data.batch.get("prompts", None)
-        if prompts is None:
-            raise ValueError("DiffusionOPSD requires `prompts` token ids in the actor batch for its reward model.")
-        data.batch["opsd_prompt_ids"] = prompts
-        return data
-
     def _update_old_policy(self) -> tuple[bool, float, str]:
         """Refresh the NFT old-policy adapter (copy or EMA)."""
         algo_cfg = self.config.algorithm
@@ -789,7 +772,6 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             )
             data = self._prepare_actor_batch(data, reward_tensor)
             data.batch["sample_level_rewards"] = data.batch["sample_level_scores"]
-            data = self._attach_opsd_prompt_ids(data)
 
         if self.use_reference_policy:
             with marked_timer("ref", timing_raw, color="olive"):

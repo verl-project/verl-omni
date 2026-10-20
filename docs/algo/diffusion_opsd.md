@@ -170,9 +170,10 @@ matching $\hat\sigma$), and `_advantage_to_reward_prob` applies the
 $\pm c_\text{adv}$ clamp and the affine map. There is no PPO ratio, no clipping
 of the policy ratio, no KL term, and no reference model. $c_\text{adv} = 5.0$
 (`actor_rollout_ref.actor.diffusion_loss.adv_clip_max`) is **both** the reward
-normalization scale and the loss scale; changing it changes the target
-construction and the loss magnitude at once, so it is not a plain learning-rate
-knob.
+normalization scale and the loss scale; changing it changes the branch weights
+$\omega$ and the loss magnitude at once, so it is not a plain learning-rate
+knob. It does not affect target construction, which is governed by `opsd_rho`,
+`opsd_n_ascent` and `opsd_eta`.
 
 ### Behavior-policy refresh and fit budget
 

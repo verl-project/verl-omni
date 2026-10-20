@@ -771,6 +771,10 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                     "Diffusion infer_batch requires rollout.log_prob_micro_batch_size_per_gpu or "
                     "actor.ppo_micro_batch_size_per_gpu (used by prepare_micro_batches)."
                 )
+                # Every diffusion algorithm keeps its knobs in ``diffusion_loss``; expose them to
+                # the engine so a pipeline adapter can configure itself through its own hook
+                # instead of the shared worker branching on the algorithm name.
+                actor_training_config.engine_config.algorithm_config = self.config.actor.diffusion_loss
             else:
                 actor_use_dynamic_bsz = self.config.actor.get("use_dynamic_bsz", False)
                 rollout_log_prob_use_dynamic_bsz = self.config.rollout.get("log_prob_use_dynamic_bsz", False)
@@ -826,8 +830,6 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             self.actor = TrainingWorker(config=actor_training_config)
             self.actor.reset()
             self.actor.set_loss_fn(self.loss_fn)
-            if is_diffusion and self.config.actor.diffusion_loss.get("loss_mode", "flow_grpo") == "opsd":
-                self.actor.engine.configure_opsd_runtime(loss_config=self.config.actor.diffusion_loss)
             self.set_dispatch_collect(mesh_name="actor", **self.actor.get_dispatch_collect())
 
         # 2.5 build frozen teachers for diffusion on-policy distillation

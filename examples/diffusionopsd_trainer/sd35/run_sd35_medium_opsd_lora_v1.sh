@@ -13,16 +13,16 @@
 # old-policy EMA uses `linear_to_0_5`, which is exactly
 # eta_beh = min(1e-3 * update, 0.5).
 #
-# Status: the first PR ships the loss, config, the `diffusion_opsd_model`
-# engine, the SD3.5 adapters and CPU tests. GPU validation of this recipe is
-# still pending (see examples/diffusionopsd_trainer).
+# Status: the loss, config, the `diffusion_opsd_model` engine, the SD3.5 adapters,
+# CPU tests and an offline e2e smoke are in place, and this recipe was validated
+# on GPU at 512x512 for 100 steps (see examples/diffusionopsd_trainer for the
+# measured curve).
 #
-# TODO(GPU validation): the endpoint omega reward is the native PickScore named
-# model configured below. It must use the same checkpoint and image
-# preprocessing as the differentiable target reward
-# (`diffusion_loss.opsd_reward_model_path`) and must be verified against the
-# target construction inside the OPSD engine on GPU. Do not report a reward
-# curve before that alignment check.
+# The endpoint omega reward is the native PickScore named model configured below.
+# It must use the same checkpoint as the differentiable target reward
+# (`diffusion_loss.opsd_reward_model_path`): the endpoint score goes through the
+# native PIL preprocessing while target construction resizes bicubically, so the
+# two paths differ by a small, bounded amount rather than being identical.
 set -x
 
 # Set WORKSPACE to any writable directory; defaults to $HOME.

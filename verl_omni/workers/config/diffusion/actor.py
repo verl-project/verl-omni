@@ -284,6 +284,12 @@ class DiffusionActorConfig(BaseConfig):
             raise ValueError(
                 f"Invalid distill_loss_mode: {self.distill_loss_mode}. Must be one of {valid_distill_modes}"
             )
+        # Every diffusion algorithm keeps its knobs in ``diffusion_loss``. Publish them on the
+        # engine config so a pipeline adapter can drive engine-specific setup through its own
+        # hook instead of the shared worker branching on the algorithm name.
+        engine = getattr(self, "engine", None)
+        if engine is not None and not hasattr(engine, "algorithm_config"):
+            engine.algorithm_config = self.diffusion_loss
 
 
 @dataclass
