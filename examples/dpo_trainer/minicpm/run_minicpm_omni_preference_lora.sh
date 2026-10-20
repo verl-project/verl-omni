@@ -52,16 +52,30 @@ AUDIO_RATIO=${AUDIO_RATIO:-1.0}
 TRAIN_FILES=${TRAIN_FILES:-"['${DATA_DIR}/image/train.parquet','${DATA_DIR}/audio/train.parquet']"}
 VAL_FILES=${VAL_FILES:-"['${DATA_DIR}/image/test.parquet','${DATA_DIR}/audio/test.parquet']"}
 
-for parquet in \
-    "${DATA_DIR}/image/train.parquet" \
-    "${DATA_DIR}/audio/train.parquet" \
-    "${DATA_DIR}/image/test.parquet" \
-    "${DATA_DIR}/audio/test.parquet"; do
-    if [ ! -f "${parquet}" ]; then
-        echo "Missing MiniCPM offline DPO parquet: ${parquet}" >&2
-        exit 1
-    fi
-done
+# Fail fast when a configured parquet file is missing. A caller-provided
+# TRAIN_FILES / VAL_FILES override replaces the default DATA_DIR layout, so
+# validate the lists actually handed to Hydra instead of the four defaults.
+check_parquet_list() {
+    local list=$1 parquet entries
+    entries=${list#[}
+    entries=${entries%]}
+    entries=${entries//\'/}
+    entries=${entries//\"/}
+    local IFS=','
+    for parquet in ${entries}; do
+        parquet=${parquet#"${parquet%%[![:space:]]*}"}
+        parquet=${parquet%"${parquet##*[![:space:]]}"}
+        if [ -z "${parquet}" ]; then
+            continue
+        fi
+        if [ ! -f "${parquet}" ]; then
+            echo "Missing MiniCPM offline DPO parquet: ${parquet}" >&2
+            exit 1
+        fi
+    done
+}
+check_parquet_list "${TRAIN_FILES}"
+check_parquet_list "${VAL_FILES}"
 
 # Train MiniCPM understanding modules; exclude only generation-only audio/TTS paths.
 EXCLUDE_MODULES=${EXCLUDE_MODULES:-".*vpm.*|.*apm.*|.*talker.*|.*code2wav.*|.*code_predictor.*|.*codec.*|.*audio_decoder.*|.*audio_generator.*|.*audio_head.*|.*tts.*|.*vocoder.*"}
