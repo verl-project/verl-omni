@@ -196,7 +196,7 @@ The kernel never builds that tensor.
    `compute_logits` consumes — and ships it on the existing
    `multimodal_output` channel, opt-in per request. The nitrobrew agent loop
    sets that flag and lifts the tensor onto the batch as a jagged
-   `teacher_hidden_states` field (from `verl_omni/agent_loop/nitrobrew_opd_agent_loop.py`).
+   `teacher_hidden_states` field (from `verl_omni/experimental/nitrobrew_opd_agent_loop.py`).
 2. **The unembedding is distributed to the actor.** `h @ W.T` needs the
    teacher's `lm_head` weight, so the driver reads it once out of the teacher
    checkpoint's safetensors — `thinker.lm_head.weight`, falling back to a tied
@@ -233,7 +233,7 @@ directly rather than folded into the policy-gradient reward.
   `OmniDistillationLossConfig` synthesizes their `loss_settings` with
   `use_hidden_states=True` — that flag is what triggers the widening.
 - **Agent loop.** The rollout must use
-  `+actor_rollout_ref.rollout.agent.agent_loop_manager_class=verl_omni.agent_loop.nitrobrew_opd_agent_loop.NitrobrewOPDAgentLoopManagerTQ`,
+  `+actor_rollout_ref.rollout.agent.agent_loop_manager_class=verl_omni.experimental.nitrobrew_opd_agent_loop.NitrobrewOPDAgentLoopManagerTQ`,
   which adds the hidden-state teacher client and the batch lift on top of the
   standard manager.
 - **Teacher engine.** `enable_chunked_prefill=false` is required: hidden states

@@ -17,7 +17,7 @@ import pytest
 import torch
 from omegaconf import OmegaConf
 
-from verl_omni.agent_loop.nitrobrew_opd_agent_loop import (
+from verl_omni.experimental.nitrobrew_opd_agent_loop import (
     lift_teacher_hidden_states,
     use_hidden_states_from_config,
 )
@@ -71,7 +71,7 @@ class TestWorkerHiddenModeSelection:
         pytest.importorskip("verl")
 
     def test_imports_resolve(self):
-        from verl_omni.agent_loop.nitrobrew_opd_agent_loop import (  # noqa: F401
+        from verl_omni.experimental.nitrobrew_opd_agent_loop import (  # noqa: F401
             AsyncTeacherHiddenStatesManager,
             NitrobrewOPDAgentLoopManagerTQ,
             NitrobrewOPDAgentLoopWorker,
@@ -80,7 +80,7 @@ class TestWorkerHiddenModeSelection:
 
 class TestTeacherHiddenManagerRouting:
     def _make_manager(self, keys):
-        from verl_omni.agent_loop.nitrobrew_opd_agent_loop import AsyncTeacherHiddenStatesManager
+        from verl_omni.experimental.nitrobrew_opd_agent_loop import AsyncTeacherHiddenStatesManager
 
         teachers = {k: object() for k in keys}
         distill = OmegaConf.create(

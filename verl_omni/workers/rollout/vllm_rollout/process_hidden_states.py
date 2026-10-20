@@ -45,12 +45,7 @@ _applied = False
 
 
 def request_wants_hidden_states(runner, req_id: str) -> bool:
-    """True when the request opted in via ``SamplingParams.extra_args``.
-
-    Reads the flag off the request's cached sampling params rather than the
-    runner's ``model_intermediate_buffer``, which the engine overwrites with its
-    own ``additional_information`` on the request's first scheduled step.
-    """
+    """True when the request opted in via ``SamplingParams.extra_args``."""
     req_state = runner.requests.get(req_id)
     params = getattr(req_state, "sampling_params", None)
     extra = getattr(params, "extra_args", None)
@@ -76,7 +71,6 @@ def apply_hidden_states_patches() -> None:
 
 
 def _is_step_hidden_states(hidden_states, scheduler_output) -> bool:
-    """Validate ``execute_model_state.hidden_states`` before use."""
     if not isinstance(hidden_states, torch.Tensor) or hidden_states.ndim != 2:
         return False
     total = sum(int(n) for n in scheduler_output.num_scheduled_tokens.values())
@@ -197,12 +191,7 @@ def _merge_prefix_hidden_states(
 
 
 def _collect_hidden_states_payloads(runner, scheduler_output, hidden_states) -> dict[str, dict]:
-    """Slice per-request hidden states [S, D] (bf16, CPU) from the step's hidden tensor.
-
-    Only requests that opted in AND are finishing their prefill in this step
-    are captured; partial (chunked) prefills raise instead of emitting
-    truncated tensors.
-    """
+    """Slice per-request hidden states [S, D] (bf16, CPU) from the step's hidden tensor."""
     num_scheduled_tokens = scheduler_output.num_scheduled_tokens
     snapshot_qsl = getattr(runner, "_snapshot_query_start_loc_cpu", None)
     if callable(snapshot_qsl):
@@ -293,11 +282,7 @@ def _merge_into_multimodal_outputs(output, hidden_payloads: dict[str, dict]) -> 
 
 
 def extract_hidden_states(req_output) -> object:
-    """Read the hidden states off a client-facing OmniRequestOutput.
-
-    Looks at the first completion's ``multimodal_output`` payload (a
-    MultimodalPayload or dict). Returns the tensor or None.
-    """
+    """Read the hidden states off a client-facing OmniRequestOutput."""
     outputs = getattr(req_output, "outputs", None)
     if not outputs:
         return None

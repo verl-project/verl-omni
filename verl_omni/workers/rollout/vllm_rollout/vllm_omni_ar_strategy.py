@@ -351,10 +351,6 @@ class ARStrategy(OmniStrategyBase):
         if mm_processor_kwargs and not adapter_prepared_prompt:
             prompt.setdefault("mm_processor_kwargs", mm_processor_kwargs)
         if return_hidden:
-            # Carry the opt-in on the request's SamplingParams so it survives the
-            # engine's per-step request bookkeeping; a prompt dict
-            # ``model_intermediate_buffer`` entry gets overwritten by the engine's
-            # own additional_information on the first scheduled step.
             policy_stage_params = params[self._policy_stage_index] if isinstance(params, list) else params
             extra_args = dict(policy_stage_params.extra_args or {})
             extra_args[RETURN_FLAG_KEY] = True
@@ -424,8 +420,7 @@ class ARStrategy(OmniStrategyBase):
             )
 
         # Teacher hidden states ride CompletionOutput.multimodal_output when the
-        # request opted in via sampling_params["return_hidden_states"]
-        # (popped in preprocess_input; presence of the payload is the signal).
+        # request opted in via sampling_params["return_hidden_states"].
         hidden = extract_hidden_states(req_output)
         if hidden is not None:
             extra_fields["teacher_hidden_states"] = hidden

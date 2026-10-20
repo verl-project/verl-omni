@@ -273,7 +273,7 @@ scripts. Beyond the teacher block shared with the OPD recipe, the script sets:
 - `distillation.distillation_loss.loss_mode=nitrobrew` with
   `use_policy_gradient=false`. `nitrobrew_reverse_kl` selects `KL(p_S ‖ p_T)`
   instead of the default forward `KL(p_T ‖ p_S)`.
-- `+actor_rollout_ref.rollout.agent.agent_loop_manager_class=verl_omni.agent_loop.nitrobrew_opd_agent_loop.NitrobrewOPDAgentLoopManagerTQ`
+- `+actor_rollout_ref.rollout.agent.agent_loop_manager_class=verl_omni.experimental.nitrobrew_opd_agent_loop.NitrobrewOPDAgentLoopManagerTQ`
   — the agent loop that asks the teacher for hidden states and lifts them onto
   the batch as a first-class tensor field.
 - `+...rollout.engine_kwargs.vllm_omni.block_size=128`, and the teacher's

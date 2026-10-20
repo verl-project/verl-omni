@@ -31,11 +31,6 @@ from verl.workers.config import DistillationConfig
 _CHUNK_V: int = 1024
 
 
-# ---------------------------------------------------------------------------
-# Forward KL: KL(p_T || p_S)
-# ---------------------------------------------------------------------------
-
-
 def _student_logsumexp(student_logits: torch.Tensor, temperature: float, chunk_V: int) -> torch.Tensor:
     """Stable online logsumexp of the temperature-scaled student logits."""
     N = student_logits.shape[0]
@@ -136,16 +131,6 @@ def _chunked_kl_forward(
     return kl, t_lse, s_lse, t_unc
 
 
-# ---------------------------------------------------------------------------
-# Backward: unclamped d(KL)/d(zs_v) = p_S(v) - p_T(v); with the forward's
-# log_prob_min_clamp floor active it becomes
-#     d/dzs_v = p_S(v) * U - p_T(v) * 1{zs_v > s_lse + clamp}
-# where U is the teacher mass on unclamped vocabulary (saved by the forward):
-# the floor freezes the teacher-weighted term where it binds, and the student
-# term keeps scaling with U because s_lse still couples every logit.
-# ---------------------------------------------------------------------------
-
-
 def _bwd_chunk(
     z_f: torch.Tensor,  # (N, D_t) float32
     W_chunk: torch.Tensor,  # (C, D_t) float32
@@ -156,18 +141,19 @@ def _bwd_chunk(
     t_unc: torch.Tensor | None = None,  # (N,) teacher mass above the floor
     s_min: torch.Tensor | None = None,  # (N, 1) floor for student logits
 ) -> torch.Tensor:
-    """d(KL)/d(student_logits) for one vocab chunk. Returns (N, C)."""
+    """d(KL)/d(student_logits) for one vocab chunk. Returns (N, C).
+
+    Unclamped: p_S(v) - p_T(v). With the forward's log_prob_min_clamp floor:
+    p_S(v) * U - p_T(v) * 1{zs_v > s_lse + clamp}, where U is the teacher
+    mass on unclamped vocab — the floor freezes the teacher term where it
+    binds, while s_lse keeps coupling every logit into the student term.
+    """
     zt = z_f @ W_chunk.T
     p_T = (zt - t_lse.unsqueeze(1)).exp()
     p_S = (zs_chunk - s_lse.unsqueeze(1)).exp()
     if t_unc is None:
         return (p_S - p_T) * grad.unsqueeze(1)
     return (p_S * t_unc.unsqueeze(1) - p_T * (zs_chunk > s_min)) * grad.unsqueeze(1)
-
-
-# ---------------------------------------------------------------------------
-# autograd.Function -- wires forward & backward
-# ---------------------------------------------------------------------------
 
 
 class _NitrobrewKL(torch.autograd.Function):
@@ -230,11 +216,6 @@ class _NitrobrewKL(torch.autograd.Function):
                 g_chunk = g_chunk * inv_T
             grad_s[:, v : v + chunk_V] = g_chunk.to(student_logits.dtype)
         return None, None, grad_s, None, None, None
-
-
-# ---------------------------------------------------------------------------
-# Reverse KL: KL(p_S || p_T)
-# ---------------------------------------------------------------------------
 
 
 def _rev_fwd_chunk(
@@ -375,17 +356,8 @@ class _NitrobrewReverseKL(torch.autograd.Function):
         return None, None, grad_s, None, None
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
 def hidden_token_count(teacher_hidden_states: torch.Tensor) -> int:
-    """Total packed token count of a batch of teacher hidden states.
-
-    A nested (jagged) tensor stores one flat ``[T, D]`` payload; a plain
-    ``[bsz, S, D]`` tensor packs to ``bsz * S``.
-    """
+    """Total packed token count of a batch of teacher hidden states."""
     if teacher_hidden_states.is_nested:
         return teacher_hidden_states.values().shape[0]
     return teacher_hidden_states.numel() // teacher_hidden_states.shape[-1]
@@ -410,11 +382,6 @@ def _unpack_hidden_states(
     return z, z.shape[1]
 
 
-# ---------------------------------------------------------------------------
-# Multi-teacher (MOPD) grouping
-# ---------------------------------------------------------------------------
-
-
 def _grouped_nitrobrew_kl(
     student_logits: torch.Tensor,
     teacher_hidden_states: torch.Tensor,
@@ -425,20 +392,17 @@ def _grouped_nitrobrew_kl(
 ) -> dict[str, torch.Tensor]:
     """Nitrobrew KL with per-token teacher routing (MOPD).
 
-    Tokens are grouped by their ``teacher_key_ids`` entry; each group is piped
-    through the single-teacher kernel with that teacher's unembedding. Single
-    teacher degenerates to one group with no extra branching cost.
+    Tokens are grouped by ``teacher_key_ids``; each group runs the
+    single-teacher kernel with that teacher's unembedding.
 
     Args:
         student_logits: [N, V] full student logits (rmpad).
         teacher_hidden_states: nested [bsz, S, D] or flat [N, D].
-        teacher_key_ids: [T] int teacher id per packed token, over the full
-            packed length; sharded to the local Ulysses slice here when
-            sequence parallelism is active.
-        teacher_unembeds: id -> unembedding [V, D] (keyed by config key order).
-        config: DistillationConfig whose ``distillation_loss`` carries the
-            omni loss settings (``kd_temperature``, ``log_prob_min_clamp``).
-        reverse: use KL(p_S || p_T) instead of KL(p_T || p_S).
+        teacher_key_ids: [T] int teacher id per packed token; sharded here to
+            the local Ulysses slice when sequence parallelism is active.
+        teacher_unembeds: id -> unembedding [V, D].
+        config: DistillationConfig (kd_temperature, log_prob_min_clamp).
+        reverse: KL(p_S || p_T) instead of KL(p_T || p_S).
 
     Returns:
         {"distillation_losses": [1, N] float32 per-token KL}.
@@ -506,7 +470,6 @@ def compute_nitrobrew_multi_kl(
     config: DistillationConfig,
     data_format: str,
 ) -> dict[str, torch.Tensor]:
-    """Multi-teacher forward KL KL(p_T || p_S) for the FSDP path."""
     return _grouped_nitrobrew_kl(
         student_logits, teacher_hidden_states, teacher_key_ids, teacher_unembeds, config, reverse=False
     )
@@ -520,7 +483,6 @@ def compute_nitrobrew_multi_reverse_kl(
     config: DistillationConfig,
     data_format: str,
 ) -> dict[str, torch.Tensor]:
-    """Multi-teacher reverse KL KL(p_S || p_T) for the FSDP path."""
     return _grouped_nitrobrew_kl(
         student_logits, teacher_hidden_states, teacher_key_ids, teacher_unembeds, config, reverse=True
     )
