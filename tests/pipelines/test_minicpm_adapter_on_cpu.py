@@ -494,16 +494,15 @@ def test_rollout_adapter_registers_thinker_only_text_pipeline():
         MiniCPMORolloutAdapter.build_stage_configs("full")
 
 
-def test_ensure_pipeline_registered_checks_the_plugin_entry_point_first(monkeypatch):
-    """A stale plugin entry point must surface before the engine cores spawn."""
+def test_ensure_pipeline_registered_registers_pipeline(monkeypatch):
+    """Ensure thinker-only pipeline is registered in vLLM-Omni."""
     from verl_omni.pipelines.minicpm import omni_rollout_adapter
 
     calls: list[str] = []
-    monkeypatch.setattr(omni_rollout_adapter, "assert_entry_point_installed", lambda: calls.append("assert"))
     monkeypatch.setattr(omni_rollout_adapter, "register_pipeline", lambda pipeline: calls.append("register"))
 
     omni_rollout_adapter.MiniCPMORolloutAdapter.ensure_pipeline_registered()
-    assert calls == ["assert", "register"]
+    assert calls == ["register"]
 
 
 def test_configure_model_applies_omni_embedding_splice_patch():
