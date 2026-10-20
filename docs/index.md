@@ -86,6 +86,7 @@ examples/overview.md
 examples/flowgrpo_trainer.md
 examples/flowdppo_trainer.md
 examples/dpo_trainer.md
+examples/minicpm/dpo_trainer_minicpm.md
 examples/dancegrpo_trainer.md
 examples/flux1/dancegrpo_trainer_flux1.md
 examples/grpoguard_trainer.md

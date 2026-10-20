@@ -18,7 +18,7 @@ MiniCPM's remote-code processor supports two training batch types only:
 ## Data
 
 Prepare Omni-Preference parquet files by following
-[`omni_preference_dpo_dataset.md`](../data_process/omni_preference_dpo_dataset.md).
+[`omni_preference_dpo_dataset.md`](https://github.com/verl-project/verl-omni/blob/main/examples/dpo_trainer/data_process/omni_preference_dpo_dataset.md).
 
 Convert Omni-Preference into the offline MLLM DPO parquet schema:
 
