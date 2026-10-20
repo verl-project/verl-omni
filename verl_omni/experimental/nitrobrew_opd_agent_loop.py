@@ -14,22 +14,11 @@
 """Agent-loop plumbing for full-vocabulary (hidden-state) on-policy distillation.
 
 When ``distillation.distillation_loss.loss_mode`` is a nitrobrew mode the
-teacher signal is per-position hidden states instead of logprobs.  The worker
-below subclasses verl's ``AgentLoopWorkerTQ`` (through its
-``__ray_actor_class__`` plain-class base, since Ray does not allow subclassing
-the ``ActorClass`` wrapper directly) with two additions:
-
-* ``_compute_teacher_logprobs`` fetches ``teacher_hidden_states`` [S, D] plus
-  the routing ``teacher_key`` through the vllm-omni hidden-states
-  channel (``verl_omni.workers.rollout.vllm_rollout.process_hidden_states``);
-* ``_agent_loop_postprocess`` lifts the hidden states from
-  ``extra_fields`` onto the TransferQueue field dict so they ride the batch
-  as a first-class (jagged) tensor next to ``teacher_logprobs``.
-
-Wire-up (recipe / hydra override)::
+teacher signal is per-position hidden states instead of logprobs.
+Wire-up (recipe / hydra override):
 
     actor_rollout_ref.rollout.agent.agent_loop_manager_class=\
-verl_omni.agent_loop.nitrobrew_opd_agent_loop.NitrobrewOPDAgentLoopManagerTQ
+verl_omni.experimental.nitrobrew_opd_agent_loop.NitrobrewOPDAgentLoopManagerTQ
 """
 
 import logging
@@ -46,10 +35,8 @@ from verl.utils.tensordict_utils import list_of_dict_to_tensordict
 
 from verl_omni.workers.config.omni.distillation import HIDDEN_STATE_LOSS_MODES
 
-# ``@ray.remote`` replaces the class with an ``ActorClass`` wrapper, which
-# cannot be subclassed; ``__ray_actor_class__`` returns the original plain
-# class.  The same unwrap is performed by verl's ``_unwrap_ray_remote`` for
-# colocated workers.
+# ``@ray.remote`` replaces the class with an ``ActorClass`` wrapper, which cannot
+# be subclassed; ``__ray_actor_class__`` returns the original plain class.
 AgentLoopWorkerTQBase = AgentLoopWorkerTQ.__ray_actor_class__
 
 logger = logging.getLogger(__name__)

@@ -35,11 +35,6 @@ logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
-# ---------------------------------------------------------------------------
-# Final-policy-loss aggregation (registered into verl's loss registry)
-# ---------------------------------------------------------------------------
-
-
 @register_distillation_loss(
     OmniDistillationLossSettings(names=["nitrobrew", "nitrobrew_reverse_kl"], use_hidden_states=True)
 )  # type: ignore[arg-type]
@@ -65,18 +60,13 @@ def compute_nitrobrew_loss_aggregate(
     return distillation_losses, {}
 
 
-# ---------------------------------------------------------------------------
-# Logits-processor dispatch (intercepts the student_logits call)
-# ---------------------------------------------------------------------------
-
-
 def _compute_nitrobrew_in_logits_processor(
     distillation_config,
     data,
     student_logits: torch.Tensor,
     data_format: str,
 ) -> dict[str, torch.Tensor]:
-    """Run the chunked nitrobrew KL on the full student_logits tensor."""
+    """Chunked nitrobrew KL over the full student_logits tensor."""
 
     loss_mode = distillation_config.distillation_loss.loss_mode
     reverse = loss_mode == "nitrobrew_reverse_kl"
@@ -86,11 +76,9 @@ def _compute_nitrobrew_in_logits_processor(
     unembeds_map = data["teacher_unembeds"]
     key_to_id = data["teacher_key_to_id"]
 
-    # key_to_id maps teacher key -> int id (MOPD-aware). Rearrange unembeds by id.
+    # Rearrange unembeds to be keyed by int teacher id (MOPD-aware).
     unembeds = {int(key_to_id[k]): W for k, W in unembeds_map.items()}
 
-    # Per-token route: single-teacher degenerate to all-zero id; multi-teacher
-    # expands per-sequence ids over the jagged token offsets (see note below).
     key_ids = _per_token_teacher_key_ids(data, teacher_hidden_states, key_to_id)
 
     fn = compute_nitrobrew_multi_reverse_kl if reverse else compute_nitrobrew_multi_kl
@@ -105,7 +93,6 @@ def _compute_nitrobrew_in_logits_processor(
 
 
 def _per_seq_teacher_keys(data) -> list[str] | None:
-    """Read the per-sequence teacher routing keys carried by the agent loop."""
     per_seq = data.get("teacher_key", None)
     if per_seq is None:
         return None
@@ -117,11 +104,7 @@ def _per_seq_teacher_keys(data) -> list[str] | None:
 
 
 def _per_token_teacher_key_ids(data, teacher_hidden_states, key_to_id):
-    """Build [T] int teacher id per packed token.
-
-    Multi teacher: resolve ``data["teacher_key"]`` through ``key_to_id`` and
-    expand over the packed token layout; single teacher: all zeros.
-    """
+    """[T] teacher ids over the packed token layout; single teacher -> all zeros."""
     device = teacher_hidden_states.device
     T = hidden_token_count(teacher_hidden_states)
     if len(key_to_id) <= 1:
@@ -155,11 +138,8 @@ def omni_distillation_ppo_loss(
     student_logits: torch.Tensor | None = None,
     data_format: str = "thd",
 ):
-    """Loss function used both as the logits processor and the final policy loss.
-
-    Mirrors verl's ``distillation_ppo_loss`` but dispatches the logits-processor
-    call to the chunked nitrobrew kernel for hidden loss modes.
-    """
+    """Same entry as verl's ``distillation_ppo_loss``: logits processor + final
+    policy loss, with hidden modes dispatched to the chunked nitrobrew kernel."""
     loss_mode = distillation_config.distillation_loss.loss_mode
     use_hidden = loss_mode in HIDDEN_STATE_LOSS_MODES
 

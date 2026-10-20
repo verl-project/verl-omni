@@ -91,14 +91,16 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
 
         # 1. patch for Lora
         VLLMOmniHijack.hijack()
-        # The hidden-states patch must live in the worker sub-process
-        # (NPUARModelRunner runs in a StageEngineCoreProc spawned by vLLM-Omni,
-        # so patches installed on the server actor do not propagate). The worker
-        # extension materializes inside that sub-process, so install it here.
+        # 2. Teach the AR runners to return the thinker's last-layer hidden states
+        # (full-vocab OPD teacher signal). The patch targets the runner inside
+        # the StageEngineCoreProc sub-process, where server-actor installs do
+        # not propagate; the worker extension materializes there.
         from verl_omni.workers.rollout.vllm_rollout.process_hidden_states import (
             apply_hidden_states_patches,
         )
 
+        # TODO(upstream): move the generic per-request opt-in hidden-state return
+        # (vLLM core's `return_hidden_states`) into vllm-omni as a wire field.
         apply_hidden_states_patches()
 
         vllm_config = kwargs.get("vllm_config")
