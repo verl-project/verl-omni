@@ -1,0 +1,51 @@
+name: publish
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - dashboard
+
+permissions:
+  actions: read
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Build L3 dashboard
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python build_dashboard.py \
+            --repo verl-project/verl-omni \
+            --branch main \
+            --max-reports 30 \
+            --output site/dashboard/pages/index.html \
+            --history-url https://verl-project.github.io/verl-omni/dashboard/pages/history.json
+          cp site/dashboard/pages/index.html site/dashboard/pages.html
+          printf '%s\n' '<!DOCTYPE html><meta http-equiv="refresh" content="0; url=dashboard/pages/">' > site/index.html
+          touch site/.nojekyll
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - id: deployment
+        uses: actions/deploy-pages@v4
