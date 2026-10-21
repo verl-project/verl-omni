@@ -624,10 +624,10 @@ class OfflineMLLMDPODataset(MultiTurnSFTDataset):
                 "constructing the dataset."
             )
 
-        if self.requires_position_id_func and self.transform_kwargs.get("use_audio_in_video"):
+        if self.transform_kwargs.get("use_audio_in_video"):
             raise ValueError(
-                "use_audio_in_video=True is not supported yet for Qwen3-Omni offline DPO preprocessing. "
-                "Leave use_audio_in_video unset or set it to false."
+                "use_audio_in_video=True is not supported yet for Qwen3-Omni or MiniCPM offline DPO "
+                "preprocessing. Leave use_audio_in_video unset or set it to false."
             )
 
         self.parquet_files = _normalise_data_files(data_files)
@@ -768,7 +768,7 @@ class OfflineMLLMDPODataset(MultiTurnSFTDataset):
             extra_info = {}
         if "index" not in extra_info:
             extra_info = {**extra_info, "index": int(item)}
-        extra_info = {**extra_info, "modality": modality, "dataset_index": int(item)}
+        extra_info = {**extra_info, "modality": modality}
         transformed["extra_info"] = [extra_info, extra_info]
         transformed["is_chosen"] = [True, False]
         return transformed

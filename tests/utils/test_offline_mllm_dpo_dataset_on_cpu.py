@@ -272,6 +272,36 @@ def test_minicpm_base_transform_does_not_require_qwen_rope(monkeypatch, tmp_path
     assert item["is_chosen"] == [True, False]
 
 
+def test_minicpm_base_transform_rejects_use_audio_in_video(tmp_path):
+    rows = [
+        {
+            "data_source": "minicpm/image",
+            "prompt": [{"role": "user", "content": "<image>Question?"}],
+            "chosen": {"role": "assistant", "content": "chosen"},
+            "rejected": {"role": "assistant", "content": "rejected"},
+            "images": ["/tmp/image.png"],
+            "extra_info": {"modality": "image"},
+        }
+    ]
+    parquet_path = tmp_path / "minicpm.parquet"
+    pd.DataFrame(rows).to_parquet(parquet_path, index=False)
+    config = OmegaConf.create(
+        {
+            "base_transform": "minicpm",
+            "pad_mode": "right",
+            "mm_configs": {"use_audio_in_video": True},
+        }
+    )
+
+    with pytest.raises(ValueError, match="use_audio_in_video=True is not supported"):
+        dataset_mod.OfflineMLLMDPODataset(
+            str(parquet_path),
+            tokenizer=None,
+            processor=MagicMock(),
+            config=config,
+        )
+
+
 def test_pair_branch_values_keeps_chosen_rejected_branches_separate():
     chosen = {"input_ids": torch.tensor([1, 2]), "labels": torch.tensor([3, 4])}
     rejected = {"input_ids": torch.tensor([5]), "labels": torch.tensor([7])}
@@ -583,6 +613,7 @@ def test_offline_mllm_dpo_dataset_getitem(monkeypatch, mock_processor, mixed_par
     assert item["modality"] == ["image", "image"]
     assert item["data_source"] == ["omni_preference/image", "omni_preference/image"]
     assert item["extra_info"][0]["modality"] == "image"
+    assert "dataset_index" not in item["extra_info"][0]
 
 
 def test_offline_mllm_dpo_dataset_getitem_compact_top_level_media_schema(monkeypatch, mock_processor, tmp_path):

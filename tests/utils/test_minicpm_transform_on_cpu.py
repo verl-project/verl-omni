@@ -104,29 +104,13 @@ def test_minicpm_transform_labels_only_final_assistant_answer():
     assert output["position_ids"].shape == output["input_ids"].shape
     assert output["position_ids"].dtype == torch.int64
     assert torch.equal(output["position_ids"], torch.arange(output["input_ids"].shape[-1]))
-    assert "pixel_values" in output
-    assert "tgt_sizes" in output
+    # image_bound stays present (empty) as verl's minicpm list-layout sentinel;
+    # the adapter re-derives media containers and bounds from the ids.
     assert "image_bound" in output
-    assert "audio_bounds" in output
-
-
-def test_sample_pixel_slices_unwraps_processor_batch_list():
-    inner = torch.ones(3, 2, 4)
-    slices = minicpm_transform._sample_pixel_slices([[inner.numpy(), inner.numpy()]])
-    assert len(slices) == 2
-    assert all(isinstance(item, torch.Tensor) for item in slices)
-    assert slices[0].shape == (3, 2, 4)
-
-
-def test_empty_collated_audio_features_collapse_to_empty_list():
-    assert minicpm_transform._normalize_audio_features([[], [], []]) == []
-    assert minicpm_transform._batch_audio_feature_lens([[], []], torch.device("cpu")) == []
-
-
-def test_audio_feature_lens_are_tensors_for_hstack():
-    lenses = minicpm_transform._batch_audio_feature_lens([[10, 20], [5]], torch.device("cpu"))
-    stacked = torch.hstack(lenses)
-    torch.testing.assert_close(stacked, torch.tensor([10, 20, 5]))
+    assert output["image_bound"].numel() == 0
+    assert "pixel_values" not in output
+    assert "tgt_sizes" not in output
+    assert "audio_bounds" not in output
 
 
 def test_inject_processor_media_slots_rewrites_image_and_audio_markers():
@@ -175,7 +159,7 @@ class _RecordingMiniCPMProcessor(_MiniCPMProcessor):
 
 def test_call_processor_aliases_sample_rate_to_sampling_rate():
     processor = _RecordingMiniCPMProcessor()
-    _call_processor(processor, text="hi", images=[], videos=[], audios=[], sample_rate=8000)
+    _call_processor(processor, text="hi", images=[], audios=[], sample_rate=8000)
     assert processor.last_kwargs["sampling_rate"] == 8000
 
 
@@ -188,7 +172,7 @@ def test_call_processor_does_not_drop_media_via_tokenizer_fallback():
             raise TypeError("unsupported MiniCPM processor signature")
 
     with pytest.raises(TypeError, match="Refusing a text-only tokenizer fallback"):
-        _call_processor(_RejectingProcessor(), text="hi", images=["/tmp/x.png"], videos=[], audios=[])
+        _call_processor(_RejectingProcessor(), text="hi", images=["/tmp/x.png"], audios=[])
 
 
 def test_call_processor_text_only_can_use_tokenizer_fallback():
@@ -199,7 +183,7 @@ def test_call_processor_text_only_can_use_tokenizer_fallback():
             del args, kwargs
             raise TypeError("unsupported MiniCPM processor signature")
 
-    output = _call_processor(_RejectingProcessor(), text="hi", images=[], videos=[], audios=[])
+    output = _call_processor(_RejectingProcessor(), text="hi", images=[], audios=[])
     assert output["input_ids"].tolist() == [[ord("h"), ord("i")]]
 
 
@@ -215,13 +199,28 @@ def test_process_minicpm_sample_rejects_video_rows():
         process_minicpm_sample(sample, processor=_MiniCPMProcessor())
 
 
+def test_process_minicpm_sample_requires_conversations():
+    with pytest.raises(ValueError, match="non-empty 'conversations'"):
+        process_minicpm_sample({"images": []}, processor=_MiniCPMProcessor())
+
+
+def test_process_minicpm_sample_accepts_falsy_use_audio_in_video():
+    sample = {
+        "conversations": [
+            ["user", ("text", "question")],
+            ["assistant", ("text", "answer")],
+        ]
+    }
+    output = process_minicpm_sample(sample, processor=_MiniCPMProcessor(), use_audio_in_video=False)[0]
+    assert output["input_ids"].numel() > 0
+
+
 def test_call_processor_prefers_explicit_sampling_rate_over_sample_rate():
     processor = _RecordingMiniCPMProcessor()
     _call_processor(
         processor,
         text="hi",
         images=[],
-        videos=[],
         audios=[],
         sample_rate=8000,
         sampling_rate=16000,
