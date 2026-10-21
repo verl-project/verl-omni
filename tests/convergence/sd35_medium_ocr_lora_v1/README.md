@@ -76,8 +76,8 @@ step-100 val floor only.
 ## Requirements
 
 - 8 accelerators (`NUM_GPUS_ACTOR_ROLLOUT=6`, `NUM_GPUS_REWARD=2`) — NVIDIA
-  GPUs or Ascend NPUs (CANN under `/usr/local/Ascend`, overridable via
-  `ASCEND_HOME_PATH`)
+  GPUs or Ascend NPUs (CANN at `${ASCEND_HOME_PATH:-/usr/local/Ascend/ascend-toolkit/latest}`
+  plus `/usr/local/Ascend/nnal/atb`)
 - `stabilityai/stable-diffusion-3.5-medium` (`MODEL_PATH`) or a local copy
 - `Qwen/Qwen2.5-VL-3B-Instruct` (`REWARD_MODEL_PATH`) or a local copy
 - `$WORKSPACE/data/ocr/sd3/{train,test}.parquet`
@@ -106,6 +106,17 @@ under `sd35_medium_ocr_lora_v1_npu`):
 DEVICE=npu bash tests/convergence/sd35_medium_ocr_lora_v1/run_sd35_medium_ocr_lora_v1.sh
 ```
 
+NPU notes (aligned with `tests/special_e2e/*_npu.sh` / npu_smoke CI):
+
+- CANN is sourced from `${ASCEND_HOME_PATH:-/usr/local/Ascend/ascend-toolkit/latest}/set_env.sh`
+  plus the absolute `/usr/local/Ascend/nnal/atb/set_env.sh`; `DEVICE=npu` fails
+  closed when they are missing.
+- The script prints the sourced Ascend env and `npu-smi info` for diagnostics,
+  and defaults `ASCEND_RT_VISIBLE_DEVICES=0..7` (`NUM_NPUS` overrides).
+- An Ascend teardown abort with exit code 134 after training is tolerated: the
+  pass/fail decision is deferred to the `collect_report.py` gates. Any other
+  nonzero trainer exit fails the job.
+
 Hydra overrides can be appended after the script. Validation runs every
 `TEST_FREQ` steps (default 20) and always on the last step.
 
@@ -113,11 +124,16 @@ Hydra overrides can be appended after the script. Validation runs every
 
 GitHub Actions workflow: `.github/workflows/l4_convergence.yml`
 
-- Manual: **Actions → l4_convergence → Run workflow** → choose this case or `all`.
-- Pull request: apply the `L4-weekly-ci` label (diff-selected on an `L20x8`
-  runner).
+- Manual (GPU): **Actions → l4_convergence → Run workflow** → choose this
+  case or `all`; enable **run_npu** to also run it on Ascend NPU.
+- Pull request: apply the `L4-npu-ci` label → NPU job (diff-selected on the
+  static 8-NPU runner `linux-aarch64-a2b4-8`, image
+  `swr.cn-north-4.myhuaweicloud.com/mindspeed/pr-verl-omni-a2:v010-vllm030-omni030`,
+  `DEVICE=npu`, timeout 720 min). The former `L4-weekly-ci` GPU PR label was
+  removed; GPU runs are dispatch-only.
 
-Artifacts: `tests/convergence/outputs/l4_convergence/**/*.jsonl` and `**/*.json`.
+Artifacts: `tests/convergence/outputs/l4_convergence/**/*.jsonl` and `**/*.json`
+(NPU job uploads under the `l4-convergence-npu-outputs-*` artifact name).
 
 ## Outputs
 
@@ -125,5 +141,7 @@ Artifacts: `tests/convergence/outputs/l4_convergence/**/*.jsonl` and `**/*.json`
 tests/convergence/outputs/l4_convergence/
 |-- sd35_medium_ocr_lora_v1/metrics.jsonl
 |-- sd35_medium_ocr_lora_v1/report.json
+|-- sd35_medium_ocr_lora_v1_npu/metrics.jsonl    # NPU run only
+|-- sd35_medium_ocr_lora_v1_npu/report.json      # NPU run only
 `-- logs/sd35_medium_ocr_lora_v1/sd35_medium_ocr_lora_v1.log
 ```

@@ -47,17 +47,29 @@ if [ "${DEVICE}" = "npu" ]; then
     export DEVICE_NAME=npu
     export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=${RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES:-1}
     export VERL_DATAPROTO_SERIALIZATION_METHOD=${VERL_DATAPROTO_SERIALIZATION_METHOD:-numpy}
-    ASCEND_HOME_PATH=${ASCEND_HOME_PATH:-/usr/local/Ascend/cann}
+    ASCEND_HOME_PATH=${ASCEND_HOME_PATH:-/usr/local/Ascend/ascend-toolkit/latest}
     set +u
-    if [ -f "${ASCEND_HOME_PATH}/set_env.sh" ]; then
-        # shellcheck disable=SC1091
-        source "${ASCEND_HOME_PATH}/set_env.sh"
-    fi
-    if [ -f "${ASCEND_HOME_PATH}/../nnal/atb/set_env.sh" ]; then
-        # shellcheck disable=SC1091
-        source "${ASCEND_HOME_PATH}/../nnal/atb/set_env.sh"
-    fi
+    # shellcheck disable=SC1091
+    source "${ASCEND_HOME_PATH}/set_env.sh"
+    # shellcheck disable=SC1091
+    source /usr/local/Ascend/nnal/atb/set_env.sh
     set -u
+    echo "===== Ascend environment after source ====="
+    ascend_env="$(
+        {
+            env | LC_ALL=C sort | grep -F "/usr/local/Ascend/" || true
+            env | LC_ALL=C sort | grep -E "^(ASCEND|ATB|HCCL|NPU|DEVICE_|RANK_TABLE|RAY_EXPERIMENTAL_NOSET_ASCEND)" || true
+        } | LC_ALL=C sort -u
+    )"
+    if [[ -n "${ascend_env}" ]]; then
+        printf "%s\n" "${ascend_env}"
+    else
+        echo "No Ascend/NPU environment entries were found."
+    fi
+    if command -v npu-smi >/dev/null 2>&1; then
+        npu-smi info || true
+    fi
+    echo "======================================"
     if [ -z "${ASCEND_RT_VISIBLE_DEVICES:-}" ]; then
         NUM_NPUS=${NUM_NPUS:-8}
         npu_list=""
@@ -233,6 +245,7 @@ print_l4_thresholds
 rm -rf "${CASE_DIR}"
 mkdir -p "${CASE_DIR}" "${LOG_DIR}"
 
+set +e
 python3 "${SCRIPT_DIR}/run.py" \
     data.train_files="${TRAIN_FILES}" \
     data.val_files="${VAL_FILES}" \
@@ -314,6 +327,16 @@ python3 "${SCRIPT_DIR}/run.py" \
     trainer.use_v1=true \
     trainer.v1.trainer_mode=sync \
     "$@" 2>&1 | tee "${CONSOLE_LOG}"
+RUN_RC=${PIPESTATUS[0]}
+set -e
+
+if [ "${RUN_RC}" -ne 0 ] && [ "${RUN_RC}" -ne 134 ]; then
+    echo "Trainer failed with exit code ${RUN_RC}." >&2
+    exit "${RUN_RC}"
+fi
+if [ "${RUN_RC}" -eq 134 ]; then
+    echo "Trainer exit=134 (Ascend teardown abort); deferring success to collect_report gates." >&2
+fi
 
 python3 "${SCRIPT_DIR}/collect_report.py" \
     --metrics-jsonl "${L4_METRICS_JSONL}" \

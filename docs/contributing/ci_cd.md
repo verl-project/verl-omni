@@ -9,7 +9,7 @@ VeRL-Omni uses layered CI/CD checks so fast CPU feedback and expensive GPU or co
 | L1 CPU API tests | Validate CPU-only APIs, configs, data utilities, adapters, rewards, and unit behavior | Pull requests with `ready-for-ci`, pushes to `main` and release branches | CPU | Required before merge | Pass/fail and coverage artifacts |
 | L2 GPU smoke tests | Validate tiny-random GPU end-to-end training paths | Pull requests with `ready-for-ci`, usually after L1 is green | GPU | Required before merge for GPU-touching changes | Smoke logs and summaries |
 | L3 nightly regression | Detect numerical drift and performance regressions | Scheduled or manual | Fixed GPU runners | Nightly regression signal | Metrics and baseline comparisons |
-| L4 convergence tests | Real-recipe precision: train-infer gap, finite grad, 100-step val reward floor | `workflow_dispatch` or PR label `L4-weekly-ci` | Fixed 8-GPU runners (`L20x8`) | Release-readiness signal, not a PR merge gate | `report.json` (gates + recorded perf), `metrics.jsonl`, console logs |
+| L4 convergence tests | Real-recipe precision: train-infer gap, finite grad, 100-step val reward floor | `workflow_dispatch` (8-GPU) or PR label `L4-npu-ci` (8-NPU) | Dynamic `L20x8` (GPU), static `linux-aarch64-a2b4-8` (NPU) | Release-readiness signal, not a PR merge gate | `report.json` (gates + recorded perf), `metrics.jsonl`, console logs |
 
 L3 has one runnable scheduled workflow for the Qwen-Image FlowGRPO
 single-sample regression. L4 has runnable local/cluster scripts and a GitHub
@@ -126,21 +126,26 @@ raw trainer log dump used to build both files.
 The workflow is `.github/workflows/l4_convergence.yml`. Trigger it in either
 way:
 
-- **Manual:** GitHub Actions → `l4_convergence` → **Run workflow** → choose
-  `all` or `sd35_medium_ocr_lora_v1`.
-- **Pull request:** apply the `L4-weekly-ci` label. The workflow selects the
+- **Manual (GPU):** GitHub Actions → `l4_convergence` → **Run workflow** →
+  choose `all` or `sd35_medium_ocr_lora_v1`; enable **run_npu** to also run on
+  Ascend NPU.
+- **Pull request (NPU):** apply the `L4-npu-ci` label. The workflow selects the
   smallest case set that covers the PR diff; shared trainer or unknown paths run
-  all cases sequentially on one `L20x8` runner.
+  all cases on the static 8-NPU runner (`linux-aarch64-a2b4-8`, image
+  `swr.cn-north-4.myhuaweicloud.com/mindspeed/pr-verl-omni-a2:v010-vllm030-omni030`).
 
-Each case requires **8 GPUs**. When multiple cases are selected, they run
-sequentially on the same 8-GPU machine.
+Each case requires **8 accelerators**. The GPU job runs on a dynamic `L20x8`
+runner; the NPU job runs with `DEVICE=npu` and sources CANN from
+`${ASCEND_HOME_PATH:-/usr/local/Ascend/ascend-toolkit/latest}`. When multiple
+cases are selected, they run sequentially on the same machine.
 
 After every run (pass or fail), the workflow uploads
 `tests/convergence/outputs/l4_convergence/**/*.jsonl` and `**/*.json` as a
-workflow artifact (`l4-convergence-outputs-<run_id>`).
+workflow artifact (`l4-convergence-outputs-<run_id>` for GPU,
+`l4-convergence-npu-outputs-<run_id>` for NPU).
 
 Keep L4 off the default pull-request merge path unless a maintainer explicitly
-requests `L4-weekly-ci`.
+requests `L4-npu-ci`.
 
 ## Contributor Expectations
 

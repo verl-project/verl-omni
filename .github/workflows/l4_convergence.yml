@@ -11,6 +11,11 @@ on:
         options:
           - all
           - sd35_medium_ocr_lora_v1
+      run_npu:
+        description: "Also run the selected case(s) on Ascend NPU"
+        required: false
+        default: false
+        type: boolean
   pull_request:
     branches:
       - main
@@ -29,7 +34,9 @@ on:
       - .github/actions/l4-convergence-upload-artifacts/**
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.ref }}
+  # Include the trigger name (PR label or ref) so PR-triggered NPU runs and
+  # dispatch runs do not cancel each other.
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('{0}-{1}', github.event.pull_request.number, github.event.label.name) || github.ref }}
   cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
 
 permissions:
@@ -44,9 +51,8 @@ env:
 
 jobs:
   setup_runner:
-    # Pull request label mapping:
-    #   L4-weekly-ci -> diff-selected L4 cases on one 8-GPU runner (sequential)
-    # workflow_dispatch -> explicit case selection from the workflow input
+    # GPU cases run via workflow_dispatch only (the L4-weekly-ci PR label was
+    # removed); pull requests trigger the NPU job via L4-npu-ci instead.
     if: github.repository_owner == 'verl-project'
     runs-on: ubuntu-latest
     outputs:
@@ -62,8 +68,6 @@ jobs:
           mode="none"
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
             mode="dispatch"
-          elif [[ "${{ github.event_name }}" == "pull_request" && "${{ github.event.label.name }}" == "L4-weekly-ci" ]]; then
-            mode="pr"
           fi
           echo "mode=${mode}" >> "$GITHUB_OUTPUT"
 
@@ -72,24 +76,12 @@ jobs:
 
       - id: resolve-cases
         if: steps.resolve-mode.outputs.mode != 'none'
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
-          mode="${{ steps.resolve-mode.outputs.mode }}"
-
-          if [[ "${mode}" == "dispatch" ]]; then
-            selected_case="${{ github.event.inputs.case }}"
-            if [[ "${selected_case}" == "all" ]]; then
-              plan_json="$(python3 tests/convergence/select_l4_convergence_cases.py --all)"
-            else
-              plan_json="$(python3 tests/convergence/select_l4_convergence_cases.py --cases "${selected_case}")"
-            fi
+          selected_case="${{ github.event.inputs.case }}"
+          if [[ "${selected_case}" == "all" ]]; then
+            plan_json="$(python3 tests/convergence/select_l4_convergence_cases.py --all)"
           else
-            gh api \
-              "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files" \
-              --paginate \
-              --jq '.[].filename' > changed_files.txt
-            plan_json="$(python3 tests/convergence/select_l4_convergence_cases.py --changed-files-file changed_files.txt)"
+            plan_json="$(python3 tests/convergence/select_l4_convergence_cases.py --cases "${selected_case}")"
           fi
 
           echo "Resolved L4 convergence plan: ${plan_json}"
@@ -195,6 +187,157 @@ jobs:
 
       - if: always()
         uses: ./.github/actions/l4-convergence-upload-artifacts
+
+  l4_convergence_npu:
+    # Pull request label mapping:
+    #   L4-npu-ci -> diff-selected L4 cases on the static 8-NPU runner
+    # workflow_dispatch with run_npu=true -> explicit case selection on NPU
+    # Runner/image/CANN diagnostics mirror .github/workflows/npu_smoke.yml.
+    if: >-
+      github.repository_owner == 'verl-project' &&
+      (github.event_name == 'workflow_dispatch' && inputs.run_npu ||
+       github.event_name == 'pull_request' && github.event.label.name == 'L4-npu-ci')
+    runs-on: linux-aarch64-a2b4-8
+    timeout-minutes: 720
+    container:
+      image: swr.cn-north-4.myhuaweicloud.com/mindspeed/pr-verl-omni-a2:v010-vllm030-omni030
+      options: >-
+        --shm-size 16g
+    env:
+      HF_ENDPOINT: "https://hf-mirror.com"
+      HF_HUB_ENABLE_HF_TRANSFER: "0"
+      PIP_INDEX_URL: "http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple"
+      PIP_TRUSTED_HOST: "cache-service.nginx-pypi-cache.svc.cluster.local"
+      TRANSFORMERS_VERBOSITY: "error"
+      DEVICE: "npu"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Check NPU and CANN info
+        shell: bash
+        run: |
+          cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
+          npu-smi info
+          echo "===== Ascend/NPU environment ====="
+          env | LC_ALL=C sort | grep -E "(/usr/local/Ascend/|^(ASCEND|ATB|HCCL|NPU|DEVICE_|RANK_TABLE|RAY_EXPERIMENTAL_NOSET_ASCEND))" || true
+
+      - name: Print vLLM stack versions
+        shell: bash
+        run: |
+          pip show vllm || true
+          pip show vllm-ascend || true
+          pip show vllm-omni || true
+
+      - name: Verify 8 NPUs
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "${ASCEND_RT_VISIBLE_DEVICES:-}" ]]; then
+            csv="${ASCEND_RT_VISIBLE_DEVICES// /}"
+            IFS=',' read -r -a ids <<< "${csv}"
+            visible="${#ids[@]}"
+          else
+            visible="$(ls -1 /dev/davinci* 2>/dev/null | grep -vc 'manager' || true)"
+            visible="${visible:-0}"
+          fi
+          echo "Visible NPUs: ${visible}"
+          if [[ "${visible}" -lt 8 ]]; then
+            echo "L4 NPU convergence requires at least 8 NPUs (visible=${visible})." >&2
+            exit 1
+          fi
+
+      - name: Resolve L4 convergence cases
+        id: resolve-cases
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          DISPATCH_CASE: ${{ inputs.case }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          if [[ "${EVENT_NAME}" == "workflow_dispatch" ]]; then
+            if [[ "${DISPATCH_CASE}" == "all" ]]; then
+              plan_json="$(python3 tests/convergence/select_l4_convergence_cases.py --all)"
+            else
+              plan_json="$(python3 tests/convergence/select_l4_convergence_cases.py --cases "${DISPATCH_CASE}")"
+            fi
+          else
+            gh api \
+              "repos/${{ github.repository }}/pulls/${PR_NUMBER}/files" \
+              --paginate \
+              --jq '.[].filename' > changed_files.txt
+            plan_json="$(python3 tests/convergence/select_l4_convergence_cases.py --changed-files-file changed_files.txt)"
+          fi
+
+          echo "Resolved L4 NPU convergence plan: ${plan_json}"
+          echo "cases-json=${plan_json}" >> "$GITHUB_OUTPUT"
+          PLAN_JSON="${plan_json}" python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          import os
+
+          plan = json.loads(os.environ["PLAN_JSON"])
+          print(f"case-count={plan['case_count']}")
+          if plan["required_gpus"] != 8:
+              raise SystemExit(f"L4 convergence requires 8 accelerators, got required_gpus={plan['required_gpus']}")
+          PY
+
+      - name: Run selected L4 convergence cases on NPU
+        env:
+          L4_CASES_JSON: ${{ steps.resolve-cases.outputs.cases-json }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ray stop --force || true
+          mkdir -p tests/convergence/outputs/l4_convergence
+
+          python3 - <<'PY' > /tmp/l4_convergence_cases.tsv
+          import json
+          import os
+
+          plan = json.loads(os.environ["L4_CASES_JSON"])
+          for case in plan["cases"]:
+              print(f"{case['name']}\t{case['script']}\t{case['required_gpus']}")
+          PY
+
+          if [[ ! -s /tmp/l4_convergence_cases.tsv ]]; then
+            echo "No L4 convergence cases selected."
+            exit 1
+          fi
+
+          failed=0
+          while IFS=$'\t' read -r name script required_gpus; do
+            echo "===== Starting L4 NPU case ${name} (requires ${required_gpus} NPUs) ====="
+            if DEVICE=npu bash "${script}"; then
+              echo "[PASS] ${name}"
+            else
+              echo "[FAIL] ${name}"
+              failed=1
+            fi
+          done < /tmp/l4_convergence_cases.tsv
+
+          ray stop --force || true
+          exit "${failed}"
+
+      # Inline upload (not the repo-local composite action): the NPU runner
+      # executes in a container, per docs/contributing/npu_smoke_tests.md.
+      - name: Upload L4 NPU convergence JSON and JSONL outputs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: l4-convergence-npu-outputs-${{ github.run_id }}
+          path: |
+            tests/convergence/outputs/l4_convergence/**/*.jsonl
+            tests/convergence/outputs/l4_convergence/**/*.json
+          if-no-files-found: warn
+
+      - name: Upload NPU console logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: l4-convergence-npu-logs-${{ github.run_id }}
+          path: tests/convergence/outputs/l4_convergence/logs/**
+          if-no-files-found: ignore
 
   cleanup:
     runs-on: ubuntu-latest
