@@ -13,8 +13,7 @@ VeRL-Omni uses layered CI/CD checks so fast CPU feedback and expensive GPU or co
 
 L3 has one runnable scheduled workflow for the Qwen-Image FlowGRPO
 single-sample regression. L4 has runnable local/cluster scripts and a GitHub
-Actions workflow (`.github/workflows/l4_convergence.yml`) for the Qwen-Image and
-SD3.5 OCR LoRA v1 recipes.
+Actions workflow (`.github/workflows/l4_convergence.yml`) for the SD3.5 OCR LoRA v1 recipes.
 
 ## L1 CPU API Tests
 
@@ -105,8 +104,7 @@ Defaults (the launcher exports `MODEL_PATH`, `REWARD_MODEL_PATH`, and
   `$HOME`); missing parquet is regenerated from `${OCR_RAW_DIR}/{train,test}.txt`
 - `VAL_REWARD_MIN` defaults to `0.8`.
 
-Gate logic lives in `collect_report.py`. The collector's own tests are L1
-(`tests/convergence/test_collect_report_on_cpu.py`).
+Gate logic lives in `collect_report.py`.
 
 ### What is gated
 
