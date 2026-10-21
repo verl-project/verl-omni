@@ -227,31 +227,25 @@ async def test_caller_cancellation_does_not_disturb_settlement_of_accepted_work(
 
 
 @pytest.mark.asyncio
-async def test_shared_forward_lock_serializes_two_microbatchers():
-    lock = asyncio.Lock()
-    active = 0
-    peak = 0
+async def test_consumer_cancellation_fails_the_batch_and_terminates_the_consumer():
+    entered = asyncio.Event()
+    release = asyncio.Event()
 
     async def score_batch(requests):
-        nonlocal active, peak
-        active += 1
-        peak = max(peak, active)
-        await asyncio.sleep(0)
-        await asyncio.sleep(0)
-        active -= 1
+        entered.set()
+        await release.wait()
         return [{"score": request["i"]} for request in requests]
 
-    first = ScorerMicrobatcher(score_batch, name="a", forward_lock=lock)
-    second = ScorerMicrobatcher(score_batch, name="b", forward_lock=lock)
-    await asyncio.gather(first.start(), second.start())
-    results = await asyncio.gather(
-        first.submit({"i": 0}),
-        first.submit({"i": 1}),
-        second.submit({"i": 2}),
-        second.submit({"i": 3}),
-    )
-    assert results == [{"score": i} for i in range(4)]
-    assert peak == 1
+    microbatcher = ScorerMicrobatcher(score_batch, name="m")
+    await microbatcher.start()
+    scoring = asyncio.create_task(microbatcher.submit({"i": 0}))
+    await asyncio.wait_for(entered.wait(), 5)
+
+    microbatcher._consumer.cancel()
+    with pytest.raises(RuntimeError, match="consumer was cancelled"):
+        await scoring
+    with pytest.raises(asyncio.CancelledError):
+        await microbatcher._consumer
 
 
 @pytest.mark.asyncio

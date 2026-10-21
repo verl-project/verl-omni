@@ -110,6 +110,26 @@ class LegacyModel:
         pass
 
 
+class LoadFailingScorer(RewardScorer):
+    """Fails load() after construction; close() must still dispose the half-built scorer."""
+
+    max_batch_size = 4
+    instances: list["LoadFailingScorer"] = []
+
+    def __init__(self):
+        self.closed = False
+        LoadFailingScorer.instances.append(self)
+
+    def load(self, device):
+        raise OSError("weights unavailable")
+
+    def score_batch(self, batch):
+        return [{"score": request["i"]} for request in batch]
+
+    def close(self):
+        self.closed = True
+
+
 def _executor(
     monkeypatch, model_ref: str, kwargs: dict | None = None, model_path: str | None = None
 ) -> NativeRewardExecutor:
@@ -234,6 +254,16 @@ async def test_failed_load_fails_closed(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_failed_load_disposes_the_half_built_scorer(monkeypatch):
+    LoadFailingScorer.instances = []
+    executor = _executor(monkeypatch, f"{_TEST_MODULE}:LoadFailingScorer")
+    with pytest.raises(OSError, match="weights unavailable"):
+        await executor.wake_up()
+    assert executor._closed
+    assert LoadFailingScorer.instances[0].closed
+
+
+@pytest.mark.asyncio
 async def test_sleep_waits_for_the_in_flight_forward_before_offload(monkeypatch):
     executor = _executor(monkeypatch, f"{_TEST_MODULE}:GatedScorer")
     await executor.wake_up()
@@ -264,12 +294,21 @@ async def test_legacy_native_model_still_serves_infer(monkeypatch):
         await executor.close()
 
 
-@pytest.mark.asyncio
-async def test_executors_on_the_same_device_share_one_forward_lock(monkeypatch):
-    first = _executor(monkeypatch, "cpu-fake-scorer")
-    second = _executor(monkeypatch, "cpu-fake-scorer")
-    await asyncio.gather(first.wake_up(), second.wake_up())
-    try:
-        assert first._forward_lock is second._forward_lock
-    finally:
-        await asyncio.gather(first.close(), second.close())
+def test_offload_scorer_survives_repeated_sync_entrypoint_loops(monkeypatch):
+    """compute_rm_score() opens a fresh event loop per call; wake/score/sleep must
+    not carry loop-bound primitives (the admission condition) across those loops."""
+    FakeScorer.instances = 0
+    executor = _executor(monkeypatch, "cpu-fake-scorer")
+
+    async def one_call(i: int) -> dict:
+        await executor.wake_up()
+        try:
+            return await executor.score({"i": i})
+        finally:
+            await executor.sleep()
+
+    assert asyncio.run(one_call(0)) == {"score": 0}
+    assert asyncio.run(one_call(1)) == {"score": 1}
+    assert asyncio.run(one_call(2)) == {"score": 2}
+    asyncio.run(executor.close())
+    assert FakeScorer.instances == 1

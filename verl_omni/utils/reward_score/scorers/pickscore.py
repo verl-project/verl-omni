@@ -77,6 +77,8 @@ class PickScoreScorer(RewardScorer):
                     request.get("solution_image"), request.get("extra_info"), scorer="PickScore"
                 )
                 score_divisor = request.get("score_divisor", 26.0)
+                if isinstance(score_divisor, bool) or not isinstance(score_divisor, int | float):
+                    raise ValueError(f"PickScore score_divisor must be a number, got {score_divisor!r}")
                 if score_divisor == 0:
                     raise ValueError("PickScore score_divisor must be non-zero")
                 prompts.append(request.get("ground_truth") or "")

@@ -174,6 +174,17 @@ def test_score_batch_rejects_zero_divisor_per_request(fake_inferencer):
     assert isinstance(results[0], ValueError)
 
 
+@pytest.mark.parametrize("bad_divisor", [None, "26", True])
+def test_score_batch_isolates_non_numeric_divisor_per_request(fake_inferencer, bad_divisor):
+    scorer = port.PickScoreScorer()
+    scorer.load(torch.device("cpu"))
+    good = _request("cat", seed=1)
+    bad = _request("cat", seed=2, score_divisor=bad_divisor)
+    results = scorer.score_batch([good, bad])
+    assert results[0]["score"] == pytest.approx(_expected_score(good))
+    assert isinstance(results[1], ValueError)
+
+
 @pytest.mark.asyncio
 async def test_sleep_wake_close_choreography(fake_inferencer):
     scorer = port.PickScoreScorer()

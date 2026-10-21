@@ -16,7 +16,6 @@
 from __future__ import annotations
 
 import asyncio
-import functools
 import gc
 import inspect
 import logging
@@ -93,8 +92,10 @@ class NativeRewardExecutor:
       every in-flight call to settle.
     - ``await_owned`` keeps an accepted operation running to settlement even
       when its caller is cancelled.
-    - The scorer path adds the microbatcher's admission condition and a
-      per-device forward lock (see :class:`ScorerMicrobatcher`).
+    - The scorer path adds the microbatcher's admission condition. Forwards
+      need no cross-executor lock: placement validation grants each native
+      model exclusive device indices, and one consumer task per scorer
+      already serializes its own forwards.
     """
 
     def __init__(self, spec: RewardModelSpec):
@@ -113,7 +114,7 @@ class NativeRewardExecutor:
         self._model_cls: Any = None
         self._is_scorer = False
         self._microbatcher: ScorerMicrobatcher | None = None
-        self._forward_lock: asyncio.Lock | None = None
+        self._microbatch_loop: asyncio.AbstractEventLoop | None = None
 
     def reward_kwargs(self) -> dict[str, Any]:
         return {"reward_model": self}
@@ -176,24 +177,29 @@ class NativeRewardExecutor:
 
     async def _wake_up_scorer(self) -> None:
         """Load (or re-wake) the hosted scorer and open its microbatcher."""
+        loop = asyncio.get_running_loop()
         if self._model is None:
             # Scorer constructors take configuration only; device arrives via load().
             kwargs = dict(self.spec.executor_config.get("kwargs", {}))
             if self.spec.model_path is not None:
                 kwargs.setdefault("model_path", self.spec.model_path)
-            scorer = self._model_cls(**kwargs)
             device = self._placement_device()
-            await self._call(scorer.load, device)
+            scorer = self._model_cls(**kwargs)
+            # Ownership precedes load(): a load failing after placing weights
+            # still reaches close() through _fail_closed.
             self._model = scorer
-            self._forward_lock = _device_forward_lock(device)
-            self._microbatcher = ScorerMicrobatcher(
-                scorer.score_batch,
-                max_batch_size=self._model_cls.max_batch_size,
-                forward_lock=self._forward_lock,
-                name=self.spec.name,
-            )
+            await self._call(scorer.load, device)
         elif self._supports_cpu_offload(self._model):
             await self._call(self._model.wake_up)
+        if self._microbatcher is None or loop is not self._microbatch_loop:
+            # The admission condition binds to its creating loop, and the sync
+            # entrypoint opens a fresh loop per call — a changed loop rebuilds.
+            self._microbatcher = ScorerMicrobatcher(
+                self._model.score_batch,
+                max_batch_size=self._model_cls.max_batch_size,
+                name=self.spec.name,
+            )
+            self._microbatch_loop = loop
         await self._microbatcher.start()
         async with self._lock:
             self._awake = True
@@ -363,6 +369,9 @@ class ScorerMicrobatcher:
       consumer; ``start`` re-opens admission.
     - ``close``: fails every not-yet-accepted request with a ``RuntimeError``,
       then awaits the in-flight forward.
+    - Consumer-task cancellation (e.g. loop shutdown): the in-flight microbatch
+      fails with a ``RuntimeError`` and the cancellation propagates, terminating
+      the consumer instead of leaving it waiting forever.
     - Per-request preprocessing failures (``Exception`` slots returned by
       ``score_batch``) are isolated to that request; a raised ``score_batch``
       failure fails each request in that microbatch.
@@ -374,8 +383,6 @@ class ScorerMicrobatcher:
         max_batch_size: requests packed per ``score_batch`` call; ``None`` or
             ``1`` means unbatched.
         max_inflight: cap on queued-but-not-accepted requests (default 64).
-        forward_lock: optional per-device lock held across the forward so two
-            scorers cannot enter ``score_batch`` on the same device together.
         name: owning model name for error messages.
     """
 
@@ -385,7 +392,6 @@ class ScorerMicrobatcher:
         *,
         max_batch_size: int | None = None,
         max_inflight: int = 64,
-        forward_lock: asyncio.Lock | None = None,
         name: str = "",
     ):
         if max_batch_size is not None and (
@@ -397,7 +403,6 @@ class ScorerMicrobatcher:
         self._score_batch = score_batch
         self._pack = max_batch_size or 1
         self._max_inflight = max_inflight
-        self._forward_lock = forward_lock
         self._name = name
         self._is_async = inspect.iscoroutinefunction(score_batch)
         self._cond = asyncio.Condition()
@@ -508,6 +513,12 @@ class ScorerMicrobatcher:
                     f"got {len(results) if isinstance(results, list | tuple) else type(results).__name__} "
                     f"for {len(batch)} requests"
                 )
+        except asyncio.CancelledError:
+            # A swallowed cancellation would leave the consumer waiting forever.
+            for _, future in batch:
+                if not future.done():
+                    future.set_exception(RuntimeError(f"Reward scorer {self._name!r} consumer was cancelled"))
+            raise
         except BaseException as error:
             logger.error("Reward scorer %r microbatch failed", self._name, exc_info=error)
             for _, future in batch:
@@ -521,12 +532,7 @@ class ScorerMicrobatcher:
                 future.set_result(result)
 
     async def _forward(self, requests: list[dict[str, Any]]) -> list[Any]:
-        if self._forward_lock is not None:
-            async with self._forward_lock:
-                return await self._invoke(requests)
-        return await self._invoke(requests)
-
-    async def _invoke(self, requests: list[dict[str, Any]]) -> list[Any]:
+        # Only the single consumer task calls this, so forwards never overlap.
         if self._is_async:
             return await self._score_batch(requests)
         return await asyncio.to_thread(self._score_batch, requests)
@@ -540,9 +546,3 @@ def build_engine_reward_executors(specs: dict[str, RewardModelSpec]) -> dict[str
 def build_native_reward_executors(specs: dict[str, RewardModelSpec]) -> dict[str, NativeRewardExecutor]:
     """Build worker-local executors for native model specs."""
     return {name: NativeRewardExecutor(spec) for name, spec in specs.items() if spec.backend == "native"}
-
-
-@functools.cache
-def _device_forward_lock(device: torch.device) -> asyncio.Lock:
-    """One forward lock per device so two scorers never share a GPU forward."""
-    return asyncio.Lock()
