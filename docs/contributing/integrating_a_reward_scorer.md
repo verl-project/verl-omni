@@ -5,12 +5,12 @@ Last updated: 10/21/2026.
 
 This guide covers adding a **reward scorer** to VeRL-Omni: the function or class
 that turns one generated sample into a score. Most scorers are a single
-free-function file — start with the
-[reward rule](../../.agents/rules/reward.md) and the
-[add-reward-score](../../.agents/skills/add-reward-score/SKILL.md) skill; this
-page is the reference you need **when the scorer holds state across requests**
-(a local GPU model, a preference model, a judge session) and therefore becomes a
-**class-based (stateful) scorer** under `verl_omni/utils/reward_score/scorers/`.
+free-function file — model-backed ones follow
+[Named Reward Models](../algo/named_reward_models.md)
+for selection and configuration. This page is the reference you need
+**when the scorer holds state across requests** (a local GPU model, a preference
+model, a judge session) and therefore becomes a **class-based (stateful)
+scorer** under `verl_omni/utils/reward_score/scorers/`.
 
 The layering mirrors the trainer side: a class-based scorer writes **scoring
 semantics only** — batching, threading, placement, and lifecycle are
