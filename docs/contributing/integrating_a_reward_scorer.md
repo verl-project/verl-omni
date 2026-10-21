@@ -44,7 +44,7 @@ from verl_omni.utils.reward_score.scorers.base import RewardScorer
 from verl_omni.utils.reward_score.scorers.registry import register_scorer
 
 
-@register_scorer("<name>", modality="image")  # modality is a docs/validation tag
+@register_scorer("<name>")
 class MyScorer(RewardScorer):
     max_batch_size = 16            # executor packs up to this many requests per forward
     supports_cpu_offload = True    # sleep() can park weights on CPU; wake_up() restores
@@ -160,3 +160,5 @@ you do not need to retest them per scorer.
       `tests/reward_loop/` and `tests/utils/reward_score/` tests stay green.
 - [ ] An example launch script (or an edit to an existing one) selects the
       scorer through `reward.models.<name>` + `reward.reward_functions.<term>`.
+      During the migration window, example updates land with the post-window
+      cleanup (#723) together with the legacy-path scripts.

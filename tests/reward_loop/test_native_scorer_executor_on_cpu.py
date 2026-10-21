@@ -27,7 +27,7 @@ from verl_omni.workers.config.reward import RewardModelSpec
 _TEST_MODULE = "tests.reward_loop.test_native_scorer_executor_on_cpu"
 
 
-@register_scorer("cpu-fake-scorer", modality="test")
+@register_scorer("cpu-fake-scorer")
 class FakeScorer(RewardScorer):
     """Records lifecycle calls; scores request kwarg ``i`` back as ``score``."""
 
@@ -214,7 +214,7 @@ async def test_offload_sleep_pauses_consumer_and_reuses_instance_on_wake(monkeyp
 
     await executor.sleep()
     assert scorer.calls == [scorer.calls[0], "sleep"]
-    assert executor._microbatcher.state == "paused"
+    assert executor._microbatcher._state == "paused"
     with pytest.raises(RuntimeError, match="not awake"):
         await executor.score({"i": 1})
 

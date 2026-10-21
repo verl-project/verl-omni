@@ -13,11 +13,11 @@
 # limitations under the License.
 """Registry and selection for stateful (class-based) reward scorers.
 
-Selection follows exactly this order (RFC §5.3):
+Selection follows this order:
 
 1. a name registered via :func:`register_scorer`;
 2. an import spec ``pkg.module:Attr`` (a ``pkg://`` prefix is tolerated);
-3. today's file-path form ``path/to/module.py:Attr``.
+3. a file path ``path/to/module.py:Attr``.
 
 Every step missed fails with a ``ValueError`` listing the registered names —
 the same fail-fast posture as ``DiffusionModelBase.get_class_by_name``.
@@ -25,13 +25,12 @@ the same fail-fast posture as ``DiffusionModelBase.get_class_by_name``.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
+
+from verl_omni.utils.reward_score.scorers.base import RewardScorer
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-
-    from verl_omni.utils.reward_score.scorers.base import RewardScorer
 
 __all__ = [
     "get_scorer_cls",
@@ -40,38 +39,30 @@ __all__ = [
     "register_scorer",
 ]
 
-
-@dataclass(frozen=True)
-class _ScorerRegistration:
-    cls: type[RewardScorer]
-    modality: str | None
+_REGISTERED: dict[str, type[RewardScorer]] = {}
 
 
-_REGISTERED: dict[str, _ScorerRegistration] = {}
-
-
-def register_scorer(name: str, *, modality: str | None = None) -> Callable[[type[RewardScorer]], type[RewardScorer]]:
+def register_scorer(name: str) -> Callable[[type[RewardScorer]], type[RewardScorer]]:
     """Class decorator registering a stateful scorer class under ``name``.
+
+    Registering the identical class again is a tolerated no-op, keeping the
+    decorator idempotent when a module is re-imported.
 
     Args:
         name: the config-facing selection name; must be a non-empty string
             without ``:`` (which would make it an import spec).
-        modality: optional tag (e.g. ``image``) reserved for docs/validation.
 
     Raises:
         ValueError: the name is malformed or registered to a different class,
             the class is not a :class:`RewardScorer`, or its declarations are
-            invalid. Re-registering the identical class is a tolerated no-op
-            (the rule of upstream verl's reward-manager registry).
+            invalid.
     """
 
     def decorator(cls: type[RewardScorer]) -> type[RewardScorer]:
-        from verl_omni.utils.reward_score.scorers.base import RewardScorer
-
         if not isinstance(name, str) or not name or ":" in name:
             raise ValueError(f"Scorer name must be a non-empty string without ':', got {name!r}")
-        if name in _REGISTERED and _REGISTERED[name].cls is not cls:
-            registered = _REGISTERED[name].cls
+        if name in _REGISTERED and _REGISTERED[name] is not cls:
+            registered = _REGISTERED[name]
             raise ValueError(
                 f"Reward scorer {name!r} has already been registered: "
                 f"{registered.__module__}.{registered.__qualname__} vs "
@@ -87,7 +78,7 @@ def register_scorer(name: str, *, modality: str | None = None) -> Callable[[type
             raise ValueError(f"Reward scorer {name!r} max_batch_size must be a positive integer or None")
         if type(cls.supports_cpu_offload) is not bool:
             raise ValueError(f"Reward scorer {name!r} supports_cpu_offload must be a bool")
-        _REGISTERED[name] = _ScorerRegistration(cls=cls, modality=modality)
+        _REGISTERED[name] = cls
         return cls
 
     return decorator
@@ -95,14 +86,14 @@ def register_scorer(name: str, *, modality: str | None = None) -> Callable[[type
 
 def peek_registered_scorers() -> dict[str, type[RewardScorer]]:
     """Return a snapshot of registered scorer classes keyed by name."""
-    return {name: registration.cls for name, registration in _REGISTERED.items()}
+    return dict(_REGISTERED)
 
 
 def get_scorer_cls(ref: str) -> type[RewardScorer]:
     """Resolve a scorer class by registered name or import spec.
 
     Args:
-        ref: a registered name, ``pkg.module:Attr``, or ``path/file.py:Attr``.
+        ref: a registered name, ``pkg.module:Attr``, or ``path/to/file.py:Attr``.
 
     Raises:
         ValueError: nothing resolvable matched ``ref``, or the resolved class
@@ -114,8 +105,6 @@ def get_scorer_cls(ref: str) -> type[RewardScorer]:
     if not isinstance(ref, str) or ":" not in ref:
         raise _unknown_scorer_error(ref, registered)
     cls = _load_ref(ref)
-    from verl_omni.utils.reward_score.scorers.base import RewardScorer
-
     if not (isinstance(cls, type) and issubclass(cls, RewardScorer)):
         raise ValueError(f"Scorer reference {ref!r} resolved to {cls!r}, which does not subclass RewardScorer")
     return cls
@@ -124,9 +113,10 @@ def get_scorer_cls(ref: str) -> type[RewardScorer]:
 def import_from_spec(ref: str) -> Any:
     """Resolve a ``module:Attr`` reference to the object.
 
-    Accepts a dotted module (a ``pkg://`` prefix is tolerated — upstream's
-    :func:`load_extern_object` handles prefixed, file, and ``file://`` forms);
-    a bare dotted module is prefixed before delegating.
+    The module part may be a dotted module path (``pkg.module``, optionally
+    ``pkg://``-prefixed) or a file path (``path/to/module.py``, optionally
+    ``file://``-prefixed); a bare dotted module is ``pkg://``-prefixed before
+    delegating to verl's :func:`load_extern_object`.
     """
     from verl.utils.import_utils import load_extern_object
 
@@ -139,7 +129,7 @@ def import_from_spec(ref: str) -> Any:
 def _load_ref(ref: str) -> Any:
     try:
         return import_from_spec(ref)
-    except (ImportError, AttributeError, FileNotFoundError, ModuleNotFoundError) as error:
+    except (ImportError, AttributeError, FileNotFoundError) as error:
         raise _unknown_scorer_error(ref, peek_registered_scorers()) from error
 
 

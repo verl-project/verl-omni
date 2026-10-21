@@ -70,7 +70,7 @@ class EngineRewardExecutor:
 
 
 class NativeRewardExecutor:
-    """Worker-local model owner that exposes inference, never scoring.
+    """Worker-local owner of a native reward model or scorer, exposing ``score()`` or ``infer()``.
 
     Two hosting paths share the wake/sleep fencing, in-flight accounting, and
     fail-closed disposal:
@@ -196,7 +196,7 @@ class NativeRewardExecutor:
             # entrypoint opens a fresh loop per call — a changed loop rebuilds.
             self._microbatcher = ScorerMicrobatcher(
                 self._model.score_batch,
-                max_batch_size=self._model_cls.max_batch_size,
+                max_batch_size=self._model.max_batch_size,
                 name=self.spec.name,
             )
             self._microbatch_loop = loop
@@ -410,10 +410,6 @@ class ScorerMicrobatcher:
         self._state = "idle"  # idle -> running -> (paused -> running)* | closed
         self._consumer: asyncio.Task | None = None
 
-    @property
-    def state(self) -> str:
-        return self._state
-
     async def start(self) -> None:
         """Open admission and start the consumer (idempotent while running)."""
         async with self._cond:
@@ -526,7 +522,7 @@ class ScorerMicrobatcher:
                     future.set_exception(error)
             return
         for (_, future), result in zip(batch, results, strict=True):
-            if isinstance(result, BaseException) and not future.done():
+            if isinstance(result, Exception) and not future.done():
                 future.set_exception(result)
             elif not future.done():
                 future.set_result(result)

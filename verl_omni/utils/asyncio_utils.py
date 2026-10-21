@@ -24,11 +24,11 @@ __all__ = [
 
 
 async def await_owned(awaitable: Any) -> Any:
-    """Keep an accepted operation owned until it settles, even if its caller leaves.
+    """Await ``awaitable`` to settlement, absorbing repeated cancellation of the awaiting task.
 
-    Repeated caller cancellation is absorbed until ``awaitable`` completes; the
-    caller then sees ``CancelledError`` only if it was itself cancelled, with
-    the operation's outcome already settled.
+    Use when the operation must run to completion once started, even if the task
+    awaiting it is cancelled: cancellation is absorbed until settlement, the
+    operation's outcome is then consumed, and ``CancelledError`` is re-raised.
     """
     task = asyncio.ensure_future(awaitable)
     cancelled = False

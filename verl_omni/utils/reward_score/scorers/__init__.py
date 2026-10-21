@@ -15,13 +15,12 @@
 
 Importing this package registers every bundled scorer (registration is an
 import side effect, mirroring ``verl_omni/pipelines/__init__.py``). The flat
-modules one directory up remain the frozen home of the free-function scorers
-and are never moved.
+free-function scorers live in the parent ``reward_score`` package.
 """
 
 from verl_omni.utils.reward_score.scorers.base import RewardScorer
 
-# Importing a scorer module registers it; keep in sync with the scorer modules above.
+# Importing a scorer module registers it; add each new scorer module here.
 from verl_omni.utils.reward_score.scorers.pickscore import PickScoreScorer
 from verl_omni.utils.reward_score.scorers.registry import get_scorer_cls, peek_registered_scorers, register_scorer
 
