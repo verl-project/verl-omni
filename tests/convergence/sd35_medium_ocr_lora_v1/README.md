@@ -80,18 +80,33 @@ step-100 val floor only.
   plus `/usr/local/Ascend/nnal/atb`)
 - `stabilityai/stable-diffusion-3.5-medium` (`MODEL_PATH`) or a local copy
 - `Qwen/Qwen2.5-VL-3B-Instruct` (`REWARD_MODEL_PATH`) or a local copy
-- `$WORKSPACE/data/ocr/sd3/{train,test}.parquet`
+- `${OCR_DATA_DIR}/{train,test}.parquet` where `OCR_DATA_DIR=${OCR_RAW_DIR}/sd3`
 
-Prepare OCR parquet with:
+If the parquet files are missing, the script converts the raw one-prompt-per-line
+`${OCR_RAW_DIR}/{train,test}.txt` automatically via `sd3_ocr.py`; otherwise it
+fails closed. `OCR_RAW_DIR` defaults to `$WORKSPACE/data/ocr` when the case
+script runs standalone; the launcher
+(`tests/convergence/run_l4_convergence.sh`) exports
+`OCR_RAW_DIR=$HOME/.cache/huggingface/hub/verl-omni` instead. Manual
+preparation:
 
 ```bash
 python3 examples/flowgrpo_trainer/data_process/sd3_ocr.py \
-  --output_dir "$WORKSPACE/data/ocr/sd3"
+  --input_dir "${OCR_RAW_DIR:-$WORKSPACE/data/ocr}" \
+  --output_dir "${OCR_RAW_DIR:-$WORKSPACE/data/ocr}/sd3"
 ```
 
 `WORKSPACE` defaults to `$HOME`.
 
 ## Run
+
+Preferred — via the `tests/convergence` launcher (case list, weight snapshots
+`MODEL_PATH`/`REWARD_MODEL_PATH`, and `OCR_RAW_DIR` are wired in there):
+
+```bash
+bash tests/convergence/run_l4_convergence.sh sd35_medium_ocr_lora_v1
+bash tests/convergence/run_l4_convergence.sh --device npu sd35_medium_ocr_lora_v1
+```
 
 GPU:
 
@@ -126,8 +141,9 @@ GitHub Actions workflow: `.github/workflows/l4_convergence.yml`
 
 - Manual (GPU): **Actions → l4_convergence → Run workflow** → choose this
   case or `all`; enable **run_npu** to also run it on Ascend NPU.
-- Pull request: apply the `L4-npu-ci` label → NPU job (diff-selected on the
-  static 8-NPU runner `linux-aarch64-a2b4-8`, image
+- Pull request: apply the `L4-npu-ci` label → NPU job (runs every case
+  registered in `tests/convergence/run_l4_convergence.sh` on the static 8-NPU
+  runner `linux-aarch64-a2b4-8`, image
   `swr.cn-north-4.myhuaweicloud.com/mindspeed/pr-verl-omni-a2:v010-vllm030-omni030`,
   `DEVICE=npu`, timeout 720 min). The former `L4-weekly-ci` GPU PR label was
   removed; GPU runs are dispatch-only.

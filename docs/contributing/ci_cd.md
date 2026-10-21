@@ -92,15 +92,17 @@ FSDP offload, `train_batch_size=16`, `rollout.n=16`, and the same train-infer
 and grad gates. Validation runs every 20 steps and on the last step.
 
 ```bash
-bash tests/convergence/sd35_medium_ocr_lora_v1/run_sd35_medium_ocr_lora_v1.sh
+bash tests/convergence/run_l4_convergence.sh sd35_medium_ocr_lora_v1
 ```
 
-Defaults:
+Defaults (the launcher exports `MODEL_PATH`, `REWARD_MODEL_PATH`, and
+`OCR_RAW_DIR`; running the case script directly falls back to the values below):
 
 - Policy: `stabilityai/stable-diffusion-3.5-medium` (`MODEL_PATH`)
 - Reward: `Qwen/Qwen2.5-VL-3B-Instruct` (`REWARD_MODEL_PATH`)
-- Data: `$WORKSPACE/data/ocr/sd3/{train,test}.parquet`
-- `WORKSPACE` defaults to `$HOME`.
+- Data: `${OCR_DATA_DIR}/{train,test}.parquet` with `OCR_DATA_DIR=${OCR_RAW_DIR}/sd3`
+- `OCR_RAW_DIR` defaults to `$WORKSPACE/data/ocr` (`WORKSPACE` defaults to
+  `$HOME`); missing parquet is regenerated from `${OCR_RAW_DIR}/{train,test}.txt`
 - `VAL_REWARD_MIN` defaults to `0.8`.
 
 Gate logic lives in `collect_report.py`. The collector's own tests are L1
@@ -129,9 +131,9 @@ way:
 - **Manual (GPU):** GitHub Actions → `l4_convergence` → **Run workflow** →
   choose `all` or `sd35_medium_ocr_lora_v1`; enable **run_npu** to also run on
   Ascend NPU.
-- **Pull request (NPU):** apply the `L4-npu-ci` label. The workflow selects the
-  smallest case set that covers the PR diff; shared trainer or unknown paths run
-  all cases on the static 8-NPU runner (`linux-aarch64-a2b4-8`, image
+- **Pull request (NPU):** apply the `L4-npu-ci` label. The workflow runs every
+  case registered in `tests/convergence/run_l4_convergence.sh` on the static
+  8-NPU runner (`linux-aarch64-a2b4-8`, image
   `swr.cn-north-4.myhuaweicloud.com/mindspeed/pr-verl-omni-a2:v010-vllm030-omni030`).
 
 Each case requires **8 accelerators**. The GPU job runs on a dynamic `L20x8`

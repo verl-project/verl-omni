@@ -10,6 +10,8 @@
 #
 # Fail closed on:
 #   - visible device count < REQUIRED_GPUS (NUM_GPUS_ACTOR_ROLLOUT + NUM_GPUS_REWARD)
+#   - missing OCR parquet with no raw ${OCR_RAW_DIR:-$WORKSPACE/data/ocr}/{train,test}.txt
+#     to convert (auto-runs examples/flowgrpo_trainer/data_process/sd3_ocr.py)
 #   - rollout_prob_diff_mean > ROLLOUT_PROB_DIFF_MEAN_MAX (default 1e-4)
 #   - non-finite actor/grad_norm
 #   - step-100 val-core reward/mean below VAL_REWARD_MIN
@@ -101,7 +103,8 @@ REWARD_GPU_MEMORY_UTILIZATION=${REWARD_GPU_MEMORY_UTILIZATION:-0.85}
 
 MODEL_PATH=${MODEL_PATH:-stabilityai/stable-diffusion-3.5-medium}
 REWARD_MODEL_PATH=${REWARD_MODEL_PATH:-Qwen/Qwen2.5-VL-3B-Instruct}
-OCR_DATA_DIR=${OCR_DATA_DIR:-${WORKSPACE}/data/ocr/sd3}
+OCR_RAW_DIR=${OCR_RAW_DIR:-${WORKSPACE}/data/ocr}
+OCR_DATA_DIR=${OCR_DATA_DIR:-${OCR_RAW_DIR}/sd3}
 TRAIN_FILES=${TRAIN_FILES:-${OCR_DATA_DIR}/train.parquet}
 VAL_FILES=${VAL_FILES:-${OCR_DATA_DIR}/test.parquet}
 
@@ -209,8 +212,17 @@ if [[ "${VISIBLE_DEVICES}" -lt "${REQUIRED_GPUS}" ]]; then
 fi
 
 if [ ! -f "${TRAIN_FILES}" ] || [ ! -f "${VAL_FILES}" ]; then
+    if [ -f "${OCR_RAW_DIR}/train.txt" ] && [ -f "${OCR_RAW_DIR}/test.txt" ]; then
+        echo "OCR parquet missing under ${OCR_DATA_DIR}; converting ${OCR_RAW_DIR}/{train,test}.txt ..."
+        mkdir -p "${OCR_DATA_DIR}"
+        python3 "${REPO_ROOT}/examples/flowgrpo_trainer/data_process/sd3_ocr.py" \
+            --input_dir "${OCR_RAW_DIR}" \
+            --output_dir "${OCR_DATA_DIR}"
+    fi
+fi
+if [ ! -f "${TRAIN_FILES}" ] || [ ! -f "${VAL_FILES}" ]; then
     echo "Missing OCR parquet under ${OCR_DATA_DIR} (train=${TRAIN_FILES}, val=${VAL_FILES})." >&2
-    echo "Prepare data with: python3 examples/flowgrpo_trainer/data_process/sd3_ocr.py --output_dir ${OCR_DATA_DIR}" >&2
+    echo "Prepare data with: python3 examples/flowgrpo_trainer/data_process/sd3_ocr.py --input_dir \${OCR_RAW_DIR:-${WORKSPACE}/data/ocr} --output_dir ${OCR_DATA_DIR}" >&2
     exit 1
 fi
 
