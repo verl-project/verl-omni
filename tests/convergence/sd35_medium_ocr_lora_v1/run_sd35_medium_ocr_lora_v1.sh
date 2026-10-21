@@ -12,6 +12,9 @@
 #   - visible device count < REQUIRED_GPUS (NUM_GPUS_ACTOR_ROLLOUT + NUM_GPUS_REWARD)
 #   - missing OCR parquet with no raw ${OCR_RAW_DIR:-$WORKSPACE/data/ocr}/{train,test}.txt
 #     to convert (auto-runs examples/flowgrpo_trainer/data_process/sd3_ocr.py)
+#   - vLLM reward-path preflight diagnostics (import vllm / registry inspect /
+#     qwen2_5_vl model class) — catches environment-level native crashes
+#     (glibc heap corruption, SIGABRT/134) before burning a full training run
 #   - rollout_prob_diff_mean > ROLLOUT_PROB_DIFF_MEAN_MAX (default 1e-4)
 #   - non-finite actor/grad_norm
 #   - step-100 val-core reward/mean below VAL_REWARD_MIN
@@ -223,6 +226,65 @@ fi
 if [ ! -f "${TRAIN_FILES}" ] || [ ! -f "${VAL_FILES}" ]; then
     echo "Missing OCR parquet under ${OCR_DATA_DIR} (train=${TRAIN_FILES}, val=${VAL_FILES})." >&2
     echo "Prepare data with: python3 examples/flowgrpo_trainer/data_process/sd3_ocr.py --input_dir \${OCR_RAW_DIR:-${WORKSPACE}/data/ocr} --output_dir ${OCR_DATA_DIR}" >&2
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# vLLM reward-path preflight diagnostics (environment-level).
+#
+# Background: on the aarch64 Ascend CI runner, vLLM's model-architecture
+# inspection subprocess crashed with glibc heap corruption
+# ("corrupted size vs. prev_size", SIGABRT -> exit 134). That crash surfaces
+# deep inside training setup as an opaque pydantic ValidationError from the
+# reward-model vLLM server, after burning most of the run. These checks
+# exercise the exact import path beforehand. They need no model weights and
+# no accelerator, so a failure here means the container's native dependency
+# stack (vllm / vllm-ascend / torch-npu) is broken — independent of data,
+# weights, or verl-omni code. Fail fast with a clear cause instead.
+# DIAG_ROUNDS controls repetition per check (heap corruption can be flaky).
+# ---------------------------------------------------------------------------
+DIAG_ROUNDS=${DIAG_ROUNDS:-3}
+
+diag_python() {
+    # diag_python <label> <python-expr>; repeats the check ${DIAG_ROUNDS}x.
+    local label="$1" expr="$2" i
+    for ((i = 1; i <= DIAG_ROUNDS; i++)); do
+        if ! python3 -c "${expr}" 2>&1; then
+            echo "[DIAG] FAIL: ${label} (round ${i}/${DIAG_ROUNDS})" >&2
+            return 1
+        fi
+    done
+    echo "[DIAG] PASS: ${label} (${DIAG_ROUNDS}/${DIAG_ROUNDS} rounds)"
+}
+
+DIAG_FAILED=0
+echo "===== vLLM reward-path preflight diagnostics (rounds=${DIAG_ROUNDS}) ====="
+python3 -m pip list 2>/dev/null | grep -Ei 'vllm|torch|ascend|cann|pyarrow' || true
+ldd --version 2>/dev/null | head -1 || true
+
+set +e
+diag_python "A: import vllm (pulls in vllm-ascend plugin)" \
+    "import vllm; print('import vllm OK')" || DIAG_FAILED=1
+diag_python "B: ModelConfig for Qwen2.5-VL reward model (triggers the exact CI inspection subprocess)" \
+    "from vllm.config import ModelConfig; ModelConfig(model='${REWARD_MODEL_PATH}'); print('ModelConfig(inspect) OK')" || DIAG_FAILED=1
+diag_python "C: import vllm.model_executor.models.qwen2_5_vl (reward model class)" \
+    "import vllm.model_executor.models.qwen2_5_vl; print('import qwen2_5_vl OK')" || DIAG_FAILED=1
+diag_python "D: control import vllm.model_executor.models.qwen3_vl" \
+    "import vllm.model_executor.models.qwen3_vl; print('import qwen3_vl OK')" || DIAG_FAILED=1
+set -e
+
+if [[ "${DIAG_FAILED}" -ne 0 ]]; then
+    cat >&2 <<'EOF'
+[DIAG] ====================================================================
+[DIAG] vLLM reward-path preflight FAILED: the container's native dependency
+[DIAG] stack (vllm / vllm-ascend / torch-npu) cannot import the Qwen2.5-VL
+[DIAG] model class. Training would fail at reward-server startup anyway.
+[DIAG] This is an environment/dependency-level issue, not data or verl-omni
+[DIAG] code. For a sharper repro on the runner, try:
+[DIAG]   MALLOC_CHECK_=3 MALLOC_PERTURB_=165 python3 -c \
+[DIAG]     "import vllm.model_executor.models.qwen2_5_vl"
+[DIAG] ====================================================================
+EOF
     exit 1
 fi
 
