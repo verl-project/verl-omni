@@ -2,8 +2,8 @@
 # L4 precision job: real SD3.5-Medium + Qwen2.5-VL GenRM OCR weights, real OCR parquet,
 # 8 accelerators (6 actor+rollout, 2 reward), 100 FlowGRPO steps on the v1 sync trainer.
 #
-# Runs on NVIDIA GPU by default; set DEVICE=npu (or use the run_*_npu.sh wrapper)
-# to run the same job on Ascend NPU.
+# Runs on NVIDIA GPU by default; set DEVICE=npu to run the same job on Ascend
+# NPU (sources the CANN env and isolates artifacts under the _npu case name).
 #
 # Route A (memory-first sync): TP-sharded rollout/reward, FSDP offload, smaller
 # micro-batches, and a larger train batch + rollout.n for faster convergence.
@@ -47,6 +47,25 @@ if [ "${DEVICE}" = "npu" ]; then
     export DEVICE_NAME=npu
     export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=${RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES:-1}
     export VERL_DATAPROTO_SERIALIZATION_METHOD=${VERL_DATAPROTO_SERIALIZATION_METHOD:-numpy}
+    ASCEND_HOME_PATH=${ASCEND_HOME_PATH:-/usr/local/Ascend/cann}
+    set +u
+    if [ -f "${ASCEND_HOME_PATH}/set_env.sh" ]; then
+        # shellcheck disable=SC1091
+        source "${ASCEND_HOME_PATH}/set_env.sh"
+    fi
+    if [ -f "${ASCEND_HOME_PATH}/../nnal/atb/set_env.sh" ]; then
+        # shellcheck disable=SC1091
+        source "${ASCEND_HOME_PATH}/../nnal/atb/set_env.sh"
+    fi
+    set -u
+    if [ -z "${ASCEND_RT_VISIBLE_DEVICES:-}" ]; then
+        NUM_NPUS=${NUM_NPUS:-8}
+        npu_list=""
+        for ((i = 0; i < NUM_NPUS; i++)); do
+            npu_list="${npu_list:+${npu_list},}${i}"
+        done
+        export ASCEND_RT_VISIBLE_DEVICES="${npu_list}"
+    fi
 else
     export FLASHINFER_DISABLE_VERSION_CHECK=1
 fi
@@ -84,7 +103,11 @@ fi
 ROLLOUT_ATTN_BACKEND=${ROLLOUT_ATTN_BACKEND:-TORCH_SDPA}
 CUSTOM_CHAT_TEMPLATE='{% for message in messages %}{% if message['\''role'\''] == '\''user'\'' %}{{ message['\''content'\''] }}{% endif %}{% endfor %}'
 
-L4_TEST_CASE=${L4_TEST_CASE:-sd35_medium_ocr_lora_v1}
+if [ "${DEVICE}" = "npu" ]; then
+    L4_TEST_CASE=${L4_TEST_CASE:-sd35_medium_ocr_lora_v1_npu}
+else
+    L4_TEST_CASE=${L4_TEST_CASE:-sd35_medium_ocr_lora_v1}
+fi
 OUTPUT_ROOT=${OUTPUT_ROOT:-${SCRIPT_DIR}/../outputs/l4_convergence}
 CASE_DIR=${CASE_DIR:-${OUTPUT_ROOT}/${L4_TEST_CASE}}
 LOG_DIR=${LOG_DIR:-${OUTPUT_ROOT}/logs/${L4_TEST_CASE}}

@@ -5,8 +5,9 @@ weights and the real OCR parquet for 100 steps on **8 devices** (6
 actor+rollout, 2 reward). There is **no baseline** compare. Timing is written
 into the report only.
 
-Runs on NVIDIA GPU by default and on Ascend NPU via the `_npu.sh` wrapper
-(`DEVICE=npu`; attention switches to `_native_npu`).
+Runs on NVIDIA GPU by default and on Ascend NPU via `DEVICE=npu` (sources the
+CANN env, attention switches to `_native_npu`, artifacts land under the
+`sd35_medium_ocr_lora_v1_npu` case name).
 
 This L4 case uses **Route A (memory-first sync)**:
 
@@ -98,11 +99,11 @@ GPU:
 bash tests/convergence/sd35_medium_ocr_lora_v1/run_sd35_medium_ocr_lora_v1.sh
 ```
 
-NPU (Ascend; sources CANN env, sets `DEVICE=npu`, artifacts under
-`sd35_medium_ocr_lora_v1_npu`):
+NPU (Ascend; sources CANN env and sets `DEVICE=npu`; artifacts are isolated
+under `sd35_medium_ocr_lora_v1_npu`):
 
 ```bash
-bash tests/convergence/sd35_medium_ocr_lora_v1/run_sd35_medium_ocr_lora_v1_npu.sh
+DEVICE=npu bash tests/convergence/sd35_medium_ocr_lora_v1/run_sd35_medium_ocr_lora_v1.sh
 ```
 
 Hydra overrides can be appended after the script. Validation runs every
