@@ -145,8 +145,7 @@ GitHub Actions workflow: `.github/workflows/l4_convergence.yml`
   registered in `tests/convergence/run_l4_convergence.sh` on the static 8-NPU
   runner `linux-aarch64-a2b4-8`, image
   `swr.cn-north-4.myhuaweicloud.com/mindspeed/pr-verl-omni-a2:v010-vllm030-omni030`,
-  `DEVICE=npu`, timeout 720 min). The former `L4-weekly-ci` GPU PR label was
-  removed; GPU runs are dispatch-only.
+  `DEVICE=npu`, timeout 720 min).
 
 Artifacts: `tests/convergence/outputs/l4_convergence/**/*.jsonl` and `**/*.json`
 (NPU job uploads under the `l4-convergence-npu-outputs-*` artifact name).

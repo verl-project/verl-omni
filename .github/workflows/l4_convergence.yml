@@ -51,8 +51,7 @@ env:
 
 jobs:
   setup_runner:
-    # GPU cases run via workflow_dispatch only (the L4-weekly-ci PR label was
-    # removed); pull requests trigger the NPU job via L4-npu-ci instead.
+    # GPU cases run via workflow_dispatch only; pull requests trigger the NPU job via L4-npu-ci instead.
     if: github.repository_owner == 'verl-project'
     runs-on: ubuntu-latest
     outputs:
