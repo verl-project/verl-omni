@@ -382,11 +382,7 @@ def test_sync_entrypoint_pins_one_loop_and_survives_sleep_overlapping_a_forward(
             scorer.entered.clear()
             scorer.release.clear()
             scoring = asyncio.create_task(executor.score({"i": i}))
-            for _ in range(1000):
-                if scorer.entered.is_set():
-                    break
-                await asyncio.sleep(0)
-            assert scorer.entered.is_set(), "forward never started"
+            assert await asyncio.to_thread(scorer.entered.wait, 5), "forward never started"
             sleeping = asyncio.create_task(executor.sleep())
             for _ in range(20):
                 await asyncio.sleep(0)
