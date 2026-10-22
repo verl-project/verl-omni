@@ -42,7 +42,16 @@ __all__ = ["PickScoreScorer", "compute_score_pickscore_batched"]
 
 @register_scorer("pickscore")
 class PickScoreScorer(RewardScorer):
-    """PickScore preference model as a batch-native scorer."""
+    """PickScore preference model as a batch-native scorer.
+
+    Args:
+        model_path: PickScore checkpoint to load (default
+            ``yuvalkirstain/PickScore_v1``); the named model's top-level
+            ``model_path`` forwards here unless ``executor.kwargs`` sets one.
+        processor_path: CLIP processor for prompt/image preprocessing
+            (default ``laion/CLIP-ViT-H-14-laion2B-s32B-b79K``).
+        dtype: weights dtype at load (default ``torch.float32``).
+    """
 
     max_batch_size = _frozen._MAX_BATCH_SIZE
     supports_cpu_offload = True
