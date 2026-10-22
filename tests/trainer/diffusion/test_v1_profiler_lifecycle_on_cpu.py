@@ -169,6 +169,21 @@ def test_async_without_hybrid_only_profiles_standalone(monkeypatch):
     assert events.count(("standalone", "start", {})) == 3
 
 
+@pytest.mark.parametrize("mode", ["sync", "separate_async"])
+def test_continuous_rollout_windows(monkeypatch, mode):
+    """Check window scheduling independently of the mocked profiler backend."""
+    trainer, events = make_trainer(monkeypatch, mode=mode, continuous=True)
+    trainer.fit(Mock())
+    role = "rollout" if mode == "sync" else "standalone"
+    assert events.count((role, "start", {})) == 2
+    assert events.count((role, "stop")) == 2
+    first_start = events.index((role, "start", {}))
+    first_stop = events.index((role, "stop"))
+    assert first_start < events.index(("feed", 1)) < events.index(("feed", 2)) < first_stop
+    assert first_stop < events.index(("feed", 3))
+    assert [kwargs["run_command"] for name, kwargs in trainer.profile_stop_calls if name == "actor"] == [False, True]
+
+
 @pytest.mark.parametrize("continuous", [False, True])
 def test_failed_step_closes_all_started_targets(monkeypatch, continuous):
     trainer, events = make_trainer(monkeypatch, continuous=continuous, fail_at=1)
@@ -251,4 +266,24 @@ def test_failed_step_end_closes_continuous_window(monkeypatch):
         trainer.fit(Mock())
     assert events.count(("rollout", "start", {})) == events.count(("rollout", "stop")) == 1
     assert events.count(("actor", "stop")) == 1
+    assert not trainer._profile_window_active
+
+
+def test_finish_hook_runs_at_last_reachable_selected_step(monkeypatch):
+    trainer, _ = make_trainer(monkeypatch)
+    trainer.config.global_profiler.steps = [1, 100]
+    trainer.fit(Mock())
+    assert [kwargs["run_command"] for name, kwargs in trainer.profile_stop_calls if name == "actor"] == [True]
+
+
+def test_training_limit_closes_continuous_window(monkeypatch):
+    trainer, events = make_trainer(monkeypatch, continuous=True)
+    trainer.config.global_profiler.steps = [1, 2, 3]
+    trainer.total_training_steps = 2
+
+    trainer.fit(Mock())
+
+    assert [e[2]["profile_step"] for e in events if e[:2] == ("actor", "start")] == [1]
+    assert [kwargs for name, kwargs in trainer.profile_stop_calls if name == "actor"] == [{"run_command": True}]
+    assert events.count(("rollout", "start", {})) == events.count(("rollout", "stop")) == 1
     assert not trainer._profile_window_active
