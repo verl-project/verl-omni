@@ -203,7 +203,6 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             self._loss_fn = None
             self._has_old_adapter = False
         # DPO needs trainer-side ref noise preds even when KL is disabled.
-        self.use_critic = False  # Diffusion has no critic worker group.
         self.use_reference_policy = need_reference_policy(config) or (loss_mode == "dpo")
         self.use_rm = reward_is_enabled(config)
         self.use_teacher_policy = is_distillation_enabled(config.get("distillation"))
@@ -224,6 +223,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         # Local update index within the parameter-sync cycle.
         self.local_trigger_step = 0
         self._nonfinite_grad_streak = 0
+        self._init_profile_state()
         watchdog_config = dict(config.trainer.v1.get("watchdog", {}))
         watchdog_enabled = watchdog_config.pop("enabled", False)
         if not isinstance(watchdog_enabled, bool):
@@ -285,81 +285,145 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         managers = [getattr(self, "llm_server_manager", None)]
         return [manager for manager in managers if manager is not None]
 
+    def _init_profile_state(self) -> None:
+        """Initialize state for worker and rollout profiling targets."""
+        self._profile_window_active = False
+        self._active_profile_targets: list[object] = []
+        self._active_rollout_profile_targets: list[object] = []
+
+    def _start_profile_target(self, target, **kwargs) -> None:
+        """Track a target before starting so a partial start can be cleaned up."""
+        self._active_profile_targets.append(target)
+        target.start_profile(**kwargs)
+
+    @staticmethod
+    def _stop_profile_targets(targets: list, **kwargs) -> None:
+        """Drain one group in reverse startup order, continuing after stop failures."""
+        first_error = None
+        while targets:
+            target = targets.pop()
+            try:
+                target.stop_profile(**kwargs)
+            except BaseException as exc:
+                first_error = first_error or exc
+        if first_error is not None:
+            raise first_error
+
     def _start_rollout_profiling(self) -> None:
-        """Start rollout profiling."""
+        """Start and track the rollout replicas selected by the trainer mode."""
         for manager in self._rollout_server_managers():
+            self._active_rollout_profile_targets.append(manager)
             manager.start_profile()
 
     def _stop_rollout_profiling(self) -> None:
-        """Stop rollout profiling."""
-        for manager in self._rollout_server_managers():
-            manager.stop_profile()
+        """Close the rollout phase unless it belongs to a continuous window."""
+        if not self.config.global_profiler.profile_continuous_steps:
+            self._stop_profile_targets(self._active_rollout_profile_targets)
 
-    def _start_profiling(self) -> None:
-        """Start profiling for all worker groups if profiling is enabled."""
+    def _profile_worker_groups(self) -> list[tuple[object, dict]]:
+        """Return distinct training worker groups and their profiler start arguments."""
+        groups = [(self.actor_rollout_wg, {"role": "train", "profile_step": self.global_steps})]
+
+        if self.use_reference_policy and self.ref_policy_wg is not None:
+            groups.append((self.ref_policy_wg, {"role": "ref", "profile_step": self.global_steps}))
+
+        if self.use_teacher_policy:
+            groups.extend(
+                (worker_group, {"role": "teacher", "profile_step": self.global_steps})
+                for worker_group in self.teacher_model_manager.teacher_wg.values()
+            )
+
+        distinct_groups = []
+        seen = set()
+        for worker_group, kwargs in groups:
+            if id(worker_group) in seen:
+                continue
+            seen.add(id(worker_group))
+            distinct_groups.append((worker_group, kwargs))
+        return distinct_groups
+
+    def _open_profile_window(self) -> None:
+        """Open one worker profiling window."""
+        if self._profile_window_active:
+            raise RuntimeError("Profiling window is already active")
+
+        try:
+            for worker_group, kwargs in self._profile_worker_groups():
+                self._start_profile_target(worker_group, **kwargs)
+
+            self._start_rollout_profiling()
+
+            self._profile_window_active = True
+        except BaseException:
+            self._cleanup_active_profiling()
+            raise
+
+    def _close_profile_window(self, *, run_command: bool, close_rollout: bool = False) -> None:
+        """Close all targets opened for the current profiling window."""
+        first_error = None
+
+        # Drain worker targets in reverse startup order.
+        try:
+            self._stop_profile_targets(self._active_profile_targets, run_command=run_command)
+        except BaseException as exc:
+            first_error = exc
+
+        # Phase-scoped rollout is closed by the mode hook. On failure, close
+        # remaining rollout targets even if that hook has not run yet.
+        if close_rollout or self.config.global_profiler.profile_continuous_steps:
+            try:
+                self._stop_profile_targets(self._active_rollout_profile_targets)
+            except BaseException as exc:
+                first_error = first_error or exc
+
+        self._profile_window_active = False
+
+        if first_error is not None:
+            raise first_error
+
+    def _cleanup_active_profiling(self) -> None:
+        """Best-effort cleanup of profiling targets still active when training exits."""
+        try:
+            self._close_profile_window(run_command=False, close_rollout=True)
+        except BaseException:
+            # Cleanup must not replace the training or profiler-start exception.
+            pass
+
+    def _on_profiling_step_start(self) -> None:
+        """Open a profiling window if this step starts a configured range."""
         do_profile = (
             not self.prev_step_profile and self.curr_step_profile
             if self.config.global_profiler.profile_continuous_steps
             else self.curr_step_profile
         )
-
         if do_profile:
-            # "train", not "e2e": this window only holds what the training worker itself runs
-            # (log-prob forwards and the actor update). Generation happens in the inference
-            # engines below, which write their own traces.
-            #
-            # In the hybrid engine, actor/rollout and the (colocated) reference -- and sometimes the
-            # critic -- share ONE worker group object, so ref_policy_wg / critic_wg can alias
-            # actor_rollout_wg. Each start/stop_profile round-trips to every rank and, on stop, runs
-            # the finish hook (e.g. the user's trace-upload command); driving the same physical
-            # workers more than once would fire that hook once per alias and upload the same trace
-            # file multiple times. Drive each distinct worker group exactly once.
-            self.actor_rollout_wg.start_profile(role="train", profile_step=self.global_steps)
-            seen = {id(self.actor_rollout_wg)}
-            if self.use_reference_policy and id(self.ref_policy_wg) not in seen:
-                seen.add(id(self.ref_policy_wg))
-                self.ref_policy_wg.start_profile(profile_step=self.global_steps)
-            if self.use_critic and id(self.critic_wg) not in seen:
-                seen.add(id(self.critic_wg))
-                self.critic_wg.start_profile(profile_step=self.global_steps)
-            self._start_rollout_profiling()
+            self._open_profile_window()
 
-    def _stop_profiling(self) -> None:
-        """Stop profiling for all worker groups if profiling is enabled."""
+    def _on_profiling_step_end(self) -> None:
+        """Advance profiling step state and close a window at its boundary."""
         this_step_profile = self.curr_step_profile
         self.next_step_profile = (
             self.global_steps + 1 in self.config.global_profiler.steps
             if self.config.global_profiler.steps is not None
             else False
         )
+        is_last_step = self.global_steps >= self.total_training_steps
         do_profile = (
-            self.curr_step_profile and not self.next_step_profile
+            this_step_profile and (not self.next_step_profile or is_last_step)
             if self.config.global_profiler.profile_continuous_steps
-            else self.curr_step_profile
+            else this_step_profile
         )
-        self.prev_step_profile = self.curr_step_profile
+        self.prev_step_profile = this_step_profile
         self.curr_step_profile = self.next_step_profile
 
         if do_profile:
-            # Run the finish command (e.g. the trace upload) only once, on the last profiled step, so
-            # a command that uploads the whole save_path sends each trace once instead of re-uploading
-            # the accumulating directory every step. "Last" is the largest configured step, or the
-            # run's final step if it ends earlier on a profiled step.
-            profiled_steps = self.config.global_profiler.steps
-            is_last_step = self.global_steps >= self.total_training_steps
+            profiled_steps = [
+                step for step in (self.config.global_profiler.steps or []) if step <= self.total_training_steps
+            ]
             run_command = bool(
                 this_step_profile and profiled_steps and (self.global_steps == max(profiled_steps) or is_last_step)
             )
-            # See _start_profiling: skip aliased worker groups so the finish hook (and any trace
-            # upload it triggers) fires exactly once per distinct process, not once per role alias.
-            self.actor_rollout_wg.stop_profile(run_command=run_command)
-            seen = {id(self.actor_rollout_wg)}
-            if self.use_reference_policy and id(self.ref_policy_wg) not in seen:
-                seen.add(id(self.ref_policy_wg))
-                self.ref_policy_wg.stop_profile(run_command=run_command)
-            if self.use_critic and id(self.critic_wg) not in seen:
-                seen.add(id(self.critic_wg))
-                self.critic_wg.stop_profile(run_command=run_command)
+            self._close_profile_window(run_command=run_command)
 
     def fit(self, agent_loop_manager: AgentLoopManager):
         """Run the v1 training loop, mirroring upstream ``PPOTrainer.fit``."""
@@ -407,63 +471,67 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         )
         self.next_step_profile = False
 
-        self.on_train_begin()
-        last_val_metrics = None
-        while current_epoch < self.config.trainer.total_epochs and self.global_steps <= self.total_training_steps:
-            is_last_step = self.global_steps >= self.total_training_steps
-            metrics: dict = {}
-            self.timing_raw: dict = {}
-            with marked_timer("step", self.timing_raw):
-                self.on_step_begin()
-                self._start_profiling()
-                batch = self.step(metrics, self.timing_raw)
-                self._stop_profiling()
-                if self.config.trainer.save_freq > 0 and (
-                    is_last_step or self.global_steps % self.config.trainer.save_freq == 0
+        try:
+            self.on_train_begin()
+            last_val_metrics = None
+            while current_epoch < self.config.trainer.total_epochs and self.global_steps <= self.total_training_steps:
+                is_last_step = self.global_steps >= self.total_training_steps
+                metrics: dict = {}
+                self.timing_raw: dict = {}
+                with marked_timer("step", self.timing_raw):
+                    self.on_step_begin()
+                    self._on_profiling_step_start()
+                    batch = self.step(metrics, self.timing_raw)
+                    self._on_profiling_step_end()
+                    if self.config.trainer.save_freq > 0 and (
+                        is_last_step or self.global_steps % self.config.trainer.save_freq == 0
+                    ):
+                        with marked_timer("save_checkpoint", self.timing_raw, color="green"):
+                            self._save_checkpoint()
+                    self.on_step_end()
+                    metrics.update(self._consume_sync_metrics())
+
+                if self.config.trainer.test_freq > 0 and (
+                    is_last_step or self.global_steps % self.config.trainer.test_freq == 0
                 ):
-                    with marked_timer("save_checkpoint", self.timing_raw, color="green"):
-                        self._save_checkpoint()
-                self.on_step_end()
-                metrics.update(self._consume_sync_metrics())
+                    with marked_timer("testing", self.timing_raw, color="green"):
+                        self.on_validate_begin()
+                        val_metrics = self._validate()
+                        self.on_validate_end()
+                        if is_last_step:
+                            last_val_metrics = val_metrics
+                    metrics.update(val_metrics)
 
-            if self.config.trainer.test_freq > 0 and (
-                is_last_step or self.global_steps % self.config.trainer.test_freq == 0
-            ):
-                with marked_timer("testing", self.timing_raw, color="green"):
-                    self.on_validate_begin()
-                    val_metrics = self._validate()
-                    self.on_validate_end()
-                    if is_last_step:
-                        last_val_metrics = val_metrics
-                metrics.update(val_metrics)
+                self._compute_metrics(batch, metrics, self.timing_raw, self.global_steps, current_epoch)
 
-            self._compute_metrics(batch, metrics, self.timing_raw, self.global_steps, current_epoch)
-            self._report_training_watchdog(metrics)
+                self._report_training_watchdog(metrics)
 
-            rollout_data_dir = self.config.trainer.get("rollout_data_dir", None)
-            rollout_data_save_freq = self.config.trainer.get("rollout_data_save_freq", 1)
-            if rollout_data_dir and rollout_data_save_freq > 0 and self.global_steps % rollout_data_save_freq == 0:
-                self._log_rollout_data(batch, self.timing_raw, rollout_data_dir)
+                rollout_data_dir = self.config.trainer.get("rollout_data_dir", None)
+                rollout_data_save_freq = self.config.trainer.get("rollout_data_save_freq", 1)
+                if rollout_data_dir and rollout_data_save_freq > 0 and self.global_steps % rollout_data_save_freq == 0:
+                    self._log_rollout_data(batch, self.timing_raw, rollout_data_dir)
 
-            tq.kv_clear(keys=batch.keys, partition_id=batch.partition_id)
+                tq.kv_clear(keys=batch.keys, partition_id=batch.partition_id)
 
-            self.logger.log(data=metrics, step=self.global_steps)
-            progress_bar.update(1)
-            self.global_steps += 1
-            SkipManager.set_step(self.global_steps)
-            current_epoch = (self.global_steps - 1) // self.steps_per_epoch
-            if is_last_step:
-                log_skip_summary(self.logger, self.global_steps)
-                self._shutdown_dump_executor()
-                pprint(f"Final validation metrics: {last_val_metrics}")
-                progress_bar.close()
-                self._shutdown_dataloaders()
-                return
+                self.logger.log(data=metrics, step=self.global_steps)
+                progress_bar.update(1)
+                self.global_steps += 1
+                SkipManager.set_step(self.global_steps)
+                current_epoch = (self.global_steps - 1) // self.steps_per_epoch
+                if is_last_step:
+                    log_skip_summary(self.logger, self.global_steps)
+                    self._shutdown_dump_executor()
+                    pprint(f"Final validation metrics: {last_val_metrics}")
+                    progress_bar.close()
+                    self._shutdown_dataloaders()
+                    return
 
-        self.on_train_end()
-        log_skip_summary(self.logger, self.global_steps)
-        self._shutdown_dump_executor()
-        self._shutdown_dataloaders()
+            self.on_train_end()
+            log_skip_summary(self.logger, self.global_steps)
+            self._shutdown_dump_executor()
+            self._shutdown_dataloaders()
+        finally:
+            self._cleanup_active_profiling()
 
     def _report_training_watchdog(self, metrics: dict) -> None:
         if self._training_watchdog is None:

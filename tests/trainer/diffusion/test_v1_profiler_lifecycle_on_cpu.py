@@ -46,7 +46,11 @@ def make_trainer(monkeypatch, *, mode="sync", continuous=False, fail_at=None, re
         }
     )
     trainer.use_reference_policy = False
-    trainer.use_critic = False
+    trainer._init_profile_state()
+    trainer.use_teacher_policy = False
+    trainer.ref_policy_wg = None
+    trainer.reward_loop_manager = None
+    trainer.gpu_metrics_profiler = None
     trainer.sync_compatible = False
     trainer._training_watchdog = None
     trainer.global_steps = resumed_step

@@ -62,14 +62,17 @@ def test_training_windows_and_shared_reference_group(continuous, expected):
     trainer.actor_rollout_wg = Mock()
     trainer.ref_policy_wg = trainer.actor_rollout_wg
     trainer.use_reference_policy = True
-    trainer.use_critic = False
+    trainer.use_teacher_policy = False
+    trainer.reward_loop_manager = None
+    trainer.gpu_metrics_profiler = None
+    trainer._init_profile_state()
     trainer.total_training_steps = 4
     trainer.prev_step_profile = False
     trainer.curr_step_profile = True
     for step in range(1, 5):
         trainer.global_steps = step
-        trainer._start_profiling()
-        trainer._stop_profiling()
+        trainer._on_profiling_step_start()
+        trainer._on_profiling_step_end()
     assert [call.kwargs["profile_step"] for call in trainer.actor_rollout_wg.start_profile.call_args_list] == expected
     assert trainer.actor_rollout_wg.stop_profile.call_count == len(expected)
     assert [call.kwargs["run_command"] for call in trainer.actor_rollout_wg.stop_profile.call_args_list] == (
