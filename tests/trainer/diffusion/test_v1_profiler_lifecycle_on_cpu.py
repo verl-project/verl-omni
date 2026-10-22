@@ -15,7 +15,7 @@
 
 from contextlib import nullcontext
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, call
 
 import pytest
 from omegaconf import OmegaConf
@@ -123,6 +123,30 @@ def test_fit_selected_steps_and_mode_hooks(monkeypatch, mode):
         False,
         True,
     ]
+
+
+def test_fit_profiles_each_distinct_worker_group(monkeypatch):
+    trainer, _ = make_trainer(monkeypatch)
+    actor = trainer.actor_rollout_wg = Mock(wraps=trainer.actor_rollout_wg)
+    ref = trainer.ref_policy_wg = Mock()
+    teacher = Mock()
+    trainer.use_reference_policy = True
+    trainer.use_teacher_policy = True
+    trainer.teacher_model_manager = SimpleNamespace(
+        teacher_wg={"actor_alias": actor, "ref_alias": ref, "teacher1": teacher, "teacher2": teacher}
+    )
+
+    trainer.fit(Mock())
+
+    for worker, role in ((actor, "train"), (ref, "ref"), (teacher, "teacher")):
+        assert worker.mock_calls == [
+            call.start_profile(role=role, profile_step=1),
+            call.stop_profile(run_command=False),
+            call.start_profile(role=role, profile_step=2),
+            call.stop_profile(run_command=False),
+            call.start_profile(role=role, profile_step=4),
+            call.stop_profile(run_command=True),
+        ]
 
 
 @pytest.mark.parametrize("mode", ["sync", "separate_async"])
