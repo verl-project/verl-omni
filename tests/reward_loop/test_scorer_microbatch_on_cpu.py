@@ -238,14 +238,42 @@ async def test_consumer_cancellation_fails_the_batch_and_terminates_the_consumer
 
     microbatcher = ScorerMicrobatcher(score_batch, name="m")
     await microbatcher.start()
+    consumer = microbatcher._consumer
     scoring = asyncio.create_task(microbatcher.submit({"i": 0}))
     await asyncio.wait_for(entered.wait(), 5)
+    queued = [asyncio.create_task(microbatcher.submit({"i": i})) for i in (1, 2)]
 
-    microbatcher._consumer.cancel()
-    with pytest.raises(RuntimeError, match="consumer was cancelled"):
-        await scoring
+    consumer.cancel()
+    outcomes = await asyncio.gather(scoring, *queued, return_exceptions=True)
+    assert all(isinstance(outcome, RuntimeError) and "consumer was cancelled" in str(outcome) for outcome in outcomes)
     with pytest.raises(asyncio.CancelledError):
-        await microbatcher._consumer
+        await consumer
+    assert not microbatcher._queue
+    assert microbatcher._state == "closed"
+
+
+@pytest.mark.asyncio
+async def test_consumer_cancellation_fails_the_in_hand_request_and_what_is_still_queued():
+    calls = []
+    microbatcher = ScorerMicrobatcher(_recording_scorer(calls), name="m")
+    await microbatcher.start()
+    consumer = microbatcher._consumer
+    submits = [asyncio.create_task(microbatcher.submit({"i": i})) for i in range(3)]
+    # Two loop passes: the submits enqueue; the consumer pops request 0 and
+    # parks on its packing yield with requests 1 and 2 still queued.
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    consumer.cancel()
+    outcomes = await asyncio.gather(*submits, return_exceptions=True)
+    assert all(isinstance(outcome, RuntimeError) and "consumer was cancelled" in str(outcome) for outcome in outcomes)
+    with pytest.raises(asyncio.CancelledError):
+        await consumer
+    assert calls == [], "the cancelled forward must not run"
+    assert not microbatcher._queue
+    assert microbatcher._state == "closed"
+    with pytest.raises(RuntimeError, match="closed"):
+        await microbatcher.start()
 
 
 @pytest.mark.asyncio

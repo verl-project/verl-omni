@@ -23,7 +23,7 @@ from collections import deque
 from typing import Any, Callable
 
 import torch
-from verl.utils.device import get_device_id, get_device_name, get_torch_device
+from verl.utils.device import get_device_id, get_device_name
 
 from verl_omni.utils.asyncio_utils import await_owned
 from verl_omni.utils.reward_score.scorers.base import RewardScorer
@@ -89,9 +89,14 @@ class NativeRewardExecutor:
     - ``_lock`` guards the ``_awake``/``_closed``/``_inflight`` fields; the
       ``_inflight`` count plus the ``_idle`` event is a readers-many gate —
       concurrent scoring proceeds, while sleep/close wait on ``_idle`` for
-      every in-flight call to settle.
+      every in-flight call to settle. On the scorer path they stop microbatcher
+      admission *before* that wait, so queued and capacity-blocked work fails
+      retryably instead of being scored out under it.
     - ``await_owned`` keeps an accepted operation running to settlement even
       when its caller is cancelled.
+    - The executor binds to the loop of its first use and never crosses loops:
+      the sync entrypoint pins one loop per process, and the worker path runs
+      on the worker's stable loop.
     - The scorer path adds the microbatcher's admission condition. Forwards
       need no cross-executor lock: placement validation grants each native
       model exclusive device indices, and one consumer task per scorer
@@ -114,7 +119,6 @@ class NativeRewardExecutor:
         self._model_cls: Any = None
         self._is_scorer = False
         self._microbatcher: ScorerMicrobatcher | None = None
-        self._microbatch_loop: asyncio.AbstractEventLoop | None = None
 
     def reward_kwargs(self) -> dict[str, Any]:
         return {"reward_model": self}
@@ -177,7 +181,6 @@ class NativeRewardExecutor:
 
     async def _wake_up_scorer(self) -> None:
         """Load (or re-wake) the hosted scorer and open its microbatcher."""
-        loop = asyncio.get_running_loop()
         if self._model is None:
             # Scorer constructors take configuration only; device arrives via load().
             kwargs = dict(self.spec.executor_config.get("kwargs", {}))
@@ -191,15 +194,12 @@ class NativeRewardExecutor:
             await self._call(scorer.load, device)
         elif self._supports_cpu_offload(self._model):
             await self._call(self._model.wake_up)
-        if self._microbatcher is None or loop is not self._microbatch_loop:
-            # The admission condition binds to its creating loop, and the sync
-            # entrypoint opens a fresh loop per call — a changed loop rebuilds.
+        if self._microbatcher is None:
             self._microbatcher = ScorerMicrobatcher(
                 self._model.score_batch,
                 max_batch_size=self._model.max_batch_size,
                 name=self.spec.name,
             )
-            self._microbatch_loop = loop
         await self._microbatcher.start()
         async with self._lock:
             self._awake = True
@@ -249,22 +249,24 @@ class NativeRewardExecutor:
                 return
             async with self._lock:
                 self._awake = False
-            await self._idle.wait()
             try:
+                if self._microbatcher is not None:
+                    # Admission stops first: queued and capacity-blocked submits fail
+                    # retryably instead of being scored out under the idle wait.
+                    await self._microbatcher.pause()
+                await self._idle.wait()
                 if self._microbatcher is not None:
                     await self._sleep_scorer()
                 else:
                     # Legacy adapter leg — dropped at post-window cleanup (#723).
                     await self._sleep_legacy_model()
-                get_torch_device().empty_cache()
+                _empty_accelerator_cache()
             except BaseException:
                 await self._fail_closed()
                 raise
 
     async def _sleep_scorer(self) -> None:
-        """Park the hosted scorer: consumer first, then the weights."""
-        # A consumer mid-forward would race weight offload; join it first.
-        await self._microbatcher.pause()
+        """Park the hosted scorer weights; the caller already joined the consumer."""
         if self._supports_cpu_offload(self._model):
             await self._call(self._model.sleep)
         else:
@@ -294,6 +296,9 @@ class NativeRewardExecutor:
             async with self._lock:
                 self._awake = False
                 self._closed = True
+            if self._microbatcher is not None:
+                # Same ordering as sleep: unaccepted work fails before the idle wait.
+                await self._microbatcher.close()
             await self._idle.wait()
             model, self._model = self._model, None
             self._close_failed = True
@@ -321,7 +326,7 @@ class NativeRewardExecutor:
         if microbatcher is not None:
             await microbatcher.close()
         await self._dispose(model)
-        get_torch_device().empty_cache()
+        _empty_accelerator_cache()
 
     @classmethod
     async def _dispose(cls, model) -> None:
@@ -369,9 +374,11 @@ class ScorerMicrobatcher:
       consumer; ``start`` re-opens admission.
     - ``close``: fails every not-yet-accepted request with a ``RuntimeError``,
       then awaits the in-flight forward.
-    - Consumer-task cancellation (e.g. loop shutdown): the in-flight microbatch
-      fails with a ``RuntimeError`` and the cancellation propagates, terminating
-      the consumer instead of leaving it waiting forever.
+    - Consumer-task cancellation (e.g. loop shutdown): every unsettled request
+      — in the in-flight microbatch, in hand for packing, or still queued —
+      fails with a ``RuntimeError`` and the microbatcher lands in ``closed``;
+      the cancellation propagates, terminating the consumer. ``start``
+      re-spawns a consumer that was cancelled before it first ran.
     - Per-request preprocessing failures (``Exception`` slots returned by
       ``score_batch``) are isolated to that request; a raised ``score_batch``
       failure fails each request in that microbatch.
@@ -415,8 +422,9 @@ class ScorerMicrobatcher:
         async with self._cond:
             if self._state == "closed":
                 raise RuntimeError(f"Reward scorer microbatcher {self._name!r} is closed")
-            if self._state == "running":
+            if self._state == "running" and self._consumer is not None and not self._consumer.done():
                 return
+            # A consumer cancelled before its first step leaves "running" with a dead task.
             self._state = "running"
             self._consumer = asyncio.create_task(self._consumer_loop())
 
@@ -486,19 +494,38 @@ class ScorerMicrobatcher:
             await consumer
 
     async def _consumer_loop(self) -> None:
-        while True:
-            async with self._cond:
-                while self._state == "running" and not self._queue:
-                    await self._cond.wait()
-                if not self._queue:
-                    return
-                batch = [self._queue.popleft()]
-            await asyncio.sleep(0)
-            async with self._cond:
-                while self._state == "running" and self._queue and len(batch) < self._pack:
-                    batch.append(self._queue.popleft())
-                self._cond.notify_all()
-            await self._run_batch(batch)
+        batch: list[tuple[dict[str, Any], asyncio.Future]] = []
+        try:
+            while True:
+                async with self._cond:
+                    while self._state == "running" and not self._queue:
+                        await self._cond.wait()
+                    if not self._queue:
+                        return
+                    batch = [self._queue.popleft()]
+                await asyncio.sleep(0)
+                async with self._cond:
+                    while self._state == "running" and self._queue and len(batch) < self._pack:
+                        batch.append(self._queue.popleft())
+                    self._cond.notify_all()
+                await self._run_batch(batch)
+                batch = []
+        except asyncio.CancelledError:
+            # Unsettled futures would hang shielded submitters and the executor's idle gate.
+            await self._fail_pending(batch)
+            raise
+
+    async def _fail_pending(self, batch: list[tuple[dict[str, Any], asyncio.Future]]) -> None:
+        """Settle every unsettled request after consumer cancellation and close admission."""
+        async with self._cond:
+            self._state = "closed"
+            pending = list(batch) + list(self._queue)
+            self._queue.clear()
+            self._consumer = None
+            self._cond.notify_all()
+        for _, future in pending:
+            if not future.done():
+                future.set_exception(RuntimeError(f"Reward scorer {self._name!r} consumer was cancelled"))
 
     async def _run_batch(self, batch: list[tuple[dict[str, Any], asyncio.Future]]) -> None:
         try:
@@ -510,10 +537,7 @@ class ScorerMicrobatcher:
                     f"for {len(batch)} requests"
                 )
         except asyncio.CancelledError:
-            # A swallowed cancellation would leave the consumer waiting forever.
-            for _, future in batch:
-                if not future.done():
-                    future.set_exception(RuntimeError(f"Reward scorer {self._name!r} consumer was cancelled"))
+            # Consumer cancellation is settled by the loop, not swallowed as a forward failure.
             raise
         except BaseException as error:
             logger.error("Reward scorer %r microbatch failed", self._name, exc_info=error)
@@ -532,6 +556,14 @@ class ScorerMicrobatcher:
         if self._is_async:
             return await self._score_batch(requests)
         return await asyncio.to_thread(self._score_batch, requests)
+
+
+def _empty_accelerator_cache() -> None:
+    """Clear the accelerator cache only when the backend has one and is available."""
+    accelerator = getattr(torch, get_device_name(), None)
+    empty_cache = getattr(accelerator, "empty_cache", None)
+    if callable(empty_cache) and getattr(accelerator, "is_available", lambda: False)():
+        empty_cache()
 
 
 def build_engine_reward_executors(specs: dict[str, RewardModelSpec]) -> dict[str, EngineRewardExecutor]:

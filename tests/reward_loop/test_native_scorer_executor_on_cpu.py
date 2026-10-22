@@ -15,10 +15,12 @@
 
 import asyncio
 import threading
+from types import SimpleNamespace
 
 import pytest
 
 from verl_omni.reward_loop import reward_model_executor as executor_module
+from verl_omni.reward_loop.reward_loop import OmniRewardLoopManager
 from verl_omni.reward_loop.reward_model_executor import NativeRewardExecutor
 from verl_omni.utils.reward_score.scorers.base import RewardScorer
 from verl_omni.utils.reward_score.scorers.registry import register_scorer
@@ -84,6 +86,23 @@ class GatedScorer(FakeScorer):
         self.batches.append([request["i"] for request in batch])
         self._loop.call_soon_threadsafe(self.entered.set)
         # Sync score_batch runs in an executor thread; block it, not the loop.
+        if not self.release.wait(timeout=30):
+            raise TimeoutError("gated forward was never released")
+        return [{"score": request["i"]} for request in batch]
+
+
+class LoopGatedScorer(FakeScorer):
+    """Gated forward synchronized only by threading primitives, so the same
+    scorer instance can gate calls across repeated sync-entrypoint invocations."""
+
+    def __init__(self):
+        super().__init__()
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def score_batch(self, batch):
+        self.batches.append([request["i"] for request in batch])
+        self.entered.set()
         if not self.release.wait(timeout=30):
             raise TimeoutError("gated forward was never released")
         return [{"score": request["i"]} for request in batch]
@@ -283,6 +302,57 @@ async def test_sleep_waits_for_the_in_flight_forward_before_offload(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_sleep_fails_queued_requests_retryably_and_offloads_after_the_accepted_forward(monkeypatch):
+    executor = _executor(monkeypatch, f"{_TEST_MODULE}:GatedScorer")
+    await executor.wake_up()
+    scorer = executor._model
+    accepted = asyncio.create_task(executor.score({"i": 0}))
+    await asyncio.wait_for(scorer.entered.wait(), 5)
+    queued = [asyncio.create_task(executor.score({"i": i})) for i in (1, 2)]
+
+    sleeping = asyncio.create_task(executor.sleep())
+    outcomes = await asyncio.gather(*queued, return_exceptions=True)
+    assert all(isinstance(outcome, RuntimeError) and "retry after wake_up" in str(outcome) for outcome in outcomes)
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert not sleeping.done(), "weights must not offload while the accepted forward runs"
+    assert "sleep" not in scorer.calls
+
+    scorer.release.set()
+    assert await accepted == {"score": 0}
+    await sleeping
+    assert scorer.batches == [[0]], "queued requests must fail, not score"
+    assert scorer.calls[-1] == "sleep"
+    await executor.close()
+
+
+@pytest.mark.asyncio
+async def test_close_fails_queued_requests_and_closes_after_the_accepted_forward(monkeypatch):
+    executor = _executor(monkeypatch, f"{_TEST_MODULE}:GatedScorer")
+    await executor.wake_up()
+    scorer = executor._model
+    accepted = asyncio.create_task(executor.score({"i": 0}))
+    await asyncio.wait_for(scorer.entered.wait(), 5)
+    queued = [asyncio.create_task(executor.score({"i": i})) for i in (1, 2)]
+
+    closing = asyncio.create_task(executor.close())
+    outcomes = await asyncio.gather(*queued, return_exceptions=True)
+    assert all(
+        isinstance(outcome, RuntimeError) and "closed before this request was accepted" in str(outcome)
+        for outcome in outcomes
+    )
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert not closing.done(), "teardown must join the accepted forward before disposing weights"
+
+    scorer.release.set()
+    assert await accepted == {"score": 0}
+    await closing
+    assert scorer.batches == [[0]], "queued requests must fail, not score"
+    assert scorer.calls[-1] == "close"
+
+
+@pytest.mark.asyncio
 async def test_legacy_native_model_still_serves_infer(monkeypatch):
     executor = _executor(monkeypatch, f"{_TEST_MODULE}:LegacyModel")
     await executor.wake_up()
@@ -294,21 +364,73 @@ async def test_legacy_native_model_still_serves_infer(monkeypatch):
         await executor.close()
 
 
-def test_offload_scorer_survives_repeated_sync_entrypoint_loops(monkeypatch):
-    """compute_rm_score() opens a fresh event loop per call; wake/score/sleep must
-    not carry loop-bound primitives (the admission condition) across those loops."""
+def test_sync_entrypoint_pins_one_loop_and_survives_sleep_overlapping_a_forward(monkeypatch):
+    """compute_rm_score() runs every call on one pinned loop, so state bound while
+    a sleep overlaps an in-flight forward stays valid on the next call instead of
+    raising ``bound to a different event loop``."""
     FakeScorer.instances = 0
-    executor = _executor(monkeypatch, "cpu-fake-scorer")
+    executor = _executor(monkeypatch, f"{_TEST_MODULE}:LoopGatedScorer")
+    manager = object.__new__(OmniRewardLoopManager)
+    manager.multi_reward_model_manager = SimpleNamespace(models=["fake"])
+    manager._score_lock = asyncio.Lock()
+    manager._sync_loop = None
 
-    async def one_call(i: int) -> dict:
-        await executor.wake_up()
-        try:
-            return await executor.score({"i": i})
-        finally:
-            await executor.sleep()
+    async def async_compute_rm_score(i: int) -> dict:
+        async with manager._score_lock:
+            await executor.wake_up()
+            scorer = executor._model
+            scorer.entered.clear()
+            scorer.release.clear()
+            scoring = asyncio.create_task(executor.score({"i": i}))
+            for _ in range(1000):
+                if scorer.entered.is_set():
+                    break
+                await asyncio.sleep(0)
+            assert scorer.entered.is_set(), "forward never started"
+            sleeping = asyncio.create_task(executor.sleep())
+            for _ in range(20):
+                await asyncio.sleep(0)
+            assert not sleeping.done(), "sleep must join the accepted forward before offloading weights"
+            scorer.release.set()
+            assert await scoring == {"score": i}
+            await sleeping
+            return {"score": i}
 
-    assert asyncio.run(one_call(0)) == {"score": 0}
-    assert asyncio.run(one_call(1)) == {"score": 1}
-    assert asyncio.run(one_call(2)) == {"score": 2}
-    asyncio.run(executor.close())
+    manager.async_compute_rm_score = async_compute_rm_score
+    assert manager.compute_rm_score(0) == {"score": 0}
+    assert manager.compute_rm_score(1) == {"score": 1}
+
+    pinned = manager._sync_loop
+    assert pinned is not None and not pinned.is_closed()
+    pinned.run_until_complete(executor.close())
+    assert manager._sync_loop is pinned, "the pinned loop must be reused, not recreated"
     assert FakeScorer.instances == 1
+
+
+def test_empty_accelerator_cache_only_runs_on_an_available_accelerator(monkeypatch):
+    calls = []
+
+    def backend(*, has_cache: bool, available: bool):
+        namespace = SimpleNamespace(is_available=lambda: available)
+        if has_cache:
+            namespace.empty_cache = lambda: calls.append("flushed")
+        return namespace
+
+    monkeypatch.setattr(
+        executor_module,
+        "torch",
+        SimpleNamespace(
+            cuda=backend(has_cache=True, available=True),
+            cpu=backend(has_cache=False, available=False),
+            mps=backend(has_cache=True, available=False),
+        ),
+    )
+    monkeypatch.setattr(executor_module, "get_device_name", lambda: "cuda")
+    executor_module._empty_accelerator_cache()
+    assert calls == ["flushed"]
+
+    monkeypatch.setattr(executor_module, "get_device_name", lambda: "cpu")
+    executor_module._empty_accelerator_cache()
+    monkeypatch.setattr(executor_module, "get_device_name", lambda: "mps")
+    executor_module._empty_accelerator_cache()
+    assert calls == ["flushed"], "backends without a cache or unavailable must be skipped"
