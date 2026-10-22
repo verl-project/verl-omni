@@ -103,6 +103,14 @@ algorithm:
 # verl's distillation group.
 distillation:
 
+  distillation_loss:
+
+    # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+    _target_: verl_omni.workers.config.omni.distillation.OmniDistillationLossConfig
+
+    # Temperature for the hidden-state (nitrobrew) distillation loss modes.
+    kd_temperature: 1.0
+
   teacher_models:
 
     teacher_model:

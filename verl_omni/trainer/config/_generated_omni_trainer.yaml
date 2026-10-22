@@ -940,7 +940,7 @@ distillation:
   _target_: verl.workers.config.DistillationConfig
   enabled: false
   distillation_loss:
-    _target_: verl.workers.config.DistillationLossConfig
+    _target_: verl_omni.workers.config.omni.distillation.OmniDistillationLossConfig
     loss_mode: k3
     topk: 32
     use_task_rewards: true
@@ -952,6 +952,7 @@ distillation:
     clip_ratio: 0.2
     clip_ratio_low: 0.2
     clip_ratio_high: 0.2
+    kd_temperature: 1.0
   n_gpus_per_node: 8
   nnodes: 0
   teacher_models:
