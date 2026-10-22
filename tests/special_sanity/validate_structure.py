@@ -80,7 +80,17 @@ def main() -> None:
     parser.add_argument(
         "--allow-dirs",
         nargs="*",
-        default=["special_e2e", "special_sanity", "special_standalone", "special_distributed"],
+        # `convergence` is the L4 CI layer folder.  Like the `special_*` layers it
+        # owns both long-running recipe runners and the CPU unit tests for that
+        # layer's tooling, so it is exempt from the "mirror a verl_omni package"
+        # rule.
+        default=[
+            "special_e2e",
+            "special_sanity",
+            "special_standalone",
+            "special_distributed",
+            "convergence",
+        ],
         help="Extra top-level test folders that are exempt from the rule",
     )
     parser.add_argument(

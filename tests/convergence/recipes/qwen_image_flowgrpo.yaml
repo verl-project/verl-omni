@@ -1,0 +1,87 @@
+# L4 convergence recipe: Qwen-Image FlowGRPO OCR LoRA (production shape).
+#
+# This is one of the two recipes #247 names as the first L4 set.  It deliberately
+# keeps the production recipe's model, LoRA, optimizer, rollout and reward knobs
+# and only appends seed/step/output knobs so that a convergence window is
+# reproducible.
+#
+# Resource shape: the v1 recipe colocates actor, rollout and reward on 4 x 80GB
+# GPUs.  The maintainer note on #247 says the current GPU CI runner has far less
+# VRAM, so this case reports `skipped` until a production cluster is attached;
+# that is the intended fail-closed behaviour, not a missing test.
+schema_version: 1
+layer: L4
+case_id: qwen_image_flowgrpo
+title: "Qwen-Image FlowGRPO LoRA OCR convergence"
+algorithm: flow_grpo
+precision: bf16
+release_gate: true
+
+recipe:
+  launcher: examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora_v1.sh
+  overrides:
+    - data.train_files={dataset:train}
+    - data.val_files={dataset:val}
+    - data.seed=42
+    - actor_rollout_ref.model.path={model:policy}
+    - reward.reward_model.model_path={model:reward}
+    - actor_rollout_ref.rollout.seed=42
+    - trainer.total_training_steps=200
+    - trainer.save_freq=-1
+    - trainer.test_freq=-1
+    - trainer.log_val_generations=0
+    - trainer.val_before_train=False
+    - trainer.logger=console
+    - trainer.project_name=verl-l4
+    - trainer.experiment_name=qwen-image-flowgrpo-l4
+
+models:
+  policy:
+    kind: real
+    source: Qwen/Qwen-Image
+    revision: main
+    local_path: /models/Qwen-Image
+    env_path: L4_QWEN_IMAGE_PATH
+  reward:
+    kind: real
+    source: Qwen/Qwen3-VL-8B-Instruct
+    revision: main
+    local_path: /models/Qwen3-VL-8B-Instruct
+    env_path: L4_QWEN3_VL_PATH
+
+dataset:
+  kind: real
+  train: data/ocr/qwen_image/train.parquet
+  val: data/ocr/qwen_image/test.parquet
+  env_root: L4_OCR_DATA_ROOT
+  train_max_samples: 7200
+
+hardware:
+  min_gpus: 4
+  min_gpu_memory_gb: 80
+  gpu_architectures: [sm90, sm100]
+  min_free_disk_gb: 400
+
+budget:
+  timeout_minutes: 1440
+  total_training_steps: 200
+
+metrics:
+  warmup_steps: 20
+  final_window: 20
+  min_points: 80
+  tracked:
+    - {name: "critic/rewards/mean", direction: higher, optional: false}
+    - {name: "critic/score/mean", direction: higher, optional: true}
+    - {name: "actor/loss", direction: lower, optional: true}
+    - {name: "actor/grad_norm", direction: lower, optional: true}
+
+convergence:
+  atol: 0.02
+  rtol: 0.05
+  min_improvement: 0.0
+  require_finite: true
+
+baseline:
+  artifact_name: l4-convergence-baseline
+  branch: main
