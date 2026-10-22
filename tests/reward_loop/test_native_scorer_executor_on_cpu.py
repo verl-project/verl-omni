@@ -108,6 +108,21 @@ class LoopGatedScorer(FakeScorer):
         return [{"score": request["i"]} for request in batch]
 
 
+class AsyncGatedScorer(FakeScorer):
+    """Async gated forward — cancellation propagates into the coroutine itself."""
+
+    def __init__(self):
+        super().__init__()
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def score_batch(self, batch):
+        self.batches.append([request["i"] for request in batch])
+        self.entered.set()
+        await self.release.wait()
+        return [{"score": request["i"]} for request in batch]
+
+
 class LegacyModel:
     """Legacy native model shape: infer() + opt-in CPU offload pair."""
 
@@ -350,6 +365,53 @@ async def test_close_fails_queued_requests_and_closes_after_the_accepted_forward
     await closing
     assert scorer.batches == [[0]], "queued requests must fail, not score"
     assert scorer.calls[-1] == "close"
+
+
+@pytest.mark.asyncio
+async def test_consumer_cancellation_keeps_the_sync_forward_owned_until_the_thread_settles(monkeypatch):
+    executor = _executor(monkeypatch, f"{_TEST_MODULE}:GatedScorer")
+    await executor.wake_up()
+    scorer = executor._model
+    accepted = asyncio.create_task(executor.score({"i": 0}))
+    await asyncio.wait_for(scorer.entered.wait(), 5)
+    consumer = executor._microbatcher._consumer
+    sleeping = asyncio.create_task(executor.sleep())
+
+    consumer.cancel()
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert not accepted.done(), "the forward thread must stay owned, not failed early"
+    assert not sleeping.done(), "weights must not offload while the forward thread still runs"
+    assert "sleep" not in scorer.calls
+
+    scorer.release.set()
+    with pytest.raises(RuntimeError, match="consumer was cancelled"):
+        await accepted
+    await sleeping
+    assert scorer.calls[-1] == "sleep"
+    await executor.close()
+
+
+@pytest.mark.asyncio
+async def test_close_still_disposes_when_its_consumer_join_is_cancelled(monkeypatch):
+    executor = _executor(monkeypatch, f"{_TEST_MODULE}:AsyncGatedScorer")
+    await executor.wake_up()
+    scorer = executor._model
+    accepted = asyncio.create_task(executor.score({"i": 0}))
+    await asyncio.wait_for(scorer.entered.wait(), 5)
+    consumer = executor._microbatcher._consumer
+
+    closing = asyncio.create_task(executor.close())
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert not closing.done(), "close must not finish while the accepted forward runs"
+
+    consumer.cancel()
+    with pytest.raises(RuntimeError, match="consumer was cancelled"):
+        await accepted
+    await closing
+    assert scorer.calls[-1] == "close", "the scorer must be disposed despite the cancelled join"
+    await executor.close(), "repeat close after successful cleanup returns cleanly"
 
 
 @pytest.mark.asyncio

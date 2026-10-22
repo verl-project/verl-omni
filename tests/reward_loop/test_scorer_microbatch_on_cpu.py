@@ -288,6 +288,22 @@ async def test_submit_outside_running_state_fails_fast():
         await microbatcher.submit({"i": 0})
 
 
+@pytest.mark.asyncio
+async def test_submit_fails_fast_when_the_consumer_was_cancelled_before_its_first_step():
+    calls = []
+    microbatcher = ScorerMicrobatcher(_recording_scorer(calls), name="m")
+    await microbatcher.start()
+    consumer = microbatcher._consumer
+    consumer.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await consumer
+
+    with pytest.raises(RuntimeError, match="consumer was cancelled"):
+        await asyncio.wait_for(microbatcher.submit({"i": 0}), 5)
+    assert calls == []
+    assert microbatcher._state == "closed"
+
+
 def test_constructor_rejects_invalid_bounds():
     with pytest.raises(ValueError, match="max_batch_size"):
         ScorerMicrobatcher(_recording_scorer([]), max_batch_size=0)

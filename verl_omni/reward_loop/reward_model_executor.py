@@ -93,7 +93,9 @@ class NativeRewardExecutor:
       admission *before* that wait, so queued and capacity-blocked work fails
       retryably instead of being scored out under it.
     - ``await_owned`` keeps an accepted operation running to settlement even
-      when its caller is cancelled.
+      when its caller is cancelled. A synchronous ``score_batch`` thread
+      stays owned through consumer cancellation, so sleep/close never
+      offload weights under a live forward.
     - The executor binds to the loop of its first use and never crosses loops:
       the sync entrypoint pins one loop per process, and the worker path runs
       on the worker's stable loop.
@@ -296,12 +298,14 @@ class NativeRewardExecutor:
             async with self._lock:
                 self._awake = False
                 self._closed = True
+            # Detach and mark failed up front: any failure below must leave the
+            # accurate failed-cleanup state, not a resident model reporting closed.
+            model, self._model = self._model, None
+            self._close_failed = True
             if self._microbatcher is not None:
                 # Same ordering as sleep: unaccepted work fails before the idle wait.
                 await self._microbatcher.close()
             await self._idle.wait()
-            model, self._model = self._model, None
-            self._close_failed = True
             await self._teardown(model)
             self._close_failed = False
 
@@ -377,8 +381,11 @@ class ScorerMicrobatcher:
     - Consumer-task cancellation (e.g. loop shutdown): every unsettled request
       — in the in-flight microbatch, in hand for packing, or still queued —
       fails with a ``RuntimeError`` and the microbatcher lands in ``closed``;
-      the cancellation propagates, terminating the consumer. ``start``
-      re-spawns a consumer that was cancelled before it first ran.
+      the cancellation propagates, terminating the consumer. A synchronous
+      forward stays owned until its thread settles, and joining a cancelled
+      consumer never cancels the joiner. ``start`` re-spawns a consumer that
+      was cancelled before it first ran; ``submit`` into that dead state
+      fails like any other cancellation.
     - Per-request preprocessing failures (``Exception`` slots returned by
       ``score_batch``) are isolated to that request; a raised ``score_batch``
       failure fails each request in that microbatch.
@@ -433,11 +440,18 @@ class ScorerMicrobatcher:
 
         Raises:
             RuntimeError: admission stopped by :meth:`pause` (retry after wake)
-                or the microbatcher closed before this request was accepted.
+                or the microbatcher closed before this request was accepted —
+                including via a consumer that was cancelled.
             asyncio.CancelledError: the caller left; settlement of accepted
                 work continues regardless.
         """
         async with self._cond:
+            if self._state == "running" and self._consumer.done():
+                # A consumer cancelled before its first step settles nothing itself.
+                for _, future in self._settle_closed_locked([]):
+                    if not future.done():
+                        future.set_exception(RuntimeError(f"Reward scorer {self._name!r} consumer was cancelled"))
+                raise RuntimeError(f"Reward scorer {self._name!r} consumer was cancelled")
             while self._state == "running" and len(self._queue) >= self._max_inflight:
                 await self._cond.wait()
             if self._state == "paused":
@@ -473,7 +487,13 @@ class ScorerMicrobatcher:
                     )
                 )
         if consumer is not None:
-            await consumer
+            try:
+                await consumer
+            except asyncio.CancelledError:
+                # A cancelled consumer settled its own work; reaping it must not
+                # cancel the lifecycle caller joining it.
+                if not consumer.cancelled():
+                    raise
 
     async def close(self) -> None:
         """Fail every not-yet-accepted request, then await the in-flight forward."""
@@ -491,7 +511,13 @@ class ScorerMicrobatcher:
                     RuntimeError(f"Reward scorer {self._name!r} closed before this request was accepted")
                 )
         if consumer is not None:
-            await consumer
+            try:
+                await consumer
+            except asyncio.CancelledError:
+                # A cancelled consumer settled its own work; reaping it must not
+                # cancel the lifecycle caller joining it.
+                if not consumer.cancelled():
+                    raise
 
     async def _consumer_loop(self) -> None:
         batch: list[tuple[dict[str, Any], asyncio.Future]] = []
@@ -518,14 +544,19 @@ class ScorerMicrobatcher:
     async def _fail_pending(self, batch: list[tuple[dict[str, Any], asyncio.Future]]) -> None:
         """Settle every unsettled request after consumer cancellation and close admission."""
         async with self._cond:
-            self._state = "closed"
-            pending = list(batch) + list(self._queue)
-            self._queue.clear()
-            self._consumer = None
-            self._cond.notify_all()
+            pending = self._settle_closed_locked(batch)
         for _, future in pending:
             if not future.done():
                 future.set_exception(RuntimeError(f"Reward scorer {self._name!r} consumer was cancelled"))
+
+    def _settle_closed_locked(self, batch: list[tuple[dict[str, Any], asyncio.Future]]) -> list[Any]:
+        """Close admission and collect every unsettled request; the caller holds ``_cond``."""
+        self._state = "closed"
+        pending = list(batch) + list(self._queue)
+        self._queue.clear()
+        self._consumer = None
+        self._cond.notify_all()
+        return pending
 
     async def _run_batch(self, batch: list[tuple[dict[str, Any], asyncio.Future]]) -> None:
         try:
@@ -555,7 +586,9 @@ class ScorerMicrobatcher:
         # Only the single consumer task calls this, so forwards never overlap.
         if self._is_async:
             return await self._score_batch(requests)
-        return await asyncio.to_thread(self._score_batch, requests)
+        # Owned to thread settlement: cancelling the consumer cannot stop the
+        # thread, so weights are never offloaded under a live forward.
+        return await await_owned(asyncio.to_thread(self._score_batch, requests))
 
 
 def _empty_accelerator_cache() -> None:
