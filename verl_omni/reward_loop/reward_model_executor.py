@@ -383,9 +383,11 @@ class ScorerMicrobatcher:
       fails with a ``RuntimeError`` and the microbatcher lands in ``closed``;
       the cancellation propagates, terminating the consumer. A synchronous
       forward stays owned until its thread settles, and joining a cancelled
-      consumer never cancels the joiner. ``start`` re-spawns a consumer that
-      was cancelled before it first ran; ``submit`` into that dead state
-      fails like any other cancellation.
+      consumer never cancels the joiner. A consumer that dies without running
+      its handler — cancellation delivered before the coroutine's first step —
+      is settled by its done-callback. ``start`` re-spawns a consumer that was
+      cancelled before it first ran; ``submit`` into that dead state fails
+      like any other cancellation.
     - Per-request preprocessing failures (``Exception`` slots returned by
       ``score_batch``) are isolated to that request; a raised ``score_batch``
       failure fails each request in that microbatch.
@@ -431,9 +433,20 @@ class ScorerMicrobatcher:
                 raise RuntimeError(f"Reward scorer microbatcher {self._name!r} is closed")
             if self._state == "running" and self._consumer is not None and not self._consumer.done():
                 return
-            # A consumer cancelled before its first step leaves "running" with a dead task.
+            # Also revives a consumer cancelled before its first step, whose
+            # scheduled settlement has not landed yet.
             self._state = "running"
             self._consumer = asyncio.create_task(self._consumer_loop())
+            self._consumer.add_done_callback(self._consumer_died)
+
+    def _consumer_died(self, task: asyncio.Task) -> None:
+        """Settle admission when a consumer dies without running its handler.
+
+        A cancellation delivered before the coroutine's first step never
+        reaches the handler, so this callback is the only settlement site.
+        """
+        if task.cancelled() and task is self._consumer and self._state == "running":
+            asyncio.get_running_loop().create_task(self._fail_pending([]))
 
     async def submit(self, request: dict[str, Any]) -> dict[str, Any]:
         """Submit one request and await its score dict.

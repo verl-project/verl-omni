@@ -304,6 +304,21 @@ async def test_submit_fails_fast_when_the_consumer_was_cancelled_before_its_firs
     assert microbatcher._state == "closed"
 
 
+@pytest.mark.asyncio
+async def test_submit_fails_fast_when_cancellation_is_requested_but_not_delivered():
+    calls = []
+    microbatcher = ScorerMicrobatcher(_recording_scorer(calls), name="m")
+    async with asyncio.timeout(5):
+        await microbatcher.start()
+        # No yield between the cancel request and admission: done() is still
+        # False, and the consumer dies before its handler can run.
+        microbatcher._consumer.cancel()
+        with pytest.raises(RuntimeError, match="consumer was cancelled"):
+            await microbatcher.submit({"i": 0})
+    assert calls == []
+    assert microbatcher._state == "closed"
+
+
 def test_constructor_rejects_invalid_bounds():
     with pytest.raises(ValueError, match="max_batch_size"):
         ScorerMicrobatcher(_recording_scorer([]), max_batch_size=0)
