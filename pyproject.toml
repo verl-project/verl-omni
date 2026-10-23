@@ -23,7 +23,7 @@ dependencies = [
     "cachetools",
     "codetiming",
     "datasets>=2.20.0",
-    "diffusers>=0.40.0",
+    "diffusers>=0.41.0",
     "dill",
     "hydra-core",
     "imageio[ffmpeg]>=2.37.2",
@@ -205,6 +205,7 @@ verl_omni = [
 [tool.uv]
 override-dependencies = [
     "accelerate>=1.14.0",
+    "diffusers>=0.41.0",
     "kernels==0.16.0",
     "transformers>=5.13.0,<=5.14.1",
 ]
