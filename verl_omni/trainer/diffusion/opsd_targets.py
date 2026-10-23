@@ -53,7 +53,6 @@ from torch import Tensor
 
 __all__ = [
     "build_positive_negative_targets",
-    "build_trust_region_targets",
     "clean_output",
     "opsd_anchor",
     "opsd_two_branch_loss",
@@ -151,54 +150,6 @@ def _project_to_budget(x: Tensor, anchor: Tensor, budget: Tensor, *, eps_g: floa
     return (anchor + displacement * _broadcast_per_sample(scale, displacement)).detach()
 
 
-def build_trust_region_targets(
-    anchor: Tensor,
-    reward_fn: Callable[[Tensor], Tensor],
-    *,
-    rho: float = 0.10,
-    n_ascent: int = 2,
-    eta: float = 1.0,
-    direction: float = 1,
-    eps_g: float = 1e-12,
-) -> Tensor:
-    """Build one detached trust-region target (paper Eq. 6-7).
-
-    Per sample ``i``:
-
-    ``b_i = rho * ||anchor_i||_2`` (norm over all non-batch dims)
-    ``step_len_i = eta * b_i / n_ascent``
-    repeat ``n_ascent`` times: ``x <- x + direction * step_len_i * g / (||g||_2 + eps_g)``
-    finally project: ``x <- anchor + d * clamp(b_i / (||d||_2 + eps_g), max=1)``
-    with ``d = x - anchor``.
-
-    Args:
-        anchor: Detached clean-sample anchor of shape ``(B, ...)``.
-        reward_fn: Differentiable reward mapping ``(B, ...)`` to ``(B,)``.
-        rho: Relative trust-region radius.
-        n_ascent: Number of normalized-gradient steps (must be >= 1).
-        eta: Fraction of the budget actually traversed before projection.
-        direction: ``+1`` for reward ascent, ``-1`` for reward descent.
-        eps_g: Numerical epsilon for the gradient-norm and displacement-norm denominators.
-
-    Returns:
-        Detached target tensor with the same shape as ``anchor``.
-
-    Raises:
-        ValueError: If ``n_ascent < 1``.
-    """
-    if n_ascent < 1:
-        raise ValueError(f"n_ascent must be >= 1, got {n_ascent}.")
-
-    anchor = anchor.detach()
-    budget = rho * _per_sample_norm(anchor)
-    step_len = eta * budget / n_ascent
-
-    x = anchor.clone()
-    for _ in range(n_ascent):
-        x = _ascent_step(x, reward_fn, step_len, direction=direction, eps_g=eps_g)
-    return _project_to_budget(x, anchor, budget, eps_g=eps_g)
-
-
 def build_positive_negative_targets(
     anchor: Tensor,
     reward_fn: Callable[[Tensor], Tensor],
@@ -212,16 +163,20 @@ def build_positive_negative_targets(
 
     Both branches need the gradient of ``reward_fn`` at the anchor as their first
     step. That gradient is computed once here and used with opposite signs, which
-    saves one reward backward pass compared to calling
-    :func:`build_trust_region_targets` twice (``2 * n_ascent - 1`` reward calls
-    instead of ``2 * n_ascent``).
+    saves one reward backward pass compared to running the two branches
+    independently (``2 * n_ascent - 1`` reward calls instead of ``2 * n_ascent``).
+
+    Per sample ``i``, with ``b_i = rho * ||anchor_i||_2`` and
+    ``step_len_i = eta * b_i / n_ascent``, every iterate is projected back into the
+    ``b_i``-ball around the anchor, so each intermediate point stays inside the
+    trust region even when ``eta > 1``.
 
     Args:
         anchor: Detached clean-sample anchor of shape ``(B, ...)``.
         reward_fn: Differentiable reward mapping ``(B, ...)`` to ``(B,)``.
         rho: Relative trust-region radius.
         n_ascent: Number of normalized-gradient steps per branch (must be >= 1).
-        eta: Fraction of the budget actually traversed before projection.
+        eta: Fraction of the budget traversed per iteration before projection.
         eps_g: Numerical epsilon for the gradient-norm and displacement-norm denominators.
 
     Returns:
@@ -246,15 +201,16 @@ def build_positive_negative_targets(
     first_step = (
         _broadcast_per_sample(step_len, first_grad) * first_grad / _broadcast_per_sample(first_grad_norm, first_grad)
     )
-    target_pos = anchor + first_step
-    target_neg = anchor - first_step
+    target_pos = _project_to_budget(anchor + first_step, anchor, budget, eps_g=eps_g)
+    target_neg = _project_to_budget(anchor - first_step, anchor, budget, eps_g=eps_g)
 
     for _ in range(n_ascent - 1):
-        target_pos = _ascent_step(target_pos, reward_fn, step_len, direction=1, eps_g=eps_g)
-        target_neg = _ascent_step(target_neg, reward_fn, step_len, direction=-1, eps_g=eps_g)
-
-    target_pos = _project_to_budget(target_pos, anchor, budget, eps_g=eps_g)
-    target_neg = _project_to_budget(target_neg, anchor, budget, eps_g=eps_g)
+        target_pos = _project_to_budget(
+            _ascent_step(target_pos, reward_fn, step_len, direction=1, eps_g=eps_g), anchor, budget, eps_g=eps_g
+        )
+        target_neg = _project_to_budget(
+            _ascent_step(target_neg, reward_fn, step_len, direction=-1, eps_g=eps_g), anchor, budget, eps_g=eps_g
+        )
 
     with torch.no_grad():
         anchor_norm = _per_sample_norm(anchor)

@@ -94,9 +94,23 @@ class StableDiffusion3OPSD(StableDiffusion3DGPO):
                 "Converting DiffusionOPSD `train_timesteps` to flow time requires "
                 f"scheduler.config.num_train_timesteps, but {type(scheduler).__name__} does not define it."
             )
-        tu.assign_non_tensor(micro_batch, num_train_timesteps=int(scale))
+        scheduler_scale = int(scale)
+        # Query selection happens in the trainer, before any engine exists, so it cannot read
+        # the scheduler. The selected scale travels with the batch and is validated here: one
+        # scale must govern both the selected sigma and the flow time used for fitting.
+        selected_scale = micro_batch.get("opsd_timestep_scale", None)
+        if selected_scale is not None:
+            selected_scale = int(selected_scale.reshape(-1)[0])
+            if selected_scale != scheduler_scale:
+                raise ValueError(
+                    "DiffusionOPSD query selection and fitting disagree on the timestep scale: "
+                    f"diffusion_loss.opsd_num_train_timesteps={selected_scale} selected the query, "
+                    f"but this pipeline's scheduler uses num_train_timesteps={scheduler_scale}. "
+                    "Set opsd_num_train_timesteps to the scheduler value."
+                )
+        tu.assign_non_tensor(micro_batch, num_train_timesteps=scheduler_scale)
 
-        time = timestep.float() / float(scale)
+        time = timestep.float() / float(scheduler_scale)
         t_expanded = time.view(-1, *([1] * (query_latents.ndim - 1)))
         loss_context = {"xt": query_latents, "t_expanded": t_expanded}
         return query_latents, timestep, loss_context

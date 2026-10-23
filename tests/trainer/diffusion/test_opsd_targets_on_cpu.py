@@ -36,7 +36,6 @@ from torch.testing import assert_close
 
 from verl_omni.trainer.diffusion.opsd_targets import (
     build_positive_negative_targets,
-    build_trust_region_targets,
     clean_output,
     opsd_anchor,
     opsd_two_branch_loss,
@@ -69,7 +68,32 @@ class _CountingReward:
 
 
 def _reference_trust_region_targets(anchor, reward_fn, *, rho, n_ascent, eta=1.0, direction=1, eps_g=1e-12):
-    """Literal, loop-based transcription of paper Eq. 6-7 for 2-D ``(B, D)`` inputs."""
+    """Literal, loop-based transcription of paper Eq. 6-7 for 2-D ``(B, D)`` inputs.
+
+    Every iterate is projected back into the per-sample budget ball, which is the documented
+    contract: intermediate points stay inside the trust region for any ``eta``.
+    """
+    budget = rho * anchor.flatten(1).norm(dim=1)
+    step_len = eta * budget / n_ascent
+    x = anchor.clone()
+    for _ in range(n_ascent):
+        x = x.detach().clone().requires_grad_(True)
+        grad = torch.autograd.grad(reward_fn(x).sum(), x)[0]
+        grad_norm = grad.flatten(1).norm(dim=1) + eps_g
+        x = x.detach() + direction * step_len.view(-1, 1) * grad / grad_norm.view(-1, 1)
+        displacement = x - anchor
+        displacement_norm = displacement.flatten(1).norm(dim=1)
+        scale = (budget / (displacement_norm + eps_g)).clamp(max=1.0)
+        x = anchor + displacement * scale.view(-1, 1)
+    return x.detach()
+
+
+def _reference_final_only_projection(anchor, reward_fn, *, rho, n_ascent, eta=1.0, direction=1, eps_g=1e-12):
+    """Variant that projects only after the last step.
+
+    Used to prove a test input actually distinguishes the two projection strategies, so the
+    per-iterate assertions cannot pass against a final-only implementation.
+    """
     budget = rho * anchor.flatten(1).norm(dim=1)
     step_len = eta * budget / n_ascent
     x = anchor.clone()
@@ -183,58 +207,85 @@ class TestRewardGradient:
             reward_gradient(torch.zeros(BATCH, DIM), _quadratic_reward(torch.zeros(BATCH, DIM)))
 
 
-class TestTrustRegionTargets:
+class TestTargetConstructionInvariants:
     @pytest.mark.parametrize("rho", [0.05, 0.1])
     @pytest.mark.parametrize("n_ascent", [1, 2, 3])
-    @pytest.mark.parametrize("direction", [1, -1])
     @pytest.mark.parametrize("eta", [0.5, 1.0, 2.0])
-    def test_matches_reference_and_stays_inside_budget(self, rho, n_ascent, direction, eta):
+    def test_matches_reference_and_stays_inside_budget(self, rho, n_ascent, eta):
         torch.manual_seed(7)
         anchor = torch.randn(BATCH, DIM) + 0.5
         reward_fn = _quadratic_reward(torch.full((BATCH, DIM), 1.5))
 
-        target = build_trust_region_targets(anchor, reward_fn, rho=rho, n_ascent=n_ascent, eta=eta, direction=direction)
-        reference = _reference_trust_region_targets(
-            anchor, reward_fn, rho=rho, n_ascent=n_ascent, eta=eta, direction=direction
+        target_pos, target_neg, _ = build_positive_negative_targets(
+            anchor, reward_fn, rho=rho, n_ascent=n_ascent, eta=eta
         )
-        assert target.requires_grad is False
-        assert_close(target, reference)
-
-        displacement_norm = (target - anchor).flatten(1).norm(dim=1)
         budget = rho * anchor.flatten(1).norm(dim=1)
-        assert torch.all(displacement_norm <= budget + 1e-6)
+        for target, direction in ((target_pos, 1), (target_neg, -1)):
+            reference = _reference_trust_region_targets(
+                anchor, reward_fn, rho=rho, n_ascent=n_ascent, eta=eta, direction=direction
+            )
+            assert target.requires_grad is False
+            assert_close(target, reference)
+            assert torch.all((target - anchor).flatten(1).norm(dim=1) <= budget + 1e-6)
 
     def test_ascent_raises_and_descent_lowers_reward(self):
         torch.manual_seed(11)
         anchor = torch.randn(BATCH, DIM)
-        center = anchor + 2.0
-        reward_fn = _quadratic_reward(center)
+        reward_fn = _quadratic_reward(anchor + 2.0)
 
-        ascent = build_trust_region_targets(anchor, reward_fn, rho=0.1, n_ascent=2, direction=1)
-        descent = build_trust_region_targets(anchor, reward_fn, rho=0.1, n_ascent=2, direction=-1)
+        target_pos, target_neg, _ = build_positive_negative_targets(anchor, reward_fn, rho=0.1, n_ascent=2)
         anchor_reward = reward_fn(anchor)
-        assert torch.all(reward_fn(ascent) > anchor_reward)
-        assert torch.all(reward_fn(descent) < anchor_reward)
+        assert torch.all(reward_fn(target_pos) > anchor_reward)
+        assert torch.all(reward_fn(target_neg) < anchor_reward)
 
     def test_target_construction_leaves_no_grad_on_the_anchor(self):
         torch.manual_seed(13)
         anchor = torch.randn(BATCH, DIM, requires_grad=True)
         reward_fn = _quadratic_reward(torch.zeros(BATCH, DIM))
-        target = build_trust_region_targets(anchor, reward_fn, rho=0.1, n_ascent=2)
+        target_pos, target_neg, _ = build_positive_negative_targets(anchor, reward_fn, rho=0.1, n_ascent=2)
 
-        assert target.requires_grad is False
-        assert target.grad_fn is None
+        for target in (target_pos, target_neg):
+            assert target.requires_grad is False
+            assert target.grad_fn is None
         assert anchor.grad is None
         # Construction detaches every intermediate: rewarding the target is pure.
         with torch.enable_grad():
-            probe = reward_fn(target).sum()
+            probe = reward_fn(target_pos).sum()
         assert probe.requires_grad is False
 
     @pytest.mark.parametrize("n_ascent", [0, -1])
     def test_rejects_non_positive_n_ascent(self, n_ascent):
         anchor = torch.randn(BATCH, DIM)
         with pytest.raises(ValueError, match="n_ascent"):
-            build_trust_region_targets(anchor, _quadratic_reward(torch.zeros(BATCH, DIM)), n_ascent=n_ascent)
+            build_positive_negative_targets(anchor, _quadratic_reward(torch.zeros(BATCH, DIM)), n_ascent=n_ascent)
+
+    def test_every_iterate_is_projected_when_eta_exceeds_one(self):
+        """With ``eta > 1`` a single step overshoots the budget, so intermediate points must be
+        projected back; a final-only projection produces a different target under a nonlinear
+        reward, which is exactly the regression this guards against.
+        """
+        torch.manual_seed(31)
+        anchor = torch.tensor([[1.0, 0.0], [1.0, 0.0]])
+
+        def reward_fn(y):
+            # Quartic in the first coordinate: the gradient direction rotates as the iterate
+            # moves, so per-iterate and final-only projection diverge.
+            return -((y[:, 0] - 2.0) ** 4) - 3.0 * (y[:, 1] - 0.5) ** 2
+
+        target_pos, target_neg, _ = build_positive_negative_targets(anchor, reward_fn, rho=0.1, n_ascent=2, eta=4.0)
+        budget = 0.1 * anchor.flatten(1).norm(dim=1)
+        for target, direction in ((target_pos, 1), (target_neg, -1)):
+            assert_close(
+                target,
+                _reference_trust_region_targets(anchor, reward_fn, rho=0.1, n_ascent=2, eta=4.0, direction=direction),
+            )
+            assert torch.all((target - anchor).flatten(1).norm(dim=1) <= budget + 1e-6)
+
+        # Sanity check on the test itself: this input must actually distinguish the two
+        # projection strategies, otherwise the assertion above would pass either way.
+        per_iterate = _reference_trust_region_targets(anchor, reward_fn, rho=0.1, n_ascent=2, eta=4.0, direction=1)
+        final_only = _reference_final_only_projection(anchor, reward_fn, rho=0.1, n_ascent=2, eta=4.0, direction=1)
+        assert not torch.allclose(per_iterate, final_only, atol=1e-6)
 
 
 class TestPositiveNegativeTargets:
@@ -261,18 +312,6 @@ class TestPositiveNegativeTargets:
         assert_close(
             target_neg,
             _reference_branch_target(anchor, reward_fn, rho=rho, n_ascent=n_ascent, direction=-1),
-        )
-
-    @pytest.mark.parametrize("n_ascent", [1, 2, 3])
-    def test_branches_match_single_direction_builder(self, n_ascent):
-        torch.manual_seed(23)
-        anchor = torch.randn(BATCH, DIM)
-        reward_fn = _quadratic_reward(torch.full((BATCH, DIM), 0.75))
-
-        target_pos, target_neg, _ = build_positive_negative_targets(anchor, reward_fn, rho=0.1, n_ascent=n_ascent)
-        assert_close(target_pos, build_trust_region_targets(anchor, reward_fn, rho=0.1, n_ascent=n_ascent, direction=1))
-        assert_close(
-            target_neg, build_trust_region_targets(anchor, reward_fn, rho=0.1, n_ascent=n_ascent, direction=-1)
         )
 
     def test_diagnostics_are_finite_and_within_budget(self):

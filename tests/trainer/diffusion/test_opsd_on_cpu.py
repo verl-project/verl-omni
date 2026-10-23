@@ -449,7 +449,8 @@ class TestPrepareActorBatch:
         # sigma = t / 1000, so the captured [0.666, 0.562, 0.428, 0.25] queries sigma*=0.278 at index 3.
         torch.testing.assert_close(result.batch["opsd_query_latents"], latents[:, 3])
         assert result.batch["opsd_query_latents"].shape == (BATCH, C, H, W)
-        torch.testing.assert_close(result.batch["train_timesteps"], torch.full((BATCH, 1), 250, dtype=torch.long))
+        # The query timestep stays a float so fractional scheduler timesteps survive fitting.
+        torch.testing.assert_close(result.batch["train_timesteps"], torch.full((BATCH, 1), 250.0))
 
         expected_advantages = DiffusionNFTLoss._compute_group_advantages(
             rewards=rewards,
@@ -509,6 +510,34 @@ class TestPrepareActorBatch:
 
         with pytest.raises(ValueError, match="requires `prompts` token ids"):
             OPSDLoss.prepare_actor_batch(batch, torch.tensor([0.2, 0.8]), make_prepare_config())
+
+    def test_publishes_the_selection_scale_for_the_adapter(self):
+        # Selection runs in the trainer and fitting in the adapter; the scale used here travels
+        # with the batch so the adapter can reject a config that disagrees with its scheduler.
+        batch = make_rollout_batch(["a", "a"])
+        result = OPSDLoss.prepare_actor_batch(batch, torch.tensor([0.2, 0.8]), make_prepare_config())
+        torch.testing.assert_close(result.batch["opsd_timestep_scale"], torch.full((2,), 1000, dtype=torch.long))
+
+    def test_keeps_fractional_query_timesteps_for_fitting(self):
+        # SD3.5's shifted schedule yields fractional timesteps; truncating them would fit a
+        # different sigma than the one selected during query selection.
+        uid = ["a", "a"]
+        all_timesteps = torch.tensor(
+            [[1000.0, 500.0, 250.4, 100.0], [1000.0, 500.0, 250.4, 100.0]], dtype=torch.float32
+        )
+        batch = DataProto.from_dict(
+            tensors={
+                "all_latents": torch.zeros(2, all_timesteps.shape[1] + 1, C, H, W),
+                "all_timesteps": all_timesteps,
+                "prompts": torch.zeros(2, 8, dtype=torch.long),
+            },
+            non_tensors={"uid": np.array(uid, dtype=object)},
+        )
+
+        result = OPSDLoss.prepare_actor_batch(batch, torch.tensor([0.2, 0.8]), make_prepare_config())
+
+        # sigma = 0.2504 is the captured value closest to the requested 0.278.
+        torch.testing.assert_close(result.batch["train_timesteps"], torch.full((2, 1), 250.4))
 
     def test_rejects_missing_rollout_fields(self):
         uid = ["a", "a"]
@@ -611,6 +640,49 @@ class TestStableDiffusion3OPSDTrainingAdapter:
         expected_time = timesteps[:, 1].float() / 1000.0
         torch.testing.assert_close(loss_context["t_expanded"], expected_time.view(-1, 1, 1, 1))
         assert tu.get_non_tensor_data(micro_batch, "num_train_timesteps", default=None) == 1000
+
+    def test_rejects_a_selection_scale_that_disagrees_with_the_scheduler(self):
+        # The query sigma and the fitted flow time must come from one scale; a mismatch would
+        # silently fit a different sigma than the one selected.
+        scheduler = SimpleNamespace(config=SimpleNamespace(num_train_timesteps=1000))
+        micro_batch = TensorDict(
+            {
+                "opsd_query_latents": torch.randn(2, C, H, W),
+                "train_timesteps": torch.tensor([[562.0], [562.0]]),
+                "opsd_timestep_scale": torch.full((2,), 2000, dtype=torch.long),
+            },
+            batch_size=[2],
+        )
+
+        with pytest.raises(ValueError, match="disagree on the timestep scale"):
+            StableDiffusion3OPSD.prepare_training_inputs(micro_batch, 0, scheduler)
+
+    def test_accepts_a_matching_selection_scale(self):
+        scheduler = SimpleNamespace(config=SimpleNamespace(num_train_timesteps=1000))
+        micro_batch = TensorDict(
+            {
+                "opsd_query_latents": torch.randn(2, C, H, W),
+                "train_timesteps": torch.tensor([[250.0], [250.0]]),
+                "opsd_timestep_scale": torch.full((2,), 1000, dtype=torch.long),
+            },
+            batch_size=[2],
+        )
+
+        _, _, loss_context = StableDiffusion3OPSD.prepare_training_inputs(micro_batch, 0, scheduler)
+        torch.testing.assert_close(loss_context["t_expanded"], torch.full((2, 1, 1, 1), 0.25))
+
+    def test_preserves_fractional_query_timesteps(self):
+        scheduler = SimpleNamespace(config=SimpleNamespace(num_train_timesteps=1000))
+        timesteps = torch.tensor([[250.4], [199.6]])
+        micro_batch = TensorDict(
+            {"opsd_query_latents": torch.randn(2, C, H, W), "train_timesteps": timesteps},
+            batch_size=[2],
+        )
+
+        _, timestep, loss_context = StableDiffusion3OPSD.prepare_training_inputs(micro_batch, 0, scheduler)
+
+        torch.testing.assert_close(loss_context["t_expanded"], (timesteps / 1000.0).view(-1, 1, 1, 1))
+        assert timestep.dtype.is_floating_point, "fractional query timesteps must not be truncated"
 
     def test_slices_the_query_state_from_a_stacked_window(self):
         query = torch.randn(2, 3, C, H, W)

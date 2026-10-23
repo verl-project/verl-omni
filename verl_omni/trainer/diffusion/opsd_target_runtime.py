@@ -145,6 +145,10 @@ class OPSDTargetRuntime:
         batch = anchor.shape[0]
         target_pos = torch.empty_like(anchor)
         target_neg = torch.empty_like(anchor)
+        # The target builder already reports the relative displacements; accumulate them
+        # chunk-size weighted instead of recomputing norms over the assembled batch.
+        displacement_pos_sum = 0.0
+        displacement_neg_sum = 0.0
 
         with torch.enable_grad():
             for start in range(0, batch, self.target_micro_batch):
@@ -155,7 +159,7 @@ class OPSDTargetRuntime:
                 def reward_fn(latents: torch.Tensor, ids: torch.Tensor = chunk_prompt_ids) -> torch.Tensor:
                     return self.reward_of_latents(latents, ids)
 
-                y_pos, y_neg, _diagnostics = build_positive_negative_targets(
+                y_pos, y_neg, chunk_diagnostics = build_positive_negative_targets(
                     chunk_anchor,
                     reward_fn,
                     rho=self.rho,
@@ -164,17 +168,21 @@ class OPSDTargetRuntime:
                 )
                 target_pos[start:end] = y_pos
                 target_neg[start:end] = y_neg
+                chunk_rows = end - start
+                displacement_pos_sum += chunk_diagnostics["displacement_pos_rel_mean"] * chunk_rows
+                displacement_neg_sum += chunk_diagnostics["displacement_neg_rel_mean"] * chunk_rows
 
-        with torch.no_grad():
-            displacement_pos = (target_pos - anchor).flatten(1).norm(dim=1)
-            displacement_neg = (target_neg - anchor).flatten(1).norm(dim=1)
-            anchor_norm = anchor.flatten(1).norm(dim=1).clamp_min(1e-8)
+        rows = max(batch, 1)
         return {
             "opsd_target_pos": target_pos.detach(),
             "opsd_target_neg": target_neg.detach(),
             "opsd_anchor_latents": anchor.detach(),
-            "opsd_target_displacement_rel": (displacement_pos / anchor_norm).mean().detach(),
-            "opsd_target_displacement_neg_rel": (displacement_neg / anchor_norm).mean().detach(),
+            "opsd_target_displacement_rel": torch.tensor(
+                displacement_pos_sum / rows, device=anchor.device, dtype=torch.float32
+            ),
+            "opsd_target_displacement_neg_rel": torch.tensor(
+                displacement_neg_sum / rows, device=anchor.device, dtype=torch.float32
+            ),
         }
 
 

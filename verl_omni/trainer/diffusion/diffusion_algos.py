@@ -2288,6 +2288,10 @@ class OPSDLoss(DiffusionLossFn):
                 f"(got {all_latents.shape[1]} and {all_timesteps.shape[1]})."
             )
 
+        # One scheduler timestep scale governs both query selection (here) and the flow-time
+        # conversion used for fitting (the pipeline adapter). Keep the selected timestep as a
+        # float: SD3.5's shifted flow schedule produces fractional timesteps, and truncating
+        # them would fit a different sigma than the one selected here.
         num_train_timesteps = int(loss_cfg.opsd_num_train_timesteps)
         sigmas = all_timesteps.float() / float(num_train_timesteps)
         query_index = OPSDLoss._select_query_index(
@@ -2297,7 +2301,13 @@ class OPSDLoss(DiffusionLossFn):
         )
         batch_index = torch.arange(all_latents.shape[0], device=all_latents.device)
         query_latents = all_latents[batch_index, query_index]
-        query_timesteps = all_timesteps[batch_index, query_index].long()
+        query_timesteps = all_timesteps[batch_index, query_index].float()
+        # Published alongside the timesteps so the adapter can reject a config whose scale
+        # disagrees with the scheduler's before any fitting happens. It travels as a batch
+        # tensor (like `train_timesteps`) because the actor batch becomes a TensorDict.
+        batch.batch["opsd_timestep_scale"] = torch.full(
+            (all_latents.shape[0],), num_train_timesteps, dtype=torch.long
+        )
 
         advantages = DiffusionNFTLoss._compute_group_advantages(
             rewards=reward_tensor,
@@ -2344,6 +2354,16 @@ class OPSDLoss(DiffusionLossFn):
             problems.append('actor_rollout_ref.model.policy_state_adapters must include "old"')
         if rollout_cfg.get("rollout_adapter", None) != "old":
             problems.append("actor_rollout_ref.rollout.rollout_adapter must be old")
+        # The old-policy anchor must be the velocity that generated the query trajectory.
+        # OPSD fits the conditional velocity, so a guided (CFG) rollout would desynchronize
+        # the anchor from the trajectory; only guidance_scale == 1.0 (CFG disabled) is supported.
+        guidance_scale = OmegaConf.select(config, "actor_rollout_ref.rollout.pipeline.guidance_scale", default=1.0)
+        if guidance_scale is not None and abs(float(guidance_scale) - 1.0) > 1e-9:
+            problems.append(
+                "actor_rollout_ref.rollout.pipeline.guidance_scale must be 1.0 because OPSD fits the "
+                "conditional velocity; a guided rollout would desynchronize the old-policy anchor "
+                "from the trajectory that produced the query state"
+            )
         if int(rollout_cfg.get("n", 1)) <= 1:
             problems.append("actor_rollout_ref.rollout.n must be > 1 so the endpoint reward can be group-normalized")
         if actor_cfg.get("use_kl_loss", False):

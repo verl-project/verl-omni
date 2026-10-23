@@ -49,12 +49,15 @@ train_batch_size=${TRAIN_BATCH_SIZE:-2}
 mini_bsz=${train_batch_size}
 
 python3 tests/special_e2e/build_sd3_tiny_random.py --output-dir "${MODEL_PATH}"
-# The differentiable target runtime preprocesses latents with the fixed CLIP geometry
-# (224x224), so the tiny reward checkpoint must use the same image size.
-python3 tests/special_e2e/build_pickscore_tiny_random.py \
-    --output-dir "${PICKSCORE_PATH}" \
-    --image-size 224 \
-    --force
+# The differentiable target runtime preprocesses latents with the CLIP geometry declared by the
+# reward checkpoint's own processor, so the tiny reward checkpoint is built at 224x224 to match
+# real PickScore. An existing checkpoint is reused: passing --force unconditionally would
+# overwrite files in a user-supplied PICKSCORE_PATH. Set OPSD_REBUILD_PICKSCORE=1 to regenerate.
+pickscore_build_args=(--output-dir "${PICKSCORE_PATH}" --image-size 224)
+if [[ "${OPSD_REBUILD_PICKSCORE:-0}" == "1" ]]; then
+    pickscore_build_args+=(--force)
+fi
+python3 tests/special_e2e/build_pickscore_tiny_random.py "${pickscore_build_args[@]}"
 python3 tests/special_e2e/create_dummy_diffusion_data.py \
     --local_save_dir "${DATA_DIR}" \
     --train_size "${train_batch_size}" \
