@@ -420,6 +420,11 @@ comes from a reward gradient, not from a model score difference.
   on the actor/rollout GPU and 4.8 GB on the reward GPU, and no non-finite
   gradients. A 30-step 256x256 smoke run (0.707 -> 0.899) and a 45-step 512x512
   run (0.797 -> 1.066) are consistent with it.
+- **Held-out validation:** the same 512x512 configuration with
+  `trainer.test_freq=20` and `val_before_train=True` raises the validation
+  PickScore from **0.832 to 0.947 (+13.9%)** over 100 steps, so the gain is not
+  training-set only. Validation plateaus after roughly 60 steps while the
+  training reward keeps climbing.
 - **Recipe fidelity:** the example still uses a smaller rollout group than the
   paper's $K = 24$ (8 instead of 24) and 4 prompts per update instead of 48, so
   the absolute numbers are not comparable to the paper's reported scores.
@@ -431,6 +436,12 @@ Endpoint reward, actor loss, relative target displacement and step time for the
 The reward rises throughout training while the relative target displacement
 stays just under $\rho = 0.10$, which is the intended trust-region behaviour:
 the targets stay bounded and the policy keeps fitting them.
+
+![DiffusionOPSD training versus held-out validation reward](../assets/diffusion_opsd_val_curve_100step.png)
+
+Training reward (blue) against the held-out validation reward (red, annotated) for
+the 512×512 100-step run. Validation rises from 0.832 to 0.947 and then plateaus
+around step 60, while the training reward keeps increasing.
 
 ## Reference Example
 

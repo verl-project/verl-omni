@@ -43,6 +43,9 @@ ROLLOUT_TP=1
 REWARD_TP=1
 IMAGE_RESOLUTION=${IMAGE_RESOLUTION:-512}
 TOTAL_TRAINING_STEPS=${TOTAL_TRAINING_STEPS:-100}
+# The epoch budget must not run out before TOTAL_TRAINING_STEPS: a small prompt set gives only
+# a few steps per epoch, so the cap is raised well above it (100 steps / 3 per epoch = 34).
+TOTAL_EPOCHS=${TOTAL_EPOCHS:-1000}
 ATTN_BACKEND=native
 ROLLOUT_ATTN_BACKEND=TORCH_SDPA
 MAX_NUM_SEQS=256
@@ -149,7 +152,7 @@ python3 -m verl_omni.trainer.main_diffusion_v1 \
     trainer.nnodes=1 \
     trainer.save_freq=100 \
     trainer.test_freq=20 \
-    trainer.total_epochs=15 \
+    trainer.total_epochs=$TOTAL_EPOCHS \
     trainer.total_training_steps=$TOTAL_TRAINING_STEPS \
     trainer.use_v1=true \
     trainer.v1.trainer_mode=sync \

@@ -94,6 +94,7 @@ after the recipe defaults.
 | `TRAIN_BATCH_SIZE` | `8` | Prompts per training step. The paper v1 recipe uses 48. |
 | `IMAGE_RESOLUTION` | `512` | Square rollout resolution. |
 | `TOTAL_TRAINING_STEPS` | `100` | Training steps. |
+| `TOTAL_EPOCHS` | `1000` | Epoch cap. Keep it well above `TOTAL_TRAINING_STEPS / steps_per_epoch`, otherwise the run stops early when the epoch budget runs out (e.g. a 12-prompt set at batch 4 gives 3 steps per epoch, so the default `15` would stop at 45 steps). |
 
 ## Reward wiring and alignment
 
@@ -206,6 +207,7 @@ consistent with it.
 | Target construction | `sigma*=0.278`, `rho=0.10`, `M_tgt=2`, `beta=1.0`, `c_adv=5`, `opsd_target_micro_batch=6` |
 | Endpoint reward | PickScore v1 native named model, same checkpoint as the target reward |
 | Reward curve | **0.797 → 1.122 (+41%), peak 1.184**; 256² smoke: 0.707 → 0.899; 512² 45 steps: 0.797 → 1.066 |
+| Held-out validation | **0.832 → 0.947 (+13.9%)** over 100 steps with `trainer.test_freq=20`; plateaus after ~60 steps while the training reward keeps rising |
 | Step time | 120 s first step (warm-up), then 39.8 s average |
 | Peak VRAM | **61.6 GB actor/rollout GPU**, 4.8 GB reward GPU |
 | Metrics | `opsd_query_sigma=0.2780`; `opsd_target_displacement_rel` in [0.0688, 0.0718] (inside `(0, rho]`); 0 non-finite-gradient steps |
