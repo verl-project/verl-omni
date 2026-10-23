@@ -1079,3 +1079,36 @@ class OmniRolloutPipelineBase:
                 "An omni rollout adapter with multiple final outputs must implement combine_engine_outputs()."
             )
         return outputs[0], {}
+
+
+"""Post-build hooks for a composite training engine's autoregressive module.
+
+The AR backend is verl's ``FSDPEngineWithLMHead`` (``model_type="language_model"``).
+It does not enter ``DiffusionModelBase``, which configures the DiT only.
+Pipeline packages register here when that text encoder needs setup before FSDP wrap.
+For example, Qwen-Image Dual-GRPO.
+"""
+
+_COMPOSITE_AR_REGISTRY: dict[tuple[str, str], Callable[[torch.nn.Module, object], None]] = {}
+
+
+def register_composite_ar_module(architecture: str, algorithm: str):
+    """Register ``fn(module, model_config)`` for ``(architecture, algorithm)``."""
+
+    def decorator(fn: Callable[[torch.nn.Module, object], None]):
+        _COMPOSITE_AR_REGISTRY[(architecture, algorithm)] = fn
+        return fn
+
+    return decorator
+
+
+def configure_composite_ar_module(module: torch.nn.Module, model_config) -> None:
+    """Run the registered AR-module hook, or do nothing when none is registered."""
+    external_lib: Optional[str] = getattr(model_config, "external_lib", None)
+    if external_lib is not None:
+        from verl.utils.import_utils import import_external_libs
+
+        import_external_libs(external_lib)
+    fn = _COMPOSITE_AR_REGISTRY.get((model_config.architecture, model_config.algorithm))
+    if fn is not None:
+        fn(module, model_config)
