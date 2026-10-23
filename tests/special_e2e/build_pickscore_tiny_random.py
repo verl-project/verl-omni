@@ -89,9 +89,17 @@ def ensure_tiny_pickscore_checkpoint(
     *,
     hidden_size: int = 32,
     seed: int = 42,
+    image_size: int = 64,
     skip_if_exists: bool = True,
 ) -> str:
-    """Build and save a tiny CLIP PickScore checkpoint if missing."""
+    """Build and save a tiny CLIP PickScore checkpoint if missing.
+
+    Args:
+        image_size: Square input size of the CLIP vision tower and its image processor.
+            The default matches the original Bagel smoke checkpoint; DiffusionOPSD
+            passes 224 so its differentiable latent preprocessing (fixed CLIP geometry)
+            and the reward model agree.
+    """
     output_dir = os.path.expanduser(output_dir)
     marker = os.path.join(output_dir, "config.json")
     if skip_if_exists and os.path.isfile(marker):
@@ -118,7 +126,7 @@ def ensure_tiny_pickscore_checkpoint(
             "intermediate_size": hidden_size * 2,
             "num_attention_heads": 4,
             "num_hidden_layers": 2,
-            "image_size": 64,
+            "image_size": image_size,
             "patch_size": 8,
             "num_channels": 3,
         },
@@ -127,9 +135,9 @@ def ensure_tiny_pickscore_checkpoint(
     tokenizer = _build_tiny_clip_tokenizer()
     image_processor = CLIPImageProcessor(
         do_resize=True,
-        size={"height": 64, "width": 64},
+        size={"height": image_size, "width": image_size},
         do_center_crop=True,
-        crop_size={"height": 64, "width": 64},
+        crop_size={"height": image_size, "width": image_size},
         do_normalize=True,
         image_mean=[0.48145466, 0.4578275, 0.40821073],
         image_std=[0.26862954, 0.26130258, 0.27577711],
@@ -146,6 +154,7 @@ def main() -> None:
     parser.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--hidden-size", type=int, default=32)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--image-size", type=int, default=64)
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
 
@@ -153,6 +162,7 @@ def main() -> None:
         args.output_dir,
         hidden_size=args.hidden_size,
         seed=args.seed,
+        image_size=args.image_size,
         skip_if_exists=not args.force,
     )
     print(f"Tiny PickScore checkpoint ready at {output_dir}")

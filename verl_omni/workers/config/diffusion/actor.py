@@ -53,6 +53,30 @@ class DiffusionLossConfig(BaseConfig):
     audio_weight: float = 1.0
     video_ref_kl_coef: float = 0.0
     audio_ref_kl_coef: float = 0.0
+    # DiffusionOPSD relative trust-region radius for reward-gradient targets.
+    opsd_rho: float = 0.10
+    # DiffusionOPSD number of normalized reward-gradient steps per target.
+    opsd_n_ascent: int = 2
+    # DiffusionOPSD step-size multiplier inside the relative trust region.
+    opsd_eta: float = 1.0
+    # DiffusionOPSD positive/negative branch mixing coefficient (paper beta).
+    opsd_branch_beta: float = 1.0
+    # DiffusionOPSD requested low-noise query sigma in scheduler flow time.
+    opsd_query_sigma: float = 0.278
+    # DiffusionOPSD tolerance between requested and selected query sigma.
+    opsd_query_sigma_tolerance: float = 0.15
+    # DiffusionOPSD scheduler train-timestep scale (SD3.5 flow scheduler: 1000).
+    opsd_num_train_timesteps: int = 1000
+    # DiffusionOPSD detached residual-normalizer floor.
+    opsd_eps_gamma: float = 1e-5
+    # DiffusionOPSD differentiable target reward kind.
+    opsd_reward_kind: str = "pickscore"
+    # DiffusionOPSD differentiable reward checkpoint path; empty uses the scorer default.
+    opsd_reward_model_path: str = ""
+    # DiffusionOPSD target-construction dtype for the reward model.
+    opsd_reward_dtype: str = "float32"
+    # DiffusionOPSD trajectories per reward-gradient micro batch.
+    opsd_target_micro_batch: int = 6
 
     def __post_init__(self):
         """Validate diffusion loss configuration."""
@@ -68,6 +92,7 @@ class DiffusionLossConfig(BaseConfig):
             "dance_grpo",
             "distill_kl",
             "distill_fm_mse",
+            "opsd",
         ]
         if self.loss_mode not in valid_modes:
             raise ValueError(f"Invalid diffusion loss_mode: {self.loss_mode}. Must be one of {valid_modes}")
@@ -83,6 +108,33 @@ class DiffusionLossConfig(BaseConfig):
             raise ValueError(f"dgpo_beta must be positive, got {self.dgpo_beta}.")
         if self.dgpo_clip_range < 0:
             raise ValueError(f"dgpo_clip_range must be non-negative, got {self.dgpo_clip_range}.")
+        if not 0 < self.opsd_rho <= 1:
+            raise ValueError(f"opsd_rho must be in (0, 1], got {self.opsd_rho}.")
+        if self.opsd_n_ascent < 1:
+            raise ValueError(f"opsd_n_ascent must be positive, got {self.opsd_n_ascent}.")
+        if self.opsd_eta <= 0:
+            raise ValueError(f"opsd_eta must be positive, got {self.opsd_eta}.")
+        if self.opsd_branch_beta < 0:
+            raise ValueError(f"opsd_branch_beta must be non-negative, got {self.opsd_branch_beta}.")
+        if not 0 < self.opsd_query_sigma < 1:
+            raise ValueError(f"opsd_query_sigma must be in (0, 1), got {self.opsd_query_sigma}.")
+        if self.opsd_query_sigma_tolerance <= 0:
+            raise ValueError(f"opsd_query_sigma_tolerance must be positive, got {self.opsd_query_sigma_tolerance}.")
+        if self.opsd_num_train_timesteps <= 0:
+            raise ValueError(f"opsd_num_train_timesteps must be positive, got {self.opsd_num_train_timesteps}.")
+        if self.opsd_eps_gamma <= 0:
+            raise ValueError(f"opsd_eps_gamma must be positive, got {self.opsd_eps_gamma}.")
+        if self.opsd_target_micro_batch <= 0:
+            raise ValueError(f"opsd_target_micro_batch must be positive, got {self.opsd_target_micro_batch}.")
+        if self.loss_mode == "opsd":
+            valid_opsd_rewards = ["pickscore"]
+            if self.opsd_reward_kind not in valid_opsd_rewards:
+                raise ValueError(
+                    f"Invalid opsd_reward_kind: {self.opsd_reward_kind}. The first DiffusionOPSD integration "
+                    f"ships only {valid_opsd_rewards}; add a differentiable scorer before enabling another reward."
+                )
+            if self.opsd_reward_dtype not in ["float32", "bfloat16", "float16"]:
+                raise ValueError(f"Invalid opsd_reward_dtype: {self.opsd_reward_dtype}.")
 
 
 @dataclass

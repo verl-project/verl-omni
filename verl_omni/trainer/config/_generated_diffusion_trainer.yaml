@@ -99,6 +99,18 @@ actor_rollout_ref:
       audio_weight: 1.0
       video_ref_kl_coef: 0.0
       audio_ref_kl_coef: 0.0
+      opsd_rho: 0.1
+      opsd_n_ascent: 2
+      opsd_eta: 1.0
+      opsd_branch_beta: 1.0
+      opsd_query_sigma: 0.278
+      opsd_query_sigma_tolerance: 0.15
+      opsd_num_train_timesteps: 1000
+      opsd_eps_gamma: 1.0e-05
+      opsd_reward_kind: pickscore
+      opsd_reward_model_path: ''
+      opsd_reward_dtype: float32
+      opsd_target_micro_batch: 6
     rollout_correction:
       _target_: verl.trainer.config.algorithm.RolloutCorrectionConfig
       bypass_mode: ${oc.select:algorithm.rollout_correction.bypass_mode,false}
