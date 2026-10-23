@@ -21,6 +21,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from verl_omni.pipelines.minicpm.omni_rollout_adapter import MiniCPMORolloutAdapter
 from verl_omni.pipelines.minicpm.prompt_parity import (
     MINICPM_AUDIO_SLOT,
     MINICPM_ENGINE_AUDIO_SLOT,
@@ -37,6 +38,8 @@ from verl_omni.pipelines.minicpm.thinker_training_adapter import (
     _merge_packed_media,
     split_minicpm_forward_kwargs,
 )
+from verl_omni.pipelines.rollout_request import OmniRolloutRequest
+from verl_omni.workers.rollout.vllm_rollout.vllm_omni_ar_strategy import ARStrategy
 
 _SPECIAL_TOKENS = {
     "<image>": 100,
@@ -152,11 +155,13 @@ def test_collapse_handles_slice_grid_and_missing_image_id():
     assert tokens.collapse_to_slots(text, engine_slots=False) == MINICPM_IMAGE_SLOT + "rest"
 
 
-def test_dedup_pad_tokens_round_trips_to_engine_slots():
-    processor = bind_minicpm_processor(_StubProcessor())
-    tokenizer = processor.tokenizer
-    ids = tokenizer.encode(_expanded_prompt(num_unk=3))
-    decoded = tokenizer.decode(processor.dedup_pad_tokens(ids))
+def _collapse(ids, num_images=1, num_audios=1):
+    return _tokens().collapse_ids_to_slots(ids, num_images=num_images, num_audios=num_audios)
+
+
+def test_collapse_ids_round_trips_to_engine_slots():
+    tokenizer = _StubTokenizer()
+    decoded = tokenizer.decode(_collapse(tokenizer.encode(_expanded_prompt(num_unk=3))))
     assert MINICPM_ENGINE_IMAGE_SLOT in decoded
     assert MINICPM_ENGINE_AUDIO_SLOT in decoded
     assert "<unk>" not in decoded
@@ -164,34 +169,38 @@ def test_dedup_pad_tokens_round_trips_to_engine_slots():
     assert decoded.count("(<image>") == 1 and decoded.count("(<audio>") == 1
 
 
-def test_dedup_pad_tokens_text_only_prompt_is_untouched():
-    processor = bind_minicpm_processor(_StubProcessor())
-    ids = processor.tokenizer.encode("<|im_start|>user\nplain question<|im_end|>")
-    assert processor.dedup_pad_tokens(ids) == ids
+def test_engine_prompt_leaves_text_only_requests_to_the_default_path():
+    ids = _StubTokenizer().encode("<|im_start|>user\nplain question<|im_end|>")
+    model_config = SimpleNamespace(processor=bind_minicpm_processor(_StubProcessor()))
+    assert MiniCPMORolloutAdapter.prepare_engine_prompt(ids, model_config, {}) is None
 
 
-def test_dedup_pad_tokens_raises_when_media_tokens_do_not_form_spans():
-    processor = bind_minicpm_processor(_StubProcessor())
+def test_collapse_ids_raises_when_media_tokens_do_not_form_spans():
+    tokenizer = _StubTokenizer()
     # A lone </image> with no <image> start: orphan end marker at unit position.
-    ids = processor.tokenizer.encode("broken </image> prompt")
     with pytest.raises(ValueError, match="only valid.*inside an expanded media span"):
-        processor.dedup_pad_tokens(ids)
+        _collapse(tokenizer.encode("broken </image> prompt"), num_audios=0)
     # Unterminated <image> block.
-    ids = processor.tokenizer.encode("<image>" + "<unk>" * 3)
     with pytest.raises(ValueError, match="unterminated <image> block"):
-        processor.dedup_pad_tokens(ids)
+        _collapse(tokenizer.encode("<image>" + "<unk>" * 3), num_audios=0)
 
 
-def test_dedup_pad_tokens_preserves_surrounding_ids_verbatim():
-    processor = bind_minicpm_processor(_StubProcessor())
-    tokenizer = processor.tokenizer
+@pytest.mark.parametrize(("num_images", "num_audios"), [(2, 1), (1, 2), (0, 1)])
+def test_collapse_ids_requires_one_span_per_attached_media(num_images, num_audios):
+    ids = _StubTokenizer().encode(_expanded_prompt())
+    with pytest.raises(ValueError, match="(carry|more) .*spans"):
+        _collapse(ids, num_images=num_images, num_audios=num_audios)
+
+
+def test_collapse_ids_preserves_surrounding_ids_verbatim():
+    tokenizer = _StubTokenizer()
     prefix = tokenizer.encode("<|im_start|>user\nlook at this: ")
     suffix = tokenizer.encode(" and listen<|im_end|>")
     expanded = tokenizer.encode(
         "<image_id>0</image_id><image><unk><unk><unk></image>"
         + "<|audio_start|><unk><unk><|audio_end|><|audio_start|><unk><|audio_end|>"
     )
-    result = processor.dedup_pad_tokens(prefix + expanded + suffix)
+    result = _collapse(prefix + expanded + suffix)
     # ids outside media spans pass through byte-for-byte — no decode/re-encode.
     assert result[: len(prefix)] == prefix
     assert result[-len(suffix) :] == suffix
@@ -199,13 +208,55 @@ def test_dedup_pad_tokens_preserves_surrounding_ids_verbatim():
     assert middle == MINICPM_ENGINE_IMAGE_SLOT + MINICPM_ENGINE_AUDIO_SLOT
 
 
-def test_dedup_pad_tokens_collapses_slice_grid_with_newlines():
-    processor = bind_minicpm_processor(_StubProcessor())
-    tokenizer = processor.tokenizer
+def test_collapse_ids_collapses_slice_grid_with_newlines():
+    tokenizer = _StubTokenizer()
     ids = tokenizer.encode("q <image><unk></image><slice><unk></slice>\n<slice><unk></slice> tail")
-    result = processor.dedup_pad_tokens(ids)
-    decoded = tokenizer.decode(result)
-    assert decoded == "q " + MINICPM_ENGINE_IMAGE_SLOT + " tail"
+    assert tokenizer.decode(_collapse(ids, num_audios=0)) == "q " + MINICPM_ENGINE_IMAGE_SLOT + " tail"
+
+
+@pytest.mark.parametrize("marker", ["<unk>", "</image>", "<image>", "<|audio_start|>", "<image><unk></image>"])
+def test_collapse_ids_keeps_media_markers_sampled_in_the_response(marker):
+    # A teacher request carries prompt + response, and the student can sample a
+    # media marker id; it must stay part of the response.
+    tokenizer = _StubTokenizer()
+    prompt_ids = tokenizer.encode(_expanded_prompt())
+    response_ids = tokenizer.encode(f"see {marker} here<|im_end|>")
+
+    assert _collapse(prompt_ids + response_ids) == _collapse(prompt_ids) + response_ids
+
+
+@pytest.mark.parametrize("role", ["rollout", "teacher"])
+def test_ar_engine_prompt_keeps_actor_prompt_and_student_response(role):
+    # Rollout and teacher requests take the same AR strategy path; a teacher
+    # request appends the student's response and asks for prompt log probabilities.
+    processor = bind_minicpm_processor(_StubProcessor())
+    server = SimpleNamespace(
+        config=SimpleNamespace(max_model_len=512, prompt_length=256, response_length=256),
+        model_config=SimpleNamespace(processor=processor),
+    )
+    strategy = ARStrategy(server)
+    strategy._rollout_adapter = MiniCPMORolloutAdapter
+    tokenizer = processor.tokenizer
+    prompt_ids = tokenizer.encode(_expanded_prompt())
+    response_ids = tokenizer.encode("The answer is <unk> B.<|im_end|>") if role == "teacher" else []
+    sampling_params = {"max_tokens": 1, "prompt_logprobs": 0} if role == "teacher" else {}
+    request = OmniRolloutRequest.from_generate_kwargs(
+        prompt_ids=prompt_ids + response_ids,
+        image_data=["image"],
+        audio_data=["audio"],
+        mm_processor_kwargs={"sampling_rate": 16000},
+    )
+
+    prompt, _ = strategy.preprocess_input(request, sampling_params, None)
+
+    assert prompt.pop("_verl_omni_scored_prompt_ids", None) == (
+        prompt_ids + response_ids if role == "teacher" else None
+    )
+    assert prompt == {
+        "prompt_token_ids": _collapse(prompt_ids) + response_ids,
+        "multi_modal_data": {"image": ["image"], "audio": ["audio"]},
+        "mm_processor_kwargs": {"sampling_rate": 16000},
+    }
 
 
 def test_processor_call_adapts_audio_kwarg_and_appends_missing_slots():

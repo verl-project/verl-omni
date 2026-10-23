@@ -62,6 +62,10 @@ class OmniFSDPEngine(FSDPEngineWithLMHead):
         return model_inputs, output_args
 
     def get_per_tensor_param(self, layered_summon=False, base_sync_done=False, **kwargs):
+        from verl.utils.torch_dtypes import PrecisionType
+
+        mixed_precision = self.engine_config.mixed_precision or {}
+        full_weight_dtype = PrecisionType.to_dtype(mixed_precision.get("param_dtype", "bf16"))
         log_gpu_memory_usage("Before load_fsdp_model_to_gpu", logger=logger)
 
         # FSDP2 CPUOffloadPolicy owns CPU<->GPU placement; calling model.to(device) here
@@ -87,6 +91,7 @@ class OmniFSDPEngine(FSDPEngineWithLMHead):
             is_diffusers=False,
             offload_fn=_offload_to_cpu,
             stream_transform=self._qat_stream_transform(),
+            full_weight_dtype=full_weight_dtype,
         )
 
     def get_per_tensor_param_shard(self, **kwargs):

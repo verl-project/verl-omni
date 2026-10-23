@@ -1,0 +1,1 @@
+../../../examples/opd_trainer/minicpm_o/README.md
