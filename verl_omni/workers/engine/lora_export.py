@@ -69,9 +69,9 @@ def _merged_lora_stream(module, *, key_prefix: str = "", offload_fn: Callable[[]
             params = normalize_peft_param_name(module.state_dict())
             params = convert_weight_keys(params, getattr(module, "_fsdp_wrapped_module", module))
             for name, param in params.items():
-                # clone: plain tensors also alias module storage, and bucketed
-                # senders may flush after the restore has already run
-                tensor = _cast_for_sync(param) if isinstance(param, DTensor) else param.detach().clone()
+                # Single-rank gathers and plain tensors can alias actor storage;
+                # bucketed senders may flush after the merge context restores it.
+                tensor = _cast_for_sync(param).clone() if isinstance(param, DTensor) else param.detach().clone()
                 yield f"{key_prefix}{name}", tensor
     finally:
         if offload_fn is not None:

@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from .alphagrpo_impl import AlphaGRPOFSDPEngine  # noqa: F401
 from .diffusers_impl import (  # noqa: F401
     DiffusersFSDPEngine,
     DPODiffusersFSDPEngine,
@@ -21,6 +22,7 @@ from .omni_impl import OmniFSDPEngine  # noqa: F401
 
 # TODO(andy): unify DPO and NFT engines later.
 __all__ = [
+    "AlphaGRPOFSDPEngine",
     "PPODiffusersFSDPEngine",
     "DPODiffusersFSDPEngine",
     "NFTDiffusersFSDPEngine",

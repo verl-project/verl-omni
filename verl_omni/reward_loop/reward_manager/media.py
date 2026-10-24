@@ -53,6 +53,7 @@ def _reward_extra_info(data_item) -> dict:
         "audio",
         "audio_sample_rate",
         "media_kind",
+        "thinking_text",
         ARTIFACT_SPECS,
         PRIMARY_ARTIFACT,
         PREVIEW_ARTIFACT,
