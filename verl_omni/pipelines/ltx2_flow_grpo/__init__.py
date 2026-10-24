@@ -13,9 +13,11 @@
 # limitations under the License.
 
 from .diffusers_training_adapter import LTX23FlowGRPO
+from .veomni_training_adapter import LTX23FlowGRPOVeOmni
 from .vllm_omni_rollout_adapter import LTX23PipelineWithLogProb
 
 __all__ = [
     "LTX23FlowGRPO",
+    "LTX23FlowGRPOVeOmni",
     "LTX23PipelineWithLogProb",
 ]
