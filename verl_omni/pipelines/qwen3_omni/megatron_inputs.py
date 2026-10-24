@@ -14,6 +14,7 @@ _MULTIMODAL_KEYS = (
     "image_grid_thw",
     "pixel_values_videos",
     "video_grid_thw",
+    "video_second_per_grid",
     "input_features",
     "feature_attention_mask",
     "audio_feature_lengths",
@@ -59,6 +60,8 @@ def qwen3_omni_forward_model_engine(
     MTP, fused kernels, THD, PP and CP are rejected by ``OmniMegatronEngine``.
     Logits processing and BSHD postprocessing match pinned verl's model forward.
     """
+    if multi_modal_inputs.get("video_grid_thw") is not None and multi_modal_inputs.get("video_second_per_grid") is None:
+        raise ValueError("Qwen3-Omni video requires video_second_per_grid for temporal M-RoPE.")
     unwrapped_model = unwrap_model(model)
     post_process = unwrapped_model.post_process
     use_fp8_padding = unwrapped_model.config.fp8 in ("e4m3", "hybrid")
