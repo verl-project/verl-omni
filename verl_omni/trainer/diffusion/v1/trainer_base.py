@@ -580,6 +580,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         elif not self.skip_old_log_prob:
             with marked_timer("old_log_prob", timing_raw, color="blue"):
                 old_log_prob = self._compute_old_log_prob(data)
+                metrics.update(old_log_prob.meta_info.pop("metrics", {}))
                 data = data.union(old_log_prob)
             assert "old_log_probs" in data.batch, f'"old_log_probs" not in {data.batch.keys()}'
 
@@ -1417,7 +1418,10 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         prev_sample_mean = tu.get(output, "prev_sample_mean")
         if prev_sample_mean is not None:
             old_log_prob_dict["old_prev_sample_mean"] = prev_sample_mean.float()
-        return DataProto.from_tensordict(tu.get_tensordict(old_log_prob_dict))
+        old_log_prob = DataProto.from_tensordict(tu.get_tensordict(old_log_prob_dict))
+        if (mfu := tu.get(output, "metrics").pop("mfu", None)) is not None:
+            old_log_prob.meta_info["metrics"] = {"perf/mfu/actor_infer": mfu}
+        return old_log_prob
 
     def _compute_ref_log_prob(self, data: DataProto) -> DataProto:
         """Compute reference log-probs over diffusion latents."""
