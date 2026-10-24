@@ -18,6 +18,7 @@ import importlib.util
 import threading
 from contextlib import nullcontext
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -53,7 +54,11 @@ async def test_opt_in_moves_same_model_between_cpu_and_explicit_cuda(monkeypatch
             return self
 
     weights = Weights()
-    inferencer = type("Inferencer", (), {"model": weights, "processor": object(), "device": torch.device("cuda:2")})()
+    inferencer = type(
+        "Inferencer",
+        (),
+        {"model": weights, "processor": SimpleNamespace(tokenizer=SimpleNamespace()), "device": torch.device("cuda:2")},
+    )()
     monkeypatch.setattr(module, "_PickScoreInferencer", lambda **kwargs: inferencer)
     model = module.PickScoreNativeModel(device="cuda:2", retain_weights_on_cpu=True)
     assert model.supports_cpu_offload
@@ -91,7 +96,7 @@ async def test_sleep_drains_consumer_thread_before_cpu_transfer(monkeypatch):
         def __init__(self):
             self.model = Weights()
             self.device = torch.device("cuda:1")
-            self.processor = object()
+            self.processor = SimpleNamespace(tokenizer=SimpleNamespace())
 
         def infer(self, prompts, images):
             entered.set()
@@ -134,7 +139,7 @@ async def test_cancelled_sleep_finishes_drain_and_serializes_wake(monkeypatch):
         def __init__(self):
             self.model = Weights()
             self.device = torch.device("cuda:1")
-            self.processor = object()
+            self.processor = SimpleNamespace(tokenizer=SimpleNamespace())
 
         def infer(self, prompts, images):
             entered.set()
@@ -174,7 +179,11 @@ async def test_failed_transfer_closes_model_permanently(monkeypatch):
         def to(self, target):
             raise OSError("transfer failed")
 
-    inferencer = type("Inferencer", (), {"model": Weights(), "processor": object(), "device": torch.device("cuda:0")})()
+    inferencer = SimpleNamespace(
+        model=Weights(),
+        processor=SimpleNamespace(tokenizer=SimpleNamespace()),
+        device=torch.device("cuda:0"),
+    )
     monkeypatch.setattr(module, "_PickScoreInferencer", lambda **kwargs: inferencer)
     model = module.PickScoreNativeModel(device="cuda:0", retain_weights_on_cpu=True)
     with pytest.raises(OSError, match="transfer failed"):
@@ -206,7 +215,11 @@ async def test_cancelled_device_transfer_settles_before_close(monkeypatch, opera
             return self
 
     weights = Weights()
-    inferencer = type("Inferencer", (), {"model": weights, "device": torch.device("cuda:2")})()
+    inferencer = SimpleNamespace(
+        model=weights,
+        processor=SimpleNamespace(tokenizer=SimpleNamespace()),
+        device=torch.device("cuda:2"),
+    )
     monkeypatch.setattr(module, "_PickScoreInferencer", lambda **kwargs: inferencer)
     model = module.PickScoreNativeModel(device="cuda:2", retain_weights_on_cpu=True)
     if operation == "wake_up":

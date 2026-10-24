@@ -119,7 +119,12 @@ class NativeRewardExecutor:
                     kwargs = dict(self.spec.executor_config.get("kwargs", {}))
                     if self.spec.model_path is not None:
                         kwargs.setdefault("model_path", self.spec.model_path)
-                    kwargs.setdefault("device", torch.device(get_device_name(), get_device_id()))
+                    if "device" not in kwargs:
+                        kwargs["device"] = (
+                            torch.device("cpu")
+                            if self.spec.device_type == "cpu"
+                            else torch.device(get_device_name(), get_device_id())
+                        )
                     self._model = model_cls(**kwargs)
                 elif self._supports_cpu_offload(self._model):
                     await self._call(self._model.wake_up)
@@ -188,7 +193,8 @@ class NativeRewardExecutor:
                     self._close_failed = True
                     await self._dispose(model)
                     self._close_failed = False
-                _empty_accelerator_cache()
+                if self.spec.device_type != "cpu":
+                    _empty_accelerator_cache()
             except BaseException:
                 await self._fail_closed()
                 raise
@@ -209,7 +215,8 @@ class NativeRewardExecutor:
             model, self._model = self._model, None
             self._close_failed = True
             await self._dispose(model)
-            _empty_accelerator_cache()
+            if self.spec.device_type != "cpu":
+                _empty_accelerator_cache()
             self._close_failed = False
 
     async def _fail_closed(self) -> None:
@@ -222,7 +229,8 @@ class NativeRewardExecutor:
         self._close_failed = True
         try:
             await self._dispose(model)
-            _empty_accelerator_cache()
+            if self.spec.device_type != "cpu":
+                _empty_accelerator_cache()
         except BaseException:
             logger.exception("Failed to clean up native reward model %s", self.spec.name)
         else:
