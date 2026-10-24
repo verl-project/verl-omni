@@ -62,8 +62,9 @@ async def test_named_media_survives_to_preview_and_reward_consumers(monkeypatch,
         worker = object.__new__(DiffusionAgentLoopWorkerTQ.__ray_metadata__.modified_class)
         stored = {}
 
-        async def put(*, keys, fields, **kwargs):
-            stored.update(fields=fields)
+        async def put(*, keys, fields=None, **kwargs):
+            if fields is not None:  # payload put; tag-only completion puts are skipped
+                stored.update(fields=fields)
 
         monkeypatch.setattr(tq_utils.tq, "async_kv_batch_put", put)
         await worker._write_trajectories_to_tq(

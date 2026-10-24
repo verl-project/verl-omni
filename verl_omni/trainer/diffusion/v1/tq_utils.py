@@ -15,6 +15,7 @@
 import dataclasses
 import logging
 import os
+import time
 from typing import Any, Literal
 
 import numpy as np
@@ -24,6 +25,7 @@ from tensordict import TensorDict
 from transfer_queue import KVBatchMeta
 from verl.protocol import DataProto
 from verl.utils import tensordict_utils as tu
+from verl_omni.trainer.diffusion.v1.async_profiling import tensordict_payload_bytes
 
 from verl_omni.trainer.diffusion.diffusion_trainer_utils import MEDIA_ARTIFACT_FIELD_PREFIX
 
@@ -167,6 +169,7 @@ def diffusion_tq_batch_to_dataproto(
     batch_meta: KVBatchMeta,
     pad_token_id: int = 0,
     select_fields: list[str] | None = None,
+    timing_raw: dict | None = None,
 ) -> DataProto:
     """Read TQ rows and assemble a diffusion ``DataProto``.
 
@@ -175,6 +178,13 @@ def diffusion_tq_batch_to_dataproto(
         pad_token_id: Padding token id for variable-length prompt token tensors.
         select_fields: Optional TQ fields to retrieve. ``None`` preserves the
             full-payload behavior required by training and validation.
+        timing_raw: Optional accumulator (the trainer's ``timing_raw``); when
+            given, the ``kv_batch_get`` transfer is timed into ``tq_get`` (so
+            it surfaces as ``timing_s/tq_get``) and the bytes actually fetched
+            accumulate into ``tq_get_bytes`` -- measured on the returned
+            payload at this boundary, so bytes and seconds always describe the
+            same reads (issue #712 transfer accounting). The caller owns
+            exporting ``tq_get_bytes``; it is not a timing value.
 
     Returns:
         ``DataProto`` whose ``batch`` carries diffusion tensors (prompts,
@@ -185,11 +195,17 @@ def diffusion_tq_batch_to_dataproto(
     keys = [batch_meta.keys[i] for i in sort_idx]
     partition_id = batch_meta.partition_id
 
+    start = time.perf_counter()
     data = tq.kv_batch_get(
         keys=keys,
         partition_id=partition_id,
         select_fields=select_fields,
     )
+    if timing_raw is not None:
+        timing_raw.setdefault("tq_get", 0.0)
+        timing_raw["tq_get"] += time.perf_counter() - start
+        timing_raw.setdefault("tq_get_bytes", 0.0)
+        timing_raw["tq_get_bytes"] += tensordict_payload_bytes(data)
 
     batch_dict: dict[str, torch.Tensor] = {}
     non_tensor_batch: dict[str, Any] = {}
@@ -283,8 +299,8 @@ def canonicalize_diffusion_tq_meta(batch_meta: KVBatchMeta) -> KVBatchMeta:
     run, while the v0 trainer produced rows prompt-major in dataset order
     (``prompt_index * rollout.n + session``). ``prompt_index`` is unique only
     within one generation batch, so rows carry ``(gen_batch_seq,
-    prompt_index)`` — the per-run generation-batch number plus the position
-    inside it — which stays unique across every path that can mix batches in
+    prompt_index)`` -- the per-run generation-batch number plus the position
+    inside it -- which stays unique across every path that can mix batches in
     one sample (DAPO speculative refills, incomplete-group replacement,
     multi-chunk generation dispatches). Rows whose tag predates the pair fall
     back to uid order, which is deterministic but not dataset order.

@@ -162,7 +162,7 @@ class TestOneStepOffScheduler:
         )
         sampled = iter(["b1", "b2", "b3"])
         monkeypatch.setattr(trainer, "_sample_batch", lambda metrics, timing_raw, n: next(sampled))
-        monkeypatch.setattr(trainer, "_convert_and_dispatch", lambda meta: (meta, f"data_{meta}", f"handle_{meta}"))
+        monkeypatch.setattr(trainer, "_convert_and_dispatch", lambda meta, timing_raw=None: (meta, f"data_{meta}", f"handle_{meta}"))
         trained = []
 
         def fake_train(metrics, timing_raw, batch_meta, data=None, teacher_handle=None):
