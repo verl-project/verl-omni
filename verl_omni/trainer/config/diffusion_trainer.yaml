@@ -531,3 +531,59 @@ skip:
 
     # Action to take when rollout is skipped (cache | repeat).
     action: cache
+
+# Per-stage skip configs (verl-omni extension on top of verl's SkipManager).
+# Each entry caches/replays one pipeline stage's output per global step under
+# `{dump_dir}/{experiment_name}_{project_name}/{role}/{step}/`. The diffusion V1
+# and V0 trainers wire these roles; the omni (AR) stack only supports `skip:`.
+# Kept out of `skip:` because verl parses that block against its fixed
+# SkipManagerConfig schema.
+omni_skip:
+
+  # Colocated reward-model scoring. Actions: cache | repeat.
+  reward:
+    enable: false
+    dump_dir: "~/.verl/stage_dump"
+    steps: []
+    action: cache
+
+  # Recomputed old log-probs (policy gradient only). Actions: cache | repeat.
+  # Conflicts with algorithm.rollout_correction.bypass_mode.
+  old_log_prob:
+    enable: false
+    dump_dir: "~/.verl/stage_dump"
+    steps: []
+    action: cache
+
+  # Reference-policy outputs: ref log-probs (policy gradient) or ref noise
+  # preds (direct preference). Actions: cache | repeat.
+  ref_log_prob:
+    enable: false
+    dump_dir: "~/.verl/stage_dump"
+    steps: []
+    action: cache
+
+  # Driver-side advantage computation (policy gradient only). Actions: cache | repeat.
+  advantage:
+    enable: false
+    dump_dir: "~/.verl/stage_dump"
+    steps: []
+    action: cache
+
+  # Actor update. `empty` no-ops the update; cache/repeat replay its metrics.
+  # Nothing is written to checkpoints while skipped.
+  actor_update:
+    enable: false
+    dump_dir: "~/.verl/stage_dump"
+    steps: []
+    action: empty
+
+  # Mid-cycle rollout weight refresh (async modes only). `empty` only: step-end
+  # lifecycle syncs always run, but replicas keep pre-update weights for the
+  # rest of the step. Requires ack_stale_weights=true.
+  weight_sync:
+    enable: false
+    dump_dir: "~/.verl/stage_dump"
+    steps: []
+    action: empty
+    ack_stale_weights: false

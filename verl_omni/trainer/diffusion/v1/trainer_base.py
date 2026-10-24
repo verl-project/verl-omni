@@ -106,6 +106,7 @@ from verl_omni.trainer.diffusion.v1.tq_utils import (
 )
 from verl_omni.utils.config import resolve_lora_config
 from verl_omni.utils.net_utils import worker_group_port_ranges
+from verl_omni.utils.skip import init_skip_manager, skip_stage_metrics
 from verl_omni.utils.tracking import batch_items, validate_audio_batch
 from verl_omni.workers.config.reward import (
     reward_is_enabled,
@@ -346,8 +347,8 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         """Run the v1 training loop, mirroring upstream ``PPOTrainer.fit``."""
         self.agent_loop_manager = agent_loop_manager
 
-        # initialize SkipManager for V1 rollout skip support (no-op until configured).
-        SkipManager.init(self.config)
+        # initialize SkipManager (verl rollout skip + verl-omni stage skip; no-op until configured).
+        init_skip_manager(self.config)
 
         self.logger = Tracking(
             project_name=self.config.trainer.project_name,
@@ -368,6 +369,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             pprint(f"Initial validation metrics: {val_metrics}")
             self.logger.log(data=val_metrics, step=self.global_steps)
             if self.config.trainer.get("val_only", False):
+                self._log_skip_summary()
                 self._shutdown_dump_executor()
                 self._shutdown_dataloaders()
                 return
@@ -431,6 +433,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             SkipManager.set_step(self.global_steps)
             current_epoch = (self.global_steps - 1) // self.steps_per_epoch
             if is_last_step:
+                self._log_skip_summary()
                 self._shutdown_dump_executor()
                 pprint(f"Final validation metrics: {last_val_metrics}")
                 progress_bar.close()
@@ -438,6 +441,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
                 return
 
         self.on_train_end()
+        self._log_skip_summary()
         self._shutdown_dump_executor()
         self._shutdown_dataloaders()
 
@@ -560,7 +564,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
                     # syncs the standalone rollout, and switch_to_rollout is
                     # not guaranteed to fire), so keep the mid-cycle wake+sync
                     # or colocated generation stalls on stale weights.
-                    self.checkpoint_manager.update_weights(self.global_steps)
+                    self._update_rollout_weights_mid_cycle()
                 # In sync mode the replicas must stay asleep through the
                 # training phases below: update_weights resumes their weights
                 # (~55GB for Qwen-Image at rollout TP=1) and the actor update
@@ -655,6 +659,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         reward_tensor = reward_tensor.squeeze(-1).float() if reward_tensor.ndim > 1 else reward_tensor.float()
         return self._loss_fn.prepare_actor_batch(batch, reward_tensor, self.config)
 
+    @SkipManager.annotate(role="ref_log_prob")
     def _compute_ref_noise_pred(self, data: DataProto) -> DataProto | None:
         """Reference transformer output and shared flow tensors for DPO."""
         batch_td = _to_diffusion_worker_tensordict(data)
@@ -1336,6 +1341,25 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         batch = self._next_train_batch()
         self._submit_batch_to_rollout(batch)
 
+    @SkipManager.annotate(role="weight_sync")
+    def _update_rollout_weights_mid_cycle(self) -> None:
+        """Refresh colocated rollout weights mid-step (async modes).
+
+        Lifecycle syncs (init, step end, validation) always run; skipping this
+        mid-cycle refresh only leaves replicas on pre-update weights for the
+        rest of the step.
+        """
+        self.checkpoint_manager.update_weights(self.global_steps)
+
+    def _log_skip_summary(self) -> None:
+        """Log the end-of-run per-stage skip counters."""
+        metrics = skip_stage_metrics()
+        if not metrics:
+            return
+        self.logger.log(data=metrics, step=self.global_steps)
+        pprint(f"Stage skip summary: {metrics}")
+
+    @SkipManager.annotate(role="reward")
     def _compute_reward_colocate(self, data: DataProto) -> DataProto:
         """Compute reward score with a colocated reward model on a DataProto batch."""
         assert self.reward_loop_manager is not None, "RewardLoopManager is None"
@@ -1394,6 +1418,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         advantages[is_pad] = 0.0
         return data
 
+    @SkipManager.annotate(role="old_log_prob")
     def _compute_old_log_prob(self, data: DataProto) -> DataProto:
         """Recompute old log-probs over diffusion latents with the actor engine."""
         batch_td = _to_diffusion_worker_tensordict(data)
@@ -1419,6 +1444,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             old_log_prob_dict["old_prev_sample_mean"] = prev_sample_mean.float()
         return DataProto.from_tensordict(tu.get_tensordict(old_log_prob_dict))
 
+    @SkipManager.annotate(role="ref_log_prob")
     def _compute_ref_log_prob(self, data: DataProto) -> DataProto:
         """Compute reference log-probs over diffusion latents."""
         batch_td = _to_diffusion_worker_tensordict(data)
@@ -1443,6 +1469,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             ref_dict["ref_prev_sample_mean"] = prev_sample_mean.float()
         return DataProto.from_tensordict(tu.get_tensordict(ref_dict))
 
+    @SkipManager.annotate(role="advantage")
     def _compute_advantage(self, data: DataProto) -> DataProto:
         """Compute diffusion (Flow-GRPO) advantages on the driver."""
         reward_tensor, reward_extra_infos_dict = extract_reward(data)
@@ -1463,6 +1490,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         )
         return data
 
+    @SkipManager.annotate(role="actor_update")
     def _update_actor(self, data: DataProto) -> DataProto:
         """Update the diffusion actor network."""
         rollout_config = self.config.actor_rollout_ref.rollout
@@ -1557,6 +1585,10 @@ class PolicyGradientDiffusionTrainerV1(ABC):
                 )
                 tq.kv_clear(keys=batch_meta.keys, partition_id=batch_meta.partition_id)
                 continue
+
+            # Stage-skip decorators bypass validation calls via this marker;
+            # a validation batch must never poison the training stage caches.
+            data.meta_info["validate"] = True
 
             if self.use_rm and self.reward_loop_manager.reward_loop_worker_handles is None:
                 self.checkpoint_manager.sleep_replicas()
