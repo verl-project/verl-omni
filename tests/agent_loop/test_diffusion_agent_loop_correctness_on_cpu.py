@@ -457,13 +457,27 @@ async def test_run_prompt_publishes_failure_after_siblings_settle(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_generate_sequences_seeds_from_global_prompt_index(monkeypatch):
-    """Per-request rollout seeds must derive from the global batch index (#561).
+@pytest.mark.parametrize(
+    "chunks",
+    [
+        # One generation batch split across two workers (#561): chunk-local
+        # positions restart at 0, global indices do not.
+        [{"index": [0, 1]}, {"index": [2, 3]}],
+        # One step spanning two generation batches (gen_batch_size < num_prompts,
+        # refills): ``index`` restarts per batch, the step-wide seed index does not.
+        [
+            {"index": [0, 1], "rollout_seed_index": [0, 1]},
+            {"index": [0, 1], "rollout_seed_index": [2, 3]},
+        ],
+    ],
+)
+async def test_generate_sequences_seeds_from_global_prompt_index(monkeypatch, chunks):
+    """Per-request rollout seeds must be unique across the step's prompts.
 
-    Each agent worker only sees a chunk of the batch, so seeding from the
-    chunk-local position makes every worker reuse the same seed offsets and
-    roll out duplicated noise. Two chunks carrying global indices [0, 1] and
-    [2, 3] must yield distinct seeds for all prompt x session combinations.
+    Each agent worker only sees a chunk of the batch, and one step can span
+    several generation batches; seeding from a position that repeats makes
+    prompts reuse the same seed offsets and roll out duplicated noise. Both
+    layouts must yield distinct seeds for all prompt x session combinations.
     """
     worker_cls = DiffusionAgentLoopWorkerTQ.__ray_metadata__.modified_class
     worker = object.__new__(worker_cls)
@@ -490,21 +504,19 @@ async def test_generate_sequences_seeds_from_global_prompt_index(monkeypatch):
     monkeypatch.setattr(diffusion_agent_loop_tq.tq, "async_kv_put", fake_kv_put)
     worker._run_agent_loop = MethodType(fake_run_agent_loop, worker)
 
-    def make_chunk(global_indices: list[int], uids: list[str]) -> TensorDict:
+    def make_chunk(fields: dict[str, list[int]], uids: list[str]) -> TensorDict:
         return TensorDict(
             {
-                "index": torch.tensor(global_indices),
+                **{name: torch.tensor(values) for name, values in fields.items()},
                 "uid": NonTensorStack(*uids),
                 "rollout_seed": NonTensorData(42),
                 "global_steps": NonTensorData(1),
             },
-            batch_size=[len(global_indices)],
+            batch_size=[len(uids)],
         )
 
-    # Two chunks as AgentLoopManagerTQ would split a 4-prompt batch across two
-    # workers: chunk-local positions restart at 0, global indices do not.
-    await worker.generate_sequences(make_chunk([0, 1], ["a", "b"]))
-    await worker.generate_sequences(make_chunk([2, 3], ["c", "d"]))
+    await worker.generate_sequences(make_chunk(chunks[0], ["a", "b"]))
+    await worker.generate_sequences(make_chunk(chunks[1], ["c", "d"]))
     await asyncio.gather(*worker.background_tasks)
 
     assert len(captured_seeds) == 4 * 2  # 4 prompts x rollout.n=2

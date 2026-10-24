@@ -931,6 +931,9 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         # Per-run monotonic generation-batch number; pairs with the batch-local
         # ``index`` so TQ row ordering survives multi-batch sampling paths.
         self._gen_batch_seq = 0
+        # Prompts already given a rollout seed position in ``_rollout_seed_step``.
+        self._rollout_seed_step = None
+        self._rollout_seed_next_index = 0
         val_batch_size = self.config.data.val_batch_size or len(self.val_dataset)
         self.val_dataloader = StatefulDataLoader(
             dataset=self.val_dataset,
@@ -1216,6 +1219,14 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         rollout_seed_cfg = self.config.actor_rollout_ref.rollout.get("seed")
         if rollout_seed_cfg is not None:
             tu.assign_non_tensor_data(batch, "rollout_seed", int(rollout_seed_cfg) + self.global_steps - 1)
+            # ``index`` restarts in every generation batch, and refills reuse this
+            # step's seed base, so seed from the position among the step's prompts.
+            if self._rollout_seed_step != self.global_steps:
+                self._rollout_seed_step = self.global_steps
+                self._rollout_seed_next_index = 0
+            start = self._rollout_seed_next_index
+            self._rollout_seed_next_index += num_prompts
+            batch["rollout_seed_index"] = torch.arange(start, start + num_prompts, dtype=torch.int64)
         return batch
 
     @staticmethod
