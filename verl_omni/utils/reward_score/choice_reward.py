@@ -34,6 +34,10 @@ def compute_score(
     del kwargs
     prediction = extract_answer(solution_str)
     target = extract_answer(ground_truth)
+    if not target:
+        # Samples without a tagged answer should be filtered out during data
+        # preprocessing; scoring them would let an untagged response match "".
+        raise ValueError(f"ground_truth has no <answer> tag: {ground_truth!r}")
     accuracy = float(prediction == target)
     return {
         "score": accuracy,
