@@ -284,11 +284,19 @@ class BagelPipelineWithLogProb(BagelPipeline):
             loaded |= self.language_model.load_weights(actor_weights)
         return loaded
 
-    def _decode_token_prompt(self, token_ids: Any) -> str | None:
+    def _decode_token_prompt(self, token_ids: Any, *, native: bool = False) -> str | None:
         """Decode BAGEL token IDs to a cleaned prompt text string."""
         token_list = _to_token_list(token_ids)
         if not token_list:
+            if native:
+                raise ValueError("Native BAGEL prompts must preserve start/end token framing.")
             return None
+        if native:
+            bos = self.tokenizer.convert_tokens_to_ids("<|im_start|>")
+            eos = self.tokenizer.convert_tokens_to_ids("<|im_end|>")
+            if token_list[0] != bos or token_list[-1] != eos:
+                raise ValueError("Native BAGEL prompts must preserve start/end token framing.")
+            return self.tokenizer.decode(token_list[1:-1], skip_special_tokens=False)
         decoded = self.tokenizer.decode(token_list, skip_special_tokens=False)
         return _extract_prompt_text(decoded)
 
@@ -299,7 +307,10 @@ class BagelPipelineWithLogProb(BagelPipeline):
 
         custom_prompt = req.prompts[0]
         if not custom_prompt.get("prompt"):
-            prompt = self._decode_token_prompt(prompt_ids_from_payload(custom_prompt))
+            prompt = self._decode_token_prompt(
+                prompt_ids_from_payload(custom_prompt),
+                native=req.sampling_params.extra_args.get("native_prompt_tokens", False),
+            )
             if prompt is not None:
                 custom_prompt["prompt"] = prompt
 
