@@ -8,6 +8,7 @@ on:
     paths:
       - "verl_omni/**"
       - "tests/npu_smoke/**"
+      - "tests/agent_loop/**"
       - "tests/workers/**"
       - "tests/special_e2e/**"
       - "pyproject.toml"
@@ -21,6 +22,7 @@ on:
     paths:
       - "verl_omni/**"
       - "tests/npu_smoke/**"
+      - "tests/agent_loop/**"
       - "tests/workers/**"
       - "tests/special_e2e/**"
       - "pyproject.toml"

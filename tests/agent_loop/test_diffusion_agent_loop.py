@@ -126,6 +126,71 @@ def init_config(request, tmp_path_factory) -> DictConfig:
     return config
 
 
+def run_diffusion_single_turn(init_config):
+    """Run the shared GPU/NPU single-turn output assertions."""
+    AgentLoopManager.agent_loop_workers_class = ray.remote(DiffusionAgentLoopWorker)
+    llm_server_manager = LLMServerManager.create(config=init_config)
+    agent_loop_manager = AgentLoopManager.create(
+        config=init_config,
+        llm_client=llm_server_manager.get_client(),
+    )
+
+    system_prompt = (
+        "Describe the image by detailing the color, shape, size, texture, quantity, text, "
+        "spatial relationships of the objects and background:"
+    )
+    user_prompts = ["A photo of cute cat with long fur and big eyes.", "A photo of cute dog with short hair."]
+
+    raw_prompts = []
+    for user_prompt in user_prompts:
+        raw_prompts.append(
+            [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ]
+        )
+
+    raw_negative_prompts = []
+    for user_prompt in user_prompts:
+        raw_negative_prompts.append(
+            [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": " "},
+            ]
+        )
+
+    batch = DataProto(
+        non_tensor_batch={
+            "raw_prompt": np.array(raw_prompts),
+            "raw_negative_prompt": np.array(raw_negative_prompts),
+            "data_source": np.array(["jpeg_compressibility"] * len(raw_prompts)),
+            "reward_model": np.array([{"style": "rule", "ground_truth": ""}] * len(raw_prompts)),
+        },
+    )
+    n = init_config.actor_rollout_ref.rollout.n
+    batch = batch.repeat(n)
+    batch.meta_info["global_steps"] = 0
+    result = agent_loop_manager.generate_sequences(prompts=batch)
+    assert len(result) == len(raw_prompts) * n
+
+    expected_batch_keys = [
+        "responses",
+        "all_latents",
+        "all_timesteps",
+        "prompt_embeds",
+        "prompt_embeds_mask",
+        "rollout_log_probs",
+    ]
+    for key in expected_batch_keys:
+        assert key in result.batch, f"Key {key} not found in result batch with keys {list(result.batch.keys())}."
+
+    # check turns
+    num_turns = result.non_tensor_batch["__num_turns__"]
+    assert np.all(num_turns == 2)
+
+    print("Test passed!")
+
+
 def test_single_turn(init_config):
     ray.init(
         runtime_env={
@@ -137,67 +202,7 @@ def test_single_turn(init_config):
         }
     )
     try:
-        AgentLoopManager.agent_loop_workers_class = ray.remote(DiffusionAgentLoopWorker)
-        llm_server_manager = LLMServerManager.create(config=init_config)
-        agent_loop_manager = AgentLoopManager.create(
-            config=init_config,
-            llm_client=llm_server_manager.get_client(),
-        )
-
-        system_prompt = (
-            "Describe the image by detailing the color, shape, size, texture, quantity, text, "
-            "spatial relationships of the objects and background:"
-        )
-        user_prompts = ["A photo of cute cat with long fur and big eyes.", "A photo of cute dog with short hair."]
-
-        raw_prompts = []
-        for user_prompt in user_prompts:
-            raw_prompts.append(
-                [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ]
-            )
-
-        raw_negative_prompts = []
-        for user_prompt in user_prompts:
-            raw_negative_prompts.append(
-                [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": " "},
-                ]
-            )
-
-        batch = DataProto(
-            non_tensor_batch={
-                "raw_prompt": np.array(raw_prompts),
-                "raw_negative_prompt": np.array(raw_negative_prompts),
-                "data_source": np.array(["jpeg_compressibility"] * len(raw_prompts)),
-                "reward_model": np.array([{"style": "rule", "ground_truth": ""}] * len(raw_prompts)),
-            },
-        )
-        n = init_config.actor_rollout_ref.rollout.n
-        batch = batch.repeat(n)
-        batch.meta_info["global_steps"] = 0
-        result = agent_loop_manager.generate_sequences(prompts=batch)
-        assert len(result) == len(raw_prompts) * n
-
-        expected_batch_keys = [
-            "responses",
-            "all_latents",
-            "all_timesteps",
-            "prompt_embeds",
-            "prompt_embeds_mask",
-            "rollout_log_probs",
-        ]
-        for key in expected_batch_keys:
-            assert key in result.batch, f"Key {key} not found in result batch with keys {list(result.batch.keys())}."
-
-        # check turns
-        num_turns = result.non_tensor_batch["__num_turns__"]
-        assert np.all(num_turns == 2)
-
-        print("Test passed!")
+        run_diffusion_single_turn(init_config)
     finally:
         ray.shutdown()
         gc.collect()
