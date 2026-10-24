@@ -1,6 +1,15 @@
 # DMD2 distribution-only configuration; does not activate OPD.
 _target_: verl_omni.workers.config.DiffusionDMDConfig
 
+# Generator sampling steps, independent of the score-training timestep.
+num_inference_steps: 4
+
+# Per-modality flow shifts used by continuous sampling instead of scalar shifts.
+modality_shifts: {}
+
+# Per-modality loss weights; keys must match modality_shifts.
+modality_weights: {}
+
 # Fake-score update attempts per student attempt.
 fake_update_ratio: 2
 
@@ -25,7 +34,7 @@ fake_score_optim:
 # Teacher CFG scale; student and fake score are conditional-only.
 teacher_guidance_scale: 4.0
 
-# Packed-denoiser-space teacher CFG normalization.
+# Teacher CFG normalization; DMD2Program layer_norm requires (B, tokens, features).
 cfg_norm: layer_norm
 
 # Explicit negative teacher condition.
@@ -37,8 +46,14 @@ normalization_epsilon: 1.0e-6
 # Fixed inference sigma shift.
 rollout_timestep_shift: 3.0
 
-# Discrete score grid size; zero selects continuous uniform sampling.
+# Discrete score grid size; zero selects continuous score sampling.
 score_discrete_steps: 1000
+
+# Lower continuous base-time bound, before DMD2Program's per-modality shifts.
+score_time_min: 0.02
+
+# Upper continuous base-time bound, before DMD2Program's per-modality shifts.
+score_time_max: 0.98
 
 # Lower score sigma bound.
 score_sigma_min: 0.02

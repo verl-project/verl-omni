@@ -590,6 +590,9 @@ distillation:
   scheduler: inline
 dmd:
   _target_: verl_omni.workers.config.DiffusionDMDConfig
+  num_inference_steps: 4
+  modality_shifts: {}
+  modality_weights: {}
   fake_update_ratio: 2
   student_micro_batch_size_per_gpu: 1
   fake_score_micro_batch_size_per_gpu: 1
@@ -611,6 +614,8 @@ dmd:
   normalization_epsilon: 1.0e-06
   rollout_timestep_shift: 3.0
   score_discrete_steps: 1000
+  score_time_min: 0.02
+  score_time_max: 0.98
   score_sigma_min: 0.02
   score_sigma_max: 0.98
   score_timestep_shift: 3.0
