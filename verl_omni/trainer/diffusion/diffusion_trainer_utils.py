@@ -41,24 +41,27 @@ OLD_POLICY_DECAY_SCHEDULES = {
     "copy": (0, 0.0, 0.0),
     "linear_to_0_3": (0, 0.001, 0.3),
     "linear_to_0_5": (0, 0.001, 0.5),
+    "linear_from_0_25_to_0_5": (0, 0.001, 0.5),
     "delayed_linear_to_0_999": (75, 0.0075, 0.999),
 }
 
 
 def old_policy_decay(step: int, schedule: str) -> float:
-    """Return the old-policy LoRA EMA decay for a named DiffusionNFT schedule.
+    """Return the LoRA EMA decay for a named forward-process policy schedule.
 
     The decay is used as ``old <- decay * old + (1 - decay) * current`` when refreshing
     the rollout adapter. The schedules mirror the reference DiffusionNFT ``return_decay``
     helper: ``copy`` hard-copies the current adapter, ``linear_to_0_5`` ramps from 0 to
     0.5 (``linear_to_0_3``, the DGPO reference EMA, stops at 0.3), and
     ``delayed_linear_to_0_999`` waits 75 steps before ramping to 0.999.
+    CRD's ``linear_from_0_25_to_0_5`` starts at 0.25 and ramps by 0.001 per step.
     """
     if schedule in OLD_POLICY_DECAY_SCHEDULES:
         warmup_steps, ramp_rate, max_decay = OLD_POLICY_DECAY_SCHEDULES[schedule]
     else:
         raise ValueError(f"Unsupported old_policy_decay_schedule: {schedule}")
-    return 0.0 if step < warmup_steps else min((step - warmup_steps) * ramp_rate, max_decay)
+    initial_decay = 0.25 if schedule == "linear_from_0_25_to_0_5" else 0.0
+    return 0.0 if step < warmup_steps else min(initial_decay + (step - warmup_steps) * ramp_rate, max_decay)
 
 
 def track_nonfinite_grad_streak(streak: int, grad_norm: Optional[float]) -> int:

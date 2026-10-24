@@ -94,6 +94,8 @@ actor_rollout_ref:
       kl_mask_threshold: 1.0e-05
       add_kl_coefficient: true
       dgpo_beta: 100.0
+      crd_beta: 1.0
+      crd_kl_min: 0.0
       dgpo_clip_range: 0.01
       video_weight: 1.0
       audio_weight: 1.0
@@ -323,6 +325,7 @@ actor_rollout_ref:
       true_cfg_scale: 1.0
       max_sequence_length: 512
       guidance_scale: null
+      reference_guidance_scale: 4.5
       reference_image_short_edge: null
       num_frames: 1
       frame_rate: 24.0
@@ -407,6 +410,7 @@ actor_rollout_ref:
       true_cfg_scale: ${oc.select:actor_rollout_ref.rollout.pipeline.true_cfg_scale,1.0}
       max_sequence_length: ${oc.select:actor_rollout_ref.rollout.pipeline.max_sequence_length,512}
       guidance_scale: ${oc.select:actor_rollout_ref.rollout.pipeline.guidance_scale,null}
+      reference_guidance_scale: 4.5
       reference_image_short_edge: ${oc.select:actor_rollout_ref.rollout.pipeline.reference_image_short_edge,null}
       num_frames: ${oc.select:actor_rollout_ref.rollout.pipeline.num_frames,1}
       frame_rate: ${oc.select:actor_rollout_ref.rollout.pipeline.frame_rate,24.0}
@@ -627,6 +631,9 @@ algorithm:
   old_policy_decay_schedule: copy
   old_policy_decay: null
   old_policy_update_interval: 1
+  reference_policy_decay_schedule: linear_from_0_25_to_0_5
+  reference_policy_decay: null
+  reference_policy_update_interval: 1
   timestep_fraction: 1.0
   train_timestep_range: null
   train_timestep_count: null

@@ -253,9 +253,14 @@ class PolicyGradientDiffusionTrainerV1(ABC):
     def init(self):
         """Initialize workers, rollout server, reward loop, checkpoint engine."""
         self._setup()
+        self.on_init_end()
+
+    def _initialize_policy_adapters(self):
+        """Initialize snapshots before checkpoint restoration can replace them."""
         if self._has_old_adapter:
             self.actor_rollout_wg.copy_adapter(source="default", target="old")
-        self.on_init_end()
+        if "moving_reference" in resolve_lora_config(self.config.actor_rollout_ref.model).adapters:
+            self.actor_rollout_wg.copy_adapter(source="default", target="moving_reference")
 
     def _rollout_server_managers(self) -> list:
         """LLM server managers whose inference engines take part in rollout profiling.
@@ -698,8 +703,16 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         return DataProto.from_tensordict(tu.get_tensordict(ref_output))
 
     def _update_old_policy(self) -> tuple[bool, float, str]:
-        """Refresh the NFT old-policy adapter (copy or EMA)."""
+        """Refresh the sampling adapter and any independently configured moving reference."""
         algo_cfg = self.config.algorithm
+        if "moving_reference" in resolve_lora_config(self.config.actor_rollout_ref.model).adapters:
+            if self.global_steps % algo_cfg.reference_policy_update_interval == 0:
+                reference_decay = algo_cfg.reference_policy_decay
+                if reference_decay is None:
+                    reference_decay = old_policy_decay(self.global_steps, algo_cfg.reference_policy_decay_schedule)
+                self.actor_rollout_wg.ema_update_adapter(
+                    source="default", target="moving_reference", decay=reference_decay
+                )
         if self.global_steps % algo_cfg.old_policy_update_interval != 0:
             return False, 0.0, "none"
 
@@ -826,6 +839,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         actor_rollout_resource_pool = self._init_colocated_workers()
         self._init_online_rollout_stack(actor_rollout_resource_pool)
         self.checkpoint_manager.sleep_replicas()
+        self._initialize_policy_adapters()
         self._load_checkpoint()
 
         logger.info("diffusion v1 trainer initialized, ready to fit")

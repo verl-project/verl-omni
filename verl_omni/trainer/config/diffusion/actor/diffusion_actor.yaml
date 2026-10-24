@@ -56,6 +56,12 @@ diffusion_loss:
   # DGPO inverse temperature of the group-level preference weight
   dgpo_beta: 100.0
 
+  # CRD implicit reward scale.
+  crd_beta: 1.0
+
+  # Minimum reward-adaptive pretrained-reference coefficient.
+  crd_kl_min: 0.0
+
   # DGPO clip range on the old-policy denoising-loss ratio; 0 disables clipping
   dgpo_clip_range: 0.01
 

@@ -93,7 +93,7 @@ def test_omni_nft_trainer_rejects_timestep_staging(actor_config):
 @pytest.mark.parametrize("key,value", [("train_timestep_range", [0, 2]), ("train_timestep_count", 2)])
 def test_omni_nft_retains_base_trainer_validation(key, value):
     config = OmegaConf.create({"algorithm": {key: value}, "actor_rollout_ref": {"actor": {}}})
-    with pytest.raises(ValueError, match=f"algorithm.{key} is only used by the dgpo loss"):
+    with pytest.raises(ValueError, match=f"algorithm.{key} is only used by the dgpo and crd losses"):
         diffusion_algos.get_diffusion_loss_fn("omni_nft").validate_trainer_config(config)
 
 

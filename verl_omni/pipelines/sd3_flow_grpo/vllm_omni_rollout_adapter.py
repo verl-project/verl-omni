@@ -176,6 +176,9 @@ class StableDiffusion3PipelineWithLogProb(SD3TokenIdPromptMixin, StableDiffusion
       entirely, halving the transformer NFE).
     """
 
+    # Forward-process anchors may require negative conditioning even with unguided sampling.
+    always_encode_negative_prompt = False
+
     supports_request_batch = True
     #: Also return the final latents as ``latents_clean`` when the output type is not ``both``.
     emit_clean_latents = False
@@ -437,7 +440,7 @@ class StableDiffusion3PipelineWithLogProb(SD3TokenIdPromptMixin, StableDiffusion
             )
         negative_prompt_embeds = None
         negative_pooled_prompt_embeds = None
-        if do_cfg:
+        if do_cfg or self.always_encode_negative_prompt:
             if negative_extra_prompt_ids is not None:
                 negative_prompt_embeds, negative_pooled_prompt_embeds = self.encode_prompt_from_token_ids(
                     clip_prompt_ids=negative_extra_prompt_ids[SD3_CLIP_TOKENS_KEY],

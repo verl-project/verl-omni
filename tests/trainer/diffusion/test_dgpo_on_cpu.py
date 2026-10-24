@@ -604,7 +604,7 @@ def test_dgpo_trainer_config_requires_whole_groups(overrides, message):
 
 def test_other_losses_reject_the_dgpo_timestep_knobs():
     config = make_trainer_config(**{"algorithm.train_timestep_count": 4})
-    with pytest.raises(ValueError, match="only used by the dgpo loss"):
+    with pytest.raises(ValueError, match="only used by the dgpo and crd losses"):
         get_diffusion_loss_fn("diffusion_nft").validate_trainer_config(config)
     get_diffusion_loss_fn("diffusion_nft").validate_trainer_config(make_trainer_config())
 

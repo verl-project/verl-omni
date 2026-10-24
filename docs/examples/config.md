@@ -67,12 +67,15 @@ algorithm:
 - `algorithm.adv_estimator`: Advantage estimator name; defaults to `actor_rollout_ref.model.algorithm` (e.g. `flow_grpo`).
 - `algorithm.norm_adv_by_std_in_grpo`: Normalize advantages by within-group std (GRPO-style).
 - `algorithm.global_std`: Use a global (cross-group) std for advantage normalization.
-- `algorithm.old_policy_decay_schedule`: DiffusionNFT/DGPO old-policy EMA schedule. One of `copy`, `linear_to_0_5`, `linear_to_0_3`, `delayed_linear_to_0_999`.
+- `algorithm.old_policy_decay_schedule`: DiffusionNFT/DGPO/CRD sampling-policy EMA schedule. One of `copy`, `linear_to_0_5`, `linear_to_0_3`, `linear_from_0_25_to_0_5`, `delayed_linear_to_0_999`.
 - `algorithm.old_policy_decay`: Fixed old-policy EMA decay in `[0, 1]`. When set, overrides `old_policy_decay_schedule`.
-- `algorithm.old_policy_update_interval`: DiffusionNFT optimizer steps between old-policy adapter refreshes (must be `> 0`).
+- `algorithm.old_policy_update_interval`: Trainer updates between sampling-policy adapter refreshes (must be `> 0`).
+- `algorithm.reference_policy_decay_schedule`: Independent EMA schedule for CRD's `moving_reference` adapter (default `linear_from_0_25_to_0_5`).
+- `algorithm.reference_policy_decay`: Optional fixed moving-reference decay in `[0, 1]`.
+- `algorithm.reference_policy_update_interval`: Trainer updates between moving-reference refreshes.
 - `algorithm.timestep_fraction`: Fraction of rollout timesteps used for forward-process training, in `(0, 1]`.
-- `algorithm.train_timestep_range`: DGPO only. Rollout schedule indices `[start, end)` that training timesteps are drawn from; `null` uses the whole schedule.
-- `algorithm.train_timestep_count`: DGPO only. Number of schedule indices drawn per step and shared by the batch; `null` applies `timestep_fraction`.
+- `algorithm.train_timestep_range`: DGPO/CRD. Rollout schedule indices `[start, end)` that training timesteps are drawn from; `null` uses the whole schedule.
+- `algorithm.train_timestep_count`: DGPO/CRD. Number of schedule indices drawn per step and shared by the batch; `null` applies `timestep_fraction`.
 - `algorithm.adv_mode`: Advantage mapping before reward-probability scaling. One of `continuous`, `positive_only`, `negative_only`, `one_only`, `binary`.
 - `algorithm.paired_preference`: `true` for pair-based algorithms (e.g. offline DPO); doubles actor batch size and disables shuffle.
 - `algorithm.rollout_correction.*`: Experimental IS / RS correction. Schema mirrors upstream verl; see {doc}`../algo/rollout_correction` and [verl Rollout Correction](https://verl.readthedocs.io/en/latest/algo/rollout_corr.html).
@@ -260,6 +263,9 @@ actor_rollout_ref:
 - `actor_rollout_ref.actor.diffusion_loss.ref_kl_coef`: DiffusionNFT prediction-space reference MSE coefficient.
 - `actor_rollout_ref.actor.diffusion_loss.adaptive_weight_min`: DiffusionNFT minimum adaptive denominator for x0 reconstruction losses (must be `> 0`).
 - `actor_rollout_ref.actor.diffusion_loss.dpo_beta`: DPO inverse temperature for pairwise flow-matching preference loss.
+- `actor_rollout_ref.actor.diffusion_loss.crd_beta`: CRD implicit reward scale (finite, positive; default `1.0`).
+- `actor_rollout_ref.actor.diffusion_loss.crd_kl_min`: Minimum reward-adaptive anchor coefficient, between zero and `ref_kl_coef`.
+- `actor_rollout_ref.model.pipeline.reference_guidance_scale`: CRD pretrained-anchor CFG, independent of sampling CFG (default `4.5`).
 - `actor_rollout_ref.actor.diffusion_loss.dgpo_beta`: DGPO β in the group preference score (must be `> 0`).
 - `actor_rollout_ref.actor.diffusion_loss.dgpo_clip_range`: DGPO old-policy ratio clip range; `0` disables clipping (must be `>= 0`).
 - `actor_rollout_ref.actor.diffusion_loss.kl_mask_threshold`: Flow-DPPO divergence threshold for masking high-KL updates (must be `> 0`).
