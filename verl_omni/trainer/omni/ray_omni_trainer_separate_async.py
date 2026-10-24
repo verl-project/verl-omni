@@ -21,6 +21,7 @@ from verl.utils.config import omega_conf_to_dataclass
 from verl.workers.rollout.llm_server import LLMServerManager
 from verl.workers.rollout.utils import update_prometheus_config
 
+from verl_omni.trainer.omni.proximal_actor_reuse import ProximalActorReuseMixin
 from verl_omni.trainer.omni.trainer_base import OmniPPOTrainer
 from verl_omni.workers.checkpoint_engine import OmniCheckpointEngineManager
 from verl_omni.workers.config import OmniModelConfig
@@ -28,7 +29,7 @@ from verl_omni.workers.omni_engine_workers import OmniDetachActorWorker
 
 
 @register_trainer("omni_separate_async")
-class OmniPPOTrainerSeparateAsync(OmniPPOTrainer, PPOTrainerSeparateAsync):
+class OmniPPOTrainerSeparateAsync(ProximalActorReuseMixin, OmniPPOTrainer, PPOTrainerSeparateAsync):
     """``PPOTrainerSeparateAsync`` with omni tokenizer/processor wiring and LoRA-aware weight sync."""
 
     def __init__(self, config):
