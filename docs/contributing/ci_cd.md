@@ -1,6 +1,6 @@
 # CI/CD Layers
 
-Last updated: 08/04/2026.
+Last updated: 09/14/2026.
 
 VeRL-Omni uses layered CI/CD checks so fast CPU feedback and expensive GPU or convergence validation can evolve independently.
 
@@ -9,10 +9,11 @@ VeRL-Omni uses layered CI/CD checks so fast CPU feedback and expensive GPU or co
 | L1 CPU API tests | Validate CPU-only APIs, configs, data utilities, adapters, rewards, and unit behavior | Pull requests with `ready-for-ci`, pushes to `main` and release branches | CPU | Required before merge | Pass/fail and coverage artifacts |
 | L2 GPU smoke tests | Validate tiny-random GPU end-to-end training paths | Pull requests with `ready-for-ci`, usually after L1 is green | GPU | Required before merge for GPU-touching changes | Smoke logs and summaries |
 | L3 nightly regression | Detect numerical drift and performance regressions | Scheduled or manual | Fixed GPU runners | Nightly regression signal | Metrics and baseline comparisons |
-| L4 convergence tests | Validate real recipe convergence | Weekly, release candidate, or manual | Production GPU cluster | Release readiness gate | Reward/loss curves and convergence reports |
+| L4 convergence tests | Real-recipe precision: train-infer gap, finite grad, 100-step val reward floor | `workflow_dispatch` (8-GPU) or PR label `L4-npu-ci` (8-NPU) | Dynamic `L20x8` (GPU), static `linux-aarch64-a2b4-8` (NPU) | Release-readiness signal, not a PR merge gate | `report.json` (gates + recorded perf), `metrics.jsonl`, console logs |
 
 L3 has one runnable scheduled workflow for the Qwen-Image FlowGRPO
-single-sample regression. L4 remains a planned layer.
+single-sample regression. L4 has runnable local/cluster scripts and a GitHub
+Actions workflow (`.github/workflows/l4_convergence.yml`) for the SD3.5 OCR LoRA v1 recipes.
 
 ## L1 CPU API Tests
 
@@ -73,9 +74,78 @@ should be treated as a regression signal rather than a required merge gate.
 
 ## L4 Convergence Tests
 
-L4 validates production-like recipes with real weights and real datasets. These checks are release-focused and should compare convergence curves against reviewed baselines.
+L4 validates production-like recipes with real weights and real datasets. It
+is release-focused and is **not** a replacement for L1 or L2.
 
-L4 is not a replacement for L1 or L2. A recipe can converge while an API regression still exists, and a unit test can pass while a long-running recipe no longer converges.
+L4 does **not** compare against a stored baseline and does **not** fail on
+throughput or step time. Those numbers are recorded for humans to inspect.
+
+### Current runnable cases
+
+#### SD3.5 OCR LoRA v1
+
+`tests/convergence/sd35_medium_ocr_lora_v1/` wraps
+`examples/flowgrpo_trainer/sd35/run_sd35_medium_ocr_lora_v1.sh` for an 8-GPU
+(6 actor+rollout, 2 reward) Route-A sync LoRA OCR job: TP-sharded rollout/reward,
+FSDP offload, `train_batch_size=16`, `rollout.n=16`, and the same train-infer
+and grad gates. Validation runs every 20 steps and on the last step.
+
+```bash
+bash tests/convergence/run_l4_convergence.sh sd35_medium_ocr_lora_v1
+```
+
+Defaults (the launcher exports `MODEL_PATH`, `REWARD_MODEL_PATH`, and
+`OCR_RAW_DIR`; running the case script directly falls back to the values below):
+
+- Policy: `stabilityai/stable-diffusion-3.5-medium` (`MODEL_PATH`)
+- Reward: `Qwen/Qwen2.5-VL-3B-Instruct` (`REWARD_MODEL_PATH`)
+- Data: `${OCR_DATA_DIR}/{train,test}.parquet` with `OCR_DATA_DIR=${OCR_RAW_DIR}/sd3`
+- `OCR_RAW_DIR` defaults to `$WORKSPACE/data/ocr` (`WORKSPACE` defaults to
+  `$HOME`); missing parquet is regenerated from `${OCR_RAW_DIR}/{train,test}.txt`
+- `VAL_REWARD_MIN` defaults to `0.8`.
+
+Gate logic lives in `collect_report.py`.
+
+### What is gated
+
+| Gate | Metric | Fail when |
+| --- | --- | --- |
+| Train-infer consistency | `training/rollout_probs_diff_mean` if present, else `rollout_corr/logprob_abs_diff_mean` | missing, non-finite, or any post-warmup step **> 1e-4** |
+| Grad | `actor/grad_norm` | NaN / Inf |
+| Val reward at step 100 | `val-core/*/reward/mean@*` | missing, or any source **< `VAL_REWARD_MIN`** (default **0.8**) |
+
+`perf/time_per_step` and related `timing_s/*` keys are copied into
+`report.json` under `"perf"` with no pass/fail.
+
+`metrics.json` records per-step training loss (`actor/loss/mean` or `actor/loss`)
+and `val-core/*/reward/mean@*` at each `test_freq` step. `metrics.jsonl` is the
+raw trainer log dump used to build both files.
+
+### Run in CI
+
+The workflow is `.github/workflows/l4_convergence.yml`. Trigger it in either
+way:
+
+- **Manual (GPU):** GitHub Actions → `l4_convergence` → **Run workflow** →
+  choose `all` or `sd35_medium_ocr_lora_v1`; enable **run_npu** to also run on
+  Ascend NPU.
+- **Pull request (NPU):** apply the `L4-npu-ci` label. The workflow runs every
+  case registered in `tests/convergence/run_l4_convergence.sh` on the static
+  8-NPU runner (`linux-aarch64-a2b4-8`, image
+  `swr.cn-north-4.myhuaweicloud.com/mindspeed/pr-verl-omni-a2:v010-vllm030-omni030`).
+
+Each case requires **8 accelerators**. The GPU job runs on a dynamic `L20x8`
+runner; the NPU job runs with `DEVICE=npu` and sources CANN from
+`${ASCEND_HOME_PATH:-/usr/local/Ascend/ascend-toolkit/latest}`. When multiple
+cases are selected, they run sequentially on the same machine.
+
+After every run (pass or fail), the workflow uploads
+`tests/convergence/outputs/l4_convergence/**/*.jsonl` and `**/*.json` as a
+workflow artifact (`l4-convergence-outputs-<run_id>` for GPU,
+`l4-convergence-npu-outputs-<run_id>` for NPU).
+
+Keep L4 off the default pull-request merge path unless a maintainer explicitly
+requests `L4-npu-ci`.
 
 ## Contributor Expectations
 
