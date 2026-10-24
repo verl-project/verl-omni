@@ -95,6 +95,8 @@ actor_rollout_ref:
       add_kl_coefficient: true
       dgpo_beta: 100.0
       dgpo_clip_range: 0.01
+      awm_clip_range: 0.0001
+      awm_kl_coef: 0.1
       video_weight: 1.0
       audio_weight: 1.0
       video_ref_kl_coef: 0.0

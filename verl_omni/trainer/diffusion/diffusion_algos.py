@@ -132,14 +132,14 @@ class DiffusionLossFn(ABC):
     def validate_trainer_config(config: Any) -> None:
         """Fail at trainer start on settings this loss cannot honour.
 
-        Called by the direct-preference trainers at start. Only DGPO consumes ``algorithm.train_timestep_range``
-        and ``algorithm.train_timestep_count``, so the other direct-preference losses reject them instead of
-        silently ignoring them.
+        Called by the direct-preference trainers at start. Only DGPO and AWM consume
+        ``algorithm.train_timestep_range`` and ``algorithm.train_timestep_count``, so the other direct-preference
+        losses reject them instead of silently ignoring them.
         """
         algorithm_cfg = config.algorithm
         for key in ("train_timestep_range", "train_timestep_count"):
             if getattr(algorithm_cfg, key, None) is not None:
-                raise ValueError(f"algorithm.{key} is only used by the dgpo loss.")
+                raise ValueError(f"algorithm.{key} is only used by the dgpo and awm losses.")
 
 
 DIFFUSION_LOSS_REGISTRY: dict[str, DiffusionLossFn] = {}
@@ -1516,11 +1516,12 @@ class DGPOLoss(DiffusionLossFn):
     def validate_trainer_config(config: Any) -> None:
         """Fail at trainer start on configs DGPO cannot train, instead of after the first rollout.
 
-        Each rank receives a contiguous ``batch * n / dp`` slice of the update batch and of every mini batch and
-        cuts it into contiguous micro batches, so groups stay whole only when every division is exact in units
-        of ``n``. The loss also needs the LoRA ``old`` adapter for rollout and the reference forward, complete
-        groups from the v1 sampler, the unstaged NFT engine path, and training timesteps that fit the rollout
-        schedule.
+        ``actor_rollout_ref.model.algorithm`` selects the rollout and training adapters, so it must name ``dgpo``
+        when this loss is selected. Each rank receives a contiguous ``batch * n / dp`` slice of the update batch
+        and of every mini batch and cuts it into contiguous micro batches, so groups stay whole only when every
+        division is exact in units of ``n``. The loss also needs the LoRA ``old`` adapter for rollout and the
+        reference forward, complete groups from the v1 sampler, the unstaged NFT engine path, and training
+        timesteps that fit the rollout schedule.
         """
         actor_cfg = config.actor_rollout_ref.actor
         model_cfg = config.actor_rollout_ref.model
@@ -1535,6 +1536,11 @@ class DGPOLoss(DiffusionLossFn):
             mode = OmegaConf.select(config, "trainer.v1.trainer_mode", default="sync")
             update_prompts //= int(OmegaConf.select(config, f"trainer.v1.{mode}.parameter_sync_step", default=1) or 1)
         problems = []
+        if model_cfg.get("algorithm", None) != "dgpo":
+            problems.append(
+                "actor_rollout_ref.model.algorithm must be dgpo when diffusion_loss.loss_mode is dgpo, got "
+                f"{model_cfg.get('algorithm', None)}"
+            )
         if micro is None or int(micro) % n != 0:
             problems.append(f"ppo_micro_batch_size_per_gpu={micro} must be a multiple of rollout.n={n}")
         if int(actor_cfg.ppo_mini_batch_size) % dp_size != 0:
@@ -1662,6 +1668,196 @@ class DGPOLoss(DiffusionLossFn):
         batch.batch["group_index"] = group_index
         batch.batch["group_size"] = group_size
         batch.batch["advantages"] = advantages[:, None].expand(-1, num_steps)
+        batch.batch["returns"] = batch.batch["advantages"]
+        batch.batch["sample_level_rewards"] = reward_tensor[:, None].expand(-1, num_steps)
+        return batch
+
+
+@register_diffusion_loss("awm")
+class AWMLoss(DiffusionLossFn):
+    """Advantage Weighted Matching (Xue et al., arXiv:2509.25050).
+
+    Each rollout sample's clean latent is re-noised at a forward timestep and its flow-matching
+    error ``dsm_i = mean(||(noise - x0^i) - v_theta(x_t^i)||^2)`` stands in for ``-log pi_theta(x^i)``.
+    With the rollout (``old``) adapter error ``old_dsm_i`` and the GRPO group advantage ``A_i``::
+
+        ratio_i = exp(old_dsm_i - dsm_i)
+        loss = mean_i( max(-A_i * ratio_i, -A_i * clip(ratio_i, 1 - eps, 1 + eps)) )
+               + awm_kl_coef * mean(||v_theta - v_old||^2) + ref_kl_coef * mean(||v_theta - v_ref||^2)
+
+    The ``old`` adapter is the EMA of the trained adapter (``algorithm.old_policy_decay`` or
+    ``old_policy_decay_schedule``), so the ``awm_kl_coef`` term is the paper's velocity-space KL to an
+    EMA copy of the policy. Under the default ``copy`` schedule ``old == default`` when a step starts,
+    so the first ``ppo_epochs`` pass is the on-policy advantage-weighted flow-matching update and the
+    ratio and KL only act on later passes. Training timesteps are shared across the batch and drawn
+    from ``algorithm.train_timestep_range`` / ``train_timestep_count`` / ``timestep_fraction`` exactly
+    as for DGPO; the forward noise is drawn per sample by the engine. Timestep weighting ``w(t)`` is
+    uniform (``w(t) = 1``).
+    """
+
+    uses_old_adapter = True
+    required_model_output_keys = (
+        "forward_prediction",
+        "old_prediction",
+        "ref_forward_prediction",
+        "x0",
+        "xt",
+        "t_expanded",
+    )
+    required_data_keys = ("advantages",)
+
+    @classmethod
+    def compute_loss(
+        cls,
+        *,
+        forward_prediction: torch.Tensor,
+        old_prediction: torch.Tensor,
+        ref_forward_prediction: torch.Tensor,
+        x0: torch.Tensor,
+        xt: torch.Tensor,
+        t_expanded: torch.Tensor,
+        advantages: torch.Tensor,
+        config: DiffusionActorConfig,
+    ) -> tuple[torch.Tensor, dict[str, Any]]:
+        """Compute the AWM clipped surrogate plus the EMA and reference velocity regularizers."""
+        loss_cfg = config.diffusion_loss
+        reduce_dims = tuple(range(1, x0.ndim))
+        # xt = (1 - t) * x0 + t * noise, so the flow-matching target noise - x0 is (xt - x0) / t.
+        target = ((xt.float() - x0.float()) / t_expanded.float()).detach()
+        advantages = advantages.to(device=x0.device, dtype=torch.float32)
+        if advantages.ndim > 1:
+            advantages = advantages.flatten(1).mean(dim=1)
+        advantages = advantages.clamp(-loss_cfg.adv_clip_max, loss_cfg.adv_clip_max)
+        old_prediction = old_prediction.detach().float()
+        ref_forward_prediction = ref_forward_prediction.detach().float()
+
+        dsm = ((target - forward_prediction.float()) ** 2).mean(dim=reduce_dims)
+        with torch.no_grad():
+            old_dsm = ((target - old_prediction) ** 2).mean(dim=reduce_dims)
+        ratio = torch.exp(old_dsm - dsm)
+        clip_range = loss_cfg.awm_clip_range
+        if clip_range > 0:
+            clipped_ratio = ratio.clamp(1.0 - clip_range, 1.0 + clip_range)
+            policy_loss = torch.maximum(-advantages * ratio, -advantages * clipped_ratio).mean()
+        else:
+            policy_loss = (-advantages * ratio).mean()
+        ema_kl_loss = ((forward_prediction.float() - old_prediction) ** 2).mean()
+        ref_kl_loss = ((forward_prediction.float() - ref_forward_prediction) ** 2).mean()
+        loss = policy_loss + loss_cfg.awm_kl_coef * ema_kl_loss + loss_cfg.ref_kl_coef * ref_kl_loss
+
+        with torch.no_grad():
+            # Samples whose surrogate is the clipped constant, i.e. that receive no policy gradient.
+            if clip_range > 0:
+                should_clip = torch.where(advantages > 0, ratio > 1.0 + clip_range, ratio < 1.0 - clip_range)
+            else:
+                should_clip = torch.zeros_like(ratio, dtype=torch.bool)
+            metrics = {
+                "actor/policy_loss": policy_loss.item(),
+                "actor/dsm_loss": dsm.mean().item(),
+                "actor/old_dsm_loss": old_dsm.mean().item(),
+                "actor/ratio_mean": ratio.mean().item(),
+                "actor/clip_frac": should_clip.float().mean().item(),
+                "actor/ema_kl_loss": ema_kl_loss.item(),
+                "actor/ref_kl_loss": ref_kl_loss.item(),
+                "actor/total_loss": loss.item(),
+            }
+        return loss, metrics
+
+    def __call__(
+        self,
+        *,
+        config: DiffusionActorConfig,
+        model_output: dict[str, Any],
+        data: TensorDict,
+    ) -> DiffusionLossResult:
+        """Compute the AWM loss from the engine's model output and the per-step batch tensors."""
+        loss, metrics = self.compute_loss(
+            forward_prediction=model_output["forward_prediction"],
+            old_prediction=model_output["old_prediction"],
+            ref_forward_prediction=model_output["ref_forward_prediction"],
+            x0=model_output["x0"],
+            xt=model_output["xt"],
+            t_expanded=model_output["t_expanded"],
+            advantages=data["advantages"],
+            config=config,
+        )
+        return DiffusionLossResult(loss=loss, metrics=metrics)
+
+    @staticmethod
+    def validate_trainer_config(config: Any) -> None:
+        """Fail at trainer start without the LoRA ``old`` adapter, with timestep staging, or a bad timestep window.
+
+        ``actor_rollout_ref.model.algorithm`` selects the rollout and training adapters, so it must name ``awm``
+        when this loss is selected. The staged NFT engine path expects a per-step ``reward_prob`` tensor that
+        AWM does not produce.
+        """
+        actor_cfg = config.actor_rollout_ref.actor
+        model_cfg = config.actor_rollout_ref.model
+        rollout_cfg = config.actor_rollout_ref.rollout
+        problems = []
+        if model_cfg.get("algorithm", None) != "awm":
+            problems.append(
+                "actor_rollout_ref.model.algorithm must be awm when diffusion_loss.loss_mode is awm, got "
+                f"{model_cfg.get('algorithm', None)}"
+            )
+        if not int(model_cfg.get("lora_rank", 0) or 0) > 0:
+            problems.append("actor_rollout_ref.model.lora_rank must be > 0 (AWM trains LoRA adapters)")
+        if "old" not in tuple(model_cfg.get("policy_state_adapters", ("default",))):
+            problems.append('actor_rollout_ref.model.policy_state_adapters must include "old"')
+        if rollout_cfg.get("rollout_adapter", None) != "old":
+            problems.append("actor_rollout_ref.rollout.rollout_adapter must be old")
+        if actor_cfg.get("use_kl_loss", False):
+            problems.append("actor_rollout_ref.actor.use_kl_loss must be False (use diffusion_loss.ref_kl_coef)")
+        if actor_cfg.get("enable_timestep_staging", False):
+            problems.append("actor_rollout_ref.actor.enable_timestep_staging must be False")
+        num_steps = OmegaConf.select(rollout_cfg, "pipeline.num_inference_steps", default=None)
+        timestep_range = OmegaConf.select(config, "algorithm.train_timestep_range", default=None)
+        count = OmegaConf.select(config, "algorithm.train_timestep_count", default=None)
+        if num_steps is not None:
+            num_steps = int(num_steps)
+            if timestep_range is None:
+                start, end = 0, num_steps
+            elif len(timestep_range) == 2:
+                start, end = int(timestep_range[0]), int(timestep_range[1])
+            else:
+                start, end = 0, 0
+            if not 0 <= start < end <= num_steps:
+                problems.append(f"train_timestep_range {timestep_range} must satisfy 0 <= start < end <= {num_steps}")
+            elif count is not None and not 1 <= int(count) <= end - start:
+                problems.append(f"train_timestep_count={count} must be between 1 and {end - start}, the range width")
+        if problems:
+            raise ValueError("AWM config is not supported: " + "; ".join(problems) + ".")
+
+    @staticmethod
+    def prepare_actor_batch(
+        batch: DataProto,
+        reward_tensor: torch.Tensor,
+        config: Any,
+    ) -> DataProto:
+        """Turn ODE rollouts into AWM actor tensors: GRPO group advantages and shared training timesteps."""
+        algorithm_cfg = config.algorithm
+        if "uid" not in batch.non_tensor_batch:
+            raise ValueError("AWM actor batch requires `uid` in non_tensor_batch.")
+        if "latents_clean" not in batch.batch.keys():
+            raise ValueError("AWM actor batch requires `latents_clean` from rollout.")
+        timestep_key = next((key for key in ("train_timesteps", "all_timesteps") if key in batch.batch.keys()), None)
+        if timestep_key is None:
+            raise ValueError("AWM actor batch requires `train_timesteps` or `all_timesteps` from rollout.")
+        advantages, _ = compute_flow_grpo_outcome_advantage(
+            reward_tensor.float().view(-1, 1),
+            index=batch.non_tensor_batch["uid"],
+            norm_adv_by_std_in_grpo=algorithm_cfg.norm_adv_by_std_in_grpo,
+            global_std=algorithm_cfg.global_std,
+        )
+        train_timesteps = DGPOLoss._select_shared_timesteps(
+            batch.batch[timestep_key],
+            timestep_range=getattr(algorithm_cfg, "train_timestep_range", None),
+            count=getattr(algorithm_cfg, "train_timestep_count", None),
+            timestep_fraction=algorithm_cfg.timestep_fraction,
+        )
+        num_steps = train_timesteps.shape[1]
+        batch.batch["train_timesteps"] = train_timesteps
+        batch.batch["advantages"] = advantages.expand(-1, num_steps)
         batch.batch["returns"] = batch.batch["advantages"]
         batch.batch["sample_level_rewards"] = reward_tensor[:, None].expand(-1, num_steps)
         return batch

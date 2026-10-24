@@ -59,6 +59,12 @@ diffusion_loss:
   # DGPO clip range on the old-policy denoising-loss ratio; 0 disables clipping
   dgpo_clip_range: 0.01
 
+  # AWM PPO-style clip range on the old-policy flow-matching ratio exp(old_dsm - dsm); 0 disables clipping
+  awm_clip_range: 1e-4
+
+  # AWM coefficient of the velocity-space KL toward the EMA (old) adapter
+  awm_kl_coef: 0.1
+
   # OmniNFT video loss weight
   video_weight: 1.0
 
