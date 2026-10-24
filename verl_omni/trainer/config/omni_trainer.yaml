@@ -14,6 +14,16 @@ defaults:
   - agentic/image_gen_tools@agentic_image_gen
   - _self_
 
+# Dataset / agent-loop data config.
+data:
+
+  # Required by verl AgentLoopBase (struct access). Disabled for Bagel Co-RL (Joint-Training) UND/GEN.
+  continuous_token:
+
+    enable: false
+
+    model_family: auto
+
 # Config for actor, rollout and reference model.
 actor_rollout_ref:
 
@@ -71,6 +81,9 @@ trainer:
 
     # Use the omni trainer mode for omni models.
     trainer_mode: omni_sync
+
+    # Bagel UND+GEN Co-RL (Joint-Training) (PR1 serial gather, one composite optimizer step).
+    bagel_corl_sync: {}
 
 
 # Config for the algorithm.

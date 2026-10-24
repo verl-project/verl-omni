@@ -11,17 +11,17 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Fallback client that asks the frozen vision judge for image scores.
+"""HTTP client for the frozen image-judge sidecar (reward C/A fallback).
 
-Scores normally come from the ``judge_image`` observations already in the
-trajectory; this client only fills the gap. Knobs come from ``extra_info``; the HTTP
-POST itself lives in ``verl_omni.utils.agentic.vllm_chat``.
+Primary C/A comes from trajectory ``agentic_judge`` observations. Knobs come
+from ``extra_info``; HTTP POST lives in ``verl_omni.utils.agentic.vllm_chat``.
 """
 
 from __future__ import annotations
 
 import base64
 import logging
+import re
 from pathlib import Path
 
 from verl_omni.utils.agentic.vllm_chat import post_vllm_chat
@@ -31,6 +31,15 @@ logger = logging.getLogger(__name__)
 
 
 def _normalize_scored(data: dict, *, backend: str) -> dict | None:
+    # ``data`` normally comes from ``parse_judge_json``, which ALWAYS supplies both facets
+    # (``normalize_judge_payload`` returns them in every branch), so the defaults below are
+    # unreachable on that path and this guard is defence for any other caller.
+    #
+    # It is deliberately NOT the explanation for a flat-zero reward: an all-zero payload
+    # legitimately parses to 0.0 and a missing one can never arrive, so those zeros are the
+    # judge's own answers. Check the RM's raw reply before blaming this function.
+    if "correctness" not in data and "aesthetics" not in data:
+        return None
     try:
         correctness = float(data.get("correctness", 0.0))
         aesthetics = float(data.get("aesthetics", 0.0))
@@ -59,6 +68,7 @@ def _normalize_scored(data: dict, *, backend: str) -> dict | None:
         },
         "match": max(0.0, min(1.0, match)),
         "good_enough": bool(data.get("good_enough", False)),
+        "rubber_stamp": bool(data.get("rubber_stamp", False)),
         "findings": str(data.get("findings") or ""),
         "suggested_fixes": str(data.get("suggested_fixes") or "none"),
         "backend": str(data.get("backend") or backend),
@@ -91,6 +101,18 @@ def _call_vllm_openai(
     base_tokens = int(reflect_max_new_tokens)
     max_retries = max(0, int(judge_parse_retries))
 
+    # The frozen judge sidecar used to load ``judge_image_log_middleware``, which rewrote every
+    # incoming ``/chat/completions`` body to force ``chat_template_kwargs.enable_thinking`` off
+    # ("Qwen3.5 burns ``max_tokens`` on CoT and never emits JSON -> parse_ok=0"). Routing at the
+    # reward pool's own router serves the same checkpoint with NO such middleware, so that
+    # guarantee has to live here or the RM silently answers in prose.
+    if judge_enable_thinking:
+        logger.warning(
+            "reflect VLM: forcing enable_thinking=False (the frozen sidecar's middleware did "
+            "this unconditionally; without it Qwen spends the budget on CoT and emits no JSON)"
+        )
+    think = False
+
     for attempt in range(max_retries + 1):
         strict = attempt > 0
         tokens = base_tokens if attempt == 0 else max(base_tokens, 1536)
@@ -101,16 +123,31 @@ def _call_vllm_openai(
             max_tokens=tokens,
             model=vllm_model,
             timeout=float(reflect_vlm_timeout),
-            enable_thinking=bool(judge_enable_thinking),
+            enable_thinking=think,
         )
         if err is not None:
             logger.warning("reflect VLM OpenAI call failed (%s); C/A will be zeroed", err)
             return None
         assert raw_text is not None
+        # Truncated raw head, mirroring the middleware's ``format_judge_parse_fail_line``. The
+        # sidecar used to print this to its tmux pane; without it, a reply that is *prose* and a
+        # reply that is *JSON in another schema* are indistinguishable from the outside -- which
+        # is how a flat-zero reward hid here while every log line said ``ok=1``.
+        raw_head = re.sub(r"\s+", " ", (raw_text or "").strip())[:200]
         parsed = parse_judge_json(raw_text, good_enough_threshold_value=good_enough_threshold)
         if parsed is not None:
-            return _normalize_scored(parsed, backend="vllm")
-        logger.warning("reflect VLM OpenAI unparseable (attempt=%d)", attempt)
+            normalized = _normalize_scored(parsed, backend="vllm")
+            if normalized is not None:
+                return normalized
+            # ``parsed`` succeeded but carried no correctness/aesthetics facet: a schema
+            # mismatch, not a verdict. Say so with the evidence attached.
+            logger.warning(
+                "reflect VLM JSON lacks correctness/aesthetics facets (attempt=%d); raw=%r",
+                attempt,
+                raw_head,
+            )
+            continue
+        logger.warning("reflect VLM OpenAI unparseable (attempt=%d); raw=%r", attempt, raw_head)
     return None
 
 

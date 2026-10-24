@@ -1,0 +1,48 @@
+# Co-RL (Joint-Training) GEN deploy, **tensor-parallel across two cards**.
+#
+# Selected by ``run_agentic_bagel_rpco_lora*.sh`` for a pool of >= 4 cards, where
+# ``ROLLOUT_TP=2``. Reads the same as ``bagel_corl_deploy.yaml`` except for
+# ``devices`` -- keep the two in step apart from that line.
+#
+# Why: with TP=1 each actor rank starts its own GEN server holding the whole ~28.2GiB
+# Bagel checkpoint, and on a 4-card pool those servers share cards with the UND AR
+# stages. Measured on the 2026-09-17 01:43 run, GPU 0 held
+#
+#   actor shard 12.17 + four vLLM-Omni front-ends 2.08 + GEN 28.99 + AR Thinker 35.73
+#   = 78.97GiB of 79.11GiB
+#
+# so the first weight publish died in the LoRA-merge restore path:
+#
+#   restore_base_model_weights -> param.data.copy_(backup[name].to(param.device))
+#   OOM on device 0 while trying to allocate 1090519040 bytes (free: 1012465664)
+#
+# i.e. a 1.016GiB staging copy against 0.943GiB free. Bagel's DiT is tensor-parallel
+# (``MoTQKVParallelLinear`` / ``MoTRowParallelLinear``, heads sharded by
+# ``get_tensor_model_parallel_world_size``, and 32 heads % 2 == 0), so TP=2 splits that
+# checkpoint across both cards of a replica and frees ~14GiB on precisely the two tight
+# cards. It is not a budget knob: ``gpu_memory_utilization`` cannot shrink a full
+# checkpoint, which is why the AR side had to move stages instead.
+#
+# ``devices`` is a per-replica *template* whose length must equal the stage's
+# ``parallel_config.world_size`` (``split_devices_for_replicas`` template mode):
+# ``"0,1"`` yields replica 0 -> 0,1 and replica 1 -> 2,3 on a 4-card pool. A bare
+# ``"0"`` here would leave the second rank of each replica without a device, which is
+# the same class of mis-declaration that once collapsed the UND AR replica onto GPU 0.
+# The recipes read this file back and refuse to launch if it disagrees with
+# ``ROLLOUT_TP``.
+pipeline: bagel_single_stage
+async_chunk: false
+
+stages:
+  - stage_id: 0
+    # Cap far below HF max_position_embeddings (262144) so 1-GPU util~0.18 can init.
+    max_model_len: 2048
+    max_num_batched_tokens: 2048
+    max_num_seqs: 1
+    enforce_eager: true
+    trust_remote_code: true
+    enable_prefix_caching: false
+    # Two entries == TP=2. Requires ROLLOUT_TP=2 (checked by the recipe).
+    devices: "0,1"
+    default_sampling_params:
+      seed: 52

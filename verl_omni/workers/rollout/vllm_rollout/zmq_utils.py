@@ -13,6 +13,31 @@
 # limitations under the License.
 
 
+import os
+
+_VERL_COLOCATE_PREFIX = "ipc:///tmp/rl-colocate-zmq-"
+
+
+def colocate_zmq_handle(job_id: str, replica_rank: int | str, rank: int | str) -> str:
+    """Rank-local IPC handle between a trainer rank and its colocated rollout worker.
+
+    Carries the uid: ``/tmp`` is shared by every user on the node and the first job of any
+    fresh Ray cluster is ``01000000``, so without it another user's stale socket owns our
+    path (``EADDRINUSE``) and the sticky bit stops us from unlinking it.
+    """
+    return f"{_VERL_COLOCATE_PREFIX}u{os.getuid()}-{job_id}-replica-{replica_rank}-rank-{rank}.sock"
+
+
+def namespace_colocate_zmq_handle(handle: str) -> str:
+    """Rewrite a handle built by verl's ``ServerAdapter`` into ``colocate_zmq_handle``'s form."""
+    if not handle.startswith(_VERL_COLOCATE_PREFIX):
+        return handle
+    suffix = handle[len(_VERL_COLOCATE_PREFIX) :]
+    if suffix.startswith(f"u{os.getuid()}-"):
+        return handle
+    return f"{_VERL_COLOCATE_PREFIX}u{os.getuid()}-{suffix}"
+
+
 def make_update_zmq_id(global_steps: int | None, update_seq: int) -> str:
     """Return an id that is unique for each weight update in a worker lifetime."""
     step = "none" if global_steps is None else str(global_steps)

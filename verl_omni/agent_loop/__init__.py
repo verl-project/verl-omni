@@ -19,17 +19,32 @@
 from verl_omni.pipelines.ltx2_flow_grpo.agent_loop import LTX2DiffusionSingleTurnAgentLoop
 from verl_omni.pipelines.minimax_h3_diffusion_nft.agent_loop import MiniMaxH3DiffusionSingleTurnAgentLoop
 
+# Register image_gen_tool_agent from the Hydra-driven loop. The legacy env-var
+# loop in image_gen_tool_agent_loop.py registers the SAME verl registry name and
+# verl's register overwrites silently — import order must not decide which class
+# other jobs get, so only this import may fire on package import.
+from . import tool_agent_loop as _image_gen_tool_agent_loop  # noqa: F401
+from .bagel_corl import BagelMultiturnAgentLoop, MultiturnAgentLoopWorker
+from .bagel_corl_tq import BagelCorlAgentLoopManagerTQ, BagelCorlAgentLoopWorkerTQ
 from .composite_agent_loop import CompositeAgentLoopManager, CompositeAgentLoopWorker
 from .diffusion_agent_loop import DiffusionAgentLoopOutput, DiffusionAgentLoopWorker
 from .diffusion_agent_loop_tq import (
     DiffusionAgentLoopWorkerTQ,
     create_diffusion_agent_loop_manager,
 )
-from .single_turn_agent_loop import CompositeSingleTurnAgentLoop, DiffusionSingleTurnAgentLoop, OmniSingleTurnAgentLoop
+from .single_turn_agent_loop import (
+    CompositeSingleTurnAgentLoop,
+    DiffusionSingleTurnAgentLoop,
+    OmniSingleTurnAgentLoop,
+)
 
 __all__ = [
     "CompositeAgentLoopManager",
     "CompositeAgentLoopWorker",
+    "BagelMultiturnAgentLoop",
+    "MultiturnAgentLoopWorker",
+    "BagelCorlAgentLoopManagerTQ",
+    "BagelCorlAgentLoopWorkerTQ",
     "DiffusionAgentLoopOutput",
     "DiffusionAgentLoopWorker",
     "DiffusionAgentLoopWorkerTQ",

@@ -28,6 +28,7 @@ server_module = pytest.importorskip("verl_omni.workers.rollout.vllm_rollout.vllm
 from verl.workers.rollout.replica import RolloutMode  # noqa: E402
 
 from verl_omni.workers.rollout.vllm_rollout.vllm_omni_async_server import vLLMOmniHttpServer  # noqa: E402
+from verl_omni.workers.rollout.vllm_rollout.vllm_omni_diffusion_strategy import DiffusionStrategy  # noqa: E402
 from verl_omni.workers.rollout.vllm_rollout.vllm_omni_strategy_base import OmniStrategyBase  # noqa: E402
 
 _SUCCESS_ACK = SimpleNamespace(status="SUCCESS")
@@ -524,3 +525,100 @@ async def test_failed_wake_skips_admission_resume():
         await server.wake_up()
 
     assert engine.resumed == 0
+
+
+# ---------------------------------------------------------------------------
+# conditioning-cache flush: only an *enabled* cache may be flushed. The RPC is
+# fatal in the pinned vllm_omni, so a disabled cache must never issue it.
+# ---------------------------------------------------------------------------
+
+
+class _RpcRecordingEngine:
+    """Records ``collective_rpc`` methods and returns a scripted stage result."""
+
+    def __init__(self, results=None):
+        self.rpc_calls: list[str] = []
+        self._results = list(results if results is not None else [{"supported": True}])
+
+    async def collective_rpc(self, method, *args, **kwargs):
+        self.rpc_calls.append(method)
+        return list(self._results)
+
+
+def _make_diffusion_cache_server(engine, *, prompt_embed_cache: bool):
+    """A diffusion-strategy server whose conditioning cache is on or off."""
+    server = _make_server(engine)
+    # object.__new__: the gate only reads isinstance, so no server init is needed.
+    server._generate_strategy = object.__new__(DiffusionStrategy)
+    server.config = SimpleNamespace(free_cache_engine=True, enable_prompt_embed_cache=prompt_embed_cache)
+    return server
+
+
+async def test_disabled_prompt_embed_cache_never_issues_the_flush_rpc():
+    """A cache that was never installed must not be cleared.
+
+    ``trainer.init()`` reaches ``_invalidate_policy_caches`` via ``set_global_steps``, and
+    ``clear_prompt_embed_cache`` cannot be served by the diffusion *worker* -- the method
+    lives on ``DiffusionModelRunner`` and nothing bridges worker -> model_runner -- so
+    ``collective_rpc`` raises inside the stage's ``multiproc_executor`` and the diffusion
+    stage counts it as a fatal init error:
+
+        AttributeError: 'DiffusionWorkerWithvLLMOmniColocateWorkerExtension' object has
+        no attribute 'clear_prompt_embed_cache'
+          -> RuntimeError: Orchestrator initialization failed
+
+    Every launch therefore died at engine init (measured 2026-10-15,
+    ``bagel_corl_prfix_t07_20261015_102119_a1``). With the cache off there is nothing to
+    flush, so no RPC may be issued at all.
+    """
+    engine = _RpcRecordingEngine()
+    server = _make_diffusion_cache_server(engine, prompt_embed_cache=False)
+
+    await server._invalidate_policy_caches()
+
+    assert engine.rpc_calls == [], "a disabled cache has nothing to flush"
+
+
+async def test_enabled_prompt_embed_cache_still_issues_the_flush_rpc():
+    """The gate is the cache flag, not a blanket removal of the R2 flush."""
+    engine = _RpcRecordingEngine()
+    server = _make_diffusion_cache_server(engine, prompt_embed_cache=True)
+
+    await server._invalidate_policy_caches()
+
+    assert engine.rpc_calls == ["clear_prompt_embed_cache"]
+
+
+async def test_unserviceable_flush_rpc_latches_off_but_transient_failure_does_not():
+    """Only a missing-method report may latch the RPC off.
+
+    The engine logs a traceback *before* returning this shape, so the client cannot
+    suppress the first one; it can only stop repeating it. A transient stage failure
+    (engine asleep, replica detached) returns the same ``supported: False`` shape and
+    must keep the flush alive.
+    """
+    missing = [
+        {
+            "supported": False,
+            "error": (
+                "RPC 'clear_prompt_embed_cache' failed on worker rank(s): rank 0: "
+                "AttributeError: 'DiffusionWorkerWithvLLMOmniColocateWorkerExtension' "
+                "object has no attribute 'clear_prompt_embed_cache'"
+            ),
+        }
+    ]
+    engine = _RpcRecordingEngine(results=missing)
+    server = _make_diffusion_cache_server(engine, prompt_embed_cache=True)
+
+    await server._invalidate_policy_caches()
+    await server._invalidate_policy_caches()
+
+    assert engine.rpc_calls == ["clear_prompt_embed_cache"], "the repeat must be skipped"
+
+    transient_engine = _RpcRecordingEngine(results=[{"supported": False, "error": "stage detached"}])
+    transient = _make_diffusion_cache_server(transient_engine, prompt_embed_cache=True)
+
+    await transient._invalidate_policy_caches()
+    await transient._invalidate_policy_caches()
+
+    assert transient_engine.rpc_calls == ["clear_prompt_embed_cache"] * 2

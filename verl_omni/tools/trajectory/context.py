@@ -23,9 +23,17 @@ from .paths import rollout_id_from_relpath
 __all__ = [
     "active_trajectory_relpath",
     "active_user_prompt",
+    "clear_pending_generate_provenance",
+    "consume_pending_generate_provenance",
     "get_active_rollout_id",
+    "get_active_user_prompt",
+    "get_pending_generate_provenance",
+    "merge_pending_generate_provenance",
     "reset_active_trajectory_relpath",
+    "reset_active_user_prompt",
     "set_active_trajectory_relpath",
+    "set_active_user_prompt",
+    "set_pending_generate_provenance",
 ]
 
 # Relative path under the images/trajectories roots.
@@ -85,3 +93,54 @@ def get_active_rollout_id() -> str | None:
     if rid:
         return rid
     return rollout_id_from_relpath(active_trajectory_relpath.get())
+
+
+def set_active_user_prompt(prompt: str | None) -> contextvars.Token:
+    """Bind the dataset user request so ``meta.json`` can record it per call."""
+    return active_user_prompt.set(prompt)
+
+
+def reset_active_user_prompt(token: contextvars.Token) -> None:
+    """Restore the user-prompt binding that preceded ``token``."""
+    active_user_prompt.reset(token)
+
+
+def get_active_user_prompt() -> str | None:
+    """Return the active dataset user request, or ``None`` if unbound."""
+    return active_user_prompt.get()
+
+
+# Optional rewrite provenance written before generate_image executes.
+_pending_generate_provenance: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
+    "agentic_pending_generate_provenance", default=None
+)
+
+
+def set_pending_generate_provenance(data: dict | None) -> contextvars.Token:
+    """Bind rewrite provenance consumed by the next ``generate_image`` call."""
+    return _pending_generate_provenance.set(dict(data) if data else None)
+
+
+def merge_pending_generate_provenance(updates: dict) -> contextvars.Token:
+    """Merge non-None ``updates`` into the pending provenance dict."""
+    current = dict(_pending_generate_provenance.get() or {})
+    current.update({key: value for key, value in updates.items() if value is not None})
+    return _pending_generate_provenance.set(current)
+
+
+def get_pending_generate_provenance() -> dict | None:
+    """Return the pending provenance dict, or ``None``."""
+    pending = _pending_generate_provenance.get()
+    return dict(pending) if pending else None
+
+
+def consume_pending_generate_provenance() -> dict:
+    """Return and clear the pending provenance (one-shot per generate call)."""
+    pending = dict(_pending_generate_provenance.get() or {})
+    _pending_generate_provenance.set(None)
+    return pending
+
+
+def clear_pending_generate_provenance() -> None:
+    """Drop any pending provenance without consuming it."""
+    _pending_generate_provenance.set(None)

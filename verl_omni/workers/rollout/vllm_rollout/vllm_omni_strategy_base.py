@@ -14,9 +14,11 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from dataclasses import fields, is_dataclass
 from typing import TYPE_CHECKING, Any, Optional
 
 import torch
+from omegaconf import DictConfig, ListConfig, OmegaConf
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.tokenizer import normalize_token_ids
 from verl.utils.tracking import RLInsightLogger
@@ -76,6 +78,36 @@ class OmniStrategyBase(ABC):
     def __init__(self, server: vLLMOmniHttpServer) -> None:
         self.server = server
 
+    def _coerce_to_dataclass(self, config: Any, dataclass_type: type) -> Any:
+        """Convert OmegaConf/dict/foreign dataclasses into ``dataclass_type``.
+
+        ``omega_conf_to_dataclass`` returns non-mapping objects unchanged, so an
+        already-instantiated omni ``RolloutConfig`` would otherwise skip conversion
+        to ``DiffusionRolloutConfig`` (Bagel Co-RL (Joint-Training) via ``main_omni``). Nested omni
+        blocks (e.g. ``val_kwargs``) are dropped when schemas diverge; scalars and
+        plain mappings such as ``engine_kwargs`` are preserved.
+        """
+        if isinstance(config, dataclass_type):
+            return config
+        if isinstance(config, DictConfig | ListConfig | dict | list):
+            return omega_conf_to_dataclass(config, dataclass_type=dataclass_type)
+        if is_dataclass(config) and not isinstance(config, type):
+            allowed = {f.name for f in fields(dataclass_type)}
+            filtered: dict[str, Any] = {}
+            for f in fields(config):
+                if f.name not in allowed or f.name == "_target_":
+                    continue
+                val = getattr(config, f.name)
+                if is_dataclass(val) and not isinstance(val, type):
+                    # Nested omni vs diffusion schemas often diverge; keep defaults.
+                    continue
+                if isinstance(val, DictConfig):
+                    filtered[f.name] = OmegaConf.to_container(val, resolve=True)
+                else:
+                    filtered[f.name] = val
+            return omega_conf_to_dataclass(filtered, dataclass_type=dataclass_type)
+        return omega_conf_to_dataclass(config, dataclass_type=dataclass_type)
+
     def init_config(self, config: Any) -> Any:
         """Convert the raw rollout config into :attr:`rollout_config_cls`.
 
@@ -88,7 +120,7 @@ class OmniStrategyBase(ABC):
         Returns:
             The mode's rollout-config dataclass instance.
         """
-        return omega_conf_to_dataclass(config, dataclass_type=self.rollout_config_cls)
+        return self._coerce_to_dataclass(config, self.rollout_config_cls)
 
     def init_model_config(self, model_config: Any) -> Any:
         """Convert the raw model config into :attr:`model_config_cls`.
@@ -99,7 +131,7 @@ class OmniStrategyBase(ABC):
         Returns:
             The mode's model-config dataclass instance.
         """
-        return omega_conf_to_dataclass(model_config, dataclass_type=self.model_config_cls)
+        return self._coerce_to_dataclass(model_config, self.model_config_cls)
 
     def validate_configs(self) -> None:
         """Validate/normalize ``self.server.config`` after it is built.

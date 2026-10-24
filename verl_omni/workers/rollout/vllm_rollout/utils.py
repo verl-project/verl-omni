@@ -22,7 +22,7 @@ from verl.workers.rollout.vllm_rollout.utils import VLLM_LORA_INT_ID, VLLM_LORA_
 from vllm_omni.diffusion.worker.diffusion_worker import CustomPipelineWorkerExtension
 
 from verl_omni.utils.vllm_omni import OmniTensorLoRARequest, VLLMOmniHijack
-from verl_omni.workers.rollout.vllm_rollout.zmq_utils import make_update_zmq_handle
+from verl_omni.workers.rollout.vllm_rollout.zmq_utils import colocate_zmq_handle, make_update_zmq_handle
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -140,6 +140,22 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
         if model is not None and model_config is not None and hasattr(model, "load_weights"):
             return model, model_config
         return None
+
+    def policy_param_checksum(self, name: str) -> float | None:
+        """``weight_fingerprint`` of one loaded parameter, or ``None`` when this worker lacks it.
+
+        Lets the trainer confirm a full-weight sync actually rewrote the engine: the actor
+        fingerprints the tensor it sent under ``name`` the same way.
+        """
+        from verl_omni.workers.rollout.vllm_rollout.weight_fingerprint import weight_fingerprint
+
+        standard = self._get_standard_weight_model_and_config()
+        if standard is None:
+            return None
+        param = dict(standard[0].named_parameters()).get(name)
+        if param is None:
+            return None
+        return weight_fingerprint(param)
 
     def monkey_patch_model(self) -> None:
         # startup MoE weight-loader patch; re-attached per sync in update_weights_from_ipc
@@ -443,4 +459,4 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
             replica_entries = _split_visible_devices(replica_devices)
             if 0 <= local_rank < len(stage_entries) and stage_entries[local_rank] in replica_entries:
                 local_rank = replica_entries.index(stage_entries[local_rank])
-        return f"ipc:///tmp/rl-colocate-zmq-{job_id}-replica-{replica_rank}-rank-{local_rank}.sock"
+        return colocate_zmq_handle(job_id, replica_rank, local_rank)

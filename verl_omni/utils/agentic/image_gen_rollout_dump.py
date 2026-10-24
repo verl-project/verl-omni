@@ -26,8 +26,10 @@ import numpy as np
 
 from verl_omni.tools.trajectory import (
     build_trajectory_relpath,
+    resolve_rollout_images_root,
     resolve_run_dir,
 )
+from verl_omni.tools.trajectory.paths import project_relpath
 from verl_omni.utils.agentic.image_gen_rollout_parse import (
     extract_generate_image_prompts,
     last_user_prompt,
@@ -435,3 +437,129 @@ def dump_raw_rollouts(*, tokenizer: Any, output: Any, step: Any) -> None:
     except Exception as exc:  # noqa: BLE001
         # Monitoring must never fail or alter rollout generation.
         logger.warning("Failed to dump raw agent rollouts: %s", exc)
+
+
+def dump_bagel_corl_episode_images(
+    output_or_episodes: Any,
+    *,
+    step: Any = None,
+    sample_index: Any = 0,
+    rollout_n: int = 0,
+) -> list[str]:
+    """Copy Bagel Co-RL (Joint-Training) gen_sample PNGs into the rollout image tree.
+
+    Layout: ``<rollout_images_root>/step_XXXXXX/sample_i.nn/image_*.png``.
+    Accepts CompositeAgentLoop ``extra_fields`` rows, a list of episodes, or a
+    single episode-like object with ``gen_samples``.
+
+    Bagel Co-RL (Joint-Training) specific: kept even though upstream ``verl_omni.utils.agentic``
+    does not need it, because ``bagel_corl.py`` imports it from this module.
+
+    Args:
+        output_or_episodes: Composite/DataProto-like object, an episode list, or
+            a single episode-like object carrying ``gen_samples``.
+        step: Global step (``None`` → ``step_unknown``).
+        sample_index: Dataset sample index used when there is a single episode.
+        rollout_n: Rollout index within the sample.
+
+    Returns:
+        Written image paths (absolute), in copy order.
+    """
+    import shutil
+
+    episodes: list[Any] = []
+    if isinstance(output_or_episodes, list):
+        episodes = list(output_or_episodes)
+    elif hasattr(output_or_episodes, "gen_samples"):
+        episodes = [output_or_episodes]
+    else:
+        # Composite / DataProto-like: look for gen_samples in non_tensor / meta / extras.
+        non_tensor = getattr(output_or_episodes, "non_tensor_batch", None) or {}
+        meta = getattr(output_or_episodes, "meta_info", None) or {}
+        extras = non_tensor.get("gen_samples") or meta.get("gen_samples")
+        if extras is None and hasattr(output_or_episodes, "extra_fields"):
+            extras = (output_or_episodes.extra_fields or {}).get("gen_samples")
+        if extras is None and non_tensor.get("extra_fields") is not None:
+            # Bagel Co-RL (Joint-Training) shape: ``bagel_corl`` emits one
+            # ``extra_fields`` row per episode and each row carries its OWN
+            # ``gen_samples`` list -- the samples are nested inside the rows and are
+            # never hoisted to a top-level ``gen_samples`` column.
+            #
+            # Only the top-level column and the ``extra_fields`` *attribute* used to
+            # be inspected. On the driver ``extra_fields`` is a batch column, not an
+            # attribute, so both lookups missed and this function fell through to an
+            # empty ``episodes`` and returned ``[]`` WITHOUT raising -- no log line and
+            # no ``rollout_images/`` directory, while the ``gen_call`` rows kept
+            # pointing at the scratch dir.
+            episodes = list(non_tensor["extra_fields"])
+        elif extras is not None:
+            episodes = [{"gen_samples": extras}]
+
+    root = resolve_rollout_images_root()
+    written: list[str] = []
+    for ep_i, episode in enumerate(episodes):
+        samples = getattr(episode, "gen_samples", None)
+        if samples is None and isinstance(episode, dict):
+            samples = episode.get("gen_samples") or []
+        samples = list(samples or [])
+        if not samples:
+            continue
+        # Prefer the relpath the episode was actually dumped under, so its image
+        # folder lands beside its trajectory (``step_000001/sample_0.01``). The
+        # ``sample_index``/``rollout_n`` derivation is only a fallback: it cannot
+        # reconstruct the live ``sample_<id>.01`` naming on its own, so relying on it
+        # would scatter images into ``sample_0.00`` folders that match no trajectory.
+        relpath = None
+        if isinstance(episode, dict):
+            relpath = episode.get("trajectory_relpath") or None
+        if not relpath:
+            relpath = getattr(episode, "trajectory_relpath", None) or None
+        if not relpath:
+            idx = sample_index if len(episodes) == 1 else ep_i
+            relpath = build_trajectory_relpath(
+                step=step,
+                sample_index=idx,
+                rollout_n=rollout_n,
+            )
+        target_dir = root / relpath
+        # Resolve the copies first and create the folder only if something will land in
+        # it. A missing source file (or a stub-only / K=0 episode) must not leave an
+        # empty ``rollout_images/<relpath>/`` behind for every rollout.
+        copies: list[tuple[Path, Path]] = []
+        for sample in samples:
+            src = getattr(sample, "image_path", None)
+            if src is None and isinstance(sample, dict):
+                src = sample.get("image_path")
+            if not src:
+                continue
+            src_path = Path(str(src))
+            if not src_path.is_file():
+                continue
+            copies.append((src_path, target_dir / src_path.name))
+        if not copies:
+            continue
+        target_dir.mkdir(parents=True, exist_ok=True)
+        ep_written: list[str] = []
+        for src_path, dest in copies:
+            if src_path.resolve() != dest.resolve():
+                shutil.copy2(src_path, dest)
+            ep_written.append(str(dest))
+        written.extend(ep_written)
+        if ep_written:
+            meta_path = target_dir / "meta.json"
+            try:
+                meta = json.loads(meta_path.read_text()) if meta_path.is_file() else {}
+            except json.JSONDecodeError:
+                meta = {}
+            meta.update(
+                {
+                    "trajectory_relpath": relpath,
+                    # Per-episode: ``written`` accumulates across episodes, so using
+                    # it here listed every earlier episode's images in each folder's
+                    # meta.json.
+                    "image_paths": [project_relpath(p) for p in ep_written],
+                    "source": "bagel_corl_gen_samples",
+                }
+            )
+            meta_path.write_text(json.dumps(meta, indent=2, ensure_ascii=False) + "\n")
+    return written

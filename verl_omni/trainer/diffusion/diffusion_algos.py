@@ -13,6 +13,7 @@
 # limitations under the License.
 """Diffusion-specific loss functions and KL penalties."""
 
+import math
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
@@ -143,6 +144,39 @@ class DiffusionLossFn(ABC):
 
 
 DIFFUSION_LOSS_REGISTRY: dict[str, DiffusionLossFn] = {}
+
+
+def _loss_cfg_of(config: Any) -> Any:
+    """Return an attribute-accessible view of ``config.diffusion_loss``.
+
+    Every diffusion loss reads its knobs as **attributes** (``loss_cfg.adv_clip_max``,
+    ``loss_cfg.clip_ratio``, ``loss_cfg.dpo_beta``). The Bagel Co-RL (Joint-Training) composite
+    retargets the GEN actor config onto the outer AR trainer's ``OmniActorConfig``, whose
+    ``diffusion_loss`` node can arrive as a **plain dict** -- a recipe that overrides *inside* the
+    node (the Co-RL recipes pass ``+actor_rollout_ref.actor.diffusion_loss.loss_mode=flow_grpo``)
+    creates one, and Hydra never binds it to ``DiffusionLossConfig``. The first attribute read then
+    dies with ``AttributeError: 'dict' object has no attribute 'adv_clip_max'``.
+
+    ``_rewrite_bagel_corl_configs`` now stamps ``_target_`` so the node is normally schema-bound and
+    this never triggers. This accessor is the belt to that braces: it upgrades a plain dict using the
+    declared ``DiffusionLossConfig`` defaults, so a partial dict behaves exactly like a partial
+    override. Config nodes that are not dicts (a ``DictConfig``, or the instantiated dataclass) are
+    returned untouched.
+    """
+    loss_cfg = config.diffusion_loss
+    if not isinstance(loss_cfg, dict):
+        return loss_cfg
+    import dataclasses
+
+    from verl_omni.workers.config.diffusion.actor import DiffusionLossConfig
+
+    values = {
+        field.name: field.default
+        for field in dataclasses.fields(DiffusionLossConfig)
+        if field.default is not dataclasses.MISSING
+    }
+    values.update(loss_cfg)
+    return DiffusionLossConfig(**values)
 
 
 def register_diffusion_loss(name: str) -> Callable[[type[DiffusionLossFn]], type[DiffusionLossFn]]:
@@ -301,6 +335,8 @@ class FlowGRPOLoss(DiffusionLossFn):
         advantages: torch.Tensor,
         config: DiffusionActorConfig,
         rollout_is_weights: Optional[torch.Tensor] = None,
+        unit_weights: Optional[torch.Tensor] = None,
+        loss_normalizer: Optional[float] = None,
     ) -> tuple[torch.Tensor, dict[str, Any]]:
         """Compute the clipped policy objective and related metrics for FlowGRPO.
 
@@ -323,7 +359,31 @@ class FlowGRPOLoss(DiffusionLossFn):
                 the mean reduction.
         """
         assert config is not None, "config is required for FlowGRPOLoss!"
-        loss_cfg = config.diffusion_loss
+        if log_prob.shape != old_log_prob.shape or log_prob.shape != advantages.shape:
+            raise ValueError(
+                f"FlowGRPO shape mismatch: new={tuple(log_prob.shape)}, old={tuple(old_log_prob.shape)}, "
+                f"advantages={tuple(advantages.shape)}; broadcasting across rows/timesteps is forbidden"
+            )
+        if rollout_is_weights is not None and rollout_is_weights.shape != log_prob.shape:
+            raise ValueError("FlowGRPO rollout IS weights shape must match log probabilities")
+        if unit_weights is not None:
+            if (
+                unit_weights.shape != log_prob.shape
+                or not torch.isfinite(unit_weights).all()
+                or (unit_weights < 0).any()
+            ):
+                raise ValueError("FlowGRPO unit weights shape/values invalid")
+            valid = unit_weights > 0
+            log_prob = log_prob.masked_fill(~valid, 0.0)
+            old_log_prob = old_log_prob.masked_fill(~valid, 0.0)
+            advantages = advantages.masked_fill(~valid, 0.0)
+            if rollout_is_weights is not None:
+                rollout_is_weights = rollout_is_weights.masked_fill(~valid, 0.0)
+        else:
+            valid = torch.ones_like(log_prob, dtype=torch.bool)
+        if loss_normalizer is not None and (not math.isfinite(loss_normalizer) or loss_normalizer <= 0):
+            raise ValueError("FlowGRPO loss_normalizer must be finite and positive")
+        loss_cfg = _loss_cfg_of(config)
         advantages = torch.clamp(
             advantages,
             -loss_cfg.adv_clip_max,
@@ -340,15 +400,19 @@ class FlowGRPOLoss(DiffusionLossFn):
         per_elem_loss = torch.maximum(unclipped_loss, clipped_loss)
         if rollout_is_weights is not None:
             per_elem_loss = per_elem_loss * rollout_is_weights.detach()
-        pg_loss = torch.mean(per_elem_loss)
+        if unit_weights is not None:
+            per_elem_loss = per_elem_loss * unit_weights
+        pg_loss = per_elem_loss.sum() / loss_normalizer if loss_normalizer is not None else per_elem_loss.mean()
 
         with torch.no_grad():
+            ratio = ratio[valid] if valid.any() else ratio.new_ones(1)
+            log_ratio = log_ratio[valid] if valid.any() else log_ratio.new_zeros(1)
             ppo_kl = torch.mean(-log_ratio)
             pg_clipfrac = torch.mean((torch.abs(ratio - 1.0) > loss_cfg.clip_ratio).float())
             pg_clipfrac_higher = torch.mean((ratio - 1.0 > loss_cfg.clip_ratio).float())
             pg_clipfrac_lower = torch.mean((1.0 - ratio > loss_cfg.clip_ratio).float())
             ratio_mean = ratio.mean()
-            ratio_std = ratio.std()
+            ratio_std = ratio.std(unbiased=False)
 
         pg_metrics = {
             "actor/ppo_kl": ppo_kl.detach().item(),
@@ -356,6 +420,7 @@ class FlowGRPOLoss(DiffusionLossFn):
             "actor/pg_clipfrac_higher": pg_clipfrac_higher.detach().item(),
             "actor/pg_clipfrac_lower": pg_clipfrac_lower.detach().item(),
             "actor/ratio_mean": ratio_mean.detach().item(),
+            "actor/ratio_square_mean": ratio.square().mean().detach().item(),
             "actor/ratio_std": ratio_std.detach().item(),
         }
         return pg_loss, pg_metrics
@@ -373,6 +438,8 @@ class FlowGRPOLoss(DiffusionLossFn):
             advantages=data["advantages"],
             config=config,
             rollout_is_weights=data.get("rollout_is_weights", None),
+            unit_weights=data.get("loss_unit_weight", None),
+            loss_normalizer=tu.get_non_tensor_data(data, "loss_normalizer", default=None),
         )
         return DiffusionLossResult(loss=loss, metrics=metrics)
 
@@ -411,7 +478,7 @@ class FlowDPPOLoss(DiffusionLossFn):
         divergence threshold and move farther from the old policy.
         """
         assert config is not None, "config is required for FlowDPPOLoss!"
-        loss_cfg = config.diffusion_loss
+        loss_cfg = _loss_cfg_of(config)
         advantages = advantages.detach()
 
         log_ratio = log_prob - old_log_prob
@@ -536,7 +603,7 @@ class GRPOGuardLoss(DiffusionLossFn):
                 the per-element policy loss is multiplied by these (detached) weights before
                 the mean reduction.
         """
-        loss_cfg = config.diffusion_loss
+        loss_cfg = _loss_cfg_of(config)
         advantages = torch.clamp(
             advantages,
             -loss_cfg.adv_clip_max,
@@ -750,7 +817,7 @@ class DPOLoss(DiffusionLossFn):
         if torch.any(chosen_scores < rejected_scores).item():
             raise ValueError("DPO loss expects each chosen sample reward to be >= its rejected pair reward.")
 
-        beta = config.diffusion_loss.dpo_beta
+        beta = _loss_cfg_of(config).dpo_beta
         target = noise.float() - latent.float()
         model_err = ((model_noise_pred.float() - target) ** 2).flatten(1).mean(dim=1)
         ref_err = ((ref_noise_pred.float() - target) ** 2).flatten(1).mean(dim=1)
@@ -838,7 +905,7 @@ class DiffusionNFTLoss(DiffusionLossFn):
         `A` cancels out of it because `r - 0.5 = adv / (2*A)`. `log10_signal_ratio` reports the
         two scales separately, since the `1/beta` scaling of the loss values hides that balance.
         """
-        loss_cfg = config.diffusion_loss
+        loss_cfg = _loss_cfg_of(config)
         beta = loss_cfg.mix_beta
 
         old_prediction = old_prediction.detach()
@@ -1021,7 +1088,7 @@ class DiffusionNFTLoss(DiffusionLossFn):
 
         algorithm_cfg = config.algorithm
         actor_cfg = config.actor_rollout_ref.actor
-        adv_clip_max = actor_cfg.diffusion_loss.adv_clip_max
+        adv_clip_max = _loss_cfg_of(actor_cfg).adv_clip_max
         timestep_shuffle_seed = actor_cfg.data_loader_seed
 
         rollout_batch = {key: batch.batch[key] for key in batch.batch.keys()}

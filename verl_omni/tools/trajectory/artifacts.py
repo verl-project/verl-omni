@@ -296,3 +296,67 @@ def resolve_tool_image_path(
     if prompt_hit:
         return prompt_hit
     return latest_hit
+
+
+
+
+def build_generate_call_meta(*, prompt: str, user_prompt: str) -> dict:
+    """Build initial/rewrite provenance for one generated-image metadata row.
+
+    Ported from the legacy ``agent_loop/image_gen_trajectory_context`` layer so
+    the Bagel Co-RL (Joint-Training) lane and the Mode-2a tool loop share one registry and one
+    provenance implementation (audit T1.6).
+
+    Args:
+        prompt: Diffusion prompt for this call.
+        user_prompt: Dataset user request for the active trajectory.
+
+    Returns:
+        Meta dict with ``call_role`` (``initial`` | ``rewrite``), reflection
+        provenance, and prompt bookkeeping consumed by ``meta.json`` writers.
+    """
+    from .context import consume_pending_generate_provenance
+
+    prev_prompt = get_latest_generate_prompt_for_active_rollout() or ""
+    prev_image = get_latest_tool_image_path() or ""
+    pending = consume_pending_generate_provenance()
+    prompt_text = prompt or ""
+    reflection = str(pending.get("reflection") or pending.get("llm_reflection") or "").strip()
+    model_decode = str(pending.get("model_decode") or "").strip()
+    llm_prompt = str(pending.get("llm_prompt") or "").strip() or prompt_text
+    forced_rewrite = bool(pending.get("controlled_by_reflection")) or (
+        str(pending.get("call_role") or "").strip().lower() == "rewrite"
+    )
+    if not prev_prompt and not forced_rewrite:
+        return {
+            "call_role": "initial",
+            "controlled_by_reflection": False,
+            "reflection": "",
+            "prev_tool_prompt": "",
+            "source_image_for_reflection": "",
+            "rewritten_prompt": "",
+            "image_generated_from_reflected_prompt": False,
+            "tool_prompt_equals_rewritten_prompt": False,
+            "content_source": "initial",
+            "llm_reflection": "",
+            "llm_prompt": llm_prompt,
+            "model_decode": model_decode,
+            "user_prompt": user_prompt or "",
+            "tool_prompt": prompt_text,
+        }
+    return {
+        "call_role": "rewrite",
+        "controlled_by_reflection": True,
+        "reflection": reflection,
+        "prev_tool_prompt": prev_prompt,
+        "source_image_for_reflection": prev_image,
+        "rewritten_prompt": prompt_text,
+        "image_generated_from_reflected_prompt": True,
+        "tool_prompt_equals_rewritten_prompt": True,
+        "content_source": "reflection",
+        "llm_reflection": reflection,
+        "llm_prompt": llm_prompt,
+        "model_decode": model_decode,
+        "user_prompt": user_prompt or "",
+        "tool_prompt": prompt_text,
+    }

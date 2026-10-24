@@ -46,6 +46,13 @@ class DiffusionLossConfig(BaseConfig):
     dpo_beta: float = 2000.0
     kl_mask_threshold: float = 1e-5
     add_kl_coefficient: bool = True
+    # Bagel Co-RL (Joint-Training) dual-lane weighting (RFC §4.4): composite loss =
+    # loss_weight_und * ppo_loss(UND) + loss_weight_gen * diffusion_loss(GEN).
+    loss_weight_und: float = 1.0
+    loss_weight_gen: float = 1.0
+    # GEN regularizer: "latent_kl" is the stack default (provisional per UniGRPO);
+    # "velocity_mse" (UniGRPO Eq. 8, the reward-hacking-safe choice) lands in Phase 2.
+    gen_regularizer: str = "latent_kl"
     dgpo_beta: float = 100.0
     dgpo_clip_range: float = 0.01
     # OmniNFT-only modality weights and reference regularization coefficients.
@@ -56,6 +63,13 @@ class DiffusionLossConfig(BaseConfig):
 
     def __post_init__(self):
         """Validate diffusion loss configuration."""
+        if self.loss_weight_und < 0 or self.loss_weight_gen < 0:
+            raise ValueError(
+                "loss_weight_und/loss_weight_gen must be non-negative, got "
+                f"{self.loss_weight_und}/{self.loss_weight_gen}"
+            )
+        if self.gen_regularizer not in ("latent_kl", "velocity_mse"):
+            raise ValueError(f"gen_regularizer must be 'latent_kl' or 'velocity_mse', got {self.gen_regularizer!r}")
         valid_modes = [
             "flow_grpo",
             "flow_dppo",

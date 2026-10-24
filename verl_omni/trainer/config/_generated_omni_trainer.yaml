@@ -495,6 +495,7 @@ actor_rollout_ref:
       freeze_vision_projection: true
       freeze_language_model: true
     model_type: omni_model
+    composite_mode: null
     architecture: null
     model_stage: thinker
     hf_config_name: null
@@ -550,6 +551,9 @@ data:
     path: null
     name: null
   apply_chat_template_kwargs: {}
+  continuous_token:
+    enable: false
+    model_family: auto
 critic:
   optim:
     _target_: verl.workers.config.FSDPOptimizerConfig
@@ -1060,6 +1064,7 @@ trainer:
         path: null
         name: null
       sampler_kwargs: {}
+    bagel_corl_sync: {}
   ray_master_port_range: null
 global_profiler:
   _target_: verl.utils.profiler.ProfilerConfig
@@ -1140,6 +1145,9 @@ agentic_image_gen:
   reflect_vlm_timeout: 120
   judge_enable_thinking: false
   good_enough_threshold: 0.8
+  score_backend: unified_reward
+  unified_good_enough_threshold: 0.62
+  pickscore_good_enough_threshold: 1.0
   block_generate_after_yes: true
   block_generate_after_max_passes: true
   max_generate_image_passes: 3
@@ -1149,3 +1157,5 @@ agentic_image_gen:
   force_reflection_after_judge: true
   rewrite_judge_before_generate: true
   e2e_root: null
+  run_dir: null
+  corl_reward_version: v1

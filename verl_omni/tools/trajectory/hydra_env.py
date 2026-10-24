@@ -12,12 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""The ``agentic_image_gen`` settings, made readable outside Hydra.
+"""Process-local store for Hydra ``agentic_image_gen`` knobs.
 
-The yaml (``image_gen_tools.yaml``) is the source of truth. ``OmniAgentLoopWorker``
-binds it per process so the frozen tools can read it; the same values are copied onto
-each sample's ``extra_info`` for reward workers, which never see Hydra.
-``merge_agentic_scorer_knobs`` raises if those copies are missing.
+Yaml ``image_gen_tools.yaml`` is the default source of truth. Bind on the
+rollout worker; stamp scorer knobs onto inbound ``prompts`` extra_info
+before worker dispatch (and again on concatenated output). Reward scorers
+call ``merge_agentic_scorer_knobs`` and fail loud if those keys are missing
+when Hydra ``config`` is absent.
 """
 
 from __future__ import annotations
@@ -52,6 +53,10 @@ SCORER_KNOB_KEYS: tuple[str, ...] = (
     "reflect_vlm_timeout",
     "judge_enable_thinking",
     "good_enough_threshold",
+    "score_backend",
+    "corl_reward_version",
+    "unified_good_enough_threshold",
+    "pickscore_good_enough_threshold",
 )
 
 _YAML_PATH = Path(__file__).resolve().parents[2] / "trainer" / "config" / "agentic" / "image_gen_tools.yaml"
@@ -138,17 +143,24 @@ def bind_agentic_image_gen(config: Any) -> None:
     """Store ``config.agentic_image_gen`` for process-local readers.
 
     Args:
-        config: Hydra config (or ``None``). Missing node still marks bound and
-            clears overrides so readers see yaml defaults.
+        config: Hydra config. Missing node still marks bound and clears overrides
+            so readers see yaml defaults. ``None`` fails loud — a worker that
+            cannot produce its config must not silently run on file defaults and
+            hide CLI overrides (audit knob-SoT module C).
 
     Returns:
         None.
+
+    Raises:
+        ValueError: If ``config`` is ``None``.
     """
     global _cfg, _bound
-    _bound = True
     if config is None:
-        _cfg = {}
-        return
+        raise ValueError(
+            "bind_agentic_image_gen requires a composed Hydra config; "
+            "bind(None) would silently serve yaml file defaults"
+        )
+    _bound = True
     try:
         node = config.get("agentic_image_gen")
     except (AttributeError, TypeError, KeyError):
