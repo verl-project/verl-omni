@@ -24,7 +24,7 @@ from verl_omni.utils.skip.stage_skip import DiffusionRolloutSkip
 DUMP_DIR = "dump"
 
 
-def make_config(tmp_path, *, algorithm=None, omni_skip_overrides=None, trainer_type=None) -> OmegaConf:
+def make_config(tmp_path, *, algorithm=None, omni_skip_overrides=None, trainer_type=None, v1=None) -> OmegaConf:
     omni_skip = {
         role: {
             "enable": False,
@@ -39,11 +39,20 @@ def make_config(tmp_path, *, algorithm=None, omni_skip_overrides=None, trainer_t
     algorithm = dict(algorithm or {})
     if trainer_type is not None:
         algorithm["trainer_type"] = trainer_type
+    trainer = {"experiment_name": "exp", "project_name": "proj"}
+    # The real trainer config always ships trainer.v1 (and verl's RolloutTqSkip
+    # reads trainer.v1.trainer_mode at init even when rollout_tq is disabled).
+    trainer["v1"] = {"trainer_mode": "separate_async", "separate_async": {"parameter_sync_step": 1}}
+    if v1 is not None:
+        trainer["v1"].update(v1)
     return OmegaConf.create(
         {
-            "trainer": {"experiment_name": "exp", "project_name": "proj"},
+            "trainer": trainer,
             "skip": {},
             "algorithm": algorithm,
+            # The loss reads log probs, so the real skip_old_log_prob conflict
+            # check passes and the annotated stage is created.
+            "actor_rollout_ref": {"actor": {"diffusion_loss": {"loss_mode": "flow_grpo"}}},
             "omni_skip": omni_skip,
         }
     )
@@ -64,8 +73,9 @@ class DummyTrainer:
 
     @SkipManager.annotate(role="old_log_prob")
     def compute_old_log_prob(self, data: DataProto) -> DataProto:
+        value = 7.0 + self.calls.get("old_log_prob", 0)  # per-call distinct so replay mismatches are visible
         self._bump("old_log_prob")
-        return DataProto.from_single_dict(data={"old_log_probs": torch.full((len(data.batch["x"]), 2), 7.0)})
+        return DataProto.from_single_dict(data={"old_log_probs": torch.full((len(data.batch["x"]), 2), value)})
 
     @SkipManager.annotate(role="actor_update")
     def update_actor(self, data: DataProto) -> DataProto:
@@ -105,12 +115,47 @@ def test_stage_cache_miss_then_hit_round_trip(tmp_path, reset_skip_manager, dumm
 
     first = dummy.compute_old_log_prob(_batch())
     assert dummy.calls == {"old_log_prob": 1}
-    assert skip_stage_metrics() == {}  # running the stage does not count as a skip
+    assert skip_stage_metrics() == {"skip/old_log_prob/calls": 0, "skip/old_log_prob/steps": 0}
 
+    # Re-running init models a fresh run: instances and per-step call counters
+    # start over, so the dumped step replays instead of running the stage again.
+    init_skip_manager(config)
+    SkipManager.set_step(1)
     second = dummy.compute_old_log_prob(_batch())
     assert dummy.calls == {"old_log_prob": 1}  # replayed from cache
     torch.testing.assert_close(second.batch["old_log_probs"], first.batch["old_log_probs"])
     assert skip_stage_metrics() == {"skip/old_log_prob/calls": 1, "skip/old_log_prob/steps": 1}
+
+
+def test_stage_cache_replays_per_call_within_split_step(tmp_path, reset_skip_manager, dummy):
+    """parameter_sync_step > 1: each mini-batch call of a step owns its own cache slot."""
+    config = make_config(tmp_path, v1={"separate_async": {"parameter_sync_step": 2}})
+    enable_stage(config, "old_log_prob", steps=[1])
+    init_skip_manager(config)
+    SkipManager.set_step(1)
+
+    first = dummy.compute_old_log_prob(_batch())
+    second = dummy.compute_old_log_prob(_batch())
+    assert dummy.calls == {"old_log_prob": 2}  # mini-batch 1 must not replay mini-batch 0
+
+    init_skip_manager(config)
+    SkipManager.set_step(1)
+    replayed = [dummy.compute_old_log_prob(_batch()) for _ in range(2)]
+    assert dummy.calls == {"old_log_prob": 2}
+    torch.testing.assert_close(replayed[0].batch["old_log_probs"], first.batch["old_log_probs"])
+    torch.testing.assert_close(replayed[1].batch["old_log_probs"], second.batch["old_log_probs"])
+    assert skip_stage_metrics() == {"skip/old_log_prob/calls": 2, "skip/old_log_prob/steps": 1}
+
+
+def test_repeat_ignores_incomplete_split_step(tmp_path, reset_skip_manager, dummy):
+    config = make_config(tmp_path, v1={"separate_async": {"parameter_sync_step": 2}})
+    enable_stage(config, "old_log_prob", steps=[5], action="repeat")
+    init_skip_manager(config)
+    SkipManager.set_step(5)
+    dummy.compute_old_log_prob(_batch())  # mini-batch 0 dumped; the step cache is incomplete
+
+    dummy.compute_old_log_prob(_batch())
+    assert dummy.calls == {"old_log_prob": 2}  # an incomplete cache never replays
 
 
 def test_stage_not_listed_step_runs_normally(tmp_path, reset_skip_manager, dummy):
@@ -121,12 +166,12 @@ def test_stage_not_listed_step_runs_normally(tmp_path, reset_skip_manager, dummy
 
     dummy.compute_old_log_prob(_batch())
     assert dummy.calls == {"old_log_prob": 1}
-    assert skip_stage_metrics() == {}
+    assert skip_stage_metrics() == {"skip/old_log_prob/calls": 0, "skip/old_log_prob/steps": 0}
 
 
 def test_repeat_action_replays_closest_dumped_step(tmp_path, reset_skip_manager, dummy):
     config = make_config(tmp_path)
-    enable_stage(config, "old_log_prob", steps=[5], action="repeat")
+    enable_stage(config, "old_log_prob", steps=[1, 5], action="repeat")
     init_skip_manager(config)
     SkipManager.set_step(1)
     dummy.compute_old_log_prob(_batch())  # cache-miss run dumps step 1
@@ -200,6 +245,21 @@ def test_advantage_inert_for_direct_preference(tmp_path, reset_skip_manager):
     enable_stage(config, "advantage", steps=[1])
     with pytest.raises(ValueError, match="direct_preference"):
         init_skip_manager(config)
+
+
+def test_advantage_inert_for_v0_policy_gradient(tmp_path, reset_skip_manager):
+    config = make_config(tmp_path)  # trainer.use_v1 unset: the V0 trainer computes advantages inline
+    enable_stage(config, "advantage", steps=[1])
+    with pytest.raises(ValueError, match="V0"):
+        init_skip_manager(config)
+
+
+def test_advantage_supported_for_v1_policy_gradient(tmp_path, reset_skip_manager):
+    config = make_config(tmp_path, v1={"separate_async": {"parameter_sync_step": 1}})
+    config.trainer.use_v1 = True  # V1 run: the annotated advantage stage hook exists
+    enable_stage(config, "advantage", steps=[1])
+    init_skip_manager(config)
+    assert "advantage" in SkipManager.skip_instances
 
 
 def test_old_log_prob_inert_when_loss_reads_no_log_probs(tmp_path, reset_skip_manager, monkeypatch):

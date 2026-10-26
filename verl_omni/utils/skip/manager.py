@@ -78,6 +78,11 @@ def _check_skip_conflicts(config: DictConfig) -> None:
             f"omni_skip.old_log_prob / omni_skip.advantage are inert with algorithm.trainer_type={trainer_type}: "
             "direct-preference trainers never recompute old log probs or advantages."
         )
+    if "advantage" in enabled and not bool(OmegaConf.select(config, "trainer.use_v1", default=False)):
+        raise ValueError(
+            "omni_skip.advantage is inert on the V0 policy-gradient trainer: it computes advantages inline "
+            "with no annotated stage hook. Enable it only with trainer.use_v1=true."
+        )
 
     if "old_log_prob" in enabled:
         if bool(OmegaConf.select(config, "algorithm.rollout_correction.bypass_mode", default=False)):

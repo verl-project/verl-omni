@@ -1947,7 +1947,7 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
                                 # streaming reward scores inside the gen window; colocate in the reward phase
                                 if self.enable_agent_reward_loop:
                                     self.reward_loop_manager.start_profile()
-                            gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch_output)
+                            gen_batch_output = self._generate_sequences(gen_batch_output)
                             self.checkpoint_manager.sleep_replicas()
                             if curr_step_profile:
                                 self.llm_server_manager.stop_profile()

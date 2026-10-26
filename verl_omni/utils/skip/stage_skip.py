@@ -20,8 +20,10 @@ update, weight sync -- plus a driver-side rollout replay for the v0 diffusion
 trainer. Instances are created by :func:`verl_omni.utils.skip.init_skip_manager`
 from the ``omni_skip`` config block; a decorated stage call whose global step is
 listed in ``steps`` replays its output from
-``{dump_dir}/{experiment}_{project}/{role}/{step}/`` instead of running the
-model forward.
+``{dump_dir}/{experiment}_{project}/{role}/{step}/{call_idx}/`` instead of
+running the model forward. ``call_idx`` is the mini-batch ordinal within the
+step (always 0 unless the v1 trainer splits the step, ``parameter_sync_step >
+1``), mirroring upstream verl's ``rollout_tq`` cache layout.
 """
 
 import json
@@ -31,7 +33,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 import torch
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 from verl.protocol import DataProto
 from verl.utils.skip import SkipManager
 from verl.utils.skip.base_skip import BaseSkip, SkipAction, register_skip
@@ -67,6 +69,12 @@ class StageSkip(BaseSkip):
     step, ``empty`` skips the stage without any cache (subclasses define the
     empty return). Skipped calls are counted loudly on the instance for the
     end-of-run summary.
+
+    A step's cache holds one slot per stage call (``{step}/{call_idx}/``): the
+    v1 separate-async trainer runs ``parameter_sync_step`` mini-batch calls per
+    global step, and replaying mini-batch 0's output into mini-batch 1 would
+    feed wrong samples to the update. ``repeat`` only considers a step whose
+    slots are all dumped (complete cache).
     """
 
     support_actions = [SkipAction.CACHE, SkipAction.REPEAT]
@@ -77,21 +85,32 @@ class StageSkip(BaseSkip):
         super().__init__(local_config, global_config)
         self.exp_name = global_config.trainer.get("experiment_name", "default_experiment_name")
         self.project_name = global_config.trainer.get("project_name", "default_project_name")
+        trainer_mode = OmegaConf.select(global_config, "trainer.v1.trainer_mode", default="sync")
+        self.parameter_sync_step = max(
+            1, int(OmegaConf.select(global_config, f"trainer.v1.{trainer_mode}.parameter_sync_step", default=1))
+        )
         # Driver-only counters: one StageSkip instance per role per process.
         self.skipped_calls = 0
         self.skipped_steps: set[int] = set()
+        # Ordinal of the current call within the step; the decorator reaches
+        # meet_precondition once per eligible (non-validation) call, so this
+        # tracks mini-batch 0, 1, ... of a split step.
+        self._call_step: int | None = None
+        self._call_idx = 0
 
     def meet_precondition(self, step: int, func: Callable, *args, **kwargs) -> bool:
         if self.action == SkipAction.EMPTY:
             return True
+        self._advance_call_idx(step)
         if self.action == SkipAction.CACHE:
-            if self._payload_path(step).is_file():
+            if self._payload_path(step, self._call_idx).is_file():
                 return True
             logger.info(
-                "%sNo cached %s output at step %s under %s; the stage will run and dump.",
+                "%sNo cached %s output at step %s (call %s) under %s; the stage will run and dump.",
                 self.print_mark,
                 self.role,
                 step,
+                self._call_idx,
                 self._step_dir(step),
             )
             return False
@@ -117,43 +136,48 @@ class StageSkip(BaseSkip):
             return self.empty_result(*args, **kwargs)
 
         load_step = step if self.action == SkipAction.CACHE else self._find_latest_step(step)
-        payload_path = self._payload_path(load_step)
+        payload_path = self._payload_path(load_step, self._call_idx)
         payload = torch.load(payload_path, map_location="cpu", weights_only=False)
         logger.info(
-            "%s\033[33mLoad cached %s output at step %s (request step %s) from %s\033[0m",
+            "%s\033[33mLoad cached %s output at step %s (request step %s, call %s) from %s\033[0m",
             self.print_mark,
             self.role,
             load_step,
             step,
+            self._call_idx,
             payload_path,
         )
         self._record_skip(step)
         return payload["result"]
 
     def prepare_data(self, step: int, result, *args, **kwargs) -> None:
-        step_dir = self._step_dir(step)
+        step_dir = self._payload_dir(step, self._call_idx)
         tmp_path = step_dir / (PAYLOAD_NAME + ".tmp")
         try:
             step_dir.mkdir(parents=True, exist_ok=True)
             with open(tmp_path, "wb") as f:
-                torch.save({"result": result, "global_steps": step}, f)
+                torch.save({"result": result, "global_steps": step, "call_idx": self._call_idx}, f)
             # Atomic swap so meet_precondition never sees a partial dump.
             os.replace(tmp_path, step_dir / PAYLOAD_NAME)
-            (step_dir / META_NAME).write_text(json.dumps({"global_steps": step, "role": self.role}))
+            (step_dir / META_NAME).write_text(
+                json.dumps({"global_steps": step, "call_idx": self._call_idx, "role": self.role})
+            )
             logger.info(
-                "%s\033[33mDump %s output at step %s to %s\033[0m",
+                "%s\033[33mDump %s output at step %s (call %s) to %s\033[0m",
                 self.print_mark,
                 self.role,
                 step,
+                self._call_idx,
                 step_dir,
             )
         except Exception as e:
             tmp_path.unlink(missing_ok=True)
             logger.warning(
-                "%s\033[31mFailed to dump %s output at step %s to %s: %s\033[0m",
+                "%s\033[31mFailed to dump %s output at step %s (call %s) to %s: %s\033[0m",
                 self.print_mark,
                 self.role,
                 step,
+                self._call_idx,
                 step_dir,
                 e,
             )
@@ -166,6 +190,14 @@ class StageSkip(BaseSkip):
         self.skipped_calls += 1
         self.skipped_steps.add(step)
 
+    def _advance_call_idx(self, step: int) -> None:
+        """Advance the mini-batch ordinal: restart at 0 when the step changes."""
+        if step != self._call_step:
+            self._call_step = step
+            self._call_idx = 0
+        else:
+            self._call_idx += 1
+
     def _role_dir(self) -> Path:
         dumped_dir = Path(self.dump_dir).expanduser().resolve()
         return dumped_dir.joinpath(f"{self.exp_name}_{self.project_name}", self.role).absolute()
@@ -173,8 +205,15 @@ class StageSkip(BaseSkip):
     def _step_dir(self, step: int) -> Path:
         return self._role_dir().joinpath(str(step)).absolute()
 
-    def _payload_path(self, step: int) -> Path:
-        return self._step_dir(step).joinpath(PAYLOAD_NAME)
+    def _payload_dir(self, step: int, call_idx: int) -> Path:
+        return self._step_dir(step).joinpath(str(call_idx)).absolute()
+
+    def _payload_path(self, step: int, call_idx: int) -> Path:
+        return self._payload_dir(step, call_idx).joinpath(PAYLOAD_NAME)
+
+    def _step_cache_complete(self, step_dir: Path) -> bool:
+        """All ``parameter_sync_step`` call slots of the step hold a dumped payload."""
+        return all((step_dir / str(i) / PAYLOAD_NAME).is_file() for i in range(self.parameter_sync_step))
 
     def _available_steps(self) -> list[int]:
         result: list[int] = []
@@ -182,7 +221,7 @@ class StageSkip(BaseSkip):
         if not role_dir.is_dir():
             return result
         for child in role_dir.iterdir():
-            if child.is_dir() and (child / PAYLOAD_NAME).is_file():
+            if child.is_dir() and self._step_cache_complete(child):
                 try:
                     result.append(int(child.name))
                 except ValueError:
@@ -191,7 +230,7 @@ class StageSkip(BaseSkip):
 
     def _find_latest_step(self, step: int) -> int:
         """Prefer the exact step, else the closest dumped step below, else above; -1 if none."""
-        if self._payload_path(step).is_file():
+        if self._step_cache_complete(self._step_dir(step)):
             return step
         available = self._available_steps()
         smaller = [s for s in available if s < step]

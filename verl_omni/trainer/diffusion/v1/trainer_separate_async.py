@@ -58,7 +58,6 @@ from verl.trainer.config import HybridRolloutSwitchConfig
 from verl.trainer.ppo.utils import Role
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.debug import marked_timer
-from verl.utils.skip import SkipManager
 
 from verl_omni.trainer.diffusion.v1.trainer_base import (
     PolicyGradientDiffusionTrainerV1,
@@ -183,9 +182,14 @@ class PolicyGradientDiffusionTrainerV1SeparateAsync(PolicyGradientDiffusionTrain
         standalone_gpus = rollout_cfg.nnodes * rollout_cfg.n_gpus_per_node
         self._scaling_factor = (hybrid_gpus + standalone_gpus) / standalone_gpus
 
-    @SkipManager.annotate(role="old_log_prob")
     def _compute_old_log_prob(self, data: DataProto) -> DataProto:
-        """Compute every local update's proximal log-probs with cycle-start weights."""
+        """Compute every local update's proximal log-probs with cycle-start weights.
+
+        Not annotated directly: the base method already carries the
+        ``old_log_prob`` annotation and this override reaches it through
+        ``super()``, so skipping and dumping happen exactly once per call while
+        the snapshot lifecycle here always runs.
+        """
         if self.parameter_sync_step == 1:
             return super()._compute_old_log_prob(data)
 

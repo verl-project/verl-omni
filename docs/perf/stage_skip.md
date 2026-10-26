@@ -1,7 +1,7 @@
 (stage_skip)=
 # Stage Skip: Cache and Replay Pipeline Stages
 
-Last updated: 10/20/2026
+Last updated: 10/26/2026
 
 Stage skip replays the output of one RL pipeline stage — reward scoring,
 old log-prob, reference outputs, advantage, actor update, weight sync — for
@@ -55,9 +55,14 @@ omni_skip:
   cache. A step not listed in `steps` always runs for real. On a cache miss
   the stage runs normally and its output is dumped.
 - Caches live under
-  `{dump_dir}/{experiment_name}_{project_name}/{role}/{step}/`. Rollout skip
-  uses its own directory layout under `skip.rollout.dump_dir`, so the two
-  dumps do not collide.
+  `{dump_dir}/{experiment_name}_{project_name}/{role}/{step}/{call_idx}/`,
+  where `call_idx` is the mini-batch ordinal within the step. The v1
+  separate-async trainer runs `parameter_sync_step` mini-batch calls per
+  global step, and each call dumps and replays its own slot — mini-batch 1
+  never sees mini-batch 0's cached output (the layout matches verl's
+  `rollout_tq` cache). `repeat` only considers steps whose slots are all
+  dumped. Rollout skip uses its own directory layout under
+  `skip.rollout.dump_dir`, so the two dumps do not collide.
 - Every skipped call is counted; the trainer logs `skip/<role>/calls` and
   `skip/<role>/steps` at the end of the run and prints a summary.
 
@@ -90,6 +95,8 @@ silently inert or unsafe:
   substitute old log-probs.
 - `old_log_prob` or `advantage` with
   `algorithm.trainer_type=direct_preference` — those stages never fire.
+- `advantage` with the V0 policy-gradient trainer (`trainer.use_v1=false`) —
+  the V0 trainer computes advantages inline with no annotated stage hook.
 - `old_log_prob` when the configured loss reads no recomputed log-probs —
   the stage call never fires.
 - `weight_sync` without `ack_stale_weights: true`.
