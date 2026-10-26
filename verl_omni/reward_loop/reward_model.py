@@ -23,6 +23,7 @@ from typing import Any
 from omegaconf import OmegaConf
 from verl.experimental.reward_loop.reward_model import RewardModelManager
 from verl.single_controller.ray.base import split_resource_pool
+from verl.utils.profiler import resolve_ray_actor_profiler_config
 
 from verl_omni.workers.config.reward import (
     EngineRewardModelConfig,
@@ -75,8 +76,13 @@ class MultiRewardModelManager:
 
         for name, model in entries:
             if isinstance(model, EngineRewardModelConfig):
+                model_config = _prepare_engine_config(model, base_config, fallback_model)
+                if model_config.rollout.get("profiler") is not None:
+                    model_config.rollout.profiler = resolve_ray_actor_profiler_config(
+                        model_config.rollout.profiler, config
+                    )
                 self.models[name] = EngineManagedRewardModel(
-                    name, model, base_config, engine_pools.get(name), fallback_model
+                    name, model_config, engine_pools.get(name), offload=model.resolved_offload
                 )
             else:
                 self.models[name] = NativeManagedRewardModel(name, model)
@@ -227,11 +233,7 @@ class ManagedRewardModel(ABC):
 class EngineManagedRewardModel(ManagedRewardModel):
     """Engine-backed model owned by the upstream ``RewardModelManager``."""
 
-    def __init__(self, name: str, model, base_config, resource_pool, fallback_model=None):
-        if not isinstance(model, EngineRewardModelConfig):
-            model = parse_reward_model_config(name, model)
-        offload = model.resolved_offload
-        config = _prepare_engine_config(model, base_config, fallback_model)
+    def __init__(self, name: str, config, resource_pool, *, offload: bool):
         self.reward_model_manager = RewardModelManager(config, resource_pool)
         super().__init__(
             RewardModelSpec(

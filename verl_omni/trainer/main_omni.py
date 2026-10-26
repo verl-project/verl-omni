@@ -35,6 +35,7 @@ from omegaconf import OmegaConf, open_dict
 from verl.trainer.constants_ppo import batch_invariant_requested, export_batch_invariant_env, get_ppo_ray_runtime_env
 from verl.trainer.ppo.utils import need_reference_policy
 from verl.utils.device import auto_set_device, is_cuda_available
+from verl.utils.profiler import build_controller_nsight_launch_options
 
 import verl_omni.trainer.omni  # noqa: F401  — registers @register_trainer("omni_sync")
 from verl_omni.trainer.diffusion.ray_diffusion_trainer import (
@@ -319,9 +320,7 @@ def launch_ray_task_runner(
         from verl.utils.import_utils import is_nvtx_available
 
         assert is_nvtx_available(), "nvtx is not available in CUDA platform. Please 'pip3 install nvtx'"
-        nsight_options = OmegaConf.to_container(
-            config.global_profiler.global_tool_config.nsys.controller_nsight_options
-        )
+        nsight_options = build_controller_nsight_launch_options(config)
         runner = task_runner_class.options(runtime_env={"nsight": nsight_options}).remote()
     else:
         runner = task_runner_class.remote()

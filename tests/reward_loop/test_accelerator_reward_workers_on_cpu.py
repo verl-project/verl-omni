@@ -48,7 +48,7 @@ class _FakeSubResourcePool(_FakeResourcePool):
 
 
 def _config(num_workers):
-    return SimpleNamespace(reward=SimpleNamespace(num_workers=num_workers))
+    return SimpleNamespace(reward=SimpleNamespace(num_workers=num_workers, profiler=None))
 
 
 def _build_workers(num_workers, resource_pool):

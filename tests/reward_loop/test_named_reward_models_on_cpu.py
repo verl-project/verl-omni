@@ -229,8 +229,8 @@ def test_multi_reward_model_manager_binds_each_engine_to_its_sub_pool(monkeypatc
         return ["pickscore-pool", "ocr-pool"]
 
     class FakeEngineModel:
-        def __init__(self, name, model, base_config, resource_pool, fallback_model):
-            del model, base_config, fallback_model
+        def __init__(self, name, config, resource_pool, *, offload):
+            del config, offload
             observed.append((name, resource_pool))
             self._spec = RewardModelSpec(name=name, backend="engine", router_address=f"{name}:8000")
 

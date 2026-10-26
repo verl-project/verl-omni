@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Reject unsupported V1 profiling combinations before distributed startup."""
+"""Check accepted V1 profiling configurations before distributed startup."""
 
 from unittest.mock import Mock
 
@@ -60,12 +60,12 @@ def config(*, tool="torch", mode="sync", steps=(1, 2), continuous=False, rollout
 
 
 @pytest.mark.parametrize("mode", ["sync", "separate_async"])
-def test_reject_controller_cuda_capture_before_startup(startup, mode):
+def test_allow_controller_cuda_capture_before_startup(startup, mode):
     cfg = config(tool="nsys", mode=mode)
     cfg.global_profiler.global_tool_config.nsys.controller_nsight_options["capture-range"] = "cudaProfilerApi"
-    with pytest.raises(ValueError, match="controller-side Nsight capture-range=cudaProfilerApi"):
+    with pytest.raises(StartupReached):
         entrypoint.run_diffusion_v1(cfg)
-    startup.assert_not_called()
+    startup.assert_called_once()
 
 
 @pytest.mark.parametrize("mode", ["sync", "separate_async"])
@@ -87,10 +87,10 @@ def test_inactive_nsight_options_do_not_reject_other_tools(startup, tool):
 
 @pytest.mark.parametrize("mode", ["sync", "separate_async"])
 @pytest.mark.parametrize("tool", ["npu", "torch"])
-def test_reject_continuous_rollout_before_startup(startup, mode, tool):
-    with pytest.raises(ValueError, match="global_profiler.profile_continuous_steps=False"):
+def test_allow_continuous_rollout_before_startup(startup, mode, tool):
+    with pytest.raises(StartupReached):
         entrypoint.run_diffusion_v1(config(tool=tool, mode=mode, continuous=True))
-    startup.assert_not_called()
+    startup.assert_called_once()
 
 
 @pytest.mark.parametrize("tool", ["npu", "torch"])

@@ -50,6 +50,10 @@ from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.debug import marked_timer
 from verl.utils.import_utils import load_class_from_fqn
 from verl.utils.metric import reduce_metrics
+from verl.utils.profiler import (
+    build_worker_group_profile_kwargs,
+    is_controller_nsys_api_control_enabled,
+)
 from verl.utils.py_functional import rename_dict
 from verl.utils.skip import SkipManager
 from verl.utils.tracking import ValidationGenerationsLogger
@@ -476,15 +480,7 @@ class BaseRayDiffusionTrainer(ABC):
         self._create_dataloader(train_dataset, val_dataset, collate_fn, train_sampler)
 
         self.checkpoint_manager = None
-        controller_nsight_options = OmegaConf.select(
-            self.config,
-            "global_profiler.global_tool_config.nsys.controller_nsight_options",
-            default={},
-        )
-        self._controller_nsys_profile_enabled = (
-            OmegaConf.select(self.config, "global_profiler.tool") == "nsys"
-            and controller_nsight_options.get("capture-range") == "cudaProfilerApi"
-        )
+        self._controller_nsys_api_control_enabled = is_controller_nsys_api_control_enabled(self.config)
         self._controller_nsys_profile_active = False
 
         # initialize SkipManager (verl rollout skip + verl-omni stage skip; no-op until configured).
@@ -959,23 +955,9 @@ class BaseRayDiffusionTrainer(ABC):
         # Instead, directly pass different resource pool to different worker groups.
         # See https://github.com/volcengine/verl/blob/master/examples/ray/tutorial.ipynb for more information.
         all_wg = {}
-        wg_kwargs = {}  # Setting up kwargs for RayWorkerGroup
+        wg_kwargs = build_worker_group_profile_kwargs(self.config, device_name=self.device_name)
         if OmegaConf.select(self.config.trainer, "ray_wait_register_center_timeout") is not None:
             wg_kwargs["ray_wait_register_center_timeout"] = self.config.trainer.ray_wait_register_center_timeout
-        # Forward profiling steps and (when nsys is selected) per-worker Nsight options to the
-        # Ray worker group so that workers can be launched under nsys with the right capture range.
-        if OmegaConf.select(self.config, "global_profiler.steps") is not None:
-            wg_kwargs["profile_steps"] = OmegaConf.select(self.config.global_profiler, "steps")
-            if OmegaConf.select(self.config.global_profiler, "tool") == "nsys":
-                worker_nsight_options = OmegaConf.select(
-                    self.config.global_profiler.global_tool_config.nsys, "worker_nsight_options"
-                )
-                assert worker_nsight_options is not None, (
-                    "global_profiler.global_tool_config.nsys.worker_nsight_options must be set "
-                    "when using nsys with global_profiler.steps"
-                )
-                wg_kwargs["worker_nsight_options"] = OmegaConf.to_container(worker_nsight_options)
-        wg_kwargs["device_name"] = self.device_name
 
         pools = [(pool, class_dict) for pool, class_dict in self.resource_pool_to_cls.items() if class_dict]
         master_port_range = OmegaConf.select(self.config.trainer, "ray_master_port_range")
@@ -1238,7 +1220,7 @@ class BaseRayDiffusionTrainer(ABC):
 
         controller_profile_started = False
         try:
-            if self._controller_nsys_profile_enabled:
+            if self._controller_nsys_api_control_enabled:
                 if self._controller_nsys_profile_active:
                     raise RuntimeError("Controller Nsight profiling is already active")
                 get_platform().profiler_start()

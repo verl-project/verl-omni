@@ -24,6 +24,7 @@ from verl.experimental.reward_loop import RewardLoopManager
 from verl.experimental.reward_loop.reward_loop import RewardLoopWorker
 from verl.protocol import DataProto
 from verl.trainer.ppo.reward import resolve_reward_manager_cls
+from verl.utils.profiler import build_ray_actor_nsight_launch_options, resolve_ray_actor_profiler_config
 
 from verl_omni.workers.config.reward import (
     accelerator_workers_enabled,
@@ -173,6 +174,7 @@ class OmniRewardLoopManager(RewardLoopManager):
             self.reward_loop_workers_class = ray.remote(OmniRewardLoopWorker)
             self.reward_manager_cls = named_reward_manager_cls or resolve_reward_manager_cls(config)
             self._init_reward_loop_workers()
+            self._init_reward_loop_profilers()
         else:
             super().__init__(config=config, rm_resource_pool=rm_resource_pool)
 
@@ -283,15 +285,25 @@ class OmniRewardLoopManager(RewardLoopManager):
         node_ids = [node["NodeID"] for node in ray.nodes() if node["Alive"] and node["Resources"].get("CPU", 0) > 0]
         if not node_ids:
             raise ValueError("No alive Ray node with CPU resources is available for reward workers")
-        return [
-            self.reward_loop_workers_class.options(
-                name=f"{name_prefix}_{index}",
-                scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
+        workers = []
+        rank_offset = len(self._flatten_worker_groups())
+        profiler_config = resolve_ray_actor_profiler_config(config.reward.profiler, config)
+        for index in range(config.reward.num_workers):
+            options = {
+                "name": f"{name_prefix}_{index}",
+                "scheduling_strategy": ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
                     node_id=node_ids[index % len(node_ids)], soft=True
                 ),
-            ).remote(config, self.reward_router_address, specs)
-            for index in range(config.reward.num_workers)
-        ]
+            }
+            nsight_options = build_ray_actor_nsight_launch_options(
+                profiler_config, rank=rank_offset + index, role="reward_loop"
+            )
+            if nsight_options is not None:
+                options["runtime_env"] = {"nsight": nsight_options}
+            workers.append(
+                self.reward_loop_workers_class.options(**options).remote(config, self.reward_router_address, specs)
+            )
+        return workers
 
     def _create_native_workers(self, config, specs, model_name, name_prefix):
         model = self.multi_reward_model_manager.models[model_name]
@@ -317,6 +329,7 @@ class OmniRewardLoopManager(RewardLoopManager):
             reward_router_address=self.reward_router_address,
             reward_model_specs=specs,
             worker_name_prefix=name_prefix,
+            profile_rank_offset=len(self._flatten_worker_groups()),
         )
 
     def compute_rm_score(self, data):
@@ -416,17 +429,25 @@ class OmniRewardLoopManager(RewardLoopManager):
         )
 
     def start_profile(self, **kwargs) -> None:
-        """Start profiling on all reward-model rollout servers. No-op without a reward model."""
+        """Start profiling on reward-loop workers and reward-model rollout servers."""
+        super().start_profile(**kwargs)
         self._run_on_replicas("start_profile", **kwargs)
 
-    def stop_profile(self) -> None:
-        """Stop profiling on all reward-model rollout servers. No-op without a reward model."""
-        self._run_on_replicas("stop_profile")
+    def stop_profile(self, run_command: bool = True) -> None:
+        """Stop profiling on reward-loop workers and reward-model rollout servers."""
+        try:
+            self._run_on_replicas("stop_profile")
+        finally:
+            super().stop_profile(run_command=run_command)
 
     def _run_on_replicas(self, method: str, **kwargs) -> None:
-        if self.reward_model_manager is None:
+        managers = [self.reward_model_manager]
+        managers.extend(
+            getattr(model, "reward_model_manager", None) for model in self.multi_reward_model_manager.models.values()
+        )
+        replicas = [replica for manager in managers if manager is not None for replica in manager.rollout_replicas]
+        if not replicas:
             return
-        replicas = self.reward_model_manager.rollout_replicas
 
         async def run_all():
             await asyncio.gather(*[getattr(replica, method)(**kwargs) for replica in replicas])

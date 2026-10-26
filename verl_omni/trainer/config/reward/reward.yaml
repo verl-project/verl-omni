@@ -3,6 +3,9 @@
 # specify the default per-component configs
 defaults:
 
+  # Per-role profiling for reward-loop workers.
+  - ../profiler@profiler: profiler
+
   # per-role profiler config for the reward-model rollout servers,
   # inheriting from trainer/config/profiler/profiler.yaml
   - ../profiler@reward_model.rollout.profiler: profiler
