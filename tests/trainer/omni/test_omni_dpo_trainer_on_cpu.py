@@ -124,12 +124,20 @@ class TestOmniDirectPreferenceRayTrainerHelpers:
         ray_worker_group = MagicMock(return_value=actor_worker_group)
         trainer.ray_worker_group_cls = ray_worker_group
 
-        with patch(
-            "verl_omni.trainer.omni.ray_omni_trainer.create_colocated_worker_cls",
-            return_value=MagicMock(),
+        with (
+            patch(
+                "verl_omni.trainer.omni.ray_omni_trainer.create_colocated_worker_cls",
+                return_value=MagicMock(),
+            ),
+            patch(
+                "verl_omni.trainer.omni.ray_omni_trainer.build_worker_group_profile_kwargs",
+                return_value={"worker_nsight_options": {"trace": "nvtx"}},
+            ) as profile_kwargs,
         ):
             trainer._init_colocated_workers()
 
+        profile_kwargs.assert_called_once_with(config, device_name="cpu")
+        assert ray_worker_group.call_args.kwargs["worker_nsight_options"] == {"trace": "nvtx"}
         assert ray_worker_group.call_args.kwargs["master_port_range"] == [21000, 22000]
 
     def test_infer_reference_policy_maps_row_level_logps(self):

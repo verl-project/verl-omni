@@ -206,3 +206,22 @@ class TestRayMasterPortRangeSchema:
                 overrides=["trainer.ray_master_port_range=[21000,22000]"],
             )
         assert list(cfg.trainer.ray_master_port_range) == [21000, 22000]
+
+
+def test_omni_entrypoint_forwards_controller_launch_options(monkeypatch):
+    from verl_omni.trainer import main_omni
+
+    config = OmegaConf.create({"ray_kwargs": {}, "global_profiler": {"tool": "nsys", "steps": [1]}})
+    options = {"trace": "nvtx", "o": "controller-test"}
+    build_options = MagicMock(return_value=options)
+    runner = MagicMock()
+    monkeypatch.setattr(main_omni, "build_controller_nsight_launch_options", build_options)
+    monkeypatch.setattr(main_omni, "is_cuda_available", True)
+    monkeypatch.setattr(main_omni.ray, "is_initialized", lambda: True)
+    monkeypatch.setattr(main_omni.ray, "get", lambda ref: None)
+    monkeypatch.setattr("verl.utils.import_utils.is_nvtx_available", lambda: True)
+
+    main_omni.launch_ray_task_runner(config, runner)
+
+    build_options.assert_called_once_with(config)
+    runner.options.assert_called_once_with(runtime_env={"nsight": options})
