@@ -328,6 +328,30 @@ def test_prepare_model_inputs_applies_registered_adapter_hook():
     assert output_args == {"base": True}
 
 
+@pytest.mark.parametrize(
+    ("mixed_precision", "expected_dtype"),
+    [(None, torch.bfloat16), ({"param_dtype": "bf16"}, torch.bfloat16), ({"param_dtype": "fp32"}, torch.float32)],
+)
+def test_weight_sync_uses_actor_compute_dtype(mixed_precision, expected_dtype):
+    omni_impl = _get_omni_impl_module()
+    engine = object.__new__(omni_impl.OmniFSDPEngine)
+    engine.engine_config = types.SimpleNamespace(mixed_precision=mixed_precision)
+    engine.module = MagicMock()
+    engine.model_config = _make_mock_model_config()
+    engine._uses_fsdp2_cpu_offload_policy = True
+    engine._is_offload_param = False
+    engine._qat_enabled = False
+
+    with (
+        patch.object(omni_impl, "log_gpu_memory_usage"),
+        patch.object(omni_impl, "export_lora_for_sync", return_value=(iter(()), None)) as export,
+    ):
+        engine.get_per_tensor_param(base_sync_done=True)
+
+    assert export.call_args.kwargs["full_weight_dtype"] is expected_dtype
+    assert export.call_args.kwargs["is_diffusers"] is False
+
+
 # ---------------------------------------------------------------------------
 # ``collect_lora_params`` import source
 # ---------------------------------------------------------------------------
@@ -717,6 +741,7 @@ class TestAdapterNameForwarding:
         engine = object.__new__(omni_impl.OmniFSDPEngine)
         engine.module = module
         engine.model_config = _make_mock_model_config()
+        engine.engine_config = types.SimpleNamespace(mixed_precision=None)
         engine._uses_fsdp2_cpu_offload_policy = True
         engine._is_offload_param = False
         engine._qat_enabled = False

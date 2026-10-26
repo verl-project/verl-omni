@@ -42,18 +42,25 @@ from verl_omni.utils.config import resolve_lora_config
 from verl_omni.utils.fsdp_utils import collect_lora_params
 
 
-def _cast_for_sync(tensor: torch.Tensor) -> torch.Tensor:
-    """The single dtype policy for full-weight exports: gather DTensors to one
-    device and cast floating-point gathers to bf16; leave everything else alone.
-    Adapter-only exports never pass through here (training dtype is preserved)."""
+def _cast_for_sync(tensor: torch.Tensor, full_weight_dtype: torch.dtype = torch.bfloat16) -> torch.Tensor:
+    """Gather full-weight DTensors and cast floating gathers to the requested dtype.
+
+    Adapter-only exports preserve training dtype; plain tensors pass through.
+    """
     if isinstance(tensor, DTensor):
         tensor = tensor.to(get_device_id(), non_blocking=True).full_tensor()
-        if tensor.is_floating_point() and tensor.dtype != torch.bfloat16:
-            tensor = tensor.to(torch.bfloat16, non_blocking=True)
+        if tensor.is_floating_point() and tensor.dtype != full_weight_dtype:
+            tensor = tensor.to(full_weight_dtype, non_blocking=True)
     return tensor
 
 
-def _merged_lora_stream(module, *, key_prefix: str = "", offload_fn: Callable[[], None] | None = None):
+def _merged_lora_stream(
+    module,
+    *,
+    key_prefix: str = "",
+    offload_fn: Callable[[], None] | None = None,
+    full_weight_dtype: torch.dtype = torch.bfloat16,
+):
     """Stream merged (base + LoRA) weights for rollout weight sync.
 
     ``state_dict()`` returns tensors that alias the live FSDP parameter storage,
@@ -71,7 +78,10 @@ def _merged_lora_stream(module, *, key_prefix: str = "", offload_fn: Callable[[]
             for name, param in params.items():
                 # clone: plain tensors also alias module storage, and bucketed
                 # senders may flush after the restore has already run
-                tensor = _cast_for_sync(param) if isinstance(param, DTensor) else param.detach().clone()
+                if isinstance(param, DTensor):
+                    tensor = _cast_for_sync(param, full_weight_dtype)
+                else:
+                    tensor = param.detach().clone()
                 yield f"{key_prefix}{name}", tensor
     finally:
         if offload_fn is not None:
@@ -90,6 +100,7 @@ def export_lora_for_sync(
     adapter_context: Callable[[], object] | None = None,
     offload_fn: Callable[[], None] | None = None,
     stream_transform: Callable[[Iterator], Iterator] | None = None,
+    full_weight_dtype: torch.dtype = torch.bfloat16,
 ) -> tuple[Iterator[tuple[str, torch.Tensor]], dict | None]:
     """Yield ``(name, tensor)`` for a rollout sync plus ``peft_config``-or-``None``.
 
@@ -114,6 +125,8 @@ def export_lora_for_sync(
         stream_transform: Engine post-processing (QAT quantization) applied to
             the non-merged export stream; merged exports bypass it, matching
             upstream verl.
+        full_weight_dtype: Floating dtype for gathered full-weight DTensors;
+            adapter-only exports and plain tensors retain their dtypes.
 
     Returns:
         ``(iterator, peft_config_dict)`` where ``peft_config_dict`` is ``None``
@@ -137,7 +150,9 @@ def export_lora_for_sync(
                     f"model.lora.merge=True exports the active 'default' adapter only; "
                     f"got rollout_adapter={adapter_name!r}."
                 )
-            return _merged_lora_stream(module, key_prefix=key_prefix, offload_fn=offload_fn), None
+            return _merged_lora_stream(
+                module, key_prefix=key_prefix, offload_fn=offload_fn, full_weight_dtype=full_weight_dtype
+            ), None
         peft_config = peft_model.peft_config.get(adapter, None)
         adapter_ctx = adapter_context() if adapter_context is not None else nullcontext()
         if is_diffusers:
@@ -170,7 +185,7 @@ def export_lora_for_sync(
     if peft_config is not None and base_sync_done:
         per_tensor_param = params.items()
     else:
-        per_tensor_param = ((name, _cast_for_sync(param)) for name, param in params.items())
+        per_tensor_param = ((name, _cast_for_sync(param, full_weight_dtype)) for name, param in params.items())
 
     if key_prefix:
         per_tensor_param = ((f"{key_prefix}{name}", tensor) for name, tensor in per_tensor_param)

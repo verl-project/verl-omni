@@ -459,6 +459,88 @@ def test_minicpmo_from_pretrained_requires_trust_remote_code():
         MiniCPMO.from_pretrained("/fake/minicpm", config=None, trust_remote_code=False)
 
 
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+def test_actor_model_cast_preserves_rotary_frequencies(monkeypatch, dtype):
+    from transformers import Qwen3Config, Qwen3ForCausalLM
+
+    import verl_omni.pipelines.minicpm.thinker_training_adapter as adapter
+
+    # The stub has no media towers for the remote-code patches to wrap.
+    monkeypatch.setattr(adapter, "_apply_remote_code_patches", lambda module: None)
+    config = Qwen3Config(
+        vocab_size=32,
+        hidden_size=64,
+        intermediate_size=128,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=16,
+        rope_theta=1000000.0,
+    )
+    model = torch.nn.Module()
+    model.config = SimpleNamespace()
+    model.llm = Qwen3ForCausalLM(config)
+    rotary = model.llm.model.rotary_emb
+    frequencies = rotary.inv_freq.clone()
+    x = torch.zeros(1, 3, 64, dtype=dtype)
+    positions = torch.tensor([[0, 1023, 4095]])
+    expected = rotary(x, positions)
+
+    MiniCPMThinkerAdapter.configure_model(model, SimpleNamespace())
+    model.to(dtype=dtype)
+
+    assert model.llm.model.embed_tokens.weight.dtype == dtype
+    assert rotary.inv_freq.dtype == torch.float32
+    assert rotary.original_inv_freq.dtype == torch.float32
+    torch.testing.assert_close(rotary.inv_freq, frequencies, atol=0, rtol=0)
+    torch.testing.assert_close(rotary.original_inv_freq, frequencies, atol=0, rtol=0)
+    for actual, reference in zip(rotary(x, positions), expected, strict=True):
+        torch.testing.assert_close(actual, reference, atol=0, rtol=0)
+    assert not any("inv_freq" in key for key in model.state_dict())
+
+
+def test_remote_loader_restores_nonpersistent_resampler_positions(monkeypatch, tmp_path):
+    from transformers import AutoModel, PretrainedConfig, PreTrainedModel
+
+    class Resampler(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.proj = torch.nn.Linear(2, 2)
+            self.max_size = (2, 2)
+            self._set_2d_pos_cache(self.max_size)
+
+        def _set_2d_pos_cache(self, size, device="cpu"):
+            positions = torch.arange(size[0] * size[1], dtype=torch.float32, device=device).cos()
+            self.register_buffer("pos_embed", positions, persistent=False)
+
+    class NativeModel(PreTrainedModel):
+        config_class = PretrainedConfig
+
+        def __init__(self, config):
+            super().__init__(config)
+            self.resampler = Resampler()
+            self.post_init()
+
+    config = PretrainedConfig()
+    source = NativeModel(config)
+    source.resampler._set_2d_pos_cache(source.resampler.max_size)
+    expected = source.resampler.pos_embed.clone()
+    source.save_pretrained(tmp_path)
+    monkeypatch.setattr("verl_omni.models.transformers.minicpm_o.patch_minicpm_auto_model_init", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "verl_omni.models.transformers.minicpm_o.patch_minicpm_siglip_flash_attn_support", lambda *a, **k: None
+    )
+    monkeypatch.setattr(
+        AutoModel, "from_pretrained", lambda path, **kwargs: NativeModel.from_pretrained(path, config=kwargs["config"])
+    )
+
+    loaded = MiniCPMO.from_pretrained(str(tmp_path), config=config, trust_remote_code=True)
+
+    torch.testing.assert_close(loaded.resampler.pos_embed, expected, atol=0, rtol=0)
+    assert "resampler.pos_embed" not in loaded.state_dict()
+    torch.testing.assert_close(loaded.resampler.proj.weight, source.resampler.proj.weight)
+
+
 def test_configure_model_applies_remote_whisper_compat(monkeypatch):
     from verl_omni.models.transformers import minicpm_o
 

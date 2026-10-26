@@ -15,7 +15,7 @@
 
 Pins, for both engines behind one implementation:
 - the dtype matrix (adapter tensors keep training dtype; full-weight DTensor
-  gathers cast floating point to bf16; plain tensors pass through),
+  gathers use the requested dtype, defaulting to bf16; plain tensors pass through),
 - merged streams materialize inside ``merged_lora_context`` and stay valid
   after the actor is restored,
 - engine memory management runs at the right point of each path,
@@ -128,6 +128,26 @@ def test_full_weight_export_casts_only_floating_dtensors(monkeypatch, is_diffuse
     assert weights["dti" if not is_diffusers else "transformer.dti"].dtype is torch.int64
 
 
+def test_ar_full_weight_export_preserves_fp32_dtensor(monkeypatch):
+    floating = _floating_dtensor(1.0001)
+    integer = _integer_dtensor()
+    _patch_export_machinery(monkeypatch, collect=MagicMock(return_value={"weight": floating, "count": integer}))
+    monkeypatch.setattr(lora_export, "replace_lora_wrapper", lambda name, config: name)
+
+    params, _ = export_lora_for_sync(
+        _peft_module(),
+        model_config=_model_config(),
+        base_sync_done=False,
+        is_diffusers=False,
+        full_weight_dtype=torch.float32,
+    )
+
+    weights = dict(params)
+    torch.testing.assert_close(weights["weight"], torch.tensor([1.0001]), atol=0, rtol=0)
+    assert weights["weight"].dtype is torch.float32
+    assert weights["count"].dtype is torch.int64
+
+
 def test_non_lora_full_weights_cast_policy(monkeypatch):
     plain = torch.tensor([1.5], dtype=torch.float32)
     module = _plain_module()
@@ -190,6 +210,29 @@ def test_merged_stream_materializes_inside_context(monkeypatch):
     assert peft_config is None  # merge mode routes the rollout to a full-weight sync
     torch.testing.assert_close(weights["weight"], torch.tensor([2.0]))  # merged value, not restored base
     torch.testing.assert_close(module.weight, torch.tensor([1.0]))  # actor restored after the stream
+
+
+@pytest.mark.parametrize("full_weight_dtype", [torch.bfloat16, torch.float32])
+def test_merged_dtensor_uses_full_weight_dtype(monkeypatch, full_weight_dtype):
+    module = _FakeModule()
+    floating = _floating_dtensor(1.0001)
+    monkeypatch.setattr(module, "state_dict", lambda: {"weight": floating})
+    monkeypatch.setattr(lora_export, "merged_lora_context", _merged_context(module))
+    monkeypatch.setattr(lora_export, "normalize_peft_param_name", lambda state: state)
+    _patch_export_machinery(monkeypatch)
+
+    params, _ = export_lora_for_sync(
+        module,
+        model_config=_model_config(merge=True),
+        base_sync_done=True,
+        is_diffusers=False,
+        full_weight_dtype=full_weight_dtype,
+    )
+
+    weights = dict(params)
+    expected = torch.tensor([1.0001]).to(full_weight_dtype)
+    torch.testing.assert_close(weights["weight"], expected, atol=0, rtol=0)
+    assert weights["weight"].dtype is full_weight_dtype
 
 
 def test_merged_stream_keeps_prefix(monkeypatch):
