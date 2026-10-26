@@ -1,6 +1,6 @@
 # Installation (NPU)
 
-Last updated: 10/18/2026
+Last updated: 10/22/2026
 
 For NVIDIA GPU, see the {doc}`GPU installation guide <install>`. For AMD GPU, see the {doc}`ROCm installation guide <install_rocm>`. For Intel GPU, see the {doc}`Intel GPU installation guide <install_xpu>`.
 
@@ -28,13 +28,26 @@ source .venv/bin/activate
 2. Install PyTorch
 
 Install the CPU build first; otherwise later steps pull the CUDA build of `torch` from PyPI.
+Keep the selected PyTorch stack constrained in subsequent installs. Store the
+constraints under the active virtual environment so the path remains valid when
+changing directories.
 
 ```bash
+NPU_TORCH_CONSTRAINTS="$VIRTUAL_ENV/constraints-npu-torch.txt"
+cat > "$NPU_TORCH_CONSTRAINTS" <<'EOF'
+torch==2.10.0+cpu
+torchvision==0.25.0+cpu
+torchaudio==2.10.0+cpu
+torch-npu==2.10.0.post4
+EOF
+
 uv pip install --force-reinstall \
     torch==2.10.0+cpu torchvision==0.25.0+cpu torchaudio==2.10.0+cpu \
+    --constraint "$NPU_TORCH_CONSTRAINTS" \
     --extra-index-url https://download.pytorch.org/whl/cpu/ \
     --index-strategy unsafe-best-match
 uv pip install --force-reinstall torch-npu==2.10.0.post4 \
+    --constraint "$NPU_TORCH_CONSTRAINTS" \
     --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi \
     --extra-index-url https://download.pytorch.org/whl/cpu/ \
     --index-strategy unsafe-best-match
@@ -46,6 +59,15 @@ Use `ASCEND_HOME_PATH` to select a custom CANN toolkit installation; otherwise,
 the commands use the `latest` symlink. Load ATB from its own installation
 directory rather than deriving its location from the toolkit path.
 
+vLLM's isolated build environment installs its own build dependencies, including
+PyTorch, even when CPU PyTorch is already installed. `VLLM_TARGET_DEVICE=empty`
+does not disable build isolation. Install the build tools explicitly, then use
+`--no-build-isolation` to build against the selected NPU-compatible PyTorch.
+Runtime constraints alone do not constrain isolated build dependencies.
+PyYAML is needed for torch-npu to load when the build imports PyTorch. The
+packaging/setuptools-scm bounds keep the build tools compatible with runtime
+dependencies that require packaging below 26.
+
 ```bash
 source "${ASCEND_HOME_PATH:-/usr/local/Ascend/ascend-toolkit/latest}/set_env.sh"
 source /usr/local/Ascend/nnal/atb/set_env.sh
@@ -53,7 +75,12 @@ source /usr/local/Ascend/nnal/atb/set_env.sh
 cd ..
 git clone --depth 1 -b v0.30.0 https://github.com/vllm-project/vllm.git
 cd vllm
-VLLM_TARGET_DEVICE=empty uv pip install -e ".[audio]"
+uv pip install \
+    'cmake>=3.26.1' ninja 'packaging>=24.2,<26' \
+    'setuptools>=77.0.3,<81.0.0' 'setuptools-scm>=8.0,<9' \
+    'setuptools-rust>=1.9.0' wheel jinja2 pyyaml
+VLLM_TARGET_DEVICE=empty uv pip install --no-build-isolation -e ".[audio]" \
+    --constraint "$NPU_TORCH_CONSTRAINTS"
 uv pip uninstall -y triton || true
 cd ..
 
@@ -63,22 +90,29 @@ cd vllm-ascend
 git checkout $(tr -d '[:space:]' < ../verl-omni/.github/vllm_ascend_pin.txt)
 git submodule update --init --recursive
 uv pip install -e . \
+    --constraint "$NPU_TORCH_CONSTRAINTS" \
     --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi \
     --extra-index-url https://download.pytorch.org/whl/cpu/ \
     --index-strategy unsafe-best-match
 cd ..
 uv pip install --reinstall --no-deps triton-ascend==3.2.2 \
+    --constraint "$NPU_TORCH_CONSTRAINTS" \
     --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
 cd verl-omni
 ```
 
 4. Install vLLM-Omni and VeRL-Omni
 
+Keep the NPU target set for both installs, since installing verl-omni can also
+build its vllm-omni dependency.
+
 ```bash
-VLLM_OMNI_TARGET_DEVICE=npu \
-    uv pip install "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@$(cat .github/vllm_omni_pin.txt)"
-uv pip install -e .
-uv pip install --upgrade onnxruntime
+export VLLM_OMNI_TARGET_DEVICE=npu
+uv pip install \
+    "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@$(cat .github/vllm_omni_pin.txt)" \
+    --constraint "$NPU_TORCH_CONSTRAINTS"
+uv pip install -e . --constraint "$NPU_TORCH_CONSTRAINTS"
+uv pip install --upgrade onnxruntime --constraint "$NPU_TORCH_CONSTRAINTS"
 ```
 
 ### Extras
@@ -93,6 +127,7 @@ The CUDA `gpu` extra is not used on NPU. NPU recipes override the attention back
 ## Post-Installation Verification
 
 ```bash
+python -c "import torch; assert torch.version.cuda is None, torch.version.cuda"
 python -c "from importlib.metadata import version; import torch, torch_npu; print('torch', torch.__version__, '| torch-npu', version('torch-npu'), '| NPU', torch.npu.is_available())"
 python -c "import vllm; print('vllm', vllm.__version__)"
 python -c "import triton; from triton.backends import backends; print('triton', triton.__version__, sorted(backends))"
