@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # MiniMax-H3 T2VA DiffusionNFT LoRA on 16 Ascend NPUs with two FSDP8 groups.
+# Defaults below are 16 NPUs with ROLLOUT_TP=4. On Atlas A5, NUM_GPUS=8 and
+# ROLLOUT_TP=2 is enough; TEXT_ENCODER_TP follows ROLLOUT_TP.
 set -e
 
 ASCEND_HOME_PATH=${ASCEND_HOME_PATH:-/usr/local/Ascend/ascend-toolkit}

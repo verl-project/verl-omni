@@ -76,6 +76,12 @@ gpu = [
     "liger-kernel",
     "cupy-cuda13x",
 ]
+xpu = [
+    # verl has no built-in Intel platform; the plugin registers it via the verl.plugins entry point.
+    "verl-hardware-plugin @ git+https://github.com/verl-project/verl-hardware-plugin.git@53c4de2626745543e45761711d4f6c265c508dc6",
+    # Ray counts Intel GPUs through dpctl; 0.22.x matches the oneAPI 2026 runtime of torch 2.13+xpu.
+    "dpctl>=0.22,<0.23",
+]
 dev = [
     "pytest",
     "pytest-cov",

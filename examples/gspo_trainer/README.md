@@ -1,6 +1,6 @@
 # Qwen3-Omni Thinker GSPO Trainer
 
-Last updated: 10/06/2026
+Last updated: 10/24/2026
 
 This example shows how to post-train the **Qwen3-Omni-30B-A3B Thinker** with
 **GSPO** on multimodal reasoning tasks, using FSDP for the actor and `vllm-omni` as
@@ -15,7 +15,7 @@ Both **GPU** and **NPU** training platforms are supported:
   — **GPU**, **LoRA (r=32)** on a single node with **4 × H800 80GB**.
 - [`run_qwen3_omni_thinker_gspo_lora_avqa_v1.sh`](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_avqa_v1.sh)
   — **GPU**, **LoRA (r=32) V1** for text + image + audio AVQA training.
-- [`run_qwen3_omni_thinker_gspo_npu_avqa_v1.sh`](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_npu_avqa_v1.sh)
+- [`run_qwen3_omni_thinker_gspo_avqa_v1.sh`](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_avqa_v1.sh)
   — **NPU**, **full-parameter V1** for text + image + audio AVQA training.
 - [`run_qwen3_omni_thinker_gspo_npu_nextqa_v1.sh`](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_npu_nextqa_v1.sh)
   — **NPU**, **full-parameter V1** for video and soundtrack NExT-QA training.
@@ -54,7 +54,7 @@ monkey-patches through `external_lib`.
 
 The launchers colocate the FSDP actor and the `vllm-omni` rollout on the same
 devices. `run_qwen3_omni_thinker_gspo_lora_v1.sh` targets a single node with
-**4 × H800 80GB**; `run_qwen3_omni_thinker_gspo_npu_avqa_v1.sh` targets a single
+**4 × H800 80GB**; `run_qwen3_omni_thinker_gspo_avqa_v1.sh` targets a single
 **Atlas 800T A3** node with **16 × Ascend 910C 64GB**. It dynamically generates
 a thinker-only deploy config for each rollout replica from that replica's
 visible devices, avoiding cross-replica device-rank collisions.
@@ -93,7 +93,7 @@ Launch from the repository root — pick the flavor that matches your hardware:
 bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_v1.sh
 
 # NPU, AVQA, Atlas 800T A3 (16 × Ascend 910C 64GB) — V1 trainer
-bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_npu_avqa_v1.sh
+bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_avqa_v1.sh
 ```
 
 The V1 launchers use pure CLI overrides on `verl_omni.trainer.main_omni`
@@ -307,7 +307,7 @@ existing generic NPU script.
 TRAIN_FILE=$HOME/data/avqa_r1_6k/train.parquet \
 VAL_FILE=$HOME/data/avqa_r1_6k/validation.parquet \
 MODEL_PATH=/path/to/Qwen3-Omni-30B-A3B-Instruct \
-bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_npu_avqa_v1.sh
+bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_avqa_v1.sh
 ```
 
 The launcher uses a 4096-token multimodal prompt budget, a 12288-token response
@@ -709,7 +709,7 @@ examples/gspo_trainer/
 │   ├── run_qwen3_omni_thinker_gspo_lora_v1.sh       ← V1 launch script (GPU, LoRA r=32, text)
 │   ├── run_qwen3_omni_thinker_gspo_lora_mmk12_v1.sh  ← V1 launch script (GPU, LoRA r=32, image)
 │   ├── run_qwen3_omni_thinker_gspo_lora_avqa_v1.sh   ← V1 launch script (GPU, LoRA r=32, audio + image)
-│   ├── run_qwen3_omni_thinker_gspo_npu_avqa_v1.sh    ← V1 launch script (NPU, AVQA)
+│   ├── run_qwen3_omni_thinker_gspo_avqa_v1.sh    ← V1 launch script (NPU, AVQA)
 │   ├── run_qwen3_omni_thinker_gspo_npu_nextqa_v1.sh  ← V1 launch script (NPU, NExT-QA)
 ├── data_process/
 │   ├── mmk12.py                                      ← MMK12 → verl RL parquet converter

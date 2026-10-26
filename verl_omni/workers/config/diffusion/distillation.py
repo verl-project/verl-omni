@@ -31,6 +31,9 @@ class DiffusionDistillationTeacherModelConfig(BaseConfig):
         same pipeline family as the student.
     world_size (int):
         Number of GPUs this teacher occupies in the distillation resource pool.
+    guidance_scale (float, optional):
+        Classifier-free guidance scale of the teacher forward. ``None`` reuses the student's
+        ``pipeline.guidance_scale``.
     """
 
     _mutable_fields = BaseConfig._mutable_fields | {"key", "world_size"}
@@ -38,6 +41,7 @@ class DiffusionDistillationTeacherModelConfig(BaseConfig):
     key: Optional[str] = None
     model_path: Optional[str] = None
     world_size: int = 0
+    guidance_scale: Optional[float] = None
 
     def check_configured(self):
         if self.model_path is None:

@@ -1,6 +1,6 @@
 # NPU Smoke Tests
 
-Last updated: 10/16/2026.
+Last updated: 10/19/2026.
 
 This guide explains how to add CI test cases for Huawei Ascend devices in verl-omni.
 
@@ -19,6 +19,27 @@ into these runners:
 | 0 | core | vLLM-Omni rollout + sleep/wake-up | tests/workers/rollout/rollout_vllm/test_vllm_omni_generate_npu.py | 8 |
 | 1 | e2e | Qwen-Image FlowGRPO trainer | tests/special_e2e/run_flowgrpo_qwen_image_npu.sh | 8 |
 | 2 | e2e | Wan2.2 DanceGRPO trainer | tests/special_e2e/run_dancegrpo_wan22_npu.sh | 8 |
+| 3 | core | Diffusers FSDP engine inference and training | tests/workers/test_diffusers_fsdp_engine_npu.py | 8 |
+
+Test 3 ports the `fsdp` case of `tests/workers/test_diffusers_fsdp_engine.py`
+(GPU core ID 2). It reuses the GPU test's synthetic trajectories and engine
+inference/training exercise, with `_native_npu` attention and sequence parallel
+size 1. It requires at least two visible NPUs and a local tiny Qwen-Image model.
+FSDP2 and sequence-parallel execution are not covered by this NPU case.
+The test checks finite inference log probabilities, training loss, and gradient
+norm; it does not establish GPU/NPU numerical parity or model convergence.
+
+Run only the migrated case from the repository root after sourcing CANN/ATB:
+
+```bash
+DEVICE_NAME=npu NUM_NPUS=2 \
+MODEL_PATH="${HOME}/.cache/modelscope/hub/models/tiny-random/Qwen-Image" \
+python3 -m pytest -v -s tests/workers/test_diffusers_fsdp_engine_npu.py
+```
+
+The same case runs through `run_npu_smoke_core.sh` and the combined
+`run_npu_smoke_tests.sh` entry point. Missing hardware or model files fail
+explicitly rather than producing an all-skipped smoke success.
 
 ## Add a New NPU Smoke Test
 
@@ -40,7 +61,7 @@ Keep tests small and reproducible:
 Add core tests to run_npu_smoke_core.sh and trainer tests to
 run_npu_smoke_e2e.sh. Assign the next unused numeric ID and call run_test:
 
-    run_test 3 "my NPU smoke test"         env ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES}"             NUM_NPUS="${NUM_NPUS}"         pytest -s tests/workers/test_my_npu_feature.py
+    run_test 4 "my NPU smoke test"         env ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES}"             NUM_NPUS="${NUM_NPUS}"         pytest -s tests/workers/test_my_npu_feature.py
 
 Do not reuse an existing ID. Adding a test to an existing group needs no
 workflow mapping change.
@@ -170,3 +191,9 @@ Some Ascend runtime versions can abort with exit code 134 during allocator
 teardown after a successful workload. The runner accepts 134 only when the
 test-specific positive completion markers are present. Earlier aborts, missing
 markers, and other exit codes remain failures.
+
+For Tests 0 and 3, the shared compatibility rule requires exactly one passed pytest case
+with no failures, errors, or skips in the final summary, followed by the known
+`corrupted size vs. prev_size` diagnostic and exit code 134. The runner emits a
+warning and preserves the log. This handles the observed CI teardown failure;
+it does not fix the underlying native memory issue.

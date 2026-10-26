@@ -1,16 +1,28 @@
 #!/usr/bin/env bash
 # Qwen3-Omni Thinker GSPO full-parameter AVQA training with the omni V1 trainer.
 # Modalities: text + image + audio -> text.
-# Hardware: Atlas 800T A3 (16 × Ascend 910C 64GB).
+# Hardware: A5 (8 × Ascend 950 96GB).
 set -x
 
 export CPATH=/usr/include${CPATH:+:$CPATH}
 export VLLM_ASCEND_ENABLE_NZ=0
 export VERL_USE_EXTERNAL_MODULES=verl_omni
 
-ASCEND_HOME_PATH=${ASCEND_HOME_PATH:-/usr/local/Ascend/cann-9.0.0}
-source "${ASCEND_HOME_PATH}/set_env.sh"
-source "${ASCEND_HOME_PATH}/../nnal/atb/set_env.sh"
+# DEVICE is auto-detected by querying npu-smi; override only for special cases.
+DEVICE=${DEVICE:-$(command -v npu-smi >/dev/null 2>&1 && npu-smi info >/dev/null 2>&1 && echo npu || echo gpu)}
+if [[ "${DEVICE}" != "npu" && "${DEVICE}" != "gpu" ]]; then
+    echo "DEVICE must be npu or gpu, got '${DEVICE}'." >&2
+    exit 2
+fi
+
+if [[ "${DEVICE}" == "npu" ]]; then
+    ASCEND_HOME_PATH=${ASCEND_HOME_PATH:-/usr/local/Ascend/cann-9.1.0}
+    source "${ASCEND_HOME_PATH}/set_env.sh"
+    source "${ASCEND_HOME_PATH}/../nnal/atb/set_env.sh"
+fi
+
+# Setting actor_rollout_ref.actor.fsdp_config.use_no_sync_for_gradient_accumulation=false
+# requires verl commit a0feb78fe8229fde644aec3bbec20b5dc4583509 or later.
 
 MODEL_PATH=${MODEL_PATH:-"Qwen/Qwen3-Omni-30B-A3B-Instruct"}
 TRAIN_FILE=${TRAIN_FILE:-"$HOME/data/avqa_r1_6k/train.parquet"}
@@ -59,6 +71,7 @@ python3 -m verl_omni.trainer.main_omni \
     actor_rollout_ref.actor.loss_agg_mode=seq-mean-token-mean \
     actor_rollout_ref.actor.fsdp_config.param_offload=true \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=true \
+    actor_rollout_ref.actor.fsdp_config.use_no_sync_for_gradient_accumulation=false \
     actor_rollout_ref.actor.fsdp_config.model_dtype=bfloat16 \
     actor_rollout_ref.actor.fsdp_config.use_orig_params=true \
     actor_rollout_ref.actor.fsdp_config.use_torch_compile=False \
@@ -77,6 +90,8 @@ python3 -m verl_omni.trainer.main_omni \
     actor_rollout_ref.rollout.agent.num_workers=$((NUM_GPUS_ACTOR_ROLLOUT_REWARD / ROLLOUT_TP)) \
     +actor_rollout_ref.rollout.engine_kwargs.vllm_omni.output_mode=ar \
     +actor_rollout_ref.rollout.engine_kwargs.vllm_omni.pipeline_name=qwen3_omni_moe \
+    ++actor_rollout_ref.rollout.engine_kwargs.vllm_omni.additional_config.weight_nz_mode=0 \
+    ++actor_rollout_ref.rollout.engine_kwargs.vllm_omni.compilation_config.cudagraph_mode=PIECEWISE \
     actor_rollout_ref.rollout.val_kwargs.n=1 \
     actor_rollout_ref.rollout.val_kwargs.temperature=0 \
     actor_rollout_ref.rollout.val_kwargs.top_p=1.0 \

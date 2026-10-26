@@ -49,6 +49,16 @@ def _load_dataset_module():
     sys.modules[transform_spec.name] = transform_module
     transform_spec.loader.exec_module(transform_module)
 
+    minicpm_transform_spec = importlib.util.spec_from_file_location(
+        "verl_omni.utils.dataset.minicpm_transform",
+        dataset_dir / "minicpm_transform.py",
+    )
+    if minicpm_transform_spec is None or minicpm_transform_spec.loader is None:
+        raise ImportError("Cannot load minicpm_transform module.")
+    minicpm_transform_module = importlib.util.module_from_spec(minicpm_transform_spec)
+    sys.modules[minicpm_transform_spec.name] = minicpm_transform_module
+    minicpm_transform_spec.loader.exec_module(minicpm_transform_module)
+
     dataset_spec = importlib.util.spec_from_file_location(
         "verl_omni.utils.dataset.offline_mllm_dpo_dataset",
         dataset_dir / "offline_mllm_dpo_dataset.py",
@@ -190,6 +200,26 @@ def test_build_preference_branch_supports_compact_top_level_media_schema():
     assert branch["conversations"][-1] == ["assistant", ("text", "preferred answer")]
 
 
+def test_build_preference_branch_supports_numbered_minicpm_image_placeholders():
+    sample = {
+        "prompt": [{"role": "user", "content": "<image_00>Compare it with <image_01>."}],
+        "chosen": {"role": "assistant", "content": "preferred answer"},
+        "images": ["/tmp/left.png", "/tmp/right.png"],
+        "data_source": "minicpm/image",
+    }
+    branch = dataset_mod._build_preference_branch(sample, sample["chosen"])
+
+    assert branch["images"] == ["/tmp/left.png", "/tmp/right.png"]
+    assert branch["conversations"][0] == [
+        "user",
+        ("image", None),
+        ("text", "Compare it with "),
+        ("image", None),
+        ("text", "."),
+    ]
+    assert branch["conversations"][-1] == ["assistant", ("text", "preferred answer")]
+
+
 def test_build_preference_branch_rejects_missing_top_level_media():
     sample = {
         "prompt": [{"role": "user", "content": "<video>What happens at the end?"}],
@@ -199,6 +229,166 @@ def test_build_preference_branch_rejects_missing_top_level_media():
 
     with pytest.raises(ValueError, match=r"Prompt contains 1 <video> token\(s\) but videos has 0 item\(s\)"):
         dataset_mod._build_preference_branch(sample, sample["chosen"])
+
+
+@pytest.mark.parametrize(
+    ("modality", "path"),
+    [("image", "/tmp/a.png"), ("video", "/tmp/a.mp4"), ("audio", "/tmp/a.wav")],
+)
+def test_build_preference_branch_keeps_repeated_inline_media_paths(modality, path):
+    item = _content_item(modality, **{modality: path})
+    sample = {
+        "prompt": [{"role": "user", "content": [item, item, _content_item("text", text="Compare these.")]}],
+        "chosen": "answer A",
+    }
+    branch = dataset_mod._build_preference_branch(sample, sample["chosen"])
+
+    assert branch[f"{modality}s"] == [path, path]
+
+
+def test_build_preference_branch_keeps_same_media_path_across_messages():
+    item = _content_item("image", image="/tmp/a.png")
+    sample = {
+        "prompt": [
+            {"role": "user", "content": [item]},
+            {"role": "assistant", "content": "Noted."},
+            {"role": "user", "content": [item, _content_item("text", text="Is this the same image?")]},
+        ],
+        "chosen": "answer A",
+    }
+    branch = dataset_mod._build_preference_branch(sample, sample["chosen"])
+
+    assert branch["images"] == ["/tmp/a.png", "/tmp/a.png"]
+
+
+def test_build_preference_branch_does_not_double_count_declared_top_level_media():
+    sample = {
+        "prompt": [{"role": "user", "content": [_content_item("image", image="/tmp/a.png")]}],
+        "chosen": "answer A",
+        "images": ["/tmp/a.png"],
+    }
+    branch = dataset_mod._build_preference_branch(sample, sample["chosen"])
+
+    assert branch["images"] == ["/tmp/a.png"]
+
+
+def test_build_preference_branch_appends_inline_media_missing_from_top_level():
+    sample = {
+        "prompt": [
+            {"role": "user", "content": "<image>What is this?"},
+            {"role": "user", "content": [_content_item("image", image="/tmp/b.png")]},
+        ],
+        "chosen": "answer A",
+        "images": ["/tmp/a.png"],
+    }
+    branch = dataset_mod._build_preference_branch(sample, sample["chosen"])
+
+    assert branch["images"] == ["/tmp/a.png", "/tmp/b.png"]
+
+
+def test_build_preference_branch_orders_media_by_prompt_tokens():
+    sample = {
+        "prompt": [
+            {
+                "role": "user",
+                "content": [
+                    _content_item("image", image="/tmp/b.png"),
+                    _content_item("image", image="/tmp/a.png"),
+                    _content_item("text", text="Which is brighter?"),
+                ],
+            }
+        ],
+        "chosen": "answer A",
+        "images": ["/tmp/a.png"],
+    }
+    branch = dataset_mod._build_preference_branch(sample, sample["chosen"])
+
+    assert branch["images"] == ["/tmp/b.png", "/tmp/a.png"]
+
+
+def test_build_preference_branch_orders_placeholder_after_inline_media():
+    sample = {
+        "prompt": [
+            {"role": "user", "content": [_content_item("image", image="/tmp/b.png")]},
+            {"role": "user", "content": "<image>What is this?"},
+        ],
+        "chosen": "answer A",
+        "images": ["/tmp/a.png"],
+    }
+    branch = dataset_mod._build_preference_branch(sample, sample["chosen"])
+
+    assert branch["images"] == ["/tmp/b.png", "/tmp/a.png"]
+
+
+def test_minicpm_base_transform_does_not_require_qwen_rope(monkeypatch, tmp_path):
+    rows = [
+        {
+            "data_source": "minicpm/image",
+            "prompt": [{"role": "user", "content": "<image>Question?"}],
+            "chosen": {"role": "assistant", "content": "chosen"},
+            "rejected": {"role": "assistant", "content": "rejected"},
+            "images": ["/tmp/image.png"],
+            "extra_info": {"modality": "image"},
+        }
+    ]
+    parquet_path = tmp_path / "minicpm.parquet"
+    pd.DataFrame(rows).to_parquet(parquet_path, index=False)
+
+    def fake_minicpm_transform(sample, processor, **kwargs):
+        del sample, processor, kwargs
+        return [
+            {
+                "input_ids": torch.tensor([1, 2, 3]),
+                "attention_mask": torch.tensor([1, 1, 1]),
+                "position_ids": torch.tensor([0, 1, 2]),
+                "labels": torch.tensor([-100, -100, 3]),
+            }
+        ]
+
+    monkeypatch.setattr(dataset_mod, "process_minicpm_sample", fake_minicpm_transform)
+    config = OmegaConf.create({"base_transform": "minicpm", "pad_mode": "right"})
+
+    dataset = dataset_mod.OfflineMLLMDPODataset(
+        str(parquet_path),
+        tokenizer=None,
+        processor=MagicMock(),
+        config=config,
+    )
+    item = dataset[0]
+
+    assert item["input_ids"][0].tolist() == [1, 2, 3]
+    assert item["input_ids"][1].tolist() == [1, 2, 3]
+    assert item["is_chosen"] == [True, False]
+
+
+def test_minicpm_base_transform_rejects_use_audio_in_video(tmp_path):
+    rows = [
+        {
+            "data_source": "minicpm/image",
+            "prompt": [{"role": "user", "content": "<image>Question?"}],
+            "chosen": {"role": "assistant", "content": "chosen"},
+            "rejected": {"role": "assistant", "content": "rejected"},
+            "images": ["/tmp/image.png"],
+            "extra_info": {"modality": "image"},
+        }
+    ]
+    parquet_path = tmp_path / "minicpm.parquet"
+    pd.DataFrame(rows).to_parquet(parquet_path, index=False)
+    config = OmegaConf.create(
+        {
+            "base_transform": "minicpm",
+            "pad_mode": "right",
+            "mm_configs": {"use_audio_in_video": True},
+        }
+    )
+
+    with pytest.raises(ValueError, match="use_audio_in_video=True is not supported"):
+        dataset_mod.OfflineMLLMDPODataset(
+            str(parquet_path),
+            tokenizer=None,
+            processor=MagicMock(),
+            config=config,
+        )
 
 
 def test_pair_branch_values_keeps_chosen_rejected_branches_separate():
@@ -538,6 +728,7 @@ def test_offline_mllm_dpo_dataset_getitem(monkeypatch, mock_processor, mixed_par
     assert item["modality"] == ["image", "image"]
     assert item["data_source"] == ["omni_preference/image", "omni_preference/image"]
     assert item["extra_info"][0]["modality"] == "image"
+    assert "dataset_index" not in item["extra_info"][0]
 
 
 def test_offline_mllm_dpo_dataset_getitem_compact_top_level_media_schema(monkeypatch, mock_processor, tmp_path):

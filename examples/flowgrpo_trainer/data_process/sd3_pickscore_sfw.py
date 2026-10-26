@@ -67,13 +67,13 @@ def split_captions(
     return train_captions, test_captions
 
 
-def build_split(captions: list[str], split: str) -> datasets.Dataset:
+def build_split(captions: list[str], split: str, data_source: str = DATA_SOURCE) -> datasets.Dataset:
     """Build the parquet schema consumed by the SD3 diffusion trainer."""
     rows = []
     for index, caption in enumerate(captions):
         rows.append(
             {
-                "data_source": DATA_SOURCE,
+                "data_source": data_source,
                 "prompt": [{"role": "user", "content": caption}],
                 "ability": "preference_alignment",
                 # The latent DRM scorer reuses rollout prompt embeddings and
@@ -121,6 +121,11 @@ def main() -> None:
         help="Optional deterministic cap after filtering and splitting.",
     )
     parser.add_argument("--num-proc", type=int, default=16, help="Dataset loading worker count.")
+    parser.add_argument(
+        "--data-source",
+        default=DATA_SOURCE,
+        help="data_source stamped on every row; the trainer routes rewards and teachers by it.",
+    )
     args = parser.parse_args()
 
     if args.input_dir:
@@ -156,8 +161,8 @@ def main() -> None:
             "seed": args.seed,
             "min_spaces": args.min_spaces,
         }
-    train_dataset = build_split(train_captions, "train")
-    test_dataset = build_split(test_captions, "test")
+    train_dataset = build_split(train_captions, "train", args.data_source)
+    test_dataset = build_split(test_captions, "test", args.data_source)
 
     output_dir = Path(args.output_dir).expanduser()
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -168,7 +173,7 @@ def main() -> None:
         **source_metadata,
         "train_samples": len(train_dataset),
         "test_samples": len(test_dataset),
-        "data_source": DATA_SOURCE,
+        "data_source": args.data_source,
         "reward": "DiNa-LRM latent HTTP scorer (configured by the trainer)",
     }
     (output_dir / "metadata.json").write_text(json.dumps(metadata, indent=2) + "\n")

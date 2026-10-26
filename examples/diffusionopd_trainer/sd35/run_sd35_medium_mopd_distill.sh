@@ -1,30 +1,42 @@
 #!/usr/bin/env bash
-# SD3.5-Medium multi-teacher on-policy distillation on mixed OCR + PickScore data.
+# SD3.5-Medium multi-teacher on-policy distillation on the OCR + PickScore +
+# GenEval mixture.
 #
-# Batches mix two tasks and each row is routed to its task's frozen teacher by
+# Every generation batch holds the same number of rows per task
+# (TaskBalancedSampler), and each row is routed to its task's frozen teacher by
 # the `data_source` column (the default `distillation.teacher_key`). The student
 # minimizes distill_kl toward the routed teacher's transition means; per-task
-# rewards (GenRM OCR, PickScore) are monitored only and never enter the loss.
+# rewards (GenRM OCR, PickScore) are monitored only and never enter the loss;
+# GenEval rows are not scored in-run.
 #
-# Teachers: merge the task LoRAs of quanhaol/DiffusionOPD (AesTeacher/lora,
-# OCRTeacher/lora) into stabilityai/stable-diffusion-3.5-medium with peft
-# (`PeftModel.from_pretrained` + `merge_and_unload`), save the merged
-# transformer, and reuse the base model's other components.
+# Operating point: deterministic 10-step sampling (noise_level=0, CFG 4.5,
+# 512px) with no SDE window, so every step but the last is distilled. The OCR
+# and Aes teachers run CFG 4.5, the GenEval teacher CFG 1.0, and one optimizer
+# step spans the whole mixed batch.
 #
-# Data: examples/flowgrpo_trainer/data_process/sd3_ocr.py and
-# sd3_pickscore_sfw.py produce the two parquet pairs used below.
+# Teachers: merge the task LoRAs of quanhaol/DiffusionOPD (OCRTeacher/lora,
+# AesTeacher/lora, GenEvalTeacher/lora) into stabilityai/stable-diffusion-3.5-medium
+# with peft in fp32 (`PeftModel.from_pretrained` + `merge_and_unload`), save the
+# merged transformer, and reuse the base model's other components.
+#
+# Data: examples/flowgrpo_trainer/data_process/sd3_ocr.py, sd3_pickscore_sfw.py
+# (--input-dir on the Flow-GRPO pickscore split, --data-source flow_grpo/pickscore)
+# and sd3_geneval.py produce the three parquet pairs used below.
 set -x
 
 WORKSPACE=${OCR_WORKSPACE:-${WORKSPACE:-$HOME}}
 
 ocr_train_path=$WORKSPACE/data/ocr/sd3/train.parquet
 ocr_test_path=$WORKSPACE/data/ocr/sd3/test.parquet
-pickscore_train_path=$WORKSPACE/data/pickscore_sfw/sd3/train.parquet
-pickscore_test_path=$WORKSPACE/data/pickscore_sfw/sd3/test.parquet
+pickscore_train_path=$WORKSPACE/data/pickscore/sd3/train.parquet
+pickscore_test_path=$WORKSPACE/data/pickscore/sd3/test.parquet
+geneval_train_path=$WORKSPACE/data/geneval/sd3/train.parquet
+geneval_test_path=$WORKSPACE/data/geneval/sd3/test.parquet
 
 model_name=stabilityai/stable-diffusion-3.5-medium
 ocr_teacher_path=${OCR_TEACHER_PATH:?set OCR_TEACHER_PATH to the merged OCR teacher checkpoint}
 aes_teacher_path=${AES_TEACHER_PATH:?set AES_TEACHER_PATH to the merged Aes teacher checkpoint}
+geneval_teacher_path=${GENEVAL_TEACHER_PATH:?set GENEVAL_TEACHER_PATH to the merged GenEval teacher checkpoint}
 reward_model_name=Qwen/Qwen2.5-VL-3B-Instruct
 reward_function_path=examples/diffusionopd_trainer/sd35/mixed_task_reward.py
 custom_chat_template='{% for message in messages %}{% if message['\''role'\''] == '\''user'\'' %}{{ message['\''content'\''] }}{% endif %}{% endfor %}'
@@ -33,7 +45,7 @@ NUM_GPUS_ACTOR_ROLLOUT=2
 NUM_GPUS_REWARD=1
 ROLLOUT_TP=1
 REWARD_TP=1
-IMAGE_RESOLUTION=384
+IMAGE_RESOLUTION=512
 TOTAL_TRAINING_STEPS=100
 ATTN_BACKEND=native
 
@@ -50,10 +62,12 @@ ENGINE=vllm_omni
 REWARD_ENGINE=vllm
 
 python3 -m verl_omni.trainer.main_diffusion_v1 \
-    data.train_files="[\"$ocr_train_path\",\"$pickscore_train_path\"]" \
-    data.val_files="[\"$ocr_test_path\",\"$pickscore_test_path\"]" \
-    data.train_batch_size=8 \
-    data.val_max_samples=64 \
+    data.train_files="[\"$ocr_train_path\",\"$pickscore_train_path\",\"$geneval_train_path\"]" \
+    data.val_files="[\"$ocr_test_path\",\"$pickscore_test_path\",\"$geneval_test_path\"]" \
+    data.train_batch_size=96 \
+    data.val_max_samples=96 \
+    data.sampler.class_path=examples/diffusionopd_trainer/sd35/task_balanced_sampler.py \
+    data.sampler.class_name=TaskBalancedSampler \
     data.max_prompt_length=512 \
     data.truncation=error \
     data.seed=42 \
@@ -68,15 +82,20 @@ python3 -m verl_omni.trainer.main_diffusion_v1 \
     distillation.enabled=True \
     +distillation.teacher_models.ocr_teacher.key=flow_grpo/ocr \
     +distillation.teacher_models.ocr_teacher.model_path=$ocr_teacher_path \
-    +distillation.teacher_models.pickscore_teacher.key=flow_grpo/pickscore_sfw \
+    +distillation.teacher_models.ocr_teacher.guidance_scale=4.5 \
+    +distillation.teacher_models.pickscore_teacher.key=flow_grpo/pickscore \
     +distillation.teacher_models.pickscore_teacher.model_path=$aes_teacher_path \
+    +distillation.teacher_models.pickscore_teacher.guidance_scale=4.5 \
+    +distillation.teacher_models.geneval_teacher.key=flow_grpo/geneval \
+    +distillation.teacher_models.geneval_teacher.model_path=$geneval_teacher_path \
+    +distillation.teacher_models.geneval_teacher.guidance_scale=1.0 \
     actor_rollout_ref.actor.diffusion_loss.loss_mode=distill_kl \
     actor_rollout_ref.actor.diffusion_loss.clip_ratio=1e-5 \
     actor_rollout_ref.actor.use_kl_loss=False \
     actor_rollout_ref.actor.kl_loss_coef=0.0 \
     actor_rollout_ref.actor.optim.lr=1e-4 \
     actor_rollout_ref.actor.optim.weight_decay=0.0001 \
-    actor_rollout_ref.actor.ppo_mini_batch_size=4 \
+    actor_rollout_ref.actor.ppo_mini_batch_size=96 \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=8 \
     actor_rollout_ref.actor.strategy=fsdp2 \
     actor_rollout_ref.actor.fsdp_config.param_offload=False \
@@ -87,20 +106,18 @@ python3 -m verl_omni.trainer.main_diffusion_v1 \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=8 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=$ROLLOUT_TP \
     actor_rollout_ref.rollout.name=$ENGINE \
-    actor_rollout_ref.rollout.n=8 \
+    actor_rollout_ref.rollout.n=1 \
     actor_rollout_ref.rollout.seed=42 \
     actor_rollout_ref.rollout.agent.num_workers=$((NUM_GPUS_ACTOR_ROLLOUT / ROLLOUT_TP)) \
     actor_rollout_ref.rollout.load_format=safetensors \
     actor_rollout_ref.rollout.pipeline.height=$IMAGE_RESOLUTION \
     actor_rollout_ref.rollout.pipeline.width=$IMAGE_RESOLUTION \
     actor_rollout_ref.rollout.pipeline.num_inference_steps=10 \
-    actor_rollout_ref.rollout.pipeline.guidance_scale=1.0 \
+    actor_rollout_ref.rollout.pipeline.guidance_scale=4.5 \
     actor_rollout_ref.rollout.pipeline.max_sequence_length=256 \
     actor_rollout_ref.rollout.max_prompt_embed_length=333 \
-    actor_rollout_ref.rollout.algo.noise_level=0.8 \
+    actor_rollout_ref.rollout.algo.noise_level=0.0 \
     actor_rollout_ref.rollout.algo.sde_type="cps" \
-    actor_rollout_ref.rollout.algo.sde_window_size=3 \
-    actor_rollout_ref.rollout.algo.sde_window_range="[0,5]" \
     ++actor_rollout_ref.rollout.engine_kwargs.vllm_omni.max_num_seqs=${MAX_NUM_SEQS} \
     ++actor_rollout_ref.rollout.engine_kwargs.vllm_omni.request_batch_max_wait_ms=${REQUEST_BATCH_MAX_WAIT_MS} \
     actor_rollout_ref.rollout.val_kwargs.pipeline.num_inference_steps=28 \

@@ -212,7 +212,8 @@ class NativeRewardExecutor:
             kwargs = dict(self.spec.executor_config.get("kwargs", {}))
             if self.spec.model_path is not None:
                 kwargs.setdefault("model_path", self.spec.model_path)
-            kwargs.setdefault("device", self._placement_device())
+            if "device" not in kwargs:
+                kwargs["device"] = self._placement_device()
             self._model = self._model_cls(**kwargs)
         elif self._supports_cpu_offload(self._model):
             await self._call(self._model.wake_up)
@@ -262,7 +263,8 @@ class NativeRewardExecutor:
                 else:
                     # Legacy adapter leg — dropped at post-window cleanup (#723).
                     await self._sleep_legacy_model()
-                _empty_accelerator_cache()
+                if self.spec.device_type != "cpu":
+                    _empty_accelerator_cache()
             except BaseException:
                 await self._fail_closed()
                 raise
@@ -330,7 +332,8 @@ class NativeRewardExecutor:
         if microbatcher is not None:
             await microbatcher.close()
         await self._dispose(model)
-        _empty_accelerator_cache()
+        if self.spec.device_type != "cpu":
+            _empty_accelerator_cache()
 
     @classmethod
     async def _dispose(cls, model) -> None:
@@ -352,6 +355,8 @@ class NativeRewardExecutor:
         return await result if inspect.isawaitable(result) else result
 
     def _placement_device(self) -> torch.device:
+        if self.spec.device_type == "cpu":
+            return torch.device("cpu")
         return torch.device(get_device_name(), get_device_id())
 
 

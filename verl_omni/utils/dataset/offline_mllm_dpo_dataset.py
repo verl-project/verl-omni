@@ -34,6 +34,7 @@ from torch.utils.data import Dataset, Sampler
 from verl.utils.dataset.dataset_utils import DatasetPadMode, SFTTensorCollator
 from verl.utils.dataset.multiturn_sft_dataset import MultiTurnSFTDataset
 
+from verl_omni.utils.dataset.minicpm_transform import process_minicpm_sample
 from verl_omni.utils.dataset.qwen3_omni_transform import IGNORE_INDEX, process_qwen3_omni_sample
 
 __all__ = [
@@ -43,7 +44,7 @@ __all__ = [
     "offline_mllm_dpo_collate_fn",
 ]
 
-_MEDIA_TOKEN_PATTERN = re.compile(r"<(image|video|audio)>")
+_MEDIA_TOKEN_PATTERN = re.compile(r"<(image|video|audio)(?:_\d+)?>")
 _SUPPORTED_MODALITIES = {"audio", "image", "video"}
 _TEXT_MODEL_KEYS = {
     "input_ids",
@@ -133,10 +134,28 @@ def _is_missing(value: Any) -> bool:
 
 
 def _append_media_path(media: dict[str, list[Any]], key: str, value: Any) -> None:
-    if _is_missing(value):
-        return
-    if value not in media[key]:
-        media[key].append(value)
+    # One entry per media token; None marks a reference without its own path.
+    media[key].append(None if _is_missing(value) else value)
+
+
+def _resolve_media_order(declared: list[Any], refs: list[Any]) -> list[Any]:
+    """Return media paths in prompt token order.
+
+    An inline path that is also declared at the top level claims that entry, so it counts once.
+    References without a path take the remaining top-level entries in order.
+    """
+    unclaimed = list(declared)
+    for path in refs:
+        if path is not None and path in unclaimed:
+            unclaimed.remove(path)
+    resolved = []
+    for path in refs:
+        if path is not None:
+            resolved.append(path)
+        elif unclaimed:
+            resolved.append(unclaimed.pop(0))
+    # Leftover top-level entries are kept so alignment validation reports the mismatch.
+    return resolved + unclaimed
 
 
 def _normalise_media_list(value: Any) -> list[Any]:
@@ -188,13 +207,14 @@ def _content_to_text(content: Any) -> str:
     return str(content)
 
 
-def _append_string_content(conversation: list[Any], content: str) -> None:
+def _append_string_content(conversation: list[Any], content: str, media: dict[str, list[Any]]) -> None:
     cursor = 0
     for match in _MEDIA_TOKEN_PATTERN.finditer(content):
         text = content[cursor : match.start()]
         if text:
             conversation.append(("text", text))
         conversation.append((match.group(1), None))
+        _append_media_path(media, f"{match.group(1)}s", None)
         cursor = match.end()
     remaining = content[cursor:]
     if remaining:
@@ -204,7 +224,7 @@ def _append_string_content(conversation: list[Any], content: str) -> None:
 def _append_content(conversation: list[Any], content: Any, media: dict[str, list[Any]]) -> None:
     content = _as_python(content)
     if isinstance(content, str):
-        _append_string_content(conversation, content)
+        _append_string_content(conversation, content, media)
         return
 
     for item in content or []:
@@ -252,6 +272,7 @@ def _validate_media_alignment(conversations: Sequence[Sequence[Any]], media: dic
 def _build_preference_branch(sample: dict[str, Any], answer: Any) -> dict[str, Any]:
     prompt = _as_python(sample.get("prompt", []))
     media = _initial_media(sample)
+    media_refs: dict[str, list[Any]] = {key: [] for key in media}
     conversations: list[list[Any]] = []
 
     for message in prompt:
@@ -262,9 +283,11 @@ def _build_preference_branch(sample: dict[str, Any], answer: Any) -> dict[str, A
         if role == "system":
             continue
         conversation = [role or "user"]
-        _append_content(conversation, message.get("content", ""), media)
+        _append_content(conversation, message.get("content", ""), media_refs)
         if len(conversation) > 1:
             conversations.append(conversation)
+
+    media = {key: _resolve_media_order(media[key], media_refs[key]) for key in media}
 
     _validate_media_alignment(conversations, media)
     conversations.append(["assistant", ("text", _answer_text(answer))])
@@ -546,7 +569,7 @@ def _balanced_modality_sample_indices(
 
 
 class OfflineMLLMDPODataset(MultiTurnSFTDataset):
-    """Build Qwen3-Omni offline DPO samples from Omni-Preference style rows.
+    """Build offline MLLM DPO samples from Omni-Preference style rows.
 
     The dataset reads parquet/json/jsonl files containing a multimodal prompt,
     a preferred response, and a rejected response. Each row is converted into
@@ -557,7 +580,7 @@ class OfflineMLLMDPODataset(MultiTurnSFTDataset):
         data_files: Path or sequence of paths to parquet, json, or jsonl files.
         tokenizer: Unused tokenizer argument kept for compatibility with the
             common dataset factory signature.
-        processor: Multimodal processor used by the Qwen3-Omni transform.
+        processor: Multimodal processor used by the selected base transform.
         config: Dataset config containing column names, multimodal transform
             kwargs, and source metadata.
         max_samples: Optional positive limit on the number of rows to load.
@@ -577,7 +600,20 @@ class OfflineMLLMDPODataset(MultiTurnSFTDataset):
             raise ValueError("OfflineMLLMDPODataset requires a multimodal processor.")
 
         self.config = config
-        self.processor = _prepare_qwen3_omni_processor(processor)
+        base_transform = config.get("base_transform", "qwen3_omni_moe")
+        if base_transform in {"qwen3_omni_moe", "qwen2_5_omni"}:
+            self.processor = _prepare_qwen3_omni_processor(processor)
+            self.base_transform = process_qwen3_omni_sample
+            self.requires_position_id_func = True
+        elif base_transform in {"minicpm", "minicpm_o", "minicpm_v"}:
+            self.processor = processor
+            self.base_transform = process_minicpm_sample
+            self.requires_position_id_func = False
+        else:
+            raise ValueError(
+                f"Unsupported base_transform {base_transform!r}. Expected one of: "
+                "'qwen3_omni_moe', 'qwen2_5_omni', 'minicpm', 'minicpm_o', 'minicpm_v'."
+            )
         self.tokenizer = tokenizer if tokenizer is not None else getattr(processor, "tokenizer", processor)
         self.pad_mode = DatasetPadMode(config.get("pad_mode", DatasetPadMode.RIGHT))
 
@@ -602,7 +638,7 @@ class OfflineMLLMDPODataset(MultiTurnSFTDataset):
         self.transform_kwargs = dict(mm_configs or {})
         if "position_id_func" not in self.transform_kwargs and hasattr(self.processor, "get_rope_index"):
             self.transform_kwargs["position_id_func"] = self.processor.get_rope_index
-        if "position_id_func" not in self.transform_kwargs:
+        if self.requires_position_id_func and "position_id_func" not in self.transform_kwargs:
             raise ValueError(
                 "OfflineMLLMDPODataset requires `mm_configs.position_id_func` or a processor with "
                 "`get_rope_index`. For Qwen3-Omni, bind "
@@ -612,16 +648,9 @@ class OfflineMLLMDPODataset(MultiTurnSFTDataset):
 
         if self.transform_kwargs.get("use_audio_in_video"):
             raise ValueError(
-                "use_audio_in_video=True is not supported yet for Qwen3-Omni offline DPO preprocessing. "
-                "Leave use_audio_in_video unset or set it to false."
+                "use_audio_in_video=True is not supported yet for Qwen3-Omni or MiniCPM offline DPO "
+                "preprocessing. Leave use_audio_in_video unset or set it to false."
             )
-
-        base_transform = config.get("base_transform", "qwen3_omni_moe")
-        if base_transform not in {"qwen3_omni_moe", "qwen2_5_omni"}:
-            raise ValueError(
-                f"Unsupported base_transform {base_transform!r}. Expected one of: 'qwen3_omni_moe', 'qwen2_5_omni'."
-            )
-        self.base_transform = process_qwen3_omni_sample
 
         self.parquet_files = _normalise_data_files(data_files)
         self._read_files_and_process()
@@ -756,9 +785,12 @@ class OfflineMLLMDPODataset(MultiTurnSFTDataset):
         transformed["reward_model"] = [reward_model, reward_model]
         modality = self.get_modality(item)
         transformed["modality"] = [modality, modality]
-        extra_info = _as_python(row.get("extra_info", {"index": int(item)}))
-        if isinstance(extra_info, dict):
-            extra_info = {**extra_info, "modality": modality}
+        extra_info = _as_python(row.get("extra_info", {}))
+        if not isinstance(extra_info, dict):
+            extra_info = {}
+        if "index" not in extra_info:
+            extra_info = {**extra_info, "index": int(item)}
+        extra_info = {**extra_info, "modality": modality}
         transformed["extra_info"] = [extra_info, extra_info]
         transformed["is_chosen"] = [True, False]
         return transformed

@@ -2,7 +2,7 @@
 
 Last updated: 09/10/2026
 
-For NVIDIA GPU, see the {doc}`GPU installation guide <install>`. For Ascend NPU, see the {doc}`NPU installation guide <install_npu>`.
+For NVIDIA GPU, see the {doc}`GPU installation guide <install>`. For Ascend NPU, see the {doc}`NPU installation guide <install_npu>`. For Intel GPU, see the {doc}`Intel GPU installation guide <install_xpu>`.
 
 ## Requirements
 

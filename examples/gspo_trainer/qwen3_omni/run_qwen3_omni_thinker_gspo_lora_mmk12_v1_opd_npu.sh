@@ -80,6 +80,8 @@ python3 -m verl_omni.trainer.main_omni \
     actor_rollout_ref.rollout.enable_prefix_caching=False \
     +actor_rollout_ref.rollout.engine_kwargs.vllm_omni.output_mode="ar" \
     +actor_rollout_ref.rollout.engine_kwargs.vllm_omni.pipeline_name="qwen3_omni_moe" \
+    ++actor_rollout_ref.rollout.engine_kwargs.vllm_omni.additional_config.weight_nz_mode=0 \
+    ++actor_rollout_ref.rollout.engine_kwargs.vllm_omni.compilation_config.cudagraph_mode=PIECEWISE \
     actor_rollout_ref.rollout.val_kwargs.n=1 \
     actor_rollout_ref.rollout.val_kwargs.temperature=1.0 \
     actor_rollout_ref.rollout.val_kwargs.top_p=0.7 \
@@ -116,6 +118,8 @@ python3 -m verl_omni.trainer.main_omni \
     distillation.teacher_models.teacher_model.inference.response_length=12288 \
     +distillation.teacher_models.teacher_model.inference.engine_kwargs.vllm_omni.output_mode="ar" \
     +distillation.teacher_models.teacher_model.inference.engine_kwargs.vllm_omni.pipeline_name="qwen3_omni_moe" \
+    ++distillation.teacher_models.teacher_model.inference.engine_kwargs.vllm_omni.additional_config.weight_nz_mode=0 \
+    ++distillation.teacher_models.teacher_model.inference.engine_kwargs.vllm_omni.compilation_config.cudagraph_mode=PIECEWISE \
     distillation.distillation_loss.loss_mode=kl \
     distillation.distillation_loss.use_policy_gradient=true \
     "$@"

@@ -4,6 +4,7 @@
 # VCS / IDE
 .git
 .github
+!.github/
 !.github/verl_pin.txt
 !.github/vllm_ascend_pin.txt
 !.github/vllm_omni_pin.txt

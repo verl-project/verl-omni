@@ -2,7 +2,7 @@
 
 Last updated: 09/24/2026
 
-For Ascend NPU, see the {doc}`NPU installation guide <install_npu>`. For AMD GPU, see the {doc}`ROCm installation guide <install_rocm>`.
+For Ascend NPU, see the {doc}`NPU installation guide <install_npu>`. For AMD GPU, see the {doc}`ROCm installation guide <install_rocm>`. For Intel GPU, see the {doc}`Intel GPU installation guide <install_xpu>`.
 
 ## Requirements
 

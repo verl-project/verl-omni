@@ -90,10 +90,10 @@ algorithm:
   # DiffusionNFT fraction of rollout timesteps used for forward-process training
   timestep_fraction: 1.0
 
-  # DGPO rollout schedule indices [start, end) eligible for training; null uses the full schedule
+  # DGPO/AWM rollout schedule indices [start, end) eligible for training; null uses the full schedule
   train_timestep_range: null
 
-  # DGPO number of schedule indices drawn per step and shared by the whole batch; null applies timestep_fraction
+  # DGPO/AWM number of schedule indices drawn per step and shared by the whole batch; null applies timestep_fraction
   train_timestep_count: null
 
   # DiffusionNFT advantage mapping mode before reward-probability scaling

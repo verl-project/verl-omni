@@ -548,9 +548,13 @@ def build_teacher_training_config(
 ) -> TrainingWorkerConfig:
     """Derive the frozen teacher's training config from the ref-shaped scoring config."""
     teacher_config: DiffusionActorConfig = omega_conf_to_dataclass(config.ref)
+    teacher_pipeline = model_config.pipeline
+    if teacher_model_config.guidance_scale is not None:
+        teacher_pipeline = replace(teacher_pipeline, guidance_scale=teacher_model_config.guidance_scale)
     teacher_config.model_config = replace(
         deepcopy(model_config),
         path=teacher_model_config.model_path,
+        pipeline=teacher_pipeline,
         lora_rank=0,
         lora_adapter_path=None,
         lora={},

@@ -1,0 +1,66 @@
+# verl-omni Intel GPU (XPU) image
+#
+# Build (from repo root):
+#   docker build -f docker/Dockerfile.xpu -t verl-omni:xpu .
+#
+# Override the verl pin:
+#   docker build -f docker/Dockerfile.xpu -t verl-omni:xpu \
+#     --build-arg VERL_GIT_REF=fefb080262e1c015a0ea05f958822a6a512dc795 .
+#
+# Run:
+#   docker run --device /dev/dri -v /dev/dri/by-path:/dev/dri/by-path --ipc=host \
+#     --group-add "$(getent group render | cut -d: -f3)" -it verl-omni:xpu
+#
+# oneCCL reads /dev/dri/by-path, which --device /dev/dri alone does not create.
+
+# Base provides torch-xpu, oneCCL, the Intel GPU user-mode driver and vLLM 0.30.0 in /opt/venv.
+ARG BASE_IMAGE=vllm/vllm-openai-xpu:v0.30.0
+# Default: read from .github/verl_pin.txt at build time (override with VERL_GIT_REF).
+ARG VERL_GIT_REF=
+
+FROM ${BASE_IMAGE}
+
+ARG VERL_GIT_REF
+
+SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
+
+# The base image's entrypoint is `vllm serve`.
+ENTRYPOINT []
+
+# Step 1: pin the accelerator packages from the base. Neither PyPI nor the core
+# vllm==0.30.0 pin knows about the +xpu builds, so a resolver would otherwise
+# swap in CUDA or CPU wheels.
+RUN python3 - > /opt/xpu-constraints.txt <<'PY'
+from importlib.metadata import version, PackageNotFoundError
+for pkg in ("torch", "torchvision", "torchaudio", "triton", "triton-xpu", "vllm", "vllm-xpu-kernels"):
+    try:
+        print(f"{pkg}=={version(pkg)}")
+    except PackageNotFoundError:
+        pass
+PY
+ENV UV_CONSTRAINT=/opt/xpu-constraints.txt \
+    VLLM_OMNI_TARGET_DEVICE=xpu
+
+WORKDIR /workspace/verl-omni
+
+COPY pyproject.toml setup.py README.md ./
+COPY .github/verl_pin.txt ./.github/
+COPY verl_omni ./verl_omni
+
+# Step 2: verl at the pin (from .github/verl_pin.txt, overridable via VERL_GIT_REF).
+RUN VERL_REF="${VERL_GIT_REF:-$(tr -d '[:space:]' < .github/verl_pin.txt)}" \
+ && echo "Installing verl@${VERL_REF}" \
+ && uv pip install --no-deps \
+      "verl @ git+https://github.com/verl-project/verl.git@${VERL_REF}"
+
+# Step 3: verl-omni and its core dependencies (vllm-omni arrives via the core deps),
+# plus the xpu extra.
+RUN VERL_REF="${VERL_GIT_REF:-$(tr -d '[:space:]' < .github/verl_pin.txt)}" \
+ && printf 'verl @ git+https://github.com/verl-project/verl.git@%s\n' "${VERL_REF}" > /tmp/verl-override.txt \
+ && uv pip install --override /tmp/verl-override.txt -e ".[xpu]"
+
+# Device-independent checks only; the GPU runtime is not reachable at build time.
+RUN python3 -c "import torch; print('torch', torch.__version__, '| XPU', torch.version.xpu)" \
+ && python3 -c "from importlib.metadata import version as v; [print(p, v(p)) for p in ('vllm', 'vllm-omni', 'verl', 'verl-hardware-plugin', 'verl-omni')]"
+
+CMD ["/bin/bash"]

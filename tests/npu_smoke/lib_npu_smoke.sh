@@ -102,8 +102,16 @@ run_test() {
     set -e
 
     if [[ "${rc}" -eq 134 ]]; then
-        if [[ "${id}" == "0" ]] && grep -Eq '=+ [0-9]+ passed' "${logfile}"; then
-            warn "[${id}] Ignoring native teardown abort after pytest success"
+        if [[ "${id}" == "0" || "${id}" == "3" ]] && awk '
+            /^=+ .* =+$/ {
+                passed = ($0 ~ /^=+ 1 passed(, [0-9]+ warnings?)? in .+ =+$/)
+                known_abort = 0
+                next
+            }
+            passed && $0 == "corrupted size vs. prev_size" { known_abort = 1 }
+            END { exit !known_abort }
+        ' "${logfile}"; then
+            warn "[${id}] Ignoring known native teardown abort after pytest success"
             rc=0
         elif [[ "${id}" == "1" || "${id}" == "2" ]]             && grep -q 'training/global_step:1' "${logfile}"             && grep -q 'Training Progress: 100%' "${logfile}"; then
             warn "[${id}] Ignoring native teardown abort after training step success"

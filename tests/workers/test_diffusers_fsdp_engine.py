@@ -65,7 +65,16 @@ def _create_sp_compatible_model(parent_dir, src_model_path, num_attention_heads=
     return dst
 
 
-def create_training_config(model_type, strategy, device_count, model, policy_state_adapters=None):
+def create_training_config(
+    model_type,
+    strategy,
+    device_count,
+    model,
+    policy_state_adapters=None,
+    *,
+    sequence_parallel_size=None,
+    attn_backend=None,
+):
     if strategy not in {"fsdp", "fsdp2"}:
         raise NotImplementedError(f"strategy {strategy} is not supported")
 
@@ -74,6 +83,8 @@ def create_training_config(model_type, strategy, device_count, model, policy_sta
     else:
         cp = 2 if _diffusers_sp_supported() else 1
         fsdp_size = device_count
+    if sequence_parallel_size is not None:
+        cp = sequence_parallel_size
     path = os.path.expanduser(model)
     tokenizer_path = os.path.join(path, "tokenizer")
 
@@ -92,7 +103,9 @@ def create_training_config(model_type, strategy, device_count, model, policy_sta
     from verl_omni.utils.diffusion_attention import fa_available
 
     # TODO: fix cp and fa3 compatibility
-    if cp > 1 or not fa_available():
+    if attn_backend is not None:
+        model_overrides.append("attn_backend=" + attn_backend)
+    elif cp > 1 or not fa_available():
         model_overrides.append("attn_backend=native")
     if policy_state_adapters is not None:
         adapters = ",".join(f'"{adapter}"' for adapter in policy_state_adapters)
@@ -140,18 +153,19 @@ def create_training_config(model_type, strategy, device_count, model, policy_sta
 
 
 def create_data_samples(num_device: int, model_config: DiffusionModelConfig) -> DataProto:
+    """Build synthetic trajectories matching the loaded Qwen-Image transformer."""
     from tensordict import TensorDict
 
     scheduler = build_scheduler(model_config)
 
     batch_size = 8 * num_device
     seq_len = 64
-    latent_dim = 64
-    encoder_latent_dim = 32
+    latent_dim = model_config.transformer_config["in_channels"]
+    encoder_latent_dim = model_config.transformer_config["joint_attention_dim"]
     vae_scale_factor = 8
     height, width = 512, 512
     latent_height, latent_width = height // vae_scale_factor // 2, width // vae_scale_factor // 2
-    num_diffusion_steps = 10
+    num_diffusion_steps = scheduler.timesteps.numel()
     timesteps = scheduler.timesteps[None].repeat(batch_size, 1)
 
     torch.manual_seed(1)
@@ -177,6 +191,44 @@ def create_data_samples(num_device: int, model_config: DiffusionModelConfig) -> 
     data.meta_info["vae_scale_factor"] = vae_scale_factor
 
     return data
+
+
+def run_diffusers_engine_batches(training_config, actor_config, device_count, *, device_name=None):
+    """Exercise the shared GPU/NPU engine inference and optimizer paths."""
+    ray_cls_with_init = RayClassWithInitArgs(cls=ray.remote(TrainingWorker), config=training_config)
+    resource_pool = RayResourcePool(process_on_nodes=[device_count])
+    worker_kwargs = {} if device_name is None else {"device_name": device_name}
+    wg = RayWorkerGroup(resource_pool=resource_pool, ray_cls_with_init=ray_cls_with_init, **worker_kwargs)
+    wg.reset()
+
+    data_td = create_data_samples(device_count, training_config.model_config).to_tensordict()
+    data_td = embeds_padding_2_no_padding(data_td)
+    tu.assign_non_tensor(
+        data_td,
+        compute_loss=False,
+        height=training_config.model_config.get("height", 512),
+        width=training_config.model_config.get("width", 512),
+        vae_scale_factor=training_config.model_config.get("vae_scale_factor", 8),
+    )
+    inference_output = wg.infer_batch(data_td).get()
+    for key in ["log_probs", "metrics"]:
+        assert key in inference_output
+
+    wg.set_loss_fn(partial(diffusion_loss, config=actor_config))
+    data_td = create_data_samples(device_count, training_config.model_config).to_tensordict()
+    data_td = embeds_padding_2_no_padding(data_td)
+    ppo_mini_batch_size = 4
+    tu.assign_non_tensor(
+        data_td,
+        global_batch_size=ppo_mini_batch_size * device_count,
+        mini_batch_size=ppo_mini_batch_size * device_count,
+        epochs=actor_config.ppo_epochs,
+        seed=42,
+        dataloader_kwargs={"shuffle": actor_config.shuffle},
+    )
+    training_output = wg.train_mini_batch(data_td).get()
+    assert "metrics" in training_output
+    return inference_output, training_output
 
 
 @pytest.mark.parametrize(
@@ -209,52 +261,7 @@ def test_diffusers_fsdp_engine(strategy):
             device_count=device_count,
             model=model_path,
         )
-        # init model
-        ray_cls_with_init = RayClassWithInitArgs(cls=ray.remote(TrainingWorker), config=training_config)
-        resource_pool = RayResourcePool(process_on_nodes=[device_count])
-        wg = RayWorkerGroup(resource_pool=resource_pool, ray_cls_with_init=ray_cls_with_init)  # TrainigWorker
-        wg.reset()
-
-        # forward only without loss function
-        data_td = create_data_samples(device_count, training_config.model_config).to_tensordict()
-        data_td = embeds_padding_2_no_padding(data_td)
-        tu.assign_non_tensor(
-            data_td,
-            compute_loss=False,
-            height=training_config.model_config.get("height", 512),
-            width=training_config.model_config.get("width", 512),
-            vae_scale_factor=training_config.model_config.get("vae_scale_factor", 8),
-        )
-        output = wg.infer_batch(data_td)
-        output_dict = output.get()
-
-        for key in ["log_probs", "metrics"]:
-            assert key in output_dict
-
-        # forward and backward with loss function
-        # set loss function
-        loss_fn = partial(diffusion_loss, config=actor_config)
-        wg.set_loss_fn(loss_fn)
-
-        # train batch
-        data_td = create_data_samples(device_count, training_config.model_config).to_tensordict()
-        data_td = embeds_padding_2_no_padding(data_td)
-        ppo_mini_batch_size = 4
-        ppo_epochs = actor_config.ppo_epochs
-        seed = 42
-        shuffle = actor_config.shuffle
-        tu.assign_non_tensor(
-            data_td,
-            global_batch_size=ppo_mini_batch_size * device_count,
-            mini_batch_size=ppo_mini_batch_size * device_count,
-            epochs=ppo_epochs,
-            seed=seed,
-            dataloader_kwargs={"shuffle": shuffle},
-        )
-        output = wg.train_mini_batch(data_td)
-        output_dict = output.get()
-
-        assert "metrics" in output_dict.keys()
+        run_diffusers_engine_batches(training_config, actor_config, device_count)
     finally:
         ray.shutdown()
         shutil.rmtree(tmp_dir, ignore_errors=True)

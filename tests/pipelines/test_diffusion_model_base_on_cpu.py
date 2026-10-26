@@ -116,6 +116,31 @@ class TestVllmOmniPipelineBaseRegistry:
         assert VllmOmniPipelineBase.get_class("QwenImagePipeline", "flow_grpo") is QwenImagePipelineWithLogProb
         assert VllmOmniPipelineBase.get_class("QwenImagePipeline", "diffusion_nft") is QwenImageDiffusionNFTPipeline
 
+    def test_ar_position_ids_default_is_1d_and_dual_grpo_uses_mrope(self):
+        pytest.importorskip("vllm_omni")
+        import torch
+
+        from verl_omni.pipelines.qwen_image_dual_grpo.vllm_omni_rollout_adapter import (
+            QwenImagePipelineWithDualLogProb,
+        )
+
+        # left-padded prompt (2 pads) + response (3 tokens)
+        attention_mask = torch.tensor([[0, 0, 1, 1, 1]], dtype=torch.long)
+
+        default_ids = VllmOmniPipelineBase.build_ar_position_ids(attention_mask)
+        assert default_ids.shape == (1, 5)
+        assert default_ids.tolist() == [[0, 0, 0, 1, 2]]
+
+        unresolved = VllmOmniPipelineBase.resolve_ar_position_ids(None, None, attention_mask)
+        assert unresolved.shape == (1, 5)
+
+        dual_ids = VllmOmniPipelineBase.resolve_ar_position_ids("QwenImagePipeline", "dual_grpo", attention_mask)
+        assert VllmOmniPipelineBase.get_class("QwenImagePipeline", "dual_grpo") is QwenImagePipelineWithDualLogProb
+        assert dual_ids.shape == (1, 4, 5)
+        assert dual_ids[0, 0].tolist() == [1, 1, 0, 1, 2]
+        assert torch.equal(dual_ids[0, 0], dual_ids[0, 1])
+        assert torch.equal(dual_ids[0, 0], dual_ids[0, 3])
+
     def test_diffusion_nft_rollout_does_not_override_sde_trajectory_loop(self):
         pytest.importorskip("vllm_omni")
         from verl_omni.pipelines.qwen_image_diffusion_nft.vllm_omni_rollout_adapter import (
