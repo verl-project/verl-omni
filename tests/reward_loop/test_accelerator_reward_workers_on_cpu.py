@@ -184,3 +184,22 @@ def test_accelerator_reward_workers_respect_indexed_pool_global_bundles(monkeypa
 def test_accelerator_reward_workers_reject_invalid_explicit_bundle_indices():
     with pytest.raises(ValueError, match="bundle index 3 exceeds"):
         _build_selected_workers([3], _FakeResourcePool())
+
+
+def test_accelerator_profiler_ranks_use_flattened_group_offset():
+    from omegaconf import OmegaConf
+
+    config = _config(2)
+    config.reward.profiler = OmegaConf.create(
+        {
+            "tool": "nsys",
+            "enable": True,
+            "ranks": [3],
+            "ray_actor_nsight_options": {"trace": "cuda", "o": "{role}_rank_{rank}"},
+        }
+    )
+    workers = worker_module.build_accelerator_reward_workers(
+        config, _FakeActorClass(), _FakeResourcePool(), profile_rank_offset=2
+    )
+    assert "runtime_env" not in workers[0].options
+    assert workers[1].options["runtime_env"]["nsight"]["o"] == "reward_loop_rank_3"
