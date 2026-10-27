@@ -1220,6 +1220,8 @@ class BaseRayDiffusionTrainer(ABC):
             print(f"Warning: No dataloader state found at {dataloader_local_path}, will start from scratch")
 
     def _update_actor(self, batch: DataProto) -> DataProto:
+        if batch.meta_info.get("skip_actor_update", False):
+            return DataProto(meta_info={"metrics": {"actor/skipped_update": 1.0}})
         rollout_config = self.config.actor_rollout_ref.rollout
         batch.meta_info["multi_turn"] = rollout_config.multi_turn.enable
         # update actor

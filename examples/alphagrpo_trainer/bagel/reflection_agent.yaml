@@ -1,0 +1,2 @@
+- name: bagel_reflection_agent
+  _target_: verl_omni.pipelines.bagel_alphagrpo.reflection_agent.BagelReflectionAgentLoop

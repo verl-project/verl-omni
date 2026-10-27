@@ -439,8 +439,9 @@ def test_error_provenance_survives_tensor_transport():
         select_artifact(restored, name="image_preview", modality="image", representation="decoded")
 
 
+@pytest.mark.parametrize("windowed", [False, True])
 @pytest.mark.parametrize("output_type,requested", [("pil", []), ("latent", []), ("latent", ["image_preview"])])
-def test_bagel_forward_emits_native_packed_latents_and_canonical_preview(monkeypatch, output_type, requested):
+def test_bagel_forward_emits_native_packed_latents_and_canonical_preview(monkeypatch, output_type, requested, windowed):
     from PIL import Image
     from vllm_omni.diffusion.models.bagel.pipeline_bagel import BagelPipeline
 
@@ -453,7 +454,12 @@ def test_bagel_forward_emits_native_packed_latents_and_canonical_preview(monkeyp
     pipeline = object.__new__(BagelPipelineWithLogProb)
     pipeline.scheduler = _BagelSchedulerAdapter(FlowMatchSDEDiscreteScheduler())
     latent = torch.arange(32, dtype=torch.bfloat16).reshape(2, 16)
-    trajectory = torch.stack([latent, latent + 1, latent + 2])
+    trajectory = torch.stack([latent + i for i in range(5 if windowed else 3)])
+    timesteps = torch.tensor([1.0, 0.75, 0.5, 0.25] if windowed else [1.0, 0.5])
+    extra_args = {"requested_outputs": requested}
+    if windowed:
+        monkeypatch.setenv("LOCAL_RANK", "0")
+        extra_args.update(noise_level=0.7, sde_window_size=2, sde_window_range=[1, 3])
     pixels = torch.arange(24, dtype=torch.uint8).reshape(2, 4, 3)
     image = Image.fromarray(pixels.numpy())
 
@@ -467,7 +473,7 @@ def test_bagel_forward_emits_native_packed_latents_and_canonical_preview(monkeyp
                     "image": decoded,
                     "trajectory": {
                         "latents": trajectory,
-                        "timesteps": torch.tensor([1.0, 0.5]),
+                        "timesteps": timesteps,
                         "log_probs": torch.tensor([0.2, 0.3]),
                         "decoded": [image],
                     },
@@ -481,7 +487,7 @@ def test_bagel_forward_emits_native_packed_latents_and_canonical_preview(monkeyp
         request_id="bagel-named",
         prompts=[{"prompt": "image prompt"}],
         sampling_params=OmniDiffusionSamplingParams(
-            num_inference_steps=3, output_type=output_type, extra_args={"requested_outputs": requested}
+            num_inference_steps=5 if windowed else 3, output_type=output_type, extra_args=extra_args
         ),
     )
     output = pipeline.forward(request)
@@ -494,8 +500,10 @@ def test_bagel_forward_emits_native_packed_latents_and_canonical_preview(monkeyp
     assert row["image_preview"].dtype == torch.uint8
     torch.testing.assert_close(row["image_latent"], latent)
     torch.testing.assert_close(row["image_preview"], pixels.permute(2, 0, 1))
-    torch.testing.assert_close(output.trajectory_latents, trajectory.unsqueeze(0))
-    torch.testing.assert_close(output.trajectory_timesteps, torch.tensor([[1.0, 0.5]]))
+    expected_latents = trajectory[1:4] if windowed else trajectory
+    expected_timesteps = timesteps[1:3] if windowed else timesteps
+    torch.testing.assert_close(output.trajectory_latents, expected_latents.unsqueeze(0))
+    torch.testing.assert_close(output.trajectory_timesteps, expected_timesteps.unsqueeze(0))
     torch.testing.assert_close(output.trajectory_log_probs, torch.tensor([[0.2, 0.3]]))
     assert output.trajectory_decoded == [image]
     assert output.output["metadata"]["sentinel"] == 13

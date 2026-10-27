@@ -68,6 +68,9 @@ class DiffusionPipelineConfig(BaseConfig):
     requested_outputs: Optional[list[str]] = None
     true_cfg_scale: float = 1.0
     max_sequence_length: int = 512
+    max_think_tokens: int = 128
+    think_temperature: float = 1.0
+    think_top_p: float = 1.0
     guidance_scale: Optional[float] = None
     reference_image_short_edge: Optional[int] = None
 
