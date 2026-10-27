@@ -20,7 +20,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 import torch
-from tensordict import TensorDict
+from test_bagel_corl_gen_alignment_on_cpu import gen_trajectory
 from verl.utils import tensordict_utils as tu
 
 
@@ -34,19 +34,8 @@ def batch_ops():
 
 
 def gen_batch():
-    data = TensorDict(
-        {
-            "parent_episode_id": torch.tensor([10, 20, 20, 30]),
-            "gen_row_id": torch.arange(4),
-            "all_latents": torch.ones(4, 4, 2),
-            "all_timesteps": torch.full((4, 3), 0.8),
-            "gen_valid": torch.ones(4),
-            "gen_transition_valid": torch.tensor([[1.0, 0.0, 0.0], [1.0, 1.0, 1.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0]]),
-            "old_log_probs": torch.zeros(4, 3),
-            "advantages": torch.ones(4, 3),
-        },
-        batch_size=[4],
-    )
+    valid = torch.tensor([[1.0, 0.0, 0.0], [1.0, 1.0, 1.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0]])
+    data = gen_trajectory(torch.tensor([10, 20, 20, 30]), torch.ones(4, 3), valid)
     prompts = np.empty(4, dtype=object)
     prompts[:] = [[101], [201], [202], [301]]
     tu.assign_non_tensor(data, prompt_token_ids=prompts)

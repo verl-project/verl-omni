@@ -940,6 +940,7 @@ algorithm:
   sample_source: online
   paired_preference: false
   global_std: true
+  gen_norm_adv_by_std_in_grpo: null
 distillation:
   _target_: verl.workers.config.DistillationConfig
   enabled: false

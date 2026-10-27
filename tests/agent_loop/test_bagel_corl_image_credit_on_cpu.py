@@ -12,18 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""CPU tests for the Bagel Co-RL UND image credit (``und/no_image_credit``).
-
-The episode scalar used to be the mean over *every* rated GEN seed, which diluted a
-successful rewrite: an episode that went ``0.2 -> 0.8`` across two ``generate_image``
-calls scored ``0.5``, exactly what ``0.4 -> 0.6`` scored. The image the user is finally
-shown is the last call's, so the last call is what ``image_credit_reward`` scores, plus
-``max(0, final - first)`` for the gain the rewrite bought.
-
-One derivation feeds both consumers -- the TQ row the v1 advantage reads and the flatten
-row's ``token_level_scores`` -- so UND and GEN cannot train against different numbers for
-the same episode.
-"""
+"""CPU tests for the Bagel Co-RL UND image credit (``und/no_image_credit``)."""
 
 import pytest
 
@@ -88,12 +77,7 @@ def test_the_seeds_of_one_call_are_averaged():
 
 
 def test_the_rewrite_bonus_is_capped_but_the_total_is_not():
-    """Clamping the total would make two improved siblings saturate to the same number.
-
-    That is exactly the zero-advantage group the reward exists to avoid, so only the
-    bonus carries the cap. ``rm_score`` is not bounded by 1 either (``pickscore`` divides
-    a raw model score), so the gain is the only term with a defensible bound.
-    """
+    """Clamping the total would make two improved siblings saturate to the same number."""
     # A 1.5 gain is clipped to 1.0.
     huge = [_sample(call="pass0", index=0, score=0.0), _sample(call="pass1", index=0, score=1.5)]
     assert image_credit_reward(huge) == pytest.approx(2.5)
@@ -136,24 +120,7 @@ def test_a_pattern_3_episode_still_falls_back_to_the_non_image_scalar():
 
 
 def test_the_row_field_and_the_trained_signal_can_disagree():
-    """``und_reward`` on the row is NOT the reward the actor trains on.
-
-    ``bagel_corl_tq.episode_from_agent_extra`` builds the row's ``und_reward`` from
-    ``AgentLoopOutput.reward_score`` (the reward manager's composite over
-    ``reward_extra_info``), while ``episode_und_reward`` -- which the TQ ingest hands to
-    ``und_row_reward``, and ``trainer_base`` copies into ``token_level_scores`` --
-    recomputes ``image_credit_reward`` over ``gen_samples``. Those are different
-    quantities, and the trained one wins.
-
-    This matters for diagnostics rather than training: any metric that reads the row's
-    ``und_reward`` summarises the composite while claiming to describe the training
-    signal. On ``bagel_corl_prfix_t07_20261016_102501_a1`` that read
-    ``bagel_corl/reward_valid/mean`` 0.19 below ``critic/score/mean`` on every step, even
-    the steps where all 16 episodes had image credit.
-
-    The two derivations sharing a name is the trap; this pins the divergence so a reader
-    cannot assume the row field is the trained value.
-    """
+    """``und_reward`` on the row is NOT the reward the actor trains on."""
     gens = [_sample(call="pass0", index=0, score=0.2), _sample(call="pass1", index=0, score=0.8)]
     # The reward manager scored the episode 0.5 (say, the composite of the text dims).
     episode = _episode(gens=gens, und_reward=0.5)

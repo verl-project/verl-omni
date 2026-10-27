@@ -1748,6 +1748,8 @@ class KLLoss(DiffusionLossFn):
         prev_sample_mean: torch.Tensor,
         ref_prev_sample_mean: torch.Tensor,
         std_dev_t: torch.Tensor,
+        unit_weights: torch.Tensor | None = None,
+        loss_normalizer: float | None = None,
     ) -> tuple[torch.Tensor, dict[str, Any]]:
         """Compute KL divergence given previous sample mean and reference previous sample mean (for images or videos).
 
@@ -1756,6 +1758,34 @@ class KLLoss(DiffusionLossFn):
             ref_prev_sample_mean: (torch.Tensor) shape is (bs, s, c)
             std_dev_t: (torch.Tensor) shape is (bs, 1, 1)
         """
+        if unit_weights is not None or loss_normalizer is not None:
+            if prev_sample_mean.shape != ref_prev_sample_mean.shape or prev_sample_mean.ndim < 2:
+                raise ValueError("GEN reference means must have identical (batch, ...) shapes")
+            weights = torch.ones_like(prev_sample_mean[:, 0].reshape(len(prev_sample_mean), -1)[:, 0])
+            if unit_weights is not None:
+                if unit_weights.shape != weights.shape:
+                    raise ValueError("GEN reference unit weight shape must match batch")
+                weights = unit_weights.to(device=weights.device, dtype=weights.dtype)
+            if not torch.isfinite(weights).all() or (weights < 0).any():
+                raise ValueError("GEN reference unit weights must be finite and nonnegative")
+            mask = (weights > 0).reshape(-1, *([1] * (prev_sample_mean.ndim - 1)))
+            # Mask before subtraction/division; invalid dummy transitions may carry NaNs or sigma=0.
+            current = torch.where(mask, prev_sample_mean, 0.0)
+            reference = torch.where(mask, ref_prev_sample_mean, 0.0)
+            if std_dev_t.ndim == 1:
+                std_dev_t = std_dev_t.reshape(-1, *([1] * (prev_sample_mean.ndim - 1)))
+            sigma = torch.where(mask, torch.broadcast_to(std_dev_t, current.shape), 1.0)
+            if not torch.isfinite(current).all() or not torch.isfinite(reference).all():
+                raise ValueError("GEN reference means must be finite on valid transitions")
+            if not torch.isfinite(sigma).all() or (sigma <= 0).any():
+                raise ValueError("GEN reference sigma must be finite and positive on valid transitions")
+            per_unit = ((current - reference).square() / (2 * sigma.square())).flatten(1).mean(1)
+            weighted = (per_unit * weights).sum()
+            count = weights.sum().clamp_min(1)
+            denominator = loss_normalizer if loss_normalizer is not None else count
+            if not torch.isfinite(torch.as_tensor(denominator)) or denominator <= 0:
+                raise ValueError("GEN reference loss normalizer must be finite and positive")
+            return weighted / denominator, {"actor/kl_loss": (weighted / count).detach().item()}
         kl_loss = ((prev_sample_mean - ref_prev_sample_mean) ** 2).mean(dim=(1, 2), keepdim=True) / (2 * std_dev_t**2)
         metrics = {"actor/kl_loss": kl_loss.mean().detach().item()}
         return kl_loss.mean(), metrics
@@ -1771,6 +1801,8 @@ class KLLoss(DiffusionLossFn):
             prev_sample_mean=model_output["prev_sample_mean"],
             ref_prev_sample_mean=data["ref_prev_sample_mean"],
             std_dev_t=model_output["std_dev_t"],
+            unit_weights=data.get("loss_unit_weight", None),
+            loss_normalizer=tu.get_non_tensor_data(data, "loss_normalizer", default=None),
         )
         return DiffusionLossResult(loss=kl_loss, metrics=metrics)
 

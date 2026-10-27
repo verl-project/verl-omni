@@ -72,6 +72,7 @@ def build_eval_panel(
     training_dataset_path: Path | None = None,
     render_seeds=None,
     tasks=("breakdown", "reflection"),
+    drop_duplicate_prompts: bool = False,
 ) -> Path:
     if per_task < 1 or len(tasks) != 2 or len(set(tasks)) != 2:
         raise ValueError("Require positive per_task and exactly two distinct task labels")
@@ -95,6 +96,9 @@ def build_eval_panel(
     for row in candidates:
         identity, prompt_hash = str(row["id"]), digest(row["prompt"])
         overlap_hash = digest(row["overlap_prompt"])
+        if drop_duplicate_prompts and identity not in seen_ids and overlap_hash in seen_prompts:
+            # UniCoT repeats some prompts under distinct IDs; keep the first such row.
+            continue
         if identity in seen_ids or overlap_hash in seen_prompts:
             raise ValueError(f"Duplicate example ID or prompt: {identity}")
         if identity in train_ids or overlap_hash in train_prompts:
@@ -165,6 +169,7 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--render-seeds", type=int, nargs="+")
     parser.add_argument("--tasks", nargs=2, default=["breakdown", "reflection"])
+    parser.add_argument("--drop-duplicate-prompts", action="store_true", help="keep the first of rows sharing a prompt")
     args = parser.parse_args()
     print(
         build_eval_panel(
@@ -175,5 +180,6 @@ if __name__ == "__main__":
             training_dataset_path=args.training_dataset,
             render_seeds=args.render_seeds,
             tasks=args.tasks,
+            drop_duplicate_prompts=args.drop_duplicate_prompts,
         )
     )

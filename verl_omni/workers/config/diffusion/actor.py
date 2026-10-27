@@ -61,6 +61,10 @@ class DiffusionLossConfig(BaseConfig):
     video_ref_kl_coef: float = 0.0
     audio_ref_kl_coef: float = 0.0
 
+    # Co-RL GEN reference KL is independent of the UND actor's use_kl_loss.
+    # Requires explicit per-transition reference reverse-SDE means.
+    use_gen_kl_loss: bool = False
+
     def __post_init__(self):
         """Validate diffusion loss configuration."""
         if self.loss_weight_und < 0 or self.loss_weight_gen < 0:

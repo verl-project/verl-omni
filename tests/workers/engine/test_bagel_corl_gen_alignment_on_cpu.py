@@ -70,8 +70,8 @@ def losses(monkeypatch):
         _loss_cfg_of=lambda c: c.diffusion_loss,
         DiffusionLossResult=lambda loss, metrics: SimpleNamespace(loss=loss, metrics=metrics, add_loss_metric=False),
     )
-    load_nodes("verl_omni/trainer/diffusion/diffusion_algos.py", {"FlowGRPOLoss"}, ns)
-    ns["get_diffusion_loss_fn"] = lambda name: ns["FlowGRPOLoss"]()
+    load_nodes("verl_omni/trainer/diffusion/diffusion_algos.py", {"FlowGRPOLoss", "KLLoss"}, ns)
+    ns["get_diffusion_loss_fn"] = lambda name: ns["KLLoss" if name == "kl" else "FlowGRPOLoss"]()
     ns["_LANE_SCALAR_TYPES"] = (bool, int, float, str, type(None))
     load_nodes(
         "verl_omni/workers/utils/losses.py",
@@ -111,6 +111,80 @@ def config():
     )
 
 
+def tag_gen(data, **metadata):
+    tu.assign_non_tensor(
+        data,
+        bagel_corl_lane="gen",
+        has_complete_gen_groups=True,
+        skip_gen=False,
+        num_gen_rows=len(data),
+        sp_size=1,
+        **metadata,
+    )
+
+
+def gen_trajectory(parents, advantages, valid):
+    rows, steps = valid.shape
+    return TensorDict(
+        {
+            "parent_episode_id": parents,
+            "gen_row_id": torch.arange(rows),
+            "all_latents": torch.ones(rows, steps + 1, 2),
+            "all_timesteps": torch.full((rows, steps), 0.8),
+            "gen_valid": torch.ones(rows),
+            "gen_transition_valid": valid,
+            "old_log_probs": torch.zeros(rows, steps),
+            "advantages": advantages,
+        },
+        batch_size=[rows],
+    )
+
+
+def und_batch(episodes, gen):
+    data = TensorDict(
+        {
+            "bagel_episode_id": episodes,
+            "input_ids": torch.ones(len(episodes), 2),
+            "old_log_probs": torch.zeros(len(episodes), 1),
+            "advantages": torch.ones(len(episodes), 1),
+        },
+        batch_size=[len(episodes)],
+    )
+    tu.assign_non_tensor(data, bagel_corl_gen=gen, has_complete_gen_groups=True, skip_gen=False)
+    return data
+
+
+def composite_dispatch(losses, monkeypatch):
+    module = ModuleType("verl_omni.workers.engine.fsdp.bagel_corl_composite")
+    names = {"composite_forward_mode", "gen_view_has_traj", "is_bagel_corl_composite"}
+    load_nodes("verl_omni/workers/engine/fsdp/bagel_corl_composite.py", names, losses)
+    for name in names | {"materialize_gen_train_batch"}:
+        setattr(module, name, losses[name])
+    module.run_und_token_forward_backward = lambda *a: {"loss": [], "metrics": {}}
+    module.merge_composite_outputs = lambda parts: parts[-1] if parts else {"loss": [], "metrics": {}}
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    return module
+
+
+def install_real_ppo(monkeypatch, *, entropy_coeff, kl_loss_coef):
+    from verl.workers.config import ActorConfig
+
+    path = Path(importlib.util.find_spec("verl").submodule_search_locations[0]) / "workers/utils/losses.py"
+    spec = importlib.util.spec_from_file_location("acceptance_verl_losses", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    monkeypatch.setattr(sys.modules["verl.workers.utils.losses"], "ppo_loss", module.ppo_loss)
+    return ActorConfig(
+        strategy="fsdp",
+        rollout_n=1,
+        ppo_micro_batch_size_per_gpu=1,
+        entropy_coeff=entropy_coeff,
+        use_kl_loss=True,
+        kl_loss_coef=kl_loss_coef,
+        kl_loss_type="kl",
+    )
+
+
 @pytest.mark.parametrize("order", [[0, 1], [1, 0]])
 def test_each_gen_microbatch_has_its_own_signed_gradient(losses, order):
     view = TensorDict(
@@ -122,15 +196,7 @@ def test_each_gen_microbatch_has_its_own_signed_gradient(losses, order):
         adv = losses["select_gen_advantages_for_step"](micro, 0, require_bagel_corl_gen=True)
         assert adv.shape == (1,)
         step = TensorDict({"old_log_probs": micro["old_log_probs"][:, 0], "advantages": adv}, batch_size=[1])
-        tu.assign_non_tensor(
-            step,
-            bagel_corl_lane="gen",
-            has_complete_gen_groups=True,
-            skip_gen=False,
-            num_gen_rows=1,
-            gradient_accumulation_steps=4,
-            sp_size=1,
-        )
+        tag_gen(step, gradient_accumulation_steps=4)
         new = torch.zeros(1, requires_grad=True)
         loss, _ = losses["bagel_composite_loss"](config(), {"log_probs": new}, step)
         loss.backward()
@@ -223,23 +289,32 @@ def test_trajectory_padding_has_explicit_valid_mask_and_safe_timesteps(losses):
         losses["build_gen_flowgrpo_proto"]([bad])
 
 
+def test_optional_gen_reference_means_survive_trajectory_packing(losses):
+    rows = [
+        dict(
+            rollout_log_probs=torch.zeros(t),
+            rm_score=0.7,
+            gen_group_uid="call",
+            episode_uid="episode",
+            prompt_token_ids=[42],
+            all_latents=torch.ones(t + 1, 2),
+            timesteps=torch.full((t,), 0.8),
+            ref_prev_sample_mean=torch.full((t, 2), float(t)),
+        )
+        for t in [1, 3]
+    ]
+    proto = losses["build_gen_flowgrpo_proto"](rows)
+    torch.testing.assert_close(proto.batch["ref_prev_sample_mean"], torch.tensor([[[1.0, 1.0]] * 3, [[3.0, 3.0]] * 3]))
+    assert proto.batch["gen_transition_valid"].tolist() == [[1.0, 0.0, 0.0], [1.0, 1.0, 1.0]]
+    rows[1].pop("ref_prev_sample_mean")
+    with pytest.raises(ValueError, match="reference"):
+        losses["build_gen_flowgrpo_proto"](rows)
+
+
 def test_composite_engine_selects_gen_rows_for_current_und_minibatch(losses, monkeypatch):
-    module = ModuleType("verl_omni.workers.engine.fsdp.bagel_corl_composite")
-    load_nodes(
-        "verl_omni/workers/engine/fsdp/bagel_corl_composite.py",
-        {"composite_forward_mode", "gen_view_has_traj", "is_bagel_corl_composite"},
-        losses,
-    )
-    for name in (
-        "composite_forward_mode",
-        "gen_view_has_traj",
-        "is_bagel_corl_composite",
-        "materialize_gen_train_batch",
-    ):
-        setattr(module, name, losses[name])
+    module = composite_dispatch(losses, monkeypatch)
     module.run_und_token_forward_backward = lambda *a: {"loss": [0.0], "metrics": {}}
     module.merge_composite_outputs = lambda parts: parts[-1]
-    monkeypatch.setitem(sys.modules, module.__name__, module)
     losses["get_device_id"] = lambda: "cpu"
     load_nodes(
         "verl_omni/workers/engine/fsdp/diffusers_impl.py",
@@ -326,18 +401,7 @@ def test_gen_metrics_exclude_padding_and_use_global_unit_count(losses):
             {"old_log_probs": torch.zeros(1), "advantages": torch.ones(1), "loss_unit_weight": torch.tensor([valid])},
             batch_size=[1],
         )
-        tu.assign_non_tensor(
-            data,
-            bagel_corl_lane="gen",
-            has_complete_gen_groups=True,
-            skip_gen=False,
-            num_gen_rows=1,
-            corl_loss_normalized=True,
-            loss_normalizer=3.0,
-            corl_dp_size=1,
-            gradient_accumulation_steps=999,
-            sp_size=1,
-        )
+        tag_gen(data, corl_loss_normalized=True, loss_normalizer=3.0, corl_dp_size=1, gradient_accumulation_steps=999)
         loss, metrics = losses["bagel_composite_loss"](config(), {"log_probs": torch.tensor([math.log(ratio)])}, data)
         total += float(metrics["actor/gen/ratio_mean"].aggregate())
     assert total == pytest.approx((1.01 + 0.99 + 1.005) / 3)
@@ -345,22 +409,7 @@ def test_gen_metrics_exclude_padding_and_use_global_unit_count(losses):
 
 @pytest.mark.parametrize("micro_size", [1, 3])
 def test_und_real_ppo_with_jagged_outputs_kl_entropy_and_rejected_row(losses, monkeypatch, micro_size):
-    from verl.workers.config import ActorConfig
-
-    path = Path(importlib.util.find_spec("verl").submodule_search_locations[0]) / "workers/utils/losses.py"
-    spec = importlib.util.spec_from_file_location("real_verl_losses", path)
-    real = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(real)
-    monkeypatch.setattr(sys.modules["verl.workers.utils.losses"], "ppo_loss", real.ppo_loss)
-    cfg = ActorConfig(
-        strategy="fsdp",
-        rollout_n=1,
-        ppo_micro_batch_size_per_gpu=1,
-        entropy_coeff=0.05,
-        use_kl_loss=True,
-        kl_loss_coef=0.01,
-        kl_loss_type="kl",
-    )
+    cfg = install_real_ppo(monkeypatch, entropy_coeff=0.05, kl_loss_coef=0.01)
     prompts = [torch.ones(n, dtype=torch.long) for n in [1, 2, 1]]
     responses = [torch.ones(n, dtype=torch.long) for n in [2, 4, 1]]
     leaves = [torch.zeros(p.numel() + r.numel(), requires_grad=True) for p, r in zip(prompts, responses, strict=True)]
@@ -405,23 +454,109 @@ def test_und_real_ppo_with_jagged_outputs_kl_entropy_and_rejected_row(losses, mo
 
 
 @pytest.mark.parametrize("reference_key", ["ref_log_prob", "ref_prev_sample_mean"])
-def test_corl_rejects_unsupported_gen_reference_regularization(losses, reference_key):
+def test_corl_explicit_gen_kl_requires_reverse_sde_inputs(losses, reference_key):
     data = TensorDict(
         {"old_log_probs": torch.zeros(1), "advantages": torch.ones(1), reference_key: torch.zeros(1)}, batch_size=[1]
     )
-    tu.assign_non_tensor(
-        data,
-        bagel_corl_lane="gen",
-        has_complete_gen_groups=True,
-        skip_gen=False,
-        num_gen_rows=1,
-        gradient_accumulation_steps=1,
-        sp_size=1,
-    )
+    tag_gen(data, gradient_accumulation_steps=1)
     cfg = config()
     cfg.use_kl_loss = True  # UND reference KL remains independently supported.
-    with pytest.raises(NotImplementedError, match="GEN reference"):
+    cfg.diffusion_loss.use_gen_kl_loss = True
+    with pytest.raises(ValueError, match="GEN reference"):
         losses["bagel_composite_loss"](cfg, {"log_probs": torch.zeros(1)}, data)
+
+
+@pytest.mark.parametrize("micro_size", [1, 3])
+def test_gen_reference_kl_masks_padding_and_is_microbatch_invariant(losses, micro_size):
+    means = torch.tensor([[[2.0, 4.0]], [[4.0, 6.0]], [[float("nan"), float("nan")]]], requires_grad=True)
+    valid = torch.tensor([1.0, 1.0, 0.0])
+    sigmas = torch.tensor([1.0, 2.0, 0.0]).reshape(3, 1, 1)
+    total = 0.0
+    for start in range(0, 3, micro_size):
+        sl = slice(start, start + micro_size)
+        value, metrics = losses["KLLoss"].compute_loss(
+            prev_sample_mean=means[sl],
+            ref_prev_sample_mean=torch.zeros_like(means[sl]),
+            std_dev_t=sigmas[sl],
+            unit_weights=valid[sl],
+            loss_normalizer=2.0,
+        )
+        assert torch.isfinite(value)
+        assert math.isfinite(metrics["actor/kl_loss"])
+        total += value.item()
+        value.backward()
+    assert total == pytest.approx((5 + 3.25) / 2)
+    torch.testing.assert_close(means.grad, torch.tensor([[[0.5, 1.0]], [[0.25, 0.375]], [[0.0, 0.0]]]))
+
+
+def test_gen_reference_switch_is_independent_from_und_kl(losses):
+    cfg = config()
+    cfg.use_kl_loss = False
+    cfg.kl_loss_coef = 0.1
+    cfg.diffusion_loss.use_gen_kl_loss = True
+    data = TensorDict(
+        {
+            "old_log_probs": torch.zeros(1),
+            "advantages": torch.ones(1),
+            "ref_prev_sample_mean": torch.zeros(1, 1, 1),
+            "loss_unit_weight": torch.ones(1),
+        },
+        batch_size=[1],
+    )
+    tag_gen(data, corl_loss_normalized=True, loss_normalizer=1.0, corl_dp_size=1)
+    lp = torch.zeros(1, requires_grad=True)
+    mean = torch.full((1, 1, 1), 2.0, requires_grad=True)
+    value, metrics = losses["bagel_composite_loss"](
+        cfg,
+        {"log_probs": lp, "prev_sample_mean": mean, "std_dev_t": torch.ones(1, 1, 1)},
+        data,
+    )
+    assert value.item() == pytest.approx(-0.8)
+    assert metrics["actor/gen/pg_loss"].aggregate() == pytest.approx(-1.0)
+    assert metrics["actor/gen/ref_kl"].aggregate() == pytest.approx(2.0)
+    value.backward()
+    torch.testing.assert_close(mean.grad, torch.full_like(mean, 0.2))
+
+
+def test_und_kl_does_not_request_gen_reference_inputs(losses):
+    cfg = config()
+    cfg.use_kl_loss = True
+    data = TensorDict({"old_log_probs": torch.zeros(1), "advantages": torch.ones(1)}, batch_size=[1])
+    tag_gen(data, gradient_accumulation_steps=1)
+    value, _ = losses["bagel_composite_loss"](cfg, {"log_probs": torch.zeros(1)}, data)
+    assert value == -1
+
+
+@pytest.mark.parametrize("bad", ["mean", "sigma", "weight", "normalizer"])
+def test_gen_reference_rejects_invalid_valid_units(losses, bad):
+    mean = torch.ones(1, 1, 2)
+    sigma, weight, denominator = torch.ones(1, 1, 1), torch.ones(1), 1.0
+    if bad == "mean":
+        mean.fill_(float("nan"))
+    elif bad == "sigma":
+        sigma.zero_()
+    elif bad == "weight":
+        weight.fill_(float("nan"))
+    else:
+        denominator = 0.0
+    with pytest.raises(ValueError, match="GEN reference"):
+        losses["KLLoss"].compute_loss(
+            prev_sample_mean=mean,
+            ref_prev_sample_mean=torch.zeros_like(mean),
+            std_dev_t=sigma,
+            unit_weights=weight,
+            loss_normalizer=denominator,
+        )
+
+
+def test_unweighted_reference_kl_retains_legacy_mean(losses):
+    mean = torch.tensor([[[1.0, 3.0]], [[2.0, 4.0]]], requires_grad=True)
+    sigma = torch.tensor([1.0, 2.0]).reshape(2, 1, 1)
+    value, _ = losses["KLLoss"].compute_loss(
+        prev_sample_mean=mean, ref_prev_sample_mean=torch.zeros_like(mean), std_dev_t=sigma
+    )
+    expected = (mean.square().mean((1, 2), keepdim=True) / (2 * sigma.square())).mean()
+    torch.testing.assert_close(value, expected)
 
 
 def test_corl_cfg_gates_each_rows_timestep_with_equal_forward_counts(losses):

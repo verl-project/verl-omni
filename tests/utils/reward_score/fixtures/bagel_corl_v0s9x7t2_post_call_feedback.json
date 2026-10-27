@@ -1,0 +1,12 @@
+{
+  "provenance": "Cropped from real run v0s9x7t2, step 4. Exact feedback bullet prose and reference_subtasks; episode identifiers and paths omitted. Both feedback blocks occur after the first generate JSON, including the first block within that same sampled assistant turn. Synthetic tool framing is added only by the regression test.",
+  "feedback_blocks": [
+    "Findings: \n- Consider adding more dynamic contrast or subtle color gradations to further emphasize the tunnel's depth and the miner's gaunt appearance.\n- Ensure the rusted rails have varied textures and directions to enhance the scene's sense of decay and abandonment.\nSuggested Prompt Fixes: \n- Add a specific instruction for the texture and lighting of the gas lamps to achieve a more immersive glow effect.\n- Specify the type of moths (e.g., mining bees, certain moth species) to make the scene more authentic.",
+    "Findings: \n- The image could benefit from slight adjustments to the lighting direction on the miner's face to better emphasize his gauntness and the soot on his face.\n- Consider adding more dynamic contrast or subtle color gradations to further enhance the sense of depth in the tunnel.\nSuggested Prompt Fixes: \n- Provide more specific instructions for the lighting direction on the miner's face to achieve a more pronounced gaunt effect.\n- Suggest a wider range of dynamic contrast options or color gradations to experiment with achieving the desired depth in the tunnel."
+  ],
+  "reference_subtasks": [
+    "Old man stands in coal mine tunnel, with stone walls, rails, moths, gas lamps.",
+    "Keep the outline of the image unchanged and edit with following details. The old man is a miner with a gaunt, soot-covered face. The setting is a desolate, apocalyptic coal mine tunnel with crumbling stone walls and rusted rails. Swarms of moths are fluttering around flickering gas lamps that cast jagged shadows and an eerie, dim glow against the oppressive darkness.",
+    "Keep all previously rendered elements unchanged. Render the image as a black and white, ultra high-resolution 4K photograph, ensuring the atmosphere remains eerie and oppressive, with emphasis on the photographic quality and lighting details to match the overall mood described in the original prompt."
+  ]
+}

@@ -11,25 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""CPU regression: validation must denoise with the *validation* diffusion kernel.
-
-``AgentLoopWorkerTQ.generate_sequences`` builds the per-phase ``sampling_params`` from
-the training rollout config and, when validating, overrides only the AR knobs
-(``top_p`` / ``top_k`` / ``temperature``).  ``val_kwargs.pipeline`` /
-``val_kwargs.algo`` are never applied, so ``VAL_NOISE_LEVEL`` / ``VAL_GEN_STEPS`` were
-dead on the bagel path: ``build_gen_sampling_params`` back-filled them from the
-*training* ``pipeline`` / ``algo`` and validation denoised with the training kernel.
-
-Measured 2026-09-30 on ``bagel_corl_rm1_0123_20260930_021712``: the step-30 validation
-boundary dumped 8 val + 4 train episodes into one ``step_000030`` with flat-region
-noise indistinguishable between them (val 3.1-7.1 vs train 4.7-7.3), and the training
-frames stayed grainy on plain white backgrounds -- which a deterministic ODE decode
-cannot produce.  Val prompts were identified by matching
-``outputs/data/agentic_unicot/val.parquet``.
-
-These tests pin the two halves of the fix: the overlay itself, and the ``val/``
-artifact tag that keeps the deterministic reference out of the training step dir.
-"""
+"""CPU regression: validation must denoise with the *validation* diffusion kernel."""
 
 from __future__ import annotations
 
@@ -111,19 +93,15 @@ def test_val_overlay_keeps_train_values_for_keys_val_does_not_set():
 
 
 def test_val_overlay_clears_logprobs():
-    """``logprobs=False`` is required: ``build_gen_sampling_params`` refuses a request
-    that wants log-probs *and* carries ``noise_level <= 0``."""
+    """``logprobs=False`` is required: ``build_gen_sampling_params`` refuses a request that wants log-probs *and*
+    carries ``noise_level <= 0``."""
     out = tq_mod.val_overlay_sampling_params(_train_sampling_params(), _rollout_cfg())
 
     assert out["logprobs"] is False
 
 
 def test_val_overlay_accepts_a_flowgrpo_refused_combination():
-    """The overlay's own output must not trip ``build_gen_sampling_params``'s guard.
-
-    That guard raises exactly when ``logprobs`` is wanted and ``noise_level <= 0`` --
-    the combination the val overlay would produce if it forgot to clear ``logprobs``.
-    """
+    """The overlay's own output must not trip ``build_gen_sampling_params``'s guard."""
     from verl_omni.agent_loop.bagel_corl_gen_serve import build_gen_sampling_params
 
     rollout = _rollout_cfg()
@@ -180,18 +158,7 @@ def test_run_prompt_overlays_the_val_kernel_only_when_validating(monkeypatch):
 
 
 def test_val_overlay_tolerates_a_struct_val_kwargs_without_seed():
-    """Regression: the worker's ``val_kwargs`` is a *struct* node that need not carry ``seed``.
-
-    Measured 2026-09-30 on ``bagel_corl_rm1_0123_20260930_091627``: the recipe sets only
-    ``val_kwargs.pipeline.num_inference_steps`` and ``val_kwargs.algo.noise_level``, so the
-    composed struct node has no ``seed``.  Reading ``val_kwargs.seed`` then raised
-    ``ConfigAttributeError: Key 'seed' is not in struct`` on every validation episode, so
-    the init validation generated no GEN images and dumped none -- the symptom was "no
-    val images", not an obvious crash, because the TQ worker logs the task exception and
-    records a failed group.
-
-    The overlay must therefore degrade to "seed not set" instead of raising.
-    """
+    """Regression: the worker's ``val_kwargs`` is a *struct* node that need not carry ``seed``."""
     val_kwargs = OmegaConf.create(
         {
             "pipeline": {"num_inference_steps": _VAL_STEPS},
@@ -211,15 +178,7 @@ def test_val_overlay_tolerates_a_struct_val_kwargs_without_seed():
 
 
 def test_val_overlay_applies_to_the_runtime_dataclass_shape():
-    """The worker sees a *dataclass* ``DiffusionSamplingConfig``, not an OmegaConf node.
-
-    The trainer retargets ``rollout.val_kwargs`` to ``DiffusionSamplingConfig``, whose
-    ``pipeline`` / ``algo`` are frozen dataclasses (``DiffusionPipelineConfig`` /
-    ``DiffusionRolloutAlgoConfig``) rather than config nodes.  The overlay must flatten
-    those, which is why it goes through ``_config_to_sampling_dict`` instead of reading
-    attributes by hand -- an attribute-by-attribute version would silently find nothing
-    and leave validation on the training kernel, which is the bug being fixed.
-    """
+    """The worker sees a *dataclass* ``DiffusionSamplingConfig``, not an OmegaConf node."""
     from verl_omni.workers.config.diffusion.rollout import (
         DiffusionPipelineConfig,
         DiffusionRolloutAlgoConfig,
@@ -243,12 +202,7 @@ def test_val_overlay_applies_to_the_runtime_dataclass_shape():
 
 
 def test_train_rollout_cfg_is_not_overlaid_when_val_kwargs_lack_the_subtree():
-    """A val node with no ``pipeline``/``algo`` must not fabricate an ODE kernel.
-
-    This is the failure shape of the original bug in reverse: if the overlay cannot
-    find the val subtree it leaves the training kernel in place, so ``build_gen`` still
-    sees a coherent (stochastic) config rather than a half-built one.
-    """
+    """A val node with no ``pipeline``/``algo`` must not fabricate an ODE kernel."""
     rollout = OmegaConf.create({"val_kwargs": {"seed": 7}})
 
     out = tq_mod.val_overlay_sampling_params(_train_sampling_params(), rollout)
@@ -271,7 +225,6 @@ def test_validation_artifact_relpath_tags_only_validation(sampling_params, expec
     assert validation_artifact_relpath("step_000030/sample_1.01", sampling_params) == expected
 
 
-# ---------------------------------------------------------------------------
 # The GEN traj stash is the *saving* path for the rollout image, and it used to
 # require the SDE trajectory unconditionally.  Validation runs ODE
 # (``noise_level=0.0``), which by construction has no SDE log-probs, so the stash
@@ -281,7 +234,6 @@ def test_validation_artifact_relpath_tags_only_validation(sampling_params, expec
 #   "GEN traj stash incomplete from vLLM-Omni (all_latents=ok, timesteps=ok,
 #    log_probs=missing)"
 # and ``find /tmp/bagel_corl_gen -name '*.png' -newermt ... `` was empty.
-# ---------------------------------------------------------------------------
 
 
 def _noise_free_output(**extra):
@@ -295,11 +247,7 @@ def _noise_free_output(**extra):
 
 
 def test_validation_row_keeps_its_image_without_a_trajectory(tmp_path):
-    """``require_traj=False`` must yield a ``valid`` row with an image and no traj.
-
-    The image is the entire deliverable of a validation pass, so a missing trajectory
-    must not be able to suppress it.
-    """
+    """``require_traj=False`` must yield a ``valid`` row with an image and no traj."""
     row = stash_gen_row_from_diffusion_output(
         _noise_free_output(), seed=1, image_root=str(tmp_path), require_traj=False
     )
@@ -312,10 +260,7 @@ def test_validation_row_keeps_its_image_without_a_trajectory(tmp_path):
 
 
 def test_training_still_fails_closed_without_a_trajectory(tmp_path):
-    """The default is unchanged: a training GEN call with no traj is a hard error.
-
-    And it must fail *before* writing, so a dropped training group leaves no stray PNG.
-    """
+    """The default is unchanged: a training GEN call with no traj is a hard error."""
     with pytest.raises(RuntimeError, match="traj stash incomplete"):
         stash_gen_row_from_diffusion_output(_noise_free_output(), seed=1, image_root=str(tmp_path))
 
@@ -344,12 +289,7 @@ def test_training_row_still_carries_the_full_trajectory(tmp_path):
 
 
 def test_a_valid_row_without_traj_is_dropped_from_the_gen_training_lane():
-    """The row shape validation produces must be one the packer already understands.
-
-    ``_sample_has_gen_traj`` gates the GEN *training* lane, so a valid-but-traj-less
-    validation row is booked as ``gen/dropped_incomplete_groups`` rather than packed --
-    this is why the fix needs no change to ``pack_dual_lane_episode``.
-    """
+    """The row shape validation produces must be one the packer already understands."""
     from verl_omni.agent_loop.bagel_corl_lib import GenSample
 
     sample = GenSample(

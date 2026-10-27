@@ -12,17 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Training must publish the reward breakdown, not just ``critic/score/mean``.
-
-``critic/score/mean`` is ``token_level_scores.sum(-1).mean()`` over the non-aborted episodes
-of the current rollout batch -- ~16-25 heterogeneous episodes. On
-``bagel_corl_prfix_t07_20261016_023749_a1`` it correlated -0.71 with ``episode/K_zero``,
-carried a std of 0.088 against a total drift of -0.014 over 76 updates, and was therefore
-unreadable -- while ``val-core/unicot_reflection/reward/mean@1`` rose 0.729 -> 0.829 and the
-validation pass logged all eight dims that training omitted. These tests pin the two views
-that close the gap: the per-dim breakdown, and the ``used_image_credit`` split that
-separates "quality when it worked" from "how often it worked".
-"""
+"""Training must publish the reward breakdown, not just ``critic/score/mean``."""
 
 import pytest
 
@@ -31,7 +21,7 @@ from verl_omni.agent_loop.bagel_corl_lib import (
     aggregate_reward_breakdown_metrics,
     und_record_field_keys,
 )
-from verl_omni.utils.reward_score.agentic_multidim_reward import REWARD_COMPONENTS
+from verl_omni.utils.reward_score.bagel_corl_multidim_reward import REWARD_COMPONENTS
 
 
 def _record(
@@ -62,13 +52,7 @@ def _record(
 
 
 def _authored_record(und_reward: float, credit: bool, breakdown: dict) -> dict:
-    """A row exactly as ``bagel_corl.episode_from_agent_extra`` writes it.
-
-    That function sets ``extra_fields=extra`` with ``used_image_credit`` and ``und_reward``
-    on it, and the agent loop's ``_compute_score`` then adds ``reward_extra_info``. So the
-    episode reward is reachable as ``und_reward`` -- *not* as ``token_level_scores``, which
-    is derived from ``rm_scores`` after the reward step and is absent from these rows.
-    """
+    """A row exactly as ``bagel_corl.episode_from_agent_extra`` writes it."""
     return {
         "fields": {
             "und_reward": und_reward,
@@ -121,13 +105,7 @@ def test_used_image_credit_splits_the_episode_reward():
 
 
 def test_the_split_works_on_the_row_shape_the_agent_loop_actually_writes():
-    """Regression: a row carrying only ``und_reward`` must still split.
-
-    Rows come in several shapes. This one has the credit flag and ``und_reward`` but neither
-    ``rm_scores`` nor ``token_level_scores``, so the reward has to come from the fallback --
-    an earlier revision read ``token_level_scores`` only and would have published nothing at
-    all, while looking correct against a hand-built fixture.
-    """
+    """Regression: a row carrying only ``und_reward`` must still split."""
     metrics = aggregate_reward_breakdown_metrics(
         [
             _authored_record(0.0, False, {"reward_image": 0.0}),
@@ -149,15 +127,7 @@ def test_token_level_scores_wins_when_both_spellings_are_present():
 
 
 class TestTrainedRewardPrecedence:
-    """The split must summarise the reward the actor trains on, not a namesake field.
-
-    ``rm_scores`` is the column ``trainer_base`` copies into ``token_level_scores``, and
-    ``compute_data_metrics`` reduces it with ``.sum(-1)`` -- so a per-token vector is a
-    *single* episode reward that has to be summed, not a sequence of episodes and not a
-    value ``float()`` can read. Reading the wrong one is not cosmetic: it reported
-    ``bagel_corl/reward_valid/mean`` 0.19 below ``critic/score/mean`` on every step of
-    ``bagel_corl_prfix_t07_20261016_102501_a1``.
-    """
+    """The split must summarise the reward the actor trains on, not a namesake field."""
 
     def test_rm_scores_is_summed_and_beats_every_other_spelling(self):
         metrics = aggregate_reward_breakdown_metrics(
@@ -271,13 +241,7 @@ def test_empty_batch_publishes_nothing():
 
 
 class TestUndRecordFieldKeys:
-    """The empty-breakdown warning names the row's fields; that helper has to be total.
-
-    An empty breakdown is the silent failure mode of the whole feature: the step log goes
-    back to one unattributable scalar and nothing says why. The warning in
-    ``_gen_batch_from_step`` therefore dumps the fields the first row actually carries, so
-    this helper has to survive every row shape ``_und_records_from_batch`` can produce.
-    """
+    """The empty-breakdown warning names the row's fields; that helper has to be total."""
 
     def test_returns_sorted_keys_of_the_wrapped_shape(self):
         assert und_record_field_keys([_record(score=0.5, credit=True)]) == [

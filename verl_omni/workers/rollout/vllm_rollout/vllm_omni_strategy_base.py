@@ -78,6 +78,29 @@ class OmniStrategyBase(ABC):
     def __init__(self, server: vLLMOmniHttpServer) -> None:
         self.server = server
 
+    def observed_rollout_provenance(self, final_res: Any) -> dict[str, Any]:
+        """Project the serving replica's loaded version, never the request's step.
+
+        Native stage replica IDs are separate diagnostics: they are not the
+        outer physical server replica rank used by the rollout load balancer.
+        """
+        version = getattr(self.server, "global_steps", None)
+        replica = getattr(self.server, "replica_rank", None)
+        if replica is None:
+            # Legacy/offline server stubs have no physical identity to assert.
+            return {}
+        result = {
+            "rollout_policy_version": version,
+            "rollout_replica_id": replica,
+            "serving_provenance_verified": version is not None,
+        }
+        native = getattr(final_res, "request_output", None) or final_res
+        for source, target in (("stage_id", "rollout_stage_id"), ("replica_id", "rollout_stage_replica_id")):
+            value = getattr(native, source, None)
+            if value is not None:
+                result[target] = value
+        return result
+
     def _coerce_to_dataclass(self, config: Any, dataclass_type: type) -> Any:
         """Convert OmegaConf/dict/foreign dataclasses into ``dataclass_type``.
 

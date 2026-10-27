@@ -56,26 +56,11 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
-# ---------------------------------------------------------------------------
-# Decode watchdog: the only client-side valve for a stalled engine.
-# ---------------------------------------------------------------------------
-# ``LLMServerClient.generate`` awaits ``server.generate.remote(...)`` with no
-# timeout, and the AR strategy drains the engine generator with
-# ``_collect_last_output`` -- which only returns once the orchestrator delivers a
-# terminal output for the request. So a request the engine admits and never
-# finishes parks a whole episode (and its ``TaskRunnerV1`` step) forever.
-#
-# ``BAGEL_CORL_DECODE_TIMEOUT_S`` (default 600, 0 disables) bounds that await.
-# ``BAGEL_CORL_DECODE_HEARTBEAT_S`` (default 30) logs a warning while a decode is
-# still outstanding, so a stall is visible with timestamps instead of silent.
-# On expiry the lane's engine is aborted *and resumed* (``abort_all_requests``
-# pauses admission, ``resume_generation`` lifts it) and the decode is re-issued
-# ``BAGEL_CORL_DECODE_MAX_RECOVERIES`` times (default 1) -- new requests served
-# after such an abort complete normally, so the retry keeps a long run alive
-# instead of failing the step. Aborts are reported at ERROR level with the
-# engine-reported in-flight count, which is the one number that separates
-# "admitted but never finished" (engine side) from "never reached the engine"
-# (client/balancer side).
+# --------------------------------------------------------------------------- Decode watchdog: the only client-side
+# valve for a stalled engine. ---------------------------------------------------------------------------
+# ``LLMServerClient.generate`` awaits ``server.generate.remote(...)`` with no timeout, and the AR strategy drains the
+# engine generator with ``_collect_last_output`` -- which only returns once the orchestrator delivers a terminal
+# output for the request.
 _DECODE_TIMEOUT_S = _env_float("BAGEL_CORL_DECODE_TIMEOUT_S", 600.0)
 _DECODE_HEARTBEAT_S = _env_float("BAGEL_CORL_DECODE_HEARTBEAT_S", 30.0)
 _DECODE_MAX_RECOVERIES = int(_env_float("BAGEL_CORL_DECODE_MAX_RECOVERIES", 1.0))
@@ -151,15 +136,7 @@ _STALL_ERROR_MARKERS = (
 
 
 def _is_stall_error(exc: BaseException) -> bool:
-    """True when ``exc`` is a stall marker raised by our own decode valve.
-
-    The AR strategy bounds its engine drain and raises once the wait expires (it
-    sees the request id and the engine's in-flight count); the watchdog below
-    raises when the *actor call* itself never returns. Both are recoverable the
-    same way -- abort the lane, resume it, re-issue -- so both are matched here.
-    Matching is by message because Ray re-wraps actor exceptions
-    (``RayTaskError``) and the original type does not survive that round trip.
-    """
+    """True when ``exc`` is a stall marker raised by our own decode valve."""
     return any(marker in str(exc) for marker in _STALL_ERROR_MARKERS)
 
 
@@ -254,15 +231,8 @@ class BagelDualRoleLLMServerClient(LLMServerClient):
                 str(request_id)[:48],
                 len(prompt_ids),
                 params.get("max_tokens", params.get("max_new_tokens")),
-                # The sampling params the lane's strategy will actually hand the engine: the
-                # only way to tell a tiny/absent ``max_tokens`` or a stray ``stop`` from a model
-                # that simply emits EOS. One line per decode, debug-only.
-                #
-                # Values, not just keys: ``temperature``/``top_p``/``top_k``/
-                # ``repetition_penalty``/``max_tokens``/``stop`` are exactly the knobs whose
-                # *values* decide whether the checkpoint answers or degenerates into a
-                # role-label repetition loop, and a keys-only dump cannot distinguish the
-                # mitigated set from the as-trained one.
+                # The sampling params the lane's strategy will actually hand the engine: the only way to tell a
+                # tiny/absent ``max_tokens`` or a stray ``stop`` from a model that simply emits EOS.
                 {
                     key: params[key]
                     for key in (
@@ -339,19 +309,7 @@ class BagelDualRoleLLMServerClient(LLMServerClient):
         return output
 
     async def _abort_and_resume(self, client: LLMServerClient, *, route: str, request_id: Any) -> None:
-        """Abort everything the lane's engine still holds, then un-pause it.
-
-        ``abort_all_requests`` aborts the sticky replica the stalled call was
-        routed to (same ``request_id`` => same replica in the pool's sticky map)
-        and *pauses* admission as part of its contract
-        (``pause_generation(mode="abort")``), so ``resume_generation`` has to
-        follow or every later decode in the run would block on ``_pause_cond``.
-
-        The returned ``aborted_count`` is the diagnosis this whole valve exists
-        for: ``>0`` means the engine had admitted the request and never produced a
-        terminal output for it (engine-side stall); ``0`` means the call never
-        reached the engine (client-side / load-balancer stall).
-        """
+        """Abort everything the lane's engine still holds, then un-pause it."""
         server_id = None
         try:
             server_id, server = await client._acquire_server(request_id)
@@ -376,19 +334,7 @@ class BagelDualRoleLLMServerClient(LLMServerClient):
                 client._release_server(server_id)
 
     async def prompt_embed_cache_stats(self, routing_key: str) -> dict[str, Any] | None:
-        """R2 conditioning-cache counters for the GEN replica ``routing_key`` pins to.
-
-        ``generate`` acquires its replica from the pool's load balancer with the
-        caller's sticky ``request_id``, so re-acquiring with the *same* key reaches
-        the exact replica that served those requests and whose counters therefore
-        account for them (RFC §4.4.4). Sampling per replica — rather than asking
-        each pool for a total — is what makes the number attribute to a call at all:
-        counters live in the runner process, one cache per replica.
-
-        Metrics must never break a rollout, so every failure path degrades to
-        ``None``. A caller that gets ``None`` publishes no R2 numbers rather than
-        a fabricated zero.
-        """
+        """R2 conditioning-cache counters for the GEN replica ``routing_key`` pins to."""
         try:
             # Protected helper on the shared ``LLMServerClient`` base: the pool's
             # sticky acquisition is exactly the routing ``generate`` performed, so

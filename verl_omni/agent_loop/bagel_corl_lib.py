@@ -53,24 +53,12 @@ from verl_omni.tools.trajectory.judge_latch import (
 logger = logging.getLogger(__name__)
 
 
-# ``BAGEL_CORL_DEBUG=1`` re-enables this package's INFO diagnostics. vLLM calls
-# ``logging.basicConfig(level=ERROR)`` in every process that imports it, which raises the
-# *root* level and silently swallows the ``bagel_corl_sync`` lifecycle traces, the
-# per-turn timing below and ``_wake_und_rollout_replicas``' confirmation -- the driver
-# log goes quiet at the exact moment the engines start, so a stalled rollout looks like
-# an idle one. An explicit level on this package's logger wins over the root's, and
-# leaves vLLM's own verbosity untouched.
+# ``BAGEL_CORL_DEBUG=1`` re-enables this package's INFO diagnostics. vLLM calls ``logging.basicConfig(level=ERROR)``
+# in every process that imports it, which raises the *root* level and silently swallows the ``bagel_corl_sync``
+# lifecycle traces, the per-turn timing below and ``_wake_und_rollout_replicas``' confirmation -- the driver log goes
+# quiet at the exact moment the engines start, so a stalled rollout looks like an idle one.
 def _force_info_logging() -> None:
-    """Make this process actually *emit* INFO diagnostics.
-
-    Setting a child logger's level is not enough. ``vllm`` (imported lazily, on the first
-    decode, i.e. *after* the episode has already printed its first lines) calls
-    ``logging.basicConfig(..., force=True)``, which REPLACES the root handlers with one
-    carrying vLLM's own level. From that moment every record below that level is dropped
-    even though ``verl_omni``/``verl`` loggers still say INFO -- which is exactly what a
-    diagnostic run must not do. So raise the root logger AND every root handler (including
-    vLLM's replacement) to INFO, and re-install a handler if ``force=True`` left none behind.
-    """
+    """Make this process actually *emit* INFO diagnostics."""
     level = logging.INFO
     for name in ("verl_omni", "verl"):
         logging.getLogger(name).setLevel(level)
@@ -110,7 +98,8 @@ JUDGE_IMAGE_TOOL_SCHEMA: dict[str, Any] = {
         "name": "judge_image",
         "description": (
             "Judge the last generated image. Returns correctness/aesthetics scores, "
-            "findings, suggested prompt fixes, and a good_enough verdict. Call after every generate_image."
+            "findings, suggested prompt fixes, and a good_enough verdict. Call it after generate_image; "
+            "on a planned task, call it once, after the final planned image."
         ),
         "parameters": {
             "type": "object",
@@ -186,23 +175,7 @@ def resolve_task_type(*, extra_info: Any = None, ground_truth: Any = None) -> An
 
 
 def with_reflection_system_prompt(raw_prompt: Any, *, task_type: Any = None) -> Any:
-    """Replace the dataset system turn with the reflection protocol.
-
-    UniCoT parquet rows carry a short protocol. The longer rewrite rules make later UND
-    turns reflections, not a second copy of the user request. Non-message prompts are
-    left unchanged.
-
-    ``task_type="plan"`` rows are returned untouched. Their system turn is the dataset's
-    ``PLAN_SYSTEM_PROMPT`` ("Write a short numbered plan ..."), and that sentence is the only
-    thing that makes the numbered ``Plan:`` block get written. Overwriting it with the
-    reflection protocol deleted the instruction, so ``Plan:`` appeared in 0 of 731 dumped
-    transcripts (and "plan" in 0 of 731 rendered prompts) and ``_extract_plan_lines`` always
-    returned ``[]``. ``R_plan`` was therefore pinned to 0 on all 1107 ``unicot_breakdown``
-    rows -- and ``R_result`` with it, since it needs ``successful_generates ==
-    expected_num_images``, knowable only from the plan -- leaving 40% of that lane's score
-    unreachable and ``val-core/unicot_breakdown/reward/mean@1`` pinned near 0.46 across all
-    150 steps (measured 2026-10-12, ``bagel_corl_rm1_0123_20261012_084724``).
-    """
+    """Replace the dataset system turn with the reflection protocol."""
     if str(task_type or "").strip().lower() == "plan":
         return raw_prompt
     if not isinstance(raw_prompt, list | tuple) or not raw_prompt:
@@ -229,7 +202,10 @@ _TAGGED_CALL_RE = re.compile(r"<tools>\s*(.*?)\s*</tools>", re.DOTALL)
 # The terminal ``Done.`` decode comes back from the engine with ``skip_special_tokens=False``, so
 # the raw text is ``Done.<|im_end|>``. The trailing special tokens are therefore tolerated;
 # without that the loop reads its own stop word as ``continue`` and appends a second ``Done.``.
-_DONE_RE = re.compile(r"\bDone\.\s*(?:<\|[^|]*?\|>\s*)*$", re.IGNORECASE)
+# The period is optional: the checkpoint writes ``Done`` as often as ``Done.`` (16 of 96
+# episodes in steps 78-82 of ``bagel_corl_plateaufix_2356``), and a missing period used to make
+# the loop re-sample its own stop word until ``max_und_turns``.
+_DONE_RE = re.compile(r"\bDone\.?\s*(?:<\|[^|]*?\|>\s*)*$", re.IGNORECASE)
 
 # Control markers, which the engine returns inside ``text`` because it decodes with
 # ``skip_special_tokens=False`` (``<|im_end|>``, ``<|end of conversation|>``, ...). A turn made
@@ -255,16 +231,7 @@ _FENCED_BLOCK_RE = re.compile(r"```[a-zA-Z0-9_+.-]*[ \t]*\r?\n?(.*?)```", re.DOT
 # object per step (a plan, then the call) still counts, while a lone quoted example does not.
 _FENCED_PREAMBLE_LIMIT = 120
 
-# Native call tags. The checkpoint's *own* serving template wraps a call as
-# ``<|start of ToolCall|>[...]<|end of ToolCall|>`` (older builds spell it
-# ``<|FunctionCallBegin|>``/``<|FunctionCallEnd|>``), and -- unlike every other dialect here --
-# the payload is a JSON **array** of call objects, not a single object. The closing tag is
-# optional because a turn cut by ``und_turn_max_tokens`` can stop mid-array.
-#
-# The marker *spelling* is not stable across turns of a single episode (``start of``,
-# ``begin_of``, ``end of the``), so every observed variant is accepted rather than one canonical
-# pair: matching only one spelling made a complete, well-formed call parse as ``None``, left
-# ``K`` at 0 and flattened the reward to 0.0.
+# Native call tags.
 _NATIVE_OPEN_TAGS = (
     "start of ToolCall",
     "begin of ToolCall",
@@ -296,24 +263,13 @@ _STOP_TOOL_NAMES = frozenset(
     {"done", "done.", "stop", "finish", "finished", "finalize", "end", "complete", "terminate"}
 )
 
-# The recipe's system prompt asks the UND lane to ``judge_image`` after the last image, but the
-# loop's tool registry has only ``generate_image`` (judging is the RM's job, see
-# ``bagel_corl_rm``). A *Hermes*-tagged unsupported tool stays fail-closed
-# (``test_unsupported_tool_is_fail_closed``); every other dialect the checkpoint actually samples
-# (bare, fenced, ``<tools>``, native array) treats a non-action name as prose instead of killing
-# the episode. The checkpoint replayed the reference trajectory's extra ``<tools>`` blocks in the
-# same turn as its real call (``judge_image``, then a hallucinated name); treating those as
-# errors dropped an episode per step and padded the batch.
+# The recipe's system prompt asks the UND lane to ``judge_image`` after the last image, but the loop's tool registry
+# has only ``generate_image`` (judging is the RM's job, see ``bagel_corl_rm``).
 _INERT_BARE_TOOLS = frozenset({"judge_image"})
 
-# The user prompt asks for a short private reflection in the same turn (``_BREVITY_SUFFIX``
-# in ``build_unicot_agentic_rl``), and the checkpoint appends that reflection to the
-# ``generate_image`` prompt itself, e.g. "... D&D hero. Short reflection: The image seems to
-# capture ...". That tail conditions the diffusion model on a critique of a *previous* image
-# instead of the requested subject.
-#
-# The lookbehind requires a sentence boundary and the colon requires a labelled clause, so
-# a genuine subject ("the reflection of the moon on the lake") survives untouched.
+# The user prompt asks for a short private reflection in the same turn (``_BREVITY_SUFFIX`` in
+# ``build_unicot_agentic_rl``), and the checkpoint appends that reflection to the ``generate_image`` prompt itself,
+# e.g. "...
 _REFLECTION_TAIL_RE = re.compile(
     r"(?:^|(?<=[.!?\n]))\s*"
     r"(?:(?:short|brief|private|self|final|quick|inner)\s+)*"
@@ -323,15 +279,7 @@ _REFLECTION_TAIL_RE = re.compile(
 
 
 def strip_reflection_tail(prompt: str) -> str:
-    """Drop a trailing ``Short reflection: ...`` / ``Reflection: ...`` clause.
-
-    The in-turn reflection is scaffolding the reward consumes; it is not image
-    conditioning. Leaving it in made the GEN lane render a critique of the previous
-    sample rather than the requested subject. Returns ``prompt`` unchanged when no
-    labelled reflection clause is present, and refuses to return an empty string (a
-    prompt that is *only* a reflection keeps its original text rather than losing all
-    conditioning).
-    """
+    """Drop a trailing ``Short reflection: ...`` / ``Reflection: ...`` clause."""
     match = _REFLECTION_TAIL_RE.search(prompt)
     if match is None:
         return prompt
@@ -409,19 +357,7 @@ def _named_payload(payload: dict[str, Any] | None) -> dict[str, Any] | None:
 
 
 def _labelled_fenced_call(text: str) -> dict[str, Any] | None:
-    """Parse the first *labelled* fenced block in ``text`` that names a tool.
-
-    The label bound applies **per block** -- the text between one fence and the next -- and not
-    against the whole prefix. That distinction is load-bearing for a turn that lists one fenced
-    object per step (a plan fence, then a call fence): the call sits in the *second* fence behind
-    a short label while the first fence carries no ``name``. Reading only the first block missed
-    the call, ``und_turn_kind`` returned ``continue`` on every turn, ``K`` stayed 0 and the GEN
-    lane never ran; measuring the label from the start of the turn would also fail, because the
-    plan's braces trip the bound.
-
-    A single *quoted* example still does not match: with one fence the label is the whole prose
-    plan, which exceeds ``_FENCED_PREAMBLE_LIMIT``.
-    """
+    """Parse the first *labelled* fenced block in ``text`` that names a tool."""
     cursor = 0
     for match in _FENCED_BLOCK_RE.finditer(text):
         label = text[cursor : match.start()]
@@ -435,19 +371,7 @@ def _labelled_fenced_call(text: str) -> dict[str, Any] | None:
 
 
 def _tools_tagged_call(text: str) -> dict[str, Any] | None:
-    """Parse the first ``<tools>{...}</tools>`` span that carries a *complete call*.
-
-    The checkpoint re-uses the prompt's own schema tag (the recipe lists tools inside ``<tools>``)
-    for its calls, behind prose and a ``<plan>`` block, so neither untagged path sees it; without
-    this dialect the loop issues no GEN request (``K`` stays 0, reward flat 0).
-
-    Only ``<tools>`` is a call tag. ``<output>`` is deliberately *not* accepted: it is the model
-    role-playing the tool's side of a hallucinated conversation. The ``arguments`` requirement
-    separates a call from a *schema echo* (a signature carries ``parameters``, not ``arguments``),
-    without which the loop would issue a GEN request with an empty prompt.
-
-    Every ``<tools>`` block is considered in turn; the first carrying a real call wins.
-    """
+    """Parse the first ``<tools>{...}</tools>`` span that carries a *complete call*."""
     for match in _TAGGED_CALL_RE.finditer(text):
         payload = _named_payload(_leading_json_object(match.group(1)))
         if payload is None or "arguments" not in payload:
@@ -493,19 +417,7 @@ def _native_payload(raw: str) -> dict[str, Any] | None:
 
 
 def _native_tagged_call(text: str) -> dict[str, Any] | None:
-    """Parse a ``<|start of ToolCall|>[...]<|end of ToolCall|>`` span.
-
-    The checkpoint's *native* dialect: the payload is a JSON **array** of call objects, which is
-    why the Hermes and bare paths (single object) cannot see it, and there is no fence or
-    ``<tools>`` tag in the span. The first element carrying an actionable ``name`` wins, so a
-    multi-call array still drives the loop. Without it ``parse_und_tool_call`` returns ``None``,
-    the loop reads the turn as prose and the model repeats its own payload until the turn cap
-    (``gen_calls=0``, flat 0 reward) -- the loss mode :func:`count_degenerate_und_turns` counts.
-
-    The tag *spelling* varies across -- and within -- episodes (``begin_of ToolCall``,
-    ``end of the ToolCall``, ...); ``_NATIVE_CALL_RE`` accepts every observed variant, because
-    matching only one of them is what made this dialect invisible the first time.
-    """
+    """Parse a ``<|start of ToolCall|>[...]<|end of ToolCall|>`` span."""
     for match in _NATIVE_CALL_RE.finditer(text):
         payload = _native_payload(match.group(1))
         if payload is not None:
@@ -513,31 +425,42 @@ def _native_tagged_call(text: str) -> dict[str, Any] | None:
     return None
 
 
-def parse_und_tool_call(text: str) -> dict[str, Any] | None:
-    """Parse a tool call emitted by the UND lane -- tagged, native, ``<tools>``, bare, or fenced.
+_NAMED_OBJECT_START_RE = re.compile(r'\{\s*"(?:name|function)"\s*:')
+_TRAILING_JUNK_RE = re.compile(r"(?:<\|[^|]*?\|>|[^\w])*")
 
-    Five dialects have to be accepted, because the *same* published checkpoint produces all of
-    them once it is handed the ``<tools>`` block:
 
-    * Hermes, ``<tool_call>{"name": ...}</tool_call>`` -- what ``HERMES_SPECIAL_TOKENS``, the
-      spike gate and the RFC call the contract, and what the chat template re-renders from
-      ``message.tool_calls``.
-    * the **bare payload**, ``{"name": ..., "arguments": {...}}`` with no surrounding tags --
-      sometimes behind a role label the model writes as *text* (``'ASSISTANT\\n {...}'``).
-    * the **fenced payload** behind a short label -- the model *makes* the call, it does not
-      quote one -- see :func:`_labelled_fenced_call`.
-    * the **``<tools>`` payload** behind a prose plan -- see :func:`_tools_tagged_call`.
-    * the **native ``<|start of ToolCall|>`` array** (spellings vary: ``begin_of``, ``end of the
-      ToolCall``, ...; see ``_NATIVE_OPEN_TAGS``) -- see :func:`_native_tagged_call`.
+def _trailing_call(text: str) -> dict[str, Any] | None:
+    """Parse a named call that *ends* the turn, after a prose plan.
 
-    Only a payload that *starts* the text (bare, after an optional role echo and echoed ``<...>``
-    markers), that sits inside a ``<tools>`` block or a native ``<|start of ToolCall|>`` tag, or
-    that is a fenced block naming a tool behind a label of at most ``_FENCED_PREAMBLE_LIMIT``
-    characters counting no braces counts; a JSON example inside the model's prose plan satisfies
-    none of those, so it is not mistaken for a call. Every fenced block is considered in turn, each
-    against its **own** label, because the checkpoint also emits a numbered plan whose call is a
-    later fence than the plan itself.
+    The plan prompt makes the checkpoint write ``Plan: 1. ... 2. ...`` and then its call with
+    no tag, or in a wrapper it invents (``《《{...}》》``). A JSON example quoted inside the plan
+    is followed by more prose; a call is followed by nothing but punctuation and special
+    tokens, which is what this requires. ``arguments`` separates a call from a schema echo.
+    A turn that ends in several calls (generate, then judge) runs the first of them.
     """
+    decoder = json.JSONDecoder()
+    run: list[dict[str, Any]] = []
+    tail_start = len(text)
+    for match in reversed(list(_NAMED_OBJECT_START_RE.finditer(text))):
+        try:
+            payload, end = decoder.raw_decode(text, match.start())
+        except json.JSONDecodeError:
+            continue
+        if end > tail_start or not isinstance(payload, dict):
+            continue
+        if _TRAILING_JUNK_RE.fullmatch(text[end:tail_start]) is None:
+            break
+        run.insert(0, payload)
+        tail_start = match.start()
+    for payload in run:
+        payload = _named_payload(payload)
+        if payload is not None and "arguments" in payload:
+            return payload
+    return None
+
+
+def parse_und_tool_call(text: str) -> dict[str, Any] | None:
+    """Parse a tool call emitted by the UND lane -- tagged, native, ``<tools>``, bare, or fenced."""
     tagged = parse_hermes_tool_call(text)
     if tagged is not None:
         return tagged
@@ -550,20 +473,14 @@ def parse_und_tool_call(text: str) -> dict[str, Any] | None:
     tools_tagged = _tools_tagged_call(text)
     if tools_tagged is not None:
         return tools_tagged
-    if "```" not in text:
-        return None
-    return _labelled_fenced_call(text)
+    if "```" in text:
+        fenced = _labelled_fenced_call(text)
+        if fenced is not None:
+            return fenced
+    return _trailing_call(text)
 
 
-#: Stop strings for the UND lane. The checkpoint role-plays the transcript: once it has made a
-#: call it carries on writing the *tool's* side as an ``<output>`` block, repeats
-#: ``judge_image`` with empty arguments dozens of times, and only then stops -- at the token cap.
-#: ``<output>`` is never part of the protocol (the chat template wraps tool results in
-#: ``<tool_response>``), so ending the turn there is safe and cuts the spiral at the call
-#: boundary. The turn also ends at the close of its first call (``</tool_call>``, or the
-#: ``</tools>`` dialect): one call per turn, so the tool's real response is the next thing in
-#: context instead of a judge verdict and rewrite the model invents for itself. The decode asks
-#: for ``include_stop_str_in_output`` so the closing tag stays in the text and the call parses.
+# : Stop strings for the UND lane.
 UND_STOP_SEQUENCES: tuple[str, ...] = ("<output>", "</tool_call>", "</tools>")
 
 #: Chat-template wrapper for an environment observation: close the assistant turn, hand the
@@ -607,19 +524,7 @@ def _iter_exception_chain(exc: BaseException):
 
 
 def exception_search_text(exc: BaseException) -> str:
-    """Flatten ``exc`` and everything it wraps into one searchable string.
-
-    ``str()`` alone is not enough, and that is the entire reason this exists. The rejection from
-    ``AsyncOmni.generate`` reaches the agent loop wrapped in ``ray.exceptions.RayTaskError``,
-    whose ``__str__`` is the *task* repr -- ``ray::vLLMOmniHttpServer.generate() (pid=...,
-    ip=..., actor_id=...)`` -- with the actual ``RuntimeError: Generation rejected: Engine is
-    partially or fully asleep...`` only in the cause chain. Matching the marker against that task
-    repr silently disables the retry.
-
-    The rendered traceback is appended as a backstop: it is the same text the log shows, so a
-    future wrapper that hides the cause behind yet another ``__str__`` cannot silently disable
-    the retry again.
-    """
+    """Flatten ``exc`` and everything it wraps into one searchable string."""
     parts: list[str] = []
     for current in _iter_exception_chain(exc):
         parts.append(f"{type(current).__name__}: {current}")
@@ -632,21 +537,7 @@ def exception_search_text(exc: BaseException) -> str:
 
 
 def engine_asleep_retry_delay(attempt: int, message: str) -> float | None:
-    """Seconds to wait before re-issuing a decode rejected by a still-waking engine.
-
-    Returns ``None`` when the error is not the transient wake-window rejection, or when the
-    backoff schedule is exhausted -- in both cases the caller must re-raise.
-
-    Why this is safe to retry: ``AsyncOmni.generate`` rejects the request **before** executing
-    it, so nothing was sampled and no log-prob, KV entry or RNG state was consumed. The engine
-    clears the sleeping tag set only once its re-map finishes, so the rejection simply means
-    "not yet" rather than "this request is invalid". Re-issuing with the *same* ``request_id``
-    keeps the conditioning-cache affinity that the GEN S-group depends on
-    (``_cond_routing_key``), and is harmless for the UND lane's per-turn ``uuid4``.
-
-    The wake call returns as soon as the request is dispatched, not when the memory is mapped,
-    so the rollout can start inside the wake window.
-    """
+    """Seconds to wait before re-issuing a decode rejected by a still-waking engine."""
     if ENGINE_ASLEEP_MARKER not in message:
         return None
     if attempt >= len(ENGINE_ASLEEP_BACKOFF_S):
@@ -688,24 +579,13 @@ def und_turn_max_tokens(
 ) -> int:
     """Per-turn ``max_tokens`` for the UND lane.
 
-    Without an explicit cap, ``ARStrategy.preprocess_input`` falls back to
-    ``min(response_length, prompt_length + response_length - len(prompt))``. For the recipe's
-    1024+1024 budget that is the *whole* episode response budget, so one degenerate turn ends
-    the episode: turn 1 can spend the full 1024 tokens emitting ``assistant\\n`` and the episode
-    closes with ``gen_calls=0`` -- no image observation, no second turn, nothing to train on.
-
-    Capping each turn at ``fraction`` of what is *left* guarantees the loop keeps several
-    attempts and always leaves room for a tool observation, while still comfortably fitting a
-    full ``<plan>`` + ``<tools>`` call.
-
     Args:
         context_used: ``len(prompt_ids) + len(response_ids)`` already in the episode.
         max_context_tokens: the episode budget (``prompt_length + response_length``).
         fraction: share of the remaining budget one turn may take; ``1.0`` disables the cap.
 
     Returns:
-        The per-turn token cap, or 0 when the budget is already spent.
-    """
+        The per-turn token cap, or 0 when the budget is already spent."""
     remaining = int(max_context_tokens) - int(context_used)
     if remaining <= 0:
         return 0
@@ -741,18 +621,13 @@ def und_health_verdict(
 ) -> tuple[bool, float]:
     """Judge an AR-replica canary answer as coherent or degenerate.
 
-    A corrupted UND replica does not raise -- it stops being a language model and collapses onto
-    one token, so the *only* way to notice is to look at the text. This is that judgement, split
-    out from the trainer so it is pinned on CPU instead of being re-derived by eye in a log.
-
     Args:
         text: the decoded canary answer.
         min_words: answers shorter than this are unjudgeable and called degenerate.
         repeat_share: a single repeated token taking more than this share is a loop.
 
     Returns:
-        ``(degenerate, top_token_share)``. An empty answer is ``(True, 1.0)``.
-    """
+        ``(degenerate, top_token_share)``. An empty answer is ``(True, 1.0)``."""
     words = text.split()
     if not words:
         return True, 1.0
@@ -772,23 +647,7 @@ UND_LOOP_MIN_TOKENS: int = 6
 
 
 def count_degenerate_und_turns(turn_trace: list[dict[str, Any]]) -> int:
-    """Count UND turns that collapsed onto one repeated token.
-
-    This is the artifact-level oracle for a corrupted AR replica. An HTTP canary cannot do the
-    job: this checkpoint only behaves when the ``<tools>`` schema is rendered into the system
-    turn, and the omni chat endpoint rejects ``tools``, so a bare chat probe answers
-    ``' . . . . . .'`` on a *healthy* replica too. The real turns are the only honest signal.
-
-    A ``generate_image`` turn is never counted -- producing the call is the success condition.
-    A short ``continue`` turn is not counted either: it is only a loop when it keeps going and
-    says the same thing (the ``assistant\n`` spiral, ``gen_calls=0``).
-
-    Args:
-        turn_trace: an episode's ``turn_trace`` (records with ``record``/``kind``/``text``).
-
-    Returns:
-        The number of looping UND turns.
-    """
+    """Count UND turns that collapsed onto one repeated token."""
     loops = 0
     for record in turn_trace:
         if record.get("record") != "und_turn":
@@ -805,22 +664,7 @@ def count_degenerate_und_turns(turn_trace: list[dict[str, Any]]) -> int:
 
 
 def und_turn_kind(text: str) -> str:
-    """Classify an UND decode: ``generate_image``, ``judge_image``, ``done``, or ``continue``.
-
-    Accepts every tool-call dialect of :func:`parse_und_tool_call` (Hermes-tagged, ``<tools>``,
-    bare, fenced, native array).
-
-    A *Hermes-tagged* unsupported tool stays fail-closed -- that is the Qwen-tool guard the RFC
-    asks for, and it is the only dialect where the tag itself claims "this is an OpenAI/Hermes
-    function call". Every dialect the checkpoint actually samples treats a non-action name as a
-    non-action instead of killing the episode:
-
-    * a stop name (``Done``, ``finish``, ...) is the terminal signal, not an unsupported tool -- the
-      loop wants ``done``;
-    * ``judge_image`` is the loop's second tool, answered from the in-loop RM verdict;
-    * anything else (e.g. a hallucinated tool name the checkpoint replayed out of the reference
-      trajectory) is inert, since killing the episode there drops rows and pads the batch.
-    """
+    """Classify an UND decode: ``generate_image``, ``judge_image``, ``done``, or ``continue``."""
     tagged = parse_hermes_tool_call(text)
     call = tagged if tagged is not None else parse_und_tool_call(text)
     if call is not None:
@@ -847,22 +691,7 @@ def und_turn_kind(text: str) -> str:
 
 
 def _is_terminal_only(text: str) -> bool:
-    """True when a decode carries only control markers / the end-of-conversation line.
-
-    A turn that is nothing but a bare ``<|im_end|>`` or the template's ``End of conversation.``
-    would otherwise be read as ``continue``, so the loop keeps re-sampling the same silence until
-    the ``max_und_turns`` cap (a K=0 episode burning its whole budget).
-
-    This is the *opposite* trade to :data:`_INERT_BARE_TOOLS`: there the turn carried a name the
-    loop does not execute but the episode could still continue, so ending it would have dropped a
-    row. Here the turn carries **no content at all**, so continuing cannot produce anything the
-    episode did not already have -- terminal is exactly what the checkpoint is signalling, and
-    the episode still reaches the K=0 / pattern-3 path that gives UND its non-image scalar.
-
-    A turn holding a real payload in any dialect never reaches this test: ``parse_und_tool_call``
-    runs first, and a native empty array (``<|start of ToolCall|>[]<|end of ToolCall|>``) leaves
-    ``[]`` as its residue, which is not terminal.
-    """
+    """True when a decode carries only control markers / the end-of-conversation line."""
     residue = _SPECIAL_TOKEN_RE.sub(" ", text).strip().strip(".").strip()
     return not residue or residue.lower() == _END_OF_CONVERSATION
 
@@ -892,20 +721,7 @@ def gen_sample_uid(gen_call_id: str, seed_index: int) -> str:
 
 
 def conditioning_uid(token_ids: list[int]) -> str:
-    """RFC §4.4.2a ``cond_uid``: content hash of the conditioning token slice.
-
-    Derived, never hand-set. This is the identity every reuse mechanism keys on
-    (R2 here; R3/R5 later), so it must be exact: hashing the **token ids the GEN
-    stage actually encodes** rather than the decoded text keeps the key stable
-    and unambiguous. Two conditionings that tokenize identically are the same
-    conditioning for attention purposes; a text-level hash would instead depend
-    on whitespace/normalization round-trips and could make equal KVs look
-    distinct (a silent cache miss) or, worse, collide.
-
-    Reusing ``encode_prompt`` on the same ids is exactly what the conditioning
-    cache does, so this key and the cache's own argument-derived key agree on
-    which requests are interchangeable.
-    """
+    """RFC §4.4.2a ``cond_uid``: content hash of the conditioning token slice."""
     digest = hashlib.sha256()
     for token in token_ids:
         digest.update(int(token).to_bytes(8, "big", signed=True))
@@ -919,33 +735,7 @@ def cond_reuse_metrics(
     misses: int | None,
     bypassed: int | None = 0,
 ) -> dict[str, float]:
-    """RFC §4.4.4 R2 metrics, from the engine's own conditioning-cache counters.
-
-    ``PromptEmbedCache.stats()`` is the only authority on whether a conditioning
-    was re-encoded, so these are **measured**, not modelled: a client-side count
-    of "we submitted S seeds with one conditioning" would read ``1/S`` even when
-    the cache is off or the seed fan-out missed the worker that holds the entry,
-    which is precisely the failure §8.7 exists to catch.
-
-    Definitions (RFC §4.4.4):
-
-    * ``calls`` is the number of GEN **generate requests**, i.e. ``S`` per
-      ``generate_image`` turn — the same granularity as ``PromptEmbedCache``'s own
-      hit/miss counters. Dividing by the turn count instead would report ``1``
-      (no reuse) for a perfectly warm cache.
-    * ``gen/cond_recompute_ratio`` = conditioning prefills / requests, target
-      ``1/S``. Prefills are misses **plus** bypasses: a bypassed call never
-      consults the cache, so it always encoded (the cache wrapper bypasses on
-      precomputed embeds or arguments it cannot hash safely).
-    * ``gen/prompt_embed_cache_hit_rate`` = hits / (hits + misses), target
-      ``1 - 1/S``. Bypasses are excluded from the denominator — they are not
-      cache decisions. Absent when nothing consulted the cache.
-    * ``gen/cond_amortization`` = ``1 / cond_recompute_ratio`` — the headline
-      "one encode serves this many calls" number.
-
-    Returns ``{}`` when the engine exposed no counters or the episode made no
-    GEN request, so callers never publish a fabricated zero.
-    """
+    """RFC §4.4.4 R2 metrics, from the engine's own conditioning-cache counters."""
     if calls <= 0 or hits is None or misses is None:
         return {}
     hits = max(0, int(hits))
@@ -965,6 +755,20 @@ def cond_reuse_metrics(
     if ratio > 0.0:
         metrics["gen/cond_amortization"] = 1.0 / ratio
     return metrics
+
+
+def serving_rollout_provenance(extra: dict[str, Any], *, required: bool = False) -> dict[str, Any]:
+    """Read serving-observed provenance only; request/trainer steps are not evidence."""
+    version = extra.get("rollout_policy_version")
+    replica = extra.get("rollout_replica_id")
+    if version is not None and (type(version) is not int or version < 0):
+        raise ValueError("Invalid observed serving policy version")
+    if replica is not None and (type(replica) not in (str, int) or replica == ""):
+        raise ValueError("Invalid observed serving replica identity")
+    verified = version is not None and replica is not None and extra.get("serving_provenance_verified") is True
+    if required and not verified:
+        raise ValueError("Live BAGEL output requires observed serving version and replica identity")
+    return {"rollout_policy_version": version, "rollout_replica_id": replica, "serving_provenance_verified": verified}
 
 
 @dataclass
@@ -998,6 +802,9 @@ class GenSample:
     # coincides. ``None`` when the serving path did not report it.
     cond_uid: str | None = None
     cond_len: int = 0
+    rollout_policy_version: int | None = None
+    rollout_replica_id: str | int | None = None
+    serving_provenance_verified: bool = False
 
 
 @dataclass
@@ -1010,7 +817,7 @@ class EpisodeRollout:
 
     und_group_uid: str
     episode_uid: str
-    policy_version: int
+    policy_version: int | None
     prompt_ids: list[int]
     response_ids: list[int]
     response_mask: list[int]
@@ -1019,6 +826,10 @@ class EpisodeRollout:
     # TransferQueue as ``rollout_log_probs`` so the trainer's π_rollout/π_θ correction has a
     # rollout distribution; empty on a replay that never sampled (tests, pattern-3 stubs).
     rollout_log_probs: list[float] = field(default_factory=list)
+    requested_policy_version: int | None = None
+    rollout_replica_id: str | int | None = None
+    serving_provenance_verified: bool = False
+    und_serving_provenance: list[dict[str, Any]] = field(default_factory=list)
     gen_samples: list[GenSample] = field(default_factory=list)
     used_image_credit: bool = False
     forced_reflection: bool = False
@@ -1093,20 +904,7 @@ class BagelGenerateImageTool:
         return max(0, self.max_generate_passes - self._passes)
 
     def _default_seeds(self, call_index: int) -> list[int]:
-        """Fresh FlowGRPO seeds for one ``generate_image`` turn.
-
-        These seeds pin the diffusion noise: the bagel pipeline does
-        ``torch.manual_seed(req.sampling_params.seed)`` (vllm_omni
-        ``pipeline_bagel.py``), so the *same* seed yields a byte-identical PNG.
-
-        A constant ``range(self.s)`` for every episode therefore makes the whole GEN group a
-        function of the prompt alone -- repeated prompts come back byte-identical. For FlowGRPO
-        that is fatal: a constant group has no variance, so its advantages collapse and the GEN
-        lane receives no learning signal regardless of how many seeds S it samples.
-
-        Deriving from ``seed_base`` (the episode's rollout seed) keeps a run
-        reproducible while making each episode's group independent.
-        """
+        """Fresh FlowGRPO seeds for one ``generate_image`` turn."""
         return [derive_rollout_seed(self._seed_base, call_index * self.s + seed_index) for seed_index in range(self.s)]
 
     async def __call__(
@@ -1157,6 +955,7 @@ class BagelGenerateImageTool:
                     call_role="initial",
                     cond_uid=str(cond_uid) if cond_uid else None,
                     cond_len=int(row.get("cond_len") or 0),
+                    **serving_rollout_provenance(row),
                 )
             )
             _ = seed
@@ -1183,8 +982,7 @@ def judge_text_from_gen_samples(
             (fraction of YES flags >= ``threshold``).
         threshold: ``good_enough_threshold`` from the single SoT
             (``agentic_image_gen.good_enough_threshold``); ``None`` keeps the
-            turn-protocol default for callers that did not wire the knob.
-    """
+            turn-protocol default for callers that did not wire the knob."""
     scores = [float(s.rm_score) for s in samples if s.valid and s.rm_score is not None]
     if not scores:
         return None
@@ -1323,36 +1121,10 @@ async def run_serial_episode(
     good_enough_reduction: str = "any",
     corl_reward_version: str = "v1",
     fixed_gen_prompt: str = "",
+    task_type: str | None = None,
+    expected_num_images: int = 1,
 ) -> EpisodeRollout:
-    """Serial UND turn(s) → optional one GEN turn (S FlowGRPO seeds) → RM → reflection / Done.
-
-    Episode shape follows the RFC: ``UND (+ GEN) (+ UND…)* + Done``, where each
-    ``generate_image`` verdict enqueues exactly one GEN turn (``K += 1``). ``S`` is
-    seed fan-out inside that turn for FlowGRPO — not additional GEN turns.
-
-    ``non_image_reward`` is the RFC "non-image UND scalar" used when the episode
-    makes zero ``generate_image`` calls (pattern 3, ``K = 0``). When it is ``None``
-    and no image was scored, the episode reward is 0.0 and the caller should let the
-    reward model fill it post-hoc.
-
-    ``max_context_tokens`` is the episode's whole context budget, i.e.
-    ``rollout.prompt_length + rollout.response_length``. ``und_decode`` is handed
-    ``prompt_ids + response_ids`` as the decode prompt, so the context grows by every
-    turn's tokens and the loop has to stop once it is spent -- otherwise it asks the
-    engine for a decode it cannot emit a single token for, and the AR strategy rejects
-    it outright:
-
-        ValueError: Prompt length (2048) meets or exceeds the model's maximum context
-        length (2048), leaving no space for generation.
-
-    ``max_response_tokens`` (``rollout.response_length``) bounds the response alone: the
-    agent loop pads every response to exactly that length and never truncates, so a
-    longer episode breaks the batch. The loop stops once it is spent and the response is
-    cut to it before return.
-
-    The turns that fit are kept and the post-loop forced reflection still closes the
-    episode. ``None`` disables the guard.
-    """
+    """Serial UND turn(s) → optional one GEN turn (S FlowGRPO seeds) → RM → reflection / Done."""
     ids = bind_episode_ids(
         dataset_task_uid=dataset_task_uid,
         episode_uid=episode_uid,
@@ -1373,6 +1145,9 @@ async def run_serial_episode(
     num_gen_calls = 0
     judge_text: str | None = None
     stop_required = False
+    planned_images = max(1, int(expected_num_images)) if str(task_type or "").strip().lower() == "plan" else 1
+    images_rendered = 0
+    early_judge_declined = False
     # Per-turn trajectory trace (see ``EpisodeRollout.turn_trace``). Collected even when
     # ``BAGEL_CORL_DEBUG`` is off: the live per-turn ``logger.info`` below is the only
     # other place the raw UND text surfaces, and it is exactly the text that explains a
@@ -1387,6 +1162,37 @@ async def run_serial_episode(
         # failure that made a healthy rollout look wedged (see ``_force_info_logging``).
         _force_info_logging()
 
+    observed_und_version: int | None = None
+    observed_und_replicas: set[str | int] = set()
+    und_provenance: list[dict[str, Any]] = []
+    all_und_provenance_verified = True
+
+    def _observe_serving(step: dict[str, Any]) -> None:
+        nonlocal observed_und_version, all_und_provenance_verified
+        provenance = serving_rollout_provenance(step)
+        version = provenance["rollout_policy_version"]
+        if version is not None:
+            if observed_und_version is not None and version != observed_und_version:
+                raise ValueError("Synchronous episode mixed observed UND serving policy versions")
+            observed_und_version = version
+        replica = provenance["rollout_replica_id"]
+        if replica is not None:
+            observed_und_replicas.add(replica)
+        all_und_provenance_verified &= provenance["serving_provenance_verified"]
+        und_provenance.append(
+            {
+                **provenance,
+                "response_start": len(response_ids),
+                "response_end": len(response_ids) + len(step.get("token_ids") or []),
+            }
+        )
+
+    def _check_gen_serving(samples: list[GenSample]) -> None:
+        for sample in samples:
+            version = sample.rollout_policy_version
+            if version is not None and observed_und_version is not None and version != observed_und_version:
+                raise ValueError("Synchronous episode mixed GEN and UND serving policy versions")
+
     def _context_budget_spent() -> bool:
         """True once ``prompt_ids + response_ids`` has used up ``max_context_tokens``.
 
@@ -1400,17 +1206,10 @@ async def run_serial_episode(
     def _append_response(tokens: Any, mask_value: int, log_probs: Any | None = None) -> None:
         """Extend the episode with ``tokens``, keeping π_rollout aligned with ``response_ids``.
 
-        The trainer pairs ``rollout_log_probs`` with our recomputed ``old_log_probs`` position by
-        position, so the three lists must never drift. Tokens the policy did not sample --
-        ``Done.`` templates and forced reflection -- carry 0.0: the former are environment
-        fallbacks and the latter are masked out of the loss (``response_mask`` 0), so no
-        fabricated value can ever be read as a policy ratio *and* passed off as measured.
-
         Args:
             tokens: token ids (or tokens already extracted from a decode step).
             mask_value: 1 for policy tokens, 0 for forced/environment tokens.
-            log_probs: the AR engine's per-token log-probs, if this decode sampled them.
-        """
+            log_probs: the AR engine's per-token log-probs, if this decode sampled them."""
         token_list = [int(t) for t in tokens]
         response_ids.extend(token_list)
         response_mask.extend([int(mask_value)] * len(token_list))
@@ -1484,6 +1283,7 @@ async def run_serial_episode(
         else:
             done_decode = und_decode(prompt_ids=prompt_ids, response_ids=response_ids)
             done_step = await done_decode if asyncio.iscoroutine(done_decode) else done_decode
+            _observe_serving(done_step)
         done_ids = list(done_step.get("token_ids") or [])
         done_text = str(done_step.get("text") or "")
         try:
@@ -1547,6 +1347,7 @@ async def run_serial_episode(
         _req_ctx = len(prompt_ids) + len(response_ids)
         decode = und_decode(prompt_ids=prompt_ids, response_ids=response_ids)
         step = await decode if asyncio.iscoroutine(decode) else decode
+        _observe_serving(step)
         token_ids: list[int] = list(step["token_ids"])
         text: str = str(step["text"])
         kind = und_turn_kind(text)
@@ -1577,6 +1378,27 @@ async def run_serial_episode(
             )
         _append_response(token_ids, 1, step.get("log_probs"))
         if kind == "done":
+            remaining = generate_tool.remaining_passes()
+            if remaining > 0 and not get_good_enough_yes_reached() and not _is_terminal_only(text):
+                # The episode ends at min(max_generate_passes, first good_enough=YES); an
+                # earlier Done. is declined so the policy rewrites instead of quitting on NO.
+                # A silent turn (bare ``<|im_end|>``) is not a Done the policy chose to write:
+                # re-sampling it produced prompt fragments repeated to ``max_und_turns``
+                # (``sample_9003.01``, step 82), so it ends the episode as before.
+                next_step = (
+                    "call judge_image on the new image"
+                    if pending_judge is not None
+                    else "rewrite the diffusion prompt from the judge's findings and call generate_image"
+                )
+                _append_env_turn(
+                    "agentic_stop ok=0\n"
+                    f"good_enough=YES has not been reached and {remaining} of "
+                    f"{generate_tool.max_generate_passes} generate_image calls remain: {next_step}. "
+                    "Done. is accepted after good_enough=YES or the final generate_image call.",
+                    text,
+                    list(step.get("obs_token_ids") or []),
+                )
+                continue
             autonomous_done = not forced
             break
         if kind == "judge_image":
@@ -1584,6 +1406,18 @@ async def run_serial_episode(
                 _append_env_turn(
                     "agentic_judge ok=0 parse_ok=0 stub=0 backend=reward_loop\n"
                     "No new image to judge: call generate_image first.",
+                    text,
+                    list(step.get("obs_token_ids") or []),
+                )
+                continue
+            if not early_judge_declined and images_rendered < planned_images and generate_tool.remaining_passes() > 0:
+                # Declined once only, so a policy that keeps judging still gets a verdict
+                # within ``max_und_turns``.
+                early_judge_declined = True
+                _append_env_turn(
+                    "agentic_judge ok=0 parse_ok=1 stub=0 backend=reward_loop\n"
+                    f"Plan step {images_rendered}/{planned_images}: call generate_image for subtask "
+                    f"{images_rendered + 1} first. judge_image runs once, after the final subtask image.",
                     text,
                     list(step.get("obs_token_ids") or []),
                 )
@@ -1642,6 +1476,7 @@ async def run_serial_episode(
             gen_call_id=gen_call_id,
         )
         call_samples = sorted(call_samples, key=lambda sample: sample.seed_index)
+        _check_gen_serving(call_samples)
         call_role = str(meta.get("call_role") or "initial")
         for sample in call_samples:
             sample.call_role = call_role
@@ -1668,6 +1503,7 @@ async def run_serial_episode(
             if asyncio.iscoroutine(scored):
                 scored = await scored
             call_samples = scored
+            _check_gen_serving(call_samples)
 
         # Accumulate — every generate_image call contributes its S seeds to the
         # episode (RFC: all K calls survive to gen_batch). Replacing the list here
@@ -1676,10 +1512,16 @@ async def run_serial_episode(
 
         if valid_paths:
             used_image_credit = True
+            images_rendered += 1
             observation = (
                 f"vLLM-Omni generated the requested image. {compact_image_observation(valid_paths[0])} "
                 f"agentic_tool ok=1 images={len(valid_paths)} backend=vllm_omni"
             )
+            if images_rendered < planned_images and generate_tool.remaining_passes() > 0:
+                observation += (
+                    f"\nPlan step {images_rendered}/{planned_images} rendered. Next: call generate_image "
+                    f"with the complete prompt for subtask {images_rendered + 1} of your plan."
+                )
         else:
             observation = (
                 "agentic_tool ok=0 images=0 backend=vllm_omni\n"
@@ -1766,7 +1608,13 @@ async def run_serial_episode(
     return EpisodeRollout(
         und_group_uid=str(ids["und_group_uid"]),
         episode_uid=str(ids["episode_uid"]),
-        policy_version=int(ids["policy_version"]),
+        policy_version=observed_und_version,
+        requested_policy_version=int(ids["policy_version"]),
+        rollout_replica_id=next(iter(observed_und_replicas)) if len(observed_und_replicas) == 1 else None,
+        serving_provenance_verified=bool(und_provenance)
+        and all_und_provenance_verified
+        and len(observed_und_replicas) == 1,
+        und_serving_provenance=und_provenance,
         prompt_ids=list(prompt_ids),
         response_ids=response_ids,
         response_mask=response_mask,
@@ -1846,35 +1694,7 @@ def trusted_image_reward_fields(samples, *, num_gen_calls, autonomous_done=False
 
 
 def image_credit_reward(samples: list[GenSample]) -> float | None:
-    """RFC ``und/no_image_credit`` image credit: the **final** pass plus the rewrite gain.
-
-    Replaces the mean over *every* rated seed, which diluted a successful rewrite until the
-    UND token-GRPO signal could not tell it apart from two mediocre passes: an episode that
-    went ``0.2 -> 0.8`` across two ``generate_image`` calls scored ``0.5``, the same as
-    ``0.4 -> 0.6``. The image the user is finally shown is the *last* call's, so that call is
-    what is scored, plus ``max(0, final - first)`` (capped at 1) for the gain the rewrite
-    bought. One call is scored on its own quality -- it is never penalised for having no
-    rewrite to improve on -- and a rewrite that made the image worse keeps only its lower
-    final quality.
-
-    Seeds of a single call are still averaged. With ``S >= 2`` they are one prompt at
-    different noise, so no seed is "final" and the mean *is* that call's quality; ordering
-    calls by ``gen_group_uid`` first appearance reproduces the order the loop made them in.
-
-    The bonus is capped at 1, the *total* is not: a good rewrite is the one thing this lane
-    exists to reward, and clamping the sum would make two siblings that both improved
-    saturate to the same number, i.e. exactly the zero-advantage group the reward is meant to
-    avoid. ``rm_score`` is not guaranteed to be in ``[0, 1]`` either (``pickscore`` divides a
-    raw model score), so only the bonus has a defensible bound.
-
-    Returns ``None`` when no seed was rated, so the caller can fall back to the non-image
-    UND scalar (pattern 3, ``K = 0``). The composite trajectory scorer's parse-level terms
-    (``R_protocol`` / ``R_done`` / ``R_image`` in ``agentic_multidim_reward``) are *not*
-    available on this lane: it scores pixels mid-loop and never decodes the episode to text.
-
-    Both reward consumers call this (``run_serial_episode`` for the episode field,
-    ``episode_und_reward`` for the TQ and flatten rows), so the rule cannot drift.
-    """
+    """RFC ``und/no_image_credit`` image credit: the **final** pass plus the rewrite gain."""
     ordered: dict[str, list[float]] = {}
     for sample in samples or []:
         score = sample.rm_score
@@ -1890,18 +1710,7 @@ def image_credit_reward(samples: list[GenSample]) -> float | None:
 
 
 def episode_und_reward(episode: EpisodeRollout) -> tuple[float, bool]:
-    """RFC ``und/no_image_credit``: the episode reward carried on the UND row.
-
-    Returns ``(reward, used_non_image_scalar)``. The reward is ``image_credit_reward`` over the
-    episode's *rated* GEN seeds -- final call quality plus the rewrite gain -- when the RM
-    scored images, else the non-image UND scalar the loop recorded (pattern 3, ``K = 0``
-    episodes must not have their token-GRPO signal zeroed).
-
-    This is the single source of truth for both reward consumers: the TQ row the v1 advantage
-    reads (``bagel_corl_tq.und_row_reward``) and the flatten row
-    (``flatten_multiturn_rollouts``' ``token_level_scores``). Keeping them on one derivation is
-    what stops UND and GEN from training against different numbers for the same episode.
-    """
+    """RFC ``und/no_image_credit``: the episode reward carried on the UND row."""
     if episode.corl_reward_version == "v2" and episode.terminal_reward is not None:
         return float(episode.terminal_reward), not episode.used_image_credit
     if episode.corl_reward_version == "v2":
@@ -1914,30 +1723,7 @@ def episode_und_reward(episode: EpisodeRollout) -> tuple[float, bool]:
 
 
 def und_episode_rm_scores(response_mask: Any, reward: float) -> list[float]:
-    """Per-token UND episode reward, placed on the last *trainable* response position.
-
-    The v1 UND advantage reads this column directly -- ``trainer_base.py:1595`` does
-    ``data.batch["token_level_scores"] = data.batch["rm_scores"]`` -- so an episode whose row
-    never carries it kills the step with
-
-        KeyError: 'key "rm_scores" not found in TensorDict with keys
-        ['old_log_probs', 'response_mask', 'rollout_log_probs', 'uid']'
-
-    ``AgentLoopOutput.as_dict`` only emits the column when ``reward_score`` is set, and it
-    writes it at ``rm_scores[-1]`` (``verl/experimental/agent_loop/agent_loop.py:143-147``).
-    That index is wrong for this loop: an episode that exhausts its ``generate_image`` budget ends
-    on a *forced* turn whose tokens are appended with ``mask_value=0``
-    (``bagel_corl_lib.run_serial_episode``), and an episode can also end on an observation. A
-    score parked on a masked position is dropped by ``compute_advantage_for_multi_trajectories``
-    and the episode silently carries no signal at all.
-
-    So the reward goes on the last unmasked token, mirroring the pinned reward manager
-    (``reward_manager/base.py:78-80`` -> ``rm_scores[arange, valid_response_length - 1]``). An
-    all-masked row is a bug, not a zero: raise instead of publishing an invisible reward.
-
-    Returns plain floats so this module stays torch-free; ``bagel_corl_tq.und_row_reward`` wraps
-    it into the ``torch.float32`` column the TransferQueue stores.
-    """
+    """Per-token UND episode reward, placed on the last *trainable* response position."""
     if hasattr(response_mask, "ndim") and response_mask.ndim != 1:
         raise ValueError(
             "Bagel Co-RL UND rm_scores expects a 1-D response mask for one episode, got shape "
@@ -1992,6 +1778,11 @@ def flatten_multiturn_rollouts(
                 "und_group_uid": episode.und_group_uid,
                 "episode_uid": episode.episode_uid,
                 "policy_version": episode.policy_version,
+                "rollout_policy_version": episode.policy_version,
+                "requested_policy_version": episode.requested_policy_version,
+                "rollout_replica_id": episode.rollout_replica_id,
+                "serving_provenance_verified": episode.serving_provenance_verified,
+                "und_serving_provenance": list(episode.und_serving_provenance),
                 "prompt_ids": list(episode.prompt_ids),
                 "response_ids": list(episode.response_ids),
                 "response_mask": list(episode.response_mask),
@@ -2019,6 +1810,7 @@ def flatten_multiturn_rollouts(
             for sample in sorted(rows, key=lambda s: int(s.seed_index)):
                 gen_batch.append(
                     {
+                        "episode_uid": episode.episode_uid,
                         "gen_group_uid": sample.gen_group_uid,
                         "gen_sample_uid": sample.gen_sample_uid,
                         "seed_index": sample.seed_index,
@@ -2026,6 +1818,9 @@ def flatten_multiturn_rollouts(
                         "all_latents": sample.all_latents,
                         "timesteps": sample.timesteps,
                         "rollout_log_probs": sample.rollout_log_probs,
+                        "rollout_policy_version": sample.rollout_policy_version,
+                        "rollout_replica_id": sample.rollout_replica_id,
+                        "serving_provenance_verified": sample.serving_provenance_verified,
                         "rm_score": sample.rm_score,
                         "call_role": sample.call_role,
                         "cond_uid": sample.cond_uid,
@@ -2129,20 +1924,8 @@ def aggregate_episode_metrics(records: list[Any]) -> dict[str, float]:
     return aggregated
 
 
-#: Reward dims republished on every *training* update.
-#:
-#: The validation pass already logs all of these as ``val-aux/<lane>/<dim>/mean@1``, but
-#: training published only the scalar ``critic/score/mean``. That scalar is a mean over
-#: ~16-25 heterogeneous episodes, and its step-to-step swing is dominated by how many
-#: rollouts failed outright rather than by policy quality: on
-#: ``bagel_corl_prfix_t07_20261016_023749_a1`` it correlates -0.71 with ``episode/K_zero``
-#: and carries a std of 0.088 against a total drift of -0.014 over 76 updates, so the
-#: trend is unreadable -- while ``val-core/unicot_reflection/reward/mean@1`` rose
-#: 0.729 -> 0.829 over the same span.
-#:
-#: Duplicated from ``agentic_multidim_reward.REWARD_COMPONENTS`` rather than imported so
-#: this module stays free of the reward-score package at import time;
-#: ``tests/agent_loop/test_bagel_corl_reward_breakdown_on_cpu.py`` pins the two together.
+# : Reward dims republished on every *training* update. : : The validation pass already logs all of these as ``val-
+# aux/<lane>/<dim>/mean@1``, but : training published only the scalar ``critic/score/mean``.
 TRAIN_REWARD_DIM_KEYS: tuple[str, ...] = (
     "reward_reflect",
     "reward_plan",
@@ -2173,16 +1956,7 @@ def _record_fields(record: Any) -> dict[str, Any]:
 
 
 def und_record_field_keys(records: list[Any], *, limit: int | None = None) -> list[str]:
-    """Field names the first UND row carries, for diagnosing an empty reward breakdown.
-
-    ``_reward_breakdown`` accepts two shapes -- a nested ``extra_fields.reward_extra_info``
-    and a flattened ``reward_extra_info`` -- and which one arrives depends on the carrier
-    that handed the batch over (``_und_records_from_batch`` has a ``child_gen_keys`` branch
-    and a TensorDict branch). When neither shape is present the breakdown comes back empty
-    and the step log silently reverts to the unattributable scalar it was meant to replace.
-    Naming the row's own keys is the difference between a one-line diagnosis and re-reading
-    the agent loop to find out which shape went missing.
-    """
+    """Field names the first UND row carries, for diagnosing an empty reward breakdown."""
     if not records:
         return []
     keys = sorted(_record_fields(records[0]))
@@ -2240,26 +2014,7 @@ def _episode_score(value: Any) -> float | None:
 
 
 def _episode_reward(fields: dict[str, Any]) -> float | None:
-    """The episode's trained reward, read the way the trainer reads it.
-
-    Order matters and is ``rm_scores`` -> ``token_level_scores`` -> ``und_reward``:
-
-    * ``rm_scores`` is the column the ingest writes (``bagel_corl_tq``) and the one
-      ``trainer_base`` copies into ``token_level_scores``, so it IS the trained signal.
-    * ``token_level_scores`` is that same column after the copy, or the flatten row's own
-      copy of ``episode_und_reward``. Either way it is the trained signal.
-    * ``und_reward`` is **not** the trained signal, and is only a last resort.
-      ``bagel_corl_tq.episode_from_agent_extra`` stamps it from
-      ``AgentLoopOutput.reward_score`` -- the reward manager's composite over
-      ``reward_extra_info`` -- while the trained signal is recomputed as
-      ``episode_und_reward`` -> ``image_credit_reward`` over the GEN seeds. On
-      ``bagel_corl_prfix_t07_20261016_102501_a1`` reading this field reported
-      ``bagel_corl/reward_valid/mean`` 0.19 below ``critic/score/mean`` at every step,
-      including the steps where all 16 episodes had image credit. It is kept because a row
-      shape that carries neither training column should still publish something readable,
-      and ``tests/agent_loop/test_bagel_corl_image_credit_on_cpu.py`` pins that the two
-      derivations are genuinely different numbers.
-    """
+    """The episode's trained reward, read the way the trainer reads it."""
     for key in ("rm_scores", "token_level_scores"):
         if key not in fields:
             continue
@@ -2270,28 +2025,7 @@ def _episode_reward(fields: dict[str, Any]) -> float | None:
 
 
 def aggregate_reward_breakdown_metrics(records: list[Any]) -> dict[str, float]:
-    """Batch-aggregate the per-episode reward breakdown into step-level logging values.
-
-    Keyed off the same UND rows ``aggregate_episode_metrics`` reads, and publishing two
-    views onto the *training* step log:
-
-    * ``bagel_corl/reward_dim/<dim>/{mean,min,max}`` -- the dims validation already logs,
-      so a step's scalar swing can be attributed to a named term instead of staying
-      opaque. This is what the training log was missing entirely.
-    * ``bagel_corl/reward_valid/{mean,count}`` and ``bagel_corl/reward_no_image/{mean,count}``
-      -- the episode reward split by ``used_image_credit``, separating "quality when the
-      episode produced a usable image" from "how often it did". ``count`` rides along
-      because a mean over a shrinking subset is not comparable on its own.
-
-    Rows carrying no measurement contribute nothing: an absent dim is never reported as a
-    zero, which is what keeps a missing scorer distinguishable from a scorer that scored 0.
-
-    The two views are read from different places on the row, which is why ``_episode_reward``
-    exists: the dims ride ``extra_fields.reward_extra_info`` (written by the agent loop's
-    ``_compute_score``), while the credit flag and ``und_reward`` are stamped by
-    ``bagel_corl.episode_from_agent_extra``. A row missing either half is counted in neither
-    view, so an absent measurement never enters a mean as a zero.
-    """
+    """Batch-aggregate the per-episode reward breakdown into step-level logging values."""
     dim_values: dict[str, list[float]] = {key: [] for key in TRAIN_REWARD_DIM_KEYS}
     with_image: list[float] = []
     without_image: list[float] = []
@@ -2350,6 +2084,7 @@ def _as_gen_sample(item: Any) -> GenSample | None:
         good_enough=item.get("good_enough"),
         cond_uid=str(item["cond_uid"]) if item.get("cond_uid") else None,
         cond_len=int(item.get("cond_len") or 0),
+        **serving_rollout_provenance(item),
     )
 
 
@@ -2364,6 +2099,11 @@ def _ntb_from_extra_fields(extras: Any) -> dict[str, list[Any]]:
         "response_mask": [],
         "turns": [],
         "used_image_credit": [],
+        "policy_version": [],
+        "requested_policy_version": [],
+        "rollout_replica_id": [],
+        "serving_provenance_verified": [],
+        "und_serving_provenance": [],
     }
     for extra in rows:
         mapping = extra if isinstance(extra, dict) else {}
@@ -2375,6 +2115,14 @@ def _ntb_from_extra_fields(extras: Any) -> dict[str, list[Any]]:
         ntb["response_mask"].append(mapping.get("response_mask") or [])
         ntb["turns"].append(mapping.get("turns", 1))
         ntb["used_image_credit"].append(mapping.get("used_image_credit", False))
+        for name in (
+            "policy_version",
+            "requested_policy_version",
+            "rollout_replica_id",
+            "serving_provenance_verified",
+            "und_serving_provenance",
+        ):
+            ntb[name].append(mapping.get(name))
     return ntb
 
 
@@ -2418,7 +2166,11 @@ def flatten_from_agent_output(output: Any, *, expected_s: int) -> FlattenResult:
             EpisodeRollout(
                 und_group_uid=str(und_groups[index]),
                 episode_uid=str(episode_uids[index] or f"ep{index}"),
-                policy_version=0,
+                policy_version=_col("policy_version", None)[index],
+                requested_policy_version=_col("requested_policy_version", None)[index],
+                rollout_replica_id=_col("rollout_replica_id", None)[index],
+                serving_provenance_verified=bool(_col("serving_provenance_verified", False)[index]),
+                und_serving_provenance=list(_col("und_serving_provenance", [])[index] or []),
                 prompt_ids=list(prompt_ids[index] or []),
                 response_ids=list(response_ids[index] or []),
                 response_mask=list(response_mask[index] or []),

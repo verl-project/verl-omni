@@ -193,6 +193,7 @@ def _validate_no_breakdown_tail(
     *,
     source_record_id: str,
 ) -> None:
+    """Reject planning text or images attached to a no-breakdown row."""
     for index, value in enumerate(subtasks[1:], start=1):
         if value is not None:
             raise VisualReflectionDataError(
@@ -212,6 +213,7 @@ def _validate_no_breakdown_tail(
 
 
 def _required_field(record: Mapping[str, Any], field: str, source_record_id: str) -> Any:
+    """Read a mandatory source field or raise a structured missing-field error."""
     if field not in record:
         raise VisualReflectionDataError(
             RejectionReason.MISSING_FIELD,
@@ -223,6 +225,7 @@ def _required_field(record: Mapping[str, Any], field: str, source_record_id: str
 
 
 def _required_list(record: Mapping[str, Any], field: str, source_record_id: str) -> list[Any]:
+    """Read a mandatory list without coercing invalid source values."""
     value = _required_field(record, field, source_record_id)
     if not isinstance(value, list):
         raise VisualReflectionDataError(
@@ -235,8 +238,10 @@ def _required_list(record: Mapping[str, Any], field: str, source_record_id: str)
 
 
 def _is_no_breakdown(value: Any) -> bool:
+    """Recognize the normalized no-breakdown sentinel only in text values."""
     return isinstance(value, str) and _normalize_sentinel(value) == _normalize_sentinel(DEFAULT_NO_BREAKDOWN_SENTINEL)
 
 
 def _normalize_sentinel(value: str) -> str:
+    """Normalize Unicode, whitespace, and case for sentinel comparisons."""
     return " ".join(unicodedata.normalize("NFKC", value).split()).casefold()

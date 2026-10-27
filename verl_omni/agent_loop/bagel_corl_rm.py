@@ -11,32 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Mid-episode RM scoring adapter for Bagel Co-RL (Joint-Training) (RFC §4.2).
-
-The rollout worker holds the dual reward handles (``reward_loop_worker_handles``,
-``[0]`` = GEN pool, ``[1]`` = LLM/AR pool — the ``CompositeAgentLoopWorker``
-contract, whose generic slot name for ``[0]`` is "dit"). Note that **Bagel has no
-DiT** — it is a Mixture-of-Tokens model whose text and VAE (denoising) experts
-share one set of transformer layers — so this module says GEN throughout.
-``bind_bagel_rm_handles`` stashes the GEN-side handle process-locally
-and ``make_rm_score_fn`` turns it into the ``score_fn`` that
-``bagel_corl_lib.run_serial_episode`` already consumes — GEN call samples get
-``rm_score`` / ``good_enough`` **inside the episode**, which is what drives the
-``good_enough`` stop/continue cue.
-
-Payload contract for the reward-loop worker (``compute_score``): a verl
-``DataProto`` whose ``non_tensor_batch["extra_info"]`` carries one object row
-``{"bagel_corl": <dict>}`` — ``extra_info`` is the field the configured reward
-manager forwards verbatim, so the payload rides there (the dict itself holds
-``image_paths`` / ``reference_paths`` / ``extra_info`` / ``scorer_knobs``). The
-reward function wired on the RM pool reads that key (recipe-level wiring);
-``reward_score`` comes back as a scalar or per-image
-``reward_extra_info["sample_scores"]`` aligned with ``image_paths``.
-
-This module stays torch-free at import time (verl is imported lazily inside the
-closure) so the pure payload/parse logic is unit-testable without the training
-stack.
-"""
+"""Mid-episode RM scoring adapter for Bagel Co-RL (Joint-Training) (RFC §4.2)."""
 
 from __future__ import annotations
 
@@ -191,21 +166,7 @@ def parse_rm_judges(result: Any, image_paths: list[str]) -> list[dict[str, Any] 
 
 
 def _default_data_builder(payload: dict[str, Any], *, output_type: str = "image") -> Any:
-    """Wrap the payload in the one-row ``DataProto`` the reward manager consumes.
-
-    ``RewardLoopWorker.compute_score`` hands this straight to
-    ``reward_manager.run_single``. The repo default for omni is
-    ``VisualRewardManager`` (``verl_omni/reward_loop/reward_manager/visual.py``),
-    which validates ``batch["responses"]`` as a *visual* response before calling
-    the reward function (``_validate_visual_response``): ``uint8`` pixels, or a
-    floating-point tensor when ``rollout.pipeline.output_type == "latent"``. A
-    payload-only row therefore cannot ride through unchanged, so the fields the
-    manager insists on are filled with inert, *dtype-valid* placeholders — the
-    scorer dispatches on ``extra_info["bagel_corl"]`` and ignores them.
-
-    ``attention_mask`` / ``data_source`` / ``reward_model`` cover the
-    ``NaiveRewardManager`` variant (LLM side) without needing a second builder.
-    """
+    """Wrap the payload in the one-row ``DataProto`` the reward manager consumes."""
     import torch
     from tensordict import TensorDict
     from verl.protocol import DataProto
@@ -243,18 +204,7 @@ def make_rm_score_fn(
     data_builder: Callable[[dict[str, Any]], Any] | None = None,
     output_type: str = "image",
 ) -> Callable[[list[Any]], Any]:
-    """Build the ``score_fn(samples) -> samples`` hook consumed by ``run_serial_episode``.
-
-    The handle is duck-typed so tests can pass a plain object: either an async
-    Ray actor (``await handle.compute_score.remote(data)`` — the
-    ``CompositeAgentLoopWorker`` idiom) or a plain async/sync callable. ``verl``
-    is imported lazily so this module imports without the training stack.
-
-    ``output_type`` is the rollout pipeline's response kind
-    (``rollout.pipeline.output_type``); it selects the placeholder dtype the
-    manager's visual-response validation demands. Override it whenever the recipe
-    sets ``output_type=latent``, or the RM worker raises on dtype mid-episode.
-    """
+    """Build the ``score_fn(samples) -> samples`` hook consumed by ``run_serial_episode``."""
     if handle is None:
         raise RMScoringError(
             "bagel in-loop RM scoring requires a reward-loop handle; "
@@ -273,15 +223,9 @@ def make_rm_score_fn(
         else:
             result = method(data)
         result = await result if asyncio.iscoroutine(result) else result
-        # A Ray actor call hands back an ObjectRef, and the ref is not a score: if it is
-        # returned unresolved, ``parse_rm_result`` dies on
-        # ``missing 'reward_score': <class 'ray.ObjectRef'>``, which aborts the episode and
-        # can starve the sync replay buffer until the whole run fails with "no
-        # materializable trajectories". Resolve it always; ``timeout_s`` is only a bound on
-        # the wait.
-        #
-        # Detected by type, not by ``hasattr(result, 'get')``: a dict answer also has a
-        # ``get`` attribute, and ``ray.get`` on a dict is a TypeError.
+        # A Ray actor call hands back an ObjectRef, and the ref is not a score: if it is returned unresolved,
+        # ``parse_rm_result`` dies on ``missing 'reward_score': <class 'ray.ObjectRef'>``, which aborts the episode
+        # and can starve the sync replay buffer until the whole run fails with "no materializable trajectories".
         import ray
 
         if isinstance(result, ray.ObjectRef):

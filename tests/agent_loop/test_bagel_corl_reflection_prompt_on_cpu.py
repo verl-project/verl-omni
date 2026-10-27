@@ -12,21 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""CPU tests for the Bagel Co-RL system-turn rewrite.
-
-``with_reflection_system_prompt`` decides whether the dataset's own system turn survives
-rendering. Plan (``unicot_breakdown``) rows must keep the dataset's ``PLAN_SYSTEM_PROMPT``
-("Write a short numbered plan ..."), because that sentence is the only thing that makes a
-numbered ``Plan:`` block get written; reflect rows must get the reflection rewrite rules.
-
-Replacing the system turn unconditionally deleted the numbered-plan instruction, so
-``Plan:`` appeared in 0 of 731 dumped transcripts and ``_extract_plan_lines`` always
-returned ``[]``. ``R_plan`` was pinned to 0 on all 1107 plan rows -- and ``R_result`` with
-it, since it needs ``successful_generates == expected_num_images``, knowable only from the
-plan -- leaving 40% of that lane's score unreachable and
-``val-core/unicot_breakdown/reward/mean@1`` flat near 0.46 for all 150 steps of
-``bagel_corl_rm1_0123_20261012_084724``.
-"""
+"""CPU tests for the Bagel Co-RL system-turn rewrite."""
 
 import pytest
 

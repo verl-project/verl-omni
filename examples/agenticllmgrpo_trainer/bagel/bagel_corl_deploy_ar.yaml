@@ -5,7 +5,7 @@
 # that is DiffusionStrategy / GEN-only.
 #
 # Passed from run_agentic_bagel_rpco_lora.sh as BAGEL_UND_DEPLOY_CONFIG and from
-# run_bagel_und_ar_serve.sh for the spike_und_hermes.py gate.
+# run_bagel_und_ar_serve.sh for standalone Hermes verification.
 #
 # Layout: Thinker on logical 0, DiT on logical 1 -- the same split the serve helper
 # applies when two GPUs are visible (``run_bagel_und_ar_serve.sh``: "Two visible cards

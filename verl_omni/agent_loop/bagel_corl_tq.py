@@ -58,16 +58,7 @@ _AgentLoopWorkerTQBase = AgentLoopWorkerTQ.__ray_metadata__.modified_class
 
 
 def _optional_val_field(val_kwargs: Any, name: str, default: Any = None) -> Any:
-    """Read ``name`` from ``val_kwargs`` when present, else ``default`` -- never raising.
-
-    The worker holds ``val_kwargs`` as a **struct** OmegaConf node containing only the
-    keys the recipe actually set.  In struct mode a missing key raises
-    ``ConfigAttributeError`` rather than yielding ``None``, so a plain attribute read is
-    unsafe.
-
-    The dataclass form (``DiffusionSamplingConfig``) always carries the field, so both
-    shapes must work and a missing key must degrade to "not set".
-    """
+    """Read ``name`` from ``val_kwargs`` when present, else ``default`` -- never raising."""
     if val_kwargs is None:
         return default
     try:
@@ -81,28 +72,7 @@ def _optional_val_field(val_kwargs: Any, name: str, default: Any = None) -> Any:
 
 
 def val_overlay_sampling_params(sampling_params: dict, rollout_config: Any) -> dict:
-    """Return ``sampling_params`` with the validation diffusion kernel overlaid.
-
-    ``AgentLoopWorkerTQ.generate_sequences`` builds ``sampling_params`` from the
-    *training* rollout config and, when validating, overrides only the three AR knobs
-    (``top_p`` / ``top_k`` / ``temperature``).  ``val_kwargs.pipeline`` and
-    ``val_kwargs.algo`` are never applied, so the recipe's ``VAL_NOISE_LEVEL`` /
-    ``VAL_GEN_STEPS`` / val ``cfg_*`` never reach the diffusion request:
-    ``build_gen_sampling_params`` then fills those keys from the training
-    ``pipeline`` / ``algo``, and validation denoises with the *training* kernel --
-    exactly as stochastic as training and non-reproducible between runs.
-
-    ``logprobs=False`` is required, not cosmetic: ``build_gen_sampling_params`` raises
-    when a request wants log-probs *and* carries ``noise_level <= 0``, because a
-    deterministic decode has no SDE log-probs to stash.  Setting it is also what makes
-    it true that ``base["logprobs"]`` is the per-phase answer
-    ``bagel_corl_gen_serve`` documents -- the base worker does not set it.  The
-    ``val/`` artifact tag in ``BagelMultiturnAgentLoop.run`` keys on this same flag.
-
-    Mirrors ``diffusion_agent_loop_tq``, which performs this same overlay on the stock
-    diffusion path (``composite_agent_loop`` and ``diffusion_agent_loop`` likewise);
-    the bagel loop was the one path missing it.
-    """
+    """Return ``sampling_params`` with the validation diffusion kernel overlaid."""
     params = dict(sampling_params)
     val_kwargs = getattr(rollout_config, "val_kwargs", None)
     params.update(_config_to_sampling_dict(_optional_val_field(val_kwargs, "pipeline")))
@@ -137,17 +107,7 @@ __all__ = [
 
 
 def is_val_viz_prompt(prompt: Mapping[str, Any]) -> bool:
-    """True when ``prompt`` is a holdout validation-visualization row.
-
-    The holdout is dispatched through this same worker (it needs the episode to run,
-    because the agent loop is what dumps the reference PNGs), but it is not a training
-    or validation *row*: see ``BagelCorlAgentLoopWorkerTQ._run_holdout_prompt``. The
-    marker column is what distinguishes the two, and it travels with the prompt from
-    ``AgenticValVizProvider.build_tensordict_batch``, so no worker-side state is needed.
-
-    Absent/blank/``0``/``False`` all read as "not a holdout"; a value this recipe never
-    writes (e.g. ``"False"`` from a YAML round-trip) must not switch the holdout on.
-    """
+    """True when ``prompt`` is a holdout validation-visualization row."""
     raw = prompt.get(VAL_VIZ_PROMPT_KEY)
     if raw is None:
         return False
@@ -268,6 +228,9 @@ def pack_dual_lane_episode(
                     "all_latents": sample.all_latents,
                     "timesteps": sample.timesteps,
                     "rollout_log_probs": sample.rollout_log_probs,
+                    "rollout_policy_version": sample.rollout_policy_version,
+                    "rollout_replica_id": sample.rollout_replica_id,
+                    "serving_provenance_verified": sample.serving_provenance_verified,
                     "rm_score": sample.rm_score,
                     "rm_score_source": sample.rm_score_source,
                     "call_role": sample.call_role,
@@ -315,7 +278,12 @@ def pack_dual_lane_episode(
         "used_image_credit": bool(episode.used_image_credit),
         "token_level_scores": float(episode.und_reward),
         "num_gen_calls": k,
-        "policy_version": int(episode.policy_version),
+        "policy_version": episode.policy_version,
+        "rollout_policy_version": episode.policy_version,
+        "requested_policy_version": episode.requested_policy_version,
+        "rollout_replica_id": episode.rollout_replica_id,
+        "serving_provenance_verified": episode.serving_provenance_verified,
+        "und_serving_provenance": list(episode.und_serving_provenance),
         "gen_cond_uids": cond_uids,
         "gen_cond_len": int(max((s.cond_len for s in episode.gen_samples if s.valid), default=0)),
     }
@@ -358,23 +326,7 @@ def pack_dual_lane_episode(
 
 
 def und_row_reward(episode: EpisodeRollout, response_mask: Any) -> torch.Tensor:
-    """Build the ``rm_scores`` column for a UND row from the episode's RFC reward.
-
-    Two details have to line up, which is why this is one helper rather than two lines at the
-    call site:
-
-    * the column must exist at all -- ``AgentLoopOutput.as_dict`` only publishes ``rm_scores``
-      when ``reward_score`` is set (``verl/experimental/agent_loop/agent_loop.py:143``), and the
-      v1 UND advantage reads it unconditionally (``trainer_base.py:1595``). The UND ingest
-      therefore writes this column itself instead of relying on the optional ``as_dict`` path;
-    * the score itself must land on the last *trainable* token (see
-      ``bagel_corl_lib.und_episode_rm_scores`` for why ``as_dict``'s ``[-1]`` is wrong here).
-
-    With the served RM disabled (``ENABLE_RM=0`` in the recipe, until Hermes + composite step are
-    green) the reward is the RFC ``und/no_image_credit`` scalar: the final rated
-    ``generate_image`` call plus the rewrite gain when the RM ran, else the non-image UND
-    scalar -- exactly the value ``flatten_multiturn_rollouts`` writes to ``token_level_scores``.
-    """
+    """Build the ``rm_scores`` column for a UND row from the episode's RFC reward."""
     reward, _ = episode_und_reward(episode)
     return torch.tensor(und_episode_rm_scores(response_mask, reward), dtype=torch.float32)
 
@@ -432,7 +384,11 @@ def episode_from_agent_extra(
     return EpisodeRollout(
         und_group_uid=str(extra.get("und_group_uid") or und_group_uid),
         episode_uid=str(extra.get("episode_uid") or f"{und_group_uid}-ep"),
-        policy_version=int(extra.get("policy_version") or 0),
+        policy_version=extra.get("policy_version"),
+        requested_policy_version=extra.get("requested_policy_version"),
+        rollout_replica_id=extra.get("rollout_replica_id"),
+        serving_provenance_verified=bool(extra.get("serving_provenance_verified", False)),
+        und_serving_provenance=list(extra.get("und_serving_provenance") or []),
         prompt_ids=list(prompt_ids),
         response_ids=list(response_ids),
         response_mask=list(response_mask),
@@ -465,20 +421,7 @@ class BagelCorlAgentLoopWorkerTQ(_AgentLoopWorkerTQBase):
         reward_loop_worker_handles=None,
     ):
         """Accept the handles the pinned ``TaskRunnerV1`` forwards via the manager
-        (``main_ppo`` passes ``trainer.get_reward_handles()`` unconditionally).
-
-        The signature mirrors ``AgentLoopManager._init_agent_loop_workers``'
-        ``.remote(config, llm_client, teacher_client, reward_loop_worker_handles)``
-        call positionally. It must NOT be ``(*args, reward_loop_worker_handles=None)``:
-        the base call then receives the handle list both positionally and by keyword
-        and raises ``TypeError: got multiple values for argument
-        'reward_loop_worker_handles'`` before any episode runs.
-
-        ``[0]`` is the GEN pool (the composite contract's first slot, which it
-        generically calls "dit"; Bagel is a MoT model with no DiT) and is bound for the
-        in-loop RM adapter; the full list stays on ``self`` for the inherited
-        episode-reward ``_compute_score`` when the base supports it.
-        """
+        (``main_ppo`` passes ``trainer.get_reward_handles()`` unconditionally)."""
         # Bind before anything reads agentic knobs: ``BagelMultiturnAgentLoop.run``
         # calls ``agentic_get("good_enough_threshold")``, which raises while unbound.
         bind_agentic_image_gen(config)
@@ -510,30 +453,7 @@ class BagelCorlAgentLoopWorkerTQ(_AgentLoopWorkerTQBase):
         return int(raw)
 
     async def _run_prompt(self, prompt: dict, sampling_params: dict, trajectory: dict, trace: bool = False) -> None:
-        """Overlay the validation diffusion kernel before the episode runs.
-
-        ``AgentLoopWorkerTQ.generate_sequences`` builds ``sampling_params`` from the
-        *training* rollout config and, when validating, overrides only the three AR knobs
-        (``top_p`` / ``top_k`` / ``temperature``). ``val_kwargs.pipeline`` and
-        ``val_kwargs.algo`` are never applied, so the recipe's ``VAL_NOISE_LEVEL`` /
-        ``VAL_GEN_STEPS`` / val ``cfg_*`` never reach the diffusion request:
-        ``build_gen_sampling_params`` then fills those keys from the training
-        ``pipeline`` / ``algo``, and validation denoises with the *training* kernel --
-        exactly as stochastic as training and non-reproducible between runs.
-
-        ``logprobs=False`` is required, not cosmetic: ``build_gen_sampling_params``
-        raises when a request wants log-probs *and* carries ``noise_level <= 0``,
-        because a deterministic decode has no SDE log-probs to stash. Setting it is
-        also what makes it true that ``base["logprobs"]`` is the per-phase answer
-        that ``bagel_corl_gen_serve`` documents -- the base worker does not set it.
-
-        Mirrors ``diffusion_agent_loop_tq``, which performs this same overlay on the
-        stock diffusion path (``composite_agent_loop`` and ``diffusion_agent_loop``
-        likewise); the bagel loop was the one path missing it.
-
-        A holdout validation-visualization prompt (``AGENTIC_VAL_VIZ=1``) takes the
-        overlay *and* skips TransferQueue entirely: see ``_run_holdout_prompt``.
-        """
+        """Overlay the validation diffusion kernel before the episode runs."""
         if trajectory.get("validate"):
             config = self.config.actor_rollout_ref.rollout
             sampling_params = val_overlay_sampling_params(sampling_params, config)
@@ -545,24 +465,7 @@ class BagelCorlAgentLoopWorkerTQ(_AgentLoopWorkerTQBase):
     async def _run_holdout_prompt(
         self, prompt: dict, sampling_params: dict, trajectory: dict, trace: bool = False
     ) -> None:
-        """Run one holdout-viz prompt to completion without touching TransferQueue.
-
-        The base ``_run_prompt`` brackets every prompt with ``tq.async_kv_put`` status
-        markers in ``"train"``/``"val"``, and ``_agent_loop_postprocess`` then writes the
-        episode's rows into the same partition. Neither is the holdout's transport:
-        ``_validate`` samples ``"val"`` with ``batch_size=len(batch)``, so four extra rows
-        there either displace real validation rows or leave the buffer short, and nothing
-        ever waits on a holdout's status marker. The holdout's consumers are the PNGs and
-        the trajectory the episode dumps itself (``dump_episode_images`` /
-        ``dump_episode_trace``, called from ``BagelMultiturnAgentLoop.run``), so this path
-        exists to run the sessions and write **no** TransferQueue row at all.
-
-        Because this worker *does* still run the base's fire-and-forget dispatch, the
-        manager waits on :meth:`wait_for_background` before it lets the step advance.
-
-        ``n`` mirrors the base: a holdout is a validation batch, so it rolls out
-        ``rollout.val_kwargs.n`` siblings.
-        """
+        """Run one holdout-viz prompt to completion without touching TransferQueue."""
         config = self.config.actor_rollout_ref.rollout
         n = prompt.pop("__rollout_n__", config.val_kwargs.n)
         prompt.pop("__do_sample__", None)
@@ -582,17 +485,7 @@ class BagelCorlAgentLoopWorkerTQ(_AgentLoopWorkerTQBase):
             )
 
     async def wait_for_background(self) -> None:
-        """Block until every episode this worker has accepted has settled.
-
-        ``generate_sequences`` is fire-and-forget by design, so a holdout dispatched
-        through it is still decoding when the caller returns. The manager calls this once
-        per holdout so the step's reference PNGs exist *before* the trainer advances (and
-        re-syncs or sleeps the replicas out from under an in-flight episode).
-
-        The sibling validation batch the trainer is already blocked on is part of the
-        same task set and is simply waited on here too; no task can be added after that
-        batch because the trainer dispatches the next one only after ``sample`` returns.
-        """
+        """Block until every episode this worker has accepted has settled."""
         while self.background_tasks:
             await asyncio.gather(*list(self.background_tasks), return_exceptions=True)
 
@@ -689,6 +582,15 @@ class BagelCorlAgentLoopWorkerTQ(_AgentLoopWorkerTQBase):
         und_field["bagel_episode_id"] = torch.tensor(episode_numeric_id(episode.episode_uid), dtype=torch.long)
 
         und_field.update({k: v for k, v in kwargs.items() if k not in und_field})
+        for name in (
+            "policy_version",
+            "rollout_policy_version",
+            "requested_policy_version",
+            "rollout_replica_id",
+            "serving_provenance_verified",
+            "und_serving_provenance",
+        ):
+            und_field[name] = pack.und_record["fields"][name]
         und_field.pop("multi_modal_data", None)
         und_field["loss_mask"] = und_field["response_mask"]
         prompts = und_field["prompts"]
@@ -716,8 +618,14 @@ class BagelCorlAgentLoopWorkerTQ(_AgentLoopWorkerTQBase):
                 "und_group_uid": pack.und_record["fields"]["und_group_uid"],
                 "episode_uid": pack.und_record["fields"]["episode_uid"],
                 "bagel_corl_metrics": dict(pack.metrics),
-                "min_global_steps": und_extra.get("min_global_steps", kwargs.get("global_steps")),
-                "max_global_steps": und_extra.get("max_global_steps", kwargs.get("global_steps")),
+                "min_global_steps": episode.policy_version,
+                "max_global_steps": episode.policy_version,
+                "policy_version": episode.policy_version,
+                "rollout_policy_version": episode.policy_version,
+                "requested_policy_version": episode.requested_policy_version,
+                "rollout_replica_id": episode.rollout_replica_id,
+                "serving_provenance_verified": episode.serving_provenance_verified,
+                "und_serving_provenance": list(episode.und_serving_provenance),
             }
         )
         und_field["extra_fields"] = und_extra
@@ -761,8 +669,8 @@ class BagelCorlAgentLoopWorkerTQ(_AgentLoopWorkerTQBase):
             gen_fields["extra_fields"] = {
                 "bagel_role": "gen",
                 "parent_und_key": und_key,
-                "min_global_steps": kwargs.get("global_steps"),
-                "max_global_steps": kwargs.get("global_steps"),
+                "min_global_steps": gen_fields.get("rollout_policy_version"),
+                "max_global_steps": gen_fields.get("rollout_policy_version"),
             }
             # RM score as a 1-length tensor for TQ consumers that expect rm_scores.
             if gen_fields.get("rm_score") is not None:
@@ -778,8 +686,8 @@ class BagelCorlAgentLoopWorkerTQ(_AgentLoopWorkerTQBase):
                     "is_auxiliary": True,
                     "parent_und_key": und_key,
                     "global_steps": kwargs["global_steps"],
-                    "min_global_steps": kwargs.get("global_steps"),
-                    "max_global_steps": kwargs.get("global_steps"),
+                    "min_global_steps": gen_fields.get("rollout_policy_version"),
+                    "max_global_steps": gen_fields.get("rollout_policy_version"),
                     "prompt_len": 0,
                     "response_len": 0,
                     "seq_len": 0,
@@ -804,28 +712,7 @@ async def put_dual_lane_rows(
     partition_id: str,
     und_row_count: int = 1,
 ) -> int:
-    """Write one episode's dual-lane rows, one ``kv_batch_put`` **per lane**. Returns the put count.
-
-    The UND row and the GEN rows have disjoint schemas — UND carries ``prompts``/``responses``/
-    ``input_ids``/``position_ids``/``multi_modal_inputs``, GEN carries ``prompt_token_ids``/
-    ``all_latents``/``timesteps``/``seed_index``/``cond_uid`` — and
-    ``list_of_dict_to_tensordict`` builds its column dict from the **first** row's keys
-    (``verl/utils/tensordict_utils.py:929``):
-
-        keys = list_of_dicts[0].keys()
-        dict_of_lists = {key: [d[key] for d in list_of_dicts] for key in keys}
-
-    so packing both lanes into one call dies with ``KeyError: 'prompts'`` on the GEN rows. That
-    is not an edge case: it fires on the first episode that actually calls ``generate_image``
-    (K >= 1) — precisely the episodes this trainer exists to learn from. Pattern-3 (K = 0)
-    episodes hid it, because then the list is a single UND row and the schema is trivially
-    uniform.
-
-    ``kv_batch_put`` is per key set (``transfer_queue/interface.py:768``), so splitting by lane
-    is a contract-preserving change: both lanes land in the same partition with the same tags,
-    and consumers already fetch them by their own keys (UND by ``batch.keys``, GEN by
-    ``child_gen_keys``).
-    """
+    """Write one episode's dual-lane rows, one ``kv_batch_put`` **per lane**. Returns the put count."""
     if not (len(keys) == len(field_dicts) == len(tags)):
         raise ValueError(
             f"dual-lane put needs aligned keys/fields/tags, got {len(keys)}/{len(field_dicts)}/{len(tags)}"
@@ -893,30 +780,7 @@ class BagelCorlAgentLoopManagerTQ(AgentLoopManager):
         self._maybe_run_val_viz(prompts)
 
     def _maybe_run_val_viz(self, prompts) -> None:
-        """Run the fixed holdout once per validation step when ``AGENTIC_VAL_VIZ=1``.
-
-        ``val-core`` is a scalar mean over the whole val parquet, so a lane can collapse
-        into a degenerate-but-scoring mode and barely move it. Four *fixed* prompts --
-        samples 9001/9002 (cafe) and 9003/9004 (CN poster), each rendered by the
-        deterministic ODE validation kernel -- are the artifact that makes that visible,
-        which is what the Mode (2a) RPCO recipe dumps as
-        ``rollout_images/step_XXXXXX/sample_9001..9004``. Here they land under
-        ``rollout_images/val/step_XXXXXX/sample_900N.01/`` because the bagel lane's
-        episode dump prefixes every validation artifact with ``val/``.
-
-        Two details this method exists for:
-
-        * ``_validate`` calls this once per val *batch* (``data.val_max_samples`` /
-          ``val_batch_size``), so a per-pass guard keeps one holdout per step instead of
-          one per batch.
-        * the holdout must survive the call: the workers dispatch episodes
-          fire-and-forget, and the trainer may sleep or re-sync the replicas as soon as
-          this returns, so the wait is what keeps a reference image from being torn down
-          mid-denoise.
-
-        Nothing here may raise: this is an experiment-tracking fixture and the validation
-        pass it rides on is the training signal.
-        """
+        """Run the fixed holdout once per validation step when ``AGENTIC_VAL_VIZ=1``."""
         provider = self._val_viz_provider
         if provider is None or not _is_validate_batch(prompts):
             return

@@ -81,6 +81,8 @@ class OmniAlgoConfig(AlgoConfig):
     adv_estimator: str = "dpo"
     norm_adv_by_std_in_grpo: bool = True
     global_std: bool = True
+    # Bagel Co-RL GEN-lane override of ``norm_adv_by_std_in_grpo``; ``None`` inherits it.
+    gen_norm_adv_by_std_in_grpo: Optional[bool] = None
 
     def __post_init__(self):
         valid_trainer_types = {"policy_gradient", "direct_preference"}

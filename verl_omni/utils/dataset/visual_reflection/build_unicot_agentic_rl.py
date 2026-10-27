@@ -37,6 +37,7 @@ import hashlib
 import json
 import os
 import random
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -87,9 +88,19 @@ Protocol:
 1. Write a short numbered plan of at most three complete subtask image prompts.
 2. Call generate_image once per planned subtask, in order.
 3. After the final image, call judge_image on that image.
-4. Reflect briefly on the feedback and finish with Done.
+4. Reflect briefly on the feedback. If it says good_enough=NO and a generate_image call remains, \
+rewrite the final image prompt from its findings, call generate_image, and judge again.
+5. Finish with Done once good_enough=YES or no generate_image call remains.
 
-Do not judge between subtasks or generate more images than the plan lists."""
+Do not judge between subtasks or plan more subtask images than the request needs.
+
+Start your reply like this, with your own prompts in place of the angle brackets:
+Plan:
+1. <complete image prompt for subtask 1>
+2. <complete image prompt for subtask 2>
+<tool_call>
+{"name": "generate_image", "arguments": {"prompt": "<complete image prompt for subtask 1>"}}
+</tool_call>"""
 
 _BREVITY_SUFFIX = (
     " Keep any private thinking to one short paragraph; do not repeat the request, "
@@ -188,7 +199,7 @@ def _resolve_hub_snapshot(root: Path) -> Path:
     return candidates[0]
 
 
-def _load_metadata(dataset_dir: str, dataset_id: str) -> list[dict[str, Any]]:
+def _load_metadata(dataset_dir: str, dataset_id: str) -> list[Any]:
     root = Path(dataset_dir).expanduser()
     snapshot = _resolve_hub_snapshot(root)
     metadata_path = snapshot / "metadata.json"
@@ -198,9 +209,10 @@ def _load_metadata(dataset_dir: str, dataset_id: str) -> list[dict[str, Any]]:
     return data
 
 
-def _rejection(record: dict[str, Any], error: VisualReflectionDataError) -> dict[str, Any]:
+def _rejection(record: Any, error: VisualReflectionDataError) -> dict[str, Any]:
+    """Describe a rejected row even when the JSON entry is not an object."""
     return {
-        "data_id": str(record.get("data_id") or ""),
+        "data_id": str(record.get("data_id") or "") if isinstance(record, Mapping) else "",
         "reason": error.reason.value,
         "field": error.field,
     }
@@ -216,7 +228,7 @@ def _split_record(*, dataset_id: str, data_id: str, prompt: str) -> dict[str, st
     }
 
 
-def _parse_reflection_rows(metadata: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+def _parse_reflection_rows(metadata: list[Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     rows: list[dict[str, Any]] = []
     rejections: list[dict[str, Any]] = []
     resolver = _TextOnlyImageResolver()
@@ -258,7 +270,7 @@ def _parse_reflection_rows(metadata: list[dict[str, Any]]) -> tuple[list[dict[st
     return rows, rejections
 
 
-def _parse_breakdown_rows(metadata: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+def _parse_breakdown_rows(metadata: list[Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     rows: list[dict[str, Any]] = []
     rejections: list[dict[str, Any]] = []
     weights = _weights()
@@ -447,6 +459,7 @@ def main_cli(
         "partition_id": partition_id,
         "seed": seed,
         "val_ratio": val_ratio,
+        "reward_weights": _weights(),
         "source_configs": {
             "reflection": unicot_converter_config(),
             "breakdown": breakdown_converter_config(),

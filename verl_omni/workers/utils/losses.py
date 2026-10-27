@@ -100,6 +100,10 @@ def diffusion_loss(config: DiffusionActorConfig, model_output, data: TensorDict,
     metrics_values = Metric.from_dict(metrics_values, aggregation=AggregationType.MEAN)
 
     metrics.update(metrics_values)
+    if tu.get_non_tensor_data(data, "bagel_corl_lane", default=None) == "gen":
+        # Metric.aggregate_dp averages ranks even for SUM; retain the local
+        # DP-scaled contribution and sum only timestep/microbatch contributions.
+        metrics["actor/gen/pg_loss"] = Metric(value=loss_value.detach().item(), aggregation=AggregationType.SUM)
     if loss_result.add_loss_metric:
         metrics["actor/loss"] = Metric(value=loss_value, aggregation=AggregationType.MEAN)
 
@@ -290,7 +294,6 @@ def bagel_und_episode_loss(config, model_output, data, dp_group=None):
             term = torch.nan_to_num(raw).sum() * 0.0
         terms.append(term)
         append_to_dict(metrics, row_metrics)
-        dp_size = float(tu.get_non_tensor_data(data, "corl_dp_size", default=1))
         for key, value in row_metrics.items():
             leaf = {
                 "actor/pg_loss": "pg_loss",
@@ -300,7 +303,7 @@ def bagel_und_episode_loss(config, model_output, data, dp_group=None):
             }.get(key)
             if leaf:
                 raw_value = float(value.aggregate()) if isinstance(value, Metric) else float(value)
-                metric = Metric(value=raw_value * int(valid) / (normalizer * dp_size), aggregation=AggregationType.SUM)
+                metric = Metric(value=raw_value * int(valid) / normalizer, aggregation=AggregationType.SUM)
                 append_to_dict(metrics, {f"actor/und/{leaf}": metric})
     return torch.stack(terms).sum() / normalizer, metrics
 
@@ -409,26 +412,26 @@ def bagel_composite_loss(config, model_output, data, dp_group=None):
             "gen_regularizer='velocity_mse' (UniGRPO Eq. 8) lands in Phase 2; use 'latent_kl' for now"
         )
 
-    if "ref_log_prob" in gen_data.keys() or "ref_prev_sample_mean" in gen_data.keys():
-        raise NotImplementedError(
-            "Co-RL GEN reference regularization requires valid-transition normalization and is unsupported; "
-            "omit GEN reference tensors. UND reference KL remains supported."
-        )
+    use_gen_kl = _bagel_lane_weight(config, "use_gen_kl_loss", default=False, cast=bool)
+    if use_gen_kl:
+        if "ref_prev_sample_mean" not in gen_data.keys() or any(
+            key not in gen_output for key in ("prev_sample_mean", "std_dev_t")
+        ):
+            raise ValueError("GEN reference KL requires ref_prev_sample_mean, prev_sample_mean, and std_dev_t")
 
     gen_loss, gen_metrics = diffusion_loss(
         config,
         gen_output,
         gen_data,
         dp_group=dp_group,
-        use_kl_loss=False,
+        use_kl_loss=use_gen_kl,
     )
     metrics.update(gen_metrics)
     normalized = bool(tu.get_non_tensor_data(data, "corl_loss_normalized", default=False))
-    dp_size = float(tu.get_non_tensor_data(data, "corl_dp_size", default=1))
     metric_weight = 1.0
     if normalized:
         normalizer = float(tu.get_non_tensor_data(data, "loss_normalizer", default=None))
-        metric_weight = float(data["loss_unit_weight"].sum().item()) / (normalizer * dp_size)
+        metric_weight = float(data["loss_unit_weight"].sum().item()) / normalizer
     for key, value in gen_metrics.items():
         leaf = {
             "actor/loss": "pg_loss",
@@ -437,13 +440,14 @@ def bagel_composite_loss(config, model_output, data, dp_group=None):
             "actor/ratio_mean": "ratio_mean",
             "actor/ratio_square_mean": "ratio_square_mean",
             "actor/ppo_kl": "update_kl",
+            "actor/kl_loss": "ref_kl",
         }.get(key)
         if leaf:
             raw_value = float(value.aggregate()) if isinstance(value, Metric) else float(value)
             metrics[f"actor/gen/{leaf}"] = (
                 Metric(value=raw_value * metric_weight, aggregation=AggregationType.SUM) if normalized else value
             )
-    metrics["actor/gen/pg_loss"] = Metric(value=gen_loss.detach().item() / dp_size, aggregation=AggregationType.SUM)
+    metrics["actor/gen/total_loss"] = Metric(value=gen_loss.detach().item(), aggregation=AggregationType.SUM)
     metrics["gen/skipped_no_groups"] = Metric(value=0.0, aggregation=AggregationType.MEAN)
     if loss_value is None:
         loss_value = gen_loss * _bagel_lane_weight(config, "loss_weight_gen")

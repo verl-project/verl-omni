@@ -39,25 +39,10 @@ _AR_ONLY_SAMPLING_KEYS = frozenset(
     }
 )
 
-# The values an AR request carries when nobody thought about this lane: vLLM's untruncated
-# decoding defaults, plus the ``repetition_penalty=1.0`` that ``verl``'s
-# ``AgentLoopWorkerTQ.generate_sequences`` *hardcodes*
-#
-#     sampling_params = dict(temperature=config.temperature, top_p=config.top_p,
-#                            top_k=config.top_k, repetition_penalty=1.0, ...)
-#
-# and never reads ``actor_rollout_ref.rollout.repetition_penalty`` from. That hardcode is
-# why ``ROLLOUT_REPETITION_PENALTY=1.05`` had no effect at all on this lane: the key is
-# present in the request, so the AR strategy's own
-# ``sampling_params.setdefault("repetition_penalty", self.server.config.repetition_penalty)``
-# (``vllm_omni_ar_strategy``) never fires, and the engine is handed 1.0 -- measured
-# 2026-10-15, ``bagel_corl_prfix_t07_20261015_162700_a1`` decoded ``temperature=0.7,
-# top_p=0.9, top_k=50, repetition_penalty=1.0`` and looped ``\tbuf_widget`` for every
-# turn of every episode (7/8 turns flagged degenerate, ``gen_lane_skipped=True``).
-#
-# So on the UND route these four values mean "unset", not "chosen": they are not a
-# preference anyone expressed, they are the collapse. A caller that genuinely wants one of
-# them can say so through the config, which always wins.
+# The values an AR request carries when nobody thought about this lane: vLLM's untruncated decoding defaults, plus the
+# ``repetition_penalty=1.0`` that ``verl``'s ``AgentLoopWorkerTQ.generate_sequences`` *hardcodes*  sampling_params =
+# dict(temperature=config.temperature, top_p=config.top_p, top_k=config.top_k, repetition_penalty=1.0, ...)  and never
+# reads ``actor_rollout_ref.rollout.repetition_penalty`` from.
 UNTRAINED_AR_SAMPLING: dict[str, Any] = {
     "temperature": 1.0,
     "top_p": 1.0,
@@ -65,30 +50,7 @@ UNTRAINED_AR_SAMPLING: dict[str, Any] = {
     "repetition_penalty": 1.0,
 }
 
-# Minimally-mitigated UND sampling, used only for the knobs above that are unset *and*
-# absent from the config.
-#
-# The published Bagel checkpoint answers the Hermes ``<tools>`` prompt only while the
-# top-p/top-k truncation and the anti-repetition penalty are actually in force. Under the
-# untruncated values it collapses onto a single token for the entire budget instead of
-# emitting ``<tool_call>``. Measured 2026-10-15 against the live AR replica, replaying the
-# exact ``prompt_text`` of a degenerate rollout from ``bagel_corl_prfix_t07_20261015_142346_a1``
-# (the run that reported ``episode/K: 0.0``, ``episode/K_zero: 1.0``,
-# ``und/no_image_credit: 1.0``):
-#
-#   untruncated -> '\n    }'                                        collapse, no tool call
-#   mitigated   -> '{"name": "generate_image", "arguments": {...}}'  correct
-#
-# The engine's own defaults are not mitigated either: the AR engine runs with
-# ``generation_config="vllm"``, which *replaces* the checkpoint's own
-# ``generation_config.json`` (0.7 / 0.8 / 20 / 1.05) with the untruncated set, so a request
-# that omits a knob decodes as-trained without anything going red.
-#
-# Hence the UND lane resolves every AR knob from ``actor_rollout_ref.rollout`` -- the
-# section the AR engine is launched with, and what the recipe's ``ROLLOUT_TEMPERATURE`` /
-# ``ROLLOUT_TOP_P`` / ``ROLLOUT_TOP_K`` / ``ROLLOUT_REPETITION_PENALTY`` pin -- and uses
-# the values below only when the config is silent. The deploy config's stage-0
-# ``default_sampling_params`` carries the same four numbers.
+# Minimally-mitigated UND sampling, used only for the knobs above that are unset *and* absent from the config.
 UND_AR_SAMPLING_FALLBACK: dict[str, Any] = {
     "temperature": 0.7,
     "top_p": 0.9,
@@ -140,15 +102,7 @@ def config_sampling_value(config: Any, name: str) -> Any:
 
 def fill_und_ar_sampling_params(params: dict[str, Any], config: Any = None) -> dict[str, Any]:
     """Pin the UND AR knobs to the configured recipe whenever the caller left them at the
-    untruncated defaults.
-
-    "Left them" covers both spellings: absent, and present-but-untruncated. The second one
-    is the one that bit: ``verl``'s generic AR worker always sends
-    ``repetition_penalty=1.0``, so the recipe's ``ROLLOUT_REPETITION_PENALTY`` could not
-    reach this lane and an "only fill what is missing" rule was a no-op on exactly the knob
-    the collapse is about. Any value that is *not* one of the untruncated defaults is taken
-    as deliberate and left alone.
-    """
+    untruncated defaults."""
     for name, fallback in UND_AR_SAMPLING_FALLBACK.items():
         current = params.get(name)
         if current is not None and current != UNTRAINED_AR_SAMPLING[name]:
@@ -158,23 +112,8 @@ def fill_und_ar_sampling_params(params: dict[str, Any], config: Any = None) -> d
     return params
 
 
-# ``sde`` (default) keeps the trained FlowGRPO kernel from ``rollout.algo``
-# (``noise_level > 0`` + a bounded ``sde_window_*``). It is the only decode that
-# carries latents/log-probs, and therefore the only one the GEN loss can use.
-# ``ode`` pins every GEN call -- each seed of each ``generate_image`` in a multi-turn
-# trajectory -- to a finished 50-step ODE (the official BAGEL inference schedule),
-# which is deterministic but has no policy ratio to optimise.
-#
-# The grain that motivated ``ode`` is NOT inherent to SDE and NOT a step-count effect.
-# ``BagelPipelineWithLogProb.forward`` documents the cause itself (see the warning in
-# ``pipelines/bagel_flow_grpo/vllm_omni_rollout_adapter.py``): it is the
-# ``sde_window is None`` fallback, where the inner scheduler applies its default
-# ``noise_level`` to *every* step -- including the terminal sigma->0 step -- and
-# nothing removes that noise afterwards, so it is baked into the PNG. With a bounded
-# window (size 2 inside ``[0, 7]``) the noise sits on a couple of early steps and the
-# later deterministic steps undo it, exactly as ``pr634-bagel-unigrpo`` and the
-# canonical ``flowgrpo_trainer/bagel`` recipes train. So ``sde`` fails loud below when
-# ``sde_window_size`` is absent rather than quietly emitting grainy images.
+# ``sde`` (default) keeps the trained FlowGRPO kernel from ``rollout.algo`` (``noise_level > 0`` + a bounded
+# ``sde_window_*``).
 GEN_DECODE_SDE = "sde"
 GEN_DECODE_ODE = "ode"
 # Env knob (not a Hydra key) so it cannot leak into the engine sampling params, which
@@ -275,13 +214,7 @@ def build_gen_sampling_params(
             params["seed"] = int(seed)
         return params
 
-    # SDE. ``base["logprobs"]`` is the per-phase answer: the worker sets it False for
-    # validation batches and leaves it True for training. A validation batch
-    # legitimately asks for a deterministic ODE decode with no SDE log-probs, so it
-    # must not trip the guards below; a training batch missing any of
-    # ``noise_level > 0`` / ``num_inference_steps`` / ``sde_window_size`` still must.
-    # Each missing key is a distinct way to silently lose the FlowGRPO trajectory --
-    # and for the window, to grain the image on the terminal sigma->0 step.
+    # SDE.
     wants_logprobs = (base or {}).get("logprobs") is not False
     params["logprobs"] = wants_logprobs
 
@@ -378,17 +311,7 @@ def stash_gen_row_from_diffusion_output(
     image_root: Optional[str] = None,
     require_traj: bool = True,
 ) -> dict[str, Any]:
-    """Build one GEN seed row.
-
-    ``require_traj`` is the training/validation split.  Training packs the FlowGRPO
-    trajectory (latents + timesteps + SDE log-probs) and fails closed without it.
-    Validation instead decodes with ODE (``noise_level=0.0``), which by construction
-    has no SDE log-probs, so it passes ``require_traj=False``: the row stays ``valid``
-    and keeps its ``image_path`` (so the image is dumped and RM-scored) but carries no
-    trajectory.  ``pack_dual_lane_episode`` then drops it from the GEN *training* lane
-    via ``_sample_has_gen_traj`` and books it as ``gen/dropped_incomplete_groups`` --
-    the state that helper exists to express.
-    """
+    """Build one GEN seed row."""
     if not hasattr(output, "diffusion_output"):
         raise RuntimeError(
             "Bagel Co-RL (Joint-Training) generate_image returned a non-diffusion output: dual-role GEN "
@@ -414,7 +337,10 @@ def stash_gen_row_from_diffusion_output(
             "refuse soft-fallback to stashed-only / skip GEN loss."
         )
 
+    from verl_omni.agent_loop.bagel_corl_lib import serving_rollout_provenance
+
     extra = dict(getattr(output, "extra_fields", None) or {})
+    provenance = serving_rollout_provenance(extra)
     image_path = extra.get("image_path") or extra.get("path")
     if not image_path:
         image_path = save_diffusion_image(output.diffusion_output, seed=seed, root=image_root)
@@ -425,4 +351,5 @@ def stash_gen_row_from_diffusion_output(
         "timesteps": timesteps,
         "rollout_log_probs": log_probs,
         "image_path": image_path,
+        **provenance,
     }

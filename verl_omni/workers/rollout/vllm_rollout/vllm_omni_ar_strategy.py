@@ -485,6 +485,7 @@ class ARStrategy(OmniStrategyBase):
 
         extra_fields = {"global_steps": self.server.global_steps}
         extra_fields.update(rollout_fields)
+        extra_fields.update(self.observed_rollout_provenance(final_res))
 
         num_prompt_logprobs = getattr(params, "prompt_logprobs", None)
         if num_prompt_logprobs is not None and hasattr(req_output, "prompt_logprobs"):

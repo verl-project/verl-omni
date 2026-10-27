@@ -41,7 +41,7 @@ under ``extra_info["bagel_corl"]``.
   ``sample_scores`` / ``sample_good_enough`` aligned to ``image_paths`` — exactly
   what ``parse_rm_result`` consumes off ``reward_extra_info``.
 - Episode post-hoc (no payload): delegated to
-  ``agentic_multidim_reward.compute_score`` (image-grounded when ``K >= 1``,
+  ``bagel_corl_multidim_reward.compute_score`` (image-grounded when ``K >= 1``,
   multi-dim RPCO when ``K = 0``) — the authoritative token-GRPO scalar.
 
 Fails loud when any image cannot be scored (missing file, empty judge URL, parse
@@ -302,7 +302,7 @@ def compute_score(
     """
     payload = _mid_loop_payload(extra_info)
     if payload is None:
-        from verl_omni.utils.reward_score.agentic_multidim_reward import compute_score as episode_compute_score
+        from verl_omni.utils.reward_score.bagel_corl_multidim_reward import compute_score as episode_compute_score
 
         return episode_compute_score(
             data_source=data_source,
@@ -330,7 +330,14 @@ def compute_score(
     # Route the judge at the reward pool when one is deployed (see
     # ``_resolve_judge_endpoint``); falls back to the configured judge otherwise.
     knobs = _resolve_judge_endpoint(knobs, kwargs)
-    user_request = str(extra_info.get("user_prompt") or extra_info.get("raw_prompt") or "")
+    # ``user_prompt`` is the rendered user turn, which carries the dataset's brevity
+    # instructions; the judge caption must be the request alone.
+    raw_request = extra_info.get("raw_prompt")
+    user_request = (
+        raw_request.strip()
+        if isinstance(raw_request, str) and raw_request.strip()
+        else str(extra_info.get("user_prompt") or "")
+    )
     image_prompt = str(payload.get("image_prompt") or "")
     reference_paths = [str(p) for p in payload.get("reference_paths") or []]
     if reference_paths:

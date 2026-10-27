@@ -11,14 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""CPU tests for the per-episode trajectory dump of the Bagel Co-RL UND lane.
-
-The case these exist for is the **degenerate K = 0 episode**: the UND lane never emits a
-``generate_image`` verdict, so no GEN request is ever issued, ``gen/skipped_no_groups`` is
-1 and the reward is a flat 0. Nothing in the training row records *why*, because the reason
-is the raw UND text of each turn. These tests pin down that (a) the text is captured even
-with ``BAGEL_CORL_DEBUG`` unset, and (b) the dump writes the K=0 signature to disk.
-"""
+"""CPU tests for the per-episode trajectory dump of the Bagel Co-RL UND lane."""
 
 from __future__ import annotations
 
@@ -59,6 +52,16 @@ async def _noop_gen(**kwargs):
     return [{"valid": True, "image_path": "/tmp/x.png"} for _ in kwargs["seeds"]]
 
 
+def _run_episode(und_decode, *, samples, generate_fn, **kwargs):
+    async def run():
+        tool = BagelGenerateImageTool(gen_samples_per_call=samples, generate_fn=generate_fn)
+        return await run_serial_episode(
+            dataset_task_uid="task", policy_version=1, und_decode=und_decode, generate_tool=tool, **kwargs
+        )
+
+    return asyncio.run(run())
+
+
 def _degenerate_episode(max_und_turns: int = 3) -> EpisodeRollout:
     """Drive a real episode whose every UND turn is a repetition loop (K stays 0)."""
 
@@ -66,27 +69,18 @@ def _degenerate_episode(max_und_turns: int = 3) -> EpisodeRollout:
         _ = kwargs
         return {"token_ids": [11] * 1024, "text": DEGENERATE_TEXT}
 
-    async def _run():
-        tool = BagelGenerateImageTool(gen_samples_per_call=2, generate_fn=_noop_gen)
-        return await run_serial_episode(
-            dataset_task_uid="task",
-            policy_version=1,
-            prompt_ids=[1, 2, 3],
-            und_decode=und_decode,
-            generate_tool=tool,
-            tokenizer=_FakeTokenizer(),
-            max_und_turns=max_und_turns,
-        )
-
-    return asyncio.run(_run())
+    return _run_episode(
+        und_decode,
+        samples=2,
+        generate_fn=_noop_gen,
+        prompt_ids=[1, 2, 3],
+        tokenizer=_FakeTokenizer(),
+        max_und_turns=max_und_turns,
+    )
 
 
 def test_degenerate_turns_are_recorded_with_their_raw_text():
-    """The K=0 episode must leave a per-turn record -- that is the whole point of the dump.
-
-    ``BAGEL_CORL_DEBUG`` is not set here, mirroring the long run that produced the stall:
-    the raw text has to be kept regardless, or there is nothing to diagnose.
-    """
+    """The K=0 episode must leave a per-turn record -- that is the whole point of the dump."""
     episode = _degenerate_episode(max_und_turns=3)
 
     assert episode.num_gen_calls == 0
@@ -109,19 +103,9 @@ def test_a_generate_image_call_is_recorded_as_its_own_trace_entry():
             "text": '{"name": "generate_image", "arguments": {"prompt": "a cat"}}',
         }
 
-    async def _run():
-        tool = BagelGenerateImageTool(gen_samples_per_call=2, generate_fn=_noop_gen)
-        return await run_serial_episode(
-            dataset_task_uid="task",
-            policy_version=1,
-            prompt_ids=[1],
-            und_decode=und_decode,
-            generate_tool=tool,
-            tokenizer=_FakeTokenizer(),
-            max_und_turns=2,
-        )
-
-    episode = asyncio.run(_run())
+    episode = _run_episode(
+        und_decode, samples=2, generate_fn=_noop_gen, prompt_ids=[1], tokenizer=_FakeTokenizer(), max_und_turns=2
+    )
 
     calls = [r for r in episode.turn_trace if r["record"] == "gen_call"]
     assert len(calls) == 1
@@ -171,18 +155,7 @@ def test_dump_records_the_gen_call_block_when_the_lane_ran(tmp_path, monkeypatch
     async def und_decode(**kwargs):
         return {"token_ids": [7], "text": '{"name": "generate_image", "arguments": {"prompt": "a dog"}}'}
 
-    async def _run():
-        tool = BagelGenerateImageTool(gen_samples_per_call=1, generate_fn=_noop_gen)
-        return await run_serial_episode(
-            dataset_task_uid="task",
-            policy_version=1,
-            prompt_ids=[1],
-            und_decode=und_decode,
-            generate_tool=tool,
-            max_und_turns=1,
-        )
-
-    episode = asyncio.run(_run())
+    episode = _run_episode(und_decode, samples=1, generate_fn=_noop_gen, prompt_ids=[1], max_und_turns=1)
     dump_episode_trace(episode=episode, relpath="step_000001/sample_1.01", step=1, sample_index=1)
 
     payload = json.loads((tmp_path / "rollout_trajectories" / "step_000001" / "sample_1.01.json").read_text())
@@ -211,22 +184,14 @@ def test_dump_failure_never_propagates(monkeypatch):
     assert dump_episode_trace(episode=episode, relpath="step_000001/sample_1.01") is None
 
 
-# --------------------------------------------------------------------------- #
 # hermes_actions: the action-level index the bagel TQ worker never wrote
-# --------------------------------------------------------------------------- #
 def _hermes_rows(tmp_path, step_tag="step_000004"):
     path = tmp_path / "hermes_actions" / f"{step_tag}.jsonl"
     return [json.loads(line) for line in path.read_text().splitlines()]
 
 
 def _bind_hermes(tmp_path, monkeypatch):
-    """Point the shared run root at the test tree.
-
-    Patch the *shared* ``paths`` state rather than each module's imported name:
-    ``bagel_corl`` and ``image_gen_rollout_dump`` both resolve through
-    ``verl_omni.tools.trajectory.paths``, so patching only the former leaves the
-    latter writing into the real ``outputs/e2e`` tree.
-    """
+    """Point the shared run root at the test tree."""
     from verl_omni.tools.trajectory import paths as traj_paths
 
     monkeypatch.setattr(traj_paths, "_diffusion_image_dir", tmp_path / "rollout_images")
@@ -264,12 +229,7 @@ def test_hermes_row_records_the_k0_signature(tmp_path, monkeypatch):
 
 
 def test_hermes_row_points_at_the_materialized_image_not_the_scratch_file(tmp_path, monkeypatch):
-    """The row must name the ``rollout_images/`` copy, matching the sibling agentic lane.
-
-    The GEN tool returns a ``/tmp`` scratch path; the images are then copied into
-    ``rollout_images/<relpath>/``. The index is what a reviewer reads, so it has to name
-    the durable copy.
-    """
+    """The row must name the ``rollout_images/`` copy, matching the sibling agentic lane."""
     _bind_hermes(tmp_path, monkeypatch)
     scratch = tmp_path / "scratch"
     scratch.mkdir()
@@ -281,18 +241,7 @@ def test_hermes_row_points_at_the_materialized_image_not_the_scratch_file(tmp_pa
         _ = kwargs
         return {"token_ids": [7], "text": '{"name": "generate_image", "arguments": {"prompt": "a dog"}}'}
 
-    async def _run():
-        tool = BagelGenerateImageTool(gen_samples_per_call=2, generate_fn=gen_fn)
-        return await run_serial_episode(
-            dataset_task_uid="task",
-            policy_version=1,
-            prompt_ids=[1],
-            und_decode=und_decode,
-            generate_tool=tool,
-            max_und_turns=1,
-        )
-
-    episode = asyncio.run(_run())
+    episode = _run_episode(und_decode, samples=2, generate_fn=gen_fn, prompt_ids=[1], max_und_turns=1)
     dump_episode_hermes_action(
         episode=episode,
         relpath="step_000002/sample_3.01",
@@ -336,11 +285,7 @@ def test_hermes_dump_failure_never_propagates(monkeypatch):
 
 
 def _gen_episode(scratch):
-    """One episode that really fires ``generate_image`` with two GEN seeds.
-
-    The seed PNGs are written to disk: ``dump_bagel_corl_episode_images`` copies bytes
-    and skips sources that do not exist, so a path string alone would copy nothing.
-    """
+    """One episode that really fires ``generate_image`` with two GEN seeds."""
     scratch.mkdir(parents=True, exist_ok=True)
 
     async def gen_fn(**kwargs):
@@ -355,28 +300,11 @@ def _gen_episode(scratch):
         _ = kwargs
         return {"token_ids": [7], "text": '{"name": "generate_image", "arguments": {"prompt": "a cat"}}'}
 
-    async def _run():
-        tool = BagelGenerateImageTool(gen_samples_per_call=2, generate_fn=gen_fn)
-        return await run_serial_episode(
-            dataset_task_uid="task",
-            policy_version=1,
-            prompt_ids=[1],
-            und_decode=und_decode,
-            generate_tool=tool,
-            max_und_turns=1,
-        )
-
-    return asyncio.run(_run())
+    return _run_episode(und_decode, samples=2, generate_fn=gen_fn, prompt_ids=[1], max_und_turns=1)
 
 
 def test_episode_path_produces_all_three_artifact_trees(tmp_path, monkeypatch):
-    """The recipe's only live hook must yield traj + hermes_actions + rollout_images.
-
-    Regression for the observed layout: ``outputs/e2e/bagel_corl_pr1/`` had
-    ``rollout_trajectories/`` alone, with 42 PNGs stranded in
-    ``/tmp/bagel_corl_gen/``. ``BagelCorlAgentLoopWorkerTQ`` never reaches the
-    driver-side dump, so all three have to come off this path.
-    """
+    """The recipe's only live hook must yield traj + hermes_actions + rollout_images."""
     _bind_hermes(tmp_path, monkeypatch)
     scratch = tmp_path / "scratch"
     scratch.mkdir()
@@ -422,12 +350,7 @@ def _bind_project(tmp_path, monkeypatch):
 
 
 def test_trajectory_names_the_project_relative_copy_not_the_scratch_file(tmp_path, monkeypatch):
-    """The trajectory JSON/TXT must point at the durable ``rollout_images/`` copy.
-
-    Measured 2026-10-13 on ``bagel_corl_rm1_0123_20261013_084015``: every ``gen_call`` in
-    ``rollout_trajectories/`` read ``/tmp/bagel_corl_gen/gen_*.png`` -- a host-local file
-    the next run's scratch dir can overwrite -- while the copy sat beside the trajectory.
-    """
+    """The trajectory JSON/TXT must point at the durable ``rollout_images/`` copy."""
     _bind_project(tmp_path, monkeypatch)
     episode = _gen_episode(tmp_path / "scratch")
     relpath = "step_000009/sample_2.01"
@@ -523,14 +446,7 @@ def test_episode_image_dump_failure_never_propagates(monkeypatch, tmp_path):
 
 
 def test_two_tasks_at_the_same_sibling_index_do_not_collide():
-    """``session_id`` is the rollout *sibling* index, not the sample identity.
-
-    Measured 2026-09-22 on ``bagel_corl_20260922_025201`` step 60: keying both the
-    artifact path and the GEN seed base on ``session_id`` alone put 740 PNGs into two
-    folders under two seed families and left only 2 trajectory files, i.e. ~370 episodes
-    overwrote each other's dump and repeated prompts returned near-identical images.
-    Every task's sibling 0 shares ``session_id``, so it cannot identify an episode.
-    """
+    """``session_id`` is the rollout *sibling* index, not the sample identity."""
     a_path, a_seed = episode_artifact_keys(dataset_task_uid="task_a", session_id=0, global_steps=60)
     b_path, b_seed = episode_artifact_keys(dataset_task_uid="task_b", session_id=0, global_steps=60)
     sibling_path, sibling_seed = episode_artifact_keys(dataset_task_uid="task_a", session_id=1, global_steps=60)

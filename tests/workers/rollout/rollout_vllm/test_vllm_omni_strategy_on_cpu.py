@@ -609,7 +609,13 @@ async def test_ar_strategy_retains_requested_stage_outputs_and_targets_weight_sy
     assert rpc_result == [None]
 
     output = strategy.process_output(result, ar_strategy_module.SamplingParams(), {})
-    assert output.extra_fields == {"global_steps": 3, "audio_sample_rate": 24_000}
+    assert output.extra_fields == {
+        "global_steps": 3,
+        "audio_sample_rate": 24_000,
+        "rollout_policy_version": 3,
+        "rollout_replica_id": 0,
+        "serving_provenance_verified": True,
+    }
     assert strategy._rollout_fields_by_request_id == {}
 
     server.config = SimpleNamespace(max_model_len=8, prompt_length=4, response_length=4)

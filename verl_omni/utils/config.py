@@ -212,7 +212,7 @@ def validate_bagel_corl_config(config: Any) -> None:
             "bagel_corl_sync: dual-role UND AR serving is not ready. "
             "bagel_single_stage is GEN-only (DiffusionStrategy); UND _und_decode then fails with "
             "'num_inference_steps must be set for RL rollouts' and leaves TQ empty. "
-            "Prove Hermes generate_image via spike_und_hermes.py / dual-role replica, then set "
+            "Verify Hermes generate_image on the UND AR replica, then set "
             "actor_rollout_ref.rollout.agent.und_ar_serving_ready=True. "
             "Do not fall back to Qwen3-VL for UND."
         )
@@ -335,6 +335,7 @@ def _bagel_corl_divisibility_failures(config: Any, *, n: int) -> list[str]:
         if tp and tp > 0 and pool % tp != 0:
             failures.append(f"trainer.n_gpus_per_node={pool} % {label}={tp} != 0")
     return failures
+
 
 # ---------------------------------------------------------------------------
 # LoRA config surface

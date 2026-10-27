@@ -26,97 +26,45 @@ import re
 import subprocess
 from pathlib import Path
 
-CONFIG_ALLOWLIST = (
-    "actor_rollout_ref.actor.optim.lr",
-    "actor_rollout_ref.model.lr_gen",
-    "actor_rollout_ref.actor.optim.lr_warmup_steps_ratio",
-    "actor_rollout_ref.actor.optim.lr_scheduler_type",
-    "actor_rollout_ref.actor.optim.min_lr_ratio",
-    "actor_rollout_ref.actor.optim.weight_decay",
-    "actor_rollout_ref.model.path",
-    "actor_rollout_ref.model.lora_rank",
-    "actor_rollout_ref.model.tokenizer_path",
-    "actor_rollout_ref.model.lora_alpha",
-    "actor_rollout_ref.model.lora_dtype",
-    "actor_rollout_ref.model.lora.merge",
-    "actor_rollout_ref.model.target_modules",
-    "actor_rollout_ref.model.algorithm",
-    "actor_rollout_ref.model.composite_mode",
-    "actor_rollout_ref.model.architecture",
-    "actor_rollout_ref.actor.strategy",
-    "actor_rollout_ref.actor.ppo_mini_batch_size",
-    "actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu",
-    "actor_rollout_ref.actor.ppo_epochs",
-    "actor_rollout_ref.actor.data_loader_seed",
-    "actor_rollout_ref.actor.fsdp_config.seed",
-    "actor_rollout_ref.rollout.seed",
-    "actor_rollout_ref.actor.use_kl_loss",
-    "actor_rollout_ref.actor.kl_loss_coef",
-    "actor_rollout_ref.actor.entropy_coeff",
-    "actor_rollout_ref.actor.diffusion_loss.clip_ratio",
-    "actor_rollout_ref.actor.diffusion_loss.loss_weight_und",
-    "actor_rollout_ref.actor.diffusion_loss.loss_weight_gen",
-    "actor_rollout_ref.rollout.n",
-    "actor_rollout_ref.rollout.agent.gen_samples_per_call",
-    "actor_rollout_ref.rollout.agent.max_generate_passes",
-    "algorithm.norm_adv_by_std_in_grpo",
-    "actor_rollout_ref.rollout.pipeline.height",
-    "actor_rollout_ref.rollout.pipeline.width",
-    "actor_rollout_ref.rollout.pipeline.num_inference_steps",
-    "actor_rollout_ref.rollout.algo.noise_level",
-    "actor_rollout_ref.rollout.pipeline.cfg_text_scale",
-    "actor_rollout_ref.rollout.pipeline.cfg_img_scale",
-    "actor_rollout_ref.rollout.pipeline.max_sequence_length",
-    "actor_rollout_ref.rollout.tensor_model_parallel_size",
-    "actor_rollout_ref.rollout.val_kwargs.pipeline.num_inference_steps",
-    "actor_rollout_ref.rollout.val_kwargs.algo.noise_level",
-    "actor_rollout_ref.rollout.engine_kwargs.vllm_omni.deploy_config",
-    "actor_rollout_ref.rollout.agent.und_deploy_config",
-    "actor_rollout_ref.rollout.agent.max_und_turns",
-    "actor_rollout_ref.rollout.algo.sde_window_size",
-    "actor_rollout_ref.rollout.algo.sde_window_range",
-    "actor_rollout_ref.rollout.temperature",
-    "actor_rollout_ref.rollout.top_p",
-    "actor_rollout_ref.rollout.top_k",
-    "actor_rollout_ref.rollout.repetition_penalty",
-    "actor_rollout_ref.actor.fsdp_config.model_dtype",
-    "data.train_files",
-    "data.val_files",
-    "data.holdout_files",
-    "data.seed",
-    "trainer.seed",
-    "data.train_batch_size",
-    "data.val_batch_size",
-    "data.val_max_samples",
-    "data.max_prompt_length",
-    "data.max_response_length",
-    "trainer.n_gpus_per_node",
-    "trainer.nnodes",
-    "trainer.resume_mode",
-    "trainer.resume_from_path",
-    "trainer.total_training_steps",
-    "trainer.project_name",
-    "trainer.experiment_name",
-    "scorer_version",
-    "evaluation_scorer_version",
-    "logprob_convention",
-    "checkpoint_step",
-    "effective_optimizer_group_lrs.und",
-    "effective_optimizer_group_lrs.gen",
-    "actor_rollout_ref.model.freeze_und",
-    "actor_rollout_ref.model.corl_freeze_und",
-    "actor_rollout_ref.model.corl_freeze_gen",
-    "actor_rollout_ref.model.corl_no_optimizer_step",
-    "actor_rollout_ref.rollout.agent.corl_fixed_gen_prompt",
-    "agentic_image_gen.corl_reward_version",
-    "agentic_image_gen.unified_good_enough_threshold",
-    "agentic_image_gen.score_backend",
-    "agentic_image_gen.good_enough_threshold",
-    "agentic_image_gen.pickscore_good_enough_threshold",
-    "reward.reward_model.model_path",
-    "reward.reward_model.enable",
-    "reward.custom_reward_function.path",
-    "reward.custom_reward_function.name",
+CONFIG_ALLOWLIST = tuple(
+    """
+actor_rollout_ref.actor.optim.lr actor_rollout_ref.model.lr_gen actor_rollout_ref.actor.optim.lr_warmup_steps_ratio
+actor_rollout_ref.actor.optim.lr_scheduler_type actor_rollout_ref.actor.optim.min_lr_ratio
+actor_rollout_ref.actor.optim.weight_decay actor_rollout_ref.model.path actor_rollout_ref.model.lora_rank
+actor_rollout_ref.model.tokenizer_path actor_rollout_ref.model.lora_alpha actor_rollout_ref.model.lora_dtype
+actor_rollout_ref.model.lora.merge actor_rollout_ref.model.target_modules actor_rollout_ref.model.algorithm
+actor_rollout_ref.model.composite_mode actor_rollout_ref.model.architecture actor_rollout_ref.actor.strategy
+actor_rollout_ref.actor.ppo_mini_batch_size actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu
+actor_rollout_ref.actor.ppo_epochs actor_rollout_ref.actor.data_loader_seed
+actor_rollout_ref.actor.fsdp_config.seed actor_rollout_ref.rollout.seed actor_rollout_ref.actor.use_kl_loss
+actor_rollout_ref.actor.kl_loss_coef actor_rollout_ref.actor.entropy_coeff
+actor_rollout_ref.actor.diffusion_loss.clip_ratio actor_rollout_ref.actor.diffusion_loss.loss_weight_und
+actor_rollout_ref.actor.diffusion_loss.loss_weight_gen actor_rollout_ref.rollout.n
+actor_rollout_ref.rollout.agent.gen_samples_per_call actor_rollout_ref.rollout.agent.max_generate_passes
+algorithm.norm_adv_by_std_in_grpo actor_rollout_ref.rollout.pipeline.height
+actor_rollout_ref.rollout.pipeline.width actor_rollout_ref.rollout.pipeline.num_inference_steps
+actor_rollout_ref.rollout.algo.noise_level actor_rollout_ref.rollout.pipeline.cfg_text_scale
+actor_rollout_ref.rollout.pipeline.cfg_img_scale actor_rollout_ref.rollout.pipeline.max_sequence_length
+actor_rollout_ref.rollout.tensor_model_parallel_size
+actor_rollout_ref.rollout.val_kwargs.pipeline.num_inference_steps
+actor_rollout_ref.rollout.val_kwargs.algo.noise_level
+actor_rollout_ref.rollout.engine_kwargs.vllm_omni.deploy_config actor_rollout_ref.rollout.agent.und_deploy_config
+actor_rollout_ref.rollout.agent.max_und_turns actor_rollout_ref.rollout.algo.sde_window_size
+actor_rollout_ref.rollout.algo.sde_window_range actor_rollout_ref.rollout.temperature
+actor_rollout_ref.rollout.logprobs_mode actor_rollout_ref.rollout.top_p actor_rollout_ref.rollout.top_k
+actor_rollout_ref.rollout.repetition_penalty actor_rollout_ref.actor.fsdp_config.model_dtype
+actor_rollout_ref.actor.diffusion_loss.use_gen_kl_loss data.train_files data.val_files data.holdout_files data.seed
+trainer.seed data.train_batch_size data.val_batch_size data.val_max_samples data.max_prompt_length
+data.max_response_length trainer.n_gpus_per_node trainer.nnodes trainer.resume_mode trainer.resume_from_path
+trainer.total_training_steps trainer.project_name trainer.experiment_name scorer_version evaluation_scorer_version
+logprob_convention checkpoint_step effective_optimizer_group_lrs.und effective_optimizer_group_lrs.gen
+actor_rollout_ref.model.freeze_und actor_rollout_ref.model.corl_freeze_und actor_rollout_ref.model.corl_freeze_gen
+actor_rollout_ref.model.corl_no_optimizer_step actor_rollout_ref.rollout.agent.corl_fixed_gen_prompt
+agentic_image_gen.corl_reward_version agentic_image_gen.unified_good_enough_threshold
+agentic_image_gen.score_backend agentic_image_gen.good_enough_threshold
+agentic_image_gen.pickscore_good_enough_threshold reward.reward_model.model_path reward.reward_model.enable
+reward.custom_reward_function.path reward.custom_reward_function.name
+""".split()
 )
 SOURCE_SUFFIXES = {".py", ".sh", ".yaml", ".yml", ".json", ".toml", ".cfg", ".ini", ".cpp", ".cu", ".h"}
 
@@ -214,6 +162,11 @@ def write_run_manifest(output_dir: Path, resolved_config: dict, checkpoint_path:
     versions = {
         dist.metadata["Name"]: dist.version for dist in importlib.metadata.distributions() if dist.metadata["Name"]
     }
+    logprobs_mode = get(resolved_config, "actor_rollout_ref.rollout.logprobs_mode")
+    convention = {
+        "raw_logprobs": "raw_policy",
+        "processed_logprobs": "processed_behavior_vs_raw_actor",
+    }.get(logprobs_mode, get(resolved_config, "logprob_convention", "unverified"))
     manifest = {
         "schema_version": 1,
         "source": {
@@ -244,7 +197,10 @@ def write_run_manifest(output_dir: Path, resolved_config: dict, checkpoint_path:
             "training": get(resolved_config, "scorer_version"),
             "evaluation": get(resolved_config, "evaluation_scorer_version"),
         },
-        "logprob_convention": get(resolved_config, "logprob_convention", "unverified"),
+        "logprob_convention": convention,
+        "logprob_parity_verified": False,
+        "behavior_sampling_convention": "transformed",
+        "behavior_importance_correction": "unverified",
     }
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)

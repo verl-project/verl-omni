@@ -91,8 +91,7 @@ def validate_disjoint_lora_targets(target_modules: Iterable[str]) -> tuple[set[s
         ``(und_selected, gen_selected)`` subsets of the known target lists.
 
     Raises:
-        ValueError: A non-sequence value, an overlap, or a name that is neither UND nor GEN.
-    """
+        ValueError: A non-sequence value, an overlap, or a name that is neither UND nor GEN."""
     # A bare string is iterable, so "all-linear" (the shared model-config default) would
     # be sliced into characters and reported as unknown names. The dual-lane split is
     # only expressible as an explicit list, so reject the string up front.
@@ -204,14 +203,8 @@ _UND_AR_TOP_LEVEL_PREFIXES = ("time_embedder.", "vae2llm.", "llm2vae.", "latent_
 def route_actor_weight_for_und_ar(name: str) -> str:
     """Map an exported actor parameter name onto the UND AR Thinker's checkpoint layout.
 
-    The Thinker stage (vLLM-Omni ``OmniBagelForConditionalGeneration``) loads the published
-    ``ema.safetensors`` names at boot, so the sync sends exactly those names back: this is the
-    inverse of ``map_checkpoint_to_corl`` (``language_model.model.*`` -> bare, and
-    ``language_model.lm_head`` -> ``lm_head``) behind the ``transformer.`` export prefix.
-
     Raises:
-        ValueError: ``name`` does not carry the actor's ``transformer.`` export prefix.
-    """
+        ValueError: ``name`` does not carry the actor's ``transformer.`` export prefix."""
     if not name.startswith("transformer."):
         raise ValueError(f"UND AR weight sync expects actor names under 'transformer.', got {name!r}")
     inner = name[len("transformer.") :]
@@ -276,8 +269,7 @@ class BagelForCoRL(BagelForTraining):
         Returns:
             ``(B, L-1)`` log-probs aligned with ``input_ids[:, 1:]``, zeroed where
             ``response_mask[:, 1:]`` is 0. With ``with_entropy``, a ``(log_probs, entropy)`` pair
-            where ``entropy`` is the token-level policy entropy on the same grid and masking.
-        """
+            where ``entropy`` is the token-level policy entropy on the same grid and masking."""
         if input_ids.ndim != 2:
             raise ValueError("compute_und_log_prob expects input_ids of shape (B, L)")
         attention_mask = attention_mask.to(device=input_ids.device, dtype=torch.bool)

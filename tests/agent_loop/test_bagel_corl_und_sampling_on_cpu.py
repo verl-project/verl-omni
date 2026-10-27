@@ -11,42 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""CPU regression: the UND AR lane must never decode with the engine's raw defaults.
-
-``BagelDualRoleLLMServerClient.generate`` strips cross-role knobs before routing, but on the
-UND route it only *removed* the GEN (diffusion) keys -- it never touched the AR knobs, so the
-lane decoded with whatever the generic AR worker sent.
-
-That worker is ``verl``'s ``AgentLoopWorkerTQ.generate_sequences``, and what it sends is
-
-    sampling_params = dict(temperature=config.temperature, top_p=config.top_p,
-                           top_k=config.top_k, repetition_penalty=1.0, ...)
-
--- ``repetition_penalty=1.0`` is a hardcode; it never reads
-``actor_rollout_ref.rollout.repetition_penalty``. So the recipe's
-``ROLLOUT_REPETITION_PENALTY=1.05`` could not reach this lane, and because the key was
-*present* in the request the AR strategy's own
-``sampling_params.setdefault("repetition_penalty", self.server.config.repetition_penalty)``
-(``vllm_omni_ar_strategy``) never fired either. An "only fill the keys the caller omitted"
-rule was therefore a no-op on exactly the knob the collapse is about.
-
-Measured 2026-10-15 against the live AR replica, replaying the exact ``prompt_text`` of a
-degenerate rollout from ``bagel_corl_prfix_t07_20261015_142346_a1`` (the run that reported
-``episode/K: 0.0``, ``episode/K_zero: 1.0``, ``und/no_image_credit: 1.0``):
-
-    untruncated -> '\\n    }'                                        collapse, no tool call
-    mitigated   -> '{"name": "generate_image", "arguments": {...}}'  correct
-
-and the run under test (``..._162700_a1``) reproduced it through the real stack: with
-``temperature=0.7, top_p=0.9, top_k=50`` from the config but ``repetition_penalty=1.0`` from
-that hardcode, every episode looped ``\\tbuf_widget`` for all 8 turns (7 flagged degenerate,
-``gen_lane_skipped=True``, no GEN group to score).
-
-These tests pin the rule that fixes it: on the UND route the four AR knobs are resolved from
-``actor_rollout_ref.rollout`` (or the mitigated fallback when the config is silent) whenever
-the caller left them absent *or* at one of the untruncated defaults, while a value someone
-actually chose is preserved -- and that the routing call site really applies it.
-"""
+"""CPU regression: the UND AR lane must never decode with the engine's raw defaults."""
 
 from __future__ import annotations
 
@@ -91,13 +56,7 @@ def test_omitted_knobs_get_the_mitigated_fallback(config):
 
 
 def test_the_generic_ar_worker_repetition_penalty_is_replaced():
-    """The regression, exactly: the base worker's hardcoded ``repetition_penalty=1.0``.
-
-    ``verl``'s ``AgentLoopWorkerTQ.generate_sequences`` builds the request with
-    ``repetition_penalty=1.0`` and never reads the config's, so an "only fill what is
-    missing" rule left this lane decoding with no anti-repetition penalty at all and the
-    recipe's ``ROLLOUT_REPETITION_PENALTY=1.05`` unreachable.
-    """
+    """The regression, exactly: the base worker's hardcoded ``repetition_penalty=1.0``."""
     filled = fill_und_ar_sampling_params(dict(GENERIC_WORKER_PARAMS), OmegaConf.create({"repetition_penalty": 1.05}))
     assert filled["repetition_penalty"] == 1.05, "the hardcoded 1.0 must not survive onto the UND route"
     assert filled["temperature"] == 0.7, "the config's own AR values must be left alone"
@@ -181,11 +140,9 @@ def test_config_probe_returns_none_when_absent():
     assert config_sampling_value(None, "temperature") is None
 
 
-# ---------------------------------------------------------------------------
 # Call-site guards. The helper tests pin the contract; these drive the real ``generate``
 # with recording child clients, so deleting the fill from the routing path fails the
 # suite instead of silently restoring the as-trained collapse.
-# ---------------------------------------------------------------------------
 
 
 def _dual_role_client_cls():
@@ -246,13 +203,7 @@ def test_und_route_replaces_the_generic_workers_hardcoded_repetition_penalty():
 
 
 def test_und_route_reads_the_same_section_the_recipe_pins():
-    """The real call site passes the *trainer* config, so the fill must find the recipe keys.
-
-    This is the difference between the fill being load-bearing and being decorative: on the
-    real path the knobs sit at ``actor_rollout_ref.rollout``, so a probe that only looked at
-    the root would silently answer "unset" and pin the fallback even for a run launched with
-    ``ROLLOUT_TEMPERATURE`` overridden.
-    """
+    """The real call site passes the *trainer* config, so the fill must find the recipe keys."""
     config = {
         "actor_rollout_ref": {"rollout": {"temperature": 0.55, "top_p": 0.85, "top_k": 7, "repetition_penalty": 1.11}}
     }

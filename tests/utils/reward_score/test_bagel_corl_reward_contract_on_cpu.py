@@ -72,7 +72,7 @@ def test_missing_or_untrusted_quality_fails_closed():
 
 
 def test_v2_ignores_policy_claims_and_requires_envelope():
-    ns = load_functions("verl_omni/utils/reward_score/agentic_multidim_reward.py", ["_trusted_v2_reward"], math=math)
+    ns = load_functions("verl_omni/utils/reward_score/bagel_corl_multidim_reward.py", ["_trusted_v2_reward"], math=math)
     f = ns["_trusted_v2_reward"]
     with pytest.raises(ValueError):
         f({"image_reward_final": 1.0})
@@ -125,9 +125,14 @@ def test_v2_rubric_disagreement_keeps_score_stop(monkeypatch):
     assert seen == ["original", "original"]
     assert result["sample_judge"][0]["correctness"] == 1.0
 
+    seen.clear()
+    payload["extra_info"] = {"user_prompt": "original Keep any private thinking short.", "raw_prompt": "original"}
+    scorer.compute_score(extra_info={"bagel_corl": payload})
+    assert seen == ["original", "original"]
+
 
 def test_posthoc_v2_uses_same_stored_image_scores_and_keeps_structure(monkeypatch):
-    scorer = load_module("verl_omni/utils/reward_score/agentic_multidim_reward.py")
+    scorer = load_module("verl_omni/utils/reward_score/bagel_corl_multidim_reward.py")
     # Exercise the full scalar assembly with a valid protocol fixture from parser-independent helpers.
     monkeypatch.setattr(scorer, "_normalize_trajectory_dialect", lambda t: t)
     monkeypatch.setattr(scorer, "_extract_tool_calls", lambda t: [(0, 1, {"name": "generate_image"})])
@@ -277,8 +282,103 @@ def test_forced_done_cannot_be_autonomous():
         orelse=[],
     )
     for forced in (True, False):
-        ns = {"kind": "done", "forced": forced, "autonomous_done": False}
+        spent = type("SpentTool", (), {"remaining_passes": staticmethod(lambda: 0)})()
+        ns = {"kind": "done", "forced": forced, "autonomous_done": False, "generate_tool": spent}
         exec(
             compile(ast.fix_missing_locations(ast.Module(body=[loop], type_ignores=[])), "done_attribution", "exec"), ns
         )
         assert ns["autonomous_done"] is (not forced)
+
+
+@pytest.mark.parametrize("failure", ["timeout", "reward_failure", "missing_score", "wrong_seed_count"])
+def test_rm_failure_cannot_mark_a_sample_as_trusted(monkeypatch, failure):
+    """A failed real adapter invocation must not manufacture successful RM credit."""
+    import asyncio
+    import sys
+
+    # The adapter imports Ray only for its ObjectRef check; no Ray server is needed.
+    monkeypatch.setitem(sys.modules, "ray", SimpleNamespace(ObjectRef=type("ObjectRef", (), {})))
+    adapter = load_module("verl_omni/agent_loop/bagel_corl_rm.py")
+    item = SimpleNamespace(valid=True, image_path="fixture.png", rm_score=None, rm_score_source=None)
+
+    async def compute(data):
+        if failure == "timeout":
+            raise TimeoutError("RM request timed out")
+        if failure == "reward_failure":
+            raise RuntimeError("reward backend unavailable")
+        if failure == "missing_score":
+            return {"reward_extra_info": {}}
+        return {"reward_score": 0.8, "reward_extra_info": {"sample_scores": [0.7, 0.9]}}
+
+    score = adapter.make_rm_score_fn(SimpleNamespace(compute_score=compute), data_builder=lambda p: p)
+    error = TimeoutError if failure == "timeout" else RuntimeError
+    with pytest.raises(error):
+        asyncio.run(score([item]))
+    assert item.rm_score is None
+    assert item.rm_score_source is None
+
+
+def test_plan_reference_roundtrip_from_breakdown_builder_to_reward():
+    """Synthetic metadata runs real parser/builder/scorer without serving imports."""
+    import json
+    import sys
+    import types
+
+    contracts = load_module("verl_omni/utils/dataset/visual_reflection/contracts.py")
+    path = "verl_omni/utils/dataset/visual_reflection/unicot_breakdown.py"
+    tree = ast.parse((ROOT / path).read_text(encoding="utf8"))
+    tree.body = [n for n in tree.body if not isinstance(n, ast.ImportFrom) or not n.level]
+    name = "isolated_breakdown_contract_test"
+    parser = types.ModuleType(name)
+    parser.__dict__.update(
+        {
+            key: getattr(contracts, key)
+            for key in ("RejectionReason", "VisualReflectionDataError", "require_nonempty_text")
+        }
+    )
+    sys.modules[name] = parser  # dataclasses resolves annotations through its defining module
+    try:
+        exec(compile(ast.fix_missing_locations(tree), path, "exec"), parser.__dict__)
+        ns = load_functions(
+            "verl_omni/utils/dataset/visual_reflection/build_unicot_agentic_rl.py",
+            ["_parse_breakdown_rows", "_build_parquet_row", "_weights", "_env_weight", "_with_brevity"],
+            Any=object,
+            os=__import__("os"),
+            parse_unicot_breakdown_record=parser.parse_unicot_breakdown_record,
+            VisualReflectionDataError=contracts.VisualReflectionDataError,
+            MANIFEST_ID="synthetic-contract",
+            REWARD_DIMS=("reflect", "plan", "format", "tool", "result"),
+            UNICOT_BREAKDOWN_DATASET_ID="synthetic",
+            PLAN_DATA_SOURCE="unicot_breakdown",
+            PLAN_ABILITY="agentic_plan_generate",
+            PLAN_SYSTEM_PROMPT="Write a short numbered plan.",
+            _BREVITY_SUFFIX="",
+            _CLI_WEIGHTS=None,
+            _split_record=lambda **kwargs: kwargs,
+        )
+        reference = "Draw a red fox outdoors"
+        rows, rejected = ns["_parse_breakdown_rows"](
+            [
+                {
+                    "data_id": "synthetic-plan",
+                    "prompt": "Create a fox scene.",
+                    "subtasks": [reference, None, None],
+                    "subtask_images": ["fixture.png", None, None],
+                }
+            ]
+        )
+        assert rejected == []
+        exported = ns["_build_parquet_row"](rows[0], split="validation", index=0)
+        restored = json.loads(json.dumps(exported))
+        gt = restored["reward_model"]["ground_truth"]
+        assert gt["task_type"] == "plan"
+        assert gt["reference_subtasks"] == [reference]
+        assert restored["extra_info"]["plan_expected"] is True
+        assert all(reference not in message["content"] for message in restored["prompt"])
+        scorer = load_module("verl_omni/utils/reward_score/bagel_corl_multidim_reward.py")
+        text = "Plan:\n1. Draw a red fox outdoors\n"
+        assert scorer._plan_reward(text, gt) == 1.0
+        assert scorer._plan_reward("Done.", gt) == 0.0
+        assert scorer._plan_reward(text, {"task_type": "plan"}) == 0.0
+    finally:
+        sys.modules.pop(name, None)

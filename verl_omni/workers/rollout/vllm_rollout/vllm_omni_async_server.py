@@ -49,7 +49,11 @@ from verl_omni.workers.rollout.base import get_rollout_sequence_parallel_size, g
 from verl_omni.workers.rollout.replica import DiffusionOutput
 from verl_omni.workers.rollout.vllm_rollout.vllm_omni_ar_strategy import ARStrategy
 from verl_omni.workers.rollout.vllm_rollout.vllm_omni_diffusion_strategy import DiffusionStrategy
-from verl_omni.workers.rollout.vllm_rollout.zmq_utils import colocate_zmq_handle, namespace_colocate_zmq_handle
+from verl_omni.workers.rollout.vllm_rollout.zmq_utils import (
+    colocate_zmq_handle,
+    export_colocate_zmq_namespace,
+    namespace_colocate_zmq_handle,
+)
 
 logger = logging.getLogger(__file__)
 logger.setLevel(logging.INFO)
@@ -328,6 +332,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
 
     def _post_init(self, cuda_visible_devices: str) -> None:
         """Run strategy post-init and preserve the replica device list."""
+        export_colocate_zmq_namespace()
         if get_rollout_sequence_parallel_size(self.config) > 1:
             self.replica_world_size = get_rollout_world_size(self.config)
             profiler = self.profiler_controller
@@ -886,12 +891,10 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         sleep issued while a decode is still running tears that request down *and* unmaps the
         memory the worker is reading it from.
 
-        Why it counts here rather than asking the engine: ``AsyncOmni.request_states`` is
-        append-only -- only its ``abort`` path ever pops, so it never empties and would always read
-        as "everything is in flight". ``vLLMOmniHttpServer`` is the single entry point for both
-        lanes' ``generate`` calls, so it is the one place that can count this exactly (a *number*,
-        not a set of ids, because the GEN S-group deliberately reuses one ``routing_key`` across
-        siblings).
+        The server admission counter covers registration and cleanup windows around
+        engine requests; the native registry's lifetime varies across serving versions.
+        Count calls rather than IDs because the GEN S-group deliberately reuses one
+        ``routing_key`` across siblings.
 
         On timeout it logs and returns the remainder instead of raising: the caller is a sleep
         and the engine's own abort semantics are the fallback.

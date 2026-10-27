@@ -95,3 +95,31 @@ def test_manifest_does_not_hash_its_own_output(tmp_path):
     path = tool.write_run_manifest(repo / "unignored-output", {"source_root": str(repo)}, None)
     first = path.read_bytes()
     assert tool.write_run_manifest(repo / "unignored-output", {"source_root": str(repo)}, None).read_bytes() == first
+
+
+@pytest.mark.parametrize(
+    "mode,convention",
+    [
+        ("raw_logprobs", "raw_policy"),
+        ("processed_logprobs", "processed_behavior_vs_raw_actor"),
+    ],
+)
+def test_manifest_records_actual_logprob_mode_without_claiming_parity(tmp_path, mode, convention):
+    config = {
+        "source_root": str(ROOT),
+        "actor_rollout_ref": {
+            "rollout": {
+                "logprobs_mode": mode,
+                "temperature": 0.7,
+                "repetition_penalty": 1.05,
+                "top_k": 50,
+                "top_p": 0.9,
+            }
+        },
+    }
+    manifest = json.loads(load().write_run_manifest(tmp_path, config, None).read_text())
+    assert manifest["resolved_config_allowlist"]["actor_rollout_ref.rollout.logprobs_mode"] == mode
+    assert manifest["logprob_convention"] == convention
+    assert manifest["logprob_parity_verified"] is False
+    assert manifest["behavior_sampling_convention"] == "transformed"
+    assert manifest["behavior_importance_correction"] == "unverified"

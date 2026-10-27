@@ -3,7 +3,7 @@
 #
 # Default: physical GPUs 0-3 -> logical 0=Thinker, 1=DiT, the same cards the trainer
 # uses. Stop this server before training — the colocated UND AR shares GPU 0.
-# Then prove Hermes: BAGEL_UND_URL=http://127.0.0.1:8094 python3 .../spike_und_hermes.py
+# Verify that the UND endpoint emits Hermes generate_image calls before training.
 # Do not point the spike at bagel_single_stage / GEN. Do not use Qwen for UND.
 set -euo pipefail
 # Shell tracing is opt-in: ``DEBUG=1`` adds the ``+ ...`` lines, a normal launch stays quiet.
@@ -158,7 +158,7 @@ fi
 echo "[INFO] UND AR serve model=${BAGEL_MODEL_PATH}"
 echo "[INFO] deploy=${DEPLOY_CONFIG} host=${HOST} port=${PORT}"
 echo "[INFO] CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES} STAGE_OVERRIDES=${STAGE_OVERRIDES}"
-echo "[INFO] spike: BAGEL_UND_URL=http://${HOST}:${PORT} python3 ${_SCRIPT_DIR}/spike_und_hermes.py --model-path \"\$BAGEL_MODEL_PATH\""
+echo "[INFO] Verify Hermes generate_image calls at http://${HOST}:${PORT}/v1/chat/completions before training."
 
 exec "${_VLLM_OMNI}" serve "${BAGEL_MODEL_PATH}" \
   --omni \

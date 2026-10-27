@@ -87,15 +87,7 @@ def _stack_padded(tensors: list[torch.Tensor], *, pad_value: float = 0.0) -> tor
 
 
 def _flowgrpo_group_index(usable: list[tuple[Mapping[str, Any], Any, float, str, Any, Any]]) -> list[str]:
-    """FlowGRPO group id per usable GEN row.
-
-    A ``generate_image`` call with ``S >= 2`` seeds is its own group (same diffusion
-    prompt, different noise). A call with a single image cannot be: ``flow_grpo`` sets a
-    singleton group's mean to its own score, so its advantage is identically zero. Such
-    rows are grouped with every other single-image row of the same task
-    (``und_group_uid``), i.e. the images the N sibling episodes drew for one user request
-    across all of their turns.
-    """
+    """FlowGRPO group id per usable GEN row."""
     call_sizes: dict[str, int] = {}
     for item in usable:
         call_sizes[item[3]] = call_sizes.get(item[3], 0) + 1
@@ -125,15 +117,9 @@ def build_gen_flowgrpo_proto(gen_batch: list[Mapping[str, Any]]) -> DataProto | 
     # ``gen/skipped_no_groups: 1`` / ``has_complete_gen_groups: 0`` are correct but opaque.
     # Naming the missing column here turns "GEN never trains" into one readable line.
     missing_score = missing_logprob = missing_uid = 0
-    # Split the log-prob counter by *cause*, because "missing" is ambiguous and the two
-    # have different fixes:
-    #   ``absent`` -- the rebuild handed us ``None``: the value was dropped between
-    #     generation and advantage (TQ round-trip / row rebuild).
-    #   ``empty``  -- a vector with no elements. ``_logprob_1d`` collapses it to None, but
-    #     note the sampler cannot produce it *with the key present*: ``pipeline_bagel`` only
-    #     attaches ``log_probs`` when the trajectory list is truthy, and the stash raises
-    #     when the attribute is absent. So a truthy ``empty`` count would mean the value was
-    #     zero-length before the pipeline, which the stash's own guard should have caught.
+    # Split the log-prob counter by *cause*, because "missing" is ambiguous and the two have different fixes:
+    # ``absent`` -- the rebuild handed us ``None``: the value was dropped between generation and advantage (TQ round-
+    # trip / row rebuild).
     missing_logprob_absent = missing_logprob_empty = 0
     for row in gen_batch:
         raw_logprob = row.get("rollout_log_probs")
@@ -193,6 +179,8 @@ def build_gen_flowgrpo_proto(gen_batch: list[Mapping[str, Any]]) -> DataProto | 
 
     max_steps = max(item[1].numel() for item in usable)
     latent_list, timestep_list, prompt_token_ids, old_list, masks, parents = [], [], [], [], [], []
+    has_reference = any(row.get("ref_prev_sample_mean") is not None for row, *_ in usable)
+    reference_means = []
     for row, logprob, _, _, latents, timesteps in usable:
         timesteps = timesteps.reshape(-1).float()
         count = logprob.numel()
@@ -211,6 +199,15 @@ def build_gen_flowgrpo_proto(gen_batch: list[Mapping[str, Any]]) -> DataProto | 
             raise ValueError("GEN trajectory requires parent episode_uid for unique ownership")
         parents.append(episode_numeric_id(str(episode_uid)))
         pad = max_steps - count
+        if has_reference:
+            reference = _as_tensor(row.get("ref_prev_sample_mean"))
+            if reference is None or reference.shape != (count, *latents.shape[1:]):
+                raise ValueError("GEN reference means must be supplied for every row with T latent-shaped transitions")
+            if not torch.isfinite(reference).all():
+                raise ValueError("GEN reference means contain nonfinite transitions")
+            reference_means.append(
+                torch.cat([reference.float(), reference[-1:].float().expand(pad, *reference.shape[1:])])
+            )
         # Repeat a finite transition timestep/latent instead of synthetic zero SDE inputs.
         latent_list.append(torch.cat([latents.float(), latents[-1:].float().expand(pad, *latents.shape[1:])]))
         timestep_list.append(torch.cat([timesteps, timesteps[:1].expand(pad)]))
@@ -230,15 +227,11 @@ def build_gen_flowgrpo_proto(gen_batch: list[Mapping[str, Any]]) -> DataProto | 
         "parent_episode_id": torch.tensor(parents, dtype=torch.long),
         "gen_row_id": torch.arange(len(usable), dtype=torch.long),
     }
+    if has_reference:
+        batch_tensors["ref_prev_sample_mean"] = torch.stack(reference_means)
 
     batch = TensorDict(batch_tensors, batch_size=[len(usable)])
-    # Build the object array explicitly 1-D rather than ``np.array(prompt_token_ids,
-    # dtype=object)``. With ``dtype=object`` numpy collapses the per-row lists into a *2-D*
-    # ``(B, L)`` matrix whenever every prompt in the batch shares one token length, and then
-    # ``prompt_token_ids[i]`` is an ``ndarray`` instead of the row's list.
-    # ``DiffusionTrainingAdapter._prompt_token_ids_to_batch`` does
-    # ``torch.as_tensor(ids, dtype=torch.long)``, which refuses any object-dtype array even when
-    # every element is an int. Assigning element-wise pins the shape regardless of collisions.
+    # Build the object array explicitly 1-D rather than ``np.array(prompt_token_ids, dtype=object)``.
     prompt_token_ids_arr = np.empty(len(prompt_token_ids), dtype=object)
     for index, ids in enumerate(prompt_token_ids):
         prompt_token_ids_arr[index] = ids
@@ -252,21 +245,7 @@ def build_gen_flowgrpo_proto(gen_batch: list[Mapping[str, Any]]) -> DataProto | 
 
 
 def fold_gen_prompt_token_ids(proto: DataProto) -> None:
-    """Move the GEN prompt token ids from ``non_tensor_batch`` onto the batch itself.
-
-    ``DiffusionTrainingAdapter._prompt_token_ids_to_batch`` reads ``prompt_token_ids`` off the
-    *micro-batch* (``bagel_flow_grpo/diffusers_training_adapter.py:152``), and
-    ``prepare_micro_batches`` only propagates non-tensor entries that sit on the batch it is handed
-    -- which is why the sibling ``skip_gen`` / ``has_complete_gen_groups`` / ``num_gen_rows`` flags
-    do reach the diffusion step while a list parked in ``non_tensor_batch`` does not. Leaving the
-    ids behind costs the whole GEN lane at the last moment, inside ``update_actor``.
-
-    Call this on **every** GEN proto. It used to be inlined in
-    :func:`apply_gen_flowgrpo_advantage` alone, but the live path does not call that function: with
-    an actor pool present the trainer goes through
-    ``_diffusion_v1_gen_lane()._compute_advantage(proto)`` instead, so the fold silently ran only on
-    the CPU-test fallback branch.
-    """
+    """Move the GEN prompt token ids from ``non_tensor_batch`` onto the batch itself."""
     non_tensor = getattr(proto, "non_tensor_batch", None) or {}
     if "prompt_token_ids" in non_tensor:
         from verl.utils import tensordict_utils as tu

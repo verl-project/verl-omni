@@ -98,7 +98,8 @@ def test_the_tripwire_warns_on_kl_and_publishes_the_metric(caplog):
         trainer._divergence_tripwire(metrics)
 
     assert metrics["bagel_corl/divergence_warning"] == 1.0
-    assert "left its trust region" in caplog.text
+    assert "actor/rollout mismatch or gradient health threshold exceeded" in caplog.text
+    assert "left its trust region" not in caplog.text
     assert "rollout_corr/kl=21" in caplog.text
 
 
@@ -113,10 +114,11 @@ def test_the_tripwire_warns_on_grad_norm_alone(caplog):
     assert "actor/grad_norm" in caplog.text
 
 
-def test_the_tripwire_reports_nan_as_runaway():
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_the_tripwire_reports_nonfinite_as_runaway(value):
     """``nan > limit`` is False, so a non-finite reading must be caught explicitly."""
     trainer = _tripwire_trainer()
-    metrics = {"rollout_corr/kl": float("nan"), "actor/grad_norm": 1.5}
+    metrics = {"rollout_corr/kl": value, "actor/grad_norm": 1.5}
 
     trainer._divergence_tripwire(metrics)
 
@@ -134,7 +136,7 @@ def test_the_tripwire_stays_quiet_and_clears_when_healthy(caplog):
     caplog.clear()
     with caplog.at_level(logging.WARNING):
         trainer._divergence_tripwire(hot)
-    assert "left its trust region" not in caplog.text
+    assert "actor/rollout mismatch or gradient health threshold exceeded" not in caplog.text
 
     healthy = {"rollout_corr/kl": 0.4, "actor/grad_norm": 1.2}
     trainer._divergence_tripwire(healthy)
@@ -145,19 +147,19 @@ def test_the_tripwire_stays_quiet_and_clears_when_healthy(caplog):
     caplog.clear()
     with caplog.at_level(logging.WARNING):
         trainer._divergence_tripwire(hot)
-    assert "left its trust region" in caplog.text
+    assert "actor/rollout mismatch or gradient health threshold exceeded" in caplog.text
 
 
 def test_the_tripwire_aborts_only_when_opted_in(monkeypatch):
     hot = {"rollout_corr/kl": _tripwire_trainer().DIVERGENCE_KL_LIMIT + 1.0}
 
-    # Default is warn-only: a run this far out is useless, but killing it is the operator's call.
+    # Default is warn-only; a cross-engine mismatch alone does not prove policy divergence.
     default = _tripwire_trainer()
     default._divergence_tripwire(dict(hot))
     assert default._divergence_warned is True
 
     monkeypatch.setenv("BAGEL_CORL_DIVERGENCE_ABORT", "1")
-    with pytest.raises(RuntimeError, match="left its trust region"):
+    with pytest.raises(RuntimeError, match="actor/rollout mismatch or gradient health threshold exceeded"):
         _tripwire_trainer()._divergence_tripwire(dict(hot))
 
 
