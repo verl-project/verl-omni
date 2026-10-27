@@ -375,8 +375,9 @@ def make_opsd_trainer_config(**overrides):
         ({"actor_rollout_ref.actor.enable_timestep_staging": True}, "enable_timestep_staging must be False"),
         ({"trainer.use_v1": False}, "trainer.use_v1 must be true"),
         ({"trainer.v1.trainer_mode": "separate_async"}, "trainer.v1.trainer_mode must be sync"),
-        ({"algorithm.train_timestep_range": [0, 7]}, "only used by the dgpo loss"),
-        ({"algorithm.train_timestep_count": 4}, "only used by the dgpo loss"),
+        # The shared guard names every loss that consumes these knobs, so match the stable prefix.
+        ({"algorithm.train_timestep_range": [0, 7]}, "only used by the dgpo"),
+        ({"algorithm.train_timestep_count": 4}, "only used by the dgpo"),
     ],
 )
 def test_opsd_trainer_config_guards(overrides, message):
