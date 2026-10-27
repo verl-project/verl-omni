@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""CPU contracts for excluding driver-only pixels from diffusion worker RPCs."""
+"""CPU contracts for excluding driver-only pixels and named media artifacts from diffusion worker RPCs."""
 
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -55,7 +55,12 @@ def _make_config():
 
 def _make_batch(*, include_responses: bool = True):
     latents = torch.arange(16, dtype=torch.float32).reshape(2, 2, 2, 2)
-    tensors = {"latents": latents}
+    tensors = {
+        "latents": latents,
+        # Reward/dump-only payload that must never reach compute workers.
+        "media_artifact__image_preview": torch.randint(256, (2, 3, 4, 4), dtype=torch.uint8),
+        "media_artifact__image_latent": latents * 2,
+    }
     if include_responses:
         tensors["responses"] = torch.randint(256, (2, 3, 4, 4), dtype=torch.uint8)
     return DataProto.from_dict(
@@ -92,6 +97,9 @@ def _make_worker_groups():
 def _assert_worker_projection(sent_batch, driver_batch):
     assert "responses" not in sent_batch
     assert "responses" in driver_batch.batch
+    assert "media_artifact__image_preview" not in sent_batch
+    assert "media_artifact__image_latent" not in sent_batch
+    assert "media_artifact__image_preview" in driver_batch.batch
     assert sent_batch["latents"].data_ptr() == driver_batch.batch["latents"].data_ptr()
 
 
@@ -105,6 +113,8 @@ def test_worker_projection_preserves_driver_batch_and_shared_tensor_storage(incl
     assert "responses" not in worker_batch
     assert ("responses" in driver_batch.batch) is include_responses
     assert driver_batch.batch.get("responses") is responses
+    assert "media_artifact__image_preview" not in worker_batch
+    assert "media_artifact__image_preview" in driver_batch.batch
     assert worker_batch["latents"].data_ptr() == driver_batch.batch["latents"].data_ptr()
     assert tu.get(worker_batch, "sample_id") == ["sample-0", "sample-1"]
     assert tu.get(worker_batch, "driver_tag") == "keep-me"

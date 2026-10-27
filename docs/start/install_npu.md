@@ -1,6 +1,6 @@
 # Installation (NPU)
 
-Last updated: 10/18/2026
+Last updated: 10/20/2026
 
 For NVIDIA GPU, see the {doc}`GPU installation guide <install>`. For AMD GPU, see the {doc}`ROCm installation guide <install_rocm>`. For Intel GPU, see the {doc}`Intel GPU installation guide <install_xpu>`.
 
@@ -110,47 +110,103 @@ for all supported Ascend devices. The image includes CANN, `torch-npu`,
 
 ### Build
 
-Set `NPU_DEVICE` to `a2`, `a3` (default), or `a5`. The Dockerfile selects the
-base image and compiler target automatically.
+Pass `BASE_IMAGE` and `SOC_VERSION` from the same row. The Dockerfile has a
+single `FROM`, so the build pulls only that image. Omitting both build args
+uses the A3 row.
+
+| Device | `BASE_IMAGE` | `SOC_VERSION` |
+| --- | --- | --- |
+| A2 | `quay.io/ascend/cann:9.1.0-910b-ubuntu22.04-py3.12` | `ascend910b1` |
+| A3 | `quay.io/ascend/cann:9.1.0-a3-ubuntu22.04-py3.12` | `ascend910_9391` |
+| A5 | `quay.io/ascend/cann:9.1.0-950-ubuntu22.04-py3.12` | `ascend950dt_9582` |
+
+Other CANN versions, operating systems, and Python versions are listed in the
+[Ascend CANN container image tags](https://github.com/Ascend/cann-container-image/blob/main/supported_tags.md).
+Use `quay.io/ascend/cann:<tag>` as `BASE_IMAGE`, and keep `SOC_VERSION` aligned
+with the chip series in that tag.
+
+Example for A5:
 
 ```bash
-NPU_DEVICE=a5
+BASE_IMAGE=quay.io/ascend/cann:9.1.0-950-ubuntu22.04-py3.12
+SOC_VERSION=ascend950dt_9582
+IMAGE=verl-omni:npu-a5
 
 docker build \
   -f docker/Dockerfile.npu \
-  --build-arg NPU_DEVICE=$NPU_DEVICE \
-  -t verl-omni:npu-$NPU_DEVICE \
+  --build-arg BASE_IMAGE=$BASE_IMAGE \
+  --build-arg SOC_VERSION=$SOC_VERSION \
+  -t $IMAGE \
   .
 ```
 
 ### Run
 
 The host needs the Ascend driver and firmware compatible with CANN 9.1.0.
-Set `NPU_DEVICE` to the image you built and `NPU_DEVICE_IDS` to the devices
-to expose, as listed by `npu-smi info`.
+Use the command matching your machine, and adjust the `davinci` range to the
+NPUs you want to expose.
+
+A2:
 
 ```bash
-NPU_DEVICE=a5
-NPU_DEVICE_IDS=(0 1 2 3 4 5 6 7)
-DEVICES=()
-for id in "${NPU_DEVICE_IDS[@]}"; do
-  DEVICES+=(--device="/dev/davinci${id}")
-done
-for device in /dev/davinci_manager /dev/devmm_svm /dev/hisi_hdc; do
-  if [[ -e "$device" ]]; then
-    DEVICES+=(--device="$device")
-  fi
-done
+DEVICES=""
+for i in {0..7}; do DEVICES+=" --device=/dev/davinci$i"; done
 
-docker run -it --rm \
+docker run -it \
   --name verl_omni_npu \
   --network host \
   --ipc host \
-  "${DEVICES[@]}" \
+  $DEVICES \
+  --device=/dev/davinci_manager \
+  --device=/dev/devmm_svm \
+  --device=/dev/hisi_hdc \
   -v /usr/local/sbin/npu-smi:/usr/local/sbin/npu-smi:ro \
   -v /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro \
-  -v /mnt/data:/mnt/data \
-  verl-omni:npu-$NPU_DEVICE \
+  -v /home:/home \
+  verl-omni:npu-a2 \
+  bash
+```
+
+A3:
+
+```bash
+DEVICES=""
+for i in {0..15}; do DEVICES+=" --device=/dev/davinci$i"; done
+
+docker run -it \
+  --name verl_omni_npu \
+  --network host \
+  --ipc host \
+  $DEVICES \
+  --device=/dev/davinci_manager \
+  --device=/dev/devmm_svm \
+  --device=/dev/hisi_hdc \
+  -v /usr/local/sbin/npu-smi:/usr/local/sbin/npu-smi:ro \
+  -v /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro \
+  -v /home:/home \
+  verl-omni:npu-a3 \
+  bash
+```
+
+A5:
+
+```bash
+DEVICES=""
+for i in {0..7}; do DEVICES+=" --device=/dev/davinci$i"; done
+
+docker run -it \
+  --name verl_omni_npu \
+  --network host \
+  --ipc host \
+  $DEVICES \
+  --device=/dev/davinci_manager \
+  --device=/dev/hisi_hdc \
+  --device=/dev/ummu \
+  --device=/dev/uburma \
+  -v /usr/local/sbin/npu-smi:/usr/local/sbin/npu-smi:ro \
+  -v /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro \
+  -v /home:/home \
+  verl-omni:npu-a5 \
   bash
 ```
 

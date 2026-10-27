@@ -55,6 +55,8 @@ class DiffusionLossConfig(BaseConfig):
     gen_regularizer: str = "latent_kl"
     dgpo_beta: float = 100.0
     dgpo_clip_range: float = 0.01
+    awm_clip_range: float = 1e-4
+    awm_kl_coef: float = 0.1
     # OmniNFT-only modality weights and reference regularization coefficients.
     video_weight: float = 1.0
     audio_weight: float = 1.0
@@ -81,6 +83,7 @@ class DiffusionLossConfig(BaseConfig):
             "diffusion_nft",
             "omni_nft",
             "dgpo",
+            "awm",
             "dpo",
             "dmd2",
             "dance_grpo",
@@ -101,6 +104,10 @@ class DiffusionLossConfig(BaseConfig):
             raise ValueError(f"dgpo_beta must be positive, got {self.dgpo_beta}.")
         if self.dgpo_clip_range < 0:
             raise ValueError(f"dgpo_clip_range must be non-negative, got {self.dgpo_clip_range}.")
+        if self.awm_clip_range < 0:
+            raise ValueError(f"awm_clip_range must be non-negative, got {self.awm_clip_range}.")
+        if self.awm_kl_coef < 0:
+            raise ValueError(f"awm_kl_coef must be non-negative, got {self.awm_kl_coef}.")
 
 
 @dataclass

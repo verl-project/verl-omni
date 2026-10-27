@@ -22,6 +22,7 @@ from transfer_queue import KVBatchMeta
 from verl import DataProto
 
 from verl_omni.pipelines.rollout_media import ARTIFACT_PREFIX, previews_from_batch
+from verl_omni.trainer.diffusion.diffusion_trainer_utils import MEDIA_ARTIFACT_FIELD_PREFIX
 from verl_omni.trainer.diffusion.v1 import tq_utils
 from verl_omni.trainer.diffusion.v1 import trainer_base as trainer_base_module
 
@@ -512,4 +513,5 @@ def test_rollout_dump_projection_restores_media_artifacts(monkeypatch, preview_n
 
 
 def test_dump_artifact_prefix_matches_rollout_media():
-    assert tq_utils.MEDIA_ARTIFACT_TQ_PREFIX == ARTIFACT_PREFIX
+    assert MEDIA_ARTIFACT_FIELD_PREFIX == ARTIFACT_PREFIX
+    assert tq_utils.MEDIA_ARTIFACT_FIELD_PREFIX is MEDIA_ARTIFACT_FIELD_PREFIX

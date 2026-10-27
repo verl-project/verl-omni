@@ -25,6 +25,8 @@ from transfer_queue import KVBatchMeta
 from verl.protocol import DataProto
 from verl.utils import tensordict_utils as tu
 
+from verl_omni.trainer.diffusion.diffusion_trainer_utils import MEDIA_ARTIFACT_FIELD_PREFIX
+
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
@@ -44,10 +46,6 @@ def diffusion_persisted_tq_fields(
         return ["sample_level_scores", "sample_level_rewards"]
     raise ValueError(f"Unsupported diffusion trainer algorithm: {algorithm}")
 
-
-# ``rollout_media.ARTIFACT_PREFIX``, spelled literally to keep this core
-# trainer module free of the pipeline package's import graph.
-MEDIA_ARTIFACT_TQ_PREFIX = "media_artifact__"
 
 # Fields consumed by the post-step rollout-dump read. Selecting them
 # explicitly keeps the dump from re-pulling the trainer-only compute payloads
@@ -91,7 +89,7 @@ def diffusion_dump_tq_fields(batch_meta: KVBatchMeta) -> list[str]:
         .kv_retrieve_meta(keys=list(batch_meta.keys), partition_id=batch_meta.partition_id, create=False)
         .field_names
     )
-    return [*DIFFUSION_DUMP_TQ_FIELDS, *(name for name in stored if name.startswith(MEDIA_ARTIFACT_TQ_PREFIX))]
+    return [*DIFFUSION_DUMP_TQ_FIELDS, *(name for name in stored if name.startswith(MEDIA_ARTIFACT_FIELD_PREFIX))]
 
 
 def diffusion_metric_tq_fields(
