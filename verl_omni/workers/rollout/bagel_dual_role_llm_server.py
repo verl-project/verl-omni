@@ -95,39 +95,6 @@ def is_bagel_gen_sampling_params(sampling_params: dict[str, Any] | None) -> bool
     return str(role).lower() in {"gen", "diffusion", "generate_image"}
 
 
-def summarize_prompt_embed_cache_counters(results: Any) -> dict[str, Any] | None:
-    """Sum per-stage ``PromptEmbedCache.stats()`` payloads into one counter set.
-
-    Each runner process owns its own cache, so a multi-stage deploy reports one
-    dict per stage and the meaningful number is the sum. Returns ``None`` when no
-    stage reported a cache at all — "no cache installed" and "a cache that has
-    served nothing yet" must not both read as zero hits (RFC §4.4.4 R2 gate).
-    """
-    if results is None:
-        return None
-    if isinstance(results, dict):
-        results = [results]
-    totals = {"hits": 0, "misses": 0, "bypassed": 0, "size": 0}
-    seen = False
-    for item in results:
-        if not isinstance(item, dict):
-            continue
-        if "hits" not in item and "misses" not in item:
-            # ``{"supported": False, "error": …}`` from the stage pool, or an
-            # engine that has no diffusion runner behind the probe.
-            continue
-        seen = True
-        for key in totals:
-            try:
-                totals[key] += int(item.get(key) or 0)
-            except (TypeError, ValueError):
-                logger.warning("prompt-embed cache stats: non-integer %s=%r ignored", key, item.get(key))
-    if not seen:
-        return None
-    totals["installed"] = True
-    return totals
-
-
 _STALL_ERROR_MARKERS = (
     "AR decode stalled",
     "engine yielded no terminal output",
@@ -332,22 +299,3 @@ class BagelDualRoleLLMServerClient(LLMServerClient):
         finally:
             if server_id is not None:
                 client._release_server(server_id)
-
-    async def prompt_embed_cache_stats(self, routing_key: str) -> dict[str, Any] | None:
-        """R2 conditioning-cache counters for the GEN replica ``routing_key`` pins to."""
-        try:
-            # Protected helper on the shared ``LLMServerClient`` base: the pool's
-            # sticky acquisition is exactly the routing ``generate`` performed, so
-            # this is the only way to name the replica that served a given call.
-            server_id, server = await self.gen_client._acquire_server(routing_key)
-        except Exception as exc:  # noqa: BLE001 — metrics only
-            logger.warning("prompt-embed cache stats: no GEN replica for key %r: %s", routing_key, exc)
-            return None
-        try:
-            results = await server.prompt_embed_cache_stats.remote()
-        except Exception as exc:  # noqa: BLE001 — metrics only
-            logger.warning("prompt-embed cache stats probe failed on the GEN engine: %s", exc)
-            return None
-        finally:
-            self.gen_client._release_server(server_id)
-        return summarize_prompt_embed_cache_counters(results)

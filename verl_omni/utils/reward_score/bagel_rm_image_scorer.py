@@ -106,21 +106,7 @@ def _mid_loop_payload(extra_info: Any) -> dict[str, Any] | None:
 
 
 def _resolve_judge_endpoint(knobs: dict[str, Any], manager_kwargs: dict[str, Any]) -> dict[str, Any]:
-    """Point the judge at the reward pool's own router when the manager offers one.
-
-    ``VisualRewardManager`` passes ``reward_router_address`` (and ``model_name``)
-    whenever a reward model is deployed: the manager builds a router in front of the
-    RM replicas (``RewardModelManager._initialize_router`` -> a catch-all proxy) and
-    hands our function its ``host:port``. That router speaks OpenAI
-    ``/v1/chat/completions``, so the SAME scoring path the frozen sidecar served can be
-    served by the reward pool itself — no second model, no second process, and the
-    Yes/No (``good_enough``) flag comes back through the identical parse.
-
-    The router wins over the configured ``vllm_url`` on purpose: the config knob is the
-    external judge, and an operator who sets both has almost certainly left the knob
-    behind. Passing no router (no reward model enabled) leaves ``knobs`` untouched and
-    the configured sidecar, if any, keeps working as a fallback.
-    """
+    """Point the judge at the reward pool's own router when the manager offers one."""
     router = str(manager_kwargs.get("reward_router_address") or "").strip()
     if not router:
         return knobs
@@ -137,21 +123,7 @@ def _resolve_judge_endpoint(knobs: dict[str, Any], manager_kwargs: dict[str, Any
 def _score_image_unified(
     *, path: str, caption: str, knobs: dict[str, Any]
 ) -> tuple[float, bool, dict[str, float]] | None:
-    """Score one image with UnifiedReward 2.0; ``(normalized_score, good_enough, axes)`` or None.
-
-    ``axes`` is the raw 1-5 ``alignment`` / ``coherence`` / ``style`` breakdown; the Co-RL
-    loop renders it into the ``judge_image`` observation so the reflection has per-axis
-    findings to act on.
-
-    Reuses the canonical prompt/parse/aggregate helpers from
-    ``unified_reward.py`` so this path and the plain ``compute_score_unified_reward``
-    recipe stay byte-identical in what they ask the model and how they read the answer.
-
-    Returns ``None`` (caller records a failure and raises) when the endpoint is
-    unset, the file is gone, the HTTP call fails, or the reply does not carry all
-    three 1-5 axes. Never zero-fills: a silently-zeroed GEN call is exactly the
-    degenerate reward this backend exists to replace.
-    """
+    """Score one image with UnifiedReward 2.0; ``(normalized_score, good_enough, axes)`` or None."""
     from verl_omni.utils.agentic.vllm_chat import post_vllm_chat
     from verl_omni.utils.reward_score.unified_reward import (
         _aggregate_unified_reward_scores,
@@ -224,18 +196,7 @@ def _pickscore_inferencer(device: str | None = None) -> Any:
 
 
 def _score_image_pickscore(*, path: str, caption: str, knobs: dict[str, Any]) -> tuple[float, bool] | None:
-    """Score one image with PickScore; ``(score, good_enough)`` or ``None`` on failure.
-
-    Unlike ``_score_image_unified`` this runs the reward model in-process on the RM
-    worker's own GPU (no judge HTTP route): PickScore *is* the model, so there is
-    nothing to proxy. ``good_enough`` therefore keys off
-    ``pickscore_good_enough_threshold`` rather than the judge's facet grid, whose
-    degenerate 0.0 floor is exactly why the unified backend exists.
-
-    Returns ``None`` (caller records a failure and raises) when the file is gone or the
-    model cannot score it. Never zero-fills: a zeroed GEN call is the degenerate reward
-    this backend is meant to avoid.
-    """
+    """Score one image with PickScore; ``(score, good_enough)`` or ``None`` on failure."""
     from PIL import Image
 
     try:

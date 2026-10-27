@@ -303,15 +303,11 @@ def pack_dual_lane_episode(
         # call returned a usable image and the observation was fed back to UND).
         # Keying off ``k_complete == 0`` under-counted: an episode with K>=1 whose
         # every group was dropped also gave UND no image credit but reported 0 here,
-        # while the flatten path (bagel_corl_lib.flatten_multiturn_rollouts) counted it.
         "und/no_image_credit": 0.0 if episode.used_image_credit else 1.0,
         "gen/skipped_no_groups": 1.0 if k_complete == 0 else 0.0,
         "episode/pattern_paired": 1.0 if pattern == "paired" else 0.0,
         "episode/pattern_mixed": 1.0 if pattern == "mixed" else 0.0,
         "episode/pattern_gen_off": 1.0 if pattern == "gen_off" else 0.0,
-        # RFC §4.4.4 R2, measured from the engine's cache counters (absent when
-        # the engine exposed none — never a fabricated value).
-        **dict(episode.r2_metrics or {}),
     }
     return DualLanePack(
         und_key=und_key,
@@ -405,7 +401,6 @@ def episode_from_agent_extra(
         terminal_reward=float(reward_score) if reward_score is not None else None,
         und_reward=float(reward_score if reward_score is not None else extra.get("und_reward") or 0.0),
         num_gen_calls=int(num_gen),
-        r2_metrics=dict(extra.get("bagel_corl_r2") or {}),
     )
 
 

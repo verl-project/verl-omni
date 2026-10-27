@@ -25,7 +25,6 @@ import pytest
 import torch
 from tensordict.tensorclass import NonTensorData, NonTensorStack
 
-from verl_omni.trainer.omni import bagel_corl_trainer as trainer_module
 from verl_omni.trainer.omni.bagel_corl_trainer import OmniBagelCoRLTrainerSync
 
 
@@ -86,17 +85,6 @@ def test_colocated_reward_hands_the_scorer_unwrapped_row_fields(monkeypatch):
     assert [row["ground_truth"]["task_type"] for row in seen["reward_model"]] == ["plan", "reflect"]
     assert isinstance(seen["reward_model"], np.ndarray)
     assert fake.put is not None
-
-
-def test_override_is_bound_on_the_trainer_not_inherited():
-    assert "_compute_reward_colocate" in vars(OmniBagelCoRLTrainerSync)
-    # ``extra_info`` rides along: ``VisualRewardManager._reward_extra_info`` reads it
-    # to rebuild the media/provenance metadata the episode scorer needs.
-    assert trainer_module.OmniBagelCoRLTrainerSync.REWARD_ROW_FIELDS == (
-        "data_source",
-        "reward_model",
-        "extra_info",
-    )
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -102,14 +102,7 @@ def _flowgrpo_group_index(usable: list[tuple[Mapping[str, Any], Any, float, str,
 
 
 def build_gen_flowgrpo_proto(gen_batch: list[Mapping[str, Any]]) -> DataProto | None:
-    """Stack flattened GEN rows into a diffusion ``DataProto`` for FlowGRPO + actor.
-
-    Requires live traj stash: ``all_latents`` + ``timesteps`` + ``rollout_log_probs``
-    (plus ``gen_group_uid`` / ``rm_score``). Refuse logprobs-only soft path that would
-    skip GEN ``diffusion_loss``.
-
-    Empty ``gen_batch`` (pattern 3 / ``K=0``) returns ``None`` so UND still trains.
-    """
+    """Stack flattened GEN rows into a diffusion ``DataProto`` for FlowGRPO + actor."""
     usable: list[tuple[Mapping[str, Any], torch.Tensor, float, str, torch.Tensor, torch.Tensor]] = []
     missing_traj = 0
     # Reason counters for the "rows arrived but none are trainable" case, which is otherwise a

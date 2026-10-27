@@ -90,10 +90,6 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
         """Expose the diffusion runner's cache invalidation through worker RPC."""
         self.model_runner.clear_prompt_embed_cache()
 
-    def get_prompt_embed_cache_stats(self) -> dict | None:
-        """Return the owning runner's counters, or None when no cache is installed."""
-        return self.model_runner.get_prompt_embed_cache_stats()
-
     def __new__(cls, **kwargs):
         set_death_signal()
 

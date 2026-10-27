@@ -24,7 +24,7 @@ from verl_omni.pipelines.minimax_h3_diffusion_nft.agent_loop import MiniMaxH3Dif
 # verl's register overwrites silently — import order must not decide which class
 # other jobs get, so only this import may fire on package import.
 from . import tool_agent_loop as _image_gen_tool_agent_loop  # noqa: F401
-from .bagel_corl import BagelMultiturnAgentLoop, MultiturnAgentLoopWorker
+from .bagel_corl import BagelMultiturnAgentLoop
 from .bagel_corl_tq import BagelCorlAgentLoopManagerTQ, BagelCorlAgentLoopWorkerTQ
 from .composite_agent_loop import CompositeAgentLoopManager, CompositeAgentLoopWorker
 from .diffusion_agent_loop import DiffusionAgentLoopOutput, DiffusionAgentLoopWorker
@@ -42,7 +42,6 @@ __all__ = [
     "CompositeAgentLoopManager",
     "CompositeAgentLoopWorker",
     "BagelMultiturnAgentLoop",
-    "MultiturnAgentLoopWorker",
     "BagelCorlAgentLoopManagerTQ",
     "BagelCorlAgentLoopWorkerTQ",
     "DiffusionAgentLoopOutput",

@@ -24,8 +24,6 @@ never having computed it.
 
 from verl_omni.agent_loop.bagel_corl_lib import aggregate_reward_breakdown_metrics
 from verl_omni.trainer.omni.bagel_corl_trainer import (
-    _BAGEL_CORL_STEP_METRIC_KEYS,
-    _BAGEL_CORL_STEP_METRIC_PREFIXES,
     _bagel_corl_step_metric_keys,
 )
 
@@ -56,13 +54,6 @@ def test_every_key_the_aggregator_emits_survives_the_allowlist():
     assert "episode/J" in published
 
 
-def test_prefix_families_match_the_aggregator_namespace():
-    """Any ``bagel_corl/reward_*`` key the lib adds must be covered by a prefix."""
-    records = [_record(0.5, True, {"reward_image": 0.5})]
-    for key in aggregate_reward_breakdown_metrics(records):
-        assert key.startswith(_BAGEL_CORL_STEP_METRIC_PREFIXES), key
-
-
 def test_static_keys_are_reported_only_when_present():
     assert _bagel_corl_step_metric_keys({}) == []
     assert _bagel_corl_step_metric_keys({"episode/K_zero": 0.0}) == ["episode/K_zero"]
@@ -90,13 +81,3 @@ def test_an_unrelated_key_is_never_published():
     """``extra`` carries the whole lane state; only the allowlist reaches the step log."""
     extra = {"bagel_corl_gen": {"advantages": 1}, "raw_prompt": ["secret"], "episode/K": 2.0}
     assert _bagel_corl_step_metric_keys(extra) == ["episode/K"]
-
-
-def test_allowlist_static_keys_are_the_documented_five():
-    assert _BAGEL_CORL_STEP_METRIC_KEYS == (
-        "und/no_image_credit",
-        "gen/dropped_incomplete_groups",
-        "episode/J",
-        "episode/K",
-        "episode/K_zero",
-    )

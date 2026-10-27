@@ -128,11 +128,6 @@ def test_request_step_one_records_actual_serving_zero_and_each_lane_identity():
     assert len(result.und_serving_provenance) == 3
     assert result.gen_samples[0].rollout_policy_version == 0
     assert result.gen_samples[0].rollout_replica_id == "gen-server"
-    flat = module.flatten_multiturn_rollouts([result], expected_s=1)
-    assert flat.und_batch[0]["policy_version"] == 0
-    assert flat.und_batch[0]["rollout_replica_id"] == "und-server"
-    assert flat.gen_batch[0]["rollout_policy_version"] == 0
-    assert flat.gen_batch[0]["rollout_replica_id"] == "gen-server"
     assert module._as_gen_sample(asdict(result.gen_samples[0])).rollout_replica_id == "gen-server"
 
 
@@ -178,7 +173,7 @@ def functions(file, names, namespace):
     return namespace
 
 
-def test_normal_and_transfer_queue_roundtrip_keep_observed_versions(monkeypatch):
+def test_transfer_queue_roundtrip_keeps_observed_versions(monkeypatch):
     import dataclasses
 
     module = load_lib()
@@ -192,12 +187,6 @@ def test_normal_and_transfer_queue_roundtrip_keep_observed_versions(monkeypatch)
     assert output.extra_fields["policy_version"] == 0
     assert output.extra_fields["requested_policy_version"] == 1
     assert output.extra_fields["rollout_replica_id"] == "und-server"
-    normal = module.flatten_from_agent_output(
-        SimpleNamespace(non_tensor_batch={"extra_fields": [output.extra_fields]}), expected_s=1
-    )
-    assert normal.und_batch[0]["policy_version"] == 0
-    assert normal.und_batch[0]["rollout_replica_id"] == "und-server"
-    assert normal.gen_batch[0]["rollout_replica_id"] == "gen-server"
     path = "verl_omni/agent_loop/bagel_corl_tq.py"
     names = [
         "episode_from_agent_extra",

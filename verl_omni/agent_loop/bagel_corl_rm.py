@@ -103,13 +103,7 @@ def parse_rm_result(
     result: Any,
     image_paths: list[str],
 ) -> tuple[list[float], list[bool | None]]:
-    """Parse a ``compute_score`` result into per-image scores + per-image stop bits.
-
-    Accepts ``reward_score`` as a scalar (broadcast to every image) or
-    ``reward_extra_info["sample_scores"]`` aligned with ``image_paths``. The stop
-    bit comes from ``reward_extra_info["sample_good_enough"]`` (per-image flags,
-    preferred) or ``reward_extra_info["good_enough"]`` (broadcast).
-    """
+    """Parse a ``compute_score`` result into per-image scores + per-image stop bits."""
     if not isinstance(result, dict) or "reward_score" not in result:
         raise RMScoringError(f"bagel RM result missing 'reward_score': {type(result)!r}")
     extra = result.get("reward_extra_info") or {}

@@ -24,7 +24,6 @@ import time
 import uuid
 import zlib
 from functools import partial
-from pathlib import Path
 from typing import Any
 
 from verl.experimental.agent_loop.agent_loop import AgentLoopBase, AgentLoopMetrics, AgentLoopOutput, register
@@ -38,23 +37,19 @@ from verl_omni.agent_loop.bagel_corl_lib import (  # noqa: F401
     BagelGenerateImageTool,
     EpisodeRollout,
     GenSample,
-    cond_reuse_metrics,
     conditioning_uid,
-    count_degenerate_und_turns,
     generate_retrying_engine_wake,
     resolve_task_type,
     run_serial_episode,
     serving_rollout_provenance,
     strip_reflection_tail,
     trusted_image_reward_fields,
-    turn_histogram,
     und_turn_max_tokens,
 )
 from verl_omni.agent_loop.bagel_corl_lib import (
     with_reflection_system_prompt as _with_reflection_system_prompt,
 )
 from verl_omni.agent_loop.bagel_corl_rm import get_bagel_rm_gen_handle, make_rm_score_fn
-from verl_omni.agent_loop.composite_agent_loop import CompositeAgentLoopWorker
 from verl_omni.agent_loop.rpco_turn_protocol import derive_good_enough_from_scores
 from verl_omni.agent_loop.utils import derive_rollout_seed
 from verl_omni.tools.trajectory.artifacts import get_latest_generate_prompt_for_active_rollout
@@ -68,11 +63,9 @@ from verl_omni.tools.trajectory.context import (
 from verl_omni.tools.trajectory.hydra_env import agentic_get, agentic_scorer_knobs_from_config
 from verl_omni.tools.trajectory.paths import (
     build_trajectory_relpath,
-    project_relpath,
-    resolve_rollout_images_root,
-    resolve_run_dir,
 )
 from verl_omni.utils.agentic.image_gen_rollout_parse import last_user_prompt
+from verl_omni.utils.agentic_val_viz import VAL_VIZ_PROMPT_KEY, save_val_viz_images
 
 logger = logging.getLogger(__name__)
 
@@ -80,13 +73,7 @@ logger = logging.getLogger(__name__)
 def _log_engine_asleep_retry(
     _logger, attempt: int, delay: float, exc: Exception, *, lane: str, step: Any = None
 ) -> None:
-    """Report a re-issue of a decode the engine rejected mid-wake.
-
-    Logged at WARNING, not DEBUG: this is a transient that the retry schedule is expected to
-    absorb, but a *run* of these means wake latency is outgrowing the schedule and the rollout is
-    stalling on it. ``lane`` separates the AR (``und``) and diffusion (``gen``) pools, which wake
-    on different paths.
-    """
+    """Report a re-issue of a decode the engine rejected mid-wake."""
     _logger.warning(
         "bagel_corl %s lane: engine rejected a decode mid-wake (step=%s attempt=%d, retrying in %.1fs) -- "
         "the wake call returns when the request is dispatched, not when the memory is mapped: %s",
@@ -122,13 +109,7 @@ def _messages_are_text_only(messages: Any) -> bool:
 
 
 def _template_renders_hermes_tools(tokenizer: Any) -> bool:
-    """True when the checkpoint's chat template knows the Hermes tool-call grammar.
-
-    Gating the schema injection on the template (rather than on a recipe flag) keeps a
-    non-Hermes UND model from being handed a ``<tools>`` block it cannot render:
-    the published Bagel tokenizer's template contains both ``<tools>`` and
-    ``<tool_call>``, which is exactly the grammar ``parse_hermes_tool_call`` reads.
-    """
+    """True when the checkpoint's chat template knows the Hermes tool-call grammar."""
     template = getattr(tokenizer, "chat_template", None) or ""
     return "<tools>" in template and "<tool_call>" in template
 
@@ -203,13 +184,7 @@ def episode_to_agent_output(
         "min_global_steps": episode.policy_version,
         "max_global_steps": episode.policy_version,
         "bagel_role_timing": dict(timing or {}),
-        "bagel_corl_r2": dict(episode.r2_metrics),
         "llm_all_log_probs": None,
-        # Stamped so ``dump_bagel_corl_episode_images`` can drop the GEN PNGs into the
-        # same ``step_XXXXXX/sample_<id>.01`` folder this episode's trajectory was
-        # dumped under. Without it those images were copied to a synthesised
-        # ``sample_0.00`` path that matched no trajectory (or, before that, not
-        # copied at all).
         "trajectory_relpath": relpath or "",
     }
     return AgentLoopOutput(
@@ -226,52 +201,8 @@ def episode_to_agent_output(
     )
 
 
-def _trace_dump_enabled() -> bool:
-    """``BAGEL_CORL_TRACE_DUMP=0`` opts out of the per-episode trajectory dump.
-
-    On by default: the dump is a few KB of text per episode and it is the only record
-    of a rollout that never reached ``generate_image`` (K=0). Opting out matters for
-    very long runs on a shared filesystem, not for correctness.
-    """
-    return os.getenv("BAGEL_CORL_TRACE_DUMP", "1") not in ("0", "false", "False", "")
-
-
-def materialized_image_path(source: Any, image_relpath: str) -> str:
-    """Name the ``rollout_images/<image_relpath>/`` copy of a GEN scratch PNG.
-
-    ``dump_episode_images`` copies each scratch file to that folder under its own basename,
-    so the destination is a pure function of the two and can be named before the copy runs.
-    Rendered project-relative so the record stays valid when the checkout moves.
-    """
-    return project_relpath(resolve_rollout_images_root() / image_relpath / Path(str(source)).name)
-
-
-def _materialized_turn_trace(turn_trace: list[dict[str, Any]], image_relpath: str) -> list[dict[str, Any]]:
-    """Copy ``turn_trace`` with each ``gen_call`` naming the materialized images.
-
-    The scratch locations move to ``source_image_paths`` for provenance. The episode's own
-    records are left untouched: the GEN lane still reads the scratch files.
-    """
-    out = []
-    for record in turn_trace:
-        if record.get("record") == "gen_call":
-            sources = list(record.get("image_paths") or [])
-            record = {
-                **record,
-                "image_paths": [materialized_image_path(p, image_relpath) for p in sources],
-                "source_image_paths": sources,
-            }
-        out.append(record)
-    return out
-
-
-def trace_ground_truth(kwargs: dict[str, Any]) -> dict[str, Any]:
-    """Copy only reward ground truth from dataset metadata, never policy prose.
-
-    Do not export arbitrary rollout kwargs (which can include service secrets).
-    Preserve missing labels/references as missing so offline diagnosis can detect
-    them. ``resolve_task_type`` uses the same extra_info precedence as rollout.
-    """
+def episode_ground_truth_fields(kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Read reward metadata with the same task precedence as the episode scorer."""
     extra = kwargs.get("extra_info")
     extra = extra if isinstance(extra, dict) else {}
     reward_model = kwargs.get("reward_model")
@@ -300,241 +231,8 @@ def trace_ground_truth(kwargs: dict[str, Any]) -> dict[str, Any]:
     return ground_truth
 
 
-def dump_episode_trace(
-    *,
-    episode: EpisodeRollout,
-    relpath: str,
-    step: Any = None,
-    sample_index: Any = None,
-    user_prompt: str = "",
-    prompt_ids: list[int] | None = None,
-    tokenizer: Any | None = None,
-    image_relpath: str | None = None,
-    ground_truth: dict[str, Any] | None = None,
-) -> str | None:
-    """Write one finished Co-RL episode to ``rollout_trajectories/<relpath>``."""
-    if not _trace_dump_enabled():
-        return None
-    try:
-        step_dir = Path(relpath).parent
-        name = Path(relpath).name
-        trajectory_dir = resolve_run_dir() / "rollout_trajectories" / step_dir
-        trajectory_dir.mkdir(parents=True, exist_ok=True)
-
-        turn_trace = _materialized_turn_trace(episode.turn_trace, image_relpath or relpath)
-        turns = [r for r in turn_trace if r.get("record") == "und_turn"]
-        gen_calls = [r for r in turn_trace if r.get("record") == "gen_call"]
-        kind_counts: dict[str, int] = {}
-        for record in turns:
-            key = str(record.get("kind"))
-            kind_counts[key] = kind_counts.get(key, 0) + 1
-        # The artifact-level oracle for a corrupted AR replica. A healthy run shows 0 here and a
-        # positive ``num_gen_calls``; a corrupted one loops every turn while K stays 0. See
-        # ``count_degenerate_und_turns`` for why an HTTP canary cannot do this.
-        degenerate_und_turns = count_degenerate_und_turns(episode.turn_trace)
-        prompt_text = ""
-        if tokenizer is not None and prompt_ids:
-            try:
-                prompt_text = tokenizer.decode(list(prompt_ids), skip_special_tokens=False)
-            except Exception:  # noqa: BLE001 - decoding is best effort
-                prompt_text = ""
-
-        trusted_reward = dict(episode.bagel_corl_reward)
-        trusted_capture_error = None
-        if not trusted_reward:
-            # Diagnostic capture for V1 comparisons only. This does not change
-            # the episode's live reward or promote legacy unmarked RM scores.
-            try:
-                trusted_reward = trusted_image_reward_fields(
-                    episode.gen_samples,
-                    num_gen_calls=episode.num_gen_calls,
-                    autonomous_done=episode.autonomous_done,
-                    forced_reflection=episode.forced_reflection,
-                )
-            except ValueError as error:
-                trusted_capture_error = str(error)
-
-        payload = {
-            "trajectory_relpath": relpath,
-            "step": step,
-            "sample_index": sample_index,
-            "episode_uid": episode.episode_uid,
-            "und_group_uid": episode.und_group_uid,
-            "policy_version": episode.policy_version,
-            "ground_truth": dict(ground_truth or {}),
-            "corl_reward_version": episode.corl_reward_version,
-            "bagel_corl_reward": trusted_reward,
-            "trusted_reward_capture_error": trusted_capture_error,
-            "autonomous_done": episode.autonomous_done,
-            "response_mask": list(episode.response_mask),
-            "trace_metadata_origin": {
-                "ground_truth": "dataset_rollout_kwargs",
-                "bagel_corl_reward": "episode_harness_envelope",
-                "response_mask": "episode_response_mask",
-            },
-            "user_prompt": user_prompt,
-            "prompt_text": prompt_text,
-            "turns": episode.turns,
-            "num_gen_calls": episode.num_gen_calls,
-            "und_reward": episode.und_reward,
-            "stop_required": episode.stop_required,
-            "forced_reflection": episode.forced_reflection,
-            "judge_text": episode.judge_text,
-            "response_tokens": len(episode.response_ids),
-            "response_mask_ones": int(sum(episode.response_mask)),
-            # The single boolean that separates "GEN ran and produced nothing" from
-            # "GEN was never asked": K == 0 means no GEN request was ever issued.
-            "gen_lane_skipped": episode.num_gen_calls == 0,
-            "turn_kind_counts": kind_counts,
-            "degenerate_und_turns": degenerate_und_turns,
-            "gen_calls": gen_calls,
-            "turn_trace": turn_trace,
-        }
-        (trajectory_dir / f"{name}.json").write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n")
-
-        lines = [
-            f"relpath={relpath}",
-            f"episode_uid={episode.episode_uid}",
-            f"turns={episode.turns} num_gen_calls={episode.num_gen_calls} "
-            f"gen_lane_skipped={episode.num_gen_calls == 0} und_reward={episode.und_reward}",
-            f"turn_kind_counts={kind_counts}",
-            f"degenerate_und_turns={degenerate_und_turns}",
-            f"user_prompt: {user_prompt}",
-            "assistant_rollout:",
-        ]
-        for record in turn_trace:
-            if record.get("record") == "gen_call":
-                lines.extend(
-                    [
-                        f"  gen_call turn={record.get('turn')} role={record.get('call_role')} "
-                        f"samples={record.get('num_samples')} valid={record.get('num_valid')}",
-                        f"    prompt: {record.get('prompt')}",
-                        *[f"    image: {p}" for p in (record.get("image_paths") or [])],
-                    ]
-                )
-                continue
-            if record.get("record") in ("env_obs", "reflection"):
-                lines.append(f"  {record.get('record')} turn={record.get('turn')} (mask 0)")
-                lines.extend(f"      {line}" for line in str(record.get("text") or "").splitlines() or [""])
-                continue
-            header = (
-                f"  turn={record.get('turn')} kind={record.get('kind')} "
-                f"req_ctx={record.get('req_ctx')} out_tokens={record.get('out_tokens')} "
-                f"decode_s={record.get('decode_s')}"
-            )
-            lines.append(header)
-            lines.append("    text:")
-            lines.extend(f"      {line}" for line in str(record.get("text") or "").splitlines() or [""])
-        (trajectory_dir / f"{name}.txt").write_text("\n".join(lines) + "\n")
-        return str(trajectory_dir / f"{name}.txt")
-    except Exception:  # noqa: BLE001 - diagnostics must never fail a rollout
-        logger.warning("bagel_corl_trace_dump_failed relpath=%s", relpath, exc_info=True)
-        return None
-
-
-def dump_episode_hermes_action(
-    *,
-    episode: EpisodeRollout,
-    relpath: str,
-    step: Any = None,
-    sample_index: Any = None,
-    user_prompt: str = "",
-    image_relpath: str | None = None,
-) -> str | None:
-    """Append one compact action row to ``hermes_actions/step_XXXXXX.jsonl``."""
-    if not _trace_dump_enabled():
-        return None
-    try:
-        monitor_dir = resolve_run_dir() / "hermes_actions"
-        monitor_dir.mkdir(parents=True, exist_ok=True)
-        step_tag = f"step_{int(step):06d}" if step is not None else "step_unknown"
-        path = monitor_dir / f"{step_tag}.jsonl"
-
-        gen_calls = [r for r in episode.turn_trace if r.get("record") == "gen_call"]
-        kind_counts: dict[str, int] = {}
-        for record in episode.turn_trace:
-            if record.get("record") == "und_turn":
-                kind = str(record.get("kind"))
-                kind_counts[kind] = kind_counts.get(kind, 0) + 1
-
-        image_relpath = image_relpath or relpath
-        source_paths = [p for call in gen_calls for p in (call.get("image_paths") or [])]
-        image_paths = [materialized_image_path(p, image_relpath) for p in source_paths]
-
-        row = {
-            "trajectory_relpath": relpath,
-            "image_dir": project_relpath(resolve_rollout_images_root() / image_relpath),
-            "step": step,
-            "sample_index": sample_index,
-            "episode_uid": episode.episode_uid,
-            "und_group_uid": episode.und_group_uid,
-            "policy_version": episode.policy_version,
-            "user_prompt": user_prompt,
-            "turns": episode.turns,
-            "turn_kind_counts": kind_counts,
-            # The single boolean separating "GEN ran and produced nothing" from "GEN was
-            # never asked" -- the first thing to check when the GEN lane looks idle.
-            "num_gen_calls": episode.num_gen_calls,
-            "gen_lane_skipped": episode.num_gen_calls == 0,
-            "num_tool_calls_executed": len(gen_calls),
-            "gen_calls": [
-                {
-                    "turn": call.get("turn"),
-                    "call_role": call.get("call_role"),
-                    "prompt": call.get("prompt"),
-                    "num_samples": call.get("num_samples"),
-                    "num_valid": call.get("num_valid"),
-                    "image_paths": [materialized_image_path(p, image_relpath) for p in (call.get("image_paths") or [])],
-                }
-                for call in gen_calls
-            ],
-            "image_paths": image_paths,
-            "source_image_paths": source_paths,
-            "response_tokens": len(episode.response_ids),
-            "stop_required": episode.stop_required,
-            "forced_reflection": episode.forced_reflection,
-            "judge_text": episode.judge_text,
-            "reward_metrics": {"und_reward": episode.und_reward},
-        }
-
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
-        try:
-            os.write(fd, (json.dumps(row, ensure_ascii=False) + "\n").encode("utf-8"))
-        finally:
-            os.close(fd)
-        return str(path)
-    except Exception:  # noqa: BLE001 - diagnostics must never fail a rollout
-        logger.warning("bagel_corl_hermes_dump_failed relpath=%s", relpath, exc_info=True)
-        return None
-
-
-def validation_artifact_relpath(relpath: str, sampling_params: dict | None) -> str:
-    """Return ``relpath`` under a ``val/`` prefix for a validation episode."""
-    return f"val/{relpath}" if (sampling_params or {}).get("logprobs") is False else relpath
-
-
-def dump_episode_images(*, episode: EpisodeRollout, relpath: str, step: Any = None) -> list[str]:
-    """Copy this episode's GEN PNGs into ``rollout_images/<relpath>/``."""
-    try:
-        from verl_omni.utils.agentic.image_gen_rollout_dump import dump_bagel_corl_episode_images
-
-        return dump_bagel_corl_episode_images(
-            [{"gen_samples": episode.gen_samples, "trajectory_relpath": relpath}],
-            step=step,
-        )
-    except Exception:  # noqa: BLE001 - diagnostics must never fail a rollout
-        logger.warning("bagel_corl_image_dump_failed relpath=%s", relpath, exc_info=True)
-        return []
-
-
 def episode_seed_index(episode_key: str) -> int:
-    """Deterministic per-episode integer for the GEN seed base.
-
-    Uses ``zlib.crc32`` rather than the builtin ``hash``: ``hash`` is salted per
-    process (``PYTHONHASHSEED``), so a replayed step would draw *different* noise
-    than the run it is meant to reproduce, and FlowGRPO's GEN keys are supposed to
-    be reproducible per ``(episode, call)``.
-    """
+    """Deterministic per-episode integer for the GEN seed base."""
     return int(zlib.crc32(str(episode_key).encode("utf-8")))
 
 
@@ -650,14 +348,6 @@ class BagelMultiturnAgentLoop(AgentLoopBase):
             getattr(rollout_cfg, "enable_prompt_embed_cache", False)
             and getattr(rollout_cfg, "enable_prompt_embed_cache_routing_affinity", False)
         )
-        # RFC §4.4.4 R2 accumulator: engine-measured counters for this episode's GEN requests, turned into ratios once
-        # the episode ends.
-        self._bagel_r2: dict[str, Any] = {
-            "calls": 0,
-            "hits": None,
-            "misses": None,
-            "bypassed": None,
-        }
         # Role timing (RFC §8 KPIs): per-episode wall-clock split by lane.
         timing = {"und_decode_s": 0.0, "gen_s": 0.0, "rm_s": 0.0}
         self._bagel_timing = timing
@@ -813,7 +503,7 @@ class BagelMultiturnAgentLoop(AgentLoopBase):
         path_tokens = set_active_trajectory_relpath(relpath)
         user_prompt_text = last_user_prompt(raw_prompt)
         prompt_token = set_active_user_prompt(user_prompt_text)
-        episode_ground_truth = trace_ground_truth(kwargs)
+        episode_ground_truth = episode_ground_truth_fields(kwargs)
         try:
             expected_num_images = max(1, int(episode_ground_truth.get("expected_num_images") or 1))
         except (TypeError, ValueError):
@@ -841,43 +531,10 @@ class BagelMultiturnAgentLoop(AgentLoopBase):
         finally:
             reset_active_trajectory_relpath(path_tokens)
             reset_active_user_prompt(prompt_token)
-        # Per-episode trajectory dump.
-        image_relpath = validation_artifact_relpath(relpath, getattr(self, "_sampling_params", None))
-        episode.trace_dump_path = dump_episode_trace(
-            episode=episode,
-            relpath=relpath,
-            step=global_steps,
-            sample_index=session_id,
-            user_prompt=user_prompt_text,
-            prompt_ids=list(prompt_ids),
-            tokenizer=self.tokenizer,
-            image_relpath=image_relpath,
-            ground_truth=episode_ground_truth,
-        )
-        # Action-level index beside the trajectory (and the PNGs the image dumper copies
-        # under the same ``relpath``). Written from the episode because the bagel TQ
-        # worker never runs ``dump_raw_rollouts``, which is what produces
-        # ``hermes_actions`` for the sibling agentic lane.
-        dump_episode_hermes_action(
-            episode=episode,
-            relpath=relpath,
-            step=global_steps,
-            sample_index=session_id,
-            user_prompt=user_prompt_text,
-            image_relpath=image_relpath,
-        )
-        # Same reason: copy the GEN PNGs out of the scratch dir into the run's
-        # ``rollout_images`` tree, next to this episode's trajectory.
-        dump_episode_images(episode=episode, relpath=image_relpath, step=global_steps)
-        # RFC §4.4.4 R2: engine-measured conditioning reuse for this episode. Empty
-        # whenever the engine exposed no counters, so nothing is fabricated.
-        r2 = getattr(self, "_bagel_r2", None) or {}
-        episode.r2_metrics = cond_reuse_metrics(
-            calls=int(r2.get("calls", 0)),
-            hits=r2.get("hits"),
-            misses=r2.get("misses"),
-            bypassed=r2.get("bypassed", 0),
-        )
+        if str(kwargs.get(VAL_VIZ_PROMPT_KEY, "")).lower() in {"1", "true", "yes", "on"}:
+            save_val_viz_images(
+                [sample.image_path for sample in episode.gen_samples if sample.valid and sample.image_path], relpath
+            )
         return episode_to_agent_output(episode, timing=self._bagel_timing, relpath=relpath)
 
     async def _generate_image(self, **kwargs) -> list[dict[str, Any]]:
@@ -889,7 +546,7 @@ class BagelMultiturnAgentLoop(AgentLoopBase):
 
         rollout = self.config.actor_rollout_ref.rollout
         base = dict(getattr(self, "_sampling_params", None) or {})
-        # ``logprobs is False`` is the validate marker the val overlay sets (see ``validation_artifact_relpath``).
+        # The validation overlay disables trajectory log-probabilities.
         is_validate = base.get("logprobs") is False
         rows: list[dict[str, Any]] = []
         timing = getattr(self, "_bagel_timing", None)
@@ -907,7 +564,6 @@ class BagelMultiturnAgentLoop(AgentLoopBase):
         # scattered the group across replicas and made a cold cache guaranteed.
         affinity = bool(getattr(self, "_bagel_cond_affinity", False))
         routing_key = self._cond_routing_key(kwargs.get("gen_call_id") or cond_uid) if affinity else None
-        counters_before = await self._prompt_embed_cache_counters(routing_key)
         for seed in seeds:
             t0 = time.perf_counter()
             try:
@@ -945,7 +601,6 @@ class BagelMultiturnAgentLoop(AgentLoopBase):
             finally:
                 if timing is not None:
                     timing["gen_s"] += time.perf_counter() - t0
-        await self._record_cond_reuse(routing_key, counters_before, calls=len(seeds))
         return rows
 
     def _cond_routing_key(self, group_key: str) -> str:
@@ -955,61 +610,8 @@ class BagelMultiturnAgentLoop(AgentLoopBase):
         """
         return f"bagel_cond::{group_key}"
 
-    async def _prompt_embed_cache_counters(self, routing_key: str | None) -> dict[str, Any] | None:
-        """Read the conditioning-cache counters of the replica ``routing_key`` pins to.
-
-        Returns ``None`` whenever affinity is off or the client/engine cannot
-        answer. Metrics must never break a rollout, so every failure degrades to
-        "no measurement" rather than an exception or a fabricated zero.
-        """
-        if routing_key is None:
-            return None
-        probe = getattr(self.server_manager, "prompt_embed_cache_stats", None)
-        if probe is None:
-            return None
-        try:
-            return await probe(routing_key)
-        except Exception as exc:  # noqa: BLE001 — metrics only
-            logger.warning("bagel_corl R2: prompt-embed cache probe failed: %s", exc)
-            return None
-
-    async def _record_cond_reuse(
-        self,
-        routing_key: str | None,
-        before: dict[str, Any] | None,
-        *,
-        calls: int,
-    ) -> None:
-        """Accumulate one ``generate_image`` turn's engine-measured reuse (RFC §4.4.4)."""
-        r2 = getattr(self, "_bagel_r2", None)
-        if r2 is None:
-            return
-        r2["calls"] = int(r2.get("calls", 0)) + max(0, int(calls))
-        if routing_key is None:
-            return
-        after = await self._prompt_embed_cache_counters(routing_key)
-        if before is None or after is None:
-            # Nothing measured: leave ``hits``/``misses`` at ``None`` so the episode
-            # reports no R2 numbers instead of a fabricated perfect ratio.
-            return
-        if r2.get("hits") is None:
-            # First successful probe: start counting from here.
-            r2["hits"] = 0
-            r2["misses"] = 0
-            r2["bypassed"] = 0
-        for key in ("hits", "misses", "bypassed"):
-            delta = int(after.get(key, 0) or 0) - int(before.get(key, 0) or 0)
-            if delta > 0:
-                r2[key] = int(r2.get(key, 0) or 0) + delta
-
     async def _score_gen_samples(self, samples: list[GenSample]) -> list[GenSample]:
-        """Score GEN samples via an injected RM hook (C/A, UniCoT similarity, good_enough).
-
-        When no hook is wired (no mid-episode RM), derive ``good_enough`` from any
-        pre-populated ``rm_score`` and otherwise leave the samples unscored so the
-        post-episode reward loop supplies the authoritative scalar. Never hardcode a
-        zero score.
-        """
+        """Score GEN samples via an injected RM hook (C/A, UniCoT similarity, good_enough)."""
         rm_fn = getattr(self, "_rm_score_fn", None)
         if rm_fn is None:
             for sample in samples:
@@ -1029,54 +631,3 @@ class BagelMultiturnAgentLoop(AgentLoopBase):
             timing = getattr(self, "_bagel_timing", None)
             if timing is not None:
                 timing["rm_s"] += time.perf_counter() - t0
-
-
-class MultiturnAgentLoopWorker(CompositeAgentLoopWorker):
-    """Composite worker that gathers J serial episodes, then flattens UND vs GEN.
-
-    Prefer ``BagelCorlAgentLoopWorkerTQ`` for bagel_corl_sync (dual-lane TQ).
-    """
-
-    async def generate_sequences(self, batch):
-        output = await super().generate_sequences(batch)
-        turns = []
-        if "metrics" in output.meta_info:
-            for row in output.meta_info["metrics"]:
-                if isinstance(row, dict) and "turns" in row:
-                    turns.append(int(row["turns"]))
-        hist = turn_histogram(turns)
-        extra = output.meta_info.setdefault("bagel_corl", {})
-        extra.update(hist)
-        logger.info("bagel_corl turn histogram: %s", hist)
-        agent_cfg = getattr(self.config.actor_rollout_ref.rollout, "agent", None)
-        expected_s = int(getattr(agent_cfg, "gen_samples_per_call", None) or 4)
-        from verl_omni.agent_loop.bagel_corl_lib import flatten_from_agent_output, strip_pixels_for_actor
-
-        flat = flatten_from_agent_output(output, expected_s=expected_s)
-        extra.update(flat.metrics)
-        extra["gen_batch"] = [strip_pixels_for_actor(row) for row in flat.gen_batch]
-        extra["und_batch"] = flat.und_batch
-        extra["gen_episode_map"] = flat.gen_episode_map
-        try:
-            from verl_omni.utils.agentic.image_gen_rollout_dump import (
-                dump_bagel_corl_episode_images,
-                dump_raw_rollouts,
-            )
-
-            step = None
-            if hasattr(batch, "meta_info") and isinstance(batch.meta_info, dict):
-                step = batch.meta_info.get("global_steps") or batch.meta_info.get("step")
-            if step is None and isinstance(getattr(output, "meta_info", None), dict):
-                step = output.meta_info.get("global_steps") or output.meta_info.get("step")
-            try:
-                dump_raw_rollouts(
-                    tokenizer=getattr(self, "tokenizer", None),
-                    output=output,
-                    step=step,
-                )
-            except (TypeError, KeyError, AttributeError) as exc:
-                logger.debug("dump_raw_rollouts skipped for Bagel Co-RL (Joint-Training) batch shape: %s", exc)
-                dump_bagel_corl_episode_images(output, step=step)
-        except ImportError as exc:
-            logger.debug("rollout dump unavailable: %s", exc)
-        return output

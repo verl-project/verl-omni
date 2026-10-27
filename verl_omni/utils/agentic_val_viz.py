@@ -12,42 +12,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Fixed holdout tasks for agentic validation visualization.
+"""Fixed café (9001/9002) and Chinese-poster (9003/9004) validation demos.
 
-These are experiment-tracking fixtures, not part of the agent-loop protocol. On each
-validate step the run generates this holdout *first* (samples 9001/9002 cafe +
-9003/9004 CN poster by default), writes PNGs and ``meta.json`` under
-``outputs/<run>/rollout_images/``, then evaluates the UniCoT val set. The trainer
-driver logs ``val-core`` at the same step.
-
-Why they exist: ``val-core`` is a scalar mix over the whole val parquet, so a lane can
-degrade to a degenerate-but-scoring mode (e.g. emit the terminal token immediately) and
-the mean barely moves. Four *fixed* prompts, rendered as an ordered image progression
-every validation step, are the artifact that makes that visible -- which is exactly what
-the Mode (2a) RPCO recipe dumps as ``rollout_images/step_000010/sample_9001..9004``.
-
-Two entry points, because the two lanes carry batches differently:
-
-* :meth:`AgenticValVizProvider.build_batch` returns a ``DataProto`` -- the shape the
-  non-TransferQueue agentic lane (``ImageGenMetricsAgentLoopManager``) hands to
-  ``generate_sequences``.
-* :meth:`AgenticValVizProvider.build_tensordict_batch` returns a ``TensorDict`` -- the
-  shape the V1 TransferQueue lane (``BagelCorlAgentLoopManagerTQ``) chunks and
-  dispatches to ``BagelCorlAgentLoopWorkerTQ``.
-
-The TransferQueue lane also needs the rows to be *separable from real validation*:
-``_validate`` samples the ``"val"`` partition with ``batch_size=len(batch)``, so four
-extra holdout rows there would either displace real validation rows or leave the buffer
-short. Every viz row therefore carries :data:`VAL_VIZ_PROMPT_KEY`, which makes
-``BagelCorlAgentLoopWorkerTQ`` run the episode and write **no** TransferQueue row at all:
-the holdout's consumers are the PNGs and the trajectory the episode dumps itself, not the
-training lane's transport.
+The V1 worker runs these separately from queued validation and persists their
+images under ``rollout_images/val/step_XXXXXX/sample_9001..9004.nn/``. They do not
+contribute training rows or alter the validation aggregate.
 """
 
 from __future__ import annotations
 
+import logging
 import os
+import shutil
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Sequence
 
 import numpy as np
@@ -59,6 +37,27 @@ VAL_VIZ_PROMPT_KEY = "agentic_val_viz"
 
 #: Dataset ``data_source`` stamped on every holdout row.
 VAL_VIZ_DATA_SOURCE = "agentic_val_viz"
+
+
+def save_val_viz_images(image_paths: Sequence[str], relpath: str) -> list[str]:
+    """Keep demo PNGs under their validation step and fixed case identity."""
+    from verl_omni.tools.trajectory.paths import resolve_rollout_images_root
+
+    written = []
+    try:
+        target_dir = resolve_rollout_images_root() / "val" / relpath
+        for index, path in enumerate(image_paths):
+            source = Path(path)
+            if not source.is_file():
+                continue
+            target_dir.mkdir(parents=True, exist_ok=True)
+            target = target_dir / f"image_{index:03d}.png"
+            if source.resolve() != target.resolve():
+                shutil.copy2(source, target)
+            written.append(str(target))
+    except OSError:
+        logging.getLogger(__name__).warning("Could not save validation demo %s", relpath, exc_info=True)
+    return written
 
 
 @dataclass(frozen=True)

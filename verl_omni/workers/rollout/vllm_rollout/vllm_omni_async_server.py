@@ -254,7 +254,7 @@ def _drop_defaulted_engine_args(engine_args: dict, deploy_config: Any = None) ->
 
 # Control RPCs the diffusion worker cannot serve in the pinned vllm_omni.
 #
-# ``clear_prompt_embed_cache`` / ``get_prompt_embed_cache_stats`` live on
+# ``clear_prompt_embed_cache`` lives on
 # ``DiffusionModelRunner``, but ``collective_rpc`` resolves
 # ``getattr(self.worker, method)`` against the *worker*
 # (``DiffusionWorkerWithvLLMOmniColocateWorkerExtension``) and nothing bridges worker →
@@ -599,31 +599,6 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             await self._invalidate_policy_caches()
         await super().set_global_steps(global_steps)
 
-    async def prompt_embed_cache_stats(self) -> list[Any] | None:
-        """Conditioning-cache counters from the GEN engine (RFC §4.4.4, R2).
-
-        ``DiffusionModelRunner.get_prompt_embed_cache_stats`` owns the counters —
-        each runner process holds its own cache, so there is no engine-level
-        aggregate to read instead. The control RPC fans out per stage so a
-        multi-stage deploy reports every cache rather than one silently-partial
-        number. Returns ``None`` on non-head ranks.
-        """
-        if self.node_rank != 0:
-            return None
-        if self._prompt_embed_cache_rpc_unsupported("get_prompt_embed_cache_stats"):
-            return []
-        # ``self.engine`` is the ``AsyncOmni`` *client* (vllm_omni
-        # ``entrypoints/async_omni.py``), whose control-plane entry point is
-        # ``collective_rpc`` -- itself already a coroutine that delegates to the inner
-        # ``AsyncOmniEngine.collective_rpc_async``. Calling ``_async`` here would reach
-        # for the engine-internal method on the client object, which has no such
-        # attribute.
-        results = list(await self.engine.collective_rpc(method="get_prompt_embed_cache_stats"))
-        if _rpc_reports_missing_method(results, "get_prompt_embed_cache_stats"):
-            self._mark_prompt_embed_cache_rpc_unsupported("get_prompt_embed_cache_stats")
-            return []
-        return results
-
     async def _reset_frontend_mm_cache(self) -> None:
         """Clear the frontend multimodal cache; EngineCore.sleep wipes only the engine-side copy."""
         # Diffusion-only engines build no InputProcessor, so renderer is None.
@@ -798,12 +773,8 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         if self._prompt_embed_cache_rpc_unsupported("clear_prompt_embed_cache"):
             return
         try:
-            # ``collective_rpc`` (not ``collective_rpc_async``): see
-            # ``prompt_embed_cache_stats`` -- the latter exists only on the inner
-            # ``AsyncOmniEngine``, not on the ``AsyncOmni`` client held here. This call
-            # is inside a try/except that degrades to a warning, so the wrong name used
-            # to fail silently on every weight sync: the cache was never flushed, and
-            # the only trace was a warning about stale entries.
+            # The AsyncOmni client exposes collective_rpc; the _async variant
+            # belongs to its inner engine.
             results = await self.engine.collective_rpc(method="clear_prompt_embed_cache")
         except Exception as exc:  # noqa: BLE001 — must not break weight sync
             logger.warning("prompt-embed cache flush failed; entries may be stale: %s", exc)
@@ -836,8 +807,8 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         self._pec_rpc_unsupported = frozenset(known)
         logger.warning(
             "prompt-embed cache RPC %r is not serviceable by this engine: the diffusion "
-            "worker does not expose the runner's method, so the RFC §4.4.4 counters stay "
-            "empty and the conditioning cache is not flushed. Skipping further calls "
+            "worker does not expose the runner's method, so the conditioning cache "
+            "is not flushed. Skipping further calls "
             "(this warning appears once per method).",
             method,
         )

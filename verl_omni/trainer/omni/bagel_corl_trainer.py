@@ -199,13 +199,7 @@ def _normalize_tq_kv_get_result(data, keys: list[str]) -> dict[str, dict]:
 
 
 def _index_column(col, i: int):
-    """Index a stacked TQ column (Tensor / NonTensorStack / list) at position ``i``.
-
-    ``NonTensorStack.__getitem__`` yields a ``NonTensorData`` wrapper — unwrap it so
-    field dicts carry plain values (a wrapper would silently break
-    ``split_und_gen_metas`` iteration and ``build_gen_flowgrpo_proto``). Tensors are
-    returned as-is (never touch ``Tensor.data``).
-    """
+    """Index a stacked TQ column (Tensor / NonTensorStack / list) at position ``i``."""
     if col is None:
         return None
     try:
@@ -775,14 +769,7 @@ class OmniBagelCoRLTrainerSync(OmniPPOTrainerSync):
         return records
 
     def _fetch_gen_records_by_keys(self, batch, und_records: list[dict]) -> dict[str, dict]:
-        """Lookup GEN TQ rows by ``child_gen_keys``. Returns key → {fields: ...}.
-
-        ``transfer_queue.kv_batch_get`` returns a **columnar TensorDict** (one entry
-        per requested key, in request order), not a keyed dict. Treating it as a dict
-        silently yields ``{}`` and drops the whole GEN lane. Normalize every known
-        return shape here and fail-loud on an unrecognized one instead of silently
-        skipping GEN.
-        """
+        """Lookup GEN TQ rows by ``child_gen_keys``. Returns key → {fields: ...}."""
         extra = self._extra_info(batch)
         if isinstance(extra.get("gen_by_key"), dict):
             return {str(k): ({"fields": v} if "fields" not in v else v) for k, v in extra["gen_by_key"].items()}
@@ -1153,13 +1140,7 @@ class OmniBagelCoRLTrainerSync(OmniPPOTrainerSync):
 
     @staticmethod
     def _und_stage_device_indices(deploy_config: str) -> dict[int, int]:
-        """Highest logical device index each stage of the UND AR deploy config asks for.
-
-        Stage ``devices`` are logical indices into the replica's own
-        ``CUDA_VISIBLE_DEVICES`` (``run_bagel_und_ar_serve.sh`` relies on the same
-        convention), so the pool width has to cover the widest one or the stage's
-        engine core dies during init with an unrelated-looking error.
-        """
+        """Highest logical device index each stage of the UND AR deploy config asks for."""
         return {
             stage_id: max(indices)
             for stage_id, indices in OmniBagelCoRLTrainerSync._und_stage_devices(deploy_config).items()

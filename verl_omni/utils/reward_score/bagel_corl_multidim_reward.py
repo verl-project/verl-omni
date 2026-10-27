@@ -219,17 +219,7 @@ def _zero_result(*, method: str) -> dict[str, float | str | int | None]:
 
 
 def _as_sequence(value: Any) -> list[Any]:
-    """Coerce a dataset reference field into a list of items.
-
-    ``reference_steps`` / ``reference_subtasks`` are written as Python lists but do not
-    survive the parquet round-trip as ones: they come back as ``ndarray``, 1-3 elements
-    wide. ``value or []`` is therefore a latent crash -- on a >1-element array it raises
-    ``ValueError: The truth value of an array with more than one element is ambiguous``.
-
-    Coercion is deliberately permissive: ``None`` (the unused sibling key) and an empty
-    string degrade to no references, a plain string stays *one* reference rather than being
-    iterated into characters, and an unlistable scalar degrades to itself.
-    """
+    """Coerce a dataset reference field into a list of items."""
     if value is None:
         return []
     if isinstance(value, str):
@@ -274,13 +264,7 @@ def _balanced_object_end(text: str, start: int) -> int | None:
 
 
 def _wrap_bare_line_payloads(text: str) -> str:
-    """Wrap every line-anchored, named JSON object in ``<tool_call>`` tags.
-
-    Runs *after* the ``<tools>`` rewrite, and skips spans that rewrite already produced
-    (tracked by ``_TOOL_CALL_BLOCK_RE``) so a ``<tools>`` call is never wrapped twice -- a
-    nested ``<tool_call>`` would make ``raw_blocks`` and ``_extract_tool_calls`` disagree
-    again, which is the very check ``_format_reward`` opens with.
-    """
+    """Wrap every line-anchored, named JSON object in ``<tool_call>`` tags."""
     protected = [match.span() for match in _TOOL_CALL_BLOCK_RE.finditer(text)]
     pieces: list[str] = []
     cursor = 0
@@ -308,14 +292,7 @@ def _wrap_bare_line_payloads(text: str) -> str:
 
 
 def _first_named_object(raw: str) -> dict[str, Any] | None:
-    """First ``{"name": ...}`` object inside a native call body (an array, or a bare object).
-
-    The native fence wraps a JSON **array** of calls, so :func:`_parse_tool_call_body` cannot
-    read it directly. Scans the body's own balanced objects in order and takes the first one
-    that names a tool, which mirrors ``bagel_corl_lib._native_payload``: a multi-call array
-    still drives the loop on its first actionable element. Returns ``None`` for a body with no
-    complete named object -- a turn cut by the token budget must not become a fabricated call.
-    """
+    """First ``{"name": ...}`` object inside a native call body (an array, or a bare object)."""
     if not raw:
         return None
     cursor = 0
@@ -336,13 +313,7 @@ def _first_named_object(raw: str) -> dict[str, Any] | None:
 
 
 def _wrap_native_call_payloads(text: str) -> str:
-    """Rewrite every native ``<|... ToolCall|>[...]<|... ToolCall|>`` span into ``<tool_call>``.
-
-    Runs *before* ``_wrap_bare_line_payloads`` (which would otherwise wrap a pretty-printed
-    element of the same array a second time) and before the ``<tools>`` rewrite is irrelevant
-    -- the spans cannot overlap. A fence whose body carries no named object is left untouched,
-    matching the loop, which also declines to execute it.
-    """
+    """Rewrite every native ``<|... ToolCall|>[...]<|... ToolCall|>`` span into ``<tool_call>``."""
 
     def replace(match: re.Match[str]) -> str:
         payload = _first_named_object(match.group(1) or "")
@@ -354,37 +325,7 @@ def _wrap_native_call_payloads(text: str) -> str:
 
 
 def _normalize_trajectory_dialect(text: str) -> str:
-    """Rewrite the Bagel Co-RL call dialect into the Hermes vocabulary.
-
-    The scorer's dims are protocol-shaped (``format`` counts ``<tool_call>`` blocks
-    against parsed calls, ``result`` needs a judge verdict), and they were written against
-    the Mode-2a Hermes transcript. The Bagel Joint-Training loop renders the *same* facts in
-    its own vocabulary, so every dim read zero:
-
-    * calls ride the schema tag -- ``<tools>{json}</tools>`` -- not ``<tool_call>``;
-    * or they ride the checkpoint's native ``<|start of ToolCall|>[{json}]<|end of ToolCall|>``
-      fence (every spelling in ``_NATIVE_OPEN_TAGS``/``_NATIVE_CLOSE_TAGS``), whose payload is an
-      array rather than an object;
-    * or they ride *no* tag at all, as a bare line-anchored JSON object (see
-      ``_LINE_START_OBJECT_RE``);
-    * a generated image is announced as a bare ``path=<abs>.png`` with no
-      ``agentic_tool ok=1`` prefix (handled in ``_count_successful_generates``);
-    * the RM verdict arrives as the forced ``Reflection: VL judge reports ...`` line
-      (handled in ``_bagel_judge_hits``).
-
-    Only the calls are a safe rewrite. The observation is *not* rewritten: a turn that runs
-    out of context is truncated mid-JSON, so the loop's ``compact_image_observation`` is
-    glued to the model's last tokens (``...ideal for`` + ``path=...``), and any rewrite that
-    inserts a line break to satisfy the line-oriented matcher would have to guess whether it
-    is landing inside a JSON string. The verdict is *parsed* rather than rewritten because
-    it is attributable to ``generate_image``, not to a policy ``judge_image`` action, and
-    laundering it into the Hermes judge gate would credit the wrong action.
-
-    The rewrite is inert on a Hermes transcript: ``_TAGGED_CALL_RE`` only matches a JSON
-    object, so the prompt's ``<tools>`` schema block -- a JSON *array* of function
-    definitions -- can never be mistaken for a call, and a Hermes transcript keeps its calls
-    inside ``<tool_call>`` blocks, which ``_wrap_bare_line_payloads`` skips.
-    """
+    """Rewrite the Bagel Co-RL call dialect into the Hermes vocabulary."""
     if not text:
         return text
     text = _wrap_native_call_payloads(text)
@@ -408,20 +349,7 @@ def _follows_judge_image_call(pos: int, calls: list[tuple[int, int, dict[str, An
 
 
 def _count_successful_generates(text: str) -> int:
-    """Images the environment confirmed, in either lane's vocabulary.
-
-    Hermes writes ``agentic_tool ok=1 path=<p>.png`` on its own line. Bagel appends the bare
-    path of ``bagel_corl_lib.compact_image_observation``, and that observation is *glued* to
-    the model's preceding tokens whenever the turn was truncated mid-JSON (``...ideal for`` +
-    ``path=/abs/gen_x.png``). The line-oriented matcher cannot see it there: ``\\bagentic_tool``
-    needs a word boundary, and ``</tools`` + ``agentic_tool`` sits between two word characters.
-    Counting the bare form by occurrence sidesteps the glue entirely.
-
-    The bare form is only consulted when the transcript carries *no* Hermes generate
-    observation at all. A Hermes lane that reported ``ok=0`` writes a ``path=`` too, and a
-    failed generate is a hard zero -- counting it would resurrect exactly the zero-credit
-    rollout ``test_empty_and_failed_generate_rollouts_are_hard_zero`` pins.
-    """
+    """Images the environment confirmed, in either lane's vocabulary."""
     blob = text or ""
     strict = sum(
         1
@@ -462,16 +390,7 @@ def _judge_parse_stats(text: str, calls: list[tuple[int, int, dict[str, Any]]] |
 def _bagel_judge_hits(
     text: str, calls: list[tuple[int, int, dict[str, Any]]] | None = None
 ) -> list[tuple[float, float, bool, int]]:
-    """Trusted ``(correctness, aesthetics, good_enough, end)`` from a Bagel Reflection verdict.
-
-    The Bagel loop never writes an ``agentic_judge ok=1`` observation: the reward loop
-    judges the GEN samples of a ``generate_image`` call and
-    ``rpco_turn_protocol.build_forced_reflection`` paraphrases the verdict into the forced
-    ``Reflection: VL judge reports correctness=..., aesthetics=..., good_enough=...`` line,
-    which IS in the transcript. Reading it here is not a loosening of the Hermes gate -- the
-    Bagel verdict is attributable to a different action (the image request, not a
-    ``judge_image`` call) and is gated on that instead.
-    """
+    """Trusted ``(correctness, aesthetics, good_enough, end)`` from a Bagel Reflection verdict."""
     parsed_calls = calls if calls is not None else _extract_tool_calls(text or "")
     hits = []
     for match in _BAGEL_VERDICT_RE.finditer(text or ""):
@@ -487,15 +406,7 @@ def _bagel_judge_hits(
 
 
 def _successful_judges(text: str) -> list[tuple[float, float, bool | None, int]]:
-    """Return trusted ``(correctness, aesthetics, good_enough, end)`` values.
-
-    Hermes hits must follow a parsed ``judge_image`` ``<tool_call>`` and the tool's
-    ``VL judge on the last generated image`` header. Bagel hits follow a ``generate_image``
-    call and carry the verdict inline (``_bagel_judge_hits``). Both feed one
-    chronologically ordered list, because every consumer -- ``_terminal_decision``'s anchor,
-    ``_result_reward``'s final verdict, ``_generates_after_first_yes`` -- is asking about
-    "the last verdict", regardless of which lane wrote it.
-    """
+    """Return trusted ``(correctness, aesthetics, good_enough, end)`` values."""
     blob = text or ""
     calls = _extract_tool_calls(blob)
     hits = []
@@ -720,16 +631,7 @@ def _protocol_reward(
     judge_failed: int,
     blocked: bool,
 ) -> float:
-    """Parse-level protocol validity: every call block and every verdict parsed, no hard block.
-
-    Deliberately disjoint from ``R_format``, which owns the *structural* checks
-    (a generate happened, the verdict lands after the images it judged, the turn
-    ended in the terminal token). This dim is the "nothing silently failed" half:
-    an unparsed ``<tool_call>`` block, an ``agentic_judge ok=0``, or a
-    ``blocked_after_*`` stop all cost it. A transcript that is entirely empty is
-    not rewarded for having nothing to fail -- with no call at all there is no
-    protocol to be valid.
-    """
+    """Parse-level protocol validity: every call block and every verdict parsed, no hard block."""
     if parsed_calls < 1:
         return 0.0
     checks = [
@@ -748,15 +650,7 @@ def _image_reward(
     blocked: bool,
     rewrite_after_yes: int,
 ) -> float:
-    """Image quality of the **final** pass plus the gain a rewrite bought.
-
-    Scores the last trusted verdict (mean of its C/A) and adds ``max(0, final -
-    first)`` when the episode ran more than one judged pass, capped at 1. A single
-    pass is scored on its own quality -- never penalised for not having a rewrite
-    to improve on -- and a rewrite that made the image worse earns no bonus, it
-    keeps only the (lower) final quality. Zero when the transcript carries no
-    trusted verdict, or when the episode hard-blocked or rewrote after a YES.
-    """
+    """Image quality of the **final** pass plus the gain a rewrite bought."""
     if successful_generates < 1 or blocked or rewrite_after_yes > 0:
         return 0.0
     qualities = [0.5 * (correctness + aesthetics) for correctness, aesthetics, _, _ in _successful_judges(text)]
@@ -770,15 +664,7 @@ def _image_reward(
 def _active_weights(
     ground_truth: dict[str, Any], extra_info: dict[str, Any], *, task_type: str
 ) -> dict[str, float] | None:
-    """Return positive active-set weights, or None if a ``w_*`` value is garbage.
-
-    ``plan`` is active only for plan rows, mirroring the existing "a dim that does
-    not apply is not scored" rule. Every other dim -- including the composite
-    ``image``/``done``/``protocol`` -- is scored whenever this function is reached,
-    which already requires a confirmed ``generate_image`` (a transcript without one
-    returns a hard zero before the dims are computed). An absent ``w_<dim>`` falls
-    back to ``DEFAULT_DIM_WEIGHTS``.
-    """
+    """Return positive active-set weights, or None if a ``w_*`` value is garbage."""
     weights = {}
     for dim in DIMS:
         if dim == "plan" and task_type != "plan":

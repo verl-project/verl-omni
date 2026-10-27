@@ -41,14 +41,7 @@ _ENTROPY_VOCAB_CHUNK = 8192
 
 
 def und_categorical_entropy(log_probs: Tensor) -> Tensor:
-    """Token-level entropy of the categorical the log-probs describe.
-
-    Matches ``entropy_from_logits`` in verl's AR engine (``verl/verl/workers/utils/losses.py:60``
-    feeds the same quantity to ``ppo_loss``'s entropy bonus and the trainer publishes it beside
-    ``log_probs``). The vocab is reduced in chunks of ``_ENTROPY_VOCAB_CHUNK``: ``exp()`` over the
-    full vocab at once would add another ``(B, L-1, V)`` float32 transient on top of ``log_probs``,
-    which is exactly the kind of allocation that OOMed these cards before.
-    """
+    """Token-level entropy of the categorical the log-probs describe."""
     total = torch.zeros(log_probs.shape[:-1], dtype=log_probs.dtype, device=log_probs.device)
     for start in range(0, log_probs.shape[-1], _ENTROPY_VOCAB_CHUNK):
         block = log_probs[..., start : start + _ENTROPY_VOCAB_CHUNK]

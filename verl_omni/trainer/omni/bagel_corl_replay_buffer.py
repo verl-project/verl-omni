@@ -27,25 +27,12 @@ logger = logging.getLogger(__name__)
 
 
 def is_auxiliary_row(tag: Any) -> bool:
-    """Whether a TransferQueue row tag marks a row held for a *different* consumer.
-
-    Only the writer's own flag counts. ``bagel_role == "gen"`` would also match the GEN
-    rows today, but the tag name is the contract the sibling ``verl`` filters on, and a
-    second, weaker condition here would silently disagree with it the moment a row is
-    tagged one way and not the other.
-    """
+    """Whether a TransferQueue row tag marks a row held for a *different* consumer."""
     return isinstance(tag, dict) and bool(tag.get("is_auxiliary"))
 
 
 def drop_auxiliary_sampled_rows(meta: KVBatchMeta) -> KVBatchMeta:
-    """Return ``meta`` with its auxiliary rows removed, preserving the order of the rest.
-
-    Raises:
-        RuntimeError: if *every* selected row is auxiliary. That means the prompt group was
-            terminal with no UND row under its uid, and continuing would hand the trainer an
-            empty batch -- the very failure this filter exists to prevent, only one frame
-            later and far less legible (``KeyError: 'prompts'`` inside ``_compute_reward_
-            colocate``). The TQ rows are intact at this point, so the uids are worth naming."""
+    """Return ``meta`` with its auxiliary rows removed, preserving the order of the rest."""
     if meta is None:
         return meta
     keys = list(getattr(meta, "keys", None) or [])

@@ -24,7 +24,6 @@ import torch
 from omegaconf import OmegaConf
 
 from verl_omni.agent_loop import bagel_corl_tq as tq_mod
-from verl_omni.agent_loop.bagel_corl import validation_artifact_relpath
 from verl_omni.agent_loop.bagel_corl_gen_serve import stash_gen_row_from_diffusion_output
 
 # The recipe's real numbers: training is deliberately stochastic (``noise_level=0.7``,
@@ -209,20 +208,6 @@ def test_train_rollout_cfg_is_not_overlaid_when_val_kwargs_lack_the_subtree():
 
     assert out["noise_level"] == _TRAIN_NOISE, "must not invent noise_level=0"
     assert out["num_inference_steps"] == _TRAIN_STEPS
-
-
-@pytest.mark.parametrize(
-    ("sampling_params", "expected"),
-    [
-        ({"logprobs": False}, "val/step_000030/sample_1.01"),
-        ({"logprobs": True}, "step_000030/sample_1.01"),
-        ({}, "step_000030/sample_1.01"),
-        (None, "step_000030/sample_1.01"),
-    ],
-)
-def test_validation_artifact_relpath_tags_only_validation(sampling_params, expected):
-    """Val PNGs move under ``val/``; the training tree stays byte-identical."""
-    assert validation_artifact_relpath("step_000030/sample_1.01", sampling_params) == expected
 
 
 # The GEN traj stash is the *saving* path for the rollout image, and it used to

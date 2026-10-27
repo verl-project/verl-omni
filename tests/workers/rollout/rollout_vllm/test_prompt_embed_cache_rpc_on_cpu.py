@@ -36,7 +36,7 @@ def worker_method(name):
 
 
 @pytest.mark.parametrize("enabled", [False, True])
-def test_worker_clear_and_stats_use_same_runner_cache(enabled):
+def test_worker_clear_invalidates_the_runner_cache(enabled):
     class Runner:
         def __init__(self):
             self.entries = {"prompt": "conditioning from old weights"} if enabled else None
@@ -47,18 +47,12 @@ def test_worker_clear_and_stats_use_same_runner_cache(enabled):
             if self.entries is not None:
                 self.entries.clear()
 
-        def get_prompt_embed_cache_stats(self):
-            self.calls.append("stats")
-            return None if self.entries is None else {"size": len(self.entries)}
-
     runner = Runner()
     worker = SimpleNamespace(model_runner=runner)
-    stats = worker_method("get_prompt_embed_cache_stats")
     clear = worker_method("clear_prompt_embed_cache")
-    assert stats(worker) == ({"size": 1} if enabled else None)
     assert clear(worker) is None
-    assert stats(worker) == ({"size": 0} if enabled else None)
-    assert runner.calls == ["stats", "clear", "stats"]
+    assert runner.entries == ({} if enabled else None)
+    assert runner.calls == ["clear"]
 
 
 def test_worker_does_not_report_success_when_runner_flush_fails():

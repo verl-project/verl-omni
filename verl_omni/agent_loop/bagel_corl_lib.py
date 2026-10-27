@@ -158,14 +158,7 @@ only — never let it shorten or water down a diffusion prompt."""
 
 
 def resolve_task_type(*, extra_info: Any = None, ground_truth: Any = None) -> Any:
-    """Return the row's ``task_type`` label from the rollout kwargs.
-
-    The label decides whether the dataset's own system turn survives rendering (see
-    ``with_reflection_system_prompt``), and it lives in whichever of the two metadata
-    dicts the caller populated. ``extra_info`` wins because it is the per-rollout
-    metadata the loop is built with; ``ground_truth`` is the dataset-side fallback the
-    reward scorer also reads.
-    """
+    """Return the row's ``task_type`` label from the rollout kwargs."""
     for source in (extra_info, ground_truth):
         if isinstance(source, dict):
             label = source.get("task_type")
@@ -430,14 +423,7 @@ _TRAILING_JUNK_RE = re.compile(r"(?:<\|[^|]*?\|>|[^\w])*")
 
 
 def _trailing_call(text: str) -> dict[str, Any] | None:
-    """Parse a named call that *ends* the turn, after a prose plan.
-
-    The plan prompt makes the checkpoint write ``Plan: 1. ... 2. ...`` and then its call with
-    no tag, or in a wrapper it invents (``《《{...}》》``). A JSON example quoted inside the plan
-    is followed by more prose; a call is followed by nothing but punctuation and special
-    tokens, which is what this requires. ``arguments`` separates a call from a schema echo.
-    A turn that ends in several calls (generate, then judge) runs the first of them.
-    """
+    """Parse a named call that *ends* the turn, after a prose plan."""
     decoder = json.JSONDecoder()
     run: list[dict[str, Any]] = []
     tail_start = len(text)
@@ -546,14 +532,7 @@ def engine_asleep_retry_delay(attempt: int, message: str) -> float | None:
 
 
 async def generate_retrying_engine_wake(attempt_fn, *, on_retry=None, sleep=None):
-    """Await ``attempt_fn()``, re-issuing while the engine reports a still-waking sleep tag.
-
-    ``attempt_fn`` is a zero-argument callable returning a fresh coroutine per try (a coroutine
-    object cannot be awaited twice). ``on_retry(attempt, delay, exc)`` is an optional hook for
-    logging; ``sleep`` is injectable so CPU tests need not wait the real backoff.
-
-    See :func:`engine_asleep_retry_delay` for why the rejection is retryable.
-    """
+    """Await ``attempt_fn()``, re-issuing while the engine reports a still-waking sleep tag."""
     import asyncio
 
     sleeper = sleep or asyncio.sleep
@@ -646,23 +625,6 @@ def und_health_verdict(
 UND_LOOP_MIN_TOKENS: int = 6
 
 
-def count_degenerate_und_turns(turn_trace: list[dict[str, Any]]) -> int:
-    """Count UND turns that collapsed onto one repeated token."""
-    loops = 0
-    for record in turn_trace:
-        if record.get("record") != "und_turn":
-            continue
-        if str(record.get("kind")) == "generate_image":
-            continue
-        text = str(record.get("text") or "")
-        if len(text.split()) < UND_LOOP_MIN_TOKENS:
-            continue
-        degenerate, top_share = und_health_verdict(text)
-        if degenerate and top_share > UND_HEALTH_REPEAT_SHARE:
-            loops += 1
-    return loops
-
-
 def und_turn_kind(text: str) -> str:
     """Classify an UND decode: ``generate_image``, ``judge_image``, ``done``, or ``continue``."""
     tagged = parse_hermes_tool_call(text)
@@ -726,35 +688,6 @@ def conditioning_uid(token_ids: list[int]) -> str:
     for token in token_ids:
         digest.update(int(token).to_bytes(8, "big", signed=True))
     return digest.hexdigest()
-
-
-def cond_reuse_metrics(
-    *,
-    calls: int,
-    hits: int | None,
-    misses: int | None,
-    bypassed: int | None = 0,
-) -> dict[str, float]:
-    """RFC §4.4.4 R2 metrics, from the engine's own conditioning-cache counters."""
-    if calls <= 0 or hits is None or misses is None:
-        return {}
-    hits = max(0, int(hits))
-    misses = max(0, int(misses))
-    bypassed = max(0, int(bypassed or 0))
-    prefills = misses + bypassed
-    metrics: dict[str, float] = {
-        "gen/cond_cache_hits": float(hits),
-        "gen/cond_cache_misses": float(misses),
-        "gen/cond_cache_bypassed": float(bypassed),
-        "gen/cond_recompute_ratio": float(prefills) / float(calls),
-    }
-    consulted = hits + misses
-    if consulted > 0:
-        metrics["gen/prompt_embed_cache_hit_rate"] = float(hits) / float(consulted)
-    ratio = metrics["gen/cond_recompute_ratio"]
-    if ratio > 0.0:
-        metrics["gen/cond_amortization"] = 1.0 / ratio
-    return metrics
 
 
 def serving_rollout_provenance(extra: dict[str, Any], *, required: bool = False) -> dict[str, Any]:
@@ -841,29 +774,11 @@ class EpisodeRollout:
     judge_text: str | None = None
     stop_required: bool = False
     num_gen_calls: int = 0
-    # RFC §4.4.4 R2 metrics measured from the engine's conditioning-cache
-    # counters for this episode's GEN calls. Empty when the engine exposed none.
-    r2_metrics: dict[str, float] = field(default_factory=dict)
-    # Per-turn trace: one record per UND decode (``kind``, ``text``, token counts) and one
-    # per GEN call. Recorded unconditionally -- it is a few KB per episode -- because the
-    # failure mode worth diagnosing is an episode that *never* reaches a
-    # ``generate_image`` verdict: there K stays 0, ``gen/skipped_no_groups`` is 1, and the
-    # only remaining evidence of what the UND lane actually emitted is this text.
-    # ``bagel_corl.dump_episode_trace`` renders it under ``rollout_trajectories/``.
+    # In-memory observations for inspecting the episode's tool protocol.
     turn_trace: list[dict[str, Any]] = field(default_factory=list)
-    # Where :func:`~verl_omni.agent_loop.bagel_corl.dump_episode_trace` wrote this episode,
-    # or ``None`` when the dump is disabled/failed. Set by the agent loop, not the lib.
-    trace_dump_path: str | None = None
 
     def __post_init__(self) -> None:
-        """π_rollout must stay positionally aligned with the response it describes.
-
-        ``rollout_log_probs`` is read by the trainer per response position, so a
-        length mismatch would silently pair a token with another token's log-prob
-        (or truncate the correction) instead of failing. Empty is allowed: a
-        replayed/deserialized episode that never sampled carries none, and the
-        trainer simply does not get a rollout distribution for it.
-        """
+        """π_rollout must stay positionally aligned with the response it describes."""
         if self.rollout_log_probs and len(self.rollout_log_probs) != len(self.response_ids):
             raise ValueError(
                 "Bagel Co-RL rollout_log_probs must align with response_ids "
@@ -872,13 +787,7 @@ class EpisodeRollout:
 
 
 class BagelGenerateImageTool:
-    """One GEN turn per call (RFC ``K`` += 1).
-
-    ``gen_samples_per_call`` is **S** (FlowGRPO seeds under the same conditioning),
-    not the episode GEN-turn count **K**. One UND ``generate_image`` tool verdict
-    invokes this once → one GEN turn; the seed fan-out is group sampling for FlowGRPO.
-    ``max_generate_passes`` bounds how many such GEN turns an episode may enqueue.
-    """
+    """One GEN turn per call (RFC ``K`` += 1)."""
 
     def __init__(
         self,
@@ -1078,28 +987,6 @@ def _encode_text(tokenizer: Any | None, text: str, *, fallback_ids: list[int] | 
     return list(fallback_ids or [])
 
 
-def turn_histogram(turns: list[int]) -> dict[str, float]:
-    if not turns:
-        return {
-            "turns_per_episode/mean": 0.0,
-            "turns_per_episode/p50": 0.0,
-            "turns_per_episode/p95": 0.0,
-            "turns_per_episode/max": 0.0,
-            "tail_frac": 0.0,
-        }
-    arr = np.asarray(turns, dtype=np.float64)
-    p95 = float(np.percentile(arr, 95))
-    max_t = float(arr.max())
-    tail = float(np.mean(arr > p95)) if max_t > 0 else 0.0
-    return {
-        "turns_per_episode/mean": float(arr.mean()),
-        "turns_per_episode/p50": float(np.percentile(arr, 50)),
-        "turns_per_episode/p95": p95,
-        "turns_per_episode/max": max_t,
-        "tail_frac": tail,
-    }
-
-
 async def run_serial_episode(
     *,
     dataset_task_uid: str,
@@ -1226,13 +1113,7 @@ async def run_serial_episode(
     pending_judge: tuple[str, str, list[GenSample]] | None = None
 
     def _append_env_turn(body: str, policy_text: str, fallback_ids: list[int]) -> None:
-        """Answer the policy's tool call with a ``<tool_response>`` user turn (mask 0).
-
-        The UND decode stops on the call's closing tag, so the policy's turn is still open:
-        close it, emit the tool response in the chat template and re-open the assistant
-        turn. Without the template the model reads the observation as its own text and
-        closes the episode with ``<|im_end|>`` instead of calling the next tool.
-        """
+        """Answer the policy's tool call with a ``<tool_response>`` user turn (mask 0)."""
         close = "" if policy_text.rstrip().endswith(_IM_END) else _IM_END
         obs_ids = _encode_text(
             tokenizer,
@@ -1634,14 +1515,6 @@ async def run_serial_episode(
     )
 
 
-@dataclass
-class FlattenResult:
-    und_batch: list[dict[str, Any]]
-    gen_batch: list[dict[str, Any]]
-    gen_episode_map: list[dict[str, Any]]
-    metrics: dict[str, float]
-
-
 def trusted_image_reward_fields(samples, *, num_gen_calls, autonomous_done=False, forced_reflection=False):
     """Build the harness-only V2 envelope from RM-marked samples, never transcript text.
 
@@ -1741,125 +1614,8 @@ def und_episode_rm_scores(response_mask: Any, reward: float) -> list[float]:
     return scores
 
 
-def flatten_multiturn_rollouts(
-    episodes: list[EpisodeRollout],
-    *,
-    expected_s: int,
-) -> FlattenResult:
-    """Split token UND rows from latent GEN rows. Never concatenate the two.
-
-    Incomplete S-seed groups are dropped. Reflection-only episodes contribute zero GEN rows.
-    One finished ``generate_image`` tool call is one GEN turn (RFC K); ``expected_s`` is
-    FlowGRPO seeds under that single turn.
-    """
-    if expected_s < 1:
-        raise ValueError("expected_s must be >= 1")
-    und_batch: list[dict[str, Any]] = []
-    gen_batch: list[dict[str, Any]] = []
-    gen_episode_map: list[dict[str, Any]] = []
-    dropped_incomplete = 0
-    no_image_credit = 0
-
-    for und_index, episode in enumerate(episodes):
-        # Single source of truth with the TQ ingest (``bagel_corl_tq.und_row_reward``); see
-        # ``episode_und_reward`` for why the two must not derive this independently.
-        und_reward, used_non_image_scalar = episode_und_reward(episode)
-        if used_non_image_scalar:
-            # Pattern 3 (K=0): propagate the non-image UND scalar instead of zeroing
-            # token GRPO signal (RFC und/no_image_credit).
-            no_image_credit += 1
-        # RFC §4.4.2a: the conditioning identity of this episode's GEN calls.
-        # Carried on the UND row so R2's per-call grouping survives the flatten
-        # (a GEN row's own ``cond_uid`` alone cannot tell "S seeds, one
-        # conditioning" from "S calls, S conditionings").
-        cond_uids = sorted({str(s.cond_uid) for s in episode.gen_samples if s.valid and s.cond_uid})
-        und_batch.append(
-            {
-                "und_group_uid": episode.und_group_uid,
-                "episode_uid": episode.episode_uid,
-                "policy_version": episode.policy_version,
-                "rollout_policy_version": episode.policy_version,
-                "requested_policy_version": episode.requested_policy_version,
-                "rollout_replica_id": episode.rollout_replica_id,
-                "serving_provenance_verified": episode.serving_provenance_verified,
-                "und_serving_provenance": list(episode.und_serving_provenance),
-                "prompt_ids": list(episode.prompt_ids),
-                "response_ids": list(episode.response_ids),
-                "response_mask": list(episode.response_mask),
-                "rollout_log_probs": list(episode.rollout_log_probs),
-                "token_level_scores": und_reward,
-                "used_image_credit": episode.used_image_credit,
-                "gen_cond_uids": cond_uids,
-                "gen_cond_len": int(max((s.cond_len for s in episode.gen_samples if s.valid), default=0)),
-            }
-        )
-        valid = [s for s in episode.gen_samples if s.valid]
-        if not valid:
-            continue
-        # Group by gen_group_uid — every complete call (exactly S valid seeds)
-        # contributes its rows; a K>1 episode keeps ALL of its calls. Demanding
-        # len(valid) == expected_s for the whole episode was a K=1 assumption that
-        # silently dropped every multi-call episode.
-        groups: dict[str, list[GenSample]] = {}
-        for sample in valid:
-            groups.setdefault(str(sample.gen_group_uid), []).append(sample)
-        for rows in groups.values():
-            if len(rows) != expected_s:
-                dropped_incomplete += 1
-                continue
-            for sample in sorted(rows, key=lambda s: int(s.seed_index)):
-                gen_batch.append(
-                    {
-                        "episode_uid": episode.episode_uid,
-                        "gen_group_uid": sample.gen_group_uid,
-                        "gen_sample_uid": sample.gen_sample_uid,
-                        "seed_index": sample.seed_index,
-                        "prompt_token_ids": list(sample.prompt_token_ids),
-                        "all_latents": sample.all_latents,
-                        "timesteps": sample.timesteps,
-                        "rollout_log_probs": sample.rollout_log_probs,
-                        "rollout_policy_version": sample.rollout_policy_version,
-                        "rollout_replica_id": sample.rollout_replica_id,
-                        "serving_provenance_verified": sample.serving_provenance_verified,
-                        "rm_score": sample.rm_score,
-                        "call_role": sample.call_role,
-                        "cond_uid": sample.cond_uid,
-                        "cond_len": int(sample.cond_len or 0),
-                    }
-                )
-                gen_episode_map.append(
-                    {
-                        "und_index": und_index,
-                        "episode_uid": episode.episode_uid,
-                        "gen_sample_uid": sample.gen_sample_uid,
-                        "gen_group_uid": sample.gen_group_uid,
-                    }
-                )
-
-    metrics = {
-        "gen/dropped_incomplete_groups": float(dropped_incomplete),
-        "und/no_image_credit": float(no_image_credit),
-        "gen/num_rows": float(len(gen_batch)),
-        "und/num_rows": float(len(und_batch)),
-        "gen/skipped_no_groups": 1.0 if not gen_batch else 0.0,
-    }
-    return FlattenResult(
-        und_batch=und_batch,
-        gen_batch=gen_batch,
-        gen_episode_map=gen_episode_map,
-        metrics=metrics,
-    )
-
-
 def aggregate_episode_metrics(records: list[Any]) -> dict[str, float]:
-    """Batch-aggregate per-episode metrics into step-level logging values.
-
-    Per-episode ``J``/``K`` must be **averaged over the sibling batch**, and
-    ``gen/dropped_incomplete_groups`` summed — first-row-wins collapse hides every
-    episode but one (audit module A). Records are the UND TQ rows (``{"fields": …}``
-    or plain field dicts) carrying ``episode_J`` / ``episode_K`` and the
-    ``bagel_corl_metrics`` blob written by ``pack_dual_lane_episode``.
-    """
+    """Batch-aggregate per-episode metrics into step-level logging values."""
     j_values: list[float] = []
     k_values: list[float] = []
     dropped = 0.0
@@ -1940,13 +1696,7 @@ TRAIN_REWARD_DIM_KEYS: tuple[str, ...] = (
 
 
 def _record_fields(record: Any) -> dict[str, Any]:
-    """Fields of one TQ row, accepting the ``{"fields": ...}`` wrapper or a bare dict.
-
-    Production rows are always the wrapped shape -- both branches of ``_und_records_from_batch``
-    build ``{"fields": row}`` -- so the bare-dict fallback serves tests and direct callers.
-    A ``fields`` key holding a non-dict (``{"fields": None}``) is treated as a wrapper with
-    nothing in it, not as a field *named* ``fields``.
-    """
+    """Fields of one TQ row, accepting the ``{"fields": ...}`` wrapper or a bare dict."""
     if not isinstance(record, dict):
         return {}
     fields = record.get("fields")
@@ -1987,13 +1737,7 @@ def _as_float(value: Any) -> float | None:
 
 
 def _episode_score(value: Any) -> float | None:
-    """The episode scalar from a per-token score vector, mirroring the trainer's ``sum(-1)``.
-
-    ``trainer_base`` does ``batch["token_level_scores"] = batch["rm_scores"]`` and
-    ``compute_data_metrics`` then takes ``.sum(-1)``, so an episode's trained value is the
-    **sum** of its per-token vector (the reward rides on one trainable token, which is why
-    the sum and not the mean). A bare scalar is already that sum; a sequence is reduced.
-    """
+    """The episode scalar from a per-token score vector, mirroring the trainer's ``sum(-1)``."""
     if isinstance(value, bool):
         return None
     if isinstance(value, int | float):
@@ -2086,102 +1830,6 @@ def _as_gen_sample(item: Any) -> GenSample | None:
         cond_len=int(item.get("cond_len") or 0),
         **serving_rollout_provenance(item),
     )
-
-
-def _ntb_from_extra_fields(extras: Any) -> dict[str, list[Any]]:
-    rows = list(extras or [])
-    ntb: dict[str, list[Any]] = {
-        "gen_samples": [],
-        "und_group_uid": [],
-        "episode_uid": [],
-        "prompt_ids": [],
-        "response_ids": [],
-        "response_mask": [],
-        "turns": [],
-        "used_image_credit": [],
-        "policy_version": [],
-        "requested_policy_version": [],
-        "rollout_replica_id": [],
-        "serving_provenance_verified": [],
-        "und_serving_provenance": [],
-    }
-    for extra in rows:
-        mapping = extra if isinstance(extra, dict) else {}
-        ntb["gen_samples"].append(mapping.get("gen_samples") or [])
-        ntb["und_group_uid"].append(mapping.get("und_group_uid", "missing_task"))
-        ntb["episode_uid"].append(mapping.get("episode_uid"))
-        ntb["prompt_ids"].append(mapping.get("prompt_ids") or [])
-        ntb["response_ids"].append(mapping.get("response_ids") or [])
-        ntb["response_mask"].append(mapping.get("response_mask") or [])
-        ntb["turns"].append(mapping.get("turns", 1))
-        ntb["used_image_credit"].append(mapping.get("used_image_credit", False))
-        for name in (
-            "policy_version",
-            "requested_policy_version",
-            "rollout_replica_id",
-            "serving_provenance_verified",
-            "und_serving_provenance",
-        ):
-            ntb[name].append(mapping.get(name))
-    return ntb
-
-
-def flatten_from_agent_output(output: Any, *, expected_s: int) -> FlattenResult:
-    """RFC Flatten after ``generate_sequences``: UND vs GEN rows from extra_fields."""
-    ntb = dict(getattr(output, "non_tensor_batch", None) or {})
-    if ntb.get("gen_samples") is None and ntb.get("extra_fields") is not None:
-        ntb.update(_ntb_from_extra_fields(ntb["extra_fields"]))
-    gen_col = ntb.get("gen_samples")
-    if gen_col is None:
-        return flatten_multiturn_rollouts([], expected_s=expected_s)
-
-    length = len(gen_col)
-
-    def _col(name: str, default: Any) -> list[Any]:
-        arr = ntb.get(name)
-        if arr is None:
-            return [default] * length
-        values = list(arr)
-        if len(values) < length:
-            values.extend([default] * (length - len(values)))
-        return values[:length]
-
-    episodes: list[EpisodeRollout] = []
-    und_groups = _col("und_group_uid", "missing_task")
-    episode_uids = _col("episode_uid", None)
-    prompt_ids = _col("prompt_ids", [])
-    response_ids = _col("response_ids", [])
-    response_mask = _col("response_mask", [])
-    rollout_log_probs = _col("rollout_log_probs", [])
-    turns = _col("turns", 1)
-    used = _col("used_image_credit", False)
-    for index in range(length):
-        raw_samples = gen_col[index] or []
-        samples = []
-        for item in raw_samples:
-            sample = _as_gen_sample(item)
-            if sample is not None:
-                samples.append(sample)
-        episodes.append(
-            EpisodeRollout(
-                und_group_uid=str(und_groups[index]),
-                episode_uid=str(episode_uids[index] or f"ep{index}"),
-                policy_version=_col("policy_version", None)[index],
-                requested_policy_version=_col("requested_policy_version", None)[index],
-                rollout_replica_id=_col("rollout_replica_id", None)[index],
-                serving_provenance_verified=bool(_col("serving_provenance_verified", False)[index]),
-                und_serving_provenance=list(_col("und_serving_provenance", [])[index] or []),
-                prompt_ids=list(prompt_ids[index] or []),
-                response_ids=list(response_ids[index] or []),
-                response_mask=list(response_mask[index] or []),
-                rollout_log_probs=list(rollout_log_probs[index] or []),
-                turns=int(turns[index] or 1),
-                gen_samples=samples,
-                used_image_credit=bool(used[index]),
-                num_gen_calls=len({str(s.gen_group_uid) for s in samples if s.valid}),
-            )
-        )
-    return flatten_multiturn_rollouts(episodes, expected_s=expected_s)
 
 
 def strip_pixels_for_actor(row: dict[str, Any]) -> dict[str, Any]:
