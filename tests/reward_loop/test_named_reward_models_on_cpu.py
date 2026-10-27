@@ -282,6 +282,66 @@ def test_native_only_model_uses_parent_pool_and_batch_scoring():
     assert not streaming_reward_enabled(config)
 
 
+def test_cpu_native_only_model_does_not_require_parent_pool(monkeypatch):
+    config = _config(
+        {
+            "quality": {
+                "backend": "native",
+                "executor": {"model": "tests.fake:Model"},
+                "placement": {"resource": "cpu", "num_replicas": 2, "cpus_per_worker": 2},
+            }
+        }
+    )
+
+    monkeypatch.setattr(
+        reward_model_module,
+        "split_resource_pool",
+        lambda *args: pytest.fail("CPU-native models must not split an accelerator resource pool"),
+    )
+    manager = MultiRewardModelManager(config)
+
+    assert manager.resource_pool is None
+    assert manager.native_resource_pools == {}
+    assert manager.native_device_assignments == {}
+    assert manager.models["quality"].placement.is_cpu
+    assert manager.models["quality"].placement.cpus_per_worker == 2
+    assert not reward_role_required(config)
+    assert reward_is_enabled(config)
+
+
+def test_cpu_native_model_is_excluded_from_mixed_accelerator_pool_split(monkeypatch):
+    config = _config(
+        {
+            "ocr": {"backend": "engine", "model_path": "/models/ocr"},
+            "quality": {
+                "backend": "native",
+                "executor": {"model": "tests.fake:Model"},
+                "placement": {"resource": "cpu", "num_replicas": 1},
+            },
+        }
+    )
+    manager = object.__new__(MultiRewardModelManager)
+    manager.config = config
+    manager.resource_pool = SimpleNamespace(world_size=4)
+    parsed = dict(_parsed_models(config))
+    manager.native_device_assignments = manager._validate_native_device_assignments([("quality", parsed["quality"])])
+    observed = {}
+
+    def fake_split(pool, sizes):
+        observed["pool"] = pool
+        observed["sizes"] = sizes
+        return ["engine-pool"]
+
+    monkeypatch.setattr(reward_model_module, "split_resource_pool", fake_split)
+    engine_pools, native_pools = manager._split_model_resource_pools(
+        [("ocr", parsed["ocr"])], [("quality", parsed["quality"])], config.reward.reward_model
+    )
+
+    assert observed == {"pool": manager.resource_pool, "sizes": [2, 2]}
+    assert engine_pools == {"ocr": "engine-pool"}
+    assert native_pools == {}
+
+
 def test_named_models_require_multi_reward_manager():
     _validate_named_reward_manager_cls(MultiVisualRewardManager)
 
@@ -446,7 +506,12 @@ async def test_native_model_delegates_lifecycle_to_bound_workers():
 
 
 @pytest.mark.asyncio
-async def test_native_model_can_stay_resident():
+@pytest.mark.parametrize(
+    ("placement", "wake_count"),
+    [({"resource": "cpu", "num_replicas": 1}, 2), ({"devices": [0]}, 1)],
+    ids=["cpu", "accelerator"],
+)
+async def test_native_model_can_stay_resident(placement, wake_count):
     calls = []
 
     class _RemoteMethod:
@@ -473,7 +538,7 @@ async def test_native_model_can_stay_resident():
                 "offload": False,
                 "executor": {"model": "tests.fake:Model"},
                 "model_path": "/models/pickscore",
-                "placement": {"devices": [0]},
+                "placement": placement,
             }
         ),
     )
@@ -483,7 +548,7 @@ async def test_native_model_can_stay_resident():
     await model.sleep()
     await model.wake_up()
 
-    assert calls == [("wake", "pickscore")]
+    assert calls == [("wake", "pickscore")] * wake_count
 
 
 @pytest.mark.parametrize(
@@ -661,9 +726,8 @@ def test_native_models_create_isolated_worker_groups(monkeypatch):
     manager.config = config
     manager.reward_router_address = None
     manager.multi_reward_model_manager = SimpleNamespace(
-        models={"pickscore": object(), "hpsv3": object()},
+        models={name: NativeManagedRewardModel(name, model) for name, model in config.reward.models.items()},
         reward_model_specs=specs,
-        native_device_assignments={"pickscore": (0, 1), "hpsv3": (2, 3)},
         bind_native_workers=lambda name, workers: observed_bindings.append((name, workers)),
     )
     observed = []
@@ -1112,6 +1176,7 @@ def test_native_model_requires_allocated_native_resource_pool():
     manager = object.__new__(OmniRewardLoopManager)
     manager.multi_reward_model_manager = SimpleNamespace(
         native_resource_pools={},
+        models={"pickscore": SimpleNamespace(placement=SimpleNamespace(is_cpu=False))},
     )
 
     with pytest.raises(ValueError, match="requires an allocated resource pool"):

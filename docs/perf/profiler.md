@@ -1,6 +1,6 @@
 # Profiling FlowGRPO / diffusion training in VeRL-Omni
 
-Last updated: 10/06/2026.
+Last updated: 10/24/2026.
 
 VeRL-Omni reuses the profiler subsystem from upstream
 [verl](https://github.com/verl-project/verl) (`verl.utils.profiler`) and exposes
@@ -366,7 +366,7 @@ of these NPU examples:
 | Training workload | Launcher |
 | --- | --- |
 | Qwen-Image FlowGRPO LoRA | `examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora_npu.sh` |
-| Qwen3-Omni GSPO on AVQA | `examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_npu_avqa_v1.sh` |
+| Qwen3-Omni GSPO on AVQA | `examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_avqa_v1.sh` |
 
 Set `RECIPE` to your launcher and select training steps 1 and 2:
 

@@ -1,6 +1,6 @@
 # Supported Models
 
-Last updated: 10/16/2026.
+Last updated: 10/24/2026.
 
 VeRL-Omni supports RL post-training for generative models across image, video,
 audio, and omni modalities. This page catalogues every model with a ready-to-run
@@ -248,7 +248,7 @@ For version requirements and detailed setup instructions, see
 | GSPO (text) | `examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_v1.sh` | 4×H100/H200 80GB |
 | GSPO (full, VeOmni 0.1.12; text/image) | `examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_veomni.sh` | 2×8 GPU (recipe default) |
 | GSPO (image) | `examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_mmk12_v1.sh` | 4×H100/H200 80GB |
-| GSPO (AVQA, NPU) | `examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_npu_avqa_v1.sh` | 16×NPU (Atlas 800T A3) |
+| GSPO (AVQA, NPU) | `examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_avqa_v1.sh` | 16×NPU (Atlas 800T A3) |
 | Offline DPO (LoRA) | `examples/dpo_trainer/qwen3_omni/qwen3_omni/run_qwen3_omni_omni_preference_lora.sh` | 4×H800 |
 | [GSPO OPD (image, NPU)](../algo/omni_opd.md) | `examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_mmk12_v1_opd_npu.sh` | 32×NPU (2 x Atlas 800T A3) |
 | GSPO (AudioMCQ, Megatron, separate-async) | `examples/gspo_trainer/qwen3_omni/run_qwen3_omni_megatron_audiomcq_separate_async.sh` | 32×A100 80GB (4 train + 4 rollout GPUs/node). Experimental; not reproducible from the current public pins. See the [AudioMCQ recipe](../examples/qwen3_omni/gspo_trainer_qwen3_omni.md). |
