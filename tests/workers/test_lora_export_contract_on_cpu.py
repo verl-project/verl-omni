@@ -192,6 +192,30 @@ def test_merged_stream_materializes_inside_context(monkeypatch):
     torch.testing.assert_close(module.weight, torch.tensor([1.0]))  # actor restored after the stream
 
 
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
+def test_merged_dtensor_export_survives_aliasing_gather(monkeypatch, dtype):
+    module = _FakeModule()
+    module.weight = module.weight.to(dtype)
+    gathered = MagicMock(spec=DTensor)
+    gathered.to.return_value.full_tensor.return_value = module.weight
+    monkeypatch.setattr(module, "state_dict", lambda: {"weight": gathered})
+    monkeypatch.setattr(lora_export, "merged_lora_context", _merged_context(module))
+    _patch_export_machinery(monkeypatch)
+
+    params, _ = export_lora_for_sync(
+        module,
+        model_config=_model_config(merge=True),
+        base_sync_done=True,
+        is_diffusers=True,
+        key_prefix="transformer.",
+    )
+    weights = dict(params)
+
+    torch.testing.assert_close(weights["transformer.weight"], torch.tensor([2.0], dtype=torch.bfloat16))
+    torch.testing.assert_close(module.weight, torch.tensor([1.0], dtype=dtype))
+    assert weights["transformer.weight"].data_ptr() != module.weight.data_ptr()
+
+
 def test_merged_stream_keeps_prefix(monkeypatch):
     module = _FakeModule()
     monkeypatch.setattr(lora_export, "merged_lora_context", _merged_context(module))
