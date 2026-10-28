@@ -88,6 +88,7 @@ from verl_omni.trainer.diffusion.rollout_correction import (
     rollout_correction_enabled,
 )
 from verl_omni.trainer.diffusion.teacher_manager import DiffusionTeacherManager
+from verl_omni.utils.config import resolve_lora_config
 from verl_omni.utils.net_utils import worker_group_port_ranges
 from verl_omni.utils.tracking import (
     _export_video,
@@ -131,16 +132,19 @@ def validate_separate_config(config) -> None:
     if config.actor_rollout_ref.hybrid_engine:
         raise ValueError("Separate mode requires actor_rollout_ref.hybrid_engine=false.")
 
-    model = config.actor_rollout_ref.model
-    lora_rank = (model.get("lora") or {}).get("rank", 0) or 0
-    legacy_lora_rank = model.get("lora_rank", 0) or 0
-    lora_adapter_path = model.get("lora_adapter_path")
-    if lora_rank > 0 or legacy_lora_rank > 0 or lora_adapter_path is not None:
-        raise ValueError(
-            "Separate mode currently supports full finetuning only; "
-            "actor_rollout_ref.model.lora.rank, actor_rollout_ref.model.lora_rank, and "
-            "actor_rollout_ref.model.lora_adapter_path must respectively be 0, 0, and null."
-        )
+    # A resolver ValueError means LoRA was requested in some spelling; its flat-key
+    # hint is a dead end where the flat key is refused too.
+    separate_lora_error = (
+        "Separate mode currently supports full finetuning only; "
+        "actor_rollout_ref.model.lora.rank, actor_rollout_ref.model.lora_rank, and "
+        "actor_rollout_ref.model.lora_adapter_path must respectively be 0, 0, and null."
+    )
+    try:
+        lora_settings = resolve_lora_config(config.actor_rollout_ref.model)
+    except ValueError as e:
+        raise ValueError(separate_lora_error) from e
+    if lora_settings.enabled:
+        raise ValueError(separate_lora_error)
 
     rollout = config.actor_rollout_ref.rollout
     if rollout.nnodes <= 0 or rollout.n_gpus_per_node <= 0:
@@ -453,10 +457,7 @@ class BaseRayDiffusionTrainer(ABC):
         )
 
         # if ref_in_actor is True, the reference policy will be actor without lora applied
-        lora_rank = config.actor_rollout_ref.model.get("lora", {}).get("rank", 0)
-        if lora_rank <= 0:
-            lora_rank = config.actor_rollout_ref.model.get("lora_rank", 0)
-        self.ref_in_actor = lora_rank > 0 or config.actor_rollout_ref.model.get("lora_adapter_path") is not None
+        self.ref_in_actor = resolve_lora_config(config.actor_rollout_ref.model).enabled
         if self.separate and self.use_reference_policy and not self.ref_in_actor:
             if Role.RefPolicy not in role_worker_mapping:
                 raise ValueError(
@@ -1663,9 +1664,7 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
         loss_mode = config.actor_rollout_ref.actor.diffusion_loss.loss_mode
         # DPO needs trainer-side ref noise preds; DiffusionNFT computes ref in the actor engine.
         self.use_reference_policy = need_reference_policy(self.config) or (loss_mode == "dpo")
-        self._has_old_adapter = "old" in tuple(
-            config.actor_rollout_ref.model.get("policy_state_adapters", ("default",))
-        )
+        self._has_old_adapter = "old" in resolve_lora_config(config.actor_rollout_ref.model).adapters
         if self._has_old_adapter:
             self._validate_old_adapter_config()
         self._loss_fn = get_diffusion_loss_fn(loss_mode)

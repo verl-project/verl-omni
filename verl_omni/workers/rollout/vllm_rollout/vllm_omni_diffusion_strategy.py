@@ -516,12 +516,19 @@ class DiffusionStrategy(OmniStrategyBase):
             logger.debug(
                 "diffusion rollout produced no image (finish_reason=%s); returning %s", finish_reason, stop_reason
             )
+            extra_fields: dict[str, Any] = {"global_steps": self.server.global_steps}
+            if final_res is not None:
+                for metadata_group in _rollout_metadata_groups(final_res.multimodal_output):
+                    for key, value in metadata_group.items():
+                        if key in extra_fields:
+                            raise ValueError(f"Duplicate rollout metadata field: {key}")
+                        extra_fields[key] = _unbatch_training_field(value, context=context, name=key)
             return DiffusionOutput(
                 diffusion_output=torch.empty(0, dtype=torch.float32 if output_type == "latent" else torch.uint8),
                 log_probs=None,
                 stop_reason=stop_reason,
                 num_preempted=None,
-                extra_fields={"global_steps": self.server.global_steps},
+                extra_fields=extra_fields,
             )
 
         artifacts = self._parse_media_artifacts(final_res, header, sampling_params, context=context)

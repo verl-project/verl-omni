@@ -57,7 +57,10 @@ from verl.workers.rollout.base import BaseRollout, get_rollout_class
 from verl.workers.rollout.vllm_rollout.bucketed_weight_transfer import BucketedWeightSender
 from verl.workers.utils.losses import ppo_loss
 
+# Register nitrobrew / nitrobrew_reverse_kl aggregate into verl's loss registry.
+import verl_omni.trainer.distillation.losses as _omni_distill_losses  # noqa: E402, F401
 from verl_omni.pipelines.utils import build_scheduler
+from verl_omni.utils.config import resolve_lora_config
 from verl_omni.utils.mfu import (
     DiffusionFlopsCounter,
     allgather_diffusion_flops_meta,
@@ -69,6 +72,7 @@ from verl_omni.workers.config import (
     OmniModelConfig,
 )
 from verl_omni.workers.config.diffusion import DiffusionDistillationTeacherModelConfig
+from verl_omni.workers.config.omni.distillation import HIDDEN_STATE_LOSS_MODES
 from verl_omni.workers.rollout.base import get_rollout_sequence_parallel_size
 from verl_omni.workers.rollout.vllm_rollout.zmq_utils import make_update_zmq_handle, make_update_zmq_id
 from verl_omni.workers.utils.losses import diffusion_loss, omni_loss
@@ -547,11 +551,16 @@ def build_teacher_training_config(
 ) -> TrainingWorkerConfig:
     """Derive the frozen teacher's training config from the ref-shaped scoring config."""
     teacher_config: DiffusionActorConfig = omega_conf_to_dataclass(config.ref)
+    teacher_pipeline = model_config.pipeline
+    if teacher_model_config.guidance_scale is not None:
+        teacher_pipeline = replace(teacher_pipeline, guidance_scale=teacher_model_config.guidance_scale)
     teacher_config.model_config = replace(
         deepcopy(model_config),
         path=teacher_model_config.model_path,
+        pipeline=teacher_pipeline,
         lora_rank=0,
         lora_adapter_path=None,
+        lora={},
         load_tokenizer=False,
         tokenizer=None,
         processor=None,
@@ -767,9 +776,19 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             ):
                 self.loss_fn = partial(omni_loss, config=actor_config)
             elif self.distillation_enabled:
-                self.loss_fn = partial(
-                    distillation_ppo_loss, config=actor_config, distillation_config=distillation_config
-                )
+                loss_mode = distillation_config.distillation_loss.loss_mode
+                if loss_mode in HIDDEN_STATE_LOSS_MODES:
+                    from verl_omni.trainer.distillation.losses import omni_distillation_ppo_loss
+
+                    self.loss_fn = partial(
+                        omni_distillation_ppo_loss,
+                        config=actor_config,
+                        distillation_config=distillation_config,
+                    )
+                else:
+                    self.loss_fn = partial(
+                        distillation_ppo_loss, config=actor_config, distillation_config=distillation_config
+                    )
             else:
                 self.loss_fn = partial(ppo_loss, config=actor_config)
             self.actor = TrainingWorker(config=actor_training_config)
@@ -873,7 +892,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         self.layered_summon = self.config.rollout.get("layered_summon", False)
         # diffusion-only dual-adapter knob; the omni rollout config has no such field
         self.rollout_adapter: str = self.config.rollout.get("rollout_adapter", "default")
-        self.peft_merge: bool = model_config.lora.get("merge", False)
+        self.peft_merge: bool = resolve_lora_config(model_config).merge
         self._zmq_update_seq = 0
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="ref"))
@@ -915,6 +934,23 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         output = self.actor.infer_batch(data)
         return output.cpu() if output is not None else None
 
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def set_teacher_unembeds(self, teacher_unembeds: dict[str, torch.Tensor]) -> None:
+        """Store teacher lm_head weights for hidden-state (nitrobrew) loss.
+
+        Each entry is ``{teacher_key: W [V, D_t]}`` bf16.  Factored into the
+        micro-batch on ``update_actor`` via a NonTensorData reference so the
+        chunked KL kernel can reconstruct teacher logits on this rank.
+
+        Args:
+            teacher_unembeds: key -> unembedding matrix (CPU/any device).
+        """
+        assert "actor" in self.role, "set_teacher_unembeds is only valid for actor workers"
+        self._teacher_unembeds: dict[str, torch.Tensor] = {
+            key: W.detach().to(dtype=torch.bfloat16).cpu().contiguous() for key, W in teacher_unembeds.items()
+        }
+        self._teacher_key_vocab: list[str] = sorted(teacher_unembeds.keys())
+
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
     @DistProfiler.annotate(color="red", role="actor_update")
     @_with_routing_replay_flag(enabled=True)
@@ -924,6 +960,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             data,
             use_no_sync_for_gradient_accumulation=self.config.actor.get("use_no_sync_for_gradient_accumulation", False),
         )
+        if getattr(self, "_teacher_unembeds", None):
+            data["teacher_unembeds"] = NonTensorData(self._teacher_unembeds)
+            data["teacher_key_to_id"] = NonTensorData({key: i for i, key in enumerate(self._teacher_key_vocab)})
         output = self.actor.train_mini_batch(data=data)
         return output.cpu() if output is not None else None
 

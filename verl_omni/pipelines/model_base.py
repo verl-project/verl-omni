@@ -596,6 +596,33 @@ class VllmOmniPipelineBase:
             return None
         return f"{pipeline_cls.__module__}.{pipeline_cls.__qualname__}"
 
+    @staticmethod
+    def build_ar_position_ids(attention_mask: torch.Tensor) -> torch.Tensor:
+        """Build AR ``position_ids`` for one padded sample.
+
+        Default is standard 1D text positions of shape ``(1, seq_len)``. Composite
+        AR+DiT adapters that need a model-specific layout (e.g. multi-channel
+        M-RoPE) override this as a ``@staticmethod`` on the registered pipeline
+        class; :meth:`resolve_ar_position_ids` dispatches to that override.
+        """
+        from verl.utils.model import compute_position_id_with_mask
+
+        return compute_position_id_with_mask(attention_mask)
+
+    @classmethod
+    def resolve_ar_position_ids(
+        cls,
+        architecture: str | None,
+        algorithm: str | None,
+        attention_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        """Dispatch AR ``position_ids`` to the registered rollout adapter, if any."""
+        pipeline_cls = cls.get_class(architecture, algorithm) if architecture and algorithm else None
+        builder = getattr(pipeline_cls, "build_ar_position_ids", None) if pipeline_cls is not None else None
+        if builder is None:
+            return cls.build_ar_position_ids(attention_mask)
+        return builder(attention_mask)
+
 
 class OmniModelBase(ABC):
     """Abstract base class for omni model training adapters.

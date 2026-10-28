@@ -1,6 +1,6 @@
 # Diffusion On-Policy Distillation
 
-Last updated: 10/12/2026.
+Last updated: 10/22/2026.
 
 ## Background
 
@@ -24,7 +24,9 @@ closed form, implemented by the `distill_kl` loss:
 = \frac{\lVert \mu_\theta - \mu_\text{teacher} \rVert^2}{2 \sigma_t^2},
 ```
 
-averaged over latent dimensions. This is the diffusion analog of matching
+averaged over latent dimensions. On deterministic (ODE) steps, where
+`noise_level = 0` gives `σ_t = 0`, the loss is the unit-variance surrogate
+`½‖μ_θ − μ_teacher‖²`. This is the diffusion analog of matching
 next-token log-probabilities in LLM OPD: the teacher scores the student's
 states, and the student moves its transition means toward the teacher's.
 
@@ -143,6 +145,17 @@ Number of GPUs this teacher occupies in the teacher resource pool. Default:
 multiple teachers must set it explicitly so the sum matches the pool size.
 Each teacher's sub-pool is its own worker group, so teachers are scored
 concurrently.
+
+### `distillation.teacher_models.<name>.guidance_scale` (float, optional)
+
+Classifier-free guidance scale of this teacher's forward. Default: `null`,
+which inherits the student's `actor_rollout_ref.model.pipeline.guidance_scale`
+(by default the rollout's `pipeline.guidance_scale`). A teacher whose
+effective `guidance_scale > 1` needs the negative prompt embeds, which
+the rollout only stores when the student itself samples with
+`pipeline.guidance_scale > 1`; startup raises otherwise. Teachers with
+`guidance_scale <= 1` run a single conditional forward whatever the student
+uses.
 
 ### `distillation.scheduler` (str)
 

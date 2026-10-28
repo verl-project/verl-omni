@@ -30,6 +30,7 @@ start/install.md
 start/engine_backends.md
 start/install_npu.md
 start/install_rocm.md
+start/install_xpu.md
 start/models.md
 start/flowgrpo_quickstart.md
 start/diffusion_v1.md
@@ -88,6 +89,7 @@ examples/overview.md
 examples/flowgrpo_trainer.md
 examples/flowdppo_trainer.md
 examples/dpo_trainer.md
+examples/minicpm/dpo_trainer_minicpm.md
 examples/dancegrpo_trainer.md
 examples/flux1/dancegrpo_trainer_flux1.md
 examples/grpoguard_trainer.md
@@ -95,6 +97,7 @@ examples/mixgrpo_trainer.md
 examples/diffusionnft_trainer.md
 examples/omninft_trainer.md
 examples/dgpo_trainer.md
+examples/awm_trainer.md
 examples/diffusionopd_trainer.md
 examples/flowgrpo_trainer_sd35_drm.md
 examples/qwen_image/flowgrpo_trainer_qwen_image.md

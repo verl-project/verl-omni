@@ -55,11 +55,12 @@ def tokenize_bagel_prompt(
     BAGEL rollout uses raw ``tokenizer.encode(prompt)`` wrapped with
     ``<|im_start|>`` / ``<|im_end|>`` markers — no chat template.
     """
+    if max_length < 2:
+        raise ValueError("max_length must leave room for the BAGEL start and end markers.")
     bos_id = tokenizer.convert_tokens_to_ids("<|im_start|>")
     eos_id = tokenizer.convert_tokens_to_ids("<|im_end|>")
     raw_ids = tokenizer.encode(user_text, add_special_tokens=False)
-    bagel_ids = [bos_id] + raw_ids + [eos_id]
-    return bagel_ids[:max_length]
+    return [bos_id] + raw_ids[: max_length - 2] + [eos_id]
 
 
 if __name__ == "__main__":

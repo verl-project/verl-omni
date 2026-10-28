@@ -1,6 +1,6 @@
 # Qwen3-Omni Thinker GSPO Trainer
 
-Last updated: 10/06/2026
+Last updated: 10/24/2026
 
 This example shows how to post-train the **Qwen3-Omni-30B-A3B Thinker** with
 **GSPO** on multimodal reasoning tasks, using FSDP for the actor and `vllm-omni` as
@@ -15,7 +15,7 @@ Both **GPU** and **NPU** training platforms are supported:
   — **GPU**, **LoRA (r=32)** on a single node with **4 × H800 80GB**.
 - [`run_qwen3_omni_thinker_gspo_lora_avqa_v1.sh`](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_avqa_v1.sh)
   — **GPU**, **LoRA (r=32) V1** for text + image + audio AVQA training.
-- [`run_qwen3_omni_thinker_gspo_npu_avqa_v1.sh`](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_npu_avqa_v1.sh)
+- [`run_qwen3_omni_thinker_gspo_avqa_v1.sh`](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_avqa_v1.sh)
   — **NPU**, **full-parameter V1** for text + image + audio AVQA training.
 - [`run_qwen3_omni_thinker_gspo_npu_nextqa_v1.sh`](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_npu_nextqa_v1.sh)
   — **NPU**, **full-parameter V1** for video and soundtrack NExT-QA training.
@@ -54,7 +54,7 @@ monkey-patches through `external_lib`.
 
 The launchers colocate the FSDP actor and the `vllm-omni` rollout on the same
 devices. `run_qwen3_omni_thinker_gspo_lora_v1.sh` targets a single node with
-**4 × H800 80GB**; `run_qwen3_omni_thinker_gspo_npu_avqa_v1.sh` targets a single
+**4 × H800 80GB**; `run_qwen3_omni_thinker_gspo_avqa_v1.sh` targets a single
 **Atlas 800T A3** node with **16 × Ascend 910C 64GB**. It dynamically generates
 a thinker-only deploy config for each rollout replica from that replica's
 visible devices, avoiding cross-replica device-rank collisions.
@@ -93,7 +93,7 @@ Launch from the repository root — pick the flavor that matches your hardware:
 bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_v1.sh
 
 # NPU, AVQA, Atlas 800T A3 (16 × Ascend 910C 64GB) — V1 trainer
-bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_npu_avqa_v1.sh
+bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_avqa_v1.sh
 ```
 
 The V1 launchers use pure CLI overrides on `verl_omni.trainer.main_omni`
@@ -204,7 +204,8 @@ bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_mmk12_v1_
 Compared with the GPU script, the NPU variant includes two important Ascend
 settings:
 
-- `export VLLM_ASCEND_ENABLE_NZ=0` disables the NZ format in vLLM Ascend.
+- `++actor_rollout_ref.rollout.engine_kwargs.vllm_omni.additional_config.weight_nz_mode=0`
+  disables the NZ format in vLLM Ascend.
 - `actor_rollout_ref.rollout.cudagraph_capture_sizes` limits the graph shapes
   captured by the rollout engine. Capturing too many shapes can cause runtime
   errors, so keep this list sparse. The current script uses capture sizes
@@ -243,6 +244,45 @@ bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_mmk12_v1_
 The script sets `distillation.enabled=true` with a `vllm_omni` teacher
 (`loss_mode=kl`, `use_policy_gradient=true`). Teacher and student must share
 the same tokenizer (same model family).
+
+### MMK12 Full-Vocabulary On-Policy Distillation (nitrobrew)
+
+A variant of the OPD recipe replaces the sampled / top-k teacher signal with an
+**exact KL over the full vocabulary**. The teacher serves its Thinker last-layer
+hidden states instead of log-probs, and the actor reconstructs the teacher
+logits as `h @ W.T` from the teacher's `lm_head` in vocabulary chunks of 1024
+with a single online-softmax pass — peak extra memory is `O(N × 1024)` instead of
+`O(N × 151936)`. The loss is supervised (`use_policy_gradient=false`), so the
+whole-vocabulary signal is backpropagated directly instead of being folded into
+the policy-gradient reward.
+
+Same student (25% weight noise), same teacher (the un-noised model) and the same
+2 × Ascend 910C topology as the OPD recipe above:
+
+```bash
+# 1. On the master node (node 1): ray start --head
+# 2. On the slave node (node 2): ray start --address='<head_ip>:<port>'
+# 3. Run on the master node:
+bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_mmk12_v1_nitrobrew_opd_npu.sh
+```
+
+`STUDENT_MODEL`, `TEACHER_MODEL`, `TRAIN_FILE`, `VAL_FILE` and
+`REWARD_FUNCTION_PATH` are overridable the same way as in the other MMK12
+scripts. Beyond the teacher block shared with the OPD recipe, the script sets:
+
+- `distillation.distillation_loss.loss_mode=nitrobrew` with
+  `use_policy_gradient=false`. `nitrobrew_reverse_kl` selects `KL(p_S ‖ p_T)`
+  instead of the default forward `KL(p_T ‖ p_S)`.
+- `+actor_rollout_ref.rollout.agent.agent_loop_manager_class=verl_omni.experimental.nitrobrew_opd_agent_loop.NitrobrewOPDAgentLoopManagerTQ`
+  — the agent loop that asks the teacher for hidden states and lifts them onto
+  the batch as a first-class tensor field.
+- `+...rollout.engine_kwargs.vllm_omni.block_size=128`, and the teacher's
+  `enable_chunked_prefill=false`: hidden states are only emitted for the tokens
+  scheduled in the step that finishes prefill, so a chunked prefill would
+  return partial tensors.
+
+See [`docs/algo/omni_opd.md`](../../docs/algo/omni_opd.md#full-vocabulary-opd-nitrobrew)
+for the mechanism and the additional config keys.
 
 ## Training with `AVQA-R1-6K`
 
@@ -307,7 +347,7 @@ existing generic NPU script.
 TRAIN_FILE=$HOME/data/avqa_r1_6k/train.parquet \
 VAL_FILE=$HOME/data/avqa_r1_6k/validation.parquet \
 MODEL_PATH=/path/to/Qwen3-Omni-30B-A3B-Instruct \
-bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_npu_avqa_v1.sh
+bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_avqa_v1.sh
 ```
 
 The launcher uses a 4096-token multimodal prompt budget, a 12288-token response
@@ -709,7 +749,10 @@ examples/gspo_trainer/
 │   ├── run_qwen3_omni_thinker_gspo_lora_v1.sh       ← V1 launch script (GPU, LoRA r=32, text)
 │   ├── run_qwen3_omni_thinker_gspo_lora_mmk12_v1.sh  ← V1 launch script (GPU, LoRA r=32, image)
 │   ├── run_qwen3_omni_thinker_gspo_lora_avqa_v1.sh   ← V1 launch script (GPU, LoRA r=32, audio + image)
-│   ├── run_qwen3_omni_thinker_gspo_npu_avqa_v1.sh    ← V1 launch script (NPU, AVQA)
+│   ├── run_qwen3_omni_thinker_gspo_lora_mmk12_v1_npu.sh        ← V1 launch script (NPU, MMK12)
+│   ├── run_qwen3_omni_thinker_gspo_lora_mmk12_v1_opd_npu.sh    ← V1 OPD script (NPU, MMK12, top-k teacher)
+│   ├── run_qwen3_omni_thinker_gspo_lora_mmk12_v1_nitrobrew_opd_npu.sh  ← V1 OPD script (NPU, MMK12, full-vocabulary)
+│   ├── run_qwen3_omni_thinker_gspo_avqa_v1.sh    ← V1 launch script (NPU, AVQA)
 │   ├── run_qwen3_omni_thinker_gspo_npu_nextqa_v1.sh  ← V1 launch script (NPU, NExT-QA)
 ├── data_process/
 │   ├── mmk12.py                                      ← MMK12 → verl RL parquet converter

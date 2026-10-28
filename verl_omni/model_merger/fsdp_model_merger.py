@@ -620,9 +620,15 @@ class FSDPModelMerger(BaseModelMerger):
             self.config.base_model,
             adapter_name=self.config.adapter_name,
         )
-        # verl defaults missing task types to CAUSAL_LM when saving checkpoint metadata.
+        # verl defaults missing task types to CAUSAL_LM when saving checkpoint metadata. That is
+        # only right for omni actors, whose saved HF config is a transformers config.
         adapter_config = read_json(target / "adapter_config.json")
-        adapter_config["task_type"] = None
+        actor_config_path = Path(self.config.hf_model_config_path) / "config.json"
+        if not actor_config_path.is_file():
+            raise FileNotFoundError(actor_config_path)
+        actor_config = read_json(actor_config_path)
+        causal_lm = "model_type" in actor_config and "_class_name" not in actor_config
+        adapter_config["task_type"] = "CAUSAL_LM" if causal_lm else None
         write_json(target / "adapter_config.json", adapter_config)
         weights = load_file(target / "adapter_model.safetensors")
         manifest = {
@@ -634,6 +640,7 @@ class FSDPModelMerger(BaseModelMerger):
             "tensor_directory": ".",
             "adapter_name": self.config.adapter_name,
             "weight_layout": "peft",
+            "task_type": adapter_config["task_type"],
             "files": inventory(target, tree_files(target)),
             "tensors": {key: tensor_spec(value) for key, value in weights.items()},
         }

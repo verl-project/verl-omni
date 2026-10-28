@@ -95,8 +95,8 @@ def test_delta_sharded_rejects_legacy_diffusion_trainer():
 @pytest.mark.parametrize(
     "model_override",
     [
-        {"lora": {"rank": 8}},  # adapter sync (merge=false default)
-        {"lora": {"rank": 8, "merge": True}},  # merged full-weight export
+        {"lora_rank": 8},  # adapter sync (merge=false default)
+        {"lora_rank": 8, "lora": {"merge": True}},  # merged full-weight export
         {"lora_rank": 16},  # legacy knob
         {"lora_adapter_path": "/tmp/adapter"},
     ],
@@ -104,6 +104,19 @@ def test_delta_sharded_rejects_legacy_diffusion_trainer():
 def test_delta_sharded_rejects_lora(model_override):
     with pytest.raises(ValueError, match="full-weight"):
         validate_config(_delta_config(actor_rollout_ref={"model": model_override}))
+
+
+def test_delta_sharded_rejects_conflicting_lora_spellings():
+    """A resolver ValueError means LoRA was requested: the delta gate re-raises
+    its own full-weight message instead of the resolver's flat-key hint."""
+    with pytest.raises(ValueError, match="full-weight training"):
+        validate_config(_delta_config(actor_rollout_ref={"model": {"lora": {"rank": 8}, "lora_rank": 16}}))
+
+
+def test_delta_sharded_rejects_nested_only_rank():
+    """Same for a nested-only rank: the flat-key hint would dead-end at this gate."""
+    with pytest.raises(ValueError, match="full-weight training"):
+        validate_config(_delta_config(actor_rollout_ref={"model": {"lora": {"rank": 8}}}))
 
 
 @pytest.mark.parametrize(
