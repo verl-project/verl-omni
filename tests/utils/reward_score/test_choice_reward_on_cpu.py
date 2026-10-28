@@ -43,3 +43,14 @@ compute_score = choice_reward.compute_score
 )
 def test_compute_score_uses_first_tag_and_exact_match(response, ground_truth, expected):
     assert compute_score(response, ground_truth) == {"score": expected, "accuracy": expected}
+
+
+@pytest.mark.parametrize("response", ["I ran out of tokens before answering", "", "asdkjfh"])
+def test_compute_score_untagged_response_scores_zero(response):
+    assert compute_score(response, "<answer>B</answer>") == {"score": 0.0, "accuracy": 0.0}
+
+
+@pytest.mark.parametrize("ground_truth", ["B", "", None, "<answer></answer>"])
+def test_compute_score_rejects_untagged_ground_truth(ground_truth):
+    with pytest.raises(ValueError):
+        compute_score("<answer>B</answer>", ground_truth)
