@@ -487,7 +487,7 @@ the actor's `analysis=True` does not configure rollout parsing.
 
 #### Further reading
 
-- [verl NPU profiling examples](https://github.com/verl-project/verl/blob/fefb080262e1c015a0ea05f958822a6a512dc795/examples/profile/README.md#npu-profiling)
+- [verl NPU profiling examples](https://github.com/verl-project/verl/blob/2ab35292039a51175a4b3d3b3b2d76e951a0d3e4/examples/profile/README.md#npu-profiling)
   cover continuous and discrete collection. Their `PROFILE_*` environment
   variables apply to the upstream scripts; use the Hydra overrides above with
   VeRL-Omni launchers.

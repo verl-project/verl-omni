@@ -146,6 +146,49 @@ async def test_abort_with_no_in_flight_requests_still_pauses():
     assert result == {"aborted_count": 0, "request_ids": []}
 
 
+async def test_abort_only_aborts_without_pausing():
+    states = {"ext-1-abc": _FakeRequestState("ext-1-abc", "ext-1")}
+    engine = _FakeAsyncOmni(states=states)
+    server = _make_server(engine)
+
+    result = await server.abort_all_requests(abort_only=True)
+
+    # abort_only cancels current engine requests and keeps admission open: no pause.
+    assert engine.calls == ["abort"]
+    assert engine.pause_calls == []
+    assert result == {"aborted_count": 1, "request_ids": ["ext-1"]}
+
+
+async def test_reject_request_is_accepted_and_still_pauses():
+    states = {"ext-1-abc": _FakeRequestState("ext-1-abc", "ext-1")}
+    engine = _FakeAsyncOmni(states=states)
+    server = _make_server(engine)
+
+    await server.abort_all_requests(reject_request=True)
+
+    # The AsyncOmni engine has no reject knob; arrivals behind the pause park.
+    assert engine.calls == ["abort", "pause"]
+
+
+async def test_generate_accepts_session_id_without_forwarding():
+    engine = _FakeAsyncOmni()
+    server = _make_server(engine)
+    forwarded: dict = {}
+
+    async def _record_generate(**kwargs):
+        forwarded.update(kwargs)
+        return SimpleNamespace()
+
+    server._generate_strategy = SimpleNamespace(generate=_record_generate)
+
+    await server.generate(prompt_ids=[1], sampling_params={"top_p": 1.0}, request_id="req-1", session_id="sess-1")
+
+    # Cross-request server affinity has no AsyncOmni counterpart; routing
+    # stickiness stays owned by the load balancer.
+    assert forwarded["request_id"] == "req-1"
+    assert "session_id" not in forwarded
+
+
 # ---------------------------------------------------------------------------
 # abort outputs arrive via the request queues; mapper untouched
 # ---------------------------------------------------------------------------

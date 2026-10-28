@@ -123,7 +123,7 @@ def test_inbound_stamp_reaches_compute_score_kwargs(monkeypatch):
 
     def _parent_generate(self, prompts):
         del self
-        # Same construction as pinned AgentLoopWorker.generate_sequences (fefb0802).
+        # Same construction as pinned AgentLoopWorker.generate_sequences.
         kwargs = {k: v[0] for k, v in prompts.non_tensor_batch.items() if k != "__do_sample__"}
         captured["kwargs"] = kwargs
         captured["remote_extra"] = np.array([kwargs["extra_info"]])[0]

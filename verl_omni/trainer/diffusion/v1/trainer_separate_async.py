@@ -46,6 +46,7 @@ import logging
 import os
 import time
 from collections import deque
+from copy import deepcopy
 from enum import Enum
 
 import ray
@@ -265,8 +266,15 @@ class PolicyGradientDiffusionTrainerV1SeparateAsync(PolicyGradientDiffusionTrain
         # Standalone rollout replicas on dedicated GPUs. start_rank skips the
         # colocated replica ranks to avoid Ray named-actor collisions.
         hybrid_num_replicas = len(self.llm_server_manager.rollout_replicas)
+        # Standalone replicas have dedicated GPUs; keep their memory budget
+        # separate from the hybrid replicas that share GPUs with training.
+        standalone_config = deepcopy(self.config)
+        standalone_rollout_config = standalone_config.actor_rollout_ref.rollout
+        standalone_memory = standalone_rollout_config.get("standalone_gpu_memory_utilization")
+        if standalone_memory is not None:
+            standalone_rollout_config.gpu_memory_utilization = standalone_memory
         self.standalone_server_manager: LLMServerManager = LLMServerManager.create(
-            config=self.config, start_rank=hybrid_num_replicas
+            config=standalone_config, start_rank=hybrid_num_replicas
         )
 
         standalone_ckpt_config = omega_conf_to_dataclass(self.config.actor_rollout_ref.rollout.checkpoint_engine)
@@ -315,20 +323,17 @@ class PolicyGradientDiffusionTrainerV1SeparateAsync(PolicyGradientDiffusionTrain
         train_batch_size = self.config.data.train_batch_size
         target_warmup_prompts = num_warmup_batches * train_batch_size
         queue_state = tq.kv_list("train") or {}
-        restored_inflight_prompts = sum(
-            tag.get("is_prompt", False) and tag.get("status") in ("pending", "running")
-            for tag in queue_state.get("train", {}).values()
-        )
-        prompts_to_add = max(0, target_warmup_prompts - restored_inflight_prompts)
+        restored_prompts = sum(tag.get("is_prompt", False) for tag in queue_state.get("train", {}).values())
+        prompts_to_add = max(0, target_warmup_prompts - restored_prompts)
         full_batches, remaining_prompts = divmod(prompts_to_add, train_batch_size)
         for _ in range(full_batches):
             self._add_batch_to_generate()
         if remaining_prompts:
             self._add_prompts_to_generate(remaining_prompts)
         logger.info(
-            "Added %d warmup prompts to the agent loop manager; restored %d in-flight prompts",
+            "Added %d warmup prompts to the agent loop manager; restored %d prompt groups",
             prompts_to_add,
-            restored_inflight_prompts,
+            restored_prompts,
         )
 
     def on_validate_begin(self):
@@ -553,7 +558,7 @@ class PolicyGradientDiffusionTrainerV1SeparateAsync(PolicyGradientDiffusionTrain
     def switch_to_trainer(self):
         """Stop routing to Hybrid, abort partial requests, and return its GPU memory to training."""
         self.remove_replicas_from_balancer()
-        self.checkpoint_manager.abort_replicas()
+        self.checkpoint_manager.abort_replicas(reject_request=True)
         self.checkpoint_manager.sleep_replicas()
         self.current_mode = HybridEngineMode.TRAINER
 

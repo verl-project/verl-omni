@@ -180,7 +180,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
     # launch_server hooks
     # -----------------------------------------------------------------------
 
-    def _apply_quantization(self) -> tuple[str | None, dict]:
+    def _apply_quantization(self) -> dict:
         return self._generate_strategy.apply_quantization()
 
     def _get_override_generation_config(self) -> dict:
@@ -460,7 +460,10 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         extra_prompt_ids: Optional[dict[str, list[int]]] = None,
         negative_extra_prompt_ids: Optional[dict[str, list[int]]] = None,
         priority: int = 0,
+        session_id: Optional[str] = None,
     ) -> DiffusionOutput | TokenOutput:
+        # session_id (cross-request server affinity in the vLLM path) has no
+        # AsyncOmni counterpart; routing stickiness is owned by the load balancer.
         return await self._generate_strategy.generate(
             prompt_ids=prompt_ids,
             sampling_params=sampling_params,
@@ -524,11 +527,21 @@ class vLLMOmniHttpServer(vLLMHttpServer):
     # so the parent's AsyncLLM-specific implementation must be overridden.
     # -----------------------------------------------------------------------
 
-    async def abort_all_requests(self, reset_prefix_cache: bool = True) -> dict[str, Any]:
-        """Abort all in-flight requests on the AsyncOmni engine."""
+    async def abort_all_requests(
+        self, reset_prefix_cache: bool = True, reject_request: bool = False, abort_only: bool = False
+    ) -> dict[str, Any]:
+        """Abort all in-flight requests on the AsyncOmni engine.
+
+        ``abort_only`` cancels current engine requests and keeps admission open;
+        the other flags shape the pause that otherwise follows. The AsyncOmni
+        engine parks requests that arrive behind its pause (it has no reject
+        knob), so ``reject_request`` only reaches engines that support it.
+        """
         engine = self.engine
         if getattr(engine, "output_processor", None) is not None:
-            return await super().abort_all_requests(reset_prefix_cache)
+            return await super().abort_all_requests(
+                reset_prefix_cache, reject_request=reject_request, abort_only=abort_only
+            )
 
         # ``engine.abort`` takes EXTERNAL ids; ``request_states`` is keyed by internal.
         in_flight: list[tuple[str, str, Any]] = []
@@ -540,6 +553,13 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             in_flight.append((state.request_id, state.external_request_id, state))
 
         request_ids = [external_id for _, external_id, _ in in_flight]
+
+        if abort_only:
+            await asyncio.wait_for(
+                engine.abort(request_ids), timeout=float(os.getenv("VERL_OMNI_ABORT_ACK_TIMEOUT_S", "120"))
+            )
+            logger.info("Aborted %d request(s) (admission left open): %s", len(request_ids), request_ids)
+            return {"aborted_count": len(request_ids), "request_ids": request_ids}
 
         aborted = False
         try:
