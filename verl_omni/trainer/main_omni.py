@@ -301,6 +301,20 @@ def launch_ray_task_runner(
             runtime_env_kwargs["env_vars"] = runtime_env_vars
 
         runtime_env = OmegaConf.merge(default_runtime_env, runtime_env_kwargs)
+        # ``BAGEL_CORL_VLLM_LOG_LEVEL`` forces the vLLM log level into the runtime
+        # env that every rollout engine process inherits. The default of "ERROR"
+        # (or "WARN") silences the engine's own scheduler heartbeat
+        # ("Engine 000: Avg generation throughput: ... Running: N reqs, Waiting: M"),
+        # which is the *only* way to tell "the engine is starved of KV blocks" from
+        # "the engine is decoding" when a rollout stops making progress -- a
+        # stalled AR replica otherwise looks like an idle one. Set it to "INFO"
+        # for a diagnostic run; leave it unset for production runs.
+        forced_vllm_log_level = os.getenv("BAGEL_CORL_VLLM_LOG_LEVEL")
+        if forced_vllm_log_level:
+            merged_runtime_env = OmegaConf.to_container(runtime_env, resolve=True) or {}
+            merged_runtime_env.setdefault("env_vars", {})["VLLM_LOGGING_LEVEL"] = forced_vllm_log_level
+            runtime_env = OmegaConf.create(merged_runtime_env)
+            print(f"forcing VLLM_LOGGING_LEVEL={forced_vllm_log_level} for rollout engine processes")
         ray_init_kwargs = OmegaConf.create({**ray_init_kwargs, "runtime_env": runtime_env})
         print(f"ray init kwargs: {ray_init_kwargs}")
         ray.init(**OmegaConf.to_container(ray_init_kwargs))
@@ -334,16 +348,56 @@ def uses_v1_trainer(config) -> bool:
     return not (sample_source == "offline" and trainer_type == "direct_preference")
 
 
+def _v1_task_runner_class():
+    """Return the PPO-V1 task-runner actor with ``verl_omni`` registered *in the actor*.
+
+    ``verl.trainer.main_ppo.TaskRunnerV1`` resolves ``config.trainer.v1.trainer_mode``
+    through ``verl.trainer.ppo.v1.TRAINER_REGISTRY`` inside the Ray actor, and that
+    registry holds only ``colocate_async`` / ``separate_async`` / ``sync`` until
+    something imports ``verl_omni`` (``verl_omni/trainer/__init__.py`` pulls in
+    ``verl_omni.trainer.omni``, where ``@register_trainer("bagel_corl_sync")`` lives).
+    The ``import verl_omni.trainer.omni`` at the top of *this* module only ever ran in
+    the driver, which does not cross the actor boundary, so the actor aborted with::
+
+        ValueError: Unknown trainer 'bagel_corl_sync'.
+                    Available trainers: colocate_async, separate_async, sync.
+
+    Defining the actor class here fixes that: Ray imports this module in the worker to
+    reconstruct the class, so the package import above runs there too. ``ray.remote``
+    refuses to inherit from an actor class ("inheriting from actor classes is not
+    currently supported"), so subclass the undecorated class Ray keeps on
+    ``__ray_metadata__.modified_class`` and re-decorate it. The subclass adds no
+    behaviour -- the worker-side import is the entire point -- and ``TaskRunnerV1``
+    itself is used unchanged if those internals are ever renamed.
+    """
+    from verl.trainer.main_ppo import TaskRunnerV1
+
+    base = getattr(getattr(TaskRunnerV1, "__ray_metadata__", None), "modified_class", None)
+    if base is None:  # pragma: no cover - Ray internals moved; keep stock behaviour
+        return TaskRunnerV1
+
+    @ray.remote
+    class OmniTaskRunnerV1(base):  # type: ignore[misc, valid-type]
+        """``TaskRunnerV1`` that also registers the omni trainers in its own process."""
+
+        def __init__(self, *args, **kwargs):
+            import verl_omni  # noqa: F401 - registers bagel_corl_sync / omni_sync
+
+            super().__init__(*args, **kwargs)
+
+    return OmniTaskRunnerV1
+
+
 def run_omni(config, task_runner_class=None) -> None:
     """Initialize Ray and run distributed Omni training."""
     enable_rl_insight(config)
 
     if uses_v1_trainer(config):
-        from verl.trainer.main_ppo import TaskRunnerV1, run_ppo
+        from verl.trainer.main_ppo import run_ppo
 
         config.trainer.use_v1 = True
         if task_runner_class is None:
-            task_runner_class = TaskRunnerV1
+            task_runner_class = _v1_task_runner_class()
         run_ppo(config, task_runner_class=task_runner_class)
         return
 

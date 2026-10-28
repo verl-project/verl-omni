@@ -26,6 +26,9 @@ n_gpus_per_node: ${oc.select:trainer.n_gpus_per_node,8}
 # same as data.max_prompt_length if it exists
 prompt_length: ${oc.select:data.max_prompt_length,512}
 
+# AgentLoopWorker UND pad / max decode (not diffusion pipeline length)
+response_length: ${oc.select:data.max_response_length,512}
+
 # Final prompt-embedding sequence length after combining all text encoders.
 # null falls back to pipeline.max_sequence_length for single-encoder models.
 max_prompt_embed_length: null
@@ -385,6 +388,15 @@ agent:
 
   # default agent loop to use if `agent_name` not set in RL dataset
   default_agent_loop: diffusion_single_turn_agent
+
+# Rollout tracing (AgentLoopWorker reads this even on diffusion Co-RL (Joint-Training))
+trace:
+  _target_: verl.workers.config.TraceConfig
+  project_name: ${oc.select:trainer.project_name,null}
+  experiment_name: ${oc.select:trainer.experiment_name,null}
+  backend: null
+  token2text: false
+  max_samples_per_step_per_worker: null
 
 # Checkpoint Engine config for update weights from trainer to rollout
 checkpoint_engine:
