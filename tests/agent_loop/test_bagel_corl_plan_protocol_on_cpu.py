@@ -19,7 +19,11 @@ import asyncio
 
 import pytest
 
-from verl_omni.agent_loop.bagel_corl_lib import BagelGenerateImageTool, parse_und_tool_call, run_serial_episode
+from verl_omni.pipelines.bagel_flow_grpo.agentic_und_gen.episode import (
+    BagelGenerateImageTool,
+    parse_und_tool_call,
+    run_serial_episode,
+)
 
 GENERATE = '<tool_call>\n{"name": "generate_image", "arguments": {"prompt": "subtask"}}\n</tool_call>'
 JUDGE = (
@@ -66,6 +70,16 @@ def _episode(script, verdict=VERDICT, **kwargs):
 
 def _observations(episode):
     return [r["text"] for r in episode.turn_trace if r["record"] == "env_obs"]
+
+
+def test_negative_judge_is_associated_with_the_generated_call():
+    from verl_omni.tools.trajectory import EpisodeState, episode_scope
+
+    with episode_scope(EpisodeState(episode_id="negative")) as state:
+        result = _episode([GENERATE, JUDGE] * 3, verdict=VERDICT.replace("good_enough=YES", "good_enough=NO"))
+        assert state.judgments[-1].call_id == result.gen_samples[-1].gen_group_uid
+        assert not state.judgments[-1].good_enough
+        assert not state.good_enough
 
 
 def test_plan_episode_is_cued_and_an_early_judge_is_declined_once():
@@ -122,7 +136,7 @@ NO_VERDICT = VERDICT.replace("good_enough=YES", "good_enough=NO").replace("0.800
 @pytest.mark.parametrize("terminal", ["Done", "Done.", "Done<|im_end|>", "Done.<|im_end|>"])
 def test_a_done_without_the_period_still_ends_the_episode(terminal):
     """The checkpoint writes ``Done`` as often as ``Done.``; a missing period is not a continuation."""
-    from verl_omni.agent_loop.bagel_corl_lib import und_turn_kind
+    from verl_omni.pipelines.bagel_flow_grpo.agentic_und_gen.episode import und_turn_kind
 
     assert und_turn_kind(terminal) == "done"
 

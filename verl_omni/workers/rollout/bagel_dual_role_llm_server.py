@@ -30,7 +30,7 @@ from omegaconf import DictConfig
 from verl.workers.rollout.llm_server import LLMServerClient
 from verl.workers.rollout.replica import TokenOutput
 
-from verl_omni.agent_loop.bagel_corl_gen_serve import (
+from verl_omni.pipelines.bagel_flow_grpo.agentic_und_gen.serving import (
     _AR_ONLY_SAMPLING_KEYS,
     fill_und_ar_sampling_params,
 )
@@ -173,7 +173,7 @@ class BagelDualRoleLLMServerClient(LLMServerClient):
             # how a healthy rollout came to look wedged (nothing logged after turn 1 while the
             # engines kept serving). Re-assert INFO logging on entry, i.e. *after* the import
             # that would otherwise silence us.
-            from verl_omni.agent_loop.bagel_corl_lib import _force_info_logging
+            from verl_omni.pipelines.bagel_flow_grpo.agentic_und_gen.episode import _force_info_logging
 
             _force_info_logging()
         # Strip cross-role knobs so AR/Diffusion strategies do not reject the request.

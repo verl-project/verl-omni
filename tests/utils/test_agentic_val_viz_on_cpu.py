@@ -141,7 +141,7 @@ def test_tensordict_batch_names_the_dump_folder_after_the_sample_index(monkeypat
     assert [_cell(batch, "dataset_task_uid", i) for i in range(len(batch))] == [str(i) for i in EXPECTED_SAMPLE_INDICES]
     assert all(_cell(batch, "raw_prompt", i)[-1]["role"] == "user" for i in range(len(batch)))
 
-    from verl_omni.agent_loop.bagel_corl import episode_artifact_keys
+    from verl_omni.pipelines.bagel_flow_grpo.agentic_und_gen.agent_loop import episode_artifact_keys
 
     relpath, seed_base = episode_artifact_keys(
         dataset_task_uid=str(_cell(batch, "dataset_task_uid", 0)),
@@ -234,7 +234,7 @@ def test_holdout_raw_prompt_reaches_the_agent_loop_as_a_message_list():
 
     from tensordict.tensorclass import NonTensorData, NonTensorStack
 
-    from verl_omni.agent_loop.bagel_corl import _messages_are_text_only
+    from verl_omni.pipelines.bagel_flow_grpo.agentic_und_gen.agent_loop import _messages_are_text_only
     from verl_omni.utils.agentic_val_viz import resolve_agentic_val_viz_provider
 
     os.environ["AGENTIC_VAL_VIZ"] = "1"

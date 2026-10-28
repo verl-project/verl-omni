@@ -20,7 +20,7 @@ import json
 import re
 from typing import Any
 
-from verl_omni.tools.trajectory.hydra_env import agentic_get, agentic_get_bool
+from verl_omni.utils.agentic.config import agentic_get, agentic_get_bool
 from verl_omni.utils.agentic.max_passes import max_generate_passes
 
 __all__ = [
@@ -30,7 +30,6 @@ __all__ = [
     "fits_response_budget",
     "force_first_generate_probability",
     "hermes_tool_call",
-    "last_live_generate_prompt",
     "last_user_text",
     "max_generate_passes",
     "messages_after_last_user",
@@ -211,30 +210,6 @@ def count_successful_judges(messages: list[dict[str, Any]]) -> int:
         and _is_successful_judge(tool_message_text(message))
         and not _is_fewshot_observation(tool_message_text(message))
     )
-
-
-def last_live_generate_prompt(messages: list[dict[str, Any]]) -> str:
-    """Return the diffusion prompt from the last successful live generation.
-
-    Args:
-        messages: Full chat message list.
-
-    Returns:
-        Prompt string, or ``""`` if none.
-    """
-    for message in reversed(messages_after_last_user(messages)):
-        if message.get("role") != "tool":
-            continue
-        text = tool_message_text(message)
-        if not _is_live_generate_observation(text) or _is_fewshot_observation(text):
-            continue
-        match = re.search(r"prompt='([^']*)'", text)
-        if match:
-            return match.group(1).strip()
-        match = re.search(r'prompt="([^"]*)"', text)
-        if match:
-            return match.group(1).strip()
-    return ""
 
 
 def count_successful_generates(messages: list[dict[str, Any]]) -> int:

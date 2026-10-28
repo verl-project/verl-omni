@@ -12,10 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Sidecar-agnostic RPCO turn protocol shared by Mode (2a) and Bagel Co-RL (Joint-Training).
+"""BAGEL Co-RL judge observations and forced reflection turn protocol.
 
-Mask semantics (single source of truth for both loops)
------------------------------------------------------
+Response-mask contract
+----------------------
 * Forced Hermes ``<tool_call>`` teacher tokens → ``response_mask=1`` (policy
   format the actor must learn; GRPO may credit them).
 * Injected Reflection prose from ``build_forced_reflection`` → ``response_mask=0``
@@ -27,18 +27,15 @@ Mask semantics (single source of truth for both loops)
 
 from __future__ import annotations
 
-import json
 import re
 
 __all__ = [
-    "JUDGE_OK_RE",
     "build_forced_reflection",
+    "derive_good_enough_from_scores",
     "format_rm_scores_as_judge_text",
-    "hermes_tool_call",
-    "parse_rubber_stamp",
 ]
 
-JUDGE_OK_RE = re.compile(r"\bagentic_judge\s+ok=1\b", re.IGNORECASE)
+_JUDGE_OK_RE = re.compile(r"\bagentic_judge\s+ok=1\b", re.IGNORECASE)
 _CORRECTNESS_RE = re.compile(r"\bcorrectness\s*=\s*([0-9.]+)", re.IGNORECASE)
 _AESTHETICS_RE = re.compile(r"\baesthetics\s*=\s*([0-9.]+)", re.IGNORECASE)
 _GOOD_ENOUGH_RE = re.compile(r"\bgood_enough\s*=\s*(YES|NO)", re.IGNORECASE)
@@ -49,17 +46,11 @@ _FINDINGS_RE = re.compile(
 _FIXES_RE = re.compile(r"\bsuggested_fixes:\s*(.+?)(?:\n\s*agentic_judge\b|\n\n|\Z)", re.IGNORECASE | re.DOTALL)
 
 
-def parse_rubber_stamp(tool_text: str) -> bool:
+def _parse_rubber_stamp(tool_text: str) -> bool:
     match = _RUBBER_STAMP_RE.search(tool_text or "")
     if not match:
         return False
     return match.group(1).strip().lower() in {"true", "1", "yes"}
-
-
-def hermes_tool_call(name: str, **arguments: str) -> str:
-    """Hermes wire format (must match ``multi_turn.format=hermes``)."""
-    payload = {"name": name, "arguments": dict(arguments)}
-    return f"<tool_call>\n{json.dumps(payload, ensure_ascii=False)}\n</tool_call>"
 
 
 def format_rm_scores_as_judge_text(
@@ -72,11 +63,7 @@ def format_rm_scores_as_judge_text(
     rubber_stamp: bool = False,
     similarity: float | None = None,
 ) -> str:
-    """Render colocated RM scores into the Mode-2a judge observation format.
-
-    ``build_forced_reflection`` parses this string unchanged — one verdict format
-    for both Mode (2a) HTTP judge and Bagel Co-RL (Joint-Training) ``reward_loop_manager``.
-    """
+    """Render RM scores into judge observations consumed by forced reflection."""
     findings_text = (findings or "").strip() or "see VL facet scores above"
     if similarity is not None and "similarity" not in findings_text.lower():
         findings_text = f"{findings_text}; unicot_similarity={float(similarity):.4f}"
@@ -105,7 +92,7 @@ def build_forced_reflection(
     or the pass cap is reached, leave ``Done.`` to one subsequent policy decode
     so GRPO has a sampled terminal action to reinforce.
     """
-    if not JUDGE_OK_RE.search(tool_text or ""):
+    if not _JUDGE_OK_RE.search(tool_text or ""):
         return None
     c_m = _CORRECTNESS_RE.search(tool_text)
     a_m = _AESTHETICS_RE.search(tool_text)
@@ -115,7 +102,7 @@ def build_forced_reflection(
     correctness = c_m.group(1) if c_m else "?"
     aesthetics = a_m.group(1) if a_m else "?"
     good_enough = (g_m.group(1).upper() == "YES") if g_m else False
-    rubber_stamp = parse_rubber_stamp(tool_text)
+    rubber_stamp = _parse_rubber_stamp(tool_text)
     findings = re.sub(r"\s+", " ", (f_m.group(1) if f_m else "").strip())[:220]
     fixes = re.sub(r"\s+", " ", (x_m.group(1) if x_m else "").strip())[:160]
     if not findings:

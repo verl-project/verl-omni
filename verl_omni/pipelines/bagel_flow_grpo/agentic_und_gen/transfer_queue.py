@@ -35,7 +35,8 @@ from verl.trainer.ppo.v1.agent_loop_tq import AgentLoopWorkerTQ, _settle_session
 from verl.utils.ray_utils import auto_await
 from verl.utils.tensordict_utils import list_of_dict_to_tensordict
 
-from verl_omni.agent_loop.bagel_corl_lib import (
+from verl_omni.agent_loop.diffusion_agent_loop import _config_to_sampling_dict
+from verl_omni.pipelines.bagel_flow_grpo.agentic_und_gen.episode import (
     EpisodeRollout,
     GenSample,
     _as_gen_sample,
@@ -43,10 +44,9 @@ from verl_omni.agent_loop.bagel_corl_lib import (
     strip_pixels_for_actor,
     und_episode_rm_scores,
 )
-from verl_omni.agent_loop.bagel_corl_rm import bind_bagel_rm_handles
-from verl_omni.agent_loop.diffusion_agent_loop import _config_to_sampling_dict
-from verl_omni.tools.trajectory.hydra_env import bind_agentic_image_gen
-from verl_omni.tools.trajectory.paths import bind_run_artifacts
+from verl_omni.pipelines.bagel_flow_grpo.agentic_und_gen.reward import bind_bagel_rm_handles
+from verl_omni.utils.agentic.artifacts import bind_run_artifacts
+from verl_omni.utils.agentic.config import bind_agentic_image_gen
 from verl_omni.utils.agentic_val_viz import VAL_VIZ_PROMPT_KEY, resolve_agentic_val_viz_provider
 
 logger = logging.getLogger(__name__)

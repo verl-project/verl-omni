@@ -22,7 +22,7 @@ any one of the three is computed and then thrown away, which is indistinguishabl
 never having computed it.
 """
 
-from verl_omni.agent_loop.bagel_corl_lib import aggregate_reward_breakdown_metrics
+from verl_omni.pipelines.bagel_flow_grpo.agentic_und_gen.episode import aggregate_reward_breakdown_metrics
 from verl_omni.trainer.omni.bagel_corl_trainer import (
     _bagel_corl_step_metric_keys,
 )

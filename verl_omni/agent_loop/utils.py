@@ -14,7 +14,7 @@
 
 """Shared helpers for agent-loop rollout seeding (diffusion + composite loops).
 
-``ImageGenToolAgentLoop`` helpers are in ``verl_omni.tools.agent_helper.image_gen_utils``,
+``ImageGenToolAgentLoop`` helpers are in ``verl_omni.tools.agent_helper.image_gen_protocol``,
 not here, so diffusion loops do not import Hydra ``agentic_image_gen`` readers.
 """
 

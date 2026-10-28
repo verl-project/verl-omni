@@ -41,7 +41,7 @@ VAL_VIZ_DATA_SOURCE = "agentic_val_viz"
 
 def save_val_viz_images(image_paths: Sequence[str], relpath: str) -> list[str]:
     """Keep demo PNGs under their validation step and fixed case identity."""
-    from verl_omni.tools.trajectory.paths import resolve_rollout_images_root
+    from verl_omni.utils.agentic.artifacts import resolve_rollout_images_root
 
     written = []
     try:

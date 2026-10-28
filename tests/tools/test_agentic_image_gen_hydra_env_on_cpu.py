@@ -126,7 +126,8 @@ def test_bind_clears_stale_cfg_when_agentic_image_gen_missing():
     bind_agentic_image_gen(OmegaConf.create({"trainer": {}}))
     assert agentic_get_str("diffusion_tool_url") == ""
     assert agentic_get_bool("force_first_generate") is False
-    bind_agentic_image_gen(None)
+    with pytest.raises(ValueError, match="None"):
+        bind_agentic_image_gen(None)
     assert agentic_get_str("diffusion_tool_url") == ""
     clear_agentic_image_gen()
 

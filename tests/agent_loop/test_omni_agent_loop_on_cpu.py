@@ -162,9 +162,9 @@ def test_inbound_stamp_reaches_compute_score_kwargs(monkeypatch):
 def test_stamp_reward_context_does_not_override_row_values(monkeypatch):
     from omegaconf import OmegaConf
 
-    import verl_omni.tools.trajectory as trajectory_pkg
+    from verl_omni.utils.agentic import artifacts
 
-    monkeypatch.setattr(trajectory_pkg, "resolve_rollout_images_root", lambda: Path("/run/root/rollout_images"))
+    monkeypatch.setattr(artifacts, "resolve_rollout_images_root", lambda: Path("/run/root/rollout_images"))
     output = SimpleNamespace(
         non_tensor_batch={
             "extra_info": np.array(
@@ -188,7 +188,7 @@ def test_stamp_reward_context_does_not_override_row_values(monkeypatch):
         fresh,
         OmegaConf.create({"agentic_image_gen": {"vllm_url": "http://cli", "good_enough_threshold": 0.55}}),
     )
-    assert fresh.non_tensor_batch["extra_info"][0]["rollout_images_root"] == "/run/root/rollout_images"
+    assert fresh.non_tensor_batch["extra_info"][0]["rollout_images_root"] == str(Path("/run/root/rollout_images"))
 
 
 def test_materialize_rollout_images_ignores_stub_no_image_txt(tmp_path):

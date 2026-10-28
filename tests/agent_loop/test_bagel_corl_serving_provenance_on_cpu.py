@@ -30,11 +30,11 @@ ROOT = Path(__file__).resolve().parents[2]
 
 def load_lib():
     spec = importlib.util.spec_from_file_location(
-        "provenance_protocol", ROOT / "verl_omni/agent_loop/rpco_turn_protocol.py"
+        "provenance_protocol", ROOT / "verl_omni/pipelines/bagel_flow_grpo/agentic_und_gen/turn_protocol.py"
     )
     protocol = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(protocol)
-    path = ROOT / "verl_omni/agent_loop/bagel_corl_lib.py"
+    path = ROOT / "verl_omni/pipelines/bagel_flow_grpo/agentic_und_gen/episode.py"
     tree = ast.parse(path.read_text(encoding="utf-8"))
     tree.body = [
         node
@@ -43,8 +43,13 @@ def load_lib():
     ]
     module = ModuleType("serving_provenance_lib")
     sys.modules[module.__name__] = module
+    from verl_omni.tools.trajectory import EpisodeState, current_episode, episode_scope
+
     latch = [False]
     module.__dict__.update(
+        EpisodeState=EpisodeState,
+        current_episode=current_episode,
+        episode_scope=episode_scope,
         build_forced_reflection=protocol.build_forced_reflection,
         derive_good_enough_from_scores=protocol.derive_good_enough_from_scores,
         format_rm_scores_as_judge_text=protocol.format_rm_scores_as_judge_text,
@@ -179,7 +184,7 @@ def test_transfer_queue_roundtrip_keeps_observed_versions(monkeypatch):
     module = load_lib()
     result = episode(module, [step(GENERATE), step(JUDGE), step("Done.")])
     project = functions(
-        "verl_omni/agent_loop/bagel_corl.py",
+        "verl_omni/pipelines/bagel_flow_grpo/agentic_und_gen/agent_loop.py",
         ["episode_to_agent_output"],
         dict(AgentLoopOutput=SimpleNamespace, AgentLoopMetrics=SimpleNamespace),
     )["episode_to_agent_output"]
@@ -187,7 +192,7 @@ def test_transfer_queue_roundtrip_keeps_observed_versions(monkeypatch):
     assert output.extra_fields["policy_version"] == 0
     assert output.extra_fields["requested_policy_version"] == 1
     assert output.extra_fields["rollout_replica_id"] == "und-server"
-    path = "verl_omni/agent_loop/bagel_corl_tq.py"
+    path = "verl_omni/pipelines/bagel_flow_grpo/agentic_und_gen/transfer_queue.py"
     names = [
         "episode_from_agent_extra",
         "pack_dual_lane_episode",
@@ -228,7 +233,9 @@ def test_live_und_decode_keeps_observed_output_metadata():
     import uuid
 
     module = load_lib()
-    tree = ast.parse((ROOT / "verl_omni/agent_loop/bagel_corl.py").read_text(encoding="utf-8"))
+    tree = ast.parse(
+        (ROOT / "verl_omni/pipelines/bagel_flow_grpo/agentic_und_gen/agent_loop.py").read_text(encoding="utf-8")
+    )
     node = next(n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef) and n.name == "_und_decode")
 
     async def generate(**kwargs):
@@ -289,8 +296,14 @@ def test_native_strategy_projects_its_actual_server_not_requested_step(lane):
         n for n in strategy_tree.body if isinstance(n, ast.ClassDef) and n.name in ("ARStrategy", "DiffusionStrategy")
     )
     method = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "process_output")
+    hidden_spec = importlib.util.spec_from_file_location(
+        "provenance_hidden_states", ROOT / "verl_omni/workers/rollout/vllm_rollout/process_hidden_states.py"
+    )
+    hidden = importlib.util.module_from_spec(hidden_spec)
+    hidden_spec.loader.exec_module(hidden)
     namespace.update(
         {
+            "extract_hidden_states": hidden.extract_hidden_states,
             output_type: SimpleNamespace,
             "_diffusion_output_type": lambda params: "image",
             "_media_artifact_header": lambda metadata, **kwargs: None,
@@ -334,9 +347,9 @@ def test_native_strategy_projects_its_actual_server_not_requested_step(lane):
 
 def test_gen_stash_retains_only_its_own_observed_serving_metadata(monkeypatch):
     lib = load_lib()
-    monkeypatch.setitem(sys.modules, "verl_omni.agent_loop.bagel_corl_lib", lib)
+    monkeypatch.setitem(sys.modules, "verl_omni.pipelines.bagel_flow_grpo.agentic_und_gen.episode", lib)
     spec = importlib.util.spec_from_file_location(
-        "provenance_gen_serve", ROOT / "verl_omni/agent_loop/bagel_corl_gen_serve.py"
+        "provenance_gen_serve", ROOT / "verl_omni/pipelines/bagel_flow_grpo/agentic_und_gen/serving.py"
     )
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)

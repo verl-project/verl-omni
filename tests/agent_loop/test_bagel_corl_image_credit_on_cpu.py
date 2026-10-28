@@ -16,7 +16,7 @@
 
 import pytest
 
-from verl_omni.agent_loop.bagel_corl_lib import (
+from verl_omni.pipelines.bagel_flow_grpo.agentic_und_gen.episode import (
     EpisodeRollout,
     GenSample,
     episode_und_reward,

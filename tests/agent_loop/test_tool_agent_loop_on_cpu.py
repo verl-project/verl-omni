@@ -22,7 +22,7 @@ import pytest
 from omegaconf import OmegaConf
 
 import verl_omni  # noqa: F401
-from verl_omni.tools.agent_helper import image_gen_utils as utils
+from verl_omni.tools.agent_helper import image_gen_protocol as utils
 from verl_omni.tools.trajectory.hydra_env import bind_agentic_image_gen, clear_agentic_image_gen
 
 
@@ -199,19 +199,6 @@ def test_count_successful_generates_requires_live_backend():
         {"role": "tool", "content": "agentic_tool ok=1 images=1 prompt='p3'"},  # no live backend token
     ]
     assert u.count_successful_generates(live) == 1
-
-
-def test_last_live_generate_prompt_extraction():
-    u = utils
-    live = [
-        {"role": "user", "content": "live"},
-        {"role": "assistant", "content": u.hermes_tool_call("generate_image", prompt="first")},
-        {"role": "tool", "content": _gen_obs(prompt="first", backend="qwen_image")},
-        {"role": "assistant", "content": u.hermes_tool_call("generate_image", prompt="rewritten")},
-        {"role": "tool", "content": _gen_obs(prompt="rewritten", backend="qwen_image")},
-    ]
-    assert u.last_live_generate_prompt(live) == "rewritten"
-    assert u.last_live_generate_prompt([]) == ""
 
 
 def test_tool_message_text_forms():

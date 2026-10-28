@@ -23,8 +23,8 @@ import pytest
 import torch
 from omegaconf import OmegaConf
 
-from verl_omni.agent_loop import bagel_corl_tq as tq_mod
-from verl_omni.agent_loop.bagel_corl_gen_serve import stash_gen_row_from_diffusion_output
+from verl_omni.pipelines.bagel_flow_grpo.agentic_und_gen import transfer_queue as tq_mod
+from verl_omni.pipelines.bagel_flow_grpo.agentic_und_gen.serving import stash_gen_row_from_diffusion_output
 
 # The recipe's real numbers: training is deliberately stochastic (``noise_level=0.7``,
 # 15 steps) while validation pins the deterministic reference (``noise_level=0.0``, 50
@@ -101,7 +101,7 @@ def test_val_overlay_clears_logprobs():
 
 def test_val_overlay_accepts_a_flowgrpo_refused_combination():
     """The overlay's own output must not trip ``build_gen_sampling_params``'s guard."""
-    from verl_omni.agent_loop.bagel_corl_gen_serve import build_gen_sampling_params
+    from verl_omni.pipelines.bagel_flow_grpo.agentic_und_gen.serving import build_gen_sampling_params
 
     rollout = _rollout_cfg()
     rollout["calculate_log_probs"] = True
@@ -275,7 +275,7 @@ def test_training_row_still_carries_the_full_trajectory(tmp_path):
 
 def test_a_valid_row_without_traj_is_dropped_from_the_gen_training_lane():
     """The row shape validation produces must be one the packer already understands."""
-    from verl_omni.agent_loop.bagel_corl_lib import GenSample
+    from verl_omni.pipelines.bagel_flow_grpo.agentic_und_gen.episode import GenSample
 
     sample = GenSample(
         gen_sample_uid="g.01",

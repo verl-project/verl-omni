@@ -32,7 +32,9 @@ def load_functions(path, names, **namespace):
 
 
 def contract(samples, **kwargs):
-    ns = load_functions("verl_omni/agent_loop/bagel_corl_lib.py", ["trusted_image_reward_fields"], math=math)
+    ns = load_functions(
+        "verl_omni/pipelines/bagel_flow_grpo/agentic_und_gen/episode.py", ["trusted_image_reward_fields"], math=math
+    )
     return ns["trusted_image_reward_fields"](samples, **kwargs)
 
 
@@ -160,7 +162,9 @@ def test_tq_forwards_real_envelope_inside_extra_info_before_rm():
     # Execute the actual live pre-RM block without importing the GPU worker module.
     import asyncio
 
-    tree = ast.parse((ROOT / "verl_omni/agent_loop/bagel_corl_tq.py").read_text(encoding="utf8"))
+    tree = ast.parse(
+        (ROOT / "verl_omni/pipelines/bagel_flow_grpo/agentic_und_gen/transfer_queue.py").read_text(encoding="utf8")
+    )
     cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "BagelCorlAgentLoopWorkerTQ")
     method = next(
         n
@@ -227,7 +231,9 @@ def test_reordered_transport_retains_call_chronology():
 
 
 def test_v2_terminal_composite_is_authoritative_for_tq_reward():
-    ns = load_functions("verl_omni/agent_loop/bagel_corl_lib.py", ["episode_und_reward"], EpisodeRollout=object)
+    ns = load_functions(
+        "verl_omni/pipelines/bagel_flow_grpo/agentic_und_gen/episode.py", ["episode_und_reward"], EpisodeRollout=object
+    )
     ep = SimpleNamespace(
         corl_reward_version="v2",
         terminal_reward=0.73,
@@ -239,14 +245,20 @@ def test_v2_terminal_composite_is_authoritative_for_tq_reward():
 
 def test_nonfinite_rm_response_is_rejected():
     ns = load_functions(
-        "verl_omni/agent_loop/bagel_corl_rm.py", ["parse_rm_result"], Any=object, math=math, RMScoringError=ValueError
+        "verl_omni/pipelines/bagel_flow_grpo/agentic_und_gen/reward.py",
+        ["parse_rm_result"],
+        Any=object,
+        math=math,
+        RMScoringError=ValueError,
     )
     with pytest.raises(ValueError, match="nonfinite"):
         ns["parse_rm_result"]({"reward_score": float("nan")}, ["image"])
 
 
 def test_fixed_original_request_reaches_generator_prompt():
-    tree = ast.parse((ROOT / "verl_omni/agent_loop/bagel_corl_lib.py").read_text(encoding="utf8"))
+    tree = ast.parse(
+        (ROOT / "verl_omni/pipelines/bagel_flow_grpo/agentic_und_gen/episode.py").read_text(encoding="utf8")
+    )
     run = next(n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name == "run_serial_episode")
     block = next(
         n
@@ -263,7 +275,9 @@ def test_fixed_original_request_reaches_generator_prompt():
 
 
 def test_forced_done_cannot_be_autonomous():
-    tree = ast.parse((ROOT / "verl_omni/agent_loop/bagel_corl_lib.py").read_text(encoding="utf8"))
+    tree = ast.parse(
+        (ROOT / "verl_omni/pipelines/bagel_flow_grpo/agentic_und_gen/episode.py").read_text(encoding="utf8")
+    )
     run = next(n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name == "run_serial_episode")
     block = next(
         n
@@ -298,7 +312,7 @@ def test_rm_failure_cannot_mark_a_sample_as_trusted(monkeypatch, failure):
 
     # The adapter imports Ray only for its ObjectRef check; no Ray server is needed.
     monkeypatch.setitem(sys.modules, "ray", SimpleNamespace(ObjectRef=type("ObjectRef", (), {})))
-    adapter = load_module("verl_omni/agent_loop/bagel_corl_rm.py")
+    adapter = load_module("verl_omni/pipelines/bagel_flow_grpo/agentic_und_gen/reward.py")
     item = SimpleNamespace(valid=True, image_path="fixture.png", rm_score=None, rm_score_source=None)
 
     async def compute(data):

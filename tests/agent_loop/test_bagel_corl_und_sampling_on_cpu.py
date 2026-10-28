@@ -21,7 +21,7 @@ import types
 import pytest
 from omegaconf import OmegaConf
 
-from verl_omni.agent_loop.bagel_corl_gen_serve import (
+from verl_omni.pipelines.bagel_flow_grpo.agentic_und_gen.serving import (
     UND_AR_SAMPLING_FALLBACK,
     UNTRAINED_AR_SAMPLING,
     config_sampling_value,

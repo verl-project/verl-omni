@@ -171,7 +171,7 @@ class VisualRewardManager(RewardManagerBase):
             # never learns, so say it once and let the metric surface it.
             #
             # Scoped on purpose: the mid-loop scoring row is built by
-            # ``bagel_corl_rm._default_data_builder``, which carries the images in
+            # ``agentic_und_gen.reward._default_data_builder``, which carries the images in
             # ``extra_info['bagel_corl']`` and *deliberately* leaves ``ground_truth``
             # empty, so warning there fired on every scored image (11 times per poll,
             # measured 2026-09-22) and buried the real signal.

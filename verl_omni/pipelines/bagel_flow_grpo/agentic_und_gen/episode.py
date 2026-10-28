@@ -31,20 +31,20 @@ from typing import Any, Callable
 
 import numpy as np
 
-from verl_omni.agent_loop.rpco_turn_protocol import (
-    build_forced_reflection,
-    derive_good_enough_from_scores,
-    format_rm_scores_as_judge_text,
-)
-
 # Single trajectory-state layer (audit T1.6): the bagel lane shares the Mode-2a
 # tool loop's registry/latch/context under tools.trajectory. The legacy
 # agent_loop/image_gen_trajectory_context module remains only for its own
 # deprecated consumers and must not be imported here.
 from verl_omni.agent_loop.utils import derive_rollout_seed
-from verl_omni.tools.trajectory.artifacts import build_generate_call_meta, register_tool_artifact
-from verl_omni.tools.trajectory.context import get_active_user_prompt
-from verl_omni.tools.trajectory.judge_latch import (
+from verl_omni.pipelines.bagel_flow_grpo.agentic_und_gen.turn_protocol import (
+    build_forced_reflection,
+    derive_good_enough_from_scores,
+    format_rm_scores_as_judge_text,
+)
+from verl_omni.tools.trajectory.episode import EpisodeState, current_episode, episode_scope
+from verl_omni.tools.trajectory.episode_artifacts import build_generate_call_meta, register_tool_artifact
+from verl_omni.tools.trajectory.episode_context import get_active_user_prompt
+from verl_omni.tools.trajectory.episode_judge import (
     clear_good_enough_yes_reached,
     get_good_enough_yes_reached,
     set_good_enough_yes_reached,
@@ -257,7 +257,7 @@ _STOP_TOOL_NAMES = frozenset(
 )
 
 # The recipe's system prompt asks the UND lane to ``judge_image`` after the last image, but the loop's tool registry
-# has only ``generate_image`` (judging is the RM's job, see ``bagel_corl_rm``).
+# has only ``generate_image`` (judging is the RM's job, see ``agentic_und_gen.reward``).
 _INERT_BARE_TOOLS = frozenset({"judge_image"})
 
 # The user prompt asks for a short private reflection in the same turn (``_BREVITY_SUFFIX`` in
@@ -1017,502 +1017,515 @@ async def run_serial_episode(
         episode_uid=episode_uid,
         policy_version=policy_version,
     )
-    response_ids: list[int] = []
-    response_mask: list[int] = []
-    # π_rollout per response position, from the AR replica's own sampling. Kept in lockstep
-    # with ``response_ids``/``response_mask`` by ``_append_response`` below.
-    response_log_probs: list[float] = []
-    gen_samples: list[GenSample] = []
-    used_image_credit = False
-    forced = False
-    autonomous_done = False
-    if corl_reward_version not in ("v1", "v2"):
-        raise ValueError("corl_reward_version must be v1 or v2")
-    turns = 0
-    num_gen_calls = 0
-    judge_text: str | None = None
-    stop_required = False
-    planned_images = max(1, int(expected_num_images)) if str(task_type or "").strip().lower() == "plan" else 1
-    images_rendered = 0
-    early_judge_declined = False
-    # Per-turn trajectory trace (see ``EpisodeRollout.turn_trace``). Collected even when
-    # ``BAGEL_CORL_DEBUG`` is off: the live per-turn ``logger.info`` below is the only
-    # other place the raw UND text surfaces, and it is exactly the text that explains a
-    # K=0 episode -- so the dump must not depend on the debug flag being set.
-    trace: list[dict[str, Any]] = []
-    clear_good_enough_yes_reached()
-    active_user_prompt = user_prompt or get_active_user_prompt() or ""
-    if _BAGEL_CORL_TURN_DEBUG:
-        # Re-assert INFO logging per episode: the first decode of the step lazily imports
-        # ``vllm``, whose logger setup reconfigures the *root* logger (``force=True``) and
-        # would otherwise drop every INFO/WARNING line emitted from here on -- the exact
-        # failure that made a healthy rollout look wedged (see ``_force_info_logging``).
-        _force_info_logging()
+    with episode_scope(current_episode() or EpisodeState(episode_id=ids["episode_uid"], user_prompt=user_prompt)):
+        response_ids: list[int] = []
+        response_mask: list[int] = []
+        # π_rollout per response position, from the AR replica's own sampling. Kept in lockstep
+        # with ``response_ids``/``response_mask`` by ``_append_response`` below.
+        response_log_probs: list[float] = []
+        gen_samples: list[GenSample] = []
+        used_image_credit = False
+        forced = False
+        autonomous_done = False
+        if corl_reward_version not in ("v1", "v2"):
+            raise ValueError("corl_reward_version must be v1 or v2")
+        turns = 0
+        num_gen_calls = 0
+        judge_text: str | None = None
+        stop_required = False
+        planned_images = max(1, int(expected_num_images)) if str(task_type or "").strip().lower() == "plan" else 1
+        images_rendered = 0
+        early_judge_declined = False
+        # Per-turn trajectory trace (see ``EpisodeRollout.turn_trace``). Collected even when
+        # ``BAGEL_CORL_DEBUG`` is off: the live per-turn ``logger.info`` below is the only
+        # other place the raw UND text surfaces, and it is exactly the text that explains a
+        # K=0 episode -- so the dump must not depend on the debug flag being set.
+        trace: list[dict[str, Any]] = []
+        clear_good_enough_yes_reached()
+        active_user_prompt = user_prompt or get_active_user_prompt() or ""
+        if _BAGEL_CORL_TURN_DEBUG:
+            # Re-assert INFO logging per episode: the first decode of the step lazily imports
+            # ``vllm``, whose logger setup reconfigures the *root* logger (``force=True``) and
+            # would otherwise drop every INFO/WARNING line emitted from here on -- the exact
+            # failure that made a healthy rollout look wedged (see ``_force_info_logging``).
+            _force_info_logging()
 
-    observed_und_version: int | None = None
-    observed_und_replicas: set[str | int] = set()
-    und_provenance: list[dict[str, Any]] = []
-    all_und_provenance_verified = True
+        observed_und_version: int | None = None
+        observed_und_replicas: set[str | int] = set()
+        und_provenance: list[dict[str, Any]] = []
+        all_und_provenance_verified = True
 
-    def _observe_serving(step: dict[str, Any]) -> None:
-        nonlocal observed_und_version, all_und_provenance_verified
-        provenance = serving_rollout_provenance(step)
-        version = provenance["rollout_policy_version"]
-        if version is not None:
-            if observed_und_version is not None and version != observed_und_version:
-                raise ValueError("Synchronous episode mixed observed UND serving policy versions")
-            observed_und_version = version
-        replica = provenance["rollout_replica_id"]
-        if replica is not None:
-            observed_und_replicas.add(replica)
-        all_und_provenance_verified &= provenance["serving_provenance_verified"]
-        und_provenance.append(
-            {
-                **provenance,
-                "response_start": len(response_ids),
-                "response_end": len(response_ids) + len(step.get("token_ids") or []),
-            }
-        )
+        def _observe_serving(step: dict[str, Any]) -> None:
+            nonlocal observed_und_version, all_und_provenance_verified
+            provenance = serving_rollout_provenance(step)
+            version = provenance["rollout_policy_version"]
+            if version is not None:
+                if observed_und_version is not None and version != observed_und_version:
+                    raise ValueError("Synchronous episode mixed observed UND serving policy versions")
+                observed_und_version = version
+            replica = provenance["rollout_replica_id"]
+            if replica is not None:
+                observed_und_replicas.add(replica)
+            all_und_provenance_verified &= provenance["serving_provenance_verified"]
+            und_provenance.append(
+                {
+                    **provenance,
+                    "response_start": len(response_ids),
+                    "response_end": len(response_ids) + len(step.get("token_ids") or []),
+                }
+            )
 
-    def _check_gen_serving(samples: list[GenSample]) -> None:
-        for sample in samples:
-            version = sample.rollout_policy_version
-            if version is not None and observed_und_version is not None and version != observed_und_version:
-                raise ValueError("Synchronous episode mixed GEN and UND serving policy versions")
+        def _check_gen_serving(samples: list[GenSample]) -> None:
+            for sample in samples:
+                version = sample.rollout_policy_version
+                if version is not None and observed_und_version is not None and version != observed_und_version:
+                    raise ValueError("Synchronous episode mixed GEN and UND serving policy versions")
 
-    def _context_budget_spent() -> bool:
-        """True once ``prompt_ids + response_ids`` has used up ``max_context_tokens``.
+        def _context_budget_spent() -> bool:
+            """True once ``prompt_ids + response_ids`` has used up ``max_context_tokens``.
 
-        One predicate for both decode sites below: the engine rejects a prompt with no
-        room left for generation, so neither may be attempted past the budget.
-        """
-        if max_response_tokens is not None and len(response_ids) >= max_response_tokens:
+            One predicate for both decode sites below: the engine rejects a prompt with no
+            room left for generation, so neither may be attempted past the budget.
+            """
+            if max_response_tokens is not None and len(response_ids) >= max_response_tokens:
+                return True
+            return max_context_tokens is not None and len(prompt_ids) + len(response_ids) >= max_context_tokens
+
+        def _append_response(tokens: Any, mask_value: int, log_probs: Any | None = None) -> None:
+            """Extend the episode with ``tokens``, keeping π_rollout aligned with ``response_ids``.
+
+            Args:
+                tokens: token ids (or tokens already extracted from a decode step).
+                mask_value: 1 for policy tokens, 0 for forced/environment tokens.
+                log_probs: the AR engine's per-token log-probs, if this decode sampled them."""
+            token_list = [int(t) for t in tokens]
+            response_ids.extend(token_list)
+            response_mask.extend([int(mask_value)] * len(token_list))
+            score = None if log_probs is None else [float(v) for v in log_probs]
+            if score is not None and len(score) != len(token_list):
+                raise ValueError(
+                    "Bagel Co-RL UND pass: rollout_log_probs must align with response_ids "
+                    f"(got {len(score)} log-probs for {len(token_list)} tokens)"
+                )
+            response_log_probs.extend(score if score is not None else [0.0] * len(token_list))
+
+        # (judge text, judged image path, the GEN call's samples): the RM verdict on the last
+        # generate_image call, held until the policy asks for it with ``judge_image``.
+        pending_judge: tuple[str, str, list[GenSample]] | None = None
+
+        def _append_env_turn(body: str, policy_text: str, fallback_ids: list[int]) -> None:
+            """Answer the policy's tool call with a ``<tool_response>`` user turn (mask 0)."""
+            close = "" if policy_text.rstrip().endswith(_IM_END) else _IM_END
+            obs_ids = _encode_text(
+                tokenizer,
+                close + TOOL_RESPONSE_TEMPLATE.format(body=body),
+                fallback_ids=fallback_ids,
+            )
+            if obs_ids:
+                _append_response(obs_ids, 0)
+            trace.append({"record": "env_obs", "turn": turns, "text": body})
+
+        async def _reflect_on_judge(verdict: str, judged_samples: list[GenSample], judged_step: dict[str, Any]) -> bool:
+            """Inject the Mode-2a reflection after a judge response; True ends the episode."""
+            nonlocal forced, stop_required
+            remaining = generate_tool.remaining_passes()
+            reflection = build_forced_reflection(
+                verdict,
+                force_done=remaining == 0,
+                generate_pass=generate_tool.max_generate_passes - remaining,
+                max_passes=generate_tool.max_generate_passes,
+            )
+            if reflection is None:
+                return False
+            reflection_text, stop_required = reflection
+            forced_ids = _encode_text(
+                tokenizer,
+                reflection_text + "\n",
+                fallback_ids=list(judged_step.get("forced_token_ids") or []),
+            )
+            if forced_ids:
+                forced = True
+                _append_response(forced_ids, 0)
+            trace.append({"record": "reflection", "turn": turns, "text": reflection_text})
+            reached = (
+                ("good_enough=YES" in verdict)
+                if corl_reward_version == "v2"
+                else (
+                    any(s.good_enough for s in judged_samples if s.good_enough is not None)
+                    or "good_enough=YES" in verdict
+                )
+            )
+            state = current_episode()
+            judged_call = judged_samples[-1].gen_group_uid if judged_samples else None
+            if state is not None and any(record.call_id == judged_call for record in state.generations):
+                state.record_judgment(judged_call, good_enough=reached)
+            elif reached:
+                set_good_enough_yes_reached(True)
+            if not stop_required:
+                return False
+            if _context_budget_spent():
+                # Same rule as the turn loop: with the context spent there is no room for the
+                # closing ``Done.`` decode, so take the tokenizer fallback below instead of
+                # asking the engine for a turn it cannot generate.
+                done_step: dict[str, Any] = {}
+            else:
+                done_decode = und_decode(prompt_ids=prompt_ids, response_ids=response_ids)
+                done_step = await done_decode if asyncio.iscoroutine(done_decode) else done_decode
+                _observe_serving(done_step)
+            done_ids = list(done_step.get("token_ids") or [])
+            done_text = str(done_step.get("text") or "")
+            try:
+                done_kind = und_turn_kind(done_text)
+            except ValueError as exc:
+                # A stop decode is the one place the fail-closed guard has nothing to protect:
+                # the episode is ending either way, and the fallback below appends the
+                # tokenizer's literal ``Done.``. Raising here instead dropped the whole episode
+                # (e.g. a ``{"name": "Done"}`` payload) and shrank the batch with a synthetic pad.
+                logger.warning("bagel_corl_und_done_decode_unparsed err=%s; using Done. fallback", exc)
+                done_kind = "continue"
+            if done_step:
+                trace.append(
+                    {
+                        "record": "und_turn",
+                        "turn": turns,
+                        "kind": done_kind,
+                        "req_ctx": len(prompt_ids) + len(response_ids),
+                        "out_tokens": len(done_ids),
+                        "text": done_text,
+                    }
+                )
+            if done_ids and done_kind == "done":
+                _append_response(done_ids, 1, done_step.get("log_probs"))
+            else:
+                fallback = _encode_text(
+                    tokenizer,
+                    "Done.",
+                    fallback_ids=list(done_step.get("done_token_ids") or judged_step.get("done_token_ids") or []),
+                )
+                if fallback:
+                    _append_response(fallback, 0 if corl_reward_version == "v2" else 1)
             return True
-        return max_context_tokens is not None and len(prompt_ids) + len(response_ids) >= max_context_tokens
 
-    def _append_response(tokens: Any, mask_value: int, log_probs: Any | None = None) -> None:
-        """Extend the episode with ``tokens``, keeping π_rollout aligned with ``response_ids``.
+        # Defined before the loop so the budget guard below can break on its very first
+        # iteration (a prompt that already fills the context) and still leave the post-loop
+        # fallbacks that read ``step`` well-defined. A valid launch cannot reach that: the
+        # framework caps the prompt at ``rollout.prompt_length`` while the budget is
+        # ``prompt_length + response_length``.
+        step: dict[str, Any] = {}
 
-        Args:
-            tokens: token ids (or tokens already extracted from a decode step).
-            mask_value: 1 for policy tokens, 0 for forced/environment tokens.
-            log_probs: the AR engine's per-token log-probs, if this decode sampled them."""
-        token_list = [int(t) for t in tokens]
-        response_ids.extend(token_list)
-        response_mask.extend([int(mask_value)] * len(token_list))
-        score = None if log_probs is None else [float(v) for v in log_probs]
-        if score is not None and len(score) != len(token_list):
-            raise ValueError(
-                "Bagel Co-RL UND pass: rollout_log_probs must align with response_ids "
-                f"(got {len(score)} log-probs for {len(token_list)} tokens)"
-            )
-        response_log_probs.extend(score if score is not None else [0.0] * len(token_list))
-
-    # (judge text, judged image path, the GEN call's samples): the RM verdict on the last
-    # generate_image call, held until the policy asks for it with ``judge_image``.
-    pending_judge: tuple[str, str, list[GenSample]] | None = None
-
-    def _append_env_turn(body: str, policy_text: str, fallback_ids: list[int]) -> None:
-        """Answer the policy's tool call with a ``<tool_response>`` user turn (mask 0)."""
-        close = "" if policy_text.rstrip().endswith(_IM_END) else _IM_END
-        obs_ids = _encode_text(
-            tokenizer,
-            close + TOOL_RESPONSE_TEMPLATE.format(body=body),
-            fallback_ids=fallback_ids,
-        )
-        if obs_ids:
-            _append_response(obs_ids, 0)
-        trace.append({"record": "env_obs", "turn": turns, "text": body})
-
-    async def _reflect_on_judge(verdict: str, judged_samples: list[GenSample], judged_step: dict[str, Any]) -> bool:
-        """Inject the Mode-2a reflection after a judge response; True ends the episode."""
-        nonlocal forced, stop_required
-        remaining = generate_tool.remaining_passes()
-        reflection = build_forced_reflection(
-            verdict,
-            force_done=remaining == 0,
-            generate_pass=generate_tool.max_generate_passes - remaining,
-            max_passes=generate_tool.max_generate_passes,
-        )
-        if reflection is None:
-            return False
-        reflection_text, stop_required = reflection
-        forced_ids = _encode_text(
-            tokenizer,
-            reflection_text + "\n",
-            fallback_ids=list(judged_step.get("forced_token_ids") or []),
-        )
-        if forced_ids:
-            forced = True
-            _append_response(forced_ids, 0)
-        trace.append({"record": "reflection", "turn": turns, "text": reflection_text})
-        if (
-            ("good_enough=YES" in verdict)
-            if corl_reward_version == "v2"
-            else (
-                any(s.good_enough for s in judged_samples if s.good_enough is not None) or "good_enough=YES" in verdict
-            )
-        ):
-            set_good_enough_yes_reached(True)
-        if not stop_required:
-            return False
-        if _context_budget_spent():
-            # Same rule as the turn loop: with the context spent there is no room for the
-            # closing ``Done.`` decode, so take the tokenizer fallback below instead of
-            # asking the engine for a turn it cannot generate.
-            done_step: dict[str, Any] = {}
-        else:
-            done_decode = und_decode(prompt_ids=prompt_ids, response_ids=response_ids)
-            done_step = await done_decode if asyncio.iscoroutine(done_decode) else done_decode
-            _observe_serving(done_step)
-        done_ids = list(done_step.get("token_ids") or [])
-        done_text = str(done_step.get("text") or "")
-        try:
-            done_kind = und_turn_kind(done_text)
-        except ValueError as exc:
-            # A stop decode is the one place the fail-closed guard has nothing to protect:
-            # the episode is ending either way, and the fallback below appends the
-            # tokenizer's literal ``Done.``. Raising here instead dropped the whole episode
-            # (e.g. a ``{"name": "Done"}`` payload) and shrank the batch with a synthetic pad.
-            logger.warning("bagel_corl_und_done_decode_unparsed err=%s; using Done. fallback", exc)
-            done_kind = "continue"
-        if done_step:
+        for _ in range(max_und_turns):
+            if _context_budget_spent():
+                # Episode context exhausted: the next decode would leave the AR engine no
+                # room for a single token. Keep the turns that fit and fall through to the
+                # forced reflection / Done handling rather than raising.
+                break
+            turns += 1
+            if _BAGEL_CORL_TURN_DEBUG:
+                # Logged *before* the await: when an episode stops making progress, the last
+                # line here names the turn that never returned, which the after-the-fact log
+                # below cannot do. ``ctx`` is what the engine is asked to prefill this turn.
+                logger.info(
+                    "bagel_corl_turn episode=%s turn=%d req_ctx=%d resp_tokens=%d",
+                    ids["episode_uid"][:8],
+                    turns,
+                    len(prompt_ids) + len(response_ids),
+                    len(response_ids),
+                )
+            _turn_t0 = time.perf_counter()
+            _req_ctx = len(prompt_ids) + len(response_ids)
+            decode = und_decode(prompt_ids=prompt_ids, response_ids=response_ids)
+            step = await decode if asyncio.iscoroutine(decode) else decode
+            _observe_serving(step)
+            token_ids: list[int] = list(step["token_ids"])
+            text: str = str(step["text"])
+            kind = und_turn_kind(text)
             trace.append(
                 {
                     "record": "und_turn",
                     "turn": turns,
-                    "kind": done_kind,
-                    "req_ctx": len(prompt_ids) + len(response_ids),
-                    "out_tokens": len(done_ids),
-                    "text": done_text,
+                    "kind": kind,
+                    "req_ctx": _req_ctx,
+                    "out_tokens": len(token_ids),
+                    "decode_s": round(time.perf_counter() - _turn_t0, 3),
+                    "text": text,
                 }
             )
-        if done_ids and done_kind == "done":
-            _append_response(done_ids, 1, done_step.get("log_probs"))
-        else:
-            fallback = _encode_text(
-                tokenizer,
-                "Done.",
-                fallback_ids=list(done_step.get("done_token_ids") or judged_step.get("done_token_ids") or []),
-            )
-            if fallback:
-                _append_response(fallback, 0 if corl_reward_version == "v2" else 1)
-        return True
-
-    # Defined before the loop so the budget guard below can break on its very first
-    # iteration (a prompt that already fills the context) and still leave the post-loop
-    # fallbacks that read ``step`` well-defined. A valid launch cannot reach that: the
-    # framework caps the prompt at ``rollout.prompt_length`` while the budget is
-    # ``prompt_length + response_length``.
-    step: dict[str, Any] = {}
-
-    for _ in range(max_und_turns):
-        if _context_budget_spent():
-            # Episode context exhausted: the next decode would leave the AR engine no
-            # room for a single token. Keep the turns that fit and fall through to the
-            # forced reflection / Done handling rather than raising.
-            break
-        turns += 1
-        if _BAGEL_CORL_TURN_DEBUG:
-            # Logged *before* the await: when an episode stops making progress, the last
-            # line here names the turn that never returned, which the after-the-fact log
-            # below cannot do. ``ctx`` is what the engine is asked to prefill this turn.
-            logger.info(
-                "bagel_corl_turn episode=%s turn=%d req_ctx=%d resp_tokens=%d",
-                ids["episode_uid"][:8],
-                turns,
-                len(prompt_ids) + len(response_ids),
-                len(response_ids),
-            )
-        _turn_t0 = time.perf_counter()
-        _req_ctx = len(prompt_ids) + len(response_ids)
-        decode = und_decode(prompt_ids=prompt_ids, response_ids=response_ids)
-        step = await decode if asyncio.iscoroutine(decode) else decode
-        _observe_serving(step)
-        token_ids: list[int] = list(step["token_ids"])
-        text: str = str(step["text"])
-        kind = und_turn_kind(text)
-        trace.append(
-            {
-                "record": "und_turn",
-                "turn": turns,
-                "kind": kind,
-                "req_ctx": _req_ctx,
-                "out_tokens": len(token_ids),
-                "decode_s": round(time.perf_counter() - _turn_t0, 3),
-                "text": text,
-            }
-        )
-        if _BAGEL_CORL_TURN_DEBUG:
-            logger.info(
-                "bagel_corl_turn episode=%s turn=%d kind=%s out_tokens=%d decode_s=%.1f text=%r",
-                ids["episode_uid"][:8],
-                turns,
-                kind,
-                len(token_ids),
-                time.perf_counter() - _turn_t0,
-                # The raw UND text is the only way to tell a model that never emits the
-                # Hermes grammar from one whose ``<tool_call>`` block is being dropped or
-                # mangled on the way out of the engine (see the tools-schema note in
-                # ``bagel_corl.BagelMultiturnAgentLoop.run``). Truncated: one line per turn.
-                text[:240],
-            )
-        _append_response(token_ids, 1, step.get("log_probs"))
-        if kind == "done":
-            remaining = generate_tool.remaining_passes()
-            if remaining > 0 and not get_good_enough_yes_reached() and not _is_terminal_only(text):
-                # The episode ends at min(max_generate_passes, first good_enough=YES); an
-                # earlier Done. is declined so the policy rewrites instead of quitting on NO.
-                # A silent turn (bare ``<|im_end|>``) is not a Done the policy chose to write:
-                # re-sampling it produced prompt fragments repeated to ``max_und_turns``
-                # (``sample_9003.01``, step 82), so it ends the episode as before.
-                next_step = (
-                    "call judge_image on the new image"
-                    if pending_judge is not None
-                    else "rewrite the diffusion prompt from the judge's findings and call generate_image"
+            if _BAGEL_CORL_TURN_DEBUG:
+                logger.info(
+                    "bagel_corl_turn episode=%s turn=%d kind=%s out_tokens=%d decode_s=%.1f text=%r",
+                    ids["episode_uid"][:8],
+                    turns,
+                    kind,
+                    len(token_ids),
+                    time.perf_counter() - _turn_t0,
+                    # The raw UND text is the only way to tell a model that never emits the
+                    # Hermes grammar from one whose ``<tool_call>`` block is being dropped or
+                    # mangled on the way out of the engine (see the tools-schema note in
+                    # ``agentic_und_gen.agent_loop.BagelMultiturnAgentLoop.run``). Truncated: one line per turn.
+                    text[:240],
                 )
-                _append_env_turn(
-                    "agentic_stop ok=0\n"
-                    f"good_enough=YES has not been reached and {remaining} of "
-                    f"{generate_tool.max_generate_passes} generate_image calls remain: {next_step}. "
-                    "Done. is accepted after good_enough=YES or the final generate_image call.",
-                    text,
-                    list(step.get("obs_token_ids") or []),
-                )
-                continue
-            autonomous_done = not forced
-            break
-        if kind == "judge_image":
-            if pending_judge is None:
-                _append_env_turn(
-                    "agentic_judge ok=0 parse_ok=0 stub=0 backend=reward_loop\n"
-                    "No new image to judge: call generate_image first.",
-                    text,
-                    list(step.get("obs_token_ids") or []),
-                )
-                continue
-            if not early_judge_declined and images_rendered < planned_images and generate_tool.remaining_passes() > 0:
-                # Declined once only, so a policy that keeps judging still gets a verdict
-                # within ``max_und_turns``.
-                early_judge_declined = True
-                _append_env_turn(
-                    "agentic_judge ok=0 parse_ok=1 stub=0 backend=reward_loop\n"
-                    f"Plan step {images_rendered}/{planned_images}: call generate_image for subtask "
-                    f"{images_rendered + 1} first. judge_image runs once, after the final subtask image.",
-                    text,
-                    list(step.get("obs_token_ids") or []),
-                )
-                continue
-            judged_text, judged_path, judged_samples = pending_judge
-            pending_judge = None
-            _append_env_turn(
-                f"VL judge on the last generated image:\n  path={judged_path}\n{judged_text}",
-                text,
-                list(step.get("obs_token_ids") or []),
-            )
-            if await _reflect_on_judge(judged_text, judged_samples, step):
+            _append_response(token_ids, 1, step.get("log_probs"))
+            if kind == "done":
+                remaining = generate_tool.remaining_passes()
+                if remaining > 0 and not get_good_enough_yes_reached() and not _is_terminal_only(text):
+                    # The episode ends at min(max_generate_passes, first good_enough=YES); an
+                    # earlier Done. is declined so the policy rewrites instead of quitting on NO.
+                    # A silent turn (bare ``<|im_end|>``) is not a Done the policy chose to write:
+                    # re-sampling it produced prompt fragments repeated to ``max_und_turns``
+                    # (``sample_9003.01``, step 82), so it ends the episode as before.
+                    next_step = (
+                        "call judge_image on the new image"
+                        if pending_judge is not None
+                        else "rewrite the diffusion prompt from the judge's findings and call generate_image"
+                    )
+                    _append_env_turn(
+                        "agentic_stop ok=0\n"
+                        f"good_enough=YES has not been reached and {remaining} of "
+                        f"{generate_tool.max_generate_passes} generate_image calls remain: {next_step}. "
+                        "Done. is accepted after good_enough=YES or the final generate_image call.",
+                        text,
+                        list(step.get("obs_token_ids") or []),
+                    )
+                    continue
+                autonomous_done = not forced
                 break
-            continue
-        if kind != "generate_image":
-            continue
-
-        if get_good_enough_yes_reached():
-            # Env hard-stop: prior YES latch blocks further generate_image.
-            break
-        if generate_tool.remaining_passes() <= 0:
-            _append_env_turn(
-                f"agentic_tool ok=0 images=0 backend=vllm_omni\n"
-                f"generate_image pass cap ({generate_tool.max_generate_passes}) reached; reply Done.",
-                text,
-                list(step.get("obs_token_ids") or []),
-            )
-            continue
-
-        call = parse_und_tool_call(text) or {}
-        arguments = call.get("arguments", call.get("parameters", {}))
-        if isinstance(arguments, str):
-            arguments = json.loads(arguments)
-        # Strip any in-turn "Short reflection: ..." tail before the prompt conditions the
-        # diffusion model -- see ``strip_reflection_tail``. Applies at extraction so the
-        # recorded trajectory ``prompt``, ``build_generate_call_meta`` and the GEN request
-        # all see the same sanitized text.
-        prompt = strip_reflection_tail(str(arguments.get("prompt", "")))
-        if fixed_gen_prompt:
-            prompt = active_user_prompt if fixed_gen_prompt == "__user_request__" else fixed_gen_prompt
-            if not prompt:
-                raise ValueError("fixed generator prompt requires a nonempty original request")
-        meta = build_generate_call_meta(prompt=prompt, user_prompt=active_user_prompt)
-        # RFC component-1 IDs: GEN TQ keys must be deterministic per (episode, call)
-        # so a replay reproduces the same keys. Call 0 keeps the episode's base
-        # ``gen_call_id``; later calls derive from the episode id and their local
-        # index instead of a fresh uuid4, which left every K > 1 key unreproducible
-        # (``num_gen_calls`` is the 0-based local call index here; it increments below).
-        gen_call_id = (
-            str(ids["gen_call_id"]) if generate_tool._passes == 0 else f"{ids['episode_uid']}:call{num_gen_calls}"
-        )
-        num_gen_calls += 1
-        call_samples = await generate_tool(
-            prompt=prompt,
-            prompt_token_ids=list(prompt_ids) + list(response_ids),
-            gen_call_id=gen_call_id,
-        )
-        call_samples = sorted(call_samples, key=lambda sample: sample.seed_index)
-        _check_gen_serving(call_samples)
-        call_role = str(meta.get("call_role") or "initial")
-        for sample in call_samples:
-            sample.call_role = call_role
-            sample.gen_call_index = num_gen_calls - 1
-
-        valid_paths = [s.image_path for s in call_samples if s.valid and s.image_path]
-        if valid_paths:
-            register_tool_artifact(prompt=prompt, paths=[str(p) for p in valid_paths])
-        trace.append(
-            {
-                "record": "gen_call",
-                "turn": turns,
-                "gen_call_id": gen_call_id,
-                "call_role": call_role,
-                "prompt": prompt,
-                "num_samples": len(call_samples),
-                "num_valid": sum(1 for s in call_samples if s.valid),
-                "image_paths": [str(p) for p in valid_paths],
-            }
-        )
-
-        if score_fn is not None:
-            scored = score_fn(call_samples)
-            if asyncio.iscoroutine(scored):
-                scored = await scored
-            call_samples = scored
-            _check_gen_serving(call_samples)
-
-        # Accumulate — every generate_image call contributes its S seeds to the
-        # episode (RFC: all K calls survive to gen_batch). Replacing the list here
-        # silently dropped all but the last call's trajectories for K > 1.
-        gen_samples.extend(call_samples)
-
-        if valid_paths:
-            used_image_credit = True
-            images_rendered += 1
-            observation = (
-                f"vLLM-Omni generated the requested image. {compact_image_observation(valid_paths[0])} "
-                f"agentic_tool ok=1 images={len(valid_paths)} backend=vllm_omni"
-            )
-            if images_rendered < planned_images and generate_tool.remaining_passes() > 0:
-                observation += (
-                    f"\nPlan step {images_rendered}/{planned_images} rendered. Next: call generate_image "
-                    f"with the complete prompt for subtask {images_rendered + 1} of your plan."
+            if kind == "judge_image":
+                if pending_judge is None:
+                    _append_env_turn(
+                        "agentic_judge ok=0 parse_ok=0 stub=0 backend=reward_loop\n"
+                        "No new image to judge: call generate_image first.",
+                        text,
+                        list(step.get("obs_token_ids") or []),
+                    )
+                    continue
+                if (
+                    not early_judge_declined
+                    and images_rendered < planned_images
+                    and generate_tool.remaining_passes() > 0
+                ):
+                    # Declined once only, so a policy that keeps judging still gets a verdict
+                    # within ``max_und_turns``.
+                    early_judge_declined = True
+                    _append_env_turn(
+                        "agentic_judge ok=0 parse_ok=1 stub=0 backend=reward_loop\n"
+                        f"Plan step {images_rendered}/{planned_images}: call generate_image for subtask "
+                        f"{images_rendered + 1} first. judge_image runs once, after the final subtask image.",
+                        text,
+                        list(step.get("obs_token_ids") or []),
+                    )
+                    continue
+                judged_text, judged_path, judged_samples = pending_judge
+                pending_judge = None
+                _append_env_turn(
+                    f"VL judge on the last generated image:\n  path={judged_path}\n{judged_text}",
+                    text,
+                    list(step.get("obs_token_ids") or []),
                 )
+                if await _reflect_on_judge(judged_text, judged_samples, step):
+                    break
+                continue
+            if kind != "generate_image":
+                continue
+
+            if get_good_enough_yes_reached():
+                # Env hard-stop: prior YES latch blocks further generate_image.
+                break
+            if generate_tool.remaining_passes() <= 0:
+                _append_env_turn(
+                    f"agentic_tool ok=0 images=0 backend=vllm_omni\n"
+                    f"generate_image pass cap ({generate_tool.max_generate_passes}) reached; reply Done.",
+                    text,
+                    list(step.get("obs_token_ids") or []),
+                )
+                continue
+
+            call = parse_und_tool_call(text) or {}
+            arguments = call.get("arguments", call.get("parameters", {}))
+            if isinstance(arguments, str):
+                arguments = json.loads(arguments)
+            # Strip any in-turn "Short reflection: ..." tail before the prompt conditions the
+            # diffusion model -- see ``strip_reflection_tail``. Applies at extraction so the
+            # recorded trajectory ``prompt``, ``build_generate_call_meta`` and the GEN request
+            # all see the same sanitized text.
+            prompt = strip_reflection_tail(str(arguments.get("prompt", "")))
+            if fixed_gen_prompt:
+                prompt = active_user_prompt if fixed_gen_prompt == "__user_request__" else fixed_gen_prompt
+                if not prompt:
+                    raise ValueError("fixed generator prompt requires a nonempty original request")
+            meta = build_generate_call_meta(prompt=prompt, user_prompt=active_user_prompt)
+            # RFC component-1 IDs: GEN TQ keys must be deterministic per (episode, call)
+            # so a replay reproduces the same keys. Call 0 keeps the episode's base
+            # ``gen_call_id``; later calls derive from the episode id and their local
+            # index instead of a fresh uuid4, which left every K > 1 key unreproducible
+            # (``num_gen_calls`` is the 0-based local call index here; it increments below).
+            gen_call_id = (
+                str(ids["gen_call_id"]) if generate_tool._passes == 0 else f"{ids['episode_uid']}:call{num_gen_calls}"
+            )
+            num_gen_calls += 1
+            call_samples = await generate_tool(
+                prompt=prompt,
+                prompt_token_ids=list(prompt_ids) + list(response_ids),
+                gen_call_id=gen_call_id,
+            )
+            call_samples = sorted(call_samples, key=lambda sample: sample.seed_index)
+            _check_gen_serving(call_samples)
+            call_role = str(meta.get("call_role") or "initial")
+            for sample in call_samples:
+                sample.call_role = call_role
+                sample.gen_call_index = num_gen_calls - 1
+
+            valid_paths = [s.image_path for s in call_samples if s.valid and s.image_path]
+            if valid_paths:
+                register_tool_artifact(prompt=prompt, paths=[str(p) for p in valid_paths], call_id=gen_call_id)
+            trace.append(
+                {
+                    "record": "gen_call",
+                    "turn": turns,
+                    "gen_call_id": gen_call_id,
+                    "call_role": call_role,
+                    "prompt": prompt,
+                    "num_samples": len(call_samples),
+                    "num_valid": sum(1 for s in call_samples if s.valid),
+                    "image_paths": [str(p) for p in valid_paths],
+                }
+            )
+
+            if score_fn is not None:
+                scored = score_fn(call_samples)
+                if asyncio.iscoroutine(scored):
+                    scored = await scored
+                call_samples = scored
+                _check_gen_serving(call_samples)
+
+            # Accumulate — every generate_image call contributes its S seeds to the
+            # episode (RFC: all K calls survive to gen_batch). Replacing the list here
+            # silently dropped all but the last call's trajectories for K > 1.
+            gen_samples.extend(call_samples)
+
+            if valid_paths:
+                used_image_credit = True
+                images_rendered += 1
+                observation = (
+                    f"vLLM-Omni generated the requested image. {compact_image_observation(valid_paths[0])} "
+                    f"agentic_tool ok=1 images={len(valid_paths)} backend=vllm_omni"
+                )
+                if images_rendered < planned_images and generate_tool.remaining_passes() > 0:
+                    observation += (
+                        f"\nPlan step {images_rendered}/{planned_images} rendered. Next: call generate_image "
+                        f"with the complete prompt for subtask {images_rendered + 1} of your plan."
+                    )
+            else:
+                observation = (
+                    "agentic_tool ok=0 images=0 backend=vllm_omni\n"
+                    "Image generation failed; rewrite the prompt and call generate_image again."
+                )
+
+            call_judge_text: str | None = None
+            if build_judge_text_fn is not None:
+                maybe_text = build_judge_text_fn(call_samples)
+                if asyncio.iscoroutine(maybe_text):
+                    maybe_text = await maybe_text
+                call_judge_text = maybe_text
+            if not call_judge_text:
+                call_judge_text = judge_text_from_gen_samples(
+                    call_samples,
+                    reduction="all" if corl_reward_version == "v2" else good_enough_reduction,
+                    threshold=good_enough_threshold,
+                )
+
+            if valid_paths or call_judge_text:
+                _append_env_turn(observation, text, list(step.get("obs_token_ids") or [0]))
+            if call_judge_text:
+                judge_text = call_judge_text
+                # Answered on the policy's ``judge_image`` call, as in the Mode-2a loop.
+                pending_judge = (call_judge_text, valid_paths[0] if valid_paths else "", call_samples)
+                continue
+
+            # No judge text (no in-loop RM): keep legacy forced/done token fallbacks.
+            forced_ids = list(step.get("forced_token_ids") or [])
+            if forced_ids:
+                forced = True
+                _append_response(forced_ids, 0)
+            else:
+                done_ids = list(step.get("done_token_ids") or [])
+                if done_ids:
+                    _append_response(done_ids, 1)
+            break
         else:
-            observation = (
-                "agentic_tool ok=0 images=0 backend=vllm_omni\n"
-                "Image generation failed; rewrite the prompt and call generate_image again."
-            )
-
-        call_judge_text: str | None = None
-        if build_judge_text_fn is not None:
-            maybe_text = build_judge_text_fn(call_samples)
-            if asyncio.iscoroutine(maybe_text):
-                maybe_text = await maybe_text
-            call_judge_text = maybe_text
-        if not call_judge_text:
-            call_judge_text = judge_text_from_gen_samples(
-                call_samples,
-                reduction="all" if corl_reward_version == "v2" else good_enough_reduction,
-                threshold=good_enough_threshold,
-            )
-
-        if valid_paths or call_judge_text:
-            _append_env_turn(observation, text, list(step.get("obs_token_ids") or [0]))
-        if call_judge_text:
-            judge_text = call_judge_text
-            # Answered on the policy's ``judge_image`` call, as in the Mode-2a loop.
-            pending_judge = (call_judge_text, valid_paths[0] if valid_paths else "", call_samples)
-            continue
-
-        # No judge text (no in-loop RM): keep legacy forced/done token fallbacks.
-        forced_ids = list(step.get("forced_token_ids") or [])
-        if forced_ids:
             forced = True
-            _append_response(forced_ids, 0)
+            _ = forced_reflection_text
+
+        trusted_fields = (
+            trusted_image_reward_fields(
+                gen_samples, num_gen_calls=num_gen_calls, autonomous_done=autonomous_done, forced_reflection=forced
+            )
+            if corl_reward_version == "v2"
+            else {}
+        )
+        image_credit = (
+            trusted_fields.get("image_reward_objective") if trusted_fields else image_credit_reward(gen_samples)
+        )
+        if image_credit is not None:
+            und_reward = image_credit
+        elif non_image_reward is not None:
+            # Pattern 3 (K=0): use the non-image UND scalar (RFC und/no_image_credit),
+            # never a hard-coded 0 that would zero out token GRPO signal.
+            und_reward = float(non_image_reward)
         else:
-            done_ids = list(step.get("done_token_ids") or [])
-            if done_ids:
-                _append_response(done_ids, 1)
-        break
-    else:
-        forced = True
-        _ = forced_reflection_text
+            und_reward = 0.0
 
-    trusted_fields = (
-        trusted_image_reward_fields(
-            gen_samples, num_gen_calls=num_gen_calls, autonomous_done=autonomous_done, forced_reflection=forced
+        if _BAGEL_CORL_TURN_DEBUG:
+            logger.info(
+                "bagel_corl_episode episode=%s turns=%d K=%d resp_tokens=%d forced=%s stop_required=%s reward=%.3f",
+                str(ids["episode_uid"])[:8],
+                turns,
+                num_gen_calls,
+                len(response_ids),
+                forced,
+                stop_required,
+                und_reward,
+            )
+
+        if max_response_tokens is not None and len(response_ids) > max_response_tokens:
+            # An environment turn (judge response + reflection) can land past the budget after
+            # the last decode that fit; those tail tokens are mask 0 or the closing ``Done.``.
+            logger.warning(
+                "bagel_corl_episode episode=%s response %d > response_length %d; truncating",
+                str(ids["episode_uid"])[:8],
+                len(response_ids),
+                max_response_tokens,
+            )
+            del response_ids[max_response_tokens:]
+            del response_mask[max_response_tokens:]
+            del response_log_probs[max_response_tokens:]
+
+        return EpisodeRollout(
+            und_group_uid=str(ids["und_group_uid"]),
+            episode_uid=str(ids["episode_uid"]),
+            policy_version=observed_und_version,
+            requested_policy_version=int(ids["policy_version"]),
+            rollout_replica_id=next(iter(observed_und_replicas)) if len(observed_und_replicas) == 1 else None,
+            serving_provenance_verified=bool(und_provenance)
+            and all_und_provenance_verified
+            and len(observed_und_replicas) == 1,
+            und_serving_provenance=und_provenance,
+            prompt_ids=list(prompt_ids),
+            response_ids=response_ids,
+            response_mask=response_mask,
+            rollout_log_probs=response_log_probs,
+            turns=turns,
+            gen_samples=gen_samples,
+            used_image_credit=used_image_credit,
+            forced_reflection=forced,
+            autonomous_done=autonomous_done,
+            corl_reward_version=corl_reward_version,
+            bagel_corl_reward=trusted_fields,
+            und_reward=und_reward,
+            judge_text=judge_text,
+            stop_required=stop_required,
+            num_gen_calls=num_gen_calls,
+            turn_trace=trace,
         )
-        if corl_reward_version == "v2"
-        else {}
-    )
-    image_credit = trusted_fields.get("image_reward_objective") if trusted_fields else image_credit_reward(gen_samples)
-    if image_credit is not None:
-        und_reward = image_credit
-    elif non_image_reward is not None:
-        # Pattern 3 (K=0): use the non-image UND scalar (RFC und/no_image_credit),
-        # never a hard-coded 0 that would zero out token GRPO signal.
-        und_reward = float(non_image_reward)
-    else:
-        und_reward = 0.0
-
-    if _BAGEL_CORL_TURN_DEBUG:
-        logger.info(
-            "bagel_corl_episode episode=%s turns=%d K=%d resp_tokens=%d forced=%s stop_required=%s reward=%.3f",
-            str(ids["episode_uid"])[:8],
-            turns,
-            num_gen_calls,
-            len(response_ids),
-            forced,
-            stop_required,
-            und_reward,
-        )
-
-    if max_response_tokens is not None and len(response_ids) > max_response_tokens:
-        # An environment turn (judge response + reflection) can land past the budget after
-        # the last decode that fit; those tail tokens are mask 0 or the closing ``Done.``.
-        logger.warning(
-            "bagel_corl_episode episode=%s response %d > response_length %d; truncating",
-            str(ids["episode_uid"])[:8],
-            len(response_ids),
-            max_response_tokens,
-        )
-        del response_ids[max_response_tokens:]
-        del response_mask[max_response_tokens:]
-        del response_log_probs[max_response_tokens:]
-
-    return EpisodeRollout(
-        und_group_uid=str(ids["und_group_uid"]),
-        episode_uid=str(ids["episode_uid"]),
-        policy_version=observed_und_version,
-        requested_policy_version=int(ids["policy_version"]),
-        rollout_replica_id=next(iter(observed_und_replicas)) if len(observed_und_replicas) == 1 else None,
-        serving_provenance_verified=bool(und_provenance)
-        and all_und_provenance_verified
-        and len(observed_und_replicas) == 1,
-        und_serving_provenance=und_provenance,
-        prompt_ids=list(prompt_ids),
-        response_ids=response_ids,
-        response_mask=response_mask,
-        rollout_log_probs=response_log_probs,
-        turns=turns,
-        gen_samples=gen_samples,
-        used_image_credit=used_image_credit,
-        forced_reflection=forced,
-        autonomous_done=autonomous_done,
-        corl_reward_version=corl_reward_version,
-        bagel_corl_reward=trusted_fields,
-        und_reward=und_reward,
-        judge_text=judge_text,
-        stop_required=stop_required,
-        num_gen_calls=num_gen_calls,
-        turn_trace=trace,
-    )
 
 
 def trusted_image_reward_fields(samples, *, num_gen_calls, autonomous_done=False, forced_reflection=False):

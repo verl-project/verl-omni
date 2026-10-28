@@ -29,7 +29,7 @@ from verl.trainer.ppo.v1.trainer_base import register_trainer
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.debug import marked_timer
 
-from verl_omni.agent_loop.bagel_corl_lib import (
+from verl_omni.pipelines.bagel_flow_grpo.agentic_und_gen.episode import (
     aggregate_episode_metrics,
     aggregate_reward_breakdown_metrics,
     und_record_field_keys,
@@ -274,7 +274,7 @@ _BAGEL_CORL_STEP_METRIC_KEYS: tuple[str, ...] = (
 
 #: Prefix form of the same allowlist, for the keys whose names are data-dependent: the
 #: per-dim reward breakdown is one key per dim present on the batch, so it cannot be
-#: spelled as a literal tuple (``bagel_corl_lib.aggregate_reward_breakdown_metrics``).
+#: spelled as a literal tuple (``agentic_und_gen.episode.aggregate_reward_breakdown_metrics``).
 _BAGEL_CORL_STEP_METRIC_PREFIXES: tuple[str, ...] = (
     "bagel_corl/reward_dim/",
     "bagel_corl/reward_valid/",
@@ -364,7 +364,7 @@ class OmniBagelCoRLTrainerSync(OmniPPOTrainerSync):
             )
         agent.setdefault(
             "agent_loop_manager_class",
-            "verl_omni.agent_loop.bagel_corl_tq.BagelCorlAgentLoopManagerTQ",
+            "verl_omni.pipelines.bagel_flow_grpo.agentic_und_gen.transfer_queue.BagelCorlAgentLoopManagerTQ",
         )
         agent.setdefault("default_agent_loop", "bagel_multiturn_agent")
         agent.setdefault("und_ar_serving_ready", False)
@@ -641,7 +641,7 @@ class OmniBagelCoRLTrainerSync(OmniPPOTrainerSync):
         if extra.get("gen_batch") is not None:
             return list(extra["gen_batch"])
 
-        from verl_omni.agent_loop.bagel_corl_tq import split_und_gen_metas
+        from verl_omni.pipelines.bagel_flow_grpo.agentic_und_gen.transfer_queue import split_und_gen_metas
 
         und_records = self._und_records_from_batch(batch)
         if und_records and any("child_gen_keys" in (r.get("fields") or r) for r in und_records):
@@ -1699,7 +1699,7 @@ class OmniBagelCoRLTrainerSync(OmniPPOTrainerSync):
 
         Its worker handles serve both consumers: the inherited episode-reward
         ``_compute_score`` and the mid-loop GEN scoring adapter
-        (``bagel_corl_rm``). Creation mirrors the diffusion V1 trainer.
+        (``agentic_und_gen.reward``). Creation mirrors the diffusion V1 trainer.
         """
         if getattr(self, "reward_loop_manager", None) is not None:
             return self.reward_loop_manager

@@ -29,8 +29,8 @@ from typing import Any
 from verl.experimental.agent_loop.agent_loop import AgentLoopBase, AgentLoopMetrics, AgentLoopOutput, register
 from verl.utils.tokenizer import normalize_token_ids
 
-from verl_omni.agent_loop.bagel_corl_gen_serve import build_gen_sampling_params, stash_gen_row_from_diffusion_output
-from verl_omni.agent_loop.bagel_corl_lib import (  # noqa: F401
+from verl_omni.agent_loop.utils import derive_rollout_seed
+from verl_omni.pipelines.bagel_flow_grpo.agentic_und_gen.episode import (  # noqa: F401
     GENERATE_IMAGE_TOOL_SCHEMA,
     JUDGE_IMAGE_TOOL_SCHEMA,
     UND_STOP_SEQUENCES,
@@ -46,24 +46,25 @@ from verl_omni.agent_loop.bagel_corl_lib import (  # noqa: F401
     trusted_image_reward_fields,
     und_turn_max_tokens,
 )
-from verl_omni.agent_loop.bagel_corl_lib import (
+from verl_omni.pipelines.bagel_flow_grpo.agentic_und_gen.episode import (
     with_reflection_system_prompt as _with_reflection_system_prompt,
 )
-from verl_omni.agent_loop.bagel_corl_rm import get_bagel_rm_gen_handle, make_rm_score_fn
-from verl_omni.agent_loop.rpco_turn_protocol import derive_good_enough_from_scores
-from verl_omni.agent_loop.utils import derive_rollout_seed
-from verl_omni.tools.trajectory.artifacts import get_latest_generate_prompt_for_active_rollout
-from verl_omni.tools.trajectory.context import (
+from verl_omni.pipelines.bagel_flow_grpo.agentic_und_gen.reward import get_bagel_rm_gen_handle, make_rm_score_fn
+from verl_omni.pipelines.bagel_flow_grpo.agentic_und_gen.serving import (
+    build_gen_sampling_params,
+    stash_gen_row_from_diffusion_output,
+)
+from verl_omni.pipelines.bagel_flow_grpo.agentic_und_gen.turn_protocol import derive_good_enough_from_scores
+from verl_omni.tools.trajectory import EpisodeState, episode_scope
+from verl_omni.tools.trajectory.episode_artifacts import get_latest_generate_prompt_for_active_rollout
+from verl_omni.tools.trajectory.episode_context import (
     get_active_user_prompt,
-    reset_active_trajectory_relpath,
-    reset_active_user_prompt,
-    set_active_trajectory_relpath,
-    set_active_user_prompt,
 )
-from verl_omni.tools.trajectory.hydra_env import agentic_get, agentic_scorer_knobs_from_config
-from verl_omni.tools.trajectory.paths import (
+from verl_omni.utils.agentic.artifacts import (
     build_trajectory_relpath,
+    rollout_id_from_relpath,
 )
+from verl_omni.utils.agentic.config import agentic_get, agentic_scorer_knobs_from_config
 from verl_omni.utils.agentic.image_gen_rollout_parse import last_user_prompt
 from verl_omni.utils.agentic_val_viz import VAL_VIZ_PROMPT_KEY, save_val_viz_images
 
@@ -121,7 +122,7 @@ def _inject_tools_schema_enabled() -> bool:
 
 # Episode-level reduction over the S per-seed ``good_enough`` flags. SoT is
 # ``actor_rollout_ref.rollout.agent.good_enough_reduction``; unknown values fail
-# loud rather than silently degrading to best-of-S (see ``bagel_corl_lib``).
+# loud rather than silently degrading to best-of-S (see ``agentic_und_gen.episode``).
 _GOOD_ENOUGH_REDUCTIONS = frozenset({"any", "all", "mean"})
 
 # RFC §5: knobs the agent loop must see but must NOT invent a value for.
@@ -500,15 +501,17 @@ class BagelMultiturnAgentLoop(AgentLoopBase):
         non_image_reward = kwargs.get("non_image_reward")
         # ``relpath`` is precomputed beside ``seed_base`` so the folder and the noise
         # draw share one episode identity (see ``episode_artifact_keys``).
-        path_tokens = set_active_trajectory_relpath(relpath)
         user_prompt_text = last_user_prompt(raw_prompt)
-        prompt_token = set_active_user_prompt(user_prompt_text)
         episode_ground_truth = episode_ground_truth_fields(kwargs)
         try:
             expected_num_images = max(1, int(episode_ground_truth.get("expected_num_images") or 1))
         except (TypeError, ValueError):
             expected_num_images = 1
-        try:
+        with episode_scope(
+            EpisodeState(
+                episode_id=rollout_id_from_relpath(relpath), artifact_relpath=relpath, user_prompt=user_prompt_text
+            )
+        ):
             episode = await run_serial_episode(
                 dataset_task_uid=dataset_task_uid,
                 policy_version=requested_policy_version,
@@ -528,9 +531,6 @@ class BagelMultiturnAgentLoop(AgentLoopBase):
                 task_type=episode_ground_truth.get("task_type"),
                 expected_num_images=expected_num_images,
             )
-        finally:
-            reset_active_trajectory_relpath(path_tokens)
-            reset_active_user_prompt(prompt_token)
         if str(kwargs.get(VAL_VIZ_PROMPT_KEY, "")).lower() in {"1", "true", "yes", "on"}:
             save_val_viz_images(
                 [sample.image_path for sample in episode.gen_samples if sample.valid and sample.image_path], relpath

@@ -12,10 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# The MiniMax H3 and LTX-2.3 agent loops live in their pipeline packages; import
+# Model-specific agent loops live in their pipeline packages; import
 # them here so the @register decorator fires when the agent_loop package is
 # imported. Do not re-export the classes from the pipeline package __init__
 # (import cycle).
+from verl_omni.pipelines.bagel_flow_grpo.agentic_und_gen.agent_loop import BagelMultiturnAgentLoop
+from verl_omni.pipelines.bagel_flow_grpo.agentic_und_gen.transfer_queue import (
+    BagelCorlAgentLoopManagerTQ,
+    BagelCorlAgentLoopWorkerTQ,
+)
 from verl_omni.pipelines.ltx2_flow_grpo.agent_loop import LTX2DiffusionSingleTurnAgentLoop
 from verl_omni.pipelines.minimax_h3_diffusion_nft.agent_loop import MiniMaxH3DiffusionSingleTurnAgentLoop
 
@@ -24,8 +29,6 @@ from verl_omni.pipelines.minimax_h3_diffusion_nft.agent_loop import MiniMaxH3Dif
 # verl's register overwrites silently — import order must not decide which class
 # other jobs get, so only this import may fire on package import.
 from . import tool_agent_loop as _image_gen_tool_agent_loop  # noqa: F401
-from .bagel_corl import BagelMultiturnAgentLoop
-from .bagel_corl_tq import BagelCorlAgentLoopManagerTQ, BagelCorlAgentLoopWorkerTQ
 from .composite_agent_loop import CompositeAgentLoopManager, CompositeAgentLoopWorker
 from .diffusion_agent_loop import DiffusionAgentLoopOutput, DiffusionAgentLoopWorker
 from .diffusion_agent_loop_tq import (

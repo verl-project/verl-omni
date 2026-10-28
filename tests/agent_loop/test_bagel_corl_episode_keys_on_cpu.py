@@ -13,7 +13,7 @@
 # limitations under the License.
 """Episode seed and artifact-key collision regressions for the live worker."""
 
-from verl_omni.agent_loop.bagel_corl import episode_artifact_keys, episode_seed_index
+from verl_omni.pipelines.bagel_flow_grpo.agentic_und_gen.agent_loop import episode_artifact_keys, episode_seed_index
 
 
 def test_two_tasks_at_the_same_sibling_index_do_not_collide():

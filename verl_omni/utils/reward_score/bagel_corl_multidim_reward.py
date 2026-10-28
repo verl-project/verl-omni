@@ -119,7 +119,7 @@ _TOOL_CALL_RE = re.compile(r"<tool_call>\s*(.*?)\s*</tool_call>", re.IGNORECASE 
 _JUDGE_OK_RE = re.compile(r"\bagentic_judge\s+ok=1\b", re.IGNORECASE)
 # --- Bagel Co-RL (Joint-Training) observation dialect -------------------------------
 #
-# ``bagel_corl_lib.parse_und_tool_call`` accepts four dialects because the Bagel
+# ``agentic_und_gen.episode.parse_und_tool_call`` accepts four dialects because the Bagel
 # checkpoint is handed a Hermes system prompt but does NOT answer in it: it emits its
 # calls inside the *schema* tag (``<tools>{...}</tools>``) and never in the documented
 # ``<tool_call>`` one. ``_TAGGED_CALL_RE`` deliberately accepts a JSON *object* only:
@@ -133,7 +133,7 @@ _TAGGED_CALL_RE = re.compile(r"<tools>\s*(\{.*?\})\s*</tools>", re.DOTALL)
 _LINE_START_OBJECT_RE = re.compile(r"(?m)^[ \t]*\{")
 _TOOL_CALL_BLOCK_RE = re.compile(r"<tool_call>.*?</tool_call>", re.DOTALL)
 # The checkpoint's *native* call fence, and the third dialect the rollout accepts. Kept in
-# sync with ``bagel_corl_lib._NATIVE_OPEN_TAGS`` / ``_NATIVE_CLOSE_TAGS`` by hand -- this
+# sync with ``agentic_und_gen.episode._NATIVE_OPEN_TAGS`` / ``_NATIVE_CLOSE_TAGS`` by hand -- this
 # scorer stays self-contained by design (see the module docstring), so the spellings are
 # duplicated rather than imported. Unlike every other dialect the payload is a JSON *array* of
 # call objects, so the rewrite has to pick the first element that carries an actionable
@@ -159,13 +159,13 @@ _NATIVE_CALL_BLOCK_RE = re.compile(
     rf"<\|(?:{_NATIVE_OPEN_ALT})\|>\s*(.*?)\s*(?:<\|(?:{_NATIVE_CLOSE_ALT})\|>|\Z)",
     re.DOTALL,
 )
-# Bagel's UND-facing image observation: ``bagel_corl_lib.compact_image_observation``
+# Bagel's UND-facing image observation: ``agentic_und_gen.episode.compact_image_observation``
 # appends the bare path of the one image the loop accepted. It is *absolute*, which is what
 # keeps this from matching a ``path=`` that a prompt happened to mention, and it is glued to
 # whatever the model wrote last (see ``_count_successful_generates``), so no left anchor.
 _BAGEL_IMAGE_OBS_RE = re.compile(r"path=(/[^\s'\"]*?\.png)")
 # Bagel has no ``agentic_judge ok=1`` observation either: the in-loop RM verdict is
-# paraphrased by ``rpco_turn_protocol.build_forced_reflection`` into the forced
+# paraphrased by ``agentic_und_gen.turn_protocol.build_forced_reflection`` into the forced
 # *Reflection* line, and only that paraphrase reaches the transcript. Same numbers as
 # ``format_rm_scores_as_judge_text`` would emit, different vocabulary.
 _BAGEL_VERDICT_RE = re.compile(
@@ -176,7 +176,7 @@ _BAGEL_VERDICT_RE = re.compile(
 # Harness-injected stop cues. Text carrying one is context-only (``response_mask=0``) and
 # must not be read as policy prose. ``agentic_forced_reflection`` is what the Mode-2a loops
 # append (``tool_agent_loop`` / ``image_gen_tool_agent_loop``); the other two are what
-# ``rpco_turn_protocol.build_forced_reflection`` writes, and are the *only* cue the Bagel
+# ``agentic_und_gen.turn_protocol.build_forced_reflection`` writes, and are the *only* cue the Bagel
 # Co-RL loop emits -- it never appends ``agentic_forced_reflection``.
 _FORCED_CONTEXT_CUE_RE = re.compile(
     r"\bagentic_(?:forced_reflection|force_stop_max_passes|stop_decision_required)=1(?!\d)",

@@ -41,7 +41,7 @@ class BagelCorlAgentLoopConfig(AgentLoopConfig):
     # Reduction over the S per-seed ``good_enough`` flags when deciding the
     # episode-level stop cue: ``"any"`` (best-of-S, default), ``"all"``, or
     # ``"mean"`` (fraction of YES flags >= ``agentic_image_gen.good_enough_threshold``).
-    # Declared as a real field — ``bagel_corl.py`` reads it and fails loud on an
+    # Declared as a real field — ``agentic_und_gen/agent_loop.py`` reads it and fails loud on an
     # unknown value, so leaving it undeclared would instead fail at ``instantiate``
     # with "unexpected keyword" for any recipe that sets it.
     good_enough_reduction: str = "any"

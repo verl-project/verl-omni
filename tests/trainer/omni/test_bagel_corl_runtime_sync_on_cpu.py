@@ -104,7 +104,9 @@ def test_und_ar_names_match_checkpoint_layout(actor, engine):
 
 
 def test_requested_policy_version_uses_tq_request_step_only():
-    tree = ast.parse((ROOT / "verl_omni/agent_loop/bagel_corl.py").read_text(encoding="utf-8"))
+    tree = ast.parse(
+        (ROOT / "verl_omni/pipelines/bagel_flow_grpo/agentic_und_gen/agent_loop.py").read_text(encoding="utf-8")
+    )
     node = next(
         n
         for n in ast.walk(tree)

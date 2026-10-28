@@ -33,10 +33,10 @@ does one that returns ``reward_score`` instead of ``score``.
 
 The payload must ride a key the manager already forwards. ``extra_info`` is that
 key: the in-loop builder
-(``verl_omni.agent_loop.bagel_corl_rm._default_data_builder``) puts the payload
+(``verl_omni.pipelines.bagel_flow_grpo.agentic_und_gen.reward._default_data_builder``) puts the payload
 under ``extra_info["bagel_corl"]``.
 
-- Mid-loop (``verl_omni.agent_loop.bagel_corl_rm.build_rm_score_payload``): each
+- Mid-loop (``verl_omni.pipelines.bagel_flow_grpo.agentic_und_gen.reward.build_rm_score_payload``): each
   image is judged (C/A via the frozen VL judge) and the result carries per-image
   ``sample_scores`` / ``sample_good_enough`` aligned to ``image_paths`` — exactly
   what ``parse_rm_result`` consumes off ``reward_extra_info``.
@@ -76,7 +76,7 @@ __all__ = ["BAGEL_RM_EXTRA_INFO_KEY", "compute_score"]
 # as the GEN lane actually improves.
 DEFAULT_UNIFIED_GOOD_ENOUGH = 0.62
 
-# Wire key shared with the producer (verl_omni/agent_loop/bagel_corl_rm.py). Spelled
+# Wire key shared with the producer (verl_omni/pipelines/bagel_flow_grpo/agentic_und_gen/reward.py). Spelled
 # out in both modules rather than imported so this module stays importable in
 # isolation (the CPU test loads it by path without the agent_loop package).
 BAGEL_RM_EXTRA_INFO_KEY = "bagel_corl"

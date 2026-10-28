@@ -337,7 +337,7 @@ def stash_gen_row_from_diffusion_output(
             "refuse soft-fallback to stashed-only / skip GEN loss."
         )
 
-    from verl_omni.agent_loop.bagel_corl_lib import serving_rollout_provenance
+    from verl_omni.pipelines.bagel_flow_grpo.agentic_und_gen.episode import serving_rollout_provenance
 
     extra = dict(getattr(output, "extra_fields", None) or {})
     provenance = serving_rollout_provenance(extra)
