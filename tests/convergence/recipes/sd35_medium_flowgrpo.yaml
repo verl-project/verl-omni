@@ -1,0 +1,95 @@
+# L4 convergence recipe: SD3.5-Medium FlowGRPO OCR LoRA.
+#
+# This is the light L4 recipe.  SD3.5-Medium was proposed as an appropriate
+# lightweight convergence target during the #247 review, and it is small enough
+# that a real convergence window is affordable on a modest cluster, while still
+# using released weights and a real dataset (no tiny-random substitutes).
+schema_version: 1
+layer: L4
+case_id: sd35_medium_flowgrpo
+title: "SD3.5-Medium FlowGRPO LoRA OCR convergence"
+algorithm: flow_grpo
+precision: bf16
+release_gate: true
+
+recipe:
+  # Existing production recipe.  L4 only appends the knobs needed to make a
+  # convergence window reproducible and to point at the provisioned assets.
+  launcher: examples/flowgrpo_trainer/sd35/run_sd35_medium_ocr_lora.sh
+  overrides:
+    - data.train_files={dataset:train}
+    - data.val_files={dataset:val}
+    - data.seed=42
+    - actor_rollout_ref.model.path={model:policy}
+    - reward.reward_model.model_path={model:reward}
+    - actor_rollout_ref.rollout.seed=42
+    - trainer.total_training_steps=100
+    - trainer.save_freq=-1
+    - trainer.test_freq=-1
+    - trainer.log_val_generations=0
+    - trainer.val_before_train=False
+    - trainer.logger=console
+    - trainer.project_name=verl-l4
+    - trainer.experiment_name=sd35-medium-flowgrpo-l4
+
+models:
+  policy:
+    kind: real
+    # NOTE: this checkpoint is gated on Hugging Face. Provision it with an
+    # authenticated download (or a pre-staged local snapshot) before this case can
+    # leave `skipped`; the precondition only verifies that the local path exists.
+    source: stabilityai/stable-diffusion-3.5-medium
+    revision: main
+    local_path: /models/stable-diffusion-3.5-medium
+    env_path: L4_SD35_MEDIUM_PATH
+  reward:
+    kind: real
+    source: Qwen/Qwen2.5-VL-3B-Instruct
+    revision: main
+    local_path: /models/Qwen2.5-VL-3B-Instruct
+    env_path: L4_QWEN25_VL_3B_PATH
+
+dataset:
+  kind: real
+  # Paths are relative to dataset.env_root when that environment variable is set.
+  train: data/ocr/sd3/train.parquet
+  val: data/ocr/sd3/test.parquet
+  env_root: L4_OCR_DATA_ROOT
+  train_max_samples: 7200
+
+hardware:
+  # 2 actor/rollout GPUs + 1 reward GPU, per the example recipe's resource pool.
+  min_gpus: 3
+  min_gpu_memory_gb: 40
+  gpu_architectures: [sm89, sm90, sm100]
+  min_free_disk_gb: 200
+
+budget:
+  timeout_minutes: 720
+  total_training_steps: 100
+
+metrics:
+  warmup_steps: 10
+  final_window: 10
+  # 40 scored points are required, so the window can only be scored from a run
+  # that really produced a trajectory.
+  min_points: 40
+  tracked:
+    - {name: "critic/rewards/mean", direction: higher, optional: false}
+    - {name: "critic/score/mean", direction: higher, optional: true}
+    - {name: "actor/loss", direction: lower, optional: true}
+    - {name: "actor/grad_norm", direction: lower, optional: true}
+
+convergence:
+  # One-sided tolerance on the final-window mean: atol + rtol * |baseline|.
+  # An improvement never fails; a drop beyond tolerance always does.
+  atol: 0.02
+  rtol: 0.05
+  # The run must at least not regress within itself.  Raise this after the first
+  # reviewed baseline establishes the real learning signal of this recipe.
+  min_improvement: 0.0
+  require_finite: true
+
+baseline:
+  artifact_name: l4-convergence-baseline
+  branch: main

@@ -1,6 +1,6 @@
 # Testing Guide
 
-Last updated: 07/14/2026.
+Last updated: 09/17/2026.
 
 This guide explains the test hierarchy for `verl_omni`, starting with L1 CPU tests and leaving room for higher layers such as L2 GPU smoke tests.
 
@@ -115,10 +115,47 @@ Delete the temporary `pytest.ini` if it is not part of your intended change.
 
 ## Higher Layers
 
-This guide currently defines L1 in detail because L1 is the main pull-request
-test layer. L2 and L3 checks may exist as GPU smoke or nightly regression jobs,
-but they should stay outside the fast PR loop until their ownership, trigger
-rules, baseline policy, runner capacity, and artifact retention are stable.
+This guide defines L1 in detail because L1 is the main pull-request test layer.
+L2 and L3 checks may exist as GPU smoke or nightly regression jobs, but they should
+stay outside the fast PR loop until their ownership, trigger rules, baseline
+policy, runner capacity, and artifact retention are stable.
+
+### L2 GPU smoke tests
+
+Curated GPU smoke scripts live in `tests/gpu_smoke/` and run tiny-random models
+for one or two end-to-end steps. They are not accuracy or convergence checks.
+
+### L3 nightly regression
+
+`tests/nightly/` holds fixed-seed, short-window numerical and performance
+regression cases. The runnable case is `tests/nightly/qwen_image_flowgrpo/`. These
+cases compare against a reviewed baseline artifact and run outside the PR loop.
+
+### L4 convergence tests
+
+`tests/convergence/` holds the release-readiness layer. It uses real model weights
+and real dataset shards, and it compares reward/loss *curves* against a reviewed
+baseline. Because it is expensive and hardware-specific, a case is only run when
+its declared preconditions hold; otherwise it is reported as `skipped` with the
+unmet requirement and the release verdict is `incomplete`.
+
+Conventions for this layer:
+
+1. Scope: real recipe convergence only. A tiny model, a synthetic dataset, or a
+   truncated step budget cannot be used to claim L4 coverage.
+2. Required environment: production-class GPUs plus provisioned real checkpoints
+   and dataset shards, declared per recipe in `tests/convergence/recipes/*.yaml`.
+3. File naming: the CPU-testable parts of the layer are named
+   `test_l4_<area>_on_cpu.py` so the L1 workflow collects them. The layer owns its
+   runners (`run_convergence.py`, `run_l4_convergence.sh`) and its recipes.
+4. CI workflow: `.github/workflows/l4_weekly_convergence.yml`, triggered weekly, by
+   `workflow_dispatch`, or by the `L4-convergence-ci` label.
+5. Local run:
+   `MODE=preflight bash tests/convergence/run_l4_convergence.sh`, then
+   `MODE=baseline` / `MODE=verify` on a machine that has the declared assets.
+
+`tests/convergence/` is registered as an exempt CI-layer folder, like
+`tests/special_e2e/`, so its runners and CPU tests can live together.
 
 For the current CI layer overview and the runnable L3 nightly case, see
 `ci_cd.md`.
