@@ -60,7 +60,7 @@ from verl.workers.utils.losses import ppo_loss
 # Register nitrobrew / nitrobrew_reverse_kl aggregate into verl's loss registry.
 import verl_omni.trainer.distillation.losses as _omni_distill_losses  # noqa: E402, F401
 from verl_omni.pipelines.utils import build_scheduler
-from verl_omni.utils.config import resolve_lora_config
+from verl_omni.utils.config import LoRASettings, resolve_lora_config
 from verl_omni.utils.mfu import (
     DiffusionFlopsCounter,
     allgather_diffusion_flops_meta,
@@ -73,6 +73,7 @@ from verl_omni.workers.config import (
 )
 from verl_omni.workers.config.diffusion import DiffusionDistillationTeacherModelConfig
 from verl_omni.workers.config.omni.distillation import HIDDEN_STATE_LOSS_MODES
+from verl_omni.workers.lora_sync import SyncExport, resolve_lora_sync_plan
 from verl_omni.workers.rollout.base import get_rollout_sequence_parallel_size
 from verl_omni.workers.rollout.vllm_rollout.zmq_utils import make_update_zmq_handle, make_update_zmq_id
 from verl_omni.workers.utils.losses import diffusion_loss, omni_loss
@@ -892,7 +893,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         self.layered_summon = self.config.rollout.get("layered_summon", False)
         # diffusion-only dual-adapter knob; the omni rollout config has no such field
         self.rollout_adapter: str = self.config.rollout.get("rollout_adapter", "default")
-        self.peft_merge: bool = resolve_lora_config(model_config).merge
+        self.lora_settings: LoRASettings = resolve_lora_config(model_config)
         self._zmq_update_seq = 0
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="ref"))
@@ -977,12 +978,17 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         """
         if "actor" not in self.role:
             return None
+        engine = getattr(self.actor, "engine", None)
+        peft_config = _get_engine_lora_config(engine)
         # ``merge=True`` means LoRA deltas are merged into base weights before
         # sync, so the standalone rollout must use the full-weight path.
-        if self.peft_merge:
-            return None
-        engine = getattr(self.actor, "engine", None)
-        result = _get_engine_lora_config(engine)
+        plan = resolve_lora_sync_plan(
+            self.lora_settings,
+            adapter_name=self.rollout_adapter,
+            has_adapter=peft_config is not None,
+            base_sync_done=self.base_sync_done,
+        )
+        result = peft_config if plan.send_peft_config else None
         logger.debug("get_lora_peft_config role=%s -> %s", self.role, "LoRA" if result else "none")
         return result
 
@@ -995,11 +1001,11 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         the separate-async diffusion trainer to verify the same source LoRA
         weights are being pushed to both the colocated and standalone rollout
         replicas. Returns ``None`` when the actor is not training a LoRA adapter
-        (e.g. ``peft_merge=True`` or no LoRA), so the caller can skip the check.
+        (e.g. ``lora_settings.merge=True`` or no LoRA), so the caller can skip the check.
         """
         if "actor" not in self.role:
             return None
-        if self.peft_merge:
+        if self.lora_settings.merge:
             return None
         engine = getattr(self.actor, "engine", None)
         module = getattr(engine, "module", None) if engine is not None else None
@@ -1105,9 +1111,11 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         2. For async training with disaggregated trainer and rollout (any non-naive
            ``mode``), send weights only through the checkpoint engine.
 
-        LoRA handling: when model.lora.merge=True (peft_merge), LoRA is merged into
-        base weights before sync. The engine returns full HF-keyed params with
-        peft_config=None, so the rollout receives a standard weight update.
+        LoRA handling: the sync plan (``resolve_lora_sync_plan``) decides what to
+        send. With ``model.lora.merge=True`` the engine returns merged full
+        HF-keyed params with peft_config=None, so the rollout receives a standard
+        weight update; adapter mode ships base weights plus ``peft_config`` on
+        the first sync, then adapter-only deltas.
 
         Args:
             global_steps: Current global training step count, passed to rollout for
@@ -1132,8 +1140,13 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 return metrics or {}
 
             actor_has_lora = _get_engine_lora_config(self.actor.engine, self.rollout_adapter) is not None
-
-            if actor_has_lora and not self.peft_merge:
+            plan = resolve_lora_sync_plan(
+                self.lora_settings,
+                adapter_name=self.rollout_adapter,
+                has_adapter=actor_has_lora,
+                base_sync_done=self.base_sync_done,
+            )
+            if plan.export is SyncExport.ADAPTER:
                 logger.debug(
                     "adapter-only LoRA send: backend=%s global_steps=%s adapter=%s",
                     effective_mode,
@@ -1147,7 +1160,13 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 with RLInsightLogger.trace_state("update_weights", state_lane_id=f"rank_{self.rank}"):
                     await self.checkpoint_engine.send_weights(per_tensor_param, global_steps=global_steps)
                 return
-
+            if plan.send_peft_config:
+                # The standalone rollout already holds the base weights it loaded
+                # from ``load_format``; only adapter deltas can follow here.
+                raise ValueError(
+                    f"checkpoint engine backend {effective_mode!r} cannot stage the first adapter "
+                    "sync: the rollout must load real base weights (a non-dummy rollout.load_format)."
+                )
             per_tensor_param, _ = self.actor.engine.get_per_tensor_param(adapter_name=self.rollout_adapter)
             with RLInsightLogger.trace_state("update_weights", state_lane_id=f"rank_{self.rank}"):
                 await self.checkpoint_engine.send_weights(per_tensor_param, global_steps=global_steps)
@@ -1160,10 +1179,20 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         set_expandable_segments(False)
         log_gpu_memory_usage("Before resume weights", logger=logger)
 
-        # Read adapter metadata without triggering a collective parameter gather.
+        # Read adapter metadata without triggering a collective parameter gather,
+        # then resolve the one sync plan for this update.
         actor_has_lora = _get_engine_lora_config(self.actor.engine, self.rollout_adapter) is not None
-        # The first base sync still needs the standard path.
-        use_lora_fast_path = actor_has_lora and not self.peft_merge and self.base_sync_done
+        plan = resolve_lora_sync_plan(
+            self.lora_settings,
+            adapter_name=self.rollout_adapter,
+            has_adapter=actor_has_lora,
+            base_sync_done=self.base_sync_done,
+        )
+        self.rollout.sleep_level = plan.sleep_level
+        # Adapter deltas ride the direct-IPC fast path (the rollout already holds
+        # the base weights and stays at level-1 sleep); every other row is the
+        # standard bucketed sync, which also stages the first base weights.
+        use_lora_fast_path = plan.export is SyncExport.ADAPTER
         # With actor parameter offload, the actor and resumed rollout weights
         # cannot safely coexist on a capacity-bound colocated GPU.
         release_actor_before_resume = use_lora_fast_path and self.actor.engine.is_param_offload_enabled
@@ -1180,7 +1209,6 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         offloaded = False
         offload_task = None
         if use_lora_fast_path:
-            self.rollout.sleep_level = 1
             torch_device = get_torch_device()
             device_index = torch_device.current_device() if torch_device.is_available() else None
 
@@ -1274,20 +1302,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 await resume_weights_task
             log_gpu_memory_usage("After resume weights", logger=logger)
 
-            # determine if we need a base weight sync (adapter path only)
-            per_tensor_param, peft_config = self.actor.engine.get_per_tensor_param(
-                layered_summon=self.layered_summon,
-                base_sync_done=True,
-                adapter_name=self.rollout_adapter,
-            )
-
-            do_lora_base_sync = False
-            if not self.peft_merge and peft_config is not None:
-                self.rollout.sleep_level = 1
-                do_lora_base_sync = not self.base_sync_done
-
-            # sync weights: For SGLang, we need base first (when needed), then adapter/merged
-            if do_lora_base_sync:
+            # First adapter sync: the base weights must land before the deltas so
+            # the rollout never holds a PEFT wrapper without weights.
+            if plan.send_peft_config:
                 per_tensor_param_base, peft_config = self.actor.engine.get_per_tensor_param(
                     layered_summon=self.layered_summon,
                     base_sync_done=False,
@@ -1296,6 +1313,13 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 await self.rollout.update_weights(
                     per_tensor_param_base, peft_config=peft_config, base_sync_done=False, global_steps=global_steps
                 )
+
+            # sync weights: For SGLang, we need base first (when needed), then adapter/merged
+            per_tensor_param, peft_config = self.actor.engine.get_per_tensor_param(
+                layered_summon=self.layered_summon,
+                base_sync_done=True,
+                adapter_name=self.rollout_adapter,
+            )
 
             with RLInsightLogger.trace_state("update_weights", state_lane_id=f"rank_{self.rank}"):
                 await self.rollout.update_weights(

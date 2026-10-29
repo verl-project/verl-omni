@@ -26,6 +26,18 @@ import pytest
 import torch
 
 import verl_omni.workers.engine_workers as ew
+from verl_omni.utils.config import LoRASettings
+
+
+def _lora_settings(*, enabled=True, merge=False) -> LoRASettings:
+    return LoRASettings(
+        rank=8 if enabled else 0,
+        alpha=16,
+        adapter_path=None,
+        merge=merge,
+        adapters=("default",),
+        enabled=enabled,
+    )
 
 
 def _worker(*, offload=True, free_cache=True, lora=True, base_synced=True, merged=False):
@@ -86,7 +98,7 @@ def _worker(*, offload=True, free_cache=True, lora=True, base_synced=True, merge
         )
     )
     worker._rank = 0
-    worker.peft_merge = merged
+    worker.lora_settings = _lora_settings(enabled=lora, merge=merged)
     worker.base_sync_done = base_synced
     worker.layered_summon = False
     worker.rollout_adapter = "default"
