@@ -114,24 +114,38 @@ class BagelTrainingConfig:
         )
 
 
-def get_flattened_position_ids(img_h: int, img_w: int, patch_size: int, max_num_patches_per_side: int) -> torch.Tensor:
-    """Compute flattened 2-D position IDs for latent patches.
+def get_flattened_position_ids(
+    img_h: int,
+    img_w: int,
+    patch_size: int,
+    max_num_patches_per_side: int,
+    num_frames: int = 1,
+) -> torch.Tensor:
+    """Compute flattened position IDs for latent patches.
 
     Args:
         img_h: Image height in pixels.
         img_w: Image width in pixels.
         patch_size: Latent patch size (VAE downsample × latent_patch_size).
         max_num_patches_per_side: Max grid size for position embedding.
+        num_frames: Latent frames.  1 reproduces the 2-D image grid; more adds a
+            temporal axis, giving the ``t * side**2 + h * side + w`` rows that the
+            3-D position table is built with (``get_3d_sincos_pos_embed`` is
+            called with ``(max_num_frames, side, side)``, so one frame is just the
+            image table).
 
     Returns:
-        Flattened position IDs of shape ``(num_patches,)``.
+        Flattened position IDs of shape ``(num_frames * num_patches,)``.
     """
     num_patches_h = img_h // patch_size
     num_patches_w = img_w // patch_size
     coords_h = torch.arange(0, num_patches_h)
     coords_w = torch.arange(0, num_patches_w)
-    pos_ids = (coords_h[:, None] * max_num_patches_per_side + coords_w).flatten()
-    return pos_ids
+    per_frame = (coords_h[:, None] * max_num_patches_per_side + coords_w).flatten()
+    if num_frames <= 1:
+        return per_frame
+    stride = max_num_patches_per_side * max_num_patches_per_side
+    return (torch.arange(0, num_frames)[:, None] * stride + per_frame).flatten()
 
 
 # ===================================================================
@@ -483,6 +497,42 @@ class BagelForTraining(NonDiffusersModelBase):
         self.llm2vae = nn.Linear(config.hidden_size, config.patch_latent_dim)
         self.latent_pos_embed = PositionEmbedding(config.max_latent_size, config.hidden_size)
 
+    def build_position_ids(
+        self,
+        batch: int,
+        num_text: int,
+        num_latent: int,
+        latent_pos_ids: Tensor,
+        device,
+        *,
+        text_attention_mask: Optional[Tensor] = None,
+    ) -> Tensor:
+        """RoPE positions for text + start marker + latents + end marker.
+
+        BAGEL gives the whole image block a single position; the spatial
+        layout reaches the model through ``latent_pos_embed`` instead.  A
+        BAGEL-lineage model whose rollout positions the latents differently
+        overrides this, so the trainer replays on the rotary basis the rollout
+        actually used.
+
+        Args:
+            batch: Batch size.
+            num_text: Text context length.
+            num_latent: Number of latent tokens.
+            latent_pos_ids: ``(L_latent,)`` or ``(B, L_latent)`` grid indices.
+            device: Device for the returned tensor.
+            text_attention_mask: Optional valid-text mask for model-specific positions.
+
+        Returns:
+            ``(B, L_total)`` positions, or any shape the rotary accepts.
+        """
+        total = num_text + 1 + num_latent + 1
+        if num_text > 0:
+            ctx_pos = torch.arange(num_text, device=device)
+            img_pos = ctx_pos.new_full((1 + num_latent + 1,), num_text)
+            return torch.cat([ctx_pos, img_pos]).unsqueeze(0).expand(batch, -1)
+        return torch.zeros(1, total, dtype=torch.long, device=device).expand(batch, -1)
+
     def forward(
         self,
         hidden_states: Tensor,
@@ -557,12 +607,9 @@ class BagelForTraining(NonDiffusersModelBase):
         latent_mask = ~text_mask
 
         # 6. RoPE positions
-        if L_ctx > 0:
-            ctx_pos = torch.arange(L_ctx, device=dev)
-            img_pos = ctx_pos.new_full((1 + L_latent + 1,), L_ctx)
-            position_ids = torch.cat([ctx_pos, img_pos]).unsqueeze(0).expand(B, -1)
-        else:
-            position_ids = torch.zeros(1, L_total, dtype=torch.long, device=dev).expand(B, -1)
+        position_ids = self.build_position_ids(
+            B, L_ctx, L_latent, latent_pos_ids, dev, text_attention_mask=text_attention_mask
+        )
 
         # Key padding mask: zero-padded text tokens in uneven micro-batches
         # must not attend to image queries.  ``None`` keeps the flash backend.
