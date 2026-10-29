@@ -160,6 +160,24 @@ async def test_abort_only_aborts_without_pausing():
     assert result == {"aborted_count": 1, "request_ids": ["ext-1"]}
 
 
+async def test_abort_only_failure_unblocks_generators_without_pausing():
+    states = {
+        "ext-1-abc": _FakeRequestState("ext-1-abc", "ext-1"),
+        "ext-2-xyz": _FakeRequestState("ext-2-xyz", "ext-2"),
+    }
+    engine = _FakeAsyncOmni(states=states, fail_abort=True)
+    server = _make_server(engine)
+
+    with pytest.raises(RuntimeError, match="abort rpc failed"):
+        await server.abort_all_requests(abort_only=True)
+
+    assert engine.pause_calls == []
+    for state in states.values():
+        terminal = state.queue.get_nowait()
+        assert terminal.finished is True
+        assert terminal.engine_outputs.outputs[0].finish_reason == "abort"
+
+
 async def test_reject_request_is_accepted_and_still_pauses(caplog):
     states = {"ext-1-abc": _FakeRequestState("ext-1-abc", "ext-1")}
     engine = _FakeAsyncOmni(states=states)

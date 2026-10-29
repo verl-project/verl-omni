@@ -557,9 +557,15 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         request_ids = [external_id for _, external_id, _ in in_flight]
 
         if abort_only:
-            await asyncio.wait_for(
-                engine.abort(request_ids), timeout=float(os.getenv("VERL_OMNI_ABORT_ACK_TIMEOUT_S", "120"))
-            )
+            try:
+                await asyncio.wait_for(
+                    engine.abort(request_ids), timeout=float(os.getenv("VERL_OMNI_ABORT_ACK_TIMEOUT_S", "120"))
+                )
+            except Exception:
+                # Same cleanup as the pause path: synthetic terminals unblock waiting generators.
+                for internal_id, _, state in in_flight:
+                    self._enqueue_abort_output(internal_id, state)
+                raise
             logger.info("Aborted %d request(s) (admission left open): %s", len(request_ids), request_ids)
             return {"aborted_count": len(request_ids), "request_ids": request_ids}
 
