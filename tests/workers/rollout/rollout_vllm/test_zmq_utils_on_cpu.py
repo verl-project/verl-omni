@@ -52,12 +52,17 @@ def test_non_ipc_handle_is_unchanged():
 
 
 def test_peft_named_bucket_without_lora_routing_fails_loud():
+    callbacks = []
+
     class FakeReceiver:
         def __init__(self, zmq_handle, device, use_shm):
             pass
 
         def receive_weights(self, on_bucket_received):
             on_bucket_received([("base_model.model.lm_head.weight", object())])
+            callbacks.append("misrouted")
+            on_bucket_received([("lm_head.weight", object())])
+            callbacks.append("drained")
 
     worker = SimpleNamespace(
         device="cpu",
@@ -68,6 +73,11 @@ def test_peft_named_bucket_without_lora_routing_fails_loud():
     with patch.object(bucketed_weight_transfer, "BucketedWeightReceiver", FakeReceiver):
         with pytest.raises(RuntimeError, match="PEFT-wrapped names reached the dense load path"):
             vLLMOmniColocateWorkerExtension.update_weights_from_ipc(worker)
+
+    # The stream drains before the error surfaces: buckets after the misroute are
+    # discarded without loading, the sender completes, and the adapter's worker
+    # RPC future resolves with this error instead of blocking on a closed socket.
+    assert callbacks == ["misrouted", "drained"]
 
 
 def test_worker_receivers_resolve_shared_update_id_from_their_rank_local_handles():
