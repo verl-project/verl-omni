@@ -175,6 +175,9 @@ class DiffusionRolloutConfig(BaseConfig):
     max_model_len: Optional[int] = None
     max_num_seqs: int = 1024
 
+    # Ray max_concurrency of the rollout server actor.
+    ray_actor_max_concurrency: int = 1024
+
     # When True, the vLLM-Omni engine runs the registered pipeline in
     # step-execution mode.
     step_execution: bool = False

@@ -242,11 +242,11 @@ def test_transfer_queue_checkpoint_roundtrip_and_reissue(initialized_tq, tmp_pat
     ("statuses", "expected_submissions"),
     [
         (["pending"] * 4, []),
-        (["finished"], [("batch", 2), ("batch", 2)]),
+        (["finished"], [("batch", 2), ("prompts", 1)]),
         (["running"] * 3, [("prompts", 1)]),
     ],
 )
-def test_warmup_tops_up_inflight_prompts(monkeypatch, statuses, expected_submissions):
+def test_warmup_tops_up_restored_prompt_groups(monkeypatch, statuses, expected_submissions):
     trainer = object.__new__(PolicyGradientDiffusionTrainerV1SeparateAsync)
     trainer.config = OmegaConf.create(
         {

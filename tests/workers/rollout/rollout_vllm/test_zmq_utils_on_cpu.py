@@ -16,6 +16,7 @@ import os
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
 from verl.utils.device import get_visible_devices_keyword
 from verl.workers.rollout.vllm_rollout import bucketed_weight_transfer
 
@@ -48,6 +49,25 @@ def test_non_ipc_handle_is_unchanged():
     handle = "tcp://127.0.0.1:5555"
 
     assert make_update_zmq_handle(handle, "step-7-seq-2") == handle
+
+
+def test_peft_named_bucket_without_lora_routing_fails_loud():
+    class FakeReceiver:
+        def __init__(self, zmq_handle, device, use_shm):
+            pass
+
+        def receive_weights(self, on_bucket_received):
+            on_bucket_received([("base_model.model.lm_head.weight", object())])
+
+    worker = SimpleNamespace(
+        device="cpu",
+        _pending_lora_peft_config=None,
+        _get_zmq_handle=lambda: "ipc:///tmp/unused.sock",
+        _get_standard_weight_model_and_config=lambda: (SimpleNamespace(modules=lambda: []), SimpleNamespace()),
+    )
+    with patch.object(bucketed_weight_transfer, "BucketedWeightReceiver", FakeReceiver):
+        with pytest.raises(RuntimeError, match="PEFT-wrapped names reached the dense load path"):
+            vLLMOmniColocateWorkerExtension.update_weights_from_ipc(worker)
 
 
 def test_worker_receivers_resolve_shared_update_id_from_their_rank_local_handles():

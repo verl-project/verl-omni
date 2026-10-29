@@ -61,6 +61,10 @@ jobs:
       TRANSFORMERS_VERBOSITY: 'error'
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install the pinned verl over the image's stack
+        shell: bash
+        run: |
+          pip install --no-deps "verl @ git+https://github.com/verl-project/verl.git@$(cat .github/verl_pin.txt)"
       - name: Resolve NPU CI groups
         id: resolve-groups
         shell: bash

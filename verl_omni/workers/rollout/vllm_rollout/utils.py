@@ -296,6 +296,12 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
                 if delta_ctx["delta"]:
                     self._apply_delta_bucket(weights, delta_ctx, is_last=is_last)
                 elif weights:
+                    if any(name.startswith("base_model.") for name, _ in weights):
+                        raise RuntimeError(
+                            "PEFT-wrapped names reached the dense load path: this replica has "
+                            "no LoRA peft_config for the sync, so the adapters cannot be "
+                            "routed to the LoRA manager"
+                        )
                     dense_on_bucket(weights)
 
             standard = self._get_standard_weight_model_and_config()
