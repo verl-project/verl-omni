@@ -263,8 +263,7 @@ class PolicyGradientDiffusionTrainerV1SeparateAsync(PolicyGradientDiffusionTrain
     def _setup(self):
         super()._setup()
 
-        # Standalone rollout replicas on dedicated GPUs. start_rank skips the
-        # colocated replica ranks to avoid Ray named-actor collisions.
+        # start_rank skips the colocated replica ranks to avoid Ray named-actor collisions.
         hybrid_num_replicas = len(self.llm_server_manager.rollout_replicas)
         # Standalone replicas have dedicated GPUs; keep their memory budget
         # separate from the hybrid replicas that share GPUs with training.
