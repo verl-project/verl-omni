@@ -183,7 +183,13 @@ class PolicyGradientDiffusionTrainerV1SeparateAsync(PolicyGradientDiffusionTrain
         self._scaling_factor = (hybrid_gpus + standalone_gpus) / standalone_gpus
 
     def _compute_old_log_prob(self, data: DataProto) -> DataProto:
-        """Compute every local update's proximal log-probs with cycle-start weights."""
+        """Compute every local update's proximal log-probs with cycle-start weights.
+
+        Not annotated directly: the base method already carries the
+        ``old_log_prob`` annotation and this override reaches it through
+        ``super()``, so skipping and dumping happen exactly once per call while
+        the snapshot lifecycle here always runs.
+        """
         if self.parameter_sync_step == 1:
             return super()._compute_old_log_prob(data)
 
