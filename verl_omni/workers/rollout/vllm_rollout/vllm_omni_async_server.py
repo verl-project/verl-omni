@@ -542,6 +542,8 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             return await super().abort_all_requests(
                 reset_prefix_cache, reject_request=reject_request, abort_only=abort_only
             )
+        if reject_request:
+            logger.warning("AsyncOmni has no admission gate: requests arriving behind the pause park until resume")
 
         # ``engine.abort`` takes EXTERNAL ids; ``request_states`` is keyed by internal.
         in_flight: list[tuple[str, str, Any]] = []

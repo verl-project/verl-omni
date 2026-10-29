@@ -19,6 +19,7 @@ delivers tokens; diffusion sleep/wake ACKs are not engine-checked.
 """
 
 import asyncio
+import logging
 from types import SimpleNamespace
 
 import pytest
@@ -159,15 +160,17 @@ async def test_abort_only_aborts_without_pausing():
     assert result == {"aborted_count": 1, "request_ids": ["ext-1"]}
 
 
-async def test_reject_request_is_accepted_and_still_pauses():
+async def test_reject_request_is_accepted_and_still_pauses(caplog):
     states = {"ext-1-abc": _FakeRequestState("ext-1-abc", "ext-1")}
     engine = _FakeAsyncOmni(states=states)
     server = _make_server(engine)
 
-    await server.abort_all_requests(reject_request=True)
+    with caplog.at_level(logging.WARNING, logger=server_module.logger.name):
+        await server.abort_all_requests(reject_request=True)
 
     # The AsyncOmni engine has no reject knob; arrivals behind the pause park.
     assert engine.calls == ["abort", "pause"]
+    assert "park until resume" in caplog.text
 
 
 async def test_generate_accepts_session_id_without_forwarding():
