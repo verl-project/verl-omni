@@ -1350,6 +1350,46 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
         old_log_prob_mfu = tu.get(output, "metrics").get("mfu")
         return DataProto.from_tensordict(old_log_prob), old_log_prob_mfu
 
+    def _extract_ar_reward_tensor(self, batch_reward: Any, ar_batch: DataProto, avg_size: int) -> Any:
+        if "rm_scores" not in ar_batch.batch.keys():
+            assert "reward/ar" in batch_reward.non_tensor_batch.keys(), (
+                "`ar` must be used as reward function name for "
+                "ar reward computation when using MultiVisualRewardManager"
+            )
+
+            # extract raw scores for prompt-image pairs
+            reward_scores = batch_reward.non_tensor_batch.pop("reward/ar")
+
+            # compute average score for each raw-refined prompt pairs
+            num_rewards = ar_batch.batch["responses"].shape[0]
+            assert (reward_scores.ndim == 1) and (num_rewards * avg_size == reward_scores.shape[0]), (
+                f"reward_scores shape: {reward_scores.shape}, num_rewards: {num_rewards}, avg_size: {avg_size}"
+            )
+            reward_mean = []
+            reward_mean = reward_scores.reshape(num_rewards, avg_size, 1).mean(axis=1)
+            reward_tensor = torch.from_numpy(reward_mean).float()
+            ar_batch.batch["rm_scores"] = reward_tensor
+            ar_batch.non_tensor_batch["reward/ar"] = reward_mean
+
+            batch_reward.meta_info["reward_extra_keys"].remove("reward/ar")
+            all_reward_keys = list(batch_reward.meta_info["reward_extra_keys"])
+            reward_extra_keys = ["reward/ar"]
+            for key in all_reward_keys:
+                if key.startswith("reward/ar/"):
+                    sub_scores = batch_reward.non_tensor_batch.pop(key)
+                    is_number = sub_scores.size > 0 and isinstance(sub_scores.flat[0], np.number)
+                    if is_number:
+                        if sub_scores.ndim == 1:
+                            sub_scores = sub_scores.reshape(-1, 1)
+                        sub_reward = sub_scores.reshape(num_rewards, avg_size, sub_scores.shape[1]).mean(axis=1)
+                    else:
+                        sub_reward = sub_scores[::avg_size]
+                    ar_batch.non_tensor_batch[key] = sub_reward
+
+                    reward_extra_keys.append(key)
+                    batch_reward.meta_info["reward_extra_keys"].remove(key)
+            ar_batch.meta_info["reward_extra_keys"] = reward_extra_keys
+
     def fit(self):
         """
         The training loop of FlowGRPO.
