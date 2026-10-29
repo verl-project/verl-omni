@@ -48,8 +48,17 @@ class OmniPPOTrainerSeparateAsync(OmniPPOTrainer, PPOTrainerSeparateAsync):
         # The omni worker's LoRA-aware weight sync must win over upstream's (which
         # resends base weights under lora.merge=False); Detach adds CPU save/restore.
         super()._init_resource_pool_mgr()
-        actor_role = Role.ActorRolloutRef if Role.ActorRolloutRef in self.role_worker_mapping else Role.ActorRollout
-        self.role_worker_mapping[actor_role] = ray.remote(OmniDetachActorWorker)
+        # Re-map whichever actor role the parent laid out: with hybrid replicas
+        # disabled (the separate-async default) the mapping carries Role.Actor
+        # (+ Role.RefPolicy), not Role.ActorRolloutRef.
+        if Role.Actor in self.role_worker_mapping:
+            self.role_worker_mapping[Role.Actor] = ray.remote(OmniDetachActorWorker)
+            if Role.RefPolicy in self.role_worker_mapping:
+                self.role_worker_mapping[Role.RefPolicy] = ray.remote(OmniDetachActorWorker)
+        elif Role.ActorRolloutRef in self.role_worker_mapping:
+            self.role_worker_mapping[Role.ActorRolloutRef] = ray.remote(OmniDetachActorWorker)
+        elif Role.ActorRollout in self.role_worker_mapping:
+            self.role_worker_mapping[Role.ActorRollout] = ray.remote(OmniDetachActorWorker)
 
     def _setup(self):
         # Faithful copy of verl's PPOTrainerSeparateAsync._setup; super() lands on
