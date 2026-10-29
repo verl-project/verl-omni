@@ -36,10 +36,15 @@ class StableDiffusion3OPSDPipeline(StableDiffusion3PipelineWithLogProb):
     closest to ``opsd_query_sigma``. The parent loop already stores fp32 latents for an SDE
     window, so this costs one small state tensor per captured step and no extra forward pass.
 
-    The window must cover the requested query sigma: for SD3.5-Medium's shift-3 schedule the
-    four trailing states span sigma ~= 0.56 ... 0.0, which contains the paper's sigma* = 0.278.
-    The value is a class attribute (not a pipeline config field) because the rollout engine
-    forwards sampling-time tensors, not trainer-side loss config.
+    The window must cover the requested query sigma, and which sigmas land in it depends on the
+    step count. For SD3.5-Medium's shift-3 schedule at 10 steps the scheduler yields sigmas
+    ``1.0, 0.960, 0.913, 0.858, 0.790, 0.707, 0.602, 0.465, 0.278, 0.009``, so the four trailing
+    states span ``0.602, 0.465, 0.278, 0.009`` and contain the paper's sigma* = 0.278 exactly
+    (note the last captured state sits at the final sigma ~= 0.009 and is never selected because
+    it is far outside the tolerance). The covered range for sigma* = 0.278 is roughly 7 to 69
+    steps; ``OPSDLoss.validate_trainer_config`` checks the configured step count against this
+    window at startup. The value is a class attribute (not a pipeline config field) because the
+    rollout engine forwards sampling-time tensors, not trainer-side loss config.
     """
 
     supports_request_batch = True

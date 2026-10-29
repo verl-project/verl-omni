@@ -2145,6 +2145,51 @@ class DualGRPOLoss(DiffusionLossFn):
         return DiffusionLossResult(loss=pg_loss, metrics=pg_metrics)
 
 
+def _opsd_query_window_problem(model_path: str, num_steps: int, loss_cfg: Any) -> Optional[str]:
+    """Return a problem string when the trailing query window cannot reach the requested sigma.
+
+    The SD3 OPSD rollout adapter captures a fixed number of trailing denoising states
+    (``query_window_steps``). The pipeline's own schedule determines which sigmas land in that
+    window, so a step count can silently move sigma* out of reach. Derive the schedule from the
+    checkpoint here and fail at startup instead of at the first batch.
+
+    Returns ``None`` when the schedule cannot be derived (the runtime selection guard still
+    reports the mismatch at the first batch).
+    """
+    from pathlib import Path
+
+    scheduler_config = Path(model_path) / "scheduler" / "scheduler_config.json"
+    if not scheduler_config.is_file():
+        return None
+    try:
+        from diffusers import FlowMatchEulerDiscreteScheduler
+
+        from verl_omni.pipelines.sd3_opsd.vllm_omni_rollout_adapter import StableDiffusion3OPSDPipeline
+
+        scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(model_path, subfolder="scheduler")
+        scheduler.set_timesteps(num_steps)
+        # The captured window maps onto the last `window` sigmas before the terminal 0.
+        sigmas = [float(s) for s in scheduler.sigmas[:-1]]
+        window = int(StableDiffusion3OPSDPipeline.query_window_steps)
+    except Exception:  # noqa: BLE001 - the runtime guard covers anything this probe cannot run
+        return None
+
+    candidates = sigmas[-window:] if window < len(sigmas) else sigmas
+    if not candidates:
+        return None
+    query_sigma = float(loss_cfg.get("opsd_query_sigma", 0.278))
+    tolerance = float(loss_cfg.get("opsd_query_sigma_tolerance", 0.15))
+    closest = min(candidates, key=lambda sigma: abs(sigma - query_sigma))
+    if abs(closest - query_sigma) <= tolerance:
+        return None
+    return (
+        f"the trailing query window of {window} states at num_inference_steps={num_steps} covers "
+        f"sigmas {[round(s, 4) for s in candidates]}, none within tolerance {tolerance} of the "
+        f"requested sigma*={query_sigma} (closest {closest:.4f}); reduce num_inference_steps, or widen "
+        "the adapter's query window"
+    )
+
+
 @register_diffusion_loss("opsd")
 class OPSDLoss(DiffusionLossFn):
     """DiffusionOPSD detached two-branch clean-output fitting objective.
@@ -2305,9 +2350,7 @@ class OPSDLoss(DiffusionLossFn):
         # Published alongside the timesteps so the adapter can reject a config whose scale
         # disagrees with the scheduler's before any fitting happens. It travels as a batch
         # tensor (like `train_timesteps`) because the actor batch becomes a TensorDict.
-        batch.batch["opsd_timestep_scale"] = torch.full(
-            (all_latents.shape[0],), num_train_timesteps, dtype=torch.long
-        )
+        batch.batch["opsd_timestep_scale"] = torch.full((all_latents.shape[0],), num_train_timesteps, dtype=torch.long)
 
         advantages = DiffusionNFTLoss._compute_group_advantages(
             rewards=reward_tensor,
@@ -2366,6 +2409,18 @@ class OPSDLoss(DiffusionLossFn):
             )
         if int(rollout_cfg.get("n", 1)) <= 1:
             problems.append("actor_rollout_ref.rollout.n must be > 1 so the endpoint reward can be group-normalized")
+        # The rollout adapter keeps a fixed number of trailing states, so the requested sigma must
+        # fall inside that window on the model's actual schedule. Checking it here turns a
+        # first-batch selection failure into a startup error and documents the step-count range.
+        num_steps = int(
+            OmegaConf.select(config, "actor_rollout_ref.rollout.pipeline.num_inference_steps", default=0) or 0
+        )
+        model_path = model_cfg.get("path", None)
+        loss_cfg = OmegaConf.select(config, "actor_rollout_ref.actor.diffusion_loss", default=None)
+        if num_steps > 0 and model_path and loss_cfg is not None:
+            window_problem = _opsd_query_window_problem(model_path, num_steps, loss_cfg)
+            if window_problem:
+                problems.append(window_problem)
         if actor_cfg.get("use_kl_loss", False):
             problems.append("actor_rollout_ref.actor.use_kl_loss must be False (OPSD has no reference KL term)")
         if actor_cfg.get("enable_timestep_staging", False):

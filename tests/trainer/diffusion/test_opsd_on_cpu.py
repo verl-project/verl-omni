@@ -26,6 +26,7 @@ tests pin each link to an independent transcription of the paper equations (Eq.
 rollout/actor-batch contract of the implementation.
 """
 
+import json
 from types import SimpleNamespace
 
 import numpy as np
@@ -387,6 +388,46 @@ def test_opsd_trainer_config_guards(overrides, message):
     else:
         with pytest.raises(ValueError, match=message):
             OPSDLoss.validate_trainer_config(config)
+
+
+def make_model_dir_with_sd3_schedule(tmp_path, *, shift=3.0):
+    """Materialise a tiny checkpoint dir whose scheduler is a real SD3 flow schedule."""
+    model_dir = tmp_path / "sd35m"
+    (model_dir / "scheduler").mkdir(parents=True)
+    (model_dir / "scheduler" / "scheduler_config.json").write_text(
+        json.dumps({"num_train_timesteps": 1000, "shift": shift, "_class_name": "FlowMatchEulerDiscreteScheduler"}),
+        encoding="utf-8",
+    )
+    return model_dir
+
+
+def make_window_config(model_dir, num_steps):
+    config = make_opsd_trainer_config()
+    OmegaConf.update(config, "actor_rollout_ref.model.path", str(model_dir))
+    OmegaConf.update(config, "actor_rollout_ref.actor.diffusion_loss", {"loss_mode": "opsd"}, merge=True)
+    OmegaConf.update(config, "actor_rollout_ref.rollout.pipeline.num_inference_steps", num_steps)
+    return config
+
+
+def test_window_coverage_accepts_a_step_count_that_reaches_sigma(tmp_path):
+    # 10 steps puts sigma*=0.278 exactly in the trailing window on the shift-3 schedule.
+    model_dir = make_model_dir_with_sd3_schedule(tmp_path)
+    OPSDLoss.validate_trainer_config(make_window_config(model_dir, num_steps=10))
+
+
+def test_window_coverage_rejects_a_step_count_that_cannot_reach_sigma(tmp_path):
+    # 100 steps moves the trailing window below sigma*=0.278 - tolerance; this used to fail at
+    # the first training batch, wasting a model load, instead of at startup.
+    model_dir = make_model_dir_with_sd3_schedule(tmp_path)
+    with pytest.raises(ValueError, match="trailing query window"):
+        OPSDLoss.validate_trainer_config(make_window_config(model_dir, num_steps=100))
+
+
+def test_window_coverage_is_skipped_without_a_checkpoint(tmp_path):
+    # No model dir -> no schedule to derive; the runtime selection guard still covers this.
+    config = make_opsd_trainer_config()
+    OmegaConf.update(config, "actor_rollout_ref.rollout.pipeline.num_inference_steps", 100)
+    OPSDLoss.validate_trainer_config(config)
 
 
 def make_rollout_batch(uid, *, latents=None, timesteps=None):
