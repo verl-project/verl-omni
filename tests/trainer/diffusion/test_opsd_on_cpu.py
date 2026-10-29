@@ -193,6 +193,20 @@ class TestOPSDLossMath:
         )
         assert result.metrics["actor/opsd_query_sigma"] == pytest.approx(inputs["t_expanded"].mean().item(), rel=1e-6)
 
+    def test_surfaces_the_engine_target_construction_seconds(self):
+        # The engine times target construction and stashes it on the model output; the loss must
+        # report it so the OPSD-specific cost can be attributed inside the actor update.
+        inputs = _make_opsd_inputs(seed=5)
+        model_output = {key: inputs[key] for key in OPSDLoss.required_model_output_keys}
+        model_output["opsd_target_seconds"] = torch.tensor(0.25)
+        prob = inputs["reward_prob"]
+        data = TensorDict({"reward_prob": prob}, batch_size=[prob.shape[0]])
+
+        result = OPSDLoss()(config=make_actor(), model_output=model_output, data=data)
+
+        assert result.metrics["actor/opsd_target_seconds"] == pytest.approx(0.25, rel=1e-6)
+        assert set(result.metrics) == OPSD_METRIC_KEYS | {"actor/opsd_target_seconds"}
+
     def test_only_forward_prediction_carries_gradient(self):
         inputs = _make_opsd_inputs(seed=3)
         for key in ("old_prediction", "opsd_target_pos", "opsd_target_neg"):

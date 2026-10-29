@@ -17,6 +17,7 @@ import gc
 import json
 import logging
 import os
+import time
 import warnings
 from abc import ABC, abstractmethod
 from contextlib import nullcontext
@@ -1587,11 +1588,19 @@ class OPSDDiffusersFSDPEngine(NFTDiffusersFSDPEngine):
                 "DiffusionOPSD engine requires `opsd_prompt_ids` in the actor batch; the v1 trainer adds it "
                 "from `prompts` before the actor update."
             )
+        # Target construction (fp32 VAE decode + differentiable reward + ascent steps) is the only
+        # work OPSD adds on top of the shared forward process, so time it separately: it would
+        # otherwise be hidden inside the actor timing and the added cost could not be attributed.
+        # Surfaced by OPSDLoss as ``actor/opsd_target_seconds``.
+        target_started = time.perf_counter()
         targets = self._get_opsd_runtime().build_targets(
             query_latents=loss_context["xt"],
             t_expanded=loss_context["t_expanded"],
             old_prediction=old_prediction,
             prompt_ids=prompt_ids,
+        )
+        targets["opsd_target_seconds"] = torch.tensor(
+            time.perf_counter() - target_started, device=loss_context["xt"].device, dtype=torch.float32
         )
 
         forward_prediction = forward(

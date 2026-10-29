@@ -2266,6 +2266,12 @@ class OPSDLoss(DiffusionLossFn):
             value = model_output.get(name, None)
             if value is not None:
                 prefixed_metrics[f"actor/{name}"] = float(value.detach().item())
+        # Wall time the engine spent building the detached targets for this micro batch. The actor
+        # update timing includes it, so reporting it separately makes the OPSD-specific cost
+        # attributable against NFT/DGPO/FlowGRPO runs of the same recipe.
+        target_seconds = model_output.get("opsd_target_seconds", None)
+        if target_seconds is not None:
+            prefixed_metrics["actor/opsd_target_seconds"] = float(target_seconds.detach().item())
         prefixed_metrics["actor/opsd_query_sigma"] = float(model_output["t_expanded"].detach().float().mean().item())
         prefixed_metrics["actor/total_loss"] = loss.detach().item()
         return DiffusionLossResult(loss=loss, metrics=prefixed_metrics, add_loss_metric=True)
