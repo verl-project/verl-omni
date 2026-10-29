@@ -96,7 +96,7 @@ exec python3 -m verl_omni.trainer.main_omni \
     actor_rollout_ref.actor.freeze_vision_tower=false \
     actor_rollout_ref.actor.strategy=fsdp2 \
     actor_rollout_ref.actor.use_torch_compile=false \
-    actor_rollout_ref.actor.fsdp_config.model_dtype=bfloat16 \
+    actor_rollout_ref.actor.fsdp_config.model_dtype=float32 \
     actor_rollout_ref.actor.fsdp_config.param_offload=true \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=true \
     actor_rollout_ref.actor.fsdp_config.use_torch_compile=false \
