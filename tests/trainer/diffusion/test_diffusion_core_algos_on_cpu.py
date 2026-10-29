@@ -14,6 +14,7 @@
 
 import math
 import os
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -760,6 +761,42 @@ def test_diffusion_nft_reward_signal_scaling() -> None:
     # reward decomposition untouched, otherwise `ref_kl_coef` would be re-scaling the reward signal.
     assert anchored["actor/policy_loss"] == pytest.approx(rebalanced["actor/policy_loss"], rel=1e-6)
     assert anchored["actor/log10_signal_ratio"] == pytest.approx(rebalanced["actor/log10_signal_ratio"], rel=1e-6)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("batch_size", [1, 2, 8])
+@pytest.mark.parametrize("use_is_weights", [False, True])
+def test_grpo_guard_ratio_statistics(dtype: torch.dtype, batch_size: int, use_is_weights: bool) -> None:
+    config = SimpleNamespace(diffusion_loss=SimpleNamespace(adv_clip_max=5.0, clip_ratio=2e-6))
+    old_log_prob = torch.zeros(batch_size, dtype=dtype)
+    log_prob = torch.linspace(-0.02, 0.04, batch_size, dtype=dtype).requires_grad_()
+    old_mean = torch.zeros(batch_size, 2, 2, 2, dtype=dtype)
+    current_mean = old_mean.clone().requires_grad_()
+    weights = torch.linspace(0.5, 1.2, batch_size, dtype=dtype) if use_is_weights else None
+
+    loss, metrics = diffusion_algos.GRPOGuardLoss.compute_loss(
+        old_log_prob=old_log_prob,
+        log_prob=log_prob,
+        advantages=torch.tensor([(-1) ** i for i in range(batch_size)], dtype=dtype),
+        config=config,
+        old_prev_sample_mean=old_mean,
+        prev_sample_mean=current_mean,
+        std_dev_t=torch.full((batch_size, 1, 1, 1), 0.5, dtype=dtype),
+        sqrt_dt=torch.full((batch_size,), 0.5, dtype=dtype),
+        rollout_is_weights=weights,
+    )
+
+    assert torch.isfinite(loss)
+    assert all(math.isfinite(value) for value in metrics.values())
+    gradients = torch.autograd.grad(loss, (log_prob, current_mean))
+    assert all(torch.isfinite(gradient).all() for gradient in gradients)
+    if batch_size == 1:
+        assert metrics["actor/ratio_std"] == 0.0
+    else:
+        ratios = torch.exp(log_prob.detach() * 0.25).double().tolist()
+        mean = math.fsum(ratios) / batch_size
+        expected_std = math.sqrt(math.fsum((ratio - mean) ** 2 for ratio in ratios) / batch_size)
+        assert metrics["actor/ratio_std"] == pytest.approx(expected_std, rel=0.02, abs=2e-4)
 
 
 def test_compute_policy_loss_grpo_guard() -> None:
