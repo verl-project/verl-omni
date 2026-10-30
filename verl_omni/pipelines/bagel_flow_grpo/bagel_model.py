@@ -114,24 +114,38 @@ class BagelTrainingConfig:
         )
 
 
-def get_flattened_position_ids(img_h: int, img_w: int, patch_size: int, max_num_patches_per_side: int) -> torch.Tensor:
-    """Compute flattened 2-D position IDs for latent patches.
+def get_flattened_position_ids(
+    img_h: int,
+    img_w: int,
+    patch_size: int,
+    max_num_patches_per_side: int,
+    num_frames: int = 1,
+) -> torch.Tensor:
+    """Compute flattened position IDs for latent patches.
 
     Args:
         img_h: Image height in pixels.
         img_w: Image width in pixels.
         patch_size: Latent patch size (VAE downsample × latent_patch_size).
         max_num_patches_per_side: Max grid size for position embedding.
+        num_frames: Latent frames.  1 reproduces the 2-D image grid; more adds a
+            temporal axis, giving the ``t * side**2 + h * side + w`` rows that the
+            3-D position table is built with (``get_3d_sincos_pos_embed`` is
+            called with ``(max_num_frames, side, side)``, so one frame is just the
+            image table).
 
     Returns:
-        Flattened position IDs of shape ``(num_patches,)``.
+        Flattened position IDs of shape ``(num_frames * num_patches,)``.
     """
     num_patches_h = img_h // patch_size
     num_patches_w = img_w // patch_size
     coords_h = torch.arange(0, num_patches_h)
     coords_w = torch.arange(0, num_patches_w)
-    pos_ids = (coords_h[:, None] * max_num_patches_per_side + coords_w).flatten()
-    return pos_ids
+    per_frame = (coords_h[:, None] * max_num_patches_per_side + coords_w).flatten()
+    if num_frames <= 1:
+        return per_frame
+    stride = max_num_patches_per_side * max_num_patches_per_side
+    return (torch.arange(0, num_frames)[:, None] * stride + per_frame).flatten()
 
 
 # ===================================================================
@@ -236,6 +250,7 @@ class BagelMoTAttention(nn.Module):
         latent_mask: Tensor,
         L_ctx: int = 0,
         key_padding_mask: Optional[Tensor] = None,
+        attn_plan: Optional[list[tuple[int, int, int, Optional[int]]]] = None,
     ) -> Tensor:
         B, L, _ = hidden_states.shape
         text_idx = text_mask.nonzero(as_tuple=True)
@@ -287,7 +302,37 @@ class BagelMoTAttention(nn.Module):
         k_normed = k_normed.transpose(1, 2)
         v = v.transpose(1, 2)
 
-        if L_ctx > 0:
+        if attn_plan is not None:
+            # A caller that replays a sequence prefilled in segments knows each
+            # block's key range and causality, which a single text/image split
+            # cannot express: Lance's edit context alternates causal text, a
+            # fully-visible reference, causal text, then the fully-visible latent
+            # block.  Each entry is (query_start, query_end, key_end, diagonal),
+            # where ``diagonal`` is the query-relative key bound for a causal
+            # block and ``None`` means every key up to ``key_end`` is visible.
+            blocks = []
+            for q_start, q_end, k_end, diagonal in attn_plan:
+                q_len = q_end - q_start
+                block_mask = None
+                if diagonal is not None:
+                    rows = torch.arange(q_len, device=hidden_states.device).unsqueeze(1)
+                    keys = torch.arange(k_end, device=hidden_states.device).unsqueeze(0)
+                    block_mask = keys <= (diagonal + rows)
+                    block_mask = block_mask.view(1, 1, q_len, k_end)
+                if key_padding_mask is not None:
+                    valid = key_padding_mask[:, :k_end].view(B, 1, 1, k_end)
+                    block_mask = valid if block_mask is None else (block_mask & valid)
+                blocks.append(
+                    F.scaled_dot_product_attention(
+                        q_normed[:, :, q_start:q_end],
+                        k_normed[:, :, :k_end],
+                        v[:, :, :k_end],
+                        attn_mask=block_mask,
+                        is_causal=False,
+                    )
+                )
+            attn_out = torch.cat(blocks, dim=2)
+        elif L_ctx > 0:
             if key_padding_mask is not None and not key_padding_mask.all():
                 # Official BAGEL packs prompts, so padded prompt keys do not exist there.
                 # Mask them in both branches to match packed attention semantics.
@@ -359,6 +404,7 @@ class BagelMoTLayer(nn.Module):
         latent_mask: Tensor,
         L_ctx: int = 0,
         key_padding_mask: Optional[Tensor] = None,
+        attn_plan: Optional[list[tuple[int, int, int, Optional[int]]]] = None,
     ) -> Tensor:
         """Forward pass with MoT-routed layernorm, attention, and MLP.
 
@@ -382,6 +428,12 @@ class BagelMoTLayer(nn.Module):
         normed[text_idx] = self.input_layernorm(hidden_states[text_idx])
         normed[latent_idx] = self.input_layernorm_moe_gen(hidden_states[latent_idx])
 
+        # Only a replay that splices an exported context passes a plan; the SFT
+        # attention subclass shares this block and takes no ``attn_plan``, so the
+        # keyword is omitted when there is nothing to split.
+        attn_kwargs: dict = {"key_padding_mask": key_padding_mask}
+        if attn_plan is not None:
+            attn_kwargs["attn_plan"] = attn_plan
         attn_out = self.self_attn(
             normed,
             cos,
@@ -389,7 +441,7 @@ class BagelMoTLayer(nn.Module):
             text_mask,
             latent_mask,
             L_ctx,
-            key_padding_mask=key_padding_mask,
+            **attn_kwargs,
         )
         hidden_states = hidden_states + attn_out
 
@@ -438,7 +490,9 @@ class TimestepEmbedder(nn.Module):
     def forward(self, t: Tensor) -> Tensor:
         half = self.freq_dim // 2
         freqs = torch.exp(-math.log(10000) * torch.arange(half, dtype=torch.float32, device=t.device) / half)
-        args = t[:, None].float() * freqs[None]
+        # ``t`` is one sigma per sample, or one per token when a replay pins part
+        # of the latent block; both keep their leading dims.
+        args = t[..., None].float() * freqs
         emb = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
         emb = emb.to(self.mlp[0].weight.dtype)
         return self.mlp(emb)
@@ -483,12 +537,49 @@ class BagelForTraining(NonDiffusersModelBase):
         self.llm2vae = nn.Linear(config.hidden_size, config.patch_latent_dim)
         self.latent_pos_embed = PositionEmbedding(config.max_latent_size, config.hidden_size)
 
+    def build_position_ids(
+        self,
+        batch: int,
+        num_text: int,
+        num_latent: int,
+        latent_pos_ids: Tensor,
+        device,
+        *,
+        text_attention_mask: Optional[Tensor] = None,
+        position_anchor: Optional[Tensor] = None,
+    ) -> Tensor:
+        """RoPE positions for text + start marker + latents + end marker.
+
+        BAGEL gives the whole image block a single position; the spatial
+        layout reaches the model through ``latent_pos_embed`` instead.  A
+        BAGEL-lineage model whose rollout positions the latents differently
+        overrides this, so the trainer replays on the rotary basis the rollout
+        actually used.
+
+        Args:
+            batch: Batch size.
+            num_text: Text context length.
+            num_latent: Number of latent tokens.
+            latent_pos_ids: ``(L_latent,)`` or ``(B, L_latent)`` grid indices.
+            device: Device for the returned tensor.
+            text_attention_mask: Optional valid-text mask for model-specific positions.
+
+        Returns:
+            ``(B, L_total)`` positions, or any shape the rotary accepts.
+        """
+        text = torch.arange(num_text, device=device).unsqueeze(0).expand(batch, -1)
+        anchor = num_text if position_anchor is None else position_anchor
+        anchor = torch.as_tensor(anchor, device=device, dtype=torch.long).reshape(-1, 1).expand(batch, 1)
+        image = anchor.expand(batch, num_latent + 2)
+        return torch.cat([text, image], dim=-1)
+
     def forward(
         self,
         hidden_states: Tensor,
         timestep: Tensor,
         text_token_ids: Optional[Tensor],
         latent_pos_ids: Tensor,
+        position_anchor: Optional[Tensor] = None,
         **kwargs,
     ) -> tuple[Tensor]:
         """Forward pass.
@@ -538,7 +629,9 @@ class BagelForTraining(NonDiffusersModelBase):
         # 3. Latent projection
         t_emb = self.time_embedder(timestep)
         pos_emb = self.latent_pos_embed(latent_pos_ids)
-        latent_embeds = self.vae2llm(hidden_states) + t_emb.unsqueeze(1) + pos_emb
+        if t_emb.ndim == 2:
+            t_emb = t_emb.unsqueeze(1)
+        latent_embeds = self.vae2llm(hidden_states) + t_emb + pos_emb
         latent_embeds = latent_embeds.to(soi_emb.dtype)
 
         # 4. Sequence: [text?, soi, latent_0..N, eoi]
@@ -557,12 +650,15 @@ class BagelForTraining(NonDiffusersModelBase):
         latent_mask = ~text_mask
 
         # 6. RoPE positions
-        if L_ctx > 0:
-            ctx_pos = torch.arange(L_ctx, device=dev)
-            img_pos = ctx_pos.new_full((1 + L_latent + 1,), L_ctx)
-            position_ids = torch.cat([ctx_pos, img_pos]).unsqueeze(0).expand(B, -1)
-        else:
-            position_ids = torch.zeros(1, L_total, dtype=torch.long, device=dev).expand(B, -1)
+        position_ids = self.build_position_ids(
+            B,
+            L_ctx,
+            L_latent,
+            latent_pos_ids,
+            dev,
+            text_attention_mask=text_attention_mask,
+            position_anchor=position_anchor,
+        )
 
         # Key padding mask: zero-padded text tokens in uneven micro-batches
         # must not attend to image queries.  ``None`` keeps the flash backend.

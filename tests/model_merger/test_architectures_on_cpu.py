@@ -536,5 +536,9 @@ def test_registry_covers_repository_diffusers_training_architectures():
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "register":
                 if isinstance(node.func.value, ast.Name) and node.func.value.id == "DiffusionModelBase":
                     found.add(ast.literal_eval(node.args[0]))
-    # BAGEL builds NonDiffusersModelBase and requires native publishing, not ModelMixin.save_pretrained.
-    assert found - {"OmniBagelForConditionalGeneration"} == set(_TRANSFORMERS)
+    # BAGEL and Lance build NonDiffusersModelBase and require native publishing,
+    # not ModelMixin.save_pretrained, so neither appears in _TRANSFORMERS.
+    assert found - {
+        "OmniBagelForConditionalGeneration",
+        "OmniLanceForConditionalGeneration",
+    } == set(_TRANSFORMERS)

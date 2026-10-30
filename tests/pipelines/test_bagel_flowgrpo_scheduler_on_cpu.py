@@ -80,3 +80,28 @@ def test_sample_previous_step_replays_recorded_trajectory():
             return_sqrt_dt=True,
             include_logprob_normalizer=False,
         )
+
+
+def test_window_slice_keeps_in_window_log_probs():
+    from verl_omni.pipelines.bagel_flow_grpo.vllm_omni_rollout_adapter import _slice_trajectory_to_window
+
+    n_steps = 15
+    latents = torch.arange(n_steps + 1)
+    timesteps = torch.arange(n_steps)
+    window = (3, 5)
+
+    # The scheduler adapter only returns a log-prob inside the window and the
+    # pipeline drops the None entries, so the rollout hands over 2 values.
+    in_window = torch.tensor([103.0, 104.0])
+    lat, ts, lp = _slice_trajectory_to_window(latents, timesteps, in_window, window)
+    assert lat.tolist() == [3, 4, 5]
+    assert ts.tolist() == [3, 4]
+    assert lp.tolist() == [103.0, 104.0]
+
+    # A record covering every step is sliced like the timesteps.
+    full = torch.arange(n_steps).float() + 100
+    _, _, lp = _slice_trajectory_to_window(latents, timesteps, full, window)
+    assert lp.tolist() == [103.0, 104.0]
+
+    with pytest.raises(ValueError):
+        _slice_trajectory_to_window(latents, timesteps, torch.zeros(3), window)
