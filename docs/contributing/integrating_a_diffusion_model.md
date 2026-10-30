@@ -1,6 +1,6 @@
 # How to Integrate a New Diffusion Model for FlowGRPO Training
 
-Last updated: 10/05/2026.
+Last updated: 10/27/2026.
 
 This guide walks you through everything required to integrate a new diffusion
 model into VeRL-Omni so it can be trained end-to-end with the **FlowGRPO**
@@ -28,14 +28,17 @@ code is the canonical reference.
 ## TL;DR
 
 A new model needs **three files in one new package** plus **two registry
-hooks**. The same adapters work with both the default diffusers + FSDP2
+hooks**. A run that also trains the text encoder adds
+`ar_training_adapter.py`; see
+[Composite AR training adapter](#composite-ar-training-adapter).  The same adapters work with both the default diffusers + FSDP2
 backend and the optional [VeOmni backend](#53-use-the-veomni-backend-optional) — backend selection is purely a configuration concern.
 
 ```
 verl_omni/pipelines/<model>_flow_grpo/
 ├── __init__.py                       # re-exports both adapters
 ├── diffusers_training_adapter.py     # subclass of DiffusionModelBase
-└── vllm_omni_rollout_adapter.py      # subclass of VllmOmniPipelineBase
+├── vllm_omni_rollout_adapter.py      # subclass of VllmOmniPipelineBase
+└── ar_training_adapter.py            # only when the text encoder is trained
 ```
 
 Both adapters are picked up by string-based registries that dispatch on
@@ -259,7 +262,8 @@ as a template:
 verl_omni/pipelines/<model>_flow_grpo/
 ├── __init__.py
 ├── diffusers_training_adapter.py
-└── vllm_omni_rollout_adapter.py
+├── vllm_omni_rollout_adapter.py
+└── ar_training_adapter.py            # only when AR is trained
 ```
 
 The `__init__.py` re-exports both adapters so the `@register(...)`
@@ -396,6 +400,48 @@ skipped for some micro-batches — an unsharded forward emits no collectives,
 so the skip cannot desync the ranks. Ignored parameters must stay frozen
 (FSDP2 does not synchronize their gradients), and a non-empty list requires
 `strategy=fsdp2`; the engine raises otherwise.
+
+---
+
+## Composite AR training adapter
+
+Skip this file when only the DiT is trained. 
+Add `ar_training_adapter.py` when the same package trains the AR (e.g., text encoder) with the DiT (`model_type=diffusion_composite_model`). 
+Packages that do not train the AR must not register a subclass — `DiffusionModelARBase.peek_class` returns `None` and the engine skips AR setup.
+
+The AR backend is `CompositeARFSDPEngineWithLMHead`. After verl builds the
+language-model module it dispatches through `DiffusionModelARBase`, which is not `DiffusionModelBase`. AR setup stays in `ar_training_adapter.py`; the DiT adapter stays in `diffusers_training_adapter.py`. Both use the same
+`(architecture, algorithm)` key.
+
+```python
+from verl_omni.pipelines.model_base import DiffusionModelARBase
+
+@DiffusionModelARBase.register("MyModelPipeline", algorithm="flow_grpo")
+class MyModelAR(DiffusionModelARBase):
+    @classmethod
+    def configure_module(cls, module, model_config) -> None:
+        ...
+
+    @classmethod
+    def get_fsdp_ignored_module_names(cls, model_config) -> list[str]:
+        return []  # optional; frozen subtrees left unsharded under FSDP2
+```
+
+Import the class from the package `__init__.py` so the decorator runs:
+
+```python
+from .ar_training_adapter import MyModelAR  # noqa: F401
+```
+
+The worked example is
+[`qwen_image_dual_grpo/ar_training_adapter.py`](../../verl_omni/pipelines/qwen_image_dual_grpo/ar_training_adapter.py).
+
+- `configure_module` receives the Hugging Face module before FSDP wrap.
+  Strip an unused tower or patch `forward` here.
+- Do not call DiT adapter methods from this file, and do not put this
+  setup on `diffusers_training_adapter.py`.
+- Under FSDP2, `get_fsdp_ignored_module_names` feeds
+  `CompositeARFSDPEngineWithLMHead._build_fsdp_module`.
 
 ---
 
@@ -681,6 +727,9 @@ Before opening the PR, confirm every box:
       (no decode-and-re-encode in the pipeline).
 - [ ] `verl_omni/pipelines/<model>_flow_grpo/` contains `__init__.py`,
       `diffusers_training_adapter.py`, and `vllm_omni_rollout_adapter.py`.
+      A package that also trains the AR module adds
+      `ar_training_adapter.py` and imports it from `__init__.py`
+      ([Composite AR training adapter](#composite-ar-training-adapter)).
 - [ ] [`verl_omni/pipelines/__init__.py`](../../verl_omni/pipelines/__init__.py)
       imports the new package.
 - [ ] Architecture string on both `@register(...)` decorators matches

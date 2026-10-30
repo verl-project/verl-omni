@@ -1079,3 +1079,77 @@ class OmniRolloutPipelineBase:
                 "An omni rollout adapter with multiple final outputs must implement combine_engine_outputs()."
             )
         return outputs[0], {}
+
+
+class DiffusionModelARBase:
+    """Base class for composite AR training adapters.
+
+    Used only when ``model_type=diffusion_composite_model``. DiT setup stays on
+    ``DiffusionModelBase``; this class configures the AR module built by
+    ``CompositeARFSDPEngineWithLMHead``. Packages that do not train the AR must
+    not register a subclass — ``peek_class`` returns ``None`` and the engine
+    skips AR setup.
+
+    Register with ``@DiffusionModelARBase.register(architecture, algorithm)``.
+    The worked example is Qwen-Image Dual-GRPO's ``ar_training_adapter.py``.
+
+    Note that ``model_config`` here reuses diffusion model configurations.
+    """
+
+    _registry: dict[tuple[str, str], type["DiffusionModelARBase"]] = {}
+
+    @classmethod
+    def register(cls, architecture: str, algorithm: str):
+        """Class decorator that registers a subclass for ``(architecture, algorithm)``."""
+
+        def decorator(subclass: type["DiffusionModelARBase"]) -> type["DiffusionModelARBase"]:
+            cls._registry[(architecture, algorithm)] = subclass
+            return subclass
+
+        return decorator
+
+    @classmethod
+    def peek_class(cls, model_config) -> Optional[type["DiffusionModelARBase"]]:
+        """Return the registered AR adapter, or ``None`` when AR is not trained."""
+        external_lib: Optional[str] = getattr(model_config, "external_lib", None)
+        if external_lib is not None:
+            from verl.utils.import_utils import import_external_libs
+
+            import_external_libs(external_lib)
+        return cls._registry.get((model_config.architecture, model_config.algorithm))
+
+    @classmethod
+    def get_class(cls, model_config) -> type["DiffusionModelARBase"]:
+        """Return the registered AR adapter, or raise when none is registered."""
+        adapter = cls.peek_class(model_config)
+        if adapter is None:
+            registered = sorted(cls._registry.keys())
+            raise NotImplementedError(
+                f"No composite AR adapter registered for "
+                f"(architecture={model_config.architecture!r}, "
+                f"algorithm={model_config.algorithm!r}). Registered: {registered}. "
+                f"Add ``ar_training_adapter.py`` only when the text encoder is trained."
+            )
+        return adapter
+
+    @classmethod
+    def configure_module(cls, module: torch.nn.Module, model_config) -> None:
+        """Post-build AR setup before FSDP wrap. Default is a no-op."""
+        return
+
+    @classmethod
+    def maybe_configure_module(cls, module: torch.nn.Module, model_config) -> None:
+        """Run ``configure_module`` when an AR adapter is registered; otherwise no-op."""
+        adapter = cls.peek_class(model_config)
+        if adapter is not None:
+            adapter.configure_module(module, model_config)
+
+    @classmethod
+    def get_fsdp_ignored_module_names(cls, model_config) -> list[str]:
+        """Submodule name components to leave unsharded under FSDP2 (default: none).
+
+        FSDP2 only. Declare a frozen subtree whose forward is skipped on some
+        micro-batches so the skip cannot desync ranks. Ignored parameters must
+        stay frozen — FSDP2 does not synchronize their gradients.
+        """
+        return []
