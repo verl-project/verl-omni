@@ -62,7 +62,7 @@ VAL_REWARD_MIN=0.85 bash tests/convergence/sd35_medium_ocr_lora_v1/run_sd35_medi
 | `PPO_MINI_BATCH_SIZE` | `8` | Must divide `TRAIN_BATCH_SIZE` |
 | `PPO_MICRO_BATCH_SIZE` | `4` | Per-GPU actor micro-batch |
 | `LOG_PROB_MICRO_BATCH_SIZE` | `4` | Old/ref log-prob micro-batch |
-| `MAX_NUM_SEQS` | `128` | Request-level rollout depth cap |
+| `MAX_NUM_SEQS` | `8` | Request-level rollout concurrency cap; lower it to reduce the VAE-decode peak that caused NPU OOM in CI |
 | `REWARD_GPU_MEMORY_UTILIZATION` | `0.85` | Reward vLLM memory fraction |
 
 ## Recorded, not gated
