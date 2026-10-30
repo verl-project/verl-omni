@@ -8,6 +8,8 @@ on:
     paths:
       - "verl_omni/**"
       - "tests/npu_smoke/**"
+      - "tests/agent_loop/**"
+      - "tests/reward_loop/**"
       - "tests/workers/**"
       - "tests/special_e2e/**"
       - "pyproject.toml"
@@ -21,6 +23,8 @@ on:
     paths:
       - "verl_omni/**"
       - "tests/npu_smoke/**"
+      - "tests/agent_loop/**"
+      - "tests/reward_loop/**"
       - "tests/workers/**"
       - "tests/special_e2e/**"
       - "pyproject.toml"
@@ -33,7 +37,7 @@ permissions:
   pull-requests: read
 
 jobs:
-  setup_runner:
+  resolve_groups:
     # Pull requests run only after a CI label is applied:
     #   ready-for-ci                    -> all NPU tests as part of full PR validation
     #   ci-npu                         -> all NPU tests for targeted NPU validation
@@ -47,6 +51,45 @@ jobs:
        contains(github.event.pull_request.labels.*.name, 'ci-npu') ||
        contains(github.event.pull_request.labels.*.name, 'ci-npu-core') ||
        contains(github.event.pull_request.labels.*.name, 'ci-npu-e2e'))
+    runs-on: ubuntu-latest
+    outputs:
+      groups: ${{ steps.resolve-groups.outputs.groups }}
+    steps:
+      - name: Resolve NPU CI groups
+        id: resolve-groups
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_LABELS: ${{ github.event_name == 'pull_request' && toJSON(github.event.pull_request.labels.*.name) || '[]' }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+
+          label_groups = {
+              "ready-for-ci": ("core", "e2e"),
+              "ci-npu": ("core", "e2e"),
+              "ci-npu-core": ("core",),
+              "ci-npu-e2e": ("e2e",),
+          }
+          labels = json.loads(os.environ["PR_LABELS"]) if os.environ["EVENT_NAME"] == "pull_request" else ["ci-npu"]
+          selected = {group for label in labels for group in label_groups.get(label, ())}
+          groups = [group for group in ("core", "e2e") if group in selected]
+          if not groups:
+              raise SystemExit("No NPU smoke groups selected.")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write(f"groups={json.dumps(groups)}\n")
+          PY
+
+  npu_smoke:
+    needs: resolve_groups
+    if: needs.resolve_groups.result == 'success'
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        group: ${{ fromJSON(needs.resolve_groups.outputs.groups) }}
     runs-on: linux-aarch64-a2b4-8
     timeout-minutes: 120
     container:
@@ -61,40 +104,7 @@ jobs:
       TRANSFORMERS_VERBOSITY: 'error'
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-      - name: Resolve NPU CI groups
-        id: resolve-groups
-        shell: bash
-        run: |
-          declare -A label_groups=(
-            ["ready-for-ci"]="core e2e"
-            ["ci-npu"]="core e2e"
-            ["ci-npu-core"]="core"
-            ["ci-npu-e2e"]="e2e"
-          )
-          declare -A selected_groups=()
-
-          pr_labels="${{ github.event_name == 'pull_request' && join(github.event.pull_request.labels.*.name, ',') || '' }}"
-          if [[ "${{ github.event_name }}" != "pull_request" ]]; then
-            labels=("ci-npu")
-          else
-            IFS=',' read -ra labels <<< "${pr_labels}"
-          fi
-
-          for label in "${labels[@]}"; do
-            for group in ${label_groups[${label}]:-}; do
-              selected_groups["${group}"]=1
-            done
-          done
-
-          groups=""
-          for group in core e2e; do
-            if [[ -n "${selected_groups[${group}]:-}" ]]; then
-              groups+="${groups:+ }${group}"
-            fi
-          done
-          echo "groups=${groups}" >> "$GITHUB_OUTPUT"
       - name: Check NPU and CANN info
-        if: steps.resolve-groups.outputs.groups != ''
         shell: bash
         run: |
           cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
@@ -102,7 +112,6 @@ jobs:
           echo "===== Ascend/NPU environment ====="
           env | LC_ALL=C sort | grep -E "(/usr/local/Ascend/|^(ASCEND|ATB|HCCL|NPU|DEVICE_|RANK_TABLE|RAY_EXPERIMENTAL_NOSET_ASCEND))" || true
       - name: Print vLLM stack versions
-        if: steps.resolve-groups.outputs.groups != ''
         shell: bash
         run: |
           pip show vllm || true
@@ -114,28 +123,30 @@ jobs:
           MODEL_PATH="${HOME}/.cache/modelscope/hub/models/tiny-random/Qwen-Image"
           python tests/special_e2e/build_qwen_image_tiny_random.py \
             --output-dir "${MODEL_PATH}"
-      - name: Run NPU smoke tests
-        if: steps.resolve-groups.outputs.groups != ''
+      - name: Run NPU smoke ${{ matrix.group }} tests
         shell: bash
+        env:
+          NPU_SMOKE_GROUP: ${{ matrix.group }}
         run: |
           mkdir -p logs/npu_smoke/parallel
-          failed=0
-          for group in ${{ steps.resolve-groups.outputs.groups }}; do
-            script="tests/npu_smoke/run_npu_smoke_${group}.sh"
-            echo "Running NPU smoke group '${group}' with ${script}"
-            set +e
-            bash "${script}" --num-npus 8 2>&1 | tee "logs/npu_smoke/parallel/${group}.log"
-            rc="${PIPESTATUS[0]}"
-            set -e
-            if [[ "${rc}" -ne 0 ]]; then
-              failed=1
-            fi
-          done
-          exit "${failed}"
+          bash "tests/npu_smoke/run_npu_smoke_${NPU_SMOKE_GROUP}.sh" --num-npus 8 \
+            2>&1 | tee "logs/npu_smoke/parallel/${NPU_SMOKE_GROUP}.log"
       - name: Upload NPU smoke logs
-        if: always() && steps.resolve-groups.outputs.groups != ''
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: npu-smoke-logs-${{ github.job }}
+          name: npu-smoke-logs-${{ matrix.group }}
           path: logs/npu_smoke/**
           if-no-files-found: ignore
+
+  setup_runner:
+    needs: [resolve_groups, npu_smoke]
+    if: always() && needs.resolve_groups.result != 'skipped'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check selected NPU smoke groups
+        env:
+          GROUP_SELECTION_RESULT: ${{ needs.resolve_groups.result }}
+          NPU_SMOKE_RESULT: ${{ needs.npu_smoke.result }}
+        run: |
+          [[ "${GROUP_SELECTION_RESULT}" == 'success' && "${NPU_SMOKE_RESULT}" == 'success' ]]

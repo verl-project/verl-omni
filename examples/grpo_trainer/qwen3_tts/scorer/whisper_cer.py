@@ -31,6 +31,73 @@ import numpy as np
 
 __all__ = ["WhisperCERScorer"]
 
+# Device types that expose a torch.<device>.is_available() probe, in preference order.
+# MPS is deliberately absent: Whisper on MPS is untested here and ``auto`` must not
+# silently pick it. Naming ``--device mps`` still works.
+_ACCELERATOR_DEVICE_TYPES = ("cuda", "npu", "xpu")
+
+
+def _current_index(accelerator: Any, current: Any) -> int:
+    """Index of the device ``auto`` should use for ``current``.
+
+    ``torch.accelerator.current_accelerator()`` documents that the returned
+    device carries **no** index -- it is always ``None`` -- and points at
+    :func:`torch.accelerator.current_device_index` for the one actually in use.
+    Defaulting to ``0`` would silently move a multi-device run onto the first
+    card, so ask the accelerator; a build without that accessor, or one that
+    fails, still has ``current``'s own index to fall back on, then ``0``.
+    """
+    index = getattr(current, "index", None)
+    if index is not None:
+        return index
+    current_device_index = getattr(accelerator, "current_device_index", None)
+    if callable(current_device_index):
+        try:
+            reported = current_device_index()
+        except Exception:  # Defensive: a probe must never break device selection.
+            reported = None
+        if isinstance(reported, int) and reported >= 0:
+            return reported
+    return 0
+
+
+def _resolve_auto_device(torch_module: Any) -> str:
+    """Resolve ``--device auto`` to the best available accelerator, else ``cpu``.
+
+    ``torch.cuda.is_available()`` is ``False`` on non-CUDA accelerators such as
+    Ascend NPU, so probing CUDA alone silently selects CPU. That fallback then
+    trips the float16 guard in :class:`WhisperCERScorer` and the default
+    ``--device auto --dtype float16`` invocation cannot start at all.
+    """
+    accelerator = getattr(torch_module, "accelerator", None)
+    if accelerator is not None:
+        try:
+            # ``check_available=True`` adds the runtime check: without it a build
+            # compiled with CUDA answers ``cuda`` even when this host has no
+            # usable CUDA device, and the probes below would never be consulted.
+            current = accelerator.current_accelerator(check_available=True)
+        except TypeError:  # Builds whose current_accelerator() takes no kwarg.
+            try:
+                current = accelerator.current_accelerator()
+            except Exception:
+                current = None
+        except Exception:  # Some torch builds raise instead of returning None.
+            current = None
+        current_type = getattr(current, "type", None)
+        if current_type is not None and current_type != "cpu":
+            return f"{current_type}:{_current_index(accelerator, current)}"
+    for device_type in _ACCELERATOR_DEVICE_TYPES:
+        backend = getattr(torch_module, device_type, None)
+        if backend is None:
+            continue
+        try:
+            available = bool(backend.is_available())
+        except Exception:  # Defensive: an unavailable backend may still raise.
+            available = False
+        if available:
+            return f"{device_type}:0"
+    return "cpu"
+
 
 class WhisperCERScorer:
     """Transcribe generated speech with Whisper and return a capped CER reward.
@@ -55,7 +122,7 @@ class WhisperCERScorer:
         from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor
 
         if device == "auto":
-            device = "cuda:0" if torch.cuda.is_available() else "cpu"
+            device = _resolve_auto_device(torch)
         dtype_map = {"float16": torch.float16, "bfloat16": torch.bfloat16, "float32": torch.float32}
         if dtype not in dtype_map:
             raise ValueError(f"Unsupported dtype: {dtype!r}.")
@@ -239,7 +306,14 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", required=True, help="Local Whisper checkpoint or Hugging Face model ID")
     parser.add_argument("--revision", default=None)
-    parser.add_argument("--device", default="auto")
+    parser.add_argument(
+        "--device",
+        default="auto",
+        help=(
+            "Device for Whisper; 'auto' picks the first available accelerator "
+            "(CUDA / Ascend NPU / XPU) and falls back to CPU."
+        ),
+    )
     parser.add_argument("--dtype", choices=("float16", "bfloat16", "float32"), default="float16")
     parser.add_argument("--language", default="hi")
     parser.add_argument("--host", default="127.0.0.1")
