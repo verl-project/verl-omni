@@ -47,9 +47,7 @@ dependencies = [
     "math_verify",
     "mathruler",
     "tensorboard",
-    # verl@2ab3529 declares TransferQueue>=0.1.11; we stay on 0.1.9, so
-    # transfer_queue.backend.SimpleStorage.ssd_offload (new in 0.1.11) is ignored.
-    "TransferQueue==0.1.9",
+    "TransferQueue==0.1.11",
     "vllm==0.30.0",
     "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@12e9280010afc41ce5c6a1f46900fc329cf08377",
     "verl @ git+https://github.com/verl-project/verl.git@2ab35292039a51175a4b3d3b3b2d76e951a0d3e4",
