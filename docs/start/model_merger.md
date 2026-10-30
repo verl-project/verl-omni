@@ -345,10 +345,12 @@ The H3 LoRA case additionally checks the native DiT loader. Optional Boogu cases
 are reported explicitly as skipped when its package is unavailable.
 
 Without `boogu-image`, only its cases are skipped; this is not evidence that Boogu
-was tested. Local verification used Diffusers 0.40.0 and canonical Boogu source
-revision `25f8f888298224a94e5ec2abafb98abea9031a0d` on PYTHONPATH, without changing
-the shared venv. Boogu's declared dependency ranges differ from that venv; source
-execution is not dependency-resolver or clean-install validation.
+was tested. Historical validation environment (Diffusers 0.40.0; recorded before
+the project raised its minimum to 0.41.0). Local verification used Diffusers 0.40.0
+and canonical Boogu source revision `25f8f888298224a94e5ec2abafb98abea9031a0d` on
+PYTHONPATH, without changing the shared venv. Boogu's declared dependency ranges
+differ from that venv; source execution is not dependency-resolver or clean-install
+validation.
 
 These tests use random tiny weights on CPU; they are not real-weight/GPU or
 production image-quality evidence. Real checkpoint save/export/load remains a

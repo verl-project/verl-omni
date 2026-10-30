@@ -90,7 +90,7 @@ RUN VLLM_OMNI_REF="$(tr -d '[:space:]' < .github/vllm_omni_pin.txt)" \
       kernels-data==0.16.1  # not optional: kernels loads it via an entry point
 
 # Step 4 — corrections the ROCm base needs.
-RUN pip install --no-deps diffusers==0.40.0 \
+RUN pip install diffusers==0.41.0 \
  && pip install --no-deps -U "torchao>=0.16.0"  # peft >=0.19 rejects torchao <0.16
 
 # Step 5 — verl at the pin: the base ships 0.9.0.dev0, whose agent loop reads a
