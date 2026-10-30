@@ -28,15 +28,19 @@ import torch.distributed
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp import MixedPrecision, ShardingStrategy
+from verl.utils.device import get_device_name as _platform_device_name
 
 # Hub FA kernels don't fetch on the torch-2.13 CI stack (no flash-attn2 build; hf-mirror breaks flash-attn3).
 _ulysses_backends = ["native"]
 
+# Same list as ENABLED_GPU_DEVICES in tests/utils/gpu_test_topology.py (this file also runs as a torchrun
+# script, where that package is not importable). Other devices run on CPU as before.
+_ENABLED_GPU_DEVICES = ("cuda", "xpu")
+
 
 def get_device_name() -> str:
-    if torch.cuda.is_available():
-        return "cuda"
-    return "cpu"
+    name = _platform_device_name()
+    return name if name in _ENABLED_GPU_DEVICES else "cpu"
 
 
 def get_torch_device():
@@ -44,7 +48,12 @@ def get_torch_device():
 
 
 def initialize_global_process_group(timeout_second: int = 36000):
-    backend = "hccl" if get_device_name() == "npu" else "nccl"
+    if get_device_name() == "npu":
+        backend = "hccl"
+    elif get_device_name() == "xpu":
+        backend = "xccl"
+    else:
+        backend = "nccl"
     torch.distributed.init_process_group(
         backend,
         timeout=timedelta(seconds=timeout_second),
@@ -634,4 +643,4 @@ def _diffusers_ulysses_fwd_bwd_fsdp(sp_size: int, dp_size: int, backend: str):
 
 
 if __name__ == "__main__":
-    pytest.main([__file__, "-svv"])
+    raise SystemExit(pytest.main([__file__, "-svv"]))

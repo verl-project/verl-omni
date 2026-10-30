@@ -94,6 +94,10 @@ EOF
         CUDA_DEVICE_LIST=""
     fi
     export CUDA_DEVICE_LIST
+    # Level Zero ignores CUDA_VISIBLE_DEVICES; mirror the selection for Intel GPUs.
+    if [[ -n "${CUDA_DEVICE_LIST}" && -z "${ZE_AFFINITY_MASK:-}" ]]; then
+        export ZE_AFFINITY_MASK="${CUDA_DEVICE_LIST}"
+    fi
 
     TIMESTAMP="$(date '+%Y%m%d_%H%M%S')"
     LOG_DIR="${LOG_DIR:-${REPO_ROOT}/logs/gpu_smoke/${GPU_SMOKE_GROUP}/${TIMESTAMP}}"
@@ -123,6 +127,9 @@ EOF
     echo -e "  NUM_GPUS  : ${NUM_GPUS}"
     if [[ -n "${CUDA_DEVICE_LIST}" ]]; then
         echo -e "  CUDA_VISIBLE_DEVICES : ${CUDA_DEVICE_LIST}"
+    fi
+    if [[ -n "${ZE_AFFINITY_MASK:-}" ]]; then
+        echo -e "  ZE_AFFINITY_MASK : ${ZE_AFFINITY_MASK}"
     fi
     sep
     echo ""

@@ -32,7 +32,7 @@ from verl_omni.workers.engine_workers import TrainingWorker
 from verl_omni.workers.utils.losses import diffusion_loss
 from verl_omni.workers.utils.padding import embeds_padding_2_no_padding
 
-from ..utils.gpu_test_topology import resolve_requested_num_gpus
+from ..utils.gpu_test_topology import enabled_gpu_count, resolve_requested_num_gpus
 
 
 def _diffusers_sp_supported() -> bool:
@@ -243,7 +243,7 @@ def test_diffusers_fsdp_engine(strategy):
     ray.init()
     tmp_dir = tempfile.mkdtemp(prefix="qwen_image_sp_")
     try:
-        visible_gpus = torch.cuda.device_count()
+        visible_gpus = enabled_gpu_count()
         device_count = resolve_requested_num_gpus(default_num_gpus=max(1, visible_gpus))
         if device_count > 1 and device_count % 2 != 0:
             pytest.skip(f"Need even GPU count for cp=2/fsdp_size=device_count test, got {device_count}")

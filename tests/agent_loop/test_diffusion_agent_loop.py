@@ -18,7 +18,6 @@ import shutil
 import numpy as np
 import pytest
 import ray
-import torch
 from omegaconf import DictConfig
 from verl.experimental.agent_loop.agent_loop import AgentLoopManager
 from verl.protocol import DataProto
@@ -26,7 +25,7 @@ from verl.workers.rollout.llm_server import LLMServerManager
 
 from verl_omni.agent_loop import DiffusionAgentLoopWorker
 
-from ..utils.gpu_test_topology import resolve_diffusion_agent_loop_gpu_topology
+from ..utils.gpu_test_topology import empty_gpu_cache, resolve_diffusion_agent_loop_gpu_topology
 
 
 def _create_tp_compatible_model(parent_dir, src_model_path, num_attention_heads=2):
@@ -206,5 +205,4 @@ def test_single_turn(init_config):
     finally:
         ray.shutdown()
         gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        empty_gpu_cache()
