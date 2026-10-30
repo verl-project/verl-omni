@@ -92,7 +92,7 @@ def test_dpo_train_step_skips_old_log_prob_and_pairs_batch(monkeypatch):
     )
     monkeypatch.setattr(
         "verl_omni.trainer.diffusion.v1.trainer_base.diffusion_tq_batch_to_dataproto",
-        lambda meta, pad_token_id: data,
+        lambda meta, pad_token_id, timing_raw=None: data,
     )
     monkeypatch.setattr(
         "verl_omni.trainer.diffusion.v1.trainer_base.extract_reward",

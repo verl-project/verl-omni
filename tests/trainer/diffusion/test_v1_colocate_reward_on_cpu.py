@@ -54,7 +54,7 @@ def test_colocate_reward_keeps_trajectory_fields(monkeypatch):
     trainer.global_steps = 1
     monkeypatch.setattr(
         "verl_omni.trainer.diffusion.v1.trainer_base.diffusion_tq_batch_to_dataproto",
-        lambda meta, pad_token_id: data,
+        lambda meta, pad_token_id, timing_raw=None: data,
     )
     monkeypatch.setattr(trainer, "_compute_reward_colocate", lambda d: reward)
     captured = {}
@@ -100,7 +100,7 @@ def test_colocate_reward_keeps_rollout_asleep_through_actor_update(monkeypatch):
     trainer.global_steps = 1
     monkeypatch.setattr(
         "verl_omni.trainer.diffusion.v1.trainer_base.diffusion_tq_batch_to_dataproto",
-        lambda meta, pad_token_id: data,
+        lambda meta, pad_token_id, timing_raw=None: data,
     )
     monkeypatch.setattr(trainer, "_compute_reward_colocate", lambda d: (calls.append("reward"), reward)[1])
     monkeypatch.setattr(trainer, "_balance_batch", lambda d, metrics: d)
@@ -153,7 +153,7 @@ def test_colocate_reward_wakes_rollout_mid_cycle_in_async_mode(monkeypatch):
     trainer.global_steps = 1
     monkeypatch.setattr(
         "verl_omni.trainer.diffusion.v1.trainer_base.diffusion_tq_batch_to_dataproto",
-        lambda meta, pad_token_id: data,
+        lambda meta, pad_token_id, timing_raw=None: data,
     )
     monkeypatch.setattr(trainer, "_compute_reward_colocate", lambda d: (calls.append("reward"), reward)[1])
 

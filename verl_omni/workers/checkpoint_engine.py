@@ -11,6 +11,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import time
+from collections import defaultdict
+
 import ray
 from verl.checkpoint_engine import CheckpointEngineManager, CheckpointEngineRegistry
 from verl.utils.ray_utils import auto_await
@@ -84,13 +87,16 @@ class OmniCheckpointEngineManager(CheckpointEngineManager):
     @auto_await
     async def update_weights(self, global_steps: int = None):
         """Fetch the actor's LoRA ``peft_config`` and stash it on the rollout
-        workers before delegating to the parent ``update_weights``.
+        workers before delegating to the parent ``update_weights``. The
+        parent's engine sync metrics are propagated so callers (and the
+        ``WeightSyncPhaseTimerMixin`` subclass) can merge them into step
+        metrics.
         """
         if self.backend != "naive":
             peft_config = self._fetch_actor_lora_peft_config()
             self._lora_peft_config = peft_config
             await self._push_lora_peft_config_to_replicas(peft_config)
-        await super().update_weights(global_steps=global_steps)
+        return await super().update_weights(global_steps=global_steps)
 
     async def _push_lora_peft_config_to_replicas(self, peft_config: dict | None) -> None:
         """Fetch ``peft_config`` from the actor (collective-free) and stash it
@@ -117,3 +123,123 @@ class OmniCheckpointEngineManager(CheckpointEngineManager):
             if result is not None:
                 return result
         return None
+
+
+# verl's ``CheckpointEngineManager.update_weights`` runs an eight-phase
+# pipeline (abort -> temp worker group -> KV release -> process-group build ->
+# transfer -> finalize -> KV resume -> generation resume), and the trainer
+# only ever sees the total as ``timing_s/update_weights``. The mixin below
+# times each phase by wrapping the very manager methods the pipeline calls,
+# without duplicating any of verl's internals; the inline phases (worker-group
+# construction, the transfer ``ray.get`` and ``finalize``) fall out as the
+# residual and are reported together as ``transfer_and_finalize`` because the
+# transfer dominates that window. The async phase overrides keep verl's
+# ``@auto_await`` dual sync/async call style and await the parent's raw
+# coroutine via ``__wrapped__`` so the decorator never nests; the sync caller
+# gets the thread-pool path -- exactly the parent's contract.
+# ``build_process_group`` is a plain synchronous method in the pinned verl and
+# is called un-awaited from the async ``update_weights``, so its override must
+# stay synchronous: an ``auto_await`` override would hand that caller a
+# coroutine it never awaits, silently skipping topology/process-group setup.
+class WeightSyncPhaseTimerMixin:
+    """Report per-phase weight-sync timings through ``update_weights``'s metrics.
+
+    The metrics dict returned by ``update_weights`` (already merged into the
+    trainer's step metrics via ``_pending_sync_metrics``) gains
+    ``weight_sync/phase/<name>_s`` for each timed phase plus
+    ``weight_sync/total_s`` and ``weight_sync/replicas``; engine-reported
+    sync metrics keep their own keys unchanged.
+    """
+
+    _sync_phase_timings: dict[str, float]
+
+    def __init__(self, *args, **kwargs):
+        # Phase methods can be called outside update_weights (switch_to_trainer
+        # aborts/sleeps replicas directly), so the accumulator must exist from
+        # construction, not just inside a profiled sync.
+        super().__init__(*args, **kwargs)
+        self._sync_phase_timings = defaultdict(float)
+
+    async def _timed_weight_sync_phase(self, parent_method, phase: str, *args, **kwargs):
+        start = time.perf_counter()
+        try:
+            return await parent_method(*args, **kwargs)
+        finally:
+            self._sync_phase_timings[phase] += time.perf_counter() - start
+
+    async def _profiled_update_weights(self, raw_parent_update, global_steps):
+        self._sync_phase_timings = defaultdict(float)
+        start = time.perf_counter()
+        sync_metrics = await raw_parent_update(self, global_steps=global_steps)
+        total = time.perf_counter() - start
+        metrics = dict(sync_metrics or {})
+        metrics.update({f"weight_sync/phase/{p}_s": s for p, s in self._sync_phase_timings.items()})
+        measured = sum(self._sync_phase_timings.values())
+        metrics["weight_sync/phase/transfer_and_finalize_s"] = max(0.0, total - measured)
+        metrics["weight_sync/total_s"] = total
+        metrics["weight_sync/replicas"] = float(len(getattr(self, "replicas", []) or []))
+        return metrics
+
+    def _wrap_phase_method(self, name: str, phase: str, *args, **kwargs):
+        parent = getattr(super(), name, None)
+        raw = getattr(parent, "__wrapped__", None)
+        if raw is None:
+            # Parent phase is a plain async def (test doubles): time it by
+            # wrapping the coroutine we get from calling it.
+            async def _timed_plain():
+                start = time.perf_counter()
+                try:
+                    return await parent(*args, **kwargs)
+                finally:
+                    self._sync_phase_timings[phase] += time.perf_counter() - start
+
+            return _timed_plain()
+        return self._timed_weight_sync_phase(raw, phase, self, *args, **kwargs)
+
+    @auto_await
+    async def abort_replicas(self):
+        return await self._wrap_phase_method("abort_replicas", "abort")
+
+    @auto_await
+    async def release_kv_cache_replicas(self):
+        return await self._wrap_phase_method("release_kv_cache_replicas", "kv_release")
+
+    def build_process_group(self, rollout):
+        start = time.perf_counter()
+        try:
+            return super().build_process_group(rollout)
+        finally:
+            self._sync_phase_timings["topology"] += time.perf_counter() - start
+
+    @auto_await
+    async def resume_kv_cache_replicas(self):
+        return await self._wrap_phase_method("resume_kv_cache_replicas", "kv_resume")
+
+    @auto_await
+    async def resume_generation_replicas(self):
+        return await self._wrap_phase_method("resume_generation_replicas", "generation_resume")
+
+
+class TimedCheckpointEngineManager(WeightSyncPhaseTimerMixin, CheckpointEngineManager):
+    """``CheckpointEngineManager`` with per-phase weight-sync metrics.
+
+    Used for the hybrid (colocated) side of separate-async training, where
+    weights sync into the trainer-owned replicas at mode switches.
+    """
+
+    @auto_await
+    async def update_weights(self, global_steps: int = None):
+        return await self._profiled_update_weights(CheckpointEngineManager.update_weights.__wrapped__, global_steps)
+
+
+class TimedOmniCheckpointEngineManager(WeightSyncPhaseTimerMixin, OmniCheckpointEngineManager):
+    """``OmniCheckpointEngineManager`` with per-phase weight-sync metrics.
+
+    Used for the standalone rollout side of separate-async training; keeps the
+    LoRA ``peft_config`` forwarding and adds the phase timings to the metrics
+    the parent returns.
+    """
+
+    @auto_await
+    async def update_weights(self, global_steps: int = None):
+        return await self._profiled_update_weights(OmniCheckpointEngineManager.update_weights.__wrapped__, global_steps)

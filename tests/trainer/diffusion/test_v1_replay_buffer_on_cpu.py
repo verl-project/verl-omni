@@ -20,6 +20,8 @@ import torch
 from omegaconf import OmegaConf
 from verl.trainer.ppo.v1.replay_buffer import ReplayBuffer, ReplayBufferAsync
 
+from verl_omni.trainer.diffusion.v1.async_profiling import ProfiledReplayBufferAsync
+
 from verl_omni.trainer.diffusion.v1 import trainer_base as trainer_base_module
 from verl_omni.trainer.diffusion.v1.trainer_base import PolicyGradientDiffusionTrainerV1
 
@@ -340,11 +342,11 @@ def test_separate_async_uses_upstream_exact_eviction_and_refill(monkeypatch):
     ("trainer_mode", "drop_incomplete_groups", "expected_type"),
     [
         ("sync", False, ReplayBuffer),
-        ("separate_async", False, ReplayBufferAsync),
+        ("separate_async", False, ProfiledReplayBufferAsync),
         ("sync", True, ReplayBuffer),
     ],
 )
-def test_trainer_factory_uses_upstream_replay_buffer(trainer_mode, drop_incomplete_groups, expected_type):
+def test_trainer_factory_selects_replay_buffer_type_by_mode(trainer_mode, drop_incomplete_groups, expected_type):
     config = _make_config(
         drop_incomplete_groups=drop_incomplete_groups,
         trainer_mode=trainer_mode,

@@ -63,7 +63,7 @@ from verl_omni.trainer.diffusion.v1.trainer_base import (
     PolicyGradientDiffusionTrainerV1,
     register_diffusion_trainer,
 )
-from verl_omni.workers.checkpoint_engine import OmniCheckpointEngineManager
+from verl_omni.workers.checkpoint_engine import TimedOmniCheckpointEngineManager
 from verl_omni.workers.config.reward import reward_role_required, streaming_reward_enabled
 from verl_omni.workers.detach_actor_worker import DiffusionDetachActorWorker
 from verl_omni.workers.rollout.diffusion_llm_server import DiffusionWholeSampleRetryLLMServerClient
@@ -270,7 +270,9 @@ class PolicyGradientDiffusionTrainerV1SeparateAsync(PolicyGradientDiffusionTrain
         )
 
         standalone_ckpt_config = omega_conf_to_dataclass(self.config.actor_rollout_ref.rollout.checkpoint_engine)
-        self.standalone_checkpoint_manager = OmniCheckpointEngineManager(
+        # Timed variant reports the per-phase weight-sync breakdown (issue #712)
+        # through the metrics dict update_weights already returns.
+        self.standalone_checkpoint_manager = TimedOmniCheckpointEngineManager(
             config=standalone_ckpt_config,
             actor_wg=self.actor_rollout_wg,
             replicas=self.standalone_server_manager.get_replicas(),
@@ -445,6 +447,24 @@ class PolicyGradientDiffusionTrainerV1SeparateAsync(PolicyGradientDiffusionTrain
                 # actor update + weight sync so the next generate phase uses
                 # fresh weights, exactly like sync mode waking colocated replicas.
                 self._resume_standalone_generation()
+
+        # Export the rolling switch-cost windows unconditionally (issue #712):
+        # with switching disabled the windows are never initialized (or stay
+        # empty), and the export is simply skipped. The trainer idle ratio is
+        # computed in ``_compute_metrics`` after the step timer closes; here
+        # timing_s/step is still accumulating.
+        switch_cost_metrics: dict[str, float] = {}
+        to_trainer_costs = getattr(self, "_to_trainer_costs", None)
+        to_rollout_costs = getattr(self, "_to_rollout_costs", None)
+        if to_trainer_costs:
+            switch_cost_metrics["separate_async/switch/cost_to_trainer_s"] = sum(to_trainer_costs) / len(
+                to_trainer_costs
+            )
+        if to_rollout_costs:
+            switch_cost_metrics["separate_async/switch/cost_to_rollout_s"] = sum(to_rollout_costs) / len(
+                to_rollout_costs
+            )
+        self._pending_sync_metrics.update(switch_cost_metrics)
 
         if not config.enable_switch:
             return

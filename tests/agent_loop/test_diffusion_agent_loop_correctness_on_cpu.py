@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import asyncio
+import time
 from types import MethodType, SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -34,6 +35,7 @@ from verl_omni.agent_loop.diffusion_agent_loop import (
 from verl_omni.agent_loop.diffusion_agent_loop_tq import DiffusionAgentLoopWorkerTQ
 from verl_omni.agent_loop.single_turn_agent_loop import DiffusionSingleTurnAgentLoop
 from verl_omni.trainer.diffusion.v1 import tq_utils
+from verl_omni.trainer.diffusion.v1.async_profiling import TQ_PUT_AT_TAG
 
 
 class _FakeRemoteComputeScore:
@@ -264,8 +266,9 @@ async def test_tq_writer_preserves_allowlisted_non_tensor_trajectory_metadata(mo
 
     monkeypatch.setattr(diffusion_agent_loop_tq, "list_of_dict_to_tensordict", lambda rows: rows)
 
-    async def fake_kv_batch_put(*, keys, fields, tags, partition_id):
-        captured.update(keys=keys, fields=fields, tags=tags, partition_id=partition_id)
+    async def fake_kv_batch_put(*, keys, fields=None, tags=None, partition_id=None):
+        if fields is not None:  # the payload put; the tag-only completion put is skipped
+            captured.update(keys=keys, fields=fields, tags=tags, partition_id=partition_id)
 
     monkeypatch.setattr(diffusion_agent_loop_tq.tq, "async_kv_batch_put", fake_kv_batch_put)
 
@@ -313,8 +316,9 @@ async def test_run_prompt_batches_prompt_group_into_one_put(monkeypatch):
         del self, sampling_params, kwargs
         return make_output(with_log_probs=True)
 
-    async def fake_kv_batch_put(*, keys, fields, tags, partition_id):
-        captured.update(keys=keys, fields=fields, tags=tags, partition_id=partition_id)
+    async def fake_kv_batch_put(*, keys, fields=None, tags=None, partition_id=None):
+        if fields is not None:  # the payload put; the tag-only completion put rides later
+            captured.update(keys=keys, fields=fields, tags=tags, partition_id=partition_id)
 
     async def fake_kv_put(*, key, partition_id, tag):
         del key, partition_id, tag
@@ -341,6 +345,70 @@ async def test_run_prompt_batches_prompt_group_into_one_put(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_run_prompt_stamps_terminal_publication_last(monkeypatch):
+    """The completion tags must postdate the terminal status publication.
+
+    The replay buffer cannot sample a group before its prompt turns finished,
+    so ``tq_put_at`` stamped any earlier would bill the status/tag round trips
+    to detection latency. Both the status put and the payload upload take real
+    time here, and the stamp must clear the later of the two.
+    """
+    worker_cls = DiffusionAgentLoopWorkerTQ.__ray_metadata__.modified_class
+    worker = object.__new__(worker_cls)
+    worker.rollout_config = SimpleNamespace(n=1, val_kwargs=SimpleNamespace(n=1))
+    events: list[tuple[str, float]] = []
+    stamps: list[float] = []
+
+    def make_output():
+        return SimpleNamespace(
+            prompt_ids=torch.tensor([[1, 2]]),
+            response_diffusion_output=torch.zeros(1, 3, 2, 2),
+            response_logprobs=None,
+            reward_score=0.5,
+            num_turns=1,
+            extra_fields={},
+        )
+
+    async def fake_run_agent_loop(self, sampling_params, *, session_id, **kwargs):
+        del self, sampling_params, kwargs
+        await asyncio.sleep(0.01)  # slow payload generation
+        return make_output()
+
+    async def fake_kv_batch_put(*, keys, fields=None, tags=None, partition_id=None):
+        if fields is not None:
+            await asyncio.sleep(0.01)  # slow payload upload
+            events.append(("payload", time.time()))
+        else:
+            events.append(("completion_tags", time.time()))
+            stamps.extend(tag[TQ_PUT_AT_TAG] for tag in tags)
+
+    async def fake_kv_put(*, key, partition_id, tag):
+        await asyncio.sleep(0.01)  # slow status publication
+        events.append((tag["status"], time.time()))
+
+    monkeypatch.setattr(diffusion_agent_loop_tq.tq, "async_kv_batch_put", fake_kv_batch_put)
+    monkeypatch.setattr(diffusion_agent_loop_tq.tq, "async_kv_put", fake_kv_put)
+    monkeypatch.setattr(diffusion_agent_loop_tq, "list_of_dict_to_tensordict", lambda rows: rows)
+    worker._run_agent_loop = MethodType(fake_run_agent_loop, worker)
+
+    await worker._run_prompt(
+        prompt={"uid": "sample", "agent_name": "diffusion_single_turn_agent"},
+        sampling_params={"global_steps": 3},
+        trajectory={"validate": False, "step": 3},
+        prompt_index=0,
+    )
+
+    assert [name for name, _at in events] == ["running", "payload", "finished", "completion_tags"]
+    payload_at = dict(events)["payload"]
+    finished_at = dict(events)["finished"]
+    assert finished_at > payload_at  # the status publication is its own step
+    for stamp in stamps:
+        # The boundary the buffer waits on is the status publication: the
+        # stamp must never predate it (nor the payload upload it follows).
+        assert stamp >= finished_at
+
+
+@pytest.mark.asyncio
 async def test_tq_writer_batches_group_sessions_and_partitions_field_sets(monkeypatch):
     worker_cls = DiffusionAgentLoopWorkerTQ.__ray_metadata__.modified_class
     worker = object.__new__(worker_cls)
@@ -359,14 +427,14 @@ async def test_tq_writer_batches_group_sessions_and_partitions_field_sets(monkey
 
     monkeypatch.setattr(diffusion_agent_loop_tq, "list_of_dict_to_tensordict", lambda rows: rows)
 
-    async def fake_kv_batch_put(*, keys, fields, tags, partition_id):
+    async def fake_kv_batch_put(*, keys, fields=None, tags=None, partition_id=None):
         puts.append({"keys": keys, "fields": fields, "tags": tags, "partition_id": partition_id})
 
     monkeypatch.setattr(diffusion_agent_loop_tq.tq, "async_kv_batch_put", fake_kv_batch_put)
 
     # Session 1 carries rm_scores, sessions 0/2 do not: rows split by field
     # signature instead of crashing on missing keys.
-    await worker._write_trajectories_to_tq(
+    put_groups = await worker._write_trajectories_to_tq(
         [(0, make_internal(False)), (1, make_internal(True)), (2, make_internal(False))],
         uid="sample",
         trajectory={"step": 7},
@@ -378,6 +446,11 @@ async def test_tq_writer_batches_group_sessions_and_partitions_field_sets(monkey
     assert [put["keys"] for put in puts] == [["sample_0_0", "sample_2_0"], ["sample_1_0"]]
     assert "rm_scores" in puts[1]["fields"][0]
     assert all("rm_scores" not in put["fields"][0] for put in puts[:1])
+    # The write is payload-only: completion tags are published later, after
+    # the prompt's terminal status, via _publish_completion_tags.
+    assert all(put["fields"] is not None for put in puts)
+    assert [keys for keys, _seconds in put_groups] == [["sample_0_0", "sample_2_0"], ["sample_1_0"]]
+    assert all(seconds > 0.0 for _keys, seconds in put_groups)
     assert all(tag["global_steps"] == 7 for put in puts for tag in put["tags"])
     # The prompt identity rides in the tags so the trainer can restore the
     # v0 prompt-major row order: batch-local position plus the per-run

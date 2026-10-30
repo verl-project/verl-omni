@@ -599,3 +599,63 @@ recipe's own values, minding two couplings:
   [`docs/perf/torch_profiling.md` in verl](https://github.com/verl-project/verl/blob/main/docs/perf/torch_profiling.md)
 * Upstream Nsight guide:
   [`docs/perf/nsight_profiling.md` in verl](https://github.com/verl-project/verl/blob/main/docs/perf/nsight_profiling.md)
+
+## Always-on async step accounting (separate_async)
+
+Worker-level traces answer "what did this GPU do"; they cannot answer "why
+was this async step slow", because in the V1 async trainers generation is
+decoupled from the step (the trainer samples already-generated data from the
+replay buffer) and the interesting time is spent waiting or moving payloads
+between roles. The async diffusion V1 trainers therefore emit a decomposition
+of every step as plain metrics -- always on, at negligible cost (timers that
+were already being taken, promoted to the metrics dict; see
+[issue #712](https://github.com/verl-project/verl-omni/issues/712)).
+
+| Metric | Meaning |
+|--------|---------|
+| `timing_s/sample_wait/total` | Wall time inside `replay_buffer.sample()` |
+| `timing_s/sample_wait/generation_bound` | Wait while the needed trajectories were still generating (rollout-bound idle) |
+| `timing_s/sample_wait/detection` | Batch-readiness discovery latency: how long the group whose completion made the requested batch sampleable sat between its terminal publication and the metadata sync that discovered it (recoverable by a smaller `poll_interval`) |
+| `timing_s/sample_wait/metadata_sync` | `kv_list` metadata round trips while polling |
+| `timing_s/sample_wait/eviction` | Stale / DAPO / failure eviction passes |
+| `timing_s/sample_wait/polls` | Poll iterations while waiting |
+| `timing_s/sample_wait/buffer_*` | Pending / running / finished group counts seen while waiting |
+| `timing_s/tq_get` | Trainer-side TransferQueue payload reads (`kv_batch_get`) |
+| `tq/get/bytes` | Bytes fetched by the timed `kv_batch_get` reads (pairs with `timing_s/tq_get` for a GB/s figure) |
+| `tq/put/seconds`, `tq/put/bytes`, `tq/put/bytes_per_second` | Rollout-side writes of the sampled trajectories (attributed via row tags); counters sum across the step's local updates, the rate is derived from the step sums |
+| `weight_sync/phase/{abort,kv_release,topology,transfer_and_finalize,kv_resume,generation_resume}_s` | Per-phase breakdown of the standalone weight sync |
+| `weight_sync/total_s`, `weight_sync/replicas` | Whole sync window and replica count |
+| `separate_async/switch/cost_to_trainer_s`, `..._to_rollout_s` | Rolling mean hybrid-switch costs |
+| `separate_async/trainer_idle_ratio` | Share of the step the trainer waited on the replay buffer |
+| `separate_async/idle_ratio/{generation_bound,detection,metadata_sync,eviction}` | Idle decomposition |
+
+The wait split is event-based, not sleep-based: the rollout stamps each
+written row with the moment its prompt group became terminal (published
+after the `status=finished` put, the state the buffer actually waits for),
+and the buffer charges detection once, at the poll where the requested batch
+first became sampleable -- for the group whose completion crossed that
+threshold, with already-sampleable and surplus groups excluded. Earlier-
+completing groups were waited on for their generation, so their undiscovered
+time stays in `generation_bound`. Detection is measured up to the start of
+the discovering metadata sync, so it never overlaps `metadata_sync`: an
+arrival inside a sync is that sync's service time, and the segments stay
+within the wall time. Plain poll-sleep time cannot make this split — a slow
+generation and a coarse `poll_interval` both show up as sleep.
+
+Read them straight off wandb / TensorBoard, or point
+[`scripts/analyze_step_metrics.py`](https://github.com/verl-project/verl-omni/blob/main/scripts/analyze_step_metrics.py)
+at a metrics JSONL file (one metrics dict per step) or a verl console log; it
+prints per-step attribution and a cross-step summary:
+
+```text
+step 42: 41.2s -- wait:generation_bound(rollout) 38%
+    wait:generation_bound(rollout)         15.62s   37.9%
+    update_actor                            9.10s   22.1%
+    ...
+```
+
+A step is rollout-bound when `generation_bound` dominates (generation cannot
+keep up), quantization-bound when `detection` is non-trivial (lower
+`trainer.v1.sampler.poll_interval`), transfer-bound when `tq_get` /
+`tq/put/*` seconds are large relative to their byte rates, and sync-bound
+when `weight_sync/phase/transfer_and_finalize_s` dominates `update_weights`.
