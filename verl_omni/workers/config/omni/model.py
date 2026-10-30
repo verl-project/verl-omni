@@ -66,6 +66,9 @@ class OmniModelConfig(BaseConfig):
     # model type
     model_type: str = "omni_model"
 
+    # Bagel Co-RL (Joint-Training): dual UND+GEN loss on one FSDP owner. Empty for standard omni AR.
+    composite_mode: Optional[str] = None
+
     # HF config architectures[0] (auto-detected from config.json if unset)
     architecture: Optional[str] = None
     architectures: Optional[list[str]] = None

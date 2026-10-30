@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 import copy
 import json
 import logging
@@ -42,6 +43,26 @@ logger = logging.getLogger(__file__)
 logger.setLevel(logging.INFO)
 
 _WORKER_EXTENSION = "verl_omni.workers.rollout.vllm_rollout.utils.vLLMOmniColocateWorkerExtension"
+
+
+def _ar_drain_timeout_s() -> float:
+    """Seconds to wait for an AR request's terminal output before giving up.
+
+    The drain below (``_collect_last_output``) ends only when the orchestrator
+    delivers the request's *terminal* output; a request the engine admits but never
+    finishes would otherwise hold the actor's ``generate`` slot forever and stall the
+    lane. Bounding the drain turns that silent deadlock into an actor-side error: the
+    engine request is aborted, the coroutine finishes, the slot frees, and the caller
+    (``BagelDualRoleLLMServerClient``) can abort/resume/retry. Keep this *below* the
+    client's ``BAGEL_CORL_DECODE_TIMEOUT_S`` so the diagnostic lands here first (it
+    knows the request id and engine state).
+    ``BAGEL_CORL_AR_DRAIN_TIMEOUT_S=0`` disables the bound.
+    """
+    try:
+        return float(os.getenv("BAGEL_CORL_AR_DRAIN_TIMEOUT_S", "600") or 0)
+    except ValueError:
+        logger.warning("ignoring non-numeric BAGEL_CORL_AR_DRAIN_TIMEOUT_S")
+        return 600.0
 
 
 def _drop_none_mapping_values(value: Any) -> Any:
@@ -91,8 +112,18 @@ class ARStrategy(OmniStrategyBase):
         # TODO (mike): drop this later. It should be inferred from the model config.
         pipeline_name = engine_kwargs.pop("pipeline_name", None)
         pipeline_mode = engine_kwargs.pop("pipeline_mode", "thinker_only")
+        # Explicit weight-sync stages for a deploy config with no rollout adapter, whose
+        # stage topology the adapter would otherwise declare.
+        weight_sync_stage_ids = engine_kwargs.pop("weight_sync_stage_ids", None)
 
         adapter_cls = OmniRolloutPipelineBase.get_class(pipeline_name)
+        if weight_sync_stage_ids is not None:
+            if adapter_cls is not None:
+                raise ValueError(
+                    f"weight_sync_stage_ids is declared by {adapter_cls.__name__}.weight_sync_stage_ids(); "
+                    "do not also pass it as an engine kwarg."
+                )
+            self._weight_sync_stage_ids = [int(stage_id) for stage_id in weight_sync_stage_ids]
         if adapter_cls is not None:
             async_chunk = engine_kwargs.get("async_chunk", engine_kwargs.get("async-chunk", True))
             if not isinstance(async_chunk, bool):
@@ -249,7 +280,12 @@ class ARStrategy(OmniStrategyBase):
             engine_args["compilation_config"] = _drop_none_mapping_values(engine_args["compilation_config"])
 
     def collective_rpc_stage_ids(self, method: Any) -> list[int] | None:
-        if method in {"set_pending_lora_peft_config", "update_weights_from_ipc", "monkey_patch_model"}:
+        if method in {
+            "set_pending_lora_peft_config",
+            "update_weights_from_ipc",
+            "monkey_patch_model",
+            "policy_param_checksum",
+        }:
             return self._weight_sync_stage_ids
         return None
 
@@ -365,19 +401,61 @@ class ARStrategy(OmniStrategyBase):
         lora_request: Optional[LoRARequest],
         priority: int,
     ) -> Any:
+        if self._rollout_output_modalities is None:
+            # Pass the AR decode params as ``sampling_params`` (singular, the stage-0 entry), NOT
+            # ``sampling_params_list``: the latter is a per-stage *sequence*, so a bare object only
+            # works on a one-stage server and otherwise raises ``ValueError: Expected <num_stages>
+            # sampling params, got a single sampling params object``. The AR replica is a multi-stage
+            # ``bagel_think`` pipeline, so every UND decode needs the singular form.
+            #
+            # ``output_modalities=["text"]`` pins the request's e2e final stage to the AR/Thinker
+            # stage (the default lands on the DiT stage, whose output ``process_output`` cannot
+            # convert to a ``TokenOutput``) and avoids a DiT generation the UND lane discards.
+            #
+            # The drain is bounded (see ``_ar_drain_timeout_s``): an admitted request that never
+            # finishes would otherwise hold this coroutine -- and one of the actor's ``generate``
+            # slots -- until the process dies.
+            timeout_s = _ar_drain_timeout_s()
+            generator = self.server.engine.generate(
+                prompt=prompt,
+                sampling_params=params,
+                request_id=request_id,
+                lora_request=lora_request,
+                priority=priority,
+                output_modalities=["text"],
+            )
+            if timeout_s <= 0:
+                return await self._collect_last_output(generator)
+            try:
+                return await asyncio.wait_for(self._collect_last_output(generator), timeout=timeout_s)
+            except TimeoutError as exc:
+                in_flight = len(getattr(self.server.engine, "request_states", {}) or {})
+                prompt_tokens = len((prompt or {}).get("prompt_token_ids") or [])
+                logger.error(
+                    "bagel_ar_drain_stalled request_id=%s prompt_tokens=%d max_tokens=%s waited_s=%.0f "
+                    "engine_in_flight=%d: engine yielded no terminal output; aborting the request",
+                    request_id,
+                    prompt_tokens,
+                    getattr(params, "max_tokens", None),
+                    timeout_s,
+                    in_flight,
+                )
+                await self._abort_engine_request(request_id)
+                raise RuntimeError(
+                    f"Bagel Co-RL (Joint-Training) AR decode stalled: no terminal output after {timeout_s:.0f}s "
+                    f"(request_id={request_id}, prompt_tokens={prompt_tokens}, engine_in_flight={in_flight}). "
+                    "The request was aborted; see bagel_ar_drain_stalled above."
+                ) from exc
+
         generate_kwargs = dict(
             prompt=prompt,
             sampling_params_list=params,
             request_id=request_id,
             lora_request=lora_request,
             priority=priority,
+            output_modalities=self._rollout_output_modalities,
         )
-        if self._rollout_output_modalities is not None:
-            generate_kwargs["output_modalities"] = self._rollout_output_modalities
         generator = self.server.engine.generate(**generate_kwargs)
-        if self._rollout_output_modalities is None:
-            return await self._collect_last_output(generator)
-
         outputs = []
         async for output in generator:
             outputs.append(output)
@@ -386,6 +464,18 @@ class ARStrategy(OmniStrategyBase):
         final_res, rollout_fields = self._rollout_adapter.combine_engine_outputs(outputs, prompt)
         self._rollout_fields_by_request_id[request_id] = rollout_fields
         return final_res
+
+    async def _abort_engine_request(self, request_id: str) -> None:
+        """Best-effort abort of one stalled request so the scheduler stops holding it.
+
+        ``engine.abort`` takes the *external* request id, which is what the caller
+        passed in; failures degrade to a warning because the caller is already
+        reporting a stall and the client-side valve aborts the whole lane anyway.
+        """
+        try:
+            await asyncio.wait_for(self.server.engine.abort([request_id]), timeout=30)
+        except Exception as exc:  # noqa: BLE001 — diagnostics path
+            logger.warning("bagel_ar_drain_stalled abort failed for request_id=%s: %s", request_id, exc)
 
     def process_output(
         self,
@@ -410,6 +500,7 @@ class ARStrategy(OmniStrategyBase):
 
         extra_fields = {"global_steps": self.server.global_steps}
         extra_fields.update(rollout_fields)
+        extra_fields.update(self.observed_rollout_provenance(final_res))
 
         num_prompt_logprobs = getattr(params, "prompt_logprobs", None)
         if num_prompt_logprobs is not None and hasattr(req_output, "prompt_logprobs"):

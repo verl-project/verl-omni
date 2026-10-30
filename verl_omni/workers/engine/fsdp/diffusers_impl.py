@@ -22,6 +22,7 @@ from abc import ABC, abstractmethod
 from contextlib import nullcontext
 from typing import Callable, Optional
 
+import numpy as np
 import torch
 import torch.distributed
 from tensordict import TensorDict
@@ -452,7 +453,14 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
     def _build_optimizer(self, module):
         from verl.workers.config.optimizer import build_optimizer
 
-        optimizer = build_optimizer(module.parameters(), self.optimizer_config)
+        adapter_cls = DiffusionModelBase.get_class(self.model_config)
+        param_groups = None
+        if hasattr(adapter_cls, "get_optimizer_param_groups"):
+            param_groups = adapter_cls.get_optimizer_param_groups(module, self.model_config)
+        optimizer = build_optimizer(
+            param_groups if param_groups is not None else module.parameters(),
+            self.optimizer_config,
+        )
 
         return optimizer
 
@@ -501,6 +509,15 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
         else:
             # configure trainable parameters for non-lora training
             DiffusionModelBase.get_class(self.model_config).configure_trainable_params(module, self.model_config)
+
+        if self.model_config.get("composite_mode") == "bagel_corl":
+            from verl_omni.pipelines.bagel_flow_grpo.agentic_und_gen.batch import configure_corl_trainability
+
+            configure_corl_trainability(
+                module,
+                freeze_und=self.model_config.get("corl_freeze_und", False),
+                freeze_gen=self.model_config.get("corl_freeze_gen", False),
+            )
 
         if self.use_ulysses_sp:
             sp_size = self.ulysses_sequence_parallel_size
@@ -674,6 +691,41 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
         """Run forward/backward over a batch; implemented by algorithm-specific subclasses."""
         pass
 
+    @staticmethod
+    def _reslice_per_row_non_tensors(data: TensorDict, micro_batches: list[TensorDict]) -> None:
+        """Re-attach the correct per-row slice of each row-aligned non-tensor key.
+
+        ``prepare_micro_batches`` → ``chunk_tensordict`` rebuilds every micro-batch from
+        ``td.items()`` and copies non-tensor entries through **verbatim**, so a *per-row* non-tensor
+        key (one whose length equals ``len(data)``) is replicated **unsliced** into every
+        micro-batch. Scalars (``sp_size``, ``micro_batch_size_per_gpu``, ``skip_gen``) are
+        unaffected. The Bagel adapter reads per-row ids
+        (``bagel_flow_grpo/diffusers_training_adapter.py``), so an unsliced batch makes
+        ``bagel_model`` concatenate the full text rows against one latent row and fail.
+
+        Only list-like values are re-sliced. A ``TensorDict`` stash such as ``bagel_corl_gen`` also
+        reports a length, but it is a single blob the caller consumes as a whole, not a column.
+        """
+        chunks = len(micro_batches)
+        rows = len(data)
+        if chunks <= 1 or not rows:
+            return
+        chunk_size = rows // chunks
+        if chunk_size * chunks != rows:
+            # ``prepare_micro_batches`` refuses a ragged split on the non-dynamic path, so this is
+            # unreachable today; refuse rather than mis-slice if that ever changes.
+            return
+        for key in list(data.keys()):
+            if isinstance(data.get(key), torch.Tensor):
+                continue
+            values = tu.get_non_tensor_data(data, key, default=None)
+            if not isinstance(values, np.ndarray | list | tuple):
+                continue
+            if len(values) != rows:
+                continue
+            for index, micro_batch in enumerate(micro_batches):
+                tu.assign_non_tensor(micro_batch, **{key: values[index * chunk_size : (index + 1) * chunk_size]})
+
     @abstractmethod
     def prepare_model_inputs(self, micro_batch: TensorDict, step: int):
         """Build model inputs for one diffusion step; implemented by algorithm-specific subclasses."""
@@ -702,6 +754,11 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
         Returns:
             grad_norm (float): Norm of gradients before clipping.
         """
+        if self.model_config.get("composite_mode") == "bagel_corl" and self.model_config.get(
+            "corl_no_optimizer_step", False
+        ):
+            self.optimizer.zero_grad(set_to_none=True)
+            return 0.0
         assert self.optimizer_config.clip_grad is not None
 
         if isinstance(self.module, FSDP):
@@ -728,7 +785,11 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
         """
         Advance FSDP scheduler and return updated learning rate.
         """
-        self.lr_scheduler.step()
+        if not (
+            self.model_config.get("composite_mode") == "bagel_corl"
+            and self.model_config.get("corl_no_optimizer_step", False)
+        ):
+            self.lr_scheduler.step()
         lr = self.lr_scheduler.get_last_lr()[0]  # only return the first group
         return lr
 
@@ -997,9 +1058,30 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
         tu.assign_non_tensor(data, sp_size=self.ulysses_sequence_parallel_size)
         tu.assign_non_tensor(data, use_dynamic_bsz=False)
 
+        # Forcing ``use_dynamic_bsz=False`` above makes ``prepare_micro_batches`` read
+        # ``micro_batch_size_per_gpu`` straight off the batch, so the key must be present here.
+        # The Bagel Co-RL GEN sub-batch is **materialized** from the trajectory view
+        # (``materialize_gen_train_batch``, see ``forward_backward_batch`` below) rather than
+        # selected out of the parent, so nothing propagates the key. Fallback order matches the
+        # UND pass (``bagel_corl_composite.py``): batch first, then the engine's train/infer knob.
+        micro_batch_size_per_gpu = tu.get_non_tensor_data(data=data, key="micro_batch_size_per_gpu", default=None)
+        if micro_batch_size_per_gpu is None:
+            config_key = "infer_micro_batch_size_per_gpu" if forward_only else "micro_batch_size_per_gpu"
+            micro_batch_size_per_gpu = getattr(getattr(self, "engine_config", None), config_key, None)
+        if micro_batch_size_per_gpu is None:
+            raise KeyError(
+                "Bagel Co-RL (Joint-Training) GEN pass requires micro_batch_size_per_gpu: this "
+                "engine forces use_dynamic_bsz=False, so prepare_micro_batches reads it from the "
+                "batch. Set actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu for the train "
+                "pass, and actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu (or "
+                "actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu) for the infer pass."
+            )
+        tu.assign_non_tensor(data, micro_batch_size_per_gpu=int(micro_batch_size_per_gpu))
+
         micro_batches, indices = prepare_micro_batches(
             data=data, dp_group=self.get_data_parallel_group(), same_micro_num_in_dp=True
         )
+        self._reslice_per_row_non_tensors(data, micro_batches)
 
         gradient_accumulation_steps = len(micro_batches) * num_timesteps
         output_lst = []
@@ -1057,7 +1139,105 @@ class PPODiffusersFSDPEngine(DiffusersFSDPEngine):
     def forward_backward_batch(
         self, data: TensorDict, loss_function: Callable, forward_only: bool = False
     ) -> list[TensorDict]:
-        return self._run_forward_backward_batch(data, loss_function, forward_only, timesteps_key="all_timesteps")
+        """Default: diffusion timestep loop. Bagel Co-RL (Joint-Training): UND token then GEN diffusion.
+
+        Co-RL (Joint-Training) composition (RFC): one FSDP module, sequential branch backwards, then the
+        shared ``BaseEngine.train_batch`` issues a single ``optimizer.step``. This is
+        library reuse of the diffusion V1 engine under the AR V1 outer trainer — not
+        ``PolicyGradientDiffusionTrainerV1Sync``.
+        """
+        from verl_omni.pipelines.bagel_flow_grpo.agentic_und_gen.composite import (
+            composite_forward_mode,
+            gen_view_has_traj,
+            is_bagel_corl_composite,
+            materialize_gen_train_batch,
+            merge_composite_outputs,
+            run_und_token_forward_backward,
+        )
+
+        if not is_bagel_corl_composite(self.model_config):
+            return self._run_forward_backward_batch(data, loss_function, forward_only, timesteps_key="all_timesteps")
+
+        mode = composite_forward_mode(data, forward_only=forward_only)
+        if mode == "gen_only_diffusion":
+            # Diffusion V1 GEN old-logprob / GEN-only infer on latents.
+            return self._run_forward_backward_batch(data, loss_function, forward_only, timesteps_key="all_timesteps")
+        if mode == "und_infer":
+            return run_und_token_forward_backward(self, data, loss_function, forward_only=True)
+        if mode == "empty":
+            return {"model_output": {}, "loss": [], "metrics": {"gen/skipped_no_groups": [1.0]}}
+
+        from verl_omni.pipelines.bagel_flow_grpo.agentic_und_gen.batch import gradient_delta_norm, gradient_snapshot
+
+        parts: list[dict] = []
+        before_gen = {}
+        has_und = "input_ids" in data.keys()
+        gen_view = tu.get_non_tensor_data(data, "bagel_corl_gen", default=None)
+        has_complete = bool(tu.get_non_tensor_data(data, "has_complete_gen_groups", default=False))
+        skip_gen = bool(tu.get_non_tensor_data(data, "skip_gen", default=not has_complete))
+        run_gen = (not skip_gen) and has_complete and gen_view_has_traj(gen_view)
+
+        if has_und and (forward_only or ("old_log_probs" in data.keys() and "advantages" in data.keys())):
+            parts.append(run_und_token_forward_backward(self, data, loss_function, forward_only))
+            if not forward_only:
+                parts[-1]["metrics"]["actor/und/grad_norm"] = [
+                    gradient_delta_norm(
+                        self.module,
+                        {},
+                        dp_group=self.get_data_parallel_group(),
+                        collective_device=torch.device(get_device_id()),
+                    )
+                ]
+                before_gen = gradient_snapshot(self.module)
+
+        if run_gen:
+            flags = {
+                "has_complete_gen_groups": True,
+                "skip_gen": False,
+                "num_gen_rows": tu.get_non_tensor_data(data, "num_gen_rows", default=None),
+                "gradient_accumulation_steps": tu.get_non_tensor_data(
+                    data, "gradient_accumulation_steps", default=None
+                ),
+            }
+            from verl_omni.pipelines.bagel_flow_grpo.agentic_und_gen.batch import prepare_gen_shard
+
+            if "bagel_episode_id" not in data.keys():
+                raise ValueError("Co-RL update requires bagel_episode_id for unique GEN ownership")
+            micro_size = int(
+                tu.get_non_tensor_data(data, "micro_batch_size_per_gpu", default=None)
+                or self.engine_config.micro_batch_size_per_gpu
+            )
+            owned = prepare_gen_shard(
+                gen_view,
+                data["bagel_episode_id"],
+                dp_group=self.get_data_parallel_group(),
+                micro_size=micro_size,
+                collective_device=torch.device(get_device_id()),
+            )
+            if owned is None:
+                return merge_composite_outputs(parts)
+            gen_data = materialize_gen_train_batch(owned, flags)
+            parts.append(
+                self._run_forward_backward_batch(gen_data, loss_function, forward_only, timesteps_key="all_timesteps")
+            )
+        elif has_complete and not skip_gen and not gen_view_has_traj(gen_view):
+            raise RuntimeError(
+                "bagel_corl: has_complete_gen_groups but bagel_corl_gen lacks all_latents/timesteps; "
+                "refuse soft-skip of GEN diffusion_loss — fix live GEN traj stash from vLLM-Omni."
+            )
+
+        if not parts:
+            return {"model_output": {}, "loss": [], "metrics": {"gen/skipped_no_groups": [1.0]}}
+        if run_gen and not forward_only:
+            parts[-1]["metrics"]["actor/gen/grad_norm"] = [
+                gradient_delta_norm(
+                    self.module,
+                    before_gen,
+                    dp_group=self.get_data_parallel_group(),
+                    collective_device=torch.device(get_device_id()),
+                )
+            ]
+        return merge_composite_outputs(parts)
 
     def prepare_model_inputs(self, micro_batch: TensorDict, step: int):
         """
@@ -1128,13 +1308,23 @@ class PPODiffusersFSDPEngine(DiffusersFSDPEngine):
         model_output = self.prepare_model_outputs(output=raw_output, micro_batch=micro_batch)
 
         if loss_function is not None:
-            data = tu.get_tensordict(
-                {
-                    key: micro_batch[key][:, step]
-                    for key in ("old_log_probs", "advantages")
-                    if micro_batch.get(key, None) is not None
-                },
-            )
+            from verl_omni.pipelines.bagel_flow_grpo.agentic_und_gen.advantages import select_gen_advantages_for_step
+
+            composite_mode = None
+            if self.model_config is not None:
+                composite_mode = self.model_config.get("composite_mode")
+            # Fail closed only when GEN is expected to run; pattern-3 / skip_gen has no GEN view.
+            has_complete = bool(tu.get_non_tensor_data(micro_batch, "has_complete_gen_groups", default=False))
+            skip_gen = bool(tu.get_non_tensor_data(micro_batch, "skip_gen", default=not has_complete))
+            require_gen = composite_mode == "bagel_corl" and has_complete and not skip_gen
+            advantages = select_gen_advantages_for_step(micro_batch, step, require_bagel_corl_gen=require_gen)
+            # ``old_log_probs`` is optional on the diffusion path; ``advantages`` is the
+            # lane-selected GEN view, never the raw UND column.
+            loss_inputs = {"advantages": advantages}
+            if micro_batch.get("old_log_probs", None) is not None:
+                loss_inputs["old_log_probs"] = micro_batch["old_log_probs"][:, step]
+
+            data = tu.get_tensordict(loss_inputs)
             tu.assign_non_tensor(
                 data,
                 gradient_accumulation_steps=tu.get_non_tensor_data(
@@ -1142,6 +1332,20 @@ class PPODiffusersFSDPEngine(DiffusersFSDPEngine):
                 ),
                 sp_size=tu.get_non_tensor_data(micro_batch, "sp_size", default=None),
             )
+            if require_gen:
+                tu.assign_non_tensor(
+                    data,
+                    bagel_corl_lane="gen",
+                    has_complete_gen_groups=True,
+                    skip_gen=False,
+                    num_gen_rows=len(micro_batch),
+                )
+                if "gen_transition_valid" in micro_batch.keys():
+                    data["loss_unit_weight"] = micro_batch["gen_valid"] * micro_batch["gen_transition_valid"][:, step]
+                for key in ("loss_normalizer", "corl_loss_normalized", "corl_dp_size"):
+                    value = tu.get_non_tensor_data(micro_batch, key, default=None)
+                    if value is not None:
+                        tu.assign_non_tensor(data, **{key: value})
 
             # TODO (mike): refactor the data preparation logic here
             if micro_batch.get("ref_log_prob", None) is not None:

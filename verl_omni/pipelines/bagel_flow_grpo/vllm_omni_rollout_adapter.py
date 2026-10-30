@@ -33,6 +33,7 @@ from vllm_omni.diffusion.data import DiffusionOutput, OmniDiffusionConfig
 from vllm_omni.diffusion.models.bagel.pipeline_bagel import BagelPipeline
 from vllm_omni.diffusion.request import OmniDiffusionRequest
 
+from verl_omni.pipelines.bagel_flow_grpo.bagel_corl import route_actor_weight_for_und_replica
 from verl_omni.pipelines.bagel_flow_grpo.common import (
     BAGEL_FLOWGRPO_CFG_DEFAULTS,
     maybe_to_cpu,
@@ -122,6 +123,7 @@ class _BagelSchedulerAdapter:
         self._base_noise_level: float = 0.0
         self._base_return_logprobs: bool = True
         self._step_counter: int = 0
+        self._tp_divergence_reported: bool = False
 
     def __getattr__(self, name):
         return getattr(self._inner, name)
@@ -137,7 +139,8 @@ class _BagelSchedulerAdapter:
         Args:
             sde_window: ``(begin, end_exclusive)`` step range where SDE
                 noise is injected and log-probs are recorded.  ``None``
-                disables windowing (legacy behavior: noise at every step).
+                disables windowing, i.e. ``noise_level`` applies to every
+                step (legacy flow_grpo behaviour).
             noise_level: SDE noise level to apply inside the window.
             return_logprobs: whether log-probs are requested at all
                 (overridden to ``False`` outside the window even when
@@ -173,15 +176,25 @@ class _BagelSchedulerAdapter:
         if self._sde_window is not None:
             begin, end = self._sde_window
             in_window = begin <= i < end
-            # Outside the SDE window, run deterministic ODE (noise_level=0)
-            # and skip log-prob recording (std_dev_t=0 → log(0)=-inf).
-            cur_noise_level = self._base_noise_level if in_window else 0.0
-            cur_return_logprobs = self._base_return_logprobs and in_window
-            kwargs = {
-                **kwargs,
-                "noise_level": cur_noise_level,
-                "return_logprobs": cur_return_logprobs,
-            }
+        else:
+            # No window: "noise on every step" is the legacy flow_grpo behaviour.
+            in_window = True
+        # Always pass the *caller's* noise level explicitly, window or not.
+        # Leaving it implicit (only overriding inside a window) silently hands
+        # control to the inner scheduler's own default, which is
+        # ``noise_level=0.7`` -- so a caller asking for a deterministic decode
+        # (``noise_level=0.0``, e.g. validation) would get maximum SDE noise on
+        # every single step instead of an ODE rollout.
+        cur_noise_level = self._base_noise_level if in_window else 0.0
+        # A zero-noise step has no distribution to score: ``std_dev_t == 0`` makes
+        # the Gaussian log-prob ``0/0 -> nan`` (and its normalizer ``log(0)``).
+        # Never request log-probs on a step that injects no noise.
+        cur_return_logprobs = bool(self._base_return_logprobs and in_window and cur_noise_level > 0.0)
+        kwargs = {
+            **kwargs,
+            "noise_level": cur_noise_level,
+            "return_logprobs": cur_return_logprobs,
+        }
 
         sample_in = sample.unsqueeze(0)
         model_output_in = model_output.unsqueeze(0)
@@ -197,16 +210,47 @@ class _BagelSchedulerAdapter:
         )
         self._step_counter += 1
         prev_sample, log_prob = out[0], out[1]
+        if cur_noise_level > 0.0:
+            prev_sample = self._sync_tp_sample(prev_sample, i)
         prev_sample = prev_sample.squeeze(0)
         if log_prob is not None:
             log_prob = log_prob.reshape(())
         return _AdapterStepOutput(prev_sample=prev_sample, log_prob=log_prob)
+
+    def _sync_tp_sample(self, prev_sample: torch.Tensor, step: int) -> torch.Tensor:
+        """Make every tensor-parallel rank continue from TP rank 0's noisy sample.
+
+        Each TP rank runs the whole denoise loop and draws its own SDE noise. The
+        DiT's sharded attention/MLP all-reduce partial results computed from each
+        rank's *own* latent, so ranks whose noise differs feed mismatched inputs
+        into one forward and the decoded image comes out grainy (ODE steps are
+        deterministic and never diverge). Rank 0's sample, and therefore its
+        recorded log-prob, is left unchanged. Every rank must reach this call on
+        the same steps, which ``_tp_shared_sde_window`` guarantees.
+        """
+        tp_group = _tp_tensor_parallel_group()
+        if tp_group is None:
+            return prev_sample
+        if not self._tp_divergence_reported:
+            checksum = prev_sample.detach().double().sum().reshape(1)
+            checksums = tp_group.all_gather(checksum, dim=0)
+            if not torch.allclose(checksums, checksums[0].expand_as(checksums)):
+                self._tp_divergence_reported = True
+                logger.warning(
+                    "BagelPipelineWithLogProb: SDE sample diverged across TP ranks at step %d "
+                    "(per-rank checksums %s); broadcasting TP rank 0's sample.",
+                    step,
+                    checksums.tolist(),
+                )
+        prev_sample = prev_sample.contiguous()
+        return tp_group.broadcast(prev_sample, src=0)
 
 
 def _pick_sde_window(
     window_size: Optional[int],
     window_range: Optional[Any],
     seed: int,
+    num_denoise_steps: Optional[int] = None,
 ) -> Optional[tuple[int, int]]:
     """Pick a random contiguous window ``[begin, begin + window_size)``.
 
@@ -220,25 +264,83 @@ def _pick_sde_window(
         window_range: ``(low, high)`` inclusive range for the window
             start.  ``None`` defaults to ``[0, window_size)``.
         seed: Seed for the RNG.
+        num_denoise_steps: Total number of denoise steps the scheduler will
+            run (``len(timesteps)``).  When given, the window is clamped to
+            ``end_exclusive <= num_denoise_steps - 1`` so that the *terminal*
+            step (index ``num_denoise_steps - 1``, which lands on ``sigma == 0``)
+            always stays outside the window.  Noise injected on that step is
+            never removed again -- there is no later step to undo it -- so it
+            would be baked into the decoded image.
 
     Returns:
         ``(begin, end_exclusive)`` or ``None`` if windowing is disabled.
+
+    Note:
+        ``window_range`` is expressed in *step indices*, but the number of
+        denoise steps is ``num_inference_steps - 1``.  A range that fits the
+        advertised ``num_inference_steps`` can therefore overrun the real
+        schedule once the step count drops (e.g. the 1-GPU recipe branch uses
+        ``num_inference_steps=4``, i.e. 3 denoise steps, against the default
+        ``[0, 7]``).  Left unclamped, a window past the last step applies noise
+        and records log-probs on *no* step at all, which silently empties the
+        GEN trajectory instead of failing.
     """
     if window_size is None or int(window_size) <= 0:
         return None
-    if window_range is None:
-        return (0, int(window_size))
 
-    low = int(window_range[0])
-    high = int(window_range[1])
-    high_inclusive = high - int(window_size)
+    size = int(window_size)
+    if num_denoise_steps is not None:
+        # ``setup_bagel_sigmas`` accepts ``num_steps=1`` for warmup runs, which
+        # leaves a single denoise step that *is* the terminal one; there is no
+        # earlier step to relocate the window to, so shrink to the only step
+        # rather than addressing none of them.
+        size = min(size, max(int(num_denoise_steps) - 1, 1))
+
+    if window_range is None:
+        low, high = 0, size
+    else:
+        low, high = int(window_range[0]), int(window_range[1])
+
+    high_inclusive = high - size
+    if num_denoise_steps is not None:
+        last_clean_begin = max(int(num_denoise_steps) - 1 - size, 0)
+        high_inclusive = min(high_inclusive, last_clean_begin)
+        low = min(low, last_clean_begin)
+
     if high_inclusive < low:
         # Window doesn't fit; clamp to the lowest valid begin.
-        return (low, low + int(window_size))
+        return (low, low + size)
 
     rng = random.Random(seed)
     begin = rng.randint(low, high_inclusive)
-    return (begin, begin + int(window_size))
+    return (begin, begin + size)
+
+
+def _tp_tensor_parallel_group():
+    """Return vLLM's TP group when the engine runs with TP > 1, else ``None``."""
+    from vllm.distributed import get_tensor_model_parallel_world_size, get_tp_group
+    from vllm.distributed.parallel_state import model_parallel_is_initialized
+
+    if not model_parallel_is_initialized() or get_tensor_model_parallel_world_size() <= 1:
+        return None
+    return get_tp_group()
+
+
+def _tp_shared_sde_window(sde_window: tuple[int, int]) -> tuple[int, int]:
+    """Use TP rank 0's SDE window on every tensor-parallel rank of the engine.
+
+    ``_pick_sde_window`` seeds from ``LOCAL_RANK``, which differs between the TP
+    workers of one engine. Each worker runs the full denoise loop, so differing
+    windows put noise on different steps per rank, the sharded DiT all-reduces
+    partial results computed from diverged latents, and the image comes out grainy.
+    """
+    tp_group = _tp_tensor_parallel_group()
+    if tp_group is None:
+        return sde_window
+    window = torch.tensor(sde_window, dtype=torch.int64, device=tp_group.device)
+    window = tp_group.broadcast(window, src=0)
+    begin, end = window.tolist()
+    return (int(begin), int(end))
 
 
 @VllmOmniPipelineBase.register("OmniBagelForConditionalGeneration", algorithm="flow_grpo")
@@ -258,6 +360,9 @@ class BagelPipelineWithLogProb(BagelPipeline):
         super().__init__(od_config=od_config, prefix=prefix)
         inner = FlowMatchSDEDiscreteScheduler()
         self.scheduler = _BagelSchedulerAdapter(inner)
+        # One-shot guard for ``_audit_und_sync``: the sync repeats every step, the
+        # verdict does not change.
+        self._und_sync_audited = False
         logger.info("BagelPipelineWithLogProb: SDE scheduler enabled for RL rollouts")
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
@@ -270,10 +375,14 @@ class BagelPipelineWithLogProb(BagelPipeline):
         Other weights (initial checkpoint load) defer to the parent.
         """
         actor_weights: list[tuple[str, torch.Tensor]] = []
+        und_head_weights: list[tuple[str, torch.Tensor]] = []
         checkpoint_weights: list[tuple[str, torch.Tensor]] = []
         for name, tensor in weights:
-            if name.startswith("transformer."):
-                actor_weights.append((f"model.{name[len('transformer.') :]}", tensor))
+            routed = route_actor_weight_for_und_replica(name)
+            if routed is not None and routed.startswith("lm_head."):
+                und_head_weights.append((routed, tensor))
+            elif routed is not None:
+                actor_weights.append((routed, tensor))
             else:
                 checkpoint_weights.append((name, tensor))
 
@@ -281,8 +390,61 @@ class BagelPipelineWithLogProb(BagelPipeline):
         if checkpoint_weights:
             loaded |= super().load_weights(checkpoint_weights)
         if actor_weights:
-            loaded |= self.language_model.load_weights(actor_weights)
+            acc = self.language_model.load_weights(actor_weights)
+            loaded |= acc
+            self._audit_und_sync(actor_weights, acc)
+        if und_head_weights:
+            loaded |= self.language_model.load_weights(und_head_weights)
         return loaded
+
+    def _audit_und_sync(
+        self,
+        routed: list[tuple[str, torch.Tensor]],
+        accepted: set[str],
+    ) -> None:
+        """Report what the actor→AR weight sync actually wrote, once per process.
+
+        The sync is the only thing that rewrites the live UND replica, and it is
+        *silent*: ``BagelTransformer.load_weights`` logs a single
+        ``warning_once`` for every name it cannot place, so a systematically
+        mis-remapped sync (correct enqueue, wrong destination) leaves no trace in
+        the log at all -- the replica just starts emitting degenerate text and it
+        looks like a model-quality problem. This counts the damage and names the
+        parameters that the sync did *not* touch, so a partial or mis-targeted
+        remap is visible in one run instead of a bisect.
+
+        Args:
+            routed: ``(name, tensor)`` pairs handed to ``language_model.load_weights``.
+            accepted: the parameter names that loader reported as written.
+        """
+        if self._und_sync_audited:
+            return
+        self._und_sync_audited = True
+        try:
+            all_params = {name for name, _ in self.language_model.named_parameters()}
+        except Exception:  # pragma: no cover - audit must never break a rollout
+            return
+        untouched = sorted(all_params - set(accepted))
+        logger.info(
+            "und_sync_audit: routed=%d accepted=%d lm_params=%d untouched=%d lm_head_written=%s",
+            len(routed),
+            len(accepted),
+            len(all_params),
+            len(untouched),
+            sorted(n for n in accepted if "lm_head" in n) or "NO",
+        )
+        if untouched:
+            logger.info(
+                "und_sync_audit: %d param(s) left at their loaded checkpoint value, first 20: %s",
+                len(untouched),
+                untouched[:20],
+            )
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "und_sync_audit: routed names (first 20): %s; accepted (first 20): %s",
+                [n for n, _ in routed][:20],
+                sorted(accepted)[:20],
+            )
 
     def _decode_token_prompt(self, token_ids: Any, *, native: bool = False) -> str | None:
         """Decode BAGEL token IDs to a cleaned prompt text string."""
@@ -348,13 +510,25 @@ class BagelPipelineWithLogProb(BagelPipeline):
         if isinstance(sde_window_range, list):
             sde_window_range = tuple(sde_window_range)
 
+        # Per-request scheduler setup matching training-side sigma schedule.
+        # Done before the window pick because the window must be clamped against
+        # the *real* denoise-step count: ``setup_bagel_sigmas`` installs
+        # ``num_inference_steps`` sigma points but only ``num_inference_steps - 1``
+        # denoise steps (the terminal sigma is 0).
+        assert req.sampling_params.num_inference_steps is not None, "num_inference_steps must be set for RL rollouts"
+        bagel_num_timesteps = int(req.sampling_params.num_inference_steps)
+        setup_bagel_sigmas(self.scheduler._inner, bagel_num_timesteps)
+        num_denoise_steps = len(self.scheduler._inner.timesteps)
+
         sde_window: Optional[tuple[int, int]] = None
         if sde_window_size and noise_level > 0.0:
             sde_window = _pick_sde_window(
                 window_size=int(sde_window_size),
                 window_range=sde_window_range,
                 seed=int(os.environ["LOCAL_RANK"]),
+                num_denoise_steps=num_denoise_steps,
             )
+            sde_window = _tp_shared_sde_window(sde_window)
 
         # Pass scheduler kwargs; _BagelSchedulerAdapter overrides noise_level
         # and return_logprobs per-step based on the SDE window.
@@ -363,17 +537,44 @@ class BagelPipelineWithLogProb(BagelPipeline):
         # BAGEL FlowGRPO compares quadratic log-prob terms only.
         self.scheduler_kwargs["include_logprob_normalizer"] = False
 
-        # Per-request scheduler setup matching training-side sigma schedule.
-        assert req.sampling_params.num_inference_steps is not None, "num_inference_steps must be set for RL rollouts"
-        bagel_num_timesteps = int(req.sampling_params.num_inference_steps)
-        setup_bagel_sigmas(self.scheduler._inner, bagel_num_timesteps)
-
         # Reset adapter state *after* set_timesteps so inner step_index is None.
         self.scheduler.begin_forward(
             sde_window=sde_window,
             noise_level=noise_level,
             return_logprobs=logprobs,
         )
+
+        # The resolved window is the one number that separates a *bounded* SDE
+        # (noise + log-probs on a couple of mid-schedule steps, which later
+        # deterministic steps undo) from the ``_sde_window is None`` fallback,
+        # where ``_BagelSchedulerAdapter.step`` passes no overrides and the
+        # inner scheduler applies its own default ``noise_level=0.7`` to *every*
+        # step -- including the terminal sigma->0 step, where nothing can remove
+        # it again.  Report it once per request so a dropped ``sde_window_size``
+        # (e.g. an OpenAI body-param whitelist) is visible instead of showing up
+        # only as grainy rollout images.
+        if noise_level > 0.0 and sde_window is None:
+            logger.warning(
+                "BagelPipelineWithLogProb: noise_level=%.3f but no SDE window "
+                "(sde_window_size=%r, sde_window_range=%r, denoise_steps=%d) -- falling back to "
+                "the scheduler default, i.e. noise on EVERY step including the terminal "
+                "sigma=0 step. That noise is never removed and is baked into the image. "
+                "Set rollout.algo.sde_window_size.",
+                noise_level,
+                sde_window_size,
+                sde_window_range,
+                num_denoise_steps,
+            )
+        else:
+            logger.info(
+                "BagelPipelineWithLogProb: noise_level=%.3f sde_window=%s sde_window_size=%r "
+                "sde_window_range=%r denoise_steps=%d",
+                noise_level,
+                sde_window,
+                sde_window_size,
+                sde_window_range,
+                num_denoise_steps,
+            )
 
         # vllm-omni >= 0.24 (#4509) matches official BAGEL: n schedule points, n-1 denoise steps.
         self._final_image_latent = None
@@ -395,7 +596,21 @@ class BagelPipelineWithLogProb(BagelPipeline):
             if traj_timesteps is not None:
                 traj_timesteps = traj_timesteps[begin:end]
             if traj_log_probs is not None:
-                traj_log_probs = traj_log_probs[begin:end]
+                # ... (see note below) only clamp when the engine handed back the whole
+                # per-step trajectory instead of the window-local vector.
+                _n_logp = int(traj_log_probs.shape[0]) if hasattr(traj_log_probs, "shape") else len(traj_log_probs)
+                if _n_logp > (end - begin):
+                    # ``latents`` / ``timesteps`` are recorded on *every* step, so they still
+                    # need this window slice.  ``log_probs`` does not: ``begin_forward`` above
+                    # gates ``return_logprobs`` to the window, so the scheduler returns a
+                    # log-prob only on in-window steps and the engine's vector is *already*
+                    # window-local (length ``end - begin``, aligned with ``traj_timesteps``).
+                    # Re-slicing it with the absolute ``[begin:end]`` would select nothing once
+                    # ``begin >= end - begin`` -- e.g. ``begin=3, end=5`` on a 2-element vector
+                    # -- emptying the GEN log-probs and dropping every GEN row downstream.
+                    # Keep the slice only as a guard for an engine that returns the full
+                    # per-step trajectory instead.
+                    traj_log_probs = traj_log_probs[begin:end]
 
         # BAGEL trajectories are time-major; add a batch axis for training consumers.
         if traj_latents is not None:

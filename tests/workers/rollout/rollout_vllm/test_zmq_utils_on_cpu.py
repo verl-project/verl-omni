@@ -20,9 +20,24 @@ from verl.utils.device import get_visible_devices_keyword
 from verl.workers.rollout.vllm_rollout import bucketed_weight_transfer
 
 from verl_omni.workers.rollout.vllm_rollout.utils import vLLMOmniColocateWorkerExtension
-from verl_omni.workers.rollout.vllm_rollout.zmq_utils import make_update_zmq_handle, make_update_zmq_id
+from verl_omni.workers.rollout.vllm_rollout.zmq_utils import (
+    colocate_zmq_handle,
+    make_update_zmq_handle,
+    make_update_zmq_id,
+    namespace_colocate_zmq_handle,
+)
 
 _VISIBLE_DEVICES = get_visible_devices_keyword()
+
+
+def test_colocate_handle_is_per_user_and_matches_the_rewritten_verl_sender():
+    """Another user's stale ``01000000`` socket in the shared ``/tmp`` must not take our path."""
+    verl_sender = "ipc:///tmp/rl-colocate-zmq-01000000-replica-0-rank-1.sock"
+    ours = colocate_zmq_handle("01000000", 0, 1)
+    assert ours != verl_sender
+    assert f"-u{os.getuid()}-" in ours
+    assert namespace_colocate_zmq_handle(verl_sender) == ours
+    assert namespace_colocate_zmq_handle("tcp://127.0.0.1:5555") == "tcp://127.0.0.1:5555"
 
 
 def test_update_id_is_unique_when_the_same_step_is_retried():
@@ -99,14 +114,14 @@ def test_stage_local_rank_is_remapped_to_node_local_index():
         {_VISIBLE_DEVICES: "4, 5, 6, 7", "VERL_ZMQ_BASE_VISIBLE_DEVICES": "0,1,2,3,4,5,6,7"},
     )
 
-    assert handle == "ipc:///tmp/rl-colocate-zmq-job-replica-0-rank-6.sock"
+    assert handle == colocate_zmq_handle("job", "0", 6)
 
 
 def test_offset_device_ids_map_back_to_zero_based_local_rank():
     # Offset physical GPUs: stage-local rank remaps to the replica index.
     handle = _get_handle(0, {_VISIBLE_DEVICES: "4,5,6,7", "VERL_ZMQ_BASE_VISIBLE_DEVICES": "4,5,6,7"})
 
-    assert handle == "ipc:///tmp/rl-colocate-zmq-job-replica-0-rank-0.sock"
+    assert handle == colocate_zmq_handle("job", "0", 0)
 
 
 def test_offset_replica_stage_uses_replica_index():
@@ -114,7 +129,7 @@ def test_offset_replica_stage_uses_replica_index():
     # is the replica index (4).
     handle = _get_handle(0, {_VISIBLE_DEVICES: "12,13,14,15", "VERL_ZMQ_BASE_VISIBLE_DEVICES": "8,9,10,11,12,13,14,15"})
 
-    assert handle == "ipc:///tmp/rl-colocate-zmq-job-replica-0-rank-4.sock"
+    assert handle == colocate_zmq_handle("job", "0", 4)
 
 
 def test_full_replica_visible_mapping_is_identity():
@@ -123,25 +138,25 @@ def test_full_replica_visible_mapping_is_identity():
         {_VISIBLE_DEVICES: "0,1,2,3,4,5,6,7", "VERL_ZMQ_BASE_VISIBLE_DEVICES": "0,1,2,3,4,5,6,7"},
     )
 
-    assert handle == "ipc:///tmp/rl-colocate-zmq-job-replica-0-rank-5.sock"
+    assert handle == colocate_zmq_handle("job", "0", 5)
 
 
 def test_raw_rank_is_kept_when_device_lists_are_absent():
     handle = _get_handle(3, {}, clear=True)
 
-    assert handle == "ipc:///tmp/rl-colocate-zmq-job-replica-0-rank-3.sock"
+    assert handle == colocate_zmq_handle("job", "0", 3)
 
 
 def test_raw_rank_is_kept_when_only_replica_list_is_absent():
     handle = _get_handle(3, {_VISIBLE_DEVICES: "0,1,2,3"})
 
-    assert handle == "ipc:///tmp/rl-colocate-zmq-job-replica-0-rank-3.sock"
+    assert handle == colocate_zmq_handle("job", "0", 3)
 
 
 def test_raw_rank_is_kept_when_rank_is_outside_stage_devices():
     handle = _get_handle(3, {_VISIBLE_DEVICES: "0,1", "VERL_ZMQ_BASE_VISIBLE_DEVICES": "0,1,2,3"})
 
-    assert handle == "ipc:///tmp/rl-colocate-zmq-job-replica-0-rank-3.sock"
+    assert handle == colocate_zmq_handle("job", "0", 3)
 
 
 def test_raw_rank_is_kept_when_device_is_not_in_replica_list():
@@ -152,7 +167,7 @@ def test_raw_rank_is_kept_when_device_is_not_in_replica_list():
         {_VISIBLE_DEVICES: "GPU-1234,GPU-5678", "VERL_ZMQ_BASE_VISIBLE_DEVICES": "GPU-1111,GPU-2222"},
     )
 
-    assert handle == "ipc:///tmp/rl-colocate-zmq-job-replica-0-rank-1.sock"
+    assert handle == colocate_zmq_handle("job", "0", 1)
 
 
 def test_device_uuid_is_remapped_by_position_in_replica_list():
@@ -164,4 +179,4 @@ def test_device_uuid_is_remapped_by_position_in_replica_list():
         },
     )
 
-    assert handle == "ipc:///tmp/rl-colocate-zmq-job-replica-0-rank-2.sock"
+    assert handle == colocate_zmq_handle("job", "0", 2)

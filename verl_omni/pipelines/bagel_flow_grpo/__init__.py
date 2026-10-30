@@ -12,7 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from .bagel_corl import BagelForCoRL
 from .diffusers_training_adapter import BagelDiffusion
 from .vllm_omni_rollout_adapter import BagelPipelineWithLogProb
 
-__all__ = ["BagelDiffusion", "BagelPipelineWithLogProb"]
+__all__ = ["BagelDiffusion", "BagelPipelineWithLogProb", "BagelForCoRL"]

@@ -516,7 +516,10 @@ class DiffusionStrategy(OmniStrategyBase):
             logger.debug(
                 "diffusion rollout produced no image (finish_reason=%s); returning %s", finish_reason, stop_reason
             )
-            extra_fields: dict[str, Any] = {"global_steps": self.server.global_steps}
+            extra_fields: dict[str, Any] = {
+                "global_steps": self.server.global_steps,
+                **self.observed_rollout_provenance(final_res),
+            }
             if final_res is not None:
                 for metadata_group in _rollout_metadata_groups(final_res.multimodal_output):
                     for key, value in metadata_group.items():
@@ -535,6 +538,7 @@ class DiffusionStrategy(OmniStrategyBase):
         primary_name = header["primary"]
         primary = artifacts[primary_name]
         fields = self._training_output_fields(final_res, context=context)
+        fields.update(self.observed_rollout_provenance(final_res))
         if fields.get("media_kind", primary.spec.modality) != primary.spec.modality:
             raise ValueError(f"{context}: media_kind conflicts with primary artifact")
         fields["media_kind"] = primary.spec.modality

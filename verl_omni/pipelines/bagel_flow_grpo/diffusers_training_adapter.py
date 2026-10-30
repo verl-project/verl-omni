@@ -23,22 +23,57 @@ renormalization matching the rollout pipeline exactly.
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from typing import Any, Optional
 
+import numpy as np
 import torch
 from tensordict import TensorDict
 from tensordict.tensorclass import NonTensorStack
 from verl.utils import tensordict_utils as tu
 from verl.utils.device import get_device_name
 
+from verl_omni.pipelines.bagel_flow_grpo.bagel_corl import (
+    BagelForCoRL,
+    dual_lora_param_groups,
+    validate_disjoint_lora_targets,
+)
+from verl_omni.pipelines.bagel_flow_grpo.bagel_model import BagelForTraining, get_flattened_position_ids
 from verl_omni.pipelines.model_base import DiffusionModelBase
 from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
 from verl_omni.workers.config import DiffusionModelConfig
 
-from .bagel_model import BagelForTraining, get_flattened_position_ids
 from .common import BAGEL_FLOWGRPO_CFG_DEFAULTS, setup_bagel_sigmas
 
 logger = logging.getLogger(__name__)
+
+
+def _as_token_id_list(ids: Any, *, index: int) -> list[int]:
+    """Coerce one row of ``prompt_token_ids`` to a flat list of python ints.
+
+    A row arrives as a list, a 1-D ``np.ndarray`` (sometimes ``dtype=object``), or a tensor.
+    The dtype is what actually breaks the adapter: ``torch.as_tensor`` rejects an object-dtype
+    array outright -- "can't convert np.ndarray of type numpy.object_" -- even when every
+    element is an int, and a row sliced out of a 2-D object matrix is 1-D, so the shape alone
+    is never the tell. Normalising here is what makes those rows usable.
+
+    A row that is still 2-D after this is a genuine upstream shape bug (the payload is a batch
+    of sequences, not one sequence) and is rejected loudly rather than silently flattened into
+    one over-long sequence.
+    """
+    if isinstance(ids, torch.Tensor):
+        ids = ids.reshape(-1).tolist()
+    elif isinstance(ids, np.ndarray):
+        if ids.ndim != 1:
+            raise ValueError(
+                f"prompt_token_ids row {index} has shape {ids.shape}; expected one flat "
+                "sequence. A 2-D object array here means the per-row lists were collapsed into "
+                "a matrix upstream (uniform prompt lengths), so build it 1-D instead."
+            )
+        ids = ids.tolist()
+    try:
+        return [int(token) for token in ids]
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"prompt_token_ids row {index} is not a flat sequence of ints: {type(ids).__name__}") from exc
 
 
 @DiffusionModelBase.register("OmniBagelForConditionalGeneration", algorithm="flow_grpo")
@@ -47,8 +82,22 @@ class BagelDiffusion(DiffusionModelBase):
 
     @classmethod
     def build_module(cls, model_config: DiffusionModelConfig, torch_dtype: torch.dtype):
-        logger.info("Loading BagelForTraining from %s", model_config.local_path)
+        logger.info("Loading Bagel training module from %s", model_config.local_path)
+        if model_config.get("composite_mode") == "bagel_corl":
+            return BagelForCoRL.from_pretrained(model_config.local_path, torch_dtype=torch_dtype)
         return BagelForTraining.from_pretrained(model_config.local_path, torch_dtype=torch_dtype)
+
+    @classmethod
+    def get_optimizer_param_groups(cls, module, model_config: DiffusionModelConfig):
+        """Two optimizer param groups (UND LoRA vs GEN LoRA) when Co-RL (Joint-Training) dual LoRA is enabled.
+
+        ``lr_gen`` (model config) overrides the GEN group's LR — the UniGRPO
+        per-expert pattern (text 1e-6 vs denoise 3e-5); ``None`` keeps the base
+        ``actor.optim.lr`` for both groups.
+        """
+        if model_config.get("composite_mode") != "bagel_corl":
+            return None
+        return dual_lora_param_groups(module, lr_gen=model_config.get("lr_gen"))
 
     @classmethod
     def configure_train_mode(cls, module):
@@ -65,7 +114,15 @@ class BagelDiffusion(DiffusionModelBase):
 
     @classmethod
     def configure_trainable_params(cls, module, model_config):
-        """Freeze all params except the generation (``moe_gen``) pathway."""
+        """Freeze all params except the generation (``moe_gen``) pathway.
+
+        Bagel Co-RL (Joint-Training) dual LoRA is applied by PEFT; this hook is skipped when
+        ``lora_rank > 0``. Non-LoRA Co-RL (Joint-Training) is out of PR1 scope.
+        """
+        if model_config.get("composite_mode") == "bagel_corl":
+            targets = model_config.get("target_modules") or []
+            validate_disjoint_lora_targets(targets)
+            raise ValueError("Bagel CoRL PR1 requires LoRA (lora_rank > 0); shared-base training is out of scope")
         for name, param in module.named_parameters():
             param.requires_grad = "moe_gen" in name
 
@@ -73,6 +130,12 @@ class BagelDiffusion(DiffusionModelBase):
         for name, param in module.named_parameters():
             if param.requires_grad:
                 param.data = param.data.to(torch.float32)
+
+    @classmethod
+    def validate_lora_config(cls, model_config: DiffusionModelConfig) -> None:
+        if model_config.get("composite_mode") == "bagel_corl":
+            targets = model_config.get("target_modules") or []
+            validate_disjoint_lora_targets(targets)
 
     @classmethod
     def build_scheduler(cls, model_config: DiffusionModelConfig):
@@ -126,6 +189,11 @@ class BagelDiffusion(DiffusionModelBase):
 
         if isinstance(prompt_token_ids, torch.Tensor) and prompt_token_ids.ndim == 1:
             prompt_token_ids = [prompt_token_ids]
+
+        # Normalise every row to a flat list of ints before touching torch, so ``max_len``
+        # below and the copy after it measure the same thing and an object-dtype row cannot
+        # reach ``torch.as_tensor``.
+        prompt_token_ids = [_as_token_id_list(ids, index=index) for index, ids in enumerate(prompt_token_ids)]
 
         B = len(prompt_token_ids)
         max_len = max(len(ids) for ids in prompt_token_ids)
@@ -294,7 +362,10 @@ class BagelDiffusion(DiffusionModelBase):
         # sigma at this denoising step (same for the entire batch in BAGEL)
         sigma_now = float(timesteps[0, step].item())
         in_cfg_interval = sigma_now > cfg["cfg_interval_low"] and sigma_now <= cfg["cfg_interval_high"]
-        apply_cfg = in_cfg_interval and cfg["cfg_text_scale"] > 1.0
+        corl = model_config.get("composite_mode") == "bagel_corl"
+        # Co-RL can pad variable-length trajectories. Keep the FSDP forward count
+        # equal across ranks, then select guidance per row's actual timestep.
+        apply_cfg = (corl or in_cfg_interval) and cfg["cfg_text_scale"] > 1.0
 
         if apply_cfg:
             assert negative_model_inputs is not None, (
@@ -307,7 +378,7 @@ class BagelDiffusion(DiffusionModelBase):
             # reuse ``noise_pred`` instead of running a third forward.
             cfg_img_pred = noise_pred if cfg["cfg_img_scale"] > 1.0 else None
 
-            noise_pred = cls._combine_cfg(
+            guided_pred = cls._combine_cfg(
                 v_t=noise_pred,
                 cfg_text_v_t=cfg_text_pred,
                 cfg_img_v_t=cfg_img_pred,
@@ -316,6 +387,13 @@ class BagelDiffusion(DiffusionModelBase):
                 cfg_renorm_type=cfg["cfg_renorm_type"],
                 cfg_renorm_min=cfg["cfg_renorm_min"],
             )
+            if corl:
+                active = (timesteps[:, step] > cfg["cfg_interval_low"]) & (
+                    timesteps[:, step] <= cfg["cfg_interval_high"]
+                )
+                noise_pred = torch.where(active.reshape(-1, *([1] * (noise_pred.ndim - 1))), guided_pred, noise_pred)
+            else:
+                noise_pred = guided_pred
 
         _, log_prob, prev_sample_mean, std_dev_t, sqrt_dt = scheduler.sample_previous_step(
             sample=latents[:, step].float(),

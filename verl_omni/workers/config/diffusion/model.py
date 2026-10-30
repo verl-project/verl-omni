@@ -64,6 +64,9 @@ class DiffusionModelConfig(BaseConfig):
     # model type, e.g., "diffusion_model"
     model_type: str = "diffusion_model"
 
+    # Bagel Co-RL (Joint-Training): dual UND+GEN loss on one FSDP owner. Empty for GEN-only FlowGRPO.
+    composite_mode: Optional[str] = None
+
     # whether to load tokenizer. This is useful when we only want to load model config
     load_tokenizer: bool = True
     tokenizer: Any = None
@@ -104,6 +107,14 @@ class DiffusionModelConfig(BaseConfig):
     lora_init_weights: str = "gaussian"
     target_modules: Optional[Any] = "all-linear"  # allow both "all-linear" and ["q_proj","k_proj"]
     target_parameters: Optional[list[str]] = None  # for lora adapter on nn.Parameter
+    # Bagel Co-RL (Joint-Training) per-group LR (RFC §4.4 / UniGRPO per-expert LRs): GEN (*_moe_gen)
+    # optimizer group LR override; None keeps the base actor.optim.lr for both groups.
+    lr_gen: Optional[float] = None
+    # Co-RL ablations freeze actual parameter groups before FSDP construction.
+    corl_freeze_und: bool = False
+    corl_freeze_gen: bool = False
+    # Frozen-policy control: skip optimizer and LR scheduler state changes.
+    corl_no_optimizer_step: bool = False
 
     exclude_modules: Optional[str] = None
 
