@@ -110,6 +110,9 @@ jobs:
         shell: bash
         run: |
           pip install --no-deps --force-reinstall "verl @ git+https://github.com/verl-project/verl.git@$(cat .github/verl_pin.txt)"
+          # The image predates the pin bump and still ships TransferQueue 0.1.9;
+          # verl requires >=0.1.11, and --no-deps above skips it.
+          pip install "TransferQueue==0.1.11"
       - name: Check NPU and CANN info
         shell: bash
         run: |

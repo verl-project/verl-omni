@@ -235,6 +235,7 @@ actor_rollout_ref:
     dtype: bfloat16
     rollout_attn_backend: FLASH_ATTN_3_HUB
     gpu_memory_utilization: 0.5
+    standalone_gpu_memory_utilization: ${oc.select:actor_rollout_ref.rollout.gpu_memory_utilization}
     enforce_eager: false
     cudagraph_capture_sizes: null
     free_cache_engine: true
