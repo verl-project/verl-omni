@@ -1,0 +1,252 @@
+name: l4_convergence
+
+on:
+  workflow_dispatch:
+    inputs:
+      case:
+        description: "L4 convergence case(s) to run"
+        required: true
+        default: all
+        type: choice
+        options:
+          - all
+          - sd35_medium_ocr_lora_v1
+      run_npu:
+        description: "Also run the selected case(s) on Ascend NPU"
+        required: false
+        default: false
+        type: boolean
+  pull_request:
+    branches:
+      - main
+      - v0.*
+    types: [labeled]
+    paths:
+      - "verl_omni/**"
+      - "tests/convergence/**"
+      - "examples/flowgrpo_trainer/**"
+      - "pyproject.toml"
+      - .github/workflows/l4_convergence.yml
+      - .github/qwen_tts_pin.txt
+      - .github/vllm_omni_pin.txt
+      - .github/verl_pin.txt
+      - .github/actions/gpu-smoke-prepare/**
+      - .github/actions/l4-convergence-upload-artifacts/**
+
+concurrency:
+  # Include the trigger name (PR label or ref) so PR-triggered NPU runs and
+  # dispatch runs do not cancel each other.
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('{0}-{1}', github.event.pull_request.number, github.event.label.name) || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
+
+permissions:
+  contents: read
+  pull-requests: read
+
+env:
+  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:uv.cu130"
+  DYNAMIC_RUNNER_ENDPOINT: "https://sd7upeujs1b9g1a958pn0.apigateway-cn-beijing.volceapi.com/runner"
+  L4_REQUIRED_GPUS: "8"
+  L4_RUNNER_SIZE: "L20x8"
+
+jobs:
+  setup_runner:
+    # GPU cases run via workflow_dispatch only; pull requests trigger the NPU job via L4-npu-ci instead.
+    if: github.repository_owner == 'verl-project'
+    runs-on: ubuntu-latest
+    outputs:
+      mode: ${{ steps.resolve-mode.outputs.mode }}
+      runner-label: ${{ steps.create-runner.outputs.runner-label }}
+      mlp-task-id: ${{ steps.create-runner.outputs.mlp-task-id }}
+    steps:
+      - id: resolve-mode
+        run: |
+          mode="none"
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            mode="dispatch"
+          fi
+          echo "mode=${mode}" >> "$GITHUB_OUTPUT"
+
+      - id: create-runner
+        if: steps.resolve-mode.outputs.mode != 'none'
+        uses: volcengine/vemlp-github-runner@v1
+        with:
+          mode: "create"
+          faas-url: "${{ env.DYNAMIC_RUNNER_ENDPOINT }}"
+          mlp-image: "${{ env.IMAGE }}"
+
+  l4_convergence:
+    needs: setup_runner
+    if: needs.setup_runner.outputs.mode != 'none'
+    runs-on: ["${{ needs.setup_runner.outputs.runner-label || 'L20x8' }}"]
+    timeout-minutes: 720
+    env:
+      HTTP_PROXY: "http://100.68.174.87:3128"
+      HTTPS_PROXY: "http://100.68.174.87:3128"
+      NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
+      HF_ENDPOINT: "https://hf-mirror.com"
+      HF_HUB_ENABLE_HF_TRANSFER: "0"
+      UV_LINK_MODE: copy
+      UV_SYSTEM_PYTHON: "1"
+      UV_BREAK_SYSTEM_PACKAGES: "1"
+      PIP_BREAK_SYSTEM_PACKAGES: "1"
+      FLASHINFER_DISABLE_VERSION_CHECK: "1"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Keep the uv cache on the runner's persistent HOME
+        run: |
+          echo "HOME=${HOME} (uv cache baked into the image: ${UV_CACHE_DIR})"
+          echo "UV_CACHE_DIR=${HOME}/.cache/uv" | tee -a "${GITHUB_ENV}"
+
+      - name: Verify 8-GPU runner
+        run: |
+          set -euo pipefail
+          if [[ -n "${CUDA_VISIBLE_DEVICES:-}" ]]; then
+            csv="${CUDA_VISIBLE_DEVICES// /}"
+            IFS=',' read -r -a ids <<< "${csv}"
+            visible="${#ids[@]}"
+          else
+            visible="$(nvidia-smi --query-gpu=index --format=csv,noheader | grep -c .)"
+          fi
+          echo "Visible GPUs: ${visible}"
+          if [[ "${visible}" -ne "${L4_REQUIRED_GPUS}" ]]; then
+            echo "L4 convergence requires exactly ${L4_REQUIRED_GPUS} GPUs (visible=${visible})." >&2
+            exit 1
+          fi
+
+      - uses: ./.github/actions/gpu-smoke-prepare
+
+      - name: Run selected L4 convergence cases
+        run: |
+          set -euo pipefail
+          case_input="${{ github.event.inputs.case }}"
+          if [[ "${case_input}" == "all" ]]; then
+            bash tests/convergence/run_l4_convergence.sh --all
+          else
+            bash tests/convergence/run_l4_convergence.sh "${case_input}"
+          fi
+
+      - if: always()
+        uses: ./.github/actions/l4-convergence-upload-artifacts
+
+  l4_convergence_npu:
+    # Pull request label mapping:
+    #   L4-npu-ci -> all cases registered in tests/convergence/run_l4_convergence.sh
+    # workflow_dispatch with run_npu=true -> explicit case selection on NPU
+    # Runner/image/CANN diagnostics mirror .github/workflows/npu_smoke.yml.
+    if: >-
+      github.repository_owner == 'verl-project' &&
+      (github.event_name == 'workflow_dispatch' && inputs.run_npu ||
+       github.event_name == 'pull_request' && github.event.label.name == 'L4-npu-ci')
+    runs-on: linux-aarch64-a2b4-8
+    timeout-minutes: 720
+    container:
+      image: swr.cn-north-4.myhuaweicloud.com/mindspeed/pr-verl-omni-a2:v010-vllm030-omni030
+      options: >-
+        --shm-size 16g
+    env:
+      HF_ENDPOINT: "https://hf-mirror.com"
+      HF_HUB_ENABLE_HF_TRANSFER: "0"
+      PIP_INDEX_URL: "http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple"
+      PIP_TRUSTED_HOST: "cache-service.nginx-pypi-cache.svc.cluster.local"
+      TRANSFORMERS_VERBOSITY: "error"
+      DEVICE: "npu"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Check NPU and CANN info
+        shell: bash
+        run: |
+          cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
+          npu-smi info
+          echo "===== Ascend/NPU environment ====="
+          env | LC_ALL=C sort | grep -E "(/usr/local/Ascend/|^(ASCEND|ATB|HCCL|NPU|DEVICE_|RANK_TABLE|RAY_EXPERIMENTAL_NOSET_ASCEND))" || true
+
+      - name: Print vLLM stack versions
+        shell: bash
+        run: |
+          pip show vllm || true
+          pip show vllm-ascend || true
+          pip show vllm-omni || true
+
+      - name: Verify 8 NPUs
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "${ASCEND_RT_VISIBLE_DEVICES:-}" ]]; then
+            csv="${ASCEND_RT_VISIBLE_DEVICES// /}"
+            IFS=',' read -r -a ids <<< "${csv}"
+            visible="${#ids[@]}"
+          else
+            visible="$(ls -1 /dev/davinci* 2>/dev/null | grep -vc 'manager' || true)"
+            visible="${visible:-0}"
+          fi
+          echo "Visible NPUs: ${visible}"
+          if [[ "${visible}" -lt 8 ]]; then
+            echo "L4 NPU convergence requires at least 8 NPUs (visible=${visible})." >&2
+            exit 1
+          fi
+
+      - name: Resolve L4 convergence cases
+        id: resolve-cases
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          DISPATCH_CASE: ${{ inputs.case }}
+        run: |
+          set -euo pipefail
+          # PR label runs every registered case; dispatch may pin one case.
+          # Case-name validation happens inside run_l4_convergence.sh.
+          if [[ "${EVENT_NAME}" == "workflow_dispatch" && "${DISPATCH_CASE}" != "all" ]]; then
+            launcher_args="${DISPATCH_CASE}"
+          else
+            launcher_args="--all"
+          fi
+          echo "Resolved L4 NPU launcher args: ${launcher_args}"
+          echo "launcher-args=${launcher_args}" >> "$GITHUB_OUTPUT"
+
+      - name: Run selected L4 convergence cases on NPU
+        env:
+          LAUNCHER_ARGS: ${{ steps.resolve-cases.outputs.launcher-args }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash tests/convergence/run_l4_convergence.sh --device npu ${LAUNCHER_ARGS}
+
+      # Inline upload (not the repo-local composite action): the NPU runner
+      # executes in a container, per docs/contributing/npu_smoke_tests.md.
+      - name: Upload L4 NPU convergence JSON and JSONL outputs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: l4-convergence-npu-outputs-${{ github.run_id }}
+          path: |
+            tests/convergence/outputs/l4_convergence/**/*.jsonl
+            tests/convergence/outputs/l4_convergence/**/*.json
+          if-no-files-found: warn
+
+      - name: Upload NPU console logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: l4-convergence-npu-logs-${{ github.run_id }}
+          path: tests/convergence/outputs/l4_convergence/logs/**
+          if-no-files-found: ignore
+
+  cleanup:
+    runs-on: ubuntu-latest
+    needs:
+      - setup_runner
+      - l4_convergence
+    if: always()
+    steps:
+      - id: destroy-runner
+        if: needs.setup_runner.outputs.mlp-task-id != ''
+        uses: volcengine/vemlp-github-runner@v1
+        with:
+          mode: "destroy"
+          faas-url: "${{ env.DYNAMIC_RUNNER_ENDPOINT }}"
+          mlp-task-id: "${{ needs.setup_runner.outputs.mlp-task-id }}"

@@ -199,11 +199,13 @@ If possible, please add CI test(s) for your new feature. See {doc}`contributing/
 
 Pick the most relevant workflow from [`.github/workflows/`](https://github.com/verl-project/verl-omni/tree/main/.github/workflows):
 
-| Workflow | When to use |
+| Workflow / job | When to use |
 |---|---|
 | `cpu_unit_tests.yml` | New tests that run without a GPU (file name must end with `_on_cpu.py`) |
 | `gpu_smoke.yml` | GPU-requiring tests for trainer, worker, rollout, or agent-loop changes |
 | `sanity.yml` | Static / import-level checks under `tests/special_sanity/` |
+| `l3_nightly.yml` | Tiny-random numerical / perf nightly (see {doc}`contributing/ci_cd`) |
+| `l4_convergence.yml` | Real-weight recipe precision job (`workflow_dispatch` on 8-GPU; PR label `L4-npu-ci` on 8-NPU) |
 
 Steps:
 

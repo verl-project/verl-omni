@@ -1,0 +1,20 @@
+name: L4 convergence upload artifacts
+description: Upload L4 convergence JSON/JSONL outputs from tests/convergence/outputs
+
+inputs:
+  artifact_name:
+    description: Artifact name prefix
+    required: false
+    default: l4-convergence-outputs
+
+runs:
+  using: composite
+  steps:
+    - name: Upload L4 convergence JSON and JSONL outputs
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.artifact_name }}-${{ github.run_id }}
+        path: |
+          tests/convergence/outputs/l4_convergence/**/*.jsonl
+          tests/convergence/outputs/l4_convergence/**/*.json
+        if-no-files-found: warn
