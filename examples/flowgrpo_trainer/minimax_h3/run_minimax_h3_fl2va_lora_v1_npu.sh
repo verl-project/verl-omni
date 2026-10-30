@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # MiniMax H3 FL2VA LoRA FlowGRPO on Ascend NPU (V1 sync trainer).
 # Task settings follow the GPU recipe; NPU settings follow the T2VA NPU recipe.
+# Defaults below are 16 NPUs with ROLLOUT_TP=4. On Atlas A5, NUM_GPUS=8 and
+# ROLLOUT_TP=2 is enough; TEXT_ENCODER_TP follows ROLLOUT_TP.
 set -x
 
 export WANDB_MODE=${WANDB_MODE:-online}

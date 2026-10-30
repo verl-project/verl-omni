@@ -42,6 +42,9 @@ teacher_models:
     # Number of GPUs this teacher occupies in the distillation teacher resource pool. A single teacher fills the pool.
     world_size: 0
 
+    # Classifier-free guidance scale of the teacher forward. null reuses the student's pipeline.guidance_scale.
+    guidance_scale: null
+
 # Key to route examples to the appropriate teacher model in multi-teacher setups. Should correspond to a field in the data proto, e.g., data_source.
 teacher_key: data_source
 

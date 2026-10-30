@@ -1,15 +1,10 @@
-ARG NPU_DEVICE=a3
+# One base image per build. Defaults are the A3 row in
+# docs/start/install_npu.md. Pass BASE_IMAGE and SOC_VERSION together.
+ARG BASE_IMAGE=quay.io/ascend/cann:9.1.0-a3-ubuntu22.04-py3.12
+FROM ${BASE_IMAGE}
 
-FROM quay.io/ascend/cann:9.1.0-910b-ubuntu22.04-py3.12 AS base-a2
-ENV SOC_VERSION=ascend910b1
-
-FROM quay.io/ascend/cann:9.1.0-a3-ubuntu22.04-py3.12 AS base-a3
-ENV SOC_VERSION=ascend910_9391
-
-FROM swr.cn-south-1.myhuaweicloud.com/ascendhub/cann:9.1.0-950-ubuntu22.04-py3.12 AS base-a5
-ENV SOC_VERSION=ascend950dt_9582
-
-FROM base-${NPU_DEVICE} AS runtime
+ARG SOC_VERSION=ascend910_9391
+ENV SOC_VERSION=${SOC_VERSION}
 
 ARG PIP_INDEX_URL="https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
 ARG ASCEND_PIP_INDEX_URL="https://mirrors.huaweicloud.com/ascend/repos/pypi"
@@ -181,7 +176,13 @@ RUN git clone \
     python3 -m pip install --no-deps -e . \
         --extra-index-url ${ASCEND_PIP_INDEX_URL} \
         --extra-index-url ${PYTORCH_CPU_INDEX_URL} \
-    && python3 -m pip install Levenshtein
+    && python3 -m pip install diffusers==0.41.0 Levenshtein
+
+# --no-deps skips verl-omni's own pins. verl leaves transformers<5.11,
+# which breaks kernels 0.16.1, and does not install TransferQueue.
+RUN python3 -m pip install \
+        'transformers>=5.13.0,<=5.14.1' \
+        'TransferQueue==0.1.9'
 
 RUN python3 -m pip install --force-reinstall \
         torch==2.10.0+cpu \
@@ -202,7 +203,5 @@ RUN echo "export VLLM_WORKER_MULTIPROC_METHOD=spawn" \
         >> /root/.bashrc
 
 WORKDIR /workspace
-
-ENTRYPOINT ["/bin/bash", "-c", "source /usr/local/Ascend/ascend-toolkit/set_env.sh && source /usr/local/Ascend/nnal/atb/set_env.sh && exec \"$@\"", "--"]
 
 CMD ["/bin/bash"]

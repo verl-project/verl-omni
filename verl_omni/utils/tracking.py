@@ -16,6 +16,7 @@
 
 import logging
 import os
+import shutil
 import subprocess
 import tempfile
 import wave
@@ -30,6 +31,8 @@ from verl_omni.pipelines.rollout_media import MediaArtifact, MediaSpec, resolve_
 from verl_omni.utils.reward_score.reward_utils import normalize_video_tensor
 
 logger = logging.getLogger(__name__)
+
+_FFMPEG_TIMEOUT_S = 600
 
 
 def batch_items(values: Any, batch_size: int, name: str) -> list[Any]:
@@ -68,6 +71,12 @@ def validate_audio_batch(audios: Any, rates: Any, count: int, *, context: str) -
     for audio, rate in zip(audios, rates, strict=True):
         validate_audio(audio, rate, context=context)
     return audios, rates
+
+
+def _temp_path_beside(path: Path, suffix: str) -> Path:
+    fd, temp_path = tempfile.mkstemp(dir=path.parent, prefix=f".{path.stem}.", suffix=suffix)
+    os.close(fd)
+    return Path(temp_path)
 
 
 def _write_wav(audio: Any, sample_rate: Any, path: Path) -> None:
@@ -119,15 +128,18 @@ def _export_video(
 ) -> None:
     """Encode RGB frames and optional audio in one ffmpeg invocation.
 
-    Passing the contiguous RGB buffer through ``subprocess.run(input=...)`` uses
-    ``communicate`` to finish partial pipe writes. This avoids imageio-ffmpeg's
-    direct ``stdin.write`` path, which can silently truncate a raw-video frame
-    without materializing another full-video ``bytes`` copy.
+    The RGB frames are spooled to a transient file, like the audio track, instead
+    of being written to ffmpeg's stdin. Exports run on a background thread, and a
+    process forked meanwhile (e.g. a DataLoader worker) would inherit any pipe to
+    ffmpeg and keep it open, so the export would never finish. A file also avoids
+    imageio-ffmpeg's ``stdin.write`` path, which can silently truncate a frame.
     """
     if ffmpeg_exe is None:
         from imageio_ffmpeg import get_ffmpeg_exe
 
         ffmpeg_exe = get_ffmpeg_exe()
+    # CPython only uses posix_spawn for an executable given by path.
+    ffmpeg_exe = os.path.abspath(shutil.which(ffmpeg_exe) or ffmpeg_exe)
 
     if isinstance(output, MediaArtifact) and output.spec.fps is not None:
         fps = output.spec.fps
@@ -138,6 +150,7 @@ def _export_video(
 
     frames, width, height = _video_tensor_to_rgb24(output)
     output_path = Path(output_path)
+    frames_path = _temp_path_beside(output_path, ".rgb")
     audio_path = None
     command = [
         ffmpeg_exe,
@@ -155,15 +168,16 @@ def _export_video(
         "-r",
         str(fps),
         "-i",
-        "-",
+        str(frames_path),
     ]
     try:
+        frames.tofile(frames_path)
         if audio is None:
             command.append("-an")
         else:
             if audio_sample_rate is None:
                 raise ValueError("audio_sample_rate is required when logging a video with audio.")
-            audio_path = output_path.with_suffix(".wav")
+            audio_path = _temp_path_beside(output_path, ".wav")
             _write_wav(audio, audio_sample_rate, audio_path)
             command.extend(["-i", str(audio_path), "-map", "0:v:0", "-map", "1:a:0"])
 
@@ -186,11 +200,14 @@ def _export_video(
             command.extend(["-c:a", "aac", "-t", str(frames.shape[0] / fps)])
         command.append(str(output_path))
         try:
-            subprocess.run(command, input=memoryview(frames).cast("B"), check=True)
+            # No pipes, and close_fds=False lets CPython use posix_spawn, which creates no
+            # exec-status pipe either, so a concurrent fork inherits nothing from this call.
+            subprocess.run(command, stdin=subprocess.DEVNULL, close_fds=False, check=True, timeout=_FFMPEG_TIMEOUT_S)
         except Exception:
             output_path.unlink(missing_ok=True)
             raise
     finally:
+        frames_path.unlink(missing_ok=True)
         if audio_path is not None:
             audio_path.unlink(missing_ok=True)
 

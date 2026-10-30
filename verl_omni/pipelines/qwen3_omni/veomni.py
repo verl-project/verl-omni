@@ -234,15 +234,20 @@ def setup_backend(model_config, engine_config) -> None:
         raise NotImplementedError("Qwen3-Omni Thinker with VeOmni requires ulysses_parallel_size=1.")
     if not model_config.use_remove_padding:
         raise NotImplementedError("Qwen3-Omni Thinker with VeOmni requires use_remove_padding=True.")
-    if (
-        model_config.lora_rank > 0
-        or model_config.lora.get("rank", 0) > 0
-        or getattr(model_config, "lora_adapter_path", None) is not None
-    ):
-        raise NotImplementedError(
-            "Qwen3-Omni Thinker with VeOmni supports full-parameter training only; "
-            "LoRA ranks and lora_adapter_path are not supported."
-        )
+    from verl_omni.utils.config import resolve_lora_config
+
+    # A resolver ValueError means LoRA was requested in some spelling; its flat-key
+    # hint is a dead end where the flat key is refused too.
+    veomni_lora_error = (
+        "Qwen3-Omni Thinker with VeOmni supports full-parameter training only; "
+        "LoRA ranks and lora_adapter_path are not supported."
+    )
+    try:
+        lora_settings = resolve_lora_config(model_config)
+    except ValueError as e:
+        raise NotImplementedError(veomni_lora_error) from e
+    if lora_settings.enabled:
+        raise NotImplementedError(veomni_lora_error)
 
     from verl.workers.engine.veomni.utils import MOE_PARAM_HANDERS
 
