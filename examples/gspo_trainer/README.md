@@ -517,27 +517,6 @@ Follow the [NPU installation guide](../../docs/start/install_npu.md), source
 CANN/ATB, and ensure FFmpeg and the media dependencies are available on every
 Ray worker.
 
-This recipe requires verl with
-[`use_no_sync_for_gradient_accumulation` support (#7458)](https://github.com/verl-project/verl/pull/7458).
-Commit `a0feb78fe8229fde644aec3bbec20b5dc4583509` (`0.10.0.dev`) includes
-that change. The repository's current verl pin `fefb080` and the v0.9.0
-release do not include the option. This recipe therefore requires a separate
-verl update after the standard environment installation; the repository-wide
-dependency pin is unchanged. The development version string alone is not
-sufficient to identify a compatible installation.
-
-To update verl in an existing NPU training environment without replacing its
-installed PyTorch or other runtime dependencies, run:
-
-```bash
-python -m pip install --no-deps --force-reinstall \
-    "verl @ git+https://github.com/verl-project/verl.git@a0feb78fe8229fde644aec3bbec20b5dc4583509"
-```
-
-Restart the training processes and Ray workers after updating. Reinstalling
-the repository (`uv pip install -e .`) may restore the repository's older pin;
-apply the recipe-specific verl update after that installation.
-
 Launch with the original full model checkpoint:
 
 ```bash
@@ -557,7 +536,7 @@ at the cost of additional gradient communication. Gradient accumulation and
 the optimizer-step boundary are preserved. This uses the upstream verl option;
 no local gradient-synchronization override is needed.
 
-The revision installed above defaults this option to `false` in its FSDP YAML, while its
+The pinned verl defaults this option to `false` in its FSDP YAML, while its
 `FSDPEngineConfig` dataclass defaults to `true`. The launcher sets it explicitly
 so this recipe does not depend on how the configuration was constructed.
 For a deferred-synchronization comparison, explicitly override it to `true`;

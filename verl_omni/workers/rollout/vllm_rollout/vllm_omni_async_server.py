@@ -50,6 +50,12 @@ from verl_omni.workers.rollout.vllm_rollout.vllm_omni_diffusion_strategy import 
 logger = logging.getLogger(__file__)
 logger.setLevel(logging.INFO)
 
+
+def _abort_ack_timeout_s() -> float:
+    """RPC timeout for engine abort acknowledgements; env-overridable for tests."""
+    return float(os.getenv("VERL_OMNI_ABORT_ACK_TIMEOUT_S", "120"))
+
+
 # Sentinel: ``None`` is a valid cached value (LoRA not loaded).
 # TODO: Move LoRA request cache resolution/invalidation upstream to AsyncOmni.
 _LORA_REQUEST_CACHE_MISS = object()
@@ -542,7 +548,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             return await super().abort_all_requests(
                 reset_prefix_cache, reject_request=reject_request, abort_only=abort_only
             )
-        if reject_request:
+        if reject_request and not abort_only:
             logger.warning("AsyncOmni has no admission gate: requests arriving behind the pause park until resume")
 
         # ``engine.abort`` takes EXTERNAL ids; ``request_states`` is keyed by internal.
@@ -558,9 +564,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
 
         if abort_only:
             try:
-                await asyncio.wait_for(
-                    engine.abort(request_ids), timeout=float(os.getenv("VERL_OMNI_ABORT_ACK_TIMEOUT_S", "120"))
-                )
+                await asyncio.wait_for(engine.abort(request_ids), timeout=_abort_ack_timeout_s())
             except Exception:
                 # Same cleanup as the pause path: synthetic terminals unblock waiting generators.
                 for internal_id, _, state in in_flight:
@@ -571,9 +575,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
 
         aborted = False
         try:
-            await asyncio.wait_for(
-                engine.abort(request_ids), timeout=float(os.getenv("VERL_OMNI_ABORT_ACK_TIMEOUT_S", "120"))
-            )
+            await asyncio.wait_for(engine.abort(request_ids), timeout=_abort_ack_timeout_s())
             aborted = True
             # Pause even with nothing to abort: holds admission until resume_generation.
             await engine.pause_generation(
@@ -641,9 +643,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
                 break
 
         try:
-            await asyncio.wait_for(
-                engine.abort(request_id), timeout=float(os.getenv("VERL_OMNI_ABORT_ACK_TIMEOUT_S", "120"))
-            )
+            await asyncio.wait_for(engine.abort(request_id), timeout=_abort_ack_timeout_s())
         except Exception:
             if in_flight_state is not None:
                 self._enqueue_abort_output(in_flight_state.request_id, in_flight_state)

@@ -71,13 +71,88 @@ def test_peft_named_bucket_without_lora_routing_fails_loud():
         _get_standard_weight_model_and_config=lambda: (SimpleNamespace(modules=lambda: []), SimpleNamespace()),
     )
     with patch.object(bucketed_weight_transfer, "BucketedWeightReceiver", FakeReceiver):
-        with pytest.raises(RuntimeError, match="PEFT-wrapped names reached the dense load path"):
+        with pytest.raises(RuntimeError, match="PEFT-wrapped names reached a non-LoRA load path"):
             vLLMOmniColocateWorkerExtension.update_weights_from_ipc(worker)
 
     # The stream drains before the error surfaces: buckets after the misroute are
     # discarded without loading, the sender completes, and the adapter's worker
     # RPC future resolves with this error instead of blocking on a closed socket.
     assert callbacks == ["misrouted", "drained"]
+
+
+def test_peft_named_bucket_in_a_sniffed_delta_stream_fails_loud():
+    from verl_omni.workers.rollout.vllm_rollout.delta_apply import SPEC_NAME
+
+    applied = []
+    callbacks = []
+
+    class FakeReceiver:
+        def __init__(self, zmq_handle, device, use_shm):
+            pass
+
+        def receive_weights(self, on_bucket_received):
+            # A spec sentinel leads the flush, so the first bucket routes the
+            # stream to the delta applier; the PEFT-named bucket must still
+            # fail loud instead of reaching the in-place applier.
+            on_bucket_received([(SPEC_NAME + "#flush", object())])
+            callbacks.append("spec")
+            on_bucket_received([("base_model.model.lm_head.weight", object())])
+            callbacks.append("misrouted")
+            on_bucket_received([(SPEC_NAME + "#flush", object())])
+            callbacks.append("drained")
+
+    def _record_apply(weights, state, is_last=False):
+        applied.append(weights[0][0])
+
+    worker = SimpleNamespace(
+        device="cpu",
+        _pending_lora_peft_config=None,
+        _get_zmq_handle=lambda: "ipc:///tmp/unused.sock",
+        _get_standard_weight_model_and_config=lambda: (SimpleNamespace(modules=lambda: []), SimpleNamespace()),
+        _apply_delta_bucket=_record_apply,
+    )
+    with patch.object(bucketed_weight_transfer, "BucketedWeightReceiver", FakeReceiver):
+        with pytest.raises(RuntimeError, match="PEFT-wrapped names reached a non-LoRA load path"):
+            vLLMOmniColocateWorkerExtension.update_weights_from_ipc(worker)
+
+    assert callbacks == ["spec", "misrouted", "drained"]
+    # Only the pre-misroute spec bucket reached the applier; the PEFT bucket and
+    # everything after it are drained without applying.
+    assert applied == [SPEC_NAME + "#flush"]
+
+
+def test_peft_named_bucket_in_an_explicit_delta_flush_fails_loud():
+    applied = []
+    callbacks = []
+
+    class FakeReceiver:
+        def __init__(self, zmq_handle, device, use_shm):
+            pass
+
+        def receive_weights(self, on_bucket_received):
+            on_bucket_received([("lm_head.qkv_proj.weight", object())])
+            callbacks.append("delta")
+            on_bucket_received([("base_model.model.lm_head.weight", object())])
+            callbacks.append("misrouted")
+            on_bucket_received([("lm_head.qkv_proj.weight", object())])
+            callbacks.append("drained")
+
+    def _record_apply(weights, state, is_last=False):
+        applied.append(weights[0][0])
+
+    worker = SimpleNamespace(
+        device="cpu",
+        _pending_lora_peft_config=None,
+        _get_zmq_handle=lambda: "ipc:///tmp/unused.sock",
+        _get_standard_weight_model_and_config=lambda: (SimpleNamespace(modules=lambda: []), SimpleNamespace()),
+        _apply_delta_bucket=_record_apply,
+    )
+    with patch.object(bucketed_weight_transfer, "BucketedWeightReceiver", FakeReceiver):
+        with pytest.raises(RuntimeError, match="PEFT-wrapped names reached a non-LoRA load path"):
+            vLLMOmniColocateWorkerExtension.update_weights_from_ipc(worker, delta_flush=True)
+
+    assert callbacks == ["delta", "misrouted", "drained"]
+    assert applied == ["lm_head.qkv_proj.weight"]
 
 
 def test_worker_receivers_resolve_shared_update_id_from_their_rank_local_handles():

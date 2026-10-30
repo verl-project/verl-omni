@@ -95,6 +95,11 @@ max_model_len: null
 # max length of sequences
 max_num_seqs: 1024
 
+# Ray max_concurrency of the rollout server actor. Raise it above the peak number of
+# in-flight generate requests per replica, otherwise control calls (wake_up, weight sync)
+# can be starved.
+ray_actor_max_concurrency: 1024
+
 # When True, the vLLM-Omni engine runs the registered pipeline in
 # step-execution mode.
 step_execution: False

@@ -435,7 +435,8 @@ ray_kwargs:
   # Path to save Ray timeline JSON for performance profiling
   timeline_json_file: null
 
-# TransferQueue configs (mirrors verl/trainer/config/ppo_trainer.yaml `transfer_queue`).
+# TransferQueue configs, kept at the TransferQueue 0.1.9 shape (the repo pin);
+# verl's newer transfer_queue.yaml tracks 0.1.11 (SimpleStorage ssd_offload, MooncakeStore P2PHANDSHAKE).
 # Required for the V1 trainer; main_diffusion_v1.py force-enables it when use_v1=true.
 transfer_queue:
 
