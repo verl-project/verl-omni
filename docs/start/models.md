@@ -222,6 +222,25 @@ data prep, and Diffusers pin, see
 BAGEL uses a per-stage deploy YAML that overrides top-level vLLM engine arguments
 — tune `gpu_memory_utilization` and batch sizes directly in the stage config file.
 
+### Lance
+
+| Property | Detail |
+|----------|--------|
+| **Hugging Face ID** | `bytedance-research/Lance` |
+| **Architecture** | Unified multimodal understanding + generation (BAGEL-lineage MoT, 3B) |
+| **Modality** | Text + Image (understand and generate); video checkpoint tracked separately |
+| **Deploy config** | `examples/flowgrpo_trainer/lance/lance_deploy_config.yaml` |
+| **Rollout** | vLLM-Omni, `LancePipeline` |
+
+**Supported trainers:**
+
+| Trainer | Example script | GPU config |
+|---------|---------------|------------|
+| Flow-GRPO (LoRA, PickScore, text-to-image) | `examples/flowgrpo_trainer/lance/run_lance_pickscore_lora.sh` | 4×GPU |
+
+Lance reuses BAGEL's MoT training module; the differences are the Wan2.2 latent
+geometry and a sigma shift of 3.5 instead of 3.0.
+
 ---
 
 ## Omni-Modality Models

@@ -110,6 +110,7 @@ examples/minimax_h3/diffusionnft_trainer_minimax_h3.md
 examples/boogu_image/flowgrpo_trainer_boogu_image.md
 examples/boogu_image/diffusionnft_trainer_boogu_image.md
 examples/bagel/flowgrpo_trainer_bagel.md
+examples/lance/flowgrpo_trainer_lance.md
 examples/gspo_trainer.md
 examples/qwen3_omni/gspo_trainer_qwen3_omni.md
 examples/dapo_trainer.md
