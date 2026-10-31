@@ -115,6 +115,14 @@ class DiffusionModelBase(ABC):
             noise = noise[:, step]
         return {"x0": x0, "xt": (1.0 - t) * x0 + t * noise, "t_expanded": t}
 
+    # Adapter used for the detached loss-reference prediction.
+    old_policy_adapter: str = "old"
+
+    @classmethod
+    def forward_reference(cls, module, model_config, model_inputs, negative_model_inputs):
+        """Forward for the adapter-disabled pretrained reference."""
+        return cls.forward(module, model_config, model_inputs, negative_model_inputs)
+
     @classmethod
     def validate_engine_config(cls, engine_config) -> None:
         """Validate adapter requirements before NFT engine initialization."""

@@ -57,13 +57,26 @@ def test_nft_initializes_old_adapter_before_first_weight_sync(monkeypatch):
     events = []
     trainer.actor_rollout_wg = MagicMock()
     trainer.actor_rollout_wg.copy_adapter.side_effect = lambda **kwargs: events.append("copy")
-    trainer.checkpoint_manager = SimpleNamespace(update_weights=lambda step: events.append("sync"))
-    monkeypatch.setattr(trainer, "_setup", lambda: None)
+    trainer.checkpoint_manager = SimpleNamespace(
+        sleep_replicas=lambda: None, update_weights=lambda step: events.append("sync")
+    )
+    trainer.resource_pool_manager = SimpleNamespace(create_resource_pool=lambda: None, resource_pool_dict={})
+    for method in (
+        "_init_tokenizer",
+        "_init_dataloader",
+        "_init_dump_executor",
+        "_init_resource_pool_mgr",
+        "_normalize_dynamic_bsz_config",
+        "_init_colocated_workers",
+        "_init_online_rollout_stack",
+    ):
+        monkeypatch.setattr(trainer, method, MagicMock())
+    monkeypatch.setattr(trainer, "_load_checkpoint", lambda: events.append("load"))
 
     trainer.init()
 
     trainer.actor_rollout_wg.copy_adapter.assert_called_once_with(source="default", target="old")
-    assert events == ["copy", "sync"]
+    assert events == ["copy", "load", "sync"]
 
 
 @pytest.mark.parametrize("step,refresh", [(1, None), (2, "copy"), (76, "ema")])

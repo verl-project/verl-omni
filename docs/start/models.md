@@ -105,6 +105,7 @@ alignment and does not directly enforce source-image preservation.
 | Diffusion-DPO (offline, v0 by design) | `examples/dpo_trainer/sd35/run_sd35_medium_offline_dpo_lora.sh` | 3×GPU |
 | [DiffusionOPD](../algo/diffusion_opd.md) (single teacher, OCR) | `examples/diffusionopd_trainer/sd35/run_sd35_medium_ocr_distill.sh` | 3×GPU (2 actor+rollout+teacher, 1 reward) |
 | [DiffusionOPD](../algo/diffusion_opd.md) (multi-teacher / MOPD) | `examples/diffusionopd_trainer/sd35/run_sd35_medium_mopd_distill.sh` | 3×GPU (2 actor+rollout+teachers, 1 reward) |
+| [CRD](../algo/crd.md) (SD3.5-Medium LoRA, V1 sync) | `examples/crd_trainer/sd35/run_sd35_medium_ocr_lora_v1.sh` | 2×GPU (1 actor/rollout, 1 reward) |
 | [DGPO](../algo/dgpo.md) (LoRA, V1 sync) | `examples/dgpo_trainer/sd35/run_sd35_medium_ocr_lora_v1.sh` | 3×GPU (2 actor+rollout, 1 reward) |
 
 **Reward model:** `Qwen/Qwen2.5-VL-3B-Instruct` (OCR VLM judge, TP=1, dedicated pool) for Flow-GRPO OCR, DGPO and DiffusionOPD. The DiNa-LRM recipe scores clean latents over HTTP instead of decoding images; see [SD3.5 FlowGRPO with a latent reward model](../examples/flowgrpo_trainer_sd35_drm.md). DiffusionOPD monitors OCR (and PickScore on the mixed-task recipe) but does not put those scores in the loss — see [Diffusion On-Policy Distillation](../algo/diffusion_opd.md).
@@ -343,6 +344,7 @@ trainer's README in `examples/`.
 | DPO | NPU ✅<br>GPU ✅ | — | GPU ✅ | — | — | — | — | GPU ✅ | — |
 | DiffusionNFT | NPU ✅<br>GPU ✅ | — | — | — | — | NPU ✅ (T2VA)<br>GPU ✅ | — | — | — |
 | OmniNFT | — | — | — | — | ✅ | — | — | — | — |
+| [CRD](../algo/crd.md) | — | — | GPU ✅ (Medium LoRA, FSDP2) | — | — | — | — | — | — |
 | [DGPO](../algo/dgpo.md) | — | — | GPU ✅ | — | — | — | — | — | — |
 | [DiffusionOPD](../algo/diffusion_opd.md) (incl. MOPD) | — | — | GPU ✅ | — | — | — | — | — | — |
 | GSPO (incl. OPD) | — | — | — | — | — | — | — | NPU ✅<br>GPU ✅ | — |

@@ -1433,7 +1433,8 @@ class NFTDiffusersFSDPEngine(DiffusersFSDPEngine):
             micro_batch=micro_batch, step=step
         )
 
-        with self.use_adapter("old"), torch.no_grad():
+        adapter_class = DiffusionModelBase.get_class(self.model_config)
+        with self.use_adapter(adapter_class.old_policy_adapter), torch.no_grad():
             old_prediction = forward(
                 module=self.module,
                 model_config=self.model_config,
@@ -1455,7 +1456,7 @@ class NFTDiffusersFSDPEngine(DiffusersFSDPEngine):
 
         with torch.no_grad():
             with self.disable_adapter():
-                ref_forward_prediction = forward(
+                ref_forward_prediction = adapter_class.forward_reference(
                     module=self.module,
                     model_config=self.model_config,
                     model_inputs=model_inputs,

@@ -260,9 +260,19 @@ class PolicyGradientDiffusionTrainerV1(ABC):
     def init(self):
         """Initialize workers, rollout server, reward loop, checkpoint engine."""
         self._setup()
-        if self._has_old_adapter:
-            self.actor_rollout_wg.copy_adapter(source="default", target="old")
         self.on_init_end()
+
+    def _policy_adapter_specs(self) -> tuple[tuple[str, str], ...]:
+        """Return adapter names and their algorithm config prefixes."""
+        specs = self._loss_fn.extra_ema_adapters if self._loss_fn is not None else ()
+        if self._has_old_adapter:
+            specs += (("old", "old_policy"),)
+        return specs
+
+    def _initialize_policy_adapters(self):
+        """Initialize snapshots before checkpoint restoration can replace them."""
+        for target, _ in self._policy_adapter_specs():
+            self.actor_rollout_wg.copy_adapter(source="default", target=target)
 
     def _rollout_server_managers(self) -> list:
         """LLM server managers whose inference engines take part in rollout profiling.
@@ -726,21 +736,25 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         }
         return DataProto.from_tensordict(tu.get_tensordict(ref_output))
 
-    def _update_old_policy(self) -> tuple[bool, float, str]:
-        """Refresh the NFT old-policy adapter (copy or EMA)."""
+    def _update_policy_adapters(self) -> dict[str, float]:
+        """Refresh each policy snapshot on its own schedule and report its metrics."""
         algo_cfg = self.config.algorithm
-        if self.global_steps % algo_cfg.old_policy_update_interval != 0:
-            return False, 0.0, "none"
-
-        decay = algo_cfg.old_policy_decay
-        if decay is None:
-            decay = old_policy_decay(self.global_steps, algo_cfg.old_policy_decay_schedule)
-
-        if decay == 0:
-            self.actor_rollout_wg.copy_adapter(source="default", target="old")
-            return True, float(decay), "copy"
-        self.actor_rollout_wg.ema_update_adapter(source="default", target="old", decay=decay)
-        return True, float(decay), "ema"
+        metrics = {}
+        for target, prefix in self._policy_adapter_specs():
+            if self.global_steps % getattr(algo_cfg, f"{prefix}_update_interval") != 0:
+                metrics.update(compute_old_policy_metrics((False, 0.0, "none"), prefix=prefix))
+                continue
+            decay = getattr(algo_cfg, f"{prefix}_decay")
+            if decay is None:
+                decay = old_policy_decay(self.global_steps, getattr(algo_cfg, f"{prefix}_decay_schedule"))
+            if decay == 0:
+                self.actor_rollout_wg.copy_adapter(source="default", target=target)
+                update_type = "copy"
+            else:
+                self.actor_rollout_wg.ema_update_adapter(source="default", target=target, decay=decay)
+                update_type = "ema"
+            metrics.update(compute_old_policy_metrics((True, float(decay), update_type), prefix=prefix))
+        return metrics
 
     def _train_direct_preference_batch(
         self, metrics: dict, timing_raw: dict, batch_meta: KVBatchMeta, data: DataProto
@@ -778,8 +792,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             actor_output = self._update_actor(data)
             actor_metrics = reduce_metrics(actor_output.meta_info["metrics"])
             metrics.update(actor_metrics)
-            if self._has_old_adapter:
-                metrics.update(compute_old_policy_metrics(self._update_old_policy()))
+            metrics.update(self._update_policy_adapters())
 
         return batch_meta
 
@@ -855,6 +868,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         actor_rollout_resource_pool = self._init_colocated_workers()
         self._init_online_rollout_stack(actor_rollout_resource_pool)
         self.checkpoint_manager.sleep_replicas()
+        self._initialize_policy_adapters()
         self._load_checkpoint()
 
         logger.info("diffusion v1 trainer initialized, ready to fit")

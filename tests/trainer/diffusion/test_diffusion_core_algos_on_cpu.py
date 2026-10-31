@@ -94,7 +94,7 @@ def test_omni_nft_trainer_rejects_timestep_staging(actor_config):
 def test_omni_nft_retains_base_trainer_validation(key, value):
     """OmniNFT keeps the base rejection of the DGPO/AWM timestep knobs."""
     config = OmegaConf.create({"algorithm": {key: value}, "actor_rollout_ref": {"actor": {}}})
-    with pytest.raises(ValueError, match=f"algorithm.{key} is only used by the dgpo and awm losses"):
+    with pytest.raises(ValueError, match=f"algorithm.{key} is only used by the dgpo, awm and crd losses"):
         diffusion_algos.get_diffusion_loss_fn("omni_nft").validate_trainer_config(config)
 
 

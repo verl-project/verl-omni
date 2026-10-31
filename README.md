@@ -197,6 +197,8 @@ Visit our [documentation](https://verl-omni.readthedocs.io/en/latest/index.html)
     <td>✅</td>
   </tr>
   <tr>
+    <td><a href="docs/algo/crd.md">CRD</a></td>
+    <td>✅ (SD3.5-Medium LoRA)</td>
     <td><a href="examples/awm_trainer/README.md">AWM</a></td>
     <td>✅</td>
   </tr>
