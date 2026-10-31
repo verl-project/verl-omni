@@ -388,3 +388,53 @@ def test_diffusion_trainers_select_local_manager(module_name):
 
     trainer = importlib.import_module(f"verl_omni.trainer.diffusion.{module_name}")
     assert trainer.LLMServerManager is DiffusionLLMServerManager
+
+
+def _run_ar_write_deploy_config(monkeypatch, *, expert_parallel_stage_ids):
+    """Generate a deploy config for a two-stage AR pipeline (Thinker-like)."""
+    fake_self = types.SimpleNamespace(config=types.SimpleNamespace(tensor_model_parallel_size=2))
+
+    class Adapter(OmniRolloutPipelineBase):
+        @classmethod
+        def build_stage_configs(cls, pipeline_mode="thinker_only"):
+            return [
+                types.SimpleNamespace(
+                    stage_id=0,
+                    execution_type=StageExecutionType.LLM_AR,
+                    final_output=True,
+                    final_output_type="text",
+                    sampling_constraints={},
+                ),
+                types.SimpleNamespace(
+                    stage_id=1,
+                    execution_type=StageExecutionType.LLM_AR,
+                    final_output=False,
+                    final_output_type=None,
+                    sampling_constraints={},
+                ),
+            ]
+
+        @classmethod
+        def get_pipeline_id(cls, pipeline_mode="thinker_only"):
+            return "qwen3_omni_moe"
+
+    monkeypatch.setenv(get_visible_devices_keyword(), "0,1")
+
+    engine_kwargs: dict = {}
+    strategy = ARStrategy(fake_self)
+    strategy._expert_parallel_stage_ids = expert_parallel_stage_ids
+    strategy._write_deploy_config(engine_kwargs, "qwen3_omni_moe", Adapter, "thinker_only")
+    with open(engine_kwargs["deploy_config"]) as f:
+        return yaml.safe_load(f)
+
+
+def test_deploy_config_marks_only_opted_in_stages_with_expert_parallel(monkeypatch):
+    """vLLM-Omni reads EP as a per-stage flag, so only the Thinker stage gets it."""
+    deploy = _run_ar_write_deploy_config(monkeypatch, expert_parallel_stage_ids=frozenset({0}))
+    assert deploy["stages"][0]["enable_expert_parallel"] is True
+    assert "enable_expert_parallel" not in deploy["stages"][1]
+
+
+def test_deploy_config_omits_expert_parallel_by_default(monkeypatch):
+    deploy = _run_ar_write_deploy_config(monkeypatch, expert_parallel_stage_ids=frozenset())
+    assert all("enable_expert_parallel" not in stage for stage in deploy["stages"])

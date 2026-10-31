@@ -994,6 +994,37 @@ class OmniRolloutPipelineBase:
         return None
 
     @classmethod
+    def expert_parallel_stage_ids(cls, pipeline_mode="thinker_only") -> frozenset[int]:
+        """Return stages whose MoE layers may run under expert parallelism.
+
+        vLLM-Omni takes EP as a per-stage flag over the ranks that stage already
+        spans, so the deploy config carries a flag rather than a size. The default
+        empty set keeps dense pipelines on the fail-closed path.
+
+        Args:
+            pipeline_mode: The mode used to build the stages.
+
+        Returns:
+            frozenset[int]: Stage IDs that may receive ``enable_expert_parallel``.
+        """
+        return frozenset()
+
+    @classmethod
+    def expert_parallel_pipelines(cls) -> dict[str, frozenset[int]]:
+        """Return registered pipelines that opt into expert parallelism.
+
+        Returns:
+            dict[str, frozenset[int]]: Pipeline model_type to its EP stage IDs,
+            omitting pipelines that opt out.
+        """
+        supported: dict[str, frozenset[int]] = {}
+        for model_type, adapter_cls in cls._registry.items():
+            stage_ids = adapter_cls.expert_parallel_stage_ids()
+            if stage_ids:
+                supported[model_type] = stage_ids
+        return supported
+
+    @classmethod
     def policy_stage_id(cls, pipeline_mode="thinker_only") -> int:
         """Return the stage whose sampling parameters and logprobs define the policy."""
         return 0
