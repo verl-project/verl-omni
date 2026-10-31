@@ -121,6 +121,7 @@ examples/qwen3_tts/grpo_trainer_qwen3_tts.md
 :caption: Performance Tuning Guide
 
 perf/tuning_guide.md
+perf/offline_microbatch_tuner.md
 perf/diffusion_mfu.md
 perf/profiler.md
 perf/diffusion_consistency.md
