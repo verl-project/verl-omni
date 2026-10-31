@@ -26,6 +26,11 @@ __all__ = ["DiffusionDMDConfig"]
 class DiffusionDMDConfig(BaseConfig):
     """DMD2 distribution-only settings, independent of on-policy distillation."""
 
+    # Generator sampling steps, independent of the score-training timestep.
+    num_inference_steps: int = 4
+    # Explicit per-modality flow shifts and loss weights for continuous sampling.
+    modality_shifts: dict[str, float] = field(default_factory=dict)
+    modality_weights: dict[str, float] = field(default_factory=dict)
     # Fake-score update attempts per student attempt.
     fake_update_ratio: int = 2
     # Student physical microbatch size per data-parallel rank.
@@ -38,7 +43,7 @@ class DiffusionDMDConfig(BaseConfig):
     )
     # Qwen teacher CFG; student and fake score remain conditional-only.
     teacher_guidance_scale: float = 4.0
-    # Teacher velocity normalization in packed denoiser space.
+    # Teacher CFG normalization; DMD2Program layer_norm requires (B, tokens, features).
     cfg_norm: str = "layer_norm"
     # Explicit negative teacher condition; an empty string is also valid.
     negative_prompt: str = " "
@@ -46,8 +51,12 @@ class DiffusionDMDConfig(BaseConfig):
     normalization_epsilon: float = 1e-6
     # Fixed rational shift applied once to the inference sigma grid.
     rollout_timestep_shift: float = 3.0
-    # Discrete score grid size; zero selects continuous uniform sampling.
+    # Discrete score grid size; zero selects continuous score sampling.
     score_discrete_steps: int = 1000
+    # Lower continuous base-time bound, before DMD2Program's per-modality shifts.
+    score_time_min: float = 0.02
+    # Upper continuous base-time bound, before DMD2Program's per-modality shifts.
+    score_time_max: float = 0.98
     # Lower score sigma bound.
     score_sigma_min: float = 0.02
     # Upper score sigma bound.
@@ -62,6 +71,23 @@ class DiffusionDMDConfig(BaseConfig):
     export_role: str = "student"
 
     def __post_init__(self):
+        if (
+            isinstance(self.num_inference_steps, bool)
+            or not isinstance(self.num_inference_steps, int)
+            or self.num_inference_steps < 1
+        ):
+            raise ValueError("num_inference_steps must be a positive integer")
+        if self.modality_shifts.keys() != self.modality_weights.keys():
+            raise ValueError("modality_shifts and modality_weights must have matching keys")
+        for name, minimum, inclusive in (("modality_shifts", 1, True), ("modality_weights", 0, False)):
+            for value in getattr(self, name).values():
+                if (
+                    isinstance(value, bool)
+                    or not isinstance(value, int | float)
+                    or not math.isfinite(value)
+                    or (value < minimum if inclusive else value <= minimum)
+                ):
+                    raise ValueError(f"Invalid {name}: shifts must be finite and >= 1, weights finite and > 0")
         for name in ("fake_update_ratio", "student_micro_batch_size_per_gpu", "fake_score_micro_batch_size_per_gpu"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
@@ -74,6 +100,8 @@ class DiffusionDMDConfig(BaseConfig):
             "teacher_guidance_scale",
             "normalization_epsilon",
             "rollout_timestep_shift",
+            "score_time_min",
+            "score_time_max",
             "score_sigma_min",
             "score_sigma_max",
             "score_timestep_shift",
@@ -90,8 +118,9 @@ class DiffusionDMDConfig(BaseConfig):
             raise ValueError("normalization_epsilon must be positive")
         if self.rollout_timestep_shift < 1 or self.score_timestep_shift < 1:
             raise ValueError("rollout_timestep_shift and score_timestep_shift must be at least 1")
-        if not 0 < self.score_sigma_min < self.score_sigma_max <= 1:
-            raise ValueError("score sigma bounds must satisfy 0 < score_sigma_min < score_sigma_max <= 1")
+        for prefix in ("score_sigma", "score_time"):
+            if not 0 < getattr(self, f"{prefix}_min") < getattr(self, f"{prefix}_max") <= 1:
+                raise ValueError(f"{prefix} bounds must satisfy 0 < {prefix}_min < {prefix}_max <= 1")
         if not 0 <= self.ema_decay <= 1:
             raise ValueError("ema_decay must be between 0 and 1")
         valid_cfg_norms = {"none", "layer_norm", "scalar"}
