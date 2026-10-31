@@ -1050,7 +1050,7 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
         return self.postprocess_batch_func(output_lst=output_lst, indices=indices, data=data)
 
 
-@EngineRegistry.register(model_type="diffusion_model", backend=["fsdp", "fsdp2"], device=["cuda", "npu", "xpu"])
+@EngineRegistry.register(model_type="diffusion_model", backend=["fsdp", "fsdp2"], device=["cuda", "npu", "xpu", "mlu"])
 class PPODiffusersFSDPEngine(DiffusersFSDPEngine):
     """Diffusers FSDP engine with PPO forward/backward and I/O preparation."""
 

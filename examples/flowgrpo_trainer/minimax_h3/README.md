@@ -1,6 +1,6 @@
 # MiniMax H3 T2VA, FL2VA, and Ref2VA FlowGRPO
 
-Last updated: 09/30/2026
+Last updated: 10/29/2026
 
 These recipes train `MiniMaxAI/MiniMax-H3` LoRA adapters with FlowGRPO for
 text-to-audio-video (T2VA), first-frame image-to-audio-video (FL2VA), and
@@ -8,14 +8,18 @@ reference-to-audio-video (Ref2VA) generation. The launchers configure a
 Diffusers H3 Actor and vLLM-Omni rollout for joint video and audio generation,
 with CLAP and ImageBind as the default rewards.
 
-T2VA supports NVIDIA GPUs and Ascend NPUs. The FL2VA and full multimodal
-Ref2VA paths target NVIDIA GPUs.
+| Platform | T2VA | FL2VA | Ref2VA |
+| --- | --- | --- | --- |
+| NVIDIA GPU | ✅ | ✅ | ✅ |
+| Ascend NPU | ✅ | — | — |
+| Cambricon MLU | ✅ | — | — |
 
 ## Install
 
-Follow the project [installation guide](../../../docs/start/install.md) for
-NVIDIA GPU, or the [NPU installation guide](../../../docs/start/install_npu.md)
-for Ascend NPU.
+Follow the installation guide for your platform:
+[NVIDIA GPU](../../../docs/start/install.md),
+[Ascend NPU](../../../docs/start/install_npu.md), or
+[Cambricon MLU](../../../docs/start/install_mlu.md).
 
 ## Prepare the checkpoint
 
@@ -67,7 +71,7 @@ Convert the splits to verl-omni parquet files:
 export RAW_PROMPT_DIR=/path/to/raw_prompts
 export DATA_DIR="$HOME/data/vid_prompt/verl_omni"
 
-python3 examples/diffusionnft_trainer/minimax_h3/prepare_t2av_data.py \
+python3 examples/diffusionnft_trainer/minimax_h3/prepare_t2va_data.py \
   --input_dir "$RAW_PROMPT_DIR" \
   --output_dir "$DATA_DIR"
 ```
@@ -146,8 +150,9 @@ export IMAGEBIND_MODEL_PATH=/path/to/imagebind_huge.pth
 ```
 
 By default, CLAP runs on `$REWARD_DEVICE:0` and ImageBind on
-`$REWARD_DEVICE:1`, where `REWARD_DEVICE` is `cuda` for the GPU launcher and
-`npu` for the NPU launcher. Both devices must be visible to the reward worker.
+`$REWARD_DEVICE:1`, where `REWARD_DEVICE` is `cuda` for the GPU launcher,
+`npu` for the NPU launcher, and `mlu` for the MLU launcher. Both devices must
+be visible to the reward worker.
 These rewards validate generated audio/video alignment but do not directly
 measure fidelity to the supplied references.
 
@@ -318,7 +323,21 @@ bash examples/flowgrpo_trainer/minimax_h3/run_minimax_h3_t2va_lora_npu.sh \
 This uses two replicas of eight shards; rollout TP remains four. The
 existing FlowGRPO reward and SDE-window defaults are unchanged.
 
-Both launchers default to online W&B logging. Set `WANDB_MODE=offline` to keep
+### Cambricon MLU
+
+```bash
+MODEL_PATH="$MODEL_ROOT/FL2VA" \
+DATA_DIR="$HOME/data/vid_prompt/verl_omni" \
+IMAGEBIND_MODEL_PATH=/path/to/imagebind_huge.pth \
+bash examples/flowgrpo_trainer/minimax_h3/run_minimax_h3_t2va_lora_v1_mlu.sh
+```
+
+The MLU V1 launcher uses the synchronous TransferQueue trainer with FSDP2 on
+one node with eight MLU devices. It uses Actor `native`, rollout `TORCH_SDPA`,
+and Actor parameter offload. For the V0 trainer, use `run_minimax_h3_t2va_lora_mlu.sh` with the same
+environment variables.
+
+The launchers default to online W&B logging. Set `WANDB_MODE=offline` to keep
 metrics local. Checkpoints and logs are written under
 `outputs/<launcher-name>/` unless `OUTPUT_DIR` is set.
 
@@ -326,8 +345,8 @@ metrics local. Checkpoints and logs are written under
 
 | Setting | Default |
 | --- | --- |
-| Devices | 8 GPU / 16 NPU |
-| Rollout DiT TP | 2 GPU / 4 NPU |
+| Devices | 8 GPU / 16 NPU / 8 MLU |
+| Rollout DiT TP | 2 GPU / 4 NPU / 2 MLU |
 | Text-encoder TP | Same as rollout TP with SP disabled |
 | Training batch size | 32 |
 | PPO mini-batch / per-device micro-batch | 16 / 1 |
@@ -389,7 +408,7 @@ Common environment overrides are:
 | `REF_IMAGE_SHORT_EDGE` | Ref2VA training image short edge; defaults to 2048 |
 | `VAL_REF_IMAGE_SHORT_EDGE` | Ref2VA validation image short edge; defaults to the training value |
 | `REWARD_NUM_WORKERS` | Number of reward workers |
-| `REWARD_DEVICE` | Reward device type, such as `cuda` or `npu` |
+| `REWARD_DEVICE` | Reward device type, such as `cuda`, `npu`, or `mlu` |
 | `CLAP_MODEL_PATH` | CLAP model ID or local path |
 | `IMAGEBIND_MODEL_PATH` | Local ImageBind checkpoint path |
 | `ASPECT_RATIO` | Named H3 canvas ratio |

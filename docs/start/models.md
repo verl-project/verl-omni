@@ -1,6 +1,6 @@
 # Supported Models
 
-Last updated: 10/24/2026.
+Last updated: 10/29/2026.
 
 VeRL-Omni supports RL post-training for generative models across image, video,
 audio, and omni modalities. This page catalogues every model with a ready-to-run
@@ -193,6 +193,7 @@ data prep, and Diffusers pin, see
 |---------|---------------|------------|
 | Flow-GRPO (T2VA LoRA, V1 sync — default) | `examples/flowgrpo_trainer/minimax_h3/run_minimax_h3_t2va_lora_v1.sh` | 8×GPU (TP=2) |
 | Flow-GRPO (FL2VA LoRA, V1 sync — default) | `examples/flowgrpo_trainer/minimax_h3/run_minimax_h3_fl2va_lora_v1.sh` | 8×GPU (TP=4) |
+| Flow-GRPO (T2VA LoRA, V1 sync, Cambricon MLU) | `examples/flowgrpo_trainer/minimax_h3/run_minimax_h3_t2va_lora_v1_mlu.sh` | 8×MLU (TP=2) |
 | DiffusionNFT (T2VA LoRA) | `examples/diffusionnft_trainer/minimax_h3/run_minimax_h3_t2va_lora.sh` | 8×GPU (TP=2) |
 | DiffusionNFT (T2VA LoRA, Ascend NPU) | `examples/diffusionnft_trainer/minimax_h3/run_minimax_h3_t2va_lora_npu.sh` | 16×NPU (FSDP=8, TP=4, CPU offload) |
 | DiffusionNFT (FL2VA LoRA) | `examples/diffusionnft_trainer/minimax_h3/run_minimax_h3_fl2va_lora.sh` | 8×GPU (TP=4) |
@@ -335,7 +336,7 @@ trainer's README in `examples/`.
 | Algorithm | Qwen-Image | Qwen-Image-Edit | SD3.5 | Wan2.2 | LTX-2.3 | MiniMax-H3 | BAGEL | Qwen3-Omni | Qwen3-TTS |
 |-----------|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
 | GRPO | — | — | — | — | — | — | — | — | GPU ✅ |
-| Flow-GRPO | NPU ✅<br>GPU ✅ | NPU ✅<br>GPU ✅ | GPU ✅ | — | NPU ✅<br>GPU ✅ | NPU ✅<br>GPU ✅ | NPU ✅<br>GPU ✅ | — | — |
+| Flow-GRPO | NPU ✅<br>GPU ✅ | NPU ✅<br>GPU ✅ | GPU ✅ | — | NPU ✅<br>GPU ✅ | NPU ✅<br>GPU ✅<br>MLU ✅ | NPU ✅<br>GPU ✅ | — | — |
 | Flow-DPPO | GPU ✅ | — | — | — | — | — | — | — | — |
 | GRPO-Guard | NPU ✅<br>GPU ✅ | — | — | — | — | — | — | — | — |
 | Mix-GRPO | NPU ✅<br>GPU ✅ | — | — | — | — | — | — | — | — |
