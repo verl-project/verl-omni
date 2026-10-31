@@ -428,3 +428,116 @@ def test_runtime_transcript_binds_tool_results_and_excludes_fewshot(with_ids):
     assert call_id == ("generate-1" if with_ids else "call_0_0")
     assert exported[1] == {"role": "tool", "content": "path=/tmp/image.png", "tool_call_id": call_id}
     assert exported[2] == {"role": "assistant", "content": "Done."}
+
+
+def _hermes_rollout_messages(*, with_ids: bool = False) -> list[dict]:
+    """Messages as ``ToolAgentLoop`` records a reflect rollout under the Hermes parser."""
+    from verl_omni.utils.agentic_image_judge_parse import format_judge_observation
+
+    judge_text, _ = format_judge_observation(
+        image_path="/tmp/x.png",
+        parsed={"correctness": 0.8, "aesthetics": 0.7, "good_enough": True, "findings": "text is legible"},
+        backend="vllm",
+    )
+
+    def call(name: str, call_id: str, **arguments: str) -> dict:
+        entry = {"type": "function", "function": {"name": name, "arguments": json.dumps(arguments)}}
+        if with_ids:
+            entry["id"] = call_id
+        return entry
+
+    def response(content: str, call_id: str) -> dict:
+        message = {"role": "tool", "content": content}
+        if with_ids:
+            message["tool_call_id"] = call_id
+        return message
+
+    return [
+        {"role": "system", "content": "tools"},
+        {"role": "user", "content": "a poster"},
+        {"role": "assistant", "content": "", "tool_calls": [call("generate_image", "g", prompt="a poster")]},
+        response(_gen_obs(), "g"),
+        {"role": "assistant", "content": "", "tool_calls": [call("judge_image", "j", user_request="a poster")]},
+        response(judge_text, "j"),
+        {"role": "assistant", "content": "Reflection: the poster text is legible. Done."},
+    ]
+
+
+def test_exported_messages_authenticate_a_hermes_rollout_for_the_rpco_reward():
+    """The Hermes parser sets no call IDs: the export is what makes outcomes trusted."""
+    from verl_omni.agent_loop.utils import messages_to_text
+    from verl_omni.utils.reward_score.agentic_multidim_reward import compute_score
+
+    messages = _hermes_rollout_messages()
+    kwargs = {
+        "solution_str": messages_to_text(messages[2:]),
+        "ground_truth": {"task_type": "reflect", "expected_num_images": 1},
+    }
+    raw = compute_score(**kwargs, extra_info={"trajectory_messages": messages})
+    assert raw["n_successful_generates"] == 0
+    assert raw["score"] == 0.0
+
+    exported = compute_score(**kwargs, extra_info={"trajectory_messages": utils.runtime_trajectory_messages(messages)})
+    assert exported["rollout_valid"] == 1
+    assert exported["judge_parse_ok"] == 1
+    assert exported["reward_tool"] == exported["reward_result"] == exported["reward_done"] == 1.0
+
+
+@pytest.mark.asyncio
+async def test_run_publishes_runtime_trajectory_messages(monkeypatch):
+    from verl.experimental.agent_loop.tool_agent_loop import ToolAgentLoop
+
+    messages = _hermes_rollout_messages()
+
+    async def fake_pending(self, agent_data, sampling_params):
+        return None
+
+    async def fake_run(self, sampling_params, **kwargs):
+        agent_data = _agent_data(messages)
+        await self._handle_pending_state(agent_data, sampling_params)
+        return SimpleNamespace(extra_fields=agent_data.extra_fields)
+
+    monkeypatch.setattr(ToolAgentLoop, "_handle_pending_state", fake_pending)
+    monkeypatch.setattr(ToolAgentLoop, "run", fake_run)
+    output = await _bare_loop().run({})
+
+    assert output.extra_fields["trajectory_messages"] == utils.runtime_trajectory_messages(messages)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("include_runtime_messages", [False, True])
+async def test_pinned_naive_reward_manager_forwards_runtime_tool_fields(include_runtime_messages):
+    import numpy as np
+    import torch
+    from verl import DataProto
+    from verl.experimental.reward_loop.reward_manager.naive import NaiveRewardManager
+
+    from verl_omni.agent_loop.utils import messages_to_text
+    from verl_omni.utils.reward_score.agentic_multidim_reward import compute_score
+
+    messages = _hermes_rollout_messages()
+    decoded = messages_to_text(messages[2:])
+    tool_fields = (
+        {"trajectory_messages": utils.runtime_trajectory_messages(messages)} if include_runtime_messages else {}
+    )
+    data = DataProto.from_dict(
+        tensors={"responses": torch.tensor([[1, 2, 3]]), "attention_mask": torch.ones((1, 3), dtype=torch.long)},
+        non_tensors={
+            "data_source": np.array(["agentic"], dtype=object),
+            "reward_model": np.array(
+                [{"ground_truth": {"task_type": "reflect", "expected_num_images": 1}}], dtype=object
+            ),
+            "extra_info": np.array([{}], dtype=object),
+            "tool_extra_fields": np.array([tool_fields], dtype=object),
+        },
+    )
+    manager = NaiveRewardManager(
+        OmegaConf.create({}), SimpleNamespace(decode=lambda *args, **kwargs: decoded), compute_score
+    )
+    output = await manager.run_single(data)
+    metrics = output["reward_extra_info"]
+
+    assert metrics["rollout_valid"] == int(include_runtime_messages)
+    assert metrics["n_successful_generates"] == int(include_runtime_messages)
+    assert metrics["reward_result"] == float(include_runtime_messages)
+    assert (output["reward_score"] > 0) is include_runtime_messages
