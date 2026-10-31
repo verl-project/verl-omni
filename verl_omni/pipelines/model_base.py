@@ -121,6 +121,16 @@ class DiffusionModelBase(ABC):
         return
 
     @classmethod
+    def configure_engine(cls, engine, engine_config) -> None:
+        """Let an adapter attach algorithm-specific runtime state to its engine.
+
+        The shared worker passes no algorithm knowledge here: ``engine_config`` exposes the
+        actor's ``diffusion_loss`` block as ``algorithm_config`` for every diffusion
+        algorithm, and only the adapter registered for this model decides what to do with it.
+        """
+        return
+
+    @classmethod
     def configure_gradient_checkpointing(cls, module, engine_config) -> None:
         """Enable standard checkpointing unless the NFT adapter overrides it."""
         module.enable_gradient_checkpointing()

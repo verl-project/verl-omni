@@ -77,6 +77,42 @@ diffusion_loss:
   # OmniNFT audio prediction-space reference MSE coefficient
   audio_ref_kl_coef: 0.0
 
+  # DiffusionOPSD relative trust-region radius for the reward-gradient targets
+  opsd_rho: 0.10
+
+  # DiffusionOPSD number of normalized reward-gradient steps per target
+  opsd_n_ascent: 2
+
+  # DiffusionOPSD step-size multiplier inside the relative trust region
+  opsd_eta: 1.0
+
+  # DiffusionOPSD positive/negative branch mixing coefficient
+  opsd_branch_beta: 1.0
+
+  # DiffusionOPSD requested low-noise query sigma in scheduler flow time
+  opsd_query_sigma: 0.278
+
+  # DiffusionOPSD tolerance between the requested and selected query sigma
+  opsd_query_sigma_tolerance: 0.15
+
+  # DiffusionOPSD scheduler train-timestep scale used to map timesteps to flow time
+  opsd_num_train_timesteps: 1000
+
+  # DiffusionOPSD detached residual-normalizer floor
+  opsd_eps_gamma: 1e-5
+
+  # DiffusionOPSD differentiable target reward kind
+  opsd_reward_kind: pickscore
+
+  # DiffusionOPSD differentiable reward checkpoint path, empty uses the scorer default
+  opsd_reward_model_path: ""
+
+  # DiffusionOPSD target-construction dtype for the differentiable reward model
+  opsd_reward_dtype: float32
+
+  # DiffusionOPSD trajectories per reward-gradient micro batch
+  opsd_target_micro_batch: 6
+
 # Rollout Correction config.  Fields mirror RolloutCorrectionConfig.
 # rollout_is defaults to null (off); override for IS diagnostics.
 rollout_correction:

@@ -194,6 +194,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
             "diffusion_model",
             "diffusion_dpo_model",
             "diffusion_nft_model",
+            "diffusion_opsd_model",
         ):
             self.flops_counter = DiffusionFlopsCounter(
                 architecture=getattr(self.model_config, "architecture", None),
@@ -652,6 +653,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             "diffusion_model",
             "diffusion_dpo_model",
             "diffusion_nft_model",
+            "diffusion_opsd_model",
         )
 
         # 1. build reference model
@@ -739,6 +741,10 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                     "Diffusion infer_batch requires rollout.log_prob_micro_batch_size_per_gpu or "
                     "actor.ppo_micro_batch_size_per_gpu (used by prepare_micro_batches)."
                 )
+                # Every diffusion algorithm keeps its knobs in ``diffusion_loss``; expose them to
+                # the engine so a pipeline adapter can configure itself through its own hook
+                # instead of the shared worker branching on the algorithm name.
+                actor_training_config.engine_config.algorithm_config = self.config.actor.diffusion_loss
             else:
                 actor_use_dynamic_bsz = self.config.actor.get("use_dynamic_bsz", False)
                 rollout_log_prob_use_dynamic_bsz = self.config.rollout.get("log_prob_use_dynamic_bsz", False)

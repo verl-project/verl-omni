@@ -28,6 +28,7 @@ from tensordict import TensorDict
 from verl import DataProto
 from verl.utils import tensordict_utils as tu
 
+from verl_omni.trainer.diffusion.opsd_targets import opsd_two_branch_loss
 from verl_omni.workers.config import DiffusionActorConfig
 
 
@@ -2057,3 +2058,330 @@ class DistillFlowMatchingMSELoss(DiffusionLossFn):
             teacher_noise_pred=data["teacher_noise_pred"],
         )
         return DiffusionLossResult(loss=distill_loss, metrics=metrics)
+
+
+def _config_scalar(config: Any, key: str, default: float) -> float:
+    """Read one scalar from a loss config that may be an OmegaConf node or a plain mapping."""
+    if hasattr(config, "get"):
+        return float(config.get(key, default))
+    return float(getattr(config, key, default))
+
+
+def _load_opsd_scheduler_config(model_path: str) -> Optional[dict]:
+    """Load a diffusion pipeline's scheduler config, local directory or hub repo id.
+
+    ``validate_trainer_config`` runs before the trainer materialises the model snapshot, and the
+    published recipes point ``model.path`` at a hub repo id, so a plain ``Path(model_path)`` check
+    would silently skip every real run. Only the scheduler config is needed (a few hundred bytes),
+    so a hub id fetches that single file instead of the full snapshot.
+    """
+    import json
+    from pathlib import Path
+
+    local = Path(model_path) / "scheduler" / "scheduler_config.json"
+    if local.is_file():
+        return json.loads(local.read_text(encoding="utf-8"))
+    try:
+        from huggingface_hub import hf_hub_download
+
+        cached = hf_hub_download(repo_id=model_path, filename="scheduler/scheduler_config.json")
+        return json.loads(Path(cached).read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 - offline/unknown repo: the runtime guard covers it
+        return None
+
+
+def _opsd_query_window_problem(model_path: str, num_steps: int, loss_cfg: Any) -> Optional[str]:
+    """Return a problem string when the trailing query window cannot reach the requested sigma.
+
+    The SD3 OPSD rollout adapter captures a fixed number of trailing denoising states
+    (``query_window_steps``). The pipeline's own schedule determines which sigmas land in that
+    window, so a step count can silently move sigma* out of reach. Derive the schedule from the
+    checkpoint here and fail at startup instead of at the first batch.
+
+    Returns ``None`` when the schedule cannot be derived (the runtime selection guard still
+    reports the mismatch at the first batch).
+    """
+    scheduler_config = _load_opsd_scheduler_config(model_path)
+    if scheduler_config is None:
+        return None
+    if scheduler_config.get("use_dynamic_shifting", False):
+        # The schedule then depends on a resolution-derived mu that this probe does not model, so a
+        # verdict here could be wrong. SD3.5-Medium ships with the flag off; the runtime guard
+        # still covers dynamic-shift checkpoints.
+        return None
+    try:
+        from diffusers import FlowMatchEulerDiscreteScheduler
+
+        from verl_omni.pipelines.sd3_opsd.vllm_omni_rollout_adapter import StableDiffusion3OPSDPipeline
+
+        scheduler = FlowMatchEulerDiscreteScheduler.from_config(scheduler_config)
+        scheduler.set_timesteps(num_steps)
+        # The captured window maps onto the last `window` sigmas before the terminal 0.
+        sigmas = [float(s) for s in scheduler.sigmas[:-1]]
+        window = int(StableDiffusion3OPSDPipeline.query_window_steps)
+    except Exception:  # noqa: BLE001 - the runtime guard covers anything this probe cannot run
+        return None
+
+    candidates = sigmas[-window:] if window < len(sigmas) else sigmas
+    if not candidates:
+        return None
+    query_sigma = _config_scalar(loss_cfg, "opsd_query_sigma", 0.278)
+    tolerance = _config_scalar(loss_cfg, "opsd_query_sigma_tolerance", 0.15)
+    closest = min(candidates, key=lambda sigma: abs(sigma - query_sigma))
+    if abs(closest - query_sigma) <= tolerance:
+        return None
+    return (
+        f"the trailing query window of {window} states at num_inference_steps={num_steps} covers "
+        f"sigmas {[round(s, 4) for s in candidates]}, none within tolerance {tolerance} of the "
+        f"requested sigma*={query_sigma} (closest {closest:.4f}); reduce num_inference_steps, or widen "
+        "the adapter's query window"
+    )
+
+
+@register_diffusion_loss("opsd")
+class OPSDLoss(DiffusionLossFn):
+    """DiffusionOPSD detached two-branch clean-output fitting objective.
+
+    The reward/decoder graph is discarded before this loss runs: the trainer's target stage
+    stores the detached positive/negative clean-output targets ``opsd_target_pos`` /
+    ``opsd_target_neg`` in the actor batch, and this loss only fits the two implicit branches
+    of the trainable velocity (arXiv:2608.24646, Eqs. 11-13). It reuses the NFT branch
+    parameterization, adaptive mean-absolute normalizers and ``adv_clip_max`` scaling, so only
+    ``forward_prediction`` carries gradient.
+    """
+
+    uses_old_adapter = True
+    required_model_output_keys = (
+        "forward_prediction",
+        "old_prediction",
+        "xt",
+        "t_expanded",
+        "opsd_target_pos",
+        "opsd_target_neg",
+    )
+    required_data_keys = ("reward_prob",)
+
+    @classmethod
+    def compute_loss(
+        cls,
+        *,
+        forward_prediction: torch.Tensor,
+        old_prediction: torch.Tensor,
+        xt: torch.Tensor,
+        t_expanded: torch.Tensor,
+        reward_prob: torch.Tensor,
+        opsd_target_pos: torch.Tensor,
+        opsd_target_neg: torch.Tensor,
+        config: DiffusionActorConfig,
+    ) -> tuple[torch.Tensor, dict[str, Any]]:
+        """Compute the OPSD branch loss for one micro batch at its single query state."""
+        loss_cfg = config.diffusion_loss
+        return opsd_two_branch_loss(
+            forward_prediction=forward_prediction,
+            old_prediction=old_prediction,
+            xt=xt,
+            t_expanded=t_expanded,
+            target_pos=opsd_target_pos,
+            target_neg=opsd_target_neg,
+            reward_prob=reward_prob,
+            beta=loss_cfg.opsd_branch_beta,
+            adv_clip_max=loss_cfg.adv_clip_max,
+            eps_gamma=loss_cfg.opsd_eps_gamma,
+        )
+
+    def __call__(
+        self,
+        *,
+        config: DiffusionActorConfig,
+        model_output: dict[str, Any],
+        data: TensorDict,
+    ) -> DiffusionLossResult:
+        self.validate_inputs(loss_name="opsd", model_output=model_output, data=data)
+        loss, metrics = self.compute_loss(
+            forward_prediction=model_output["forward_prediction"],
+            old_prediction=model_output["old_prediction"],
+            xt=model_output["xt"],
+            t_expanded=model_output["t_expanded"],
+            reward_prob=data["reward_prob"],
+            opsd_target_pos=model_output["opsd_target_pos"],
+            opsd_target_neg=model_output["opsd_target_neg"],
+            config=config,
+        )
+        prefixed_metrics = {
+            name if name.startswith("actor/") else f"actor/{name}": value for name, value in metrics.items()
+        }
+        for name in ("opsd_target_displacement_rel", "opsd_target_displacement_neg_rel"):
+            value = model_output.get(name, None)
+            if value is not None:
+                prefixed_metrics[f"actor/{name}"] = float(value.detach().item())
+        # Wall time the engine spent building the detached targets for this micro batch. The actor
+        # update timing includes it, so reporting it separately makes the OPSD-specific cost
+        # attributable against NFT/DGPO/FlowGRPO runs of the same recipe.
+        target_seconds = model_output.get("opsd_target_seconds", None)
+        if target_seconds is not None:
+            prefixed_metrics["actor/opsd_target_seconds"] = float(target_seconds.detach().item())
+        prefixed_metrics["actor/opsd_query_sigma"] = float(model_output["t_expanded"].detach().float().mean().item())
+        prefixed_metrics["actor/total_loss"] = loss.detach().item()
+        return DiffusionLossResult(loss=loss, metrics=prefixed_metrics, add_loss_metric=True)
+
+    @staticmethod
+    def _select_query_index(
+        sigmas: torch.Tensor,
+        requested_sigma: float,
+        tolerance: float,
+    ) -> torch.Tensor:
+        """Pick the captured state whose sigma is closest to the requested low-noise query.
+
+        The rollout adapter only keeps a short trailing window, so a query level outside that
+        window would silently train on the nearest edge state. Fail loudly instead: the recipe
+        must either widen the window or change ``opsd_query_sigma``.
+        """
+        if sigmas.ndim != 2:
+            raise ValueError(f"DiffusionOPSD query sigmas must have shape [B, N], got {tuple(sigmas.shape)}.")
+        index = (sigmas - float(requested_sigma)).abs().argmin(dim=1)
+        selected = sigmas[torch.arange(sigmas.shape[0], device=sigmas.device), index]
+        worst = (selected - float(requested_sigma)).abs().max().item()
+        if worst > float(tolerance):
+            raise ValueError(
+                "DiffusionOPSD could not find the requested query sigma in the rollout's captured window: "
+                f"requested {requested_sigma}, closest captured {worst:.4f} away (tolerance {tolerance}). "
+                "Widen StableDiffusion3OPSDPipeline.query_window_steps or fix opsd_query_sigma."
+            )
+        return index
+
+    @staticmethod
+    def prepare_actor_batch(
+        batch: DataProto,
+        reward_tensor: torch.Tensor,
+        config: Any,
+    ) -> DataProto:
+        """Select the on-policy query state and build the group-normalized fitting weight.
+
+        The OPSD rollout adapter stores the trailing low-noise states in ``all_latents`` and
+        their scheduler timesteps in ``all_timesteps``. This hook picks, per row, the state
+        whose sigma is nearest ``opsd_query_sigma``, and converts the endpoint reward into the
+        DiffusionNFT-style ``reward_prob`` weight used by the loss.
+        """
+        algorithm_cfg = config.algorithm
+        actor_cfg = config.actor_rollout_ref.actor
+        loss_cfg = actor_cfg.diffusion_loss
+
+        if "uid" not in batch.non_tensor_batch:
+            raise ValueError("DiffusionOPSD actor batch requires `uid` in non_tensor_batch.")
+        all_latents = batch.batch.get("all_latents", None)
+        all_timesteps = batch.batch.get("all_timesteps", None)
+        if all_latents is None or all_timesteps is None:
+            raise ValueError(
+                "DiffusionOPSD actor batch requires `all_latents` and `all_timesteps` from the OPSD rollout "
+                "adapter; set actor_rollout_ref.model.algorithm=opsd."
+            )
+        if all_latents.ndim != 5:
+            raise ValueError(
+                f"DiffusionOPSD `all_latents` must have shape [B, N+1, ...], got {tuple(all_latents.shape)}."
+            )
+        if all_timesteps.ndim != 2:
+            raise ValueError(f"DiffusionOPSD `all_timesteps` must have shape [B, N], got {tuple(all_timesteps.shape)}.")
+        if all_latents.shape[1] != all_timesteps.shape[1] + 1:
+            raise ValueError(
+                "DiffusionOPSD expects `all_latents` to hold one more state than `all_timesteps` "
+                f"(got {all_latents.shape[1]} and {all_timesteps.shape[1]})."
+            )
+
+        # One scheduler timestep scale governs both query selection (here) and the flow-time
+        # conversion used for fitting (the pipeline adapter). Keep the selected timestep as a
+        # float: SD3.5's shifted flow schedule produces fractional timesteps, and truncating
+        # them would fit a different sigma than the one selected here.
+        num_train_timesteps = int(loss_cfg.opsd_num_train_timesteps)
+        sigmas = all_timesteps.float() / float(num_train_timesteps)
+        query_index = OPSDLoss._select_query_index(
+            sigmas,
+            requested_sigma=loss_cfg.opsd_query_sigma,
+            tolerance=loss_cfg.opsd_query_sigma_tolerance,
+        )
+        batch_index = torch.arange(all_latents.shape[0], device=all_latents.device)
+        query_latents = all_latents[batch_index, query_index]
+        query_timesteps = all_timesteps[batch_index, query_index].float()
+        # Published alongside the timesteps so the adapter can reject a config whose scale
+        # disagrees with the scheduler's before any fitting happens. It travels as a batch
+        # tensor (like `train_timesteps`) because the actor batch becomes a TensorDict.
+        batch.batch["opsd_timestep_scale"] = torch.full((all_latents.shape[0],), num_train_timesteps, dtype=torch.long)
+
+        advantages = DiffusionNFTLoss._compute_group_advantages(
+            rewards=reward_tensor,
+            uid=batch.non_tensor_batch["uid"],
+            norm_by_std=algorithm_cfg.norm_adv_by_std_in_grpo,
+            global_std=algorithm_cfg.global_std,
+        )
+        reward_prob = DiffusionNFTLoss._advantage_to_reward_prob(
+            advantages,
+            adv_clip_max=loss_cfg.adv_clip_max,
+            adv_mode=algorithm_cfg.adv_mode,
+        )
+
+        batch.batch["opsd_query_latents"] = query_latents.float()
+        batch.batch["train_timesteps"] = query_timesteps.unsqueeze(1)
+        batch.batch["reward_prob"] = reward_prob[:, None]
+        batch.batch["advantages"] = advantages[:, None]
+        batch.batch["returns"] = batch.batch["advantages"]
+        batch.batch["sample_level_rewards"] = reward_tensor[:, None].expand(-1, 1)
+        # The differentiable reward needs the prompt that produced each query state. The v1
+        # actor batch already carries ``prompts`` token ids (used by validation decode), so hand
+        # them to the engine under the key it reads instead of re-plumbing raw strings.
+        prompts = batch.batch.get("prompts", None)
+        if prompts is None:
+            raise ValueError("DiffusionOPSD requires `prompts` token ids in the actor batch for its reward model.")
+        batch.batch["opsd_prompt_ids"] = prompts
+        return batch
+
+    @staticmethod
+    def validate_trainer_config(config: Any) -> None:
+        """Reject configurations the OPSD fitting path cannot honour, at trainer start."""
+        DiffusionLossFn.validate_trainer_config(config)
+        actor_cfg = config.actor_rollout_ref.actor
+        model_cfg = config.actor_rollout_ref.model
+        rollout_cfg = config.actor_rollout_ref.rollout
+        problems = []
+        if model_cfg.get("algorithm", None) != "opsd":
+            problems.append("actor_rollout_ref.model.algorithm must be opsd")
+        if model_cfg.get("model_type", None) != "diffusion_opsd_model":
+            problems.append("actor_rollout_ref.model.model_type must be diffusion_opsd_model")
+        if not int(model_cfg.get("lora_rank", 0) or 0) > 0:
+            problems.append("actor_rollout_ref.model.lora_rank must be > 0 (OPSD uses the old LoRA adapter)")
+        if "old" not in tuple(model_cfg.get("policy_state_adapters", ("default",))):
+            problems.append('actor_rollout_ref.model.policy_state_adapters must include "old"')
+        if rollout_cfg.get("rollout_adapter", None) != "old":
+            problems.append("actor_rollout_ref.rollout.rollout_adapter must be old")
+        # The old-policy anchor must be the velocity that generated the query trajectory.
+        # OPSD fits the conditional velocity, so a guided (CFG) rollout would desynchronize
+        # the anchor from the trajectory; only guidance_scale == 1.0 (CFG disabled) is supported.
+        guidance_scale = OmegaConf.select(config, "actor_rollout_ref.rollout.pipeline.guidance_scale", default=1.0)
+        if guidance_scale is not None and abs(float(guidance_scale) - 1.0) > 1e-9:
+            problems.append(
+                "actor_rollout_ref.rollout.pipeline.guidance_scale must be 1.0 because OPSD fits the "
+                "conditional velocity; a guided rollout would desynchronize the old-policy anchor "
+                "from the trajectory that produced the query state"
+            )
+        if int(rollout_cfg.get("n", 1)) <= 1:
+            problems.append("actor_rollout_ref.rollout.n must be > 1 so the endpoint reward can be group-normalized")
+        # The rollout adapter keeps a fixed number of trailing states, so the requested sigma must
+        # fall inside that window on the model's actual schedule. Checking it here turns a
+        # first-batch selection failure into a startup error and documents the step-count range.
+        num_steps = int(
+            OmegaConf.select(config, "actor_rollout_ref.rollout.pipeline.num_inference_steps", default=0) or 0
+        )
+        model_path = model_cfg.get("path", None)
+        loss_cfg = OmegaConf.select(config, "actor_rollout_ref.actor.diffusion_loss", default=None)
+        if num_steps > 0 and model_path and loss_cfg is not None:
+            window_problem = _opsd_query_window_problem(model_path, num_steps, loss_cfg)
+            if window_problem:
+                problems.append(window_problem)
+        if actor_cfg.get("use_kl_loss", False):
+            problems.append("actor_rollout_ref.actor.use_kl_loss must be False (OPSD has no reference KL term)")
+        if actor_cfg.get("enable_timestep_staging", False):
+            problems.append("actor_rollout_ref.actor.enable_timestep_staging must be False")
+        if not bool(config.trainer.get("use_v1", False)):
+            problems.append("trainer.use_v1 must be true (DiffusionOPSD ships on the v1 sync trainer)")
+        elif OmegaConf.select(config, "trainer.v1.trainer_mode", default="sync") != "sync":
+            problems.append("trainer.v1.trainer_mode must be sync")
+        if problems:
+            raise ValueError("DiffusionOPSD config is not supported: " + "; ".join(problems) + ".")

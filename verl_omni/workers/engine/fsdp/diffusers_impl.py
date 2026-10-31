@@ -17,6 +17,7 @@ import gc
 import json
 import logging
 import os
+import time
 import warnings
 from abc import ABC, abstractmethod
 from contextlib import nullcontext
@@ -1373,9 +1374,16 @@ class NFTDiffusersFSDPEngine(DiffusersFSDPEngine):
     ):
         DiffusionModelBase.get_class(model_config).validate_engine_config(engine_config)
         super().__init__(model_config, engine_config, optimizer_config, checkpoint_config)
+        # Let the registered adapter attach any algorithm-specific runtime state. Adapters that
+        # do not need it inherit the base no-op.
+        self.configure_engine()
 
     def _configure_gradient_checkpointing(self, module):
         DiffusionModelBase.get_class(self.model_config).configure_gradient_checkpointing(module, self.engine_config)
+
+    def configure_engine(self) -> None:
+        """Run the pipeline adapter's engine hook (no algorithm knowledge in the worker)."""
+        DiffusionModelBase.get_class(self.model_config).configure_engine(self, self.engine_config)
 
     def forward_backward_batch(
         self, data: TensorDict, loss_function: Callable, forward_only: bool = False
@@ -1496,6 +1504,126 @@ class NFTDiffusersFSDPEngine(DiffusersFSDPEngine):
             prediction = forward_prediction if isinstance(forward_prediction, torch.Tensor) else forward_prediction[0]
             loss = torch.tensor(1.0, device=prediction.device)
             metrics = {}
+
+        output = {
+            "model_output": model_output,
+            "loss": loss.detach().item(),
+            "metrics": metrics,
+        }
+        return loss, output
+
+
+@EngineRegistry.register(model_type="diffusion_opsd_model", backend=["fsdp", "fsdp2"], device=["cuda", "npu"])
+class OPSDDiffusersFSDPEngine(NFTDiffusersFSDPEngine):
+    """Forward-process SD3 engine for DiffusionOPSD (on-policy self-distillation).
+
+    The fitting pass is the same NFT-style forward process, but the frozen old-policy
+    forward is reused as the behaviour anchor: ``y0 = z_q - sigma_q * v_old(z_q)``. A
+    differentiable reward, backpropagated through the VAE decoder, turns that anchor into
+    detached positive/negative targets before the trainable forward pass. The reference
+    forward is skipped because the canonical OPSD objective has no reference KL term.
+
+    Target construction lives in ``verl_omni.trainer.diffusion.opsd_target_runtime`` and is
+    configured from the ``diffusion_loss.opsd_*`` fields by the registered pipeline adapter's
+    ``configure_engine`` hook, so the shared worker carries no OPSD-specific code.
+    """
+
+    def __init__(self, *args, **kwargs):
+        # Initialized before ``super().__init__()``: the parent constructor runs the adapter's
+        # ``configure_engine`` hook, which stores the loss config on this instance.
+        self._opsd_runtime = None
+        self._opsd_loss_config = None
+        super().__init__(*args, **kwargs)
+
+    def configure_opsd_runtime(self, loss_config) -> None:
+        """Attach the loss config used to lazily build the frozen VAE + reward runtime."""
+        self._opsd_loss_config = loss_config
+
+    def _get_opsd_runtime(self):
+        if self._opsd_runtime is None:
+            if self._opsd_loss_config is None:
+                raise RuntimeError(
+                    "DiffusionOPSD engine was asked to build targets before `configure_opsd_runtime` ran; "
+                    "the actor worker must call it during init_model."
+                )
+            from verl_omni.trainer.diffusion.opsd_target_runtime import OPSDTargetRuntime
+
+            self._opsd_runtime = OPSDTargetRuntime.from_model_config(
+                model_config=self.model_config,
+                loss_config=self._opsd_loss_config,
+                device=torch.device(get_device_name(), get_device_id()),
+            )
+        return self._opsd_runtime
+
+    def forward_step(self, micro_batch: TensorDict, loss_function, forward_only, step):
+        if loss_function is None or self._opsd_loss_config is None:
+            # Validation / reference inference, or an OPSD engine used without the OPSD
+            # loss: keep the inherited forward process.
+            return super().forward_step(micro_batch, loss_function, forward_only, step)
+
+        model_inputs, negative_model_inputs, loss_context = self.prepare_model_inputs(
+            micro_batch=micro_batch, step=step
+        )
+
+        with self.use_adapter("old"), torch.no_grad():
+            old_prediction = forward(
+                module=self.module,
+                model_config=self.model_config,
+                model_inputs=model_inputs,
+                negative_model_inputs=negative_model_inputs,
+            )
+        if isinstance(old_prediction, tuple):
+            old_prediction = old_prediction[0]
+        old_prediction = old_prediction.detach()
+
+        prompt_ids = micro_batch.get("opsd_prompt_ids", None)
+        if prompt_ids is None:
+            raise KeyError(
+                "DiffusionOPSD engine requires `opsd_prompt_ids` in the actor batch; the v1 trainer adds it "
+                "from `prompts` before the actor update."
+            )
+        # Target construction (fp32 VAE decode + differentiable reward + ascent steps) is the only
+        # work OPSD adds on top of the shared forward process, so time it separately: it would
+        # otherwise be hidden inside the actor timing and the added cost could not be attributed.
+        # Surfaced by OPSDLoss as ``actor/opsd_target_seconds``.
+        target_started = time.perf_counter()
+        targets = self._get_opsd_runtime().build_targets(
+            query_latents=loss_context["xt"],
+            t_expanded=loss_context["t_expanded"],
+            old_prediction=old_prediction,
+            prompt_ids=prompt_ids,
+        )
+        targets["opsd_target_seconds"] = torch.tensor(
+            time.perf_counter() - target_started, device=loss_context["xt"].device, dtype=torch.float32
+        )
+
+        forward_prediction = forward(
+            module=self.module,
+            model_config=self.model_config,
+            model_inputs=model_inputs,
+            negative_model_inputs=negative_model_inputs,
+        )
+        self._set_adapter("default")
+
+        model_output = self.prepare_model_outputs(
+            output=(
+                {"old_prediction": old_prediction, "forward_prediction": forward_prediction},
+                loss_context,
+            ),
+            micro_batch=micro_batch,
+        )
+        model_output.update(targets)
+
+        loss_inputs = DiffusionModelBase.get_class(self.model_config).prepare_loss_inputs(micro_batch, step)
+        data = tu.get_tensordict(loss_inputs)
+        tu.assign_non_tensor(
+            data,
+            gradient_accumulation_steps=tu.get_non_tensor_data(
+                micro_batch, "gradient_accumulation_steps", default=None
+            ),
+            sp_size=tu.get_non_tensor_data(micro_batch, "sp_size", default=None),
+        )
+        loss, metrics = loss_function(model_output=model_output, data=data, dp_group=self.get_data_parallel_group())
 
         output = {
             "model_output": model_output,

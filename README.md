@@ -199,6 +199,8 @@ Visit our [documentation](https://verl-omni.readthedocs.io/en/latest/index.html)
   <tr>
     <td><a href="examples/awm_trainer/README.md">AWM</a></td>
     <td>✅</td>
+    <td><a href="docs/algo/diffusion_opsd.md">DiffusionOPSD</a></td>
+    <td>✅</td>
   </tr>
   <tr>
     <td rowspan="2">HunyuanImage-3.0</td>
