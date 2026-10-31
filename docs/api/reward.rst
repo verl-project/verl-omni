@@ -26,7 +26,7 @@ profiler control over the reward-model rollout servers.
    verl_omni.utils.reward_score.default_compute_score_image
    verl_omni.utils.reward_score.http_scorer_client.compute_score
    verl_omni.utils.reward_score.audio_http_scorer_client.compute_score
-   verl_omni.utils.reward_score.unified_reward.compute_score_unified_reward
+   verl_omni.utils.reward_score.vlm_as_a_judge.compute_score_unified_reward
 
 Reward Loop Manager
 ~~~~~~~~~~~~~~~~~~~~
@@ -65,11 +65,14 @@ JPEG Compressibility
 .. automodule:: verl_omni.utils.reward_score.jpeg_compressibility
    :members: jpeg_compressibility, jpeg_incompressibility, compute_score
 
-GRM-based OCR Reward
-^^^^^^^^^^^^^^^^^^^^^
+VLM-as-a-Judge Scorers
+^^^^^^^^^^^^^^^^^^^^^^
 
-.. automodule:: verl_omni.utils.reward_score.genrm_ocr
-   :members: compute_score_ocr
+The generative-judge scorers live in one module. ``genrm_ocr`` and
+``unified_reward`` still work as import paths and forward to it.
+
+.. automodule:: verl_omni.utils.reward_score.vlm_as_a_judge
+   :members: compute_score_ocr, compute_score_unified_reward, build_judge_prompt, parse_judge_response
 
 HTTP Scorer Client
 ^^^^^^^^^^^^^^^^^^^
@@ -82,12 +85,6 @@ Audio HTTP Scorer Client
 
 .. automodule:: verl_omni.utils.reward_score.audio_http_scorer_client
    :members: compute_score
-
-UnifiedReward Scorer
-^^^^^^^^^^^^^^^^^^^^^
-
-.. automodule:: verl_omni.utils.reward_score.unified_reward
-   :members: compute_score_unified_reward
 
 Reward Utilities
 ^^^^^^^^^^^^^^^^^^
