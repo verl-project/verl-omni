@@ -2145,6 +2145,36 @@ class DualGRPOLoss(DiffusionLossFn):
         return DiffusionLossResult(loss=pg_loss, metrics=pg_metrics)
 
 
+def _config_scalar(config: Any, key: str, default: float) -> float:
+    """Read one scalar from a loss config that may be an OmegaConf node or a plain mapping."""
+    if hasattr(config, "get"):
+        return float(config.get(key, default))
+    return float(getattr(config, key, default))
+
+
+def _load_opsd_scheduler_config(model_path: str) -> Optional[dict]:
+    """Load a diffusion pipeline's scheduler config, local directory or hub repo id.
+
+    ``validate_trainer_config`` runs before the trainer materialises the model snapshot, and the
+    published recipes point ``model.path`` at a hub repo id, so a plain ``Path(model_path)`` check
+    would silently skip every real run. Only the scheduler config is needed (a few hundred bytes),
+    so a hub id fetches that single file instead of the full snapshot.
+    """
+    import json
+    from pathlib import Path
+
+    local = Path(model_path) / "scheduler" / "scheduler_config.json"
+    if local.is_file():
+        return json.loads(local.read_text(encoding="utf-8"))
+    try:
+        from huggingface_hub import hf_hub_download
+
+        cached = hf_hub_download(repo_id=model_path, filename="scheduler/scheduler_config.json")
+        return json.loads(Path(cached).read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 - offline/unknown repo: the runtime guard covers it
+        return None
+
+
 def _opsd_query_window_problem(model_path: str, num_steps: int, loss_cfg: Any) -> Optional[str]:
     """Return a problem string when the trailing query window cannot reach the requested sigma.
 
@@ -2156,17 +2186,20 @@ def _opsd_query_window_problem(model_path: str, num_steps: int, loss_cfg: Any) -
     Returns ``None`` when the schedule cannot be derived (the runtime selection guard still
     reports the mismatch at the first batch).
     """
-    from pathlib import Path
-
-    scheduler_config = Path(model_path) / "scheduler" / "scheduler_config.json"
-    if not scheduler_config.is_file():
+    scheduler_config = _load_opsd_scheduler_config(model_path)
+    if scheduler_config is None:
+        return None
+    if scheduler_config.get("use_dynamic_shifting", False):
+        # The schedule then depends on a resolution-derived mu that this probe does not model, so a
+        # verdict here could be wrong. SD3.5-Medium ships with the flag off; the runtime guard
+        # still covers dynamic-shift checkpoints.
         return None
     try:
         from diffusers import FlowMatchEulerDiscreteScheduler
 
         from verl_omni.pipelines.sd3_opsd.vllm_omni_rollout_adapter import StableDiffusion3OPSDPipeline
 
-        scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(model_path, subfolder="scheduler")
+        scheduler = FlowMatchEulerDiscreteScheduler.from_config(scheduler_config)
         scheduler.set_timesteps(num_steps)
         # The captured window maps onto the last `window` sigmas before the terminal 0.
         sigmas = [float(s) for s in scheduler.sigmas[:-1]]
@@ -2177,8 +2210,8 @@ def _opsd_query_window_problem(model_path: str, num_steps: int, loss_cfg: Any) -
     candidates = sigmas[-window:] if window < len(sigmas) else sigmas
     if not candidates:
         return None
-    query_sigma = float(loss_cfg.get("opsd_query_sigma", 0.278))
-    tolerance = float(loss_cfg.get("opsd_query_sigma_tolerance", 0.15))
+    query_sigma = _config_scalar(loss_cfg, "opsd_query_sigma", 0.278)
+    tolerance = _config_scalar(loss_cfg, "opsd_query_sigma_tolerance", 0.15)
     closest = min(candidates, key=lambda sigma: abs(sigma - query_sigma))
     if abs(closest - query_sigma) <= tolerance:
         return None

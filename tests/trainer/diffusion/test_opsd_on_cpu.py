@@ -29,6 +29,7 @@ rollout/actor-batch contract of the implementation.
 import json
 from types import SimpleNamespace
 
+import huggingface_hub
 import numpy as np
 import pytest
 import torch
@@ -404,14 +405,22 @@ def test_opsd_trainer_config_guards(overrides, message):
             OPSDLoss.validate_trainer_config(config)
 
 
-def make_model_dir_with_sd3_schedule(tmp_path, *, shift=3.0):
+def make_model_dir_with_sd3_schedule(tmp_path, *, shift=3.0, dynamic_shifting=False):
     """Materialise a tiny checkpoint dir whose scheduler is a real SD3 flow schedule."""
     model_dir = tmp_path / "sd35m"
     (model_dir / "scheduler").mkdir(parents=True)
-    (model_dir / "scheduler" / "scheduler_config.json").write_text(
-        json.dumps({"num_train_timesteps": 1000, "shift": shift, "_class_name": "FlowMatchEulerDiscreteScheduler"}),
-        encoding="utf-8",
-    )
+    payload = {"num_train_timesteps": 1000, "shift": shift, "_class_name": "FlowMatchEulerDiscreteScheduler"}
+    if dynamic_shifting:
+        payload.update(
+            {
+                "use_dynamic_shifting": True,
+                "base_shift": 1.73,
+                "max_shift": 5.0,
+                "base_image_seq_len": 256,
+                "max_image_seq_len": 4096,
+            }
+        )
+    (model_dir / "scheduler" / "scheduler_config.json").write_text(json.dumps(payload), encoding="utf-8")
     return model_dir
 
 
@@ -435,6 +444,48 @@ def test_window_coverage_rejects_a_step_count_that_cannot_reach_sigma(tmp_path):
     model_dir = make_model_dir_with_sd3_schedule(tmp_path)
     with pytest.raises(ValueError, match="trailing query window"):
         OPSDLoss.validate_trainer_config(make_window_config(model_dir, num_steps=100))
+
+
+def test_window_coverage_resolves_a_hub_repo_id(monkeypatch, tmp_path):
+    # The published recipe points model.path at a hub repo id and validate_trainer_config runs
+    # before the snapshot exists on disk, so requiring a local directory would silently skip the
+    # check for every real run. Only the scheduler config is fetched.
+    model_dir = make_model_dir_with_sd3_schedule(tmp_path)
+    fetched = {}
+
+    def fake_download(*, repo_id, filename):
+        fetched["repo_id"] = repo_id
+        fetched["filename"] = filename
+        return str(model_dir / "scheduler" / "scheduler_config.json")
+
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", fake_download)
+
+    config = make_window_config("stabilityai/stable-diffusion-3.5-medium", num_steps=100)
+    with pytest.raises(ValueError, match="trailing query window"):
+        OPSDLoss.validate_trainer_config(config)
+
+    assert fetched == {
+        "repo_id": "stabilityai/stable-diffusion-3.5-medium",
+        "filename": "scheduler/scheduler_config.json",
+    }
+
+
+def test_window_coverage_is_skipped_when_the_hub_is_unreachable(monkeypatch):
+    # Offline or gated repo: no schedule to derive, and the first-batch guard still applies.
+    def unreachable(**_kwargs):
+        raise OSError("offline")
+
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", unreachable)
+
+    config = make_window_config("stabilityai/stable-diffusion-3.5-medium", num_steps=100)
+    OPSDLoss.validate_trainer_config(config)
+
+
+def test_window_coverage_is_skipped_for_dynamic_shifting(tmp_path):
+    # A resolution-derived mu changes the grid and this probe does not model it, so it must not
+    # reject a checkpoint it cannot reason about.
+    model_dir = make_model_dir_with_sd3_schedule(tmp_path, dynamic_shifting=True)
+    OPSDLoss.validate_trainer_config(make_window_config(model_dir, num_steps=100))
 
 
 def test_window_coverage_is_skipped_without_a_checkpoint(tmp_path):
