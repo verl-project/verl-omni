@@ -235,6 +235,7 @@ actor_rollout_ref:
     dtype: bfloat16
     rollout_attn_backend: FLASH_ATTN_3_HUB
     gpu_memory_utilization: 0.5
+    standalone_gpu_memory_utilization: ${oc.select:actor_rollout_ref.rollout.gpu_memory_utilization}
     enforce_eager: false
     cudagraph_capture_sizes: null
     free_cache_engine: true
@@ -251,6 +252,7 @@ actor_rollout_ref:
     max_num_batched_tokens: 8192
     max_model_len: null
     max_num_seqs: 1024
+    ray_actor_max_concurrency: 1024
     step_execution: false
     enable_chunked_prefill: true
     enable_prefix_caching: false
@@ -539,8 +541,12 @@ reward:
       full_determinism: false
       prompt_length: 2048
       response_length: 2048
-      quantization: null
-      quantization_config_file: null
+      quantization:
+        _target_: verl.workers.config.RolloutQuantizationConfig
+        linear: null
+        moe: null
+        ignore: []
+        config_file: null
       mtp: null
       disaggregation:
         enabled: false
@@ -750,23 +756,22 @@ ray_kwargs:
   timeline_json_file: null
 transfer_queue:
   enable: false
-  metrics:
-    enabled: false
-    port: 0
   backend:
     storage_backend: SimpleStorage
     SimpleStorage:
-      total_storage_size: 100000
+      total_storage_size: null
       num_data_storage_units: 8
+      ssd_offload:
+        enabled: false
+        path: null
+        threshold_bytes: 1048576
     MooncakeStore:
       auto_init: false
-      metadata_server: localhost:50123
+      metadata_server: P2PHANDSHAKE
       master_server_address: localhost:50124
-      local_hostname: localhost
-      protocol: tcp
       global_segment_size: 4294967296
       local_buffer_size: 1073741824
-      device_name: ''
+      hard_pin: true
 skip:
   _target_: verl.utils.skip.SkipManagerConfig
   rollout:

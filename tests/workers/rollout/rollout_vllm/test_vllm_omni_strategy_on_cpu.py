@@ -107,12 +107,12 @@ def test_strategies_preserve_mode_specific_quantization(monkeypatch):
     monkeypatch.setattr(
         ar_strategy_module.vLLMHttpServer,
         "_apply_quantization",
-        lambda server: ("fp8", {"source": server}),
+        lambda server: {"source": server},
     )
     server = SimpleNamespace()
 
-    assert ARStrategy(server).apply_quantization() == ("fp8", {"source": server})
-    assert DiffusionStrategy(server).apply_quantization() == (None, {})
+    assert ARStrategy(server).apply_quantization() == {"source": server}
+    assert DiffusionStrategy(server).apply_quantization() == {}
 
 
 def test_strategies_preserve_platform_worker_extensions():

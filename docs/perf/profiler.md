@@ -343,13 +343,6 @@ Set `global_profiler.tool=npu` and configure each role under
 #### Before you start
 
 - Set up the [NPU environment](../start/install_npu.md) and the training data.
-- For Omni PPO V1 with colocated actor and rollout, install a verl revision
-  containing [#7722](https://github.com/verl-project/verl/pull/7722)
-  (`0d3f56a8980a55bfbbf1214ea54fa1b32ca1405c`) before collecting both roles.
-  The fix stops rollout collection before training computation begins.
-  The repository's current verl pin (`fefb080`) predates this fix.
-  <!-- TODO: Remove the manual verl revision requirement above once
-  .github/verl_pin.txt includes verl-project/verl#7722. -->
 - Install `torch-npu>=2.10.0.post6` with a compatible PyTorch and CANN environment.
   Start with `contents='[npu,cpu]'` and add `module` or `stack` as needed;
   rollout collection options also depend on the inference backend.
@@ -487,7 +480,7 @@ the actor's `analysis=True` does not configure rollout parsing.
 
 #### Further reading
 
-- [verl NPU profiling examples](https://github.com/verl-project/verl/blob/fefb080262e1c015a0ea05f958822a6a512dc795/examples/profile/README.md#npu-profiling)
+- [verl NPU profiling examples](https://github.com/verl-project/verl/blob/2ab35292039a51175a4b3d3b3b2d76e951a0d3e4/examples/profile/README.md#npu-profiling)
   cover continuous and discrete collection. Their `PROFILE_*` environment
   variables apply to the upstream scripts; use the Hydra overrides above with
   VeRL-Omni launchers.

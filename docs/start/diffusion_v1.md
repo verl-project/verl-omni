@@ -374,7 +374,7 @@ dataloader (`global_step_N/transfer_queue/`). Resume with
 `trainer.resume_mode=auto` (or `resume_path`) restores queued prompt groups,
 re-issues pending and running groups, and tops warmup up to
 `num_warmup_batches * train_batch_size` instead of enqueueing that many new
-batches. Requires TransferQueue 0.1.9. Sync mode does not write a queue
+batches. Requires TransferQueue 0.1.11. Sync mode does not write a queue
 snapshot. Old checkpoints without `transfer_queue/` warn and start the queue
 empty.
 
@@ -423,11 +423,12 @@ Every V1 diffusion run depends on it:
 4. **Tuning.** `transfer_queue.backend.SimpleStorage.total_storage_size` caps
    how many experience samples the default backend holds;
    `num_data_storage_units` sets the in-memory storage units; metrics can be
-   exposed via `transfer_queue.metrics.*`. See [Important settings](#important-settings).
+   exposed via `++transfer_queue.metrics.*` (the block is not listed in the
+   config tree; see [RL-Insight](rl_insight.md)). See [Important settings](#important-settings).
 
 Omni models get the same support through verl's `TaskRunnerV1`
 (`python -m verl_omni.trainer.main_omni`); omni inherits verl's TransferQueue
-setup and requires TransferQueue >= 0.1.9 for async checkpoint resume.
+setup and requires TransferQueue >= 0.1.11 for async checkpoint resume.
 
 ## Important settings
 

@@ -21,7 +21,6 @@ from collections.abc import Sequence
 
 import torch
 from vllm.config.utils import config
-from vllm.model_executor.models.utils import WeightsMapper
 from vllm.sequence import IntermediateTensors
 from vllm_omni.config import omni_config
 from vllm_omni.config.stage_config import StageExecutionType
@@ -56,14 +55,6 @@ def patch_vllm_omni_lora_config() -> None:
         omni_config._STAGE_ENGINE_FIELDS_BY_EXECUTION_TYPE[execution_type] |= lora_fields
     # stage_init_utils imports this mapping by reference; extend it in place.
     omni_config._LOAD_STAGE_ENGINE_FIELD_MAP.update({name: name for name in lora_fields})
-
-
-def patch_vllm_lora_weights_mapper() -> None:
-    """Keep verl's tensor LoRA loader using vLLM 0.30's rename-only mapper."""
-    # TODO: Remove when the verl pin calls get_rename_mapper instead of the
-    # get_unstacked_mapper name removed in vLLM 0.30. Never skip HF name mapping.
-    if not hasattr(WeightsMapper, "get_unstacked_mapper"):
-        WeightsMapper.get_unstacked_mapper = WeightsMapper.get_rename_mapper
 
 
 def patch_qwen3_omni_thinker_forward() -> None:

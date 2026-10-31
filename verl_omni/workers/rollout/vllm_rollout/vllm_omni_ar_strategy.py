@@ -76,7 +76,7 @@ class ARStrategy(OmniStrategyBase):
         if self.server.config.max_model_len is None:
             self.server.config.max_model_len = self.server.config.prompt_length + self.server.config.response_length
 
-    def apply_quantization(self) -> tuple[str | None, dict[str, Any]]:
+    def apply_quantization(self) -> dict[str, Any]:
         return vLLMHttpServer._apply_quantization(self.server)
 
     def override_generation_config(self) -> dict[str, Any]:

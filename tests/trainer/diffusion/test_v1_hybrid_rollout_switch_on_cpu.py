@@ -43,6 +43,7 @@ class _RecordingCheckpointManager:
         self.update_calls: list[int] = []
         self.resume_calls = 0
         self.abort_calls = 0
+        self.reject_requests: list[bool] = []
         self.sleep_calls = 0
         self.wake_calls = 0
 
@@ -55,9 +56,10 @@ class _RecordingCheckpointManager:
         self.events.append(f"{self.name}_resume")
         self.resume_calls += 1
 
-    def abort_replicas(self):
+    def abort_replicas(self, reject_request: bool = False):
         self.events.append(f"{self.name}_abort")
         self.abort_calls += 1
+        self.reject_requests.append(reject_request)
 
     def sleep_replicas(self):
         self.events.append(f"{self.name}_sleep")
@@ -284,6 +286,58 @@ def test_setup_leaves_hybrid_in_rollout_mode_and_registered(monkeypatch):
     assert not hasattr(trainer, "_colocated_slept")
 
 
+def test_setup_applies_standalone_memory_budget_to_a_config_copy(monkeypatch):
+    trainer = object.__new__(PolicyGradientDiffusionTrainerV1SeparateAsync)
+    events: list[str] = []
+    trainer.config = OmegaConf.create(
+        {
+            "actor_rollout_ref": {
+                "rollout": {
+                    "checkpoint_engine": {"backend": "nccl"},
+                    "gpu_memory_utilization": 0.4,
+                    "standalone_gpu_memory_utilization": 0.85,
+                }
+            },
+            "trainer": {"v1": {"separate_async": {"sync_compatible": False}}},
+        }
+    )
+    trainer.llm_server_manager = SimpleNamespace(rollout_replicas=[object()])
+    trainer.actor_rollout_wg = object()
+    captured: dict = {}
+
+    def _record_create(**kwargs):
+        captured["config"] = kwargs["config"]
+        return SimpleNamespace(start_rank=kwargs["start_rank"], get_replicas=lambda: [])
+
+    monkeypatch.setattr(PolicyGradientDiffusionTrainerV1, "_setup", lambda self: events.append("base_setup"))
+    monkeypatch.setattr(trainer_module, "omega_conf_to_dataclass", lambda cfg: SimpleNamespace(**cfg))
+    monkeypatch.setattr(trainer_module.LLMServerManager, "create", staticmethod(_record_create))
+    monkeypatch.setattr(
+        trainer_module,
+        "OmniCheckpointEngineManager",
+        lambda **kwargs: SimpleNamespace(backend=kwargs["config"].backend),
+    )
+    trainer.add_replicas_to_balancer = lambda: events.append("add")
+
+    trainer._setup()
+
+    # Standalone replicas have dedicated GPUs: their manager gets its own memory
+    # budget on a config deepcopy, leaving the trainer's config unmutated.
+    standalone_rollout = captured["config"].actor_rollout_ref.rollout
+    assert standalone_rollout.gpu_memory_utilization == 0.85
+    assert trainer.config.actor_rollout_ref.rollout.gpu_memory_utilization == 0.4
+
+
+def test_reclaim_aborts_colocated_replicas_with_reject_request():
+    trainer = _trainer(enable_switch=False)
+
+    trainer.on_step_begin()
+
+    # Reclaimed colocated replicas will not resume generation soon, so in-flight
+    # arrivals behind the closed gate are rejected instead of parked.
+    assert trainer.checkpoint_manager.reject_requests == [True]
+
+
 def test_disabled_switch_first_step_reclaims_hybrid_without_waiting():
     trainer = _trainer(enable_switch=False)
 
@@ -331,6 +385,26 @@ def test_enabled_switch_keeps_hybrid_lent_through_the_warmup_feed(monkeypatch):
 
     assert trainer.events == ["feed"]
     assert trainer.current_mode == HybridEngineMode.ROLLOUT
+
+
+def test_restored_prompt_groups_of_any_status_fill_the_warmup_window(monkeypatch):
+    trainer = _trainer(enable_switch=False)
+    trainer.config.trainer.v1 = {"separate_async": {"num_warmup_batches": 1}}
+    feeds: list = []
+    trainer._add_batch_to_generate = lambda: feeds.append("batch")
+    trainer._add_prompts_to_generate = lambda num: feeds.append(num)
+    queue_state = {
+        "k-finished": {"is_prompt": True, "status": "finished"},
+        "k-running": {"is_prompt": True, "status": "running"},
+        "k-not-prompt": {"is_prompt": False, "status": "pending"},
+    }
+    monkeypatch.setattr(trainer_module.tq, "kv_list", lambda partition_id: {"train": queue_state})
+
+    trainer.on_train_begin()
+
+    # Finished-but-untrained groups also occupy the prefetch window: only the 62
+    # missing prompts of the 64-prompt window are fetched from the dataloader.
+    assert feeds == [62]
 
 
 def test_step_lends_the_engine_out_and_reclaims_it_exactly_once():

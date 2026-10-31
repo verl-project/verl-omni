@@ -44,6 +44,10 @@ rollout_attn_backend: FLASH_ATTN_3_HUB
 # Fraction of GPU memory used by vLLM-Omni for cache.
 gpu_memory_utilization: 0.5
 
+# Memory budget for standalone rollout replicas on dedicated GPUs; defaults to
+# gpu_memory_utilization (no separate budget).
+standalone_gpu_memory_utilization: ${oc.select:actor_rollout_ref.rollout.gpu_memory_utilization}
+
 # Whether to disable CUDA graph. Default False to best performance.
 enforce_eager: False
 
@@ -94,6 +98,11 @@ max_model_len: null
 
 # max length of sequences
 max_num_seqs: 1024
+
+# Ray max_concurrency of the rollout server actor. Raise it above the peak number of
+# in-flight generate requests per replica, otherwise control calls (wake_up, weight sync)
+# can be starved.
+ray_actor_max_concurrency: 1024
 
 # When True, the vLLM-Omni engine runs the registered pipeline in
 # step-execution mode.
