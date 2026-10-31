@@ -102,12 +102,18 @@ class SummaryStats:
     trained_score_sum: float = 0.0
 
     def update(self, result: JudgeResult) -> None:
+        self._add(result.reference_score, result.trained_score, result.winner)
+
+    def update_from_row(self, row: dict[str, Any]) -> None:
+        self._add(float(row["reference_score"]), float(row["trained_score"]), str(row.get("winner", "tie")))
+
+    def _add(self, reference_score: float, trained_score: float, winner: str) -> None:
         self.total += 1
-        self.reference_score_sum += result.reference_score
-        self.trained_score_sum += result.trained_score
-        if result.winner == "trained":
+        self.reference_score_sum += reference_score
+        self.trained_score_sum += trained_score
+        if winner == "trained":
             self.trained_wins += 1
-        elif result.winner == "reference":
+        elif winner == "reference":
             self.reference_wins += 1
         else:
             self.ties += 1
@@ -571,8 +577,8 @@ def _judge_helpers():
     """Import the shared judge prompt and parser on first use.
 
     Importing ``verl_omni`` eagerly loads the pipeline registry and its GPU
-    dependencies. Deferring the import keeps ``--help`` and the judge-only stage
-    usable without them.
+    dependencies. Deferring the import keeps ``--help`` and cached-summary runs
+    usable without them; the judge stage itself needs them.
     """
     from verl_omni.utils.reward_score import vlm_as_a_judge
 
@@ -728,21 +734,13 @@ def _format_float(value: float) -> str:
 
 
 def summarize_cached_judge_results(judge_paths: list[Path]) -> dict[str, Any]:
-    judge_result_cls = _judge_helpers().JudgeResult
     grouped: dict[tuple[int | None, str], SummaryStats] = defaultdict(SummaryStats)
     source_files: dict[tuple[int | None, str], set[str]] = defaultdict(set)
     for path in judge_paths:
         global_step = _global_step_from_path(path)
         for row in _judge_result_rows(path):
-            result = judge_result_cls(
-                reference_score=float(row["reference_score"]),
-                trained_score=float(row["trained_score"]),
-                winner=str(row.get("winner", "tie")),
-                rationale=str(row.get("rationale", "")),
-                raw_response=str(row.get("judge_raw_response", "")),
-            )
             key = (global_step, str(row["modality"]))
-            grouped[key].update(result)
+            grouped[key].update_from_row(row)
             source_files[key].add(str(path))
 
     table_rows = []
@@ -795,21 +793,13 @@ def format_cached_judge_table(rows: list[dict[str, Any]]) -> str:
 def summarize_judge_rows(
     rows: list[dict[str, Any]],
 ) -> tuple[dict[str, float | int], dict[str, dict[str, float | int]]]:
-    judge_result_cls = _judge_helpers().JudgeResult
     overall = SummaryStats()
     by_modality: dict[str, SummaryStats] = defaultdict(SummaryStats)
     for row in rows:
         if not _is_judge_result_row(row):
             continue
-        result = judge_result_cls(
-            reference_score=float(row["reference_score"]),
-            trained_score=float(row["trained_score"]),
-            winner=str(row.get("winner", "tie")),
-            rationale=str(row.get("rationale", "")),
-            raw_response=str(row.get("judge_raw_response", "")),
-        )
-        overall.update(result)
-        by_modality[str(row.get("modality", "unknown"))].update(result)
+        overall.update_from_row(row)
+        by_modality[str(row.get("modality", "unknown"))].update_from_row(row)
     return overall.to_dict(), {modality: stats.to_dict() for modality, stats in sorted(by_modality.items())}
 
 

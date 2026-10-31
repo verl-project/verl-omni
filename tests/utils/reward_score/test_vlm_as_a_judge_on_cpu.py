@@ -19,6 +19,7 @@ import inspect
 import json
 import os
 import random
+import subprocess
 import sys
 import warnings
 from pathlib import Path
@@ -632,6 +633,35 @@ def test_judge_pair_randomizes_ab_order(monkeypatch, seed, candidate_a):
     assert calls[0]["model"] == "judge-model"
     assert calls[0]["top_p"] == 1.0
     assert calls[0]["temperature"] == 0.0
+
+
+def test_cached_summaries_do_not_import_verl_omni(tmp_path):
+    judge_path = tmp_path / "judge.global_step_10.text.jsonl"
+    judge_path.write_text(
+        json.dumps({"modality": "text", "reference_score": 7.0, "trained_score": 8.0, "winner": "trained"}) + "\n"
+    )
+    example_path = REPO_ROOT / "examples/dpo_trainer/qwen3_omni/vlm_as_judge.py"
+    script = f"""
+import importlib.abc, importlib.util, json, sys
+from pathlib import Path
+
+class BlockVerlOmni(importlib.abc.MetaPathFinder):
+    def find_spec(self, name, path=None, target=None):
+        if name == "verl_omni" or name.startswith("verl_omni."):
+            raise ImportError(name)
+
+sys.meta_path.insert(0, BlockVerlOmni())
+spec = importlib.util.spec_from_file_location("example", {str(example_path)!r})
+module = importlib.util.module_from_spec(spec)
+sys.modules["example"] = module
+spec.loader.exec_module(module)
+summary = module.summarize_cached_judge_results([Path({str(judge_path)!r})])
+overall, _ = module.summarize_judge_rows(module.read_jsonl_rows(Path({str(judge_path)!r})))
+print(json.dumps([summary["rows"][0]["trained_win_rate"], overall["trained_wins"]]))
+"""
+    completed = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, check=True)
+
+    assert json.loads(completed.stdout) == [1.0, 1]
 
 
 def build_ocr_prompt() -> str:
