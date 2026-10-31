@@ -1191,9 +1191,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         return self.llm_server_manager.get_client()
 
     def get_reward_handles(self):
-        if self.enable_agent_reward_loop:
-            return self.reward_loop_manager.reward_loop_workers
-        return None
+        return self.reward_loop_manager.reward_loop_worker_handles
 
     def _fetch_one_gen_batch(self):
         if self.train_dataloader_it is None:
@@ -1252,12 +1250,21 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         parts = key.rsplit("_", 2)
         return parts[0] if len(parts) == 3 else key
 
+    def _sample_rollout_batch(self, *, partition_id: str, batch_size: int) -> tuple[KVBatchMeta, dict]:
+        """Propagate fatal background reward errors even if replay cannot materialize a batch."""
+        try:
+            return self.replay_buffer.sample(
+                global_steps=self.global_steps, partition_id=partition_id, batch_size=batch_size
+            )
+        finally:
+            if OmegaConf.select(self.config, "reward.streaming.enabled", default=False):
+                self.agent_loop_manager.raise_if_reward_failed()
+
     def _sample_training_batch(self, batch_size: int) -> tuple[KVBatchMeta, dict]:
         """Use the upstream replay buffer and replace only selected failed groups."""
         sampler_config = self.config.trainer.v1.sampler
         if not sampler_config.get("drop_incomplete_groups", False):
-            batch_meta, off_policy_metrics = self.replay_buffer.sample(
-                global_steps=self.global_steps,
+            batch_meta, off_policy_metrics = self._sample_rollout_batch(
                 partition_id="train",
                 batch_size=batch_size,
             )
@@ -1275,8 +1282,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
 
         while remaining_batch_size > 0:
             try:
-                batch, current_metrics = self.replay_buffer.sample(
-                    global_steps=self.global_steps,
+                batch, current_metrics = self._sample_rollout_batch(
                     partition_id="train",
                     batch_size=remaining_batch_size,
                 )
@@ -1571,9 +1577,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             tq.kv_batch_put(keys=list(batch["uid"]), partition_id="val", tags=tags)
             self.agent_loop_manager.generate_sequences(batch)
 
-            batch_meta, _ = self.replay_buffer.sample(
-                global_steps=self.global_steps, partition_id="val", batch_size=len(batch)
-            )
+            batch_meta, _ = self._sample_rollout_batch(partition_id="val", batch_size=len(batch))
             batch_meta = canonicalize_diffusion_tq_meta(batch_meta)
             # Full payload on purpose: the colocated reward model receives this
             # DataProto and may read any pipeline-emitted row field.

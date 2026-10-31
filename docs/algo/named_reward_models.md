@@ -1,6 +1,6 @@
 # Named Reward Models
 
-Last updated: 10/23/2026
+Last updated: 10/29/2026.
 
 This guide describes how to configure and extend named model-backed rewards
 under `reward.models` in `verl-omni`. For the general Reward Loop interface and
@@ -616,7 +616,92 @@ the default native lifecycle still closes and reconstructs the model. CPU
 retention keeps the same model and processor, and inference is rejected while
 asleep. Call `await multi_reward_model_manager.close_native_models()` for final
 native teardown when the caller owns the manager. This does not close engine
-models. No automatic trainer teardown hook is provided for this opt-in.
+models. Automatic native teardown is provided by the V1 named streaming path
+below; other callers own their final teardown.
+
+## Sample-level streaming
+
+V1 synchronous diffusion training can score each completed sample on every named
+reward worker group while other samples are being generated. This is opt-in:
+
+```yaml
+reward:
+  streaming:
+    enabled: true
+    max_inflight: 8
+    timeout: null
+    extra_fields: null
+  reward_model:
+    enable_resource_pool: true
+  models:
+    pickscore:
+      # Keep the rest of the model and term configuration as usual.
+      offload: false
+```
+
+This path requires a nonempty `reward.models` mapping and supports V1 synchronous
+policy-gradient training with scalar `weighted_sum` rewards. Function-only groups
+can accompany named models but do not satisfy this requirement alone. All named
+models must use the native backend, `offload: false`, accelerator placement, and
+a dedicated reward resource pool.
+CPU placement, direct-preference and component-reward modes, other trainers,
+engine-backed rewards, and shared pools
+are rejected before worker allocation. Models are woken when the reward manager
+starts and remain resident. Native and function-only groups use their existing
+workers and scorers through the [async reward interface](async_reward.md#how-it-plugs-in).
+Each sample uses one replica per group and the existing batch dispatcher;
+weights, raw term diagnostics, and `required` failure handling are unchanged.
+The group merge is shared with
+batch scoring. The trainer still collects a full scored batch before updating.
+
+Custom `actor_rollout_ref.rollout.agent.agent_loop_manager_class` implementations
+must extend `DiffusionAgentLoopManagerTQ`, retaining its worker initialization,
+error checks and shutdown contract. Incompatible managers are rejected before
+Ray starts. Custom agent workers must expose callable `raise_if_reward_failed`
+and `close_reward_streaming` methods; these are checked before agent allocation.
+
+`streaming.extra_fields` selects optional generated `tool_extra_fields` sent to
+every named reward group. The default `null` forwards all fields. Named media
+tensors, declarations, selectors and context, plus `media_kind`, `audio`,
+`audio_sample_rate` and `img_shapes`, are always retained. `[]` excludes
+training-only trajectory and embedding fields; include any such fields required
+by a configured scorer. Dataset `extra_info`,
+responses and the original training trajectory are preserved. This selection
+applies only to named streaming. Media contract errors remain fatal, including
+for optional rewards: the agent records the first error, and training or
+validation raises it at the replay sampling boundary before consuming results.
+Failed groups are not refilled after a contract error. See the
+[media contract](../advanced/diffusion_media_artifacts.md).
+
+Streaming is disabled by default. Early scoring may hide reward latency, but
+smaller inference batches can reduce GPU utilization. Keep the batch path unless
+a matched full-step comparison shows a benefit for the workload. Shared-GPU
+contention is outside this dedicated-pool scope.
+
+`max_inflight` bounds samples generating or scoring **per agent worker**,
+including canceled requests that are draining. Admission happens before
+generation, so completed media cannot accumulate in an unbounded local queue.
+With A agent workers and G reward groups, at most A * max_inflight sample
+fan-outs, or A * max_inflight * G group RPCs, are admitted. This is not a global
+replica scheduler or a bound on scored trajectories retained by prompt groups
+and replay buffers. Existing backend batching remains in charge of execution.
+
+`timeout` is an optional score expiry in seconds, measured from scoring start
+after generation and admission. It is not an RPC abort or a return-time limit.
+Cancellation or timeout discards the result. Accepted group RPCs settle before
+their slot is released or the error returns. Waiting can therefore exceed
+`timeout`: a hung backend requires its existing backend/worker termination policy.
+There are no automatic
+retries. Optional scorer failures still contribute zero with their existing
+diagnostics; required failures follow the trainer's existing failed-sample
+policy, including replay-buffer replacement only when configured.
+
+Generation dispatch waits for every accepted agent RPC, including on error, so
+late prompt registration cannot escape shutdown. The V1 task runner cancels
+unfinished prompts, fences new scoring, and collects all agent close results.
+Native models and TransferQueue close only after confirmed drain. A failed close
+RPC fails the job; unconfirmed work is left to job termination. Shared GPU
+sleep/wake coordination belongs to the trainer/serving lifecycle.
 
 ## PickScore validation recipe
 
@@ -671,9 +756,10 @@ workload benefits.
 - Native models are replicated; FSDP and tensor parallelism are not supported.
 - Native routing defaults to a static even split; optional microbatch dispatch
   balances available work, without preempting or stealing an active batch.
-- Named models do not participate in streaming reward computation.
+- Named-model streaming supports V1 synchronous diffusion training with dedicated,
+  resident native models and function-only groups.
 - vLLM-Omni reward serving is not implemented.
 
 Automatic migration of every existing reward implementation and a unified
-streaming/FSDP design remain follow-up work. The configuration migration and
+shared GPU streaming/FSDP design remain follow-up work. The configuration migration and
 extension contracts supported by this change are documented above.

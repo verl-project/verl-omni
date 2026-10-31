@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
-import random
+from contextlib import nullcontext
 from typing import Any, Optional
 
 import hydra
@@ -33,7 +33,10 @@ from verl.utils.profiler import simple_timer
 from verl.workers.rollout.llm_server import LLMServerClient
 
 from verl_omni.agent_loop.utils import maybe_per_rollout_seeds
+from verl_omni.reward_loop.reward_model_executor import _await_owned
+from verl_omni.reward_loop.streaming import create_async_reward_client
 from verl_omni.workers.config import DiffusionModelConfig, DiffusionRolloutConfig
+from verl_omni.workers.config.reward import get_streaming_reward_config
 
 
 def _config_to_sampling_dict(config: Optional[BaseConfig]) -> dict:
@@ -141,8 +144,7 @@ class DiffusionAgentLoopWorker:
         teacher_client (dict[str, LLMServerClient]): Not used by diffusion training; accepted to
             keep the constructor signature compatible with verl's ``AgentLoopManager.create()``,
             which positionally forwards a teacher client argument to each worker.
-        reward_loop_worker_handles (List[ray.actor.ActorHandle]): Actor handles for streaming
-            reward computation.
+        reward_loop_worker_handles: Legacy reward actors, or named reward worker groups.
     """
 
     def __init__(
@@ -150,7 +152,7 @@ class DiffusionAgentLoopWorker:
         config: DictConfig,
         llm_client: LLMServerClient,
         teacher_client: dict[str, LLMServerClient] | None = None,
-        reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
+        reward_loop_worker_handles: list[ray.actor.ActorHandle] | dict[str, tuple[ray.actor.ActorHandle, ...]] = None,
     ):
         self.config = config
         rollout_config = config.actor_rollout_ref.rollout
@@ -163,6 +165,9 @@ class DiffusionAgentLoopWorker:
 
         self.dataset_cls = get_dataset_class(config.data)
         self.reward_loop_worker_handles = reward_loop_worker_handles
+        self.async_reward_client = create_async_reward_client(
+            reward_loop_worker_handles, get_streaming_reward_config(config)
+        )
 
         self.tokenizer = self.model_config.tokenizer
         self.processor = self.model_config.processor
@@ -186,6 +191,11 @@ class DiffusionAgentLoopWorker:
             if self.model_config.processor is not None:
                 self.model_config.processor.chat_template = self.model_config.custom_chat_template
             self.model_config.tokenizer.chat_template = self.model_config.custom_chat_template
+
+    async def close_reward_streaming(self) -> None:
+        """Stop reward admission and drain before the owner closes reward models."""
+        if self.async_reward_client is not None:
+            await self.async_reward_client.close()
 
     async def generate_sequences(self, batch: DataProto) -> DataProto:
         """Generate sequences from agent loop.
@@ -245,7 +255,14 @@ class DiffusionAgentLoopWorker:
             tasks.append(
                 asyncio.create_task(self._run_agent_loop(task_sampling_params, validate=is_validate, **kwargs))
             )
-        outputs = await asyncio.gather(*tasks)
+        try:
+            outputs = await asyncio.gather(*tasks)
+        except BaseException:
+            if self.async_reward_client is not None and self.async_reward_client.requires_drain:
+                for task in tasks:
+                    task.cancel()
+                await _await_owned(asyncio.gather(*tasks, return_exceptions=True))
+            raise
 
         output = self._postprocess(outputs, input_non_tensor_batch=batch.non_tensor_batch)
 
@@ -275,8 +292,10 @@ class DiffusionAgentLoopWorker:
             hf_model_type=self.hf_model_type,
             extra_tokenizer_map=self.model_config.extra_tokenizer_map,
         )
-        output: DiffusionAgentLoopOutput = await agent_loop.run(sampling_params, **kwargs)
-        return await self._agent_loop_postprocess(output, validate=validate, **kwargs)
+        admission = self.async_reward_client.sample_slot() if self.async_reward_client else nullcontext()
+        async with admission:
+            output: DiffusionAgentLoopOutput = await agent_loop.run(sampling_params, **kwargs)
+            return await self._agent_loop_postprocess(output, validate=validate, **kwargs)
 
     async def _agent_loop_postprocess(
         self, output, validate: bool = False, **kwargs
@@ -336,9 +355,7 @@ class DiffusionAgentLoopWorker:
 
     async def _compute_score(self, output, prompts, responses, kwargs, validate: bool = False):
         """Compute reward score for single sample."""
-        enable_async_reward = self.reward_loop_worker_handles is not None
-
-        if output.reward_score is None and enable_async_reward:
+        if output.reward_score is None and self.async_reward_client is not None:
             timing = {}
             with simple_timer("compute_score", timing):
                 batch = TensorDict(
@@ -359,8 +376,7 @@ class DiffusionAgentLoopWorker:
                     non_tensor_batch=non_tensor_batch,
                     meta_info={"validate": validate},
                 )
-                selected_reward_loop_worker_handle = random.choice(self.reward_loop_worker_handles)
-                result = await selected_reward_loop_worker_handle.compute_score.remote(data)
+                result = await self.async_reward_client.compute_score(data)
                 output.reward_score = result["reward_score"]
                 output.extra_fields["reward_extra_info"] = result["reward_extra_info"]
             output.metrics.compute_score = timing["compute_score"]

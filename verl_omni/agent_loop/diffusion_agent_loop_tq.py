@@ -22,6 +22,7 @@ import torch
 import transfer_queue as tq
 from tensordict import NonTensorData, NonTensorStack, TensorDict
 from verl.experimental.agent_loop import get_trajectory_info
+from verl.trainer.ppo.v1 import AgentLoopManagerTQ
 from verl.utils.ray_utils import auto_await
 from verl.utils.tensordict_utils import list_of_dict_to_tensordict
 
@@ -31,7 +32,15 @@ from verl_omni.agent_loop.diffusion_agent_loop import (
     _InternalDiffusionAgentLoopOutput,
 )
 from verl_omni.agent_loop.utils import derive_rollout_seed
-from verl_omni.pipelines.rollout_media import ARTIFACT_CONTEXT, ARTIFACT_SPECS, PREVIEW_ARTIFACT, PRIMARY_ARTIFACT
+from verl_omni.pipelines.rollout_media import (
+    ARTIFACT_CONTEXT,
+    ARTIFACT_SPECS,
+    PREVIEW_ARTIFACT,
+    PRIMARY_ARTIFACT,
+    ArtifactContractError,
+)
+from verl_omni.reward_loop.reward_model_executor import _await_owned
+from verl_omni.workers.config.reward import get_streaming_reward_config
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
@@ -45,9 +54,24 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
         super().__init__(*args, **kwargs)
         tq.init()
         self.background_tasks = set()
+        self._fatal_reward_error: str | None = None
+
+    def raise_if_reward_failed(self) -> None:
+        """Surface fatal background scoring errors at the trainer's sampling boundary."""
+        if self._fatal_reward_error is not None:
+            raise ArtifactContractError(self._fatal_reward_error)
+
+    async def close_reward_streaming(self) -> None:
+        """Cancel unfinished prompts and drain accepted reward work before teardown."""
+        tasks = tuple(self.background_tasks)
+        for task in tasks:
+            task.cancel()
+        await super().close_reward_streaming()
+        await _await_owned(asyncio.gather(*tasks, return_exceptions=True))
 
     async def generate_sequences(self, batch: TensorDict) -> None:
         """Spawn diffusion agent loops for each prompt in the batch without waiting."""
+        self.raise_if_reward_failed()
         validate = batch["validate"] if "validate" in batch else False
         if isinstance(validate, NonTensorData):
             validate = validate.data
@@ -167,6 +191,10 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
                     f"Error in _run_prompt for uid={uid}",
                     exc_info=(type(error), error, error.__traceback__),
                 )
+            if self.async_reward_client is not None and self.async_reward_client.requires_drain:
+                for error in errors:
+                    if isinstance(error, ArtifactContractError):
+                        raise error
             # One put per prompt group instead of one per session: every TQ put
             # is a ZMQ roundtrip carrying the full image payload, and the
             # replay buffer waits for the whole group anyway, so per-session
@@ -184,6 +212,13 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
             await tq.async_kv_put(key=uid, partition_id=partition_id, tag={"status": status})
         except Exception as e:
             logger.exception(f"Error in _run_prompt for uid={uid}: {e}")
+            if (
+                isinstance(e, ArtifactContractError)
+                and self.async_reward_client is not None
+                and self.async_reward_client.requires_drain
+                and self._fatal_reward_error is None
+            ):
+                self._fatal_reward_error = str(e)
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)
             await tq.async_kv_put(key=uid, partition_id=partition_id, tag={"status": "failure"})
@@ -308,12 +343,43 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
             )
 
 
+class DiffusionAgentLoopManagerTQ(AgentLoopManagerTQ):
+    """Wait for all prompt registrations before returning dispatch failures."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.agent_loop_workers_class = DiffusionAgentLoopWorkerTQ
+
+    async def _init_agent_loop_workers(self):
+        if get_streaming_reward_config(self.config).enabled:
+            if not all(
+                callable(getattr(self.agent_loop_workers_class, method, None))
+                for method in ("raise_if_reward_failed", "close_reward_streaming")
+            ):
+                raise ValueError(
+                    "Named reward streaming requires agent workers with callable "
+                    "raise_if_reward_failed and close_reward_streaming methods"
+                )
+        await super()._init_agent_loop_workers()
+
+    def raise_if_reward_failed(self) -> None:
+        """Check all workers before sampled trajectories reach training or validation."""
+        ray.get([worker.raise_if_reward_failed.remote() for worker in self.agent_loop_workers])
+
+    def generate_sequences(self, prompts: TensorDict) -> None:
+        """Dispatch prompts and settle accepted RPCs before returning or raising."""
+        chunks = prompts.chunk(len(self.agent_loop_workers))
+        requests = []
+        try:
+            for worker, chunk in zip(self.agent_loop_workers, chunks, strict=False):
+                requests.append(worker.generate_sequences.remote(chunk))
+        finally:
+            if requests:
+                ray.wait(requests, num_returns=len(requests))
+        ray.get(requests)
+
+
 @auto_await
 async def create_diffusion_agent_loop_manager(*args, **kwargs):
-    """Build verl's ``AgentLoopManagerTQ`` wired with ``DiffusionAgentLoopWorkerTQ``."""
-    from verl.trainer.ppo.v1 import AgentLoopManagerTQ
-
-    manager = AgentLoopManagerTQ(*args, **kwargs)
-    manager.agent_loop_workers_class = DiffusionAgentLoopWorkerTQ
-    await manager._init_agent_loop_workers()
-    return manager
+    """Build the TQ manager wired with diffusion agent workers."""
+    return await DiffusionAgentLoopManagerTQ.create(*args, **kwargs)
