@@ -235,17 +235,19 @@ One judge model can serve several reward terms, each with its own `user_prompt`
 (literal text, or a `pkg://` builder). For UnifiedReward, literal text may contain
 `{caption}`, and a custom builder receives the caption. Leaving `user_prompt`
 unset keeps the scorer's default request.
+Both scorers live in `verl_omni.utils.reward_score.vlm_as_a_judge`; the older
+`genrm_ocr` and `unified_reward` paths still work.
 
 ```yaml
 reward_functions:
   ocr:
     model: judge
-    path: pkg://verl_omni.utils.reward_score.genrm_ocr
+    path: pkg://verl_omni.utils.reward_score.vlm_as_a_judge
     name: compute_score_ocr
     user_prompt: "Transcribe all text in the image exactly."
   semantics:
     model: judge
-    path: pkg://verl_omni.utils.reward_score.unified_reward
+    path: pkg://verl_omni.utils.reward_score.vlm_as_a_judge
     name: compute_score_unified_reward
     user_prompt: pkg://my_package.prompts.build_semantic_prompt
 ```
