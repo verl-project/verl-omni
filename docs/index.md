@@ -123,6 +123,7 @@ examples/qwen3_tts/grpo_trainer_qwen3_tts.md
 perf/tuning_guide.md
 perf/diffusion_mfu.md
 perf/profiler.md
+perf/diffusion_consistency.md
 ```
 
 ```{toctree}
