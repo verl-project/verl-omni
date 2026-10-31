@@ -1,0 +1,1 @@
+../../../examples/diffusionopd_trainer/ltx2/README.md

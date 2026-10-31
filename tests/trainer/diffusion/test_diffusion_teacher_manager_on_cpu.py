@@ -48,19 +48,26 @@ def compose_cfg(overrides):
 
 
 class FakeTeacherWorkerGroup:
-    """Records dispatch order and returns a key-specific constant as a future."""
+    """Records dispatch order and returns a key-specific constant as a future.
 
-    def __init__(self, value, world_size, log):
+    With ``echo_latents`` it returns each row's own latents instead, so tests can check row order.
+    """
+
+    def __init__(self, value, world_size, log, echo_latents=False):
         self.value = value
         self.world_size = world_size
         self.log = log
+        self.echo_latents = echo_latents
         self.calls = []
 
     def infer_teacher_batch(self, td):
         teacher_key = tu.get(td, "teacher_key")
         self.calls.append((teacher_key, td.batch_size[0]))
         self.log.append(("infer", teacher_key))
-        prev = torch.full((td.batch_size[0], 4, 8, 3), self.value, dtype=torch.bfloat16)
+        if self.echo_latents:
+            prev = td["all_latents"][:, :4].clone()
+        else:
+            prev = torch.full((td.batch_size[0], 4, 8, 3), self.value, dtype=torch.bfloat16)
 
         def get():
             self.log.append(("get", teacher_key))
@@ -160,15 +167,17 @@ class TestComputePrevSampleMean:
         assert wg["ocr"].calls == [("ocr", 4)]
         assert wg["aes"].calls == [("aes", 1)]
 
-    def test_single_teacher_dispatches_whole_batch_once(self):
+    def test_single_teacher_uneven_batch_padded_and_restored(self):
         log = []
-        wg = {"default": FakeTeacherWorkerGroup(3.0, 2, log)}
-        manager = make_manager(SINGLE, wg)
+        wg = {"default": FakeTeacherWorkerGroup(0.0, 2, log, echo_latents=True)}
+        manager = make_manager(SINGLE, wg, infer_micro_batch_size_per_gpu=2)
+        batch = make_batch(["x"] * 5)
 
-        out = manager.compute_prev_sample_mean(make_batch(["x", "y", "z"]))
+        out = manager.compute_prev_sample_mean(batch)
 
-        assert wg["default"].calls == [("default", 3)]
-        torch.testing.assert_close(out.batch["teacher_prev_sample_mean"], torch.full((3, 4, 8, 3), 3.0))
+        # 5 rows are padded to world_size * micro = 8, then the padding is dropped
+        assert wg["default"].calls == [("default", 8)]
+        torch.testing.assert_close(out.batch["teacher_prev_sample_mean"], batch.batch["all_latents"][:, :4])
 
 
 class TestDispatchCollectSplit:

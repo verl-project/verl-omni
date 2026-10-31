@@ -1,6 +1,6 @@
 # Supported Models
 
-Last updated: 10/24/2026.
+Last updated: 10/26/2026.
 
 VeRL-Omni supports RL post-training for generative models across image, video,
 audio, and omni modalities. This page catalogues every model with a ready-to-run
@@ -165,13 +165,17 @@ For dataset layout and launch overrides, see
 | Flow-GRPO (T2AV LoRA) | `examples/flowgrpo_trainer/ltx2/run_ltx2_3_t2av_lora.sh` | 8×GPU (TP=2) |
 | Flow-GRPO (TI2VA LoRA) | `examples/flowgrpo_trainer/ltx2/run_ltx2_3_ti2va_lora.sh` | 8×GPU (TP=1) |
 | Flow-GRPO (T2AV LoRA, NPU) | `examples/flowgrpo_trainer/ltx2/run_ltx2_3_t2av_lora_npu.sh` | 16×NPU (TP=4) |
+| Flow-GRPO (T2AV LoRA, v1 sync) | `examples/flowgrpo_trainer/ltx2/run_ltx2_3_t2av_lora_v1.sh` | 16×NPU (TP=4) or 8×GPU (TP=1) |
 | OmniNFT (T2AV LoRA, NPU) | `examples/omninft_trainer/ltx2/run_ltx2_3_omninft_lora_npu.sh` | 16×NPU (TP=4) |
+| [DiffusionOPD](../algo/diffusion_opd.md) (T2AV, single teacher) | `examples/diffusionopd_trainer/ltx2/run_ltx2_3_t2av_opd_npu.sh` | 16×NPU (TP=4, teacher colocated) |
 
 **Reward models:** FlowGRPO uses CLAP (`laion/larger_clap_general`) and
 ImageBind (local `.pth`, CC-BY-NC-SA 4.0) for audio-video alignment. OmniNFT
 keeps separate VideoAlign, HPSv3, AudioBox Aesthetics, CLAP-unfused, and
 Synchformer DeSync components and routes their normalized advantages to the
-video and audio loss branches.
+video and audio loss branches. The DiffusionOPD recipe monitors CLAP and
+ImageBind but does not put their scores in the loss — see
+[Diffusion On-Policy Distillation](../algo/diffusion_opd.md).
 
 ### MiniMax-H3
 
@@ -344,7 +348,7 @@ trainer's README in `examples/`.
 | DiffusionNFT | NPU ✅<br>GPU ✅ | — | — | — | — | NPU ✅ (T2VA)<br>GPU ✅ | — | — | — |
 | OmniNFT | — | — | — | — | ✅ | — | — | — | — |
 | [DGPO](../algo/dgpo.md) | — | — | GPU ✅ | — | — | — | — | — | — |
-| [DiffusionOPD](../algo/diffusion_opd.md) (incl. MOPD) | — | — | GPU ✅ | — | — | — | — | — | — |
+| [DiffusionOPD](../algo/diffusion_opd.md) (incl. MOPD) | — | — | GPU ✅ | — | NPU ✅ | — | — | — | — |
 | GSPO (incl. OPD) | — | — | — | — | — | — | — | NPU ✅<br>GPU ✅ | — |
 
 HunyuanImage-3.0 (MixGRPO / SRPO) appears on the project README as Planned or
