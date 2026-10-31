@@ -34,6 +34,14 @@ accelerator_workers:
 # Each entry uses path/name/weight; preserve_components requires required=true and ignores weight.
 reward_functions: {}
 
+# At values above 1, maximum concurrent independent sub-reward calls per
+# reward worker across all samples. Serial barrier terms do not use this cap
+# and retain cross-sample concurrency. The default preserves legacy per-sample
+# sequential execution. A term must opt in with independent: true to overlap
+# with adjacent eligible terms. Cancelling a serial synchronous scorer does
+# not wait for its executor thread to finish.
+multi_reward_concurrency: 1
+
 # Named reward models. See docs/algo/named_reward_models.md for configuration
 # and extension instructions.
 models: {}
