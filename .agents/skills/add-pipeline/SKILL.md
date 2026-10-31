@@ -41,6 +41,12 @@ repo infers for you.
 Both at once? Architecture first — an algorithm can only be paired with an adapter
 that already exists.
 
+**Also training the text encoder in diffusion model?** That is composite training. Keep the DiT in
+`diffusers_training_adapter.py` and put a `DiffusionModelARBase` subclass in
+`ar_training_adapter.py`. Follow "Composite AR training adapter" in
+`docs/contributing/integrating_a_diffusion_model.md`. Do not fold that setup into
+the DiT adapter, and do not register an AR adapter when the text encoder is frozen.
+
 ## Step 1 — Find the closest pair to copy
 
 List the live registry rather than guessing at a template:
