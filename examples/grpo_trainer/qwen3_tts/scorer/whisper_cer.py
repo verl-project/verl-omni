@@ -20,6 +20,7 @@ import argparse
 import base64
 import binascii
 import json
+import logging
 import re
 import threading
 import unicodedata
@@ -31,10 +32,33 @@ import numpy as np
 
 __all__ = ["WhisperCERScorer"]
 
+logger = logging.getLogger(__name__)
+
 # Device types that expose a torch.<device>.is_available() probe, in preference order.
 # MPS is deliberately absent: Whisper on MPS is untested here and ``auto`` must not
 # silently pick it. Naming ``--device mps`` still works.
 _ACCELERATOR_DEVICE_TYPES = ("cuda", "npu", "xpu")
+
+# Accepted input sample rate range. The floor is what bounds the resampling
+# ratio, and therefore the resampled length. The 8 MiB HTTP body carries a
+# base64 payload, so it decodes to at most ~6 MiB of float32 -- 1.57 M input
+# samples -- and an 8 kHz input is at most a 2x expansion, i.e. ~3.1 M output
+# samples (~12 MiB). A ceiling alone would not achieve this -- sample_rate=1 is
+# below any ceiling and asked for billions of output samples. The ceiling is the
+# input contract: the highest standard capture rates are 192 kHz and 384 kHz.
+_MIN_SAMPLE_RATE = 8_000
+_MAX_SAMPLE_RATE = 384_000
+
+# ``_import_torchaudio_functional`` is called per request, and a failed import is
+# not cached by ``sys.modules``. On the hosts this fallback targets (no torchaudio
+# wheel) every request would otherwise re-run the import machinery and re-log the
+# warning, so the outcome is memoized and the warning is emitted once.
+_TORCHAUDIO_FUNCTIONAL: Any = None
+_TORCHAUDIO_PROBED = False
+# ``transcribe()`` runs on every ``ThreadingHTTPServer`` request thread, so the
+# probe has to be serialized: a second thread must not read the "not probed yet"
+# state while the first is still importing, and must never publish a result.
+_TORCHAUDIO_PROBE_LOCK = threading.Lock()
 
 
 def _current_index(accelerator: Any, current: Any) -> int:
@@ -84,7 +108,10 @@ def _resolve_auto_device(torch_module: Any) -> str:
         except Exception:  # Some torch builds raise instead of returning None.
             current = None
         current_type = getattr(current, "type", None)
-        if current_type is not None and current_type != "cpu":
+        # Only the types listed above are accepted: a backend that reports
+        # something else (mps on Apple silicon, say) must not be selected by
+        # ``auto`` -- naming it explicitly still works.
+        if current_type in _ACCELERATOR_DEVICE_TYPES:
             return f"{current_type}:{_current_index(accelerator, current)}"
     for device_type in _ACCELERATOR_DEVICE_TYPES:
         backend = getattr(torch_module, device_type, None)
@@ -97,6 +124,77 @@ def _resolve_auto_device(torch_module: Any) -> str:
         if available:
             return f"{device_type}:0"
     return "cpu"
+
+
+def _import_torchaudio_functional() -> Any:
+    """Import ``torchaudio.functional``, or return ``None`` when it is unusable.
+
+    ``ImportError`` covers a missing wheel; ``OSError`` covers the case where
+    torchaudio *is* installed but a native component cannot be loaded.
+    ``torchaudio._extension._load_lib`` re-raises the underlying ``ctypes.DLL``
+    ``OSError`` as-is when the library file is found but cannot be loaded, so
+    catching only ``ImportError`` would miss exactly the situation this fallback
+    exists for. Ascend/aarch64 hosts hit both cases.
+
+    The outcome is memoized: a failed import is not cached by ``sys.modules``, so
+    without this every ``transcribe()`` call on a torchaudio-less host would
+    re-run the import machinery and log the warning again.
+    """
+    global _TORCHAUDIO_FUNCTIONAL, _TORCHAUDIO_PROBED
+
+    if _TORCHAUDIO_PROBED:
+        return _TORCHAUDIO_FUNCTIONAL
+    with _TORCHAUDIO_PROBE_LOCK:
+        # Another request may have finished the probe while this one waited.
+        if _TORCHAUDIO_PROBED:
+            return _TORCHAUDIO_FUNCTIONAL
+        try:
+            import torchaudio.functional as audio_functional
+        except (ImportError, OSError):
+            logger.warning("torchaudio is unavailable; falling back to linear resampling.")
+            audio_functional = None
+        # Publish the result first, then mark the probe done: a thread that sees
+        # ``_TORCHAUDIO_PROBED`` must never read an unassigned cache. An unexpected
+        # exception leaves the probe open (it is not caught here) so a later call
+        # retries instead of permanently falling back.
+        _TORCHAUDIO_FUNCTIONAL = audio_functional
+        _TORCHAUDIO_PROBED = True
+    return _TORCHAUDIO_FUNCTIONAL
+
+
+def _linear_resample(samples: Any, source_rate: int, target_rate: int) -> Any:
+    """Linearly resample a 1-D waveform on the samples' own device.
+
+    Compatibility fallback used only when ``torchaudio`` is unavailable
+    (Ascend/aarch64 hosts often ship torch without a matching torchaudio wheel),
+    so the scorer degrades instead of failing to import. Kept in the input dtype
+    on purpose: Ascend NPU lacks float64 support.
+
+    This is not a band-limited resampler: downsampling can alias frequencies
+    above the target Nyquist limit and thus change the transcription and the CER
+    reward, and interpolation can introduce spectral images when upsampling. Use
+    ``torchaudio.functional.resample`` when band-limited rate conversion is
+    required; this path only avoids failing outright on hosts that cannot import
+    it.
+    """
+    import torch
+
+    if source_rate == target_rate or samples.shape[-1] < 2:
+        return samples
+    target_length = (samples.shape[-1] * target_rate + source_rate // 2) // source_rate
+    if target_length <= 0:
+        return samples[:0]
+    positions = torch.linspace(
+        0.0,
+        samples.shape[-1] - 1,
+        target_length,
+        device=samples.device,
+        dtype=samples.dtype,
+    )
+    lower = positions.floor().long().clamp(max=samples.shape[-1] - 1)
+    upper = (lower + 1).clamp(max=samples.shape[-1] - 1)
+    weight = positions - lower.to(samples.dtype)
+    return samples[lower] * (1.0 - weight) + samples[upper] * weight
 
 
 class WhisperCERScorer:
@@ -150,11 +248,15 @@ class WhisperCERScorer:
 
     def transcribe(self, waveform: np.ndarray, sample_rate: int) -> str:
         import torch
-        import torchaudio.functional as audio_functional
+
+        audio_functional = _import_torchaudio_functional()
 
         samples = torch.from_numpy(waveform)
         if sample_rate != 16_000:
-            samples = audio_functional.resample(samples, sample_rate, 16_000)
+            if audio_functional is not None:
+                samples = audio_functional.resample(samples, sample_rate, 16_000)
+            else:
+                samples = _linear_resample(samples, sample_rate, 16_000)
         features = self.processor(
             samples.numpy(),
             sampling_rate=16_000,
@@ -243,8 +345,14 @@ def decode_request(payload: Any) -> tuple[np.ndarray, int, str, dict]:
     if isinstance(num_samples, bool) or not isinstance(num_samples, int) or num_samples != waveform.size:
         raise ValueError(f"num_samples does not match the decoded waveform: {num_samples!r} != {waveform.size}.")
     sample_rate = payload.get("sample_rate")
-    if isinstance(sample_rate, bool) or not isinstance(sample_rate, int) or sample_rate <= 0:
-        raise ValueError(f"sample_rate must be a positive integer, got {sample_rate!r}.")
+    if (
+        isinstance(sample_rate, bool)
+        or not isinstance(sample_rate, int)
+        or not _MIN_SAMPLE_RATE <= sample_rate <= _MAX_SAMPLE_RATE
+    ):
+        raise ValueError(
+            f"sample_rate must be an integer between {_MIN_SAMPLE_RATE} and {_MAX_SAMPLE_RATE} Hz, got {sample_rate!r}."
+        )
     if not np.isfinite(waveform).all():
         raise ValueError("Decoded waveform contains NaN or infinity.")
 
