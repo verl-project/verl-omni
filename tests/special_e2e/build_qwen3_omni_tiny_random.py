@@ -34,6 +34,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+from pathlib import Path
 
 import torch
 from tokenizers import Tokenizer
@@ -97,10 +98,12 @@ def _build_tiny_chatml_tokenizer(*, vocab_size: int = 2048) -> Qwen2TokenizerFas
     )
 
 
-def _build_tiny_config(vocab_size: int):
+def _build_tiny_config(vocab_size: int, *, head_dim: int = 32):
     """Default Qwen3OmniMoeConfig shrunk to a 2-layer Thinker (no Hub access)."""
     from transformers.models.qwen3_omni_moe import Qwen3OmniMoeConfig
 
+    if head_dim not in (32, 128):
+        raise ValueError(f"Expected a tiny-model attention head dimension of 32 or 128, got {head_dim}.")
     config = Qwen3OmniMoeConfig()
 
     # Thinker-only smoke test: skip the talker / code2wav stack entirely
@@ -114,7 +117,7 @@ def _build_tiny_config(vocab_size: int):
     text.intermediate_size = 256
     text.num_attention_heads = 4
     text.num_key_value_heads = 2
-    text.head_dim = 32
+    text.head_dim = head_dim
     text.num_experts = 4
     text.num_experts_per_tok = 2
     # With rollout TP=2, FlashInfer's SM100 MoE kernel requires the local
@@ -122,9 +125,13 @@ def _build_tiny_config(vocab_size: int):
     text.moe_intermediate_size = 256
     text.vocab_size = vocab_size
     # The default config leaves rope_scaling unset, but the M-RoPE rotary
-    # embedding requires it. mrope_section must sum to head_dim // 2 (= 16 here).
+    # embedding requires it. mrope_section must sum to head_dim // 2.
     # Set rope_parameters directly (not rope_scaling) to avoid dropping rope_theta.
-    text.rope_parameters = {"rope_theta": 1000000.0, "rope_type": "default", "mrope_section": [8, 4, 4]}
+    text.rope_parameters = {
+        "rope_theta": 1000000.0,
+        "rope_type": "default",
+        "mrope_section": [head_dim // 4, head_dim // 8, head_dim // 8],
+    }
 
     vision = config.thinker_config.vision_config
     # Shrink dims but keep every field vLLM-Omni's vision tower reads (the default
@@ -203,12 +210,12 @@ def _build_tiny_processor(tokenizer):
     )
 
 
-def build(output_dir: str, *, seed: int = 42, dtype: torch.dtype = torch.bfloat16) -> str:
+def build(output_dir: str, *, seed: int = 42, dtype: torch.dtype = torch.bfloat16, head_dim: int = 32) -> str:
     """Construct and save a tiny random-weight Qwen3-Omni Thinker checkpoint."""
     torch.manual_seed(seed)
 
     tokenizer = _build_tiny_chatml_tokenizer()
-    config = _build_tiny_config(vocab_size=len(tokenizer))
+    config = _build_tiny_config(vocab_size=len(tokenizer), head_dim=head_dim)
 
     # Keep generation/special-token ids consistent between model and tokenizer.
     text = config.thinker_config.text_config
@@ -258,13 +265,47 @@ def ensure_tiny_qwen3_omni_checkpoint(
     *,
     seed: int = 42,
     dtype: torch.dtype = torch.bfloat16,
+    head_dim: int = 32,
     skip_if_exists: bool = True,
 ) -> str:
-    """Build the tiny checkpoint only if it is not already present."""
+    """Reuse a compatible tiny checkpoint; reject incompatible contents unless forced."""
     output_dir = os.path.expanduser(output_dir)
-    if skip_if_exists and os.path.isfile(os.path.join(output_dir, "config.json")):
-        return output_dir
-    return build(output_dir, seed=seed, dtype=dtype)
+    output = Path(output_dir)
+    if skip_if_exists:
+        if output.is_symlink() or (output.exists() and not output.is_dir()):
+            raise ValueError(f"Refusing to rebuild a symlink or non-directory checkpoint path: {output}")
+        if output.exists() and any(output.iterdir()):
+            if _checkpoint_is_compatible(output, head_dim=head_dim):
+                return output_dir
+            raise ValueError(
+                f"Existing checkpoint at {output} is incomplete or incompatible with head_dim={head_dim}. "
+                "Choose a separate output directory, or use --force to rebuild it explicitly."
+            )
+    return build(output_dir, seed=seed, dtype=dtype, head_dim=head_dim)
+
+
+def _checkpoint_is_compatible(output: Path, *, head_dim: int) -> bool:
+    try:
+        config = json.loads((output / "config.json").read_text())
+        text = config["thinker_config"]["text_config"]
+        expected = {
+            "model_type": "qwen3_omni_moe_text",
+            "num_hidden_layers": 2,
+            "hidden_size": 128,
+            "num_attention_heads": 4,
+            "num_key_value_heads": 2,
+            "head_dim": head_dim,
+        }
+        if config.get("model_type") != "qwen3_omni_moe" or any(
+            text.get(key) != value for key, value in expected.items()
+        ):
+            return False
+        required = ("model.safetensors", "tokenizer.json", "tokenizer_config.json", "chat_template.json")
+        if not all((output / name).is_file() and (output / name).stat().st_size for name in required):
+            return False
+        return any((output / name).is_file() for name in ("processor_config.json", "preprocessor_config.json"))
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
 
 
 def main() -> None:
@@ -274,6 +315,13 @@ def main() -> None:
     parser.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--dtype", choices=["float16", "bfloat16", "float32"], default="bfloat16")
+    parser.add_argument(
+        "--head-dim",
+        type=int,
+        choices=[32, 128],
+        default=32,
+        help="Use 128 for the Ascend vLLM attention kernel; the GPU tiny model defaults to 32.",
+    )
     parser.add_argument(
         "--force",
         action="store_true",
@@ -286,6 +334,7 @@ def main() -> None:
         args.output_dir,
         seed=args.seed,
         dtype=dtype,
+        head_dim=args.head_dim,
         skip_if_exists=not args.force,
     )
     print(f"Tiny Qwen3-Omni checkpoint ready at {output_dir}")

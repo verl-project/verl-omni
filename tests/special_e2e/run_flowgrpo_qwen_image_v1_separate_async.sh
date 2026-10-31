@@ -81,6 +81,18 @@ if mod is None:
 try:
     importlib.import_module(mod)
 except Exception as e:
+    # On Ascend the "nccl"-named engine is served by the HCCL module: verl
+    # registers HCCLCheckpointEngine under "nccl" and the CUDA/NPU engines
+    # are mutually exclusive, so probe the HCCL module before failing.
+    if backend == "nccl":
+        try:
+            from verl.utils.device import is_torch_npu_available
+
+            if is_torch_npu_available(check_device=True):
+                importlib.import_module("verl.checkpoint_engine.hccl_checkpoint_engine")
+                sys.exit(0)
+        except Exception:
+            pass
     print(f"Checkpoint backend '{backend}' could not be imported: {e}", file=sys.stderr)
     print("Install the required dependency. For 'nccl' that is typically:", file=sys.stderr)
     print("  pip install cupy-cuda12x   # or cupy-cuda13x matching your CUDA major", file=sys.stderr)

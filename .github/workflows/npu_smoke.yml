@@ -11,6 +11,9 @@ on:
       - "tests/agent_loop/**"
       - "tests/reward_loop/**"
       - "tests/workers/**"
+      - "tests/trainer/**"
+      - "tests/pipelines/**"
+      - "tests/utils/**"
       - "tests/special_e2e/**"
       - "pyproject.toml"
       - ".github/workflows/npu_smoke.yml"
@@ -26,6 +29,9 @@ on:
       - "tests/agent_loop/**"
       - "tests/reward_loop/**"
       - "tests/workers/**"
+      - "tests/trainer/**"
+      - "tests/pipelines/**"
+      - "tests/utils/**"
       - "tests/special_e2e/**"
       - "pyproject.toml"
       - ".github/workflows/npu_smoke.yml"
@@ -117,6 +123,12 @@ jobs:
           pip show vllm || true
           pip show vllm-ascend || true
           pip show vllm-omni || true
+      - name: Prepare NPU image-edit dependency
+        if: matrix.group == 'e2e'
+        shell: bash
+        run: |
+          python3 -m pip install --no-deps 'qwen-vl-utils==0.0.14'
+          python3 -c 'from qwen_vl_utils import fetch_image, process_vision_info'
       - name: Prepare tiny Qwen-Image checkpoint
         shell: bash
         run: |

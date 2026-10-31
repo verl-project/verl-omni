@@ -52,8 +52,8 @@ fi
 python3 -m verl_omni.trainer.main_diffusion \
     trainer.device=npu \
     algorithm.adv_estimator=flow_grpo \
-    data.train_files=${dummy_train_path} \
-    data.val_files=${dummy_test_path} \
+    "data.train_files=${dummy_train_path}" \
+    "data.val_files=${dummy_test_path}" \
     data.train_batch_size=${train_batch_size} \
     data.max_prompt_length=${max_prompt_length} \
     actor_rollout_ref.model.path=${MODEL_PATH} \

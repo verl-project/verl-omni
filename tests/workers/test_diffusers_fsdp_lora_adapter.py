@@ -11,7 +11,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""GPU integration tests for dual-adapter LoRA under FSDP/FSDP2."""
+"""Accelerator integration tests for dual-adapter LoRA under FSDP/FSDP2.
+
+Runs on CUDA and, with DEVICE_NAME=npu plus Ascend visibility exported by the
+launcher, on NPU via the verl device API.
+"""
 
 import os
 import shutil
@@ -24,6 +28,7 @@ import torch
 from verl.single_controller.base.decorator import Dispatch, register
 from verl.single_controller.ray import RayClassWithInitArgs, RayResourcePool, RayWorkerGroup
 from verl.utils import tensordict_utils as tu
+from verl.utils.device import get_device_name, get_torch_device, is_cuda_available, is_npu_available
 
 from verl_omni.workers.engine_workers import TrainingWorker
 from verl_omni.workers.utils.losses import diffusion_loss
@@ -44,13 +49,21 @@ _FILL_BASE = 7.25
 _FILL_STEP = -0.1
 
 
+def _skip_or_fail(reason: str) -> None:
+    if os.environ.get("DEVICE_NAME") == "npu" or get_device_name() == "npu":
+        pytest.fail(reason)
+    pytest.skip(reason)
+
+
 def _require_model_path() -> str:
-    if not os.path.isdir(_DEFAULT_MODEL_PATH):
-        pytest.skip(
-            f"Tiny Qwen-Image model not found at {_DEFAULT_MODEL_PATH!r}. "
-            "Provide the model or adjust _DEFAULT_MODEL_PATH."
+    model_path = _DEFAULT_MODEL_PATH
+    if os.environ.get("DEVICE_NAME") == "npu" or get_device_name() == "npu":
+        model_path = os.path.expanduser(os.environ.get("MODEL_PATH", model_path))
+    if not os.path.isdir(model_path):
+        _skip_or_fail(
+            f"Tiny Qwen-Image model not found at {model_path!r}. Provide the model or adjust _DEFAULT_MODEL_PATH."
         )
-    return _DEFAULT_MODEL_PATH
+    return model_path
 
 
 class LoRAFSDPTestWorker(TrainingWorker):
@@ -143,12 +156,20 @@ def _assert_ema_blend(
 
 
 def _resolve_lora_test_device_count(strategy: str) -> int:
-    visible_gpus = torch.cuda.device_count()
-    device_count = resolve_requested_num_gpus(default_num_gpus=max(2 if strategy == "fsdp2" else 1, visible_gpus))
+    visible_gpus = get_torch_device().device_count()
+    if os.environ.get("DEVICE_NAME") == "npu" or get_device_name() == "npu":
+        try:
+            device_count = int(os.environ.get("NUM_NPUS", os.environ.get("NUM_GPUS", str(visible_gpus))))
+        except ValueError:
+            pytest.fail("NUM_NPUS must be an integer.")
+        if not 1 <= device_count <= visible_gpus:
+            pytest.fail(f"Need 1 <= NUM_NPUS <= visible NPU count ({visible_gpus}), got {device_count}.")
+    else:
+        device_count = resolve_requested_num_gpus(default_num_gpus=max(2 if strategy == "fsdp2" else 1, visible_gpus))
     if strategy == "fsdp2" and device_count < 2:
-        pytest.skip("FSDP2 LoRA adapter tests require at least 2 GPUs to exercise sharded summon/writeback.")
+        _skip_or_fail("FSDP2 LoRA adapter tests require at least 2 devices to exercise sharded summon/writeback.")
     if device_count > 1 and device_count % 2 != 0:
-        pytest.skip(f"Need even GPU count for cp=2/fsdp_size=device_count test, got {device_count}")
+        _skip_or_fail(f"Need even device count for cp=2/fsdp_size=device_count test, got {device_count}")
     return device_count
 
 
@@ -175,7 +196,9 @@ def _run_lora_adapter_switch_test(strategy: str) -> None:
 
         ray_cls_with_init = RayClassWithInitArgs(cls=ray.remote(LoRAFSDPTestWorker), config=training_config)
         resource_pool = RayResourcePool(process_on_nodes=[device_count])
-        wg = RayWorkerGroup(resource_pool=resource_pool, ray_cls_with_init=ray_cls_with_init)
+        wg = RayWorkerGroup(
+            resource_pool=resource_pool, ray_cls_with_init=ray_cls_with_init, device_name=get_device_name()
+        )
         wg.reset()
 
         topology = wg.report_fsdp_topology()
@@ -261,7 +284,9 @@ def _run_copy_ema_adapter_test(strategy: str) -> None:
 
         ray_cls_with_init = RayClassWithInitArgs(cls=ray.remote(LoRAFSDPTestWorker), config=training_config)
         resource_pool = RayResourcePool(process_on_nodes=[device_count])
-        wg = RayWorkerGroup(resource_pool=resource_pool, ray_cls_with_init=ray_cls_with_init)
+        wg = RayWorkerGroup(
+            resource_pool=resource_pool, ray_cls_with_init=ray_cls_with_init, device_name=get_device_name()
+        )
         wg.reset()
 
         default_0 = _rank0_params(wg.collect_lora_params("default"))
@@ -309,13 +334,13 @@ def _run_copy_ema_adapter_test(strategy: str) -> None:
 
 @pytest.mark.parametrize("strategy", ["fsdp", "fsdp2"])
 def test_diffusers_fsdp_lora_adapter_switch(strategy):
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA is required for FSDP LoRA adapter tests.")
+    if not (is_cuda_available or is_npu_available):
+        _skip_or_fail("A CUDA or Ascend NPU accelerator is required for FSDP LoRA adapter tests.")
     _run_lora_adapter_switch_test(strategy)
 
 
 @pytest.mark.parametrize("strategy", ["fsdp", "fsdp2"])
 def test_diffusers_fsdp_lora_adapter_copy_ema(strategy):
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA is required for FSDP LoRA adapter tests.")
+    if not (is_cuda_available or is_npu_available):
+        _skip_or_fail("A CUDA or Ascend NPU accelerator is required for FSDP LoRA adapter tests.")
     _run_copy_ema_adapter_test(strategy)

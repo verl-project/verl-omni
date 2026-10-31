@@ -13,7 +13,11 @@ sep() { printf '%0.s-' {1..78}; echo; }
 
 NPU_SMOKE_GROUP="${NPU_SMOKE_GROUP:?NPU_SMOKE_GROUP must be set}"
 TIMESTAMP="$(date '+%Y%m%d_%H%M%S')"
-LOG_DIR="${LOG_DIR:-${REPO_ROOT}/logs/npu_smoke/${NPU_SMOKE_GROUP}/${TIMESTAMP}}"
+if [[ -z "${LOG_DIR:-}" ]]; then
+    NPU_SMOKE_LOG_ROOT="${REPO_ROOT}/logs/npu_smoke/${NPU_SMOKE_GROUP}"
+    mkdir -p "${NPU_SMOKE_LOG_ROOT}"
+    LOG_DIR="$(mktemp -d "${NPU_SMOKE_LOG_ROOT}/${TIMESTAMP}.XXXXXX")"
+fi
 mkdir -p "${LOG_DIR}"
 SUMMARY_LOG="${LOG_DIR}/summary.log"
 
@@ -88,10 +92,12 @@ cleanup_runtime() {
     ray stop --force || true
     pkill -TERM -f DiffusionWorker || true
     pkill -TERM -f VLLMWorker || true
+    pkill -TERM -f 'VLLM::' || true
     pkill -TERM -f vLLMOmniHttpServer || true
     sleep 5
     pkill -KILL -f DiffusionWorker || true
     pkill -KILL -f VLLMWorker || true
+    pkill -KILL -f 'VLLM::' || true
     pkill -KILL -f vLLMOmniHttpServer || true
     npu-smi info || true
 }
@@ -109,11 +115,14 @@ run_test() {
     log "Log file: ${logfile}"
     sep
 
-    local start_ts end_ts elapsed rc
+    local start_ts end_ts elapsed rc tee_rc
+    local -a pipeline_status
     start_ts="$(date +%s)"
     set +e
     "$@" 2>&1 | tee "${logfile}"
-    rc="${PIPESTATUS[0]}"
+    pipeline_status=("${PIPESTATUS[@]}")
+    rc="${pipeline_status[0]}"
+    tee_rc="${pipeline_status[1]}"
     set -e
 
     end_ts="$(date +%s)"
@@ -122,12 +131,12 @@ run_test() {
     TEST_NAMES+=("${name}")
     TEST_DURATIONS+=("${elapsed}s")
     TEST_LOG_FILES+=("${logfile}")
-    if [[ "${rc}" -eq 0 ]]; then
+    if [[ "${rc}" -eq 0 && "${tee_rc}" -eq 0 ]]; then
         TEST_RESULTS+=("PASS")
         pass "[${id}] ${name}  (${elapsed}s)"
     else
         TEST_RESULTS+=("FAIL")
-        fail "[${id}] ${name}  (${elapsed}s)  exit=${rc}"
+        fail "[${id}] ${name}  (${elapsed}s)  exit=${rc} tee_exit=${tee_rc}"
     fi
 
     return 0

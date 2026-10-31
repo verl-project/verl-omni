@@ -8,6 +8,7 @@ ACTOR_NUM_NPUS=${ACTOR_NUM_NPUS:-$((NUM_NPUS - REWARD_NUM_NPUS))}
 MODEL_PATH=${MODEL_PATH:-${HOME}/.cache/models/tiny-random/Wan2.2-TI2V-5B-Diffusers}
 TOKENIZER_PATH=${TOKENIZER_PATH:-${MODEL_PATH}/tokenizer}
 REWARD_SNAPSHOT=${REWARD_SNAPSHOT:-${HOME}/.cache/huggingface/hub/models--Qwen--Qwen2.5-VL-3B-Instruct/snapshots/66285546d2b821cf421d4f5eb2576359d3770cd3}
+REWARD_MODEL_PATH=${WAN22_REWARD_MODEL_PATH:-}
 if [[ -z "${REWARD_MODEL_PATH:-}" ]]; then
     if [[ -d "${REWARD_SNAPSHOT}" ]]; then
         REWARD_MODEL_PATH="${REWARD_SNAPSHOT}"

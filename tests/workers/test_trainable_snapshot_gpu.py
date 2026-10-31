@@ -38,6 +38,7 @@ from tensordict import TensorDict
 from torch.distributed.tensor import DTensor
 from verl.trainer.config import CheckpointConfig
 from verl.utils import tensordict_utils as tu
+from verl.utils.device import get_nccl_backend, get_torch_device
 from verl.workers.config import FSDPEngineConfig, FSDPOptimizerConfig
 
 from verl_omni.trainer.diffusion.v1.trainer_base import PolicyGradientDiffusionTrainerV1
@@ -187,7 +188,7 @@ def _run_case(model_path, offload):
         engine.optimizer_zero_grad()
         engine.optimizer.state.clear()
         torch.manual_seed(SEED)
-        torch.cuda.manual_seed_all(SEED)
+        get_torch_device().manual_seed_all(SEED)
         worker = _worker(engine, trainable_only)
         trainer = object.__new__(PolicyGradientDiffusionTrainerV1SeparateAsync)
         trainer.parameter_sync_step = 3
@@ -222,11 +223,11 @@ def _run_case(model_path, offload):
         seconds = []
         for _ in range(3):
             dist.barrier()
-            torch.cuda.synchronize()
+            get_torch_device().synchronize()
             start = time.perf_counter()
             worker.save_model_to_cpu(10)
             worker.restore_model_from_cpu(10)
-            torch.cuda.synchronize()
+            get_torch_device().synchronize()
             seconds.append(time.perf_counter() - start)
             worker.clear_cpu_model(10)
         report["arms"][str(trainable_only)]["save_restore_seconds"] = seconds
@@ -296,7 +297,7 @@ def _run_case(model_path, offload):
                 if operation == "save":
                     assert failure_worker.cpu_saved_models[snapshot_id] is previous
 
-                probe = torch.ones((), device=torch.cuda.current_device())
+                probe = torch.ones((), device=get_torch_device().current_device())
                 dist.all_reduce(probe)
                 assert probe.item() == dist.get_world_size()
                 if operation == "restore":
@@ -385,16 +386,16 @@ def _run_case(model_path, offload):
     report["verdict"] = "passed"
     del worker, trainer, baseline, histories
     gc.collect()
-    torch.cuda.empty_cache()
+    get_torch_device().empty_cache()
     return report
 
 
 def test_trainable_snapshot_two_rank(tmp_path):
     """Exercise real shard helpers through the same pytest entry used by core smoke."""
-    if torch.cuda.device_count() < 2:
+    if get_torch_device().device_count() < 2:
         if os.environ.get("REQUIRE_TRAINABLE_SNAPSHOT_GPU") == "1":
-            pytest.fail("Required FSDP2 snapshot smoke needs two visible CUDA GPUs")
-        pytest.skip("Real FSDP2 shards require two CUDA GPUs")
+            pytest.fail("Required FSDP2 snapshot smoke needs two visible accelerator devices")
+        pytest.skip("Real FSDP2 shards require two accelerator devices")
     output = tmp_path / "snapshots"
     subprocess.run(
         [
@@ -420,9 +421,9 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
-    torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
+    get_torch_device().set_device(int(os.environ["LOCAL_RANK"]))
     # Liveness bound for deliberately injected rank-local failures, not a workload time budget.
-    dist.init_process_group("nccl", timeout=timedelta(seconds=120))
+    dist.init_process_group(get_nccl_backend(), timeout=timedelta(seconds=120))
     assert dist.get_world_size() == 2
     if dist.get_rank() == 0:
         args.output.mkdir(parents=True, exist_ok=False)

@@ -56,13 +56,28 @@ module_map = {
     "mooncake": "verl.checkpoint_engine.mooncake_checkpoint_engine",
     "hccl": "verl.checkpoint_engine.hccl_checkpoint_engine",
 }
+def _hccl_probe_ok():
+    try:
+        from verl.utils.device import is_torch_npu_available
+
+        if not is_torch_npu_available(check_device=True):
+            return False
+        importlib.import_module("verl.checkpoint_engine.hccl_checkpoint_engine")
+        return True
+    except Exception:
+        return False
+
 module = module_map.get(backend)
 if module is not None:
     try:
         importlib.import_module(module)
     except Exception as error:
-        print(f"Checkpoint backend '{backend}' could not be imported: {error}", file=sys.stderr)
-        sys.exit(1)
+        # On Ascend the "nccl"-named engine is served by the HCCL module:
+        # verl registers HCCLCheckpointEngine under "nccl" and the CUDA/NPU
+        # engines are mutually exclusive, so probe the HCCL module first.
+        if not (backend == "nccl" and _hccl_probe_ok()):
+            print(f"Checkpoint backend '{backend}' could not be imported: {error}", file=sys.stderr)
+            sys.exit(1)
 PY
 
 n_resp_per_prompt=2

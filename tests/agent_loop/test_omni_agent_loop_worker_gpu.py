@@ -39,6 +39,7 @@ import torch
 from omegaconf import DictConfig, open_dict
 from PIL import Image
 from verl.protocol import DataProto
+from verl.utils.device import get_torch_device
 from verl.workers.rollout.llm_server import LLMServerManager
 
 from tests.special_e2e.build_qwen3_omni_tiny_random import ensure_tiny_qwen3_omni_checkpoint
@@ -198,25 +199,30 @@ def init_config(tmp_path_factory) -> tuple[DictConfig, Path]:
     return config, run_root
 
 
-def test_omni_agent_loop_worker_image_gen_generate_sequences(init_config):
-    config, _run_root = init_config
+def _gpu_ray_runtime_env() -> dict:
+    """Ray runtime env for the GPU tool agent-loop smoke."""
+    return {
+        "worker_process_setup_hook": _register_vllm_omni_rollout_on_ray_worker,
+        "env_vars": {
+            "TOKENIZERS_PARALLELISM": "true",
+            "NCCL_DEBUG": "WARN",
+            "VLLM_LOGGING_LEVEL": "INFO",
+            "PYTHONPATH": os.pathsep.join(p for p in (os.path.abspath("."), os.environ.get("PYTHONPATH", "")) if p),
+        },
+    }
+
+
+def run_omni_agent_loop_image_gen(config, ray_runtime_env):
+    """Run the shared GPU/NPU tool agent-loop assertions.
+
+    Owns the fake diffusion tool server and the Ray lifecycle; the caller
+    only builds the config.
+    """
     with _FakeDiffusionServer() as tool_url:
         with open_dict(config):
             config.agentic_image_gen.diffusion_tool_url = tool_url
 
-        ray.init(
-            runtime_env={
-                "worker_process_setup_hook": _register_vllm_omni_rollout_on_ray_worker,
-                "env_vars": {
-                    "TOKENIZERS_PARALLELISM": "true",
-                    "NCCL_DEBUG": "WARN",
-                    "VLLM_LOGGING_LEVEL": "INFO",
-                    "PYTHONPATH": os.pathsep.join(
-                        p for p in (os.path.abspath("."), os.environ.get("PYTHONPATH", "")) if p
-                    ),
-                },
-            }
-        )
+        ray.init(runtime_env=ray_runtime_env)
         try:
             llm_server_manager = LLMServerManager.create(config=config)
             agent_loop_manager = OmniAgentLoopManager.create(
@@ -289,5 +295,9 @@ def test_omni_agent_loop_worker_image_gen_generate_sequences(init_config):
         finally:
             ray.shutdown()
             gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            get_torch_device().empty_cache()
+
+
+def test_omni_agent_loop_worker_image_gen_generate_sequences(init_config):
+    config, _run_root = init_config
+    run_omni_agent_loop_image_gen(config, _gpu_ray_runtime_env())

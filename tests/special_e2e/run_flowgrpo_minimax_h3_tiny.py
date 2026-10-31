@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""MiniMax-H3 T2VA, FL2VA, and Ref2VA FlowGRPO GPU smoke runner.
+"""MiniMax-H3 T2VA, FL2VA, and Ref2VA FlowGRPO smoke runner.
 
 Assembles one minimal ``verl_omni.trainer.main_diffusion_v1`` invocation per
 task (V1 sync trainer) with a self-contained tiny random-weight MiniMax-H3
@@ -38,6 +38,9 @@ Env overrides:
     MODEL_PATH  Tiny H3 checkpoint (default ``~/models/tiny-random/minimax-h3``)
     DATA_DIR    Dummy task parquet root (default ``~/data/dummy_h3_flowgrpo``)
     ACTOR_SP    Actor Ulysses sequence-parallel size (default ``1``)
+
+NPU runs require a complete checkpoint prepared by the tiny model builder;
+they never download or rebuild model files.
 """
 
 from __future__ import annotations
@@ -57,7 +60,10 @@ sys.path.insert(0, str(_REPO_ROOT))
 from tests.special_e2e.build_minimax_h3_tiny_random import (  # noqa: E402
     DEFAULT_OUTPUT_DIR as _DEFAULT_TINY_MODEL_DIR,
 )
-from tests.special_e2e.build_minimax_h3_tiny_random import ensure_tiny_minimax_h3_checkpoint  # noqa: E402
+from tests.special_e2e.build_minimax_h3_tiny_random import (  # noqa: E402
+    _checkpoint_is_complete,
+    ensure_tiny_minimax_h3_checkpoint,
+)
 from tests.special_e2e.create_dummy_h3_data import (  # noqa: E402
     build_dummy_h3_fl2va_data,
     build_dummy_h3_ref2va_data,
@@ -81,7 +87,7 @@ def _require_minimax_h3_diffusers() -> None:
 
 
 def _validate_actor_sp(num_gpus: int, actor_sp: int) -> None:
-    if actor_sp <= 0 or num_gpus % actor_sp:
+    if num_gpus <= 0 or actor_sp <= 0 or num_gpus % actor_sp:
         raise ValueError(f"num_gpus={num_gpus} must be divisible by actor_sp={actor_sp}.")
 
 
@@ -146,6 +152,7 @@ def _hydra_overrides(
     width: int,
     num_frames: int,
     num_inference_steps: int,
+    device: str = "cuda",
 ) -> list[str]:
     """Build a minimal task-specific MiniMax H3 FlowGRPO Hydra invocation."""
     _validate_actor_sp(num_gpus, actor_sp)
@@ -180,6 +187,7 @@ def _hydra_overrides(
         "+actor_rollout_ref.model.architecture=MiniMaxH3Pipeline",
         "actor_rollout_ref.model.algorithm=flow_grpo",
         "actor_rollout_ref.model.transformer_subfolder=transformer",
+        # Diffusers' NPU-specific context-parallel attention has no backward implementation.
         "actor_rollout_ref.model.attn_backend=native",
         "actor_rollout_ref.model.enable_gradient_checkpointing=True",
         "actor_rollout_ref.model.lora_rank=8",
@@ -286,6 +294,20 @@ def _hydra_overrides(
         )
     elif task == "ref2va":
         overrides.append("actor_rollout_ref.rollout.pipeline.reference_image_short_edge=256")
+    if device == "npu":
+        overrides.extend(
+            [
+                "trainer.device=npu",
+                "actor_rollout_ref.rollout.enforce_eager=True",
+            ]
+        )
+        for name, value in {
+            "ASCEND_VISIBLE_DEVICES": os.environ["ASCEND_VISIBLE_DEVICES"],
+            "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES": "1",
+            "HF_HUB_OFFLINE": "1",
+            "TRANSFORMERS_OFFLINE": "1",
+        }.items():
+            overrides.append(f"++ray_kwargs.ray_init.runtime_env.env_vars.{name}={json.dumps(value)}")
     return overrides
 
 
@@ -306,20 +328,43 @@ def run_smoke(
     num_frames: int,
     num_inference_steps: int,
     force_rebuild: bool,
+    device: str = "cuda",
 ) -> int:
     """Run one task-specific MiniMax H3 FlowGRPO training step."""
     if task not in {"t2va", "fl2va", "ref2va"}:
         raise ValueError(f"unsupported MiniMax H3 FlowGRPO smoke task: {task!r}")
+    if device not in {"cuda", "npu"}:
+        raise ValueError(f"unsupported device: {device!r}")
+    _validate_actor_sp(num_gpus, actor_sp)
+    if rollout_tp <= 0 or num_gpus % rollout_tp:
+        raise ValueError(f"num_gpus={num_gpus} must be divisible by rollout_tp={rollout_tp}.")
+    if text_encoder_tp not in {1, rollout_tp}:
+        raise ValueError("text_encoder_tp must be 1 or equal to rollout_tp.")
+    if total_training_steps <= 0:
+        raise ValueError("total_training_steps must be positive.")
 
     tiny_model_dir = os.path.expanduser(tiny_model_dir)
     data_dir = os.path.expanduser(data_dir)
     output_dir = os.path.expanduser(output_dir)
+    print(f"[1/3] ensuring tiny MiniMax-H3 checkpoint at {tiny_model_dir}", flush=True)
+    if device == "npu":
+        if force_rebuild or not _checkpoint_is_complete(Path(tiny_model_dir)):
+            raise ValueError(
+                "NPU smoke requires a complete prebuilt tiny MiniMax-H3 checkpoint and does not rebuild it. "
+                "Prepare it separately with tests/special_e2e/build_minimax_h3_tiny_random.py "
+                "and set MINIMAX_H3_MODEL_PATH to the output directory."
+            )
+        import torch
+        import torch_npu  # noqa: F401
+
+        if not torch.npu.is_available() or torch.npu.device_count() != num_gpus:
+            raise RuntimeError(f"Expected {num_gpus} visible NPUs, found {torch.npu.device_count()}.")
+        if not os.environ.get("ASCEND_VISIBLE_DEVICES"):
+            raise ValueError("Set ASCEND_VISIBLE_DEVICES before running the NPU smoke test.")
+    else:
+        ensure_tiny_minimax_h3_checkpoint(tiny_model_dir, skip_if_exists=not force_rebuild)
     os.makedirs(output_dir, exist_ok=True)
 
-    print(f"[1/3] ensuring tiny MiniMax-H3 checkpoint at {tiny_model_dir}", flush=True)
-    ensure_tiny_minimax_h3_checkpoint(tiny_model_dir, skip_if_exists=not force_rebuild)
-
-    _validate_actor_sp(num_gpus, actor_sp)
     micro_bsz_per_gpu = 1
     # Match the rollout n in ``_hydra_overrides``: Ref2VA supports one output per
     # request, while T2VA and FL2VA sample two responses per prompt.
@@ -355,8 +400,9 @@ def run_smoke(
     reward_stub_path = str(_REPO_ROOT / "tests" / "special_e2e" / "minimax_h3_dummy_reward.py")
     assert os.path.isfile(reward_stub_path), reward_stub_path
 
-    _fixup_ld_library_path()
-    os.environ.setdefault("FLASHINFER_DISABLE_VERSION_CHECK", "1")
+    if device == "cuda":
+        _fixup_ld_library_path()
+        os.environ.setdefault("FLASHINFER_DISABLE_VERSION_CHECK", "1")
     os.environ.setdefault("RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO", "0")
 
     overrides = _hydra_overrides(
@@ -376,6 +422,7 @@ def run_smoke(
         width=width,
         num_frames=num_frames,
         num_inference_steps=num_inference_steps,
+        device=device,
     )
     cmd = [sys.executable, "-m", "verl_omni.trainer.main_diffusion_v1", *overrides]
     child_env = _tiny_patch_environment(tiny_model_dir, task)
@@ -385,13 +432,12 @@ def run_smoke(
         flush=True,
     )
     print("  cmd:", " ".join(cmd), flush=True)
-    return subprocess.call(cmd, cwd=str(_REPO_ROOT), env=child_env)
+    rc = subprocess.call(cmd, cwd=str(_REPO_ROOT), env=child_env)
+    return 128 - rc if rc < 0 else rc
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Run tiny MiniMax-H3 T2VA, FL2VA, and Ref2VA FlowGRPO GPU smoke coverage."
-    )
+    parser = argparse.ArgumentParser(description="Run tiny MiniMax-H3 T2VA, FL2VA, and Ref2VA FlowGRPO smoke coverage.")
     parser.add_argument("--tiny-model-dir", default=os.environ.get("MODEL_PATH", _DEFAULT_TINY_MODEL_DIR))
     parser.add_argument("--data-dir", default=os.environ.get("DATA_DIR", _DEFAULT_DATA_DIR))
     parser.add_argument(
@@ -405,6 +451,7 @@ def _parse_args() -> argparse.Namespace:
         default=str(_REPO_ROOT / "outputs" / "run_flowgrpo_minimax_h3_tiny"),
     )
     parser.add_argument("--num-gpus", type=int, default=int(os.environ.get("NUM_GPUS", 2)))
+    parser.add_argument("--device", choices=("cuda", "npu"), default="cuda")
     parser.add_argument("--actor-sp", type=int, default=int(os.environ.get("ACTOR_SP", 1)))
     parser.add_argument("--rollout-tp", type=int, default=int(os.environ.get("ROLLOUT_TP", 1)))
     parser.add_argument("--text-encoder-tp", type=int, default=1)
@@ -446,6 +493,7 @@ def main() -> None:
             num_frames=args.num_frames,
             num_inference_steps=args.num_inference_steps,
             force_rebuild=args.force_rebuild and index == 1,
+            device=args.device,
         )
         if rc != 0:
             sys.exit(rc)
