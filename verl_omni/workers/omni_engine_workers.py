@@ -11,15 +11,18 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from contextlib import nullcontext
 from functools import wraps
 from typing import Optional
 
 import torch
 from omegaconf import DictConfig
 from verl.experimental.separation.engine_workers import DetachActorWorker
+from verl.single_controller.base.decorator import Dispatch, register
 from verl.workers.config import DistillationConfig
 
 from verl_omni.workers.engine_workers import ActorRolloutRefWorker
+from verl_omni.workers.utils.parameter_revision import parameter_access
 
 __all__ = ["OmniDetachActorWorker"]
 
@@ -50,6 +53,33 @@ class OmniDetachActorWorker(ActorRolloutRefWorker, DetachActorWorker):
                 copy_handler = _save_owning_storage(copy_handler)
             self._strategy_handlers = (copy_handler, restore_handler)
         return self._strategy_handlers
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def get_parameter_version(self):
+        """Explicitly enable tracking and return this worker's current version."""
+        from verl_omni.workers.engine.megatron.omni_impl import OmniMegatronEngine
+
+        if type(self.actor.engine) is not OmniMegatronEngine:
+            raise ValueError("Parameter tracking requires the Omni Megatron engine")
+        return self.actor.engine.enable_parameter_tracking().version()
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    @parameter_access("actor.engine")
+    def save_model_to_cpu(self, n):
+        return super().save_model_to_cpu(n)
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def restore_model_from_cpu(self, n):
+        tracker = getattr(self.actor.engine, "_parameter_revision", None)
+        with tracker.mutation("restore") if tracker is not None else nullcontext():
+            if tracker is not None and n not in getattr(self, "cpu_saved_models", {}):
+                raise ValueError("The requested CPU snapshot does not exist")
+            return super().restore_model_from_cpu(n)
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    @parameter_access("actor.engine")
+    def clear_cpu_model(self, n):
+        return super().clear_cpu_model(n)
 
 
 def _owning_cpu_state(value):
