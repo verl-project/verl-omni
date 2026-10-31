@@ -90,6 +90,7 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
             batch["agent_name"] = NonTensorData(default_agent_loop)
 
         index = batch["index"] if "index" in batch else list(range(len(batch)))
+        seed_index = batch["rollout_seed_index"] if "rollout_seed_index" in batch else index
         trajectory_info = await get_trajectory_info(global_steps, index, bool(validate))
 
         for i in range(len(batch)):
@@ -99,7 +100,7 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
                     prompt,
                     sampling_params,
                     trajectory=trajectory_info[i],
-                    prompt_index=int(index[i]),
+                    prompt_index=int(seed_index[i]),
                     rollout_base_seed=rollout_base_seed,
                 )
             )
@@ -140,7 +141,7 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
             for session_id in range(n):
                 run_sampling_params = dict(sampling_params)
                 if rollout_base_seed is not None and not trajectory["validate"]:
-                    # Seed from the position within the generation batch (v0
+                    # Seed from the position among the step's prompts (v0
                     # semantics): each worker only sees a chunk of the batch, so
                     # a chunk-local position would reuse the same seed offsets
                     # in every worker and roll out duplicated noise.
