@@ -21,7 +21,7 @@ from verl.workers.engine.veomni.transformer_impl import VeOmniEngineWithLMHead
 from verl_omni.pipelines.model_base import OmniModelBase
 
 
-@EngineRegistry.register(model_type="omni_model", backend="veomni", device="cuda")
+@EngineRegistry.register(model_type="omni_model", backend="veomni", device=["cuda", "npu"])
 class OmniVeOmniEngine(VeOmniEngineWithLMHead):
     """Delegate model differences to the same adapter registry used by FSDP.
 

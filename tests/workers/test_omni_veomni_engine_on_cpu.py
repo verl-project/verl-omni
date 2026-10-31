@@ -138,7 +138,7 @@ def _batch():
 
 
 def test_registers_one_shared_omni_engine():
-    _registry.register.assert_called_once_with(model_type="omni_model", backend="veomni", device="cuda")
+    _registry.register.assert_called_once_with(model_type="omni_model", backend="veomni", device=["cuda", "npu"])
 
 
 def test_resolves_existing_adapter_and_sets_up_before_loading(backend_setup):
@@ -162,12 +162,13 @@ def test_engine_masks_the_prompt_image_and_preserves_response_ids(backend_setup)
     assert inputs["base_transform_called"]
 
 
-@pytest.mark.parametrize("key", ["pixel_values_videos", "input_features"])
-def test_engine_rejects_unsupported_features(key, backend_setup):
+def test_engine_rejects_malformed_audio_features(backend_setup):
     engine = _engine()
     engine._get_model_config_path()
-    with pytest.raises(NotImplementedError, match="inputs yet"):
-        engine._apply_veomni_input_transforms({"input_ids": torch.tensor([[1]]), key: torch.ones(1)}, _batch())
+    with pytest.raises(ValueError, match="input_features"):
+        engine._apply_veomni_input_transforms(
+            {"input_ids": torch.tensor([[1]]), "input_features": torch.ones(1)}, _batch()
+        )
 
 
 def test_engine_requires_prompt_boundaries(backend_setup):
@@ -208,6 +209,42 @@ def test_optimizer_excludes_modality_towers(backend_setup):
     engine._get_model_config_path()
     params = engine._build_optimizer(model)
     assert {id(p) for p in params} == {id(p) for p in model.thinker.model.parameters()}
+
+
+def test_optimizer_can_train_all_thinker_parameters(backend_setup):
+    model = torch.nn.Module()
+    model.thinker = torch.nn.Module()
+    model.thinker.visual = torch.nn.Linear(2, 2)
+    model.thinker.audio_tower = torch.nn.Linear(2, 2)
+    model.thinker.model = torch.nn.Linear(2, 2)
+    engine = _engine()
+    engine.model_config.override_config = {"freeze_vision_tower": False, "freeze_audio_tower": False}
+    engine._get_model_config_path()
+    params = engine._build_optimizer(model)
+    assert {id(p) for p in params} == {id(p) for p in model.parameters()}
+
+
+@pytest.mark.parametrize("freeze", [False, True])
+def test_native_and_veomni_apply_same_explicit_tower_policy(freeze):
+    def model():
+        module = torch.nn.Module()
+        module.thinker = torch.nn.Module()
+        module.thinker.visual = torch.nn.Linear(2, 2)
+        module.thinker.audio_tower = torch.nn.Linear(2, 2)
+        module.thinker.model = torch.nn.Linear(2, 2)
+        module.thinker.get_input_embeddings = MagicMock()
+        module.thinker.set_input_embeddings = MagicMock()
+        return module
+
+    config = _engine().model_config
+    config.override_config = {"freeze_vision_tower": freeze, "freeze_audio_tower": freeze}
+    native, veomni = model(), model()
+    with _patch_modules({_QWEN_BACKEND: qwen_backend}):
+        Qwen3OmniThinkerAdapter.configure_model(native, config)
+        Qwen3OmniThinkerAdapter.configure_veomni_trainable_params(veomni, config)
+    assert {name for name, p in native.named_parameters() if p.requires_grad} == {
+        name for name, p in veomni.named_parameters() if p.requires_grad
+    }
 
 
 @pytest.mark.parametrize("speech_module", ["talker", "code2wav", "code_predictor", "thinker.code_predictor"])
