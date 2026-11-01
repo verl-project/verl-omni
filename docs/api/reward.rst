@@ -72,7 +72,7 @@ The generative-judge scorers live in one module. ``genrm_ocr`` and
 ``unified_reward`` still work as import paths and forward to it.
 
 .. automodule:: verl_omni.utils.reward_score.vlm_as_a_judge
-   :members: compute_score_ocr, compute_score_unified_reward, build_judge_prompt, parse_judge_response
+   :members: compute_score_ocr, compute_score_unified_reward
 
 HTTP Scorer Client
 ^^^^^^^^^^^^^^^^^^^

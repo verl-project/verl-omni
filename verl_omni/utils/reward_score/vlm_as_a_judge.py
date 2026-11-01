@@ -12,13 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""VLM-as-a-judge reward scorers and prompt parsing.
+"""VLM-as-a-judge reward scorers.
 
 This module is the shared home for the generative reward-model scorers that ask a
 vision language model to judge multimodal output: OCR transcription scoring and
-UnifiedReward 2.0 preference scoring. It also hosts the pairwise judge prompt
-builder and response parser reused by
-``examples/dpo_trainer/qwen3_omni/vlm_as_judge.py``.
+UnifiedReward 2.0 preference scoring.
 
 The historical modules :mod:`verl_omni.utils.reward_score.genrm_ocr` and
 :mod:`verl_omni.utils.reward_score.unified_reward` remain importable wrappers for
@@ -29,7 +27,6 @@ import asyncio
 import json
 import os
 import re
-from dataclasses import dataclass, field
 from typing import Optional
 
 import aiohttp
@@ -51,20 +48,6 @@ UNIFIED_REWARD_SCORE_PATTERN = re.compile(
     r"([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)",
     re.IGNORECASE,
 )
-JUDGE_DIMENSIONS = ("fluency", "relevance", "accuracy", "reasoning_quality", "safety")
-
-
-@dataclass
-class JudgeResult:
-    """Pairwise judge outcome mapped to the reference and trained answers."""
-
-    reference_score: float
-    trained_score: float
-    winner: str
-    rationale: str
-    raw_response: str
-    reference_dimension_scores: dict[str, float] = field(default_factory=dict)
-    trained_dimension_scores: dict[str, float] = field(default_factory=dict)
 
 
 async def _post_chat_completion(
@@ -469,248 +452,13 @@ async def compute_score_unified_reward(
     )
 
 
-def build_judge_prompt(answer_a: str, answer_b: str) -> str:
-    """Build the pairwise judge prompt for two candidate answers."""
-    return (
-        "You are a strict multimodal answer evaluator. Given the original multimodal user input and two candidate "
-        "answers, evaluate which answer has higher overall quality.\n\n"
-        "Score each answer from 1 to 10 for these dimensions: fluency, relevance, accuracy, reasoning_quality, "
-        "and safety. Then provide an overall_score from 1 to 10.\n\n"
-        "Candidate A:\n"
-        f"{answer_a}\n\n"
-        "Candidate B:\n"
-        f"{answer_b}\n\n"
-        "Return only valid JSON with this schema. Do not include hidden reasoning, chain-of-thought, Markdown, "
-        "code fences, or any text outside the JSON object:\n"
-        "{\n"
-        '  "A": {"overall_score": 0, "fluency": 0, "relevance": 0, "accuracy": 0, '
-        '"reasoning_quality": 0, "safety": 0},\n'
-        '  "B": {"overall_score": 0, "fluency": 0, "relevance": 0, "accuracy": 0, '
-        '"reasoning_quality": 0, "safety": 0},\n'
-        '  "winner": "A|B|TIE",\n'
-        '  "rationale": "short explanation"\n'
-        "}"
-    )
-
-
-def _strip_markdown_json(text: str) -> str:
-    stripped = text.strip()
-    if stripped.startswith("```"):
-        stripped = re.sub(r"^```(?:json)?\s*", "", stripped)
-        stripped = re.sub(r"\s*```$", "", stripped)
-    return stripped.strip()
-
-
-def _without_think_blocks(text: str) -> str:
-    return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE).strip()
-
-
-def _balanced_json_objects(text: str) -> list[str]:
-    objects = []
-    for start, char in enumerate(text):
-        if char != "{":
-            continue
-        depth = 0
-        in_string = False
-        escape = False
-        for index in range(start, len(text)):
-            current = text[index]
-            if in_string:
-                if escape:
-                    escape = False
-                elif current == "\\":
-                    escape = True
-                elif current == '"':
-                    in_string = False
-                continue
-            if current == '"':
-                in_string = True
-            elif current == "{":
-                depth += 1
-            elif current == "}":
-                depth -= 1
-                if depth == 0:
-                    objects.append(text[start : index + 1])
-                    break
-    return objects
-
-
-def _extract_object_after_key(text: str, key: str) -> dict[str, object] | None:
-    match = re.search(rf'(?:"{re.escape(key)}"|{re.escape(key)})\s*:', text)
-    if not match:
-        return None
-    remainder = text[match.end() :]
-    for candidate in _balanced_json_objects(remainder):
-        try:
-            value = json.loads(candidate)
-        except json.JSONDecodeError:
-            value = _score_block_from_text(candidate)
-        if isinstance(value, dict):
-            return value
-    return None
-
-
-def _score_block_from_text(text: str) -> dict[str, float] | None:
-    block: dict[str, float] = {}
-    for key in ("overall_score", *JUDGE_DIMENSIONS):
-        key_pattern = re.escape(key).replace("_", r"[_\s-]?")
-        match = re.search(
-            rf'"?{key_pattern}"?\s*(?:\([^)]*\))?\s*[:=]\s*(?:[^0-9-]{{0,120}})?(-?\d+(?:\.\d+)?)',
-            text,
-            flags=re.IGNORECASE,
-        )
-        if match:
-            block[key] = float(match.group(1))
-    if "overall_score" not in block:
-        dimension_scores = [block[key] for key in JUDGE_DIMENSIONS if key in block]
-        if dimension_scores:
-            block["overall_score"] = sum(dimension_scores) / len(dimension_scores)
-    return block or None
-
-
-def _text_section_after_label(text: str, label: str) -> str | None:
-    label_pattern = rf"(?:Candidate|Answer)\s+{re.escape(label)}\b|^\s*(?:\*\*)?{re.escape(label)}(?:\*\*)?\s*:"
-    label_match = re.search(label_pattern, text, flags=re.IGNORECASE | re.MULTILINE)
-    if not label_match:
-        return None
-    next_label = "B" if label == "A" else None
-    if next_label is None:
-        return text[label_match.end() :]
-    next_match = re.search(
-        rf"(?:Candidate|Answer)\s+{re.escape(next_label)}\b|^\s*(?:\*\*)?{re.escape(next_label)}(?:\*\*)?\s*:",
-        text[label_match.end() :],
-        flags=re.IGNORECASE | re.MULTILINE,
-    )
-    if not next_match:
-        return text[label_match.end() :]
-    return text[label_match.end() : label_match.end() + next_match.start()]
-
-
-def _textual_judge_payload(text: str) -> dict[str, object] | None:
-    section_a = _text_section_after_label(text, "A")
-    section_b = _text_section_after_label(text, "B")
-    if section_a is None or section_b is None:
-        return None
-    score_a = _score_block_from_text(section_a)
-    score_b = _score_block_from_text(section_b)
-    if score_a is None or score_b is None:
-        return None
-    winner_match = re.search(r"(?:winner|better answer)\D{0,80}\b(A|B|TIE)\b", text, flags=re.IGNORECASE)
-    return {
-        "A": score_a,
-        "B": score_b,
-        "winner": winner_match.group(1).upper() if winner_match else "TIE",
-        "rationale": "Recovered from non-JSON judge response.",
-    }
-
-
-def _fallback_judge_payload(text: str) -> dict[str, object] | None:
-    score_a = _extract_object_after_key(text, "A")
-    score_b = _extract_object_after_key(text, "B")
-    if score_a is None or score_b is None:
-        return _textual_judge_payload(text)
-    winner_match = re.search(r'"?winner"?\s*:\s*"([^"]+)"', text)
-    rationale_match = re.search(r'"?rationale"?\s*:\s*"([^"]*)"', text)
-    return {
-        "A": score_a,
-        "B": score_b,
-        "winner": winner_match.group(1) if winner_match else "TIE",
-        "rationale": rationale_match.group(1) if rationale_match else "",
-    }
-
-
-def _extract_json_object(text: str) -> dict[str, object]:
-    candidates = [_strip_markdown_json(text), _strip_markdown_json(_without_think_blocks(text))]
-    last_error: json.JSONDecodeError | None = None
-    for candidate in candidates:
-        if not candidate:
-            continue
-        try:
-            payload = json.loads(candidate)
-        except json.JSONDecodeError as exc:
-            last_error = exc
-        else:
-            if isinstance(payload, dict):
-                return payload
-
-        for object_text in reversed(_balanced_json_objects(candidate)):
-            try:
-                payload = json.loads(object_text)
-            except json.JSONDecodeError as exc:
-                last_error = exc
-                continue
-            if isinstance(payload, dict) and "A" in payload and "B" in payload:
-                return payload
-
-        fallback = _fallback_judge_payload(candidate)
-        if fallback is not None:
-            return fallback
-
-    if last_error is not None:
-        raise last_error
-    raise json.JSONDecodeError("No JSON object found in judge response", text, 0)
-
-
-def _score_block(payload: dict[str, object], label: str) -> tuple[float, dict[str, float]]:
-    block = payload.get(label, {})
-    if not isinstance(block, dict):
-        block = {}
-    dimensions = {}
-    for key in JUDGE_DIMENSIONS:
-        try:
-            dimensions[key] = float(block.get(key, 0.0))
-        except (TypeError, ValueError):
-            dimensions[key] = 0.0
-    try:
-        overall = float(block.get("overall_score", 0.0))
-    except (TypeError, ValueError):
-        overall = 0.0
-    if overall == 0.0 and dimensions:
-        overall = sum(dimensions.values()) / len(dimensions)
-    return overall, dimensions
-
-
-def parse_judge_response(text: str, label_to_model: dict[str, str]) -> JudgeResult:
-    """Parse a pairwise judge response into a :class:`JudgeResult`."""
-    payload = _extract_json_object(text)
-    score_a, dims_a = _score_block(payload, "A")
-    score_b, dims_b = _score_block(payload, "B")
-    raw_winner = str(payload.get("winner", "TIE")).upper()
-    if raw_winner not in {"A", "B", "TIE"}:
-        winner_tokens = [token for token in re.split(r"[^A-Z]+", raw_winner) if token in {"A", "B", "TIE"}]
-        raw_winner = winner_tokens[-1] if winner_tokens else "TIE"
-
-    scores = {
-        label_to_model["A"]: score_a,
-        label_to_model["B"]: score_b,
-    }
-    dims = {
-        label_to_model["A"]: dims_a,
-        label_to_model["B"]: dims_b,
-    }
-    winner = "tie" if raw_winner == "TIE" else label_to_model[raw_winner]
-    return JudgeResult(
-        reference_score=scores["reference"],
-        trained_score=scores["trained"],
-        winner=winner,
-        rationale=str(payload.get("rationale", "")),
-        raw_response=text,
-        reference_dimension_scores=dims["reference"],
-        trained_dimension_scores=dims["trained"],
-    )
-
-
 __all__ = [
     "DEFAULT_GRM_MODEL_PATH",
     "DEFAULT_GRM_PROMPT",
     "DEFAULT_SAMPLING_PARAMS",
     "DEFAULT_UNIFIED_REWARD_MODEL_PATH",
     "DEFAULT_UNIFIED_REWARD_SAMPLING_PARAMS",
-    "JUDGE_DIMENSIONS",
-    "JudgeResult",
     "UNIFIED_REWARD_SCORE_PATTERN",
-    "build_judge_prompt",
     "compute_score_ocr",
     "compute_score_unified_reward",
-    "parse_judge_response",
 ]
