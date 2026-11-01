@@ -11,10 +11,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Exercise full-weight reload with changed layouts and reused IPC storage."""
+"""Exercise full-weight and LoRA reload with changed layouts and reused IPC storage."""
 
 from types import SimpleNamespace
 
+import pytest
 import torch
 from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
@@ -172,3 +173,38 @@ def test_dense_omni_reload_preserves_auxiliary_buffers_and_post_load_hook(monkey
         assert "runtime" in model.encoder._non_persistent_buffers_set
         assert {name: tensor.data_ptr() for name, tensor in model.state_dict().items()} == storage
         assert model.post_load_calls == step
+
+
+@pytest.mark.parametrize("ar_worker", [True, False], ids=["ar", "diffusion"])
+def test_lora_sync_owns_tensors_across_reused_ipc_buckets(monkeypatch, ar_worker):
+    from verl.workers.rollout.vllm_rollout import bucketed_weight_transfer
+
+    class Receiver:
+        def __init__(self, **kwargs):
+            pass
+
+        def receive_weights(self, on_bucket_received):
+            # One reused buffer, as in BucketedWeightReceiver: an adapter larger
+            # than a bucket arrives as views into the same storage.
+            buffer = torch.full((4,), 3.0)
+            on_bucket_received([("lora_A.weight", buffer.view(2, 2))], False)
+            buffer.fill_(5.0)
+            on_bucket_received([("lora_B.weight", buffer.view(2, 2))], True)
+
+    monkeypatch.setattr(bucketed_weight_transfer, "BucketedWeightReceiver", Receiver)
+    added = []
+    worker = SimpleNamespace(
+        device=torch.device("cpu"),
+        _pending_lora_peft_config=None,
+        _get_zmq_handle=lambda: "test-lora-reload",
+        _get_standard_weight_model_and_config=lambda: (object(), object()) if ar_worker else None,
+        _move_diffusion_lora_stacks_to_device=lambda: None,
+        remove_lora=lambda lora_id: None,
+        add_lora=added.append,
+    )
+
+    vLLMOmniColocateWorkerExtension.update_weights_from_ipc(worker, peft_config={"r": 2}, base_sync_done=True)
+
+    (request,) = added
+    torch.testing.assert_close(request.lora_tensors["lora_A.weight"], torch.full((2, 2), 3.0))
+    torch.testing.assert_close(request.lora_tensors["lora_B.weight"], torch.full((2, 2), 5.0))
