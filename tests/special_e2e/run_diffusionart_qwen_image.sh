@@ -109,6 +109,7 @@ python3 -m verl_omni.trainer.main_diffusion_v1 \
     trainer.total_training_steps=${TOTAL_TRAIN_STEPS} \
     trainer.use_v1=true \
     trainer.v1.trainer_mode=sync \
+    trainer.v1.sampler.drop_incomplete_groups=True \
     "$@"
 
 echo "DiffusionART diffusion e2e test passed (training completed successfully)."

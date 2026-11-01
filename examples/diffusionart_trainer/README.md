@@ -1,6 +1,6 @@
 # DiffusionART Trainer
 
-Last updated: 10/12/2026
+Last updated: 11/01/2026
 
 This example post-trains `Qwen/Qwen-Image` with
 [DiffusionART](../../docs/algo/diffusionart.md) (aggregation-first reward
@@ -14,9 +14,10 @@ the actor trains from the states those trajectories visited, and the `default`
 adapter is updated. There is no likelihood ratio, no differentiable reward, no EMA
 schedule and no KL term.
 
-> **Status:** CPU math tests + golden equivalence to the authors' code; no GPU
-> run yet. The recipes below are the planned configurations and will be updated
-> with curves once they have run. See [Validation status](#validation-status).
+> **Status:** CPU math tests + golden equivalence to the authors' code; GPU smoke
+> entries and LTX-2.3 / MiniMax-H3 comparison runs reported in #744, which predate
+> the per-prompt update split and zero-signal restoration the recipes now use. See
+> [Validation status](#validation-status).
 
 Three recipes:
 
@@ -34,8 +35,8 @@ Three recipes:
   `ppo_mini_batch_size=16` of 32 prompts gives the two updates per rollout. The
   native VideoAlign / HPSv3 / AudioBox / CLAP / DeSync scorers it uses are on
   main since #663 part 1; ART reads their per-component `reward/<name>` scores
-  under the default `weighted_sum` aggregation, so it does not need
-  `preserve_components` (still pending #664). Model and data assets: the LTX-2.3
+  under the default `weighted_sum` aggregation (OmniNFT's `preserve_components`
+  aggregation is reserved for `omni_nft`). Model and data assets: the LTX-2.3
   Diffusers checkpoint and the VGGSound caption parquet are prepared as in the
   in-repo LTX-2.3 FlowGRPO example
   ([`examples/flowgrpo_trainer/ltx2/README.md`](../flowgrpo_trainer/ltx2/README.md));
@@ -132,6 +133,9 @@ sample, so micro batches do not have to hold whole rollout groups.
 | `algorithm.art_modality_reward_weights` | `null` | `{video: {reward: w}, audio: {reward: w}}` routing; `null` reads `reward_functions.*.routing_weights`. |
 | `algorithm.timestep_fraction` | `1.0` | Fraction of visited ODE states trained per rollout. |
 | `algorithm.art_sample_log_dir` | `null` | Write per-sample training records (`step_<N>.jsonl`: uid, raw/standardised reward components, routed rewards, group) under this directory. |
+| `algorithm.art_split_groups_across_updates` | `true` | Each optimizer update gets `n / updates` trajectories of every prompt (reference since 2026-10-16); needs `actor.shuffle=false`. |
+| `algorithm.art_restore_zero_signal` | `false` | Scalar mode: constant-reward groups train toward `v_old`. The LTX-2.3 and MiniMax-H3 recipes set `true`. |
+| `algorithm.art_timestep_selection` | `configured` | `high_noise` = DiffusionART-Flash: two of the first four ODE positions per rollout. |
 
 ## Validation status
 
@@ -139,7 +143,7 @@ sample, so micro batches do not have to hold whole rollout groups.
   `tests/trainer/diffusion/test_diffusionart_on_cpu.py` and the golden-value test
   `tests/trainer/diffusion/test_diffusionart_golden_on_cpu.py` (fixture generated
   from vanzll/DiffusionART @ `8652c8a`; math matches to fp32 round-off; the
-  reference's `algorithms/` code is unchanged through `b51e6ec`).
+  reference's `src/visual_rl/algorithms/` code is unchanged through `b51e6ec`).
 - GPU: both GPU smoke entries (tiny Qwen-Image and tiny MiniMax-H3) pass on
   8×B200. The LTX-2.3 and MiniMax-H3 comparison runs are reported in #744; they
   predate the per-prompt update split and zero-signal restoration the recipes now

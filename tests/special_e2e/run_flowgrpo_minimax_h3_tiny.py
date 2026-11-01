@@ -338,6 +338,7 @@ def _hydra_overrides(
                 "actor_rollout_ref.rollout.calculate_log_probs=False",
                 "actor_rollout_ref.rollout.rollout_adapter=old",
                 "actor_rollout_ref.rollout.algo.noise_level=0.0",
+                "trainer.v1.sampler.drop_incomplete_groups=True",
             ]
         )
     return overrides

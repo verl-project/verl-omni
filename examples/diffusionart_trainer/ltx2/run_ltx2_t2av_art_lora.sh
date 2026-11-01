@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # LTX-2.3 text-to-audio-video DiffusionART (arXiv:2610.12572) LoRA recipe on 8 GPUs: the OmniNFT LTX-2.3
-# recipe (PR #640, batch 32 x n 8, 150 steps) with only the algorithm changed, so the two runs compare
+# recipe (#750, batch 32 x n 8, 150 steps) with only the algorithm changed, so the two runs compare
 # like-for-like: same five rewards and routing weights (VideoAlign 1.0 / HPSv3 1.5 -> video, AudioBox 0.5 /
 # CLAP 1.0 -> audio, DeSync 1.0 -> both), LoRA r32/alpha64, lr 3e-5, 256x384x121f, 20 rollout steps, rollout
 # CFG video 1.5 / audio 3.0, validation sampler 40 steps / CFG 3 and 7 / modality 3 / rescale 0.7.
@@ -21,8 +21,9 @@
 # the training forward uses the SAME CFG as the rollout (v_old is recomputed by it), the old adapter is
 # hard-copied every step (no EMA), and ppo_mini_batch_size = train_batch_size / 2 gives the paper's two
 # disjoint updates per rollout batch. Reward stack: the native scorers, placement and the reserved
-# routing_weights key are on main since #663 part 1; preserve_components (pending #664) is not needed
-# because DiffusionARTLoss routes the reward/<name> component scores itself. NOT GPU-VALIDATED YET.
+# routing_weights key are on main since #663 part 1; preserve_components (reserved for omni_nft) is not needed
+# because DiffusionARTLoss routes the reward/<name> component scores itself. GPU runs to step 50 are reported
+# in #744; they predate the per-prompt update split and algorithm.art_restore_zero_signal set below.
 # Prepare parquet/model assets first; DATA_DIR, MODEL_PATH and REWARD_ROOT override defaults.
 set -euo pipefail
 
@@ -52,7 +53,7 @@ AUDIOBOX_DEVICES=${AUDIOBOX_DEVICES:-'[4]'}
 CLAP_DEVICES=${CLAP_DEVICES:-'[5]'}
 DESYNC_DEVICES=${DESYNC_DEVICES:-'[6,7]'}
 
-ltx_pipeline_config=verl_omni.pipelines.ltx2_diffusion_art.config.LTXARTPipelineConfig
+ltx_pipeline_config=verl_omni.pipelines.ltx2_omni_nft.config.LTXDiffusionPipelineConfig
 ltx_lora_targets="['attn1.to_q','attn1.to_k','attn1.to_v','attn1.to_out.0','attn2.to_q','attn2.to_k','attn2.to_v','attn2.to_out.0','audio_attn1.to_q','audio_attn1.to_k','audio_attn1.to_v','audio_attn1.to_out.0','audio_attn2.to_q','audio_attn2.to_k','audio_attn2.to_v','audio_attn2.to_out.0','audio_to_video_attn.to_q','audio_to_video_attn.to_k','audio_to_video_attn.to_v','audio_to_video_attn.to_out.0','video_to_audio_attn.to_q','video_to_audio_attn.to_k','video_to_audio_attn.to_v','video_to_audio_attn.to_out.0','ff.net.0.proj','ff.net.2','audio_ff.net.0.proj','audio_ff.net.2']"
 
 script_name=$(basename "$0" .sh)

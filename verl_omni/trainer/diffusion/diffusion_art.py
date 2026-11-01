@@ -329,7 +329,7 @@ def art_update_window_order(group_index: torch.Tensor, num_updates: int, dp_size
     """Row order that gives every optimizer update ``K / num_updates`` trajectories of every prompt.
 
     The reference splits each prompt's ``K`` trajectories evenly between its disjoint update windows
-    (vanzll/DiffusionART ``prompt_disjoint_windows``, 2026-10-17) instead of giving each update all ``K``
+    (vanzll/DiffusionART ``prompt_disjoint_windows``, 2026-10-16) instead of giving each update all ``K``
     trajectories of half the prompts. verl-omni hands rank ``r`` the ``r``-th contiguous ``1 / dp_size`` of
     the batch and cuts it into ``num_updates`` contiguous mini batches, so window ``w`` of rank ``r`` is the
     ``r``-th slice of window ``w``'s rows. Within a prompt, trajectories keep their order (the reference's

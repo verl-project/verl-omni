@@ -1566,7 +1566,7 @@ class NFTDiffusersFSDPEngine(DiffusersFSDPEngine):
         return loss, output
 
 
-@EngineRegistry.register(model_type="diffusion_art_model", backend=["fsdp", "fsdp2"], device=["cuda", "npu"])
+@EngineRegistry.register(model_type="diffusion_art_model", backend=["fsdp", "fsdp2"], device=["cuda", "npu", "xpu"])
 class ARTDiffusersFSDPEngine(NFTDiffusersFSDPEngine):
     """Diffusers FSDP engine for DiffusionART: old and current velocities at cached ODE rollout states.
 

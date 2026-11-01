@@ -1,6 +1,6 @@
 # DiffusionART
 
-Last updated: 10/12/2026.
+Last updated: 11/01/2026.
 
 DiffusionART ([paper](https://arxiv.org/abs/2610.12572),
 [code](https://github.com/vanzll/DiffusionART),
@@ -37,14 +37,15 @@ One training iteration (paper Algorithm 1):
    exponential reward tilt of the rollout distribution (paper Lemma 2); RMS
    normalisation removes the reward scale, so there is no guidance-strength
    coefficient to tune. Prompts with constant rewards, a single sample, or an
-   exactly zero covariance get $G(c) = 0$ and contribute nothing.
+   exactly zero covariance get $G(c) = 0$ and contribute nothing (or, with
+   `algorithm.art_restore_zero_signal`, train toward $v_{\text{old}}$).
 3. **Frozen target.** $v^{\text{ART}}_{\text{tgt}}(s_t) = v_{\text{old}}(s_t) + G(c)$
    for every state of prompt $c$. In the paper's convention
    $u_t = x_0 - \epsilon$; verl-omni's adapters predict $v = \epsilon - x_0$, so
    the target implemented here is $v_{\text{old}}(s_t) - G(c)$.
 4. **Two-update restoration** (Sec. 4.2). The rollout batch is split into two
    disjoint halves, each holding $K/2$ trajectories of every prompt (the
-   reference's split since 2026-10-17; `algorithm.art_split_groups_across_updates`),
+   reference's split since 2026-10-16; `algorithm.art_split_groups_across_updates`),
    and one MSE step
    $\mathcal{L}(s_t) = w(s_t)\,\mathrm{MSE}(v_\theta(s_t), v^{\text{ART}}_{\text{tgt}}(s_t))$
    is taken on each. With $d(s_t) = v_\theta(s_t) - v_{\text{old}}(s_t)$ the
@@ -196,13 +197,14 @@ actor_rollout_ref.actor.use_kl_loss=False
 - `algorithm.timestep_fraction`: fraction of visited states trained per rollout.
 - `algorithm.art_split_groups_across_updates`: give every optimizer update
   $K/\text{updates}$ trajectories of every prompt instead of all $K$ of half the
-  prompts. Default `true`, as in the reference since 2026-10-17. Needs
+  prompts. Default `true`, as in the reference since 2026-10-16. Needs
   `rollout.n` divisible by the number of updates and
   `actor_rollout_ref.actor.shuffle=false`; the guidance still uses the full group.
 - `algorithm.art_restore_zero_signal`: in scalar mode, rows of constant-reward
   (zero-guidance) prompts train toward $v_{\text{old}}$ instead of contributing
-  zero. Default `false`; the LTX-2.3 and MiniMax-H3 recipes set `true`, following
-  the reference's video recipes (its image recipes keep it off).
+  zero. Default `false`; the LTX-2.3 and MiniMax-H3 recipes set `true`. The
+  reference enables it in its HunyuanVideo and Wan paper recipes; its image
+  recipes reject it and its MiniMax-H3 backend has no restoration anchors.
 - `algorithm.art_timestep_selection`: `configured` (default; the pool above times
   `timestep_fraction`) or `high_noise` (DiffusionART-Flash, below).
 
@@ -213,8 +215,10 @@ ODE positions of each rollout, in chronological order, instead of every kept
 position. One pair is drawn per rollout from `data_loader_seed` and
 `global_steps` with the reference's private RNG
 (`diffusionart/high_noise/v1:<seed>:<attempt>`), so every row, rank and update
-uses the same pair, a resumed run redraws the same pairs, and for equal seed and
-rollout counter the pair equals the reference's.
+uses the same pair and a resumed run redraws the same pairs. verl-omni's
+counter is the rollout's weight version (`global_steps` stamped by the legacy
+rollout, `min_global_steps` on the v1 trainer), so the sequence of pairs is not
+index-aligned with the reference's one-based attempt counter.
 Generation is unchanged: the full schedule is still rolled out and each chosen
 position keeps its own next sigma in the mask and the weight. The reference
 reports comparable quality to all-position training at a fraction of the update
@@ -233,7 +237,7 @@ Audio-video models report every metric per modality as `actor/video/*` and
 | `actor/active_frac` | Fraction of items whose prompt has non-zero guidance. | Near 1. A drop means many prompts have constant rewards (saturated or broken reward). |
 | `actor/mask_frac` | Fraction of active items zeroed by the trust region. | Near 0 on the first update, small on the second. Values approaching 1 mean the policy moved too far in one rollout: lower the learning rate before touching `art_mask_threshold`. |
 | `actor/outward_frac` | Fraction of active items whose displacement points along the descent direction. | Moderate; it is the mask's trigger condition before the drift threshold is applied. |
-| `actor/anchor_frac` | Pairwise mode only: tie rows restored toward $v_{\text{old}}$. | Falls as the policy separates pairs. |
+| `actor/anchor_frac` | Rows restored toward $v_{\text{old}}$: pairwise ties, or constant-reward groups with `art_restore_zero_signal`. | Pairwise: falls as the policy separates pairs. Scalar: near 0 (the inactive-group fraction). |
 | `actor/old_deviate` | $\mathrm{mean}(d^2)$, the squared drift from $v_{\text{old}}$. | Zero on the first update (up to backend numerics), small and stable on the second. |
 | `actor/movement_score` | Mean $m(s_t)$, the reference-SDE KL proxy compared with `art_mask_threshold`. | Well below $10^{-5}$ on the first update. |
 | `actor/guidance_rms` | RMS of the guidance over items. | 1 when every prompt is active (`active_frac` otherwise). |
@@ -300,9 +304,9 @@ LoRA settings as the DiffusionNFT Qwen-Image recipe. See the
 
 CPU math tests plus golden equivalence to the authors' code
 (`tests/trainer/diffusion/test_diffusionart_*_on_cpu.py`; fixture generated from
-vanzll/DiffusionART @ `8652c8a`, whose `algorithms/` code is unchanged through
-`b51e6ec`, 2026-10-30). Both GPU smoke entries (tiny Qwen-Image and tiny
-MiniMax-H3, 4 steps each) pass on 8×B200. The LTX-2.3 and MiniMax-H3
+vanzll/DiffusionART @ `8652c8a`, whose `src/visual_rl/algorithms/` code is
+unchanged through `b51e6ec`, 2026-10-30). Both GPU smoke entries (tiny Qwen-Image,
+4 steps; tiny MiniMax-H3, 1 step) passed on 8×B200 before the latest main merge. The LTX-2.3 and MiniMax-H3
 comparison runs are reported in #744; they predate the per-prompt update split,
 zero-signal restoration and Flash (all off in those runs), and the smokes have not
 been re-run since. No convergence claim is made here.

@@ -2207,6 +2207,14 @@ class DiffusionARTLoss(DiffusionLossFn):
             problems.append("actor_rollout_ref.actor.use_kl_loss must be False (DiffusionART has no KL term)")
         if actor_cfg.get("enable_timestep_staging", False):
             problems.append("actor_rollout_ref.actor.enable_timestep_staging must be False")
+        if bool(OmegaConf.select(config, "trainer.use_v1", default=False)):
+            if not OmegaConf.select(config, "trainer.v1.sampler.drop_incomplete_groups", default=False):
+                problems.append("trainer.v1.sampler.drop_incomplete_groups must be True so groups arrive complete")
+            if OmegaConf.select(config, "trainer.v1.trainer_mode", default="sync") == "separate_async":
+                problems.append(
+                    "trainer.v1.trainer_mode must not be separate_async (its replay buffer can serve rollouts of an "
+                    "older policy than the old adapter that recomputes v_old)"
+                )
         if bool(algorithm_cfg.get("paired_preference", False)):
             problems.append(
                 "algorithm.paired_preference must be False (the trainers double the mini batch for it, which the "
@@ -2280,14 +2288,23 @@ class DiffusionARTLoss(DiffusionLossFn):
                     "actor_rollout_ref.actor.shuffle must be False when algorithm.art_split_groups_across_updates is "
                     "true (shuffling would undo the per-prompt update split)"
                 )
-        if (
-            algorithm_cfg.get("art_timestep_selection", "configured") == "high_noise"
-            and float(algorithm_cfg.get("timestep_fraction", 1.0)) != 1.0
-        ):
-            problems.append(
-                "algorithm.timestep_fraction must be 1.0 with art_timestep_selection=high_noise (Flash fixes the "
-                "trained positions to two of the first four)"
-            )
+        selection = algorithm_cfg.get("art_timestep_selection", "configured")
+        if selection not in ("configured", "high_noise"):
+            problems.append(f"algorithm.art_timestep_selection must be configured or high_noise, got {selection!r}")
+        elif selection == "high_noise":
+            if float(algorithm_cfg.get("timestep_fraction", 1.0)) != 1.0:
+                problems.append(
+                    "algorithm.timestep_fraction must be 1.0 with art_timestep_selection=high_noise (Flash fixes the "
+                    "trained positions to two of the first four)"
+                )
+            steps = OmegaConf.select(config, "actor_rollout_ref.rollout.pipeline.num_inference_steps", default=None)
+            if steps is not None:
+                eligible = int(steps) - (1 if algorithm_cfg.get("art_exclude_final_step", True) else 0)
+                if eligible < 4:
+                    problems.append(
+                        f"art_timestep_selection=high_noise needs 4 eligible ODE positions; rollout.pipeline."
+                        f"num_inference_steps={steps} leaves {eligible}"
+                    )
         if problems:
             raise ValueError("DiffusionART config is not supported: " + "; ".join(problems) + ".")
 
@@ -2339,13 +2356,15 @@ class DiffusionARTLoss(DiffusionLossFn):
     def _global_step(batch: DataProto) -> Optional[int]:
         """The trainer step of this rollout, if the batch carries it.
 
-        The rollout strategy stamps ``global_steps`` per sample into the batch (non-tensor or tensor field);
-        ``meta_info`` is honoured too but must never be *written* by trainers: ``DataProto.to_tensordict`` folds
-        ``meta_info`` into the worker TensorDict and asserts that no key collides with a batch field.
+        The legacy rollout strategy stamps ``global_steps`` per sample into the batch (non-tensor or tensor
+        field); the v1 agent loop forwards only ``min_global_steps`` (the weight version the rollout started
+        on). ``meta_info`` is honoured too but must never be *written* by trainers: ``DataProto.to_tensordict``
+        folds ``meta_info`` into the worker TensorDict and asserts that no key collides with a batch field.
         """
         value = batch.meta_info.get("global_steps")
-        if value is None and "global_steps" in batch.non_tensor_batch:
-            value = np.asarray(batch.non_tensor_batch["global_steps"]).reshape(-1)[0]
+        for key in ("global_steps", "min_global_steps"):
+            if value is None and key in batch.non_tensor_batch:
+                value = next((v for v in np.asarray(batch.non_tensor_batch[key]).reshape(-1) if v is not None), None)
         if value is None and "global_steps" in batch.batch.keys():
             value = batch.batch["global_steps"].reshape(-1)[0].item()
         return None if value is None else int(value)

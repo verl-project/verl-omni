@@ -619,6 +619,9 @@ def test_step_is_read_from_the_per_sample_rollout_field():
     assert DiffusionARTLoss._step_seed(batch, 42) == 53
     without = make_av_rollout_batch(["a", "a", "a", "b", "b", "b"])
     assert DiffusionARTLoss._global_step(without) is None
+    # The v1 agent loop forwards only min/max_global_steps (the weight version the rollout started on).
+    without.non_tensor_batch["min_global_steps"] = np.array([None, 7, 7, 7, 7, 7], dtype=object)
+    assert DiffusionARTLoss._global_step(without) == 7
 
 
 def test_loss_metric_key_set_is_identical_across_micro_batches():
@@ -784,6 +787,7 @@ ART_OVERRIDES = [
     "actor_rollout_ref.rollout.n=8",
     "algorithm.old_policy_decay_schedule=copy",
     "algorithm.old_policy_update_interval=1",
+    "trainer.v1.sampler.drop_incomplete_groups=true",
 ]
 
 
@@ -1064,6 +1068,11 @@ def test_prepare_actor_batch_high_noise_trains_one_early_pair_per_rollout():
             ["algorithm.art_timestep_selection=high_noise", "algorithm.timestep_fraction=0.5"],
             "timestep_fraction must be 1.0",
         ),
+        (["algorithm.art_timestep_selection=first"], "must be configured or high_noise"),
+        (
+            ["algorithm.art_timestep_selection=high_noise", "actor_rollout_ref.rollout.pipeline.num_inference_steps=4"],
+            "needs 4 eligible ODE positions",
+        ),
     ],
 )
 def test_validate_trainer_config_checks_split_and_flash_settings(extra, match):
@@ -1073,6 +1082,33 @@ def test_validate_trainer_config_checks_split_and_flash_settings(extra, match):
     config = compose_trainer_config(overrides + extra)
     with pytest.raises(ValueError, match=match):
         DiffusionARTLoss.validate_trainer_config(config)
+
+
+@pytest.mark.parametrize(
+    "override, match",
+    [
+        ("trainer.v1.sampler.drop_incomplete_groups=false", "drop_incomplete_groups must be True"),
+        ("trainer.v1.trainer_mode=separate_async", "must not be separate_async"),
+    ],
+)
+def test_validate_trainer_config_requires_complete_on_policy_groups_on_v1(override, match):
+    overrides = [o for o in ART_OVERRIDES if not o.startswith("trainer.v1.sampler.drop_incomplete_groups=")]
+    if not override.startswith("trainer.v1.sampler."):
+        overrides.append("trainer.v1.sampler.drop_incomplete_groups=true")
+    with pytest.raises(ValueError, match=match):
+        DiffusionARTLoss.validate_trainer_config(compose_trainer_config(overrides + [override]))
+    # The legacy trainer (main_diffusion forces trainer.use_v1=false) has no replay buffer.
+    DiffusionARTLoss.validate_trainer_config(
+        compose_trainer_config([o for o in ART_OVERRIDES if not o.startswith("trainer.v1.")] + ["trainer.use_v1=false"])
+    )
+
+
+def test_validate_trainer_config_accepts_flash_on_a_long_enough_schedule():
+    overrides = ART_OVERRIDES + [
+        "algorithm.art_timestep_selection=high_noise",
+        "actor_rollout_ref.rollout.pipeline.num_inference_steps=5",
+    ]
+    DiffusionARTLoss.validate_trainer_config(compose_trainer_config(overrides))
 
 
 def test_validate_trainer_config_allows_odd_n_without_the_split():

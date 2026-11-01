@@ -13,28 +13,13 @@
 # limitations under the License.
 """LTX-2.3 pipeline configuration with per-modality guidance for DiffusionART."""
 
-from dataclasses import dataclass
-from typing import Optional
-
-from verl_omni.workers.config.diffusion.rollout import DiffusionPipelineConfig
+from verl_omni.pipelines.ltx2_omni_nft.config import LTXDiffusionPipelineConfig
 
 __all__ = ["LTXARTPipelineConfig", "ltx_guidance_scales"]
 
-
-@dataclass
-class LTXARTPipelineConfig(DiffusionPipelineConfig):
-    """LTX guidance knobs shared by the vLLM-Omni rollout and the training forward.
-
-    DiffusionART recomputes ``v_old`` with the training forward, so the same instance (or equal
-    values) must be used for ``actor_rollout_ref.model.pipeline`` and ``actor_rollout_ref.rollout.pipeline``.
-    """
-
-    video_cfg_scale: Optional[float] = None
-    audio_cfg_scale: Optional[float] = None
-    video_modality_scale: Optional[float] = None
-    audio_modality_scale: Optional[float] = None
-    video_rescale_scale: Optional[float] = None
-    audio_rescale_scale: Optional[float] = None
+# DiffusionART uses the same LTX guidance knobs as OmniNFT. It recomputes ``v_old`` with the training forward, so
+# ``actor_rollout_ref.model.pipeline`` and ``actor_rollout_ref.rollout.pipeline`` must carry equal values.
+LTXARTPipelineConfig = LTXDiffusionPipelineConfig
 
 
 def ltx_guidance_scales(pipeline_config) -> tuple[float, float]:
