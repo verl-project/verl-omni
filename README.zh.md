@@ -155,7 +155,7 @@
     <td>✅ 已支持</td>
   </tr>
   <tr>
-    <td>DiffusionART</td>
+    <td><a href="docs/algo/diffusionart.md">DiffusionART</a></td>
     <td>开发中 (WIP)</td>
   </tr>
   <tr>

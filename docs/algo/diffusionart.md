@@ -15,8 +15,11 @@ direction is then applied as a frozen target at every state the ODE rollout
 visited.
 
 The implementation in verl-omni was written from the paper's Section 4 and
-Appendix C in this repository's conventions rather than ported from the
-authors' code (Apache-2.0); a golden test pins it to that code.
+Appendix C in this repository's conventions. Where the paper leaves details
+open (the guidance damping, the $t = 1$ band and variance floor of the drift
+proxy, the per-prompt update split, the Flash position RNG) it follows the
+authors' code (Apache-2.0), cited in the docstrings; a golden test pins the
+guidance and loss to that code.
 
 ## Algorithm
 
@@ -115,16 +118,23 @@ LoRA adapter at the cached state rather than cached from the vLLM-Omni rollout,
 so it equals the rollout prediction up to the numerical difference between the
 two execution backends *provided the training forward applies the same CFG as
 the rollout*; the trainer rejects configs whose `model.pipeline` and
-`rollout.pipeline` guidance scales differ (and, for LTX-2.3, if the training rollout
-uses STG, modality or rescale guidance, which only the training forward's CFG can
-reproduce; validation rollouts may use them), and
+`rollout.pipeline` guidance scales differ (comparing the scales each side
+applies, so an unset per-modality CFG counts as `guidance_scale`), and configs
+whose training rollout uses STG, modality or rescale guidance, which the
+CFG-only training forward cannot reproduce (validation rollouts may use them;
+the LTX-2.3 adapter defaults unset ones to neutral). Also,
 `algorithm.art_log_rollout_velocity_gap=true` ships the next rollout state so the
 actor logs `actor/old_rollout_gap = mean((v_old - v_rollout)^2)` with
 $v_{\text{rollout}}$ the Euler velocity implied by consecutive states. The
-trainer also requires the hard-copied `old` adapter
-(`old_policy_decay_schedule=copy`, update interval 1), `ppo_epochs=1`,
-`rollout.n >= 2`, an ODE rollout and no KL term, so a config cannot silently
-stop being DiffusionART. The two updates per rollout are realised by
+trainer also requires `model.algorithm=diffusion_art`, the hard-copied `old`
+adapter (`old_policy_decay_schedule=copy`, update interval 1), `ppo_epochs=1`,
+`rollout.n >= 2` (even for the pairwise variant, and divisible by the number of
+updates with `art_split_groups_across_updates`, which also needs
+`actor.shuffle=false`), an ODE rollout, no KL term and no
+`algorithm.paired_preference`; on the v1 trainer it also requires
+`trainer.v1.sampler.drop_incomplete_groups=true` and rejects
+`trainer_mode=separate_async`. A config therefore cannot silently stop being
+DiffusionART. The two updates per rollout are realised by
 `actor_rollout_ref.actor.ppo_mini_batch_size = data.train_batch_size / 2`;
 other splits log a warning (the paper's one-update ablation uses a single
 mini batch). The `old` adapter is refreshed with
@@ -135,6 +145,19 @@ paper's on-policy, EMA-free setting.
 
 - The reference caches $v_{\text{old}}(s_t)$ during rollout; here it is
   recomputed with the `old` adapter on the training side (see above).
+- When no row of a rollout has guidance (every group has constant rewards) the
+  reference skips the update; here the optimizer still steps, so AdamW momentum
+  and weight decay (and any restore anchors) still move the adapter.
+- Audio-video reward components are standardised like DiffusionNFT advantages
+  (`algorithm.norm_adv_by_std_in_grpo`, `algorithm.global_std`) before the
+  routing weights apply, so a component's effective weight is its routing weight
+  over its standard deviation. The reference's audio-video path weights the
+  scorer outputs directly; its post-training profile normalises per prompt
+  group, which `global_std=false` reproduces.
+- The guidance damping of near-zero reward-endpoint correlations follows the
+  reference's covariance step; the reference's loss then re-normalises the
+  direction to unit RMS, so the two differ only for groups whose reward-scaled
+  covariance has RMS below `1e-5`.
 - Only the `velocity_linear_sigma` and `velocity_uniform` loss weightings are
   implemented; the reference also offers an `x0`-space variant.
 - Qwen-Image, LTX-2.3 (text-to-audio-video only) and MiniMax-H3 (text-to-audio-video
@@ -167,6 +190,7 @@ actor_rollout_ref.rollout.rollout_adapter=old
 actor_rollout_ref.rollout.calculate_log_probs=False
 actor_rollout_ref.rollout.algo.noise_level=0.0
 actor_rollout_ref.actor.use_kl_loss=False
+trainer.v1.sampler.drop_incomplete_groups=True   # v1 trainer (main_diffusion_v1)
 ```
 
 ### Core Parameters
@@ -232,7 +256,7 @@ Audio-video models report every metric per modality as `actor/video/*` and
 
 | Metric | Meaning | Healthy pattern |
 |---|---|---|
-| `actor/policy_loss` | Masked `1/\|B\|` average of $w(s_t)\,\mathrm{MSE}$. | Equals $t \cdot \text{gain}^2$ averaged over kept items on the first update of a rollout (zero drift); lower on the second. A sustained rise means $v_\theta$ is drifting away from the frozen targets. |
+| `actor/policy_loss` | Masked `1/\|B\|` average of $w(s_t)\,\mathrm{MSE}$. | On the first update of a rollout (zero drift) each kept item contributes $t \cdot \text{gain}^2$ and masked or inactive items contribute 0; lower on the second. A sustained rise means $v_\theta$ is drifting away from the frozen targets. |
 | `actor/unmasked_loss` | Same MSE before masking, over active items. | Tracks `policy_loss`; a widening gap means the mask is removing many items. |
 | `actor/active_frac` | Fraction of items whose prompt has non-zero guidance. | Near 1. A drop means many prompts have constant rewards (saturated or broken reward). |
 | `actor/mask_frac` | Fraction of active items zeroed by the trust region. | Near 0 on the first update, small on the second. Values approaching 1 mean the policy moved too far in one rollout: lower the learning rate before touching `art_mask_threshold`. |
@@ -241,11 +265,11 @@ Audio-video models report every metric per modality as `actor/video/*` and
 | `actor/old_deviate` | $\mathrm{mean}(d^2)$, the squared drift from $v_{\text{old}}$. | Zero on the first update (up to backend numerics), small and stable on the second. |
 | `actor/movement_score` | Mean $m(s_t)$, the reference-SDE KL proxy compared with `art_mask_threshold`. | Well below $10^{-5}$ on the first update. |
 | `actor/guidance_rms` | RMS of the guidance over items. | 1 when every prompt is active (`active_frac` otherwise). |
-| `actor/reward/<name>/{mean,std,min,max}`, `actor/reward/sum/{mean,std}` | Whole-rollout summaries of the raw reward components (population std; `sum` = unweighted total), same names and semantics as OmniNFT. Emitted when per-component scores are available (`reward/<name>` extra infos or component-mode `rm_scores`). | Per-component training curves comparable one-to-one with OmniNFT runs. |
+| `actor/reward/<name>/{mean,std,min,max}`, `actor/reward/sum/{mean,std}` | Whole-rollout summaries of the raw reward components (population std; `sum` = unweighted total). Emitted when the weighted-sum reward manager attaches per-component `reward/<name>` extra infos. | Per-component training curves (the trainer's own `critic/reward/<name>/mean` reports the means too). |
 | `actor/<modality>/policy_loss` | Per-modality masked MSE (audio-video models); `actor/policy_loss` is their `art_video_weight` / `art_audio_weight` average. | Same key as OmniNFT's per-modality policy loss; magnitudes differ by construction (different objectives). |
-| `actor/<modality>/covariance_rms` | Mean over active prompts of the RMS of the raw reward-endpoint covariance before unit-RMS normalisation, i.e. the strength of the reward-endpoint correlation (in standardised-reward units). | Falls as rewards saturate within prompts; a collapse to 0 with `inactive_group_frac` rising means the reward no longer separates samples. |
+| `actor/<modality>/covariance_rms` | Mean over active prompts of the RMS of the raw reward-endpoint covariance before unit-RMS normalisation, i.e. the strength of the reward-endpoint correlation (in the units of the reward that feeds the covariance: standardised components for routed audio-video rewards, the raw reward otherwise). | Falls as rewards saturate within prompts; a collapse to 0 with `inactive_group_frac` rising means the reward no longer separates samples. |
 | `actor/<modality>/inactive_group_frac` | Fraction of prompts with zero guidance (constant rewards). | Near 0. |
-| `actor/<modality>/routed_reward_{mean,std}` | The routed (standardised, weighted) reward that feeds the covariance; ART's analogue of OmniNFT's `reward_prob_mean`. | Mean near 0 by construction (group centring); std stable. |
+| `actor/<modality>/routed_reward_{mean,std}` | The routed (standardised, weighted) reward that feeds the covariance; ART's analogue of OmniNFT's `reward_prob_mean`. | Routed audio-video rewards: mean near 0 by construction (group centring), std stable. Single-modality models log the raw reward. |
 | `actor/<modality>/movement_score_{t_high,t_mid,t_low}`, `mask_frac_{t_high,t_mid,t_low}`, `n_items_{t_high,t_mid,t_low}` | Drift proxy and mask rate for active states with $t \ge 2/3$, $1/3 \le t < 2/3$, $t < 1/3$, with the number of items averaged; always emitted (0 for an empty bucket) because the dp aggregation needs identical key sets across micro batches and ranks. | Shows where along the trajectory the trust region bites; weight by `n_items_*` when averaging across steps. |
 | `actor/old_rollout_gap` | `art_log_rollout_velocity_gap`: $\mathrm{mean}((v_{\text{old}} - v_{\text{rollout}})^2)$ with $v_{\text{rollout}}$ from consecutive rollout states. | Small and constant (backend numerics only). Growth means the training forward no longer reproduces the rollout (CFG mismatch, adapter not copied). |
 
@@ -276,7 +300,7 @@ TensorDict and would collide).
 is the DiffusionNFT MiniMax-H3 text-to-audio-video recipe with only the algorithm
 swapped (same data, CLAP + ImageBind rewards, LoRA, learning rate, rollout and
 validation settings), for a like-for-like comparison; it is WIP. With CLAP +
-ImageBind alone — neither sees the picture — ART reaches a higher reward than
+ImageBind alone — neither scorer measures picture quality — ART reaches a higher reward than
 DiffusionNFT by darkening and freezing the video; pair it with a visual reward
 (VideoAlign / HPSv3) before reading the reward as quality.
 
@@ -284,8 +308,11 @@ DiffusionNFT by darkening and freezing the video; pair it with a visual reward
 post-trains LTX-2.3 text-to-audio-video with LoRA on the OmniNFT reward set
 (VideoAlign, HPSv3, AudioBox, CLAP, DeSync) with exactly the OmniNFT LTX-2.3
 recipe's data, rewards, routing, LoRA and rollout settings, changing only the
-algorithm, so the two can be compared like-for-like. Its reward stack (native
-audio-video scorers, `routing_weights`) is on main since #663 part 1. The reward
+algorithm, so the two can be compared like-for-like (the comparison runs in
+[#744](https://github.com/verl-project/verl-omni/pull/744) used the pre-merge OmniNFT recipe, validated at 512x768 on 8
+prompts; this script validates at 256x384 on 16). Its reward stack (native
+audio-video scorers, `routing_weights`) is on main since
+[#663](https://github.com/verl-project/verl-omni/pull/663). The reward
 path differs from OmniNFT's on purpose: OmniNFT reads the per-component reward
 matrix from `reward.aggregation=preserve_components`, which the reward manager
 allows only for `omni_nft`; DiffusionART keeps `reward.aggregation=weighted_sum`
@@ -306,7 +333,9 @@ CPU math tests plus golden equivalence to the authors' code
 (`tests/trainer/diffusion/test_diffusionart_*_on_cpu.py`; fixture generated from
 vanzll/DiffusionART @ `8652c8a`, whose `src/visual_rl/algorithms/` code is
 unchanged through `b51e6ec`, 2026-10-30). Both GPU smoke entries (tiny Qwen-Image,
-4 steps; tiny MiniMax-H3, 1 step) passed on 8×B200 before the latest main merge. The LTX-2.3 and MiniMax-H3
-comparison runs are reported in #744; they predate the per-prompt update split,
-zero-signal restoration and Flash (all off in those runs), and the smokes have not
-been re-run since. No convergence claim is made here.
+4 steps; tiny MiniMax-H3, 1 step) passed on 8×B200 on 2026-10-15; they have not
+been re-run since main was merged in on 2026-11-01, and the tiny MiniMax-H3 smoke
+has since changed to two updates per rollout. The LTX-2.3 and MiniMax-H3
+comparison runs are reported in [#744](https://github.com/verl-project/verl-omni/pull/744); they predate the per-prompt update
+split, zero-signal restoration, Flash and the neutral STG default of the LTX-2.3
+rollout. No convergence claim is made here.

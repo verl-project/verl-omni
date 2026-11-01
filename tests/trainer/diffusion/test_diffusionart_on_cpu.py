@@ -835,7 +835,7 @@ def test_validate_trainer_config_rejects_unsupported_settings(override, match):
 @pytest.mark.parametrize(
     "n, mini, micro, gpus, ok",
     [
-        (8, 16, 16, 8, True),  # LTX K=8 arm: 16 samples per rank, one micro batch of 16
+        (8, 16, 16, 8, True),  # 16 samples per rank, one micro batch of 16 (the LTX recipe uses 2 of 8)
         (2, 16, 16, 8, False),  # LTX K=2 arm as first launched: 4 samples per rank, micro 16 -> engine assertion
         (2, 16, 2, 8, True),  # K=2 fix: 4 samples per rank = 2 micro batches of 2
         (2, 16, 4, 8, True),  # also valid: one micro batch of 4
@@ -862,6 +862,24 @@ def test_validate_trainer_config_checks_per_rank_micro_batching(n, mini, micro, 
         DiffusionARTLoss.validate_trainer_config(config)
     else:
         with pytest.raises(ValueError, match="divisible by"):
+            DiffusionARTLoss.validate_trainer_config(config)
+
+
+@pytest.mark.parametrize(
+    "extra, ok",
+    [
+        (["+actor_rollout_ref.model.pipeline.video_cfg_scale=1.0"], False),  # training 1.0, rollout guidance 3.0
+        (["+actor_rollout_ref.rollout.pipeline.audio_cfg_scale=7.0"], False),  # rollout 7.0, training guidance 3.0
+        (["+actor_rollout_ref.model.pipeline.video_cfg_scale=3.0"], True),  # equals the fallback on both sides
+    ],
+)
+def test_validate_trainer_config_compares_the_cfg_each_side_applies(extra, ok):
+    """An unset per-modality CFG falls back to guidance_scale on both sides, so a one-sided override is a mismatch."""
+    config = compose_trainer_config(ART_OVERRIDES + ["actor_rollout_ref.rollout.pipeline.guidance_scale=3.0"] + extra)
+    if ok:
+        DiffusionARTLoss.validate_trainer_config(config)
+    else:
+        with pytest.raises(ValueError, match="applied scales"):
             DiffusionARTLoss.validate_trainer_config(config)
 
 

@@ -1,6 +1,6 @@
 # Supported Models
 
-Last updated: 10/29/2026.
+Last updated: 11/01/2026.
 
 VeRL-Omni supports RL post-training for generative models across image, video,
 audio, and omni modalities. This page catalogues every model with a ready-to-run

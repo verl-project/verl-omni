@@ -76,7 +76,8 @@ def art_guidance(
     covariance, scaled by the group's mean absolute centred reward, is divided by its RMS (floored at
     ``eps``) so every active prompt contributes a direction of unit RMS independent of the reward
     scale, except that near-zero reward-endpoint correlations are damped rather than amplified (the
-    reference's ``historical`` direction mode). A group yields zero guidance (and is marked inactive)
+    reference covariance's ``historical`` direction mode; the reference loss re-normalises the direction to
+    unit RMS, so end to end it damps only below ``eps**2``). A group yields zero guidance (and is marked inactive)
     when it has a single sample, constant rewards, or an exactly zero covariance.
 
     Args:

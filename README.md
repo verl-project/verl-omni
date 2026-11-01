@@ -157,7 +157,7 @@ Visit our [documentation](https://verl-omni.readthedocs.io/en/latest/index.html)
     <td>✅</td>
   </tr>
   <tr>
-    <td>DiffusionART</td>
+    <td><a href="docs/algo/diffusionart.md">DiffusionART</a></td>
     <td>WIP</td>
   </tr>
   <tr>

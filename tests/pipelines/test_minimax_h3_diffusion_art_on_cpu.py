@@ -407,6 +407,15 @@ class TestRolloutForwardMergePath:
         assert "all_latents" not in rl and "all_segment_timesteps" not in rl
         assert output.output["metadata"]["media_artifacts"]["primary"] == "video_preview"
 
+    def test_v1_validation_request_with_global_steps_runs_the_plain_nft_path(self, monkeypatch):
+        """The v1 agent loop stamps global_steps on validation requests too and marks them with verl_validate."""
+        pipe, seen = self._pipeline(monkeypatch, 4, 6, {})
+        extra_args = {"global_steps": 3, "verl_validate": True}
+        request = SimpleNamespace(sampling_params=SimpleNamespace(extra_args=extra_args))
+        output = pipe.forward(request)
+        assert seen["capture_enabled"] is False
+        assert "all_latents" not in output.output["metadata"]["rl"]
+
     def test_video_seq_len_disagreeing_with_latent_meta_is_rejected(self, monkeypatch):
         trajectory = {
             "all_latents": torch.zeros(1, 2, 18, ART_ROW_WIDTH),

@@ -15,9 +15,9 @@ adapter is updated. There is no likelihood ratio, no differentiable reward, no E
 schedule and no KL term.
 
 > **Status:** CPU math tests + golden equivalence to the authors' code; GPU smoke
-> entries and LTX-2.3 / MiniMax-H3 comparison runs reported in #744, which predate
-> the per-prompt update split and zero-signal restoration the recipes now use. See
-> [Validation status](#validation-status).
+> entries and LTX-2.3 / MiniMax-H3 comparison runs reported in [#744](https://github.com/verl-project/verl-omni/pull/744), which
+> predate the per-prompt update split, and the zero-signal restoration and neutral
+> STG default the video recipes now use. See [Validation status](#validation-status).
 
 Three recipes:
 
@@ -34,15 +34,18 @@ Three recipes:
   as the rollout (video 1.5 / audio 3.0) because `v_old` is recomputed by it;
   `ppo_mini_batch_size=16` of 32 prompts gives the two updates per rollout. The
   native VideoAlign / HPSv3 / AudioBox / CLAP / DeSync scorers it uses are on
-  main since #663 part 1; ART reads their per-component `reward/<name>` scores
-  under the default `weighted_sum` aggregation (OmniNFT's `preserve_components`
-  aggregation is reserved for `omni_nft`). Model and data assets: the LTX-2.3
-  Diffusers checkpoint and the VGGSound caption parquet are prepared as in the
-  in-repo LTX-2.3 FlowGRPO example
-  ([`examples/flowgrpo_trainer/ltx2/README.md`](../flowgrpo_trainer/ltx2/README.md));
-  the five native scorers load their public checkpoints from `REWARD_ROOT`
-  (VideoReward, HPSv3, Qwen2-VL-2B/7B, audiobox-aesthetics, CLAP `clap-htsat-unfused`,
-  Synchformer) as listed in the script header.
+  main since [#663](https://github.com/verl-project/verl-omni/pull/663); ART reads
+  their per-component `reward/<name>` scores under the default `weighted_sum`
+  aggregation (OmniNFT's `preserve_components` aggregation is reserved for
+  `omni_nft`). Data: the VGGSound caption parquet (`DATA_DIR`) is the one the
+  OmniNFT LTX-2.3 example prepares with
+  [`examples/omninft_trainer/data_process/prepare_data.py`](https://github.com/verl-project/verl-omni/blob/main/examples/omninft_trainer/data_process/prepare_data.py)
+  (see the [OmniNFT LTX-2.3 README](https://github.com/verl-project/verl-omni/blob/main/examples/omninft_trainer/ltx2/README.md));
+  model: set `MODEL_PATH` to an LTX-2.3 Diffusers checkpoint (the default points
+  at a Hugging Face cache snapshot of `diffusers/LTX-2.3-Diffusers`); the five
+  native scorers load their public checkpoints from `REWARD_ROOT` (VideoReward,
+  HPSv3, Qwen2-VL-2B/7B, audiobox-aesthetics, CLAP `clap-htsat-unfused`,
+  Synchformer), as set in the script's reward overrides.
 - MiniMax-H3 text-to-audio-video,
   [`minimax_h3/run_minimax_h3_t2va_art_lora.sh`](https://github.com/verl-project/verl-omni/blob/main/examples/diffusionart_trainer/minimax_h3/run_minimax_h3_t2va_art_lora.sh):
   the DiffusionNFT MiniMax-H3 recipe with only the algorithm swapped (CLAP +
@@ -96,6 +99,7 @@ actor_rollout_ref.rollout.algo.noise_level=0.0
 algorithm.trainer_type=direct_preference
 algorithm.sample_source=online
 algorithm.old_policy_decay_schedule=copy
+trainer.v1.sampler.drop_incomplete_groups=True
 ```
 
 The paper's two disjoint updates per rollout batch are expressed through
@@ -112,8 +116,8 @@ modality; 64 rollouts per step instead of 256). Keep `ppo_mini_batch_size=16`
 constraint: each rank receives `ppo_mini_batch_size * n / dp` samples per mini
 batch and the engine asserts (after the first rollout) that this is divisible by
 `ppo_micro_batch_size_per_gpu`. At 8 GPUs that is `16 * 2 / 8 = 4` samples per
-rank, so `ppo_micro_batch_size_per_gpu` must divide 4 (`1`, `2` or `4`; run1's
-`16` fails). The trainer now checks this at start-up. ART guidance is computed per
+rank, so set `ppo_micro_batch_size_per_gpu` to `1`, `2` or `4` (the recipe's `8`
+fails); the trainer checks this at start-up. ART guidance is computed per
 sample, so micro batches do not have to hold whole rollout groups.
 
 ## Key knobs
@@ -144,8 +148,9 @@ sample, so micro batches do not have to hold whole rollout groups.
   `tests/trainer/diffusion/test_diffusionart_golden_on_cpu.py` (fixture generated
   from vanzll/DiffusionART @ `8652c8a`; math matches to fp32 round-off; the
   reference's `src/visual_rl/algorithms/` code is unchanged through `b51e6ec`).
-- GPU: both GPU smoke entries (tiny Qwen-Image and tiny MiniMax-H3) pass on
-  8×B200. The LTX-2.3 and MiniMax-H3 comparison runs are reported in #744; they
-  predate the per-prompt update split and zero-signal restoration the recipes now
-  use, and the smokes have not been re-run since. No convergence claim is made for
-  any recipe here.
+- GPU: both GPU smoke entries (tiny Qwen-Image, tiny MiniMax-H3) passed on 8×B200
+  on 2026-10-15 and have not been re-run since main was merged in on 2026-11-01.
+  The LTX-2.3 and MiniMax-H3 comparison runs are reported in [#744](https://github.com/verl-project/verl-omni/pull/744); they
+  predate the per-prompt update split and the zero-signal restoration and neutral
+  STG default of the video recipes. No convergence claim is made for any recipe
+  here.

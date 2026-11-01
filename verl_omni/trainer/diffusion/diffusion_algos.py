@@ -2222,17 +2222,19 @@ class DiffusionARTLoss(DiffusionLossFn):
                 "algorithm.art_pairwise_reward)"
             )
         for key in ("guidance_scale", "true_cfg_scale", "video_cfg_scale", "audio_cfg_scale"):
-            model_value = OmegaConf.select(config, f"actor_rollout_ref.model.pipeline.{key}", default=None)
-            rollout_value = OmegaConf.select(config, f"actor_rollout_ref.rollout.pipeline.{key}", default=None)
-            if model_value is None and rollout_value is None:
-                continue
-            if float(model_value if model_value is not None else 1.0) != float(
-                rollout_value if rollout_value is not None else 1.0
-            ):
+            raw, effective = {}, {}
+            for side in ("model", "rollout"):
+                value = OmegaConf.select(config, f"actor_rollout_ref.{side}.pipeline.{key}", default=None)
+                raw[side] = value
+                if value is None and key in ("video_cfg_scale", "audio_cfg_scale"):
+                    # An unset per-modality scale falls back to guidance_scale on both sides (ltx_guidance_scales).
+                    value = OmegaConf.select(config, f"actor_rollout_ref.{side}.pipeline.guidance_scale", default=None)
+                effective[side] = float(value) if value is not None else 1.0
+            if effective["model"] != effective["rollout"]:
                 problems.append(
-                    f"actor_rollout_ref.model.pipeline.{key}={model_value} must equal "
-                    f"actor_rollout_ref.rollout.pipeline.{key}={rollout_value} "
-                    "(v_old is recomputed by the training forward)"
+                    f"actor_rollout_ref.model.pipeline.{key}={raw['model']} must equal "
+                    f"actor_rollout_ref.rollout.pipeline.{key}={raw['rollout']} (applied scales "
+                    f"{effective['model']} vs {effective['rollout']}; v_old is recomputed by the training forward)"
                 )
         # The training rollout may only use CFG: the training adapter recomputes v_old with CFG alone, so STG,
         # modality and rescale guidance must stay neutral there (validation rollouts are free to use them).
@@ -2610,8 +2612,11 @@ class DiffusionARTLoss(DiffusionLossFn):
             batch_metrics[f"{metric_prefix}routed_reward_mean"] = modality_rewards[name].mean()
             batch_metrics[f"{metric_prefix}routed_reward_std"] = modality_rewards[name].std(correction=0)
         if not any_active:
+            # The reference skips such rollouts; here the optimizer still steps on zero (or anchor-only) gradients,
+            # so AdamW momentum and weight decay still move the adapter.
             logger.warning(
-                "DiffusionART: every prompt group in this batch has constant rewards; the update is a no-op."
+                "DiffusionART: every prompt group in this batch has constant rewards, so no row carries guidance; "
+                "the optimizer still steps (momentum / weight decay only, plus any restore anchors)."
             )
         cls._attach_batch_metrics(batch, batch_metrics, batch_size)
         sample_log_dir = algorithm_cfg.get("art_sample_log_dir", None)

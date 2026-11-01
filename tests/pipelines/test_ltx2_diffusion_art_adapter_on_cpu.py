@@ -65,6 +65,19 @@ def test_configure_flow_grpo_sets_a_pure_ode_with_all_transitions_and_per_modali
     assert pipeline._flow_grpo_window_size is None
     assert request.sampling_params.extra_args["video_cfg_scale"] == 1.5
     assert request.sampling_params.extra_args["audio_cfg_scale"] == 3.0  # falls back to guidance_scale
+    # Unset (absent or None) STG / modality / rescale guidance is neutral, not the official LTX-2.3 defaults.
+    assert {k: request.sampling_params.extra_args[k] for k in ("video_stg_scale", "audio_modality_scale")} == {
+        "video_stg_scale": 0.0,
+        "audio_modality_scale": 1.0,
+    }
+    explicit = SimpleNamespace(
+        sampling_params=SimpleNamespace(
+            output_type="pt", extra_args={"video_stg_scale": 1.0, "audio_rescale_scale": None}, guidance_scale=3.0
+        )
+    )
+    pipeline._configure_flow_grpo(explicit)
+    assert explicit.sampling_params.extra_args["video_stg_scale"] == 1.0  # explicit values (val_kwargs) pass through
+    assert explicit.sampling_params.extra_args["audio_rescale_scale"] == 0.0
     assert pipeline._select_sde_steps(20, torch.device("cpu")) == list(range(20))
     with pytest.raises(NotImplementedError, match="text-to-audio-video"):
         pipeline._configure_flow_grpo(

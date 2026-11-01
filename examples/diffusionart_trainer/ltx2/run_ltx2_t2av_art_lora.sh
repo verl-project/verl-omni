@@ -16,7 +16,8 @@
 # recipe (#750, batch 32 x n 8, 150 steps) with only the algorithm changed, so the two runs compare
 # like-for-like: same five rewards and routing weights (VideoAlign 1.0 / HPSv3 1.5 -> video, AudioBox 0.5 /
 # CLAP 1.0 -> audio, DeSync 1.0 -> both), LoRA r32/alpha64, lr 3e-5, 256x384x121f, 20 rollout steps, rollout
-# CFG video 1.5 / audio 3.0, validation sampler 40 steps / CFG 3 and 7 / modality 3 / rescale 0.7.
+# CFG video 1.5 / audio 3.0 with STG, modality and rescale guidance neutral, validation sampler 40 steps / CFG 3 and
+# 7 / STG 1 / modality 3 / rescale 0.7 (the official LTX-2.3 guidance).
 # Differences forced by the algorithm: the rollout is an ODE (noise level 0) that keeps every visited state,
 # the training forward uses the SAME CFG as the rollout (v_old is recomputed by it), the old adapter is
 # hard-copied every step (no EMA), and ppo_mini_batch_size = train_batch_size / 2 gives the paper's two
@@ -53,7 +54,7 @@ AUDIOBOX_DEVICES=${AUDIOBOX_DEVICES:-'[4]'}
 CLAP_DEVICES=${CLAP_DEVICES:-'[5]'}
 DESYNC_DEVICES=${DESYNC_DEVICES:-'[6,7]'}
 
-ltx_pipeline_config=verl_omni.pipelines.ltx2_omni_nft.config.LTXDiffusionPipelineConfig
+ltx_pipeline_config=verl_omni.pipelines.ltx2_diffusion_art.config.LTXARTPipelineConfig
 ltx_lora_targets="['attn1.to_q','attn1.to_k','attn1.to_v','attn1.to_out.0','attn2.to_q','attn2.to_k','attn2.to_v','attn2.to_out.0','audio_attn1.to_q','audio_attn1.to_k','audio_attn1.to_v','audio_attn1.to_out.0','audio_attn2.to_q','audio_attn2.to_k','audio_attn2.to_v','audio_attn2.to_out.0','audio_to_video_attn.to_q','audio_to_video_attn.to_k','audio_to_video_attn.to_v','audio_to_video_attn.to_out.0','video_to_audio_attn.to_q','video_to_audio_attn.to_k','video_to_audio_attn.to_v','video_to_audio_attn.to_out.0','ff.net.0.proj','ff.net.2','audio_ff.net.0.proj','audio_ff.net.2']"
 
 script_name=$(basename "$0" .sh)
@@ -154,6 +155,8 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.rollout.pipeline.num_inference_steps=20 \
     +actor_rollout_ref.rollout.pipeline.video_cfg_scale=1.5 \
     +actor_rollout_ref.rollout.pipeline.audio_cfg_scale=3.0 \
+    +actor_rollout_ref.rollout.pipeline.video_stg_scale=0.0 \
+    +actor_rollout_ref.rollout.pipeline.audio_stg_scale=0.0 \
     +actor_rollout_ref.rollout.pipeline.video_modality_scale=1.0 \
     +actor_rollout_ref.rollout.pipeline.audio_modality_scale=1.0 \
     +actor_rollout_ref.rollout.pipeline.video_rescale_scale=0.0 \
@@ -168,6 +171,8 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.rollout.val_kwargs.pipeline.num_inference_steps=40 \
     +actor_rollout_ref.rollout.val_kwargs.pipeline.video_cfg_scale=3.0 \
     +actor_rollout_ref.rollout.val_kwargs.pipeline.audio_cfg_scale=7.0 \
+    +actor_rollout_ref.rollout.val_kwargs.pipeline.video_stg_scale=1.0 \
+    +actor_rollout_ref.rollout.val_kwargs.pipeline.audio_stg_scale=1.0 \
     +actor_rollout_ref.rollout.val_kwargs.pipeline.video_modality_scale=3.0 \
     +actor_rollout_ref.rollout.val_kwargs.pipeline.audio_modality_scale=3.0 \
     +actor_rollout_ref.rollout.val_kwargs.pipeline.video_rescale_scale=0.7 \

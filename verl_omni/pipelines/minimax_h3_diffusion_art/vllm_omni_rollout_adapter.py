@@ -110,6 +110,8 @@ class MiniMaxH3DiffusionARTPipeline(MiniMaxH3DiffusionNFTPipeline):
             raise RuntimeError(
                 f"MiniMax H3 DiffusionART recorded {len(states)} states for {num_transitions} transitions."
             )
+        if not torch.equal(states[-1], rows_to_art_rows(video_rows.float(), audio_rows.float())):
+            raise RuntimeError("MiniMax H3 DiffusionART: on_step no longer reports the post-step rows.")
         latent_t, latent_h, latent_w, audio_t = (
             int(kwargs[k]) for k in ("latent_t", "latent_h", "latent_w", "audio_t")
         )
@@ -148,8 +150,9 @@ class MiniMaxH3DiffusionARTPipeline(MiniMaxH3DiffusionNFTPipeline):
     def forward(self, request: Any):
         """DiffusionNFT payload plus the ART trajectory for training requests."""
         extra_args = request.sampling_params.extra_args or {}
-        # The agent loop only stamps ``global_steps`` on training rollouts; validation runs the plain sampler.
-        self._art_capture_enabled = "global_steps" in extra_args
+        # Training rollouts carry ``global_steps``; the v1 agent loop stamps it on validation requests too and marks
+        # those with ``verl_validate``. Validation runs the plain sampler.
+        self._art_capture_enabled = "global_steps" in extra_args and not extra_args.get("verl_validate", False)
         self._art_trajectory = None
         try:
             output = super().forward(request)

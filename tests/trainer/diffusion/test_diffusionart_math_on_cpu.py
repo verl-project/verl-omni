@@ -255,7 +255,7 @@ def test_group_index_from_uid_numbers_prompts_by_first_appearance():
     assert group_index.dtype == torch.int64
 
 
-def test_guidance_damps_near_zero_reward_endpoint_correlation_like_the_reference():
+def test_guidance_damps_near_zero_reward_endpoint_correlation_like_the_reference_covariance():
     """Reference ``historical`` direction mode: the covariance is scaled by the group's mean absolute centred reward
     and divided by ``max(rms, eps)``. A group whose scaled covariance has RMS below ``eps`` therefore gets a damped
     push (RMS < 1) instead of a unit-RMS push along what is mostly noise; ordinary groups are unit RMS."""

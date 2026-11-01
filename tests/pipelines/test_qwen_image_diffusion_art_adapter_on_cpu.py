@@ -26,10 +26,8 @@ import torch
 pytest.importorskip("vllm_omni")
 
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase  # noqa: E402
-from verl_omni.pipelines.qwen_image_diffusion_art.vllm_omni_rollout_adapter import (  # noqa: E402
-    QwenImageDiffusionARTPipeline,
-)
-from verl_omni.pipelines.qwen_image_flow_grpo.vllm_omni_rollout_adapter import QwenImagePipelineWithLogProb  # noqa: E402
+from verl_omni.pipelines.qwen_image_diffusion_art import QwenImageDiffusionARTPipeline  # noqa: E402
+from verl_omni.pipelines.qwen_image_flow_grpo import QwenImagePipelineWithLogProb  # noqa: E402
 
 
 def test_registered_and_inherits_output_construction():
