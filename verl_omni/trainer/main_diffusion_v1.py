@@ -82,7 +82,7 @@ def run_diffusion_v1(config, task_runner_class=None) -> None:
         ray.init(**OmegaConf.to_container(ray_init_kwargs))
 
     if task_runner_class is None:
-        task_runner_class = DiffusionTaskRunnerV1.options(num_cpus=1)
+        task_runner_class = DiffusionTaskRunnerV1
 
     if (
         is_cuda_available
@@ -96,9 +96,9 @@ def run_diffusion_v1(config, task_runner_class=None) -> None:
         from verl_omni.trainer.main_diffusion import _resolve_controller_nsight_options
 
         nsight_options = _resolve_controller_nsight_options(config)
-        runner = task_runner_class.options(runtime_env={"nsight": nsight_options}).remote()
+        runner = task_runner_class.options(num_cpus=1, runtime_env={"nsight": nsight_options}).remote()
     else:
-        runner = task_runner_class.remote()
+        runner = task_runner_class.options(num_cpus=1).remote()
     ray.get(runner.run.remote(config))
 
     timeline_json_file = config.ray_kwargs.get("timeline_json_file", None)

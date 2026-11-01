@@ -1,6 +1,6 @@
 # Profiling FlowGRPO / diffusion training in VeRL-Omni
 
-Last updated: 10/24/2026.
+Last updated: 11/01/2026.
 
 VeRL-Omni reuses the profiler subsystem from upstream
 [verl](https://github.com/verl-project/verl) (`verl.utils.profiler`) and exposes
@@ -165,8 +165,11 @@ actor_rollout_ref.actor.profiler.tool=torch_memory
 
 ### 4. NVIDIA Nsight Systems (`nsys`)
 
-Nsight requires `nsys` to be installed on every node and the `nvtx` Python
-package available in the training environment (`pip install nvtx`).
+Nsight requires `nsys` to be installed on every node and the `nvtx` and
+`matplotlib` Python packages available in the training environment
+(`pip install nvtx matplotlib`). The trainer's timing ranges use named colors
+such as `brown`, which `nvtx` can only resolve through `matplotlib`; without it
+the first profiled step fails with `Invalid color brown`.
 
 ```bash
 global_profiler.tool=nsys \

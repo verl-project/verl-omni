@@ -13,6 +13,7 @@
 # limitations under the License.
 """Reject unsupported V1 profiling combinations before distributed startup."""
 
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -107,3 +108,57 @@ def test_inactive_profiling_does_not_reject_unused_options(startup, steps):
     with pytest.raises(StartupReached):
         entrypoint.run_diffusion_v1(cfg)
     startup.assert_called_once()
+
+
+class _OptionedRunner:
+    """Mimics ray's ActorOptionWrapper: ``.remote()`` only, no further ``.options()``."""
+
+    def __init__(self, record, **kwargs):
+        self._record = record
+        self._kwargs = kwargs
+
+    def remote(self):
+        self._record.append(self._kwargs)
+        return SimpleNamespace(run=SimpleNamespace(remote=lambda cfg: cfg))
+
+
+class _ActorClass:
+    def __init__(self):
+        self.calls = []
+
+    def options(self, **kwargs):
+        return _OptionedRunner(self.calls, **kwargs)
+
+    def remote(self):
+        raise AssertionError("the TaskRunner must be created through .options(num_cpus=1)")
+
+
+@pytest.fixture
+def launch(monkeypatch):
+    actor = _ActorClass()
+    monkeypatch.setattr(entrypoint, "enable_rl_insight", Mock())
+    monkeypatch.setattr(entrypoint.ray, "is_initialized", lambda: True)
+    monkeypatch.setattr(entrypoint.ray, "get", lambda ref: ref)
+    monkeypatch.setattr(entrypoint, "is_cuda_available", True)
+    monkeypatch.setattr(entrypoint, "DiffusionTaskRunnerV1", actor)
+    monkeypatch.setattr("verl.utils.import_utils.is_nvtx_available", lambda: True)
+    monkeypatch.setattr(
+        "verl_omni.trainer.main_diffusion._resolve_controller_nsight_options", lambda cfg: {"trace": "nvtx"}
+    )
+    return actor
+
+
+def _launch_config(tool):
+    cfg = config(tool=tool, rollout=False)
+    cfg.ray_kwargs = {"ray_init": {}}
+    return cfg
+
+
+def test_nsys_runner_keeps_num_cpus_and_adds_nsight_runtime_env(launch):
+    entrypoint.run_diffusion_v1(_launch_config("nsys"))
+    assert launch.calls == [{"num_cpus": 1, "runtime_env": {"nsight": {"trace": "nvtx"}}}]
+
+
+def test_non_nsys_runner_keeps_num_cpus_only(launch):
+    entrypoint.run_diffusion_v1(_launch_config("torch"))
+    assert launch.calls == [{"num_cpus": 1}]
