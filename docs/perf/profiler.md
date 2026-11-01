@@ -200,10 +200,13 @@ discrete profiled steps or contiguous step groups before Ray starts the
 TaskRunner.
 
 Diffusion V1 profiling has been validated with the NPU and PyTorch
-(`tool=torch`) backends. Nsight (`tool=nsys`) is unverified for V1. V1 does
-not implement controller capture start/stop calls, so controller
-`capture-range=cudaProfilerApi` is rejected when Nsight profiling steps are
-configured. This restriction does not apply to worker-side capture settings.
+(`tool=torch`) backends. Nsight (`tool=nsys`) has been validated on V1 for
+worker-side capture only: the actor ranks record the configured steps and
+write one report each. V1 does not implement controller capture start/stop
+calls, so controller `capture-range=cudaProfilerApi` is rejected when Nsight
+profiling steps are configured; the controller report covers the whole
+TaskRunner lifetime. This restriction does not apply to worker-side capture
+settings.
 
 `*.nsys-rep` files are written by Ray under
 `/tmp/ray/session_latest/logs/nsight/` on each node (this path is fixed by
