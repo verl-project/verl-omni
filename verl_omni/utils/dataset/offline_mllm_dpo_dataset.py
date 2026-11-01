@@ -414,6 +414,32 @@ def _collate_no_padding_values(key: str, values: Sequence[Any]) -> Any:
     return torch.stack([NonTensorData(value) for value in values], dim=0)
 
 
+_MEDIA_MASK_KEYS = ("image_mask", "video_mask", "audio_mask")
+
+
+def _media_placeholder_counts(branch: dict[str, Any]) -> dict[str, int]:
+    """Count the media placeholder tokens a branch still carries.
+
+    ``process_qwen3_omni_sample`` leaves the original token ids in ``input_ids``, so the
+    placeholder positions are only recoverable from the modality masks it emits alongside.
+    """
+    counts: dict[str, int] = {}
+    for key in _MEDIA_MASK_KEYS:
+        mask = branch.get(key)
+        if isinstance(mask, torch.Tensor) and mask.dtype == torch.bool:
+            counts[key] = int(mask.sum())
+    return counts
+
+
+def _media_placeholders_dropped(before: dict[str, int], after: dict[str, int]) -> str:
+    dropped = []
+    for key, count in before.items():
+        remaining = after.get(key, 0)
+        if remaining != count:
+            dropped.append(f"{key}: {count} -> {remaining}")
+    return ", ".join(dropped)
+
+
 def _pad_mode_value(pad_mode: DatasetPadMode | str) -> str:
     return str(getattr(pad_mode, "value", pad_mode))
 
@@ -726,9 +752,17 @@ class OfflineMLLMDPODataset(MultiTurnSFTDataset):
         if sequence_length > self.max_length and self.truncation == "error":
             raise ValueError(f"sequence_length={sequence_length} is larger than self.max_length={self.max_length}")
         if sequence_length > self.max_length:
+            media_tokens_before = _media_placeholder_counts(res)
             for key in _TEXT_MODEL_KEYS:
                 if key in res:
                     res[key] = self._truncate_sequence_value(key, res[key], self.max_length, self.truncation)
+            dropped = _media_placeholders_dropped(media_tokens_before, _media_placeholder_counts(res))
+            if dropped:
+                raise ValueError(
+                    f"truncation={self.truncation!r} to max_length={self.max_length} would cut placeholder runs of the "
+                    f"media inputs ({dropped}) while multi_modal_inputs keeps their features, so the sample would reach "
+                    f"the model desynchronised. Raise max_length, shorten the prompt/response, or use truncation='error'."
+                )
         return res
 
     def _build_preference_branch(self, sample: dict[str, Any], answer: Any) -> dict[str, Any]:
