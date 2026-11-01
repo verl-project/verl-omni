@@ -478,6 +478,54 @@ def test_build_module_calls_adapter_selected_auto_model_loader():
     assert result is configured_module
 
 
+def _build_on_meta_rank(auto_model_cls):
+    """Run ``_build_module`` as a rank that verl initializes on meta (``init_empty_weights``)."""
+    omni_impl = _get_omni_impl_module()
+    model_config = _make_mock_model_config()
+    configured_module = MagicMock(spec=torch.nn.Module)
+    configured_module.named_parameters.return_value = []
+    adapter_cls = MagicMock()
+    adapter_cls.auto_model_class = auto_model_cls
+    adapter_cls.configure_model.return_value = configured_module
+    model_base_mod = sys.modules["verl_omni.pipelines.model_base"]
+
+    with (
+        patch.object(model_base_mod.OmniModelBase, "get_class_by_name", return_value=adapter_cls),
+        patch.object(omni_impl, "get_init_weight_context_manager", return_value=omni_impl.init_empty_weights),
+        patch("verl.utils.torch_dtypes.PrecisionType") as precision_type,
+    ):
+        precision_type.to_dtype.side_effect = lambda value: value
+        engine = object.__new__(omni_impl.OmniFSDPEngine)
+        engine.model_config = model_config
+        engine.engine_config = MagicMock(model_dtype=None, forward_only=False)
+        engine.engine_config.strategy = "fsdp2"
+        engine.device_mesh = None
+        engine._build_module()
+    return model_config, adapter_cls
+
+
+def test_build_module_on_meta_rank_builds_from_config_without_reading_the_checkpoint():
+    auto_model_cls = MagicMock()
+    model_config, adapter_cls = _build_on_meta_rank(auto_model_cls)
+
+    auto_model_cls.from_pretrained.assert_not_called()
+    auto_model_cls.from_config.assert_called_once_with(
+        model_config.hf_config,
+        torch_dtype=torch.float32,
+        trust_remote_code=model_config.trust_remote_code,
+    )
+    adapter_cls.configure_model.assert_called_once_with(auto_model_cls.from_config.return_value, model_config)
+
+
+def test_build_module_on_meta_rank_loads_through_a_loader_without_from_config():
+    class PretrainedOnlyLoader:
+        from_pretrained = MagicMock()
+
+    _build_on_meta_rank(PretrainedOnlyLoader)
+
+    PretrainedOnlyLoader.from_pretrained.assert_called_once()
+
+
 def test_build_module_rejects_mixed_frozen_parameters_without_fsdp1_orig_params():
     omni_impl = _get_omni_impl_module()
     model_config = _make_mock_model_config()
