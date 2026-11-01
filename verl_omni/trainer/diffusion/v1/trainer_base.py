@@ -21,6 +21,7 @@ from abc import ABC, abstractmethod
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from functools import cached_property
 from numbers import Integral
 from pprint import pprint
 
@@ -1370,17 +1371,21 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         assert self.reward_loop_manager is not None, "RewardLoopManager is None"
         return self.reward_loop_manager.compute_rm_score(data)
 
+    @cached_property
+    def _actor_dp_size(self) -> int:
+        """Actor DP size, queried once: the dispatch mapping is fixed for the worker group's lifetime."""
+        if not hasattr(self.actor_rollout_wg, "_query_dispatch_info"):
+            return 1
+        info = self.actor_rollout_wg._query_dispatch_info("actor")
+        if isinstance(info, dict):
+            return max(info.values()) + 1 if info else 1
+        if isinstance(info, list | tuple | set):
+            return max(info) + 1 if info else 1
+        # ONE_TO_ALL dispatch may return a scalar dp rank per worker.
+        return int(info) + 1 if info is not None else 1
+
     def _balance_batch(self, data: DataProto, metrics: dict) -> DataProto:
-        dp_size = 1
-        if hasattr(self.actor_rollout_wg, "_query_dispatch_info"):
-            info = self.actor_rollout_wg._query_dispatch_info("actor")
-            if isinstance(info, dict):
-                dp_size = max(info.values()) + 1 if info else 1
-            elif isinstance(info, list | tuple | set):
-                dp_size = max(info) + 1 if info else 1
-            else:
-                # ONE_TO_ALL dispatch may return a scalar dp rank per worker.
-                dp_size = int(info) + 1 if info is not None else 1
+        dp_size = self._actor_dp_size
         actor_global_mini_batch_size = self.config.actor_rollout_ref.actor.ppo_mini_batch_size
         actor_global_mini_batch_size *= self.config.actor_rollout_ref.rollout.n
         if self.trainer_mode == "separate_async":
