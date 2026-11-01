@@ -527,16 +527,14 @@ async def test_failed_wake_skips_admission_resume():
 
 
 # ---------------------------------------------------------------------------
-# sleep level: AR-only engines discard weights at level 2 when vllm-omni allows it
+# sleep level: AR-only engines discard weights at level 2 with the opt-in
 # ---------------------------------------------------------------------------
 
 
 class _StageEngine(_FakeAsyncOmni):
-    def __init__(self, stage_types, supports_ar_level2_wake=True):
+    def __init__(self, stage_types):
         super().__init__()
         self.stage_types = list(stage_types)
-        if supports_ar_level2_wake:
-            self.SUPPORTS_AR_LEVEL2_WAKE = True
 
     def _split_stage_ids_by_type(self, stage_ids=None):
         ids = range(len(self.stage_types))
@@ -603,9 +601,3 @@ async def test_ar_only_engine_keeps_level_one_without_opt_in(monkeypatch, value)
     else:
         monkeypatch.setenv("VLLM_OMNI_AR_SLEEP_DISCARD_WEIGHTS", value)
     assert _sleep_level_server(_StageEngine(["llm"]))._resolve_sleep_level() == 1
-
-
-async def test_ar_only_engine_keeps_level_one_when_vllm_omni_cannot_wake_after_level_two(discard_weights):
-    # vllm-omni without AR level-2 wake raises NotImplementedError on the next wake_up.
-    engine = _StageEngine(["llm"], supports_ar_level2_wake=False)
-    assert _sleep_level_server(engine)._resolve_sleep_level() == 1
