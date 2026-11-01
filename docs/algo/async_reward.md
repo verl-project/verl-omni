@@ -1,7 +1,7 @@
 (async_reward)=
 # Async Reward for Diffusion Training
 
-Last updated: 07/17/2026
+Last updated: 11/01/2026
 
 Async reward lets VeRL-Omni score completed rollout samples through reward-loop
 workers while other samples are still being generated. It is useful when reward
@@ -78,6 +78,7 @@ reward.num_workers=$((NUM_GPUS_REWARD / REWARD_TP))
 reward.reward_model.enable=True
 reward.reward_model.model_path=$reward_model_name
 reward.reward_model.rollout.name=$REWARD_ENGINE
+reward.reward_model.rollout.response_length=256
 reward.reward_model.enable_resource_pool=True
 reward.reward_model.nnodes=1
 reward.reward_model.n_gpus_per_node=$NUM_GPUS_REWARD
@@ -97,6 +98,7 @@ The most important settings live under `reward`:
 | `reward.reward_model.n_gpus_per_node` / `reward.reward_model.nnodes` | Size of the reward-model resource pool. |
 | `reward.num_workers` | Number of reward-loop workers. Usually set to `NUM_GPUS_REWARD / REWARD_TP`. |
 | `reward.reward_model.rollout.tensor_model_parallel_size` | Tensor-parallel size for reward-model inference. Increase this when the reward model does not fit on one GPU. |
+| `reward.reward_model.rollout.response_length` | Output budget of a generative judge: the visual reward managers forward it to the scorer as `max_tokens`, and the server uses it as the default `max_new_tokens`. The inherited default of 2048 is sized for reasoning judges; OCR transcription needs a few dozen tokens, and a small VLM judge occasionally falls into a repetition loop that runs to the limit at single-sequence decode speed, so the OCR recipes set 256. |
 | `reward.custom_reward_function.path` / `name` | Reward function used by the reward manager. It may be a normal function or an `async def` coroutine. |
 | `reward.reward_manager.name` / `module.path` | Optional reward manager override, for example `MultiVisualRewardManager` when combining multiple rewards. |
 

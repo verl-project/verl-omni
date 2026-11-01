@@ -1,6 +1,6 @@
 # Named Reward Models
 
-Last updated: 10/27/2026
+Last updated: 11/01/2026
 
 This guide describes how to configure and extend named model-backed rewards
 under `reward.models` in `verl-omni`. For the general Reward Loop interface and
@@ -193,9 +193,25 @@ Caller overrides remain last. This recipe opts into
 response length and optional deterministic seed from the model's rollout
 settings, falling back to `reward.reward_model.rollout`. Explicit scorer
 `sampling_params` take precedence. Existing named rewards without this opt-in
-keep their scorer defaults; OCR still defaults to 4096 output tokens and honors
-`GENRM_OCR_SEED`. The opt-in preserves the legacy visual manager's seed behavior:
-an environment seed is excluded unless rollout determinism supplies a seed.
+keep their scorer defaults; OCR defaults to 256 output tokens (or
+`GENRM_OCR_MAX_TOKENS`) and honors `GENRM_OCR_SEED`. The opt-in preserves the
+legacy visual manager's seed behavior: an environment seed is excluded unless
+rollout determinism supplies a seed.
+
+### Judge output budget
+
+`reward.models.<name>.rollout.response_length` is the output budget of a
+generative judge: with the opt-in above it is forwarded as the request's
+`max_tokens`, and the engine also uses it as the server-side default
+`max_new_tokens`. Its inherited default of 2048 comes from
+`reward.reward_model.rollout` and is sized for reasoning judges. OCR
+transcriptions are a few dozen tokens, and a small VLM judge occasionally falls
+into a repetition loop on an illegible image; without a budget that one request
+runs to the limit at single-sequence decode speed while the whole step waits.
+The OCR recipes therefore set `response_length=256`. Precedence, highest first:
+`reward.reward_functions.<term>.sampling_params`, the model's
+`rollout.response_length` (when `use_rollout_sampling_params=true`), the
+scorer's environment override, the scorer default.
 
 ## Model-to-reward binding
 

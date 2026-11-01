@@ -372,7 +372,7 @@ class TestMultiRewardManagerRunSingle:
         )
         manager.loop.run_until_complete(manager.run_single(data))
         previous, current = requests
-        assert previous["max_tokens"] == 4096
+        assert previous["max_tokens"] == 256
         assert previous["seed"] == 777
         if not inherit:
             assert current == previous
