@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from .fsdp import (  # noqa: F401
+    ARTDiffusersFSDPEngine,
     DiffusersFSDPEngine,
     DPODiffusersFSDPEngine,
     NFTDiffusersFSDPEngine,
@@ -35,6 +36,7 @@ except ImportError:
 
 __all__ = [
     "PPODiffusersFSDPEngine",
+    "ARTDiffusersFSDPEngine",
     "DPODiffusersFSDPEngine",
     "NFTDiffusersFSDPEngine",
     "DiffusersFSDPEngine",

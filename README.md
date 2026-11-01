@@ -93,9 +93,9 @@ Visit our [documentation](https://verl-omni.readthedocs.io/en/latest/index.html)
     <th>Status</th>
   </tr>
   <tr>
-    <td rowspan="6">Qwen-Image & Qwen-Image-Edit</td>
-    <td rowspan="6">Diffusion generator</td>
-    <td rowspan="6">Text/Image → Image</td>
+    <td rowspan="7">Qwen-Image & Qwen-Image-Edit</td>
+    <td rowspan="7">Diffusion generator</td>
+    <td rowspan="7">Text/Image → Image</td>
     <td>FlowGRPO (+ CPS/SDE)</td>
     <td>✅</td>
   </tr>
@@ -120,6 +120,10 @@ Visit our [documentation](https://verl-omni.readthedocs.io/en/latest/index.html)
     <td>✅</td>
   </tr>
   <tr>
+    <td><a href="docs/algo/diffusionart.md">DiffusionART</a></td>
+    <td>WIP</td>
+  </tr>
+  <tr>
     <td>Wan2.2</td>
     <td>Diffusion generator</td>
     <td>Text → Video</td>
@@ -127,9 +131,9 @@ Visit our [documentation](https://verl-omni.readthedocs.io/en/latest/index.html)
     <td>✅</td>
   </tr>
   <tr>
-    <td rowspan="2">LTX2.3</td>
-    <td rowspan="2">Diffusion generator</td>
-    <td rowspan="2">Text → Video + Audio</td>
+    <td rowspan="3">LTX2.3</td>
+    <td rowspan="3">Diffusion generator</td>
+    <td rowspan="3">Text → Video + Audio</td>
     <td>FlowGRPO</td>
     <td>✅</td>
   </tr>
@@ -138,15 +142,23 @@ Visit our [documentation](https://verl-omni.readthedocs.io/en/latest/index.html)
     <td>✅</td>
   </tr>
   <tr>
-    <td rowspan="2"><b>MiniMax-H3</b></td>
-    <td rowspan="2">Diffusion generator</td>
-    <td rowspan="2">Any → Video + Audio</td>
+    <td><a href="docs/algo/diffusionart.md">DiffusionART</a></td>
+    <td>WIP</td>
+  </tr>
+  <tr>
+    <td rowspan="3"><b>MiniMax-H3</b></td>
+    <td rowspan="3">Diffusion generator</td>
+    <td rowspan="3">Any → Video + Audio</td>
     <td>DiffusionNFT</td>
     <td>✅</td>
   </tr>
   <tr>
     <td>FlowGRPO</td>
     <td>✅</td>
+  </tr>
+  <tr>
+    <td>DiffusionART</td>
+    <td>WIP</td>
   </tr>
   <tr>
     <td rowspan="2"><b>Boogu-Image</b></td>

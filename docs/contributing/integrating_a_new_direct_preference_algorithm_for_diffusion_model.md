@@ -1,6 +1,6 @@
 # How to Integrate a New Direct-Preference Algorithm for Diffusion Model
 
-Last updated: 07/06/2026.
+Last updated: 10/12/2026.
 
 This guide explains how to add a direct-preference diffusion algorithm to
 VeRL-Omni. Direct-preference algorithms train from final samples, rewards, or
@@ -50,6 +50,7 @@ into the forward-process actor batch.
 | PPO-like policy gradient | FlowGRPO, MixGRPO, GRPO-Guard | Online rollout trajectories | `PolicyGradientRayTrainer` | `PPODiffusersFSDPEngine`, reverse logprob tensors |
 | Offline direct preference | Offline DPO | Precomputed win/lose pairs | `DirectPreferenceRayTrainer` | `DPODiffusersFSDPEngine`, paired noisy-latent tensors |
 | Online direct preference | DiffusionNFT | Live rollout + reward | `DirectPreferenceRayTrainer` | `NFTDiffusersFSDPEngine`, clean latents + forward timesteps |
+| Online direct preference (reverse states) | DiffusionART | Live ODE rollout + reward | `DirectPreferenceRayTrainer` | `ARTDiffusersFSDPEngine`, cached ODE states + per-prompt guidance |
 
 ---
 
