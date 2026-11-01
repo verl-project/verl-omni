@@ -141,5 +141,7 @@ sample, so micro batches do not have to hold whole rollout groups.
   from vanzll/DiffusionART @ `8652c8a`; math matches to fp32 round-off; the
   reference's `algorithms/` code is unchanged through `b51e6ec`).
 - GPU: both GPU smoke entries (tiny Qwen-Image and tiny MiniMax-H3) pass on
-  8×B200. The LTX-2.3 and MiniMax-H3 comparison runs are reported in #744; no
-  convergence claim is made for any recipe here.
+  8×B200. The LTX-2.3 and MiniMax-H3 comparison runs are reported in #744; they
+  predate the per-prompt update split and zero-signal restoration the recipes now
+  use, and the smokes have not been re-run since. No convergence claim is made for
+  any recipe here.

@@ -186,14 +186,15 @@ def test_minimax_h3_smoke_config_rejects_invalid_sp_partition() -> None:
 
 
 @pytest.mark.parametrize("num_gpus", [2, 8])
-@pytest.mark.parametrize("algorithm, factor", [("flow_grpo", 1), ("diffusion_art", 2)])
-def test_minimax_h3_smoke_dummy_data_covers_one_rollout_batch(num_gpus, algorithm, factor) -> None:
+@pytest.mark.parametrize("algorithm", ["flow_grpo", "diffusion_art"])
+def test_minimax_h3_smoke_dummy_data_covers_one_rollout_batch(num_gpus, algorithm) -> None:
     """The dummy parquet is sized by ``_train_batch_size``; it must equal the trainer's ``data.train_batch_size``.
 
-    Regression: DiffusionART doubles the batch (two disjoint updates), and the parquet was sized without the factor,
-    so at 8 GPUs the dataloader was empty (``steps_per_epoch == 0`` -> ZeroDivisionError in ``fit``).
+    Regression: the parquet was once sized without DiffusionART's batch, so at 8 GPUs the dataloader was empty
+    (``steps_per_epoch == 0`` -> ZeroDivisionError in ``fit``). DiffusionART's batch is two mini batches of prompts
+    (two disjoint updates, each with one of every prompt's two t2va trajectories); FlowGRPO's is ``n`` of them.
     """
-    expected = num_gpus * 2 * factor  # t2va samples two responses per prompt
+    expected = num_gpus * 2  # mini batch = num_gpus prompts; two ART updates / t2va samples two responses
     assert _train_batch_size(num_gpus, "t2va", algorithm) == expected
     overrides = _hydra_overrides(
         algorithm=algorithm,

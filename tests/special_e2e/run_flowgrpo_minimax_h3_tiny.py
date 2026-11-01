@@ -137,10 +137,11 @@ def _rollout_n(task: str) -> int:
 def _train_batch_size(num_gpus: int, task: str, algorithm: str, micro_bsz_per_gpu: int = 1) -> int:
     """Prompts per rollout batch; the dummy parquet must hold at least this many rows.
 
-    DiffusionART applies two disjoint updates per rollout batch, so its batch is two mini batches of prompts.
+    DiffusionART applies two disjoint updates per rollout batch, so its batch is exactly two mini batches of
+    prompts (each update then gets one of every prompt's two trajectories).
     """
     mini_bsz = max(1, num_gpus * micro_bsz_per_gpu)
-    return mini_bsz * _rollout_n(task) * (2 if algorithm == "diffusion_art" else 1)
+    return mini_bsz * (2 if algorithm == "diffusion_art" else _rollout_n(task))
 
 
 def _hydra_overrides(

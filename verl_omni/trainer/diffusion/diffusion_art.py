@@ -25,6 +25,9 @@ Velocity convention: verl-omni's flow-matching adapters predict ``v = noise - x0
 convention-free because it only involves differences of velocities.
 """
 
+import hashlib
+import random
+
 import numpy as np
 import torch
 
@@ -32,9 +35,11 @@ __all__ = [
     "ART_LOSS_SPACES",
     "ART_MASK_METRICS",
     "art_guidance",
+    "art_high_noise_positions",
     "art_loss",
     "art_pairwise_labels",
     "art_reference_drift",
+    "art_update_window_order",
     "group_index_from_uid",
 ]
 
@@ -318,3 +323,61 @@ def art_loss(
         "movement_score": movement_score,
         "outward_alignment": outward_alignment,
     }
+
+
+def art_update_window_order(group_index: torch.Tensor, num_updates: int, dp_size: int) -> torch.Tensor:
+    """Row order that gives every optimizer update ``K / num_updates`` trajectories of every prompt.
+
+    The reference splits each prompt's ``K`` trajectories evenly between its disjoint update windows
+    (vanzll/DiffusionART ``prompt_disjoint_windows``, 2026-10-17) instead of giving each update all ``K``
+    trajectories of half the prompts. verl-omni hands rank ``r`` the ``r``-th contiguous ``1 / dp_size`` of
+    the batch and cuts it into ``num_updates`` contiguous mini batches, so window ``w`` of rank ``r`` is the
+    ``r``-th slice of window ``w``'s rows. Within a prompt, trajectories keep their order (the reference's
+    video setting). Guidance must already be computed over the complete groups.
+
+    Args:
+        group_index: ``(B,)`` prompt index of every row (``group_index_from_uid``).
+        num_updates: optimizer updates per rollout batch (mini batches).
+        dp_size: data-parallel ranks the actor batch is split across.
+
+    Returns:
+        ``(B,)`` int64 permutation; ``batch[order]`` is the reordered batch.
+    """
+    group_index = group_index.reshape(-1).cpu()
+    batch_size = group_index.numel()
+    counts = torch.bincount(group_index)
+    group_size = int(counts[0]) if counts.numel() else 0
+    if batch_size == 0 or not bool((counts == group_size).all()):
+        raise ValueError(f"Every prompt group must have the same size, got sizes {counts.tolist()}.")
+    if group_size % num_updates:
+        raise ValueError(
+            f"Each prompt's {group_size} trajectories must split evenly into {num_updates} updates per rollout."
+        )
+    if batch_size % (num_updates * dp_size):
+        raise ValueError(f"{batch_size} rows do not split into {num_updates} updates x {dp_size} ranks.")
+    per_window = group_size // num_updates
+    # Rows of each group in their original order; position j within its group puts a row in window j // per_window.
+    members = torch.argsort(group_index, stable=True).view(-1, group_size)
+    windows = [members[:, w * per_window : (w + 1) * per_window].reshape(-1) for w in range(num_updates)]
+    rows_per_rank_window = batch_size // (num_updates * dp_size)
+    return torch.cat(
+        [
+            window[rank * rows_per_rank_window : (rank + 1) * rows_per_rank_window]
+            for rank in range(dp_size)
+            for window in windows
+        ]
+    )
+
+
+def art_high_noise_positions(seed: int, attempt: int, pool: int = 4, count: int = 2) -> tuple[int, ...]:
+    """DiffusionART-Flash: ``count`` distinct ODE positions from the first ``pool``, in chronological order.
+
+    Mirrors the reference's ``timestep_selection: high_noise`` (vanzll/DiffusionART ``art_training_positions``):
+    a private RNG keyed by the experiment seed and the rollout attempt picks one pair shared by every rank,
+    trajectory and update of that rollout, without consuming any training RNG, so retries and resumes
+    reproduce it.
+    """
+    if pool < count:
+        raise ValueError(f"Cannot choose {count} positions from a pool of {pool}.")
+    digest = hashlib.sha256(f"diffusionart/high_noise/v1:{seed}:{attempt}".encode()).digest()
+    return tuple(sorted(random.Random(int.from_bytes(digest, "big")).sample(range(pool), count)))

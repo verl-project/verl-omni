@@ -33,7 +33,14 @@ from verl import DataProto
 from verl.trainer.ppo.core_algos import get_policy_loss_fn
 from verl.utils import tensordict_utils as tu
 
-from verl_omni.trainer.diffusion.diffusion_art import art_guidance, art_loss, art_pairwise_labels, group_index_from_uid
+from verl_omni.trainer.diffusion.diffusion_art import (
+    art_guidance,
+    art_high_noise_positions,
+    art_loss,
+    art_pairwise_labels,
+    art_update_window_order,
+    group_index_from_uid,
+)
 from verl_omni.workers.config import DiffusionActorConfig
 
 logger = logging.getLogger(__name__)
@@ -2152,7 +2159,10 @@ class DiffusionARTLoss(DiffusionLossFn):
         batch (``ppo_mini_batch_size * n / dp`` samples) must be divisible by
         ``ppo_micro_batch_size_per_gpu``, which the engine otherwise asserts only after the first rollout.
         The paper's two-update restoration follows from ``ppo_mini_batch_size`` splitting the rollout batch
-        in two; any other split only logs a warning so ablations stay possible.
+        in two; any other split only logs a warning so ablations stay possible. Splitting every prompt's
+        trajectories across those updates (``art_split_groups_across_updates``) needs ``n`` divisible by the
+        number of updates and no actor shuffle; pairwise ART needs an even ``n``; Flash
+        (``art_timestep_selection=high_noise``) replaces ``timestep_fraction``.
         """
         DiffusionLossFn.validate_trainer_config(config)
         algorithm_cfg = config.algorithm
@@ -2238,8 +2248,7 @@ class DiffusionARTLoss(DiffusionLossFn):
         # micro batches need not hold whole rollout groups.
         n = int(rollout_cfg.n)
         micro = actor_cfg.get("ppo_micro_batch_size_per_gpu", None)
-        sp_size = int(OmegaConf.select(actor_cfg, "fsdp_config.ulysses_sequence_parallel_size", default=1) or 1)
-        dp_size = max(int(config.trainer.n_gpus_per_node) * int(config.trainer.nnodes) // sp_size, 1)
+        dp_size = DiffusionARTLoss._actor_dp_size(config)
         mini_samples = int(actor_cfg.ppo_mini_batch_size) * n
         if mini_samples % dp_size:
             problems.append(
@@ -2252,14 +2261,36 @@ class DiffusionARTLoss(DiffusionLossFn):
                 f"{actor_cfg.ppo_mini_batch_size} x rollout.n {n} / dp {dp_size}), which must be divisible by "
                 f"ppo_micro_batch_size_per_gpu={micro}; set it to a divisor of {per_gpu} or raise ppo_mini_batch_size"
             )
-        if problems:
-            raise ValueError("DiffusionART config is not supported: " + "; ".join(problems) + ".")
-
         update_prompts = int(config.data.train_batch_size)
         if bool(OmegaConf.select(config, "trainer.use_v1", default=False)):
             mode = OmegaConf.select(config, "trainer.v1.trainer_mode", default="sync")
             update_prompts //= int(OmegaConf.select(config, f"trainer.v1.{mode}.parameter_sync_step", default=1) or 1)
         mini = int(actor_cfg.ppo_mini_batch_size)
+        num_updates = update_prompts // mini if update_prompts % mini == 0 else 1
+        if algorithm_cfg.get("art_split_groups_across_updates", True) and num_updates > 1:
+            # prepare_actor_batch reorders rows for the trainers' contiguous mini-batch split; shuffling would undo it.
+            if n % num_updates:
+                problems.append(
+                    f"rollout.n={n} must be divisible by the {num_updates} updates per rollout when "
+                    "algorithm.art_split_groups_across_updates is true (each update gets n / updates trajectories "
+                    "of every prompt)"
+                )
+            if actor_cfg.get("shuffle", False):
+                problems.append(
+                    "actor_rollout_ref.actor.shuffle must be False when algorithm.art_split_groups_across_updates is "
+                    "true (shuffling would undo the per-prompt update split)"
+                )
+        if (
+            algorithm_cfg.get("art_timestep_selection", "configured") == "high_noise"
+            and float(algorithm_cfg.get("timestep_fraction", 1.0)) != 1.0
+        ):
+            problems.append(
+                "algorithm.timestep_fraction must be 1.0 with art_timestep_selection=high_noise (Flash fixes the "
+                "trained positions to two of the first four)"
+            )
+        if problems:
+            raise ValueError("DiffusionART config is not supported: " + "; ".join(problems) + ".")
+
         if update_prompts != 2 * mini:
             logger.warning(
                 "DiffusionART (paper Sec. 4.2) applies two disjoint updates per rollout batch, i.e. "
@@ -2320,13 +2351,53 @@ class DiffusionARTLoss(DiffusionLossFn):
         return None if value is None else int(value)
 
     @classmethod
-    def _step_seed(cls, batch: DataProto, base_seed: int) -> int:
-        """Deterministic per-rollout seed: ``data_loader_seed + global_steps``, or a hash of the ``uid``s when the
-        batch carries no step (uids are fresh every rollout)."""
+    def _rollout_attempt(cls, batch: DataProto) -> int:
+        """The rollout's ``global_steps``, or a hash of its ``uid``s when the batch carries no step (uids are fresh
+        every rollout)."""
         global_steps = cls._global_step(batch)
         if global_steps is not None:
-            return base_seed + global_steps
-        return base_seed + zlib.crc32("".join(map(str, batch.non_tensor_batch["uid"])).encode())
+            return global_steps
+        return zlib.crc32("".join(map(str, batch.non_tensor_batch["uid"])).encode())
+
+    @classmethod
+    def _step_seed(cls, batch: DataProto, base_seed: int) -> int:
+        """Deterministic per-rollout seed: ``data_loader_seed + global_steps`` (see ``_rollout_attempt``)."""
+        return base_seed + cls._rollout_attempt(batch)
+
+    @staticmethod
+    def _actor_dp_size(config: Any) -> int:
+        """Data-parallel ranks of the actor: the trainer's GPUs over the Ulysses sequence-parallel size."""
+        actor_cfg = config.actor_rollout_ref.actor
+        sp_size = int(OmegaConf.select(actor_cfg, "fsdp_config.ulysses_sequence_parallel_size", default=1) or 1)
+        return max(int(config.trainer.n_gpus_per_node) * int(config.trainer.nnodes) // sp_size, 1)
+
+    @classmethod
+    def _split_groups_across_updates(cls, batch: DataProto, group_index: torch.Tensor, config: Any) -> None:
+        """Reorder rows so every optimizer update gets ``K / updates`` trajectories of every prompt.
+
+        The trainers cut the actor batch into ``ppo_mini_batch_size * n`` row mini batches (after the contiguous
+        split across data-parallel ranks), which would otherwise give each update all ``K`` trajectories of half
+        the prompts (``art_update_window_order``). A no-op for a single update per call.
+        """
+        actor_cfg = config.actor_rollout_ref.actor
+        rollout_cfg = getattr(config.actor_rollout_ref, "rollout", None)
+        mini = getattr(actor_cfg, "ppo_mini_batch_size", None)
+        n = getattr(rollout_cfg, "n", None) if rollout_cfg is not None else None
+        if mini is None or n is None or getattr(config, "trainer", None) is None:
+            return
+        mini_rows = int(mini) * int(n)
+        batch_size = len(batch)
+        if batch_size % mini_rows:
+            logger.warning(
+                "DiffusionART: %d rows are not a multiple of ppo_mini_batch_size * rollout.n = %d; prompt groups are "
+                "not split across updates.",
+                batch_size,
+                mini_rows,
+            )
+            return
+        num_updates = batch_size // mini_rows
+        if num_updates > 1:
+            batch.reorder(art_update_window_order(group_index, num_updates, cls._actor_dp_size(config)))
 
     @staticmethod
     def _trajectory(batch: DataProto) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -2444,15 +2515,19 @@ class DiffusionARTLoss(DiffusionLossFn):
         Writes ``train_latents`` ``(B, S, *latent)``, ``train_timesteps`` / ``train_timesteps_next``
         ``(B, S)`` (``S`` states per rollout drawn from the first ``T - 1`` ODE positions by default,
         ``algorithm.art_exclude_final_step``, times ``algorithm.timestep_fraction``, reseeded per rollout
-        with ``data_loader_seed + global_steps``), ``art_guidance``
+        with ``data_loader_seed + global_steps``; or, with ``algorithm.art_timestep_selection=high_noise``, one
+        pair of the first four positions per rollout), ``art_guidance``
         ``(B, *latent)`` shared by all rows of a prompt (per modality for audio-video latents), the
-        pairwise ``art_anchor`` flags, optionally ``train_latents_next`` for the rollout-velocity
+        ``art_anchor`` flags (pairwise ties, or constant-reward groups with ``algorithm.art_restore_zero_signal``),
+        optionally ``train_latents_next`` for the rollout-velocity
         diagnostic, ``advantages`` / ``returns`` / ``sample_level_rewards`` for logging, and replicated
         whole-rollout scalars (``batch_metric_prefix``) that the loss reports as ``actor/<name>``: OmniNFT's
         ``reward/<name>/{mean,std,min,max}`` and ``reward/sum/{mean,std}`` when raw components are available,
         plus per-modality ``covariance_rms``, ``inactive_group_frac`` and ``routed_reward_{mean,std}``. With
         ``algorithm.art_sample_log_dir`` one JSON line per sample is written to ``<dir>/step_<N>.jsonl``. The raw
-        trajectory tensors are dropped afterwards so the worker batch stays as small as DiffusionNFT's.
+        trajectory tensors are dropped afterwards so the worker batch stays as small as DiffusionNFT's. Finally,
+        with ``algorithm.art_split_groups_across_updates`` the rows are reordered so every optimizer update gets
+        ``n / updates`` trajectories of every prompt.
         """
         algorithm_cfg = config.algorithm
         actor_cfg = config.actor_rollout_ref.actor
@@ -2478,6 +2553,7 @@ class DiffusionARTLoss(DiffusionLossFn):
             batch, reward_tensor, config, [name for name, _ in segments]
         )
         pairwise = bool(algorithm_cfg.get("art_pairwise_reward", False))
+        restore_zero_signal = not pairwise and bool(algorithm_cfg.get("art_restore_zero_signal", False))
         step_seed = cls._step_seed(batch, int(actor_cfg.data_loader_seed))
 
         guidance = torch.zeros_like(endpoints)
@@ -2500,6 +2576,8 @@ class DiffusionARTLoss(DiffusionLossFn):
             direction, active, covariance_rms = art_guidance(
                 endpoints[:, rows], rewards, group_index, num_groups, return_covariance_rms=True
             )
+            if restore_zero_signal:
+                anchor = ~active[group_index]  # reference restore_zero_signal: constant-reward groups keep v_old
             row_direction = direction[group_index] * decided.view(-1, *([1] * (direction.ndim - 1))).float()
             guidance[:, rows] = row_direction
             anchors.append(anchor)
@@ -2531,13 +2609,22 @@ class DiffusionARTLoss(DiffusionLossFn):
                 logger.warning("DiffusionART: could not write per-sample records to %s: %s", sample_log_dir, exc)
 
         pool = num_steps - 1 if algorithm_cfg.get("art_exclude_final_step", True) and num_steps > 1 else num_steps
-        # Fresh random subset of ODE positions per rollout batch (paper Algorithm 1); DiffusionNFT reseeds the same
-        # helper with the fixed data_loader_seed every step, which would train the same positions each step.
-        step_index = DiffusionNFTLoss._select_train_timesteps(
-            torch.arange(pool).expand(batch_size, -1),
-            timestep_fraction=algorithm_cfg.timestep_fraction,
-            seed=step_seed,
-        )
+        if algorithm_cfg.get("art_timestep_selection", "configured") == "high_noise":
+            # DiffusionART-Flash: two of the first four ODE positions, one pair per rollout for every row and rank.
+            if pool < 4:
+                raise ValueError(
+                    f"art_timestep_selection=high_noise needs 4 eligible ODE positions, the rollout has {pool}."
+                )
+            positions = art_high_noise_positions(int(actor_cfg.data_loader_seed), cls._rollout_attempt(batch))
+            step_index = torch.tensor(positions, dtype=torch.long).repeat(batch_size, 1)
+        else:
+            # Fresh random subset of ODE positions per rollout batch (paper Algorithm 1); DiffusionNFT reseeds the
+            # same helper with the fixed data_loader_seed every step, which would train the same positions each step.
+            step_index = DiffusionNFTLoss._select_train_timesteps(
+                torch.arange(pool).expand(batch_size, -1),
+                timestep_fraction=algorithm_cfg.timestep_fraction,
+                seed=step_seed,
+            )
         num_train = step_index.shape[1]
         next_timesteps = torch.cat([all_timesteps[:, 1:], torch.zeros_like(all_timesteps[:, :1])], dim=1)
         latent_index = step_index.view(batch_size, num_train, *([1] * (states.ndim - 2))).expand(
@@ -2572,7 +2659,7 @@ class DiffusionARTLoss(DiffusionLossFn):
             batch.batch["train_segment_timesteps"] = segment_timesteps.gather(1, segment_index)
             batch.batch["train_segment_timesteps_next"] = segment_next.gather(1, segment_index)
         batch.batch["art_guidance"] = guidance
-        if pairwise:
+        if pairwise or restore_zero_signal:
             batch.batch["art_anchor"] = anchors[0] if len(anchors) == 1 else torch.stack(anchors, dim=1)
         batch.batch["latents_clean"] = endpoints
         batch.batch["advantages"] = advantages[:, None].expand(-1, num_train)
@@ -2581,6 +2668,8 @@ class DiffusionARTLoss(DiffusionLossFn):
         for key in ("all_latents", "all_next_latents", "all_log_probs", "all_segment_timesteps"):
             if key in batch.batch.keys():
                 del batch.batch[key]
+        if algorithm_cfg.get("art_split_groups_across_updates", True):
+            cls._split_groups_across_updates(batch, group_index, config)
         return batch
 
 

@@ -46,6 +46,9 @@ class DiffusionAlgoConfig(BaseConfig):
     art_log_rollout_velocity_gap: bool = False
     art_modality_reward_weights: Optional[dict] = None
     art_sample_log_dir: Optional[str] = None
+    art_split_groups_across_updates: bool = True
+    art_restore_zero_signal: bool = False
+    art_timestep_selection: str = "configured"
     paired_preference: bool = False  # True for pair-based algorithms (e.g. DPO)
     rollout_correction: RolloutCorrectionConfig = field(default_factory=RolloutCorrectionConfig)
 
@@ -62,6 +65,10 @@ class DiffusionAlgoConfig(BaseConfig):
             raise ValueError(f"old_policy_decay must be in [0, 1], got {self.old_policy_decay}.")
         if self.old_policy_update_interval <= 0:
             raise ValueError(f"old_policy_update_interval must be positive, got {self.old_policy_update_interval}.")
+        if self.art_timestep_selection not in ("configured", "high_noise"):
+            raise ValueError(
+                f"art_timestep_selection must be configured or high_noise, got {self.art_timestep_selection!r}."
+            )
         if not 0 < self.timestep_fraction <= 1:
             raise ValueError(f"timestep_fraction must be in (0, 1], got {self.timestep_fraction}.")
         if self.train_timestep_range is not None:

@@ -21,14 +21,18 @@ pin each piece to the paper's equations (arXiv:2610.12572, Eq. 5-8 and App. C.2-
 
 import math
 
+import numpy as np
 import pytest
 import torch
 
 from verl_omni.trainer.diffusion.diffusion_art import (
     art_guidance,
+    art_high_noise_positions,
     art_loss,
     art_pairwise_labels,
     art_reference_drift,
+    art_update_window_order,
+    group_index_from_uid,
 )
 
 C, H, W = 2, 3, 3
@@ -307,3 +311,53 @@ def test_reference_drift_edge_handling_matches_the_reference():
     torch.testing.assert_close(tiny.double(), expected_tiny, rtol=1e-4, atol=0)
     with pytest.raises(ValueError, match="sigma > sigma_next"):
         art_reference_drift(energy, torch.tensor([0.5, 0.5, 0.5]), torch.tensor([0.5, 0.4, 0.6]), nu)
+
+
+def _uid_groups(uid):
+    return group_index_from_uid(np.array(uid, dtype=object))[0]
+
+
+def test_update_window_order_gives_every_update_half_of_every_prompt():
+    """One rank: update 1 gets the first half of every prompt's trajectories, update 2 the second half."""
+    group_index = _uid_groups(["a"] * 4 + ["b"] * 4)
+    order = art_update_window_order(group_index, num_updates=2, dp_size=1)
+    assert order.tolist() == [0, 1, 4, 5, 2, 3, 6, 7]
+
+
+def test_update_window_order_slices_each_window_per_rank():
+    """Rank r holds the r-th slice of every window, so all its mini batches cover the same prompts."""
+    group_index = _uid_groups([p for p in "abcd" for _ in range(4)])
+    order = art_update_window_order(group_index, num_updates=2, dp_size=2)
+    # rank 0: (a0 a1 b0 b1 | a2 a3 b2 b3), rank 1: (c0 c1 d0 d1 | c2 c3 d2 d3)
+    assert order.tolist() == [0, 1, 4, 5, 2, 3, 6, 7, 8, 9, 12, 13, 10, 11, 14, 15]
+    # One prompt per rank is already split across that rank's two mini batches: the order is unchanged.
+    assert art_update_window_order(group_index, num_updates=2, dp_size=4).tolist() == list(range(16))
+
+
+def test_update_window_order_handles_non_contiguous_groups():
+    group_index = _uid_groups(["a", "b", "a", "b"])
+    order = art_update_window_order(group_index, num_updates=2, dp_size=1)
+    assert order.tolist() == [0, 1, 2, 3]  # (a0 b0 | a1 b1)
+
+
+@pytest.mark.parametrize(
+    "uid, num_updates, dp_size, match",
+    [
+        (["a", "a", "b"], 1, 1, "same size"),
+        (["a", "a", "a", "b", "b", "b"], 2, 1, "split evenly"),
+        (["a", "a", "b", "b"], 2, 4, "do not split"),
+    ],
+)
+def test_update_window_order_rejects_layouts_it_cannot_split(uid, num_updates, dp_size, match):
+    with pytest.raises(ValueError, match=match):
+        art_update_window_order(_uid_groups(uid), num_updates, dp_size)
+
+
+def test_high_noise_positions_match_the_reference_selection():
+    """Golden values from vanzll/DiffusionART @ b51e6ec ``art_training_positions(high_noise)`` (seed 42)."""
+    expected = [(2, 3), (0, 2), (1, 3), (0, 1), (1, 3), (2, 3), (0, 1), (0, 2)]
+    assert [art_high_noise_positions(42, attempt) for attempt in range(1, 9)] == expected
+    seen = {art_high_noise_positions(seed, attempt) for seed in range(4) for attempt in range(1, 50)}
+    assert seen == {(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)}
+    with pytest.raises(ValueError, match="Cannot choose"):
+        art_high_noise_positions(0, 1, pool=1)

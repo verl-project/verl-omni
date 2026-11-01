@@ -108,6 +108,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     algorithm.global_std=true \
     algorithm.art_pairwise_reward=false \
     algorithm.art_exclude_final_step=true \
+    algorithm.art_restore_zero_signal=true \
     algorithm.art_log_rollout_velocity_gap=false \
     algorithm.art_modality_reward_weights=null \
     algorithm.art_sample_log_dir=$output_dir/train_samples \

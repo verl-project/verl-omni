@@ -29,6 +29,7 @@ import numpy as np
 import pytest
 import torch
 from hydra import compose, initialize_config_dir
+from omegaconf import OmegaConf
 from tensordict import TensorDict
 from verl import DataProto
 from verl.utils import tensordict_utils as tu
@@ -36,7 +37,7 @@ from verl.utils import tensordict_utils as tu
 import verl_omni
 from verl_omni.trainer.config.algorithm import DiffusionAlgoConfig
 from verl_omni.trainer.diffusion.diffusion_algos import DiffusionARTLoss, get_diffusion_loss_fn
-from verl_omni.trainer.diffusion.diffusion_art import art_loss
+from verl_omni.trainer.diffusion.diffusion_art import art_high_noise_positions, art_loss
 from verl_omni.workers.config import DiffusionActorConfig, DiffusionLossConfig
 from verl_omni.workers.utils.losses import diffusion_loss
 
@@ -225,6 +226,10 @@ def test_algorithm_config_exposes_art_knobs():
     cfg = DiffusionAlgoConfig()
     assert cfg.art_pairwise_reward is False and cfg.art_exclude_final_step is True
     assert cfg.art_log_rollout_velocity_gap is False and cfg.art_modality_reward_weights is None
+    assert cfg.art_split_groups_across_updates is True and cfg.art_restore_zero_signal is False
+    assert cfg.art_timestep_selection == "configured"
+    with pytest.raises(ValueError, match="art_timestep_selection"):
+        DiffusionAlgoConfig(art_timestep_selection="first")
     assert DiffusionAlgoConfig(art_modality_reward_weights={"video": {"a": 1.0}}).art_modality_reward_weights == {
         "video": {"a": 1.0}
     }
@@ -958,3 +963,124 @@ def test_validate_trainer_config_rejects_odd_groups_for_pairwise(n, ok):
     else:
         with pytest.raises(ValueError, match="must be even with algorithm.art_pairwise_reward"):
             DiffusionARTLoss.validate_trainer_config(config)
+
+
+def make_trainer_config(mini_prompts, n, gpus, **algorithm_kwargs):
+    """A DictConfig with what prepare_actor_batch reads for the per-prompt update split."""
+    algorithm = {
+        "norm_adv_by_std_in_grpo": True,
+        "global_std": True,
+        "timestep_fraction": 1.0,
+        "art_pairwise_reward": False,
+        "art_exclude_final_step": False,
+        **algorithm_kwargs,
+    }
+    return OmegaConf.create(
+        {
+            "algorithm": algorithm,
+            "actor_rollout_ref": {
+                "actor": {"data_loader_seed": 42, "ppo_mini_batch_size": mini_prompts, "shuffle": False},
+                "rollout": {"n": n},
+            },
+            "trainer": {"n_gpus_per_node": gpus, "nnodes": 1},
+        }
+    )
+
+
+def test_prepare_actor_batch_splits_every_prompt_across_the_two_updates():
+    """Reference (2026-10-17): each update gets n / 2 trajectories of every prompt, not all n of half the prompts."""
+    uid = ["a"] * 4 + ["b"] * 4
+    batch = make_rollout_batch(uid)
+    endpoints = batch.batch["all_latents"][:, -1].clone()
+    rewards = torch.tensor([0.1, 0.9, 0.3, 0.5, 0.2, 0.8, 0.4, 0.6])
+    result = DiffusionARTLoss.prepare_actor_batch(batch, rewards, make_trainer_config(mini_prompts=1, n=4, gpus=1))
+    order = [0, 1, 4, 5, 2, 3, 6, 7]
+    assert list(result.non_tensor_batch["uid"]) == [uid[i] for i in order]
+    # Rows move whole: every tensor still belongs to its own trajectory.
+    torch.testing.assert_close(result.batch["latents_clean"], endpoints[order])
+    torch.testing.assert_close(result.batch["sample_level_rewards"][:, 0], rewards[order])
+    first_update, second_update = result.non_tensor_batch["uid"][:4], result.non_tensor_batch["uid"][4:]
+    assert sorted(first_update) == sorted(second_update) == ["a", "a", "b", "b"]
+
+
+@pytest.mark.parametrize(
+    "mini_prompts, gpus, split, reordered",
+    [
+        (1, 1, True, True),
+        (1, 1, False, False),  # disabled
+        (2, 1, True, False),  # one update per rollout batch
+        (1, 2, True, False),  # one prompt per rank is already split across that rank's two mini batches
+    ],
+)
+def test_prepare_actor_batch_split_applies_only_with_several_updates(mini_prompts, gpus, split, reordered):
+    uid = ["a"] * 4 + ["b"] * 4
+    config = make_trainer_config(mini_prompts=mini_prompts, n=4, gpus=gpus, art_split_groups_across_updates=split)
+    result = DiffusionARTLoss.prepare_actor_batch(make_rollout_batch(uid), torch.linspace(0, 1, 8), config)
+    assert (list(result.non_tensor_batch["uid"]) != uid) == reordered
+
+
+def test_prepare_actor_batch_restores_constant_reward_groups_when_enabled():
+    """Reference ``restore_zero_signal`` (its video recipes): rows of zero-guidance groups train toward v_old."""
+    uid = ["a", "a", "c", "c"]
+    rewards = torch.tensor([0.1, 0.9, 0.2, 0.2])
+    plain = DiffusionARTLoss.prepare_actor_batch(make_rollout_batch(uid), rewards, make_config())
+    assert "art_anchor" not in plain.batch.keys()
+    restored = DiffusionARTLoss.prepare_actor_batch(
+        make_rollout_batch(uid), rewards, make_config(art_restore_zero_signal=True)
+    )
+    assert restored.batch["art_anchor"].tolist() == [False, False, True, True]
+    # Pairwise mode keeps its own tie anchors.
+    pairwise = DiffusionARTLoss.prepare_actor_batch(
+        make_rollout_batch(uid), rewards, make_config(art_restore_zero_signal=True, art_pairwise_reward=True)
+    )
+    assert pairwise.batch["art_anchor"].shape == (4,)
+
+
+def test_prepare_actor_batch_high_noise_trains_one_early_pair_per_rollout():
+    """DiffusionART-Flash: the reference's pair for (data_loader_seed, global_steps), the same for every row."""
+    uid = ["a", "a", "b", "b"]
+    batch = make_rollout_batch(uid, num_steps=6)
+    batch.meta_info["global_steps"] = 3
+    all_timesteps = batch.batch["all_timesteps"].clone()
+    result = DiffusionARTLoss.prepare_actor_batch(
+        batch, torch.tensor([0.1, 0.9, 0.3, 0.5]), make_config(art_timestep_selection="high_noise")
+    )
+    positions = list(art_high_noise_positions(42, 3))
+    assert result.batch["train_timesteps"].shape == (4, 2)
+    torch.testing.assert_close(result.batch["train_timesteps"], all_timesteps[:, positions])
+    short = make_rollout_batch(uid, num_steps=3)
+    with pytest.raises(ValueError, match="needs 4 eligible ODE positions"):
+        DiffusionARTLoss.prepare_actor_batch(
+            short, torch.tensor([0.1, 0.9, 0.3, 0.5]), make_config(art_timestep_selection="high_noise")
+        )
+
+
+@pytest.mark.parametrize(
+    "extra, match",
+    [
+        (["actor_rollout_ref.rollout.n=3"], "divisible by the 2 updates"),
+        (["actor_rollout_ref.actor.shuffle=true"], "shuffle must be False"),
+        (
+            ["algorithm.art_timestep_selection=high_noise", "algorithm.timestep_fraction=0.5"],
+            "timestep_fraction must be 1.0",
+        ),
+    ],
+)
+def test_validate_trainer_config_checks_split_and_flash_settings(extra, match):
+    overrides = [o for o in ART_OVERRIDES if not o.startswith("actor_rollout_ref.rollout.n=")]
+    if not any(o.startswith("actor_rollout_ref.rollout.n=") for o in extra):
+        overrides.append("actor_rollout_ref.rollout.n=8")
+    config = compose_trainer_config(overrides + extra)
+    with pytest.raises(ValueError, match=match):
+        DiffusionARTLoss.validate_trainer_config(config)
+
+
+def test_validate_trainer_config_allows_odd_n_without_the_split():
+    overrides = [o for o in ART_OVERRIDES if not o.startswith("actor_rollout_ref.rollout.n=")]
+    overrides += [
+        "actor_rollout_ref.rollout.n=3",
+        "algorithm.art_split_groups_across_updates=false",
+        "data.train_batch_size=16",
+        "actor_rollout_ref.actor.ppo_mini_batch_size=8",
+    ]
+    DiffusionARTLoss.validate_trainer_config(compose_trainer_config(overrides))

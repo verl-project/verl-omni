@@ -43,7 +43,9 @@ One training iteration (paper Algorithm 1):
    $u_t = x_0 - \epsilon$; verl-omni's adapters predict $v = \epsilon - x_0$, so
    the target implemented here is $v_{\text{old}}(s_t) - G(c)$.
 4. **Two-update restoration** (Sec. 4.2). The rollout batch is split into two
-   disjoint halves and one MSE step
+   disjoint halves, each holding $K/2$ trajectories of every prompt (the
+   reference's split since 2026-10-17; `algorithm.art_split_groups_across_updates`),
+   and one MSE step
    $\mathcal{L}(s_t) = w(s_t)\,\mathrm{MSE}(v_\theta(s_t), v^{\text{ART}}_{\text{tgt}}(s_t))$
    is taken on each. With $d(s_t) = v_\theta(s_t) - v_{\text{old}}(s_t)$ the
    second step's descent direction is
@@ -92,7 +94,7 @@ states instead of re-noised endpoints.
 |---|---|---|
 | Math | `art_guidance`, `art_pairwise_labels`, `art_reference_drift`, `art_loss` (pure tensors). | `verl_omni/trainer/diffusion/diffusion_art.py` |
 | Rollout adapters | Deterministic rollouts with the `old` adapter that keep every visited fp32 state: Qwen-Image (`all_latents` with `T + 1` entries), LTX-2.3 text-to-audio-video (`all_latents` + `all_next_latents` over the unified `[video \| audio]` tokens, `video_seq_len`) and MiniMax-H3 text-to-audio-video (the official Euler sampler with every state recorded: `all_latents` with `T + 1` entries as width-32 tokens `[video rows x3 \| audio rows]`, `video_seq_len`, and `all_segment_timesteps` because H3 denoises video and audio on different sigma grids). | `verl_omni/pipelines/qwen_image_diffusion_art/`, `verl_omni/pipelines/ltx2_diffusion_art/`, `verl_omni/pipelines/minimax_h3_diffusion_art/` |
-| Batch preparation | Computes `G(c)` per `uid` (per modality for audio-video latents) from the endpoints and rewards, draws the states to train from the first `T - 1` ODE positions (`algorithm.art_exclude_final_step`, as in the paper's recipes) times `algorithm.timestep_fraction`, writes `train_latents`, `train_timesteps`, `train_timesteps_next`, `art_guidance` (+ `art_anchor`, `train_latents_next`); drops the raw trajectory. | `DiffusionARTLoss.prepare_actor_batch` |
+| Batch preparation | Computes `G(c)` per `uid` (per modality for audio-video latents) from the endpoints and rewards, draws the states to train from the first `T - 1` ODE positions (`algorithm.art_exclude_final_step`, as in the paper's recipes) times `algorithm.timestep_fraction`, or the Flash pair, writes `train_latents`, `train_timesteps`, `train_timesteps_next`, `art_guidance` (+ `art_anchor`, `train_latents_next`); drops the raw trajectory; reorders rows so every update gets `n / updates` trajectories of every prompt. | `DiffusionARTLoss.prepare_actor_batch` |
 | Actor loss | Trust-region-masked frozen-target MSE, `1/\|B\|` average with masked items in the denominator; per-modality losses combined with `art_video_weight` / `art_audio_weight`. | `DiffusionARTLoss` in `verl_omni/trainer/diffusion/diffusion_algos.py` |
 | FSDP engine | `diffusion_art_model`: `old`-adapter and current velocities at `(train_latents[:, s], train_timesteps[:, s])`; no reference forward. | `ARTDiffusersFSDPEngine` in `verl_omni/workers/engine/fsdp/diffusers_impl.py` |
 | Golden test | Guidance, loss, masks and gradient reproduce the authors' `art_scalar_covariance` / `art_loss` (vanzll/DiffusionART @ `8652c8a`) to fp32 round-off on a stored fixture. | `tests/trainer/diffusion/test_diffusionart_golden_on_cpu.py` |
@@ -192,6 +194,32 @@ actor_rollout_ref.actor.use_kl_loss=False
   reward routing for audio-video models; `null` reads
   `reward_functions.*.routing_weights`.
 - `algorithm.timestep_fraction`: fraction of visited states trained per rollout.
+- `algorithm.art_split_groups_across_updates`: give every optimizer update
+  $K/\text{updates}$ trajectories of every prompt instead of all $K$ of half the
+  prompts. Default `true`, as in the reference since 2026-10-17. Needs
+  `rollout.n` divisible by the number of updates and
+  `actor_rollout_ref.actor.shuffle=false`; the guidance still uses the full group.
+- `algorithm.art_restore_zero_signal`: in scalar mode, rows of constant-reward
+  (zero-guidance) prompts train toward $v_{\text{old}}$ instead of contributing
+  zero. Default `false`; the LTX-2.3 and MiniMax-H3 recipes set `true`, following
+  the reference's video recipes (its image recipes keep it off).
+- `algorithm.art_timestep_selection`: `configured` (default; the pool above times
+  `timestep_fraction`) or `high_noise` (DiffusionART-Flash, below).
+
+### DiffusionART-Flash
+
+`algorithm.art_timestep_selection=high_noise` trains only two of the first four
+ODE positions of each rollout, in chronological order, instead of every kept
+position. One pair is drawn per rollout from `data_loader_seed` and
+`global_steps` with the reference's private RNG
+(`diffusionart/high_noise/v1:<seed>:<attempt>`), so every row, rank and update
+uses the same pair, a resumed run redraws the same pairs, and for equal seed and
+rollout counter the pair equals the reference's.
+Generation is unchanged: the full schedule is still rolled out and each chosen
+position keeps its own next sigma in the mask and the weight. The reference
+reports comparable quality to all-position training at a fraction of the update
+cost; that claim has not been reproduced in verl-omni. Requires
+`timestep_fraction = 1.0` and at least four eligible positions.
 
 ### Metrics to watch
 
@@ -275,4 +303,6 @@ CPU math tests plus golden equivalence to the authors' code
 vanzll/DiffusionART @ `8652c8a`, whose `algorithms/` code is unchanged through
 `b51e6ec`, 2026-10-30). Both GPU smoke entries (tiny Qwen-Image and tiny
 MiniMax-H3, 4 steps each) pass on 8×B200. The LTX-2.3 and MiniMax-H3
-comparison runs are reported in #744; no convergence claim is made here.
+comparison runs are reported in #744; they predate the per-prompt update split,
+zero-signal restoration and Flash (all off in those runs), and the smokes have not
+been re-run since. No convergence claim is made here.

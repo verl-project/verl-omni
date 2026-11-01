@@ -712,6 +712,9 @@ algorithm:
   art_log_rollout_velocity_gap: false
   art_modality_reward_weights: null
   art_sample_log_dir: null
+  art_split_groups_across_updates: true
+  art_restore_zero_signal: false
+  art_timestep_selection: configured
   paired_preference: false
   rollout_correction:
     _target_: verl.trainer.config.algorithm.RolloutCorrectionConfig
