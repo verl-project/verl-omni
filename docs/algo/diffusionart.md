@@ -15,8 +15,8 @@ direction is then applied as a frozen target at every state the ODE rollout
 visited.
 
 The implementation in verl-omni was written from the paper's Section 4 and
-Appendix C in this repository's conventions; it does not copy the authors'
-code, which carries no license.
+Appendix C in this repository's conventions rather than ported from the
+authors' code (Apache-2.0); a golden test pins it to that code.
 
 ## Algorithm
 
@@ -253,9 +253,14 @@ post-trains LTX-2.3 text-to-audio-video with LoRA on the OmniNFT reward set
 (VideoAlign, HPSv3, AudioBox, CLAP, DeSync) with exactly the OmniNFT LTX-2.3
 recipe's data, rewards, routing, LoRA and rollout settings, changing only the
 algorithm, so the two can be compared like-for-like. Its reward stack (native
-audio-video scorers, `routing_weights`) is on main since #663 part 1; the
-`preserve_components` aggregation pending #664 is not needed because ART routes
-the `reward/<name>` component scores itself.
+audio-video scorers, `routing_weights`) is on main since #663 part 1. The reward
+path differs from OmniNFT's on purpose: OmniNFT reads the per-component reward
+matrix from `reward.aggregation=preserve_components`, which the reward manager
+allows only for `omni_nft`; DiffusionART keeps `reward.aggregation=weighted_sum`
+and routes the per-component `reward/<name>` extra-info scores that aggregation
+attaches, with `algorithm.art_modality_reward_weights` (or `routing_weights`).
+Unifying the two would change both the reward manager and the actor batch
+contract and is left to a follow-up.
 
 [`examples/diffusionart_trainer/qwen_image/run_qwen_image_ocr_lora.sh`](https://github.com/verl-project/verl-omni/blob/main/examples/diffusionart_trainer/qwen_image/run_qwen_image_ocr_lora.sh)
 post-trains `Qwen/Qwen-Image` with LoRA on the OCR task using
@@ -267,5 +272,7 @@ LoRA settings as the DiffusionNFT Qwen-Image recipe. See the
 
 CPU math tests plus golden equivalence to the authors' code
 (`tests/trainer/diffusion/test_diffusionart_*_on_cpu.py`; fixture generated from
-vanzll/DiffusionART @ `8652c8a`). No GPU run has been performed yet; training
-curves will be added to the example README when available.
+vanzll/DiffusionART @ `8652c8a`, whose `algorithms/` code is unchanged through
+`b51e6ec`, 2026-10-30). Both GPU smoke entries (tiny Qwen-Image and tiny
+MiniMax-H3, 4 steps each) pass on 8×B200. The LTX-2.3 and MiniMax-H3
+comparison runs are reported in #744; no convergence claim is made here.

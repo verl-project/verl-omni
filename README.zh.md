@@ -91,9 +91,9 @@
     <th>当前支持状态</th>
   </tr>
   <tr>
-    <td rowspan="6">Qwen-Image 与 Qwen-Image-Edit</td>
-    <td rowspan="6">扩散生成模型</td>
-    <td rowspan="6">文本/图像 → 图像</td>
+    <td rowspan="7">Qwen-Image 与 Qwen-Image-Edit</td>
+    <td rowspan="7">扩散生成模型</td>
+    <td rowspan="7">文本/图像 → 图像</td>
     <td>FlowGRPO (+ CPS/SDE)</td>
     <td>✅ 已支持</td>
   </tr>
@@ -118,6 +118,10 @@
     <td>✅ 已支持</td>
   </tr>
   <tr>
+    <td><a href="docs/algo/diffusionart.md">DiffusionART</a></td>
+    <td>开发中 (WIP)</td>
+  </tr>
+  <tr>
     <td>Wan2.2</td>
     <td>扩散生成模型</td>
     <td>文本 → 视频</td>
@@ -125,9 +129,9 @@
     <td>✅ 已支持</td>
   </tr>
   <tr>
-    <td rowspan="2">LTX2.3</td>
-    <td rowspan="2">扩散生成模型</td>
-    <td rowspan="2">文本 → 视频 + 音频</td>
+    <td rowspan="3">LTX2.3</td>
+    <td rowspan="3">扩散生成模型</td>
+    <td rowspan="3">文本 → 视频 + 音频</td>
     <td>FlowGRPO</td>
     <td>✅ 已支持</td>
   </tr>
@@ -136,15 +140,23 @@
     <td>✅ 已支持</td>
   </tr>
   <tr>
-    <td rowspan="2"><b>MiniMax-H3</b></td>
-    <td rowspan="2">扩散生成模型</td>
-    <td rowspan="2">任意模态 → 视频 + 音频</td>
+    <td><a href="docs/algo/diffusionart.md">DiffusionART</a></td>
+    <td>开发中 (WIP)</td>
+  </tr>
+  <tr>
+    <td rowspan="3"><b>MiniMax-H3</b></td>
+    <td rowspan="3">扩散生成模型</td>
+    <td rowspan="3">任意模态 → 视频 + 音频</td>
     <td>DiffusionNFT</td>
     <td>✅ 已支持</td>
   </tr>
   <tr>
     <td>FlowGRPO</td>
     <td>✅ 已支持</td>
+  </tr>
+  <tr>
+    <td>DiffusionART</td>
+    <td>开发中 (WIP)</td>
   </tr>
   <tr>
     <td rowspan="2"><b>Boogu-Image</b></td>

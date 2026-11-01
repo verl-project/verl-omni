@@ -2160,6 +2160,11 @@ class DiffusionARTLoss(DiffusionLossFn):
         model_cfg = config.actor_rollout_ref.model
         rollout_cfg = config.actor_rollout_ref.rollout
         problems = []
+        if model_cfg.get("algorithm", None) != "diffusion_art":
+            problems.append(
+                "actor_rollout_ref.model.algorithm must be diffusion_art when diffusion_loss.loss_mode is "
+                f"diffusion_art, got {model_cfg.get('algorithm', None)}"
+            )
         if not int(model_cfg.get("lora_rank", 0) or 0) > 0:
             problems.append("actor_rollout_ref.model.lora_rank must be > 0 (DiffusionART trains LoRA adapters)")
         if "old" not in tuple(model_cfg.get("policy_state_adapters", ("default",))):
@@ -2180,6 +2185,11 @@ class DiffusionARTLoss(DiffusionLossFn):
             )
         if int(rollout_cfg.n) < 2:
             problems.append("actor_rollout_ref.rollout.n must be >= 2 (the guidance is a per-prompt covariance)")
+        elif bool(algorithm_cfg.get("art_pairwise_reward", False)) and int(rollout_cfg.n) % 2:
+            problems.append(
+                f"actor_rollout_ref.rollout.n={rollout_cfg.n} must be even with algorithm.art_pairwise_reward "
+                "(each group is split into disjoint win/lose pairs)"
+            )
         noise_level = OmegaConf.select(rollout_cfg, "algo.noise_level", default=None)
         if noise_level is not None and float(noise_level) != 0.0:
             problems.append("actor_rollout_ref.rollout.algo.noise_level must be 0.0 (DiffusionART rolls out an ODE)")

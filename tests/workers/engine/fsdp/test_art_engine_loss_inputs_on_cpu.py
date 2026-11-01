@@ -93,3 +93,22 @@ def test_loss_inputs_pass_per_segment_flow_times_when_the_rollout_published_them
         micro_batch, 1, micro_batch["train_latents"][:, 1], flow_time(micro_batch, 1), 1000
     )
     torch.testing.assert_close(last["segment_sigma_next"], torch.zeros(B, 2))
+
+
+def test_rollout_velocity_divides_each_modality_by_its_own_sigma_step():
+    """Video and audio step on different sigma grids, so an old velocity that exactly reproduces the rollout
+    transition must give a zero ``old_rollout_gap`` in both modalities (a shared video step would not)."""
+    micro_batch = make_micro_batch(with_optional=True)
+    micro_batch["train_segment_timesteps"] = torch.tensor([[[900.0, 450.0], [500.0, 250.0]]] * B)
+    micro_batch["train_segment_timesteps_next"] = torch.tensor([[[500.0, 250.0], [0.0, 0.0]]] * B)
+    xt = micro_batch["train_latents"][:, 0]
+    old_velocity = torch.randn(B, TOKENS, C)
+    video_step, audio_step = 0.5 - 0.9, 0.25 - 0.45
+    next_latents = micro_batch["train_latents_next"].clone()
+    next_latents[:, 0, :4] = xt[:, :4] + video_step * old_velocity[:, :4]
+    next_latents[:, 0, 4:] = xt[:, 4:] + audio_step * old_velocity[:, 4:]
+    micro_batch["train_latents_next"] = next_latents
+    inputs = ARTDiffusersFSDPEngine.art_loss_inputs(micro_batch, 0, xt, flow_time(micro_batch, 0), 1000)
+    for rows in (slice(0, 4), slice(4, TOKENS)):
+        gap = (old_velocity[:, rows] - inputs["rollout_velocity"][:, rows]).square().mean()
+        torch.testing.assert_close(gap, torch.tensor(0.0), atol=1e-10, rtol=0)

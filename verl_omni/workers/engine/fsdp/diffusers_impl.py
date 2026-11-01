@@ -1596,6 +1596,8 @@ class ARTDiffusersFSDPEngine(NFTDiffusersFSDPEngine):
 
         ``rollout_velocity`` is the Euler velocity implied by consecutive rollout states,
         ``(x_next - x_t) / (sigma_next - sigma)``, available when the trainer shipped ``train_latents_next``.
+        With per-modality flow times, the video and audio tokens (split at ``video_seq_len``) are each divided
+        by their own ``segment_sigma_next - segment_sigma``.
         """
         sigma_next = micro_batch["train_timesteps_next"][:, step].float() / float(num_train_timesteps)
         loss_inputs = {"art_guidance": micro_batch["art_guidance"], "sigma_next": sigma_next}
@@ -1616,7 +1618,18 @@ class ARTDiffusersFSDPEngine(NFTDiffusersFSDPEngine):
                 loss_inputs[key] = micro_batch[key]
         if micro_batch.get("train_latents_next", None) is not None:
             sigma = t_expanded.reshape(xt.shape[0], -1)[:, 0]
-            step_size = (sigma_next - sigma).view(-1, *([1] * (xt.ndim - 1)))
+            token_step = (sigma_next - sigma)[:, None].expand(-1, xt.shape[1])
+            if "segment_sigma" in loss_inputs and "video_seq_len" in loss_inputs:
+                split = int(loss_inputs["video_seq_len"].reshape(-1)[0].item())
+                segment_step = loss_inputs["segment_sigma_next"] - loss_inputs["segment_sigma"]
+                token_step = torch.cat(
+                    (
+                        segment_step[:, :1].expand(-1, split),
+                        segment_step[:, 1:2].expand(-1, xt.shape[1] - split),
+                    ),
+                    dim=1,
+                )
+            step_size = token_step.reshape(*token_step.shape, *([1] * (xt.ndim - 2)))
             loss_inputs["rollout_velocity"] = (
                 micro_batch["train_latents_next"][:, step].float() - xt.float()
             ) / step_size

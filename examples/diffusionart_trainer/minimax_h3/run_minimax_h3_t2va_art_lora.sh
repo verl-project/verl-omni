@@ -9,6 +9,15 @@
 # Video and audio keep their own sigma grids (shift 12 / shift 3); the loss uses each modality's flow time.
 # Defaults match the DiffusionNFT recipe (ROLLOUT_N=16); our 8xB200 comparison runs set ROLLOUT_N=8 on both arms to halve the
 # rollout cost — pass ROLLOUT_N explicitly when reproducing them.
+#
+# WARNING: with these default rewards (CLAP + ImageBind) DiffusionART degraded the video. In our 8xB200 run
+# (ROLLOUT_N=8, 32 prompts/step) the validation reward rose .302 -> .532 by step 10 (DiffusionNFT: .300 -> .381)
+# because the clips turned nearly black and nearly static: on 16 same-seed clips, step 10 vs step 0 gave luma x0.20,
+# contrast x0.40 and motion x0.38. Neither scorer looks at picture quality; the run was stopped at step 12.
+# Scope: this script is the like-for-like integration recipe against the DiffusionNFT one, not a quality recipe.
+# Do not read its reward curve as video quality. A run with video-quality scorers added (VideoAlign 1.0 / HPSv3 1.5 /
+# AudioBox 0.5 / CLAP 1.0 / DeSync 1.0) did not black out over 60 steps but still lost about half the motion,
+# so always compare same-seed clips against the base model.
 set -x
 
 export WANDB_MODE=${WANDB_MODE:-offline}

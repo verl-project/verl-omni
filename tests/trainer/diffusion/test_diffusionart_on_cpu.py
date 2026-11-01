@@ -805,7 +805,8 @@ def test_validate_trainer_config_warns_on_a_single_update_per_rollout(caplog):
         ("actor_rollout_ref.model.lora_rank=0", "lora_rank must be > 0"),
         ("actor_rollout_ref.actor.use_kl_loss=true", "use_kl_loss must be False"),
         ("actor_rollout_ref.actor.enable_timestep_staging=true", "enable_timestep_staging must be False"),
-        ("algorithm.train_timestep_count=3", "only used by the dgpo loss"),
+        ("algorithm.train_timestep_count=3", "only used by the dgpo and awm losses"),
+        ("actor_rollout_ref.model.algorithm=dgpo", "model.algorithm must be diffusion_art"),
         ("algorithm.old_policy_decay_schedule=linear_to_0_5", "old_policy_decay_schedule must be copy"),
         ("algorithm.old_policy_decay=0.5", "old_policy_decay must be null or 0.0"),
         ("algorithm.old_policy_update_interval=2", "old_policy_update_interval must be 1"),
@@ -943,3 +944,17 @@ def test_validate_trainer_config_rejects_paired_preference():
     config = compose_trainer_config(ART_OVERRIDES + ["algorithm.paired_preference=true"])
     with pytest.raises(ValueError, match="paired_preference"):
         DiffusionARTLoss.validate_trainer_config(config)
+
+
+@pytest.mark.parametrize("n, ok", [(2, True), (4, True), (3, False), (5, False)])
+def test_validate_trainer_config_rejects_odd_groups_for_pairwise(n, ok):
+    """Pairwise ART splits each group into disjoint win/lose pairs, so an odd rollout.n must fail at start-up,
+    not after the first full rollout."""
+    overrides = [o for o in ART_OVERRIDES if not o.startswith("actor_rollout_ref.rollout.n=")]
+    overrides += [f"actor_rollout_ref.rollout.n={n}", "algorithm.art_pairwise_reward=true"]
+    config = compose_trainer_config(overrides)
+    if ok:
+        DiffusionARTLoss.validate_trainer_config(config)
+    else:
+        with pytest.raises(ValueError, match="must be even with algorithm.art_pairwise_reward"):
+            DiffusionARTLoss.validate_trainer_config(config)

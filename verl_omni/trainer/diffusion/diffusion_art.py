@@ -14,7 +14,7 @@
 """DiffusionART tensor math: aggregation-first guidance, trust-region mask and frozen-target MSE.
 
 DiffusionART (Wan et al., "DiffusionART: Efficient, Stable and Scalable Reinforcement of
-Diffusion Models", arXiv:2610.12572; authors' code https://github.com/vanzll/DiffusionART)
+Diffusion Models", arXiv:2610.12572; authors' code https://github.com/vanzll/DiffusionART, Apache-2.0)
 is implemented here from the paper's Section 4 and Appendix C, in verl-omni's conventions.
 The pure functions below have no trainer dependencies; ``DiffusionARTLoss`` in
 ``diffusion_algos.py`` wires them into the worker loss and the actor batch preparation.
