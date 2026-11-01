@@ -190,6 +190,9 @@ def test_lora_sync_owns_tensors_across_reused_ipc_buckets(monkeypatch, ar_worker
             on_bucket_received([("lora_A.weight", buffer.view(2, 2))], False)
             buffer.fill_(5.0)
             on_bucket_received([("lora_B.weight", buffer.view(2, 2))], True)
+            # Stand-in for the sender cleaning up its buffer after the final ack,
+            # before add_lora runs: the last bucket must be copied too.
+            buffer.fill_(0.0)
 
     monkeypatch.setattr(bucketed_weight_transfer, "BucketedWeightReceiver", Receiver)
     added = []
