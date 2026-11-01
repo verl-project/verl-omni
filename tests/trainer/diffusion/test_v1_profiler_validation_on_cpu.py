@@ -162,3 +162,31 @@ def test_nsys_runner_keeps_num_cpus_and_adds_nsight_runtime_env(launch):
 def test_non_nsys_runner_keeps_num_cpus_only(launch):
     entrypoint.run_diffusion_v1(_launch_config("torch"))
     assert launch.calls == [{"num_cpus": 1}]
+
+
+class _CustomRunnerClass:
+    """A recipe-provided TaskRunner class: launched as given, without implicit options."""
+
+    def __init__(self):
+        self.calls = []
+
+    def options(self, **kwargs):
+        return _OptionedRunner(self.calls, **kwargs)
+
+    def remote(self):
+        self.calls.append(None)
+        return SimpleNamespace(run=SimpleNamespace(remote=lambda cfg: cfg))
+
+
+def test_custom_runner_is_launched_as_given_without_nsys(launch):
+    custom = _CustomRunnerClass()
+    entrypoint.run_diffusion_v1(_launch_config("torch"), task_runner_class=custom)
+    assert custom.calls == [None]
+    assert launch.calls == []
+
+
+def test_custom_runner_gets_only_the_nsight_runtime_env(launch):
+    custom = _CustomRunnerClass()
+    entrypoint.run_diffusion_v1(_launch_config("nsys"), task_runner_class=custom)
+    assert custom.calls == [{"runtime_env": {"nsight": {"trace": "nvtx"}}}]
+    assert launch.calls == []
