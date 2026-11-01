@@ -123,6 +123,8 @@ class _OptionedRunner:
 
 
 class _ActorClass:
+    """Mimics a ``@ray.remote`` class: ``.remote()`` directly or through one ``.options()``."""
+
     def __init__(self):
         self.calls = []
 
@@ -130,7 +132,8 @@ class _ActorClass:
         return _OptionedRunner(self.calls, **kwargs)
 
     def remote(self):
-        raise AssertionError("the TaskRunner must be created through .options(num_cpus=1)")
+        self.calls.append(None)
+        return SimpleNamespace(run=SimpleNamespace(remote=lambda cfg: cfg))
 
 
 @pytest.fixture
@@ -154,39 +157,23 @@ def _launch_config(tool):
     return cfg
 
 
-def test_nsys_runner_keeps_num_cpus_and_adds_nsight_runtime_env(launch):
+def test_default_runner_reserves_one_cpu_on_the_class():
+    assert entrypoint.DiffusionTaskRunnerV1.__ray_metadata__.num_cpus == 1
+
+
+def test_nsys_runner_adds_only_the_nsight_runtime_env(launch):
     entrypoint.run_diffusion_v1(_launch_config("nsys"))
-    assert launch.calls == [{"num_cpus": 1, "runtime_env": {"nsight": {"trace": "nvtx"}}}]
+    assert launch.calls == [{"runtime_env": {"nsight": {"trace": "nvtx"}}}]
 
 
-def test_non_nsys_runner_keeps_num_cpus_only(launch):
+def test_non_nsys_runner_is_launched_directly(launch):
     entrypoint.run_diffusion_v1(_launch_config("torch"))
-    assert launch.calls == [{"num_cpus": 1}]
+    assert launch.calls == [None]
 
 
-class _CustomRunnerClass:
-    """A recipe-provided TaskRunner class: launched as given, without implicit options."""
-
-    def __init__(self):
-        self.calls = []
-
-    def options(self, **kwargs):
-        return _OptionedRunner(self.calls, **kwargs)
-
-    def remote(self):
-        self.calls.append(None)
-        return SimpleNamespace(run=SimpleNamespace(remote=lambda cfg: cfg))
-
-
-def test_custom_runner_is_launched_as_given_without_nsys(launch):
-    custom = _CustomRunnerClass()
-    entrypoint.run_diffusion_v1(_launch_config("torch"), task_runner_class=custom)
-    assert custom.calls == [None]
-    assert launch.calls == []
-
-
-def test_custom_runner_gets_only_the_nsight_runtime_env(launch):
-    custom = _CustomRunnerClass()
-    entrypoint.run_diffusion_v1(_launch_config("nsys"), task_runner_class=custom)
-    assert custom.calls == [{"runtime_env": {"nsight": {"trace": "nvtx"}}}]
+@pytest.mark.parametrize("tool,expected", [("torch", None), ("nsys", {"runtime_env": {"nsight": {"trace": "nvtx"}}})])
+def test_custom_runner_follows_the_same_launch_path(launch, tool, expected):
+    custom = _ActorClass()
+    entrypoint.run_diffusion_v1(_launch_config(tool), task_runner_class=custom)
+    assert custom.calls == [expected]
     assert launch.calls == []

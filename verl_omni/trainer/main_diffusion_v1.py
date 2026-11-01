@@ -81,12 +81,8 @@ def run_diffusion_v1(config, task_runner_class=None) -> None:
         print(f"ray init kwargs: {ray_init_kwargs}")
         ray.init(**OmegaConf.to_container(ray_init_kwargs))
 
-    # Ray actor options are applied once: ``.options()`` returns a wrapper that
-    # cannot be chained, so num_cpus and the Nsight runtime env go in one call.
-    runner_options = {}
     if task_runner_class is None:
         task_runner_class = DiffusionTaskRunnerV1
-        runner_options["num_cpus"] = 1
 
     if (
         is_cuda_available
@@ -99,10 +95,10 @@ def run_diffusion_v1(config, task_runner_class=None) -> None:
         assert is_nvtx_available(), "nvtx is not available in CUDA platform. Please 'pip3 install nvtx'"
         from verl_omni.trainer.main_diffusion import _resolve_controller_nsight_options
 
-        runner_options["runtime_env"] = {"nsight": _resolve_controller_nsight_options(config)}
-    if runner_options:
-        task_runner_class = task_runner_class.options(**runner_options)
-    runner = task_runner_class.remote()
+        nsight_options = _resolve_controller_nsight_options(config)
+        runner = task_runner_class.options(runtime_env={"nsight": nsight_options}).remote()
+    else:
+        runner = task_runner_class.remote()
     ray.get(runner.run.remote(config))
 
     timeline_json_file = config.ray_kwargs.get("timeline_json_file", None)
@@ -110,7 +106,7 @@ def run_diffusion_v1(config, task_runner_class=None) -> None:
         ray.timeline(filename=timeline_json_file)
 
 
-@ray.remote
+@ray.remote(num_cpus=1)  # keep the controller off the head node, as the v0 entrypoint does
 class DiffusionTaskRunnerV1:
     def __init__(self):
         self.config = None
