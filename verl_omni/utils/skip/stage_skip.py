@@ -239,10 +239,16 @@ class WeightSyncSkip(StageSkip):
 class DiffusionRolloutSkip(RolloutSkip):
     """Driver-side rollout replay for the v0 diffusion trainer.
 
+    Intentionally replaces verl's process-wide ``rollout`` registration so
+    its existing agent-loop annotation uses diffusion metadata handling.
     The diffusion agent loop echoes the prompt batch's ``non_tensor_batch``
     (uid, dataset metadata) into its output and the trainer unions output with
     the fresh batch, so a cached generation is re-stamped with the current
     call's non-tensor fields before it is returned.
+
+    Raises:
+        TypeError: If a cached result is not a DataProto.
+        ValueError: If the cached and current batches have different row counts.
     """
 
     print_mark = "[DiffusionRolloutSkip()] "
@@ -250,6 +256,13 @@ class DiffusionRolloutSkip(RolloutSkip):
     def warp_function(self, step: int, func: Callable, *args, **kwargs) -> DataProto:
         result = super().warp_function(step, func, *args, **kwargs)
         gen_batch = kwargs["prompts"] if "prompts" in kwargs else args[1]
+        if not isinstance(result, DataProto):
+            raise TypeError(f"Diffusion rollout replay requires a DataProto cache, got {type(result).__name__}.")
+        if len(result) != len(gen_batch):
+            raise ValueError(
+                f"Diffusion rollout replay has {len(result)} cached rows but {len(gen_batch)} prompt rows. "
+                "Use a fresh dump directory after changing the batch size."
+            )
         result.non_tensor_batch.update(gen_batch.non_tensor_batch)
         return result
 
@@ -258,6 +271,8 @@ class DiffusionRolloutSkip(RolloutSkip):
 class DiffusionRolloutTqSkip(RolloutTqSkip):
     """V1 rollout replay with a stable row order.
 
+    Intentionally replaces verl's process-wide ``rollout_tq`` registration
+    so its existing replay-buffer annotation dumps diffusion rows in order.
     Upstream assigns replayed session ids by dumped key order, and
     ``ReplayBuffer.sample`` returns keys in arbitrary storage order. Dumping in
     canonical order keeps every replayed row where the record pass had it, so

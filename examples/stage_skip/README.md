@@ -118,6 +118,7 @@ for comparing separately recorded full-run metrics.
 Stage roles live in the top-level `omni_skip` block of `diffusion_trainer.yaml`.
 They stay out of `skip:` because verl parses that block against its own fixed
 schema. A misspelled role fails at startup.
+Misspelled actions fail at startup even when their role is disabled.
 
 ```yaml
 omni_skip:
@@ -147,6 +148,9 @@ Rollout itself is replayed by verl's roles under `skip:`. Use
 `skip.rollout_tq` on the V1 trainer and `skip.rollout` on the V0 trainer. The
 omni (AR) stack delegates its trainer to verl and supports only those `skip:`
 roles.
+The V1 separate-async trainer omits warmup submissions whenever
+`skip.rollout_tq.enable=true`; the regular step submission handles replay so
+warmup cannot inject the same cached trajectories twice.
 
 ### Actions
 

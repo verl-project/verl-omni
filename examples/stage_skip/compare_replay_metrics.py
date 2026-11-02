@@ -20,6 +20,7 @@ all its steps as skipped. Timing and throughput metrics are not compared.
 
 import argparse
 import json
+import math
 from pathlib import Path
 
 COMPARED_PREFIXES = ("actor/", "critic/")
@@ -48,11 +49,14 @@ def find_problems(record: dict[int, dict], replay: dict[int, dict], stages: list
     expected, actual = training_metrics(record), training_metrics(replay)
     if not expected:
         return ["no comparable training metrics in the record pass"]
-    problems = [
-        f"step {step} {key}: record={expected.get((step, key))} replay={actual.get((step, key))}"
-        for step, key in sorted(expected.keys() | actual.keys())
-        if expected.get((step, key), "missing") != actual.get((step, key), "missing")
-    ]
+    problems = []
+    for metric in sorted(expected.keys() | actual.keys()):
+        recorded, replayed = expected.get(metric), actual.get(metric)
+        if metric in expected and metric in actual:
+            if recorded == replayed or (math.isnan(recorded) and math.isnan(replayed)):
+                continue
+        step, key = metric
+        problems.append(f"step {step} {key}: record={recorded} replay={replayed}")
     replay_totals = {key: value for data in replay.values() for key, value in data.items()}
     for stage in stages:
         skipped_steps = replay_totals.get(f"skip/{stage}/steps")

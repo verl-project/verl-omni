@@ -29,7 +29,13 @@ from verl.experimental.agent_loop.agent_loop import AgentLoopManager
 from verl.utils.skip import SkipManager
 from verl.utils.skip.rollout_skip import RolloutTqSkip
 
+from verl_omni.trainer.diffusion.ray_diffusion_trainer import (
+    BaseRayDiffusionTrainer,
+    DirectPreferenceRayTrainer,
+    PolicyGradientRayTrainer,
+)
 from verl_omni.trainer.diffusion.v1.trainer_base import PolicyGradientDiffusionTrainerV1
+from verl_omni.trainer.diffusion.v1.trainer_separate_async import PolicyGradientDiffusionTrainerV1SeparateAsync
 from verl_omni.utils.skip import STAGE_SKIP_ROLES, init_skip_manager, log_skip_summary, skip_stage_metrics
 from verl_omni.utils.skip.stage_skip import DiffusionRolloutSkip
 
@@ -344,6 +350,61 @@ def test_misspelled_stage_rejected(tmp_path, reset_skip_manager):
         init_skip_manager(config)
 
 
+@pytest.mark.parametrize("role", STAGE_SKIP_ROLES)
+@pytest.mark.parametrize("enabled", [False, True])
+def test_misspelled_action_rejected_even_when_disabled(tmp_path, reset_skip_manager, role, enabled):
+    config = make_config(tmp_path, omni_skip_overrides={role: {"action": "cahce", "enable": enabled, "steps": [1]}})
+    config.omni_skip.weight_sync.ack_stale_weights = True
+    with pytest.raises(ValueError, match="[Aa]ction"):
+        init_skip_manager(config)
+
+
+@pytest.mark.parametrize(
+    "trainer_cls,method_name,role",
+    [
+        (PolicyGradientDiffusionTrainerV1, "_compute_reward_colocate", "reward"),
+        (PolicyGradientDiffusionTrainerV1, "_compute_old_log_prob", "old_log_prob"),
+        (PolicyGradientDiffusionTrainerV1, "_compute_ref_log_prob", "ref_log_prob"),
+        (PolicyGradientDiffusionTrainerV1, "_compute_ref_noise_pred", "ref_log_prob"),
+        (PolicyGradientDiffusionTrainerV1, "_compute_advantage", "advantage"),
+        (PolicyGradientDiffusionTrainerV1, "_update_actor", "actor_update"),
+        (PolicyGradientDiffusionTrainerV1, "_update_rollout_weights_mid_cycle", "weight_sync"),
+        (PolicyGradientDiffusionTrainerV1SeparateAsync, "_compute_old_log_prob", "old_log_prob"),
+        (BaseRayDiffusionTrainer, "_compute_reward_colocate", "reward"),
+        (BaseRayDiffusionTrainer, "_update_actor", "actor_update"),
+        (PolicyGradientRayTrainer, "_compute_old_log_prob", "old_log_prob"),
+        (PolicyGradientRayTrainer, "_compute_ref_log_prob", "ref_log_prob"),
+        (DirectPreferenceRayTrainer, "_update_actor", "actor_update"),
+        (DirectPreferenceRayTrainer, "_compute_ref_noise_pred", "ref_log_prob"),
+    ],
+)
+def test_real_trainer_stage_uses_expected_skip_role(reset_skip_manager, trainer_cls, method_name, role):
+    intercepted = []
+    sentinel = object()
+
+    def replay(step, func, *args, **kwargs):
+        intercepted.append((step, func.__name__))
+        return sentinel
+
+    SkipManager.skip_instances = {
+        role: SimpleNamespace(
+            is_enabled=lambda: True,
+            support_online_step=False,
+            steps=[1],
+            meet_precondition=lambda *args, **kwargs: True,
+            warp_function=replay,
+        )
+    }
+    SkipManager.set_step(1)
+    trainer = SimpleNamespace(parameter_sync_step=1)
+    if trainer_cls is PolicyGradientDiffusionTrainerV1SeparateAsync:
+        trainer = object.__new__(trainer_cls)
+        trainer.parameter_sync_step = 1
+    args = () if role == "weight_sync" else (_batch(),)
+    assert getattr(trainer_cls, method_name)(trainer, *args) is sentinel
+    assert intercepted == [(1, method_name)]
+
+
 def test_v0_trainer_ignores_leftover_parameter_sync_step(tmp_path, reset_skip_manager, dummy):
     config = make_config(tmp_path, v1={"separate_async": {"parameter_sync_step": 4}})
     config.trainer.use_v1 = False
@@ -496,6 +557,26 @@ def test_compare_script_fails_on_metric_mismatch(tmp_path):
     assert "actor/loss" in result.stdout
 
 
+@pytest.mark.parametrize(
+    "recorded,replayed,exit_code", [(float("nan"), float("nan"), 0), (float("nan"), 0.5, 1), (0.5, float("nan"), 1)]
+)
+def test_compare_script_handles_nan_metrics(tmp_path, recorded, replayed, exit_code):
+    record = _write_metrics(tmp_path / "a.jsonl", [(1, {"actor/loss": recorded})])
+    replay = _write_metrics(tmp_path / "b.jsonl", [(1, {"actor/loss": replayed})])
+    assert _compare(record, replay).returncode == exit_code
+
+
+@pytest.mark.parametrize("missing_from", ["record", "replay"])
+def test_compare_script_rejects_missing_nan_metric(tmp_path, missing_from):
+    complete = [(1, {"actor/loss": 0.5, "actor/optional": float("nan")})]
+    missing = [(1, {"actor/loss": 0.5})]
+    record = _write_metrics(tmp_path / "a.jsonl", missing if missing_from == "record" else complete)
+    replay = _write_metrics(tmp_path / "b.jsonl", missing if missing_from == "replay" else complete)
+    result = _compare(record, replay)
+    assert result.returncode == 1
+    assert "actor/optional" in result.stdout
+
+
 def test_compare_script_fails_when_a_stage_was_not_replayed(tmp_path):
     rows = [(1, {"actor/loss": 0.5}), (2, {"skip/old_log_prob/calls": 0, "skip/old_log_prob/steps": 0})]
     record, replay = _write_metrics(tmp_path / "a.jsonl", rows), _write_metrics(tmp_path / "b.jsonl", rows)
@@ -540,3 +621,25 @@ def test_diffusion_rollout_skip_restamps_input_metadata(tmp_path, reset_skip_man
     assert result.non_tensor_batch["data_source"] == ["ocr"]
     torch.testing.assert_close(result.batch["responses"], torch.ones(1, 4))
     assert result.meta_info["timing"] == {"gen": 1.0}
+
+
+@pytest.mark.parametrize("keyword_prompts", [False, True])
+@pytest.mark.parametrize("malformed", ["tuple", "row_count"])
+def test_diffusion_rollout_rejects_invalid_cache_before_restamping(tmp_path, monkeypatch, keyword_prompts, malformed):
+    from verl.utils.skip.rollout_skip import RolloutSkip
+
+    skip = DiffusionRolloutSkip(
+        OmegaConf.create({"enable": True, "dump_dir": str(tmp_path), "steps": [1], "action": "cache"}),
+        make_config(tmp_path),
+    )
+    cached = _batch(1)
+    cached.non_tensor_batch["uid"] = ["cached-uid"]
+    result = (cached, {}) if malformed == "tuple" else cached
+    monkeypatch.setattr(RolloutSkip, "warp_function", lambda *args, **kwargs: result)
+    prompts = _batch(2)
+    prompts.non_tensor_batch["uid"] = ["fresh-0", "fresh-1"]
+    args, kwargs = ((None,), {"prompts": prompts}) if keyword_prompts else ((None, prompts), {})
+    error, message = (TypeError, "DataProto") if malformed == "tuple" else (ValueError, "rows")
+    with pytest.raises(error, match=message):
+        skip.warp_function(1, None, *args, **kwargs)
+    assert cached.non_tensor_batch["uid"] == ["cached-uid"]

@@ -31,7 +31,7 @@ class StageSkipConfig(BaseConfig):
         action: ``cache`` (exact step), ``repeat`` (closest dumped step), or ``empty`` where the role supports it.
 
     Raises:
-        ValueError: If the role is enabled with no steps, which could never fire.
+        ValueError: If the action is invalid or the role is enabled with no steps, which could never fire.
     """
 
     enable: bool = False
@@ -40,6 +40,8 @@ class StageSkipConfig(BaseConfig):
     action: str = "cache"
 
     def __post_init__(self) -> None:
+        if self.action not in {"cache", "repeat", "empty"}:
+            raise ValueError(f"Invalid omni_skip action: {self.action}. Must be one of cache, repeat, empty.")
         if self.enable and not self.steps:
             raise ValueError("An enabled omni_skip role needs a non-empty steps list: an empty list never fires.")
 
