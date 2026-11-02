@@ -20,30 +20,35 @@ import hashlib
 import os
 import re
 from pathlib import Path
-from typing import Any
 
-from verl_omni.tools.trajectory.hydra_env import agentic_get
+from omegaconf import DictConfig, OmegaConf
 
 __all__ = [
     "bind_run_artifacts",
     "build_artifact_id",
     "build_trajectory_relpath",
     "clear_run_artifacts",
+    "project_root",
     "resolve_rollout_images_root",
-    "run_name",
+    "get_run_name",
     "resolve_run_dir",
     "rollout_id_from_relpath",
 ]
 
-run_name: str = "agentic_run"
-_e2e_root: Path | None = None
-_diffusion_image_dir: Path | None = None
+_run_config: DictConfig | None = None
 
-# On-disk layout produced by the builders below, under the e2e run dir:
-#   rollout_trajectories/step_{S:06d}/sample_{index}.{rollout_n:02d}.json
-#   rollout_images/step_{S:06d}/sample_{index}.{rollout_n:02d}/
-#       image_00_<artifact_id>.png ...
-#       meta.json
+
+def project_root() -> Path:
+    """Return the verl-omni checkout root (honours ``VERLOMNI_ROOT`` when set).
+
+    Returns:
+        Absolute repo root.
+    """
+    verlomni = os.getenv("VERLOMNI_ROOT", "").strip()
+    if verlomni:
+        return Path(verlomni).expanduser().resolve()
+    # <repo>/verl_omni/utils/agentic/this_file.py → parents[3] == repo root
+    return Path(__file__).resolve().parents[3]
 
 
 def default_e2e_root() -> Path:
@@ -52,98 +57,46 @@ def default_e2e_root() -> Path:
     Returns:
         Absolute ``outputs/e2e`` path (honours ``VERLOMNI_ROOT`` when set).
     """
-    verlomni = os.getenv("VERLOMNI_ROOT", "").strip()
-    if verlomni:
-        return Path(verlomni).expanduser().resolve() / "outputs" / "e2e"
-    # <repo>/verl_omni/tools/trajectory/this_file.py → parents[3] == repo root
-    return Path(__file__).resolve().parents[3] / "outputs" / "e2e"
+    return project_root() / "outputs" / "e2e"
 
 
 def clear_run_artifacts() -> None:
-    """Reset process-local run-dir bindings (tests).
+    """Clear the process-local artifact configuration binding."""
+    global _run_config
+    _run_config = None
 
-    Returns:
-        None.
-    """
-    global run_name, _e2e_root, _diffusion_image_dir
-    run_name = "agentic_run"
-    _e2e_root = None
-    _diffusion_image_dir = None
+
+def get_run_name() -> str:
+    """Return the configured experiment name or the standalone-tool default."""
+    name = OmegaConf.select(_run_config, "trainer.experiment_name") if _run_config is not None else None
+    return str(name) if name else "agentic_run"
 
 
 def resolve_e2e_root() -> Path:
-    """Return the shared e2e artifact root.
-
-    Returns:
-        Absolute path for traj / images / hermes dumps.
-    """
-    if _e2e_root is not None:
-        return _e2e_root
-    return default_e2e_root()
+    """Return the configured artifact root, defaulting to project outputs/e2e."""
+    root = OmegaConf.select(_run_config, "agentic_image_gen.e2e_root") if _run_config is not None else None
+    return Path(str(root)).expanduser().resolve() if root else default_e2e_root()
 
 
 def resolve_run_dir() -> Path:
-    """Return the per-run directory.
-
-    Returns:
-        ``<e2e_root>/<experiment_name>/``.
-    """
-    if _diffusion_image_dir is not None:
-        return _diffusion_image_dir.parent
-    return resolve_e2e_root() / (run_name or "agentic_run")
+    """Return explicit run_dir verbatim, or e2e_root / experiment_name."""
+    run_dir = OmegaConf.select(_run_config, "agentic_image_gen.run_dir") if _run_config is not None else None
+    return Path(str(run_dir)).expanduser().resolve() if run_dir else resolve_e2e_root() / get_run_name()
 
 
 def resolve_rollout_images_root() -> Path:
-    """Return the rollout images directory.
-
-    Returns:
-        ``<run_dir>/rollout_images`` (or an explicit diffusion override).
-    """
-    if _diffusion_image_dir is not None:
-        return _diffusion_image_dir
+    """Return the rollout_images directory under the configured run directory."""
     return resolve_run_dir() / "rollout_images"
 
 
-def bind_run_artifacts(config: Any) -> None:
-    """Bind run-dir knobs from Hydra so driver and Ray workers share one layout.
+def bind_run_artifacts(config: DictConfig | None) -> None:
+    """Snapshot the incoming Hydra config for function-tool artifact readers.
 
-    Args:
-        config: Hydra config. ``trainer.experiment_name`` sets the run name;
-            ``agentic_image_gen.e2e_root`` overrides the default ``outputs/e2e``.
-
-    Returns:
-        None.
+    Each worker binds its own config before tools run. Replace the whole binding
+    so omitted fields cannot inherit a previous run's directory settings.
     """
-    global run_name, _e2e_root, _diffusion_image_dir
-    # Drop stale explicit image-dir overrides from a previous bind/test.
-    _diffusion_image_dir = None
-    if config is None:
-        _e2e_root = default_e2e_root()
-        return
-
-    try:
-        experiment_name = config.trainer.get("experiment_name")
-    except Exception:  # noqa: BLE001
-        experiment_name = None
-    if experiment_name:
-        run_name = str(experiment_name)
-
-    e2e_root = None
-    try:
-        node = config.get("agentic_image_gen")
-    except Exception:  # noqa: BLE001
-        node = getattr(config, "agentic_image_gen", None)
-    if node is not None:
-        try:
-            e2e_root = node.get("e2e_root")
-        except Exception:  # noqa: BLE001
-            e2e_root = getattr(node, "e2e_root", None)
-    if e2e_root is None:
-        e2e_root = agentic_get("e2e_root")
-    if e2e_root:
-        _e2e_root = Path(str(e2e_root)).expanduser().resolve()
-    else:
-        _e2e_root = default_e2e_root()
+    global _run_config
+    _run_config = OmegaConf.create(OmegaConf.to_container(config, resolve=False)) if config is not None else None
 
 
 def rollout_id_from_relpath(relpath: str | None) -> str | None:

@@ -52,6 +52,7 @@ examples/config.md
 :caption: Advanced Features
 
 advanced/diffusion_media_artifacts.md
+advanced/multi_turn_image_agents.md
 algo/async_reward.md
 algo/named_reward_models.md
 algo/rollout_correction.md
@@ -123,6 +124,7 @@ examples/qwen3_tts/grpo_trainer_qwen3_tts.md
 perf/tuning_guide.md
 perf/diffusion_mfu.md
 perf/profiler.md
+perf/diffusion_consistency.md
 ```
 
 ```{toctree}

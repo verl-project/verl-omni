@@ -17,6 +17,8 @@
 它源自 `verl` 在多模态生成强化学习方面的探索与实践，现已建立独立代码库，以便更加聚焦、敏捷地持续演进。
 
 ## 最新动态 🔥
+- **[2026-10]** 🎉 我们正式发布了 [v0.3.0](https://github.com/verl-project/verl-omni/releases/tag/v0.3.0)，支持扩散模型与全模态模型的全异步强化学习，并将 v1 训练器设为默认配置。
+- **[2026-10]** 正式支持 [OmniNFT](examples/omninft_trainer/README.md) 音视频后训练。[LTX2.3](examples/omninft_trainer/ltx2/README.md) 文本生成视频+音频 LoRA 配方现可在昇腾 NPU 上按模态路由优势。
 - **[2026-09]** [v1 训练器](docs/start/diffusion_v1.md)（TransferQueue + ReplayBuffer）现已成为扩散模型的默认配置；旧版 v0 训练器已弃用，离线 DPO 按设计保持在 v0。
 - **[2026-08]** 正式支持 **[DiffusionOPD](docs/algo/diffusion_opd.md)**（在线策略蒸馏 On-Policy Distillation，包含多教师 MOPD）。
 - **[2026-08]** 🔥 **MiniMax-H3** 现已支持文生音画（T2VA）、首尾帧生音画（FL2VA）以及参考图/音频生音画（Ref2VA），全面兼容 [FlowGRPO](examples/flowgrpo_trainer/minimax_h3/README.md) 与 [DiffusionNFT](examples/diffusionnft_trainer/minimax_h3/README.md)。
@@ -123,10 +125,14 @@
     <td>✅ 已支持</td>
   </tr>
   <tr>
-    <td>LTX2.3</td>
-    <td>扩散生成模型</td>
-    <td>文本 → 视频 + 音频</td>
+    <td rowspan="2">LTX2.3</td>
+    <td rowspan="2">扩散生成模型</td>
+    <td rowspan="2">文本 → 视频 + 音频</td>
     <td>FlowGRPO</td>
+    <td>✅ 已支持</td>
+  </tr>
+  <tr>
+    <td><a href="examples/omninft_trainer/README.md">OmniNFT</a></td>
     <td>✅ 已支持</td>
   </tr>
   <tr>
@@ -149,6 +155,13 @@
   </tr>
   <tr>
     <td>DiffusionNFT</td>
+    <td>✅ 已支持</td>
+  </tr>
+  <tr>
+    <td><a href="examples/dancegrpo_trainer/flux1/README.md">FLUX.1-dev</a></td>
+    <td>扩散生成模型</td>
+    <td>文本 → 图像</td>
+    <td>DanceGRPO</td>
     <td>✅ 已支持</td>
   </tr>
   <tr>
@@ -197,9 +210,9 @@
     <td>规划中 (Planned)</td>
   </tr>
   <tr>
-    <td rowspan="3">Qwen3-Omni-Thinker</td>
-    <td rowspan="3">全模态模型</td>
-    <td rowspan="3">文本 / 图像 / 视频 / 音频</td>
+    <td rowspan="4">Qwen3-Omni-Thinker</td>
+    <td rowspan="4">全模态模型</td>
+    <td rowspan="4">文本 / 图像 / 视频 / 音频</td>
     <td>DPO</td>
     <td>✅ 已支持</td>
   </tr>
@@ -208,7 +221,22 @@
     <td>✅ 已支持</td>
   </tr>
   <tr>
+    <td><a href="docs/algo/omni_opd.md">OPD</a></td>
+    <td>✅ 已支持</td>
+  </tr>
+  <tr>
     <td><a href="examples/dapo_trainer/README.md">DAPO (阶段 1，LoRA)</a></td>
+    <td>✅ 已支持</td>
+  </tr>
+  <tr>
+    <td rowspan="2">MiniCPM-o 4.5</td>
+    <td rowspan="2">全模态模型</td>
+    <td rowspan="2">图像 / 音频 → 文本</td>
+    <td><a href="examples/gspo_trainer/README.md#training-with-minicpm-o-45-avqa">GSPO</a></td>
+    <td>✅ 已支持</td>
+  </tr>
+  <tr>
+    <td><a href="examples/dpo_trainer/minicpm/README.md">DPO</a></td>
     <td>✅ 已支持</td>
   </tr>
   <tr>
@@ -234,7 +262,7 @@
 
 ## 发展路线图 🗺
 
-未来的技术规划与功能特性跟踪于 [VeRL-Omni Q4 Roadmap)](https://github.com/verl-project/verl-omni/issues/700)。
+未来的技术规划与功能特性跟踪于 [VeRL-Omni Q4 Roadmap](https://github.com/verl-project/verl-omni/issues/700)。
 
 ## 参与贡献 🤝
 
