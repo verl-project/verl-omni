@@ -39,7 +39,9 @@ def _npu_ray_runtime_env(requested: int) -> dict:
             "PYTHONPATH": os.pathsep.join(p for p in (os.path.abspath("."), os.environ.get("PYTHONPATH", "")) if p),
             "ASCEND_RT_VISIBLE_DEVICES": visible_devices,
             "ASCEND_VISIBLE_DEVICES": os.getenv("ASCEND_VISIBLE_DEVICES") or visible_devices,
-            "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES": "1",
+            "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES": os.environ.get(
+                "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES", "1"
+            ),
             "HCCL_NPU_SOCKET_PORT_RANGE": os.getenv("HCCL_NPU_SOCKET_PORT_RANGE") or "auto",
             "HF_HUB_OFFLINE": "1",
             "TRANSFORMERS_OFFLINE": "1",

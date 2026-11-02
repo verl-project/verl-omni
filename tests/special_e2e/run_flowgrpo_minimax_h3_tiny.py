@@ -303,7 +303,9 @@ def _hydra_overrides(
         )
         for name, value in {
             "ASCEND_VISIBLE_DEVICES": os.environ["ASCEND_VISIBLE_DEVICES"],
-            "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES": "1",
+            "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES": os.environ.get(
+                "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES", "1"
+            ),
             "HF_HUB_OFFLINE": "1",
             "TRANSFORMERS_OFFLINE": "1",
         }.items():

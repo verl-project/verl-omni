@@ -158,6 +158,20 @@ class _Controller:
             NPU_SMOKE_CONTROLLER_START=str(self.identity.start),
             NPU_SMOKE_SUPERVISOR_TOKEN=token,
         )
+        if name != "exclusive":
+            # Ray returns physical IDs; resource workers must use Ray-managed local visibility.
+            for variable in (
+                "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES",
+                "RAY_EXPERIMENTAL_NOSET_ROCR_VISIBLE_DEVICES",
+                "RAY_EXPERIMENTAL_NOSET_HIP_VISIBLE_DEVICES",
+                "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES",
+                "RAY_EXPERIMENTAL_NOSET_HABANA_VISIBLE_MODULES",
+                "RAY_EXPERIMENTAL_NOSET_NEURON_RT_VISIBLE_CORES",
+                "RAY_EXPERIMENTAL_NOSET_TPU_VISIBLE_CHIPS",
+                "RAY_EXPERIMENTAL_NOSET_ONEAPI_DEVICE_SELECTOR",
+            ):
+                env[variable] = ""
+            env["RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO"] = "0"
         command = self._command(state_path)
         output = (log_dir / "runner.log").open("wb")
         try:

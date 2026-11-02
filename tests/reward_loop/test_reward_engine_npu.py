@@ -39,7 +39,9 @@ def npu_reward_checkpoint(monkeypatch, tmp_path_factory):
         "DEVICE_NAME": "npu",
         "ASCEND_RT_VISIBLE_DEVICES": visible_devices,
         "ASCEND_VISIBLE_DEVICES": os.environ.get("ASCEND_VISIBLE_DEVICES") or visible_devices,
-        "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES": "1",
+        "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES": os.environ.get(
+            "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES", "1"
+        ),
         "HCCL_NPU_SOCKET_PORT_RANGE": os.environ.get("HCCL_NPU_SOCKET_PORT_RANGE") or "auto",
         "HF_HUB_OFFLINE": "1",
         "TRANSFORMERS_OFFLINE": "1",
@@ -138,7 +140,9 @@ def test_standalone_reward_engine_npu(npu_reward_checkpoint):
     env_vars.update(
         {
             "DEVICE_NAME": "npu",
-            "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES": "1",
+            "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES": os.environ.get(
+                "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES", "1"
+            ),
             "HF_HUB_OFFLINE": "1",
             "TRANSFORMERS_OFFLINE": "1",
             "TOKENIZERS_PARALLELISM": "false",
