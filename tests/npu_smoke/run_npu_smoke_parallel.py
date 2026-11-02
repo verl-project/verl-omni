@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Run disjoint NPU smoke lanes in private mount and PID namespaces."""
+"""Run disjoint NPU smoke lanes with authenticated process-tree cleanup."""
 
 from __future__ import annotations
 
@@ -20,12 +20,17 @@ import codecs
 import json
 import os
 import re
+import secrets
 import shutil
 import signal
+import stat
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
+
+from run_npu_smoke_processes import DescendantScope, _read_state, enable_subreaper, process_identity
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _LAYOUTS = {
@@ -47,6 +52,8 @@ def _device_list(name: str, default: str) -> list[str]:
     devices = value.split(",")
     if len(devices) != 8 or len({int(device) for device in devices}) != 8:
         raise ValueError(f"{name} must contain eight distinct NPU IDs.")
+    if [int(device) for device in devices] != sorted(int(device) for device in devices):
+        raise ValueError(f"{name} must use ascending physical NPU IDs for parallel Ascend lanes.")
     return devices
 
 
@@ -67,53 +74,71 @@ def _selected_ids(group: str) -> set[int]:
     return set(ids)
 
 
-def _outside_tmp(path: Path) -> Path:
-    path = path.expanduser().resolve()
-    if path == Path("/tmp").resolve() or Path("/tmp").resolve() in path.parents:
-        raise ValueError(f"Namespace input must remain accessible after /tmp is mounted: {path}")
-    return path
+def _discard_successful_runtime(child: dict) -> None:
+    if not child.get("successful"):
+        return
+    runtime = child["runtime"]
+    metadata = runtime.lstat()
+    if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.getuid() or metadata.st_mode & 0o777 != 0o700:
+        raise RuntimeError(f"Refusing to remove changed smoke runtime directory: {runtime}")
+    shutil.rmtree(runtime)
 
 
 class _Controller:
-    def __init__(self, group: str, log_dir: Path, unshare: str, devices: tuple[list[str], list[str]]):
+    def __init__(self, group: str, log_dir: Path, devices: tuple[list[str], list[str]]):
         self.group = group
         self.log_dir = log_dir
-        self.unshare = unshare
         self.devices = devices
         self.children: list[dict] = []
         self.cancel_signal = 0
-        (log_dir / ".namespace").mkdir(mode=0o700)
+        self.identity = process_identity(os.getpid())
+        self.scope = DescendantScope(self.identity)
+        (log_dir / ".processes").mkdir(mode=0o700)
 
     def _signal(self, signum: int, _frame) -> None:
         self.cancel_signal = signum
 
-    def _command(self, backing: Path, group: str) -> list[str]:
+    def _command(self, state_path: Path) -> list[str]:
         return [
-            self.unshare,
-            "--mount",
-            "--propagation",
-            "private",
-            "--pid",
-            "--fork",
-            "--kill-child",
-            "--mount-proc",
-            "bash",
-            str(_REPO_ROOT / "tests/npu_smoke/run_npu_smoke_namespace.sh"),
-            str(backing),
+            sys.executable,
+            str(Path(__file__).with_name("run_npu_smoke_processes.py")),
+            "supervise",
+            self.group,
+            "--repo-root",
             str(_REPO_ROOT),
-            group,
+            "--state-path",
+            str(state_path),
         ]
+
+    def _metadata(self, child: dict, *, complete: bool = False) -> dict:
+        state = _read_state(child["state_path"])
+        if (state.get("pid"), state.get("start"), state.get("token")) != (
+            child["process"].pid,
+            child["identity"].start,
+            child["token"],
+        ):
+            raise RuntimeError(f"{child['name']}: invalid supervisor identity metadata.")
+        if complete and (
+            state.get("phase") != "complete"
+            or state.get("cleanup_complete") is not True
+            or state.get("returncode") != child["process"].returncode
+        ):
+            raise RuntimeError(f"{child['name']}: supervisor exited without verified cleanup and raw status.")
+        return state
 
     def _start(self, name: str, count: int, ids: tuple[int, ...], offset: int, port_start: int) -> dict:
         if self.cancel_signal:
             raise InterruptedError(f"Received signal {self.cancel_signal}")
         log_dir = self.log_dir / name
         log_dir.mkdir(mode=0o700)
-        private = self.log_dir / ".namespace" / name
+        private = self.log_dir / ".processes" / name
         private.mkdir(mode=0o700)
-        backing, fixtures = private / "tmp", private / "fixtures"
-        backing.mkdir(mode=0o700)
+        fixtures = private / "fixtures"
         fixtures.mkdir(mode=0o700)
+        runtime = Path(tempfile.mkdtemp(prefix="vn-", dir="/tmp"))
+        state_path = private / "state.json"
+        token = secrets.token_hex(24)
+        (private / "runtime.json").write_text(json.dumps({"runtime": str(runtime)}))
         env = dict(os.environ)
         env.pop("RAY_ADDRESS", None)
         env.update(
@@ -126,18 +151,40 @@ class _Controller:
             NPU_SMOKE_FIXTURE_ROOT=str(fixtures),
             NPU_SMOKE_MASTER_PORT_RANGE=f"[{port_start},{port_start + 4000}]",
             LOG_DIR=str(log_dir),
+            TMPDIR=str(runtime),
+            RAY_TMPDIR=str(runtime),
+            VERL_ZMQ_DIR=str(runtime),
+            NPU_SMOKE_CONTROLLER_PID=str(self.identity.pid),
+            NPU_SMOKE_CONTROLLER_START=str(self.identity.start),
+            NPU_SMOKE_SUPERVISOR_TOKEN=token,
         )
-        command = self._command(backing, "--probe" if name == "namespace-check" else self.group)
+        command = self._command(state_path)
         output = (log_dir / "runner.log").open("wb")
         try:
             process = subprocess.Popen(
-                command, env=env, stdout=output, stderr=subprocess.STDOUT, start_new_session=True
+                command, env=env, stdin=subprocess.PIPE, stdout=output, stderr=subprocess.STDOUT, start_new_session=True
             )
         except BaseException:
             output.close()
             raise
+        try:
+            identity = process_identity(process.pid)
+            pidfd = os.pidfd_open(process.pid, 0)
+            if process_identity(process.pid).start != identity.start:
+                os.close(pidfd)
+                raise RuntimeError(f"{name}: supervisor identity changed before acknowledgement.")
+        except (FileNotFoundError, ProcessLookupError):
+            process.wait(timeout=5)
+            process.stdin.close()
+            output.close()
+            raise RuntimeError(f"{name}: supervisor disappeared before acknowledgement.") from None
         child = {
             "name": name,
+            "identity": identity,
+            "pidfd": pidfd,
+            "token": token,
+            "state_path": state_path,
+            "runtime": runtime,
             "ids": ids,
             "process": process,
             "output": output,
@@ -148,7 +195,23 @@ class _Controller:
             "log_dir": log_dir,
         }
         self.children.append(child)
-        print(f"[namespace] {name}: IDs {ids}; {env['ASCEND_RT_VISIBLE_DEVICES']}; log={log_dir}", flush=True)
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if self.cancel_signal:
+                raise InterruptedError(f"Received signal {self.cancel_signal}")
+            if process.poll() is not None:
+                raise RuntimeError(f"{name}: supervisor exited before workload acknowledgement.")
+            if state_path.exists():
+                state = self._metadata(child)
+                if state.get("phase") != "ready":
+                    raise RuntimeError(f"{name}: workload started before controller acknowledgement.")
+                process.stdin.write((token + "\n").encode())
+                process.stdin.flush()
+                break
+            time.sleep(0.05)
+        else:
+            raise RuntimeError(f"{name}: supervisor startup timed out; no workload was acknowledged.")
+        print(f"[process lane] {name}: IDs {ids}; {env['ASCEND_RT_VISIBLE_DEVICES']}; log={log_dir}", flush=True)
         return child
 
     def _stream(self, child: dict, *, final: bool = False) -> int:
@@ -174,7 +237,10 @@ class _Controller:
                 raise InterruptedError(f"Received signal {self.cancel_signal}")
             for child in children:
                 self._stream(child)
-            if all(child["process"].poll() is not None for child in children):
+            for child in children:
+                if child["process"].poll() is not None:
+                    self._metadata(child, complete=True)
+            if all(child["process"].returncode is not None for child in children):
                 for child in children:
                     child["process"].wait()
                     self._drain(child)
@@ -182,46 +248,69 @@ class _Controller:
             time.sleep(0.1)
 
     def close(self) -> None:
-        live = [child for child in self.children if child["process"].poll() is None]
-        for child in live:
-            try:
-                os.killpg(child["process"].pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-        deadline = time.monotonic() + 5
-        while any(child["process"].poll() is None for child in live) and time.monotonic() < deadline:
-            time.sleep(0.1)
-        for child in live:
-            if child["process"].poll() is not None:
-                continue
-            try:
-                os.killpg(child["process"].pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
         errors = []
+        # Closing the ACK pipe also asks a live supervisor to cancel on parent EOF.
+        for child in self.children:
+            if child["process"].stdin is not None:
+                child["process"].stdin.close()
+            if child["process"].poll() is None:
+                try:
+                    signal.pidfd_send_signal(child["pidfd"], signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+        deadline = time.monotonic() + 15
+        while any(child["process"].poll() is None for child in self.children) and time.monotonic() < deadline:
+            for child in self.children:
+                self._stream(child)
+            time.sleep(0.05)
+        for child in self.children:
+            if child["process"].poll() is None:
+                try:
+                    signal.pidfd_send_signal(child["pidfd"], signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
         for child in self.children:
             try:
-                child["process"].wait(timeout=10)
+                child["process"].wait(timeout=5)
                 self._drain(child)
             except (OSError, subprocess.TimeoutExpired) as error:
                 errors.append(error)
             finally:
+                os.close(child["pidfd"])
                 child["reader"].close()
                 child["output"].close()
+
+        # Subreaping at the controller catches detached orphans left by a dead supervisor.
+        # Popen children have all been waited before waitpid(-1), preserving their raw exits.
+        def reap_adopted() -> None:
+            while True:
+                try:
+                    pid, _ = os.waitpid(-1, os.WNOHANG)
+                except ChildProcessError:
+                    return
+                if pid == 0:
+                    return
+
+        try:
+            self.scope.cleanup(set(), reap=reap_adopted)
+            reap_adopted()
+            while True:
+                try:
+                    if os.waitpid(-1, os.WNOHANG)[0] == 0:
+                        errors.append(RuntimeError("Controller still has an unreaped child."))
+                        break
+                except ChildProcessError:
+                    break
+        finally:
+            self.scope.close()
         if errors:
-            raise RuntimeError(f"Unable to finish namespace cleanup: {errors}") from errors[0]
+            raise RuntimeError(f"Unable to finish scoped process cleanup: {errors}") from errors[0]
+        for child in self.children:
+            _discard_successful_runtime(child)
 
     def run(self, selected: set[int]) -> int:
         for signum in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
             signal.signal(signum, self._signal)
-        probe = self._start("namespace-check", 8, (), 0, 32000)
-        self._wait([probe])
-        if probe["process"].returncode:
-            print(
-                "[FAIL] Private mount/PID namespaces are unavailable; no smoke workload was started.", file=sys.stderr
-            )
-            return 2
-
         selected_children = []
         offset = 0
         for name, count, ids in _LAYOUTS[self.group]:
@@ -266,6 +355,10 @@ class _Controller:
             (self.log_dir / "summary.log").write_text(message)
             print(message, file=sys.stderr, end="")
             return 1
+        for child in selected_children:
+            child["successful"] = exits[child["name"]] == 0 and all(
+                rows[test_id][0] == "PASS" for test_id in child["ids"]
+            )
 
         lines = ["-" * 78, f"  {self.group.upper()} NPU SMOKE TEST SUMMARY", "-" * 78]
         for test_id in sorted(rows):
@@ -300,25 +393,23 @@ def main() -> int:
         if args.num_npus != 8 or os.environ.get("NPU_SMOKE_FULL_TOPOLOGY", "0") != "0":
             raise ValueError("Parallel smoke requires eight NPUs; use the serial entry for full-topology runs.")
         if os.environ.get("NPU_SMOKE_PARALLEL_CHILD", "0") != "0":
-            raise ValueError("A namespace child cannot start another parallel controller.")
+            raise ValueError("A process-lane child cannot start another parallel controller.")
         selected = _selected_ids(args.group)
         rt_devices = _device_list("ASCEND_RT_VISIBLE_DEVICES", "0,1,2,3,4,5,6,7")
         devices = (rt_devices, _device_list("ASCEND_VISIBLE_DEVICES", ",".join(rt_devices)))
         if args.group == "core" and 0 in selected and {int(device) for device in rt_devices} != set(range(8)):
             raise ValueError("Core test 0's existing fixture resets RT visibility to device IDs 0 through 7.")
-        log_dir = _outside_tmp(args.log_dir)
-        _outside_tmp(_REPO_ROOT)
-        if sys.platform != "linux" or not (unshare := shutil.which("unshare")):
-            raise ValueError("Parallel smoke requires Linux unshare with mount and PID namespace permissions.")
+        log_dir = args.log_dir.expanduser().resolve()
+        enable_subreaper()
         log_dir.mkdir(parents=True, exist_ok=True)
-        if (log_dir / "summary.log").exists() or (log_dir / ".namespace").exists():
+        if (log_dir / "summary.log").exists() or (log_dir / ".processes").exists():
             raise ValueError(f"Refusing to reuse parallel smoke results: {log_dir}")
-        controller = _Controller(args.group, log_dir, unshare, devices)
+        controller = _Controller(args.group, log_dir, devices)
         return controller.run(selected)
     except InterruptedError as error:
         print(f"[FAIL] {error}", file=sys.stderr)
         return 128 + controller.cancel_signal
-    except (OSError, ValueError) as error:
+    except (OSError, ValueError, RuntimeError) as error:
         print(f"[FAIL] {error}", file=sys.stderr)
         return 2
     finally:

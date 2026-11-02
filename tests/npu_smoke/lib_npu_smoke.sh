@@ -151,6 +151,10 @@ declare -a TEST_LOG_FILES=()
 NPU_SMOKE_REGISTERED_IDS=,
 
 cleanup_runtime() {
+    if [[ "${NPU_SMOKE_PARALLEL_CHILD}" == 1 ]]; then
+        python3 tests/npu_smoke/run_npu_smoke_processes.py cleanup
+        return $?
+    fi
     ray stop --force || true
     pkill -TERM -f DiffusionWorker || true
     pkill -TERM -f VLLMWorker || true

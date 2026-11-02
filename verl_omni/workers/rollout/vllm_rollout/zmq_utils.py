@@ -13,6 +13,26 @@
 # limitations under the License.
 
 
+import os
+
+
+def _ipc_handle(path: str) -> str:
+    if "\0" in path or len(os.fsencode(path)) >= 108:
+        raise ValueError("ZMQ IPC socket path must contain no NUL and be shorter than 108 bytes.")
+    return f"ipc://{path}"
+
+
+def make_base_zmq_handle(job_id: str, replica_rank: int | str, local_rank: int) -> str:
+    """Return a colocated weight route under VERL_ZMQ_DIR, defaulting to /tmp."""
+    directory = os.environ.get("VERL_ZMQ_DIR") or "/tmp"
+    if os.environ.get("VERL_ZMQ_DIR") and (
+        not os.path.isabs(directory) or not os.path.isdir(directory) or os.path.islink(directory)
+    ):
+        raise ValueError("VERL_ZMQ_DIR must be an existing absolute directory, not a symbolic link.")
+    name = f"rl-colocate-zmq-{job_id}-replica-{replica_rank}-rank-{local_rank}.sock"
+    return _ipc_handle(os.path.join(directory, name))
+
+
 def make_update_zmq_id(global_steps: int | None, update_seq: int) -> str:
     """Return an id that is unique for each weight update in a worker lifetime."""
     step = "none" if global_steps is None else str(global_steps)
@@ -27,4 +47,4 @@ def make_update_zmq_handle(base_handle: str, update_id: str) -> str:
     path = base_handle.removeprefix("ipc://")
     if path.endswith(".sock"):
         path = path[: -len(".sock")]
-    return f"ipc://{path}-update-{update_id}.sock"
+    return _ipc_handle(f"{path}-update-{update_id}.sock")

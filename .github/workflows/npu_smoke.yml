@@ -102,7 +102,6 @@ jobs:
       image: swr.cn-north-4.myhuaweicloud.com/mindspeed/pr-verl-omni-a2:v010-vllm030-omni030
       options: >-
         --shm-size 16g
-        --cap-add SYS_ADMIN
     env:
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable

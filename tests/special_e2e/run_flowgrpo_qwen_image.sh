@@ -65,7 +65,9 @@ check_leak_monitor() {
     if grep -q "LEAK" "${_LEAK_FILE}" 2>/dev/null; then
         echo ""
         echo "FAIL: unexpected vLLMOmniHttpServer process(es) detected on GPU-0 —"
-        ray stop --force 2>/dev/null || true
+        if [[ "${NPU_SMOKE_PARALLEL_CHILD:-0}" != 1 ]]; then
+            ray stop --force 2>/dev/null || true
+        fi
         exit 1
     fi
 }
@@ -126,7 +128,7 @@ python3 -m verl_omni.trainer.main_diffusion_v1 \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=${micro_bsz_per_gpu} \
     reward.num_workers=1 \
     reward.reward_model.enable=True \
-    reward.reward_model.model_path=${REWARD_MODEL_PATH} \
+    reward.reward_model.model_path="${REWARD_MODEL_PATH}" \
     reward.reward_model.rollout.name=vllm \
     reward.reward_model.rollout.tensor_model_parallel_size=${REWARD_TP} \
     reward.reward_model.rollout.gpu_memory_utilization=0.4 \

@@ -66,7 +66,9 @@ check_leak_monitor() {
     if grep -q "LEAK" "${_LEAK_FILE}" 2>/dev/null; then
         echo ""
         echo "FAIL: unexpected vLLMOmniHttpServer process(es) detected on GPU-0 —"
-        ray stop --force 2>/dev/null || true
+        if [[ "${NPU_SMOKE_PARALLEL_CHILD:-0}" != 1 ]]; then
+            ray stop --force 2>/dev/null || true
+        fi
         exit 1
     fi
 }

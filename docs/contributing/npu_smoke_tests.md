@@ -1,6 +1,6 @@
 # NPU Smoke Tests
 
-Last updated: 11/01/2026.
+Last updated: 11/02/2026.
 
 This guide explains how to add CI test cases for Huawei Ascend devices in verl-omni.
 
@@ -51,9 +51,12 @@ Set `NPU_SMOKE_FULL_TOPOLOGY=1` to restore the requested budget for every entry.
 Entries run sequentially within each group and log their allocation and device IDs.
 Opt in with `NPU_SMOKE_PARALLEL=1` for two isolated four-NPU core lanes or
 2/2/4-NPU e2e lanes, after the group's exclusive eight-NPU entries finish.
-This requires `CAP_SYS_ADMIN`, private PID namespaces, and private `/proc` and `/tmp` mounts.
+This requires Linux child subreapers and pidfd signaling. Each lane keeps the
+container's PID and mount namespaces, scopes cleanup to its own descendants,
+and uses separate short Ray and weight-transfer IPC directories.
 The workflow enables this mode; set `NPU_SMOKE_PARALLEL=0` for serial execution.
-Full topology mode remains serial. Core 0 currently requires runtime device IDs 0–7.
+Full topology mode remains serial. Parallel visibility lists must be ascending;
+core 0 requires runtime device IDs 0–7.
 
 Test 3 ports the `fsdp` case of `tests/workers/test_diffusers_fsdp_engine.py`
 (GPU core ID 2). It reuses the GPU test's synthetic trajectories and engine
@@ -297,6 +300,8 @@ actions may otherwise be resolved against a different host workspace.
 Before each test, the shared library stops Ray, terminates stale
 DiffusionWorker, VLLMWorker, VLLM::, and vLLMOmniHttpServer processes, waits five
 seconds, force-kills remaining matches, and prints npu-smi information.
+Parallel lanes instead clean only verified descendants of their own supervisor;
+cleanup or log-writing failure fails the group.
 
 Per-test logs are stored under:
 

@@ -22,7 +22,7 @@ from verl.workers.rollout.vllm_rollout.utils import VLLM_LORA_INT_ID, VLLM_LORA_
 from vllm_omni.diffusion.worker.diffusion_worker import CustomPipelineWorkerExtension
 
 from verl_omni.utils.vllm_omni import OmniTensorLoRARequest, VLLMOmniHijack
-from verl_omni.workers.rollout.vllm_rollout.zmq_utils import make_update_zmq_handle
+from verl_omni.workers.rollout.vllm_rollout.zmq_utils import make_base_zmq_handle, make_update_zmq_handle
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -454,4 +454,4 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
             replica_entries = _split_visible_devices(replica_devices)
             if 0 <= local_rank < len(stage_entries) and stage_entries[local_rank] in replica_entries:
                 local_rank = replica_entries.index(stage_entries[local_rank])
-        return f"ipc:///tmp/rl-colocate-zmq-{job_id}-replica-{replica_rank}-rank-{local_rank}.sock"
+        return make_base_zmq_handle(job_id, replica_rank, local_rank)
