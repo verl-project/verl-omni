@@ -571,8 +571,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         # Convert TQ rows to diffusion DataProto; from here on the driver owns the
         # DataProto compute contract (no KVBatchMeta passed to diffusion workers).
         if data is None:
-            with marked_timer("probe_tq_read", timing_raw):
-                data = diffusion_tq_batch_to_dataproto(batch_meta, pad_token_id=self.tokenizer.pad_token_id or 0)
+            data = diffusion_tq_batch_to_dataproto(batch_meta, pad_token_id=self.tokenizer.pad_token_id or 0)
 
         # [OPTIONAL] colocated reward model
         if self.reward_loop_manager.reward_loop_worker_handles is None and self.use_rm:
@@ -662,12 +661,11 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             data_for_tq = data.select_idxs(list(range(n_keys)))
         else:
             data_for_tq = data
-        with marked_timer("probe_tq_put", timing_raw):
-            put_dataproto_fields_to_tq(
-                batch_meta,
-                data_for_tq,
-                fields=diffusion_persisted_tq_fields("policy_gradient"),
-            )
+        put_dataproto_fields_to_tq(
+            batch_meta,
+            data_for_tq,
+            fields=diffusion_persisted_tq_fields("policy_gradient"),
+        )
         return batch_meta
 
     def _validate_old_adapter_config(self):
