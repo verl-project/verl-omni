@@ -118,7 +118,7 @@ rewrite_judge_before_generate: true
 # Optional dump root for traj / hermes / images (null → repo ``outputs/e2e``).
 e2e_root: null
 
-# Explicit run directory (null -> e2e_root / trainer.experiment_name).
+# Explicit run directory (null → e2e_root / trainer.experiment_name).
 run_dir: null
 
 # Co-RL objective contract: v1 baseline or opt-in v2 final quality/call cost.
