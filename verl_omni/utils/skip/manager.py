@@ -15,70 +15,75 @@
 
 verl's ``SkipManager.init`` instantiates only the roles it knows from the
 ``skip:`` config block. This module wraps it: the verl-omni stage roles are
-registered by importing :mod:`verl_omni.utils.skip.stage_skip` and instantiated
-from the separate ``omni_skip:`` block (kept out of ``skip:`` because verl
-parses that block against its fixed ``SkipManagerConfig`` schema). Conflict
-checks here fail the run early for skip configurations that would be silently
-inert or unsafe.
+instantiated from the separate ``omni_skip:`` block (kept out of ``skip:``
+because verl parses that block against its fixed ``SkipManagerConfig`` schema).
+Conflict checks here fail the run early for skip configurations that would be
+silently inert or unsafe.
 """
 
 from omegaconf import DictConfig, OmegaConf
+from verl.trainer.ppo.utils import need_reference_policy
+from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.skip import SkipManager
 from verl.utils.skip.base_skip import SKIP_REGISTRY
 
+from verl_omni.utils.skip.config import OmniSkipConfig
 from verl_omni.utils.skip.stage_skip import STAGE_SKIP_ROLES
+from verl_omni.workers.config.reward import streaming_reward_enabled
 
 __all__ = ["init_skip_manager"]
 
 
 def init_skip_manager(config: DictConfig) -> None:
-    """Initialize SkipManager with verl's rollout roles plus verl-omni's stage roles."""
-    import verl_omni.utils.skip.stage_skip  # noqa: F401 — registers the skip classes
+    """Initialize SkipManager with verl's rollout roles plus verl-omni's stage roles.
 
+    Args:
+        config: The whole trainer config; a missing ``omni_skip`` block enables no stage role.
+
+    Raises:
+        ValueError: If an enabled role is invalid, conflicting, or could never fire with this config.
+    """
     SkipManager.init(config)
+    if OmegaConf.select(config, "omni_skip") is None:
+        return
+    stage_configs = omega_conf_to_dataclass(config.omni_skip, dataclass_type=OmniSkipConfig)
     for role in STAGE_SKIP_ROLES:
-        stage_config = OmegaConf.select(config, f"omni_skip.{role}")
-        if stage_config is None:
-            continue
-        _validate_stage_config(role, stage_config)
+        stage_config = getattr(stage_configs, role)
         if stage_config.enable:
             SkipManager.skip_instances[role] = SKIP_REGISTRY[role](stage_config, config)
     _check_skip_conflicts(config)
 
 
-def _validate_stage_config(role: str, stage_config: DictConfig) -> None:
-    if not isinstance(stage_config.enable, bool):
-        raise ValueError(f"omni_skip.{role}.enable must be bool, got {type(stage_config.enable).__name__}")
-    if not isinstance(stage_config.dump_dir, str):
-        raise ValueError(f"omni_skip.{role}.dump_dir must be str, got {type(stage_config.dump_dir).__name__}")
-    steps = OmegaConf.to_container(stage_config.steps, resolve=True)
-    if not isinstance(steps, list) or not all(
-        isinstance(step, int) and not isinstance(step, bool) for step in steps
-    ):
-        raise ValueError(f"omni_skip.{role}.steps must be a list of ints, got {steps}")
-
-
 def _check_skip_conflicts(config: DictConfig) -> None:
-    enabled = [role for role in STAGE_SKIP_ROLES if role in SkipManager.skip_instances]
+    enabled = {role for role in STAGE_SKIP_ROLES if role in SkipManager.skip_instances}
     if not enabled:
         return
 
-    if "weight_sync" in enabled and not bool(
-        OmegaConf.select(config, "omni_skip.weight_sync.ack_stale_weights", default=False)
+    use_v1 = bool(OmegaConf.select(config, "trainer.use_v1", default=False))
+    if "weight_sync" in enabled and (
+        not use_v1 or OmegaConf.select(config, "trainer.v1.trainer_mode", default="sync") == "sync"
     ):
         raise ValueError(
-            "omni_skip.weight_sync leaves rollout replicas on pre-update weights until the next lifecycle "
-            "sync, silently degrading training. Set omni_skip.weight_sync.ack_stale_weights=true to "
-            "acknowledge (debug runs only)."
+            "omni_skip.weight_sync is inert here: only the V1 async modes have a mid-cycle sync. "
+            "Set trainer.use_v1=true with a non-sync trainer.v1.trainer_mode, or disable the role."
         )
+    if enabled & {"reward", "weight_sync"} and streaming_reward_enabled(config):
+        raise ValueError(
+            "omni_skip.reward / omni_skip.weight_sync are inert without a colocated reward model: streaming "
+            "rewards are scored inside rollout, so freeze them with skip.rollout_tq / skip.rollout instead."
+        )
+    if "ref_log_prob" in enabled:
+        loss_mode = OmegaConf.select(config, "actor_rollout_ref.actor.diffusion_loss.loss_mode")
+        if not need_reference_policy(config) and loss_mode != "dpo":
+            raise ValueError("omni_skip.ref_log_prob is inert: this configuration runs no reference policy.")
 
     trainer_type = OmegaConf.select(config, "algorithm.trainer_type", default="policy_gradient")
-    if trainer_type != "policy_gradient" and ("old_log_prob" in enabled or "advantage" in enabled):
+    if trainer_type != "policy_gradient" and enabled & {"old_log_prob", "advantage"}:
         raise ValueError(
             f"omni_skip.old_log_prob / omni_skip.advantage are inert with algorithm.trainer_type={trainer_type}: "
             "direct-preference trainers never recompute old log probs or advantages."
         )
-    if "advantage" in enabled and not bool(OmegaConf.select(config, "trainer.use_v1", default=False)):
+    if "advantage" in enabled and not use_v1:
         raise ValueError(
             "omni_skip.advantage is inert on the V0 policy-gradient trainer: it computes advantages inline "
             "with no annotated stage hook. Enable it only with trainer.use_v1=true."

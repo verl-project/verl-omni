@@ -12,19 +12,32 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
+import subprocess
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
 import pytest
 import torch
 from omegaconf import OmegaConf
+from omegaconf.errors import ConfigKeyError
+from tensordict import TensorDict
+from transfer_queue import KVBatchMeta
 from verl import DataProto
+from verl.experimental.agent_loop.agent_loop import AgentLoopManager
 from verl.utils.skip import SkipManager
+from verl.utils.skip.rollout_skip import RolloutTqSkip
 
-from verl_omni.utils.skip import STAGE_SKIP_ROLES, init_skip_manager, skip_stage_metrics
+from verl_omni.trainer.diffusion.v1.trainer_base import PolicyGradientDiffusionTrainerV1
+from verl_omni.utils.skip import STAGE_SKIP_ROLES, init_skip_manager, log_skip_summary, skip_stage_metrics
 from verl_omni.utils.skip.stage_skip import DiffusionRolloutSkip
 
 DUMP_DIR = "dump"
+COMPARE_SCRIPT = Path(__file__).parents[3] / "examples" / "stage_skip" / "compare_replay_metrics.py"
 
 
-def make_config(tmp_path, *, algorithm=None, omni_skip_overrides=None, trainer_type=None, v1=None) -> OmegaConf:
+def make_config(tmp_path, *, algorithm=None, omni_skip_overrides=None, trainer_type=None, v1=None, skip=None):
     omni_skip = {
         role: {
             "enable": False,
@@ -39,7 +52,7 @@ def make_config(tmp_path, *, algorithm=None, omni_skip_overrides=None, trainer_t
     algorithm = dict(algorithm or {})
     if trainer_type is not None:
         algorithm["trainer_type"] = trainer_type
-    trainer = {"experiment_name": "exp", "project_name": "proj"}
+    trainer = {"experiment_name": "exp", "project_name": "proj", "use_v1": True}
     # The real trainer config always ships trainer.v1 (and verl's RolloutTqSkip
     # reads trainer.v1.trainer_mode at init even when rollout_tq is disabled).
     trainer["v1"] = {"trainer_mode": "separate_async", "separate_async": {"parameter_sync_step": 1}}
@@ -48,11 +61,12 @@ def make_config(tmp_path, *, algorithm=None, omni_skip_overrides=None, trainer_t
     return OmegaConf.create(
         {
             "trainer": trainer,
-            "skip": {},
+            "skip": skip or {},
             "algorithm": algorithm,
+            "reward": {"reward_model": {"enable": True, "enable_resource_pool": False}},
             # The loss reads log probs, so the real skip_old_log_prob conflict
             # check passes and the annotated stage is created.
-            "actor_rollout_ref": {"actor": {"diffusion_loss": {"loss_mode": "flow_grpo"}}},
+            "actor_rollout_ref": {"actor": {"diffusion_loss": {"loss_mode": "flow_grpo"}, "use_kl_loss": False}},
             "omni_skip": omni_skip,
         }
     )
@@ -67,6 +81,11 @@ class DummyTrainer:
 
     def __init__(self):
         self.calls: dict[str, int] = {}
+        self.woken = 0
+        self.checkpoint_manager = SimpleNamespace(wake_up_replicas=self._wake_up)
+
+    def _wake_up(self) -> None:
+        self.woken += 1
 
     def _bump(self, role: str) -> None:
         self.calls[role] = self.calls.get(role, 0) + 1
@@ -216,6 +235,7 @@ def test_weight_sync_empty_action(tmp_path, reset_skip_manager, dummy):
 
     assert dummy.sync_weights() is None
     assert dummy.calls == {}
+    assert dummy.woken == 1  # the next step's sleep must not hit a sleeping replica
     assert skip_stage_metrics() == {"skip/weight_sync/calls": 1, "skip/weight_sync/steps": 1}
 
 
@@ -248,15 +268,15 @@ def test_advantage_inert_for_direct_preference(tmp_path, reset_skip_manager):
 
 
 def test_advantage_inert_for_v0_policy_gradient(tmp_path, reset_skip_manager):
-    config = make_config(tmp_path)  # trainer.use_v1 unset: the V0 trainer computes advantages inline
+    config = make_config(tmp_path)
+    config.trainer.use_v1 = False  # the V0 trainer computes advantages inline
     enable_stage(config, "advantage", steps=[1])
     with pytest.raises(ValueError, match="V0"):
         init_skip_manager(config)
 
 
 def test_advantage_supported_for_v1_policy_gradient(tmp_path, reset_skip_manager):
-    config = make_config(tmp_path, v1={"separate_async": {"parameter_sync_step": 1}})
-    config.trainer.use_v1 = True  # V1 run: the annotated advantage stage hook exists
+    config = make_config(tmp_path)
     enable_stage(config, "advantage", steps=[1])
     init_skip_manager(config)
     assert "advantage" in SkipManager.skip_instances
@@ -280,6 +300,215 @@ def test_disabled_stage_not_instantiated(tmp_path, reset_skip_manager):
     for role in STAGE_SKIP_ROLES:
         if role != "old_log_prob":
             assert role not in SkipManager.skip_instances
+
+
+@pytest.mark.parametrize(
+    "use_v1, trainer_mode",
+    [(False, "separate_async"), (True, "sync")],
+    ids=["v0", "v1_sync"],
+)
+def test_weight_sync_inert_without_mid_cycle_sync(tmp_path, reset_skip_manager, use_v1, trainer_mode):
+    config = make_config(tmp_path, v1={"trainer_mode": trainer_mode})
+    config.trainer.use_v1 = use_v1
+    config.omni_skip.weight_sync.update({"enable": True, "steps": [1], "ack_stale_weights": True})
+    with pytest.raises(ValueError, match="mid-cycle"):
+        init_skip_manager(config)
+
+
+def test_reward_inert_with_streaming_reward(tmp_path, reset_skip_manager):
+    config = make_config(tmp_path)
+    config.reward.reward_model.enable_resource_pool = True
+    enable_stage(config, "reward", steps=[1])
+    with pytest.raises(ValueError, match="colocated reward"):
+        init_skip_manager(config)
+
+
+def test_ref_log_prob_inert_without_reference_policy(tmp_path, reset_skip_manager):
+    config = make_config(tmp_path)
+    enable_stage(config, "ref_log_prob", steps=[1])
+    with pytest.raises(ValueError, match="no reference policy"):
+        init_skip_manager(config)
+
+
+def test_enabled_stage_without_steps_rejected(tmp_path, reset_skip_manager):
+    config = make_config(tmp_path)
+    enable_stage(config, "old_log_prob", steps=[])
+    with pytest.raises(ValueError, match="non-empty steps"):
+        init_skip_manager(config)
+
+
+def test_misspelled_stage_rejected(tmp_path, reset_skip_manager):
+    config = make_config(tmp_path)
+    OmegaConf.update(config, "omni_skip.old_logprob", {"enable": True, "steps": [1]})
+    with pytest.raises(ConfigKeyError):
+        init_skip_manager(config)
+
+
+def test_v0_trainer_ignores_leftover_parameter_sync_step(tmp_path, reset_skip_manager, dummy):
+    config = make_config(tmp_path, v1={"separate_async": {"parameter_sync_step": 4}})
+    config.trainer.use_v1 = False
+    enable_stage(config, "old_log_prob", steps=[1, 2], action="repeat")
+    init_skip_manager(config)
+    SkipManager.set_step(1)
+    dummy.compute_old_log_prob(_batch())
+
+    SkipManager.set_step(2)
+    dummy.compute_old_log_prob(_batch())
+    assert dummy.calls == {"old_log_prob": 1}  # step 1 counts as a complete cache
+
+
+def test_failed_dump_raises(tmp_path, reset_skip_manager, dummy, monkeypatch):
+    config = make_config(tmp_path)
+    enable_stage(config, "old_log_prob", steps=[1])
+    init_skip_manager(config)
+    SkipManager.set_step(1)
+
+    def fail_save(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(torch, "save", fail_save)
+    with pytest.raises(OSError, match="disk full"):
+        dummy.compute_old_log_prob(_batch())
+
+
+def test_log_skip_summary_logs_counters_only_when_enabled(tmp_path, reset_skip_manager, dummy):
+    logged = []
+    tracking = SimpleNamespace(log=lambda data, step: logged.append((step, data)))
+    init_skip_manager(make_config(tmp_path))
+    log_skip_summary(tracking, step=3)
+    assert logged == []
+
+    config = make_config(tmp_path)
+    enable_stage(config, "actor_update", steps=[1], action="empty")
+    init_skip_manager(config)
+    SkipManager.set_step(1)
+    dummy.update_actor(_batch())
+    log_skip_summary(tracking, step=3)
+    assert logged == [(3, {"skip/actor_update/calls": 1, "skip/actor_update/steps": 1})]
+
+
+def _tq_trainer(submitted: list) -> SimpleNamespace:
+    return SimpleNamespace(
+        _next_train_batch=lambda: {"uid": ["new-uid"]},
+        _submit_batch_to_rollout=submitted.append,
+    )
+
+
+def test_v1_submit_replays_rollout_tq_cache_instead_of_generating(tmp_path, reset_skip_manager, monkeypatch):
+    skip = {"rollout_tq": {"enable": True, "dump_dir": str(tmp_path / DUMP_DIR), "steps": [1], "action": "cache"}}
+    config = make_config(tmp_path, skip=skip)
+    init_skip_manager(config)
+    SkipManager.set_step(1)
+    rollout_tq = SkipManager.skip_instances["rollout_tq"]
+    injected = []
+    monkeypatch.setattr(RolloutTqSkip, "load_dump_data", lambda self, **kwargs: injected.append(kwargs))
+
+    submitted = []
+    PolicyGradientDiffusionTrainerV1._add_batch_to_generate(_tq_trainer(submitted))
+    assert len(submitted) == 1 and injected == []  # cache miss: the prompts go to rollout
+
+    slot = rollout_tq._get_v1_inner_dir(1, 0)
+    slot.mkdir(parents=True)
+    (slot / rollout_tq.tq_batch_name).touch()
+    (slot / rollout_tq.meta_name).touch()
+    PolicyGradientDiffusionTrainerV1._add_batch_to_generate(_tq_trainer(submitted))
+    assert len(submitted) == 1  # cache hit: no generation
+    assert injected[0]["new_prompt_uids"] == ["new-uid"]
+
+
+def test_rollout_tq_replay_keeps_record_pass_row_order(tmp_path, reset_skip_manager, monkeypatch):
+    """Stage caches are row-aligned, so a replayed session must map back to its own trajectory."""
+    skip = {"rollout_tq": {"enable": True, "dump_dir": str(tmp_path / DUMP_DIR), "steps": [1], "action": "cache"}}
+    init_skip_manager(make_config(tmp_path, skip=skip))
+    rollout_tq = SkipManager.skip_instances["rollout_tq"]
+
+    row_ids = {"a_0_0": 0, "a_1_0": 1, "b_0_0": 2, "b_1_0": 3}
+    prompt_index = {"a": 0, "b": 1}
+    injected = {}
+
+    def kv_batch_get(keys, partition_id):
+        return TensorDict({"row": torch.tensor([row_ids[key] for key in keys])}, batch_size=[len(keys)])
+
+    def kv_batch_put(keys, partition_id, fields=None, tags=None):
+        if fields is not None:
+            injected.update(zip(keys, fields["row"].tolist(), strict=True))
+
+    fake_tq = SimpleNamespace(kv_batch_get=kv_batch_get, kv_batch_put=kv_batch_put)
+    monkeypatch.setitem(sys.modules, "transfer_queue", fake_tq)
+
+    storage_order = ["b_1_0", "a_0_0", "b_0_0", "a_1_0"]
+    tags = [{"gen_batch_seq": 0, "prompt_index": prompt_index[key[0]]} for key in storage_order]
+    sampled = KVBatchMeta(partition_id="train", keys=storage_order, tags=tags)
+    rollout_tq.prepare_data(step=1, batch=sampled, global_steps=1)
+    rollout_tq.load_dump_data(step=1, new_prompt_uids=["x", "y"], n=2, global_steps=1)
+
+    assert injected == {"x_0_0": 0, "x_1_0": 1, "y_0_0": 2, "y_1_0": 3}
+
+
+def test_v0_rollout_replays_through_verl_agent_loop_hook(tmp_path, reset_skip_manager):
+    """The V0 trainer calls verl's annotated AgentLoopManager.generate_sequences directly."""
+    skip = {"rollout": {"enable": True, "dump_dir": str(tmp_path / DUMP_DIR), "steps": [3], "action": "cache"}}
+    config = make_config(tmp_path, skip=skip)
+    init_skip_manager(config)
+    SkipManager.set_step(3)
+    rollout = SkipManager.skip_instances["rollout"]
+    assert isinstance(rollout, DiffusionRolloutSkip)
+
+    rollout.prepare_data(step=3, result=DataProto.from_single_dict(data={"responses": torch.ones(1, 4)}))
+    prompts = DataProto.from_single_dict(data={"x": torch.zeros(1, 4)})
+    prompts.non_tensor_batch["uid"] = ["fresh-uid"]
+
+    replayed = AgentLoopManager.generate_sequences(None, prompts)
+    torch.testing.assert_close(replayed.batch["responses"], torch.ones(1, 4))
+    assert replayed.non_tensor_batch["uid"] == ["fresh-uid"]
+
+
+def _write_metrics(path: Path, rows: list[tuple[int, dict]]) -> Path:
+    path.write_text("".join(json.dumps({"step": step, "data": data}) + "\n" for step, data in rows))
+    return path
+
+
+def _compare(record: Path, replay: Path, *stages: str) -> subprocess.CompletedProcess:
+    args = [sys.executable, str(COMPARE_SCRIPT), str(record), str(replay), "--num-steps", "1"]
+    if stages:
+        args += ["--replayed-stages", *stages]
+    return subprocess.run(args, capture_output=True, text=True, check=False)
+
+
+def test_compare_script_passes_identical_runs_and_ignores_timing(tmp_path):
+    record = _write_metrics(tmp_path / "a.jsonl", [(1, {"actor/loss": 0.5, "timing_s/step": 1.0})])
+    replay = _write_metrics(
+        tmp_path / "b.jsonl",
+        [
+            (1, {"actor/loss": 0.5, "timing_s/step": 9.0}),
+            (2, {"skip/old_log_prob/calls": 1, "skip/old_log_prob/steps": 1}),
+        ],
+    )
+    result = _compare(record, replay, "old_log_prob")
+    assert result.returncode == 0, result.stdout
+
+
+def test_compare_script_fails_on_metric_mismatch(tmp_path):
+    record = _write_metrics(tmp_path / "a.jsonl", [(1, {"actor/loss": 0.5})])
+    replay = _write_metrics(tmp_path / "b.jsonl", [(1, {"actor/loss": 0.5000001})])
+    result = _compare(record, replay)
+    assert result.returncode == 1
+    assert "actor/loss" in result.stdout
+
+
+def test_compare_script_fails_when_a_stage_was_not_replayed(tmp_path):
+    rows = [(1, {"actor/loss": 0.5}), (2, {"skip/old_log_prob/calls": 0, "skip/old_log_prob/steps": 0})]
+    record, replay = _write_metrics(tmp_path / "a.jsonl", rows), _write_metrics(tmp_path / "b.jsonl", rows)
+    result = _compare(record, replay, "old_log_prob")
+    assert result.returncode == 1
+    assert "skip/old_log_prob/steps" in result.stdout
+
+
+def test_compare_script_fails_when_nothing_is_comparable(tmp_path):
+    rows = [(1, {"timing_s/step": 1.0})]
+    result = _compare(_write_metrics(tmp_path / "a.jsonl", rows), _write_metrics(tmp_path / "b.jsonl", rows))
+    assert result.returncode == 1
+    assert "no comparable" in result.stdout
 
 
 def test_diffusion_rollout_skip_restamps_input_metadata(tmp_path, reset_skip_manager):

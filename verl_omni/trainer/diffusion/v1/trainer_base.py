@@ -109,7 +109,7 @@ from verl_omni.trainer.diffusion.v1.tq_utils import (
 )
 from verl_omni.utils.config import resolve_lora_config
 from verl_omni.utils.net_utils import worker_group_port_ranges
-from verl_omni.utils.skip import init_skip_manager, skip_stage_metrics
+from verl_omni.utils.skip import init_skip_manager, log_skip_summary
 from verl_omni.utils.tracking import batch_items, validate_audio_batch
 from verl_omni.workers.config.reward import (
     reward_is_enabled,
@@ -377,7 +377,6 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             pprint(f"Initial validation metrics: {val_metrics}")
             self.logger.log(data=val_metrics, step=self.global_steps)
             if self.config.trainer.get("val_only", False):
-                self._log_skip_summary()
                 self._shutdown_dump_executor()
                 self._shutdown_dataloaders()
                 return
@@ -444,7 +443,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             SkipManager.set_step(self.global_steps)
             current_epoch = (self.global_steps - 1) // self.steps_per_epoch
             if is_last_step:
-                self._log_skip_summary()
+                log_skip_summary(self.logger, self.global_steps)
                 self._shutdown_dump_executor()
                 pprint(f"Final validation metrics: {last_val_metrics}")
                 progress_bar.close()
@@ -452,7 +451,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
                 return
 
         self.on_train_end()
-        self._log_skip_summary()
+        log_skip_summary(self.logger, self.global_steps)
         self._shutdown_dump_executor()
         self._shutdown_dataloaders()
 
@@ -1367,27 +1366,19 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         batch = self._next_train_batch(num_prompts)
         return self._submit_batch_to_rollout(batch)
 
+    @SkipManager.annotate_tq(role="rollout_tq", phase="submit")
     def _add_batch_to_generate(self):
         batch = self._next_train_batch()
         self._submit_batch_to_rollout(batch)
 
     @SkipManager.annotate(role="weight_sync")
     def _update_rollout_weights_mid_cycle(self) -> None:
-        """Refresh colocated rollout weights mid-step (async modes).
+        """Wake colocated replicas after the reward phase and refresh their weights (async modes).
 
         Lifecycle syncs (init, step end, validation) always run; skipping this
-        mid-cycle refresh only leaves replicas on pre-update weights for the
-        rest of the step.
+        refresh still wakes the replicas, on pre-update weights.
         """
         self.checkpoint_manager.update_weights(self.global_steps)
-
-    def _log_skip_summary(self) -> None:
-        """Log the end-of-run per-stage skip counters."""
-        metrics = skip_stage_metrics()
-        if not metrics:
-            return
-        self.logger.log(data=metrics, step=self.global_steps)
-        pprint(f"Stage skip summary: {metrics}")
 
     @SkipManager.annotate(role="reward")
     def _compute_reward_colocate(self, data: DataProto) -> DataProto:
@@ -1623,8 +1614,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
                 tq.kv_clear(keys=batch_meta.keys, partition_id=batch_meta.partition_id)
                 continue
 
-            # Stage-skip decorators bypass validation calls via this marker;
-            # a validation batch must never poison the training stage caches.
+            # Stage-skip decorators bypass marked calls: validation must never poison training caches.
             data.meta_info["validate"] = True
 
             if self.use_rm and self.reward_loop_manager.reward_loop_worker_handles is None:

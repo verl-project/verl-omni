@@ -91,7 +91,7 @@ from verl_omni.trainer.diffusion.rollout_correction import (
 from verl_omni.trainer.diffusion.teacher_manager import DiffusionTeacherManager
 from verl_omni.utils.config import resolve_lora_config
 from verl_omni.utils.net_utils import worker_group_port_ranges
-from verl_omni.utils.skip import init_skip_manager, skip_stage_metrics
+from verl_omni.utils.skip import init_skip_manager, log_skip_summary
 from verl_omni.utils.tracking import (
     _export_video,
     batch_items,
@@ -741,19 +741,6 @@ class BaseRayDiffusionTrainer(ABC):
 
         return gen_batch
 
-    @SkipManager.annotate(role="rollout")
-    def _generate_sequences(self, gen_batch: DataProto) -> DataProto:
-        """Generate one batch through the rollout manager (replayable via ``skip.rollout``)."""
-        return self.async_rollout_manager.generate_sequences(gen_batch)
-
-    def _log_skip_summary(self, tracking_logger) -> None:
-        """Log the end-of-run per-stage skip counters."""
-        metrics = skip_stage_metrics()
-        if not metrics:
-            return
-        tracking_logger.log(data=metrics, step=self.global_steps)
-        pprint(f"Stage skip summary: {metrics}")
-
     @SkipManager.annotate(role="reward")
     def _compute_reward_colocate(self, batch: DataProto) -> tuple[torch.Tensor, dict[str, Any]] | torch.Tensor:
         """
@@ -808,11 +795,10 @@ class BaseRayDiffusionTrainer(ABC):
             # pad to be divisible by dp_size
             size_divisor = self.config.actor_rollout_ref.rollout.agent.num_workers
             test_gen_batch_padded, pad_size = pad_dataproto_to_divisor(test_gen_batch, size_divisor)
-            test_output_gen_batch_padded = self._generate_sequences(test_gen_batch_padded)
+            test_output_gen_batch_padded = self.async_rollout_manager.generate_sequences(test_gen_batch_padded)
 
             if self.use_rm and "rm_scores" not in test_output_gen_batch_padded.batch.keys():
-                # Stage-skip decorators bypass validation calls via this marker;
-                # a validation batch must never poison the training stage caches.
+                # Stage-skip decorators bypass marked calls: validation must never poison training caches.
                 test_output_gen_batch_padded.meta_info["validate"] = True
                 # for colocate reward models, we need to sleep rollout model
                 # to spare GPU memory for reward model
@@ -1476,7 +1462,7 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
                             # streaming reward scores inside the gen window; colocate in the reward phase
                             if self.enable_agent_reward_loop:
                                 self.reward_loop_manager.start_profile()
-                        gen_batch_output = self._generate_sequences(gen_batch_output)
+                        gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch_output)
                         if not self.separate:
                             self.checkpoint_manager.sleep_replicas()
                         if curr_step_profile:
@@ -1666,7 +1652,7 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
                 if is_last_step:
                     if hasattr(self.actor_rollout_wg, "async_calls_finalize_fn_exec"):
                         self.actor_rollout_wg.async_calls_finalize_fn_exec(blocking=True)
-                    self._log_skip_summary(logger)
+                    log_skip_summary(logger, self.global_steps)
                     pprint(f"Final validation metrics: {last_val_metrics}")
                     progress_bar.close()
                     return
@@ -1947,7 +1933,7 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
                                 # streaming reward scores inside the gen window; colocate in the reward phase
                                 if self.enable_agent_reward_loop:
                                     self.reward_loop_manager.start_profile()
-                            gen_batch_output = self._generate_sequences(gen_batch_output)
+                            gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch_output)
                             self.checkpoint_manager.sleep_replicas()
                             if curr_step_profile:
                                 self.llm_server_manager.stop_profile()
@@ -2088,7 +2074,7 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
                 if is_last_step:
                     if hasattr(self.actor_rollout_wg, "async_calls_finalize_fn_exec"):
                         self.actor_rollout_wg.async_calls_finalize_fn_exec(blocking=True)
-                    self._log_skip_summary(logger)
+                    log_skip_summary(logger, self.global_steps)
                     pprint(f"Final validation metrics: {last_val_metrics}")
                     progress_bar.close()
                     return

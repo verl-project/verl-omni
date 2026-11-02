@@ -13,7 +13,8 @@
 # limitations under the License.
 """verl-omni SkipManager extensions: per-stage skip for the diffusion RL pipeline."""
 
-from verl_omni.utils.skip.manager import STAGE_SKIP_ROLES, init_skip_manager
-from verl_omni.utils.skip.stage_skip import skip_stage_metrics
+from verl_omni.utils.skip.config import OmniSkipConfig
+from verl_omni.utils.skip.manager import init_skip_manager
+from verl_omni.utils.skip.stage_skip import STAGE_SKIP_ROLES, log_skip_summary, skip_stage_metrics
 
-__all__ = ["STAGE_SKIP_ROLES", "init_skip_manager", "skip_stage_metrics"]
+__all__ = ["STAGE_SKIP_ROLES", "OmniSkipConfig", "init_skip_manager", "log_skip_summary", "skip_stage_metrics"]

@@ -26,7 +26,6 @@ step (always 0 unless the v1 trainer splits the step, ``parameter_sync_step >
 1``), mirroring upstream verl's ``rollout_tq`` cache layout.
 """
 
-import json
 import logging
 import os
 from pathlib import Path
@@ -37,27 +36,29 @@ from omegaconf import DictConfig, OmegaConf
 from verl.protocol import DataProto
 from verl.utils.skip import SkipManager
 from verl.utils.skip.base_skip import BaseSkip, SkipAction, register_skip
-from verl.utils.skip.rollout_skip import RolloutSkip
+from verl.utils.skip.rollout_skip import RolloutSkip, RolloutTqSkip
 
 logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 __all__ = [
     "STAGE_SKIP_ROLES",
     "ActorUpdateSkip",
     "AdvantageSkip",
     "DiffusionRolloutSkip",
+    "DiffusionRolloutTqSkip",
     "OldLogProbSkip",
     "RefLogProbSkip",
     "RewardSkip",
     "StageSkip",
     "WeightSyncSkip",
+    "log_skip_summary",
     "skip_stage_metrics",
 ]
 
 STAGE_SKIP_ROLES = ("reward", "old_log_prob", "ref_log_prob", "advantage", "actor_update", "weight_sync")
 
 PAYLOAD_NAME = "stage_payload.pt"
-META_NAME = "meta.json"
 
 
 class StageSkip(BaseSkip):
@@ -67,8 +68,9 @@ class StageSkip(BaseSkip):
     step directory; cache-hit steps return the pickled value without executing
     the stage. ``cache`` replays the exact step, ``repeat`` the closest dumped
     step, ``empty`` skips the stage without any cache (subclasses define the
-    empty return). Skipped calls are counted loudly on the instance for the
-    end-of-run summary.
+    empty return). Skipped calls are counted on the instance for the end-of-run
+    summary. A failed dump raises: a silently missing cache would turn a later
+    replay into a real run.
 
     A step's cache holds one slot per stage call (``{step}/{call_idx}/``): the
     v1 separate-async trainer runs ``parameter_sync_step`` mini-batch calls per
@@ -78,7 +80,6 @@ class StageSkip(BaseSkip):
     """
 
     support_actions = [SkipAction.CACHE, SkipAction.REPEAT]
-    print_mark = "[StageSkip] "
     role = ""
 
     def __init__(self, local_config: DictConfig, global_config: DictConfig) -> None:
@@ -86,15 +87,16 @@ class StageSkip(BaseSkip):
         self.exp_name = global_config.trainer.get("experiment_name", "default_experiment_name")
         self.project_name = global_config.trainer.get("project_name", "default_project_name")
         trainer_mode = OmegaConf.select(global_config, "trainer.v1.trainer_mode", default="sync")
-        self.parameter_sync_step = max(
-            1, int(OmegaConf.select(global_config, f"trainer.v1.{trainer_mode}.parameter_sync_step", default=1))
+        # The v0 trainer never splits a step, whatever trainer.v1 still says.
+        self.calls_per_step = (
+            int(OmegaConf.select(global_config, f"trainer.v1.{trainer_mode}.parameter_sync_step", default=1))
+            if OmegaConf.select(global_config, "trainer.use_v1", default=False)
+            else 1
         )
-        # Driver-only counters: one StageSkip instance per role per process.
         self.skipped_calls = 0
         self.skipped_steps: set[int] = set()
-        # Ordinal of the current call within the step; the decorator reaches
-        # meet_precondition once per eligible (non-validation) call, so this
-        # tracks mini-batch 0, 1, ... of a split step.
+        # The decorator reaches meet_precondition once per eligible (non-validation) call,
+        # so this tracks mini-batch 0, 1, ... of a split step.
         self._call_step: int | None = None
         self._call_idx = 0
 
@@ -103,92 +105,43 @@ class StageSkip(BaseSkip):
             return True
         self._advance_call_idx(step)
         if self.action == SkipAction.CACHE:
-            if self._payload_path(step, self._call_idx).is_file():
-                return True
+            hit = self._payload_path(step, self._call_idx).is_file()
+        else:
+            hit = self._find_latest_step(step) != -1
+        if not hit:
             logger.info(
-                "%sNo cached %s output at step %s (call %s) under %s; the stage will run and dump.",
-                self.print_mark,
+                "No cached %s output for step %s (call %s) under %s; the stage will run and dump.",
                 self.role,
                 step,
                 self._call_idx,
-                self._step_dir(step),
+                self._role_dir(),
             )
-            return False
-        if self._find_latest_step(step) != -1:
-            return True
-        logger.info(
-            "%sNo cached %s output under %s; the stage will run and dump.",
-            self.print_mark,
-            self.role,
-            self._role_dir(),
-        )
-        return False
+        return hit
 
-    def warp_function(self, step: int, func: Callable, *args, **kwargs):
+    def warp_function(self, step: int, func: Callable, *args, **kwargs) -> Any:
+        self.skipped_calls += 1
+        self.skipped_steps.add(step)
         if self.action == SkipAction.EMPTY:
-            logger.info(
-                "%s\033[33mSkipping stage '%s' (empty action) at step %s\033[0m",
-                self.print_mark,
-                self.role,
-                step,
-            )
-            self._record_skip(step)
+            logger.info("Skipping stage '%s' (empty action) at step %s", self.role, step)
             return self.empty_result(*args, **kwargs)
 
         load_step = step if self.action == SkipAction.CACHE else self._find_latest_step(step)
         payload_path = self._payload_path(load_step, self._call_idx)
-        payload = torch.load(payload_path, map_location="cpu", weights_only=False)
-        logger.info(
-            "%s\033[33mLoad cached %s output at step %s (request step %s, call %s) from %s\033[0m",
-            self.print_mark,
-            self.role,
-            load_step,
-            step,
-            self._call_idx,
-            payload_path,
-        )
-        self._record_skip(step)
-        return payload["result"]
+        logger.info("Replaying %s output at step %s from %s", self.role, step, payload_path)
+        return torch.load(payload_path, map_location="cpu", weights_only=False)
 
-    def prepare_data(self, step: int, result, *args, **kwargs) -> None:
-        step_dir = self._payload_dir(step, self._call_idx)
-        tmp_path = step_dir / (PAYLOAD_NAME + ".tmp")
-        try:
-            step_dir.mkdir(parents=True, exist_ok=True)
-            with open(tmp_path, "wb") as f:
-                torch.save({"result": result, "global_steps": step, "call_idx": self._call_idx}, f)
-            # Atomic swap so meet_precondition never sees a partial dump.
-            os.replace(tmp_path, step_dir / PAYLOAD_NAME)
-            (step_dir / META_NAME).write_text(
-                json.dumps({"global_steps": step, "call_idx": self._call_idx, "role": self.role})
-            )
-            logger.info(
-                "%s\033[33mDump %s output at step %s (call %s) to %s\033[0m",
-                self.print_mark,
-                self.role,
-                step,
-                self._call_idx,
-                step_dir,
-            )
-        except Exception as e:
-            tmp_path.unlink(missing_ok=True)
-            logger.warning(
-                "%s\033[31mFailed to dump %s output at step %s (call %s) to %s: %s\033[0m",
-                self.print_mark,
-                self.role,
-                step,
-                self._call_idx,
-                step_dir,
-                e,
-            )
+    def prepare_data(self, step: int, result: Any, *args, **kwargs) -> None:
+        payload_path = self._payload_path(step, self._call_idx)
+        payload_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = payload_path.with_suffix(".tmp")
+        torch.save(result, tmp_path)
+        # Atomic swap so meet_precondition never sees a partial dump.
+        os.replace(tmp_path, payload_path)
+        logger.info("Dumped %s output at step %s to %s", self.role, step, payload_path)
 
-    def empty_result(self, *args, **kwargs):
+    def empty_result(self, *args, **kwargs) -> Any:
         """Return the stand-in value used when the stage is skipped via the ``empty`` action."""
         raise NotImplementedError(f"Stage '{self.role}' does not support the empty action")
-
-    def _record_skip(self, step: int) -> None:
-        self.skipped_calls += 1
-        self.skipped_steps.add(step)
 
     def _advance_call_idx(self, step: int) -> None:
         """Advance the mini-batch ordinal: restart at 0 when the step changes."""
@@ -199,47 +152,26 @@ class StageSkip(BaseSkip):
             self._call_idx += 1
 
     def _role_dir(self) -> Path:
-        dumped_dir = Path(self.dump_dir).expanduser().resolve()
-        return dumped_dir.joinpath(f"{self.exp_name}_{self.project_name}", self.role).absolute()
-
-    def _step_dir(self, step: int) -> Path:
-        return self._role_dir().joinpath(str(step)).absolute()
-
-    def _payload_dir(self, step: int, call_idx: int) -> Path:
-        return self._step_dir(step).joinpath(str(call_idx)).absolute()
+        return Path(self.dump_dir).expanduser().resolve() / f"{self.exp_name}_{self.project_name}" / self.role
 
     def _payload_path(self, step: int, call_idx: int) -> Path:
-        return self._payload_dir(step, call_idx).joinpath(PAYLOAD_NAME)
+        return self._role_dir() / str(step) / str(call_idx) / PAYLOAD_NAME
 
-    def _step_cache_complete(self, step_dir: Path) -> bool:
-        """All ``parameter_sync_step`` call slots of the step hold a dumped payload."""
-        return all((step_dir / str(i) / PAYLOAD_NAME).is_file() for i in range(self.parameter_sync_step))
-
-    def _available_steps(self) -> list[int]:
-        result: list[int] = []
-        role_dir = self._role_dir()
-        if not role_dir.is_dir():
-            return result
-        for child in role_dir.iterdir():
-            if child.is_dir() and self._step_cache_complete(child):
-                try:
-                    result.append(int(child.name))
-                except ValueError:
-                    continue
-        return sorted(result)
+    def _step_cache_complete(self, step: int) -> bool:
+        return all(self._payload_path(step, i).is_file() for i in range(self.calls_per_step))
 
     def _find_latest_step(self, step: int) -> int:
         """Prefer the exact step, else the closest dumped step below, else above; -1 if none."""
-        if self._step_cache_complete(self._step_dir(step)):
+        if self._step_cache_complete(step):
             return step
-        available = self._available_steps()
+        role_dir = self._role_dir()
+        names = [child.name for child in role_dir.iterdir()] if role_dir.is_dir() else []
+        available = sorted(int(n) for n in names if n.isdigit() and self._step_cache_complete(int(n)))
         smaller = [s for s in available if s < step]
         if smaller:
             return smaller[-1]
         larger = [s for s in available if s > step]
-        if larger:
-            return larger[0]
-        return -1
+        return larger[0] if larger else -1
 
 
 @register_skip("reward")
@@ -291,15 +223,16 @@ class ActorUpdateSkip(StageSkip):
 class WeightSyncSkip(StageSkip):
     """Skip the mid-cycle rollout-weight refresh (``omni_skip.weight_sync``).
 
-    ``empty`` only: lifecycle syncs (step end, validation) always run, so
-    replicas wake up but keep pre-update weights until the next sync.
+    ``empty`` only. The real call also wakes the replicas slept for the
+    colocated reward model, so the skip still wakes them: they resume on
+    pre-update weights, and the next step's sleep never hits a sleeping replica.
     """
 
     role = "weight_sync"
     support_actions = [SkipAction.EMPTY]
 
-    def empty_result(self, *args, **kwargs) -> None:
-        return None
+    def empty_result(self, trainer: Any, *args, **kwargs) -> None:
+        trainer.checkpoint_manager.wake_up_replicas()
 
 
 @register_skip("rollout")
@@ -314,24 +247,43 @@ class DiffusionRolloutSkip(RolloutSkip):
 
     print_mark = "[DiffusionRolloutSkip()] "
 
-    def warp_function(self, step: int, func: Callable, *args, **kwargs) -> Any:
+    def warp_function(self, step: int, func: Callable, *args, **kwargs) -> DataProto:
         result = super().warp_function(step, func, *args, **kwargs)
-        gen_batch = kwargs.get("prompts")
-        if gen_batch is None and len(args) > 1:
-            gen_batch = args[1]
-        if gen_batch is not None and hasattr(result, "non_tensor_batch"):
-            for key, value in gen_batch.non_tensor_batch.items():
-                result.non_tensor_batch[key] = value
+        gen_batch = kwargs["prompts"] if "prompts" in kwargs else args[1]
+        result.non_tensor_batch.update(gen_batch.non_tensor_batch)
         return result
 
 
+@register_skip("rollout_tq")
+class DiffusionRolloutTqSkip(RolloutTqSkip):
+    """V1 rollout replay with a stable row order.
+
+    Upstream assigns replayed session ids by dumped key order, and
+    ``ReplayBuffer.sample`` returns keys in arbitrary storage order. Dumping in
+    canonical order keeps every replayed row where the record pass had it, so
+    stage caches stay paired with the samples that produced them.
+    """
+
+    def prepare_data(self, step: int, batch: Any, global_steps: int) -> None:
+        from verl_omni.trainer.diffusion.v1.tq_utils import canonicalize_diffusion_tq_meta
+
+        super().prepare_data(step, canonicalize_diffusion_tq_meta(batch), global_steps)
+
+
 def skip_stage_metrics() -> dict[str, int]:
-    """End-of-run counters: calls skipped and distinct steps skipped per stage."""
+    """End-of-run counters: calls skipped and distinct steps skipped per enabled stage."""
     metrics: dict[str, int] = {}
     for role in STAGE_SKIP_ROLES:
         instance = SkipManager.skip_instances.get(role)
-        if instance is None or not instance.is_enabled():
-            continue
-        metrics[f"skip/{role}/calls"] = instance.skipped_calls
-        metrics[f"skip/{role}/steps"] = len(instance.skipped_steps)
+        if instance is not None:
+            metrics[f"skip/{role}/calls"] = instance.skipped_calls
+            metrics[f"skip/{role}/steps"] = len(instance.skipped_steps)
     return metrics
+
+
+def log_skip_summary(tracking_logger: Any, step: int) -> None:
+    """Log the end-of-run per-stage counters; a no-op when no stage role is enabled."""
+    metrics = skip_stage_metrics()
+    if metrics:
+        tracking_logger.log(data=metrics, step=step)
+        logger.info("Stage skip summary: %s", metrics)
