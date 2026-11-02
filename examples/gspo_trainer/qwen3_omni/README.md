@@ -1,6 +1,6 @@
 # Qwen3-Omni Thinker GSPO recipes
 
-Last updated: 10/24/2026
+Last updated: 11/02/2026
 
 This directory contains both FSDP2 and Megatron recipes. For non-Megatron
 setup, data preparation and training instructions, see the
@@ -20,6 +20,11 @@ defaults and accept CLI overrides.
 | AudioMCQ full-parameter, separate-async | Megatron / GPU | [AudioMCQ](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/qwen3_omni/run_qwen3_omni_megatron_audiomcq_separate_async.sh) |
 | AVQA image+audio full-parameter, separate-async | Megatron / GPU | [AVQA](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/qwen3_omni/run_qwen3_omni_megatron_avqa_separate_async.sh) |
 | Geo3K full-parameter, separate-async | Megatron / GPU | [Geo3K](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/qwen3_omni/run_qwen3_omni_megatron_geo3k_separate_async.sh) |
+
+The GPU LoRA recipes sync only the adapter tensors to vLLM-Omni each step
+(`actor_rollout_ref.model.lora.merge=False`), and the rollout applies them on top of the
+base weights it loaded from `MODEL_PATH` (`rollout.load_format=safetensors`).
+`lora.merge=True` restores the full merged-weight sync, which the NPU LoRA recipes still use.
 
 The following sections describe the **Megatron AudioMCQ**, **AVQA**, and **Geo3K** recipes,
 their dependency prerequisites and validation limits. For model-adapter development, see the
