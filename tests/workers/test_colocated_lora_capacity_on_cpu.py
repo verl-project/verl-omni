@@ -66,7 +66,7 @@ def _worker(*, offload=True, free_cache=True, lora=True, base_synced=True, merge
 
     async def resume(*, tags):
         events.append(("resume", tuple(tags)))
-        if tags == ["weights"]:
+        if "weights" in tags:
             occupancy["rollout"] = 1
             if capacity_enforced:
                 assert sum(occupancy.values()) <= 1, "actor and rollout weights overlap"
@@ -76,6 +76,7 @@ def _worker(*, offload=True, free_cache=True, lora=True, base_synced=True, merge
         return None
 
     rollout.resume = AsyncMock(side_effect=resume)
+    rollout.release = AsyncMock(side_effect=lambda: events.append(("release",)))
     rollout._execute_method = AsyncMock(side_effect=execute)
     rollout.update_weights = AsyncMock()
     worker.rollout = rollout
@@ -162,7 +163,9 @@ def test_offloaded_lora_releases_actor_before_rollout_and_forwards_exact_adapter
     assert events[names.index("empty_cache")] == ("empty_cache",)
     if free_cache:
         assert names.index("empty_cache") < names.index("resume") < names.index("execute")
-        assert events[-1] == ("resume", ("kv_cache",))
+        # One wake covers the cache: a second server wake handshake costs ~0.7 s per sync.
+        assert [event for event in events if event[0] == "resume"] == [("resume", ("weights", "kv_cache"))]
+        assert "release" not in names
     else:
         assert "resume" not in names
     assert len(sent) == 1 and sent[0][0] == "adapter"
@@ -188,18 +191,21 @@ def test_offloaded_lora_failure_stops_later_stages(failure):
         _run(worker, events)
     worker.rollout._execute_method.assert_not_awaited()
     worker.rollout.server_handle.clear_kv_cache.remote.assert_not_awaited()
+    worker.rollout.release.assert_not_awaited()
     if failure in ("gather", "offload"):
         worker.rollout.resume.assert_not_awaited()
     if failure == "gather":
         assert _names(events).count("offload") == 1
 
 
-def test_offloaded_lora_ipc_failure_does_not_resume_kv_cache():
+def test_offloaded_lora_ipc_failure_sleeps_the_rollout_again():
     worker, events, _, _ = _worker()
     with pytest.raises(RuntimeError, match="send failed"):
         _run(worker, events, fail_send=True)
 
-    assert [event for event in events if event[0] == "resume"] == [("resume", ("weights",))]
+    # The early cache wake must not leave a rollout that generates on stale weights.
+    assert [event for event in events if event[0] == "resume"] == [("resume", ("weights", "kv_cache"))]
+    assert events[-1] == ("release",)
     worker.rollout.server_handle.clear_kv_cache.remote.assert_not_awaited()
 
 
@@ -315,7 +321,7 @@ def test_offloaded_lora_cancellation_drains_repeatedly_cancelled_worker(blocked_
 
 
 @pytest.mark.parametrize("blocked_stage", ["resume", "send"])
-def test_offloaded_lora_cancellation_has_no_owned_task_or_kv_resume(blocked_stage):
+def test_offloaded_lora_cancellation_has_no_owned_task_or_awake_rollout(blocked_stage):
     worker, events, _, _ = _worker()
     sender = MagicMock()
 
@@ -324,7 +330,7 @@ def test_offloaded_lora_cancellation_has_no_owned_task_or_kv_resume(blocked_stag
 
         async def resume(*, tags):
             events.append(("resume", tuple(tags)))
-            if blocked_stage == "resume" and tags == ["weights"]:
+            if blocked_stage == "resume" and "weights" in tags:
                 entered.set()
                 await asyncio.Future()
 
@@ -352,6 +358,8 @@ def test_offloaded_lora_cancellation_has_no_owned_task_or_kv_resume(blocked_stag
         asyncio.run(drive())
 
     assert ("resume", ("kv_cache",)) not in events
+    # A sync cancelled after the wake sleeps the rollout again; one cancelled in the wake never woke it.
+    assert (("release",) in events) is (blocked_stage == "send")
     worker.rollout.server_handle.clear_kv_cache.remote.assert_not_awaited()
     assert ("execute" in _names(events)) is (blocked_stage == "send")
 
@@ -383,6 +391,7 @@ def test_non_offloaded_lora_keeps_fast_ipc_path():
     assert sent[0][1] is adapter
     assert _names(events).count("offload") == 0
     assert worker.rollout.resume.await_count == 2
+    worker.rollout.release.assert_not_awaited()
     worker.rollout.update_weights.assert_not_awaited()
     assert worker.base_sync_done is True
 
