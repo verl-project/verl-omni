@@ -181,6 +181,7 @@ def test_reissue_restarts_only_inflight_prompt_groups(monkeypatch):
 
 
 @requires_tq_checkpoint
+@pytest.mark.slow
 def test_transfer_queue_checkpoint_roundtrip_and_reissue(initialized_tq, tmp_path):
     partition_id = f"test-{uuid.uuid4().hex}"
     pending, finished = uuid.uuid4().hex, uuid.uuid4().hex

@@ -36,6 +36,8 @@ from verl_omni.model_merger.fsdp_model_merger import (
 )
 from verl_omni.model_merger.utils import inventory, read_json, tree_files, weight_files, write_json
 
+pytestmark = pytest.mark.slow
+
 
 def _tensor_outputs(output):
     return output if isinstance(output, tuple) else (output,)

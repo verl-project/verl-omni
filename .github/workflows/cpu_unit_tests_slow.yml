@@ -1,0 +1,77 @@
+name: cpu_unit_tests_slow
+
+on:
+  schedule:
+    # 03:00 Beijing time; keeps slow-marked CPU tests covered off the blocking lane
+    - cron: "0 19 * * *"
+  workflow_dispatch:
+
+# Cancel jobs on the same ref if a new one is triggered
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+# Declare permissions just read content.
+permissions:
+  contents: read
+
+jobs:
+  cpu_unit_tests_slow:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      matrix:
+        python-version: ["3.12"]
+    env:
+      TORCH_COMPILE_DISABLE: 1
+      TORCHINDUCTOR_DISABLE: 1
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            .github/qwen_tts_pin.txt
+            .github/vllm_omni_pin.txt
+            .github/verl_pin.txt
+      - name: Install dependencies
+        run: |
+          pip install --extra-index-url https://download.pytorch.org/whl/cpu "https://github.com/vllm-project/vllm/releases/download/v0.30.0/vllm-0.30.0+cpu-cp38-abi3-manylinux_2_39_x86_64.whl"
+          pip install uv
+          uv pip install --python "$(command -v python)" -e ".[omni,dev,ocr]"
+          pip install --no-deps \
+            "qwen-tts @ https://github.com/QwenLM/Qwen3-TTS/archive/$(cat .github/qwen_tts_pin.txt).tar.gz"
+      - name: Run slow CPU unit tests
+        run: |
+          set -o pipefail
+          pytest -s --asyncio-mode=auto \
+            -o python_files='*_on_cpu.py' \
+            -m slow \
+            --durations=25 \
+            --cov=verl_omni \
+            --cov-report=term-missing \
+            --cov-report=xml:coverage.xml \
+            --ignore=tests/models/test_flash_attention_3_graph_break_on_cpu.py \
+            tests/ | tee pytest-coverage.txt
+      - name: Add coverage summary
+        if: always()
+        run: |
+          {
+            echo "## CPU slow unit test coverage"
+            echo
+            echo '```text'
+            python -c 'from pathlib import Path; output = Path("pytest-coverage.txt"); text = output.read_text() if output.exists() else "Coverage output was not generated."; lines = text.splitlines(); start = next((idx for idx, line in enumerate(lines) if line.startswith("Name")), None); print(text if start is None else "\n".join(lines[start:]))'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload coverage artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cpu-unit-test-slow-coverage
+          path: |
+            coverage.xml
+            pytest-coverage.txt
+          if-no-files-found: ignore

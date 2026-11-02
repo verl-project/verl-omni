@@ -138,6 +138,7 @@ def test_unbridged_parent_hooks_leave_hold_set():
         model.generate()
 
 
+@pytest.mark.slow
 async def test_server_wake_up_resumes_admission_after_ack():
     """The server's wake_up re-opens admission once the wake ACKs.
 

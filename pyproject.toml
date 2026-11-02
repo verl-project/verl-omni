@@ -95,6 +95,14 @@ ocr = [
 ]
 
 # -------------------------------
+# tool.pytest - Test configuration
+# -------------------------------
+[tool.pytest.ini_options]
+markers = [
+    "slow: too slow for the blocking cpu_unit_tests lane; runs in the nightly cpu_unit_tests_slow workflow instead",
+]
+
+# -------------------------------
 # tool.ruff - Linting configuration
 # -------------------------------
 [tool.ruff]

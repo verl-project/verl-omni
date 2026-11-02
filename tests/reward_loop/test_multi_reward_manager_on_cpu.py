@@ -30,6 +30,8 @@ from verl_omni.reward_loop.reward_manager.media import _reward_extra_info
 from verl_omni.reward_loop.reward_manager.multi import MultiRewardManager, MultiVisualRewardManager, _filter_kwargs
 from verl_omni.reward_loop.reward_manager.visual import VisualRewardManager
 
+pytestmark = pytest.mark.slow
+
 # Path to this file — load_extern_object will import dummy functions from here.
 DUMMY_REWARDS_PATH = "tests/reward_loop/test_multi_reward_manager_on_cpu.py"
 

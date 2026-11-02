@@ -224,6 +224,7 @@ def test_rewards_reject_undeclared_channels_first_input():
     assert len(video_tensor_to_pil_frames(artifact.normalized(context="adapter", name="video_preview").data)) == 5
 
 
+@pytest.mark.slow
 def test_named_video_is_exported_to_real_mp4(monkeypatch):
     import shutil
 

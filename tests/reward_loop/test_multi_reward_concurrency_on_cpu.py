@@ -35,6 +35,8 @@ from verl_omni.pipelines.rollout_media import (
 from verl_omni.reward_loop.reward_manager.multi import MultiVisualRewardManager
 from verl_omni.utils.reward_score.reward_utils import get_audio, video_reward_tensor
 
+pytestmark = pytest.mark.slow
+
 REWARDS_PATH = "tests/reward_loop/test_multi_reward_concurrency_on_cpu.py"
 _DEFAULT = object()
 

@@ -5,6 +5,7 @@
 import json
 
 import numpy as np
+import pytest
 import torch
 from transformers import AutoModelForMultimodalLM, AutoProcessor
 
@@ -15,6 +16,7 @@ from tests.special_e2e.build_qwen3_omni_multimodal_tiny_random import (
 )
 
 
+@pytest.mark.slow
 def test_toy_audio_processor_and_forward(tmp_path):
     model_path = str(tmp_path / "model")
     build(model_path, dtype=torch.float32)

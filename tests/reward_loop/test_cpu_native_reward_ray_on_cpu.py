@@ -33,6 +33,8 @@ from verl_omni.reward_loop.reward_loop import OmniRewardLoopManager, OmniRewardL
 from verl_omni.reward_loop.reward_model_executor import NativeRewardExecutor
 from verl_omni.workers.config.reward import RewardModelSpec, parse_reward_model_config
 
+pytestmark = pytest.mark.slow
+
 
 class _CpuModel:
     def __init__(self, model_path, device):

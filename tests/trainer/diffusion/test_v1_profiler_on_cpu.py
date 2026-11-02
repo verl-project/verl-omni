@@ -23,6 +23,8 @@ from omegaconf import OmegaConf
 from verl_omni.trainer.diffusion.v1.trainer_separate_async import PolicyGradientDiffusionTrainerV1SeparateAsync
 from verl_omni.trainer.diffusion.v1.trainer_sync import PolicyGradientDiffusionTrainerV1Sync
 
+pytestmark = pytest.mark.slow
+
 ROOT = Path(__file__).resolve().parents[3]
 
 

@@ -26,6 +26,7 @@ from __future__ import annotations
 import subprocess
 import sys
 
+import pytest
 from tokenizers import Tokenizer, models, pre_tokenizers
 from transformers import PreTrainedTokenizerFast
 from verl.experimental.reward_loop.reward_manager import get_reward_manager_cls
@@ -69,6 +70,7 @@ def test_stock_worker_path_resolves_the_manager_by_name():
     assert issubclass(MiniCPMNaiveRewardManager, NaiveRewardManager)
 
 
+@pytest.mark.slow
 def test_importing_verl_registers_the_manager(monkeypatch):
     # Delivery guarantee in the worker process: the recipe exports
     # VERL_USE_EXTERNAL_MODULES=verl_omni, and importing verl then imports

@@ -61,6 +61,8 @@ from verl_omni.workers.config.reward import (
     validate_reward_model_terms,
 )
 
+pytestmark = pytest.mark.slow
+
 
 def _config(models=None):
     with initialize_config_dir(config_dir=os.path.abspath("verl_omni/trainer/config"), version_base=None):

@@ -431,6 +431,7 @@ def test_plain_replicas_and_unsupported_values():
         reconstruct_tensor([{"nested": torch.ones(1)}], (1,))
 
 
+@pytest.mark.slow
 def test_real_cli_cpu_startup_and_export(case):
     config, _, _ = case
     root = Path(__file__).resolve().parents[2]

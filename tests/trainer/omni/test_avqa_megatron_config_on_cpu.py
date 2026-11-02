@@ -11,6 +11,8 @@ from pathlib import Path
 import pytest
 from omegaconf import OmegaConf
 
+pytestmark = pytest.mark.slow
+
 
 @pytest.mark.parametrize(
     "num_gpus,rollout_gpus,rollout_tp,resource_overrides",

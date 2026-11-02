@@ -20,6 +20,8 @@ from verl.workers.config import McoreActorConfig, McoreEngineConfig
 from verl_omni.trainer.omni.ray_omni_trainer_separate_async import OmniPPOTrainerSeparateAsync
 from verl_omni.workers.omni_engine_workers import OmniDetachActorWorker
 
+pytestmark = pytest.mark.slow
+
 REPO_ROOT = Path(__file__).parents[3]
 LAUNCHER = REPO_ROOT / "examples/gspo_trainer/qwen3_omni/run_qwen3_omni_megatron_audiomcq_separate_async.sh"
 

@@ -37,6 +37,8 @@ from verl_omni.model_merger.fsdp_model_merger import _pipeline_class
 from verl_omni.model_merger.lora import fuse_lora, plan_lora_fusion
 from verl_omni.model_merger.utils import inventory, tree_files, weight_files, write_json
 
+pytestmark = pytest.mark.slow
+
 RANK, ALPHA = 4, 8
 
 
