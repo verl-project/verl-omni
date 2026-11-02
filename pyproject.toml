@@ -93,6 +93,11 @@ dev = [
 ocr = [
     "Levenshtein",
 ]
+swanlab = [
+    "swanlab>=0.10.3",
+    # swanlab.Audio writes wav through soundfile, which swanlab only pulls in with its large [media] extra.
+    "soundfile>=0.12.1",
+]
 
 # -------------------------------
 # tool.ruff - Linting configuration

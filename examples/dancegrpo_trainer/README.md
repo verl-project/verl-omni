@@ -151,6 +151,8 @@ export WANDB_API_KEY=<your_wandb_api_key>
 trainer.logger='["console", "wandb"]'
 ```
 
+To track with SwanLab where W&B is not reachable, run `uv pip install -e ".[swanlab]"`, set `SWANLAB_API_KEY`, and append `trainer.logger='["console","swanlab"]'`.
+
 The script sets:
 
 ```bash

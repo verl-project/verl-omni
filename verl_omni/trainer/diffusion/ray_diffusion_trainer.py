@@ -93,8 +93,10 @@ from verl_omni.utils.net_utils import worker_group_port_ranges
 from verl_omni.utils.tracking import (
     _export_video,
     batch_items,
+    log_swanlab_media,
     log_wandb_media,
     validate_audio_batch,
+    wrap_val_samples_for_swanlab,
     wrap_val_samples_for_wandb,
 )
 from verl_omni.workers.config.reward import reward_is_enabled, reward_role_required, streaming_reward_enabled
@@ -685,10 +687,22 @@ class BaseRayDiffusionTrainer(ABC):
         # Take first N samples after shuffling
         samples = samples[:generations_to_log]
 
+        # SwanLab's table takes text and its media types differ, so it gets its own rows.
+        table_loggers = self.config.trainer.logger
+        swanlab_rows = None
+        swanlab_media = {}
+        if "swanlab" in table_loggers:
+            table_loggers = [name for name in table_loggers if name != "swanlab"]
+            swanlab_rows, swanlab_media = wrap_val_samples_for_swanlab(
+                samples,
+                fps=int(self.config.trainer.get("video_fps", 24)),
+                media_kinds=[sample[5] for sample in samples],
+            )
+
         # Wrap only retained samples; keep wandb videos in persistent storage.
         video_tmp_dir = None
         wandb_media = {}
-        if "wandb" in self.config.trainer.logger:
+        if "wandb" in table_loggers:
             validation_data_dir = self.config.trainer.get("validation_data_dir", None)
             default_local_dir = self.config.trainer.get("default_local_dir", None)
             wandb_video_dir = validation_data_dir or default_local_dir
@@ -713,9 +727,18 @@ class BaseRayDiffusionTrainer(ABC):
             except Exception as error:
                 sys_logger.warning("Skipping validation media log at step %s: %s", self.global_steps, error)
             try:
-                self.validation_generations_logger.log(self.config.trainer.logger, samples, self.global_steps)
+                log_swanlab_media(swanlab_media, self.global_steps)
+            except Exception as error:
+                sys_logger.warning("Skipping SwanLab validation media log at step %s: %s", self.global_steps, error)
+            try:
+                self.validation_generations_logger.log(table_loggers, samples, self.global_steps)
             except Exception as error:
                 sys_logger.warning("Skipping validation table log at step %s: %s", self.global_steps, error)
+            if swanlab_rows is not None:
+                try:
+                    self.validation_generations_logger.log(["swanlab"], swanlab_rows, self.global_steps)
+                except Exception as error:
+                    sys_logger.warning("Skipping SwanLab validation table log at step %s: %s", self.global_steps, error)
         finally:
             if video_tmp_dir is not None:
                 shutil.rmtree(video_tmp_dir, ignore_errors=True)

@@ -741,6 +741,8 @@ export WANDB_API_KEY=<your_wandb_api_key>
 # trainer.project_name / experiment_name are already set in the script
 ```
 
+To track with SwanLab where W&B is not reachable, run `uv pip install -e ".[swanlab]"`, set `SWANLAB_API_KEY`, and append `trainer.logger='["console","swanlab"]'`.
+
 ## File map
 
 ```

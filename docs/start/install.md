@@ -168,6 +168,7 @@ docker run --gpus all --shm-size=16g -it --rm \
   -e WORKSPACE="$WORKSPACE" \
   -e HF_HOME=/root/.cache/huggingface \
   -e WANDB_API_KEY="${WANDB_API_KEY:-}" \
+  -e SWANLAB_API_KEY="${SWANLAB_API_KEY:-}" \
   -w /workspace/verl-omni \
   verl-omni:gpu-ocr \
   /bin/bash
@@ -207,11 +208,25 @@ python3 examples/flowgrpo_trainer/data_process/qwenimage_ocr.py \
   --output_dir $WORKSPACE/data/ocr/qwen_image
 ```
 
-### 3. Optional: Set W&B credentials
+### 3. Optional: Set W&B or SwanLab credentials
 
 ```bash
 export WANDB_API_KEY=<your_wandb_api_key>
 ```
+
+SwanLab works where W&B is not reachable. Install its extra, set the key, and pick
+the logger on the training command:
+
+```bash
+uv pip install -e ".[swanlab]"
+export SWANLAB_API_KEY=<your_swanlab_api_key>
+# append to the training command:
+# trainer.logger='["console","swanlab"]'
+```
+
+Set `SWANLAB_MODE=offline` to keep the run on disk without an account and `swanlab sync` it
+later. Validation images are logged as `val/images/sample_N`, videos as GIFs under
+`val/videos/sample_N`, and audio under `val/audios/sample_N`.
 
 ### 4. Run FlowGRPO training
 

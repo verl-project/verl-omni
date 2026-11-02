@@ -87,6 +87,7 @@ docker run -it --rm \
   -e WORKSPACE="$WORKSPACE" \
   -e HF_HOME=/root/.cache/huggingface \
   -e WANDB_API_KEY="${WANDB_API_KEY:-}" \
+  -e SWANLAB_API_KEY="${SWANLAB_API_KEY:-}" \
   -w /workspace/verl-omni \
   verl-omni:xpu \
   bash

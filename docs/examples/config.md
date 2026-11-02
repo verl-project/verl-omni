@@ -450,7 +450,7 @@ actor_rollout_ref:
 
 These sit on the diffusion trainer YAML (in addition to shared verl trainer fields):
 
-- `trainer.video_fps`: FPS for videos written to `rollout_data_dir` / `validation_data_dir` and logged to W&B (image runs ignore this).
+- `trainer.video_fps`: FPS for videos written to `rollout_data_dir` / `validation_data_dir` and logged to W&B or SwanLab (image runs ignore this).
 - `trainer.rollout_data_save_freq`: Dump train rollout every N steps (`1` = every step, `<= 0` = never).
 - `trainer.rollout_data_max_samples` / `validation_data_max_samples`: Cap samples dumped per train / val run (`null` = all).
 - `trainer.use_v1`: Use the V1 trainer (TransferQueue + ReplayBuffer). Defaults
