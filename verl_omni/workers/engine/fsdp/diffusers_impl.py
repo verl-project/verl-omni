@@ -1174,7 +1174,9 @@ class PPODiffusersFSDPEngine(DiffusersFSDPEngine):
         return loss, output
 
 
-@EngineRegistry.register(model_type="diffusion_dpo_model", backend=["fsdp", "fsdp2"], device=["cuda", "npu", "xpu"])
+@EngineRegistry.register(
+    model_type="diffusion_dpo_model", backend=["fsdp", "fsdp2"], device=["cuda", "npu", "xpu", "mlu"]
+)
 class DPODiffusersFSDPEngine(DiffusersFSDPEngine):
     """Diffusers FSDP engine variant for diffusion DPO."""
 
@@ -1360,7 +1362,9 @@ class DPODiffusersFSDPEngine(DiffusersFSDPEngine):
         return loss, output
 
 
-@EngineRegistry.register(model_type="diffusion_nft_model", backend=["fsdp", "fsdp2"], device=["cuda", "npu", "xpu"])
+@EngineRegistry.register(
+    model_type="diffusion_nft_model", backend=["fsdp", "fsdp2"], device=["cuda", "npu", "xpu", "mlu"]
+)
 class NFTDiffusersFSDPEngine(DiffusersFSDPEngine):
     """Diffusers FSDP engine for direct-preference / forward-process objectives (e.g. DiffusionNFT)."""
 

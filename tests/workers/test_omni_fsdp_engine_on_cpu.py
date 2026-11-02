@@ -193,7 +193,7 @@ def test_engine_registered_via_decorator():
                     kwargs_found += 1
             if kw.arg == "device" and isinstance(kw.value, ast.List):
                 vals = [e.value for e in kw.value.elts if isinstance(e, ast.Constant)]
-                if set(vals) == {"cuda", "npu", "xpu"}:
+                if set(vals) == {"cuda", "npu", "xpu", "mlu"}:
                     kwargs_found += 1
         assert kwargs_found >= 2, (
             f"@EngineRegistry.register missing expected kwargs (model_type/backend/device); found {kwargs_found}/3"
@@ -216,7 +216,7 @@ def test_engine_registered_for_fsdp_and_fsdp2_backends():
 
     for backend in ("fsdp", "fsdp2"):
         assert backend in omni_registry, f"'{backend}' not registered for omni_model; registered: {list(omni_registry)}"
-        for device in ("cuda", "npu", "xpu"):
+        for device in ("cuda", "npu", "xpu", "mlu"):
             entry = omni_registry[backend].get(device)
             assert entry is not None, f"No engine for omni_model/{backend}/{device}"
             assert entry.__name__ == "OmniFSDPEngine", (
@@ -224,13 +224,14 @@ def test_engine_registered_for_fsdp_and_fsdp2_backends():
             )
 
 
-def test_engine_get_engine_cls_resolves_to_omni_fsdp_engine():
+@pytest.mark.parametrize("device", ["cuda", "npu", "xpu", "mlu"])
+def test_engine_get_engine_cls_resolves_to_omni_fsdp_engine(device):
     """``EngineRegistry.get_engine_cls`` returns ``OmniFSDPEngine``."""
     from verl.workers.engine.base import EngineRegistry
 
     _get_omni_impl_module()
 
-    with patch("verl.workers.engine.base.get_device_name", return_value="cuda"):
+    with patch("verl.workers.engine.base.get_device_name", return_value=device):
         for backend in ("fsdp", "fsdp2"):
             cls = EngineRegistry.get_engine_cls("omni_model", backend)
             assert cls.__name__ == "OmniFSDPEngine", (
