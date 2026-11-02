@@ -1121,6 +1121,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         # Resolve mode: "auto" falls back to config, explicit values take precedence
         effective_mode = mode if mode != "auto" else self.config.rollout.checkpoint_engine.backend
+        print(f"PROBE3 update_weights enter mode={effective_mode} rank={self.rank}", flush=True)
 
         # 0. send_weights only for async training with disaggregated trainer and rollout
         if effective_mode != "naive":
@@ -1168,6 +1169,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         # With actor parameter offload, the actor and resumed rollout weights
         # cannot safely coexist on a capacity-bound colocated GPU.
         release_actor_before_resume = use_lora_fast_path and self.actor.engine.is_param_offload_enabled
+        print(f"PROBE3 fast_path={use_lora_fast_path} release_first={release_actor_before_resume}", flush=True)
 
         # 2. Resume early only when the actor need not be released first. Keep
         #    the existing overlap for all other paths.
@@ -1262,15 +1264,21 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 bucket_size_mb=bucket_size_mb,
                 use_shm=self.rollout.use_shm,
             )
+            timings["probe_dispatch_receiver"] = time.perf_counter() - sync_start
             with RLInsightLogger.trace_state("update_weights", state_lane_id=f"rank_{self.rank}"):
+                send_start = time.perf_counter()
                 await sender.async_send_weights(lora_weights.items())
+                timings["probe_send"] = time.perf_counter() - send_start
                 if future is not None:
                     await future
+                timings["probe_send_and_receiver_done"] = time.perf_counter() - send_start
+            server_rpc_start = time.perf_counter()
             # Mirror ServerAdapter.update_weights: reset caches and stamp the weight version.
             if self.rollout.rollout_rank == 0 and self.rollout._ensure_server_handle():
                 await self.rollout.server_handle.clear_kv_cache.remote()
                 if global_steps is not None:
                     await self.rollout.server_handle.set_global_steps.remote(global_steps)
+            timings["probe_server_rpcs"] = time.perf_counter() - server_rpc_start
             timings["update_weights_sync"] = time.perf_counter() - sync_start
         else:
             # Normal path: resume rollout weight memory, gather actor params and
@@ -1326,6 +1334,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         set_expandable_segments(True)
 
         timings["update_weights_total"] = time.perf_counter() - update_weights_start
+        print(f"PROBE3 update_weights timing (ms): { {k: round(v * 1000, 2) for k, v in timings.items()} }", flush=True)
         logger.debug(
             "update_weights timing (ms): %s",
             {k: round(v * 1000, 2) for k, v in timings.items()},
