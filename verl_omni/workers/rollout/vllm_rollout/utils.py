@@ -70,6 +70,24 @@ def _bucket_is_delta_flush(weights: list) -> bool:
     return bool(weights) and weights[0][0].partition("#")[0] == SPEC_NAME
 
 
+def _require_lora_modules_bound(lora_manager) -> None:
+    """Raise unless every module of the loaded actor adapter has a rollout LoRA layer.
+
+    vLLM skips adapter modules it cannot match without an error, which would leave
+    rollout sampling from a policy missing those deltas. ``.base_layer`` is the PEFT
+    entry of a 3D MoE gate/up projection, whose layer is the ``experts`` module.
+    """
+    adapter_manager = lora_manager._adapter_manager
+    adapter = adapter_manager.get_adapter(VLLM_LORA_INT_ID)
+    unbound = sorted(name for name in adapter.loras if name.removesuffix(".base_layer") not in adapter_manager.modules)
+    if unbound:
+        raise ValueError(
+            f"LoRA adapter modules have no rollout layer: {unbound}. "
+            "Drop them with model.target_modules or model.exclude_modules, "
+            "or set model.lora.merge=True to sync merged weights."
+        )
+
+
 class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
     """
     The class for vLLM-Omni's worker to inherit from, in the colocate setting.
@@ -213,11 +231,16 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
 
             # Accumulate all LoRA tensors across buckets (LoRA weights are small;
             # a single atomic ``add_lora`` is both correct for multi-bucket edge
-            # cases and more efficient than per-bucket loading).
+            # cases and more efficient than per-bucket loading). Clone each tensor:
+            # received tensors are views into the sender's IPC bucket buffer, which
+            # it refills for every bucket and can clean up once the last bucket is
+            # acked, before add_lora runs, so a single-bucket adapter needs a copy too.
             t_recv_start = time.perf_counter()
             accumulated_weights: dict[str, torch.Tensor] = {}
             receiver.receive_weights(
-                on_bucket_received=lambda weights, *args, **kwargs: accumulated_weights.update(weights)
+                on_bucket_received=lambda weights, *args, **kwargs: accumulated_weights.update(
+                    (name, tensor.clone()) for name, tensor in weights
+                )
             )
             t_recv_end = time.perf_counter()
             lora_total_bytes = sum(t.element_size() * t.numel() for t in accumulated_weights.values())
@@ -254,6 +277,8 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
             self.add_lora(lora_request)
             if self._get_standard_weight_model_and_config() is None:
                 self._move_diffusion_lora_stacks_to_device()
+            else:
+                _require_lora_modules_bound(self.model_runner.lora_manager)
             t3 = time.perf_counter()
             logger.debug("add_lora took %.3f ms", (t3 - t2) * 1000)
             logger.debug(

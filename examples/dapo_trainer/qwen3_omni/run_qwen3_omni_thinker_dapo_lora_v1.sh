@@ -37,7 +37,7 @@ python3 -m verl_omni.trainer.main_omni \
     actor_rollout_ref.model.lora_rank=32 \
     actor_rollout_ref.model.lora_alpha=64 \
     actor_rollout_ref.model.lora_dtype=float32 \
-    actor_rollout_ref.model.lora.merge=true \
+    actor_rollout_ref.model.lora.merge=false \
     actor_rollout_ref.model.enable_gradient_checkpointing=true \
     actor_rollout_ref.model.use_remove_padding=true \
     actor_rollout_ref.model.exclude_modules=".*talker.*|.*code2wav.*|.*code_predictor.*|.*visual.*|.*audio_tower.*" \

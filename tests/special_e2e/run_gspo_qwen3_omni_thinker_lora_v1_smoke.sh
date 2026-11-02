@@ -6,6 +6,8 @@
 # Follows examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_v1.sh
 # settings; only down-scales batch size, rollout.n, prompt/response length, and LoRA
 # for smoke testing (tiny random model, 2 steps).
+# Syncs adapter tensors only (lora.merge=False); a run fails if any adapter module
+# does not bind to a rollout LoRA layer.
 #
 # Requires: verl, verl-omni, vllm-omni installed.
 #
@@ -59,7 +61,7 @@ python3 -m verl_omni.trainer.main_omni \
     actor_rollout_ref.model.lora_rank=8 \
     actor_rollout_ref.model.lora_alpha=16 \
     actor_rollout_ref.model.lora_dtype=float32 \
-    actor_rollout_ref.model.lora.merge=True \
+    actor_rollout_ref.model.lora.merge=False \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.model.exclude_modules="${EXCLUDE_MODULES}" \
