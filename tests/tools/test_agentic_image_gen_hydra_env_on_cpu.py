@@ -23,7 +23,7 @@ from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
 
 import verl_omni
-from verl_omni.tools.trajectory.hydra_env import (
+from verl_omni.utils.agentic.config import (
     agentic_get,
     agentic_get_bool,
     agentic_get_str,
@@ -45,6 +45,7 @@ def test_omni_trainer_composes_agentic_image_gen():
     assert cfg.agentic_image_gen.force_reflection_after_judge is True
     assert cfg.agentic_image_gen.rewrite_judge_before_generate is True
     assert cfg.agentic_image_gen.e2e_root is None
+    assert cfg.agentic_image_gen.run_dir is None
     assert cfg.agentic_image_gen.good_enough_threshold == 0.80
     assert cfg.agentic_image_gen.qwen_image_height == 512
     assert cfg.agentic_image_gen.qwen_image_width == 512
@@ -126,7 +127,8 @@ def test_bind_clears_stale_cfg_when_agentic_image_gen_missing():
     bind_agentic_image_gen(OmegaConf.create({"trainer": {}}))
     assert agentic_get_str("diffusion_tool_url") == ""
     assert agentic_get_bool("force_first_generate") is False
-    bind_agentic_image_gen(None)
+    with pytest.raises(ValueError, match="None"):
+        bind_agentic_image_gen(None)
     assert agentic_get_str("diffusion_tool_url") == ""
     clear_agentic_image_gen()
 
@@ -162,14 +164,14 @@ def test_agentic_get_unbound_fails_loud():
 
 
 def test_agentic_scorer_knobs_from_config_rejects_none():
-    from verl_omni.tools.trajectory.hydra_env import agentic_scorer_knobs_from_config
+    from verl_omni.utils.agentic.config import agentic_scorer_knobs_from_config
 
     with pytest.raises(ValueError, match="composed Hydra config"):
         agentic_scorer_knobs_from_config(None)
 
 
 def test_yaml_defaults_are_single_source_of_truth():
-    from verl_omni.tools.trajectory.hydra_env import yaml_agentic_image_gen_defaults
+    from verl_omni.utils.agentic.config import yaml_agentic_image_gen_defaults
 
     defaults = yaml_agentic_image_gen_defaults()
     assert defaults["max_generate_image_passes"] == 3
@@ -180,7 +182,7 @@ def test_yaml_defaults_are_single_source_of_truth():
 def test_merge_agentic_scorer_knobs_requires_stamp_or_config():
     from omegaconf import OmegaConf
 
-    from verl_omni.tools.trajectory.hydra_env import SCORER_KNOB_KEYS, merge_agentic_scorer_knobs
+    from verl_omni.utils.agentic.config import SCORER_KNOB_KEYS, merge_agentic_scorer_knobs
 
     with pytest.raises(ValueError, match="missing from extra_info"):
         merge_agentic_scorer_knobs({"w_tool_call": 0.1}, None)
@@ -196,3 +198,9 @@ def test_merge_agentic_scorer_knobs_requires_stamp_or_config():
     assert merged2["good_enough_threshold"] == 0.6
     assert merged2["vllm_url"] == "http://x"
     assert merged2["w_tool_call"] == 0.1
+
+
+def test_omni_trainer_accepts_run_dir_override_without_hydra_add():
+    with initialize_config_dir(config_dir=CONFIG_DIR, version_base=None):
+        cfg = compose(config_name="omni_trainer", overrides=["agentic_image_gen.run_dir=/shared/run"])
+    assert cfg.agentic_image_gen.run_dir == "/shared/run"

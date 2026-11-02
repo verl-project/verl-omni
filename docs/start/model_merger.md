@@ -204,6 +204,14 @@ export just the adapter; `--base_model` identifies the original model and does
 not need to be available locally. To verify the adapter files, run the `test`
 command with `--test_hf_dir "$OUTPUT/lora_adapter"`.
 
+Omni actors (for example a Qwen3-Omni thinker trained with `omni_trainer`) can
+also save LoRA-only checkpoints with
+`actor_rollout_ref.actor.checkpoint.save_lora_only=true`. When the actor's
+`huggingface/config.json` is a transformers config, the adapter is exported with
+`task_type: CAUSAL_LM` so it loads with `PeftModel.from_pretrained` on the
+original model. Diffusion adapters keep `task_type: null`. `--fuse-lora` and full
+model export remain diffusers-only.
+
 Pass `--fuse-lora` to publish a complete model instead. The selected adapter is
 folded into its base weights as `W + (lora_alpha / r) * B @ A`, computed in fp32
 and cast back to the base weight dtype before the `--dtype` policy. The sum is
@@ -337,10 +345,12 @@ The H3 LoRA case additionally checks the native DiT loader. Optional Boogu cases
 are reported explicitly as skipped when its package is unavailable.
 
 Without `boogu-image`, only its cases are skipped; this is not evidence that Boogu
-was tested. Local verification used Diffusers 0.40.0 and canonical Boogu source
-revision `25f8f888298224a94e5ec2abafb98abea9031a0d` on PYTHONPATH, without changing
-the shared venv. Boogu's declared dependency ranges differ from that venv; source
-execution is not dependency-resolver or clean-install validation.
+was tested. Historical validation environment (Diffusers 0.40.0; recorded before
+the project raised its minimum to 0.41.0). Local verification used Diffusers 0.40.0
+and canonical Boogu source revision `25f8f888298224a94e5ec2abafb98abea9031a0d` on
+PYTHONPATH, without changing the shared venv. Boogu's declared dependency ranges
+differ from that venv; source execution is not dependency-resolver or clean-install
+validation.
 
 These tests use random tiny weights on CPU; they are not real-weight/GPU or
 production image-quality evidence. Real checkpoint save/export/load remains a

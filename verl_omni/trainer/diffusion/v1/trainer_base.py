@@ -15,11 +15,13 @@
 import logging
 import math
 import os
+import time
 import uuid
 from abc import ABC, abstractmethod
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from functools import cached_property
 from numbers import Integral
 from pprint import pprint
 
@@ -95,6 +97,7 @@ from verl_omni.trainer.diffusion.rollout_correction import (
     rollout_correction_enabled,
 )
 from verl_omni.trainer.diffusion.teacher_manager import DiffusionTeacherManager
+from verl_omni.trainer.diffusion.training_watchdog import TrainingWatchdog
 from verl_omni.trainer.diffusion.v1.tq_utils import (
     canonicalize_diffusion_tq_meta,
     diffusion_dump_tq_fields,
@@ -220,6 +223,11 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         # Local update index within the parameter-sync cycle.
         self.local_trigger_step = 0
         self._nonfinite_grad_streak = 0
+        watchdog_config = dict(config.trainer.v1.get("watchdog", {}))
+        watchdog_enabled = watchdog_config.pop("enabled", False)
+        if not isinstance(watchdog_enabled, bool):
+            raise ValueError("trainer.v1.watchdog.enabled must be a boolean")
+        self._training_watchdog = TrainingWatchdog(loss_mode=loss_mode, **watchdog_config) if watchdog_enabled else None
 
     def _build_replay_buffer(self) -> ReplayBuffer:
         sampler_config = self.config.trainer.v1.sampler
@@ -372,6 +380,8 @@ class PolicyGradientDiffusionTrainerV1(ABC):
                 self._shutdown_dataloaders()
                 return
 
+        if self._training_watchdog is not None:
+            self._training_watchdog.reset()
         current_epoch = self.global_steps // self.steps_per_epoch
         progress_bar = tqdm(total=self.total_training_steps, initial=self.global_steps, desc="Diffusion Training")
 
@@ -417,6 +427,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
                 metrics.update(val_metrics)
 
             self._compute_metrics(batch, metrics, self.timing_raw, self.global_steps, current_epoch)
+            self._report_training_watchdog(metrics)
 
             rollout_data_dir = self.config.trainer.get("rollout_data_dir", None)
             rollout_data_save_freq = self.config.trainer.get("rollout_data_save_freq", 1)
@@ -440,6 +451,24 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         self.on_train_end()
         self._shutdown_dump_executor()
         self._shutdown_dataloaders()
+
+    def _report_training_watchdog(self, metrics: dict) -> None:
+        if self._training_watchdog is None:
+            return
+        started = time.perf_counter()
+        alerts, diagnostics = self._training_watchdog.observe(self.global_steps, metrics)
+        for alert in alerts:
+            logger.warning(
+                "Training watchdog rule=%s step=%d window=[%d,%d] observations=%d evidence=%s",
+                alert.rule,
+                alert.step,
+                alert.first_step,
+                alert.last_step,
+                alert.observations,
+                alert.evidence,
+            )
+        metrics.update(diagnostics)
+        metrics["watchdog/processing_time_s"] = time.perf_counter() - started
 
     def step(self, metrics: dict, timing_raw: dict) -> KVBatchMeta:
         """Feed one train batch and run ``parameter_sync_step`` local updates."""
@@ -580,6 +609,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         elif not self.skip_old_log_prob:
             with marked_timer("old_log_prob", timing_raw, color="blue"):
                 old_log_prob = self._compute_old_log_prob(data)
+                metrics.update(old_log_prob.meta_info.pop("metrics", {}))
                 data = data.union(old_log_prob)
             assert "old_log_probs" in data.batch, f'"old_log_probs" not in {data.batch.keys()}'
 
@@ -1341,17 +1371,21 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         assert self.reward_loop_manager is not None, "RewardLoopManager is None"
         return self.reward_loop_manager.compute_rm_score(data)
 
+    @cached_property
+    def _actor_dp_size(self) -> int:
+        """Actor DP size, queried once: the dispatch mapping is fixed for the worker group's lifetime."""
+        if not hasattr(self.actor_rollout_wg, "_query_dispatch_info"):
+            return 1
+        info = self.actor_rollout_wg._query_dispatch_info("actor")
+        if isinstance(info, dict):
+            return max(info.values()) + 1 if info else 1
+        if isinstance(info, list | tuple | set):
+            return max(info) + 1 if info else 1
+        # ONE_TO_ALL dispatch may return a scalar dp rank per worker.
+        return int(info) + 1 if info is not None else 1
+
     def _balance_batch(self, data: DataProto, metrics: dict) -> DataProto:
-        dp_size = 1
-        if hasattr(self.actor_rollout_wg, "_query_dispatch_info"):
-            info = self.actor_rollout_wg._query_dispatch_info("actor")
-            if isinstance(info, dict):
-                dp_size = max(info.values()) + 1 if info else 1
-            elif isinstance(info, list | tuple | set):
-                dp_size = max(info) + 1 if info else 1
-            else:
-                # ONE_TO_ALL dispatch may return a scalar dp rank per worker.
-                dp_size = int(info) + 1 if info is not None else 1
+        dp_size = self._actor_dp_size
         actor_global_mini_batch_size = self.config.actor_rollout_ref.actor.ppo_mini_batch_size
         actor_global_mini_batch_size *= self.config.actor_rollout_ref.rollout.n
         if self.trainer_mode == "separate_async":
@@ -1417,7 +1451,10 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         prev_sample_mean = tu.get(output, "prev_sample_mean")
         if prev_sample_mean is not None:
             old_log_prob_dict["old_prev_sample_mean"] = prev_sample_mean.float()
-        return DataProto.from_tensordict(tu.get_tensordict(old_log_prob_dict))
+        old_log_prob = DataProto.from_tensordict(tu.get_tensordict(old_log_prob_dict))
+        if (mfu := tu.get(output, "metrics").pop("mfu", None)) is not None:
+            old_log_prob.meta_info["metrics"] = {"perf/mfu/actor_infer": mfu}
+        return old_log_prob
 
     def _compute_ref_log_prob(self, data: DataProto) -> DataProto:
         """Compute reference log-probs over diffusion latents."""

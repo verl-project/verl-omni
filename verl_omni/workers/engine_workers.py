@@ -14,6 +14,7 @@
 import asyncio
 import functools
 import logging
+import math
 import os
 import time
 from contextlib import nullcontext
@@ -57,6 +58,8 @@ from verl.workers.rollout.base import BaseRollout, get_rollout_class
 from verl.workers.rollout.vllm_rollout.bucketed_weight_transfer import BucketedWeightSender
 from verl.workers.utils.losses import ppo_loss
 
+# Register nitrobrew / nitrobrew_reverse_kl aggregate into verl's loss registry.
+import verl_omni.trainer.distillation.losses as _omni_distill_losses  # noqa: E402, F401
 from verl_omni.pipelines.utils import build_scheduler
 from verl_omni.utils.config import resolve_lora_config
 from verl_omni.utils.mfu import (
@@ -70,6 +73,7 @@ from verl_omni.workers.config import (
     OmniModelConfig,
 )
 from verl_omni.workers.config.diffusion import DiffusionDistillationTeacherModelConfig
+from verl_omni.workers.config.omni.distillation import HIDDEN_STATE_LOSS_MODES
 from verl_omni.workers.rollout.base import get_rollout_sequence_parallel_size
 from verl_omni.workers.rollout.vllm_rollout.zmq_utils import make_update_zmq_handle, make_update_zmq_id
 from verl_omni.workers.utils.losses import diffusion_loss, omni_loss
@@ -773,9 +777,19 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             ):
                 self.loss_fn = partial(omni_loss, config=actor_config)
             elif self.distillation_enabled:
-                self.loss_fn = partial(
-                    distillation_ppo_loss, config=actor_config, distillation_config=distillation_config
-                )
+                loss_mode = distillation_config.distillation_loss.loss_mode
+                if loss_mode in HIDDEN_STATE_LOSS_MODES:
+                    from verl_omni.trainer.distillation.losses import omni_distillation_ppo_loss
+
+                    self.loss_fn = partial(
+                        omni_distillation_ppo_loss,
+                        config=actor_config,
+                        distillation_config=distillation_config,
+                    )
+                else:
+                    self.loss_fn = partial(
+                        distillation_ppo_loss, config=actor_config, distillation_config=distillation_config
+                    )
             else:
                 self.loss_fn = partial(ppo_loss, config=actor_config)
             self.actor = TrainingWorker(config=actor_training_config)
@@ -921,6 +935,23 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         output = self.actor.infer_batch(data)
         return output.cpu() if output is not None else None
 
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def set_teacher_unembeds(self, teacher_unembeds: dict[str, torch.Tensor]) -> None:
+        """Store teacher lm_head weights for hidden-state (nitrobrew) loss.
+
+        Each entry is ``{teacher_key: W [V, D_t]}`` bf16.  Factored into the
+        micro-batch on ``update_actor`` via a NonTensorData reference so the
+        chunked KL kernel can reconstruct teacher logits on this rank.
+
+        Args:
+            teacher_unembeds: key -> unembedding matrix (CPU/any device).
+        """
+        assert "actor" in self.role, "set_teacher_unembeds is only valid for actor workers"
+        self._teacher_unembeds: dict[str, torch.Tensor] = {
+            key: W.detach().to(dtype=torch.bfloat16).cpu().contiguous() for key, W in teacher_unembeds.items()
+        }
+        self._teacher_key_vocab: list[str] = sorted(teacher_unembeds.keys())
+
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
     @DistProfiler.annotate(color="red", role="actor_update")
     @_with_routing_replay_flag(enabled=True)
@@ -930,6 +961,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             data,
             use_no_sync_for_gradient_accumulation=self.config.actor.get("use_no_sync_for_gradient_accumulation", False),
         )
+        if getattr(self, "_teacher_unembeds", None):
+            data["teacher_unembeds"] = NonTensorData(self._teacher_unembeds)
+            data["teacher_key_to_id"] = NonTensorData({key: i for i, key in enumerate(self._teacher_key_vocab)})
         output = self.actor.train_mini_batch(data=data)
         return output.cpu() if output is not None else None
 
@@ -1146,6 +1180,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         # 3. sync weights.
         offloaded = False
         offload_task = None
+        kv_cache_resumed = False
         if use_lora_fast_path:
             self.rollout.sleep_level = 1
             torch_device = get_torch_device()
@@ -1186,7 +1221,10 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 offloaded = True
                 log_gpu_memory_usage("After actor offload before resume weights", logger=logger)
                 if self.config.rollout.free_cache_engine:
-                    await _timed_await("resume_weights", timings, self.rollout.resume(tags=["weights"]))
+                    # The actor is released and the IPC bucket holds only the adapter, so the cache
+                    # fits now; one server wake handshake replaces two on every sync.
+                    await _timed_await("resume_weights", timings, self.rollout.resume(tags=["weights", "kv_cache"]))
+                    kv_cache_resumed = True
             else:
                 # Preserve gather/resume and offload/IPC overlap when the actor
                 # does not offload parameters.
@@ -1199,41 +1237,51 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 )
             log_gpu_memory_usage("After resume weights", logger=logger)
 
-            # Use ZMQ IPC to transfer LoRA weights, bypassing Ray serialization.
-            # Broadcast only the update id. Each vLLM worker combines it with its
-            # rank-local base handle, preserving the one-sender/one-receiver route.
-            sync_start = time.perf_counter()
-            # update_weights is dispatched ONE_TO_ALL, so every actor rank advances
-            # this sequence exactly once for the same LoRA update.
-            zmq_update_id = make_update_zmq_id(global_steps, self._zmq_update_seq)
-            self._zmq_update_seq += 1
-            zmq_handle = make_update_zmq_handle(self.rollout.zmq_handle, zmq_update_id)
-            future = await self.rollout._execute_method(
-                "update_weights_from_ipc",
-                non_block=True,
-                kwargs={
-                    "peft_config": peft_config,
-                    "base_sync_done": True,
-                    "use_shm": self.rollout.use_shm,
-                    "zmq_update_id": zmq_update_id,
-                },
-            )
-            bucket_size_mb = self.config.rollout.checkpoint_engine.update_weights_bucket_megabytes
-            sender = BucketedWeightSender(
-                zmq_handle=zmq_handle,
-                bucket_size_mb=bucket_size_mb,
-                use_shm=self.rollout.use_shm,
-            )
-            with RLInsightLogger.trace_state("update_weights", state_lane_id=f"rank_{self.rank}"):
-                await sender.async_send_weights(lora_weights.items())
-                if future is not None:
-                    await future
-            # Mirror ServerAdapter.update_weights: reset caches and stamp the weight version.
-            if self.rollout.rollout_rank == 0 and self.rollout._ensure_server_handle():
-                await self.rollout.server_handle.clear_kv_cache.remote()
-                if global_steps is not None:
-                    await self.rollout.server_handle.set_global_steps.remote(global_steps)
-            timings["update_weights_sync"] = time.perf_counter() - sync_start
+            try:
+                # Use ZMQ IPC to transfer LoRA weights, bypassing Ray serialization.
+                # Broadcast only the update id. Each vLLM worker combines it with its
+                # rank-local base handle, preserving the one-sender/one-receiver route.
+                sync_start = time.perf_counter()
+                # update_weights is dispatched ONE_TO_ALL, so every actor rank advances
+                # this sequence exactly once for the same LoRA update.
+                zmq_update_id = make_update_zmq_id(global_steps, self._zmq_update_seq)
+                self._zmq_update_seq += 1
+                zmq_handle = make_update_zmq_handle(self.rollout.zmq_handle, zmq_update_id)
+                future = await self.rollout._execute_method(
+                    "update_weights_from_ipc",
+                    non_block=True,
+                    kwargs={
+                        "peft_config": peft_config,
+                        "base_sync_done": True,
+                        "use_shm": self.rollout.use_shm,
+                        "zmq_update_id": zmq_update_id,
+                    },
+                )
+                # The sender allocates and IPC-maps a device buffer of the bucket size on every sync;
+                # size it to the adapter payload rather than the full-weight bucket the config carries.
+                lora_mb = math.ceil(sum(t.numel() * t.element_size() for t in lora_weights.values()) / (1 << 20))
+                configured_mb = self.config.rollout.checkpoint_engine.update_weights_bucket_megabytes
+                bucket_size_mb = max(1, min(configured_mb, lora_mb))
+                sender = BucketedWeightSender(
+                    zmq_handle=zmq_handle,
+                    bucket_size_mb=bucket_size_mb,
+                    use_shm=self.rollout.use_shm,
+                )
+                with RLInsightLogger.trace_state("update_weights", state_lane_id=f"rank_{self.rank}"):
+                    await sender.async_send_weights(lora_weights.items())
+                    if future is not None:
+                        await future
+                # Mirror ServerAdapter.update_weights: reset caches and stamp the weight version.
+                if self.rollout.rollout_rank == 0 and self.rollout._ensure_server_handle():
+                    await self.rollout.server_handle.clear_kv_cache.remote()
+                    if global_steps is not None:
+                        await self.rollout.server_handle.set_global_steps.remote(global_steps)
+                timings["update_weights_sync"] = time.perf_counter() - sync_start
+            except BaseException:
+                if kv_cache_resumed:
+                    # Sleep the rollout again so a failed sync cannot generate on stale weights.
+                    await self.rollout.release()
+                raise
         else:
             # Normal path: resume rollout weight memory, gather actor params and
             # sync via the standard bucketed-IPC pipeline.
@@ -1280,7 +1328,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         log_gpu_memory_usage("After offload model to cpu", logger=logger)
 
         # 5. resume kv_cache
-        if self.config.rollout.free_cache_engine:
+        if self.config.rollout.free_cache_engine and not kv_cache_resumed:
             await _timed_await("resume_kv_cache", timings, self.rollout.resume(tags=["kv_cache"]))
         log_gpu_memory_usage("After resume kv_cache", logger=logger)
 
