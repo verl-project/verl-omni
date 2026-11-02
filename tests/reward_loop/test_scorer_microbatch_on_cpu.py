@@ -319,6 +319,32 @@ async def test_submit_fails_fast_when_cancellation_is_requested_but_not_delivere
     assert microbatcher._state == "closed"
 
 
+@pytest.mark.asyncio
+async def test_start_revival_survives_the_already_queued_settlement():
+    calls = []
+    microbatcher = ScorerMicrobatcher(_recording_scorer(calls), name="m")
+    await microbatcher.start()
+    dead = microbatcher._consumer
+    dead.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        # Awaiting the dead task first runs its done callback, which queues
+        # the settlement without letting it land.
+        await dead
+
+    await microbatcher.start()
+    revived = microbatcher._consumer
+    # First pass runs the queued settlement (it must step aside); second
+    # parks the revived consumer on its empty-queue wait.
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    assert microbatcher._state == "running"
+    assert revived is not dead and not revived.done()
+    assert await microbatcher.submit({"i": 3}) == {"score": 3}
+    assert calls == [[3]]
+    await microbatcher.close()
+
+
 def test_constructor_rejects_invalid_bounds():
     with pytest.raises(ValueError, match="max_batch_size"):
         ScorerMicrobatcher(_recording_scorer([]), max_batch_size=0)

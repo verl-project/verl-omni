@@ -438,8 +438,8 @@ class ScorerMicrobatcher:
                 raise RuntimeError(f"Reward scorer microbatcher {self._name!r} is closed")
             if self._state == "running" and self._consumer is not None and not self._consumer.done():
                 return
-            # Also revives a consumer cancelled before its first step, whose
-            # scheduled settlement has not landed yet.
+            # Also revives a consumer cancelled before its first step; the
+            # settlement its done callback queued yields to the replacement.
             self._state = "running"
             self._consumer = asyncio.create_task(self._consumer_loop())
             self._consumer.add_done_callback(self._consumer_died)
@@ -451,7 +451,7 @@ class ScorerMicrobatcher:
         reaches the handler, so this callback is the only settlement site.
         """
         if task.cancelled() and task is self._consumer and self._state == "running":
-            asyncio.get_running_loop().create_task(self._fail_pending([]))
+            asyncio.get_running_loop().create_task(self._fail_pending([], dead=task))
 
     async def submit(self, request: dict[str, Any]) -> dict[str, Any]:
         """Submit one request and await its score dict.
@@ -559,9 +559,18 @@ class ScorerMicrobatcher:
             await self._fail_pending(batch)
             raise
 
-    async def _fail_pending(self, batch: list[tuple[dict[str, Any], asyncio.Future]]) -> None:
-        """Settle every unsettled request after consumer cancellation and close admission."""
+    async def _fail_pending(
+        self, batch: list[tuple[dict[str, Any], asyncio.Future]], *, dead: asyncio.Task | None = None
+    ) -> None:
+        """Settle every unsettled request after consumer cancellation and close admission.
+
+        ``dead`` names the consumer whose done callback scheduled this settlement;
+        a ``start`` revival that replaced it owns the queue, so the settlement
+        steps aside instead of closing the new consumer.
+        """
         async with self._cond:
+            if dead is not None and dead is not self._consumer:
+                return
             pending = self._settle_closed_locked(batch)
         for _, future in pending:
             if not future.done():
