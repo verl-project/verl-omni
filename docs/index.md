@@ -114,6 +114,7 @@ examples/bagel/flowgrpo_trainer_bagel.md
 examples/gspo_trainer.md
 examples/qwen3_omni/gspo_trainer_qwen3_omni.md
 examples/dapo_trainer.md
+examples/stage_skip.md
 examples/qwen3_tts/grpo_trainer_qwen3_tts.md
 ```
 
