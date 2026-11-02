@@ -56,7 +56,6 @@ def load_lib():
         derive_good_enough_from_scores=protocol.derive_good_enough_from_scores,
         format_rm_scores_as_judge_text=protocol.format_rm_scores_as_judge_text,
         derive_rollout_seed=lambda base, index: base + index,
-        build_generate_call_meta=lambda **kwargs: {},
         register_tool_artifact=lambda **kwargs: None,
         get_active_user_prompt=lambda: "a cube",
         clear_good_enough_yes_reached=lambda: latch.__setitem__(0, False),
@@ -380,3 +379,29 @@ def test_gen_stash_retains_only_its_own_observed_serving_metadata(monkeypatch):
     assert not unknown["serving_provenance_verified"]
     with pytest.raises(ValueError, match="observed serving"):
         lib.serving_rollout_provenance(unknown, required=True)
+
+
+@pytest.mark.parametrize("rewrite", [False, True])
+def test_generation_metadata_reads_only_the_current_episode(tmp_path, rewrite):
+    """The pipeline owns call metadata while shared state owns generation history."""
+    from verl_omni.tools.trajectory import EpisodeState, current_episode, episode_scope
+
+    path = ROOT / "verl_omni/pipelines/bagel_flow_grpo/agentic_und_gen/episode.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    helper = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_build_generate_call_meta"
+    )
+    namespace = {"current_episode": current_episode}
+    exec(compile(ast.Module(body=[helper], type_ignores=[]), str(path), "exec"), namespace)
+    image = tmp_path / "previous.png"
+    image.write_bytes(b"image")
+    with episode_scope(EpisodeState(episode_id="metadata")) as state:
+        if rewrite:
+            state.record_generation(prompt="previous", paths=[str(image)])
+        meta = namespace["_build_generate_call_meta"](prompt="next", user_prompt="request")
+        assert meta["call_role"] == ("rewrite" if rewrite else "initial")
+        assert meta["controlled_by_reflection"] is rewrite
+        assert meta["prev_tool_prompt"] == ("previous" if rewrite else "")
+        assert meta["source_image_for_reflection"] == (str(image) if rewrite else "")
+        assert meta["tool_prompt"] == meta["llm_prompt"] == "next"
+        assert meta["user_prompt"] == "request"

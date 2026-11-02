@@ -46,7 +46,7 @@ from verl_omni.pipelines.bagel_flow_grpo.agentic_und_gen.turn_protocol import (
     format_rm_scores_as_judge_text,
 )
 from verl_omni.tools.trajectory.episode import EpisodeState, current_episode, episode_scope
-from verl_omni.tools.trajectory.episode_artifacts import build_generate_call_meta, register_tool_artifact
+from verl_omni.tools.trajectory.episode_artifacts import register_tool_artifact
 from verl_omni.tools.trajectory.episode_context import get_active_user_prompt
 from verl_omni.tools.trajectory.episode_judge import (
     clear_good_enough_yes_reached,
@@ -146,6 +146,30 @@ Rewriting rules — the rewrite is the work, not a formality:
 Always generate before judging, judge before deciding, and use no other tools.
 The brevity note on the user turn bounds your private thinking and your reflection
 only — never let it shorten or water down a diffusion prompt."""
+
+
+def _build_generate_call_meta(*, prompt: str, user_prompt: str) -> dict:
+    """Build BAGEL call metadata from the current episode's generation history."""
+    state = current_episode()
+    record = state.latest_generation if state else None
+    previous = record.prompt if record else ""
+    rewrite = bool(previous)
+    return {
+        "call_role": "rewrite" if rewrite else "initial",
+        "controlled_by_reflection": rewrite,
+        "reflection": "",
+        "prev_tool_prompt": previous,
+        "source_image_for_reflection": (state.resolve_image() or "") if rewrite else "",
+        "rewritten_prompt": prompt if rewrite else "",
+        "image_generated_from_reflected_prompt": rewrite,
+        "tool_prompt_equals_rewritten_prompt": rewrite,
+        "content_source": "reflection" if rewrite else "initial",
+        "llm_reflection": "",
+        "llm_prompt": prompt,
+        "model_decode": "",
+        "user_prompt": user_prompt or "",
+        "tool_prompt": prompt,
+    }
 
 
 def resolve_task_type(*, extra_info: Any = None, ground_truth: Any = None) -> Any:
@@ -1322,14 +1346,14 @@ async def run_serial_episode(
                 arguments = json.loads(arguments)
             # Strip any in-turn "Short reflection: ..." tail before the prompt conditions the
             # diffusion model -- see ``strip_reflection_tail``. Applies at extraction so the
-            # recorded trajectory ``prompt``, ``build_generate_call_meta`` and the GEN request
+            # recorded trajectory ``prompt``, ``_build_generate_call_meta`` and the GEN request
             # all see the same sanitized text.
             prompt = strip_reflection_tail(str(arguments.get("prompt", "")))
             if fixed_gen_prompt:
                 prompt = active_user_prompt if fixed_gen_prompt == "__user_request__" else fixed_gen_prompt
                 if not prompt:
                     raise ValueError("fixed generator prompt requires a nonempty original request")
-            meta = build_generate_call_meta(prompt=prompt, user_prompt=active_user_prompt)
+            meta = _build_generate_call_meta(prompt=prompt, user_prompt=active_user_prompt)
             # RFC component-1 IDs: GEN TQ keys must be deterministic per (episode, call)
             # so a replay reproduces the same keys. Call 0 keeps the episode's base
             # ``gen_call_id``; later calls derive from the episode id and their local
