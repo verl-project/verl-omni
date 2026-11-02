@@ -53,12 +53,15 @@ Set `NPU_SMOKE_FULL_TOPOLOGY=1` to restore the requested budget for every entry.
 Entries run sequentially within each group and log their allocation and device IDs.
 Opt in with `NPU_SMOKE_PARALLEL=1` for two isolated four-NPU core lanes or
 2/2/4-NPU e2e lanes, after the group's exclusive eight-NPU entries finish.
-This requires Linux child subreapers and pidfd signaling. Each lane keeps the
-container's PID and mount namespaces, scopes cleanup to its own descendants,
-and uses separate short Ray and weight-transfer IPC directories.
+Serial and parallel modes require Linux child subreapers and pidfd signaling.
+Each supervised group or lane keeps the container's PID and mount namespaces,
+scopes cleanup to its own descendants, and uses separate short Ray and
+weight-transfer IPC directories.
 The workflow enables this mode; set `NPU_SMOKE_PARALLEL=0` for serial execution.
-Full topology mode remains serial. Parallel visibility lists must be ascending;
-core 0 requires runtime device IDs 0–7.
+Full topology mode remains serial. Parallel runtime visibility lists must be
+ascending; core 0 requires runtime device IDs 0–7. `ASCEND_VISIBLE_DEVICES`
+describes the container's physical allocation and is forwarded unchanged to
+each lane; it can contain more IDs than the lane's runtime mask.
 
 Test 3 ports the `fsdp` case of `tests/workers/test_diffusers_fsdp_engine.py`
 (GPU core ID 2). It reuses the GPU test's synthetic trajectories and engine
@@ -118,7 +121,8 @@ replicas, without an actor rollout server. This is an execution smoke test.
 After configuring the [runtime environment](#runtime-environment), run:
 
 ```bash
-NUM_NPUS=8 python3 -m pytest -v -s tests/reward_loop/test_reward_engine_npu.py
+NUM_NPUS=4 python3 -m pytest -v -s \
+    tests/reward_loop/test_reward_engine_npu.py::test_standalone_reward_engine_npu
 ```
 
 Entry 7 selects the standalone startup case. Entry 11 selects the other three
@@ -299,11 +303,9 @@ actions may otherwise be resolved against a different host workspace.
 
 ## Runtime Cleanup, Results, and Artifacts
 
-Before each test, the shared library stops Ray, terminates stale
-DiffusionWorker, VLLMWorker, VLLM::, and vLLMOmniHttpServer processes, waits five
-seconds, force-kills remaining matches, and prints npu-smi information.
-Parallel lanes instead clean only verified descendants of their own supervisor;
-cleanup or log-writing failure fails the group.
+Before each test and at group exit, both modes clean only verified descendants
+of their own supervisor. Unrelated Ray or vLLM services are left running.
+Cleanup or log-writing failure fails the group.
 
 Per-test logs are stored under:
 

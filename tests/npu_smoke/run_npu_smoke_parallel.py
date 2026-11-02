@@ -45,15 +45,18 @@ _LAYOUTS = {
 _SUMMARY_ROW = re.compile(r"^(\d+)\s+(PASS|FAIL)\s+(\d+s)\s+(.+)$")
 
 
-def _device_list(name: str, default: str) -> list[str]:
+def _device_list(name: str, default: str, *, expected: int = 8) -> list[str]:
     value = os.environ.get(name) or default
     if not re.fullmatch(r"[0-9]+(?:,[0-9]+)*", value):
-        raise ValueError(f"{name} must contain eight comma-separated NPU IDs.")
+        raise ValueError(f"{name} must contain comma-separated NPU IDs.")
     devices = value.split(",")
-    if len(devices) != 8 or len({int(device) for device in devices}) != 8:
-        raise ValueError(f"{name} must contain eight distinct NPU IDs.")
-    if [int(device) for device in devices] != sorted(int(device) for device in devices):
-        raise ValueError(f"{name} must use ascending physical NPU IDs for parallel Ascend lanes.")
+    allocation = name == "ASCEND_VISIBLE_DEVICES"
+    valid_size = len(devices) >= expected if allocation else len(devices) == expected
+    if not valid_size or len({int(device) for device in devices}) != len(devices):
+        count = f"at least {expected}" if allocation else str(expected)
+        raise ValueError(f"{name} must contain {count} distinct NPU IDs.")
+    if not allocation and [int(device) for device in devices] != sorted(int(device) for device in devices):
+        raise ValueError(f"{name} must use ascending runtime NPU IDs for parallel Ascend lanes.")
     return devices
 
 
@@ -144,10 +147,10 @@ class _Controller:
         env.update(
             NUM_NPUS=str(count),
             ASCEND_RT_VISIBLE_DEVICES=",".join(self.devices[0][offset : offset + count]),
-            ASCEND_VISIBLE_DEVICES=",".join(self.devices[1][offset : offset + count]),
+            ASCEND_VISIBLE_DEVICES=",".join(self.devices[1]),
             NPU_SMOKE_PARALLEL_CHILD="1",
             NPU_SMOKE_TEST_IDS=",".join(str(test_id) for test_id in ids),
-            NPU_SMOKE_FULL_TOPOLOGY="0",
+            NPU_SMOKE_FULL_TOPOLOGY=os.environ.get("NPU_SMOKE_FULL_TOPOLOGY", "0"),
             NPU_SMOKE_FIXTURE_ROOT=str(fixtures),
             NPU_SMOKE_MASTER_PORT_RANGE=f"[{port_start},{port_start + 4000}]",
             LOG_DIR=str(log_dir),
@@ -158,7 +161,13 @@ class _Controller:
             NPU_SMOKE_CONTROLLER_START=str(self.identity.start),
             NPU_SMOKE_SUPERVISOR_TOKEN=token,
         )
-        if name != "exclusive":
+        if name == "serial":
+            for variable in ("NPU_SMOKE_FIXTURE_ROOT", "NPU_SMOKE_MASTER_PORT_RANGE"):
+                if variable in os.environ:
+                    env[variable] = os.environ[variable]
+                else:
+                    env.pop(variable, None)
+        if name not in ("exclusive", "serial"):
             # Ray returns physical IDs; resource workers must use Ray-managed local visibility.
             for variable in (
                 "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES",
@@ -322,23 +331,24 @@ class _Controller:
         for child in self.children:
             _discard_successful_runtime(child)
 
-    def run(self, selected: set[int]) -> int:
+    def run(self, selected: set[int], *, serial: bool = False) -> int:
         for signum in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
             signal.signal(signum, self._signal)
         selected_children = []
         offset = 0
-        for name, count, ids in _LAYOUTS[self.group]:
+        layout = (("serial", len(self.devices[0]), tuple(sorted(selected))),) if serial else _LAYOUTS[self.group]
+        for name, count, ids in layout:
             chosen = tuple(test_id for test_id in ids if test_id in selected)
             if chosen:
                 child = self._start(
                     name,
                     count,
                     chosen,
-                    0 if name == "exclusive" else offset,
-                    32000 if name == "exclusive" else 20000 + offset // 2 * 4000,
+                    0 if name in ("exclusive", "serial") else offset,
+                    32000 if name in ("exclusive", "serial") else 20000 + offset // 2 * 4000,
                 )
                 selected_children.append(child)
-                if name == "exclusive":
+                if name in ("exclusive", "serial"):
                     self._wait([child])
             if name != "exclusive":
                 offset += count
@@ -396,30 +406,46 @@ class _Controller:
 
 
 def main() -> int:
-    """Validate the eight-device allocation, then run and reconcile every selected case."""
+    """Validate devices, supervise serial or parallel groups, and reconcile selected cases."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("group", choices=_LAYOUTS)
     parser.add_argument("--num-npus", type=int, required=True)
     parser.add_argument("--log-dir", type=Path, required=True)
+    parser.add_argument(
+        "--serial", action="store_true", help="Supervise one serial group without splitting its devices."
+    )
     args = parser.parse_args()
     controller = None
     try:
-        if args.num_npus != 8 or os.environ.get("NPU_SMOKE_FULL_TOPOLOGY", "0") != "0":
+        full_topology = os.environ.get("NPU_SMOKE_FULL_TOPOLOGY", "0")
+        if args.num_npus <= 0 or full_topology not in ("0", "1"):
+            raise ValueError("Smoke requires a positive NPU count and NPU_SMOKE_FULL_TOPOLOGY=0 or 1.")
+        if not args.serial and (args.num_npus != 8 or full_topology != "0"):
             raise ValueError("Parallel smoke requires eight NPUs; use the serial entry for full-topology runs.")
         if os.environ.get("NPU_SMOKE_PARALLEL_CHILD", "0") != "0":
             raise ValueError("A process-lane child cannot start another parallel controller.")
         selected = _selected_ids(args.group)
-        rt_devices = _device_list("ASCEND_RT_VISIBLE_DEVICES", "0,1,2,3,4,5,6,7")
-        devices = (rt_devices, _device_list("ASCEND_VISIBLE_DEVICES", ",".join(rt_devices)))
-        if args.group == "core" and 0 in selected and {int(device) for device in rt_devices} != set(range(8)):
-            raise ValueError("Core test 0's existing fixture resets RT visibility to device IDs 0 through 7.")
+        default_devices = ",".join(str(device) for device in range(args.num_npus))
+        rt_devices = _device_list("ASCEND_RT_VISIBLE_DEVICES", default_devices, expected=args.num_npus)
+        devices = (
+            rt_devices,
+            _device_list("ASCEND_VISIBLE_DEVICES", ",".join(rt_devices), expected=args.num_npus),
+        )
+        if (
+            args.group == "core"
+            and 0 in selected
+            and {int(device) for device in rt_devices} != set(range(args.num_npus))
+        ):
+            raise ValueError(
+                f"Core test 0's existing fixture resets RT visibility to device IDs 0 through {args.num_npus - 1}."
+            )
         log_dir = args.log_dir.expanduser().resolve()
         enable_subreaper()
         log_dir.mkdir(parents=True, exist_ok=True)
         if (log_dir / "summary.log").exists() or (log_dir / ".processes").exists():
             raise ValueError(f"Refusing to reuse parallel smoke results: {log_dir}")
         controller = _Controller(args.group, log_dir, devices)
-        return controller.run(selected)
+        return controller.run(selected, serial=args.serial)
     except InterruptedError as error:
         print(f"[FAIL] {error}", file=sys.stderr)
         return 128 + controller.cancel_signal

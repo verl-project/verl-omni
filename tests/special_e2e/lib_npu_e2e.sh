@@ -39,12 +39,15 @@ import os
 expected = int(os.environ["NUM_NPUS"])
 for name in ("ASCEND_RT_VISIBLE_DEVICES", "ASCEND_VISIBLE_DEVICES"):
     devices = os.environ[name].split(",")
+    runtime = name == "ASCEND_RT_VISIBLE_DEVICES"
+    valid_size = len(devices) == expected if runtime else len(devices) >= expected
     if (
-        len(devices) != expected
+        not valid_size
         or any(not device.isdecimal() for device in devices)
-        or len({int(device) for device in devices}) != expected
+        or len({int(device) for device in devices}) != len(devices)
     ):
-        raise SystemExit(f"{name} must list exactly {expected} distinct NPU IDs: {devices}")
+        count = "exactly" if runtime else "at least"
+        raise SystemExit(f"{name} must list {count} {expected} distinct NPU IDs: {devices}")
 
 import torch
 import torch_npu  # noqa: F401

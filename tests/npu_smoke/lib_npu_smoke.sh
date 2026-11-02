@@ -123,10 +123,14 @@ validate_npu_devices() {
         return 2
     }
     IFS=, read -r -a devices <<< "${value}"
-    [[ "${#devices[@]}" -eq "${NUM_NPUS}" ]] || {
+    if [[ "${name}" == ASCEND_RT_VISIBLE_DEVICES && "${#devices[@]}" -ne "${NUM_NPUS}" ]]; then
         fail "${name} must list exactly ${NUM_NPUS} NPU IDs."
         return 2
-    }
+    fi
+    if [[ "${name}" == ASCEND_VISIBLE_DEVICES && "${#devices[@]}" -lt "${NUM_NPUS}" ]]; then
+        fail "${name} must list at least ${NUM_NPUS} NPU IDs."
+        return 2
+    fi
     for device in "${devices[@]}"; do
         device="${device#"${device%%[!0]*}"}"
         device="${device:-0}"
@@ -141,7 +145,6 @@ for npu_smoke_variable in ASCEND_RT_VISIBLE_DEVICES ASCEND_VISIBLE_DEVICES; do
     validate_npu_devices "${npu_smoke_variable}" "${!npu_smoke_variable}" || exit 2
 done
 IFS=, read -r -a NPU_SMOKE_DEVICES <<< "${ASCEND_RT_VISIBLE_DEVICES}"
-IFS=, read -r -a NPU_SMOKE_VISIBLE_DEVICES <<< "${ASCEND_VISIBLE_DEVICES}"
 
 declare -a TEST_IDS=()
 declare -a TEST_NAMES=()
@@ -151,21 +154,7 @@ declare -a TEST_LOG_FILES=()
 NPU_SMOKE_REGISTERED_IDS=,
 
 cleanup_runtime() {
-    if [[ "${NPU_SMOKE_PARALLEL_CHILD}" == 1 ]]; then
-        python3 tests/npu_smoke/run_npu_smoke_processes.py cleanup
-        return $?
-    fi
-    ray stop --force || true
-    pkill -TERM -f DiffusionWorker || true
-    pkill -TERM -f VLLMWorker || true
-    pkill -TERM -f 'VLLM::' || true
-    pkill -TERM -f vLLMOmniHttpServer || true
-    sleep 5
-    pkill -KILL -f DiffusionWorker || true
-    pkill -KILL -f VLLMWorker || true
-    pkill -KILL -f 'VLLM::' || true
-    pkill -KILL -f vLLMOmniHttpServer || true
-    npu-smi info || true
+    python3 tests/npu_smoke/run_npu_smoke_processes.py cleanup
 }
 
 run_test() {
@@ -194,7 +183,7 @@ run_test() {
     fi
     [[ $# -gt 0 ]] || { fail "Test ${id}: missing command."; return 2; }
     test_devices="$(IFS=,; echo "${NPU_SMOKE_DEVICES[*]:0:test_num_npus}")"
-    test_visible_devices="$(IFS=,; echo "${NPU_SMOKE_VISIBLE_DEVICES[*]:0:test_num_npus}")"
+    test_visible_devices="${ASCEND_VISIBLE_DEVICES}"
     local logfile="${LOG_DIR}/test_${id}.log"
 
     cleanup_runtime
@@ -266,13 +255,30 @@ print_summary() {
     [[ "${failed}" -eq 0 ]]
 }
 
-trap cleanup_runtime EXIT
+finish_runtime() {
+    local rc=$? cleanup_rc
+    trap - EXIT
+    if cleanup_runtime; then
+        exit "${rc}"
+    else
+        cleanup_rc=$?
+        if [[ "${rc}" -eq 0 ]]; then
+            rc="${cleanup_rc}"
+        fi
+    fi
+    exit "${rc}"
+}
+
+trap finish_runtime EXIT
 
 dispatch_parallel() {
-    if [[ "${NPU_SMOKE_PARALLEL}" == 1 && "${NPU_SMOKE_PARALLEL_CHILD}" == 0 \
-        && "${NPU_SMOKE_FULL_TOPOLOGY}" == 0 ]]; then
+    if [[ "${NPU_SMOKE_PARALLEL_CHILD}" == 0 ]]; then
+        local -a mode_args=()
+        if [[ "${NPU_SMOKE_PARALLEL}" == 0 || "${NPU_SMOKE_FULL_TOPOLOGY}" == 1 ]]; then
+            mode_args=(--serial)
+        fi
         exec python3 tests/npu_smoke/run_npu_smoke_parallel.py "${NPU_SMOKE_GROUP}" \
-            --num-npus "${NUM_NPUS}" --log-dir "${LOG_DIR}"
+            --num-npus "${NUM_NPUS}" --log-dir "${LOG_DIR}" "${mode_args[@]}"
     fi
 }
 
