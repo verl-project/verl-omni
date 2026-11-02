@@ -193,6 +193,11 @@ def test_base_zmq_handle_keeps_legacy_default(monkeypatch, override):
     assert make_base_zmq_handle("job", 2, 3) == "ipc:///tmp/rl-colocate-zmq-job-replica-2-rank-3.sock"
 
 
+def test_base_zmq_handle_accepts_root_directory(monkeypatch):
+    monkeypatch.setenv("VERL_ZMQ_DIR", "/")
+    assert make_base_zmq_handle("job", 0, 0) == "ipc:///rl-colocate-zmq-job-replica-0-rank-0.sock"
+
+
 def test_independent_directories_allow_identical_job_ids(monkeypatch, private_zmq_directory):
     with tempfile.TemporaryDirectory(prefix="vnp-", dir="/tmp") as second:
         sockets, routes = [], []
@@ -211,8 +216,11 @@ def test_independent_directories_allow_identical_job_ids(monkeypatch, private_zm
                 listener.close()
 
 
-@pytest.mark.parametrize("kind", ["relative", "missing", "file", "symlink"])
-def test_base_zmq_handle_rejects_invalid_directory(monkeypatch, tmp_path, private_zmq_directory, kind):
+@pytest.mark.parametrize(
+    "kind,suffix",
+    [("relative", ""), ("missing", ""), ("file", ""), ("symlink", ""), ("symlink", "/"), ("symlink", "///")],
+)
+def test_base_zmq_handle_rejects_invalid_directory(monkeypatch, tmp_path, private_zmq_directory, kind, suffix):
     if kind == "relative":
         directory = "relative"
     elif kind == "missing":
@@ -224,7 +232,7 @@ def test_base_zmq_handle_rejects_invalid_directory(monkeypatch, tmp_path, privat
     else:
         path = tmp_path / "link"
         path.symlink_to(private_zmq_directory, target_is_directory=True)
-        directory = str(path)
+        directory = str(path) + suffix
     monkeypatch.setenv("VERL_ZMQ_DIR", directory)
     with pytest.raises(ValueError, match="VERL_ZMQ_DIR"):
         make_base_zmq_handle("job", 0, 0)

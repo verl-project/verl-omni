@@ -26,7 +26,9 @@ def make_base_zmq_handle(job_id: str, replica_rank: int | str, local_rank: int) 
     """Return a colocated weight route under VERL_ZMQ_DIR, defaulting to /tmp."""
     directory = os.environ.get("VERL_ZMQ_DIR") or "/tmp"
     if os.environ.get("VERL_ZMQ_DIR") and (
-        not os.path.isabs(directory) or not os.path.isdir(directory) or os.path.islink(directory)
+        not os.path.isabs(directory)
+        or not os.path.isdir(directory)
+        or os.path.islink(directory.rstrip(os.sep) or os.sep)
     ):
         raise ValueError("VERL_ZMQ_DIR must be an existing absolute directory, not a symbolic link.")
     name = f"rl-colocate-zmq-{job_id}-replica-{replica_rank}-rank-{local_rank}.sock"
