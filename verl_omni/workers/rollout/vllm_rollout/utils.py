@@ -216,24 +216,10 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
             # cases and more efficient than per-bucket loading).
             t_recv_start = time.perf_counter()
             accumulated_weights: dict[str, torch.Tensor] = {}
-            callback_times: list[float] = []
-
-            def on_bucket(weights, *args, **kwargs):
-                callback_times.append(time.perf_counter())
-                accumulated_weights.update(weights)
-
-            receiver.receive_weights(on_bucket_received=on_bucket)
-            t_recv_end = time.perf_counter()
-            print(
-                "PROBE3 receiver (ms): to_first_bucket=%.2f buckets=%d last_bucket_to_end=%.2f remove_lora=%.2f"
-                % (
-                    (callback_times[0] - t_recv_start) * 1000,
-                    len(callback_times),
-                    (t_recv_end - callback_times[-1]) * 1000,
-                    (t1 - t0) * 1000,
-                ),
-                flush=True,
+            receiver.receive_weights(
+                on_bucket_received=lambda weights, *args, **kwargs: accumulated_weights.update(weights)
             )
+            t_recv_end = time.perf_counter()
             lora_total_bytes = sum(t.element_size() * t.numel() for t in accumulated_weights.values())
             logger.debug(
                 "IPC receive took %.3f ms (%d params, %.2f MB)",
