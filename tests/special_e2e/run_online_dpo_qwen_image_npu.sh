@@ -5,9 +5,7 @@
 # Reuses the GPU launcher body: dummy OCR parquet -> vllm_omni rollout ->
 # genrm_ocr reward -> online DPO win/reject pairing -> ref noise pred -> FSDP
 # LoRA actor update. lib_npu_e2e.sh supplies CANN/ATB sourcing, visible-device
-# validation and the trainer.device=npu plus Ray visibility runtime args. The
-# GPU launcher selects native/TORCH_SDPA attention automatically because
-# fa_available() is false on the pinned Ascend stack.
+# validation and the trainer.device=npu plus Ray visibility runtime args.
 #
 # The OCR reward model defaults to the tiny random Qwen2.5-VL checkpoint built
 # for Test 11 (the architecture validated on Ascend in issue #791 probes)

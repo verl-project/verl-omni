@@ -3,9 +3,7 @@
 #
 # Reuses the GPU launcher body (dummy data, algorithm knobs, rule-only reward);
 # lib_npu_e2e.sh supplies CANN/ATB sourcing, visible-device validation and the
-# trainer.device=npu plus Ray visibility runtime args. The GPU launcher picks
-# native/TORCH_SDPA attention automatically because fa_available() is false on
-# the pinned Ascend stack.
+# trainer.device=npu plus Ray visibility runtime args.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

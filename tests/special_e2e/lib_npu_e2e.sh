@@ -54,6 +54,9 @@ if not torch.npu.is_available() or torch.npu.device_count() != expected:
 print(f"NPU e2e: {expected} devices; torch {torch.__version__}; torch-npu {torch_npu.__version__}")
 PY
 
+export ATTN_BACKEND="${ATTN_BACKEND:-native}"
+export ROLLOUT_ATTN_BACKEND="${ROLLOUT_ATTN_BACKEND:-TORCH_SDPA}"
+
 NPU_VISIBLE_DEVICES_JSON="\"${ASCEND_VISIBLE_DEVICES}\""
 export NPU_VISIBLE_DEVICES_JSON
 NPU_RUNTIME_ARGS=(
@@ -68,3 +71,17 @@ NPU_RUNTIME_ARGS=(
     # scenarios; reward-model vLLM servers sleep/wake too, so guard them as well.
     '++reward.reward_model.rollout.engine_kwargs.vllm.additional_config.weight_nz_mode=0'
 )
+
+if [[ -n "${NPU_SMOKE_MASTER_PORT_RANGE:-}" ]]; then
+    if [[ ! "${NPU_SMOKE_MASTER_PORT_RANGE}" =~ ^\[([0-9]{1,5}),([0-9]{1,5})\]$ ]]; then
+        echo "NPU_SMOKE_MASTER_PORT_RANGE must be [start,end]." >&2
+        exit 2
+    fi
+    npu_port_start=$((10#${BASH_REMATCH[1]}))
+    npu_port_end=$((10#${BASH_REMATCH[2]}))
+    if (( npu_port_start < 1024 || npu_port_end > 65536 || npu_port_start >= npu_port_end )); then
+        echo "NPU_SMOKE_MASTER_PORT_RANGE must satisfy 1024 <= start < end <= 65536." >&2
+        exit 2
+    fi
+    NPU_RUNTIME_ARGS+=("trainer.ray_master_port_range=[${npu_port_start},${npu_port_end}]")
+fi

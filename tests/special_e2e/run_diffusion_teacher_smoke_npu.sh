@@ -27,9 +27,10 @@ case "${SMOKE:-sync}" in
 esac
 
 export NUM_GPUS="${NUM_NPUS}"
-export MODEL_PATH="${MODEL_PATH:-${HOME}/.cache/verl-omni-npu-smoke/sd3-teacher-smoke-student}"
-export TEACHER_PATH="${TEACHER_PATH:-${HOME}/.cache/verl-omni-npu-smoke/sd3-teacher-smoke-teacher}"
-export TEACHER2_PATH="${TEACHER2_PATH:-${HOME}/.cache/verl-omni-npu-smoke/sd3-teacher-smoke-teacher2}"
+NPU_TEACHER_FIXTURE_ROOT="${NPU_SMOKE_FIXTURE_ROOT:-${HOME}/.cache/verl-omni-npu-smoke}"
+export MODEL_PATH="${MODEL_PATH:-${NPU_TEACHER_FIXTURE_ROOT}/sd3-teacher-smoke-student}"
+export TEACHER_PATH="${TEACHER_PATH:-${NPU_TEACHER_FIXTURE_ROOT}/sd3-teacher-smoke-teacher}"
+export TEACHER2_PATH="${TEACHER2_PATH:-${NPU_TEACHER_FIXTURE_ROOT}/sd3-teacher-smoke-teacher2}"
 DATA_DIR="${DATA_DIR:-$(mktemp -d "${TMPDIR:-/tmp}/verl-omni-diffusion-teacher-npu.XXXXXX")}"
 export DATA_DIR
 unset TRAIN_FILES VAL_FILES
