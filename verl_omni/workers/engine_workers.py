@@ -1263,14 +1263,19 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 use_shm=self.rollout.use_shm,
             )
             with RLInsightLogger.trace_state("update_weights", state_lane_id=f"rank_{self.rank}"):
+                send_start = time.perf_counter()
                 await sender.async_send_weights(lora_weights.items())
+                timings["probe_send"] = time.perf_counter() - send_start
                 if future is not None:
                     await future
+                timings["probe_send_and_receiver_done"] = time.perf_counter() - send_start
+            server_rpc_start = time.perf_counter()
             # Mirror ServerAdapter.update_weights: reset caches and stamp the weight version.
             if self.rollout.rollout_rank == 0 and self.rollout._ensure_server_handle():
                 await self.rollout.server_handle.clear_kv_cache.remote()
                 if global_steps is not None:
                     await self.rollout.server_handle.set_global_steps.remote(global_steps)
+            timings["probe_server_rpcs"] = time.perf_counter() - server_rpc_start
             timings["update_weights_sync"] = time.perf_counter() - sync_start
         else:
             # Normal path: resume rollout weight memory, gather actor params and
@@ -1326,8 +1331,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         set_expandable_segments(True)
 
         timings["update_weights_total"] = time.perf_counter() - update_weights_start
-        logger.debug(
-            "update_weights timing (ms): %s",
+        logger.warning(
+            "PROBE update_weights timing (ms): %s",
             {k: round(v * 1000, 2) for k, v in timings.items()},
         )
 
