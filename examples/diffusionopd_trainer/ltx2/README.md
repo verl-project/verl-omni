@@ -13,7 +13,7 @@ student reaching the teacher's reward level through distillation alone.
 The recipe runs on the v1 trainer (`main_diffusion_v1`, `sync` mode) and
 auto-detects Ascend NPU or GPU. See the [algorithm doc](../../../docs/algo/diffusion_opd.md)
 for the loss and every config knob, and the
-[LTX-2.3 Flow-GRPO example](../../flowgrpo_trainer/ltx2/README.md) for the
+[LTX-2.3 Flow-GRPO example](https://github.com/verl-project/verl-omni/blob/main/examples/flowgrpo_trainer/ltx2/README.md) for the
 rollout and reward setup this recipe inherits.
 
 ## Installation
@@ -45,7 +45,7 @@ The teacher must be a full diffusers checkpoint from the same pipeline family as
 the student, resolving to the same scheduler configuration -- worker init compares
 `scheduler.config` against the student's and raises on a mismatch. The natural way
 to get one is the
-[LTX-2.3 T2AV Flow-GRPO example](../../flowgrpo_trainer/ltx2/run_ltx2_3_t2av_lora_v1.sh):
+[LTX-2.3 T2AV Flow-GRPO example](https://github.com/verl-project/verl-omni/blob/main/examples/flowgrpo_trainer/ltx2/run_ltx2_3_t2av_lora_v1.sh):
 train the LoRA, merge it into the base transformer (`peft` `merge_and_unload`), and
 save the merged pipeline. LoRA adapters must be merged before use; the teacher never
 loads them.
