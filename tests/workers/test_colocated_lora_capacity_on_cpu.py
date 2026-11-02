@@ -116,12 +116,13 @@ def _run(worker, events, *, mode="naive", global_steps=7, fail_send=False, devic
             assert asyncio.all_tasks() == {asyncio.current_task()}
 
     with (
-        patch.object(ew, "BucketedWeightSender", return_value=sender),
+        patch.object(ew, "BucketedWeightSender", return_value=sender) as sender_type,
         patch.object(ew, "log_gpu_memory_usage"),
         patch.object(ew, "set_expandable_segments"),
         patch.object(ew, "get_torch_device", return_value=device or _device(events)),
     ):
         asyncio.run(invoke())
+    sender.constructed_with = sender_type.call_args
     return sender, sent
 
 
@@ -353,6 +354,26 @@ def test_offloaded_lora_cancellation_has_no_owned_task_or_kv_resume(blocked_stag
     assert ("resume", ("kv_cache",)) not in events
     worker.rollout.server_handle.clear_kv_cache.remote.assert_not_awaited()
     assert ("execute" in _names(events)) is (blocked_stage == "send")
+
+
+@pytest.mark.parametrize(
+    ("offload", "adapter_bytes", "configured_mb", "expected_mb"),
+    [
+        (True, 8, 16, 1),
+        (True, 3 << 20, 16, 3),
+        (False, 3 << 20, 2, 2),
+    ],
+)
+def test_lora_ipc_bucket_is_sized_to_the_adapter_payload(offload, adapter_bytes, configured_mb, expected_mb):
+    worker, events, _, _ = _worker(offload=offload)
+    worker.config.rollout.checkpoint_engine.update_weights_bucket_megabytes = configured_mb
+    adapter = torch.zeros(adapter_bytes, dtype=torch.uint8)
+    worker.actor.engine.get_per_tensor_param.side_effect = lambda **kwargs: (iter([("adapter", adapter)]), {"r": 8})
+
+    sender, sent = _run(worker, events)
+
+    assert sender.constructed_with.kwargs["bucket_size_mb"] == expected_mb
+    assert sent[0][1] is adapter
 
 
 def test_non_offloaded_lora_keeps_fast_ipc_path():

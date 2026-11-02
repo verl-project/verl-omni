@@ -14,6 +14,7 @@
 import asyncio
 import functools
 import logging
+import math
 import os
 import time
 from contextlib import nullcontext
@@ -1251,7 +1252,11 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                     "zmq_update_id": zmq_update_id,
                 },
             )
-            bucket_size_mb = self.config.rollout.checkpoint_engine.update_weights_bucket_megabytes
+            # The sender allocates and IPC-maps a device buffer of the bucket size on every sync;
+            # size it to the adapter payload rather than the full-weight bucket the config carries.
+            lora_mb = math.ceil(sum(t.numel() * t.element_size() for t in lora_weights.values()) / (1 << 20))
+            configured_mb = self.config.rollout.checkpoint_engine.update_weights_bucket_megabytes
+            bucket_size_mb = max(1, min(configured_mb, lora_mb))
             sender = BucketedWeightSender(
                 zmq_handle=zmq_handle,
                 bucket_size_mb=bucket_size_mb,
