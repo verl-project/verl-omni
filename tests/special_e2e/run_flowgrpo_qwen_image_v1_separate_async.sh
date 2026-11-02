@@ -71,6 +71,7 @@ import sys
 backend = "${CKPT_BACKEND}"
 module_map = {
     "nccl": "verl.checkpoint_engine.nccl_checkpoint_engine",
+    "xccl": "verl_hardware_plugin.accelerators.xpu.engines.xccl_checkpoint_engine",
     "nixl": "verl.checkpoint_engine.nixl_checkpoint_engine",
     "mooncake": "verl.checkpoint_engine.mooncake_checkpoint_engine",
     "hccl": "verl.checkpoint_engine.hccl_checkpoint_engine",
