@@ -31,6 +31,7 @@ start/engine_backends.md
 start/install_npu.md
 start/install_rocm.md
 start/install_xpu.md
+start/install_mlu.md
 start/models.md
 start/flowgrpo_quickstart.md
 start/diffusion_v1.md
@@ -123,6 +124,7 @@ examples/qwen3_tts/grpo_trainer_qwen3_tts.md
 perf/tuning_guide.md
 perf/diffusion_mfu.md
 perf/profiler.md
+perf/diffusion_consistency.md
 ```
 
 ```{toctree}

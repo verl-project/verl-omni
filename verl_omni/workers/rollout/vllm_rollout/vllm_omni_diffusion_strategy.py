@@ -38,6 +38,7 @@ from verl_omni.pipelines.rollout_media import (
     select_artifact,
 )
 from verl_omni.pipelines.rollout_request import OmniRolloutRequest, _alias_values_match
+from verl_omni.utils.config import coerce_expert_parallel_size
 from verl_omni.workers.config import DiffusionModelConfig, DiffusionRolloutConfig
 from verl_omni.workers.rollout.replica import DiffusionOutput
 from verl_omni.workers.rollout.vllm_rollout.vllm_omni_strategy_base import OmniStrategyBase
@@ -231,6 +232,40 @@ class DiffusionStrategy(OmniStrategyBase):
         if device_type == "npu":
             return _NPU_WORKER_EXTENSION
         return _GPU_WORKER_EXTENSION
+
+    def validate_configs(self) -> None:
+        """Refuse expert parallelism the diffusion rollout cannot honor.
+
+        No diffusion stage reads ``expert_parallel_size``, and vLLM-Omni enables
+        diffusion EP only for pipelines that opt in through their own stage
+        config. The rollout copies ``engine_kwargs.vllm_omni`` into the engine
+        verbatim, so both engine-flag spellings are refused here as well.
+
+        Raises:
+            ValueError: If EP is requested, by size or by either engine flag.
+        """
+        config = self.server.config
+        # The launcher compares this field, so an unset value must become 1.
+        if config.expert_parallel_size is None:
+            config.expert_parallel_size = 1
+        ep_size = coerce_expert_parallel_size(config.expert_parallel_size)
+        omni_kwargs = config.engine_kwargs.get("vllm_omni", {}) or {}
+        parallel_config = omni_kwargs.get("parallel_config") or {}
+        nested_flag = hasattr(parallel_config, "get") and bool(parallel_config.get("enable_expert_parallel", False))
+        flat_flag = bool(omni_kwargs.get("enable_expert_parallel", False))
+        stage_flag = any(
+            hasattr(overrides, "get") and bool(overrides.get("enable_expert_parallel", False))
+            for overrides in (omni_kwargs.get("stage_overrides") or {}).values()
+        )
+        if ep_size == 1 and not (nested_flag or flat_flag or stage_flag):
+            return
+        raise ValueError(
+            "Expert parallelism is not wired for the diffusion rollout: no diffusion stage consumes "
+            "actor_rollout_ref.rollout.expert_parallel_size, and vLLM-Omni enables diffusion EP only for "
+            "pipelines that opt in through their own stage config. Leave expert_parallel_size=1 and drop "
+            "any enable_expert_parallel entry from engine_kwargs.vllm_omni (flat key, parallel_config, "
+            "or stage_overrides)."
+        )
 
     def prepare_engine_args(self, engine_args: dict[str, Any], args: Namespace) -> None:
         config = self.server.config
