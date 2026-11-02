@@ -41,21 +41,19 @@ from verl.tools.function_tool import function_tool
 from verl.tools.schemas import ToolResponse
 
 from verl_omni.tools.trajectory import (
-    active_trajectory_relpath,
-    active_user_prompt,
-    build_artifact_id,
     count_live_generate_artifacts_for_active_rollout,
+    current_episode,
     get_active_rollout_id,
     get_good_enough_yes_reached,
     get_latest_generate_prompt_for_active_rollout,
     register_tool_artifact,
-    resolve_rollout_images_root,
     resolve_tool_image_path,
-    set_good_enough_yes_reached,
     set_latest_tool_image_path,
 )
-from verl_omni.tools.trajectory import paths as traj_paths
-from verl_omni.tools.trajectory.hydra_env import (
+from verl_omni.tools.trajectory.episode_context import get_active_trajectory_relpath, get_active_user_prompt
+from verl_omni.utils.agentic import artifacts as traj_paths
+from verl_omni.utils.agentic.artifacts import build_artifact_id, resolve_rollout_images_root
+from verl_omni.utils.agentic.config import (
     agentic_get,
     agentic_get_bool,
     agentic_get_float,
@@ -150,8 +148,8 @@ def _update_traj_meta(traj_dir: Path, entry: dict) -> None:
     else:
         meta = {}
     meta.setdefault("trajectory", traj_dir.name)
-    meta.setdefault("experiment", traj_paths.run_name or "agentic_run")
-    user_prompt = entry.get("user_prompt") or active_user_prompt.get() or ""
+    meta.setdefault("experiment", traj_paths.get_run_name())
+    user_prompt = entry.get("user_prompt") or get_active_user_prompt() or ""
     if user_prompt:
         meta["user_prompt"] = user_prompt
         entry.setdefault("user_prompt", user_prompt)
@@ -194,8 +192,8 @@ def _save_images(images: list[Image.Image], prompt: str, *, backend: str, tool_s
     """
     root = resolve_rollout_images_root()
     root.mkdir(parents=True, exist_ok=True)
-    relpath = active_trajectory_relpath.get()
-    user_prompt = active_user_prompt.get() or ""
+    relpath = get_active_trajectory_relpath()
+    user_prompt = get_active_user_prompt() or ""
     provenance = _call_meta_fields(prompt, user_prompt=user_prompt)
     paths: list[str] = []
 
@@ -253,8 +251,6 @@ def _save_images(images: list[Image.Image], prompt: str, *, backend: str, tool_s
             backend=backend,
             tool_stubbed=tool_stubbed,
             artifact_id=artifact_ids[0] if artifact_ids else None,
-            trajectory_relpath=relpath,
-            rollout_id=get_active_rollout_id(),
         )
         return paths
 
@@ -265,7 +261,7 @@ def _save_images(images: list[Image.Image], prompt: str, *, backend: str, tool_s
         "backend": backend,
         "tool_stubbed": tool_stubbed,
         "num_images": len(images),
-        "experiment": traj_paths.run_name or "agentic_run",
+        "experiment": traj_paths.get_run_name(),
         "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
     }
     for i, img in enumerate(images):
@@ -502,7 +498,7 @@ def _qwen_image_seed(prompt: str) -> int | None:
         base_seed = int(str(raw).strip())
     except (TypeError, ValueError) as exc:
         raise ValueError(f"agentic_image_gen.qwen_image_seed must be an integer or null, got {raw!r}") from exc
-    relpath = active_trajectory_relpath.get() or get_active_rollout_id()
+    relpath = get_active_trajectory_relpath() or get_active_rollout_id()
     if not relpath or not agentic_get_bool("qwen_image_diversify_seed", True):
         return base_seed
     generate_pass = count_live_generate_artifacts_for_active_rollout()
@@ -589,7 +585,7 @@ def _expand_judge_user_request(user_request: str) -> str:
         "previous",
     }
     raw = (user_request or "").strip()
-    bound = (active_user_prompt.get() or "").strip()
+    bound = (get_active_user_prompt() or "").strip()
     if not bound:
         return raw
     low = re.sub(r"\s+", " ", raw.lower()).rstrip(".")
@@ -741,9 +737,13 @@ def judge_image(user_request: str, image_prompt: str) -> tuple[ToolResponse, flo
         ``(ToolResponse, reward, metrics)``. Reward is unused (frozen tool).
     """
     text, meta = _call_judge_vlm(user_request, image_prompt)
-    # Env hard-stop latch: after YES, later generate_image calls are refused.
-    if meta.get("good_enough") and meta.get("parse_ok", 1) != 0 and not meta.get("error"):
-        set_good_enough_yes_reached(True)
+    if meta.get("parse_ok", 1) != 0 and not meta.get("error") and "good_enough" in meta:
+        state = current_episode(create=True)
+        generated = next(
+            (record for record in reversed(state.generations) if meta.get("image_path") in record.paths), None
+        )
+        if generated is not None:
+            state.record_judgment(generated.call_id, good_enough=bool(meta["good_enough"]))
     metrics = {
         "tool": "judge_image",
         "judge_stub": meta.get("stub", False),
