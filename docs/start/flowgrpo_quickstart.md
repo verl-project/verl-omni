@@ -1,7 +1,7 @@
 (flowgrpo_quickstart)=
 # Quickstart: FlowGRPO training on OCR dataset
 
-Last updated: 09/21/2026
+Last updated: 10/26/2026
 
 Post-train a diffusion image generation model with FlowGRPO.
 
@@ -118,6 +118,14 @@ Run the training script:
 
 ```bash
 bash examples/flowgrpo_trainer/sd35/run_sd35_medium_ocr_lora_v1.sh
+```
+
+Validated on Intel GPU (3x Arc Pro B60) with two overrides:
+
+```bash
+bash examples/flowgrpo_trainer/sd35/run_sd35_medium_ocr_lora_v1.sh \
+    actor_rollout_ref.rollout.engine_kwargs.vllm_omni.max_num_seqs=8 \
+    +reward.models.ocr.rollout.engine_kwargs.vllm.mm_processor_kwargs.max_pixels=401408
 ```
 
 The legacy v0 script (`run_sd35_medium_ocr_lora.sh`, entrypoint
