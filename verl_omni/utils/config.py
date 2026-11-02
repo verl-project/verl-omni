@@ -91,12 +91,174 @@ def _validate_delta_sharded(config: Any) -> None:
             )
 
 
+def reject_engine_side_expert_parallel(
+    omni_kwargs: Any,
+    *,
+    prefix: str = "actor_rollout_ref.rollout",
+) -> None:
+    """Refuse engine-side EP flags, which bypass the parallel-size accounting.
+
+    The flat spelling is overwritten by verl's ``launch_server`` on the AR path
+    and forwarded unvalidated by the diffusion ingress; the nested one is copied
+    into the engine arguments verbatim; and the ``stage_overrides`` resolver
+    applies its entries over the generated deploy config's stage values. All
+    three can turn EP on or off regardless of the validated size, so all three
+    are refused. Both layers check because the rollout replica is validated
+    independently of the driver.
+
+    Args:
+        omni_kwargs: The ``engine_kwargs.vllm_omni`` mapping.
+        prefix: Config path used in error messages.
+
+    Raises:
+        ValueError: If any spelling requests expert parallelism.
+    """
+    if not hasattr(omni_kwargs, "get"):
+        return
+    if omni_kwargs.get("enable_expert_parallel", False):
+        raise ValueError(
+            f"{prefix}.engine_kwargs.vllm_omni.enable_expert_parallel is not a supported spelling: "
+            "verl's launch_server overwrites the engine arg from "
+            f"{prefix}.expert_parallel_size, and the vLLM-Omni CLI rejects --enable-expert-parallel "
+            f"under --omni. Set {prefix}.expert_parallel_size instead — the rollout writes the "
+            "per-stage flag into the generated deploy config."
+        )
+    parallel_config = omni_kwargs.get("parallel_config") or {}
+    if hasattr(parallel_config, "get") and parallel_config.get("enable_expert_parallel", False):
+        raise ValueError(
+            f"{prefix}.engine_kwargs.vllm_omni.parallel_config.enable_expert_parallel bypasses the "
+            f"parallel-size accounting: the rollout replica sizes its ranks from "
+            f"{prefix}.expert_parallel_size, and the engine-side flag is then set from that size. "
+            f"Set {prefix}.expert_parallel_size instead and drop the engine_kwargs entry."
+        )
+    for key, value in (omni_kwargs.get("stage_overrides") or {}).items():
+        if hasattr(value, "get") and value.get("enable_expert_parallel", False):
+            raise ValueError(
+                f"{prefix}.engine_kwargs.vllm_omni.stage_overrides[{key!r}].enable_expert_parallel "
+                "bypasses the parallel-size accounting: the vLLM-Omni resolver applies stage "
+                "overrides over the generated deploy config, so the flag would be honored without "
+                f"accounting. Set {prefix}.expert_parallel_size instead and drop the "
+                "stage_overrides entry."
+            )
+
+
+def coerce_expert_parallel_size(raw_ep_size: Any, *, prefix: str = "actor_rollout_ref.rollout") -> int:
+    """Return the EP degree, treating an unset value as "off".
+
+    Args:
+        raw_ep_size: The configured size, before coercion.
+        prefix: Config path used in error messages.
+
+    Returns:
+        int: The degree; 1 means EP is off.
+
+    Raises:
+        ValueError: If the value is not a whole positive integer.
+    """
+    if raw_ep_size is None:
+        return 1
+    if isinstance(raw_ep_size, bool):  # bool is an int subclass
+        raise ValueError(f"{prefix}.expert_parallel_size must be a positive integer, got {raw_ep_size!r}.")
+    if isinstance(raw_ep_size, float) and not raw_ep_size.is_integer():
+        raise ValueError(f"{prefix}.expert_parallel_size must be a whole number, got {raw_ep_size!r}.")
+    try:
+        ep_size = int(raw_ep_size)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{prefix}.expert_parallel_size must be an integer, got {raw_ep_size!r}.") from exc
+    if ep_size < 1:
+        raise ValueError(f"{prefix}.expert_parallel_size must be a positive integer, got {raw_ep_size!r}.")
+    return ep_size
+
+
+def validate_expert_parallel_degree(
+    raw_ep_size: Any,
+    tp_size: int,
+    dp_size: int,
+    *,
+    prefix: str = "actor_rollout_ref.rollout",
+) -> int:
+    """Validate an EP size against the parallel layout and return the degree.
+
+    Single source of truth for the size contract shared by the driver gate and
+    the rollout replica. vLLM derives the degree as TP x DP, and the vllm-omni
+    deploy config cannot express DP, so only EP == TP with DP == 1 is honored.
+
+    Args:
+        raw_ep_size: The configured size, before coercion.
+        tp_size: Tensor-parallel size of the rollout replica.
+        dp_size: Data-parallel size of the rollout replica.
+        prefix: Config path used in error messages.
+
+    Returns:
+        int: The validated degree (1 means EP is off).
+
+    Raises:
+        ValueError: If the size is not a positive integer, disagrees with TP x DP,
+            or pairs a DP > 1 with EP.
+    """
+    ep_size = coerce_expert_parallel_size(raw_ep_size, prefix=prefix)
+    if ep_size == 1:
+        return ep_size
+    if ep_size != tp_size * dp_size:
+        raise ValueError(
+            f"{prefix}.expert_parallel_size={ep_size} must equal tensor_model_parallel_size * "
+            f"data_parallel_size (={tp_size} * {dp_size} = {tp_size * dp_size}): expert parallelism "
+            "is a boolean over the existing TP x DP ranks, not an independent world dimension. "
+            "Lower expert_parallel_size or raise the TP/DP sizes."
+        )
+    if dp_size != 1:
+        raise ValueError(
+            f"{prefix}.expert_parallel_size={ep_size} with data_parallel_size={dp_size} is not wired: "
+            "the vllm-omni rollout realizes DP as separate TP-sized rollout replicas and the generated "
+            "deploy config has no data_parallel_size field, so a stage can only shard experts over its "
+            f"own TP ranks ({tp_size}). Set data_parallel_size=1 (expert_parallel_size then equals TP), "
+            "or leave expert_parallel_size=1."
+        )
+    return ep_size
+
+
+def _validate_expert_parallel(config: Any) -> None:
+    """Honor-or-reject gate for rollout expert parallelism.
+
+    Adds the driver-level rules that need the composed config: the diffusion
+    rollout has no consumer for the knob, and both ``engine_kwargs.vllm_omni``
+    spellings of the engine flag bypass the size accounting. The size contract is
+    shared with the rollout replica via :func:`validate_expert_parallel_degree`;
+    whether the model can run EP needs the architecture, so that half lives in
+    the replica.
+    """
+    rollout = "actor_rollout_ref.rollout"
+    raw_ep_size = _select(config, f"{rollout}.expert_parallel_size", 1)
+
+    # Before the EP==1 early return: both spellings bypass the size accounting.
+    reject_engine_side_expert_parallel(
+        _select(config, f"{rollout}.engine_kwargs.vllm_omni", None) or {},
+        prefix=rollout,
+    )
+
+    tp_size = int(_select(config, f"{rollout}.tensor_model_parallel_size", 1))
+    dp_size = int(_select(config, f"{rollout}.data_parallel_size", 1))
+    ep_size = validate_expert_parallel_degree(raw_ep_size, tp_size, dp_size, prefix=rollout)
+    if ep_size == 1:
+        return
+
+    # Diffusion-only field; verl's RolloutConfig has no such key.
+    if _select(config, f"{rollout}.rollout_attn_backend", None) is not None:
+        raise ValueError(
+            f"{rollout}.expert_parallel_size={ep_size} is not supported by the diffusion rollout: "
+            "no diffusion stage consumes the knob and vLLM-Omni gates diffusion EP per pipeline, so a "
+            "pipeline must opt in through its own stage config. Leave expert_parallel_size=1."
+        )
+
+
 def validate_config(config: Any) -> None:
     """Validate configuration values that otherwise trigger silent fallbacks."""
     if _select(config, "actor_rollout_ref.actor.enable_timestep_staging", False):
         sp_size = _select(config, "actor_rollout_ref.actor.fsdp_config.ulysses_sequence_parallel_size", 1)
         if sp_size != 1:
             raise ValueError("Timestep staging requires ulysses_sequence_parallel_size=1.")
+
+    _validate_expert_parallel(config)
 
     _validate_delta_sharded(config)
 
