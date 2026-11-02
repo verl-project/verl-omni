@@ -29,8 +29,9 @@ claims or release numbers.
 [`run_sd35_medium_ocr_replay.sh`](https://github.com/verl-project/verl-omni/blob/main/examples/stage_skip/run_sd35_medium_ocr_replay.sh)
 wraps the
 [V1 OCR recipe](https://github.com/verl-project/verl-omni/blob/main/examples/flowgrpo_trainer/sd35/run_sd35_medium_ocr_lora_v1.sh)
-and runs it twice with the same arguments. The first pass finds no caches, so it
-runs every stage and dumps its output. The second finds them and replays.
+and launches training once. Step 1 computes and caches rollout plus the selected
+stages. Later steps use `action=repeat` to reuse those outputs while the
+remaining stages continue running.
 
 ### Prerequisites
 
@@ -59,7 +60,7 @@ runs every stage and dumps its output. The second finds them and replays.
    for the reward model. Rollout dumps hold every trajectory's latents, so keep
    disk space free under `STAGE_SKIP_RUN_DIR`.
 
-### Run the replay check
+### Run once with stage skipping
 
 From the repository root:
 
@@ -71,62 +72,46 @@ bash examples/stage_skip/run_sd35_medium_ocr_replay.sh
 |---|---|---|
 | `OCR_WORKSPACE` / `WORKSPACE` | `$HOME` | Dataset root of the base recipe |
 | `STAGE_SKIP_RUN_DIR` | `$WORKSPACE/stage_skip/sd35_medium_ocr` | Dumps, metrics and checkpoints |
-| `NUM_STEPS` | `3` | Training steps per pass |
-| `STAGES` | `reward old_log_prob` | `omni_skip` roles to replay; `skip.rollout_tq` is always on |
+| `NUM_STEPS` | `3` | Training steps in the single run |
+| `STAGES` | `reward old_log_prob` | Stages to repeat; rollout is always repeated through `skip.rollout_tq` |
 
-Hydra overrides after the mode reach every pass. The script refuses to start if
-the dump directory already holds a dump, because the record pass would replay
-it. Delete the directory or point `STAGE_SKIP_RUN_DIR` somewhere new.
+With the defaults, step 1 runs rollout, reward scoring and old log-probs and
+caches their outputs. Steps 2 and 3 replay those outputs; advantage computation
+and actor updates still run. Step 1 is included in the skip step lists because
+eligible cache misses populate the cache. `NUM_STEPS=1` only records outputs.
 
-Validation is off (`trainer.test_freq=-1`), checkpoint resume is off, and
-`actor_rollout_ref.actor.fsdp_config.full_determinism=True` seeds the LoRA
-initialization so that both passes start from the same weights.
+To repeat rollout and reward while recomputing old log-probs:
+
+```bash
+STAGES="reward" NUM_STEPS=5 bash examples/stage_skip/run_sd35_medium_ocr_replay.sh
+```
+
+Hydra overrides go directly after the script name and take precedence over its
+defaults:
+
+```bash
+bash examples/stage_skip/run_sd35_medium_ocr_replay.sh trainer.nnodes=1
+```
+
+There is no positional mode argument. The script refuses an existing non-empty
+dump directory so step 1 records fresh outputs. Set `STAGE_SKIP_RUN_DIR` to a
+fresh directory for another run. Validation, checkpoint resume and checkpoint
+saving are off by default.
 
 ### What a correct run shows
 
-The script exits non-zero if any of these fails:
+The run writes `metrics/repeat.jsonl` under `STAGE_SKIP_RUN_DIR`. With the default
+three steps, each selected stage reports `skip/<role>/steps = 2`: step 1 was
+computed and steps 2 and 3 were skipped. Look for `Dumped ...` on step 1 and
+`Replaying ...` on later steps, plus rollout's `Injected ...` messages. Compare
+`timing_s/gen`, `timing_s/reward` and `timing_s/old_log_prob` within that log to
+inspect the repeated stages' costs.
 
-1. **The record pass reaches each stage.** Each role in `STAGES` has at least
-   `NUM_STEPS` payloads under `$STAGE_SKIP_RUN_DIR/dump`.
-2. **The replay pass replays each stage.** Its metrics report
-   `skip/<role>/steps = NUM_STEPS`.
-3. **Training reproduces.** Every `actor/*` and `critic/*` metric in
-   `metrics/record.jsonl` and `metrics/replay.jsonl` matches exactly at every
-   step. The last line reads `REPLAY OK: ...`.
-
-The logs of the replay pass also show `[RolloutTqSkip()] Injected ...` and
-`Replaying <role> output at step ...` lines for every step, and its
-`timing_s/gen`, `timing_s/reward` and `timing_s/old_log_prob` drop sharply.
-
-A mismatch is reported per step and metric as `record=... replay=...`:
-
-- If `critic/*` differs, rollout or reward did not replay faithfully. Look for
-  a missing `Injected` or `Replaying` line first.
-- If only `actor/*` differs, the inputs match and the update itself is not
-  deterministic. Check that `full_determinism` took effect, that the GPU count
-  is unchanged, and whether you added an attention backend (`FA3=1`) that the
-  deterministic flags do not cover.
-
-### Profile the training phase
-
-Once a dump exists, run rollout from the cache while everything else runs for
-real:
-
-```bash
-bash examples/stage_skip/run_sd35_medium_ocr_replay.sh profile
-```
-
-Then compare per-stage time between the full pass and the trainer-only pass:
-
-```bash
-python3 - "$WORKSPACE/stage_skip/sd35_medium_ocr/metrics" <<'EOF'
-import json, sys
-for name in ("record", "profile"):
-    rows = [json.loads(line) for line in open(f"{sys.argv[1]}/{name}.jsonl")]
-    timing = {k: v for r in rows if r["step"] == 2 for k, v in r["data"].items() if k.startswith("timing_s/")}
-    print(name, {k: round(v, 2) for k, v in sorted(timing.items())})
-EOF
-```
+This workflow reuses the first step's trajectories and stage outputs as the
+actor changes. It is for debugging and profiling, and does not check that a
+full training run reproduces. Models still load, so the GPU requirements stay
+the same. The standalone `compare_replay_metrics.py` tool remains available
+for comparing separately recorded full-run metrics.
 
 ## Configuration
 
