@@ -85,10 +85,11 @@ throughput or step time. Those numbers are recorded for humans to inspect.
 #### SD3.5 OCR LoRA v1
 
 `tests/convergence/sd35_medium_ocr_lora_v1/` wraps
-`examples/flowgrpo_trainer/sd35/run_sd35_medium_ocr_lora_v1.sh` for an 8-GPU
-(6 actor+rollout, 2 reward) Route-A sync LoRA OCR job: TP-sharded rollout/reward,
-FSDP offload, `train_batch_size=16`, `rollout.n=16`, and the same train-infer
-and grad gates. Validation runs every 20 steps and on the last step.
+`examples/flowgrpo_trainer/sd35/run_sd35_medium_ocr_lora_v1.sh` for a Route-A
+sync LoRA OCR job on 6 of the 8 GPUs (4 actor+rollout, 2 reward): TP-sharded
+rollout/reward, FSDP offload, `train_batch_size=16`, `rollout.n=16`, and the
+same train-infer and grad gates. Validation runs every 20 steps and on the
+last step.
 
 ```bash
 bash tests/convergence/run_l4_convergence.sh sd35_medium_ocr_lora_v1
@@ -110,16 +111,17 @@ Gate logic lives in `collect_report.py`.
 
 | Gate | Metric | Fail when |
 | --- | --- | --- |
+| Training progress | logged actor steps | fewer than `MIN_TRAIN_STEPS`, or no post-warmup actor records |
 | Train-infer consistency | `training/rollout_probs_diff_mean` if present, else `rollout_corr/logprob_abs_diff_mean` | missing, non-finite, or any post-warmup step **> 1e-4** |
-| Grad | `actor/grad_norm` | NaN / Inf |
-| Val reward at step 100 | `val-core/*/reward/mean@*` | missing, or any source **< `VAL_REWARD_MIN`** (default **0.8**) |
+| Grad | `actor/grad_norm` | missing from every post-warmup record, or NaN / Inf |
+| Val reward at `MIN_TRAIN_STEPS` (default 100) | `val-core/*/reward/mean@*` | missing, recorded at another step, non-finite, or any source **< `VAL_REWARD_MIN`** (default **0.8**) |
 
 `perf/time_per_step` and related `timing_s/*` keys are copied into
 `report.json` under `"perf"` with no pass/fail.
 
-`metrics.json` records per-step training loss (`actor/loss/mean` or `actor/loss`)
-and `val-core/*/reward/mean@*` at each `test_freq` step. `metrics.jsonl` is the
-raw trainer log dump used to build both files.
+`metrics.jsonl` is the raw per-step trainer dump. `collect_report.py` parses
+it (falling back to the console log when it is empty) and writes `report.json`
+with the gate results, the thresholds above, and the `"perf"` numbers.
 
 ### Run in CI
 

@@ -119,7 +119,7 @@ Delete the temporary `pytest.ini` if it is not part of your intended change.
 ## Higher Layers
 
 This guide defines L1 in detail because L1 is the main pull-request test layer.
-L2–L4 stay outside the fast PR loop until ownership, trigger rules, baseline
+L3–L4 stay outside the fast PR loop until ownership, trigger rules, baseline
 policy, runner capacity, and artifact retention are stable.
 
 | Layer | Placement | What it proves |

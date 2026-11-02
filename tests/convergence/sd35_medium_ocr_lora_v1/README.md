@@ -1,13 +1,14 @@
 # SD3.5 OCR LoRA v1 L4 precision job
 
 Runs the production SD3.5-Medium LoRA OCR recipe on **real** SD3.5 / Qwen2.5-VL
-weights and the real OCR parquet for 100 steps on **8 devices** (6
-actor+rollout, 2 reward). There is **no baseline** compare. Timing is written
-into the report only.
+weights and the real OCR parquet for 100 steps on **6 of the 8 visible
+devices** (4 actor+rollout, 2 reward; the launcher and CI runner present 8).
+There is **no baseline** compare. Timing is written into the report only.
 
-Runs on NVIDIA GPU by default and on Ascend NPU via `DEVICE=npu` (sources the
-CANN env, attention switches to `_native_npu`, artifacts land under the
-`sd35_medium_ocr_lora_v1_npu` case name).
+`DEVICE=auto` (the default) picks Ascend NPU when `npu-smi` is available and
+NVIDIA GPU otherwise — force either with `DEVICE=gpu` / `DEVICE=npu`. On NPU
+the script sources the CANN env, attention switches to `_native_npu`, and
+artifacts land under the `sd35_medium_ocr_lora_v1_npu` case name.
 
 This L4 case uses **Route A (memory-first sync)**:
 
@@ -26,9 +27,10 @@ Reference example:
 
 | Check | Metric | Fail when |
 | --- | --- | --- |
+| Training progress | logged actor steps | fewer than `MIN_TRAIN_STEPS`, or no post-warmup actor records |
 | Train-infer gap | `training/rollout_probs_diff_mean` if logged, else `rollout_corr/logprob_abs_diff_mean` | any post-warmup step **> 1e-4**, missing, or non-finite |
-| Grad | `actor/grad_norm` | NaN / Inf |
-| Val reward at step 100 | `val-core/*/reward/mean@*` | missing, or any source **< `VAL_REWARD_MIN`** |
+| Grad | `actor/grad_norm` | missing from every post-warmup record, or NaN / Inf |
+| Val reward at `MIN_TRAIN_STEPS` (default 100) | `val-core/*/reward/mean@*` | missing, recorded at another step, non-finite, or any source **< `VAL_REWARD_MIN`** |
 
 `calculate_log_probs=true` and rollout-correction bypass off are required so
 the train-infer gap exists.
@@ -39,9 +41,9 @@ Default thresholds (printed at job start and stored in `report.json` under
 | Env var | Default | Meaning |
 | --- | --- | --- |
 | `SKIP_STEPS` | `2` | Warmup steps excluded from train-infer / grad gates |
-| `MIN_TRAIN_STEPS` | `100` | Minimum logged actor steps |
+| `MIN_TRAIN_STEPS` | `TOTAL_TRAIN_STEPS` (`100`) | Minimum logged actor steps; follows a forwarded `trainer.total_training_steps=` override |
 | `ROLLOUT_PROB_DIFF_MEAN_MAX` | `1e-4` | Max allowed train-infer log-prob gap per step |
-| `VAL_REWARD_MIN` | `0.8` | Floor for step-100 validation OCR reward |
+| `VAL_REWARD_MIN` | `0.8` | Floor for the validation OCR reward at `MIN_TRAIN_STEPS` |
 
 `VAL_REWARD_MIN` defaults to **0.8**. Override it if a recipe needs a different
 floor:
@@ -54,7 +56,7 @@ VAL_REWARD_MIN=0.85 bash tests/convergence/sd35_medium_ocr_lora_v1/run_sd35_medi
 
 | Env var | Default | Notes |
 | --- | --- | --- |
-| `NUM_GPUS_ACTOR_ROLLOUT` | `6` | Colocated actor + rollout |
+| `NUM_GPUS_ACTOR_ROLLOUT` | `4` | Colocated actor + rollout |
 | `NUM_GPUS_REWARD` | `2` | Dedicated GenRM pool |
 | `ROLLOUT_TP` / `REWARD_TP` | `2` / `2` | Shard rollout and reward models |
 | `TRAIN_BATCH_SIZE` | `16` | Up from the 3-GPU example (`8`) |
@@ -70,13 +72,15 @@ VAL_REWARD_MIN=0.85 bash tests/convergence/sd35_medium_ocr_lora_v1/run_sd35_medi
 `perf/time_per_step`, `timing_s/{step,gen,old_log_prob,reward,update_actor}`,
 `perf/throughput` — summarized in `report.json` under `"perf"`.
 
-Per-step trainer metrics are written to `metrics.jsonl`. The gate still uses the
-step-100 val floor only.
+Per-step trainer metrics are written to `metrics.jsonl`. All three gates
+remain active: train-infer gap, gradient finiteness, and validation reward.
+Performance metrics are informational only.
 
 ## Requirements
 
-- 8 accelerators (`NUM_GPUS_ACTOR_ROLLOUT=6`, `NUM_GPUS_REWARD=2`) — NVIDIA
-  GPUs or Ascend NPUs (CANN at `${ASCEND_HOME_PATH:-/usr/local/Ascend/ascend-toolkit/latest}`
+- 6 visible accelerators by default (`NUM_GPUS_ACTOR_ROLLOUT=4`,
+  `NUM_GPUS_REWARD=2`; the launcher and CI runner present 8) — NVIDIA GPUs or
+  Ascend NPUs (CANN at `${ASCEND_HOME_PATH:-/usr/local/Ascend/ascend-toolkit/latest}`
   plus `/usr/local/Ascend/nnal/atb`)
 - `stabilityai/stable-diffusion-3.5-medium` (`MODEL_PATH`) or a local copy
 - `Qwen/Qwen2.5-VL-3B-Instruct` (`REWARD_MODEL_PATH`) or a local copy
@@ -92,8 +96,8 @@ preparation:
 
 ```bash
 python3 examples/flowgrpo_trainer/data_process/sd3_ocr.py \
-  --input_dir "${OCR_RAW_DIR:-$WORKSPACE/data/ocr}" \
-  --output_dir "${OCR_RAW_DIR:-$WORKSPACE/data/ocr}/sd3"
+  --input_dir "${OCR_RAW_DIR:-${WORKSPACE:-$HOME}/data/ocr}" \
+  --output_dir "${OCR_RAW_DIR:-${WORKSPACE:-$HOME}/data/ocr}/sd3"
 ```
 
 `WORKSPACE` defaults to `$HOME`.
@@ -128,9 +132,9 @@ NPU notes (aligned with `tests/special_e2e/*_npu.sh` / npu_smoke CI):
   closed when they are missing.
 - The script prints the sourced Ascend env and `npu-smi info` for diagnostics,
   and defaults `ASCEND_RT_VISIBLE_DEVICES=0..7` (`NUM_NPUS` overrides).
-- An Ascend teardown abort with exit code 134 after training is tolerated: the
-  pass/fail decision is deferred to the `collect_report.py` gates. Any other
-  nonzero trainer exit fails the job.
+- An Ascend teardown abort with exit code 134 after training is tolerated **on
+  NPU only**: the pass/fail decision is deferred to the `collect_report.py`
+  gates. On GPU any nonzero trainer exit, including 134, fails the job.
 
 Hydra overrides can be appended after the script. Validation runs every
 `TEST_FREQ` steps (default 20) and always on the last step.

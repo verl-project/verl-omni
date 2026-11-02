@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # L4 precision job: real SD3.5-Medium + Qwen2.5-VL GenRM OCR weights, real OCR parquet,
-# 8 accelerators (6 actor+rollout, 2 reward), 100 FlowGRPO steps on the v1 sync trainer.
+# 6 of the 8 visible accelerators (4 actor+rollout, 2 reward), 100 FlowGRPO steps on the
+# v1 sync trainer.
 #
-# Runs on NVIDIA GPU by default; set DEVICE=npu to run the same job on Ascend
-# NPU (sources the CANN env and isolates artifacts under the _npu case name).
+# DEVICE=auto (default) picks Ascend NPU when npu-smi is available and NVIDIA GPU
+# otherwise; force either with DEVICE=gpu / DEVICE=npu. NPU sources the CANN env and
+# isolates artifacts under the _npu case name.
 #
 # Route A (memory-first sync): TP-sharded rollout/reward, FSDP offload, smaller
 # micro-batches, and a larger train batch + rollout.n for faster convergence.
@@ -17,7 +19,7 @@
 #     (glibc heap corruption, SIGABRT/134) before burning a full training run
 #   - rollout_prob_diff_mean > ROLLOUT_PROB_DIFF_MEAN_MAX (default 1e-4)
 #   - non-finite actor/grad_norm
-#   - step-100 val-core reward/mean below VAL_REWARD_MIN
+#   - val-core reward/mean at MIN_TRAIN_STEPS below VAL_REWARD_MIN
 # Perf (time_per_step, etc.) is recorded in report.json only — not a gate.
 #
 # Attention: pin native / TORCH_SDPA (not product-default FA3).
@@ -27,7 +29,7 @@ set -xeuo pipefail
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd -- "${SCRIPT_DIR}/../../.." && pwd)
 
-# Device selection: gpu (default) or npu. Auto-detect when DEVICE=auto.
+# Device selection: npu, gpu, or auto (default). auto prefers npu when npu-smi is present.
 DEVICE=${DEVICE:-auto}
 if [ "${DEVICE}" = "auto" ]; then
     if command -v npu-smi >/dev/null 2>&1 && npu-smi info >/dev/null 2>&1; then
@@ -52,6 +54,22 @@ if [ "${DEVICE}" = "npu" ]; then
     export DEVICE_NAME=npu
     export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=${RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES:-1}
     export VERL_DATAPROTO_SERIALIZATION_METHOD=${VERL_DATAPROTO_SERIALIZATION_METHOD:-numpy}
+    # Same env hardening as tests/npu_smoke/lib_npu_smoke.sh (from #818): pin the
+    # Ascend vLLM plugin so every reward subprocess selects the Ascend platform, and
+    # preload jemalloc before ModelConfig / Ray / any vLLM process to avoid the aarch64
+    # glibc heap corruption ("corrupted size vs. prev_size", issue #791) at teardown.
+    export VLLM_PLUGINS="${VLLM_PLUGINS:-ascend}"
+    if [[ "${LD_PRELOAD:-}" != *libjemalloc* ]]; then
+        if [[ -z "${JEMALLOC_PATH:-}" ]] && ! JEMALLOC_PATH=$(ldconfig -p 2>/dev/null \
+            | awk '/libjemalloc\.so/ && !path {path = $NF} END {print path}'); then
+            JEMALLOC_PATH=
+        fi
+        if [[ -z "${JEMALLOC_PATH:-}" || ! -r "${JEMALLOC_PATH}" ]]; then
+            echo "Unable to locate a readable jemalloc library for the NPU reward path." >&2
+            exit 1
+        fi
+        export LD_PRELOAD="${JEMALLOC_PATH}${LD_PRELOAD:+:${LD_PRELOAD}}"
+    fi
     ASCEND_HOME_PATH=${ASCEND_HOME_PATH:-/usr/local/Ascend/ascend-toolkit/latest}
     set +u
     # shellcheck disable=SC1091
@@ -94,6 +112,17 @@ REQUIRED_GPUS=${REQUIRED_GPUS:-$((NUM_GPUS_ACTOR_ROLLOUT + NUM_GPUS_REWARD))}
 ROLLOUT_TP=${ROLLOUT_TP:-2}
 REWARD_TP=${REWARD_TP:-2}
 TOTAL_TRAIN_STEPS=${TOTAL_TRAIN_STEPS:-100}
+# Follow a forwarded `trainer.total_training_steps=` Hydra override (Hydra keeps the
+# last occurrence, and "$@" is appended after our own trainer arg). Gates derived from
+# TOTAL_TRAIN_STEPS must follow it, otherwise a shortened smoke run such as
+# `run_l4_convergence.sh <case> -- trainer.total_training_steps=10` fails the
+# min_train_steps and val-step gates by construction. An explicit MIN_TRAIN_STEPS
+# still wins below.
+for _arg in "$@"; do
+    case "${_arg}" in
+        trainer.total_training_steps=*) TOTAL_TRAIN_STEPS=${_arg#*=} ;;
+    esac
+done
 TEST_FREQ=${TEST_FREQ:-20}
 IMAGE_RESOLUTION=${IMAGE_RESOLUTION:-384}
 MAX_NUM_SEQS=${MAX_NUM_SEQS:-8}
@@ -136,7 +165,7 @@ L4_REPORT_JSON=${L4_REPORT_JSON:-${CASE_DIR}/report.json}
 SKIP_STEPS=${SKIP_STEPS:-2}
 MIN_TRAIN_STEPS=${MIN_TRAIN_STEPS:-${TOTAL_TRAIN_STEPS}}
 ROLLOUT_PROB_DIFF_MEAN_MAX=${ROLLOUT_PROB_DIFF_MEAN_MAX:-1e-4}
-# Floor for val-core/*/reward/mean@* at step TOTAL_TRAIN_STEPS.
+# Floor for val-core/*/reward/mean@* at step MIN_TRAIN_STEPS.
 VAL_REWARD_MIN=${VAL_REWARD_MIN:-0.8}
 
 count_visible_devices() {
@@ -196,7 +225,7 @@ print_l4_thresholds() {
                             or rollout_corr/logprob_abs_diff_mean
   Train-infer gap cap     : ${ROLLOUT_PROB_DIFF_MEAN_MAX} (every post-warmup step must be <= cap)
   Grad norm gate          : actor/grad_norm must be finite (no NaN/Inf)
-  Val reward gate         : val-core/*/reward/mean@* at step ${TOTAL_TRAIN_STEPS}
+  Val reward gate         : val-core/*/reward/mean@* at step ${MIN_TRAIN_STEPS}
   Val reward floor        : ${VAL_REWARD_MIN}
   Recorded only (no gate) : perf/time_per_step, timing_s/*, perf/throughput
 ================================================================================
@@ -269,8 +298,12 @@ diag_python "B: ModelConfig for Qwen2.5-VL reward model (triggers the exact CI i
     "from vllm.config import ModelConfig; ModelConfig(model='${REWARD_MODEL_PATH}'); print('ModelConfig(inspect) OK')" || DIAG_FAILED=1
 diag_python "C: import vllm.model_executor.models.qwen2_5_vl (reward model class)" \
     "import vllm.model_executor.models.qwen2_5_vl; print('import qwen2_5_vl OK')" || DIAG_FAILED=1
-diag_python "D: control import vllm.model_executor.models.qwen3_vl" \
-    "import vllm.model_executor.models.qwen3_vl; print('import qwen3_vl OK')" || DIAG_FAILED=1
+# Control only: the reward path needs qwen2_5_vl, not qwen3_vl, and a GPU vllm
+# build may not ship qwen3_vl at all — report it, never fail on it.
+if ! diag_python "D: control import vllm.model_executor.models.qwen3_vl" \
+    "import vllm.model_executor.models.qwen3_vl; print('import qwen3_vl OK')"; then
+    echo "[DIAG] WARN: control import qwen3_vl failed (informational; not part of the reward path)." >&2
+fi
 set -e
 
 if [[ "${DIAG_FAILED}" -ne 0 ]]; then
@@ -404,7 +437,10 @@ python3 "${SCRIPT_DIR}/run.py" \
 RUN_RC=${PIPESTATUS[0]}
 set -e
 
-if [ "${RUN_RC}" -ne 0 ] && [ "${RUN_RC}" -ne 134 ]; then
+# Exit 134 (SIGABRT) is tolerated only on NPU, where it is the known Ascend
+# teardown abort (issue #791). On GPU any nonzero exit, including 134, is a real
+# crash and must fail immediately instead of being deferred to the gates.
+if [ "${RUN_RC}" -ne 0 ] && { [ "${RUN_RC}" -ne 134 ] || [ "${DEVICE}" != "npu" ]; }; then
     echo "Trainer failed with exit code ${RUN_RC}." >&2
     exit "${RUN_RC}"
 fi
