@@ -26,13 +26,28 @@ requires dedicated standalone rollout GPUs.
 
 `main_diffusion_v1` starts the Ray task runner, enables TransferQueue, and selects
 the `sync` or `separate_async` trainer. The diffusion agent loop samples media
-trajectories through the configured rollout backend (commonly vLLM-Omni). Reward
-scores may come from the agent loop, a configured reward loop, or a colocated
-scorer.
-TransferQueue carries each trajectory and its group and policy-step metadata to
-the trainer. ReplayBuffer turns available rows into training batches; the actor
-worker computes advantages and the configured diffusion loss, updates the policy,
-and saves checkpoints.
+trajectories through the configured rollout backend (commonly vLLM-Omni).
+TransferQueue is the center of the online experience data path. A row can hold
+prompt/group/session identity, generated media or latents, rollout
+log-probabilities, reward scores, extra fields, and policy-step metadata. In
+`separate_async`, prompt records and statuses can also be queued while generation
+is pending.
+
+Reward workers called by the agent loop receive the prompt and generated output;
+their score returns to the agent loop and is stored with the trajectory row. An
+optional colocated reward scorer runs trainer-side after the row is read. The
+trainer then writes selected score, advantage, and return fields back to that
+same queue row. ReplayBuffer samples and groups queue rows for actor training;
+the trainer computes configured advantages and diffusion loss, then updates the
+actor policy.
+
+The main implementation points are `main_diffusion_v1.py`,
+`agent_loop/diffusion_agent_loop_tq.py::_write_trajectories_to_tq`,
+`trainer/diffusion/v1/trainer_base.py::_train_sampled_batch`, and
+`trainer/diffusion/v1/tq_utils.py::put_dataproto_fields_to_tq`. The trainer's
+checkpoint manager handles actor/dataloader checkpoints and rollout weight
+sync; separate-async checkpoints can also snapshot TransferQueue state. Training
+rows are cleared after metric and rollout-dump handling.
 
 In `sync`, rollout and actor workers are colocated, and each training step waits
 for a complete rollout batch before updating the actor and refreshing rollout

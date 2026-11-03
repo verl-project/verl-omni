@@ -1,12 +1,15 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="740" viewBox="0 0 1280 740" role="img" aria-labelledby="title description">
-  <title id="title">VeRL-Omni Diffusion V1 training architecture</title>
-  <desc id="description">Prompt batches flow through the Ray V1 trainer and diffusion rollout, reward scoring, TransferQueue, ReplayBuffer, and actor updates. Updated weights return to rollout. Sync and separate asynchronous modes differ in placement and overlap.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="850" viewBox="0 0 1400 850" role="img" aria-labelledby="title description">
+  <title id="title">VeRL-Omni Diffusion V1 architecture with TransferQueue at the center</title>
+  <desc id="description">Diffusion rollout agents send completed trajectories and available reward data to TransferQueue. ReplayBuffer samples from the queue for the actor trainer, which writes selected reward and advantage fields back. Agent-loop rewards are attached before enqueue; an optional colocated reward scorer runs after dequeue. Actor weights and model checkpoints remain trainer-managed.</desc>
   <defs>
     <marker id="arrow" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto" markerUnits="strokeWidth">
       <path d="M0,0 L10,4 L0,8 z" fill="#52667f" />
     </marker>
-    <marker id="arrow-updated" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto" markerUnits="strokeWidth">
-      <path d="M0,0 L10,4 L0,8 z" fill="#6d55c7" />
+    <marker id="arrow-queue" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L10,4 L0,8 z" fill="#25845b" />
+    </marker>
+    <marker id="arrow-return" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L10,4 L0,8 z" fill="#7257bd" />
     </marker>
     <style>
       .title { font: 700 28px Arial, sans-serif; fill: #15253a; }
@@ -14,94 +17,98 @@
       .section { font: 700 13px Arial, sans-serif; letter-spacing: 1.1px; fill: #52667f; }
       .box { fill: #fff; stroke: #c9d5e3; stroke-width: 1.5; rx: 12; }
       .box-blue { fill: #eef5ff; stroke: #9dbce7; }
-      .box-purple { fill: #f3efff; stroke: #b6a9e5; }
-      .box-green { fill: #edf8f3; stroke: #a6d0ba; }
       .box-gold { fill: #fff7e8; stroke: #e5c98f; }
-      .head { font: 700 17px Arial, sans-serif; fill: #1b2c43; }
-      .body { font: 13px Arial, sans-serif; fill: #43566e; }
+      .box-green { fill: #eaf7f0; stroke: #25845b; stroke-width: 3; }
+      .box-purple { fill: #f3efff; stroke: #b6a9e5; }
+      .head { font: 700 18px Arial, sans-serif; fill: #1b2c43; }
+      .queue-head { font: 700 25px Arial, sans-serif; fill: #176342; }
+      .body { font: 14px Arial, sans-serif; fill: #43566e; }
       .small { font: 12px Arial, sans-serif; fill: #52667f; }
       .arrow { fill: none; stroke: #52667f; stroke-width: 2; marker-end: url(#arrow); }
-      .updated { fill: none; stroke: #6d55c7; stroke-width: 2; marker-end: url(#arrow-updated); }
+      .queue-arrow { fill: none; stroke: #25845b; stroke-width: 2.5; marker-end: url(#arrow-queue); }
+      .return-arrow { fill: none; stroke: #7257bd; stroke-width: 2.5; marker-end: url(#arrow-return); }
+      .dashed { stroke-dasharray: 7 5; }
       .label-bg { fill: #f7f9fc; }
       .mode-title { font: 700 16px Arial, sans-serif; fill: #1b2c43; }
       .mode-body { font: 13px Arial, sans-serif; fill: #43566e; }
     </style>
   </defs>
 
-  <rect width="1280" height="740" fill="#f7f9fc" />
+  <rect width="1400" height="850" fill="#f7f9fc" />
   <text class="title" x="40" y="48">VeRL-Omni Diffusion V1</text>
-  <text class="subtitle" x="40" y="76">Online diffusion RL: from prompt batches to policy updates, with queue-backed rollout data</text>
-  <text class="section" x="40" y="117">ROLLOUT AND DATA COLLECTION</text>
+  <text class="subtitle" x="40" y="76">TransferQueue is the central online experience store between rollout, reward scoring, and actor training</text>
 
-  <rect class="box" x="40" y="140" width="170" height="140" />
-  <text class="head" x="58" y="177">Prompt data</text>
-  <text class="body" x="58" y="204">Dataset and dataloader</text>
-  <text class="body" x="58" y="226">Prompt batches</text>
+  <text class="section" x="50" y="112">PROMPTS AND ROLLOUT</text>
+  <rect class="box" x="50" y="130" width="235" height="150" />
+  <text class="head" x="70" y="168">Prompt source</text>
+  <text class="body" x="70" y="197">Dataset + dataloader</text>
+  <text class="body" x="70" y="221">Ray V1 driver submits</text>
+  <text class="body" x="70" y="245">prompt groups</text>
 
-  <rect class="box box-blue" x="245" y="140" width="190" height="140" />
-  <text class="head" x="263" y="177">Ray V1 trainer</text>
-  <text class="body" x="263" y="204">main_diffusion_v1</text>
-  <text class="body" x="263" y="226">Selects sync mode</text>
-  <text class="body" x="263" y="248">or separate_async</text>
+  <rect class="box box-blue" x="370" y="130" width="330" height="150" />
+  <text class="head" x="392" y="168">Diffusion rollout</text>
+  <text class="body" x="392" y="197">AgentLoopManagerTQ + agent loop</text>
+  <text class="body" x="392" y="221">Configured engine (commonly vLLM-Omni)</text>
+  <text class="body" x="392" y="245">Generates media / latent trajectories</text>
 
-  <rect class="box box-blue" x="470" y="140" width="210" height="140" />
-  <text class="head" x="488" y="177">Diffusion rollout</text>
-  <text class="body" x="488" y="204">AgentLoopManagerTQ</text>
-  <text class="body" x="488" y="226">Agent loop + vLLM-Omni</text>
-  <text class="body" x="488" y="248">Samples media trajectories</text>
+  <rect class="box box-gold" x="890" y="130" width="400" height="150" />
+  <text class="head" x="912" y="168">Reward scoring</text>
+  <text class="body" x="912" y="197">Agent-loop reward returns to the rollout writer</text>
+  <text class="body" x="912" y="221">Score is attached before the row is queued</text>
+  <text class="body" x="912" y="245">Optional colocated scorer runs trainer-side</text>
 
-  <rect class="box box-gold" x="710" y="140" width="170" height="140" />
-  <text class="head" x="728" y="177">Reward scoring</text>
-  <text class="body" x="728" y="204">Configured reward loop</text>
-  <text class="body" x="728" y="226">or colocated scorer</text>
-  <text class="body" x="728" y="248">Adds score and metadata</text>
+  <path class="arrow" d="M285 205 H370" />
+  <path class="arrow" d="M700 173 H890" />
+  <rect class="label-bg" x="728" y="153" width="136" height="17" rx="4" />
+  <text class="small" x="733" y="166">prompt + media to score</text>
+  <path class="arrow" d="M890 241 H700" />
+  <rect class="label-bg" x="728" y="242" width="150" height="17" rx="4" />
+  <text class="small" x="733" y="255">score returned to agent loop</text>
+  <path class="arrow dashed" d="M1350 375 H1375 V100 H535 V130" />
+  <rect class="label-bg" x="778" y="83" width="266" height="18" rx="4" />
+  <text class="small" x="784" y="96">actor weights sync directly to rollout</text>
 
-  <rect class="box box-green" x="920" y="140" width="210" height="140" />
-  <text class="head" x="938" y="177">TransferQueue</text>
-  <text class="body" x="938" y="204">Media / latent payloads</text>
-  <text class="body" x="938" y="226">Rewards, group IDs</text>
-  <text class="body" x="938" y="248">and policy-step metadata</text>
+  <text class="section" x="50" y="326">CENTRAL EXPERIENCE STORE</text>
+  <rect class="box box-green" x="445" y="350" width="510" height="255" />
+  <text class="queue-head" x="475" y="393">TransferQueue</text>
+  <text class="body" x="475" y="428">One keyed experience row keeps related data together:</text>
+  <text class="body" x="490" y="460">• prompt / group / session identity + policy step</text>
+  <text class="body" x="490" y="488">• generated media or latents + rollout log-probs</text>
+  <text class="body" x="490" y="516">• reward score and extra fields, when available</text>
+  <text class="body" x="490" y="544">• selected scores, advantages, and returns from trainer</text>
+  <text class="small" x="475" y="578">Queue rows support the online update; they are cleared after step handling.</text>
 
-  <path class="arrow" d="M210 210 H245" />
-  <path class="arrow" d="M435 210 H470" />
-  <path class="arrow" d="M680 210 H710" />
-  <path class="arrow" d="M880 210 H920" />
+  <path class="queue-arrow" d="M620 280 V350" />
+  <rect class="label-bg" x="632" y="302" width="158" height="18" rx="4" />
+  <text class="small" x="638" y="315">rollout writes trajectory</text>
+  <path class="queue-arrow dashed" d="M1020 280 L930 350" />
+  <rect class="label-bg" x="949" y="302" width="178" height="18" rx="4" />
+  <text class="small" x="955" y="315">score travels with the row</text>
 
-  <text class="section" x="40" y="337">TRAINING AND WEIGHT UPDATES</text>
-  <rect class="box" x="260" y="365" width="220" height="125" />
-  <text class="head" x="278" y="402">Checkpoint + logs</text>
-  <text class="body" x="278" y="429">Actor and dataloader state</text>
-  <text class="body" x="278" y="451">Queue state for async resume</text>
+  <text class="section" x="1030" y="326">TRAINING CONSUMER</text>
+  <rect class="box box-purple" x="1030" y="350" width="320" height="255" />
+  <text class="head" x="1052" y="393">Diffusion V1 trainer</text>
+  <text class="body" x="1052" y="428">ReplayBuffer samples queued rows</text>
+  <text class="body" x="1052" y="456">Trainer builds actor batches</text>
+  <text class="body" x="1052" y="484">Optional colocated reward after dequeue</text>
+  <text class="body" x="1052" y="512">Advantages → diffusion loss → actor update</text>
+  <text class="body" x="1052" y="540">Writes selected derived fields back to TQ</text>
 
-  <rect class="box box-purple" x="560" y="365" width="270" height="125" />
-  <text class="head" x="578" y="402">Actor worker group</text>
-  <text class="body" x="578" y="429">Advantage → diffusion loss</text>
-  <text class="body" x="578" y="451">Optimizer updates actor policy</text>
+  <path class="queue-arrow" d="M955 419 H1030" />
+  <rect class="label-bg" x="957" y="398" width="72" height="17" rx="4" />
+  <text class="small" x="962" y="411">read batch</text>
+  <path class="return-arrow" d="M1030 526 H955" />
+  <rect class="label-bg" x="946" y="532" width="90" height="17" rx="4" />
+  <text class="small" x="951" y="545">write-back</text>
 
-  <rect class="box box-green" x="900" y="365" width="240" height="125" />
-  <text class="head" x="918" y="402">ReplayBuffer</text>
-  <text class="body" x="918" y="429">Forms sampleable batches</text>
-  <text class="body" x="918" y="451">Tracks groups and staleness</text>
+  <rect class="box" x="50" y="660" width="1300" height="100" />
+  <text class="head" x="74" y="697">Outside the queue</text>
+  <text class="body" x="74" y="728">Actor / optimizer checkpoints and actor-to-rollout weight sync are trainer-managed; model weights are not TQ payloads. Separate-async checkpoints can also snapshot queue state.</text>
 
-  <path class="arrow" d="M1025 280 V365" />
-  <text class="small" x="1038" y="326">consume rows</text>
-  <path class="arrow" d="M900 427 H830" />
-  <text class="small" x="836" y="414">sample batch</text>
-  <path class="arrow" d="M560 427 H480" />
-  <path class="updated" d="M695 365 V325 H585 V280" />
-  <rect class="label-bg" x="592" y="307" width="116" height="18" rx="4" />
-  <text class="small" x="598" y="320" fill="#6d55c7">updated weights</text>
-
-  <rect class="box" x="40" y="535" width="570" height="132" />
-  <text class="mode-title" x="62" y="568">sync</text>
-  <text class="mode-body" x="62" y="595">Actor and rollout are colocated. The trainer waits for a complete rollout</text>
-  <text class="mode-body" x="62" y="617">batch, updates the actor, then refreshes rollout weights for the next step.</text>
-
-  <rect class="box" x="640" y="535" width="600" height="132" />
-  <text class="mode-title" x="662" y="568">separate_async</text>
-  <text class="mode-body" x="662" y="595">Standalone rollout can overlap actor updates. ReplayBuffer feeds the</text>
-  <text class="mode-body" x="662" y="617">configured mini-batches; rollout weights refresh at each sync interval.</text>
-  <text class="small" x="662" y="645">The interval is set by trainer.v1.separate_async.parameter_sync_step.</text>
-
-  <text class="small" x="40" y="710">Core diffusion V1 path. Model, reward, loss, and distributed backend are configuration-dependent.</text>
+  <rect class="box" x="50" y="785" width="620" height="52" />
+  <text class="mode-title" x="70" y="808">sync</text>
+  <text class="mode-body" x="130" y="808">Colocated rollout; wait for a complete batch, update, then sync weights.</text>
+  <rect class="box" x="700" y="785" width="650" height="52" />
+  <text class="mode-title" x="720" y="808">separate_async</text>
+  <text class="mode-body" x="845" y="808">Standalone rollout can overlap updates; parameter_sync_step sets sync cadence.</text>
 </svg>

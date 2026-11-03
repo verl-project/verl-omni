@@ -56,13 +56,19 @@ Multimodal generative RL training differs from text-only LLM RL not only in mode
 
 ### Diffusion V1 training architecture
 
-Diffusion V1 uses the Ray trainer to coordinate media rollouts and actor updates. Rollout trajectories pass through TransferQueue and ReplayBuffer before training; the actor's updated weights are then synchronized back to rollout workers.
+TransferQueue is the central online experience store: rollout writes media or latent
+trajectories, available reward scores, and sample metadata. The V1 trainer reads
+rows through ReplayBuffer and writes selected score and advantage fields back.
+The trainer manages actor checkpoints and rollout weight sync.
 
 <div align="center">
   <img src="docs/assets/diffusion_v1_arch.svg" alt="VeRL-Omni Diffusion V1 training architecture" width="100%">
 </div>
 
-`sync` collects a complete rollout batch before each actor update. `separate_async` uses standalone rollout workers so generation can overlap actor training. See the [Diffusion V1 guide](docs/start/diffusion_v1.md#architecture) for component details.
+`sync` collects a complete rollout batch before each actor update. `separate_async`
+uses standalone rollout workers so generation can overlap actor training. See the
+[Diffusion V1 guide](docs/start/diffusion_v1.md#architecture) for the reward and
+queue data paths.
 
 
 ## Getting Started  🚀
