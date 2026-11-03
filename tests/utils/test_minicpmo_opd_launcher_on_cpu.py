@@ -82,7 +82,7 @@ def test_each_dataset_branch_selects_its_own_data_reward_and_experiment():
         "gsm8k": {
             "experiment": "minicpm_o_4_5_thinker_lora_gsm8k_opd",
             "train": "$HOME/data/gsm8k/train.parquet",
-            "reward": "verl_omni/utils/reward_score/gsm8k_reward.py",
+            "reward": None,
         },
     }
     for case, expected in branches.items():
@@ -97,9 +97,17 @@ def test_each_dataset_branch_selects_its_own_data_reward_and_experiment():
 
 
 def test_branch_reward_paths_resolve_in_the_repo():
-    for case in ("mmk12", "gsm8k"):
-        reward = _branch_value(case, "REWARD_FUNCTION_PATH")
-        assert (_REPO_ROOT / reward.removeprefix("${REPO_ROOT}/")).is_file(), case
+    reward = _branch_value("mmk12", "REWARD_FUNCTION_PATH")
+    assert (_REPO_ROOT / reward.removeprefix("${REPO_ROOT}/")).is_file()
+
+
+def test_gsm8k_branch_relies_on_verls_builtin_reward():
+    # data_source="openai/gsm8k" dispatches to verl's gsm8k reward; the branch
+    # must null out the AVQA base's choice reward instead of wiring its own.
+    branch = _branch("gsm8k")
+    assert "reward.custom_reward_function.path=null" in branch
+    assert "REWARD_FUNCTION_PATH" not in branch
+    assert "reward.custom_reward_function.name=" not in branch
 
 
 def test_unknown_dataset_is_rejected():

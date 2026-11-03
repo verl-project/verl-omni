@@ -45,10 +45,9 @@ python examples/gspo_trainer/data_process/mmk12.py \
   --local_save_dir ~/data/mmk12
 ```
 
-GSM8K (text-only math) is the verification task: the thinker's initial accuracy is high, so reward curves are readable from the first steps instead of saturating low like MMK12:
+GSM8K (text-only math) is the verification task: the thinker's initial accuracy is high, so reward curves are readable from the first steps instead of saturating low like MMK12. Scoring rides verl's built-in gsm8k reward — `data_source="openai/gsm8k"` with the model asked to end with `#### <number>` — the same wiring as the Qwen3-Omni GSM8K recipe; no extra dependencies:
 
 ```bash
-pip install math-verify
 python examples/gspo_trainer/data_process/gsm8k.py \
   --local_save_dir ~/data/gsm8k
 ```
@@ -102,7 +101,7 @@ TORCH_COMPILE_DISABLE=1 TORCHINDUCTOR_DISABLE=1 python -m pytest -q --asyncio-mo
   tests/workers/rollout/rollout_vllm/test_omni_teacher_on_cpu.py \
   tests/utils/test_minicpm_rl_dataset_on_cpu.py \
   tests/utils/test_minicpmo_opd_launcher_on_cpu.py \
-  tests/utils/reward_score/test_gsm8k_reward_on_cpu.py
+  tests/utils/test_gsm8k_data_process_on_cpu.py
 ```
 
 GSM8K runs are text-only: the first batch is worth a glance to confirm requests carry no media streams and the teacher scores them normally.

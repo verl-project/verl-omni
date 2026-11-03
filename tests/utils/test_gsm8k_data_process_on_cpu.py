@@ -57,7 +57,8 @@ def test_row_shape_follows_the_verl_rl_schema():
     assert row["ability"] == "math"
     assert len(row["prompt"]) == 1 and row["prompt"][0]["role"] == "user"
     assert "What is 2 + 3?" in row["prompt"][0]["content"]
-    assert "\\boxed{}" in row["prompt"][0]["content"]
+    # The #### instruction pairs with verl's built-in gsm8k reward.
+    assert 'final answer after "####"' in row["prompt"][0]["content"]
     assert row["reward_model"] == {"style": "rule", "ground_truth": "5"}
     assert row["extra_info"]["split"] == "train" and row["extra_info"]["index"] == 7
     assert "images" not in row and "audios" not in row

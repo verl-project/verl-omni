@@ -27,9 +27,11 @@ Output verl RL schema (one row per problem):
 
 GSM8K is the text-only verification task of the MiniCPM-o 4.5 simplex OPD
 recipe: the thinker LLM's initial accuracy is high, so reward curves are
-interpretable from the first steps. The instruction asks for a ``\\boxed{}`
-final answer and nothing else — the gsm8k_reward scorer has no format
-component, so the initial reward equals raw accuracy.
+interpretable from the first steps. The instruction ends responses with
+GSM8K's ``#### <number>`` marker, so verl's built-in gsm8k reward
+(``default_compute_score`` keyed on ``data_source="openai/gsm8k"``) scores
+the rows with no custom reward function — the same wiring as the Qwen3-Omni
+GSM8K recipe (examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_v1.sh).
 
 Pure helpers (extract_ground_truth) are importable without torch/verl so they
 can be unit-tested on CPU.
@@ -46,11 +48,7 @@ DATA_SOURCE = "openai/gsm8k"
 ABILITY = "math"
 DATASET_NAME = "GSM8K"
 
-INSTRUCTION = (
-    "You should first think about the reasoning process in the mind and then "
-    "provide the user with the answer. The final answer must be wrapped using "
-    "the \\boxed{} command."
-)
+INSTRUCTION = 'Let\'s think step by step and output the final answer after "####".'
 
 _ANSWER_SUFFIX_RE = re.compile(r"####\s*(.+?)\s*$")
 
@@ -58,8 +56,9 @@ _ANSWER_SUFFIX_RE = re.compile(r"####\s*(.+?)\s*$")
 def extract_ground_truth(answer: str) -> str | None:
     """Return the numeric ground truth after GSM8K's ``####`` marker.
 
-    Strips thousands commas and currency marks so ``math_verify`` compares plain
-    numbers. Returns None when the answer has no ``####`` suffix.
+    Strips thousands commas and currency marks so the built-in gsm8k reward's
+    string comparison sees plain numbers. Returns None when the answer has no
+    ``####`` suffix.
     """
     match = _ANSWER_SUFFIX_RE.search(answer or "")
     if match is None:
