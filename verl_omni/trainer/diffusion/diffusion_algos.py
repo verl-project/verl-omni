@@ -19,7 +19,7 @@ import os
 import zlib
 from abc import ABC, abstractmethod
 from collections import defaultdict
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Callable, Optional
@@ -2205,6 +2205,15 @@ class DiffusionARTLoss(DiffusionLossFn):
                     "trainer.v1.trainer_mode must not be separate_async (its replay buffer can serve rollouts of an "
                     "older policy than the old adapter that recomputes v_old)"
                 )
+        # Audio-video routing (the only models it applies to): once any reward is routed, both latents need one,
+        # which prepare_actor_batch otherwise discovers only after the first rollout.
+        routing = DiffusionARTLoss._configured_routing(config, ("video", "audio"))
+        for modality in ("video", "audio") if routing else ():
+            if not routing.get(modality):
+                problems.append(
+                    f"no reward is routed to the {modality} latents; set algorithm.art_modality_reward_weights."
+                    f"{modality} or reward.reward_functions.*.routing_weights.{modality}"
+                )
         if bool(algorithm_cfg.get("paired_preference", False)):
             problems.append(
                 "algorithm.paired_preference must be False (the trainers double the mini batch for it, which the "
@@ -2445,6 +2454,26 @@ class DiffusionARTLoss(DiffusionLossFn):
             "batch extra infos (the weighted-sum reward manager attaches them)."
         )
 
+    @staticmethod
+    def _configured_routing(config: Any, modalities: Iterable[str]) -> dict[str, dict[str, float]]:
+        """Reward-to-modality routing: ``algorithm.art_modality_reward_weights``, else the positive
+        ``reward_functions.*.routing_weights``; empty when neither is configured (modalities share the reward)."""
+        routing = config.algorithm.get("art_modality_reward_weights", None)
+        if routing is not None:
+            return {str(modality): dict(weights or {}) for modality, weights in routing.items()}
+        routing = {}
+        reward_cfg = getattr(config, "reward", None)
+        reward_functions = reward_cfg.get("reward_functions", None) if hasattr(reward_cfg, "get") else None
+        for name, entry in (reward_functions or {}).items():
+            weights = entry.get("routing_weights", None)
+            if weights is None:
+                continue
+            for modality in modalities:
+                value = float(weights.get(modality, 0.0) or 0.0)
+                if value > 0:
+                    routing.setdefault(modality, {})[name] = value
+        return routing
+
     @classmethod
     def _modality_rewards(
         cls, batch: DataProto, reward_tensor: torch.Tensor, config: Any, modalities: list[str]
@@ -2463,20 +2492,7 @@ class DiffusionARTLoss(DiffusionLossFn):
         if modalities == [""]:
             return {"": rewards}, None
         algorithm_cfg = config.algorithm
-        routing = algorithm_cfg.get("art_modality_reward_weights", None)
-        if routing is None:
-            routing = {}
-            reward_cfg = getattr(config, "reward", None)
-            reward_functions = reward_cfg.get("reward_functions", None) if hasattr(reward_cfg, "get") else None
-            if reward_functions is not None:
-                for name, entry in reward_functions.items():
-                    weights = entry.get("routing_weights", None)
-                    if weights is None:
-                        continue
-                    for modality in modalities:
-                        value = float(weights.get(modality, 0.0) or 0.0)
-                        if value > 0:
-                            routing.setdefault(modality, {})[name] = value
+        routing = cls._configured_routing(config, modalities)
         if not routing:
             return {modality: rewards for modality in modalities}, None
         names = sorted({name for weights in routing.values() for name in weights})

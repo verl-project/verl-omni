@@ -218,7 +218,12 @@ trainer.v1.sampler.drop_incomplete_groups=True   # v1 trainer (main_diffusion_v1
   (doubles the cached-state memory). Default `false`.
 - `algorithm.art_modality_reward_weights`: `{video: {name: w}, audio: {name: w}}`
   reward routing for audio-video models; `null` reads
-  `reward_functions.*.routing_weights`.
+  `reward_functions.*.routing_weights`. Once any reward is routed, both latents
+  need one (checked at start-up). Single-latent models (Qwen-Image) use the reward
+  manager's weighted-sum scalar as is, without per-component standardisation, as
+  DiffusionNFT does: with several components, the covariance follows their raw
+  weighted sum, so set the reward weights to put the components on comparable
+  scales.
 - `algorithm.timestep_fraction`: fraction of visited states trained per rollout.
 - `algorithm.art_split_groups_across_updates`: give every optimizer update
   $K/\text{updates}$ trajectories of every prompt instead of all $K$ of half the

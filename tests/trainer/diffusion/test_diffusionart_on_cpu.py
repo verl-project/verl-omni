@@ -1164,6 +1164,25 @@ def test_validate_trainer_config_requires_complete_on_policy_groups_on_v1(overri
     )
 
 
+@pytest.mark.parametrize(
+    "routing, match",
+    [
+        ("algorithm.art_modality_reward_weights={video:{clap:1.0}}", "no reward is routed to the audio latents"),
+        ("+reward.reward_functions.clap.routing_weights={video:0.0,audio:1.0}", "no reward is routed to the video"),
+        ("algorithm.art_modality_reward_weights={video:{hpsv3:1.0},audio:{clap:1.0}}", None),
+    ],
+)
+def test_validate_trainer_config_checks_modality_routing_at_start_up(routing, match):
+    """Once any reward is routed, both audio-video latents need one; prepare_actor_batch would only find out after
+    the first rollout."""
+    config = compose_trainer_config(ART_OVERRIDES + [routing])
+    if match is None:
+        DiffusionARTLoss.validate_trainer_config(config)
+    else:
+        with pytest.raises(ValueError, match=match):
+            DiffusionARTLoss.validate_trainer_config(config)
+
+
 def test_validate_trainer_config_accepts_flash_on_a_long_enough_schedule():
     overrides = ART_OVERRIDES + [
         "algorithm.art_timestep_selection=high_noise",

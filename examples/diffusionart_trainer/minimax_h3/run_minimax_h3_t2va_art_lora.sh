@@ -18,6 +18,8 @@
 # Do not read its reward curve as video quality. A run with video-quality scorers added (VideoAlign 1.0 / HPSv3 1.5 /
 # AudioBox 0.5 / CLAP 1.0 / DeSync 1.0) did not black out over 60 steps but still lost about half the motion,
 # so always compare same-seed clips against the base model.
+echo "WARNING: with only CLAP + ImageBind, DiffusionART darkens and freezes the video (see this script's header);" \
+    "add a visual-quality reward before reading the reward as quality." >&2
 set -x
 
 export WANDB_MODE=${WANDB_MODE:-offline}
