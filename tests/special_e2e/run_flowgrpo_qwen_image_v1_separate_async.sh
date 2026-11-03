@@ -83,9 +83,10 @@ try:
     importlib.import_module(mod)
 except Exception as e:
     print(f"Checkpoint backend '{backend}' could not be imported: {e}", file=sys.stderr)
-    print("Install the required dependency. For 'nccl' that is typically:", file=sys.stderr)
-    print("  pip install cupy-cuda12x   # or cupy-cuda13x matching your CUDA major", file=sys.stderr)
-    print("  pip install pyzmq", file=sys.stderr)
+    if backend == "nccl":
+        print("Install the required dependency. For 'nccl' that is typically:", file=sys.stderr)
+        print("  pip install cupy-cuda12x   # or cupy-cuda13x matching your CUDA major", file=sys.stderr)
+        print("  pip install pyzmq", file=sys.stderr)
     sys.exit(1)
 PY
 
