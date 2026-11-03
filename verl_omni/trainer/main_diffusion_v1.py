@@ -49,10 +49,12 @@ def run_diffusion_v1(config, task_runner_class=None) -> None:
     """
     if has_fsdp_reward_models(config):
         validate_reward_model_terms(config)
-        if not is_cuda_available:
-            raise ValueError("Native FSDP requires a supported GPU runtime")
         for name, entry in get_reward_model_entries(config).items():
             model = parse_reward_model_config(name, entry)
+            if model.placement.is_cpu:
+                continue
+            if not is_cuda_available:
+                raise ValueError("Native FSDP requires a supported GPU runtime")
             if max(model.placement.bundle_indices) >= config.reward.reward_model.n_gpus_per_node:
                 raise ValueError("Native FSDP bundle index exceeds the dedicated reward pool")
 

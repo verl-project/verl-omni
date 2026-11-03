@@ -61,7 +61,9 @@ class RewardModelPlacementConfig(BaseConfig):
 
     ``accelerator`` keeps the existing contract: ``devices`` are global logical
     bundle indices in the trainer-selected parent resource pool.  ``cpu`` uses
-    ordinary Ray CPU actors counted by ``num_replicas``; no GPU parent pool is required.
+    ordinary Ray CPU actors counted by ``num_replicas``. CPU ``replica_groups``
+    instead declare logical rank labels and reserve ``cpus_per_worker`` per rank.
+    Neither CPU path requires an accelerator parent pool.
     """
 
     # Global accelerator bundle indices in the trainer-selected parent pool.
@@ -79,9 +81,13 @@ class RewardModelPlacementConfig(BaseConfig):
         if self.resource not in ("accelerator", "cpu"):
             raise ValueError("Native reward model placement.resource must be 'accelerator' or 'cpu'")
         if self.is_cpu:
-            if self.devices or self.replica_groups:
-                raise ValueError("CPU placement uses placement.num_replicas; remove placement.devices/replica_groups")
-            _validate_positive_int(self.num_replicas, "Native reward model placement.num_replicas")
+            if self.devices:
+                raise ValueError("CPU placement uses num_replicas or replica_groups; remove placement.devices")
+            if self.replica_groups:
+                if self.num_replicas is not None:
+                    raise ValueError("CPU FSDP replica_groups determines the replica count; remove num_replicas")
+            else:
+                _validate_positive_int(self.num_replicas, "Native reward model placement.num_replicas")
         elif self.num_replicas is not None:
             raise ValueError("placement.num_replicas is only supported for resource='cpu'")
         if self.replica_groups:
@@ -109,7 +115,7 @@ class RewardModelPlacementConfig(BaseConfig):
 
     @property
     def bundle_indices(self) -> list[int]:
-        """All claimed parent-pool bundles, preserving declared rank order."""
+        """Declared accelerator bundles or CPU rank labels, preserving group/rank order."""
         return [index for group in self.replica_groups for index in group] if self.replica_groups else self.devices
 
     @classmethod
@@ -430,7 +436,12 @@ def validate_reward_model_terms(config) -> None:
     if fsdp_models:
         if len(models) != 1:
             raise ValueError("The initial native FSDP path supports one named deployment")
-        if not reward_pool_is_separate(config) or config.reward.reward_model.get("nnodes", 1) != 1:
+        accelerator_fsdp = any(
+            models[name].get("placement", {}).get("resource", "accelerator") != "cpu" for name in fsdp_models
+        )
+        if (accelerator_fsdp and not reward_pool_is_separate(config)) or config.reward.reward_model.get(
+            "nnodes", 1
+        ) != 1:
             raise ValueError("Native FSDP requires a dedicated single-node reward pool")
         trainer = config.get("trainer", {})
         if not trainer.get("use_v1", False) or trainer.get("v1", {}).get("trainer_mode", "sync") != "sync":

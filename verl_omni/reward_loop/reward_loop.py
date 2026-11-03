@@ -352,15 +352,27 @@ class OmniRewardLoopManager(RewardLoopManager):
         workers = []
         try:
             for indices in model.placement.replica_groups:
-                replica = build_replica(
-                    self.multi_reward_model_manager.resource_pool,
-                    model.model_path,
-                    processor_path,
-                    timeout=model.fsdp.timeout,
-                    collective_timeout=model.fsdp.collective_timeout,
-                    bundle_indices=indices,
-                    executor_model=model.executor.model,
-                )
+                if model.placement.is_cpu:
+                    from .native_fsdp_cpu import build_cpu_replica
+
+                    replica = build_cpu_replica(
+                        model.model_path,
+                        processor_path,
+                        model.fsdp.timeout,
+                        model.fsdp.collective_timeout,
+                        executor_model=model.executor.model,
+                        cpus_per_rank=model.placement.cpus_per_worker,
+                    )
+                else:
+                    replica = build_replica(
+                        self.multi_reward_model_manager.resource_pool,
+                        model.model_path,
+                        processor_path,
+                        timeout=model.fsdp.timeout,
+                        collective_timeout=model.fsdp.collective_timeout,
+                        bundle_indices=indices,
+                        executor_model=model.executor.model,
+                    )
                 owner.bind_rank_workers(replica.worker_group.workers)
                 worker = ray.remote(OmniFSDPRewardLoopWorker).remote(
                     config, {model.name: spec}, replica.worker_group.workers, processor_path, model.fsdp.timeout

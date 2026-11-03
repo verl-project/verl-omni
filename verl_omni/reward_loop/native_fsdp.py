@@ -152,17 +152,30 @@ _FORWARD_ADAPTERS = {
 class PickScoreFSDPRank(Worker):
     """One shard process; every rank receives every command in the same order."""
 
-    def __init__(self, model_path: str, collective_timeout: int = 30, executor_model: str = _PICKSCORE_EXECUTOR):
+    def __init__(
+        self,
+        model_path: str,
+        collective_timeout: int = 30,
+        executor_model: str = _PICKSCORE_EXECUTOR,
+        device_type: str = "accelerator",
+        cpu_threads: int = 1,
+    ):
         super().__init__()
-        torch.set_num_threads(4)
+        if device_type not in {"accelerator", "cpu"}:
+            raise ValueError("FSDP rank device_type must be accelerator or cpu")
+        torch.set_num_threads(cpu_threads if device_type == "cpu" else 4)
         torch.set_float32_matmul_precision("highest")
         torch.backends.cudnn.allow_tf32 = False
         self.model_path = model_path
         self.forward_cls = _FORWARD_ADAPTERS[executor_model]
         self.model = None
-        get_torch_device().set_device(0)
-        initialize_global_process_group_ray(timeout_second=collective_timeout)
-        self.mesh = init_device_mesh(get_device_name(), (dist.get_world_size(),))
+        self.device = torch.device("cpu") if device_type == "cpu" else torch.device(get_device_name(), 0)
+        if self.device.type != "cpu":
+            get_torch_device().set_device(0)
+        initialize_global_process_group_ray(
+            timeout_second=collective_timeout, backend="gloo" if self.device.type == "cpu" else None
+        )
+        self.mesh = init_device_mesh(self.device.type, (dist.get_world_size(),))
         self.sequence = 0
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
@@ -182,7 +195,12 @@ class PickScoreFSDPRank(Worker):
                 {"mesh": self.mesh, "reshard_after_forward": True},
                 {"wrap_policy": {"transformer_layer_cls_to_wrap": ["CLIPEncoderLayer"]}},
             )
-            fsdp2_load_full_state_dict(model, full_state, device_mesh=self.mesh)
+            if self.device.type == "cpu":
+                from .native_fsdp_cpu import load_cpu_state_dict
+
+                load_cpu_state_dict(model, full_state)
+            else:
+                fsdp2_load_full_state_dict(model, full_state, device_mesh=self.mesh)
             self.model = model
         return self.status()
 
@@ -194,14 +212,16 @@ class PickScoreFSDPRank(Worker):
         if sequence != self.sequence:
             raise RuntimeError(f"Out-of-order request: expected {self.sequence}, got {sequence}")
         self.sequence += 1
-        device = torch.device(get_device_name(), 0)
-        inputs = {key: {name: tensor.to(device) for name, tensor in value.items()} for key, value in inputs.items()}
+        inputs = {
+            key: {name: tensor.to(self.device) for name, tensor in value.items()} for key, value in inputs.items()
+        }
         # Use no_grad: inference_mode disables version tracking needed by some FSDP versions.
         with torch.no_grad():
             output = self.model(**inputs)
         # Explicitly release the root's gathered parameters in forward-only mode too.
         self.model.reshard()
-        get_torch_device().synchronize()
+        if self.device.type != "cpu":
+            get_torch_device().synchronize()
         return {key: value.detach().cpu() for key, value in output.items()} if dist.get_rank() == 0 else None
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
@@ -209,7 +229,8 @@ class PickScoreFSDPRank(Worker):
         """Drop weights on every rank; wake reloads the immutable checkpoint."""
         self.model = None
         gc.collect()
-        get_torch_device().empty_cache()
+        if self.device.type != "cpu":
+            get_torch_device().empty_cache()
         return self.status()
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
@@ -219,14 +240,15 @@ class PickScoreFSDPRank(Worker):
         return {
             "rank": dist.get_rank(),
             "pid": os.getpid(),
-            "gpu_uuid": str(get_torch_device().get_device_properties(0).uuid),
+            "gpu_uuid": str(get_torch_device().get_device_properties(0).uuid) if self.device.type != "cpu" else None,
+            "device_type": self.device.type,
             "world_size": dist.get_world_size(),
             "sequence": self.sequence,
             "awake": self.model is not None,
             "all_parameters_sharded": bool(parameters) and all(isinstance(p, DTensor) for p in parameters),
             "local_numel": sum(p.to_local().numel() for p in parameters),
             "global_numel": sum(p.numel() for p in parameters),
-            "allocated_bytes": get_torch_device().memory_allocated(),
+            "allocated_bytes": get_torch_device().memory_allocated() if self.device.type != "cpu" else None,
         }
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
@@ -237,7 +259,7 @@ class PickScoreFSDPRank(Worker):
 
 
 class FSDPRewardReplica:
-    """Serialize synchronous operations on one dedicated two-rank worker group.
+    """Serialize synchronous operations within one two-rank worker group.
 
     A rank failure, timeout, or partial submission invalidates the whole replica.
     All owned actors are terminated; this object never retries a collective or
