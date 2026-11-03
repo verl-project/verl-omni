@@ -53,3 +53,31 @@ The worker should perform one warmup update, restore its initial trainable/optim
 Malformed JSON, missing or extra result fields, nonfinite values, nonzero exits, declared OOM/failure, mismatched workload or initial state, and numerical differences exclude a trial. A failed baseline prevents later candidates from being recommended. The CLI can still exit zero after recording excluded trials, including when `recommendation` is null: **inspect `aggregate.json` and require the intended valid-trial count before acting on a recommendation**. A valid result is an exploratory component comparison for the declared worker; it is not a full training throughput or convergence claim.
 
 The CPU test at `tests/utils/test_offline_microbatch_tuner_on_cpu.py` exercises the protocol with a stdlib fake worker. Its results are fixture proof of controller behavior, not GPU or model evidence.
+
+## Fixed real SD3.5 Medium worker
+
+`scripts/sd35_microbatch_worker.py` provides a bounded **actor update component** recipe using the real `PPODiffusersFSDPEngine`, `BaseEngine.train_batch`, and `diffusion_loss`. It measures the `train_mode` / `train_batch` / learning-rate-scheduler-step boundary after one restored warmup; it does not measure rollout, model loading, end-to-end training throughput, or convergence. This is not a dynamic memory-budget search.
+
+Supply a local SD3.5 Medium snapshot with `model_index.json`, `transformer/config.json`, `scheduler/scheduler_config.json`, and a single `transformer/diffusion_pytorch_model.safetensors`. Supply an independently captured **real actor batch** as a `torch.save` plain dictionary of six finite CPU fp32 tensors: `all_latents` `[2,3,16,32,32]`, `all_timesteps` `[2,2]`, `prompt_embeds` `[2,L,4096]` with `L>0`, `pooled_prompt_embeds` `[2,2048]`, `old_log_probs` `[2,2]`, and nonzero `advantages` `[2,2]`. The worker does not download weights or synthesize rollout data. Capture and inspect these inputs on the authorized host before using them.
+
+First emit the byte-bound identity, then prepare the exact fixed plan. The identity hashes the captured file, the four listed model files, the installed upstream `BaseEngine` file, the local engine/loss/adapter files, and this worker file. Run from the intended source checkout with matching imports. Identity must be regenerated if any of those bytes change.
+
+```bash
+python scripts/sd35_microbatch_worker.py --mode identity --model /local/sd35-medium --batch /local/actor_batch.pt --result /tmp/sd35-workload.json
+```
+
+Save `/tmp/sd35-plan.json` as:
+
+```json
+{"effective_batch":2,"candidates":[2,1],"baseline":2,"max_trials":2,"steps":2,"atol":1e-5,"rtol":1e-3}
+```
+
+CPU admission may be run before GPU search with a request matching the identity and either candidate. It checks the scheduler, adapter, `TensorDict`, and `train_batch` signature without loading model weights or initializing CUDA. The standalone `admit` mode also accepts no request and then checks microbatch 1.
+Admission requires the captured `all_timesteps` to equal the configured scheduler's first two CPU fp32 timesteps in both batch rows, exactly. On a CPU host with the real local cache and captured batch, set `SD35_MICROBATCH_TEST_MODEL` and `SD35_MICROBATCH_TEST_BATCH` to those paths and run `pytest tests/utils/test_sd35_microbatch_worker_on_cpu.py -q`; the opt-in integration test checks both microbatch candidates and a mismatched timestep. Missing variables skip that test in a portable developer suite. A real-admission acceptance run must supply both variables and report zero skips.
+
+```bash
+python scripts/sd35_microbatch_worker.py --mode admit --model /local/sd35-medium --batch /local/actor_batch.pt --result /tmp/sd35-admission.json
+python scripts/tune_microbatch.py --plan /tmp/sd35-plan.json --workload /tmp/sd35-workload.json --output /new/sd35-search -- python scripts/sd35_microbatch_worker.py --mode run --model /local/sd35-medium --batch /local/actor_batch.pt
+```
+
+Run the search in a runtime with exactly one visible CUDA device and world size one. The worker owns a one-rank NCCL group and destroys it on exit. Each fresh child starts from the same seeded LoRA, optimizer, scheduler, and random state; the warmup update is restored before two timed updates. It retains gradient references inside the engine train context and materializes full sorted gradient/parameter witnesses after timing. A failure or OOM cannot produce an `ok` result. Each success writes a separate diagnostics sidecar before its exclusive protocol result. Inspect `aggregate.json`: require **two valid trials** and a nonnull `recommendation` before using the comparison. CPU unit tests only cover contract seams, not real SD3.5 execution.
