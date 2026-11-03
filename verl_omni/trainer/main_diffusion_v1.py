@@ -82,7 +82,7 @@ def run_diffusion_v1(config, task_runner_class=None) -> None:
         ray.init(**OmegaConf.to_container(ray_init_kwargs))
 
     if task_runner_class is None:
-        task_runner_class = DiffusionTaskRunnerV1.options(num_cpus=1)
+        task_runner_class = DiffusionTaskRunnerV1
 
     if (
         is_cuda_available
@@ -106,7 +106,7 @@ def run_diffusion_v1(config, task_runner_class=None) -> None:
         ray.timeline(filename=timeline_json_file)
 
 
-@ray.remote
+@ray.remote(num_cpus=1)  # keep the controller off the head node, as the v0 entrypoint does
 class DiffusionTaskRunnerV1:
     def __init__(self):
         self.config = None

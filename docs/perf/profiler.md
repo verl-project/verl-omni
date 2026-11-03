@@ -1,6 +1,6 @@
 # Profiling FlowGRPO / diffusion training in VeRL-Omni
 
-Last updated: 10/24/2026.
+Last updated: 11/01/2026.
 
 VeRL-Omni reuses the profiler subsystem from upstream
 [verl](https://github.com/verl-project/verl) (`verl.utils.profiler`) and exposes
@@ -165,8 +165,11 @@ actor_rollout_ref.actor.profiler.tool=torch_memory
 
 ### 4. NVIDIA Nsight Systems (`nsys`)
 
-Nsight requires `nsys` to be installed on every node and the `nvtx` Python
-package available in the training environment (`pip install nvtx`).
+Nsight requires `nsys` to be installed on every node and the `nvtx` and
+`matplotlib` Python packages available in the training environment
+(`pip install nvtx matplotlib`). The trainer's timing ranges use named colors
+such as `brown`, which `nvtx` can only resolve through `matplotlib`; without it
+the first profiled step fails with `Invalid color brown`.
 
 ```bash
 global_profiler.tool=nsys \
@@ -197,10 +200,13 @@ discrete profiled steps or contiguous step groups before Ray starts the
 TaskRunner.
 
 Diffusion V1 profiling has been validated with the NPU and PyTorch
-(`tool=torch`) backends. Nsight (`tool=nsys`) is unverified for V1. V1 does
-not implement controller capture start/stop calls, so controller
-`capture-range=cudaProfilerApi` is rejected when Nsight profiling steps are
-configured. This restriction does not apply to worker-side capture settings.
+(`tool=torch`) backends. Nsight (`tool=nsys`) has been validated on V1 for
+worker-side capture only: the actor ranks record the configured steps and
+write one report each. V1 does not implement controller capture start/stop
+calls, so controller `capture-range=cudaProfilerApi` is rejected when Nsight
+profiling steps are configured; the controller report covers the whole
+TaskRunner lifetime. This restriction does not apply to worker-side capture
+settings.
 
 `*.nsys-rep` files are written by Ray under
 `/tmp/ray/session_latest/logs/nsight/` on each node (this path is fixed by
