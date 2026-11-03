@@ -225,6 +225,22 @@ def test_collapse_ids_keeps_media_markers_sampled_in_the_response(marker):
     assert _collapse(prompt_ids + response_ids) == _collapse(prompt_ids) + response_ids
 
 
+def test_text_only_request_takes_the_default_engine_path():
+    # A text-only row (GSM8K) yields no media streams, so the engine prompt is
+    # plain ids with no multi_modal_data key — the same path a media-free model takes.
+    server = SimpleNamespace(
+        config=SimpleNamespace(max_model_len=512, prompt_length=256, response_length=256),
+        model_config=SimpleNamespace(processor=None),
+    )
+    strategy = ARStrategy(server)
+    strategy._rollout_adapter = MiniCPMORolloutAdapter
+
+    request = OmniRolloutRequest.from_generate_kwargs(prompt_ids=[11, 12, 13])
+    prompt, _ = strategy.preprocess_input(request, {"max_tokens": 4}, None)
+
+    assert prompt == {"prompt_token_ids": [11, 12, 13]}
+
+
 @pytest.mark.parametrize("role", ["rollout", "teacher"])
 def test_ar_engine_prompt_keeps_actor_prompt_and_student_response(role):
     # Rollout and teacher requests take the same AR strategy path; a teacher

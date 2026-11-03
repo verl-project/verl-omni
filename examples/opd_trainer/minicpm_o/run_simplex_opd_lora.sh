@@ -11,6 +11,12 @@
 #                        --local_dataset_path <path_to_raw_mmk12> \
 #                        --local_save_dir ~/data/mmk12
 #                  TRAIN_FILE, VAL_FILE and REWARD_FUNCTION_PATH override the defaults.
+#   DATASET=gsm8k  text-only math with gsm8k_reward.py — the verification task:
+#                  the thinker's initial accuracy is high, so reward curves are
+#                  interpretable from the first steps. Prepare the data once:
+#                    pip install math-verify    # required by gsm8k_reward.py
+#                    python examples/gspo_trainer/data_process/gsm8k.py \
+#                        --local_save_dir ~/data/gsm8k
 #
 # Student data, actor, and rollout settings come from
 # examples/gspo_trainer/minicpm/run_minicpmo_4_5_thinker_gspo_lora_avqa_v1.sh
@@ -44,8 +50,18 @@ case "${DATASET}" in
         )
         EXPERIMENT_NAME=minicpm_o_4_5_thinker_lora_mmk12_opd
         ;;
+    gsm8k)
+        export TRAIN_FILE=${TRAIN_FILE:-"$HOME/data/gsm8k/train.parquet"}
+        export VAL_FILE=${VAL_FILE:-"$HOME/data/gsm8k/test.parquet"}
+        REWARD_FUNCTION_PATH=${REWARD_FUNCTION_PATH:-"${REPO_ROOT}/verl_omni/utils/reward_score/gsm8k_reward.py"}
+        DATASET_ARGS=(
+            reward.custom_reward_function.path="${REWARD_FUNCTION_PATH}"
+            reward.custom_reward_function.name=compute_score
+        )
+        EXPERIMENT_NAME=minicpm_o_4_5_thinker_lora_gsm8k_opd
+        ;;
     *)
-        echo "DATASET must be avqa or mmk12, got '${DATASET}'." >&2
+        echo "DATASET must be avqa, mmk12, or gsm8k, got '${DATASET}'." >&2
         exit 1
         ;;
 esac

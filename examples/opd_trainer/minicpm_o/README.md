@@ -1,10 +1,10 @@
 # MiniCPM-o 4.5 simplex thinker OPD
 
-Last updated: 10/07/2026.
+Last updated: 11/03/2026.
 
 This recipe implements the first, thinker-stage part of [RFC #565](https://github.com/verl-project/verl-omni/issues/565), under [#345](https://github.com/verl-project/verl-omni/issues/345). The student generates a complete text response; a frozen teacher scores the same tokens and verl's on-policy distillation loss updates the student.
 
-It is the [MiniCPM-o GSPO recipe](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/README.md#training-with-minicpm-o-45-avqa) plus a `distillation.*` group, the same composition as the [Qwen3-Omni OPD recipe](../../../docs/algo/omni_opd.md). Data loading, prompt parity, rollout, and the actor path are unchanged from GSPO; only the teacher is added.
+It is the [MiniCPM-o GSPO recipe](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/README.md#training-with-minicpm-o-45-avqa) plus a `distillation.*` group, the same composition as the [Qwen3-Omni OPD recipe](../../../docs/algo/omni_opd.md). Data loading, prompt parity, and rollout are unchanged from GSPO; the wrapper additionally sets `use_remove_padding=false` — the packed layout has not been validated with OPD — and adds the teacher.
 
 ## Supported scope
 
@@ -45,6 +45,14 @@ python examples/gspo_trainer/data_process/mmk12.py \
   --local_save_dir ~/data/mmk12
 ```
 
+GSM8K (text-only math) is the verification task: the thinker's initial accuracy is high, so reward curves are readable from the first steps instead of saturating low like MMK12:
+
+```bash
+pip install math-verify
+python examples/gspo_trainer/data_process/gsm8k.py \
+  --local_save_dir ~/data/gsm8k
+```
+
 ## Training
 
 Run from the repository root; the base GSPO recipe resolves its reward path relative to it.
@@ -58,9 +66,14 @@ DATASET=mmk12 \
 STUDENT_MODEL="$HOME/models/MiniCPM-o-4_5-student" \
 TEACHER_MODEL="$HOME/models/MiniCPM-o-4_5" \
 bash examples/opd_trainer/minicpm_o/run_simplex_opd_lora.sh
+
+DATASET=gsm8k \
+STUDENT_MODEL="$HOME/models/MiniCPM-o-4_5-student" \
+TEACHER_MODEL="$HOME/models/MiniCPM-o-4_5" \
+bash examples/opd_trainer/minicpm_o/run_simplex_opd_lora.sh
 ```
 
-The student uses the GSPO recipe's four GPUs and settings; the teacher adds `TEACHER_GPUS` (default 4) GPUs with `TEACHER_TP` (default 2) per replica on the same node. `DATASET` (`avqa` by default, or `mmk12`) selects the data and reward; `TRAIN_FILE` / `VAL_FILE` select other data, and extra CLI arguments override the defaults.
+The student uses the GSPO recipe's four GPUs and settings; the teacher adds `TEACHER_GPUS` (default 4) GPUs with `TEACHER_TP` (default 2) per replica on the same node. `DATASET` (`avqa` by default, `mmk12`, or `gsm8k`) selects the data and reward; `TRAIN_FILE` / `VAL_FILE` select other data, and extra CLI arguments override the defaults.
 
 The default objective is task reward plus OPD, with `loss_mode=kl` and `use_policy_gradient=true`. For teacher-only OPD, add `distillation.distillation_loss.use_task_rewards=false`. Rewards decode through the GSPO recipe's `minicpm_naive` manager, which keeps MiniCPM's `<answer>` tags.
 
@@ -87,5 +100,9 @@ TORCH_COMPILE_DISABLE=1 TORCHINDUCTOR_DISABLE=1 python -m pytest -q --asyncio-mo
   tests/pipelines/test_minicpm_adapter_on_cpu.py \
   tests/trainer/omni/test_omni_distillation_on_cpu.py \
   tests/workers/rollout/rollout_vllm/test_omni_teacher_on_cpu.py \
-  tests/utils/test_minicpm_rl_dataset_on_cpu.py
+  tests/utils/test_minicpm_rl_dataset_on_cpu.py \
+  tests/utils/test_minicpmo_opd_launcher_on_cpu.py \
+  tests/utils/reward_score/test_gsm8k_reward_on_cpu.py
 ```
+
+GSM8K runs are text-only: the first batch is worth a glance to confirm requests carry no media streams and the teacher scores them normally.

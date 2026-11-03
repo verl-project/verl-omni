@@ -82,7 +82,9 @@ class MiniCPMORLHFDataset(RLHFDataset):
         # vllm-omni pads audio to a hop multiple before feature extraction while
         # the HF side drops the tail frame; pad first so both sides expand the
         # prompt to the same audio token count.
-        return images, None, [pad_audio_to_hop_multiple(a) for a in audios]
+        # Empty media → None: verl's agent loop forwards empty lists as present-but-empty
+        # streams, which would route text-only rows through the engine's zero-item media path.
+        return images or None, None, [pad_audio_to_hop_multiple(a) for a in audios] or None
 
 
 def pad_audio_to_hop_multiple(audio: np.ndarray, hop_length: int = 160) -> np.ndarray:

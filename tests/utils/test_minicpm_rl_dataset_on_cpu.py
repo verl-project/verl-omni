@@ -87,7 +87,17 @@ def test_minicpm_loader_accepts_images_decoded_from_inline_bytes():
     images, _, audios = MiniCPMORLHFDataset._process_multi_modal_info(messages, image_patch_size=14, config=None)
 
     assert len(images) == 1 and images[0].mode == "RGB" and images[0].size == (6, 4)
-    assert audios == []
+    assert audios is None
+
+
+def test_minicpm_loader_returns_no_media_for_text_only_rows():
+    # None (not an empty list) keeps text-only rows on the media-free request
+    # path: verl's agent loop forwards empty lists as present-but-empty streams.
+    messages = [{"role": "user", "content": [{"type": "text", "text": "2 + 3?"}]}]
+
+    images, videos, audios = MiniCPMORLHFDataset._process_multi_modal_info(messages, image_patch_size=14, config=None)
+
+    assert images is None and videos is None and audios is None
 
 
 def test_minicpm_loader_rejects_video_blocks():
