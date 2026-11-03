@@ -187,6 +187,10 @@ class OmniFSDPEngine(FSDPEngineWithLMHead):
             warnings.simplefilter("ignore")
 
             if meta_init:
+                # from_config resolves auto_map remote code from config.name_or_path,
+                # which AutoConfig.from_pretrained sets to hf_config_path. Rank 0's
+                # from_pretrained resolves from local_path; those directories may differ.
+                self.model_config.hf_config.name_or_path = self.model_config.local_path
                 module = auto_model_cls.from_config(
                     self.model_config.hf_config,
                     torch_dtype=torch_dtype,

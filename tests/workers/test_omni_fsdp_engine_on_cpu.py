@@ -482,6 +482,8 @@ def _build_on_meta_rank(auto_model_cls):
     """Run ``_build_module`` as a rank that verl initializes on meta (``init_empty_weights``)."""
     omni_impl = _get_omni_impl_module()
     model_config = _make_mock_model_config()
+    # Supported split: hf_config_path (name_or_path) differs from the checkpoint.
+    model_config.hf_config.name_or_path = "/fake/config/dir"
     configured_module = MagicMock(spec=torch.nn.Module)
     configured_module.named_parameters.return_value = []
     adapter_cls = MagicMock()
@@ -509,6 +511,7 @@ def test_build_module_on_meta_rank_builds_from_config_without_reading_the_checkp
     model_config, adapter_cls = _build_on_meta_rank(auto_model_cls)
 
     auto_model_cls.from_pretrained.assert_not_called()
+    assert model_config.hf_config.name_or_path == model_config.local_path
     auto_model_cls.from_config.assert_called_once_with(
         model_config.hf_config,
         torch_dtype=torch.float32,
