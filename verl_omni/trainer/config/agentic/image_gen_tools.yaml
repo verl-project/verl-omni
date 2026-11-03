@@ -47,6 +47,20 @@ vllm_url: ""
 # Optional model id for the judge OpenAI chat payload.
 vllm_model: ""
 
+# Which reward-pool model answers the C/A rubric when the pool serves several
+# (``reward.models.<name>``). The image score stays on the model the reward function is
+# bound to; the rubric goes to this sibling (a general VLM, e.g. Qwen3.5-9B). Ignored
+# when the pool has no model by this name, in which case the rubric uses the scoring
+# endpoint, as before.
+rubric_model: ca_judge
+
+# Optional external OpenAI chat base URL for the C/A rubric only. Wins over
+# ``rubric_model``; empty means "use the pool".
+rubric_vllm_url: ""
+
+# Model id sent to ``rubric_vllm_url``; ignored when the rubric rides the pool.
+rubric_vllm_model: ""
+
 # Max new tokens for judge / reflect VLM calls.
 reflect_max_new_tokens: 1024
 

@@ -101,13 +101,15 @@ from verl_omni.utils.reward_score.agentic_reward_core import (
 from verl_omni.utils.reward_score.agentic_reward_core import extract_tool_calls as _extract_tool_calls
 from verl_omni.utils.reward_score.agentic_reward_core import generate_prompts as _generate_prompts
 
-DIMS = ("reflect", "plan", "format", "protocol", "tool", "result", "image", "done")
+DIMS = ("reflect", "plan", "format", "protocol", "tool", "result", "image", "ca", "done")
 #: Default weight per dim when the row carries no ``w_<dim>``. The five original
 #: dims keep 1.0 so existing recipes are not rescaled relative to each other;
 #: ``image`` is deliberately heavier because it is the only dim with a continuous,
 #: task-specific magnitude -- the rest are mostly protocol gates that saturate.
 #: ``done``/``protocol`` are 1.0 so termination and parse validity are trained at
 #: the same order of magnitude as the behaviour dims they replace.
+#: ``ca`` is the rubric judge's correctness/aesthetics verdict on the final image, kept
+#: separate so a continuous ``image`` scorer cannot drop it. Weighted in v2 only.
 DEFAULT_DIM_WEIGHTS: dict[str, float] = {
     "reflect": 1.0,
     "plan": 1.0,
@@ -116,6 +118,7 @@ DEFAULT_DIM_WEIGHTS: dict[str, float] = {
     "tool": 1.0,
     "result": 1.0,
     "image": 3.0,
+    "ca": 1.0,
     "done": 1.0,
 }
 # Names consumed by AgenticMetricsAgentLoopManager when PR1 and PR3 are
@@ -549,6 +552,15 @@ def _image_reward(
     return min(1.0, final + improvement)
 
 
+def _ca_reward(text: str) -> float:
+    """``(correctness + aesthetics) / 2`` from the last trusted judge verdict; 0 when none parsed."""
+    judges = _successful_judges(text)
+    if not judges:
+        return 0.0
+    correctness, aesthetics, _, _ = judges[-1]
+    return 0.5 * (correctness + aesthetics)
+
+
 def _trusted_v2_reward(metadata):
     """Validate structured harness metadata; policy-written numbers are never parsed."""
     row = metadata.get("bagel_corl_reward")
@@ -716,6 +728,7 @@ def compute_score(
             blocked=blocked,
             rewrite_after_yes=rewrites_after_yes,
         ),
+        "ca": _ca_reward(text),
         "done": float(closed),
     }
     if trusted is not None:
@@ -740,6 +753,9 @@ def compute_score(
         # composite down by its weight share. Keep reporting ``reward_done`` as a diagnostic,
         # but leave it out of the score.
         weights.pop("done", None)
+    else:
+        # v1 ``image`` already is the rubric verdict; scoring ``ca`` too would count it twice.
+        weights.pop("ca", None)
     result.update(
         score=weighted_score(rewards, weights),
         **{f"reward_{dim}": float(rewards[dim]) for dim in DIMS},

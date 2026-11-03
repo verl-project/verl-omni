@@ -143,6 +143,7 @@ class AgenticRewardMetrics:
         # produced by ``agentic_multidim_reward`` and were metric-only before.
         "reward_protocol",
         "reward_image",
+        "reward_ca",
     )
     # Available at generate_sequences time (before the reward manager).
     ROLLOUT_KEYS: tuple[str, ...] = (
@@ -160,6 +161,7 @@ class AgenticRewardMetrics:
         "reward_done",
         "reward_protocol",
         "reward_image",
+        "reward_ca",
         "num_hermes_tool_calls",
         "num_generate_image_prompts",
         "num_judge_image_calls",

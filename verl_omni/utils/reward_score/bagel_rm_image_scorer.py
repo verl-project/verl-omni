@@ -90,6 +90,13 @@ BAGEL_RM_EXTRA_INFO_KEY = "bagel_corl"
 # unified cut was derived.
 DEFAULT_PICKSCORE_GOOD_ENOUGH = 1.0
 
+# Which reward-pool model answers the Mode-2a C/A rubric when the pool serves more than
+# one (``reward.models.<name>``). The image score stays on the model this reward function
+# is bound to; the rubric goes to this sibling, which is the general VLM judge rather than
+# the continuous image-reward model. Override with ``scorer_knobs``/``extra_info``
+# ``rubric_model``, or bypass the pool entirely with ``rubric_vllm_url``.
+DEFAULT_RUBRIC_MODEL = "ca_judge"
+
 
 def _mid_loop_payload(extra_info: Any) -> dict[str, Any] | None:
     """Return the in-loop payload riding ``extra_info``, or ``None`` for episodes."""
@@ -105,11 +112,79 @@ def _mid_loop_payload(extra_info: Any) -> dict[str, Any] | None:
     return payload
 
 
+def _resolve_rubric_endpoint(knobs: dict[str, Any], manager_kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Point the C/A rubric at the reward pool's *second* engine model, when it has one.
+
+    The image score and the rubric are asked to different models on purpose: the score
+    stays on a continuous image-reward model (UnifiedReward), while the rubric verdict
+    comes from a general VLM whose correctness/aesthetics read is the ``ca`` dim. The
+    reward loop gives each term exactly one ``reward_router_address`` -- its own model --
+    so the sibling router arrives in ``reward_router_addresses``, keyed by
+    ``reward.models.<name>`` and selected by the ``rubric_model`` knob.
+
+    An explicitly configured ``rubric_vllm_url`` (an outside sidecar) wins, and with
+    neither the rubric keeps using the scoring endpoint, which is the single-model
+    behaviour every existing recipe relies on.
+    """
+    if str(knobs.get("rubric_vllm_url") or "").strip():
+        return knobs
+    knobs.pop("rubric_vllm_model", None)
+    peers = manager_kwargs.get("reward_router_addresses")
+    if not isinstance(peers, dict) or not peers:
+        return knobs
+    key = str(knobs.get("rubric_model") or DEFAULT_RUBRIC_MODEL).strip()
+    address = str(peers.get(key) or "").strip()
+    if not address:
+        return knobs
+    knobs["rubric_vllm_url"] = address if address.startswith(("http://", "https://")) else f"http://{address}"
+    paths = manager_kwargs.get("reward_model_paths")
+    model = str(paths.get(key) or "").strip() if isinstance(paths, dict) else ""
+    if model:
+        knobs["rubric_vllm_model"] = model
+    logger.info(
+        "bagel_rm_image_scorer: C/A rubric routed to reward model %r (%s); image score stays on %s",
+        key,
+        knobs["rubric_vllm_url"],
+        knobs.get("vllm_url") or "<unset>",
+    )
+    return knobs
+
+
+def _rubric_knobs(knobs: dict[str, Any]) -> dict[str, Any]:
+    """The knob set one rubric call needs: ``vllm_url``/``vllm_model`` aimed at the judge."""
+    url = str(knobs.get("rubric_vllm_url") or "").strip()
+    if not url:
+        return knobs
+    out = dict(knobs)
+    out["vllm_url"] = url
+    # Never let the scoring model's id leak onto the rubric endpoint: an external sidecar
+    # serves its own checkpoint, and vLLM rejects a foreign model id.
+    out["vllm_model"] = str(knobs.get("rubric_vllm_model") or "").strip()
+    return out
+
+
 def _resolve_judge_endpoint(knobs: dict[str, Any], manager_kwargs: dict[str, Any]) -> dict[str, Any]:
-    """Point the judge at the reward pool's own router when the manager offers one."""
+    """Point the judge at the reward pool's own router when the manager offers one.
+
+    ``VisualRewardManager`` passes ``reward_router_address`` (and ``model_name``)
+    whenever a reward model is deployed: the manager builds a router in front of the
+    RM replicas (``RewardModelManager._initialize_router`` -> a catch-all proxy) and
+    hands our function its ``host:port``. That router speaks OpenAI
+    ``/v1/chat/completions``, so the SAME scoring path the frozen sidecar served can be
+    served by the reward pool itself — no second model, no second process, and the
+    Yes/No (``good_enough``) flag comes back through the identical parse.
+
+    The router wins over the configured ``vllm_url`` on purpose: the config knob is the
+    external judge, and an operator who sets both has almost certainly left the knob
+    behind. Passing no router (no reward model enabled) leaves ``knobs`` untouched and
+    the configured sidecar, if any, keeps working as a fallback.
+
+    The rubric endpoint is resolved separately (``_resolve_rubric_endpoint``), because a
+    two-model pool must score on one model and judge on the other.
+    """
     router = str(manager_kwargs.get("reward_router_address") or "").strip()
     if not router:
-        return knobs
+        return _resolve_rubric_endpoint(dict(knobs), manager_kwargs)
     out = dict(knobs)
     out["vllm_url"] = router if router.startswith(("http://", "https://")) else f"http://{router}"
     model_name = str(manager_kwargs.get("model_name") or "").strip()
@@ -117,7 +192,7 @@ def _resolve_judge_endpoint(knobs: dict[str, Any], manager_kwargs: dict[str, Any
         # vLLM serves the checkpoint path as its model id; an empty model id is rejected
         # by the OpenAI route, so carry the RM's own path through.
         out["vllm_model"] = model_name
-    return out
+    return _resolve_rubric_endpoint(out, manager_kwargs)
 
 
 def _score_image_unified(
@@ -351,7 +426,7 @@ def compute_score(
                 image_prompt=image_prompt,
                 notes=notes,
                 image_path=path,
-                extra_info=dict(knobs),
+                extra_info=_rubric_knobs(knobs),
             )
             if judged is None or not judged.get("ok"):
                 failed.append(path)
@@ -384,7 +459,7 @@ def compute_score(
                     image_prompt=image_prompt,
                     notes=notes,
                     image_path=path,
-                    extra_info=dict(knobs),
+                    extra_info=_rubric_knobs(knobs),
                 )
                 if judged is not None and judged.get("ok"):
                     sample_judge.append(_rubric_row(judged))

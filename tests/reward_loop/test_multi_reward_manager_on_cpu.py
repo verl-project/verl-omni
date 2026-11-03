@@ -116,6 +116,19 @@ def build_ocr_user_prompt() -> str:
     return "Prompt from the test-module builder."
 
 
+def reward_bagel_shape(data_source, ground_truth, extra_info, solution_str="", **kwargs):
+    """Stand-in for ``bagel_rm_image_scorer.compute_score``: reports what it was handed."""
+    return {
+        "score": 0.25,
+        "solution_str": solution_str,
+        "data_source": data_source,
+        "ground_truth": ground_truth,
+        "has_image": "solution_image" in kwargs,
+        "peers": kwargs.get("reward_router_addresses"),
+        "sample_scores": [0.25],
+    }
+
+
 async def reward_uses_legacy_router(reward_router_address, model_name, sampling_params):
     assert reward_router_address == "legacy-router"
     assert model_name == "legacy-model"
@@ -1031,3 +1044,79 @@ async def test_existing_clap_recipe_config_accepts_stereo_without_layout(recipe,
         if state.consumer_task is not None:
             state.queue.put_nowait((None, None, None, None, None))
             await state.consumer_task
+
+
+class TestBagelCorlMultiRewardManager:
+    """The Bagel Co-RL input contract on top of named reward models."""
+
+    @staticmethod
+    def _manager():
+        from verl_omni.reward_loop.reward_manager.multi import BagelCorlMultiRewardManager
+
+        config = _make_config(
+            {"bagel": {"path": DUMMY_REWARDS_PATH, "name": "reward_bagel_shape", "model": "image_rm"}}
+        )
+        config.reward.models = OmegaConf.create({"image_rm": {"backend": "engine"}, "ca_judge": {"backend": "engine"}})
+        tokenizer = MagicMock()
+        tokenizer.decode.return_value = "<tool_call>{}</tool_call> decoded trajectory"
+        manager = BagelCorlMultiRewardManager(config, tokenizer, compute_score=None)
+
+        class _Peers:
+            def reward_kwargs(self):
+                return {
+                    "reward_router_address": "ur:8000",
+                    "model_name": "/models/ur",
+                    "reward_router_addresses": {"image_rm": "ur:8000", "ca_judge": "judge:8001"},
+                    "reward_model_paths": {"image_rm": "/models/ur", "ca_judge": "/models/judge"},
+                }
+
+        manager.set_reward_executors({"image_rm": _Peers()}, None)
+        return manager
+
+    def test_token_episode_row_is_decoded_and_extras_are_flat(self):
+        manager = self._manager()
+        data = DataProto.from_dict(
+            tensors={"responses": torch.tensor([[1, 2, 3]], dtype=torch.int64)},
+            non_tensors={
+                "data_source": ["unicot_reflection"],
+                "reward_model": [{"ground_truth": {"task_type": "reflect"}}],
+                "extra_info": [{"corl_reward_version": "v2"}],
+            },
+        )
+
+        output = manager.loop.run_until_complete(manager.run_single(data))
+
+        assert output["reward_score"] == pytest.approx(0.25)
+        extras = output["reward_extra_info"]
+        assert extras["solution_str"] == "<tool_call>{}</tool_call> decoded trajectory"
+        assert extras["has_image"] is False
+        assert extras["data_source"] == "unicot_reflection"
+        assert extras["ground_truth"] == {"task_type": "reflect"}
+        assert extras["peers"] == {"image_rm": "ur:8000", "ca_judge": "judge:8001"}
+        # Flat names for the Co-RL consumers, namespaced ones kept for the multi-reward logs.
+        assert extras["sample_scores"] == [0.25]
+        assert extras["reward/bagel/sample_scores"] == [0.25]
+        assert extras["reward/combined"] == pytest.approx(0.25)
+
+    def test_mid_loop_placeholder_row_rides_the_pixel_branch_without_row_fields(self):
+        manager = self._manager()
+        data = DataProto.from_dict(
+            tensors={"responses": torch.zeros((1, 1), dtype=torch.uint8)},
+            non_tensors={"extra_info": [{"bagel_corl": {"image_paths": ["a"]}}]},
+        )
+
+        output = manager.loop.run_until_complete(manager.run_single(data))
+
+        extras = output["reward_extra_info"]
+        assert extras["has_image"] is True
+        assert extras["solution_str"] == ""
+        assert extras["data_source"] == ""
+        assert extras["ground_truth"] == ""
+
+    def test_rm_scores_are_one_scalar_per_sample(self):
+        from verl_omni.reward_loop.reward_manager.multi import BagelCorlMultiRewardManager
+
+        data = DataProto.from_dict(tensors={"responses": torch.zeros((2, 5), dtype=torch.int64)})
+        scores = BagelCorlMultiRewardManager.assemble_rm_scores(data, [0.2, 0.9])
+        assert scores.shape == (2, 1)
+        assert scores[:, 0].tolist() == pytest.approx([0.2, 0.9])

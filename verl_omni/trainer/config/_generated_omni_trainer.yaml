@@ -943,6 +943,7 @@ algorithm:
   paired_preference: false
   global_std: true
   gen_norm_adv_by_std_in_grpo: null
+  adv_std_floor: 0.05
 distillation:
   _target_: verl.workers.config.DistillationConfig
   enabled: false
@@ -1144,6 +1145,9 @@ agentic_image_gen:
   diffusion_tool_timeout: 900
   vllm_url: ''
   vllm_model: ''
+  rubric_model: ca_judge
+  rubric_vllm_url: ''
+  rubric_vllm_model: ''
   reflect_max_new_tokens: 1024
   judge_parse_retries: 1
   reflect_vlm_timeout: 120

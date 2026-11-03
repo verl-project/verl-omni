@@ -133,6 +133,65 @@ def test_v2_rubric_disagreement_keeps_score_stop(monkeypatch):
     assert seen == ["original", "original"]
 
 
+def test_rubric_goes_to_the_sibling_judge_and_the_score_stays_on_the_image_rm(monkeypatch):
+    """Dual reward pool: UnifiedReward scores, the ``ca_judge`` engine answers the rubric."""
+    import sys
+
+    rubric_calls = []
+
+    def fake_rubric(**kw):
+        rubric_calls.append(kw["extra_info"])
+        return {"ok": True, "correctness": 0.8, "aesthetics": 0.6, "good_enough": False}
+
+    client = SimpleNamespace(call_reflect_vlm=fake_rubric)
+    monkeypatch.setitem(sys.modules, "verl_omni.utils.reward_score.agentic_image_judge_client", client)
+    scorer = load_module("verl_omni/utils/reward_score/bagel_rm_image_scorer.py")
+    unified_calls = []
+
+    def unified(**kw):
+        unified_calls.append(kw["knobs"])
+        return 0.7, True, {"alignment": 4.0, "coherence": 4.0, "style": 4.0}
+
+    monkeypatch.setattr(scorer, "_score_image_unified", unified)
+    payload = {
+        "image_paths": ["a"],
+        "image_prompt": "policy target",
+        "extra_info": {"raw_prompt": "original"},
+        "scorer_knobs": {
+            "good_enough_threshold": 0.8,
+            "score_backend": "unified_reward_rubric",
+            "corl_reward_version": "v2",
+            "rubric_model": "ca_judge",
+        },
+    }
+    manager_kwargs = {
+        "reward_router_address": "ur-router:8000",
+        "model_name": "/models/unified_reward",
+        "reward_router_addresses": {"image_rm": "ur-router:8000", "ca_judge": "judge-router:8001"},
+        "reward_model_paths": {"image_rm": "/models/unified_reward", "ca_judge": "/models/qwen3.5-9b"},
+    }
+    result = scorer.compute_score(extra_info={"bagel_corl": payload}, **manager_kwargs)
+
+    assert result["score"] == pytest.approx(0.7)
+    assert unified_calls[0]["vllm_url"] == "http://ur-router:8000"
+    assert unified_calls[0]["vllm_model"] == "/models/unified_reward"
+    assert rubric_calls[0]["vllm_url"] == "http://judge-router:8001"
+    assert rubric_calls[0]["vllm_model"] == "/models/qwen3.5-9b"
+    assert result["sample_judge"][0]["correctness"] == 0.8
+
+    # Single-engine pool: no sibling by that name, the rubric rides the scoring endpoint.
+    rubric_calls.clear()
+    single = {"reward_router_address": "ur-router:8000", "model_name": "/models/unified_reward"}
+    scorer.compute_score(extra_info={"bagel_corl": payload}, **single)
+    assert rubric_calls[0]["vllm_url"] == "http://ur-router:8000"
+
+    # An explicit external rubric endpoint wins over the pool.
+    rubric_calls.clear()
+    payload["scorer_knobs"]["rubric_vllm_url"] = "http://sidecar:9000"
+    scorer.compute_score(extra_info={"bagel_corl": payload}, **manager_kwargs)
+    assert rubric_calls[0]["vllm_url"] == "http://sidecar:9000"
+
+
 def test_posthoc_v2_uses_same_stored_image_scores_and_keeps_structure(monkeypatch):
     scorer = load_module("verl_omni/utils/reward_score/bagel_corl_multidim_reward.py")
     # Exercise the full scalar assembly with a valid protocol fixture from parser-independent helpers.

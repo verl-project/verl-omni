@@ -81,6 +81,17 @@ def test_v2_score_ignores_reflect_when_the_harness_wrote_the_reflection():
     assert heavy["score"] == pytest.approx(light["score"])
 
 
+def test_v2_score_keeps_the_ca_dim_under_a_forced_reflection():
+    """The rubric verdict is not a copy of the continuous ``image`` envelope, so it stays."""
+    gt = {"task_type": "reflect"}
+    light = v2(forced_transcript(), {**gt, "w_ca": 0.0})
+    heavy = v2(forced_transcript(), {**gt, "w_ca": 5.0})
+    assert light["forced_reflection_context"] == 1
+    assert heavy["reward_ca"] > 0
+    assert heavy["reward_ca"] != pytest.approx(heavy["reward_image"])
+    assert heavy["score"] != pytest.approx(light["score"])
+
+
 def test_v1_score_still_weights_the_forced_reflect_dim():
     module_ = scorer()
     gt = {"task_type": "reflect"}
