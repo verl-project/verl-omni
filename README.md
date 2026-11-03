@@ -54,6 +54,16 @@ Multimodal generative RL training differs from text-only LLM RL not only in mode
   <img src="docs/assets/arch.png" alt="verl-omni architecture diagram" width="70%">
 </div>
 
+### Diffusion V1 training architecture
+
+Diffusion V1 uses the Ray trainer to coordinate media rollouts and actor updates. Rollout trajectories pass through TransferQueue and ReplayBuffer before training; the actor's updated weights are then synchronized back to rollout workers.
+
+<div align="center">
+  <img src="docs/assets/diffusion_v1_arch.svg" alt="VeRL-Omni Diffusion V1 training architecture" width="100%">
+</div>
+
+`sync` collects a complete rollout batch before each actor update. `separate_async` uses standalone rollout workers so generation can overlap actor training. See the [Diffusion V1 guide](docs/start/diffusion_v1.md#architecture) for component details.
+
 
 ## Getting Started  🚀
 

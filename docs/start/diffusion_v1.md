@@ -1,6 +1,6 @@
 # Diffusion V1 training
 
-Last updated: 10/15/2026
+Last updated: 11/03/2026
 
 This guide runs the diffusion V1 trainer in synchronous or separate-asynchronous
 mode using the provided Stable Diffusion 3.5 Medium FlowGRPO OCR recipes.
@@ -19,6 +19,31 @@ launches it without extra flags. The legacy v0 trainer
 The examples support a single-node NVIDIA GPU setup. Sync mode uses two GPUs for
 the colocated actor and rollout plus one reward GPU. Separate-async mode also
 requires dedicated standalone rollout GPUs.
+
+## Architecture
+
+![VeRL-Omni Diffusion V1 training architecture](../assets/diffusion_v1_arch.svg)
+
+`main_diffusion_v1` starts the Ray task runner, enables TransferQueue, and selects
+the `sync` or `separate_async` trainer. The diffusion agent loop samples media
+trajectories through the configured rollout backend (commonly vLLM-Omni). Reward
+scores may come from the agent loop, a configured reward loop, or a colocated
+scorer.
+TransferQueue carries each trajectory and its group and policy-step metadata to
+the trainer. ReplayBuffer turns available rows into training batches; the actor
+worker computes advantages and the configured diffusion loss, updates the policy,
+and saves checkpoints.
+
+In `sync`, rollout and actor workers are colocated, and each training step waits
+for a complete rollout batch before updating the actor and refreshing rollout
+weights. In `separate_async`, standalone rollout workers can generate while the
+actor trains; `parameter_sync_step` controls how many local actor updates happen
+before rollout weights are refreshed. Set `sync_compatible=true` to pause
+standalone generation during actor updates. The replay buffer handles
+asynchronous batch availability and rollout staleness.
+
+The diagram shows the shared online diffusion RL path. Optional old/reference
+policy scoring, rollout correction, and reward components depend on the recipe.
 
 ## Prerequisites
 
