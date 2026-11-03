@@ -51,6 +51,7 @@ from verl.utils.debug import marked_timer
 from verl.utils.import_utils import load_class_from_fqn
 from verl.utils.metric import reduce_metrics
 from verl.utils.py_functional import rename_dict
+from verl.utils.skip import SkipManager
 from verl.utils.tracking import ValidationGenerationsLogger
 
 from verl_omni.pipelines.rollout_media import (
@@ -90,6 +91,7 @@ from verl_omni.trainer.diffusion.rollout_correction import (
 from verl_omni.trainer.diffusion.teacher_manager import DiffusionTeacherManager
 from verl_omni.utils.config import resolve_lora_config
 from verl_omni.utils.net_utils import worker_group_port_ranges
+from verl_omni.utils.skip import init_skip_manager, log_skip_summary
 from verl_omni.utils.tracking import (
     _export_video,
     batch_items,
@@ -486,6 +488,9 @@ class BaseRayDiffusionTrainer(ABC):
         )
         self._controller_nsys_profile_active = False
 
+        # initialize SkipManager (verl rollout skip + verl-omni stage skip; no-op until configured).
+        init_skip_manager(self.config)
+
     def _create_dataloader(self, train_dataset, val_dataset, collate_fn, train_sampler: Optional[Sampler]):
         """
         Creates the train and validation dataloaders.
@@ -736,6 +741,7 @@ class BaseRayDiffusionTrainer(ABC):
 
         return gen_batch
 
+    @SkipManager.annotate(role="reward")
     def _compute_reward_colocate(self, batch: DataProto) -> tuple[torch.Tensor, dict[str, Any]] | torch.Tensor:
         """
         compute reward use colocate reward model
@@ -792,6 +798,8 @@ class BaseRayDiffusionTrainer(ABC):
             test_output_gen_batch_padded = self.async_rollout_manager.generate_sequences(test_gen_batch_padded)
 
             if self.use_rm and "rm_scores" not in test_output_gen_batch_padded.batch.keys():
+                # Stage-skip decorators bypass marked calls: validation must never poison training caches.
+                test_output_gen_batch_padded.meta_info["validate"] = True
                 # for colocate reward models, we need to sleep rollout model
                 # to spare GPU memory for reward model
                 if not self.separate:
@@ -1219,6 +1227,7 @@ class BaseRayDiffusionTrainer(ABC):
         else:
             print(f"Warning: No dataloader state found at {dataloader_local_path}, will start from scratch")
 
+    @SkipManager.annotate(role="actor_update")
     def _update_actor(self, batch: DataProto) -> DataProto:
         rollout_config = self.config.actor_rollout_ref.rollout
         batch.meta_info["multi_turn"] = rollout_config.multi_turn.enable
@@ -1306,6 +1315,7 @@ class BaseRayDiffusionTrainer(ABC):
 class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
     """Policy-gradient diffusion trainer for FlowGRPO, MixGRPO, DanceGRPO, GRPO-Guard, etc."""
 
+    @SkipManager.annotate(role="ref_log_prob")
     def _compute_ref_log_prob(self, batch: DataProto) -> DataProto:
         batch_td = _to_diffusion_worker_tensordict(batch)
         batch_td = embeds_padding_2_no_padding(batch_td)
@@ -1330,6 +1340,7 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
         )
         return DataProto.from_tensordict(ref_log_prob)
 
+    @SkipManager.annotate(role="old_log_prob")
     def _compute_old_log_prob(self, batch: DataProto) -> tuple[DataProto, Optional[float]]:
         batch_td = _to_diffusion_worker_tensordict(batch)
         batch_td = embeds_padding_2_no_padding(batch_td)
@@ -1390,6 +1401,7 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
 
         # we start from step 1
         self.global_steps += 1
+        SkipManager.set_step(self.global_steps)
         last_val_metrics = None
         self.max_steps_duration = 0
         self._nonfinite_grad_streak = 0
@@ -1635,10 +1647,12 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
 
                 progress_bar.update(1)
                 self.global_steps += 1
+                SkipManager.set_step(self.global_steps)
 
                 if is_last_step:
                     if hasattr(self.actor_rollout_wg, "async_calls_finalize_fn_exec"):
                         self.actor_rollout_wg.async_calls_finalize_fn_exec(blocking=True)
+                    log_skip_summary(logger, self.global_steps)
                     pprint(f"Final validation metrics: {last_val_metrics}")
                     progress_bar.close()
                     return
@@ -1698,6 +1712,7 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
             return {"val/offline/skipped": 1.0}
         return super()._validate()
 
+    @SkipManager.annotate(role="actor_update")
     def _update_actor(self, batch: DataProto) -> DataProto:
         rollout_config = self.config.actor_rollout_ref.rollout
         batch.meta_info["multi_turn"] = rollout_config.multi_turn.enable
@@ -1741,6 +1756,7 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
             actor_output["perf/mfu/actor"] = actor_mfu
         return DataProto.from_single_dict(data={}, meta_info={"metrics": actor_output})
 
+    @SkipManager.annotate(role="ref_log_prob")
     def _compute_ref_noise_pred(self, batch: DataProto) -> Optional[DataProto]:
         """Reference transformer output and shared flow tensors."""
         batch_td = _to_diffusion_worker_tensordict(batch)
@@ -1839,6 +1855,7 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
 
         # we start from step 1
         self.global_steps += 1
+        SkipManager.set_step(self.global_steps)
         last_val_metrics = None
         self.max_steps_duration = 0
         self._nonfinite_grad_streak = 0
@@ -2052,10 +2069,12 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
 
                 progress_bar.update(1)
                 self.global_steps += 1
+                SkipManager.set_step(self.global_steps)
 
                 if is_last_step:
                     if hasattr(self.actor_rollout_wg, "async_calls_finalize_fn_exec"):
                         self.actor_rollout_wg.async_calls_finalize_fn_exec(blocking=True)
+                    log_skip_summary(logger, self.global_steps)
                     pprint(f"Final validation metrics: {last_val_metrics}")
                     progress_bar.close()
                     return

@@ -45,7 +45,7 @@ from verl_omni.workers.engine.lora_export import export_lora_for_sync
 logger = logging.getLogger(__name__)
 
 
-@EngineRegistry.register(model_type="omni_model", backend=["fsdp", "fsdp2"], device=["cuda", "npu", "xpu"])
+@EngineRegistry.register(model_type="omni_model", backend=["fsdp", "fsdp2"], device=["cuda", "npu", "xpu", "mlu"])
 class OmniFSDPEngine(FSDPEngineWithLMHead):
     """FSDP engine for omni models"""
 

@@ -5,7 +5,6 @@
 set -x
 
 export CPATH=/usr/include${CPATH:+:$CPATH}
-export VLLM_ASCEND_ENABLE_NZ=0
 export VERL_USE_EXTERNAL_MODULES=verl_omni
 
 # DEVICE is auto-detected by querying npu-smi; override only for special cases.

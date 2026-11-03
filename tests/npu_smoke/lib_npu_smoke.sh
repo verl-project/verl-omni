@@ -21,6 +21,21 @@ export PYTHONUNBUFFERED=1
 export RAY_DEDUP_LOGS=0
 export DEVICE_NAME=npu
 export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1
+export VLLM_PLUGINS="${VLLM_PLUGINS:-ascend}"
+
+if [[ "${LD_PRELOAD:-}" != *libjemalloc* ]]; then
+    if [[ -z "${JEMALLOC_PATH:-}" ]] && ! JEMALLOC_PATH=$(ldconfig -p 2>/dev/null \
+        | awk '/libjemalloc\.so/ && !path {path = $NF} END {print path}'); then
+        JEMALLOC_PATH=
+    fi
+    if [[ -z "${JEMALLOC_PATH:-}" || ! -r "${JEMALLOC_PATH}" ]]; then
+        fail "Unable to locate a readable jemalloc library for NPU smoke tests."
+        exit 1
+    fi
+    export LD_PRELOAD="${JEMALLOC_PATH}${LD_PRELOAD:+:${LD_PRELOAD}}"
+fi
+
+log "NPU smoke tests will use jemalloc via LD_PRELOAD=${LD_PRELOAD}"
 
 REQUESTED_NUM_NPUS="${NUM_NPUS:-8}"
 while [[ $# -gt 0 ]]; do
@@ -100,24 +115,6 @@ run_test() {
     "$@" 2>&1 | tee "${logfile}"
     rc="${PIPESTATUS[0]}"
     set -e
-
-    if [[ "${rc}" -eq 134 ]]; then
-        if [[ "${id}" == "0" || "${id}" == "3" ]] && awk '
-            /^=+ .* =+$/ {
-                passed = ($0 ~ /^=+ 1 passed(, [0-9]+ warnings?)? in .+ =+$/)
-                known_abort = 0
-                next
-            }
-            passed && $0 == "corrupted size vs. prev_size" { known_abort = 1 }
-            END { exit !known_abort }
-        ' "${logfile}"; then
-            warn "[${id}] Ignoring known native teardown abort after pytest success"
-            rc=0
-        elif [[ "${id}" == "1" || "${id}" == "2" ]]             && grep -q 'training/global_step:1' "${logfile}"             && grep -q 'Training Progress: 100%' "${logfile}"; then
-            warn "[${id}] Ignoring native teardown abort after training step success"
-            rc=0
-        fi
-    fi
 
     end_ts="$(date +%s)"
     elapsed=$((end_ts - start_ts))

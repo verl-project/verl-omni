@@ -111,6 +111,11 @@ async def reward_captures_sampling_params(**kwargs):
     return {"score": 0.5, "has_sampling_params": "sampling_params" in kwargs}
 
 
+def build_ocr_user_prompt() -> str:
+    """Return an OCR user prompt loaded through pkg://."""
+    return "Prompt from the test-module builder."
+
+
 async def reward_uses_legacy_router(reward_router_address, model_name, sampling_params):
     assert reward_router_address == "legacy-router"
     assert model_name == "legacy-model"
@@ -377,6 +382,64 @@ class TestMultiRewardManagerRunSingle:
                 assert current["seed"] == 42
             else:
                 assert "seed" not in current
+
+    def test_genrm_ocr_user_prompt_is_per_reward_term(self, monkeypatch):
+        from verl_omni.utils.reward_score import genrm_ocr
+
+        requests = []
+
+        async def chat_complete(router_address, chat_complete_request):
+            requests.append(chat_complete_request)
+            return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="hello"))])
+
+        monkeypatch.setattr(genrm_ocr, "_chat_complete", chat_complete)
+        scorer_path = "pkg://verl_omni.utils.reward_score.genrm_ocr"
+        config = _make_config(
+            {
+                "ocr_default": {
+                    "model": "ocr_engine",
+                    "path": scorer_path,
+                    "name": "compute_score_ocr",
+                },
+                "ocr_literal": {
+                    "model": "ocr_engine",
+                    "path": scorer_path,
+                    "name": "compute_score_ocr",
+                    "user_prompt": "Read the text in this image.",
+                },
+                "ocr_pkg": {
+                    "model": "ocr_engine",
+                    "path": scorer_path,
+                    "name": "compute_score_ocr",
+                    "user_prompt": "pkg://tests.reward_loop.test_multi_reward_manager_on_cpu.build_ocr_user_prompt",
+                },
+            }
+        )
+        config.reward.models = OmegaConf.create({"ocr_engine": {"backend": "engine"}})
+        manager = MultiVisualRewardManager(config, MagicMock(), compute_score=None)
+        manager.set_reward_executors({"ocr_engine": _EngineRouterClient()}, None)
+        data = _make_single_data()
+        item = data[0]
+
+        manager.loop.run_until_complete(
+            genrm_ocr.compute_score_ocr(
+                data_source="test",
+                solution_image=item.batch["responses"],
+                ground_truth="hello",
+                extra_info=_reward_extra_info(item),
+                reward_router_address="engine-router",
+                model_name="ocr-model",
+            )
+        )
+        manager.loop.run_until_complete(manager.run_single(data))
+
+        baseline, default, literal, package = requests
+        assert default == baseline
+        assert default["messages"][0] == {"role": "system", "content": "You are a helpful assistant."}
+        assert default["messages"][1]["content"][1] == {"type": "text", "text": genrm_ocr.DEFAULT_GRM_PROMPT}
+        assert literal["messages"][1]["content"][1]["text"] == "Read the text in this image."
+        assert package["messages"][1]["content"][1]["text"] == "Prompt from the test-module builder."
+        assert all(request["messages"][0] == default["messages"][0] for request in requests)
 
     def test_named_engine_preserves_explicit_scorer_sampling_params(self):
         explicit = {"max_tokens": 7, "temperature": 0.2}
