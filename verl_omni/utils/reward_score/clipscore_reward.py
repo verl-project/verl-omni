@@ -70,12 +70,13 @@ class CLIPScoreInferencer:
         device: str | torch.device | None = None,
         dtype=torch.float32,
         model_path: str = CLIPSCORE_MODEL_PATH,
+        processor_path: str | None = None,
     ):
         if device is None:
             device = torch.device(get_device_name(), get_device_id())
         logger.info("Creating CLIPScore model from %s", model_path)
         self.device = torch.device(device)
-        self.processor = CLIPProcessor.from_pretrained(model_path)
+        self.processor = CLIPProcessor.from_pretrained(processor_path or model_path)
         self.model = CLIPModel.from_pretrained(model_path).eval().to(self.device, dtype=dtype)
 
     @torch.no_grad()
@@ -103,6 +104,31 @@ class CLIPScoreInferencer:
     def score(self, prompts: list[str], images: list[Image.Image], scale_factor: float = 2.5) -> torch.Tensor:
         """Return paired CLIPScore values."""
         return pairwise_clipscore(**self.infer(prompts, images), scale_factor=scale_factor)
+
+
+class CLIPScoreNativeModel:
+    """Expose existing CLIP inference through the named-model output contract."""
+
+    def __init__(self, **kwargs):
+        self._inferencer = CLIPScoreInferencer(**kwargs)
+        self._inference_lock = threading.Lock()
+
+    def infer(self, prompts, images):
+        """Return one raw feature dictionary per sample, preserving input order."""
+        if len(prompts) != len(images):
+            raise ValueError("CLIPScore prompts and images must have the same length")
+        if not prompts:
+            return []
+        with self._inference_lock:
+            if self._inferencer.model is None:
+                raise RuntimeError("CLIPScore native model is closed")
+            outputs = self._inferencer.infer(prompts, images)
+            return [{key: value[index] for key, value in outputs.items()} for index in range(len(prompts))]
+
+    def close(self):
+        """Release weights after the owning executor has drained accepted work."""
+        with self._inference_lock:
+            self._inferencer.model = None
 
 
 def _score_batch(requests) -> list[float | Exception]:
@@ -163,4 +189,22 @@ async def compute_score_clipscore(
     image = decoded_reward_image(solution_image, extra_info, scorer="CLIPScore")
     _load_inferencer(device, model_path)
     (score,) = await _loop_batcher().submit([(ground_truth or "", image, float(scale_factor))])
+    return {"score": score, "clipscore_raw": score}
+
+
+async def compute_score_clipscore_native(
+    data_source: str,
+    solution_image,
+    ground_truth: str,
+    extra_info: dict,
+    reward_model,
+    scale_factor: float = 2.5,
+) -> dict[str, float]:
+    """Apply the existing CLIPScore formula to a named model's raw features."""
+    del data_source
+    image = decoded_reward_image(solution_image, extra_info, scorer="CLIPScore")
+    (output,) = await reward_model.infer(prompts=[ground_truth or ""], images=[image])
+    score = pairwise_clipscore(
+        output["text_embeddings"].unsqueeze(0), output["image_embeddings"].unsqueeze(0), scale_factor
+    ).item()
     return {"score": score, "clipscore_raw": score}

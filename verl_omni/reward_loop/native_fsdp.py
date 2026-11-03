@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Synchronous two-rank FSDP2 inference for a named PickScore deployment.
+"""Ordered two-rank FSDP2 inference for named CLIP reward deployments.
 
 One verl RayWorkerGroup is one logical replica, with one process per shard.
 The controller owns ordering and group termination. PickScore owns its forward;
@@ -57,10 +57,21 @@ class NativeFSDPGroupError(RuntimeError):
 
 def validate_executor_config(executor):
     """Validate the model-specific FSDP adapter outside shared worker config."""
-    if executor.model != "verl_omni.utils.reward_score.pickscore_reward:PickScoreNativeModel":
-        raise ValueError("The initial native FSDP adapter supports PickScoreNativeModel only")
+    if executor.model not in _FORWARD_ADAPTERS:
+        raise ValueError(f"Native FSDP executor.model must be one of {sorted(_FORWARD_ADAPTERS)}")
     if set(executor.kwargs) - {"processor_path"}:
         raise ValueError("Native FSDP executor.kwargs supports processor_path only (float32 inference)")
+
+
+def resolve_processor_path(model):
+    """Keep each adapter's existing processor default outside shared configuration."""
+    if "processor_path" in model.executor.kwargs:
+        return model.executor.kwargs["processor_path"]
+    if model.executor.model == _PICKSCORE_EXECUTOR:
+        from verl_omni.utils.reward_score.pickscore_reward import _PROCESSOR_PATH
+
+        return _PROCESSOR_PATH
+    return model.model_path
 
 
 def validate_timeout(value, name="timeout"):
@@ -114,15 +125,40 @@ class PickScoreForward(torch.nn.Module):
         }
 
 
+class CLIPScoreForward(PickScoreForward):
+    """Reuse CLIP sharding while keeping score interpretation in CLIPScore."""
+
+    def __init__(self, clip):
+        super().__init__(clip)
+        # Transformers may load the original OpenAI projection as a transposed view.
+        for parameter in self.clip.parameters():
+            if not parameter.is_contiguous():
+                parameter.data = parameter.detach().contiguous()
+
+    def forward(self, image_inputs, text_inputs):
+        """Return the two embedding tensors required by CLIPScore."""
+        outputs = super().forward(image_inputs, text_inputs)
+        del outputs["logit_scale"]
+        return outputs
+
+
+_PICKSCORE_EXECUTOR = "verl_omni.utils.reward_score.pickscore_reward:PickScoreNativeModel"
+_FORWARD_ADAPTERS = {
+    _PICKSCORE_EXECUTOR: PickScoreForward,
+    "verl_omni.utils.reward_score.clipscore_reward:CLIPScoreNativeModel": CLIPScoreForward,
+}
+
+
 class PickScoreFSDPRank(Worker):
     """One shard process; every rank receives every command in the same order."""
 
-    def __init__(self, model_path: str, collective_timeout: int = 30):
+    def __init__(self, model_path: str, collective_timeout: int = 30, executor_model: str = _PICKSCORE_EXECUTOR):
         super().__init__()
         torch.set_num_threads(4)
         torch.set_float32_matmul_precision("highest")
         torch.backends.cudnn.allow_tf32 = False
         self.model_path = model_path
+        self.forward_cls = _FORWARD_ADAPTERS[executor_model]
         self.model = None
         get_torch_device().set_device(0)
         initialize_global_process_group_ray(timeout_second=collective_timeout)
@@ -139,7 +175,7 @@ class PickScoreFSDPRank(Worker):
                 config = CLIPConfig.from_pretrained(self.model_path)
                 with torch.device("meta"):
                     clip = CLIPModel(config)
-            model = PickScoreForward(clip)
+            model = self.forward_cls(clip)
             full_state = model.state_dict() if dist.get_rank() == 0 else {}
             apply_fsdp2(
                 model,
@@ -310,11 +346,7 @@ class NativeFSDPExecutor:
         """Retain ownership through caller cancellation and return per-sample outputs."""
         output = await _await_owned(asyncio.to_thread(self.replica.infer, prompts, images))
         return [
-            {
-                "text_embeddings": output["text_embeddings"][index],
-                "image_embeddings": output["image_embeddings"][index],
-                "logit_scale": output["logit_scale"],
-            }
+            {key: value if value.ndim == 0 else value[index] for key, value in output.items()}
             for index in range(len(prompts))
         ]
 
@@ -467,10 +499,13 @@ def build_replica(
     collective_timeout: float = 30,
     bundle_indices=None,
     _rank_class=None,
+    executor_model: str = _PICKSCORE_EXECUTOR,
 ):
     """Build one two-rank replica; the caller retains ownership of the parent pool."""
     validate_timeout(timeout)
     validate_timeout(collective_timeout, "collective_timeout")
+    if executor_model not in _FORWARD_ADAPTERS:
+        raise ValueError(f"Unsupported FSDP adapter {executor_model!r}")
     if not is_cuda_available or not resource_pool.use_gpu or len(resource_pool.store) != 1:
         raise ValueError("FSDP rewards require a dedicated single-node GPU pool")
     indices = list(range(resource_pool.world_size)) if bundle_indices is None else list(bundle_indices)
@@ -484,11 +519,12 @@ def build_replica(
     ):
         raise ValueError("FSDP requires exactly two distinct valid parent-pool bundle indices")
     processor = CLIPProcessor.from_pretrained(processor_path)
+    rank_args = (model_path, collective_timeout)
+    if executor_model != _PICKSCORE_EXECUTOR:
+        rank_args += (executor_model,)
     group = _RankWorkerGroup(
         resource_pool=_RankPool(resource_pool, indices),
-        ray_cls_with_init=RayClassWithInitArgs(
-            ray.remote(_rank_class or PickScoreFSDPRank), model_path, collective_timeout
-        ),
+        ray_cls_with_init=RayClassWithInitArgs(ray.remote(_rank_class or PickScoreFSDPRank), *rank_args),
         name_prefix=f"native_fsdp_{uuid.uuid4().hex[:8]}",
         device_name=get_device_name(),
         cleanup_timeout=min(timeout, 10),

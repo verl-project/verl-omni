@@ -345,11 +345,9 @@ class OmniRewardLoopManager(RewardLoopManager):
         )
 
     def _create_fsdp_worker(self, config, spec, model):
-        from verl_omni.utils.reward_score.pickscore_reward import _PROCESSOR_PATH
+        from .native_fsdp import build_replica, resolve_processor_path
 
-        from .native_fsdp import build_replica
-
-        processor_path = model.executor.kwargs.get("processor_path", _PROCESSOR_PATH)
+        processor_path = resolve_processor_path(model)
         owner = self.multi_reward_model_manager.models[model.name]
         workers = []
         try:
@@ -361,6 +359,7 @@ class OmniRewardLoopManager(RewardLoopManager):
                     timeout=model.fsdp.timeout,
                     collective_timeout=model.fsdp.collective_timeout,
                     bundle_indices=indices,
+                    executor_model=model.executor.model,
                 )
                 owner.bind_rank_workers(replica.worker_group.workers)
                 worker = ray.remote(OmniFSDPRewardLoopWorker).remote(
