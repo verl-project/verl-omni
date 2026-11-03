@@ -1415,24 +1415,6 @@ class NFTDiffusersFSDPEngine(DiffusersFSDPEngine):
         model_inputs, negative_model_inputs = self._prepare_conditioned_inputs(micro_batch, latents, timesteps, step)
         return model_inputs, negative_model_inputs, loss_context
 
-    def _num_train_timesteps(self) -> int:
-        """Scheduler training-timestep count that maps scheduler timesteps to flow time ``t = timestep / N``."""
-        num_train_timesteps = getattr(self.scheduler.config, "num_train_timesteps", None)
-        if num_train_timesteps is None:
-            raise ValueError(
-                "Converting `train_timesteps` to flow time requires "
-                f"scheduler.config.num_train_timesteps, but {type(self.scheduler).__name__} "
-                "does not define it."
-            )
-        return int(num_train_timesteps)
-
-    def _flow_time(self, micro_batch: TensorDict, timestep: torch.Tensor, ndim: int) -> torch.Tensor:
-        """Scheduler timesteps -> flow time ``t`` in ``(0, 1]``, shaped to broadcast against ``ndim``-D latents."""
-        num_train_timesteps = self._num_train_timesteps()
-        tu.assign_non_tensor(micro_batch, num_train_timesteps=num_train_timesteps)
-        t = timestep.float() / float(num_train_timesteps)
-        return t.view(-1, *([1] * (ndim - 1)))
-
     def _prepare_conditioned_inputs(
         self, micro_batch: TensorDict, latents: torch.Tensor, timestep: torch.Tensor, step: int
     ):
@@ -1580,8 +1562,9 @@ class ARTDiffusersFSDPEngine(NFTDiffusersFSDPEngine):
 
     def prepare_model_inputs(self, micro_batch: TensorDict, step: int):
         xt = micro_batch["train_latents"][:, step]
-        timestep = micro_batch["train_timesteps"][:, step]
-        t_expanded = self._flow_time(micro_batch, timestep, xt.ndim)
+        # Same conversion as the model classes (also records num_train_timesteps on the micro batch for the loss).
+        timestep, t = DiffusionModelBase._flow_time(micro_batch, step, self.scheduler)
+        t_expanded = t.view(-1, *([1] * (xt.ndim - 1)))
         model_inputs, negative_model_inputs = self._prepare_conditioned_inputs(micro_batch, xt, timestep, step)
         return model_inputs, negative_model_inputs, None, xt, t_expanded
 

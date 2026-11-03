@@ -43,7 +43,7 @@ from verl_omni.pipelines.rollout_media import DiffusionIOSpec, MediaSpec
 from verl_omni.pipelines.rollout_request import prompt_ids_from_payload
 from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
 
-from .common import normalize_ltx_output_type
+from .common import LTX_NEUTRAL_GUIDANCE, normalize_ltx_output_type
 
 __all__ = ["LTX23PipelineWithLogProb"]
 
@@ -167,14 +167,7 @@ class LTX23PipelineWithLogProb(LTX2Pipeline):
                     f"LTX-2.3 FlowGRPO requires {key} to match guidance_scale={guidance_scale}, got {configured}."
                 )
             extra_args[key] = guidance_scale
-        for key, expected in {
-            "video_stg_scale": 0.0,
-            "audio_stg_scale": 0.0,
-            "video_modality_scale": 1.0,
-            "audio_modality_scale": 1.0,
-            "video_rescale_scale": 0.0,
-            "audio_rescale_scale": 0.0,
-        }.items():
+        for key, expected in LTX_NEUTRAL_GUIDANCE.items():
             configured = float(extra_args.get(key, expected))
             if not math.isclose(configured, expected):
                 raise NotImplementedError(f"LTX-2.3 FlowGRPO does not support {key}={configured}; expected {expected}.")

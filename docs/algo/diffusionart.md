@@ -130,7 +130,8 @@ trainer also requires `model.algorithm=diffusion_art`, the hard-copied `old`
 adapter (`old_policy_decay_schedule=copy`, update interval 1), `ppo_epochs=1`,
 `rollout.n >= 2` (even for the pairwise variant, and divisible by the number of
 updates with `art_split_groups_across_updates`, which also needs
-`actor.shuffle=false`), an ODE rollout, no KL term and no
+`actor.shuffle=false`), an ODE rollout (`rollout.algo.noise_level=0.0`, no
+`calculate_log_probs`, no SDE window), no KL term and no
 `algorithm.paired_preference`; on the v1 trainer it also requires
 `trainer.v1.sampler.drop_incomplete_groups=true` and rejects
 `trainer_mode=separate_async`. A config therefore cannot silently stop being

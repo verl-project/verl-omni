@@ -38,7 +38,7 @@ def test_registered_and_inherits_output_construction():
     assert QwenImageDiffusionARTPipeline.supports_request_batch == QwenImagePipelineWithLogProb.supports_request_batch
 
 
-def test_diffuse_forces_noise_free_full_window_without_logprobs(monkeypatch):
+def test_diffuse_forces_the_full_capture_window_and_rejects_non_ode_requests(monkeypatch):
     captured = {}
 
     def fake_diffuse(self, *args):
@@ -48,43 +48,24 @@ def test_diffuse_forces_noise_free_full_window_without_logprobs(monkeypatch):
     monkeypatch.setattr(QwenImagePipelineWithLogProb, "diffuse", fake_diffuse)
     pipe = object.__new__(QwenImageDiffusionARTPipeline)
     timesteps = torch.tensor([1000.0, 750.0, 500.0, 250.0])
-    result = pipe.diffuse(
-        "pe",
-        "pm",
-        "npe",
-        "npm",
-        "latents",
-        "shapes",
-        "txt",
-        "ntxt",
-        timesteps,
-        True,
-        None,
-        4.0,
-        0.7,
-        (1, 3),
-        "cps",
-        "gen",
-        True,  # the caller's noise level, window and log-prob request are overridden
-    )
+    common = ("pe", "pm", "npe", "npm", "latents", "shapes", "txt", "ntxt", timesteps, True, None, 4.0)
+    result = pipe.diffuse(*common, 0.0, (1, 3), "cps", "gen", False)  # the caller's window is replaced
     assert result == "sentinel"
     args = captured["args"]
-    assert args[:12] == ("pe", "pm", "npe", "npm", "latents", "shapes", "txt", "ntxt", timesteps, True, None, 4.0)
+    assert args[:12] == common
     noise_level, sde_window, sde_type, generator, logprobs = args[12:]
     assert noise_level == 0.0 and sde_window == (0, len(timesteps)) and sde_type == "cps"
     assert generator == "gen" and logprobs is False
+    for noise_level, logprobs in ((0.7, False), (0.0, True)):
+        with pytest.raises(ValueError, match="deterministic ODE"):
+            pipe.diffuse(*common, noise_level, (0, 4), "cps", "gen", logprobs)
 
 
 def test_step_execution_path_is_forced_onto_the_same_ode(monkeypatch):
     monkeypatch.setattr(QwenImagePipelineWithLogProb, "prepare_encode", lambda self, state, **kw: state)
     pipe = object.__new__(QwenImageDiffusionARTPipeline)
-    state = SimpleNamespace(noise_level=0.8, logprobs=True, sde_window=(1, 2), timesteps=[1.0, 0.5, 0.25])
+    state = SimpleNamespace(noise_level=0.0, logprobs=False, sde_window=(1, 2), timesteps=[1.0, 0.5, 0.25])
     out = pipe.prepare_encode(state)
     assert out.noise_level == 0.0 and out.logprobs is False and out.sde_window == (0, 3)
-
-    calls = []
-    monkeypatch.setattr(QwenImagePipelineWithLogProb, "step_scheduler", lambda self, state, pred, **kw: calls.append(1))
-    pipe.step_scheduler(out, torch.zeros(1))
-    assert calls == [1]
-    with pytest.raises(RuntimeError, match="deterministic ODE"):
-        pipe.step_scheduler(SimpleNamespace(noise_level=0.5, logprobs=False), torch.zeros(1))
+    with pytest.raises(ValueError, match="deterministic ODE"):
+        pipe.prepare_encode(SimpleNamespace(noise_level=0.8, logprobs=False, sde_window=(1, 2), timesteps=[1.0]))

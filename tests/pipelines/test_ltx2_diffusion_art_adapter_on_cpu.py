@@ -62,7 +62,7 @@ def test_configure_flow_grpo_sets_a_pure_ode_with_all_transitions_and_per_modali
     pipeline._configure_flow_grpo(request)
     assert pipeline._flow_grpo_noise_level == 0.0
     assert pipeline._flow_grpo_logprobs is False
-    assert pipeline._flow_grpo_window_size is None
+    assert pipeline._flow_grpo_sde_type == "sde"  # with noise 0 every selected step is a plain Euler step
     assert request.sampling_params.extra_args["video_cfg_scale"] == 1.5
     assert request.sampling_params.extra_args["audio_cfg_scale"] == 3.0  # falls back to guidance_scale
     # Unset (absent or None) STG / modality / rescale guidance is neutral, not the official LTX-2.3 defaults.

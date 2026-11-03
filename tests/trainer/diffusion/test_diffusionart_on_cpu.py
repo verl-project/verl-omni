@@ -559,6 +559,45 @@ def test_prepare_actor_batch_writes_per_sample_records(tmp_path):
     ]
 
 
+def test_per_sample_records_never_abort_the_step(tmp_path, caplog, monkeypatch):
+    """The JSONL records are diagnostics: unwritable directories and serialisation errors only log a warning, and
+    dataset indices that are not plain ints are coerced before writing."""
+    uid = ["a", "a", "a", "b", "b", "b"]
+    reward = torch.tensor([0.5, 0.6, 0.7, 0.3, 0.2, 0.9])
+    routing = {"video": {"video_align": 1.0}, "audio": {"clap": 1.0}}
+
+    batch = make_av_rollout_batch(uid)
+    batch.meta_info["global_steps"] = 2
+    batch.non_tensor_batch["extra_info"] = np.array(
+        [{"index": np.int64(5)}] * 3 + [{"index": (1, 2)}] * 3, dtype=object
+    )
+    log_dir = tmp_path / "ok"
+    DiffusionARTLoss.prepare_actor_batch(
+        batch, reward, make_config(art_modality_reward_weights=routing, art_sample_log_dir=str(log_dir))
+    )
+    rows = [json.loads(line) for line in (log_dir / "step_2.jsonl").read_text().splitlines()]
+    assert [row["prompt_index"] for row in rows] == [5, 5, 5, "(1, 2)", "(1, 2)", "(1, 2)"]
+
+    blocker = tmp_path / "blocker"
+    blocker.write_text("not a directory")
+    for directory, failure in ((blocker / "sub", None), (tmp_path / "typed", TypeError("not serialisable"))):
+        if failure is not None:
+
+            def raise_failure(*args, _failure=failure, **kwargs):
+                raise _failure
+
+            monkeypatch.setattr(DiffusionARTLoss, "write_sample_records", staticmethod(raise_failure))
+        caplog.clear()
+        with caplog.at_level(logging.WARNING):
+            result = DiffusionARTLoss.prepare_actor_batch(
+                make_av_rollout_batch(uid),
+                reward,
+                make_config(art_modality_reward_weights=routing, art_sample_log_dir=str(directory)),
+            )
+        assert "art_guidance" in result.batch.keys()
+        assert "could not write per-sample records" in caplog.text
+
+
 def make_post_rollout_av_batch(uid, step=3):
     """What the v0 trainer hands prepare_actor_batch on an LTX-2.3 run: trajectory tensors, rollout media fields,
     per-sample `global_steps` stamped by the rollout strategy, reward component infos and the component matrix."""
@@ -811,7 +850,11 @@ def test_validate_trainer_config_warns_on_a_single_update_per_rollout(caplog):
     [
         ("actor_rollout_ref.rollout.rollout_adapter=default", "rollout_adapter must be old"),
         ("actor_rollout_ref.rollout.algo.noise_level=0.7", "noise_level must be 0.0"),
+        ("actor_rollout_ref.rollout.algo.noise_level=null", "noise_level must be 0.0"),
+        ("actor_rollout_ref.rollout.calculate_log_probs=true", "calculate_log_probs must be False"),
         ("actor_rollout_ref.model.lora_rank=0", "lora_rank must be > 0"),
+        ('actor_rollout_ref.model.policy_state_adapters=["default"]', 'policy_state_adapters must include "old"'),
+        ("actor_rollout_ref.rollout.algo.sde_window_size=2", "sde_window_size must be null"),
         ("actor_rollout_ref.actor.use_kl_loss=true", "use_kl_loss must be False"),
         ("actor_rollout_ref.actor.enable_timestep_staging=true", "enable_timestep_staging must be False"),
         ("algorithm.train_timestep_count=3", "only used by the dgpo and awm losses"),

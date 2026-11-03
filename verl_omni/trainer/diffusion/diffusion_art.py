@@ -209,7 +209,8 @@ def art_reference_drift(
             (reference default ``1e-5``).
 
     Raises:
-        ValueError: if any ``sigma - sigma_next`` is not a positive finite step.
+        ValueError: if any ``sigma`` is outside ``[0, 1]`` or any ``sigma - sigma_next`` is not a positive finite
+            step (a broken schedule would otherwise deflate the score and silently disable the mask).
 
     Returns:
         ``(B,)`` drift scores ``m(s_t)``.
@@ -217,6 +218,8 @@ def art_reference_drift(
     nu2 = float(reference_noise_level) ** 2
     sigma = sigma.float()
     step = sigma - sigma_next.float()
+    if not torch.isfinite(sigma).all() or bool(((sigma < 0) | (sigma > 1)).any()):
+        raise ValueError("art_reference_drift needs flow times sigma in [0, 1].")
     if not torch.isfinite(step).all() or bool((step <= 0).any()):
         raise ValueError("art_reference_drift needs sigma > sigma_next for every item (a forward ODE step).")
     # Reference edge handling (vanzll ``art_loss``): the ``t = 1`` form applies within ``atol=eps`` of 1, the
@@ -258,7 +261,8 @@ def art_loss(
     Args:
         current_velocity: ``v_theta(s_t)``, ``(B, *latent_shape)``; the only input with gradient.
         old_velocity: Rollout-policy prediction ``v_old(s_t)``, same shape.
-        guidance: Unit-RMS guidance ``G(c)`` of each item's prompt, same shape; zero when inactive.
+        guidance: Guidance ``G(c)`` of each item's prompt from :func:`art_guidance` (unit RMS, damped for
+            groups below its ``eps``), same shape; zero when inactive.
         sigma: Flow time ``t`` of every state, ``(B,)``.
         sigma_next: Flow time of the next ODE state, ``(B,)``.
         guidance_gain: Scalar multiplier on ``G(c)`` (paper: ``1``).
@@ -287,6 +291,8 @@ def art_loss(
     sigma_next = sigma_next.detach().to(velocity).reshape(-1)
     if sigma.numel() != velocity.shape[0] or sigma_next.numel() != velocity.shape[0]:
         raise ValueError("sigma and sigma_next need one value per item.")
+    if not torch.isfinite(sigma).all() or bool(((sigma < 0) | (sigma > 1)).any()):
+        raise ValueError("art_loss needs flow times sigma in [0, 1].")
 
     active = (direction.flatten(1).square().sum(dim=1) > 0) & (sigma > 0)
     if restore_anchor is None:

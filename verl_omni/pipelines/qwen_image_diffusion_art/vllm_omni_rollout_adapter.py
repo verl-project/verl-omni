@@ -15,13 +15,22 @@
 
 from typing import Any
 
-import torch
 from vllm_omni.diffusion.worker.utils import StepRequestState
 
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
 from verl_omni.pipelines.qwen_image_flow_grpo.vllm_omni_rollout_adapter import QwenImagePipelineWithLogProb
 
 __all__ = ["QwenImageDiffusionARTPipeline"]
+
+
+def _require_ode(noise_level: Any, logprobs: Any) -> None:
+    """Reject sampler settings a DiffusionART rollout cannot honour instead of silently replacing them."""
+    if float(noise_level or 0.0) != 0.0 or logprobs:
+        raise ValueError(
+            "DiffusionART rolls out a deterministic ODE without log-probs; got "
+            f"noise_level={noise_level}, logprobs={logprobs} (set actor_rollout_ref.rollout.algo.noise_level=0.0 "
+            "and actor_rollout_ref.rollout.calculate_log_probs=False)."
+        )
 
 
 @VllmOmniPipelineBase.register("QwenImagePipeline", algorithm="diffusion_art")
@@ -32,7 +41,9 @@ class QwenImageDiffusionARTPipeline(QwenImagePipelineWithLogProb):
     trajectory runs at noise level 0 with the SDE window spanning all steps: ``all_latents``
     holds the ``T + 1`` fp32 states (the last one is the clean endpoint) and ``all_timesteps``
     the schedule. No log-probabilities are computed; the old-policy velocity at each state is
-    recomputed by the actor's ``old`` LoRA adapter.
+    recomputed by the actor's ``old`` LoRA adapter. A request for a non-zero noise level or log-probs is
+    rejected; the SDE window is replaced because here it is the capture range, which must cover every step
+    (``validate_trainer_config`` rejects an explicit ``sde_window_size`` / ``sde_window_range``).
     """
 
     supports_request_batch = QwenImagePipelineWithLogProb.supports_request_batch
@@ -57,7 +68,8 @@ class QwenImageDiffusionARTPipeline(QwenImagePipelineWithLogProb):
         generator,
         logprobs,
     ):
-        del noise_level, sde_window, logprobs
+        _require_ode(noise_level, logprobs)
+        del sde_window  # capture range, always the whole trajectory
         return super().diffuse(
             prompt_embeds,
             prompt_embeds_mask,
@@ -81,12 +93,8 @@ class QwenImageDiffusionARTPipeline(QwenImagePipelineWithLogProb):
     def prepare_encode(self, state: StepRequestState, **kwargs: Any) -> StepRequestState:
         """Force the step-execution path onto the same full-window ODE as :meth:`diffuse`."""
         state = super().prepare_encode(state, **kwargs)
+        _require_ode(state.noise_level, state.logprobs)
         state.noise_level = 0.0
         state.logprobs = False
         state.sde_window = (0, len(state.timesteps))
         return state
-
-    def step_scheduler(self, state: StepRequestState, noise_pred: torch.Tensor, **kwargs: Any) -> None:
-        if state.noise_level != 0.0 or state.logprobs:
-            raise RuntimeError("DiffusionART rollouts must be deterministic ODE trajectories without log-probs.")
-        super().step_scheduler(state, noise_pred, **kwargs)

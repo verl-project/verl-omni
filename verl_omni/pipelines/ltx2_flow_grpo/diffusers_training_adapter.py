@@ -15,7 +15,7 @@
 """Diffusers + FSDP2 training adapter for LTX-2.3 FlowGRPO."""
 
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import torch
 from diffusers import ModelMixin
@@ -36,6 +36,43 @@ def _single_int(value: torch.Tensor, name: str) -> int:
     if values.numel() == 0 or not torch.all(values == values[0]):
         raise ValueError(f"LTX-2.3 requires one shared {name} per micro-batch, got {values.tolist()}.")
     return int(values[0].item())
+
+
+def _joint_inputs(
+    model_config: DiffusionModelConfig, video_latents: torch.Tensor, audio_latents: torch.Tensor, timestep: torch.Tensor
+) -> dict[str, Any]:
+    """Transformer inputs shared by the positive and CFG-negative passes over one joint video/audio state."""
+    pipeline = model_config.pipeline
+    return {
+        "hidden_states": video_latents,
+        "audio_hidden_states": audio_latents,
+        "timestep": timestep[:, None].expand(-1, video_latents.shape[1]),
+        "audio_timestep": timestep[:, None].expand(-1, audio_latents.shape[1]),
+        "sigma": timestep,
+        "audio_sigma": timestep,
+        "num_frames": (pipeline.num_frames - 1) // 8 + 1,
+        "height": pipeline.height // 32,
+        "width": pipeline.width // 32,
+        "fps": pipeline.frame_rate,
+        "audio_num_frames": audio_latents.shape[1],
+        "return_dict": False,
+    }
+
+
+def _with_text_context(common: dict[str, Any], video_embeds: torch.Tensor, audio_embeds: torch.Tensor) -> dict:
+    """Attach one prompt's video and audio text context.
+
+    LTX connectors replace padding with learned registers. Match the native vLLM-Omni
+    ``ltx2_denoise.build_transformer_kwargs``: all context rows attend, regardless of the mask
+    used earlier by the Gemma text encoder.
+    """
+    return {
+        **common,
+        "encoder_hidden_states": video_embeds,
+        "audio_encoder_hidden_states": audio_embeds,
+        "encoder_attention_mask": None,
+        "audio_encoder_attention_mask": None,
+    }
 
 
 @DiffusionModelBase.register("LTX2Pipeline", algorithm="flow_grpo")
@@ -93,36 +130,9 @@ class LTX23FlowGRPO(DiffusionI2IModelBase):
         video_latents = current[:, :video_seq_len]
         audio_latents = current[:, video_seq_len:]
 
-        latent_frames = (model_config.pipeline.num_frames - 1) // 8 + 1
-        latent_height = model_config.pipeline.height // 32
-        latent_width = model_config.pipeline.width // 32
-        frame_rate = model_config.pipeline.frame_rate
-
-        common = {
-            "hidden_states": video_latents,
-            "audio_hidden_states": audio_latents,
-            "timestep": timestep[:, None].expand(-1, video_latents.shape[1]),
-            "audio_timestep": timestep[:, None].expand(-1, audio_latents.shape[1]),
-            "sigma": timestep,
-            "audio_sigma": timestep,
-            "num_frames": latent_frames,
-            "height": latent_height,
-            "width": latent_width,
-            "fps": frame_rate,
-            "audio_num_frames": audio_latents.shape[1],
-            "return_dict": False,
-            "_require_image_condition": getattr(model_config.pipeline, "task", None) == "ti2va",
-        }
-        # LTX connectors replace padding with learned registers. Match the native
-        # vLLM-Omni ltx2_denoise.build_transformer_kwargs: all context rows attend,
-        # regardless of the mask used earlier by the Gemma text encoder.
-        model_inputs = {
-            **common,
-            "encoder_hidden_states": prompt_embeds,
-            "audio_encoder_hidden_states": micro_batch["audio_prompt_embeds"],
-            "encoder_attention_mask": None,
-            "audio_encoder_attention_mask": None,
-        }
+        common = _joint_inputs(model_config, video_latents, audio_latents, timestep)
+        common["_require_image_condition"] = getattr(model_config.pipeline, "task", None) == "ti2va"
+        model_inputs = _with_text_context(common, prompt_embeds, micro_batch["audio_prompt_embeds"])
 
         guidance_scale = model_config.pipeline.guidance_scale or 1.0
         if guidance_scale <= 1.0:
@@ -131,13 +141,9 @@ class LTX23FlowGRPO(DiffusionI2IModelBase):
             raise ValueError("LTX-2.3 CFG requires negative prompt embeddings and attention masks.")
         if "negative_audio_prompt_embeds" not in micro_batch:
             raise KeyError("LTX-2.3 CFG requires `negative_audio_prompt_embeds` from rollout.")
-        negative_model_inputs = {
-            **common,
-            "encoder_hidden_states": negative_prompt_embeds,
-            "audio_encoder_hidden_states": micro_batch["negative_audio_prompt_embeds"],
-            "encoder_attention_mask": None,
-            "audio_encoder_attention_mask": None,
-        }
+        negative_model_inputs = _with_text_context(
+            common, negative_prompt_embeds, micro_batch["negative_audio_prompt_embeds"]
+        )
         return model_inputs, negative_model_inputs
 
     @classmethod

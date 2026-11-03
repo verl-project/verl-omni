@@ -24,7 +24,6 @@ from vllm_omni.diffusion.models.minimax_h3.denoise_loop import (
     minimax_h3_denoise_loop,
 )
 
-from verl_omni.pipelines.minimax_h3_diffusion_nft.common import AUDIO_ROW_WIDTH
 from verl_omni.pipelines.minimax_h3_diffusion_nft.vllm_omni_rollout_adapter import MiniMaxH3DiffusionNFTPipeline
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
 
@@ -118,26 +117,8 @@ class MiniMaxH3DiffusionARTPipeline(MiniMaxH3DiffusionNFTPipeline):
         video_latent, audio_latent = self._unpack_denoised_rows(
             branch, video_rows, audio_rows, latent_t=latent_t, latent_h=latent_h, latent_w=latent_w, audio_t=audio_t
         )
-        # Same capture the DiffusionNFT adapter builds for t2va, so ``forward`` publishes the identical metadata.
-        self._nft_capture = {
-            "video_latent": video_latent,
-            "audio_latent": audio_latent,
-            "condition_video_rows": video_latent.new_zeros((0, 96), dtype=torch.float32),
-            "condition_audio_rows": audio_latent.new_zeros((0, AUDIO_ROW_WIDTH), dtype=torch.float32),
-            "keyframe_frame_indices": [],
-            "ref_block_meta": None,
-            "ref_block_count": 0,
-            "task": task,
-            "text_embeddings": kwargs.get("text_embeddings"),
-            "text_tags": kwargs.get("text_tags"),
-            "latent_t": latent_t,
-            "latent_h": latent_h,
-            "latent_w": latent_w,
-            "audio_t": audio_t,
-            "num_steps": int(kwargs.get("num_steps", 50)),
-            "video_shift": float(kwargs.get("video_shift", self.default_video_shift)),
-            "base_schedule": kwargs.get("base_schedule"),
-        }
+        # The DiffusionNFT adapter's t2va capture, so ``forward`` publishes the identical metadata.
+        self._nft_capture = self._capture_for_training(kwargs, video_latent, audio_latent, task=task)
         schedule = torch.tensor([sigmas_video[:-1], sigmas_audio[:-1]], dtype=torch.float32).T * 1000.0  # (T, 2)
         self._art_trajectory = {
             "all_latents": torch.stack(states, dim=0).unsqueeze(0).cpu(),

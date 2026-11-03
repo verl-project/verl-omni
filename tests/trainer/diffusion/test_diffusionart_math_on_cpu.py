@@ -361,3 +361,15 @@ def test_high_noise_positions_match_the_reference_selection():
     assert seen == {(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)}
     with pytest.raises(ValueError, match="Cannot choose"):
         art_high_noise_positions(0, 1, pool=1)
+
+
+@pytest.mark.parametrize("bad_sigma", [1.5, -0.1, float("nan")])
+def test_flow_times_outside_unit_interval_are_rejected(bad_sigma):
+    """A broken schedule must raise instead of deflating the drift score below the mask threshold."""
+    sigma = torch.tensor([0.9, bad_sigma])
+    sigma_next = torch.tensor([0.8, -0.5])
+    with pytest.raises(ValueError, match=r"sigma in \[0, 1\]"):
+        art_reference_drift(torch.ones(2), sigma, sigma_next, 0.8)
+    shape = (2, C, H, W)
+    with pytest.raises(ValueError, match=r"sigma in \[0, 1\]"):
+        art_loss(torch.zeros(shape), torch.zeros(shape), torch.zeros(shape), sigma, sigma_next)

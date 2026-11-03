@@ -1403,6 +1403,34 @@ class OmniNFTLoss(DiffusionNFTLoss):
         return batch
 
 
+def _old_adapter_config_problems(config: Any, algorithm: str, label: str, kl_hint: str) -> list[str]:
+    """Start-up rules shared by the losses that roll out and train against the LoRA ``old`` adapter.
+
+    DGPO, AWM and DiffusionART select their adapters through ``actor_rollout_ref.model.algorithm``, train LoRA
+    adapters, roll out with the ``old`` adapter, carry no actor KL term and run the unstaged NFT engine path.
+    """
+    actor_cfg = config.actor_rollout_ref.actor
+    model_cfg = config.actor_rollout_ref.model
+    rollout_cfg = config.actor_rollout_ref.rollout
+    problems = []
+    if model_cfg.get("algorithm", None) != algorithm:
+        problems.append(
+            f"actor_rollout_ref.model.algorithm must be {algorithm} when diffusion_loss.loss_mode is {algorithm}, got "
+            f"{model_cfg.get('algorithm', None)}"
+        )
+    if not int(model_cfg.get("lora_rank", 0) or 0) > 0:
+        problems.append(f"actor_rollout_ref.model.lora_rank must be > 0 ({label} trains LoRA adapters)")
+    if "old" not in tuple(model_cfg.get("policy_state_adapters", ("default",))):
+        problems.append('actor_rollout_ref.model.policy_state_adapters must include "old"')
+    if rollout_cfg.get("rollout_adapter", None) != "old":
+        problems.append("actor_rollout_ref.rollout.rollout_adapter must be old")
+    if actor_cfg.get("use_kl_loss", False):
+        problems.append(f"actor_rollout_ref.actor.use_kl_loss must be False ({kl_hint})")
+    if actor_cfg.get("enable_timestep_staging", False):
+        problems.append("actor_rollout_ref.actor.enable_timestep_staging must be False")
+    return problems
+
+
 @register_diffusion_loss("dgpo")
 class DGPOLoss(DiffusionLossFn):
     """DGPO group-level direct preference objective (Luo et al., arXiv:2510.08425).
@@ -1539,7 +1567,6 @@ class DGPOLoss(DiffusionLossFn):
         timesteps that fit the rollout schedule.
         """
         actor_cfg = config.actor_rollout_ref.actor
-        model_cfg = config.actor_rollout_ref.model
         rollout_cfg = config.actor_rollout_ref.rollout
         n = int(rollout_cfg.n)
         micro = actor_cfg.get("ppo_micro_batch_size_per_gpu", None)
@@ -1550,12 +1577,7 @@ class DGPOLoss(DiffusionLossFn):
         if use_v1:
             mode = OmegaConf.select(config, "trainer.v1.trainer_mode", default="sync")
             update_prompts //= int(OmegaConf.select(config, f"trainer.v1.{mode}.parameter_sync_step", default=1) or 1)
-        problems = []
-        if model_cfg.get("algorithm", None) != "dgpo":
-            problems.append(
-                "actor_rollout_ref.model.algorithm must be dgpo when diffusion_loss.loss_mode is dgpo, got "
-                f"{model_cfg.get('algorithm', None)}"
-            )
+        problems = _old_adapter_config_problems(config, "dgpo", "DGPO", "use diffusion_loss.ref_kl_coef")
         if micro is None or int(micro) % n != 0:
             problems.append(f"ppo_micro_batch_size_per_gpu={micro} must be a multiple of rollout.n={n}")
         if int(actor_cfg.ppo_mini_batch_size) % dp_size != 0:
@@ -1565,16 +1587,6 @@ class DGPOLoss(DiffusionLossFn):
             problems.append(f"the {update_prompts} prompts per actor update must be divisible by dp size {dp_size}")
         if actor_cfg.get("use_dynamic_bsz", False):
             problems.append("use_dynamic_bsz must be False")
-        if not int(model_cfg.get("lora_rank", 0) or 0) > 0:
-            problems.append("actor_rollout_ref.model.lora_rank must be > 0 (DGPO trains LoRA adapters)")
-        if "old" not in tuple(model_cfg.get("policy_state_adapters", ("default",))):
-            problems.append('actor_rollout_ref.model.policy_state_adapters must include "old"')
-        if rollout_cfg.get("rollout_adapter", None) != "old":
-            problems.append("actor_rollout_ref.rollout.rollout_adapter must be old")
-        if actor_cfg.get("use_kl_loss", False):
-            problems.append("actor_rollout_ref.actor.use_kl_loss must be False (use diffusion_loss.ref_kl_coef)")
-        if actor_cfg.get("enable_timestep_staging", False):
-            problems.append("actor_rollout_ref.actor.enable_timestep_staging must be False")
         if use_v1 and not OmegaConf.select(config, "trainer.v1.sampler.drop_incomplete_groups", default=False):
             problems.append("trainer.v1.sampler.drop_incomplete_groups must be True so groups arrive complete")
         num_steps = OmegaConf.select(rollout_cfg, "pipeline.num_inference_steps", default=None)
@@ -1803,25 +1815,8 @@ class AWMLoss(DiffusionLossFn):
         when this loss is selected. The staged NFT engine path expects a per-step ``reward_prob`` tensor that
         AWM does not produce.
         """
-        actor_cfg = config.actor_rollout_ref.actor
-        model_cfg = config.actor_rollout_ref.model
         rollout_cfg = config.actor_rollout_ref.rollout
-        problems = []
-        if model_cfg.get("algorithm", None) != "awm":
-            problems.append(
-                "actor_rollout_ref.model.algorithm must be awm when diffusion_loss.loss_mode is awm, got "
-                f"{model_cfg.get('algorithm', None)}"
-            )
-        if not int(model_cfg.get("lora_rank", 0) or 0) > 0:
-            problems.append("actor_rollout_ref.model.lora_rank must be > 0 (AWM trains LoRA adapters)")
-        if "old" not in tuple(model_cfg.get("policy_state_adapters", ("default",))):
-            problems.append('actor_rollout_ref.model.policy_state_adapters must include "old"')
-        if rollout_cfg.get("rollout_adapter", None) != "old":
-            problems.append("actor_rollout_ref.rollout.rollout_adapter must be old")
-        if actor_cfg.get("use_kl_loss", False):
-            problems.append("actor_rollout_ref.actor.use_kl_loss must be False (use diffusion_loss.ref_kl_coef)")
-        if actor_cfg.get("enable_timestep_staging", False):
-            problems.append("actor_rollout_ref.actor.enable_timestep_staging must be False")
+        problems = _old_adapter_config_problems(config, "awm", "AWM", "use diffusion_loss.ref_kl_coef")
         num_steps = OmegaConf.select(rollout_cfg, "pipeline.num_inference_steps", default=None)
         timestep_range = OmegaConf.select(config, "algorithm.train_timestep_range", default=None)
         count = OmegaConf.select(config, "algorithm.train_timestep_count", default=None)
@@ -2167,20 +2162,8 @@ class DiffusionARTLoss(DiffusionLossFn):
         DiffusionLossFn.validate_trainer_config(config)
         algorithm_cfg = config.algorithm
         actor_cfg = config.actor_rollout_ref.actor
-        model_cfg = config.actor_rollout_ref.model
         rollout_cfg = config.actor_rollout_ref.rollout
-        problems = []
-        if model_cfg.get("algorithm", None) != "diffusion_art":
-            problems.append(
-                "actor_rollout_ref.model.algorithm must be diffusion_art when diffusion_loss.loss_mode is "
-                f"diffusion_art, got {model_cfg.get('algorithm', None)}"
-            )
-        if not int(model_cfg.get("lora_rank", 0) or 0) > 0:
-            problems.append("actor_rollout_ref.model.lora_rank must be > 0 (DiffusionART trains LoRA adapters)")
-        if "old" not in tuple(model_cfg.get("policy_state_adapters", ("default",))):
-            problems.append('actor_rollout_ref.model.policy_state_adapters must include "old"')
-        if rollout_cfg.get("rollout_adapter", None) != "old":
-            problems.append("actor_rollout_ref.rollout.rollout_adapter must be old")
+        problems = _old_adapter_config_problems(config, "diffusion_art", "DiffusionART", "DiffusionART has no KL term")
         if algorithm_cfg.get("old_policy_decay_schedule", "copy") != "copy":
             problems.append(
                 "algorithm.old_policy_decay_schedule must be copy (the rollout policy is the exact old policy)"
@@ -2201,12 +2184,19 @@ class DiffusionARTLoss(DiffusionLossFn):
                 "(each group is split into disjoint win/lose pairs)"
             )
         noise_level = OmegaConf.select(rollout_cfg, "algo.noise_level", default=None)
-        if noise_level is not None and float(noise_level) != 0.0:
+        if noise_level is None or float(noise_level) != 0.0:
+            # null is not accepted either: some rollout adapters substitute their own default noise level for it.
             problems.append("actor_rollout_ref.rollout.algo.noise_level must be 0.0 (DiffusionART rolls out an ODE)")
-        if actor_cfg.get("use_kl_loss", False):
-            problems.append("actor_rollout_ref.actor.use_kl_loss must be False (DiffusionART has no KL term)")
-        if actor_cfg.get("enable_timestep_staging", False):
-            problems.append("actor_rollout_ref.actor.enable_timestep_staging must be False")
+        if rollout_cfg.get("calculate_log_probs", False):
+            problems.append(
+                "actor_rollout_ref.rollout.calculate_log_probs must be False (DiffusionART uses no likelihoods)"
+            )
+        for key in ("sde_window_size", "sde_window_range"):
+            if OmegaConf.select(rollout_cfg, f"algo.{key}", default=None) is not None:
+                problems.append(
+                    f"actor_rollout_ref.rollout.algo.{key} must be null (the DiffusionART rollout records every "
+                    "ODE transition, so an SDE window would be ignored)"
+                )
         if bool(OmegaConf.select(config, "trainer.use_v1", default=False)):
             if not OmegaConf.select(config, "trainer.v1.sampler.drop_incomplete_groups", default=False):
                 problems.append("trainer.v1.sampler.drop_incomplete_groups must be True so groups arrive complete")
@@ -2238,14 +2228,9 @@ class DiffusionARTLoss(DiffusionLossFn):
                 )
         # The training rollout may only use CFG: the training adapter recomputes v_old with CFG alone, so STG,
         # modality and rescale guidance must stay neutral there (validation rollouts are free to use them).
-        for key, neutral in (
-            ("video_stg_scale", 0.0),
-            ("audio_stg_scale", 0.0),
-            ("video_modality_scale", 1.0),
-            ("audio_modality_scale", 1.0),
-            ("video_rescale_scale", 0.0),
-            ("audio_rescale_scale", 0.0),
-        ):
+        from verl_omni.pipelines.ltx2_flow_grpo.common import LTX_NEUTRAL_GUIDANCE
+
+        for key, neutral in LTX_NEUTRAL_GUIDANCE.items():
             value = OmegaConf.select(config, f"actor_rollout_ref.rollout.pipeline.{key}", default=None)
             if value is not None and float(value) != neutral:
                 problems.append(
@@ -2271,10 +2256,8 @@ class DiffusionARTLoss(DiffusionLossFn):
                 f"{actor_cfg.ppo_mini_batch_size} x rollout.n {n} / dp {dp_size}), which must be divisible by "
                 f"ppo_micro_batch_size_per_gpu={micro}; set it to a divisor of {per_gpu} or raise ppo_mini_batch_size"
             )
+        # Only separate_async splits a rollout batch across parameter syncs, and it is rejected above.
         update_prompts = int(config.data.train_batch_size)
-        if bool(OmegaConf.select(config, "trainer.use_v1", default=False)):
-            mode = OmegaConf.select(config, "trainer.v1.trainer_mode", default="sync")
-            update_prompts //= int(OmegaConf.select(config, f"trainer.v1.{mode}.parameter_sync_step", default=1) or 1)
         mini = int(actor_cfg.ppo_mini_batch_size)
         num_updates = update_prompts // mini if update_prompts % mini == 0 else 1
         if algorithm_cfg.get("art_split_groups_across_updates", True) and num_updates > 1:
@@ -2341,7 +2324,9 @@ class DiffusionARTLoss(DiffusionLossFn):
                 "reward": float(reward_tensor[i]),
             }
             if extra_info is not None and isinstance(extra_info[i], dict) and "index" in extra_info[i]:
-                row["prompt_index"] = extra_info[i]["index"]
+                index = extra_info[i]["index"]
+                # Dataset indices may be numpy scalars or other non-JSON types; keep ints, stringify the rest.
+                row["prompt_index"] = int(index) if isinstance(index, int | np.integer) else str(index)
             if components is not None:
                 scores, names = components
                 row["reward_raw"] = {name: float(scores[i, k]) for k, name in enumerate(names)}
@@ -2629,7 +2614,7 @@ class DiffusionARTLoss(DiffusionLossFn):
                     cls._sample_records(batch, reward_tensor, group_index, components, standardized, records, anchors),
                     seed=step_seed,
                 )
-            except OSError as exc:  # diagnostics must never abort a training step
+            except (OSError, TypeError, ValueError) as exc:  # diagnostics must never abort a training step
                 logger.warning("DiffusionART: could not write per-sample records to %s: %s", sample_log_dir, exc)
 
         pool = num_steps - 1 if algorithm_cfg.get("art_exclude_final_step", True) and num_steps > 1 else num_steps

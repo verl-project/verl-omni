@@ -20,20 +20,18 @@ from diffusers import ModelMixin
 from tensordict import TensorDict
 
 from verl_omni.pipelines.ltx2_flow_grpo.common import apply_x0_cfg
-from verl_omni.pipelines.ltx2_flow_grpo.diffusers_training_adapter import LTX23FlowGRPO
+from verl_omni.pipelines.ltx2_flow_grpo.diffusers_training_adapter import (
+    LTX23FlowGRPO,
+    _joint_inputs,
+    _single_int,
+    _with_text_context,
+)
 from verl_omni.pipelines.model_base import DiffusionModelBase
 from verl_omni.workers.config import DiffusionModelConfig
 
 from .config import ltx_guidance_scales
 
 __all__ = ["LTX23DiffusionART"]
-
-
-def _shared_int(value: torch.Tensor, name: str) -> int:
-    values = value.reshape(-1)
-    if values.numel() == 0 or not torch.all(values == values[0]):
-        raise ValueError(f"LTX-2.3 DiffusionART requires one shared {name} per micro-batch, got {values.tolist()}.")
-    return int(values[0].item())
 
 
 @DiffusionModelBase.register("LTX2Pipeline", algorithm="diffusion_art")
@@ -72,46 +70,19 @@ class LTX23DiffusionART(LTX23FlowGRPO):
                 "LTX-2.3 DiffusionART supports text-to-audio-video only (no TI2VA condition rows)."
             )
 
-        video_seq_len = _shared_int(micro_batch["video_seq_len"], "video_seq_len")
-        video_latents = latents[:, :video_seq_len]
-        audio_latents = latents[:, video_seq_len:]
-        pipeline = model_config.pipeline
-        common = {
-            "hidden_states": video_latents,
-            "audio_hidden_states": audio_latents,
-            "timestep": timesteps[:, None].expand(-1, video_latents.shape[1]),
-            "audio_timestep": timesteps[:, None].expand(-1, audio_latents.shape[1]),
-            "sigma": timesteps,
-            "audio_sigma": timesteps,
-            "num_frames": (pipeline.num_frames - 1) // 8 + 1,
-            "height": pipeline.height // 32,
-            "width": pipeline.width // 32,
-            "fps": pipeline.frame_rate,
-            "audio_num_frames": audio_latents.shape[1],
-            "return_dict": False,
-        }
-        # LTX connectors replace padding with learned registers: all context rows attend (as in vLLM-Omni).
-        model_inputs = {
-            **common,
-            "encoder_hidden_states": prompt_embeds,
-            "audio_encoder_hidden_states": micro_batch["audio_prompt_embeds"],
-            "encoder_attention_mask": None,
-            "audio_encoder_attention_mask": None,
-        }
-        video_scale, audio_scale = ltx_guidance_scales(pipeline)
+        video_seq_len = _single_int(micro_batch["video_seq_len"], "video_seq_len")
+        common = _joint_inputs(model_config, latents[:, :video_seq_len], latents[:, video_seq_len:], timesteps)
+        model_inputs = _with_text_context(common, prompt_embeds, micro_batch["audio_prompt_embeds"])
+        video_scale, audio_scale = ltx_guidance_scales(model_config.pipeline)
         if video_scale <= 1.0 and audio_scale <= 1.0:
             return model_inputs, None
         if negative_prompt_embeds is None or "negative_audio_prompt_embeds" not in micro_batch:
             raise ValueError(
                 "LTX-2.3 DiffusionART CFG requires negative video and audio prompt embeddings from rollout."
             )
-        negative_model_inputs = {
-            **common,
-            "encoder_hidden_states": negative_prompt_embeds,
-            "audio_encoder_hidden_states": micro_batch["negative_audio_prompt_embeds"],
-            "encoder_attention_mask": None,
-            "audio_encoder_attention_mask": None,
-        }
+        negative_model_inputs = _with_text_context(
+            common, negative_prompt_embeds, micro_batch["negative_audio_prompt_embeds"]
+        )
         return model_inputs, negative_model_inputs
 
     @classmethod

@@ -18,20 +18,11 @@ from __future__ import annotations
 import torch
 from vllm_omni.diffusion.request import OmniDiffusionRequest
 
-from verl_omni.pipelines.ltx2_flow_grpo.common import normalize_ltx_output_type
+from verl_omni.pipelines.ltx2_flow_grpo.common import LTX_NEUTRAL_GUIDANCE, normalize_ltx_output_type
 from verl_omni.pipelines.ltx2_flow_grpo.vllm_omni_rollout_adapter import LTX23PipelineWithLogProb
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
 
 __all__ = ["LTX23DiffusionARTPipeline"]
-
-_NEUTRAL_GUIDANCE = {
-    "video_stg_scale": 0.0,
-    "audio_stg_scale": 0.0,
-    "video_modality_scale": 1.0,
-    "audio_modality_scale": 1.0,
-    "video_rescale_scale": 0.0,
-    "audio_rescale_scale": 0.0,
-}
 
 
 @VllmOmniPipelineBase.register("LTX2Pipeline", algorithm="diffusion_art")
@@ -63,21 +54,20 @@ class LTX23DiffusionARTPipeline(LTX23PipelineWithLogProb):
             extra_args[key] = float(configured) if configured is not None else guidance_scale
         # Unset keys would fall back to the official LTX-2.3 guidance (STG 1.0, modality 3.0, rescale 0.7), which the
         # CFG-only training forward cannot reproduce; default them to neutral as the FlowGRPO adapter does.
-        for key, neutral in _NEUTRAL_GUIDANCE.items():
+        for key, neutral in LTX_NEUTRAL_GUIDANCE.items():
             if extra_args.get(key) is None:  # pipeline configs forward unset fields as None
                 extra_args[key] = neutral
         task = extra_args.get("task")
         if task not in (None, "t2va"):
             raise NotImplementedError(f"LTX-2.3 DiffusionART supports text-to-audio-video only, got task={task!r}.")
         req.sampling_params.extra_args = extra_args
+        # The parent's per-step scheduler call reads these (its defaults are noise 0.8 / cps / log-probs), and every
+        # step is "selected" here, so they make each transition a deterministic Euler step without log-probs; the
+        # window and seed fields only feed the parent's ``_select_sde_steps``, which this class overrides.
         self._flow_grpo_noise_level = 0.0
         self._flow_grpo_sde_type = "sde"
-        self._flow_grpo_window_size = None
-        self._flow_grpo_window_range = None
-        self._flow_grpo_sde_contiguous = True
         self._flow_grpo_logprobs = False
         self._flow_grpo_task = task
-        self._flow_grpo_seed = 0
 
     def _select_sde_steps(self, num_steps: int, device: torch.device) -> list[int]:
         del device
