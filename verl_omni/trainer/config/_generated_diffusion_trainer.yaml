@@ -713,6 +713,15 @@ trainer:
       ratio_lower: 0.5
       ratio_upper: 2.0
       max_staleness: null
+    performance_watchdog:
+      enabled: false
+      warmup_steps: 5
+      baseline_window_size: 20
+      minimum_observations: 8
+      regression_window_size: 3
+      regression_ratio: 1.25
+      cooldown_steps: 20
+      max_phase_deltas: 3
     trainer_mode: sync
     sync: {}
     colocate_async:

@@ -267,6 +267,33 @@ trainer:
       # Optional maximum trajectory staleness in model versions; null disables this rule.
       max_staleness: null
 
+    # Automatically request one bounded profile after a sustained comparable step-time slowdown.
+    performance_watchdog:
+
+      # Disabled by default; supported only for diffusion V1 sync with a dynamic profiler backend.
+      enabled: false
+
+      # Completed steps ignored after startup or a workload-signature change.
+      warmup_steps: 5
+
+      # Maximum number of completed comparable steps retained for the baseline.
+      baseline_window_size: 20
+
+      # Minimum baseline samples required before testing for a regression.
+      minimum_observations: 8
+
+      # Number of consecutive current steps that must each exceed the baseline threshold.
+      regression_window_size: 3
+
+      # Trigger when the current median is at least this multiple of the baseline median.
+      regression_ratio: 1.25
+
+      # Minimum global training steps between profile-triggered alerts.
+      cooldown_steps: 20
+
+      # Maximum number of shared phase deltas included in the profile report.
+      max_phase_deltas: 3
+
     # Trainer mode: "sync", "separate_async".
     trainer_mode: sync
 
