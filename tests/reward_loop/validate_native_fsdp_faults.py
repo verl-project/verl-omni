@@ -23,6 +23,7 @@ import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta
 from pathlib import Path
 
 import ray
@@ -41,9 +42,14 @@ class FaultRank(native_fsdp.PickScoreFSDPRank):
     def __init__(self, model_path, collective_timeout=30):
         self.fault = json.loads((Path(model_path) / "fault.json").read_text())
         self.fault_rank = int(os.environ["RANK"])
+        (Path(self.fault["markers"]) / f"pid{self.fault_rank}").write_text(str(os.getpid()))
         if self.fault["mode"] == "init" and self.fault_rank == self.fault["rank"]:
+            (Path(self.fault["markers"]) / f"constructor{self.fault_rank}").write_text("injected constructor failure")
             raise RuntimeError("injected rank initialization failure")
-        super().__init__(model_path, collective_timeout)
+        super().__init__(model_path, 90)
+        if self.fault["mode"] == "nccl_timeout":
+            # Separate process startup from the short, actual collective deadline.
+            torch.distributed.distributed_c10d._set_pg_timeout(timedelta(seconds=collective_timeout))
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     def wake_up(self):
@@ -55,6 +61,7 @@ class FaultRank(native_fsdp.PickScoreFSDPRank):
             (marker / f"rank{self.fault_rank}").write_text("after root FSDP pre-forward/all-gather")
             if self.fault["mode"] == "hold" or self.fault_rank == self.fault["rank"]:
                 if self.fault["mode"] == "forward_error":
+                    wait_markers(marker)
                     raise RuntimeError("injected rank forward failure")
                 if self.fault["mode"] in {"hold", "kill", "hang", "nccl_timeout"}:
                     deadline = time.monotonic() + 60
@@ -141,6 +148,7 @@ def main():
         },
     }
     replica = None
+    owned = []
     error = None
     image = Image.new("RGB", (224, 224), color="blue")
     try:
@@ -164,10 +172,11 @@ def main():
                 str(checkpoint),
                 args.processor_path,
                 timeout=120,
-                collective_timeout=5 if mode == "nccl_timeout" else 20,
+                collective_timeout=5 if mode == "nccl_timeout" else 90,
                 bundle_indices=indices,
                 _rank_class=FaultRank,
             )
+            owned.extend(replica.worker_group.workers)
             started = time.monotonic()
             phase = "wake_up"
             try:
@@ -189,6 +198,14 @@ def main():
                 elapsed = time.monotonic() - started
                 assert replica._closed and replica._termination_error is None
                 assert elapsed < 130
+                cause = str(exc.__cause__).lower()
+                if mode == "missing":
+                    assert "model.safetensors" in cause and ("no file" in cause or "not found" in cause)
+                elif mode == "corrupt":
+                    assert "safetensor" in cause and ("header" in cause or "deserializ" in cause)
+                elif mode == "init":
+                    assert (markers / f"constructor{rank}").exists()
+                    assert "injected rank initialization failure" in cause
                 if mode in {"forward_error", "kill", "hang", "nccl_timeout"}:
                     assert phase == "infer"
                     assert all((markers / f"rank{index}").exists() for index in (0, 1))
@@ -196,6 +213,19 @@ def main():
                     assert isinstance(exc.__cause__, ray.exceptions.GetTimeoutError)
                 elif mode == "nccl_timeout":
                     assert isinstance(exc.__cause__, ray.exceptions.RayActorError | ray.exceptions.RayTaskError)
+                    logs = Path(ray._private.worker._global_node.get_logs_dir_path())
+                    evidence = []
+                    for pid_file in markers.glob("pid*"):
+                        for log in logs.glob(f"worker-*-{pid_file.read_text()}.err"):
+                            evidence.extend(
+                                {"log": str(log), "line": line}
+                                for line in log.read_text(errors="replace").splitlines()
+                                if "Watchdog caught collective operation timeout:" in line
+                                and "Timeout(ms)=5000" in line
+                                and "ALLGATHER" in line
+                            )
+                    assert evidence, "Require the actual owned-rank NCCL watchdog timeout, not a generic actor exit"
+                    report["nccl_timeout_evidence"] = evidence
                 for actor in replica.worker_group.workers:
                     try:
                         ray.get(actor.status.remote(), timeout=5)
@@ -209,6 +239,7 @@ def main():
                         "error": type(exc).__name__,
                         "phase": phase,
                         "cause_type": type(exc.__cause__).__name__,
+                        "cause_message": str(exc.__cause__),
                         "seconds": elapsed,
                         "forward_markers": [p.name for p in markers.glob("rank*")],
                         "all_ranks_dead": True,
@@ -225,6 +256,7 @@ def main():
         replica = native_fsdp.build_replica(
             pool, str(healthy_checkpoint), args.processor_path, bundle_indices=indices, _rank_class=FaultRank
         )
+        owned.extend(replica.worker_group.workers)
         asleep = []
         previous = None
         for _ in range(20):
@@ -259,6 +291,7 @@ def main():
             replica = native_fsdp.build_replica(
                 pool, str(checkpoint), args.processor_path, bundle_indices=indices, _rank_class=FaultRank
             )
+            owned.extend(replica.worker_group.workers)
             replica.wake_up()
             lock, attempted = threading.Lock(), threading.Event()
 
@@ -286,6 +319,14 @@ def main():
             replica.close()
             replica = None
             report[f"concurrent_{method}_drained"] = True
+        for actor in owned:
+            try:
+                ray.get(actor.status.remote(), timeout=5)
+            except ray.exceptions.RayActorError:
+                continue
+            raise AssertionError("Owned rank survived before Ray shutdown")
+        report["owned_rank_actors"] = len(owned)
+        report["all_owned_actors_dead_before_ray_shutdown"] = True
         report["passed"] = True
     except BaseException as exc:
         error = exc
