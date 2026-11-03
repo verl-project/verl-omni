@@ -24,6 +24,7 @@ from typing import Any, Callable, Iterator, Optional
 
 import torch
 import torch.distributed
+from accelerate import init_empty_weights
 from tensordict import TensorDict
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp.api import FullStateDictConfig, ShardedStateDictConfig, StateDictType
@@ -296,12 +297,18 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
         with init_context(), warnings.catch_warnings():
             warnings.simplefilter("ignore")
 
-            module = AutoModel.from_pretrained(
-                self.model_config.config_path or self.model_config.local_path,
-                torch_dtype=torch_dtype,
-                trust_remote_code=self.model_config.trust_remote_code,
-                subfolder="" if self.model_config.config_path else self.model_config.transformer_subfolder,
-            )
+            load_path = self.model_config.config_path or self.model_config.local_path
+            load_kwargs = {
+                "trust_remote_code": self.model_config.trust_remote_code,
+                "subfolder": "" if self.model_config.config_path else self.model_config.transformer_subfolder,
+            }
+            # Ranks on meta get their weights from rank 0 when FSDP wraps the module,
+            # but diffusers' from_pretrained still reads every checkpoint tensor
+            # under init_empty_weights. from_config reads only the config JSON.
+            if init_context is init_empty_weights:
+                module = AutoModel.from_config(load_path, **load_kwargs)
+            else:
+                module = AutoModel.from_pretrained(load_path, torch_dtype=torch_dtype, **load_kwargs)
             try:
                 module.set_attention_backend(self.model_config.attn_backend)
             except Exception as e:
