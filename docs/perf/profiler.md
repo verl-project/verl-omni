@@ -1,6 +1,6 @@
 # Profiling FlowGRPO / diffusion training in VeRL-Omni
 
-Last updated: 11/02/2026.
+Last updated: 11/03/2026.
 
 VeRL-Omni reuses the profiler subsystem from upstream
 [verl](https://github.com/verl-project/verl) (`verl.utils.profiler`) and exposes
@@ -497,8 +497,10 @@ the actor's `analysis=True` does not configure rollout parsing.
 ## Lightweight profiling recipe
 
 Profiling a full FlowGRPO step produces a large trace that is slow to open.
-The SD3.5-Medium V1 launcher below profiles one lightweight FlowGRPO OCR step:
-4 prompts, 2 rollouts per prompt, 4 denoising steps, and 256px images. It reuses
+The SD3.5-Medium V1 launcher below profiles lightweight FlowGRPO OCR steps —
+4 prompts, 2 rollouts per prompt, 4 denoising steps, and 256px images — after
+a warmup: it runs 5 training steps, leaves steps 1-2 unprofiled as warmup, and
+records only steps 3 and 4. It reuses
 the existing V1 sync recipe and collects actor rank 0 and rollout rank 0 using
 PyTorch. It needs two actor/rollout GPUs and one OCR reward-model GPU; reward
 inference still runs, but this launcher does not collect reward-model traces.
@@ -516,15 +518,16 @@ PROFILE_DIR=./outputs/profile_sd35_v1 \
 bash examples/flowgrpo_trainer/sd35/profile_sd35_medium_ocr_lora_v1.sh
 ```
 
-Traces are written under `PROFILE_DIR` (default `./outputs/profile_sd35_v1`).
-Open the actor Chrome trace in Perfetto or `chrome://tracing`; it should contain
+Traces are written under `PROFILE_DIR` (default `./outputs/profile_sd35_v1`);
+each recorded step writes its own trace. Open an actor Chrome trace in Perfetto
+or `chrome://tracing`; it should contain
 `actor_update` and `mini_batch0`/`mini_batch1` ranges. Rollout traces come from
 the inference engine in separate processes. Check that both actor and rollout
 artifacts contain CPU/CUDA events. A successful training exit alone does not
 establish that a trace was collected.
 
-Hydra overrides passed after the script name take precedence. For a warmed-up
-sample, use `trainer.total_training_steps=2 'global_profiler.steps=[2]'`.
+Hydra overrides passed after the script name take precedence. For a single
+cold sample, use `trainer.total_training_steps=1 'global_profiler.steps=[1]'`.
 For actor-only collection, use `actor_rollout_ref.rollout.profiler.enable=False`.
 
 ### Selecting update mini-batches

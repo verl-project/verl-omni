@@ -56,7 +56,7 @@ def test_profile_defaults_select_v1_and_both_collectors(launch, tmp_path):
     assert settings["actor_rollout_ref.model.path"] == "stabilityai/stable-diffusion-3.5-medium"
     assert settings["data.train_files"] == (tmp_path / "OCR data/data/ocr/sd3/train.parquet").as_posix()
     assert settings["global_profiler.tool"] == "torch"
-    assert settings["global_profiler.steps"] == "[1]"
+    assert settings["global_profiler.steps"] == "[3,4]"
     assert settings["global_profiler.profile_continuous_steps"] == "False"
     for role, discrete in [("actor", "False"), ("rollout", "True")]:
         prefix = f"actor_rollout_ref.{role}.profiler"
@@ -64,7 +64,7 @@ def test_profile_defaults_select_v1_and_both_collectors(launch, tmp_path):
         assert settings[f"{prefix}.all_ranks"] == "False"
         assert settings[f"{prefix}.ranks"] == "[0]"
         assert settings[f"{prefix}.tool_config.torch.discrete"] == discrete
-    assert settings["trainer.total_training_steps"] == "1"
+    assert settings["trainer.total_training_steps"] == "5"
     assert settings["trainer.save_freq"] == settings["trainer.test_freq"] == "-1"
     assert settings["trainer.resume_mode"] == "disable"
     assert settings["trainer.logger"] == "[console]"

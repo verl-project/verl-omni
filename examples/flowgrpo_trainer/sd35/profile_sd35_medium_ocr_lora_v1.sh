@@ -20,13 +20,13 @@ exec bash "$SCRIPT_DIR/run_sd35_medium_ocr_lora_v1.sh" \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=2 \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=2 \
     trainer.experiment_name=sd35_medium_ocr_lora_v1_profile \
-    trainer.total_training_steps=1 \
+    trainer.total_training_steps=5 \
     trainer.save_freq=-1 \
     trainer.test_freq=-1 \
     trainer.resume_mode=disable \
     'trainer.logger=[console]' \
     global_profiler.tool=torch \
-    'global_profiler.steps=[1]' \
+    'global_profiler.steps=[3,4]' \
     global_profiler.profile_continuous_steps=False \
     "global_profiler.save_path=$PROFILE_DIR" \
     actor_rollout_ref.actor.profiler.enable=True \
