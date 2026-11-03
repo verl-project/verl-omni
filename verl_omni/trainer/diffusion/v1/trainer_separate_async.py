@@ -51,7 +51,7 @@ from enum import Enum
 
 import ray
 import transfer_queue as tq
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 from transfer_queue import KVBatchMeta
 from verl import DataProto
 from verl.checkpoint_engine import CheckpointEngineManager
@@ -184,7 +184,13 @@ class PolicyGradientDiffusionTrainerV1SeparateAsync(PolicyGradientDiffusionTrain
         self._scaling_factor = (hybrid_gpus + standalone_gpus) / standalone_gpus
 
     def _compute_old_log_prob(self, data: DataProto) -> DataProto:
-        """Compute every local update's proximal log-probs with cycle-start weights."""
+        """Compute every local update's proximal log-probs with cycle-start weights.
+
+        Not annotated directly: the base method already carries the
+        ``old_log_prob`` annotation and this override reaches it through
+        ``super()``, so skipping and dumping happen exactly once per call while
+        the snapshot lifecycle here always runs.
+        """
         if self.parameter_sync_step == 1:
             return super()._compute_old_log_prob(data)
 
@@ -318,6 +324,8 @@ class PolicyGradientDiffusionTrainerV1SeparateAsync(PolicyGradientDiffusionTrain
             # Reclaim before the warmup feed so no warmup request is routed to a replica about to sleep.
             logger.info("Switching hybrid engine to trainer mode before the warmup feed")
             self.switch_to_trainer()
+        if OmegaConf.select(self.config, "skip.rollout_tq.enable", default=False):
+            return
         num_warmup_batches = self.config.trainer.v1.separate_async.num_warmup_batches
         train_batch_size = self.config.data.train_batch_size
         target_warmup_prompts = num_warmup_batches * train_batch_size

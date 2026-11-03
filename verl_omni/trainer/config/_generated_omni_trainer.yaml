@@ -905,6 +905,7 @@ reward:
   accelerator_workers:
     enabled: false
   reward_functions: {}
+  multi_reward_concurrency: 1
   models: {}
   aggregation: weighted_sum
   reward_manager:
@@ -1170,3 +1171,4 @@ agentic_image_gen:
   force_reflection_after_judge: true
   rewrite_judge_before_generate: true
   e2e_root: null
+  run_dir: null

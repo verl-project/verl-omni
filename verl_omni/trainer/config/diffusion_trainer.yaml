@@ -237,6 +237,36 @@ trainer:
   # V1 trainer mode configs (mirrors verl/trainer/config/ppo_trainer.yaml `trainer.v1`).
   v1:
 
+    # Reporting-only diagnostics; no tuning, stopping, recovery or checkpoint actions.
+    watchdog:
+
+      # Disabled by default; uses existing reduced scalar metrics on the trainer driver.
+      enabled: false
+
+      # Consecutive complete observations required for sustained warnings.
+      window_size: 3
+
+      # Accepted observations skipped for sustained rules after start or resume.
+      warmup_steps: 5
+
+      # Minimum accepted observations between alerts for recovered/recurrent episodes.
+      cooldown_steps: 20
+
+      # Maximum per-prompt reward std for the joint flat-reward/zero-gradient warning.
+      reward_std_max: 1.0e-8
+
+      # Maximum gradient norm for the joint flat-reward/zero-gradient warning.
+      grad_norm_max: 1.0e-12
+
+      # Lower policy-ratio mean bound for ratio-producing diffusion losses.
+      ratio_lower: 0.5
+
+      # Upper policy-ratio mean bound for ratio-producing diffusion losses.
+      ratio_upper: 2.0
+
+      # Optional maximum trajectory staleness in model versions; null disables this rule.
+      max_staleness: null
+
     # Trainer mode: "sync", "separate_async".
     trainer_mode: sync
 
@@ -497,7 +527,7 @@ transfer_queue:
       hard_pin: true
 
 # SkipManager configs (mirrors verl/trainer/config/ppo_trainer.yaml `skip`).
-# Used by the V1 trainer for rollout skip support; no-op until enabled.
+# V1 replays rollouts via rollout_tq, V0 via rollout; no-op until enabled.
 skip:
 
   # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs.
@@ -507,6 +537,21 @@ skip:
   rollout:
 
     # Whether to enable RolloutSkip.
+    enable: false
+
+    # Directory to save rollout data.
+    dump_dir: "~/.verl/rollout_dump"
+
+    # Steps to skip rollout.
+    steps: []
+
+    # Action to take when rollout is skipped (cache | repeat).
+    action: cache
+
+  # Configs for RolloutTqSkip (V1 TransferQueue rollout replay).
+  rollout_tq:
+
+    # Whether to enable RolloutTqSkip.
     enable: false
 
     # Directory to save rollout data.
@@ -532,3 +577,108 @@ skip:
 
     # Action to take when rollout is skipped (cache | repeat).
     action: cache
+
+# Per-stage skip configs (verl-omni extension on top of verl's SkipManager).
+# Each role caches/replays one pipeline stage's output per global step under
+# `{dump_dir}/{experiment_name}_{project_name}/{role}/{step}/{call_idx}/`. The
+# diffusion V1 and V0 trainers wire these roles; the omni (AR) stack only supports
+# `skip:`. Kept out of `skip:` because verl parses that block against its fixed
+# SkipManagerConfig schema. See examples/stage_skip/README.md.
+omni_skip:
+
+  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs.
+  _target_: verl_omni.utils.skip.OmniSkipConfig
+
+  # Colocated reward-model scoring.
+  reward:
+
+    # Whether to enable this role.
+    enable: false
+
+    # Root directory of the stage caches.
+    dump_dir: "~/.verl/stage_dump"
+
+    # Global steps to replay.
+    steps: []
+
+    # Action to take on those steps (cache | repeat).
+    action: cache
+
+  # Recomputed old log-probs (policy gradient only); conflicts with
+  # algorithm.rollout_correction.bypass_mode.
+  old_log_prob:
+
+    # Whether to enable this role.
+    enable: false
+
+    # Root directory of the stage caches.
+    dump_dir: "~/.verl/stage_dump"
+
+    # Global steps to replay.
+    steps: []
+
+    # Action to take on those steps (cache | repeat).
+    action: cache
+
+  # Reference-policy outputs: ref log-probs (policy gradient) or ref noise preds (direct preference).
+  ref_log_prob:
+
+    # Whether to enable this role.
+    enable: false
+
+    # Root directory of the stage caches.
+    dump_dir: "~/.verl/stage_dump"
+
+    # Global steps to replay.
+    steps: []
+
+    # Action to take on those steps (cache | repeat).
+    action: cache
+
+  # Driver-side advantage computation (V1 policy gradient only).
+  advantage:
+
+    # Whether to enable this role.
+    enable: false
+
+    # Root directory of the stage caches.
+    dump_dir: "~/.verl/stage_dump"
+
+    # Global steps to replay.
+    steps: []
+
+    # Action to take on those steps (cache | repeat).
+    action: cache
+
+  # Actor update; nothing is written to checkpoints while skipped.
+  actor_update:
+
+    # Whether to enable this role.
+    enable: false
+
+    # Root directory of the stage caches.
+    dump_dir: "~/.verl/stage_dump"
+
+    # Global steps to skip.
+    steps: []
+
+    # Action to take on those steps: empty no-ops the update, cache | repeat replay its metrics.
+    action: empty
+
+  # Mid-cycle rollout weight refresh (V1 async modes with a colocated reward model only).
+  weight_sync:
+
+    # Whether to enable this role.
+    enable: false
+
+    # Root directory of the stage caches (unused by the only supported action).
+    dump_dir: "~/.verl/stage_dump"
+
+    # Global steps to skip.
+    steps: []
+
+    # Action to take on those steps: empty still wakes the replicas, on pre-update weights.
+    action: empty
+
+    # Must be true when enabled: replicas keep pre-update weights until the next sync.
+    ack_stale_weights: false

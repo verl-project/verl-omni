@@ -222,13 +222,13 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
             t1 = time.perf_counter()
             logger.debug("remove_lora took %.3f ms", (t1 - t0) * 1000)
 
-            # Accumulate all LoRA tensors across buckets (LoRA weights are small;
-            # a single atomic ``add_lora`` is both correct for multi-bucket edge
-            # cases and more efficient than per-bucket loading).
+            # Clone: add_lora runs after receive_weights returns, past the reused IPC buffer's lifetime.
             t_recv_start = time.perf_counter()
             accumulated_weights: dict[str, torch.Tensor] = {}
             receiver.receive_weights(
-                on_bucket_received=lambda weights, *args, **kwargs: accumulated_weights.update(weights)
+                on_bucket_received=lambda weights, *args, **kwargs: accumulated_weights.update(
+                    (name, tensor.clone()) for name, tensor in weights
+                )
             )
             t_recv_end = time.perf_counter()
             lora_total_bytes = sum(t.element_size() * t.numel() for t in accumulated_weights.values())
