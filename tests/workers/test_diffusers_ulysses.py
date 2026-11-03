@@ -643,4 +643,4 @@ def _diffusers_ulysses_fwd_bwd_fsdp(sp_size: int, dp_size: int, backend: str):
 
 
 if __name__ == "__main__":
-    raise SystemExit(pytest.main([__file__, "-svv"]))
+    pytest.main([__file__, "-svv"])
