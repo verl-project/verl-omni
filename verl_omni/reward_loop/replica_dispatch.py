@@ -61,7 +61,7 @@ async def dispatch_reward_groups(
                 if owner is None:
                     result = await worker.compute_score_batch.remote(chunk)
                 else:
-                    result = await owner.run_rpc("compute_score_batch", chunk)
+                    result = await owner.run_rpc("compute_score_batch", chunk, replica_index=replica_index)
                 if len(result) != len(chunk):
                     raise ValueError(
                         f"Reward worker group {name!r} returned {len(result)} results for {len(chunk)} samples"

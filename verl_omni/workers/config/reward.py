@@ -87,13 +87,10 @@ class RewardModelPlacementConfig(BaseConfig):
         if self.replica_groups:
             if self.devices:
                 raise ValueError("placement.devices and placement.replica_groups are mutually exclusive")
-            if (
-                not isinstance(self.replica_groups, list)
-                or len(self.replica_groups) != 1
-                or not isinstance(self.replica_groups[0], list)
-                or len(self.replica_groups[0]) != 2
+            if not isinstance(self.replica_groups, list) or any(
+                not isinstance(group, list) or len(group) != 2 for group in self.replica_groups
             ):
-                raise ValueError("FSDP placement.replica_groups requires one two-rank group")
+                raise ValueError("FSDP placement.replica_groups requires non-empty two-rank groups")
         elif not isinstance(self.devices, list) or (not self.is_cpu and not self.devices):
             raise ValueError("Native reward model placement.devices must be a non-empty list")
         devices = self.bundle_indices
@@ -113,7 +110,7 @@ class RewardModelPlacementConfig(BaseConfig):
     @property
     def bundle_indices(self) -> list[int]:
         """All claimed parent-pool bundles, preserving declared rank order."""
-        return self.replica_groups[0] if self.replica_groups else self.devices
+        return [index for group in self.replica_groups for index in group] if self.replica_groups else self.devices
 
     @classmethod
     def from_mapping(cls, name: str, value) -> RewardModelPlacementConfig:

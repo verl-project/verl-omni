@@ -50,7 +50,7 @@ def _recording_worker(calls: list[list[int]]):
 async def test_group_rpc_owner_owns_submission_and_sample_order():
     calls = []
 
-    async def run_rpc(method, data):
+    async def run_rpc(method, data, replica_index=0):
         assert method == "compute_score_batch"
         values = _sample_ids(data)
         calls.append(values)

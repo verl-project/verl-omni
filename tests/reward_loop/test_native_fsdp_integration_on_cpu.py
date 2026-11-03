@@ -72,7 +72,7 @@ def test_rank_order_is_explicit_and_flat_devices_remain_complete_replicas():
         {"replica_groups": [[0, 0]]},
         {"replica_groups": [[0, True]]},
         {"replica_groups": [[0]]},
-        {"replica_groups": [[0, 1], [2, 3]]},
+        {"replica_groups": [[0, 1], [1, 2]]},
         {"resource": "cpu", "num_replicas": 1, "replica_groups": [[0, 1]]},
     ],
 )

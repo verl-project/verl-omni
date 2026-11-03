@@ -240,7 +240,7 @@ class OmniRewardLoopManager(RewardLoopManager):
                 group_config = self._copy_reward_config(terms)
                 with open_dict(group_config.reward):
                     group_config.reward.num_workers = (
-                        1
+                        len(placement.replica_groups)
                         if placement.replica_groups
                         else placement.num_replicas
                         if placement.is_cpu
@@ -350,34 +350,33 @@ class OmniRewardLoopManager(RewardLoopManager):
         from .native_fsdp import build_replica
 
         processor_path = model.executor.kwargs.get("processor_path", _PROCESSOR_PATH)
-        replica = build_replica(
-            self.multi_reward_model_manager.resource_pool,
-            model.model_path,
-            processor_path,
-            timeout=model.fsdp.timeout,
-            collective_timeout=model.fsdp.collective_timeout,
-            bundle_indices=model.placement.bundle_indices,
-        )
-        worker = None
+        owner = self.multi_reward_model_manager.models[model.name]
+        workers = []
         try:
-            self.multi_reward_model_manager.models[model.name].bind_rank_workers(replica.worker_group.workers)
-            worker = ray.remote(OmniFSDPRewardLoopWorker).remote(
-                config, {model.name: spec}, replica.worker_group.workers, processor_path, model.fsdp.timeout
-            )
-            ray.get(worker.ready.remote(), timeout=model.fsdp.timeout)
+            for indices in model.placement.replica_groups:
+                replica = build_replica(
+                    self.multi_reward_model_manager.resource_pool,
+                    model.model_path,
+                    processor_path,
+                    timeout=model.fsdp.timeout,
+                    collective_timeout=model.fsdp.collective_timeout,
+                    bundle_indices=indices,
+                )
+                owner.bind_rank_workers(replica.worker_group.workers)
+                worker = ray.remote(OmniFSDPRewardLoopWorker).remote(
+                    config, {model.name: spec}, replica.worker_group.workers, processor_path, model.fsdp.timeout
+                )
+                workers.append(worker)
+                owner.bind_workers(workers)
+                ray.get(worker.ready.remote(), timeout=model.fsdp.timeout)
         except BaseException as exc:
             errors = [exc]
-            if worker is not None:
-                try:
-                    ray.kill(worker, no_restart=True)
-                except BaseException as cleanup:
-                    errors.append(cleanup)
             try:
-                replica.close()
+                owner._terminate_owned()
             except BaseException as cleanup:
                 errors.append(cleanup)
             raise BaseExceptionGroup("FSDP scoring worker construction failed", errors) from None
-        return [worker]
+        return workers
 
     def compute_rm_score(self, data):
         """Synchronous compatibility entrypoint for current trainers."""

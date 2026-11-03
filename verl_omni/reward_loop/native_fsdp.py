@@ -343,7 +343,7 @@ class NativeFSDPManagedRewardModel(NativeManagedRewardModel):
 
     def bind_rank_workers(self, workers):
         """Retain rank handles without creating a second collective controller."""
-        self.rank_workers = list(workers)
+        self.rank_workers.extend(workers)
 
     def _terminate_owned(self):
         with self._termination_lock:
@@ -364,20 +364,20 @@ class NativeFSDPManagedRewardModel(NativeManagedRewardModel):
                 self._termination_error = BaseExceptionGroup("FSDP owner cleanup failed", errors)
                 raise self._termination_error
 
-    async def _watch_facade(self):
+    async def _watch_facade(self, replica_index=0):
         while True:
             await asyncio.sleep(min(1, self.timeout))
             # Async scoring leaves the facade event loop available for this health RPC.
-            await asyncio.wait_for(self._workers[0].ready.remote(), timeout=self.timeout)
+            await asyncio.wait_for(self._workers[replica_index].ready.remote(), timeout=self.timeout)
 
-    async def run_rpc(self, method, *args):
+    async def run_rpc(self, method, *args, replica_index=0):
         """Bound facade unresponsiveness and settle an accepted RPC after termination."""
         result = health = None
         try:
             if self._closed:
                 raise NativeFSDPGroupError("FSDP deployment is closed")
-            result = asyncio.ensure_future(getattr(self._workers[0], method).remote(*args))
-            health = asyncio.create_task(self._watch_facade())
+            result = asyncio.ensure_future(getattr(self._workers[replica_index], method).remote(*args))
+            health = asyncio.create_task(self._watch_facade(replica_index))
             done, _ = await asyncio.wait((result, health), return_when=asyncio.FIRST_COMPLETED)
             if health in done:
                 health.result()
@@ -397,7 +397,16 @@ class NativeFSDPManagedRewardModel(NativeManagedRewardModel):
     async def _run_worker_lifecycle(self, method):
         if self._workers is None:
             raise RuntimeError(f"Native reward model {self.name!r} has no bound workers")
-        await self.run_rpc(method, self.name)
+        if len(self._workers) == 1:
+            await self.run_rpc(method, self.name)
+        else:
+            results = await asyncio.gather(
+                *(self.run_rpc(method, self.name, replica_index=index) for index in range(len(self._workers))),
+                return_exceptions=True,
+            )
+            errors = [result for result in results if isinstance(result, BaseException)]
+            if errors:
+                raise BaseExceptionGroup("FSDP replica lifecycle failed", errors)
         if method == "close_reward_model":
             await _await_owned(asyncio.to_thread(self._terminate_owned))
 
