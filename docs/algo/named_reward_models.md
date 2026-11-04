@@ -741,6 +741,8 @@ after generation and admission. It is not an RPC abort or a return-time limit.
 Cancellation or timeout discards the result. Accepted group RPCs settle before
 their slot is released or the error returns. Waiting can therefore exceed
 `timeout`: a hung backend requires its existing backend/worker termination policy.
+Media-contract errors reported during drain remain fatal, even after timeout or
+caller cancellation, and take precedence over operational failures in the same fan-out.
 There are no automatic
 retries. Optional scorer failures still contribute zero with their existing
 diagnostics; required failures follow the trainer's existing failed-sample

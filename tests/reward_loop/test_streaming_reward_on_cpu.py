@@ -22,7 +22,7 @@ import torch
 from omegaconf import OmegaConf
 from verl.protocol import DataProto
 
-from verl_omni.pipelines.rollout_media import MediaArtifact, MediaSpec, artifact_fields
+from verl_omni.pipelines.rollout_media import ArtifactContractError, MediaArtifact, MediaSpec, artifact_fields
 from verl_omni.reward_loop.reward_manager.multi import MultiVisualRewardManager
 from verl_omni.reward_loop.streaming import create_async_reward_client, merge_reward_outputs
 from verl_omni.utils.config import validate_config
@@ -164,7 +164,7 @@ async def test_streaming_preserves_fatal_media_errors_for_optional_reward(extra_
         },
     )
     manager = _jpeg_manager()
-    with pytest.raises(ValueError) as batch_error:
+    with pytest.raises(ArtifactContractError) as batch_error:
         await manager.run_single(data)
     client = create_async_reward_client(
         {"jpeg": (_worker(manager.run_single),)}, StreamingRewardConfig(extra_fields=extra_fields)
@@ -470,6 +470,63 @@ async def test_deadline_discards_result_but_waits_for_accepted_work():
     with pytest.raises(TimeoutError):
         await _score_sample(client, _sample())
     assert finished.is_set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operational_peer", [False, True])
+@pytest.mark.parametrize("exit_kind", ["timeout", "cancel"])
+@pytest.mark.parametrize("failure", [None, RuntimeError, ArtifactContractError])
+async def test_late_contract_error_survives_drain(exit_kind, failure, operational_peer):
+    """Fatal media errors outrank expiry/cancellation after accepted work settles."""
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    finished = asyncio.Event()
+
+    async def score(data):
+        if data.batch["responses"].item() == 0:
+            entered.set()
+            await release.wait()
+            finished.set()
+            if failure is not None:
+                raise failure("late reward failure")
+        return _output("a", 1)
+
+    async def peer(data):
+        if data.batch["responses"].item() == 0:
+            await entered.wait()
+            raise RuntimeError("other group failed")
+        return {"reward_score": 0}
+
+    groups = {"peer": (_worker(peer),), "a": (_worker(score),)} if operational_peer else {"a": (_worker(score),)}
+    client = create_async_reward_client(
+        groups, StreamingRewardConfig(max_inflight=1, timeout=0.005 if exit_kind == "timeout" else None)
+    )
+    task = asyncio.create_task(_score_sample(client, _sample()))
+    try:
+        async with asyncio.timeout(5):
+            await entered.wait()
+            if exit_kind == "cancel":
+                task.cancel()
+                task.cancel()
+            while not task.cancelling():
+                await asyncio.sleep(0)
+            assert not task.done() and not finished.is_set()
+            release.set()
+            expected = (
+                ArtifactContractError
+                if failure is ArtifactContractError
+                else TimeoutError
+                if exit_kind == "timeout"
+                else asyncio.CancelledError
+            )
+            with pytest.raises(expected):
+                await task
+            assert finished.is_set()
+            assert (await _score_sample(client, _sample(1)))["reward_score"] == 1
+    finally:
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)
+        await client.close()
 
 
 @pytest.mark.asyncio

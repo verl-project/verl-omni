@@ -17,6 +17,8 @@ import asyncio
 
 from verl.protocol import DataProto, pad_dataproto_to_divisor
 
+from verl_omni.pipelines.rollout_media import ArtifactContractError
+
 
 async def dispatch_reward_groups(data: DataProto, worker_groups: dict, batch_sizes: dict[str, int]) -> dict[str, list]:
     """Score groups, restore sample order and drain accepted RPCs before returning.
@@ -84,6 +86,9 @@ async def dispatch_reward_groups(data: DataProto, worker_groups: dict, batch_siz
             # Remote work can outlive a cancelled await; keep its ownership until completion.
             stopped = True
             cancellation = exc
+    for result in results:
+        if isinstance(result, ArtifactContractError):
+            raise result
     if cancellation is not None:
         raise cancellation
     for result in results:

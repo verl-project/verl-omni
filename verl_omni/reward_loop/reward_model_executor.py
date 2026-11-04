@@ -25,6 +25,7 @@ from typing import Any
 import torch
 from verl.utils.device import get_device_id, get_device_name
 
+from verl_omni.pipelines.rollout_media import ArtifactContractError
 from verl_omni.workers.config.reward import RewardModelSpec, is_engine_backend
 
 __all__ = [
@@ -53,6 +54,8 @@ async def _await_owned(awaitable):
     if cancelled:
         try:
             task.result()
+        except ArtifactContractError:
+            raise
         except BaseException:
             pass
         raise asyncio.CancelledError

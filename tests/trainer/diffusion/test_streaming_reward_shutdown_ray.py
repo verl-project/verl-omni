@@ -26,6 +26,7 @@ from tensordict import NonTensorData, TensorDict
 from verl.protocol import DataProto
 
 from verl_omni.agent_loop.diffusion_agent_loop_tq import DiffusionAgentLoopManagerTQ, DiffusionAgentLoopWorkerTQ
+from verl_omni.pipelines.rollout_media import ArtifactContractError
 from verl_omni.reward_loop.streaming import create_async_reward_client
 from verl_omni.trainer.main_diffusion_v1 import DiffusionTaskRunnerV1
 from verl_omni.workers.config.reward import StreamingRewardConfig
@@ -113,16 +114,19 @@ class FailingAgent:
 class GatedReward:
     """Keep an accepted batch RPC running until explicitly released."""
 
-    def __init__(self):
+    def __init__(self, failure=None):
         self.gate = asyncio.Event()
         self.started = False
         self.finished = False
+        self.failure = failure
 
     async def compute_score_batch(self, data):
         """Return one score per sample after the gate opens."""
         self.started = True
         await self.gate.wait()
         self.finished = True
+        if self.failure is not None:
+            raise self.failure("delayed reward failure")
         return [{"reward_score": float(data.batch["responses"].item())}]
 
     async def state(self):
@@ -180,6 +184,51 @@ async def test_real_ray_batch_scoring_keeps_ownership_after_cancellation():
         await worker.release.remote()
         await asyncio.gather(task, *([close] if close is not None else []), return_exceptions=True)
         ray.kill(worker)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exit_kind", ["timeout", "cancel"])
+async def test_real_ray_late_contract_error_outranks_expiry_and_peer_failure(exit_kind):
+    """Drain both accepted RPCs and propagate the fatal error after caller expiry."""
+    peer = GatedReward.remote(RuntimeError)
+    fatal = GatedReward.remote(ArtifactContractError)
+    client = create_async_reward_client(
+        {"peer": (peer,), "fatal": (fatal,)},
+        StreamingRewardConfig(max_inflight=1, timeout=0.01 if exit_kind == "timeout" else None),
+    )
+
+    async def score():
+        async with client.sample_slot():
+            return await client.compute_score(DataProto.from_dict(tensors={"responses": torch.tensor([[2]])}))
+
+    task = asyncio.create_task(score())
+    close = None
+    try:
+        async with asyncio.timeout(30):
+            while not all(state[0] for state in await asyncio.gather(peer.state.remote(), fatal.state.remote())):
+                await asyncio.sleep(0.01)
+            if exit_kind == "cancel":
+                task.cancel()
+                task.cancel()
+            while not task.cancelling():
+                await asyncio.sleep(0)
+            close = asyncio.create_task(client.close())
+            await peer.release.remote()
+            while not (await peer.state.remote())[1]:
+                await asyncio.sleep(0.01)
+            assert not task.done() and not close.done()
+            await fatal.release.remote()
+            with pytest.raises(ray.exceptions.RayTaskError, match="delayed reward failure") as error:
+                await task
+            assert isinstance(error.value, ArtifactContractError)
+            await close
+            assert await fatal.state.remote() == (True, True)
+    finally:
+        await peer.release.remote()
+        await fatal.release.remote()
+        await asyncio.gather(task, *([close] if close is not None else []), return_exceptions=True)
+        ray.kill(peer)
+        ray.kill(fatal)
 
 
 @pytest.mark.asyncio

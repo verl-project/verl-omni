@@ -24,6 +24,7 @@ from verl_omni.pipelines.rollout_media import (
     ARTIFACT_SPECS,
     PREVIEW_ARTIFACT,
     PRIMARY_ARTIFACT,
+    ArtifactContractError,
     artifacts_from_fields,
 )
 
@@ -77,9 +78,12 @@ def _reward_extra_info(data_item) -> dict:
             else:
                 matches = np.array_equal(value, tool_value)
             if not matches:
-                raise ValueError(f"Conflicting rollout media field {key!r} in batch and tool_extra_fields")
+                raise ArtifactContractError(f"Conflicting rollout media field {key!r} in batch and tool_extra_fields")
         extra_info[key] = value
-    artifacts = artifacts_from_fields(extra_info, context="reward entry")
+    try:
+        artifacts = artifacts_from_fields(extra_info, context="reward entry")
+    except (TypeError, ValueError) as error:
+        raise ArtifactContractError(str(error)) from error
     if artifacts:
         extra_info["media_artifacts"] = artifacts
     return extra_info
