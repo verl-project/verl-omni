@@ -27,9 +27,10 @@ Three complementary pieces feed the per-step metrics dict:
 - :func:`tensordict_payload_bytes` measures the trainer-side read payload so
   ``tq/get/bytes`` pairs with ``timing_s/tq_get`` for a GB/s figure.
 
-Everything here is metadata-only: timers that were already being taken (or
-tags that were already being written) promoted to metrics, no behavior
-change.
+Everything here reuses timings that were already being taken and promotes
+them to metrics, but it is not free: the rollout writer adds two tag-only
+TransferQueue updates per prompt group (the put-cost tags, then the
+publication stamp) carrying three new tag keys. Payload puts are untouched.
 """
 
 import time
@@ -52,8 +53,10 @@ TQ_PUT_AT_TAG = "tq_put_at"
 # weighted_avg, which would undercount every one of them. The step-level
 # rate is derived from the summed bytes and seconds by
 # :func:`derive_tq_put_rate` -- averaging per-update rates misstates
-# throughput when updates carry different durations.
-TQ_COUNTER_METRICS = ("tq/put/rows", "tq/put/seconds", "tq/put/bytes", "tq/get/bytes")
+# throughput when updates carry different durations. ``tq/get/bytes`` is
+# absent: it is exported once per step from ``timing_raw`` and never passes
+# through the aggregator.
+TQ_COUNTER_METRICS = ("tq/put/rows", "tq/put/seconds", "tq/put/bytes")
 
 
 class ProfiledReplayBufferAsync(ReplayBufferAsync):
@@ -202,11 +205,7 @@ class ProfiledReplayBufferAsync(ReplayBufferAsync):
                 len(self.finished_keys[partition_id]),
             )
         )
-        start = time.perf_counter()
-        try:
-            return super()._wait_for_next_poll(partition_id, last_debug_time)
-        finally:
-            self._segment_timings["poll_sleep"] += time.perf_counter() - start
+        return super()._wait_for_next_poll(partition_id, last_debug_time)
 
     # -- profiling window --------------------------------------------------
 
@@ -347,9 +346,10 @@ def derive_tq_put_rate(step_metrics: dict[str, float]) -> None:
 def tensordict_payload_bytes(data) -> int:
     """Payload bytes of a tensor batch fetched from TransferQueue.
 
-    Counts the tensor columns only: non-tensor columns (uid, data_source, ...)
-    ride the tag/metadata channel, not the payload transfer the RFC's byte
-    counters are about.
+    Counts the tensor columns only. Non-tensor columns (uid, data_source,
+    ...) ride the same fetched batch but are excluded: they are bookkeeping
+    scalars next to the tensors, and the counter pairs with the
+    payload-dominated read time.
     """
     total = 0
     for value in data.values():

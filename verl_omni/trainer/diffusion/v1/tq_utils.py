@@ -299,7 +299,7 @@ def canonicalize_diffusion_tq_meta(batch_meta: KVBatchMeta) -> KVBatchMeta:
     run, while the v0 trainer produced rows prompt-major in dataset order
     (``prompt_index * rollout.n + session``). ``prompt_index`` is unique only
     within one generation batch, so rows carry ``(gen_batch_seq,
-    prompt_index)`` -- the per-run generation-batch number plus the position
+    prompt_index)`` — the per-run generation-batch number plus the position
     inside it -- which stays unique across every path that can mix batches in
     one sample (DAPO speculative refills, incomplete-group replacement,
     multi-chunk generation dispatches). Rows whose tag predates the pair fall

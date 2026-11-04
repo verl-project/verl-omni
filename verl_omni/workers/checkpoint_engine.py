@@ -156,28 +156,18 @@ class WeightSyncPhaseTimerMixin:
         start = time.perf_counter()
         sync_metrics = await raw_parent_update(self, global_steps=global_steps)
         total = time.perf_counter() - start
-        metrics = dict(sync_metrics or {})
+        metrics = dict(sync_metrics)
         metrics.update({f"weight_sync/phase/{p}_s": s for p, s in self._sync_phase_timings.items()})
         measured = sum(self._sync_phase_timings.values())
         metrics["weight_sync/phase/transfer_and_finalize_s"] = max(0.0, total - measured)
         metrics["weight_sync/total_s"] = total
-        metrics["weight_sync/replicas"] = float(len(getattr(self, "replicas", []) or []))
+        metrics["weight_sync/replicas"] = float(len(self.replicas))
         return metrics
 
     def _wrap_phase_method(self, name: str, phase: str, *args, **kwargs):
-        parent = getattr(super(), name, None)
-        raw = getattr(parent, "__wrapped__", None)
-        if raw is None:
-            # Parent phase is a plain async def (test doubles): time it by
-            # wrapping the coroutine we get from calling it.
-            async def _timed_plain():
-                start = time.perf_counter()
-                try:
-                    return await parent(*args, **kwargs)
-                finally:
-                    self._sync_phase_timings[phase] += time.perf_counter() - start
-
-            return _timed_plain()
+        # Phase methods carry verl's @auto_await; call the raw coroutine it
+        # wraps so the decorator never nests.
+        raw = getattr(super(), name).__wrapped__
         return self._timed_weight_sync_phase(raw, phase, self, *args, **kwargs)
 
     @auto_await
@@ -204,18 +194,6 @@ class WeightSyncPhaseTimerMixin:
     @auto_await
     async def resume_generation_replicas(self):
         return await self._wrap_phase_method("resume_generation_replicas", "generation_resume")
-
-
-class TimedCheckpointEngineManager(WeightSyncPhaseTimerMixin, CheckpointEngineManager):
-    """``CheckpointEngineManager`` with per-phase weight-sync metrics.
-
-    Used for the hybrid (colocated) side of separate-async training, where
-    weights sync into the trainer-owned replicas at mode switches.
-    """
-
-    @auto_await
-    async def update_weights(self, global_steps: int = None):
-        return await self._profiled_update_weights(CheckpointEngineManager.update_weights.__wrapped__, global_steps)
 
 
 class TimedOmniCheckpointEngineManager(WeightSyncPhaseTimerMixin, OmniCheckpointEngineManager):

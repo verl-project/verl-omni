@@ -621,14 +621,14 @@ were already being taken, promoted to the metrics dict; see
 | `timing_s/sample_wait/metadata_sync` | `kv_list` metadata round trips while polling |
 | `timing_s/sample_wait/eviction` | Stale / DAPO / failure eviction passes |
 | `timing_s/sample_wait/polls` | Poll iterations while waiting |
-| `timing_s/sample_wait/buffer_*` | Pending / running / finished group counts seen while waiting |
+| `timing_s/sample_wait/buffer_*` | Pending / running / finished group counts seen while waiting (absent on zero-poll windows) |
 | `timing_s/tq_get` | Trainer-side TransferQueue payload reads (`kv_batch_get`) |
 | `tq/get/bytes` | Bytes fetched by the timed `kv_batch_get` reads (pairs with `timing_s/tq_get` for a GB/s figure) |
-| `tq/put/seconds`, `tq/put/bytes`, `tq/put/bytes_per_second` | Rollout-side writes of the sampled trajectories (attributed via row tags); counters sum across the step's local updates, the rate is derived from the step sums |
+| `tq/put/rows`, `tq/put/seconds`, `tq/put/bytes`, `tq/put/bytes_per_second` | Rollout-side writes of the sampled trajectories (attributed via row tags); counters sum across the step's local updates, the rate is derived from the step sums |
 | `weight_sync/phase/{abort,kv_release,topology,transfer_and_finalize,kv_resume,generation_resume}_s` | Per-phase breakdown of the standalone weight sync |
 | `weight_sync/total_s`, `weight_sync/replicas` | Whole sync window and replica count |
 | `separate_async/switch/cost_to_trainer_s`, `..._to_rollout_s` | Rolling mean hybrid-switch costs |
-| `separate_async/trainer_idle_ratio` | Share of the step the trainer waited on the replay buffer |
+| `separate_async/trainer_idle_ratio` | Share of the step the trainer waited inside `replay_buffer.sample()`. Switch-mode caveat: while the engine is lent to generation, the dominant buffer wait runs under `timing_s/switch_wait` instead and is not part of this ratio -- read the two together |
 | `separate_async/idle_ratio/{generation_bound,detection,metadata_sync,eviction}` | Idle decomposition |
 
 The wait split is event-based, not sleep-based: the rollout stamps each

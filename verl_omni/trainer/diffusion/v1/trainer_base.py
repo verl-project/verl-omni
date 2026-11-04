@@ -595,11 +595,10 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         time (generation-bound wait vs detection latency vs metadata sync vs
         eviction); the row tags written by the rollout-side TQ writer carry
         the put cost and payload bytes of exactly the trajectories being
-        consumed. Neither exists in sync mode, where sampling is on-policy,
-        so both are read defensively.
+        consumed. A sync-mode buffer has no ``last_sample_timing``, so that
+        read carries a default.
         """
-        replay_buffer = getattr(self, "replay_buffer", None)
-        sample_timing = getattr(replay_buffer, "last_sample_timing", None)
+        sample_timing = getattr(self.replay_buffer, "last_sample_timing", None)
         if sample_timing:
             polls = float(sample_timing.get("sample_wait/polls", 0.0))
             for name, value in sample_timing.items():
@@ -625,7 +624,11 @@ class PolicyGradientDiffusionTrainerV1(ABC):
                     timing_raw[name] = value if name not in timing_raw else min(timing_raw[name], value)
                 else:
                     timing_raw[name] = value if name not in timing_raw else max(timing_raw[name], value)
-        metrics.update(aggregate_tq_write_stats(batch_meta))
+        # Sum, don't replace: one-step-off's first step samples twice into
+        # one iter_metrics, and the write counters of both samples must
+        # survive -- sample_wait/* above sums for the same reason.
+        for name, value in aggregate_tq_write_stats(batch_meta).items():
+            metrics[name] = metrics.get(name, 0.0) + value
 
     def _convert_and_dispatch(self, batch_meta: KVBatchMeta, timing_raw: dict | None = None):
         """Convert a sampled batch and start teacher scoring without waiting on it."""

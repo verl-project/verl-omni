@@ -172,6 +172,8 @@ def attribute_step(metrics: dict, step: int | None = None) -> dict:
     attribution["wait_s"] = wait_total
     attribution["work_s"] = work_total
     attribution["idle_ratio"] = _number(metrics, "separate_async/trainer_idle_ratio")
+    attribution["ranked"] = []
+    attribution["context"] = {}
     if step_seconds <= 0:
         attribution["bound"] = "unknown(step_s<=0)"
         return attribution
@@ -199,13 +201,14 @@ def attribute_step(metrics: dict, step: int | None = None) -> dict:
 
 def print_report(steps: list[tuple[int, dict]], top: int, as_json: bool) -> None:
     records = [attribute_step(metrics, step) for step, metrics in steps]
+    if not records:
+        # Both output modes agree on the exit code for unusable input.
+        print("no parsable step metrics found", file=sys.stderr)
+        raise SystemExit(1)
     if as_json:
         json.dump(records, sys.stdout, indent=2)
         sys.stdout.write("\n")
         return
-    if not records:
-        print("no parsable step metrics found", file=sys.stderr)
-        raise SystemExit(1)
     print(f"{len(records)} steps parsed\n")
     for record in records:
         if record["step_s"] <= 0:

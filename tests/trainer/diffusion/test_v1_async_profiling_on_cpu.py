@@ -29,6 +29,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 from verl.trainer.ppo.v1 import replay_buffer as replay_buffer_module
+from verl.utils.ray_utils import auto_await
 
 from verl_omni.trainer.diffusion.v1.async_profiling import (
     TQ_PAYLOAD_BYTES_TAG,
@@ -39,10 +40,7 @@ from verl_omni.trainer.diffusion.v1.async_profiling import (
     derive_tq_put_rate,
     tensordict_payload_bytes,
 )
-from verl_omni.workers.checkpoint_engine import (
-    TimedCheckpointEngineManager,
-    WeightSyncPhaseTimerMixin,
-)
+from verl_omni.workers.checkpoint_engine import WeightSyncPhaseTimerMixin
 
 
 class _FakeTransferQueue:
@@ -469,6 +467,28 @@ def test_aggregate_tq_write_stats_sums_tags():
     assert "tq/put/bytes_per_second" not in stats
 
 
+def test_tq_put_counters_sum_across_double_sampled_updates():
+    """One-step-off's first step samples twice into one ``iter_metrics``.
+
+    The write counters of both samples must survive, matching the
+    ``sample_wait`` accumulation recorded alongside them -- a replace
+    (``dict.update``) would keep only the second sample's rows and bytes.
+    """
+    from verl_omni.trainer.diffusion.v1.trainer_base import PolicyGradientDiffusionTrainerV1
+
+    def tagged_meta(seconds, payload_bytes):
+        return SimpleNamespace(tags=[{TQ_PUT_SECONDS_TAG: seconds, TQ_PAYLOAD_BYTES_TAG: payload_bytes}])
+
+    trainer = SimpleNamespace(replay_buffer=SimpleNamespace(last_sample_timing={}))
+    metrics: dict = {}
+    PolicyGradientDiffusionTrainerV1._record_async_sample_profile(trainer, metrics, {}, tagged_meta(1.0, 100.0))
+    PolicyGradientDiffusionTrainerV1._record_async_sample_profile(trainer, metrics, {}, tagged_meta(2.0, 50.0))
+
+    assert metrics["tq/put/rows"] == 2.0
+    assert metrics["tq/put/seconds"] == pytest.approx(3.0)
+    assert metrics["tq/put/bytes"] == 150.0
+
+
 def test_sample_profile_depth_stats_combine_across_local_updates():
     """parameter_sync_step > 1 records one profile per local update into the
     same ``timing_raw``: the wall-time segments and poll count sum, but the
@@ -534,11 +554,11 @@ def test_tq_put_counters_sum_across_local_updates():
 
     aggregator = configure_step_metrics_aggregator(MetricsAggregator())
     aggregator.add_step_metrics(
-        {"tq/put/rows": 1.0, "tq/put/seconds": 1.0, "tq/put/bytes": 100.0, "tq/get/bytes": 500.0},
+        {"tq/put/rows": 1.0, "tq/put/seconds": 1.0, "tq/put/bytes": 100.0},
         sample_count=1,
     )
     aggregator.add_step_metrics(
-        {"tq/put/rows": 1.0, "tq/put/seconds": 2.0, "tq/put/bytes": 100.0, "tq/get/bytes": 1500.0},
+        {"tq/put/rows": 1.0, "tq/put/seconds": 2.0, "tq/put/bytes": 100.0},
         sample_count=1,
     )
     step_metrics = aggregator.get_aggregated_metrics()
@@ -546,7 +566,6 @@ def test_tq_put_counters_sum_across_local_updates():
     assert step_metrics["tq/put/rows"] == 2.0
     assert step_metrics["tq/put/seconds"] == pytest.approx(3.0)
     assert step_metrics["tq/put/bytes"] == 200.0
-    assert step_metrics["tq/get/bytes"] == 2000.0
     assert step_metrics["tq/put/bytes_per_second"] == pytest.approx(200.0 / 3.0)
 
 
@@ -701,10 +720,15 @@ class _StubManagerBase:
         self.replicas = [SimpleNamespace(), SimpleNamespace()]
         self.calls = []
 
+    # The async phases carry verl's @auto_await exactly like the pinned
+    # manager, so the mixin's unwrap through __wrapped__ is the path under
+    # test -- a plain async def would take a branch production never takes.
+    @auto_await
     async def abort_replicas(self):
         self.calls.append("abort")
         await asyncio.sleep(0.01)
 
+    @auto_await
     async def release_kv_cache_replicas(self):
         self.calls.append("kv_release")
         await asyncio.sleep(0.01)
@@ -713,10 +737,12 @@ class _StubManagerBase:
         self.calls.append("topology")
         time.sleep(0.01)
 
+    @auto_await
     async def resume_kv_cache_replicas(self):
         self.calls.append("kv_resume")
         await asyncio.sleep(0.01)
 
+    @auto_await
     async def resume_generation_replicas(self):
         self.calls.append("generation_resume")
         await asyncio.sleep(0.01)
@@ -740,6 +766,9 @@ class _StubTimedManager(WeightSyncPhaseTimerMixin, _StubManagerBase):
 
 
 def test_weight_sync_phase_timer_decomposes_pipeline():
+    # Fixture guard: the stub must mirror the pinned manager's decorated
+    # phases, or the mixin's __wrapped__ unwrap is not what runs here.
+    assert hasattr(_StubManagerBase.abort_replicas, "__wrapped__")
     manager = _StubTimedManager()
     metrics = asyncio.run(manager.update_weights(global_steps=3))
 
@@ -765,11 +794,3 @@ def test_timed_manager_sync_call_style_still_works():
     # Calling the coroutine function via asyncio.run from a sync context.
     manager.abort_replicas()  # not awaited: auto_await runs it in a thread pool
     assert manager.calls == ["abort"]
-
-
-def test_timed_checkpoint_engine_manager_is_constructible_subclass():
-    # The Ray-facing classes must still subclass verl's manager for isinstance
-    # checks and the trainer's duck typing.
-    from verl.checkpoint_engine import CheckpointEngineManager
-
-    assert issubclass(TimedCheckpointEngineManager, CheckpointEngineManager)
