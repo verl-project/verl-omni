@@ -17,7 +17,8 @@
 It originated from the multi-modal generation RL effort in `verl`, and now has a dedicated home so it can evolve in a more focused way.
 
 ## News 🔥
-- **[2026-08]** 🎉 We have released [v0.3.0](https://github.com/verl-project/verl-omni/releases/tag/v0.3.0) for fully async diffusion/omni rl with v1 trainer as default.
+- **[2026-10]** 🎉 We have released [v0.3.0](https://github.com/verl-project/verl-omni/releases/tag/v0.3.0) for fully async diffusion/omni RL with the v1 trainer as the default.
+- **[2026-10]** [OmniNFT](examples/omninft_trainer/README.md) is now supported for audio-video post-training. The [LTX2.3](examples/omninft_trainer/ltx2/README.md) text-to-video+audio LoRA recipe runs on Ascend NPU with modality-wise advantage routing.
 - **[2026-09]** The [v1 trainer](docs/start/diffusion_v1.md) (TransferQueue + ReplayBuffer) is now the default for diffusion models; the legacy v0 trainer is deprecated, while offline DPO remains on v0 by design.
 - **[2026-08]** **[DiffusionOPD](docs/algo/diffusion_opd.md)** (on-policy distillation, including multi-teacher MOPD) is now supported.
 - **[2026-08]** 🔥 **MiniMax-H3** now supports T2VA, FL2VA, and Ref2VA with both [FlowGRPO](examples/flowgrpo_trainer/minimax_h3/README.md) and [DiffusionNFT](examples/diffusionnft_trainer/minimax_h3/README.md).
@@ -126,10 +127,14 @@ Visit our [documentation](https://verl-omni.readthedocs.io/en/latest/index.html)
     <td>✅</td>
   </tr>
   <tr>
-    <td>LTX2.3</td>
-    <td>Diffusion generator</td>
-    <td>Text → Video + Audio</td>
+    <td rowspan="2">LTX2.3</td>
+    <td rowspan="2">Diffusion generator</td>
+    <td rowspan="2">Text → Video + Audio</td>
     <td>FlowGRPO</td>
+    <td>✅</td>
+  </tr>
+  <tr>
+    <td><a href="examples/omninft_trainer/README.md">OmniNFT</a></td>
     <td>✅</td>
   </tr>
   <tr>
@@ -152,6 +157,13 @@ Visit our [documentation](https://verl-omni.readthedocs.io/en/latest/index.html)
   </tr>
   <tr>
     <td>DiffusionNFT</td>
+    <td>✅</td>
+  </tr>
+  <tr>
+    <td><a href="examples/dancegrpo_trainer/flux1/README.md">FLUX.1-dev</a></td>
+    <td>Diffusion generator</td>
+    <td>Text → Image</td>
+    <td>DanceGRPO</td>
     <td>✅</td>
   </tr>
   <tr>
@@ -200,9 +212,9 @@ Visit our [documentation](https://verl-omni.readthedocs.io/en/latest/index.html)
     <td>Planned</td>
   </tr>
   <tr>
-    <td rowspan="3">Qwen3-Omni-Thinker</td>
-    <td rowspan="3">Omni-modality</td>
-    <td rowspan="3">Text / Image / Video / Audio</td>
+    <td rowspan="4">Qwen3-Omni-Thinker</td>
+    <td rowspan="4">Omni-modality</td>
+    <td rowspan="4">Text / Image / Video / Audio</td>
     <td>DPO</td>
     <td>✅</td>
   </tr>
@@ -211,7 +223,22 @@ Visit our [documentation](https://verl-omni.readthedocs.io/en/latest/index.html)
     <td>✅</td>
   </tr>
   <tr>
+    <td><a href="docs/algo/omni_opd.md">OPD</a></td>
+    <td>✅</td>
+  </tr>
+  <tr>
     <td><a href="examples/dapo_trainer/README.md">DAPO (Phase 1, LoRA)</a></td>
+    <td>✅</td>
+  </tr>
+  <tr>
+    <td rowspan="2">MiniCPM-o 4.5</td>
+    <td rowspan="2">Omni-modality</td>
+    <td rowspan="2">Image / Audio → Text</td>
+    <td><a href="examples/gspo_trainer/README.md#training-with-minicpm-o-45-avqa">GSPO</a></td>
+    <td>✅</td>
+  </tr>
+  <tr>
+    <td><a href="examples/dpo_trainer/minicpm/README.md">DPO</a></td>
     <td>✅</td>
   </tr>
     <tr>

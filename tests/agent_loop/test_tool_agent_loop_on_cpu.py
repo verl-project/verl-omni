@@ -23,7 +23,7 @@ from omegaconf import OmegaConf
 
 import verl_omni  # noqa: F401
 from verl_omni.tools.agent_helper import image_gen_utils as utils
-from verl_omni.tools.trajectory.hydra_env import bind_agentic_image_gen, clear_agentic_image_gen
+from verl_omni.utils.agentic.config import bind_agentic_image_gen, clear_agentic_image_gen
 
 
 def _judge_obs(*, correctness=0.80, aesthetics=0.76, good_enough="YES", findings="text is legible", fixes="none"):
@@ -44,7 +44,7 @@ def _gen_obs(prompt="a poster", backend="qwen_image"):
 
 @pytest.mark.parametrize("value", [False, "0", "false", "off", "no"])
 def test_force_reflection_after_judge_hydra_gate(value):
-    from verl_omni.tools.trajectory.hydra_env import agentic_get_bool
+    from verl_omni.utils.agentic.config import agentic_get_bool
 
     clear_agentic_image_gen()
     bind_agentic_image_gen(OmegaConf.create({"agentic_image_gen": {"force_reflection_after_judge": value}}))
@@ -112,7 +112,7 @@ def test_force_first_generate_probability_schedule():
 
 
 def test_rewrite_judge_before_generate_hydra():
-    from verl_omni.tools.trajectory.hydra_env import agentic_get_bool
+    from verl_omni.utils.agentic.config import agentic_get_bool
 
     clear_agentic_image_gen()
     bind_agentic_image_gen(OmegaConf.create({"agentic_image_gen": {}}))
@@ -260,3 +260,171 @@ def test_fits_response_budget_rejects_overflow():
     assert u.fits_response_budget(mask_len=10, n_new_ids=6, response_length=16) is False
     assert u.fits_response_budget(mask_len=10, n_new_ids=0, response_length=16) is False
     assert u.fits_response_budget(mask_len=0, n_new_ids=1, response_length=1) is False
+
+
+@pytest.mark.parametrize("outcome", ["success", "parent_error", "missing_data"])
+def test_run_reuses_worker_episode_until_worker_scope_exits(monkeypatch, tmp_path, outcome):
+    import asyncio
+    from types import SimpleNamespace
+
+    from verl.experimental.agent_loop.agent_loop import AgentLoopWorker
+    from verl.experimental.agent_loop.tool_agent_loop import ToolAgentLoop
+
+    from verl_omni.agent_loop.omni_agent_loop import OmniAgentLoopWorker
+    from verl_omni.agent_loop.tool_agent_loop import ImageGenToolAgentLoop
+    from verl_omni.tools.trajectory import current_episode
+
+    owners = []
+    image = tmp_path / "image.png"
+    image.write_bytes(b"pixels")
+
+    async def parent_run(self, sampling_params, **kwargs):
+        state = current_episode()
+        assert state is owners[-1]
+        state.record_generation(call_id="call", prompt="scene", paths=[str(image)])
+        await asyncio.to_thread(state.record_judgment, "call", good_enough=True)
+        if outcome == "parent_error":
+            raise RuntimeError("tool failed")
+        if outcome != "missing_data":
+            self._agent_data = SimpleNamespace(messages=[{"role": "assistant", "content": "Done."}])
+        return SimpleNamespace(extra_fields={})
+
+    monkeypatch.setattr(ToolAgentLoop, "run", parent_run)
+    loop = ImageGenToolAgentLoop.__new__(ImageGenToolAgentLoop)
+
+    async def worker_parent(self, sampling_params, trajectory, *, agent_name, trace=True, **kwargs):
+        state = current_episode()
+        owners.append(state)
+        assert state.user_prompt == "request"
+        try:
+            return await loop.run(sampling_params, **kwargs)
+        finally:
+            assert current_episode() is state
+            assert not state.closed
+            assert len(state.generations) == len(state.judgments) == 1
+            assert state.good_enough
+
+    monkeypatch.setattr(AgentLoopWorker, "_run_agent_loop", worker_parent)
+    worker = OmniAgentLoopWorker.__new__(OmniAgentLoopWorker)
+
+    async def run():
+        invocation = worker._run_agent_loop(
+            {},
+            {"step": 1, "sample_index": 0, "rollout_n": 0, "validate": False},
+            agent_name="image_gen_tool_agent",
+            raw_prompt=[{"role": "user", "content": "request"}],
+        )
+        if outcome != "success":
+            message = "tool failed" if outcome == "parent_error" else "runtime trajectory messages"
+            with pytest.raises(RuntimeError, match=message):
+                await invocation
+        else:
+            output = await invocation
+            assert output.extra_fields["trajectory_relpath"] == "step_000001/sample_0.00"
+            assert output.extra_fields["trajectory_messages"] == [{"role": "assistant", "content": "Done."}]
+        state = owners[-1]
+        assert state.closed and not state.generations and not state.judgments
+        assert current_episode() is None
+
+    asyncio.run(run())
+
+
+class _Tokenizer:
+    eos_token = "<|im_end|>"
+
+    def encode(self, text, add_special_tokens=False):
+        return list(range(len(text.split())))
+
+    def decode(self, ids, skip_special_tokens=True):
+        return "Reflection: the poster is fine. Done."
+
+
+def _bare_loop():
+    import asyncio
+
+    from verl_omni.agent_loop.tool_agent_loop import ImageGenToolAgentLoop
+
+    loop = object.__new__(ImageGenToolAgentLoop)
+    loop.tokenizer = _Tokenizer()
+    loop.loop = asyncio.get_running_loop()
+    loop.response_length = 1024
+    loop.tools = {}
+    return loop
+
+
+def _agent_data(messages):
+    from verl.experimental.agent_loop.tool_agent_loop import AgentData
+
+    return AgentData(
+        messages=list(messages),
+        image_data=None,
+        video_data=None,
+        audio_data=None,
+        mm_processor_kwargs=None,
+        metrics={},
+        request_id="r",
+        tools_kwargs={},
+    )
+
+
+@pytest.mark.asyncio
+async def test_teacher_forced_call_is_recorded_as_a_structured_call():
+    from verl.experimental.agent_loop.tool_parser import FunctionCall
+
+    loop = _bare_loop()
+    agent_data = _agent_data([{"role": "user", "content": "a poster"}])
+    tool_call = FunctionCall(name="generate_image", arguments=json.dumps({"prompt": "a poster"}))
+    hermes = utils.hermes_tool_call("generate_image", prompt="a poster")
+    await loop._replace_last_assistant_with_tool_call(agent_data, hermes, tool_call)
+
+    message = agent_data.messages[-1]
+    assert tool_call.tool_call_id
+    assert message["tool_calls"] == [
+        {
+            "type": "function",
+            "id": tool_call.tool_call_id,
+            "function": {"name": "generate_image", "arguments": tool_call.arguments},
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_budget_terminated_turn_is_recorded_in_messages(monkeypatch):
+    from verl.experimental.agent_loop.tool_agent_loop import AgentState, ToolAgentLoop
+
+    async def stop_on_budget(self, agent_data, sampling_params, ignore_termination=False):
+        agent_data.response_ids = [1, 2, 3]
+        agent_data.assistant_turns += 1
+        return AgentState.TERMINATED
+
+    monkeypatch.setattr(ToolAgentLoop, "_handle_generating_state", stop_on_budget)
+    clear_agentic_image_gen()
+    bind_agentic_image_gen(OmegaConf.create({"agentic_image_gen": {}}))
+    loop = _bare_loop()
+    agent_data = _agent_data([{"role": "user", "content": "a poster"}])
+    state = await loop._handle_generating_state(agent_data, {})
+    clear_agentic_image_gen()
+
+    assert state == AgentState.TERMINATED
+    assert agent_data.messages[-1] == {"role": "assistant", "content": "Reflection: the poster is fine. Done."}
+
+
+@pytest.mark.parametrize("with_ids", [False, True])
+def test_runtime_transcript_binds_tool_results_and_excludes_fewshot(with_ids):
+    call = {"function": {"name": "generate_image", "arguments": '{"prompt": "a poster"}'}}
+    result = {"role": "tool", "content": [{"type": "text", "text": "path=/tmp/image.png"}]}
+    if with_ids:
+        call["id"] = result["tool_call_id"] = "generate-1"
+    messages = [
+        {"role": "assistant", "content": "fewshot"},
+        {"role": "user", "content": "a poster"},
+        {"role": "assistant", "content": "", "tool_calls": [call]},
+        result,
+        {"role": "assistant", "content": "Done."},
+    ]
+    exported = utils.runtime_trajectory_messages(messages)
+    assert len(exported) == 3
+    call_id = exported[0]["tool_calls"][0]["id"]
+    assert call_id == ("generate-1" if with_ids else "call_0_0")
+    assert exported[1] == {"role": "tool", "content": "path=/tmp/image.png", "tool_call_id": call_id}
+    assert exported[2] == {"role": "assistant", "content": "Done."}
