@@ -14,7 +14,7 @@ did not establish a stable quality improvement. Inference speed was not measured
 
 ## Training
 
-Use the [DVReward data preparation instructions](../flowgrpo_trainer/bagel/README.md#data-and-training),
+Use the [DVReward data preparation instructions](bagel/README.md#data-and-training),
 then run from the repository root:
 
 ```bash

@@ -5,7 +5,7 @@ set -euo pipefail
 
 recipe_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 
-bash "$recipe_dir/run_bagel_ocr_lora.sh" \
+bash "$recipe_dir/../../flowgrpo_trainer/bagel/run_bagel_ocr_lora.sh" \
     "data.train_files=$DATA_DIR/train.parquet" \
     "data.val_files=$DATA_DIR/test.parquet" \
     data.max_prompt_length=1024 \

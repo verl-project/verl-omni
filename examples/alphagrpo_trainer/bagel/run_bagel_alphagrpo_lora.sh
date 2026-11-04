@@ -3,7 +3,7 @@ set -euo pipefail
 
 recipe_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 
-bash "$recipe_dir/../../flowgrpo_trainer/bagel/run_bagel_dvreward_lora.sh" \
+bash "$recipe_dir/run_bagel_dvreward_lora.sh" \
     actor_rollout_ref.model.algorithm=alphagrpo \
     actor_rollout_ref.model.model_type=diffusion_alphagrpo_model \
     actor_rollout_ref.actor.strategy=fsdp2 \
