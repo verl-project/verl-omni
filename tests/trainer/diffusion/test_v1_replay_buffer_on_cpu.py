@@ -18,11 +18,10 @@ from types import SimpleNamespace
 import pytest
 import torch
 from omegaconf import OmegaConf
-from verl.trainer.ppo.v1.replay_buffer import ReplayBuffer, ReplayBufferAsync
-
-from verl_omni.trainer.diffusion.v1.async_profiling import ProfiledReplayBufferAsync
+from verl.trainer.ppo.v1.replay_buffer import ReplayBuffer
 
 from verl_omni.trainer.diffusion.v1 import trainer_base as trainer_base_module
+from verl_omni.trainer.diffusion.v1.async_profiling import ProfiledReplayBufferAsync
 from verl_omni.trainer.diffusion.v1.trainer_base import PolicyGradientDiffusionTrainerV1
 
 

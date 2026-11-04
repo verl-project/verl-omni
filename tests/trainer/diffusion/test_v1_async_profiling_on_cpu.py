@@ -479,9 +479,7 @@ def test_sample_profile_depth_stats_combine_across_local_updates():
 
     def record(timing_raw, sample_timing):
         trainer = SimpleNamespace(replay_buffer=SimpleNamespace(last_sample_timing=sample_timing))
-        PolicyGradientDiffusionTrainerV1._record_async_sample_profile(
-            trainer, {}, timing_raw, SimpleNamespace(tags=[])
-        )
+        PolicyGradientDiffusionTrainerV1._record_async_sample_profile(trainer, {}, timing_raw, SimpleNamespace(tags=[]))
 
     first = {
         "sample_wait/detection": 0.2,
@@ -606,7 +604,7 @@ def test_tq_write_accounting_reaches_the_queue(monkeypatch):
         calls.append({"keys": list(keys), "fields": fields, "tags": [dict(t) for t in (tags or [])]})
         # Controller-side semantics: a put merges the new tag into the stored
         # row tag (TransferQueue BatchMeta.update_custom_meta).
-        for key, tag in zip(keys, tags or [{}] * len(keys)):
+        for key, tag in zip(keys, tags or [{}] * len(keys), strict=False):
             store.setdefault(key, {}).update(tag)
 
     async def fake_async_kv_put(*, key, partition_id, tag, **kwargs):

@@ -25,9 +25,9 @@ from tensordict import TensorDict
 from transfer_queue import KVBatchMeta
 from verl.protocol import DataProto
 from verl.utils import tensordict_utils as tu
-from verl_omni.trainer.diffusion.v1.async_profiling import tensordict_payload_bytes
 
 from verl_omni.trainer.diffusion.diffusion_trainer_utils import MEDIA_ARTIFACT_FIELD_PREFIX
+from verl_omni.trainer.diffusion.v1.async_profiling import tensordict_payload_bytes
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))

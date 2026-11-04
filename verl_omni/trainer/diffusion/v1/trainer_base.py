@@ -564,13 +564,15 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         # One-step-off: teacher scoring of the batch sampled here overlaps the actor
         # update on the previously sampled batch. The first step samples twice to
         # fill the pipeline; the last sampled batch is never trained.
-        prev, self._pending_teacher_batch = self._pending_teacher_batch, self._convert_and_dispatch(
-            batch_meta, timing_raw
+        prev, self._pending_teacher_batch = (
+            self._pending_teacher_batch,
+            self._convert_and_dispatch(batch_meta, timing_raw),
         )
         if prev is None:
             next_meta = self._sample_batch(metrics, timing_raw, sample_batch_size)
-            prev, self._pending_teacher_batch = self._pending_teacher_batch, self._convert_and_dispatch(
-                next_meta, timing_raw
+            prev, self._pending_teacher_batch = (
+                self._pending_teacher_batch,
+                self._convert_and_dispatch(next_meta, timing_raw),
             )
         batch_meta, data, teacher_handle = prev
         return self._train_sampled_batch(metrics, timing_raw, batch_meta, data=data, teacher_handle=teacher_handle)
