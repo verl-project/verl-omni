@@ -1,6 +1,6 @@
 # Welcome to VeRL-Omni's documentation!
 
-Last updated: 10/16/2026
+Last updated: 10/29/2026
 
 [VeRL-Omni](https://github.com/verl-project/verl-omni) is a general RL training framework focused on multimodal generative models, built on top of [verl](https://github.com/verl-project/verl). It originated from the multi-modal generation RL effort in `verl`, and now has a dedicated home so it can evolve in a more focused way.
 
@@ -30,6 +30,8 @@ start/install.md
 start/engine_backends.md
 start/install_npu.md
 start/install_rocm.md
+start/install_xpu.md
+start/install_mlu.md
 start/models.md
 start/flowgrpo_quickstart.md
 start/diffusion_v1.md
@@ -50,6 +52,7 @@ examples/config.md
 :caption: Advanced Features
 
 advanced/diffusion_media_artifacts.md
+advanced/multi_turn_image_agents.md
 algo/async_reward.md
 algo/named_reward_models.md
 algo/rollout_correction.md
@@ -88,6 +91,7 @@ examples/overview.md
 examples/flowgrpo_trainer.md
 examples/flowdppo_trainer.md
 examples/dpo_trainer.md
+examples/minicpm/dpo_trainer_minicpm.md
 examples/dancegrpo_trainer.md
 examples/flux1/dancegrpo_trainer_flux1.md
 examples/grpoguard_trainer.md
@@ -95,12 +99,14 @@ examples/mixgrpo_trainer.md
 examples/diffusionnft_trainer.md
 examples/omninft_trainer.md
 examples/dgpo_trainer.md
+examples/awm_trainer.md
 examples/diffusionopd_trainer.md
 examples/flowgrpo_trainer_sd35_drm.md
 examples/qwen_image/flowgrpo_trainer_qwen_image.md
 examples/qwen_image_edit/flowgrpo_trainer_qwen_image_edit.md
 examples/ltx2/flowgrpo_trainer_ltx2.md
 examples/ltx2/omninft_trainer_ltx2.md
+examples/ltx2/diffusionopd_trainer_ltx2.md
 examples/minimax_h3/flowgrpo_trainer_minimax_h3.md
 examples/minimax_h3/diffusionnft_trainer_minimax_h3.md
 examples/boogu_image/flowgrpo_trainer_boogu_image.md
@@ -109,6 +115,7 @@ examples/bagel/flowgrpo_trainer_bagel.md
 examples/gspo_trainer.md
 examples/qwen3_omni/gspo_trainer_qwen3_omni.md
 examples/dapo_trainer.md
+examples/stage_skip.md
 examples/qwen3_tts/grpo_trainer_qwen3_tts.md
 ```
 
@@ -119,6 +126,7 @@ examples/qwen3_tts/grpo_trainer_qwen3_tts.md
 perf/tuning_guide.md
 perf/diffusion_mfu.md
 perf/profiler.md
+perf/diffusion_consistency.md
 ```
 
 ```{toctree}

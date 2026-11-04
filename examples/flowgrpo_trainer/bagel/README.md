@@ -144,3 +144,10 @@ wrapper replacement but simply has ``requires_grad=False`` set by the
 
 - [How to Integrate a Non-Diffusers Model for FlowGRPO Training](../../../docs/contributing/integrating_a_non_diffusers_model.md) — full integration guide using BAGEL as the worked example
 - [vLLM-Omni BAGEL docs](https://docs.vllm.ai/projects/vllm-omni/en/latest/user_guide/examples/online_serving/bagel/)
+
+## Gotchas
+
+- Pre-tokenized BAGEL prompts must retain `<|im_start|>` and `<|im_end|>` framing.
+  The agent loop marks them as native tokens; rollout decodes only their content,
+  preserving captions that begin with `user` rather than interpreting a chat role.
+  Chat-template prompts keep the existing decoding path.

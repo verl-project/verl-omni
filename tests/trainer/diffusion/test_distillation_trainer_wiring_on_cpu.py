@@ -66,6 +66,56 @@ class TestValidateDistillationConfig:
                 )
             )
 
+    def test_teacher_cfg_without_student_cfg_raises(self):
+        with pytest.raises(ValueError, match="guidance_scale"):
+            validate_distillation_config(
+                compose_cfg(
+                    ENABLE
+                    + [
+                        "actor_rollout_ref.actor.diffusion_loss.loss_mode=distill_kl",
+                        "distillation.teacher_models.teacher_model.guidance_scale=4.5",
+                        "actor_rollout_ref.rollout.pipeline.guidance_scale=1.0",
+                    ]
+                )
+            )
+
+    def test_inherited_teacher_cfg_without_student_cfg_raises(self):
+        with pytest.raises(ValueError, match="model.pipeline.guidance_scale"):
+            validate_distillation_config(
+                compose_cfg(
+                    ENABLE
+                    + [
+                        "actor_rollout_ref.actor.diffusion_loss.loss_mode=distill_kl",
+                        "actor_rollout_ref.model.pipeline.guidance_scale=4.5",
+                        "actor_rollout_ref.rollout.pipeline.guidance_scale=1.0",
+                    ]
+                )
+            )
+
+    def test_teacher_cfg_with_student_cfg_passes(self):
+        validate_distillation_config(
+            compose_cfg(
+                ENABLE
+                + [
+                    "actor_rollout_ref.actor.diffusion_loss.loss_mode=distill_kl",
+                    "distillation.teacher_models.teacher_model.guidance_scale=4.5",
+                    "actor_rollout_ref.rollout.pipeline.guidance_scale=4.5",
+                ]
+            )
+        )
+
+    def test_teacher_without_cfg_under_cfg_free_student_passes(self):
+        validate_distillation_config(
+            compose_cfg(
+                ENABLE
+                + [
+                    "actor_rollout_ref.actor.diffusion_loss.loss_mode=distill_kl",
+                    "distillation.teacher_models.teacher_model.guidance_scale=1.0",
+                    "actor_rollout_ref.rollout.pipeline.guidance_scale=1.0",
+                ]
+            )
+        )
+
     def test_direct_preference_trainer_rejected(self):
         with pytest.raises(NotImplementedError, match="policy_gradient"):
             validate_distillation_config(

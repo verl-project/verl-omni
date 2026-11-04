@@ -35,6 +35,7 @@ from verl.workers.config import CriticConfig, DistillationConfig, TrainingWorker
 from verl.workers.rollout.llm_server import LLMServerManager
 from verl.workers.utils.losses import value_loss
 
+from verl_omni.utils.config import resolve_lora_config
 from verl_omni.utils.net_utils import worker_group_port_ranges
 
 __all__ = ["OmniPPOTrainer"]
@@ -141,10 +142,7 @@ class OmniPPOTrainer(PPOTrainer):
         logger.info("actor and ref model engine initialized")
 
         # if ref_in_actor is True, the reference policy will be actor without lora applied
-        lora_rank = self.config.actor_rollout_ref.model.get("lora", {}).get("rank", 0)
-        if lora_rank <= 0:
-            lora_rank = self.config.actor_rollout_ref.model.get("lora_rank", 0)
-        self.ref_in_actor = lora_rank > 0 or self.config.actor_rollout_ref.model.get("lora_adapter_path") is not None
+        self.ref_in_actor = resolve_lora_config(self.config.actor_rollout_ref.model).enabled
         if self.use_reference_policy and not self.ref_in_actor:
             self.ref_policy_wg = all_wg[str(actor_role)]
         if self.ref_in_actor:

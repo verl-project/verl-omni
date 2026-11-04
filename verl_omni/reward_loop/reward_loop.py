@@ -210,15 +210,20 @@ class OmniRewardLoopManager(RewardLoopManager):
                     "engine_reward_loop_worker",
                 )
                 self._register_worker_group("shared", workers, group_config)
+                if any(specs[name].device_type == "cpu" for name in terms_by_group):
+                    # Start shared actors before native replicas reserve the available CPUs.
+                    ray.get([worker.__ray_ready__.remote() for worker in workers])
 
             for model_name, terms in terms_by_group.items():
                 model_config = parse_reward_model_config(model_name, models[model_name])
                 if model_config.dispatch_batch_size is not None:
                     self._reward_dispatch_batch_sizes[model_name] = model_config.dispatch_batch_size
-                placement = self.multi_reward_model_manager.native_device_assignments[model_name]
+                placement = self.multi_reward_model_manager.models[model_name].placement
                 group_config = self._copy_reward_config(terms)
                 with open_dict(group_config.reward):
-                    group_config.reward.num_workers = len(placement)
+                    group_config.reward.num_workers = (
+                        placement.num_replicas if placement.is_cpu else len(placement.devices)
+                    )
                 workers = self._create_native_workers(
                     group_config,
                     {model_name: specs[model_name]},
@@ -289,6 +294,17 @@ class OmniRewardLoopManager(RewardLoopManager):
         ]
 
     def _create_native_workers(self, config, specs, model_name, name_prefix):
+        model = self.multi_reward_model_manager.models[model_name]
+        if model.placement.is_cpu:
+            placement = model.placement
+            return [
+                self.reward_loop_workers_class.options(
+                    num_cpus=placement.cpus_per_worker,
+                    name=f"{name_prefix}_{index}",
+                ).remote(config, None, specs)
+                for index in range(placement.num_replicas)
+            ]
+
         from .accelerator_reward_workers import build_accelerator_reward_workers
 
         resource_pool = self.multi_reward_model_manager.native_resource_pools.get(model_name)

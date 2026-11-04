@@ -41,7 +41,12 @@ from verl_omni.trainer.diffusion.ray_diffusion_trainer import (
     DirectPreferenceRayTrainer,
     PolicyGradientRayTrainer,
 )
-from verl_omni.utils.config import validate_config as validate_omni_config
+from verl_omni.utils.config import (
+    resolve_lora_config,
+)
+from verl_omni.utils.config import (
+    validate_config as validate_omni_config,
+)
 from verl_omni.utils.fs import resolve_model_local_dir
 from verl_omni.utils.rl_insight import enable_rl_insight
 from verl_omni.workers.config.reward import reward_pool_is_separate, reward_role_required
@@ -90,10 +95,7 @@ class RayTrainerTaskRunner:
         actor_rollout_cls = ActorRolloutRefWorker
         ray_worker_group_cls = RayWorkerGroup
 
-        lora_rank = config.actor_rollout_ref.model.get("lora", {}).get("rank", 0)
-        if lora_rank <= 0:
-            lora_rank = config.actor_rollout_ref.model.get("lora_rank", 0)
-        ref_in_actor = lora_rank > 0 or config.actor_rollout_ref.model.get("lora_adapter_path") is not None
+        ref_in_actor = resolve_lora_config(config.actor_rollout_ref.model).enabled
 
         if config.algorithm.sample_source == "offline":
             if not hasattr(Role, "Actor"):

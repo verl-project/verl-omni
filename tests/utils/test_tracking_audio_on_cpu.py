@@ -62,13 +62,14 @@ def test_export_video_encodes_rgb_and_audio_in_one_ffmpeg_invocation(monkeypatch
     commands = []
     output = torch.arange(5 * 3 * 8 * 10, dtype=torch.uint8).reshape(5, 3, 8, 10)
 
-    def fake_ffmpeg(command, *, input, check):
-        assert check is True
+    def fake_ffmpeg(command, **kwargs):
+        assert kwargs["check"] is True
+        assert "input" not in kwargs
         commands.append(command)
         expected_rgb = output.permute(0, 2, 3, 1).contiguous().numpy().tobytes()
-        assert isinstance(input, memoryview)
-        assert input.tobytes() == expected_rgb
-        second_input = command.index("-i", command.index("-i") + 1)
+        first_input = command.index("-i")
+        assert Path(command[first_input + 1]).read_bytes() == expected_rgb
+        second_input = command.index("-i", first_input + 1)
         with wave.open(command[second_input + 1], "rb") as wav_file:
             assert wav_file.getframerate() == 48_000
             assert wav_file.getnchannels() == 1

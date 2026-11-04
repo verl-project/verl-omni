@@ -17,9 +17,9 @@ import logging
 import warnings
 
 import torch
+from accelerate import init_empty_weights
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp.api import FullStateDictConfig, ShardedStateDictConfig, StateDictType
-from torch.distributed.tensor import DTensor
 from transformers import AutoModelForMultimodalLM
 from verl.utils.activation_offload import enable_activation_offloading
 from verl.utils.debug import log_gpu_memory_usage
@@ -33,31 +33,22 @@ from verl.utils.fsdp_utils import (
     get_init_weight_context_manager,
     init_fn,
     load_fsdp_model_to_gpu,
-    merged_lora_context,
-    normalize_peft_param_name,
     offload_fsdp_model_to_cpu,
-    replace_lora_wrapper,
 )
-from verl.utils.model import convert_weight_keys
 from verl.workers.engine.base import EngineRegistry
 from verl.workers.engine.fsdp.transformer_impl import FSDPEngineWithLMHead
 from verl.workers.engine.fsdp.utils import get_sharding_strategy
 
-from verl_omni.utils.fsdp_utils import apply_fsdp2, collect_lora_params
+from verl_omni.utils.fsdp_utils import apply_fsdp2
 from verl_omni.workers.config import OmniModelConfig
+from verl_omni.workers.engine.lora_export import export_lora_for_sync
 
 logger = logging.getLogger(__name__)
 
 
-@EngineRegistry.register(model_type="omni_model", backend=["fsdp", "fsdp2"], device=["cuda", "npu"])
+@EngineRegistry.register(model_type="omni_model", backend=["fsdp", "fsdp2"], device=["cuda", "npu", "xpu", "mlu"])
 class OmniFSDPEngine(FSDPEngineWithLMHead):
     """FSDP engine for omni models"""
-
-    @staticmethod
-    def _cast_dtensor_weight_for_sync(tensor: torch.Tensor) -> torch.Tensor:
-        if tensor.is_floating_point() and tensor.dtype != torch.bfloat16:
-            return tensor.to(dtype=torch.bfloat16, non_blocking=True)
-        return tensor
 
     def prepare_model_inputs(self, micro_batch):
         """Prepare standard LM inputs, then add model-native replay fields."""
@@ -76,80 +67,28 @@ class OmniFSDPEngine(FSDPEngineWithLMHead):
 
         # FSDP2 CPUOffloadPolicy owns CPU<->GPU placement; calling model.to(device) here
         # leaves the module half-moved and crashes state_dict() below (verl#5995). The
-        # per-DTensor .to(device).full_tensor() below still produces GPU tensors.
+        # per-DTensor gather in lora_export still produces GPU tensors.
         if not self._uses_fsdp2_cpu_offload_policy:
             load_fsdp_model_to_gpu(self.module)
 
         log_gpu_memory_usage("After load_fsdp_model_to_gpu", logger=logger)
 
-        peft_config = None
-        merge_lora = self.model_config.lora.get("merge", False)
+        def _offload_to_cpu():
+            log_gpu_memory_usage("Before offload_fsdp_model_to_cpu", logger=logger)
+            if self._is_offload_param:
+                offload_fsdp_model_to_cpu(self.module)
+            log_gpu_memory_usage("After offload_fsdp_model_to_cpu", logger=logger)
 
-        peft_model = getattr(self.module, "_fsdp_wrapped_module", self.module)
-        if hasattr(peft_model, "peft_config"):  # LoRA
-            if not merge_lora:
-                adapter_name = kwargs.get("adapter_name", "default")
-                peft_config = peft_model.peft_config.get(adapter_name, None)
-                # DIFF vs upstream: use verl_omni's fixed collect_lora_params
-                params = collect_lora_params(
-                    module=self.module,
-                    layered_summon=layered_summon,
-                    base_sync_done=base_sync_done,
-                    adapter_name=adapter_name,
-                )
-                if not base_sync_done:
-                    params = {replace_lora_wrapper(k, peft_config): v for k, v in params.items()}
-            else:  # merge lora
-                return self._merged_lora_per_tensor_param(), None
-        else:
-            params = self.module.state_dict()
-
-        params = convert_weight_keys(params, getattr(self.module, "_fsdp_wrapped_module", self.module))
-
-        log_gpu_memory_usage("Before offload_fsdp_model_to_cpu", logger=logger)
-        if self._is_offload_param:
-            offload_fsdp_model_to_cpu(self.module)
-        log_gpu_memory_usage("After offload_fsdp_model_to_cpu", logger=logger)
-
-        if peft_config is not None and base_sync_done:
-            per_tensor_param = params.items()
-        else:
-            device = get_device_id()  # used when fsdp2 set cpu_offload_policy
-            per_tensor_param = (
-                (
-                    name,
-                    self._cast_dtensor_weight_for_sync(param.to(device, non_blocking=True).full_tensor())
-                    if isinstance(param, DTensor)
-                    else param,
-                )
-                for name, param in params.items()
-            )
-
-        if self._qat_enabled:
-            from verl.utils.qat.quantizer import QATQuantizer
-            from verl.utils.torch_dtypes import PrecisionType
-
-            mixed_precision_config = self.engine_config.mixed_precision
-            if mixed_precision_config is not None:
-                param_dtype = PrecisionType.to_dtype(mixed_precision_config.get("param_dtype", "bf16"))
-            else:
-                param_dtype = torch.bfloat16
-
-            quantizer = QATQuantizer(
-                mode=self._qat_config.mode,
-                group_size=self._qat_config.group_size,
-                ignore_patterns=list(self._qat_config.ignore_patterns),
-                device=torch.device(get_device_id()),
-                param_dtype=param_dtype,
-            )
-            per_tensor_param = quantizer.quantize_with_fusion(
-                per_tensor_param,
-                target_device=torch.device("cpu"),
-            )
-
-        peft_config_dict = peft_config.to_dict() if peft_config is not None else None
-
-        return per_tensor_param, peft_config_dict
+        return export_lora_for_sync(
+            self.module,
+            model_config=self.model_config,
+            base_sync_done=base_sync_done,
+            adapter_name=kwargs.get("adapter_name"),
+            layered_summon=layered_summon,
+            is_diffusers=False,
+            offload_fn=_offload_to_cpu,
+            stream_transform=self._qat_stream_transform(),
+        )
 
     def get_per_tensor_param_shard(self, **kwargs):
         """Audit gate for the inherited delta shard export (RFC #38).
@@ -176,25 +115,28 @@ class OmniFSDPEngine(FSDPEngineWithLMHead):
             )
         return super().get_per_tensor_param_shard(**kwargs)
 
-    def _merged_lora_per_tensor_param(self):
-        """Stream materialized merged weights before restoring the actor."""
-        device = get_device_id()
-        try:
-            with merged_lora_context(self.module, backup_adapters=True):
-                params = normalize_peft_param_name(self.module.state_dict())
-                params = convert_weight_keys(params, getattr(self.module, "_fsdp_wrapped_module", self.module))
-                for name, param in params.items():
-                    yield (
-                        name,
-                        self._cast_dtensor_weight_for_sync(param.to(device, non_blocking=True).full_tensor())
-                        if isinstance(param, DTensor)
-                        else param.detach().clone(),
-                    )
-        finally:
-            log_gpu_memory_usage("Before offload_fsdp_model_to_cpu", logger=logger)
-            if self._is_offload_param:
-                offload_fsdp_model_to_cpu(self.module)
-            log_gpu_memory_usage("After offload_fsdp_model_to_cpu", logger=logger)
+    def _qat_stream_transform(self):
+        """Engine post-processing (QAT quantization) applied to the non-merged export stream."""
+        if not self._qat_enabled:
+            return None
+
+        from verl.utils.qat.quantizer import QATQuantizer
+        from verl.utils.torch_dtypes import PrecisionType
+
+        mixed_precision_config = self.engine_config.mixed_precision
+        if mixed_precision_config is not None:
+            param_dtype = PrecisionType.to_dtype(mixed_precision_config.get("param_dtype", "bf16"))
+        else:
+            param_dtype = torch.bfloat16
+
+        quantizer = QATQuantizer(
+            mode=self._qat_config.mode,
+            group_size=self._qat_config.group_size,
+            ignore_patterns=list(self._qat_config.ignore_patterns),
+            device=torch.device(get_device_id()),
+            param_dtype=param_dtype,
+        )
+        return lambda stream: quantizer.quantize_with_fusion(stream, target_device=torch.device("cpu"))
 
     def _build_module(self):
         unsupported_options = [
@@ -236,17 +178,31 @@ class OmniFSDPEngine(FSDPEngineWithLMHead):
             self.model_config.hf_config.tie_word_embeddings = tie_word_embeddings
 
         init_context = get_init_weight_context_manager(use_meta_tensor=not tie_word_embeddings, mesh=self.device_mesh)
+        auto_model_cls = getattr(adapter_cls, "auto_model_class", None) or AutoModelForMultimodalLM
+        # Ranks on meta get their weights from rank 0 when FSDP wraps the module, but transformers 5's
+        # from_pretrained reads and converts every checkpoint tensor even under init_empty_weights.
+        meta_init = init_context is init_empty_weights and hasattr(auto_model_cls, "from_config")
 
         with init_context(), warnings.catch_warnings():
             warnings.simplefilter("ignore")
 
-            auto_model_cls = getattr(adapter_cls, "auto_model_class", None) or AutoModelForMultimodalLM
-            module = auto_model_cls.from_pretrained(
-                pretrained_model_name_or_path=self.model_config.local_path,
-                torch_dtype=torch_dtype,
-                config=self.model_config.hf_config,
-                trust_remote_code=self.model_config.trust_remote_code,
-            )
+            if meta_init:
+                # from_config resolves auto_map remote code from config.name_or_path,
+                # which AutoConfig.from_pretrained sets to hf_config_path. Rank 0's
+                # from_pretrained resolves from local_path; those directories may differ.
+                self.model_config.hf_config.name_or_path = self.model_config.local_path
+                module = auto_model_cls.from_config(
+                    self.model_config.hf_config,
+                    torch_dtype=torch_dtype,
+                    trust_remote_code=self.model_config.trust_remote_code,
+                )
+            else:
+                module = auto_model_cls.from_pretrained(
+                    pretrained_model_name_or_path=self.model_config.local_path,
+                    torch_dtype=torch_dtype,
+                    config=self.model_config.hf_config,
+                    trust_remote_code=self.model_config.trust_remote_code,
+                )
             module = adapter_cls.configure_model(module, self.model_config)
 
             if self.engine_config.strategy == "fsdp" and not self.engine_config.use_orig_params:

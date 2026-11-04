@@ -48,6 +48,7 @@ def make_trainer(monkeypatch, *, mode="sync", continuous=False, fail_at=None, re
     trainer.use_reference_policy = False
     trainer.use_critic = False
     trainer.sync_compatible = False
+    trainer._training_watchdog = None
     trainer.global_steps = resumed_step
     trainer.steps_per_epoch = 4
     trainer.total_training_steps = 4
@@ -90,6 +91,7 @@ def make_trainer(monkeypatch, *, mode="sync", continuous=False, fail_at=None, re
 
     trainer.step = step
     monkeypatch.setattr(trainer_base, "SkipManager", Mock())
+    monkeypatch.setattr(trainer_base, "init_skip_manager", Mock())
     monkeypatch.setattr(trainer_base, "Tracking", Mock())
     monkeypatch.setattr(trainer_base, "ValidationGenerationsLogger", Mock())
     monkeypatch.setattr(trainer_base, "tq", Mock())

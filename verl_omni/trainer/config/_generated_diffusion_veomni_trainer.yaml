@@ -94,6 +94,11 @@ actor_rollout_ref:
     strategy: veomni
     ppo_mini_batch_size: 256
     ppo_micro_batch_size_per_gpu: null
+    clip_ratio: 0.2
+    clip_ratio_low: 0.2
+    clip_ratio_high: 0.2
+    clip_ratio_c: 3.0
+    loss_agg_mode: token-mean
     diffusion_loss:
       _target_: verl_omni.workers.config.diffusion.DiffusionLossConfig
       loss_mode: ${oc.select:actor_rollout_ref.model.algorithm,flow_grpo}
@@ -107,6 +112,8 @@ actor_rollout_ref:
       add_kl_coefficient: true
       dgpo_beta: 100.0
       dgpo_clip_range: 0.01
+      awm_clip_range: 0.0001
+      awm_kl_coef: 0.1
       video_weight: 1.0
       audio_weight: 1.0
       video_ref_kl_coef: 0.0
@@ -138,6 +145,10 @@ actor_rollout_ref:
       save_lora_only: false
       load_contents: ${.save_contents}
       async_save: false
+    ar:
+      _target_: verl_omni.workers.config.diffusion.actor.DiffusionActorARConfig
+      calculate_entropy: false
+      entropy_coeff: 0.0
   ref:
     rollout_n: ${oc.select:actor_rollout_ref.rollout.n,1}
     strategy: veomni
@@ -298,6 +309,7 @@ actor_rollout_ref:
     log_prob_micro_batch_size_per_gpu: null
     disable_log_stats: true
     'n': 1
+    m: 1
     seed: 42
     full_determinism: false
     multi_turn:
@@ -311,6 +323,7 @@ actor_rollout_ref:
     val_kwargs:
       _target_: verl_omni.workers.config.diffusion.DiffusionSamplingConfig
       'n': 1
+      m: 1
       pipeline:
         _target_: verl_omni.workers.config.diffusion.DiffusionPipelineConfig
         height: ${oc.select:actor_rollout_ref.rollout.pipeline.height,512}
@@ -334,6 +347,13 @@ actor_rollout_ref:
         sde_window_size: ${oc.select:actor_rollout_ref.rollout.algo.sde_window_size,null}
         sde_window_range: ${oc.select:actor_rollout_ref.rollout.algo.sde_window_range,null}
         sde_contiguous: ${oc.select:actor_rollout_ref.rollout.algo.sde_contiguous,true}
+      ar:
+        _target_: verl_omni.workers.config.diffusion.DiffusionARConfig
+        temperature: ${oc.select:actor_rollout_ref.rollout.ar.temperature,1.0}
+        top_k: ${oc.select:actor_rollout_ref.rollout.ar.top_k,0}
+        top_p: ${oc.select:actor_rollout_ref.rollout.ar.top_p,1.0}
+        repetition_penalty: ${oc.select:actor_rollout_ref.rollout.ar.repetition_penalty,1.0}
+        response_length: ${oc.select:actor_rollout_ref.rollout.ar.response_length,1024}
     algo:
       _target_: verl_omni.workers.config.diffusion.DiffusionRolloutAlgoConfig
       noise_level: 1.0
@@ -360,13 +380,15 @@ actor_rollout_ref:
       task: null
       frame_indices: null
       aspect_ratio: null
+    ar:
+      _target_: verl_omni.workers.config.diffusion.DiffusionARConfig
+      temperature: 1.0
+      top_k: 0
+      top_p: 1.0
+      repetition_penalty: 1.0
+      response_length: 1024
     calculate_log_probs: false
-    llm_calculate_log_probs: false
-    temperature: 1.0
-    top_k: 0
-    top_p: 1.0
-    repetition_penalty: 1.0
-    max_new_tokens: 256
+    ar_calculate_log_probs: false
     rollout_adapter: default
     agent:
       _target_: verl.workers.config.AgentLoopConfig
@@ -401,6 +423,7 @@ actor_rollout_ref:
     external_lib: null
     enable_gradient_checkpointing: true
     config_path: null
+    text_encoder_subfolder: text_encoder
     transformer_subfolder: transformer
     attn_backend: _flash_3_varlen_hub
     use_regional_compile: false
@@ -423,6 +446,7 @@ actor_rollout_ref:
     lora_dtype: null
     fsdp_layer_prefixes:
     - transformer_blocks.
+    use_remove_padding: false
     mtp:
       _target_: verl.workers.config.MtpConfig
       enable: false
@@ -448,6 +472,21 @@ actor_rollout_ref:
       sde_window_size: ${oc.select:actor_rollout_ref.rollout.algo.sde_window_size,null}
       sde_window_range: ${oc.select:actor_rollout_ref.rollout.algo.sde_window_range,null}
       sde_contiguous: ${oc.select:actor_rollout_ref.rollout.algo.sde_contiguous,true}
+    ar:
+      _target_: verl_omni.workers.config.diffusion.DiffusionModelARConfig
+      override_config: {}
+      optim:
+        _target_: verl_omni.workers.config.diffusion.DiffusionModelAROptimizerConfig
+        lr: null
+        weight_decay: null
+        betas: null
+        clip_grad: null
+        lr_warmup_steps_ratio: null
+        lr_warmup_steps: null
+        lr_scheduler_type: null
+        min_lr_ratio: null
+        num_cycles: null
+        override_optimizer_config: null
     model_type: diffusion_model
   separate: false
   hybrid_engine: true
@@ -589,6 +628,7 @@ reward:
   accelerator_workers:
     enabled: false
   reward_functions: {}
+  multi_reward_concurrency: 1
   models: {}
   aggregation: weighted_sum
   reward_manager:
@@ -613,6 +653,7 @@ distillation:
       key: null
       model_path: null
       world_size: 0
+      guidance_scale: null
   teacher_key: data_source
   scheduler: inline
 dmd:
@@ -701,6 +742,16 @@ trainer:
   device: cuda
   use_v1: true
   v1:
+    watchdog:
+      enabled: false
+      window_size: 3
+      warmup_steps: 5
+      cooldown_steps: 20
+      reward_std_max: 1.0e-08
+      grad_norm_max: 1.0e-12
+      ratio_lower: 0.5
+      ratio_upper: 2.0
+      max_staleness: null
     trainer_mode: sync
     sync: {}
     colocate_async:
@@ -789,8 +840,46 @@ skip:
     dump_dir: ~/.verl/rollout_dump
     steps: []
     action: cache
+  rollout_tq:
+    enable: false
+    dump_dir: ~/.verl/rollout_dump
+    steps: []
+    action: cache
   async_rollout:
     enable: false
     dump_dir: ~/.verl/rollout_dump
     steps: []
     action: cache
+omni_skip:
+  _target_: verl_omni.utils.skip.OmniSkipConfig
+  reward:
+    enable: false
+    dump_dir: ~/.verl/stage_dump
+    steps: []
+    action: cache
+  old_log_prob:
+    enable: false
+    dump_dir: ~/.verl/stage_dump
+    steps: []
+    action: cache
+  ref_log_prob:
+    enable: false
+    dump_dir: ~/.verl/stage_dump
+    steps: []
+    action: cache
+  advantage:
+    enable: false
+    dump_dir: ~/.verl/stage_dump
+    steps: []
+    action: cache
+  actor_update:
+    enable: false
+    dump_dir: ~/.verl/stage_dump
+    steps: []
+    action: empty
+  weight_sync:
+    enable: false
+    dump_dir: ~/.verl/stage_dump
+    steps: []
+    action: empty
+    ack_stale_weights: false

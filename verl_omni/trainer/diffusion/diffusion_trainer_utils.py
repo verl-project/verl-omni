@@ -19,11 +19,29 @@ from typing import Any, Optional
 from verl import DataProto
 from verl.trainer.distillation import is_distillation_enabled
 
+# ``rollout_media`` artifact field names, spelled literally to keep this core
+# trainer module free of the pipeline package's import graph.
+MEDIA_ARTIFACT_FIELD_PREFIX = "media_artifact__"
+MEDIA_ARTIFACT_METADATA_FIELDS = frozenset(
+    {"media_artifact_specs", "primary_artifact", "preview_artifact", "media_artifact_context"}
+)
+
 
 def _to_diffusion_worker_tensordict(batch: DataProto):
-    """Project a driver batch for actor/ref workers without copying tensor storage."""
+    """Project a driver batch for actor/ref workers without copying tensor storage.
+
+    Named media artifacts and their per-sample declarations are reward/dump-only
+    consumers' data; compute workers never read them, so shipping them would slice and
+    serialize decoded previews and per-sample non-tensor stacks on every worker hop.
+    """
     worker_batch = batch.to_tensordict()
     worker_batch.pop("responses", None)
+    for key in [
+        key
+        for key in worker_batch.keys()
+        if key.startswith(MEDIA_ARTIFACT_FIELD_PREFIX) or key in MEDIA_ARTIFACT_METADATA_FIELDS
+    ]:
+        worker_batch.pop(key)
     return worker_batch
 
 
@@ -87,6 +105,20 @@ def validate_distillation_config(config) -> None:
             "A distillation loss is active but no teacher is configured; set distillation.enabled=true "
             "and distillation.teacher_models.teacher_model.model_path."
         )
+    if enabled:
+        student_guidance_scale = config.actor_rollout_ref.rollout.pipeline.get("guidance_scale") or 0.0
+        inherited_guidance_scale = config.actor_rollout_ref.model.pipeline.get("guidance_scale") or 0.0
+        for name, teacher in config.distillation.teacher_models.items():
+            teacher_guidance_scale = teacher.get("guidance_scale")
+            if teacher_guidance_scale is None:
+                teacher_guidance_scale = inherited_guidance_scale
+            if teacher_guidance_scale > 1.0 and student_guidance_scale <= 1.0:
+                raise ValueError(
+                    f"distillation.teacher_models.{name} runs with guidance_scale={teacher_guidance_scale} (its own "
+                    "value or the inherited actor_rollout_ref.model.pipeline.guidance_scale), which needs negative "
+                    "prompt embeds that the rollout only produces with "
+                    "actor_rollout_ref.rollout.pipeline.guidance_scale > 1."
+                )
     if enabled and actor.use_distill_loss and actor.distill_loss_mode != "distill_kl":
         raise NotImplementedError(
             f"The teacher runtime produces teacher_prev_sample_mean, which only distill_kl consumes, "

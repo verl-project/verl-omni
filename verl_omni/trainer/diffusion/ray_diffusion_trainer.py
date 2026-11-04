@@ -51,6 +51,7 @@ from verl.utils.debug import marked_timer
 from verl.utils.import_utils import load_class_from_fqn
 from verl.utils.metric import reduce_metrics
 from verl.utils.py_functional import rename_dict
+from verl.utils.skip import SkipManager
 from verl.utils.tracking import ValidationGenerationsLogger
 
 from verl_omni.pipelines.rollout_media import (
@@ -88,7 +89,9 @@ from verl_omni.trainer.diffusion.rollout_correction import (
     rollout_correction_enabled,
 )
 from verl_omni.trainer.diffusion.teacher_manager import DiffusionTeacherManager
+from verl_omni.utils.config import resolve_lora_config
 from verl_omni.utils.net_utils import worker_group_port_ranges
+from verl_omni.utils.skip import init_skip_manager, log_skip_summary
 from verl_omni.utils.tracking import (
     _export_video,
     batch_items,
@@ -131,16 +134,19 @@ def validate_separate_config(config) -> None:
     if config.actor_rollout_ref.hybrid_engine:
         raise ValueError("Separate mode requires actor_rollout_ref.hybrid_engine=false.")
 
-    model = config.actor_rollout_ref.model
-    lora_rank = (model.get("lora") or {}).get("rank", 0) or 0
-    legacy_lora_rank = model.get("lora_rank", 0) or 0
-    lora_adapter_path = model.get("lora_adapter_path")
-    if lora_rank > 0 or legacy_lora_rank > 0 or lora_adapter_path is not None:
-        raise ValueError(
-            "Separate mode currently supports full finetuning only; "
-            "actor_rollout_ref.model.lora.rank, actor_rollout_ref.model.lora_rank, and "
-            "actor_rollout_ref.model.lora_adapter_path must respectively be 0, 0, and null."
-        )
+    # A resolver ValueError means LoRA was requested in some spelling; its flat-key
+    # hint is a dead end where the flat key is refused too.
+    separate_lora_error = (
+        "Separate mode currently supports full finetuning only; "
+        "actor_rollout_ref.model.lora.rank, actor_rollout_ref.model.lora_rank, and "
+        "actor_rollout_ref.model.lora_adapter_path must respectively be 0, 0, and null."
+    )
+    try:
+        lora_settings = resolve_lora_config(config.actor_rollout_ref.model)
+    except ValueError as e:
+        raise ValueError(separate_lora_error) from e
+    if lora_settings.enabled:
+        raise ValueError(separate_lora_error)
 
     rollout = config.actor_rollout_ref.rollout
     if rollout.nnodes <= 0 or rollout.n_gpus_per_node <= 0:
@@ -453,10 +459,7 @@ class BaseRayDiffusionTrainer(ABC):
         )
 
         # if ref_in_actor is True, the reference policy will be actor without lora applied
-        lora_rank = config.actor_rollout_ref.model.get("lora", {}).get("rank", 0)
-        if lora_rank <= 0:
-            lora_rank = config.actor_rollout_ref.model.get("lora_rank", 0)
-        self.ref_in_actor = lora_rank > 0 or config.actor_rollout_ref.model.get("lora_adapter_path") is not None
+        self.ref_in_actor = resolve_lora_config(config.actor_rollout_ref.model).enabled
         if self.separate and self.use_reference_policy and not self.ref_in_actor:
             if Role.RefPolicy not in role_worker_mapping:
                 raise ValueError(
@@ -484,6 +487,9 @@ class BaseRayDiffusionTrainer(ABC):
             and controller_nsight_options.get("capture-range") == "cudaProfilerApi"
         )
         self._controller_nsys_profile_active = False
+
+        # initialize SkipManager (verl rollout skip + verl-omni stage skip; no-op until configured).
+        init_skip_manager(self.config)
 
     def _create_dataloader(self, train_dataset, val_dataset, collate_fn, train_sampler: Optional[Sampler]):
         """
@@ -735,6 +741,7 @@ class BaseRayDiffusionTrainer(ABC):
 
         return gen_batch
 
+    @SkipManager.annotate(role="reward")
     def _compute_reward_colocate(self, batch: DataProto) -> tuple[torch.Tensor, dict[str, Any]] | torch.Tensor:
         """
         compute reward use colocate reward model
@@ -791,6 +798,8 @@ class BaseRayDiffusionTrainer(ABC):
             test_output_gen_batch_padded = self.async_rollout_manager.generate_sequences(test_gen_batch_padded)
 
             if self.use_rm and "rm_scores" not in test_output_gen_batch_padded.batch.keys():
+                # Stage-skip decorators bypass marked calls: validation must never poison training caches.
+                test_output_gen_batch_padded.meta_info["validate"] = True
                 # for colocate reward models, we need to sleep rollout model
                 # to spare GPU memory for reward model
                 if not self.separate:
@@ -1218,6 +1227,7 @@ class BaseRayDiffusionTrainer(ABC):
         else:
             print(f"Warning: No dataloader state found at {dataloader_local_path}, will start from scratch")
 
+    @SkipManager.annotate(role="actor_update")
     def _update_actor(self, batch: DataProto) -> DataProto:
         rollout_config = self.config.actor_rollout_ref.rollout
         batch.meta_info["multi_turn"] = rollout_config.multi_turn.enable
@@ -1305,6 +1315,7 @@ class BaseRayDiffusionTrainer(ABC):
 class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
     """Policy-gradient diffusion trainer for FlowGRPO, MixGRPO, DanceGRPO, GRPO-Guard, etc."""
 
+    @SkipManager.annotate(role="ref_log_prob")
     def _compute_ref_log_prob(self, batch: DataProto) -> DataProto:
         batch_td = _to_diffusion_worker_tensordict(batch)
         batch_td = embeds_padding_2_no_padding(batch_td)
@@ -1329,6 +1340,7 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
         )
         return DataProto.from_tensordict(ref_log_prob)
 
+    @SkipManager.annotate(role="old_log_prob")
     def _compute_old_log_prob(self, batch: DataProto) -> tuple[DataProto, Optional[float]]:
         batch_td = _to_diffusion_worker_tensordict(batch)
         batch_td = embeds_padding_2_no_padding(batch_td)
@@ -1389,6 +1401,7 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
 
         # we start from step 1
         self.global_steps += 1
+        SkipManager.set_step(self.global_steps)
         last_val_metrics = None
         self.max_steps_duration = 0
         self._nonfinite_grad_streak = 0
@@ -1634,10 +1647,12 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
 
                 progress_bar.update(1)
                 self.global_steps += 1
+                SkipManager.set_step(self.global_steps)
 
                 if is_last_step:
                     if hasattr(self.actor_rollout_wg, "async_calls_finalize_fn_exec"):
                         self.actor_rollout_wg.async_calls_finalize_fn_exec(blocking=True)
+                    log_skip_summary(logger, self.global_steps)
                     pprint(f"Final validation metrics: {last_val_metrics}")
                     progress_bar.close()
                     return
@@ -1663,9 +1678,7 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
         loss_mode = config.actor_rollout_ref.actor.diffusion_loss.loss_mode
         # DPO needs trainer-side ref noise preds; DiffusionNFT computes ref in the actor engine.
         self.use_reference_policy = need_reference_policy(self.config) or (loss_mode == "dpo")
-        self._has_old_adapter = "old" in tuple(
-            config.actor_rollout_ref.model.get("policy_state_adapters", ("default",))
-        )
+        self._has_old_adapter = "old" in resolve_lora_config(config.actor_rollout_ref.model).adapters
         if self._has_old_adapter:
             self._validate_old_adapter_config()
         self._loss_fn = get_diffusion_loss_fn(loss_mode)
@@ -1699,6 +1712,7 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
             return {"val/offline/skipped": 1.0}
         return super()._validate()
 
+    @SkipManager.annotate(role="actor_update")
     def _update_actor(self, batch: DataProto) -> DataProto:
         rollout_config = self.config.actor_rollout_ref.rollout
         batch.meta_info["multi_turn"] = rollout_config.multi_turn.enable
@@ -1742,6 +1756,7 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
             actor_output["perf/mfu/actor"] = actor_mfu
         return DataProto.from_single_dict(data={}, meta_info={"metrics": actor_output})
 
+    @SkipManager.annotate(role="ref_log_prob")
     def _compute_ref_noise_pred(self, batch: DataProto) -> Optional[DataProto]:
         """Reference transformer output and shared flow tensors."""
         batch_td = _to_diffusion_worker_tensordict(batch)
@@ -1840,6 +1855,7 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
 
         # we start from step 1
         self.global_steps += 1
+        SkipManager.set_step(self.global_steps)
         last_val_metrics = None
         self.max_steps_duration = 0
         self._nonfinite_grad_streak = 0
@@ -2053,10 +2069,12 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
 
                 progress_bar.update(1)
                 self.global_steps += 1
+                SkipManager.set_step(self.global_steps)
 
                 if is_last_step:
                     if hasattr(self.actor_rollout_wg, "async_calls_finalize_fn_exec"):
                         self.actor_rollout_wg.async_calls_finalize_fn_exec(blocking=True)
+                    log_skip_summary(logger, self.global_steps)
                     pprint(f"Final validation metrics: {last_val_metrics}")
                     progress_bar.close()
                     return

@@ -20,7 +20,7 @@ import json
 import re
 from typing import Any
 
-from verl_omni.tools.trajectory.hydra_env import agentic_get, agentic_get_bool
+from verl_omni.utils.agentic.config import agentic_get, agentic_get_bool
 from verl_omni.utils.agentic.max_passes import max_generate_passes
 
 __all__ = [
@@ -34,6 +34,7 @@ __all__ = [
     "last_user_text",
     "max_generate_passes",
     "messages_after_last_user",
+    "runtime_trajectory_messages",
     "tool_calls_are_premature_judge",
     "tool_message_text",
 ]
@@ -178,6 +179,56 @@ def tool_message_text(message: dict[str, Any]) -> str:
             str(item.get("text") or "") for item in content if isinstance(item, dict) and item.get("type") == "text"
         )
     return str(content or "")
+
+
+def runtime_trajectory_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Export the live turns as the reward's runtime-owned ``trajectory_messages``.
+
+    Keeps the assistant and tool turns after the last user turn, as text. Every
+    structured tool call gets an ID, and every tool response is bound to the call
+    it answers: by its own ``tool_call_id`` when the parser set one, otherwise by
+    position, which is how ``ToolAgentLoop`` appends one response per call.
+
+    Args:
+        messages: Full chat message list owned by the agent loop.
+
+    Returns:
+        Assistant entries (``content`` plus OpenAI-style ``tool_calls``) and tool
+        entries (``content`` plus ``tool_call_id``).
+    """
+    exported: list[dict[str, Any]] = []
+    pending: list[str] = []
+    for turn, message in enumerate(messages_after_last_user(messages)):
+        role = message.get("role")
+        if role == "assistant":
+            calls = []
+            for index, call in enumerate(message.get("tool_calls") or []):
+                function = call.get("function") if isinstance(call, dict) else None
+                if not isinstance(function, dict):
+                    continue
+                calls.append(
+                    {
+                        "id": str(call.get("id") or f"call_{turn}_{index}"),
+                        "type": "function",
+                        "function": {"name": function.get("name"), "arguments": function.get("arguments")},
+                    }
+                )
+            pending = [call["id"] for call in calls]
+            entry: dict[str, Any] = {"role": "assistant", "content": tool_message_text(message)}
+            if calls:
+                entry["tool_calls"] = calls
+            exported.append(entry)
+        elif role == "tool":
+            call_id = message.get("tool_call_id")
+            if call_id in pending:
+                pending.remove(call_id)
+            elif call_id is None and pending:
+                call_id = pending.pop(0)
+            entry = {"role": "tool", "content": tool_message_text(message)}
+            if call_id is not None:
+                entry["tool_call_id"] = str(call_id)
+            exported.append(entry)
+    return exported
 
 
 def _is_successful_judge(text: str) -> bool:

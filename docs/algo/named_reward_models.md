@@ -1,6 +1,6 @@
 # Named Reward Models
 
-Last updated: 10/13/2026
+Last updated: 10/27/2026
 
 This guide describes how to configure and extend named model-backed rewards
 under `reward.models` in `verl-omni`. For the general Reward Loop interface and
@@ -229,6 +229,27 @@ reward_functions:
     name: compute_semantic_quality
 ```
 
+### VLM-as-a-judge
+
+One judge model can serve several reward terms, each with its own `user_prompt`
+(literal text, or a `pkg://` builder). For UnifiedReward, literal text may contain
+`{caption}`, and a custom builder receives the caption. Leaving `user_prompt`
+unset keeps the scorer's default request.
+
+```yaml
+reward_functions:
+  ocr:
+    model: judge
+    path: pkg://verl_omni.utils.reward_score.genrm_ocr
+    name: compute_score_ocr
+    user_prompt: "Transcribe all text in the image exactly."
+  semantics:
+    model: judge
+    path: pkg://verl_omni.utils.reward_score.unified_reward
+    name: compute_score_unified_reward
+    user_prompt: pkg://my_package.prompts.build_semantic_prompt
+```
+
 Every term uses the existing aggregation contract:
 
 ```text
@@ -237,7 +258,57 @@ final_reward = sum(term.weight * term.score)
 
 `required=true` makes a scoring failure fatal. An optional term records the
 error and contributes zero. Model setup and lifecycle failures are always
-fatal.
+fatal. `ArtifactContractError` is fatal for every term, including optional
+terms, so missing or invalid named media cannot silently contribute zero.
+
+## Concurrent independent reward terms
+
+By default, reward terms run in configuration order within each sample, while
+separate samples retain their existing concurrency. To overlap independent
+terms, set a worker-wide cap above one and opt in each term:
+
+```yaml
+reward:
+  multi_reward_concurrency: 2
+  reward_functions:
+    first:
+      path: pkg://my_package.rewards
+      name: score_first
+      independent: true
+    second:
+      path: pkg://my_package.rewards
+      name: score_second
+      independent: true
+```
+
+`independent` must be a boolean and defaults to `false`. Eligible terms use
+coroutine score functions with no named model (for example, an external HTTP
+scorer) or an `engine` named model. Native model terms and synchronous score
+functions cannot opt in. Opting in asserts that score functions treat sample
+inputs as read-only, do not share mutable state, and have no dependencies on
+other reward terms. The manager passes the same input objects to each scorer;
+it does not copy large image or other payloads.
+
+Adjacent independent terms execute in windows of at most
+`multi_reward_concurrency`; any other term is an ordering barrier for its
+sample. When the cap is above one, it bounds active independent scorer calls
+across all samples handled by one reward worker. Barriers do not use the cap
+and retain cross-sample concurrency, even while independent calls are active.
+Each window waits for all its terms to settle before admitting the next window
+for that sample, even if one term finishes and frees a semaphore permit while
+another is still running. This bounds the number of admitted tasks rather than
+enqueueing every term at once; a freed permit remains available to independent
+terms from other samples.
+Scores, diagnostics, and required/optional error handling remain in
+configuration order. The cap does not limit reward workers, barrier calls, or
+engine-side requests. Increasing it does not establish a throughput
+improvement by itself. Cancelling a serial synchronous scorer stops its caller
+without waiting for its executor thread; the thread may continue until the
+scorer returns.
+An admitted window settles all its terms before reporting a contract error.
+Independent async scorers must cooperate with cancellation. A scorer that
+swallows `CancelledError` can block window drain and permit release; the manager
+does not impose a timeout or preempt it.
 
 ## Component rewards and consumer support
 
@@ -329,7 +400,7 @@ arguments are already present in `executor.kwargs`.
 
 Each native model entry is one deployment. Different checkpoints or lifecycle
 policies require different named deployments; multiple reward functions may
-share one deployment through their `model` field. In this PR, every
+share one deployment through their `model` field. For accelerator placement, every
 `placement.devices` entry creates one complete replica of that deployment.
 Future FSDP support will need an explicit replica-group schema because a flat
 device list cannot distinguish full replicas from ranks within one sharded
@@ -397,6 +468,51 @@ reference OmniNFT revision is `fb9237f6e74edf0d0f2a683f4d975b79fde588fe`; record
 local modifications separately. Path checks do not authenticate source contents.
 The existing loader and AST compatibility lookup use the upstream package
 namespace; replacing only the entry-file import would not isolate that package.
+
+## Use native on CPU
+
+Small native reward executors can run as ordinary Ray CPU actors without
+allocating a trainer GPU pool. Set `placement.resource=cpu`, use
+`num_replicas` for the number of complete replicas, and reserve CPU capacity
+for each replica with `cpus_per_worker`:
+
+```yaml
+reward:
+  models:
+    quality:
+      backend: native
+      model_path: /models/quality
+      placement:
+        resource: cpu
+        num_replicas: 2
+        cpus_per_worker: 2
+      executor:
+        model: my_package.reward_model:CpuRewardModel
+  reward_functions:
+    quality:
+      path: pkg://my_package.reward_score
+      name: compute_quality_score
+```
+
+CPU native executors default to `torch.device("cpu")`. An explicit
+`executor.kwargs.device` must use CPU for CPU placement, or the current
+accelerator type for accelerator placement. A mismatch is rejected before
+workers are created. `placement.devices` is reserved for accelerator bundle
+indices; CPU placement requires a positive `num_replicas`. CPU deployments do not consume or split
+the trainer-selected accelerator reward pool, so they can be used alone or
+alongside engine and accelerator-native deployments.
+
+Each scoring phase wakes its worker-local models and, when `offload=true`,
+unloads them after all accepted scoring calls finish. A scoring failure or
+caller cancellation also waits for accepted calls before unloading. This wait
+has no timeout: a scoring RPC that never returns can block cleanup. CPU
+placement does not add forced worker termination or automatic retries.
+
+With `offload=false`, models remain resident. If a CPU deployment explicitly enables
+Ray actor restarts, the next scoring phase initializes a restarted actor again.
+Production worker creation does not enable automatic restarts. Accelerator
+deployments with `offload=false` skip repeated wake-ups and do not provide this
+restart recovery.
 
 ### Wrap a Transformers model for native mode
 
@@ -603,7 +719,6 @@ workload benefits.
 - Named-model aggregation currently uses the visual input contract implemented
   by `MultiVisualRewardManager`; the aggregation core itself is modality-neutral.
 - Native models are replicated; FSDP and tensor parallelism are not supported.
-- CPU-native placement is not supported.
 - Native routing defaults to a static even split; optional microbatch dispatch
   balances available work, without preempting or stealing an active batch.
 - Named models do not participate in streaming reward computation.

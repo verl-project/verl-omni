@@ -25,7 +25,6 @@ from torch.utils.checkpoint import checkpoint
 from verl.utils.device import get_device_name
 
 from verl_omni.pipelines.ltx2_flow_grpo.common import apply_x0_cfg, set_ltx23_timesteps
-from verl_omni.pipelines.ltx2_omni_nft.compat import apply_ltx_npu_rms_norm_workaround
 from verl_omni.pipelines.model_base import DiffusionModelBase
 from verl_omni.workers.config import DiffusionModelConfig
 
@@ -139,7 +138,6 @@ class LTX23OmniNFT(DiffusionModelBase):
         Both modalities use the supplied model-scale timesteps. The clean video
         tensor supplies the split position for the dense actor micro-batch.
         """
-        apply_ltx_npu_rms_norm_workaround(module)
         video_seq_len = micro_batch["video_latents_clean"].shape[1]
         video_latents = latents[:, :video_seq_len]
         audio_latents = latents[:, video_seq_len:]

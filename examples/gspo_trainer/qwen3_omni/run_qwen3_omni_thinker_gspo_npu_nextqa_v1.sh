@@ -57,7 +57,6 @@ GRAPH_CAPTURE_SIZES+=']'
 REPO_ROOT=$(cd -- "${SCRIPT_DIR}/../../.." && pwd)
 cd "$REPO_ROOT"
 export VERL_USE_EXTERNAL_MODULES=verl_omni
-export VLLM_ASCEND_ENABLE_NZ=0
 export OMP_NUM_THREADS=${OMP_NUM_THREADS:-8}
 export TOKENIZERS_PARALLELISM=false
 
@@ -126,6 +125,7 @@ exec python3 -m verl_omni.trainer.main_omni \
     +actor_rollout_ref.rollout.engine_kwargs.vllm_omni.output_mode=ar \
     +actor_rollout_ref.rollout.engine_kwargs.vllm_omni.pipeline_name=qwen3_omni_moe \
     +actor_rollout_ref.rollout.engine_kwargs.vllm_omni.additional_config.weight_nz_mode=0 \
+    ++actor_rollout_ref.rollout.engine_kwargs.vllm_omni.compilation_config.cudagraph_mode=PIECEWISE \
     actor_rollout_ref.rollout.gpu_memory_utilization="${ROLLOUT_MEMORY_FRACTION}" \
     actor_rollout_ref.rollout.max_num_seqs="${ROLLOUT_MAX_NUM_SEQS}" \
     actor_rollout_ref.rollout.max_num_batched_tokens=8192 \
