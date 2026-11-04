@@ -50,6 +50,8 @@ _PER_KEY_THRESHOLDS = {
 }
 _SUPPORTED_MFU_CONFIGS = {
     ("qwen-image", "flowgrpo"),
+    ("qwen-image", "diffusion-nft"),
+    ("qwen-image", "online-dpo"),
 }
 
 
@@ -237,8 +239,9 @@ def _collect_warnings(summary: dict[str, dict[str, float]], model: str | None, a
     has_mfu = any(key.startswith("perf/mfu/") for key in summary)
     mfu_config = (_normalize_name(model), _normalize_name(algorithm))
     if has_mfu and mfu_config not in _SUPPORTED_MFU_CONFIGS:
+        supported = ", ".join(f"{model} + {algorithm}" for model, algorithm in sorted(_SUPPORTED_MFU_CONFIGS))
         warnings.append(
-            "MFU metrics are only supported and validated for Qwen-Image + FlowGRPO; "
+            f"MFU metrics are only supported and validated for {supported}; "
             f"current model/algorithm is {mfu_config[0]} + {mfu_config[1]},"
             " so interpret perf/mfu/* values with caution."
         )

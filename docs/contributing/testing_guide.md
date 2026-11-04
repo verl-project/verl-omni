@@ -120,7 +120,7 @@ test layer. L2 and L3 checks may exist as GPU smoke or nightly regression jobs,
 but they should stay outside the fast PR loop until their ownership, trigger
 rules, baseline policy, runner capacity, and artifact retention are stable.
 
-For the current CI layer overview and the runnable L3 nightly case, see
+For the current CI layer overview and the runnable L3 nightly cases, see
 `ci_cd.md`.
 
 When adding a new layer section, include:

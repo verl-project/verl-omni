@@ -1,6 +1,6 @@
 # CI/CD Layers
 
-Last updated: 08/04/2026.
+Last updated: 10/30/2026.
 
 VeRL-Omni uses layered CI/CD checks so fast CPU feedback and expensive GPU or convergence validation can evolve independently.
 
@@ -11,8 +11,7 @@ VeRL-Omni uses layered CI/CD checks so fast CPU feedback and expensive GPU or co
 | L3 nightly regression | Detect numerical drift and performance regressions | Scheduled or manual | Fixed GPU runners | Nightly regression signal | Metrics and baseline comparisons |
 | L4 convergence tests | Validate real recipe convergence | Weekly, release candidate, or manual | Production GPU cluster | Release readiness gate | Reward/loss curves and convergence reports |
 
-L3 has one runnable scheduled workflow for the Qwen-Image FlowGRPO
-single-sample regression. L4 remains a planned layer.
+L3 has one runnable scheduled workflow. It runs different algorithm cases on the v1 sync trainer. L4 remains a planned layer.
 
 ## L1 CPU API Tests
 
@@ -38,34 +37,54 @@ Use L2 for changes that affect GPU rollout, trainer entrypoints, backend integra
 
 L3 is intended for scheduled numerical and performance regression tracking. These tests should run fixed-seed, short training windows and compare key metrics against reviewed baselines, such as loss, reward, KL, log probability, gradient norm, throughput, step time, and memory peak.
 
-The current runnable L3 case is
-`tests/nightly/qwen_image_flowgrpo/`. It runs a deterministic
-20-step Qwen-Image FlowGRPO LoRA training window on local tiny-random policy and
-reward models, then compares:
+The runnable L3 cases live under `tests/nightly/`. Shared debug hooks, metric
+collection, dump comparison, and `run_l3_case.sh` live in that directory next
+to the case folders. They run a
+deterministic 20-step LoRA training window on local tiny-random policy and
+reward models, then compare:
 
 - debug dumps from selected steps for precision regressions; and
 - post-warmup timing, throughput, and memory metrics for performance regressions.
 
-Run it manually with:
+Supported cases:
+| Case | Script | GPUs | Algorithm |
+| --- | --- | --- | --- |
+| `qwen_image_flowgrpo` | `tests/nightly/qwen_image_flowgrpo/run_qwen_image_flowgrpo.sh` | 1 | FlowGRPO, OCR reward |
+| `qwen_image_diffusion_nft` | `tests/nightly/qwen_image_diffusion_nft/run_qwen_image_diffusion_nft.sh` | 1 | DiffusionNFT, OCR reward, old-adapter rollout |
+| `qwen_image_online_dpo` | `tests/nightly/qwen_image_online_dpo/run_qwen_image_online_dpo.sh` | 1 | Online DPO, OCR reward |
+
+Run one case manually with:
 
 ```bash
 bash tests/nightly/qwen_image_flowgrpo/run_qwen_image_flowgrpo.sh
+bash tests/nightly/qwen_image_diffusion_nft/run_qwen_image_diffusion_nft.sh
+bash tests/nightly/qwen_image_online_dpo/run_qwen_image_online_dpo.sh
 ```
 
-The GitHub workflow is `.github/workflows/l3_nightly.yml`. The current job runs
-strict nightly
-mode every day at 22:00 Asia/Shanghai and can also be triggered manually with
-`workflow_dispatch`.
+`python3 tests/nightly/sanity.py` checks that every case stays on the v1
+trainer, that the repeated-prompt dataset is written, and that online-DPO row
+alignment restores session order. It does not start a GPU run.
+
+The GitHub workflow is `.github/workflows/l3_nightly.yml`. The job runs the
+three cases sequentially in strict nightly mode every day at 22:00
+Asia/Shanghai and can also be triggered manually with `workflow_dispatch`.
 
 Nightly jobs run with `BOOTSTRAP_MISSING_BASELINE=0` so missing or stale
 baselines fail closed. Baseline creation is manual only: run the workflow with
-`mode=baseline`. Baseline mode uses `BOOTSTRAP_MISSING_BASELINE=1`, downloads the
-existing unified baseline when available, updates each test's subdirectory, and
-uploads the reviewed baseline as the `l3-nightly-baseline` artifact.
+`mode=baseline`. Baseline mode downloads the existing unified baseline when one
+exists, sets `L3_REFRESH_BASELINE=1` so each successful case replaces only its
+own subdirectory, and uploads the reviewed baseline as the
+`l3-nightly-baseline` artifact. The `case` input selects `all` or one case.
+A single-case baseline run refreshes that subdirectory and uploads the other
+downloaded cases unchanged. Publish that artifact only from a green run: a
+failed baseline job can refresh the cases that finished and leave later cases
+unchanged.
 
 Strict nightly mode downloads the latest non-expired baseline artifact for the
-configured baseline branch, runs the comparison, and uploads current debug
-dumps, metrics, reports, and logs as artifacts even when the regression fails.
+configured baseline branch, checks that every case it is about to run has
+`payload.pt` and `metrics.json`, and fails before creating the GPU runner when
+one is missing. It then runs the comparison and uploads current debug dumps,
+metrics, reports, and logs as artifacts even when the regression fails.
 
 Until the baseline policy, artifact retention, ownership, and fixed runner
 capacity are stable, L3 should remain outside the fast pull-request loop and

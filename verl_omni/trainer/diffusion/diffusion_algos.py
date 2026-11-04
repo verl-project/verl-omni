@@ -49,6 +49,58 @@ def _format_available_keys(mapping: Any) -> str:
     return "[" + ", ".join(keys) + "]"
 
 
+def reorder_by_repeat_index(batch: DataProto, reward_tensor: torch.Tensor) -> torch.Tensor:
+    """Reorder ``batch`` and the aligned reward tensor onto ``repeat_index`` order.
+    Only used for nightly tests.
+
+    Example:
+    To include OmniNFT in nightly, add ``repeat_index`` to the nightly dataset,
+    and call this function in the `prepare_actor_batch`.
+    """
+
+    def repeat_index_order(batch: DataProto) -> np.ndarray | None:
+        """Stable dataset order, or None when ``extra_info.repeat_index`` is absent.
+
+        Rollout rows arrive in ``uid`` order, and ``uid`` is a fresh ``uuid4`` each
+        run. A loss that draws noise or a timestep permutation in row order has to
+        follow ``repeat_index``, or the same prompt gets a different draw on the
+        next run. Rows of one prompt keep their incoming order.
+        Only the nightly dataset writes this field; batches without it stay in ``uid`` order.
+        """
+        extra = batch.non_tensor_batch.get("extra_info")
+        if extra is None:
+            return None
+        try:
+            rows = list(extra)
+        except TypeError:
+            return None
+        if len(rows) != len(batch):
+            return None
+        keys: list[int] = []
+        for row in rows:
+            if isinstance(row, Mapping):
+                value = row.get("repeat_index")
+            else:
+                value = getattr(row, "repeat_index", None)
+            if value is None:
+                return None
+            try:
+                keys.append(int(value))
+            except (TypeError, ValueError):
+                return None
+        order = np.argsort(np.asarray(keys), kind="stable")
+        if np.array_equal(order, np.arange(order.size)):
+            return None
+        return order
+
+    order = repeat_index_order(batch)
+    if order is None:
+        return reward_tensor
+    index = torch.from_numpy(order)
+    batch.reorder(index)
+    return reward_tensor[index.to(reward_tensor.device)]
+
+
 class DiffusionLossFn(ABC):
     """Abstract base for worker-side diffusion loss functions."""
 
@@ -672,7 +724,9 @@ class DPOLoss(DiffusionLossFn):
         config: Any,
     ) -> DataProto:
         """Offline: no-op. Online: pick top/bottom reward pair per prompt uid."""
+        reward_tensor = reorder_by_repeat_index(batch, reward_tensor)
         rewards = reward_tensor.squeeze(-1).float() if reward_tensor.ndim > 1 else reward_tensor.float()
+
         if config.algorithm.sample_source == "offline":
             return batch
 
@@ -1024,6 +1078,8 @@ class DiffusionNFTLoss(DiffusionLossFn):
         actor_cfg = config.actor_rollout_ref.actor
         adv_clip_max = actor_cfg.diffusion_loss.adv_clip_max
         timestep_shuffle_seed = actor_cfg.data_loader_seed
+
+        reward_tensor = reorder_by_repeat_index(batch, reward_tensor)
 
         rollout_batch = {key: batch.batch[key] for key in batch.batch.keys()}
         if "uid" not in batch.non_tensor_batch:
