@@ -601,7 +601,7 @@ def compute_score(
         Dict with ``score`` and per-term ``reward_*`` fields for the reward manager.
     """
     del data_source
-    from verl_omni.tools.trajectory.hydra_env import merge_agentic_scorer_knobs
+    from verl_omni.utils.agentic.config import merge_agentic_scorer_knobs
 
     # Reward actors never bind hydra_env or receive Hydra ``config``.
     # Driver stamps SCORER_KNOB_KEYS onto inbound prompts (then output);
