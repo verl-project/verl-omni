@@ -127,32 +127,7 @@ checkpointing.  The understanding pathway (``moe_und``) is not a LoRA
 wrapper replacement but simply has ``requires_grad=False`` set by the
 ``configure_trainable_params`` hook.
 
-## Key differences from Qwen-Image
-
-| Aspect | Qwen-Image | BAGEL-7B-MoT |
-|---|---|---|
-| Model loading | diffusers | Custom ``from_pretrained`` via ``NonDiffusersModelBase`` |
-| Architecture | Auto-detected | Explicit: ``+actor_rollout_ref.model.architecture=OmniBagelForConditionalGeneration`` |
-| Deploy config | Not needed | ``bagel_deploy_config.yaml`` (single-stage topology) |
-| LoRA targets | ``*_proj`` layers | ``*_proj`` + ``*_moe_gen`` (MoT dual-pathway) |
-| LoRA weight sync | Adapter tensors | Merged full weights (``lora.merge=True``): the rollout engine's fused MoT layout cannot bind ``*_moe_gen`` adapters |
-| FSDP prefixes | ``transformer_blocks.`` | ``layers.`` |
-| CFG | Standard true CFG | 3-branch (gen / text-uncond / img-uncond) with global renormalisation |
-| Timestep convention | ``t / 1000`` | Raw sigma with SD3-style shift of 3.0 |
-
-## Further reading
-
-- [How to Integrate a Non-Diffusers Model for FlowGRPO Training](../../../docs/contributing/integrating_a_non_diffusers_model.md) — full integration guide using BAGEL as the worked example
-- [vLLM-Omni BAGEL docs](https://docs.vllm.ai/projects/vllm-omni/en/latest/user_guide/examples/online_serving/bagel/)
-
-## Gotchas
-
-- Pre-tokenized BAGEL prompts must retain `<|im_start|>` and `<|im_end|>` framing.
-  The agent loop marks them as native tokens; rollout decodes only their content,
-  preserving captions that begin with `user` rather than interpreting a chat role.
-  Chat-template prompts keep the existing decoding path.
-
-## DVReward
+## DVReward Training
 
 [DVReward](https://github.com/huangrh99/AlphaGRPO) scores generated images against
 precomputed semantic and quality questions using a frozen vision-language judge.
@@ -206,3 +181,28 @@ returned as metrics. HTTP failures propagate; they are not converted into zero r
   training steps when the window starts after zero.
 - This recipe uses the existing image-only FlowGRPO adapter. It does not train
   thinking actions or implement AlphaGRPO's joint objective.
+
+## Key differences from Qwen-Image
+
+| Aspect | Qwen-Image | BAGEL-7B-MoT |
+|---|---|---|
+| Model loading | diffusers | Custom ``from_pretrained`` via ``NonDiffusersModelBase`` |
+| Architecture | Auto-detected | Explicit: ``+actor_rollout_ref.model.architecture=OmniBagelForConditionalGeneration`` |
+| Deploy config | Not needed | ``bagel_deploy_config.yaml`` (single-stage topology) |
+| LoRA targets | ``*_proj`` layers | ``*_proj`` + ``*_moe_gen`` (MoT dual-pathway) |
+| LoRA weight sync | Adapter tensors | Merged full weights (``lora.merge=True``): the rollout engine's fused MoT layout cannot bind ``*_moe_gen`` adapters |
+| FSDP prefixes | ``transformer_blocks.`` | ``layers.`` |
+| CFG | Standard true CFG | 3-branch (gen / text-uncond / img-uncond) with global renormalisation |
+| Timestep convention | ``t / 1000`` | Raw sigma with SD3-style shift of 3.0 |
+
+## Further reading
+
+- [How to Integrate a Non-Diffusers Model for FlowGRPO Training](../../../docs/contributing/integrating_a_non_diffusers_model.md) — full integration guide using BAGEL as the worked example
+- [vLLM-Omni BAGEL docs](https://docs.vllm.ai/projects/vllm-omni/en/latest/user_guide/examples/online_serving/bagel/)
+
+## Gotchas
+
+- Pre-tokenized BAGEL prompts must retain `<|im_start|>` and `<|im_end|>` framing.
+  The agent loop marks them as native tokens; rollout decodes only their content,
+  preserving captions that begin with `user` rather than interpreting a chat role.
+  Chat-template prompts keep the existing decoding path.
