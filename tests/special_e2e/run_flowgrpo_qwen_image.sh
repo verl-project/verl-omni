@@ -28,14 +28,11 @@ max_prompt_length=256
 
 # Smoke: pin local FLASH_ATTN (product default remains FLASH_ATTN_3_HUB).
 # Use exit-code checks only — importing verl/vllm may print INFO lines on stdout.
-if [[ -z "${ATTN_BACKEND:-}" || -z "${ROLLOUT_ATTN_BACKEND:-}" ]]; then
-    if python3 -c 'from verl_omni.utils.diffusion_attention import fa_available; raise SystemExit(0 if fa_available() else 1)' >/dev/null 2>&1; then
-        ATTN_BACKEND=${ATTN_BACKEND:-_flash_3_varlen_hub}
-        ROLLOUT_ATTN_BACKEND=${ROLLOUT_ATTN_BACKEND:-FLASH_ATTN}
-    else
-        ATTN_BACKEND=${ATTN_BACKEND:-native}
-        ROLLOUT_ATTN_BACKEND=${ROLLOUT_ATTN_BACKEND:-TORCH_SDPA}
-    fi
+ATTN_BACKEND=_flash_3_varlen_hub
+ROLLOUT_ATTN_BACKEND=FLASH_ATTN
+if ! python3 -c 'from verl_omni.utils.diffusion_attention import fa_available; raise SystemExit(0 if fa_available() else 1)' >/dev/null 2>&1; then
+    ATTN_BACKEND=native
+    ROLLOUT_ATTN_BACKEND=TORCH_SDPA
 fi
 
 # This helper runs nvidia-smi in a background loop during training and
@@ -65,9 +62,7 @@ check_leak_monitor() {
     if grep -q "LEAK" "${_LEAK_FILE}" 2>/dev/null; then
         echo ""
         echo "FAIL: unexpected vLLMOmniHttpServer process(es) detected on GPU-0 —"
-        if [[ "${NPU_SMOKE_PARALLEL_CHILD:-0}" != 1 ]]; then
-            ray stop --force 2>/dev/null || true
-        fi
+        ray stop --force 2>/dev/null || true
         exit 1
     fi
 }
@@ -128,7 +123,7 @@ python3 -m verl_omni.trainer.main_diffusion_v1 \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=${micro_bsz_per_gpu} \
     reward.num_workers=1 \
     reward.reward_model.enable=True \
-    reward.reward_model.model_path="${REWARD_MODEL_PATH}" \
+    reward.reward_model.model_path=${REWARD_MODEL_PATH} \
     reward.reward_model.rollout.name=vllm \
     reward.reward_model.rollout.tensor_model_parallel_size=${REWARD_TP} \
     reward.reward_model.rollout.gpu_memory_utilization=0.4 \

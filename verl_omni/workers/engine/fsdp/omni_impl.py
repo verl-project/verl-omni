@@ -17,6 +17,7 @@ import logging
 import warnings
 
 import torch
+from accelerate import init_empty_weights
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp.api import FullStateDictConfig, ShardedStateDictConfig, StateDictType
 from transformers import AutoModelForMultimodalLM
@@ -177,17 +178,31 @@ class OmniFSDPEngine(FSDPEngineWithLMHead):
             self.model_config.hf_config.tie_word_embeddings = tie_word_embeddings
 
         init_context = get_init_weight_context_manager(use_meta_tensor=not tie_word_embeddings, mesh=self.device_mesh)
+        auto_model_cls = getattr(adapter_cls, "auto_model_class", None) or AutoModelForMultimodalLM
+        # Ranks on meta get their weights from rank 0 when FSDP wraps the module, but transformers 5's
+        # from_pretrained reads and converts every checkpoint tensor even under init_empty_weights.
+        meta_init = init_context is init_empty_weights and hasattr(auto_model_cls, "from_config")
 
         with init_context(), warnings.catch_warnings():
             warnings.simplefilter("ignore")
 
-            auto_model_cls = getattr(adapter_cls, "auto_model_class", None) or AutoModelForMultimodalLM
-            module = auto_model_cls.from_pretrained(
-                pretrained_model_name_or_path=self.model_config.local_path,
-                torch_dtype=torch_dtype,
-                config=self.model_config.hf_config,
-                trust_remote_code=self.model_config.trust_remote_code,
-            )
+            if meta_init:
+                # from_config resolves auto_map remote code from config.name_or_path,
+                # which AutoConfig.from_pretrained sets to hf_config_path. Rank 0's
+                # from_pretrained resolves from local_path; those directories may differ.
+                self.model_config.hf_config.name_or_path = self.model_config.local_path
+                module = auto_model_cls.from_config(
+                    self.model_config.hf_config,
+                    torch_dtype=torch_dtype,
+                    trust_remote_code=self.model_config.trust_remote_code,
+                )
+            else:
+                module = auto_model_cls.from_pretrained(
+                    pretrained_model_name_or_path=self.model_config.local_path,
+                    torch_dtype=torch_dtype,
+                    config=self.model_config.hf_config,
+                    trust_remote_code=self.model_config.trust_remote_code,
+                )
             module = adapter_cls.configure_model(module, self.model_config)
 
             if self.engine_config.strategy == "fsdp" and not self.engine_config.use_orig_params:

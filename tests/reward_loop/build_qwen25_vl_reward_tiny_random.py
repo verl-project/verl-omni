@@ -18,6 +18,17 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import torch
+from transformers import (
+    Qwen2_5_VLConfig,
+    Qwen2_5_VLForConditionalGeneration,
+    Qwen2_5_VLProcessor,
+    Qwen2VLImageProcessor,
+    Qwen2VLVideoProcessor,
+)
+
+from tests.special_e2e.build_qwen_image_tiny_random import _build_tiny_chatml_tokenizer
+
 _METADATA_FILE = "tiny_reward_checkpoint_metadata.json"
 _REQUIRED_FILES = (
     "config.json",
@@ -45,17 +56,6 @@ def ensure_tiny_qwen25_vl_reward_checkpoint(output_dir: str | Path, *, seed: int
         ):
             raise ValueError(f"Use an empty output directory or this builder's complete checkpoint: {output_dir}")
         return output_dir
-
-    import torch
-    from transformers import (
-        Qwen2_5_VLConfig,
-        Qwen2_5_VLForConditionalGeneration,
-        Qwen2_5_VLProcessor,
-        Qwen2VLImageProcessor,
-        Qwen2VLVideoProcessor,
-    )
-
-    from tests.special_e2e.build_qwen_image_tiny_random import _build_tiny_chatml_tokenizer
 
     tokenizer = _build_tiny_chatml_tokenizer()
     config = Qwen2_5_VLConfig(

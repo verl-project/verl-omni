@@ -13,13 +13,13 @@
 # limitations under the License.
 import os
 
-from verl.utils.device import get_torch_device
+import torch
 
 
 def resolve_requested_num_gpus(default_num_gpus: int = 4) -> int:
-    """Resolve accelerator count from NUM_GPUS env var, clamped by visible devices."""
+    """Resolve GPU count from NUM_GPUS env var, clamped by visible CUDA devices."""
     n = int(os.getenv("NUM_GPUS", str(default_num_gpus)))
-    available = get_torch_device().device_count()
+    available = torch.cuda.device_count()
     if available <= 0:
         return 0
     return max(1, min(n, available))

@@ -11,9 +11,6 @@ on:
       - "tests/agent_loop/**"
       - "tests/reward_loop/**"
       - "tests/workers/**"
-      - "tests/trainer/**"
-      - "tests/pipelines/**"
-      - "tests/utils/**"
       - "tests/special_e2e/**"
       - "pyproject.toml"
       - ".github/workflows/npu_smoke.yml"
@@ -29,9 +26,6 @@ on:
       - "tests/agent_loop/**"
       - "tests/reward_loop/**"
       - "tests/workers/**"
-      - "tests/trainer/**"
-      - "tests/pipelines/**"
-      - "tests/utils/**"
       - "tests/special_e2e/**"
       - "pyproject.toml"
       - ".github/workflows/npu_smoke.yml"
@@ -107,7 +101,6 @@ jobs:
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
       PIP_INDEX_URL: "http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple"
       PIP_TRUSTED_HOST: "cache-service.nginx-pypi-cache.svc.cluster.local"
-      NPU_SMOKE_PARALLEL: "1"
       TRANSFORMERS_VERBOSITY: 'error'
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -124,12 +117,6 @@ jobs:
           pip show vllm || true
           pip show vllm-ascend || true
           pip show vllm-omni || true
-      - name: Prepare NPU image-edit dependency
-        if: matrix.group == 'e2e'
-        shell: bash
-        run: |
-          python3 -m pip install --no-deps 'qwen-vl-utils==0.0.14'
-          python3 -c 'from qwen_vl_utils import fetch_image, process_vision_info'
       - name: Prepare tiny Qwen-Image checkpoint
         shell: bash
         run: |

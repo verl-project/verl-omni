@@ -13,18 +13,14 @@ sep() { printf '%0.s-' {1..78}; echo; }
 
 NPU_SMOKE_GROUP="${NPU_SMOKE_GROUP:?NPU_SMOKE_GROUP must be set}"
 TIMESTAMP="$(date '+%Y%m%d_%H%M%S')"
-if [[ -z "${LOG_DIR:-}" ]]; then
-    NPU_SMOKE_LOG_ROOT="${REPO_ROOT}/logs/npu_smoke/${NPU_SMOKE_GROUP}"
-    mkdir -p "${NPU_SMOKE_LOG_ROOT}"
-    LOG_DIR="$(mktemp -d "${NPU_SMOKE_LOG_ROOT}/${TIMESTAMP}.XXXXXX")"
-fi
+LOG_DIR="${LOG_DIR:-${REPO_ROOT}/logs/npu_smoke/${NPU_SMOKE_GROUP}/${TIMESTAMP}}"
 mkdir -p "${LOG_DIR}"
 SUMMARY_LOG="${LOG_DIR}/summary.log"
 
 export PYTHONUNBUFFERED=1
 export RAY_DEDUP_LOGS=0
 export DEVICE_NAME=npu
-export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES="${RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES-1}"
+export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1
 export VLLM_PLUGINS="${VLLM_PLUGINS:-ascend}"
 
 if [[ "${LD_PRELOAD:-}" != *libjemalloc* ]]; then
@@ -70,38 +66,6 @@ done
 }
 NUM_NPUS="${REQUESTED_NUM_NPUS}"
 export NUM_NPUS
-NPU_SMOKE_FULL_TOPOLOGY="${NPU_SMOKE_FULL_TOPOLOGY:-0}"
-[[ "${NPU_SMOKE_FULL_TOPOLOGY}" == 0 || "${NPU_SMOKE_FULL_TOPOLOGY}" == 1 ]] || {
-    fail "NPU_SMOKE_FULL_TOPOLOGY must be 0 or 1."
-    exit 2
-}
-NPU_SMOKE_PARALLEL="${NPU_SMOKE_PARALLEL:-0}"
-NPU_SMOKE_PARALLEL_CHILD="${NPU_SMOKE_PARALLEL_CHILD:-0}"
-for npu_smoke_flag in NPU_SMOKE_PARALLEL NPU_SMOKE_PARALLEL_CHILD; do
-    [[ "${!npu_smoke_flag}" == 0 || "${!npu_smoke_flag}" == 1 ]] || {
-        fail "${npu_smoke_flag} must be 0 or 1."
-        exit 2
-    }
-done
-NPU_SMOKE_TEST_IDS="${NPU_SMOKE_TEST_IDS:-}"
-if [[ -n "${NPU_SMOKE_TEST_IDS}" ]]; then
-    [[ "${NPU_SMOKE_TEST_IDS}" =~ ^(0|[1-9][0-9]*)(,(0|[1-9][0-9]*))*$ ]] || {
-        fail "NPU_SMOKE_TEST_IDS must be comma-separated test IDs."
-        exit 2
-    }
-    IFS=, read -r -a NPU_SMOKE_REQUESTED_IDS <<< "${NPU_SMOKE_TEST_IDS}"
-    npu_smoke_seen_ids=,
-    for npu_smoke_id in "${NPU_SMOKE_REQUESTED_IDS[@]}"; do
-        if [[ "${npu_smoke_seen_ids}" == *",${npu_smoke_id},"* ]]; then
-            fail "NPU_SMOKE_TEST_IDS must not repeat test IDs."
-            exit 2
-        fi
-        npu_smoke_seen_ids+="${npu_smoke_id},"
-    done
-elif [[ "${NPU_SMOKE_PARALLEL_CHILD}" == 1 ]]; then
-    fail "Parallel smoke children require a nonempty NPU_SMOKE_TEST_IDS selection."
-    exit 2
-fi
 
 build_npu_device_list() {
     local devices=()
@@ -113,97 +77,43 @@ build_npu_device_list() {
     echo "${devices[*]}"
 }
 export ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES:-$(build_npu_device_list "${NUM_NPUS}")}"
-export ASCEND_VISIBLE_DEVICES="${ASCEND_VISIBLE_DEVICES:-${ASCEND_RT_VISIBLE_DEVICES}}"
-
-validate_npu_devices() {
-    local name="$1" value="$2" device seen=,
-    local -a devices
-    [[ "${value}" =~ ^[0-9]+(,[0-9]+)*$ ]] || {
-        fail "${name} must be a comma-separated list of NPU IDs."
-        return 2
-    }
-    IFS=, read -r -a devices <<< "${value}"
-    if [[ "${name}" == ASCEND_RT_VISIBLE_DEVICES && "${#devices[@]}" -ne "${NUM_NPUS}" ]]; then
-        fail "${name} must list exactly ${NUM_NPUS} NPU IDs."
-        return 2
-    fi
-    if [[ "${name}" == ASCEND_VISIBLE_DEVICES && "${#devices[@]}" -lt "${NUM_NPUS}" ]]; then
-        fail "${name} must list at least ${NUM_NPUS} NPU IDs."
-        return 2
-    fi
-    for device in "${devices[@]}"; do
-        device="${device#"${device%%[!0]*}"}"
-        device="${device:-0}"
-        if [[ "${seen}" == *",${device},"* ]]; then
-            fail "${name} must not repeat NPU IDs."
-            return 2
-        fi
-        seen+="${device},"
-    done
-}
-for npu_smoke_variable in ASCEND_RT_VISIBLE_DEVICES ASCEND_VISIBLE_DEVICES; do
-    validate_npu_devices "${npu_smoke_variable}" "${!npu_smoke_variable}" || exit 2
-done
-IFS=, read -r -a NPU_SMOKE_DEVICES <<< "${ASCEND_RT_VISIBLE_DEVICES}"
 
 declare -a TEST_IDS=()
 declare -a TEST_NAMES=()
 declare -a TEST_RESULTS=()
 declare -a TEST_DURATIONS=()
 declare -a TEST_LOG_FILES=()
-NPU_SMOKE_REGISTERED_IDS=,
 
 cleanup_runtime() {
-    python3 tests/npu_smoke/run_npu_smoke_processes.py cleanup
+    ray stop --force || true
+    pkill -TERM -f DiffusionWorker || true
+    pkill -TERM -f VLLMWorker || true
+    pkill -TERM -f vLLMOmniHttpServer || true
+    sleep 5
+    pkill -KILL -f DiffusionWorker || true
+    pkill -KILL -f VLLMWorker || true
+    pkill -KILL -f vLLMOmniHttpServer || true
+    npu-smi info || true
 }
 
 run_test() {
     local id="$1"
     local name="$2"
     shift 2
-    if [[ "${NPU_SMOKE_REGISTERED_IDS}" == *",${id},"* ]]; then
-        fail "Test ${id} is registered more than once."
-        return 2
-    fi
-    NPU_SMOKE_REGISTERED_IDS+="${id},"
-    if [[ -n "${NPU_SMOKE_TEST_IDS}" && ",${NPU_SMOKE_TEST_IDS}," != *",${id},"* ]]; then
-        return 0
-    fi
-    local test_num_npus="${NUM_NPUS}" max_npus test_devices test_visible_devices
-    if [[ "${1:-}" == --max-npus ]]; then
-        [[ $# -ge 2 && "${2:-}" =~ ^[1-9][0-9]*$ ]] || {
-            fail "Test ${id}: --max-npus requires a positive integer."
-            return 2
-        }
-        max_npus="$2"
-        shift 2
-        if [[ "${NPU_SMOKE_FULL_TOPOLOGY}" == 0 ]] && (( max_npus < test_num_npus )); then
-            test_num_npus="${max_npus}"
-        fi
-    fi
-    [[ $# -gt 0 ]] || { fail "Test ${id}: missing command."; return 2; }
-    test_devices="$(IFS=,; echo "${NPU_SMOKE_DEVICES[*]:0:test_num_npus}")"
-    test_visible_devices="${ASCEND_VISIBLE_DEVICES}"
     local logfile="${LOG_DIR}/test_${id}.log"
 
     cleanup_runtime
     sep
     log "Starting  [${id}] ${name}"
-    log "NPU budget: ${test_num_npus}; ASCEND_RT_VISIBLE_DEVICES=${test_devices}; ASCEND_VISIBLE_DEVICES=${test_visible_devices}"
     log "Command : $*"
     log "Log file: ${logfile}"
     sep
 
-    local start_ts end_ts elapsed rc tee_rc
-    local -a pipeline_status
+    local start_ts end_ts elapsed rc
     start_ts="$(date +%s)"
     set +e
-    env NUM_NPUS="${test_num_npus}" \
-        ASCEND_RT_VISIBLE_DEVICES="${test_devices}" ASCEND_VISIBLE_DEVICES="${test_visible_devices}" \
-        "$@" 2>&1 | tee "${logfile}"
-    pipeline_status=("${PIPESTATUS[@]}")
-    rc="${pipeline_status[0]}"
-    tee_rc="${pipeline_status[1]}"
+    "$@" 2>&1 | tee "${logfile}"
+    rc="${PIPESTATUS[0]}"
     set -e
 
     end_ts="$(date +%s)"
@@ -212,28 +122,18 @@ run_test() {
     TEST_NAMES+=("${name}")
     TEST_DURATIONS+=("${elapsed}s")
     TEST_LOG_FILES+=("${logfile}")
-    if [[ "${rc}" -eq 0 && "${tee_rc}" -eq 0 ]]; then
+    if [[ "${rc}" -eq 0 ]]; then
         TEST_RESULTS+=("PASS")
         pass "[${id}] ${name}  (${elapsed}s)"
     else
         TEST_RESULTS+=("FAIL")
-        fail "[${id}] ${name}  (${elapsed}s)  exit=${rc} tee_exit=${tee_rc}"
+        fail "[${id}] ${name}  (${elapsed}s)  exit=${rc}"
     fi
 
     return 0
 }
 
 print_summary() {
-    local requested_id
-    if [[ -n "${NPU_SMOKE_TEST_IDS}" ]]; then
-        for requested_id in "${NPU_SMOKE_REQUESTED_IDS[@]}"; do
-            if [[ "${NPU_SMOKE_REGISTERED_IDS}" != *",${requested_id},"* ]]; then
-                fail "Unknown ${NPU_SMOKE_GROUP} smoke test ID: ${requested_id}"
-                return 2
-            fi
-        done
-    fi
-    [[ -n "${TEST_IDS[*]:-}" ]] || { fail "No smoke tests were selected."; return 2; }
     sep | tee "${SUMMARY_LOG}"
     echo "  ${NPU_SMOKE_GROUP^^} NPU SMOKE TEST SUMMARY" | tee -a "${SUMMARY_LOG}"
     sep | tee -a "${SUMMARY_LOG}"
@@ -255,32 +155,7 @@ print_summary() {
     [[ "${failed}" -eq 0 ]]
 }
 
-finish_runtime() {
-    local rc=$? cleanup_rc
-    trap - EXIT
-    if cleanup_runtime; then
-        exit "${rc}"
-    else
-        cleanup_rc=$?
-        if [[ "${rc}" -eq 0 ]]; then
-            rc="${cleanup_rc}"
-        fi
-    fi
-    exit "${rc}"
-}
-
-trap finish_runtime EXIT
-
-dispatch_parallel() {
-    if [[ "${NPU_SMOKE_PARALLEL_CHILD}" == 0 ]]; then
-        local -a mode_args=()
-        if [[ "${NPU_SMOKE_PARALLEL}" == 0 || "${NPU_SMOKE_FULL_TOPOLOGY}" == 1 ]]; then
-            mode_args=(--serial)
-        fi
-        exec python3 tests/npu_smoke/run_npu_smoke_parallel.py "${NPU_SMOKE_GROUP}" \
-            --num-npus "${NUM_NPUS}" --log-dir "${LOG_DIR}" "${mode_args[@]}"
-    fi
-}
+trap cleanup_runtime EXIT
 
 print_header() {
     sep
@@ -289,7 +164,6 @@ print_header() {
     echo "  Repo root : ${REPO_ROOT}"
     echo "  Log dir   : ${LOG_DIR}"
     echo "  NUM_NPUS  : ${NUM_NPUS}"
-    echo "  Full topology : ${NPU_SMOKE_FULL_TOPOLOGY}"
     echo "  ASCEND_RT_VISIBLE_DEVICES : ${ASCEND_RT_VISIBLE_DEVICES}"
     sep
 }

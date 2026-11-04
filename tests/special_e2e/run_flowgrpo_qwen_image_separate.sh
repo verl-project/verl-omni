@@ -37,14 +37,11 @@ ROLLOUT_TP=${ROLLOUT_TP:-1}
 ENGINE=vllm_omni
 max_prompt_length=256
 
-if [[ -z "${ATTN_BACKEND:-}" || -z "${ROLLOUT_ATTN_BACKEND:-}" ]]; then
-    if python3 -c 'from verl_omni.utils.diffusion_attention import fa_available; raise SystemExit(0 if fa_available() else 1)' >/dev/null 2>&1; then
-        ATTN_BACKEND=${ATTN_BACKEND:-_flash_3_varlen_hub}
-        ROLLOUT_ATTN_BACKEND=${ROLLOUT_ATTN_BACKEND:-FLASH_ATTN}
-    else
-        ATTN_BACKEND=${ATTN_BACKEND:-native}
-        ROLLOUT_ATTN_BACKEND=${ROLLOUT_ATTN_BACKEND:-TORCH_SDPA}
-    fi
+ATTN_BACKEND=_flash_3_varlen_hub
+ROLLOUT_ATTN_BACKEND=FLASH_ATTN
+if ! python3 -c 'from verl_omni.utils.diffusion_attention import fa_available; raise SystemExit(0 if fa_available() else 1)' >/dev/null 2>&1; then
+    ATTN_BACKEND=native
+    ROLLOUT_ATTN_BACKEND=TORCH_SDPA
 fi
 
 # Surface a missing checkpoint backend dependency before Ray workers start.
@@ -59,28 +56,13 @@ module_map = {
     "mooncake": "verl.checkpoint_engine.mooncake_checkpoint_engine",
     "hccl": "verl.checkpoint_engine.hccl_checkpoint_engine",
 }
-def _hccl_probe_ok():
-    try:
-        from verl.utils.device import is_torch_npu_available
-
-        if not is_torch_npu_available(check_device=True):
-            return False
-        importlib.import_module("verl.checkpoint_engine.hccl_checkpoint_engine")
-        return True
-    except Exception:
-        return False
-
 module = module_map.get(backend)
 if module is not None:
     try:
         importlib.import_module(module)
     except Exception as error:
-        # On Ascend the "nccl"-named engine is served by the HCCL module:
-        # verl registers HCCLCheckpointEngine under "nccl" and the CUDA/NPU
-        # engines are mutually exclusive, so probe the HCCL module first.
-        if not (backend == "nccl" and _hccl_probe_ok()):
-            print(f"Checkpoint backend '{backend}' could not be imported: {error}", file=sys.stderr)
-            sys.exit(1)
+        print(f"Checkpoint backend '{backend}' could not be imported: {error}", file=sys.stderr)
+        sys.exit(1)
 PY
 
 n_resp_per_prompt=2

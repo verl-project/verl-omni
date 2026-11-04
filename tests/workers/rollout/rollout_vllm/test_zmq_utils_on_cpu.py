@@ -303,18 +303,6 @@ def test_sender_and_receiver_share_base_route(monkeypatch, private_zmq_directory
     assert make_update_zmq_handle(sender.zmq_handle, update_id) == make_update_zmq_handle(receiver, update_id)
 
 
-def test_private_directory_preserves_stage_remapping(monkeypatch, private_zmq_directory):
-    monkeypatch.setenv("VERL_ZMQ_DIR", str(private_zmq_directory))
-    handle = _get_handle(
-        2,
-        {
-            _VISIBLE_DEVICES: "4,5,6,7",
-            "VERL_ZMQ_BASE_VISIBLE_DEVICES": "0,1,2,3,4,5,6,7",
-        },
-    )
-    assert handle == f"ipc://{private_zmq_directory}/rl-colocate-zmq-job-replica-0-rank-6.sock"
-
-
 @pytest.mark.parametrize(
     "private,extras", [(False, " KEEP,OTHER "), (True, ""), (True, " KEEP,OTHER "), (True, "KEEP,VERL_ZMQ_DIR")]
 )

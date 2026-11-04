@@ -31,14 +31,11 @@ ENGINE=vllm_omni
 max_prompt_length=64
 
 # Smoke: prefer FA3 when available; fall back like the Qwen-Image e2e.
-if [[ -z "${ATTN_BACKEND:-}" || -z "${ROLLOUT_ATTN_BACKEND:-}" ]]; then
-    if python3 -c 'from verl_omni.utils.diffusion_attention import fa_available; raise SystemExit(0 if fa_available() else 1)' >/dev/null 2>&1; then
-        ATTN_BACKEND=${ATTN_BACKEND:-_flash_3_varlen_hub}
-        ROLLOUT_ATTN_BACKEND=${ROLLOUT_ATTN_BACKEND:-FLASH_ATTN}
-    else
-        ATTN_BACKEND=${ATTN_BACKEND:-native}
-        ROLLOUT_ATTN_BACKEND=${ROLLOUT_ATTN_BACKEND:-TORCH_SDPA}
-    fi
+ATTN_BACKEND=_flash_3_varlen_hub
+ROLLOUT_ATTN_BACKEND=FLASH_ATTN
+if ! python3 -c 'from verl_omni.utils.diffusion_attention import fa_available; raise SystemExit(0 if fa_available() else 1)' >/dev/null 2>&1; then
+    ATTN_BACKEND=native
+    ROLLOUT_ATTN_BACKEND=TORCH_SDPA
 fi
 
 _LEAK_FILE=$(mktemp)
@@ -66,9 +63,7 @@ check_leak_monitor() {
     if grep -q "LEAK" "${_LEAK_FILE}" 2>/dev/null; then
         echo ""
         echo "FAIL: unexpected vLLMOmniHttpServer process(es) detected on GPU-0 —"
-        if [[ "${NPU_SMOKE_PARALLEL_CHILD:-0}" != 1 ]]; then
-            ray stop --force 2>/dev/null || true
-        fi
+        ray stop --force 2>/dev/null || true
         exit 1
     fi
 }
