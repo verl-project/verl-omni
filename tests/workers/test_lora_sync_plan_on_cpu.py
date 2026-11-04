@@ -334,3 +334,51 @@ def test_peft_config_rpc_none_for_non_actor_role():
     worker.role = "rollout"
 
     assert worker.get_lora_peft_config() is None
+
+
+def _engine_holding(*adapters):
+    engine = MagicMock()
+    engine.get_lora_peft_config = MagicMock(
+        side_effect=lambda **kw: {"r": 8} if kw["adapter_name"] in adapters else None
+    )
+    return engine
+
+
+def test_peft_config_rpc_probes_the_named_rollout_adapter():
+    worker = object.__new__(ew.ActorRolloutRefWorker)
+    worker.role = "actor"
+    worker.lora_settings = _settings(adapters=("default", "old"))
+    worker.rollout_adapter = "old"
+    worker.base_sync_done = True
+    worker.actor = SimpleNamespace(engine=_engine_holding("default"))
+
+    with pytest.raises(ValueError, match="holds no 'old' adapter"):
+        worker.get_lora_peft_config()
+
+
+def test_peft_config_rpc_returns_metadata_when_only_the_named_adapter_exists():
+    worker = object.__new__(ew.ActorRolloutRefWorker)
+    worker.role = "actor"
+    worker.lora_settings = _settings(adapters=("default", "old"))
+    worker.rollout_adapter = "old"
+    worker.base_sync_done = True
+    worker.actor = SimpleNamespace(engine=_engine_holding("old"))
+
+    assert worker.get_lora_peft_config() == {"r": 8}
+
+
+def test_checksum_rpc_skips_when_the_named_adapter_is_missing():
+    module = _peft_module()
+    module.adapter = torch.nn.ModuleDict(
+        {"lora_A": torch.nn.Linear(4, 4, bias=False), "lora_B": torch.nn.Linear(4, 4, bias=False)}
+    )
+    engine = _engine_holding("default")
+    engine.module = module
+    worker = object.__new__(ew.ActorRolloutRefWorker)
+    worker.role = "actor"
+    worker.lora_settings = _settings(adapters=("default", "old"))
+    worker.rollout_adapter = "old"
+    worker.actor = SimpleNamespace(engine=engine)
+
+    assert worker.get_lora_weight_checksum() is None
+    engine.get_lora_peft_config.assert_called_once_with(adapter_name="old")

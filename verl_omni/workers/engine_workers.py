@@ -979,7 +979,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         if "actor" not in self.role:
             return None
         engine = getattr(self.actor, "engine", None)
-        peft_config = _get_engine_lora_config(engine)
+        peft_config = _get_engine_lora_config(engine, self.rollout_adapter)
         # ``merge=True`` means LoRA deltas are merged into base weights before
         # sync, so the standalone rollout must use the full-weight path.
         plan = resolve_lora_sync_plan(
@@ -1010,7 +1010,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         engine = getattr(self.actor, "engine", None)
         module = getattr(engine, "module", None) if engine is not None else None
         peft_model = getattr(module, "_fsdp_wrapped_module", module) if module is not None else None
-        if _get_engine_lora_config(engine) is None:
+        if _get_engine_lora_config(engine, self.rollout_adapter) is None:
             return None
 
         total_sum = 0.0
