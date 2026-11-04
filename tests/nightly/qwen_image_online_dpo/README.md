@@ -9,14 +9,15 @@ to 20 deterministic steps. The nightly pins FSDP2, native/SDPA attention,
 fixed seeds, and greedy OCR sampling. The L2 smoke leaves the strategy at the
 FSDP default and probes FlashAttention.
 
-`prepare_actor_batch` stable-sorts rows by `extra_info.repeat_index`, then
-keeps the highest-reward and lowest-reward rollout of each prompt uid. Flow
-noise and timesteps are drawn in that order, so the same prompt gets the same
-draw on the next run. The nightly uses `rollout.n=4`. Pairing drops rows, so
-`prepare_actor_batch_selected_indices` is not a full permutation and dump
-comparison skips the pre-pair restore. Rows are aligned by `repeat_index`
-only. A baseline dumped before that sort assigns noise by uid order and will
-not match; replace `baseline/qwen_image_online_dpo/` after the change.
+The nightly debug hook stable-sorts rows by `extra_info.repeat_index` before
+`prepare_actor_batch`, which then keeps the highest-reward and lowest-reward
+rollout of each prompt uid. Flow noise and timesteps are drawn in that order,
+so the same prompt gets the same draw on the next run. The nightly uses
+`rollout.n=4`. Pairing drops rows, so `prepare_actor_batch_selected_indices`
+is not a full permutation and dump comparison skips the pre-pair restore. Rows
+are aligned by `repeat_index` only. A baseline dumped before that sort assigns
+noise by uid order and will not match; replace
+`baseline/qwen_image_online_dpo/` after the change.
 
 Direct-preference steps do not recompute SDE `old_log_probs`. Performance
 comparison includes `timing_s/prepare_actor_batch` and `timing_s/ref` and does

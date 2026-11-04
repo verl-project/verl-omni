@@ -11,13 +11,14 @@ training timestep, and the actor still permutes their order per row.
 `perf/mfu/actor_infer` are absent.
 
 Rollout rows arrive in per-run `uuid4` uid order, and DiffusionNFT draws the
-`train_timesteps` permutation in that row order. `prepare_actor_batch`
-stable-sorts the actor batch by `extra_info.repeat_index` before the shuffle,
-so the same prompt keeps the same timestep order on the next run. Rows of one
-prompt keep their incoming order. Dump comparison still realigns both payloads
-by `repeat_index` before comparing `latents_clean` and `train_timesteps`. A
-baseline dumped before that sort assigns timesteps by uid order and will not
-match; replace `baseline/qwen_image_diffusion_nft/` after the change.
+`train_timesteps` permutation in that row order. The nightly debug hook
+stable-sorts the actor batch by `extra_info.repeat_index` before
+`prepare_actor_batch`, so the same prompt keeps the same timestep order on the
+next run. Rows of one prompt keep their incoming order. Dump comparison still
+realigns both payloads by `repeat_index` before comparing `latents_clean` and
+`train_timesteps`. A baseline dumped before that sort assigns timesteps by uid
+order and will not match; replace `baseline/qwen_image_diffusion_nft/` after
+the change.
 
 Scores come from `genrm_ocr.compute_score_ocr` on the tiny Qwen-VL reward
 model, with greedy decoding. The precision signal is the rollout and the

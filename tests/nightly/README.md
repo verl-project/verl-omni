@@ -119,9 +119,10 @@ baseline subdirectory after training succeeds, then copy `current/` in as the
 new baseline. The run prints `BASELINE BOOTSTRAPPED` and does not compare
 against the deleted baseline. Sibling case directories stay in place. The
 workflow sets this in `mode=baseline` after downloading the current unified
-baseline artifact. The `case` input limits which scripts run, so a single-case
-baseline run leaves the other downloaded directories unchanged and uploads the
-full tree. A scheduled nightly keeps `L3_REFRESH_BASELINE` at `0` with
+baseline artifact. The `case` input limits which scripts run, so a single-case baseline run leaves
+the other downloaded directories unchanged and uploads the full tree. If no
+artifact exists yet, a single-case run uploads only that case; a later nightly
+fails before the GPU runner when a selected case has no baseline artifacts. A scheduled nightly keeps `L3_REFRESH_BASELINE` at `0` with
 `BOOTSTRAP_MISSING_BASELINE=0`, so a missing baseline, a missing dump, or a
 metric regression fails the job.
 
@@ -142,9 +143,9 @@ To refresh the production baseline:
 1. Review the expected change and choose the branch whose baseline should be
    refreshed.
 2. Trigger `l3_nightly` manually with `mode=baseline`. Choose one case to
-   refresh only that subdirectory, or leave `case=all`. The selected branch
-   must already have a full baseline artifact when refreshing one case, so the
-   other cases stay in the uploaded tree.
+   refresh only that subdirectory, or leave `case=all`. A single-case run with
+   an existing artifact keeps the other cases. With no artifact yet, it uploads
+   only the selected case.
 3. Inspect the uploaded reports and baseline artifact before relying on later
    nightly runs. Publish that artifact only from a green run: a failed baseline
    job can refresh the cases that finished and leave later cases unchanged.
@@ -197,11 +198,14 @@ cover driver-forward, actor-forward, and LoRA-gradient payloads for
 `DEBUG_DUMP_STEPS`, which defaults to `1,2`.
 
 The nightly dataset writes `extra_info.repeat_index` on each repeated prompt.
-The training batch is ordered by a per-run `uuid4` uid, so both payloads are
-first reordered onto that index and compared row for row. When either side
-lacks the key, or the two key sets differ, comparison falls back to raw file
-order and prints a `row order not realigned` warning. Rows without the field
-stay in uid order outside this nightly. Online DPO also records
+The training batch is ordered by a per-run `uuid4` uid. Online DPO and
+DiffusionNFT draw noise or a timestep permutation in actor-batch order, so the
+nightly debug hook stable-sorts rows onto `repeat_index` before
+`prepare_actor_batch`. Dump comparison also reorders both payloads onto that
+index before comparing row for row. When either side lacks the key, or the two
+key sets differ, comparison falls back to raw file order and prints a
+`row order not realigned` warning. Rows without the field stay in uid order;
+normal training does not load the hook. Online DPO also records
 `prepare_actor_batch_selected_indices`. When that list is a full permutation of
 the dumped rows, comparison restores the pre-pair order before the
 `repeat_index` sort. The nightly online-DPO case uses `rollout.n=4`, which

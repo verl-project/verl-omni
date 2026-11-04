@@ -273,11 +273,76 @@ def _install_tracking_hook() -> None:
     Tracking.log = log_with_jsonl
 
 
+def _repeat_index_order(batch: Any) -> np.ndarray | None:
+    """Stable dataset order, or None when ``extra_info.repeat_index`` is absent.
+
+    Rollout rows arrive in per-run ``uuid4`` uid order. Online DPO and
+    DiffusionNFT draw noise or a timestep permutation in that row order, so the
+    nightly must put rows onto ``repeat_index`` before ``prepare_actor_batch``.
+    Rows of one prompt keep their incoming order. Batches without the field stay
+    in uid order; normal training never loads this hook.
+    """
+    try:
+        extra = batch.non_tensor_batch.get("extra_info")
+    except Exception:
+        return None
+    if extra is None:
+        return None
+    try:
+        rows = list(extra)
+        batch_len = len(batch)
+    except TypeError:
+        return None
+    if len(rows) != batch_len:
+        return None
+    keys: list[int] = []
+    for row in rows:
+        if isinstance(row, Mapping):
+            value = row.get("repeat_index")
+        else:
+            value = getattr(row, "repeat_index", None)
+        if value is None:
+            return None
+        try:
+            keys.append(int(value))
+        except (TypeError, ValueError):
+            return None
+    order = np.argsort(np.asarray(keys), kind="stable")
+    if np.array_equal(order, np.arange(order.size)):
+        return None
+    return order
+
+
+def _reorder_batch_by_repeat_index(batch: Any, reward_tensor: Any) -> Any:
+    """Reorder ``batch`` and the aligned reward tensor onto ``repeat_index`` order."""
+    order = _repeat_index_order(batch)
+    if order is None:
+        return reward_tensor
+    import torch
+
+    index = torch.from_numpy(order)
+    batch.reorder(index)
+    return reward_tensor[index.to(reward_tensor.device)]
+
+
 def _install_driver_hook() -> None:
     try:
         from verl_omni.trainer.diffusion.v1.trainer_base import PolicyGradientDiffusionTrainerV1
     except Exception:
         return
+
+    original_prepare_actor_batch = PolicyGradientDiffusionTrainerV1._prepare_actor_batch
+    if not getattr(original_prepare_actor_batch, _WRAPPED_ATTR, False):
+
+        def prepare_actor_batch_with_repeat_index(self, batch, reward_tensor, *args, **kwargs):
+            # Direct-preference losses draw per-row noise/timesteps after this call.
+            # Sort onto the nightly dataset order first so two runs assign the same
+            # draw to the same prompt. FlowGRPO does not use this path.
+            reward_tensor = _reorder_batch_by_repeat_index(batch, reward_tensor)
+            return original_prepare_actor_batch(self, batch, reward_tensor, *args, **kwargs)
+
+        setattr(prepare_actor_batch_with_repeat_index, _WRAPPED_ATTR, True)
+        PolicyGradientDiffusionTrainerV1._prepare_actor_batch = prepare_actor_batch_with_repeat_index
 
     original_update_actor = PolicyGradientDiffusionTrainerV1._update_actor
     if getattr(original_update_actor, _WRAPPED_ATTR, False):
