@@ -179,6 +179,47 @@ def test_arrival_during_metadata_sync_is_not_double_counted(monkeypatch):
     assert measured <= timing["sample_wait/total"] + 1e-9
 
 
+def test_arrival_during_metadata_sync_discovered_by_next_poll(monkeypatch):
+    """A tag written during RPC N and first visible on poll N+1: no re-charge.
+
+    The discovering gap must run from the previous sync's RPC return, not its
+    start. The row below lands midway into a slow RPC whose in-flight response
+    misses it; clamping to the RPC's start would let detection re-book the
+    RPC's tail on top of the metadata_sync seconds it already paid. Detection
+    stays within the one-poll gap that follows the RPC.
+    """
+    fake_tq = _FakeTransferQueue({})
+    _patch_transfer_queue(monkeypatch, fake_tq)
+    real_kv_list = fake_tq.kv_list
+    state = {"syncs": 0}
+
+    def kv_list_row_missed_by_slow_rpc():
+        state["syncs"] += 1
+        if state["syncs"] == 1:
+            time.sleep(0.04)
+            snapshot = real_kv_list()  # this in-flight response misses the row
+            fake_tq.add_finished_group("uida", put_at=time.time())  # lands mid-RPC
+            time.sleep(0.04)  # RPC tail during which the row stays invisible
+            return snapshot
+        return real_kv_list()
+
+    monkeypatch.setattr(replay_buffer_module.tq, "kv_list", kv_list_row_missed_by_slow_rpc)
+
+    buffer = _make_profiled_buffer(poll_interval=0.005)
+    buffer.sample(global_steps=1, partition_id="train", batch_size=1)
+
+    timing = buffer.last_sample_timing
+    assert timing["sample_wait/polls"] >= 1.0
+    assert timing["sample_wait/metadata_sync"] >= 0.07  # the slow RPC is service time
+    # Bounded by the post-RPC gap (~one poll cycle), not by the row's ~0.04s
+    # mid-RPC residence.
+    assert timing["sample_wait/detection"] <= 0.02
+    measured = sum(timing[f"sample_wait/{s}"] for s in ("detection", "metadata_sync", "eviction"))
+    # Detection is wall-clock while the timers run on perf_counter: allow the
+    # cross-domain skew, but not a second RPC tail.
+    assert measured <= timing["sample_wait/total"] + 0.002
+
+
 def test_slow_generation_is_generation_bound_not_detection(monkeypatch):
     """Counterexample 1: slow generation must land in generation_bound.
 
@@ -540,9 +581,10 @@ def test_tq_write_accounting_reaches_the_queue(monkeypatch):
     """The write-side accounting tags must survive the producer->queue round trip.
 
     The fake queue copies tags at the send boundary (like the real controller).
-    The payload upload and the terminal status publication each take time, and
-    ``_publish_completion_tags`` runs after the status put -- so the completion
-    stamps provably postdate the boundary the replay buffer waits on, and the
+    The payload upload, the terminal status publication, and the put-cost
+    telemetry update each take time, and ``_publish_completion_tags`` stamps
+    ``tq_put_at`` only after the telemetry put returned -- so the stamp
+    provably postdates every boundary the replay buffer waits on, and the
     payload put carries no accounting tags of its own beyond the byte count.
     """
     import transfer_queue as tq_module
@@ -551,12 +593,16 @@ def test_tq_write_accounting_reaches_the_queue(monkeypatch):
     calls: list[dict] = []
     payload_completed_at = 0.0
     status_completed_at = 0.0
+    timing_put_completed_at = 0.0
 
     async def fake_async_kv_batch_put(*, keys, partition_id, fields=None, tags=None, **kwargs):
-        nonlocal payload_completed_at
+        nonlocal payload_completed_at, timing_put_completed_at
         if fields is not None:
             await asyncio.sleep(0.05)  # the payload upload takes time
             payload_completed_at = time.time()
+        elif tags and TQ_PUT_SECONDS_TAG in tags[0]:
+            await asyncio.sleep(0.02)  # the telemetry put takes time too
+            timing_put_completed_at = time.time()
         calls.append({"keys": list(keys), "fields": fields, "tags": [dict(t) for t in (tags or [])]})
         # Controller-side semantics: a put merges the new tag into the stored
         # row tag (TransferQueue BatchMeta.update_custom_meta).
@@ -625,19 +671,22 @@ def test_tq_write_accounting_reaches_the_queue(monkeypatch):
     asyncio.run(fake_async_kv_put(key="uida", partition_id="train", tag={"status": "finished"}))
     asyncio.run(worker._publish_completion_tags("uida", "train", put_groups))
 
-    completion_put = calls[1]
-    assert completion_put["fields"] is None
-    assert completion_put["keys"] == calls[0]["keys"]
-    # The completion update carries the put duration and the terminal-
-    # publication boundary -- stamped after the status put returned, so the
-    # trainer's detection never bills the status/tag round trips.
-    for tag in completion_put["tags"]:
+    timing_put, stamp_put = calls[1], calls[2]
+    assert timing_put["fields"] is None and stamp_put["fields"] is None
+    assert timing_put["keys"] == stamp_put["keys"] == calls[0]["keys"]
+    # Two tag-only updates: the put duration first, then the terminal-
+    # publication boundary -- stamped after both the status put and the
+    # telemetry put returned, so the trainer's detection never bills those
+    # round trips.
+    for tag in timing_put["tags"]:
         assert tag[TQ_PUT_SECONDS_TAG] > 0.0
-        assert tag[TQ_PUT_AT_TAG] >= status_completed_at > payload_completed_at
+        assert TQ_PUT_AT_TAG not in tag
+    for tag in stamp_put["tags"]:
+        assert tag[TQ_PUT_AT_TAG] >= timing_put_completed_at >= status_completed_at > payload_completed_at
     for key in ("uida_0_0", "uida_1_0"):
         assert store[key][TQ_PAYLOAD_BYTES_TAG] > 0
         assert store[key][TQ_PUT_SECONDS_TAG] > 0.0
-        assert store[key][TQ_PUT_AT_TAG] >= status_completed_at
+        assert store[key][TQ_PUT_AT_TAG] >= timing_put_completed_at
 
 
 # -- weight-sync phase timer -------------------------------------------------

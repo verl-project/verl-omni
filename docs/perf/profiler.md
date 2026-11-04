@@ -632,17 +632,20 @@ were already being taken, promoted to the metrics dict; see
 | `separate_async/idle_ratio/{generation_bound,detection,metadata_sync,eviction}` | Idle decomposition |
 
 The wait split is event-based, not sleep-based: the rollout stamps each
-written row with the moment its prompt group became terminal (published
-after the `status=finished` put, the state the buffer actually waits for),
-and the buffer charges detection once, at the poll where the requested batch
-first became sampleable -- for the group whose completion crossed that
-threshold, with already-sampleable and surplus groups excluded. Earlier-
-completing groups were waited on for their generation, so their undiscovered
-time stays in `generation_bound`. Detection is measured up to the start of
-the discovering metadata sync, so it never overlaps `metadata_sync`: an
-arrival inside a sync is that sync's service time, and the segments stay
-within the wall time. Plain poll-sleep time cannot make this split — a slow
-generation and a coarse `poll_interval` both show up as sleep.
+written row with the moment its prompt group became detectable (sampled after
+the `status=finished` put and the telemetry update that follows it, then
+published as one final minimal tag update -- a stamp can never postdate the
+message carrying it), and the buffer charges detection once, at the poll where
+the requested batch first became sampleable -- for the group whose completion
+crossed that threshold, with already-sampleable and surplus groups excluded.
+Earlier-completing groups were waited on for their generation, so their
+undiscovered time stays in `generation_bound`. Detection is measured up to the
+start of the discovering metadata sync and clamped to the gap since the
+previous sync's RPC returned, so it never overlaps `metadata_sync`: an
+arrival inside a sync is that sync's service time whether that sync or the
+next one discovers it, and the segments stay within the wall time. Plain
+poll-sleep time cannot make this split — a slow generation and a coarse
+`poll_interval` both show up as sleep.
 
 Read them straight off wandb / TensorBoard, or point
 [`scripts/analyze_step_metrics.py`](https://github.com/verl-project/verl-omni/blob/main/scripts/analyze_step_metrics.py)

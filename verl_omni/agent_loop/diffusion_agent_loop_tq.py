@@ -344,22 +344,40 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
         its wait from anything earlier would bill the status/tag round trips
         to detection latency. Telemetry only -- a failure here must never
         touch the prompt's outcome (the payload rows are already stored).
+
+        The boundary stamp cannot ride the put that publishes it (a tag never
+        postdates the message carrying it), so the telemetry travels as two
+        tag-only updates: the put-cost tags first, then ``tq_put_at`` sampled
+        after that put returned. Only the minimal stamp update's own round
+        trip can still sit between the boundary and the rows' detectability.
         """
         from verl_omni.trainer.diffusion.v1.async_profiling import TQ_PUT_AT_TAG, TQ_PUT_SECONDS_TAG
 
-        published_at = time.time()
+        keys = [key for group_keys, _seconds in put_groups for key in group_keys]
         try:
             await tq.async_kv_batch_put(
-                keys=[key for group_keys, _seconds in put_groups for key in group_keys],
+                keys=keys,
                 tags=[
-                    {TQ_PUT_SECONDS_TAG: seconds / len(group_keys), TQ_PUT_AT_TAG: published_at}
+                    {TQ_PUT_SECONDS_TAG: seconds / len(group_keys)}
                     for group_keys, seconds in put_groups
                     for _key in group_keys
                 ],
                 partition_id=partition_id,
             )
         except Exception as e:
-            logger.warning(f"Failed to record TQ completion tags for uid={uid}: {e}")
+            logger.warning(f"Failed to record TQ put timing for uid={uid}: {e}")
+        # Sampled after the timing put returned: the buffer stages a group
+        # only once ``tq_put_at`` is visible, so stamping before a tag put
+        # would bill that put's round trip to detection latency.
+        published_at = time.time()
+        try:
+            await tq.async_kv_batch_put(
+                keys=keys,
+                tags=[{TQ_PUT_AT_TAG: published_at}] * len(keys),
+                partition_id=partition_id,
+            )
+        except Exception as e:
+            logger.warning(f"Failed to record TQ publication stamp for uid={uid}: {e}")
 
 
 @auto_await

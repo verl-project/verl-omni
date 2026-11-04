@@ -84,9 +84,11 @@ class ProfiledReplayBufferAsync(ReplayBufferAsync):
     groups were waited on for their generation, so their undiscovered time
     stays in ``generation_bound``, and a window that opens with the batch
     already sampleable charges nothing. The arrival timestamp is sampled
-    before the discovering sync's ``kv_list`` call, so detection can never
-    overlap the metadata segment: an arrival inside a metadata RPC is that
-    RPC's service time, and the segment sums stay within the wall time.
+    before the discovering sync's ``kv_list`` call and detection is clamped to
+    the gap between the previous sync's RPC return and that call, so
+    detection can never overlap the metadata segment: an arrival inside a
+    metadata RPC is that RPC's service time whether the same sync or the next
+    one discovers it, and the segment sums stay within the wall time.
     Groups published by older writers carry no ``tq_put_at`` and fall back
     into ``generation_bound``; groups tagged before the window started are
     likewise excluded from detection, since they arrived while the trainer
@@ -142,15 +144,19 @@ class ProfiledReplayBufferAsync(ReplayBufferAsync):
         try:
             return super()._sync_metadata_from_transfer_queue()
         finally:
+            sync_end = time.time()
             if start is not None:
                 self._segment_timings["metadata_sync"] += time.perf_counter() - start
             if self._profiling_active:
                 # Arrivals are counted from the window open (older rows were
                 # published while the trainer was not polling for them), but
-                # detection is clamped to the discovering gap: an undiscovered
-                # stretch that spans earlier syncs overlaps those RPCs, so it
-                # stays in the generation_bound residual instead.
-                window_open = self._window_started_at if self._window_started_at is not None else now
+                # detection is clamped to the discovering gap. The gap runs
+                # from the previous sync's RPC return to this sync's RPC
+                # start: clamping to the previous sync's start instead would
+                # let a tag written inside that RPC and first visible on the
+                # next poll double-book the RPC tail as detection on top of
+                # its own metadata_sync service time.
+                window_open = self._window_started_at if self._window_started_at is not None else sync_end
                 prev_sync_end = self._last_sync_wall_time if self._last_sync_wall_time is not None else window_open
                 cap = max(0.0, now - prev_sync_end)
                 for partition_id, partition in self.partitions.items():
@@ -175,7 +181,7 @@ class ProfiledReplayBufferAsync(ReplayBufferAsync):
                     for uid in list(counted):
                         if uid not in uids_with_rows:
                             del counted[uid]
-                self._last_sync_wall_time = now
+                self._last_sync_wall_time = sync_end
 
     def _evict_terminal_groups(self, global_steps, partition_id, eviction_reasons):
         if not self._profiling_active:

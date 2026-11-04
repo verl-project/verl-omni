@@ -346,12 +346,14 @@ async def test_run_prompt_batches_prompt_group_into_one_put(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_run_prompt_stamps_terminal_publication_last(monkeypatch):
-    """The completion tags must postdate the terminal status publication.
+    """The publication stamp must postdate every boundary the buffer waits on.
 
-    The replay buffer cannot sample a group before its prompt turns finished,
-    so ``tq_put_at`` stamped any earlier would bill the status/tag round trips
-    to detection latency. Both the status put and the payload upload take real
-    time here, and the stamp must clear the later of the two.
+    The replay buffer cannot sample a group before its prompt turns finished
+    and stages it only once ``tq_put_at`` is visible, so a stamp taken before
+    the status put or the telemetry put would bill those round trips to
+    detection latency. The payload upload, the status publication, and the
+    put-cost telemetry update each take real time here; the stamp must clear
+    the latest of them.
     """
     worker_cls = DiffusionAgentLoopWorkerTQ.__ray_metadata__.modified_class
     worker = object.__new__(worker_cls)
@@ -378,9 +380,12 @@ async def test_run_prompt_stamps_terminal_publication_last(monkeypatch):
         if fields is not None:
             await asyncio.sleep(0.01)  # slow payload upload
             events.append(("payload", time.time()))
-        else:
-            events.append(("completion_tags", time.time()))
+        elif TQ_PUT_AT_TAG in tags[0]:
+            events.append(("publication_stamp", time.time()))
             stamps.extend(tag[TQ_PUT_AT_TAG] for tag in tags)
+        else:
+            await asyncio.sleep(0.02)  # slow telemetry put: the stamp must postdate it
+            events.append(("put_seconds", time.time()))
 
     async def fake_kv_put(*, key, partition_id, tag):
         await asyncio.sleep(0.01)  # slow status publication
@@ -398,14 +403,20 @@ async def test_run_prompt_stamps_terminal_publication_last(monkeypatch):
         prompt_index=0,
     )
 
-    assert [name for name, _at in events] == ["running", "payload", "finished", "completion_tags"]
+    assert [name for name, _at in events] == [
+        "running",
+        "payload",
+        "finished",
+        "put_seconds",
+        "publication_stamp",
+    ]
     payload_at = dict(events)["payload"]
     finished_at = dict(events)["finished"]
-    assert finished_at > payload_at  # the status publication is its own step
+    put_seconds_at = dict(events)["put_seconds"]
     for stamp in stamps:
-        # The boundary the buffer waits on is the status publication: the
-        # stamp must never predate it (nor the payload upload it follows).
-        assert stamp >= finished_at
+        # The stamp is sampled only after the telemetry put returned, which
+        # itself follows the status publication and the payload upload.
+        assert stamp >= put_seconds_at > finished_at > payload_at
 
 
 @pytest.mark.asyncio
