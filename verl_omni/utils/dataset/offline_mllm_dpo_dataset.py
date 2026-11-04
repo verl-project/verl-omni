@@ -759,9 +759,10 @@ class OfflineMLLMDPODataset(MultiTurnSFTDataset):
             dropped = _media_placeholders_dropped(media_tokens_before, _media_placeholder_counts(res))
             if dropped:
                 raise ValueError(
-                    f"truncation={self.truncation!r} to max_length={self.max_length} would cut placeholder runs of the "
-                    f"media inputs ({dropped}) while multi_modal_inputs keeps their features, so the sample would reach "
-                    f"the model desynchronised. Raise max_length, shorten the prompt/response, or use truncation='error'."
+                    f"truncation={self.truncation!r} to max_length={self.max_length} would cut placeholder "
+                    f"runs of the media inputs ({dropped}) while multi_modal_inputs keeps their features, "
+                    f"so the sample would reach the model desynchronised. Raise max_length, shorten the "
+                    f"prompt/response, or use truncation='error'."
                 )
         return res
 

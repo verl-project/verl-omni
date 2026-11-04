@@ -944,7 +944,7 @@ def test_offline_mllm_dpo_collate_fn_squeezes_position_ids():
 def _truncation_branch(placeholders: int, total_length: int, start: int = 4) -> dict:
     ids = torch.arange(total_length)
     image_mask = torch.zeros(total_length, dtype=torch.bool)
-    image_mask[start:start + placeholders] = True
+    image_mask[start : start + placeholders] = True
     return {
         "input_ids": ids,
         "attention_mask": torch.ones(total_length, dtype=torch.long),
@@ -961,9 +961,9 @@ def _truncation_branch(placeholders: int, total_length: int, start: int = 4) -> 
     "truncation,max_length",
     [
         ("right", 12),  # cuts the placeholder run in half
-        ("right", 2),   # drops the image entirely
-        ("left", 10),   # keeps the tail of the placeholder run
-        ("left", 2),    # drops the image entirely
+        ("right", 2),  # drops the image entirely
+        ("left", 10),  # keeps the tail of the placeholder run
+        ("left", 2),  # drops the image entirely
     ],
 )
 def test_prepare_branch_inputs_rejects_truncation_that_cuts_media_placeholders(truncation, max_length):
