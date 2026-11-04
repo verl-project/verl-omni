@@ -55,9 +55,8 @@ import re
 import sys
 from decimal import Decimal, InvalidOperation
 
-# Serialized trainer-step segments, in pipeline order. The wait segments are
-# reported separately (they are idle, not work) and the remainder bucket
-# catches anything unaccounted.
+# Serialized trainer-step segments, in pipeline order; wait segments are
+# reported separately (idle, not work) and the remainder catches the rest.
 SERIAL_WORK_SEGMENTS = (
     ("timing_s/reward", "reward"),
     ("timing_s/old_log_prob", "old_log_prob"),

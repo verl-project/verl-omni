@@ -138,9 +138,8 @@ class WeightSyncPhaseTimerMixin:
     _sync_phase_timings: dict[str, float]
 
     def __init__(self, *args, **kwargs):
-        # Phase methods can be called outside update_weights (switch_to_trainer
-        # aborts/sleeps replicas directly), so the accumulator must exist from
-        # construction, not just inside a profiled sync.
+        # Phase methods also run outside update_weights (switch_to_trainer),
+        # so the accumulator must exist from construction.
         super().__init__(*args, **kwargs)
         self._sync_phase_timings = defaultdict(float)
 

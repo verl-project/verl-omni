@@ -13,24 +13,12 @@
 # limitations under the License.
 """Always-on accounting for the async diffusion V1 trainers (issue #712).
 
-Three complementary pieces feed the per-step metrics dict:
-
-- :class:`ProfiledReplayBufferAsync` decomposes ``sample()`` wall time into
-  generation-bound wait, completion-detection latency, TransferQueue metadata
-  sync, and eviction. The trainer reads ``last_sample_timing`` after each
-  sample and merges it into ``timing_raw``, so every segment shows up as a
-  ``timing_s/sample_wait/*`` metric with no new export channel.
-- :func:`aggregate_tq_write_stats` sums the per-row ``tq_put_s`` /
-  ``tq_payload_bytes`` tags the rollout-side TQ writer records, attributing
-  rollout-side transfer cost and bytes to the batch that actually pays for
-  them (the sampled one).
-- :func:`tensordict_payload_bytes` measures the trainer-side read payload so
-  ``tq/get/bytes`` pairs with ``timing_s/tq_get`` for a GB/s figure.
-
-Everything here reuses timings that were already being taken and promotes
-them to metrics, but it is not free: the rollout writer adds two tag-only
-TransferQueue updates per prompt group (the put-cost tags, then the
-publication stamp) carrying three new tag keys. Payload puts are untouched.
+:class:`ProfiledReplayBufferAsync` decomposes ``sample()`` wall time into
+generation-bound wait, detection latency, TransferQueue metadata sync, and
+eviction (read via ``last_sample_timing``); :func:`aggregate_tq_write_stats`
+sums the per-row ``tq_put_s`` / ``tq_payload_bytes`` tags the rollout-side
+TQ writer records; :func:`tensordict_payload_bytes` measures the
+trainer-side read payload. Full metric catalog: ``docs/perf/profiler.md``.
 """
 
 import time
@@ -38,78 +26,41 @@ from collections import defaultdict
 
 from verl.trainer.ppo.v1.replay_buffer import ReplayBufferAsync
 
-# Tag keys written by ``DiffusionAgentLoopWorkerTQ`` and summed by
-# :func:`aggregate_tq_write_stats`. ``tq_put_at`` (wall-clock seconds) is the
-# terminal-publication boundary the wait decomposition keys on: the rollout
-# writer stamps it only after the prompt's ``status=finished`` put has
-# returned, because the buffer cannot sample the group before that status.
-# Keep in sync with the rollout writer's stamping.
+# ``tq_put_at`` marks terminal publication (the finished-status put's
+# return); keep in sync with the rollout writer's stamping.
 TQ_PUT_SECONDS_TAG = "tq_put_s"
 TQ_PAYLOAD_BYTES_TAG = "tq_payload_bytes"
 TQ_PUT_AT_TAG = "tq_put_at"
 
-# Per-local-update totals that must sum across the ``parameter_sync_step``
-# updates of one outer step: ``MetricsAggregator``'s default rule is
-# weighted_avg, which would undercount every one of them. The step-level
-# rate is derived from the summed bytes and seconds by
-# :func:`derive_tq_put_rate` -- averaging per-update rates misstates
-# throughput when updates carry different durations. ``tq/get/bytes`` is
-# absent: it is exported once per step from ``timing_raw`` and never passes
-# through the aggregator.
+# Per-update totals that must sum across the step's local updates: the
+# aggregator's weighted_avg would undercount; derive the rate from sums.
 TQ_COUNTER_METRICS = ("tq/put/rows", "tq/put/seconds", "tq/put/bytes")
 
 
 class ProfiledReplayBufferAsync(ReplayBufferAsync):
-    """``ReplayBufferAsync`` that accounts for where ``sample()`` time went.
+    """``ReplayBufferAsync`` that decomposes ``sample()`` wait time.
 
-    The upstream poll loop sleeps a fixed ``poll_interval`` between
-    ``kv_list`` metadata syncs, evicts stale/filtered groups, and re-checks
-    sampleability -- all inside one opaque wait. Because the sleep is how the
-    loop waits for generation, sleep time alone cannot distinguish a
-    generation-throughput bottleneck from polling-quantization waste: with a
-    60 s generation and a 2 s interval, nearly the whole wait is sleep. This
-    subclass therefore keys on arrival events (the ``tq_put_at`` row tags)
-    instead of the sleep:
+    The upstream poll loop's fixed sleep cannot distinguish slow generation
+    from coarse polling, so this subclass keys on ``tq_put_at`` arrival
+    events instead and exports ``last_sample_timing`` with these segments
+    (all under ``sample_wait/``):
 
-    - ``sample_wait/generation_bound`` -- wait while the needed trajectories
-      were still generating (residual: total minus the segments below);
-    - ``sample_wait/detection`` -- batch-readiness discovery latency: how long
-      the group whose completion made the requested batch sampleable sat
-      between its terminal publication and the metadata sync that discovered
-      it (this is the part a smaller ``poll_interval`` recovers);
-    - ``sample_wait/metadata_sync`` -- ``kv_list`` round trips;
-    - ``sample_wait/eviction`` -- stale/DAPO/failure eviction passes.
+    - ``generation_bound`` -- the needed trajectories were still generating
+      (residual: total minus the segments below);
+    - ``detection`` -- the batch-completing group waited between its
+      terminal publication and the sync that discovered it (what a smaller
+      ``poll_interval`` recovers);
+    - ``metadata_sync`` -- ``kv_list`` round trips;
+    - ``eviction`` -- stale/DAPO/failure eviction passes;
+    - ``polls`` and ``buffer_*`` -- poll count and pending/running/finished
+      group depths.
 
-    Detection is charged once per window, at the sampleability transition, and
-    only for the crossing group: among the eligible terminal groups first
-    tagged by the committing sync, the ``(target - already_sampleable)``-th
-    earliest arrival is the one that completed the batch -- earlier-completing
-    groups were waited on for their generation, so their undiscovered time
-    stays in ``generation_bound``, and a window that opens with the batch
-    already sampleable charges nothing. The arrival timestamp is sampled
-    before the discovering sync's ``kv_list`` call and detection is clamped to
-    the gap between the previous sync's RPC return and that call, so
-    detection can never overlap the metadata segment: an arrival inside a
-    metadata RPC is that RPC's service time whether the same sync or the next
-    one discovers it, and the segment sums stay within the wall time.
-    Groups published by older writers carry no ``tq_put_at`` and fall back
-    into ``generation_bound``; groups tagged before the window started are
-    likewise excluded from detection, since they arrived while the trainer
-    was not polling for them. A completion tag that appears on an already
-    visible group is what stages the arrival -- the writer publishes payload
-    rows before the telemetry tags, so keying on tag transitions rather than
-    row novelty is what keeps such a group's wait from collapsing to zero.
-
-    ``last_sample_timing`` (seconds per segment, plus poll count and the
-    finished-group depth seen while waiting) is refreshed on every
-    ``wait_for_sampleable`` / ``sample`` call. Accumulation only happens
-    inside those calls, so incidental metadata syncs from
-    ``get_sampleable_count`` (hybrid switch decisions) are not mixed in.
-
-    The queue-depth snapshots answer "was the trainer waiting because the
-    buffer was drained or because everything was still running" -- pending vs
-    running vs finished counts per poll -- which is the difference between a
-    generation-throughput problem and a scheduling one.
+    Detection is charged once per window, at the sampleability transition,
+    to the group whose completion crossed the batch threshold, clamped to
+    the gap since the previous sync returned so it never overlaps
+    ``metadata_sync``; untagged groups (older writers, pre-window tags)
+    stay in ``generation_bound``. Full attribution rules live in
+    ``docs/perf/profiler.md``.
     """
 
     def __init__(self, *args, **kwargs):
@@ -118,18 +69,13 @@ class ProfiledReplayBufferAsync(ReplayBufferAsync):
         self._window_depth = 0
         self._segment_timings: dict[str, float] = defaultdict(float)
         self._poll_depths: list[tuple[int, int, int]] = []
-        # Completion-tag bookkeeping per partition: uid -> staged arrival. A
-        # uid is staged once its rows first carry ``tq_put_at`` (which may be
-        # several syncs after the rows themselves became visible) and never
-        # re-staged while its rows persist.
+        # uid -> staged arrival; staged once rows first carry ``tq_put_at``,
+        # never re-staged while the rows persist.
         self._counted_arrivals: dict[str, dict[str, float]] = {}
         self._window_started_at: float | None = None
         self._last_sync_wall_time: float | None = None
-        # Batch-readiness attribution: each profiled sync stages the eligible
-        # arrivals it discovered as ``{uid: arrival}`` plus the pre-sync clock
-        # reading and the clamp cap; ``_has_enough_samples`` commits the
-        # threshold-crossing arrival only when that sync's check turns the
-        # window from waiting to ready.
+        # Per-sync staged arrivals with the pre-sync clock reading and the
+        # clamp cap; ``_has_enough_samples`` commits the crossing arrival.
         self._sync_detection_candidates: dict[str, tuple[dict[str, float], float, float]] = {}
         self._sampleable_latched = False
         self._sampleable_at_window_open = False
@@ -139,10 +85,8 @@ class ProfiledReplayBufferAsync(ReplayBufferAsync):
 
     def _sync_metadata_from_transfer_queue(self):
         start = time.perf_counter() if self._profiling_active else None
-        # Detection's reference clock is read before the RPC below: an arrival
-        # that lands inside the metadata call is that call's service time, so
-        # detection and metadata_sync stay disjoint and their sums stay within
-        # the wall time.
+        # Sampled before the RPC below: an arrival inside it is that call's
+        # service time, keeping detection disjoint from metadata_sync.
         now = time.time()
         try:
             return super()._sync_metadata_from_transfer_queue()
@@ -151,14 +95,8 @@ class ProfiledReplayBufferAsync(ReplayBufferAsync):
             if start is not None:
                 self._segment_timings["metadata_sync"] += time.perf_counter() - start
             if self._profiling_active:
-                # Arrivals are counted from the window open (older rows were
-                # published while the trainer was not polling for them), but
-                # detection is clamped to the discovering gap. The gap runs
-                # from the previous sync's RPC return to this sync's RPC
-                # start: clamping to the previous sync's start instead would
-                # let a tag written inside that RPC and first visible on the
-                # next poll double-book the RPC tail as detection on top of
-                # its own metadata_sync service time.
+                # Clamp detection to the gap since the previous sync's RPC
+                # returned: a wider clamp would double-book that RPC's tail.
                 window_open = self._window_started_at if self._window_started_at is not None else sync_end
                 prev_sync_end = self._last_sync_wall_time if self._last_sync_wall_time is not None else window_open
                 cap = max(0.0, now - prev_sync_end)
@@ -222,10 +160,8 @@ class ProfiledReplayBufferAsync(ReplayBufferAsync):
         self._last_sync_wall_time = self._window_started_at
         self._sync_detection_candidates = {}
         self._sampleable_latched = False
-        # Sampleability of the last-synced state: a window that opens with the
-        # batch already ready never waits, so it must not charge detection for
-        # rows it happens to discover. Cache-only reads -- the wait loop's own
-        # first iteration evaluates the same state.
+        # A window that opens already-sampleable never waited and must not
+        # charge detection; cache-only reads match the wait loop's first pass.
         eviction_reasons = self._terminal_eviction_reasons(global_steps, partition_id)
         self._sampleable_at_window_open = (
             len(self._sampleable_terminal_keys(partition_id, eviction_reasons)) >= target_count
@@ -237,11 +173,8 @@ class ProfiledReplayBufferAsync(ReplayBufferAsync):
         if self._window_depth > 0:
             return
         self._profiling_active = False
-        # Report every segment every time (0.0 when absent) so dashboards see
-        # a constant metric schema across steps regardless of what ran.
-        # poll_sleep is an internal measure (it cannot distinguish generation
-        # wait from quantization); the public decomposition is the residual
-        # generation_bound plus the event-based detection above.
+        # Emit every segment every time (0.0 when absent) so the metric
+        # schema is constant across steps; generation_bound is the residual.
         measured_names = ("detection", "metadata_sync", "eviction")
         measured = sum(self._segment_timings[name] for name in measured_names)
         timings = {f"sample_wait/{name}": self._segment_timings[name] for name in measured_names}
@@ -266,15 +199,8 @@ class ProfiledReplayBufferAsync(ReplayBufferAsync):
         if self._profiling_active and result and not self._sampleable_latched:
             self._sampleable_latched = True
             if not self._sampleable_at_window_open:
-                # The sync that turned the window ready stages the arrivals it
-                # discovered; restricted to the eligible set, the batch needed
-                # ``len(sampleable) - discovered`` groups that earlier syncs
-                # already knew about, so the ``needed``-th earliest staged
-                # arrival is the group whose completion crossed the
-                # sampleability threshold. Surplus, nonterminal, and evictable
-                # groups never enter this ordering, and an untagged crossing
-                # group simply leaves detection at zero (its wait stays in the
-                # generation_bound residual).
+                # The ``needed``-th earliest staged eligible arrival is the
+                # crossing group; an untagged one leaves detection at zero.
                 staged, now, cap = self._sync_detection_candidates.get(partition_id, ({}, 0.0, 0.0))
                 eligible_arrivals = sorted(t for uid, t in staged.items() if uid in sampleable_keys)
                 needed = batch_size - (len(sampleable_keys) - len(eligible_arrivals))
@@ -303,15 +229,10 @@ class ProfiledReplayBufferAsync(ReplayBufferAsync):
 def aggregate_tq_write_stats(batch_meta) -> dict[str, float]:
     """Sum rollout-side TQ write cost recorded in row tags for one batch.
 
-    ``DiffusionAgentLoopWorkerTQ`` stamps every written row with the wall time
-    of its ``kv_batch_put`` and the payload bytes it carried. Rows written by
-    older writers (or tag-only prompt rows filtered out before this point)
-    simply lack the keys and are skipped, so the aggregation degrades to zero
-    rather than error. The totals are per local update: the trainer's
-    aggregator sums them across the step (:data:`TQ_COUNTER_METRICS`) and
-    :func:`derive_tq_put_rate` derives the step-level rate from the sums --
-    per-update rates weighted-averaged by the aggregator would misstate
-    throughput, so this function emits none.
+    Rows from older writers lack the tag keys and are skipped (totals degrade
+    to zero, never error). Per-update totals by design: the aggregator sums
+    them (:data:`TQ_COUNTER_METRICS`) and :func:`derive_tq_put_rate` derives
+    the step rate from the sums -- per-update rates would misstate throughput.
     """
     put_seconds = 0.0
     payload_bytes = 0
@@ -346,10 +267,8 @@ def derive_tq_put_rate(step_metrics: dict[str, float]) -> None:
 def tensordict_payload_bytes(data) -> int:
     """Payload bytes of a tensor batch fetched from TransferQueue.
 
-    Counts the tensor columns only. Non-tensor columns (uid, data_source,
-    ...) ride the same fetched batch but are excluded: they are bookkeeping
-    scalars next to the tensors, and the counter pairs with the
-    payload-dominated read time.
+    Tensor columns only: non-tensor columns are bookkeeping scalars beside
+    the payload that dominates the read time.
     """
     total = 0
     for value in data.values():

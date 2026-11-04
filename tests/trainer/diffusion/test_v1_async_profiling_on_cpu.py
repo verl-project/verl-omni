@@ -691,10 +691,8 @@ def test_tq_write_accounting_reaches_the_queue(monkeypatch):
     timing_put, stamp_put = calls[1], calls[2]
     assert timing_put["fields"] is None and stamp_put["fields"] is None
     assert timing_put["keys"] == stamp_put["keys"] == calls[0]["keys"]
-    # Two tag-only updates: the put duration first, then the terminal-
-    # publication boundary -- stamped after both the status put and the
-    # telemetry put returned, so the trainer's detection never bills those
-    # round trips.
+    # Two tag-only updates: put duration first, then the boundary stamped
+    # after both puts returned, so detection never bills those round trips.
     for tag in timing_put["tags"]:
         assert tag[TQ_PUT_SECONDS_TAG] > 0.0
         assert TQ_PUT_AT_TAG not in tag
@@ -720,9 +718,8 @@ class _StubManagerBase:
         self.replicas = [SimpleNamespace(), SimpleNamespace()]
         self.calls = []
 
-    # The async phases carry verl's @auto_await exactly like the pinned
-    # manager, so the mixin's unwrap through __wrapped__ is the path under
-    # test -- a plain async def would take a branch production never takes.
+    # The async phases carry verl's @auto_await like the pinned manager, so
+    # the mixin's unwrap through __wrapped__ is the path under test.
     @auto_await
     async def abort_replicas(self):
         self.calls.append("abort")
@@ -748,9 +745,8 @@ class _StubManagerBase:
         await asyncio.sleep(0.01)
 
     async def update_weights(self, global_steps=None):
-        # The pinned pipeline's call order: every phase method is invoked
-        # through self, so the mixin's overrides intercept; topology is called
-        # synchronously, and the inline transfer window is the sleep below.
+        # Pinned call order: every phase runs through self (the mixin's
+        # overrides intercept); topology is called synchronously.
         await self.abort_replicas()
         await self.release_kv_cache_replicas()
         self.build_process_group(rollout=None)
@@ -772,9 +768,8 @@ def test_weight_sync_phase_timer_decomposes_pipeline():
     manager = _StubTimedManager()
     metrics = asyncio.run(manager.update_weights(global_steps=3))
 
-    # Engine metrics keep their own keys; phase timings are added alongside.
-    # (Windows timer resolution makes sleep(0.01) land up to ~0.03s, so the
-    # tolerance only separates phases from the 0.02s residual window.)
+    # Engine metrics keep their own keys. (Windows timer resolution makes
+    # sleep(0.01) land up to ~0.03s; the tolerance just separates phases.)
     assert metrics["engine/changed_ratio"] == 0.25
     for phase in ("abort", "kv_release", "topology", "kv_resume", "generation_resume"):
         assert metrics[f"weight_sync/phase/{phase}_s"] == pytest.approx(0.01, abs=0.02)
@@ -782,9 +777,8 @@ def test_weight_sync_phase_timer_decomposes_pipeline():
     assert metrics["weight_sync/phase/transfer_and_finalize_s"] == pytest.approx(0.02, abs=0.02)
     assert metrics["weight_sync/total_s"] == pytest.approx(0.07, abs=0.1)
     assert metrics["weight_sync/replicas"] == 2.0
-    # The phases ran through the mixin's overrides in pipeline order. If the
-    # topology override were async again, the un-awaited sync call site above
-    # would drop its coroutine and "topology" would be missing here.
+    # Phases ran through the mixin's overrides in order; an async topology
+    # override would drop its coroutine and lose "topology" from calls.
     assert manager.calls == ["abort", "kv_release", "topology", "kv_resume", "generation_resume"]
 
 

@@ -311,13 +311,8 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
                 tag["gen_batch_seq"] = int(gen_batch_seq)
             rows.setdefault(tuple(field.keys()), []).append((key, field, tag))
 
-        # Rollout-side transfer accounting: payload bytes must ride the
-        # payload put itself -- anything stamped only into these local dicts
-        # after that call never reaches the TransferQueue controller. The
-        # completed put's wall time and the terminal-publication boundary
-        # follow later via :meth:`_publish_completion_tags`; both are split
-        # evenly across the rows of their put. Aggregation happens in
-        # aggregate_tq_write_stats on the trainer side.
+        # Payload bytes must ride the payload put itself: tags stamped only
+        # into local dicts after that call never reach the TQ controller.
         from verl_omni.trainer.diffusion.v1.async_profiling import TQ_PAYLOAD_BYTES_TAG
 
         put_groups: list[tuple[list[str], float]] = []
@@ -339,17 +334,12 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
     async def _publish_completion_tags(self, uid: str, partition_id: str, put_groups: list[tuple[list[str], float]]):
         """Stamp written rows with their put cost and the terminal-publication boundary.
 
-        Called after the prompt's ``status=finished`` put has returned: the
-        replay buffer cannot sample the group before that status, so charging
-        its wait from anything earlier would bill the status/tag round trips
-        to detection latency. Telemetry only -- a failure here must never
-        touch the prompt's outcome (the payload rows are already stored).
-
-        The boundary stamp cannot ride the put that publishes it (a tag never
-        postdates the message carrying it), so the telemetry travels as two
-        tag-only updates: the put-cost tags first, then ``tq_put_at`` sampled
-        after that put returned. Only the minimal stamp update's own round
-        trip can still sit between the boundary and the rows' detectability.
+        Called after the prompt's ``status=finished`` put returned (the buffer
+        cannot sample the group before that status). Telemetry only: a failure
+        here must never touch the prompt's outcome. A stamp can never postdate
+        the message carrying it, so ``tq_put_at`` is sampled after the put-cost
+        tag update returned -- only that minimal round trip can sit between
+        the boundary and the rows' detectability.
         """
         from verl_omni.trainer.diffusion.v1.async_profiling import TQ_PUT_AT_TAG, TQ_PUT_SECONDS_TAG
 
@@ -366,9 +356,8 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
             )
         except Exception as e:
             logger.warning(f"Failed to record TQ put timing for uid={uid}: {e}")
-        # Sampled after the timing put returned: the buffer stages a group
-        # only once ``tq_put_at`` is visible, so stamping before a tag put
-        # would bill that put's round trip to detection latency.
+        # Sampled after the timing put returned -- an earlier stamp would
+        # bill that tag put's round trip to detection latency.
         published_at = time.time()
         try:
             await tq.async_kv_batch_put(

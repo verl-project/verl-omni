@@ -456,11 +456,8 @@ class PolicyGradientDiffusionTrainerV1SeparateAsync(PolicyGradientDiffusionTrain
                 # fresh weights, exactly like sync mode waking colocated replicas.
                 self._resume_standalone_generation()
 
-        # Export the rolling switch-cost windows unconditionally (issue #712):
-        # with switching disabled the windows are never initialized (or stay
-        # empty), and the export is simply skipped. The trainer idle ratio is
-        # computed in ``_compute_metrics`` after the step timer closes; here
-        # timing_s/step is still accumulating.
+        # The idle ratio is computed in ``_compute_metrics`` after the step
+        # timer closes; here timing_s/step is still accumulating.
         switch_cost_metrics: dict[str, float] = {}
         to_trainer_costs = getattr(self, "_to_trainer_costs", None)
         to_rollout_costs = getattr(self, "_to_rollout_costs", None)

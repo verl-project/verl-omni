@@ -591,28 +591,20 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         """Fold the async sample-wait decomposition and rollout-side TQ write
         stats into this step's metrics (issue #712).
 
-        The profiled replay buffer stashes where ``sample()`` spent its wall
-        time (generation-bound wait vs detection latency vs metadata sync vs
-        eviction); the row tags written by the rollout-side TQ writer carry
-        the put cost and payload bytes of exactly the trajectories being
-        consumed. A sync-mode buffer has no ``last_sample_timing``, so that
-        read carries a default.
+        A sync-mode buffer has no ``last_sample_timing``; that read defaults
+        to empty.
         """
         sample_timing = getattr(self.replay_buffer, "last_sample_timing", None)
         if sample_timing:
             polls = float(sample_timing.get("sample_wait/polls", 0.0))
             for name, value in sample_timing.items():
                 if not name.startswith("sample_wait/buffer_"):
-                    # Wall-time segments and the poll count accumulate across
-                    # the step's local updates (parameter_sync_step > 1 runs
-                    # this once per update against the same timing_raw).
+                    # Wall-time segments and the poll count sum across the
+                    # step's local updates into the same timing_raw.
                     timing_raw[name] = timing_raw.get(name, 0.0) + value
                 elif name.endswith("_mean"):
-                    # Poll-weighted mean: the per-sample means weighted by
-                    # their poll counts equal the mean over every poll of the
-                    # step. ``sample_wait/polls`` may already hold this
-                    # sample's contribution, so subtract it to weight what
-                    # earlier updates accumulated.
+                    # Weight this sample's mean by its poll count; the polls
+                    # entry already holds it, so subtract it first.
                     prev = timing_raw.get(name)
                     if prev is None:
                         timing_raw[name] = value
@@ -625,8 +617,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
                 else:
                     timing_raw[name] = value if name not in timing_raw else max(timing_raw[name], value)
         # Sum, don't replace: one-step-off's first step samples twice into
-        # one iter_metrics, and the write counters of both samples must
-        # survive -- sample_wait/* above sums for the same reason.
+        # one iter_metrics, and both samples' counters must survive.
         for name, value in aggregate_tq_write_stats(batch_meta).items():
             metrics[name] = metrics.get(name, 0.0) + value
 
@@ -656,10 +647,8 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         # [OPTIONAL] colocated reward model
         if self.reward_loop_manager.reward_loop_worker_handles is None and self.use_rm:
             with marked_timer("reward", timing_raw, color="yellow"):
-                # Sync sampling hooks already put colocated rollout replicas to
-                # sleep. Sleeping them again can unmap the same accelerator
-                # memory twice. Async modes still need the explicit mid-cycle
-                # sleep because they do not share the sync hook guarantee.
+                # Sync sampling hooks already sleep colocated replicas;
+                # sleeping again would unmap the same memory twice.
                 if self.trainer_mode != "sync":
                     self.checkpoint_manager.sleep_replicas()
                 data = data.union(self._compute_reward_colocate(data))
@@ -2008,17 +1997,11 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             real_images,
             responses_shape,
         )
-        # Trainer-side read accounting (issue #712): bytes accumulated at every
-        # timed kv_batch_get boundary pair with the cumulative timing_s/tq_get
-        # from the same train-path reads for a transfer rate. Pop it here: it
-        # is a byte count, not a stage timing, so it must never render as a
-        # timing_s/* metric.
+        # Pairs with the cumulative timing_s/tq_get from the same reads; a
+        # byte count must never render as a timing_s/* metric.
         metrics["tq/get/bytes"] = float(timing_raw.pop("tq_get_bytes", 0.0))
-        # Trainer idle for async modes: the share of the step the trainer spent
-        # waiting on the replay buffer, decomposed by the profiled buffer into
-        # generation-bound wait / detection latency / metadata sync / eviction.
-        # Deliberately not timing_s/gen / step: gen also covers row
-        # materialization, which is work, not idle (see verl#7601).
+        # Trainer idle share of the step, decomposed by the profiled buffer;
+        # not timing_s/gen, which also covers row materialization (work).
         if self.trainer_mode != "sync" and timing_raw.get("step", 0.0) > 0:
             step_seconds = timing_raw["step"]
             sample_wait = timing_raw.get("sample_wait/total", 0.0)
