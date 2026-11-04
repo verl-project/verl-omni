@@ -19,20 +19,28 @@ from typing import Any, Optional
 from verl import DataProto
 from verl.trainer.distillation import is_distillation_enabled
 
-# ``rollout_media.ARTIFACT_PREFIX``, spelled literally to keep this core
+# ``rollout_media`` artifact field names, spelled literally to keep this core
 # trainer module free of the pipeline package's import graph.
 MEDIA_ARTIFACT_FIELD_PREFIX = "media_artifact__"
+MEDIA_ARTIFACT_METADATA_FIELDS = frozenset(
+    {"media_artifact_specs", "primary_artifact", "preview_artifact", "media_artifact_context"}
+)
 
 
 def _to_diffusion_worker_tensordict(batch: DataProto):
     """Project a driver batch for actor/ref workers without copying tensor storage.
 
-    Named media artifacts are reward/dump-only consumers' data; compute workers never
-    read them, so shipping them would slice and serialize decoded previews per microbatch.
+    Named media artifacts and their per-sample declarations are reward/dump-only
+    consumers' data; compute workers never read them, so shipping them would slice and
+    serialize decoded previews and per-sample non-tensor stacks on every worker hop.
     """
     worker_batch = batch.to_tensordict()
     worker_batch.pop("responses", None)
-    for key in [key for key in worker_batch.keys() if key.startswith(MEDIA_ARTIFACT_FIELD_PREFIX)]:
+    for key in [
+        key
+        for key in worker_batch.keys()
+        if key.startswith(MEDIA_ARTIFACT_FIELD_PREFIX) or key in MEDIA_ARTIFACT_METADATA_FIELDS
+    ]:
         worker_batch.pop(key)
     return worker_batch
 
