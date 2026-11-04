@@ -1,6 +1,6 @@
 # Qwen3-Omni Thinker GSPO recipes
 
-Last updated: 10/24/2026
+Last updated: 11/04/2026
 
 This directory contains both FSDP2 and Megatron recipes. For non-Megatron
 setup, data preparation and training instructions, see the
@@ -15,6 +15,7 @@ defaults and accept CLI overrides.
 | MMK12 LoRA | FSDP2 / NPU | [MMK12 NPU](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_mmk12_v1_npu.sh) |
 | MMK12 LoRA with on-policy distillation | FSDP2 / NPU | [MMK12 OPD](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_mmk12_v1_opd_npu.sh) |
 | AVQA LoRA | FSDP2 / GPU | [AVQA LoRA](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_avqa_v1.sh) |
+| AVQA LoRA profiling | FSDP2 / GPU | [AVQA profiling](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/qwen3_omni/profile_qwen3_omni_thinker_gspo_lora_avqa_v1.sh) |
 | AVQA full-parameter | FSDP2 / NPU | [AVQA NPU](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_avqa_v1.sh) |
 | NExT-QA full-parameter | FSDP2 / NPU | [NExT-QA NPU](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_npu_nextqa_v1.sh) |
 | AudioMCQ full-parameter, separate-async | Megatron / GPU | [AudioMCQ](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/qwen3_omni/run_qwen3_omni_megatron_audiomcq_separate_async.sh) |
@@ -24,6 +25,33 @@ defaults and accept CLI overrides.
 The following sections describe the **Megatron AudioMCQ**, **AVQA**, and **Geo3K** recipes,
 their dependency prerequisites and validation limits. For model-adapter development, see the
 [Megatron integration notes](../../../docs/contributing/integrating_an_omni_model.md#21-megatron-training-adapters).
+
+## V1 profiling run (4 GPUs)
+
+The [AVQA profiling launcher](profile_qwen3_omni_thinker_gspo_lora_avqa_v1.sh)
+wraps the [AVQA LoRA recipe](run_qwen3_omni_thinker_gspo_lora_avqa_v1.sh)
+and uses the online V1 Omni trainer with PyTorch profiling for actor rank 0 and
+rollout rank 0. It runs four training steps, captures step 3 after two
+unprofiled steps, uses two prompts with two rollouts each, and caps generated
+responses at 2048 tokens. The full multimodal prompt limit remains 4096 tokens.
+Validation, checkpointing, automatic resume, and W&B logging are disabled for
+this run. The Qwen3-Omni checkpoint still requires four GPUs.
+
+Prepare the AVQA parquet files as described in the [AVQA recipe](run_qwen3_omni_thinker_gspo_lora_avqa_v1.sh),
+install the `[audio]` and `[omni]` extras on every Ray worker, then run from the
+repository root:
+
+```bash
+PROFILE_DIR=./outputs/profile_qwen3_omni_avqa_v1 \
+MODEL_PATH=/path/to/Qwen3-Omni-30B-A3B-Instruct \
+TRAIN_FILE=/path/to/avqa_r1_6k/train.parquet \
+VAL_FILE=/path/to/avqa_r1_6k/validation.parquet \
+bash examples/gspo_trainer/qwen3_omni/profile_qwen3_omni_thinker_gspo_lora_avqa_v1.sh
+```
+
+The launcher writes actor and rollout traces under `PROFILE_DIR`. Open the
+PyTorch Chrome traces in Perfetto and check both roles for CPU/CUDA events.
+Additional Hydra overrides passed after the script name take precedence.
 
 ## AudioMCQ with Megatron and V1 separate-async rollout
 
