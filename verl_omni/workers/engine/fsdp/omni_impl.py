@@ -41,6 +41,7 @@ from verl.workers.engine.fsdp.utils import get_sharding_strategy
 
 from verl_omni.utils.fsdp_utils import apply_fsdp2
 from verl_omni.workers.config import OmniModelConfig
+from verl_omni.workers.engine.lora_adapter_mixin import cast_adapter_params_to_base
 from verl_omni.workers.engine.lora_export import export_lora_for_sync
 
 logger = logging.getLogger(__name__)
@@ -220,6 +221,8 @@ class OmniFSDPEngine(FSDPEngineWithLMHead):
 
     def _build_lora_module(self, module):
         module = super()._build_lora_module(module)
+        # Adapters beyond the first skip peft's base-dtype cast; align them before sharding.
+        cast_adapter_params_to_base(module)
 
         lora_dtype = getattr(self.model_config, "lora_dtype", None)
         if lora_dtype is not None:

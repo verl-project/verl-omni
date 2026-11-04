@@ -24,6 +24,41 @@ from verl_omni.utils.config import resolve_lora_config
 
 logger = logging.getLogger(__name__)
 
+# peft stores adapter weights in per-adapter containers on each tuner layer.
+_ADAPTER_MODULE_CONTAINERS = ("lora_A", "lora_B", "lora_magnitude_vector")
+_ADAPTER_PARAMETER_CONTAINERS = ("lora_embedding_A", "lora_embedding_B")
+
+
+def cast_adapter_params_to_base(module: torch.nn.Module) -> None:
+    """Cast every PEFT adapter parameter to its base layer's device and dtype.
+
+    peft applies the base layer's device and dtype only when it first wraps a
+    module into a tuner layer; adapters added to an already-wrapped layer are
+    created on CPU in the default dtype. On modules built on the meta device
+    that mixes dtypes inside FSDP wrapping units, so normalize before sharding.
+    """
+    from peft.tuners.tuners_utils import BaseTunerLayer
+
+    for submodule in module.modules():
+        if not isinstance(submodule, BaseTunerLayer):
+            continue
+        base_param = next(submodule.get_base_layer().parameters(), None)
+        if base_param is None:
+            continue
+        for attr in _ADAPTER_MODULE_CONTAINERS:
+            container = getattr(submodule, attr, None)
+            if isinstance(container, torch.nn.ModuleDict):
+                for adapter_name, layer in container.items():
+                    container[adapter_name] = layer.to(device=base_param.device, dtype=base_param.dtype)
+        for attr in _ADAPTER_PARAMETER_CONTAINERS:
+            container = getattr(submodule, attr, None)
+            if isinstance(container, torch.nn.ParameterDict):
+                for adapter_name, param in container.items():
+                    container[adapter_name] = torch.nn.Parameter(
+                        param.to(device=base_param.device, dtype=base_param.dtype),
+                        requires_grad=param.requires_grad,
+                    )
+
 
 class LoRAAdapterMixin:
     """Backend-agnostic helpers for named PEFT/LoRA policy adapters."""
@@ -59,6 +94,9 @@ class LoRAAdapterMixin:
             module.add_adapter(LoraConfig(**lora_config), adapter_name="default")
             for adapter_name in extra_adapters:
                 module.add_adapter(LoraConfig(**lora_config), adapter_name=adapter_name)
+
+        # Adapters beyond the first skip peft's base-dtype cast; align them before sharding.
+        cast_adapter_params_to_base(module)
 
         if "default" in policy_state_adapters and hasattr(module, "set_adapter"):
             module.set_adapter("default")

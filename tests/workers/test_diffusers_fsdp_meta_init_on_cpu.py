@@ -125,3 +125,40 @@ def test_build_module_on_meta_rank_uses_config_path_when_set():
         trust_remote_code=True,
         subfolder="",
     )
+
+
+def test_meta_rank_adapters_beyond_the_first_match_base_dtype_and_device():
+    """Multi-adapter LoRA on a meta-built module must stay dtype-uniform for FSDP.
+
+    peft applies the base layer's device/dtype only when it first wraps a module;
+    adapters added later are created on CPU in the default dtype, which mixes
+    dtypes inside FSDP wrapping units once the base module stays on meta.
+    """
+    from diffusers import QwenImageTransformer2DModel
+    from peft import LoraConfig
+
+    from verl_omni.workers.engine.lora_adapter_mixin import cast_adapter_params_to_base
+
+    config = {
+        "patch_size": 2,
+        "in_channels": 64,
+        "out_channels": 16,
+        "num_layers": 2,
+        "attention_head_dim": 16,
+        "num_attention_heads": 2,
+        "joint_attention_dim": 32,
+        "guidance_embeds": False,
+        "axes_dims_rope": (4, 6, 6),
+    }
+    with init_empty_weights():
+        module = QwenImageTransformer2DModel.from_config(config).to(torch.bfloat16)
+
+    lora = LoraConfig(r=4, lora_alpha=8, init_lora_weights=False, target_modules="all-linear")
+    module.add_adapter(lora, adapter_name="default")
+    module.add_adapter(lora, adapter_name="old")
+
+    cast_adapter_params_to_base(module)
+
+    for name, param in module.named_parameters():
+        assert param.dtype == torch.bfloat16, name
+        assert param.device.type == "meta", name
