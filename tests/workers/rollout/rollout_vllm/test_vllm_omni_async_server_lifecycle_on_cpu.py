@@ -559,10 +559,15 @@ def _sleep_level_server(engine, *, strategy_cls=None, weight_sync_stage_ids=None
 
 @pytest.fixture
 def discard_weights(monkeypatch):
+    import vllm_omni.entrypoints.async_omni as async_omni_module
+
     monkeypatch.setenv("VLLM_OMNI_AR_SLEEP_DISCARD_WEIGHTS", "1")
     monkeypatch.setattr(
         "verl.workers.rollout.vllm_rollout.vllm_async_server.is_torch_npu_available", lambda check_device=False: False
     )
+    # The pinned vllm-omni has no ar_level2_wake_enabled. Opt-in tests stand in
+    # for a build that can wake AR stages after level 2.
+    monkeypatch.setattr(async_omni_module, "ar_level2_wake_enabled", lambda: True, raising=False)
 
 
 async def test_ar_only_engine_uses_vllm_sleep_level_with_discard_opt_in(discard_weights):
@@ -601,3 +606,28 @@ async def test_ar_only_engine_keeps_level_one_without_opt_in(monkeypatch, value)
     else:
         monkeypatch.setenv("VLLM_OMNI_AR_SLEEP_DISCARD_WEIGHTS", value)
     assert _sleep_level_server(_StageEngine(["llm"]))._resolve_sleep_level() == 1
+
+
+async def test_omni_delta_sharded_keeps_level_one_with_discard_opt_in(discard_weights):
+    """Sparse delta sync must not discard the parameters its byte-diffs patch."""
+    server = _sleep_level_server(_StageEngine(["llm"]))
+    server.config.checkpoint_engine = SimpleNamespace(backend="omni_delta_sharded")
+    assert server._resolve_sleep_level() == 1
+
+    await server.release_kv_cache()
+    assert server.engine.sleep_calls == [{"stage_ids": None, "level": 1, "mode": "abort"}]
+
+
+async def test_sleep_level_follows_ar_level2_wake_enabled(discard_weights, monkeypatch):
+    """Older vllm-omni has no AR level-2 wake, so an opted-in AR sync stays at 1."""
+    import vllm_omni.entrypoints.async_omni as async_omni_module
+
+    server = _sleep_level_server(_StageEngine(["llm"]))
+    monkeypatch.delattr(async_omni_module, "ar_level2_wake_enabled", raising=False)
+    assert server._resolve_sleep_level() == 1
+
+    monkeypatch.setattr(async_omni_module, "ar_level2_wake_enabled", lambda: False, raising=False)
+    assert server._resolve_sleep_level() == 1
+
+    monkeypatch.setattr(async_omni_module, "ar_level2_wake_enabled", lambda: True, raising=False)
+    assert server._resolve_sleep_level() == 2
