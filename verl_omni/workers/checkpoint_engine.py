@@ -125,22 +125,6 @@ class OmniCheckpointEngineManager(CheckpointEngineManager):
         return None
 
 
-# verl's ``CheckpointEngineManager.update_weights`` runs an eight-phase
-# pipeline (abort -> temp worker group -> KV release -> process-group build ->
-# transfer -> finalize -> KV resume -> generation resume), and the trainer
-# only ever sees the total as ``timing_s/update_weights``. The mixin below
-# times each phase by wrapping the very manager methods the pipeline calls,
-# without duplicating any of verl's internals; the inline phases (worker-group
-# construction, the transfer ``ray.get`` and ``finalize``) fall out as the
-# residual and are reported together as ``transfer_and_finalize`` because the
-# transfer dominates that window. The async phase overrides keep verl's
-# ``@auto_await`` dual sync/async call style and await the parent's raw
-# coroutine via ``__wrapped__`` so the decorator never nests; the sync caller
-# gets the thread-pool path -- exactly the parent's contract.
-# ``build_process_group`` is a plain synchronous method in the pinned verl and
-# is called un-awaited from the async ``update_weights``, so its override must
-# stay synchronous: an ``auto_await`` override would hand that caller a
-# coroutine it never awaits, silently skipping topology/process-group setup.
 class WeightSyncPhaseTimerMixin:
     """Report per-phase weight-sync timings through ``update_weights``'s metrics.
 
@@ -205,6 +189,8 @@ class WeightSyncPhaseTimerMixin:
         return await self._wrap_phase_method("release_kv_cache_replicas", "kv_release")
 
     def build_process_group(self, rollout):
+        # Stays synchronous: the pinned verl's async update_weights calls this
+        # un-awaited, so an auto_await override would hand back a coroutine.
         start = time.perf_counter()
         try:
             return super().build_process_group(rollout)
