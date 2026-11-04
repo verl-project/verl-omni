@@ -1,0 +1,890 @@
+# Copyright 2026 Bytedance Ltd. and/or its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""CPU contracts for the Lance FlowGRPO integration.
+
+Lance reuses BAGEL's MoT transformer; what it does not share is the sigma
+shift, the Wan2.2 latent geometry and the checkpoint layout. These tests also
+check three-axis image positions and that right padding preserves each
+sample's output and gradients. Nothing here needs a GPU or the released
+checkpoint; rollout contract tests require vllm-omni.
+"""
+
+import inspect
+import json
+import os
+from types import SimpleNamespace
+
+import pytest
+import torch
+from safetensors.torch import save_file
+
+from verl_omni.pipelines.bagel_flow_grpo.bagel_model import RotaryEmbedding, get_flattened_position_ids
+from verl_omni.pipelines.bagel_flow_grpo.common import (
+    BAGEL_TIMESTEP_SHIFT,
+    bagel_time_shift,
+    setup_bagel_sigmas,
+)
+from verl_omni.pipelines.lance_flow_grpo.common import (
+    LANCE_MROPE_SECTION,
+    LANCE_TIMESTEP_SHIFT,
+    setup_lance_sigmas,
+)
+from verl_omni.pipelines.lance_flow_grpo.lance_model import (
+    LanceForTraining,
+    LanceRotaryEmbedding,
+    LanceTrainingConfig,
+    map_lance_checkpoint_to_training,
+    resolve_checkpoint_dir,
+)
+from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
+
+#: Key set mirrors the released ``Lance_3B/llm_config.json`` (a Qwen2.5-VL
+#: config carrying ``vision_start_token_id`` / ``vision_end_token_id`` and an
+#: mrope ``rope_scaling``), with the dimensions shrunk for CPU.
+TINY_LLM_CONFIG = {
+    "architectures": ["Qwen2_5_VLForConditionalGeneration"],
+    "model_type": "qwen2_5_vl",
+    "hidden_size": 64,
+    "intermediate_size": 128,
+    "num_hidden_layers": 2,
+    "num_attention_heads": 4,
+    "num_key_value_heads": 2,
+    "vocab_size": 200,
+    "rms_norm_eps": 1e-6,
+    "rope_theta": 1_000_000.0,
+    "max_position_embeddings": 4096,
+    "tie_word_embeddings": True,
+    "vision_start_token_id": 198,
+    "vision_end_token_id": 199,
+    # head_dim here is 16, so the released [16, 24, 24] does not fit; this
+    # keeps Qwen2.5-VL's 1 : 1.5 : 1.5 ratio at that size.
+    "rope_scaling": {"type": "mrope", "mrope_section": [2, 3, 3]},
+}
+
+
+def _tiny_config() -> LanceTrainingConfig:
+    return LanceTrainingConfig(
+        hidden_size=TINY_LLM_CONFIG["hidden_size"],
+        intermediate_size=TINY_LLM_CONFIG["intermediate_size"],
+        num_hidden_layers=TINY_LLM_CONFIG["num_hidden_layers"],
+        num_attention_heads=TINY_LLM_CONFIG["num_attention_heads"],
+        num_key_value_heads=TINY_LLM_CONFIG["num_key_value_heads"],
+        vocab_size=TINY_LLM_CONFIG["vocab_size"],
+        max_latent_size=8,
+        start_of_image_id=TINY_LLM_CONFIG["vision_start_token_id"],
+        end_of_image_id=TINY_LLM_CONFIG["vision_end_token_id"],
+        mrope_section=tuple(TINY_LLM_CONFIG["rope_scaling"]["mrope_section"]),
+    )
+
+
+def _write_tiny_checkpoint(root: str, *, subdir: str | None = "Lance_3B") -> str:
+    """Write a tiny Lance-layout checkpoint and return the bundle root."""
+    ckpt_dir = os.path.join(root, subdir) if subdir else root
+    os.makedirs(ckpt_dir, exist_ok=True)
+    with open(os.path.join(ckpt_dir, "llm_config.json"), "w") as f:
+        json.dump(TINY_LLM_CONFIG, f)
+
+    config = _tiny_config()
+    reference = LanceForTraining(config)
+    state_dict = {}
+    for name, tensor in reference.state_dict().items():
+        if name.startswith(("time_embedder.", "vae2llm.", "llm2vae.", "latent_pos_embed.")):
+            state_dict[name] = tensor.clone()
+        else:
+            state_dict[f"language_model.model.{name}"] = tensor.clone()
+    # Keys the trainer must drop: the LM head and the understanding tower.
+    state_dict["language_model.lm_head.weight"] = torch.zeros(
+        TINY_LLM_CONFIG["vocab_size"], TINY_LLM_CONFIG["hidden_size"]
+    )
+    state_dict["vit_model.blocks.0.attn.qkv.weight"] = torch.zeros(3, 3)
+    save_file(state_dict, os.path.join(ckpt_dir, "model.safetensors"))
+    return ckpt_dir
+
+
+# ---------------------------------------------------------------------------
+# Sigma schedule
+# ---------------------------------------------------------------------------
+
+
+def _rollout_denoise_grid(num_steps: int, shift: float, extra_point: bool) -> torch.Tensor:
+    """The timesteps ``Bagel.generate_image`` walks, rebuilt from its own formula.
+
+    Kept independent of the helper the implementation uses, so that a change to
+    either the shift formula or the number of schedule points shows up here.
+    """
+    points = num_steps + 1 if extra_point else num_steps
+    t = torch.linspace(1, 0, points, dtype=torch.float32)
+    t = shift * t / (1 + (shift - 1) * t)
+    return t[:-1]
+
+
+@pytest.mark.parametrize("num_steps", [2, 15, 30])
+def test_trainer_sigmas_are_the_grid_the_rollout_walks(num_steps):
+    """The trainer must replay on the rollout's own grid, step for step.
+
+    Lance departs from BAGEL twice: the 3.5 shift, and one extra schedule
+    point (``LanceBagel._denoise_schedule_extra_step``) that makes the denoise
+    loop run ``num_steps`` Euler steps rather than one fewer.  Taking only the
+    shift leaves the trainer one sigma short and every remaining sigma on a
+    different grid, which the replay cannot recover from.
+    """
+    scheduler = FlowMatchSDEDiscreteScheduler()
+    setup_lance_sigmas(scheduler, num_steps)
+
+    expected = _rollout_denoise_grid(num_steps, LANCE_TIMESTEP_SHIFT, extra_point=True)
+    assert len(scheduler.timesteps) == num_steps
+    torch.testing.assert_close(scheduler.timesteps.float(), expected, rtol=0, atol=1e-6)
+
+
+def test_bagels_own_schedule_is_unchanged():
+    """The hook Lance overrides must leave BAGEL on its own grid."""
+    scheduler = FlowMatchSDEDiscreteScheduler()
+    setup_bagel_sigmas(scheduler, 15)
+
+    expected = _rollout_denoise_grid(15, BAGEL_TIMESTEP_SHIFT, extra_point=False)
+    assert len(scheduler.timesteps) == 14
+    torch.testing.assert_close(scheduler.timesteps.float(), expected, rtol=0, atol=1e-6)
+
+
+def test_the_training_adapter_builds_lances_schedule():
+    """The adapter the trainer actually calls, not just the helper underneath.
+
+    ``set_timesteps`` is the only place the training side picks a schedule, so
+    a Lance adapter that fell back to BAGEL's would go unnoticed if the tests
+    exercised ``setup_lance_sigmas`` alone.
+    """
+    from verl_omni.pipelines.lance_flow_grpo.diffusers_training_adapter import LanceDiffusion
+
+    scheduler = FlowMatchSDEDiscreteScheduler()
+    model_config = SimpleNamespace(pipeline=SimpleNamespace(num_inference_steps=15))
+    LanceDiffusion.set_timesteps(scheduler, model_config, device=None)
+
+    expected = _rollout_denoise_grid(15, LANCE_TIMESTEP_SHIFT, extra_point=True)
+    assert len(scheduler.timesteps) == 15
+    torch.testing.assert_close(scheduler.timesteps.float(), expected, rtol=0, atol=1e-6)
+
+
+def test_the_extra_schedule_point_is_the_one_lance_declares():
+    """Pin the extra point to the rollout model rather than restating it."""
+    from vllm_omni.diffusion.models.bagel.bagel_transformer import Bagel
+    from vllm_omni.diffusion.models.lance.lance_transformer import LanceBagel
+
+    from verl_omni.pipelines.lance_flow_grpo.common import LANCE_SCHEDULE_EXTRA_POINTS
+
+    assert LanceBagel._denoise_schedule_extra_step is True
+    assert Bagel._denoise_schedule_extra_step is False
+    assert LANCE_SCHEDULE_EXTRA_POINTS == 1
+
+
+def test_lance_shift_is_not_the_bagel_shift():
+    """Guard against silently inheriting BAGEL's 3.0."""
+    assert LANCE_TIMESTEP_SHIFT != BAGEL_TIMESTEP_SHIFT
+
+    t = torch.linspace(1, 0, 15, dtype=torch.float32)
+    lance = bagel_time_shift(LANCE_TIMESTEP_SHIFT, t)
+    bagel = bagel_time_shift(BAGEL_TIMESTEP_SHIFT, t)
+    assert not torch.allclose(lance, bagel)
+
+
+# ---------------------------------------------------------------------------
+# mRoPE: the trainer has to replay on the rotary basis the rollout used
+# ---------------------------------------------------------------------------
+
+#: A 512x512 image at Lance's 16x downsample: a 32x32 latent grid.
+_IMAGE_HW = 512
+_LATENT_DOWNSAMPLE = 16
+
+
+def _rollout_image_block_positions(image_hw: int, anchor: int) -> torch.Tensor:
+    """The positions ``LanceBagel`` feeds for the generation block.
+
+    Calls the rollout's own builder rather than restating its layout, so a
+    change upstream shows up here as a failure instead of being mirrored by a
+    copy that quietly agrees with itself.
+    """
+    from vllm_omni.diffusion.models.lance.lance_transformer import LanceBagel
+
+    stub = SimpleNamespace(latent_downsample=_LATENT_DOWNSAMPLE)
+    return LanceBagel._per_token_mrope_for_vae_latent(stub, [(image_hw, image_hw)], [anchor])
+
+
+def test_trainer_positions_are_the_ones_the_rollout_feeds():
+    """Start marker, per-token latents and end marker must all line up.
+
+    The rollout replaces BAGEL's single scalar for the image block with
+    ``(P, P, P)`` for the start marker, ``(P+1, P+1+hi, P+1+wi)`` per latent
+    and ``(P+max_hw+1, ...)`` for the end marker.  Replaying on BAGEL's scalar
+    would evaluate the policy under a different rotary basis than the one that
+    produced the trajectory.
+    """
+    num_text = 7
+    config = _tiny_config()
+    config.max_latent_size = 64  # the released grid, so the ids match the rollout
+    model = LanceForTraining(config)
+    latent_pos_ids = get_flattened_position_ids(_IMAGE_HW, _IMAGE_HW, _LATENT_DOWNSAMPLE, 64)
+
+    positions = model.build_position_ids(1, num_text, latent_pos_ids.numel(), latent_pos_ids, torch.device("cpu"))
+    assert positions.shape == (1, 3, num_text + 1 + latent_pos_ids.numel() + 1)
+
+    expected = _rollout_image_block_positions(_IMAGE_HW, num_text)
+    assert torch.equal(positions[0, :, num_text:], expected)
+    # the text prefix keeps BAGEL's plain arange, broadcast over the three axes
+    text = torch.arange(num_text)
+    for axis in range(3):
+        assert torch.equal(positions[0, axis, :num_text], text)
+
+
+def test_trainer_positions_are_not_bagels_scalar():
+    """The change has to be visible: a scalar block would not carry the grid."""
+    config = _tiny_config()
+    config.max_latent_size = 64
+    model = LanceForTraining(config)
+    latent_pos_ids = get_flattened_position_ids(_IMAGE_HW, _IMAGE_HW, _LATENT_DOWNSAMPLE, 64)
+
+    positions = model.build_position_ids(1, 7, latent_pos_ids.numel(), latent_pos_ids, torch.device("cpu"))
+    block = positions[0, :, 7:]
+    assert block[1].unique().numel() > 1, "the h axis must vary across rows"
+    assert block[2].unique().numel() > 1, "the w axis must vary across columns"
+    assert not torch.equal(block[1], block[2]), "h and w must not collapse onto each other"
+
+
+def test_trainer_rotary_is_the_rollouts_rotary():
+    """The assembled cos/sin must equal what the rollout's module produces."""
+    from vllm_omni.diffusion.models.bagel.bagel_transformer import BagelRotaryEmbedding
+
+    head_dim, theta, section = 128, 1_000_000.0, [16, 24, 24]
+    rollout_config = SimpleNamespace(
+        head_dim=head_dim,
+        hidden_size=2048,
+        num_attention_heads=16,
+        rope_theta=theta,
+        max_position_embeddings=32768,
+        rope_scaling={"rope_type": "mrope", "mrope_section": section},
+    )
+    rollout_rotary = BagelRotaryEmbedding(rollout_config)
+    trainer_rotary = LanceRotaryEmbedding(head_dim, theta=theta, mrope_section=section)
+
+    positions = torch.stack([torch.full((40,), 8), torch.arange(40) % 7 + 8, torch.arange(40) % 5 + 8]).unsqueeze(0)
+    cos_rollout, sin_rollout = rollout_rotary(torch.zeros(1, 40, head_dim), positions)
+    cos_trainer, sin_trainer = trainer_rotary(positions)
+
+    torch.testing.assert_close(cos_trainer.float(), cos_rollout.float(), rtol=0, atol=0)
+    torch.testing.assert_close(sin_trainer.float(), sin_rollout.float(), rtol=0, atol=0)
+
+
+def test_scalar_positions_still_take_the_1d_path():
+    """The text prefix must keep BAGEL's rotary, unchanged."""
+    head_dim = 16
+    trainer_rotary = LanceRotaryEmbedding(head_dim, mrope_section=(2, 3, 3))
+    plain = RotaryEmbedding(head_dim)
+
+    positions = torch.arange(12).unsqueeze(0)
+    for mine, theirs in zip(trainer_rotary(positions), plain(positions), strict=False):
+        torch.testing.assert_close(mine.float(), theirs.float(), rtol=0, atol=0)
+
+
+def test_the_mrope_section_is_the_one_the_checkpoint_declares(tmp_path):
+    """Read the split from the checkpoint rather than restating the constant."""
+    ckpt_dir = _write_tiny_checkpoint(str(tmp_path))
+    config = LanceTrainingConfig.from_model_path(ckpt_dir)
+    assert config.mrope_section == tuple(TINY_LLM_CONFIG["rope_scaling"]["mrope_section"])
+    assert sum(LANCE_MROPE_SECTION) * 2 == 128, "the released head_dim is 2048 / 16"
+
+
+# ---------------------------------------------------------------------------
+# Config, checkpoint layout and forward
+# ---------------------------------------------------------------------------
+
+
+def test_latent_geometry_matches_the_released_checkpoint():
+    """Wan2.2 geometry: no latent patch, 48 channels, 16x downsample."""
+    config = _tiny_config()
+    assert config.latent_patch_size == 1
+    assert config.latent_channel == 48
+    assert config.vae_downsample == 16
+    # ``vae2llm`` is (hidden, patch_latent_dim); the release ships (2048, 48).
+    assert config.patch_latent_dim == 48
+
+
+@pytest.mark.parametrize("subdir", ["Lance_3B", "Lance_3B_Video", None])
+def test_resolve_checkpoint_dir_accepts_bundle_root_and_subdir(tmp_path, subdir):
+    ckpt_dir = _write_tiny_checkpoint(str(tmp_path), subdir=subdir)
+    assert resolve_checkpoint_dir(str(tmp_path)) == ckpt_dir
+    assert resolve_checkpoint_dir(ckpt_dir) == ckpt_dir
+
+
+def test_resolve_checkpoint_dir_reports_a_missing_config(tmp_path):
+    with pytest.raises(FileNotFoundError, match="llm_config.json"):
+        resolve_checkpoint_dir(str(tmp_path))
+
+
+def test_config_reads_llm_dimensions_from_the_checkpoint(tmp_path):
+    ckpt_dir = _write_tiny_checkpoint(str(tmp_path))
+    config = LanceTrainingConfig.from_model_path(ckpt_dir)
+
+    assert config.hidden_size == TINY_LLM_CONFIG["hidden_size"]
+    assert config.num_hidden_layers == TINY_LLM_CONFIG["num_hidden_layers"]
+    assert config.num_key_value_heads == TINY_LLM_CONFIG["num_key_value_heads"]
+    # Latent geometry is Lance's, not anything the LLM config carries.
+    assert config.latent_patch_size == 1
+    assert config.vae_downsample == 16
+
+
+def test_config_takes_boundary_tokens_from_the_llm_config(tmp_path, monkeypatch):
+    """The released config carries the vision token IDs; prefer them.
+
+    Reading them here avoids loading the tokenizer, and keeps the trainer's
+    boundary tokens identical to the ones the rollout embeds.
+    """
+    from unittest.mock import Mock
+
+    from transformers import AutoTokenizer
+
+    load_tokenizer = Mock()
+    monkeypatch.setattr(AutoTokenizer, "from_pretrained", load_tokenizer)
+    ckpt_dir = _write_tiny_checkpoint(str(tmp_path))
+    config = LanceTrainingConfig.from_model_path(ckpt_dir)
+
+    assert config.start_of_image_id == TINY_LLM_CONFIG["vision_start_token_id"]
+    assert config.end_of_image_id == TINY_LLM_CONFIG["vision_end_token_id"]
+    load_tokenizer.assert_not_called()
+
+
+@pytest.mark.parametrize("trust_remote_code", [False, True])
+@pytest.mark.parametrize("missing_id", ["vision_start_token_id", "vision_end_token_id"])
+def test_build_module_preserves_tokenizer_trust_policy(tmp_path, monkeypatch, trust_remote_code, missing_id):
+    """Either missing boundary token must use the caller's tokenizer trust policy."""
+    from unittest.mock import Mock
+
+    from transformers import AutoTokenizer
+
+    from verl_omni.pipelines.lance_flow_grpo.diffusers_training_adapter import LanceDiffusion
+    from verl_omni.workers.config import DiffusionModelConfig
+
+    ckpt_dir = _write_tiny_checkpoint(str(tmp_path))
+    config = dict(TINY_LLM_CONFIG)
+    config.pop(missing_id)
+    with open(os.path.join(ckpt_dir, "llm_config.json"), "w") as f:
+        json.dump(config, f)
+    tokenizer = Mock(unk_token_id=0)
+    tokenizer.convert_tokens_to_ids.side_effect = [198, 199]
+    load_tokenizer = Mock(return_value=tokenizer)
+    monkeypatch.setattr(AutoTokenizer, "from_pretrained", load_tokenizer)
+    model_config = object.__new__(DiffusionModelConfig)
+    object.__setattr__(model_config, "local_path", str(tmp_path))
+    object.__setattr__(model_config, "trust_remote_code", trust_remote_code)
+
+    model = LanceDiffusion.build_module(model_config, torch.float32)
+
+    load_tokenizer.assert_called_once_with(ckpt_dir, trust_remote_code=trust_remote_code)
+    assert (model.config.start_of_image_id, model.config.end_of_image_id) == (198, 199)
+
+
+def test_from_pretrained_disables_remote_tokenizer_code_by_default(tmp_path, monkeypatch):
+    """Direct checkpoint loading must not implicitly trust custom tokenizer code."""
+    from unittest.mock import Mock
+
+    from transformers import AutoTokenizer
+
+    ckpt_dir = _write_tiny_checkpoint(str(tmp_path))
+    config = dict(TINY_LLM_CONFIG)
+    config.pop("vision_start_token_id")
+    with open(os.path.join(ckpt_dir, "llm_config.json"), "w") as f:
+        json.dump(config, f)
+    tokenizer = Mock(unk_token_id=0)
+    tokenizer.convert_tokens_to_ids.side_effect = [198, 199]
+    load_tokenizer = Mock(return_value=tokenizer)
+    monkeypatch.setattr(AutoTokenizer, "from_pretrained", load_tokenizer)
+
+    LanceForTraining.from_pretrained(str(tmp_path), torch_dtype=torch.float32)
+
+    load_tokenizer.assert_called_once_with(ckpt_dir, trust_remote_code=False)
+
+
+def test_checkpoint_mapping_keeps_the_transformer_and_drops_the_rest():
+    state_dict = {
+        "language_model.model.layers.0.self_attn.q_proj_moe_gen.weight": torch.zeros(2, 2),
+        "language_model.model.embed_tokens.weight": torch.zeros(2, 2),
+        "language_model.lm_head.weight": torch.zeros(2, 2),
+        "vit_model.blocks.0.attn.qkv.weight": torch.zeros(2, 2),
+        "vae2llm.weight": torch.zeros(2, 2),
+        "llm2vae.bias": torch.zeros(2),
+        "time_embedder.mlp.0.weight": torch.zeros(2, 2),
+        "latent_pos_embed.pos_embed": torch.zeros(2, 2),
+    }
+    mapped = map_lance_checkpoint_to_training(state_dict)
+
+    assert set(mapped) == {
+        "layers.0.self_attn.q_proj_moe_gen.weight",
+        "embed_tokens.weight",
+        "vae2llm.weight",
+        "llm2vae.bias",
+        "time_embedder.mlp.0.weight",
+        "latent_pos_embed.pos_embed",
+    }
+
+
+def test_from_pretrained_loads_every_trainable_tensor(tmp_path):
+    """Every transformer tensor must arrive, by value.
+
+    Comparing against a freshly built module of the same architecture would
+    only compare shapes and would pass even if the checkpoint were never
+    applied, so the checkpoint is read back and compared element by element.
+    """
+    from safetensors.torch import load_file
+
+    ckpt_dir = _write_tiny_checkpoint(str(tmp_path))
+    model = LanceForTraining.from_pretrained(str(tmp_path), torch_dtype=torch.float32)
+
+    on_disk = load_file(os.path.join(ckpt_dir, "model.safetensors"))
+    expected = map_lance_checkpoint_to_training(on_disk)
+    assert expected, "the fixture must carry transformer tensors"
+    loaded = model.state_dict()
+    for name, tensor in expected.items():
+        assert name in loaded, name
+        torch.testing.assert_close(loaded[name].float(), tensor.float(), rtol=0, atol=0)
+    # and nothing the checkpoint provides may be left at its initial value
+    assert set(expected) >= {n for n, _ in model.named_parameters() if "moe_gen" in n}
+
+
+def test_from_pretrained_takes_shapes_from_the_checkpoint(tmp_path):
+    """The released vocabulary is extended past ``llm_config.json``."""
+    ckpt_dir = _write_tiny_checkpoint(str(tmp_path))
+    with open(os.path.join(ckpt_dir, "llm_config.json")) as f:
+        llm_config = json.load(f)
+    llm_config["vocab_size"] = TINY_LLM_CONFIG["vocab_size"] - 8
+    with open(os.path.join(ckpt_dir, "llm_config.json"), "w") as f:
+        json.dump(llm_config, f)
+
+    model = LanceForTraining.from_pretrained(str(tmp_path), torch_dtype=torch.float32)
+    assert model.config.vocab_size == TINY_LLM_CONFIG["vocab_size"]
+    assert model.embed_tokens.weight.shape[0] == TINY_LLM_CONFIG["vocab_size"]
+
+
+@pytest.mark.parametrize("key", ["language_model.model.layers.0.self_attn.q_proj_moe_gen.weight", "vae2llm.weight"])
+def test_from_pretrained_rejects_missing_training_weights(tmp_path, key):
+    from safetensors.torch import load_file
+
+    ckpt_dir = _write_tiny_checkpoint(str(tmp_path))
+    path = os.path.join(ckpt_dir, "model.safetensors")
+    weights = load_file(path)
+    del weights[key]
+    save_file(weights, path)
+
+    with pytest.raises(RuntimeError, match="Missing key"):
+        LanceForTraining.from_pretrained(str(tmp_path), torch_dtype=torch.float32)
+
+
+@pytest.mark.parametrize("short_length", [0, 3, 7])
+@pytest.mark.parametrize("checkpointing", [False, True])
+@pytest.mark.parametrize("shared_grid", [False, True])
+def test_batched_forward_and_gradients_match_individual_samples(short_length, checkpointing, shared_grid):
+    """Padding and other samples' grids must not change a sample's policy."""
+    torch.manual_seed(222)
+    config = _tiny_config()
+    model = LanceForTraining(config).float()
+    if checkpointing:
+        model.enable_gradient_checkpointing()
+    latents = torch.randn(2, 4, config.patch_latent_dim)
+    timesteps = torch.tensor([0.6, 0.4])
+    # Same token count, different spatial coordinates for the second sample.
+    grids = torch.tensor([[0, 1, 8, 9], [0, 1, 2, 3]])
+    if shared_grid:
+        grids[1] = grids[0]
+    tokens = torch.randint(1, 190, (2, 7))
+    lengths = [short_length, 7]
+    mask = torch.arange(7).unsqueeze(0) < torch.tensor(lengths).unsqueeze(1)
+
+    individual = []
+    for row, length in enumerate(lengths):
+        output = model(
+            hidden_states=latents[row : row + 1],
+            timestep=timesteps[row : row + 1],
+            text_token_ids=tokens[row : row + 1, :length] if length else None,
+            latent_pos_ids=grids[row : row + 1],
+        )[0]
+        individual.append(output.detach())
+        output.square().sum().backward()
+    expected_grads = {name: p.grad.clone() if p.grad is not None else None for name, p in model.named_parameters()}
+    model.zero_grad(set_to_none=True)
+
+    batched = model(
+        hidden_states=latents,
+        timestep=timesteps,
+        text_token_ids=tokens,
+        text_attention_mask=mask,
+        latent_pos_ids=grids,
+    )[0]
+    torch.testing.assert_close(batched, torch.cat(individual), rtol=1e-5, atol=1e-6)
+    batched.square().sum().backward()
+    for name, parameter in model.named_parameters():
+        expected = expected_grads[name]
+        assert (parameter.grad is None) == (expected is None), name
+        if expected is not None:
+            # BAGEL casts attention to bf16 even for a float32 model. Masked
+            # and unmasked SDPA backward reductions can round differently.
+            # Bound relative gradient-norm error by one bf16 epsilon.
+            error = (parameter.grad - expected).norm()
+            tolerance = torch.finfo(torch.bfloat16).eps * expected.norm() + 1e-5
+            assert error <= tolerance, f"{name}: gradient error {error.item()} > {tolerance.item()}"
+
+
+def test_forward_returns_velocity_shaped_like_the_latent():
+    config = _tiny_config()
+    model = LanceForTraining(config).to(torch.float32)
+
+    batch, latent_len = 2, 9
+    hidden_states = torch.randn(batch, latent_len, config.patch_latent_dim)
+    timestep = torch.rand(batch)
+    text_token_ids = torch.randint(0, config.vocab_size, (batch, 5))
+    latent_pos_ids = torch.arange(latent_len).unsqueeze(0).expand(batch, -1)
+
+    (velocity,) = model(
+        hidden_states=hidden_states,
+        timestep=timestep,
+        text_token_ids=text_token_ids,
+        latent_pos_ids=latent_pos_ids,
+        text_attention_mask=torch.ones(batch, 5, dtype=torch.bool),
+    )
+    assert velocity.shape == (batch, latent_len, config.patch_latent_dim)
+
+    # The unconditional CFG branch drops the text context entirely.
+    (uncond_velocity,) = model(
+        hidden_states=hidden_states,
+        timestep=timestep,
+        text_token_ids=None,
+        latent_pos_ids=latent_pos_ids,
+    )
+    assert uncond_velocity.shape == velocity.shape
+
+
+def test_the_architecture_name_resolves_on_both_sides():
+    """``+actor_rollout_ref.model.architecture=...`` has to find both adapters."""
+    import verl_omni.pipelines  # noqa: F401 - registers every adapter
+    from verl_omni.pipelines.lance_flow_grpo.diffusers_training_adapter import LanceDiffusion
+    from verl_omni.pipelines.lance_flow_grpo.vllm_omni_rollout_adapter import LancePipelineWithLogProb
+    from verl_omni.pipelines.model_base import DiffusionModelBase, VllmOmniPipelineBase
+
+    name = "OmniLanceForConditionalGeneration"
+    assert DiffusionModelBase.get_class_by_name(name, algorithm="flow_grpo") is LanceDiffusion
+    assert VllmOmniPipelineBase.get_class(name, algorithm="flow_grpo") is LancePipelineWithLogProb
+
+
+def test_rollout_wrapper_keeps_lance_construction_and_bagel_rl_forward():
+    """The RL wrapper must add BAGEL's prep without losing Lance's pipeline.
+
+    ``LancePipeline.__init__`` deliberately never calls up the MRO, so the
+    composition only works if the RL class comes first: its ``forward`` runs
+    the trajectory/SDE setup and its ``super().forward`` lands on Lance.
+    """
+    from vllm_omni.diffusion.models.bagel.pipeline_bagel import BagelPipeline
+    from vllm_omni.diffusion.models.lance.pipeline_lance import LANCE_DEFAULTS, LancePipeline
+
+    from verl_omni.pipelines.bagel_flow_grpo.vllm_omni_rollout_adapter import BagelPipelineWithLogProb
+    from verl_omni.pipelines.lance_flow_grpo.vllm_omni_rollout_adapter import LancePipelineWithLogProb
+
+    mro = LancePipelineWithLogProb.__mro__
+    assert mro[1] is BagelPipelineWithLogProb
+    assert mro[2] is LancePipeline
+    assert mro[3] is BagelPipeline
+    assert LancePipelineWithLogProb.forward is BagelPipelineWithLogProb.forward
+    # The shift the adapter applies must be the one the pipeline defaults to.
+    assert LancePipelineWithLogProb.flowgrpo_timestep_shift == LANCE_DEFAULTS.timestep_shift
+    assert LancePipelineWithLogProb.flowgrpo_timestep_shift != BagelPipelineWithLogProb.flowgrpo_timestep_shift
+
+
+def test_only_the_generation_expert_trains():
+    """LoRA and full fine-tuning both target the ``moe_gen`` pathway."""
+    from verl_omni.pipelines.lance_flow_grpo.diffusers_training_adapter import LanceDiffusion
+
+    model = LanceForTraining(_tiny_config())
+    LanceDiffusion.configure_trainable_params(model, model_config=None)
+
+    trainable = {name for name, param in model.named_parameters() if param.requires_grad}
+    assert trainable
+    assert all("moe_gen" in name for name in trainable)
+    assert any("q_proj_moe_gen" in name for name in trainable)
+
+
+# ---------------------------------------------------------------------------
+# Weight sync
+# ---------------------------------------------------------------------------
+
+#: LoRA settings small enough for CPU; only the rank matters to the scaling.
+_LORA_RANK = 4
+_LORA_ALPHA = 8
+#: The projections the example recipe adapts.
+_LORA_TARGETS = [
+    "q_proj_moe_gen",
+    "k_proj_moe_gen",
+    "v_proj_moe_gen",
+    "o_proj_moe_gen",
+    "mlp_moe_gen.gate_proj",
+    "mlp_moe_gen.up_proj",
+    "mlp_moe_gen.down_proj",
+]
+
+
+def _build_rollout_language_model(monkeypatch):
+    """Build the MoT language model the rollout holds, on CPU.
+
+    The rollout reaches its parameters through vllm-omni, so the packing the
+    weight sync has to hit -- fused ``qkv_proj``, ``gate_up_proj``, the
+    ``gen_exp`` sub-modules and ``MoTRMSNorm.gen_weight`` -- can only be
+    checked against the real module.  Two things stand in the way on CPU: the
+    diffusion attention backend is chosen per platform and no CPU entry
+    exists, and the model needs a parallel group.  Pin the SDPA backend the
+    attention layer already carries as its float32 fallback (it holds no
+    parameters, so the parameter set is the one a GPU rollout would hold) and
+    set up a single-process group.  Skip if either is unavailable.
+    """
+    pytest.importorskip("vllm_omni")
+    import vllm_omni.diffusion.attention.layer as attention_layer
+    from vllm.config import VllmConfig
+    from vllm.config.vllm import set_current_vllm_config
+    from vllm.distributed import init_distributed_environment, initialize_model_parallel, parallel_state
+    from vllm_omni.diffusion.attention.backends.sdpa import SDPABackend
+    from vllm_omni.diffusion.models.bagel.bagel_transformer import Qwen2MoTConfig, Qwen2MoTForCausalLM
+
+    monkeypatch.setattr(attention_layer, "get_attn_backend_for_role", lambda **_: (SDPABackend, None))
+
+    try:
+        if not torch.distributed.is_initialized():
+            for key, value in {
+                "MASTER_ADDR": "127.0.0.1",
+                "MASTER_PORT": "29577",
+                "RANK": "0",
+                "WORLD_SIZE": "1",
+                "LOCAL_RANK": "0",
+            }.items():
+                monkeypatch.setenv(key, value)
+            init_distributed_environment(
+                world_size=1,
+                rank=0,
+                distributed_init_method="tcp://127.0.0.1:29577",
+                local_rank=0,
+                backend="gloo",
+            )
+    except (RuntimeError, OSError, ValueError) as exc:  # no loopback in the sandbox
+        pytest.skip(f"no single-process parallel group available: {exc}")
+
+    config = _tiny_config()
+    with set_current_vllm_config(VllmConfig()):
+        if parallel_state._TP is None:
+            initialize_model_parallel(tensor_model_parallel_size=1)
+        rollout_config = Qwen2MoTConfig(
+            hidden_size=config.hidden_size,
+            intermediate_size=config.intermediate_size,
+            num_hidden_layers=config.num_hidden_layers,
+            num_attention_heads=config.num_attention_heads,
+            num_key_value_heads=config.num_key_value_heads,
+            vocab_size=config.vocab_size,
+            rms_norm_eps=config.rms_norm_eps,
+            # The release ships a separate ``language_model.lm_head.weight``.
+            tie_word_embeddings=False,
+        )
+        rollout_config.layer_module = "Qwen2MoTDecoderLayer"
+        return Qwen2MoTForCausalLM(rollout_config, prefix="bagel.language_model")
+
+
+def _sync_to_rollout(rollout, named_tensors):
+    """Run the export through the adapter's routing and report what it skipped."""
+    from verl_omni.pipelines.bagel_flow_grpo.vllm_omni_rollout_adapter import BagelPipelineWithLogProb
+
+    skipped: list[str] = []
+    import vllm_omni.diffusion.models.bagel.bagel_transformer as bagel_transformer
+
+    original = bagel_transformer.logger.warning_once
+    bagel_transformer.logger.warning_once = lambda msg, *args, **kwargs: skipped.append(args[0] if args else msg)
+    try:
+        # The adapter routes every ``transformer.``-prefixed tensor here; the
+        # rewrite is the one BagelPipelineWithLogProb.load_weights performs.
+        # The adapter rewrites ``transformer.X`` to ``model.X`` and hands the
+        # result to the language model; the pipeline itself cannot be built
+        # without a GPU, so the rewrite is pinned here and applied below.
+        source = inspect.getsource(BagelPipelineWithLogProb.load_weights)
+        assert 'name.startswith("transformer.")' in source
+        assert "f\"model.{name[len('transformer.') :]}\"" in source
+        loaded = rollout.load_weights([(f"model.{name}", tensor) for name, tensor in named_tensors])
+    finally:
+        bagel_transformer.logger.warning_once = original
+    return loaded, skipped
+
+
+def test_weight_sync_reaches_every_trainable_parameter(monkeypatch):
+    """Nothing the generation expert learns is dropped on the way to the rollout.
+
+    ``load_weights`` skips a name it cannot place with a warning rather than
+    an error, so a mismatch between the trainer's parameter names and the
+    rollout's would cost nothing at sync time and silently train against a
+    stale policy.  Assert the trainable set survives the trip.
+    """
+    from verl_omni.pipelines.lance_flow_grpo.diffusers_training_adapter import LanceDiffusion
+
+    rollout = _build_rollout_language_model(monkeypatch)
+    trainer = LanceForTraining(_tiny_config())
+    LanceDiffusion.configure_trainable_params(trainer, model_config=None)
+    trainable = {name for name, param in trainer.named_parameters() if param.requires_grad}
+
+    with torch.no_grad():  # an unwritten parameter must not pass as correct
+        for param in rollout.parameters():
+            param.fill_(float("nan"))
+    _, skipped = _sync_to_rollout(rollout, [(n, p.detach().clone()) for n, p in trainer.named_parameters()])
+
+    assert not [name for name in skipped if "moe_gen" in name]
+    assert not trainable & {name.removeprefix("model.") for name in skipped}
+    # A name that lands nowhere is only warned about, and a renamed projection
+    # can still match the text pattern by substring and leave the generation
+    # half untouched, so check the destinations rather than the warnings.  The
+    # LM head is the one parameter flow matching never reads.
+    unwritten = {name for name, param in rollout.named_parameters() if torch.isnan(param).any()}
+    assert unwritten == {"lm_head.weight"}
+    # What the rollout does not receive is the diffusion adapter, which lives
+    # outside the language model and which this recipe freezes.
+    assert {name.removeprefix("model.").split(".")[0] for name in skipped} == {
+        "time_embedder",
+        "vae2llm",
+        "llm2vae",
+        "latent_pos_embed",
+    }
+
+
+def test_merged_lora_lands_in_the_rollout_packed_weights(monkeypatch):
+    """A merged LoRA update arrives in the fused projections, in the right half.
+
+    The trainer keeps q/k/v and gate/up apart; the rollout fuses them.  The
+    remap is by substring, and ``_moe_gen`` names contain the text names, so a
+    wrong ordering would still load and would only show up as a policy that
+    does not improve.
+    """
+    peft = pytest.importorskip("peft")
+    from verl.utils.fsdp_utils import _merge_or_unmerge_lora_, normalize_peft_param_name
+    from verl.utils.model import convert_weight_keys
+
+    from verl_omni.pipelines.lance_flow_grpo.diffusers_training_adapter import LanceDiffusion
+
+    rollout = _build_rollout_language_model(monkeypatch)
+    torch.manual_seed(0)
+    trainer = LanceForTraining(_tiny_config())
+    for param in trainer.parameters():
+        with torch.no_grad():
+            param.normal_(0.0, 0.5)
+    LanceDiffusion.configure_trainable_params(trainer, model_config=None)
+    base = {name: param.detach().clone().float() for name, param in trainer.named_parameters()}
+
+    model = peft.get_peft_model(
+        trainer,
+        peft.LoraConfig(
+            r=_LORA_RANK, lora_alpha=_LORA_ALPHA, target_modules=_LORA_TARGETS, lora_dropout=0.0, bias="none"
+        ),
+    )
+    # PEFT zero-initialises ``lora_B``, so an export that dropped the adapter
+    # would be indistinguishable from the base weights.
+    with torch.no_grad():
+        for name, param in model.named_parameters():
+            if "lora_B" in name:
+                param.normal_(0.0, 0.1)
+
+    # What ``_merged_lora_per_tensor_param`` streams.  ``merged_lora_context``
+    # wraps the merge in an FSDP unshard, which has nothing to do without
+    # sharding; the merge itself is ``_merge_or_unmerge_lora_``.
+    _merge_or_unmerge_lora_(model, merge=True)
+    exported = convert_weight_keys(normalize_peft_param_name(model.state_dict()), model)
+    exported = {name: tensor.detach().clone() for name, tensor in exported.items()}
+    _merge_or_unmerge_lora_(model, merge=False)
+
+    assert not [name for name in exported if "lora_" in name or "base_layer" in name or "base_model" in name]
+
+    with torch.no_grad():  # an unwritten parameter must not pass as correct
+        for param in rollout.parameters():
+            param.fill_(float("nan"))
+    _sync_to_rollout(rollout, exported.items())
+    synced = dict(rollout.named_parameters())
+
+    state = dict(model.state_dict())
+
+    def merged(name: str) -> torch.Tensor:
+        prefix = "base_model.model." + name.removesuffix(".weight")
+        lora_a = state[f"{prefix}.lora_A.default.weight"].float()
+        lora_b = state[f"{prefix}.lora_B.default.weight"].float()
+        return base[name] + (lora_b @ lora_a) * (_LORA_ALPHA / _LORA_RANK)
+
+    assert (
+        merged("layers.0.self_attn.q_proj_moe_gen.weight")
+        .sub(base["layers.0.self_attn.q_proj_moe_gen.weight"])
+        .abs()
+        .max()
+        > 1e-3
+    ), "the adapter has to move the weights for this test to mean anything"
+
+    for layer in range(_tiny_config().num_hidden_layers):
+        attn = f"model.layers.{layer}.self_attn"
+        torch.testing.assert_close(
+            synced[f"{attn}.qkv_proj.gen_exp.weight"].float(),
+            torch.cat([merged(f"layers.{layer}.self_attn.{p}_proj_moe_gen.weight") for p in "qkv"]),
+        )
+        torch.testing.assert_close(
+            synced[f"{attn}.o_proj.gen_exp.weight"].float(),
+            merged(f"layers.{layer}.self_attn.o_proj_moe_gen.weight"),
+        )
+        torch.testing.assert_close(
+            synced[f"model.layers.{layer}.mlp_moe_gen.gate_up_proj.weight"].float(),
+            torch.cat(
+                [
+                    merged(f"layers.{layer}.mlp_moe_gen.gate_proj.weight"),
+                    merged(f"layers.{layer}.mlp_moe_gen.up_proj.weight"),
+                ]
+            ),
+        )
+        # The frozen text expert has to arrive untouched, in its own half.
+        torch.testing.assert_close(
+            synced[f"{attn}.qkv_proj.weight"].float(),
+            torch.cat([base[f"layers.{layer}.self_attn.{p}_proj.weight"] for p in "qkv"]),
+        )
+        torch.testing.assert_close(
+            synced[f"model.layers.{layer}.input_layernorm.gen_weight"].float(),
+            base[f"layers.{layer}.input_layernorm_moe_gen.weight"],
+        )
+
+
+@pytest.mark.parametrize("missing", [None, 0])
+def test_config_rejects_missing_vision_token_ids(tmp_path, monkeypatch, missing):
+    from unittest.mock import Mock
+
+    from transformers import AutoTokenizer
+
+    config = dict(TINY_LLM_CONFIG)
+    config.pop("vision_start_token_id")
+    config.pop("vision_end_token_id")
+    (tmp_path / "llm_config.json").write_text(json.dumps(config))
+    tokenizer = Mock(unk_token_id=0)
+    tokenizer.convert_tokens_to_ids.side_effect = [missing, 199]
+    monkeypatch.setattr(AutoTokenizer, "from_pretrained", Mock(return_value=tokenizer))
+    with pytest.raises(ValueError, match="missing vision boundary tokens"):
+        LanceTrainingConfig.from_model_path(str(tmp_path))
+
+
+def test_config_propagates_tokenizer_load_failure(tmp_path, monkeypatch):
+    from unittest.mock import Mock
+
+    from transformers import AutoTokenizer
+
+    config = dict(TINY_LLM_CONFIG)
+    config.pop("vision_start_token_id")
+    config.pop("vision_end_token_id")
+    (tmp_path / "llm_config.json").write_text(json.dumps(config))
+    monkeypatch.setattr(AutoTokenizer, "from_pretrained", Mock(side_effect=OSError("broken tokenizer")))
+    with pytest.raises(OSError, match="broken tokenizer"):
+        LanceTrainingConfig.from_model_path(str(tmp_path))
