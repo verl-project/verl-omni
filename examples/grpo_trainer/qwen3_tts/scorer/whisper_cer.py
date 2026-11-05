@@ -39,25 +39,15 @@ logger = logging.getLogger(__name__)
 # silently pick it. Naming ``--device mps`` still works.
 _ACCELERATOR_DEVICE_TYPES = ("cuda", "npu", "xpu")
 
-# Accepted input sample rate range. The floor is what bounds the resampling
-# ratio, and therefore the resampled length. The 8 MiB HTTP body carries a
-# base64 payload, so it decodes to at most ~6 MiB of float32 -- 1.57 M input
-# samples -- and an 8 kHz input is at most a 2x expansion, i.e. ~3.1 M output
-# samples (~12 MiB). A ceiling alone would not achieve this -- sample_rate=1 is
-# below any ceiling and asked for billions of output samples. The ceiling is the
-# input contract: the highest standard capture rates are 192 kHz and 384 kHz.
+# The floor bounds the resampling ratio (sample_rate=1 would ask for billions of
+# output samples); the ceiling is the highest standard capture rate.
 _MIN_SAMPLE_RATE = 8_000
 _MAX_SAMPLE_RATE = 384_000
 
-# ``_import_torchaudio_functional`` is called per request, and a failed import is
-# not cached by ``sys.modules``. On the hosts this fallback targets (no torchaudio
-# wheel) every request would otherwise re-run the import machinery and re-log the
-# warning, so the outcome is memoized and the warning is emitted once.
+# A failed import is not cached by ``sys.modules``, so the probe is memoized and
+# serialized: ``transcribe()`` runs on every request thread.
 _TORCHAUDIO_FUNCTIONAL: Any = None
 _TORCHAUDIO_PROBED = False
-# ``transcribe()`` runs on every ``ThreadingHTTPServer`` request thread, so the
-# probe has to be serialized: a second thread must not read the "not probed yet"
-# state while the first is still importing, and must never publish a result.
 _TORCHAUDIO_PROBE_LOCK = threading.Lock()
 
 
@@ -108,9 +98,6 @@ def _resolve_auto_device(torch_module: Any) -> str:
         except Exception:  # Some torch builds raise instead of returning None.
             current = None
         current_type = getattr(current, "type", None)
-        # Only the types listed above are accepted: a backend that reports
-        # something else (mps on Apple silicon, say) must not be selected by
-        # ``auto`` -- naming it explicitly still works.
         if current_type in _ACCELERATOR_DEVICE_TYPES:
             return f"{current_type}:{_current_index(accelerator, current)}"
     for device_type in _ACCELERATOR_DEVICE_TYPES:
@@ -129,23 +116,15 @@ def _resolve_auto_device(torch_module: Any) -> str:
 def _import_torchaudio_functional() -> Any:
     """Import ``torchaudio.functional``, or return ``None`` when it is unusable.
 
-    ``ImportError`` covers a missing wheel; ``OSError`` covers the case where
-    torchaudio *is* installed but a native component cannot be loaded.
-    ``torchaudio._extension._load_lib`` re-raises the underlying ``ctypes.DLL``
-    ``OSError`` as-is when the library file is found but cannot be loaded, so
-    catching only ``ImportError`` would miss exactly the situation this fallback
-    exists for. Ascend/aarch64 hosts hit both cases.
-
-    The outcome is memoized: a failed import is not cached by ``sys.modules``, so
-    without this every ``transcribe()`` call on a torchaudio-less host would
-    re-run the import machinery and log the warning again.
+    ``ImportError`` covers a missing wheel; ``OSError`` covers torchaudio being
+    installed but unable to load a native component, which is what Ascend/aarch64
+    hosts hit when the library file exists but cannot be loaded.
     """
     global _TORCHAUDIO_FUNCTIONAL, _TORCHAUDIO_PROBED
 
     if _TORCHAUDIO_PROBED:
         return _TORCHAUDIO_FUNCTIONAL
     with _TORCHAUDIO_PROBE_LOCK:
-        # Another request may have finished the probe while this one waited.
         if _TORCHAUDIO_PROBED:
             return _TORCHAUDIO_FUNCTIONAL
         try:
@@ -153,10 +132,7 @@ def _import_torchaudio_functional() -> Any:
         except (ImportError, OSError):
             logger.warning("torchaudio is unavailable; falling back to linear resampling.")
             audio_functional = None
-        # Publish the result first, then mark the probe done: a thread that sees
-        # ``_TORCHAUDIO_PROBED`` must never read an unassigned cache. An unexpected
-        # exception leaves the probe open (it is not caught here) so a later call
-        # retries instead of permanently falling back.
+        # Assign first, then flag: a reader of the flag must never see a stale cache.
         _TORCHAUDIO_FUNCTIONAL = audio_functional
         _TORCHAUDIO_PROBED = True
     return _TORCHAUDIO_FUNCTIONAL
