@@ -40,6 +40,8 @@ dependencies = [
     # FSDP `_no_split_modules` metadata change introduced in Transformers 5.15.0.
     "transformers>=5.13.0,<=5.14.1",
     "wandb",
+    "swanlab>=0.10.3",
+    "soundfile>=0.12.1",
     "packaging>=20.0",
     "uvicorn",
     "fastapi",

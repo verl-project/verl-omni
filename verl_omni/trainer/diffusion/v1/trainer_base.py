@@ -1727,7 +1727,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         media_kinds=None,
         previews=None,
     ):
-        """Use the shared image/video W&B path with declared media metadata."""
+        """Use the shared image/video tracker path with declared media metadata."""
         return BaseRayDiffusionTrainer._maybe_log_val_generations(
             self,
             inputs,
