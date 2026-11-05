@@ -1264,6 +1264,7 @@ def test_named_batch_accepts_score_only_results_with_streaming_disabled():
     manager.config = config
     manager._preserve_reward_components = False
     manager._score_lock = asyncio.Lock()
+    manager._sync_loop = asyncio.new_event_loop()
     manager.reward_manager_cls = _ScoreOnlyRewardManager
     manager.multi_reward_model_manager = SimpleNamespace(
         models={"quality": object()}, wake_up=AsyncMock(), sleep=AsyncMock()
@@ -1274,7 +1275,10 @@ def test_named_batch_accepts_score_only_results_with_streaming_disabled():
     manager._reward_dispatch_batch_sizes = {}
     data = DataProto.from_dict(tensors={"responses": torch.tensor([[0], [1]])})
 
-    result = manager.compute_rm_score(data)
+    try:
+        result = manager.compute_rm_score(data)
+    finally:
+        manager._sync_loop.close()
 
     assert torch.equal(result.batch["rm_scores"], torch.tensor([[0.25], [1.25]]))
     assert result.non_tensor_batch["reward/combined"].tolist() == [0.25, 1.25]

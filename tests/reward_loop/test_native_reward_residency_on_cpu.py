@@ -20,10 +20,12 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from verl_omni.pipelines.rollout_media import ArtifactContractError
 from verl_omni.reward_loop import reward_model_executor as executor_module
 from verl_omni.reward_loop.reward_loop import OmniRewardLoopWorker
 from verl_omni.reward_loop.reward_model import MultiRewardModelManager, NativeManagedRewardModel
 from verl_omni.reward_loop.reward_model_executor import NativeRewardExecutor
+from verl_omni.utils.asyncio_utils import await_owned
 from verl_omni.workers.config.reward import RewardModelSpec
 
 
@@ -43,7 +45,8 @@ def _executor(monkeypatch, model_class):
 
 
 @pytest.mark.asyncio
-async def test_owned_failure_after_repeated_cancellation_is_consumed():
+@pytest.mark.parametrize("failure", [OSError, ArtifactContractError])
+async def test_owned_failure_after_repeated_cancellation_preserves_error_policy(failure):
     started = asyncio.Event()
     release = asyncio.Event()
     settled = asyncio.Event()
@@ -52,18 +55,19 @@ async def test_owned_failure_after_repeated_cancellation_is_consumed():
         started.set()
         try:
             await release.wait()
-            raise OSError("owned failure after cancellation")
+            raise failure("owned failure after cancellation")
         finally:
             settled.set()
 
-    caller = asyncio.create_task(executor_module._await_owned(fail()))
+    caller = asyncio.create_task(await_owned(fail()))
     await started.wait()
     caller.cancel()
     await asyncio.sleep(0)
     caller.cancel()
     assert not caller.done()
     release.set()
-    with pytest.raises(asyncio.CancelledError):
+    expected = ArtifactContractError if failure is ArtifactContractError else asyncio.CancelledError
+    with pytest.raises(expected):
         await caller
     assert settled.is_set()
 

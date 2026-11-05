@@ -33,8 +33,8 @@ from verl.utils.profiler import simple_timer
 from verl.workers.rollout.llm_server import LLMServerClient
 
 from verl_omni.agent_loop.utils import maybe_per_rollout_seeds
-from verl_omni.reward_loop.reward_model_executor import _await_owned
 from verl_omni.reward_loop.streaming import create_async_reward_client
+from verl_omni.utils.asyncio_utils import await_owned
 from verl_omni.workers.config import DiffusionModelConfig, DiffusionRolloutConfig
 from verl_omni.workers.config.reward import get_streaming_reward_config
 
@@ -261,7 +261,7 @@ class DiffusionAgentLoopWorker:
             if self.async_reward_client is not None and self.async_reward_client.requires_drain:
                 for task in tasks:
                     task.cancel()
-                await _await_owned(asyncio.gather(*tasks, return_exceptions=True))
+                await await_owned(asyncio.gather(*tasks, return_exceptions=True))
             raise
 
         output = self._postprocess(outputs, input_non_tensor_batch=batch.non_tensor_batch)

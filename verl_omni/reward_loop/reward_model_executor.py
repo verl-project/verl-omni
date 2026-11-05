@@ -25,7 +25,7 @@ from typing import Any
 import torch
 from verl.utils.device import get_device_id, get_device_name
 
-from verl_omni.pipelines.rollout_media import ArtifactContractError
+from verl_omni.utils.asyncio_utils import await_owned
 from verl_omni.workers.config.reward import RewardModelSpec, is_engine_backend
 
 __all__ = [
@@ -36,30 +36,6 @@ __all__ = [
 ]
 
 logger = logging.getLogger(__name__)
-
-
-async def _await_owned(awaitable):
-    """Keep an accepted operation owned until it settles, even if its caller leaves."""
-    task = asyncio.ensure_future(awaitable)
-    cancelled = False
-    while not task.done():
-        try:
-            await asyncio.shield(task)
-        except asyncio.CancelledError:
-            if asyncio.current_task().cancelling():
-                cancelled = True
-        except BaseException:
-            if not task.done():
-                raise
-    if cancelled:
-        try:
-            task.result()
-        except ArtifactContractError:
-            raise
-        except BaseException:
-            pass
-        raise asyncio.CancelledError
-    return task.result()
 
 
 class EngineRouterClient:
@@ -108,7 +84,7 @@ class NativeRewardExecutor:
         self._close_failed = False
 
     async def wake_up(self) -> None:
-        await _await_owned(self._wake_up())
+        await await_owned(self._wake_up())
 
     async def _wake_up(self) -> None:
         async with self._lifecycle_lock:
@@ -159,7 +135,7 @@ class NativeRewardExecutor:
             self._inflight += 1
             self._idle.clear()
             model = self._model
-        return await _await_owned(self._infer_owned(model, args, kwargs))
+        return await await_owned(self._infer_owned(model, args, kwargs))
 
     async def _infer_owned(self, model, args, kwargs):
         try:
@@ -178,7 +154,7 @@ class NativeRewardExecutor:
                     self._idle.set()
 
     async def sleep(self) -> None:
-        await _await_owned(self._sleep())
+        await await_owned(self._sleep())
 
     async def _sleep(self) -> None:
         async with self._lifecycle_lock:
@@ -203,7 +179,7 @@ class NativeRewardExecutor:
                 raise
 
     async def close(self) -> None:
-        await _await_owned(self._close())
+        await await_owned(self._close())
 
     async def _close(self) -> None:
         async with self._lifecycle_lock:

@@ -39,7 +39,7 @@ from verl_omni.pipelines.rollout_media import (
     PRIMARY_ARTIFACT,
     ArtifactContractError,
 )
-from verl_omni.reward_loop.reward_model_executor import _await_owned
+from verl_omni.utils.asyncio_utils import await_owned
 from verl_omni.workers.config.reward import get_streaming_reward_config
 
 logger = logging.getLogger(__name__)
@@ -67,7 +67,7 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
         for task in tasks:
             task.cancel()
         await super().close_reward_streaming()
-        await _await_owned(asyncio.gather(*tasks, return_exceptions=True))
+        await await_owned(asyncio.gather(*tasks, return_exceptions=True))
 
     async def generate_sequences(self, batch: TensorDict) -> None:
         """Spawn diffusion agent loops for each prompt in the batch without waiting."""

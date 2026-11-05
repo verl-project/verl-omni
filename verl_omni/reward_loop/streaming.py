@@ -28,10 +28,10 @@ from verl_omni.pipelines.rollout_media import (
     PREVIEW_ARTIFACT,
     PRIMARY_ARTIFACT,
 )
+from verl_omni.utils.asyncio_utils import await_owned
 from verl_omni.workers.config.reward import StreamingRewardConfig
 
 from .replica_dispatch import dispatch_reward_groups
-from .reward_model_executor import _await_owned
 
 
 def merge_reward_outputs(outputs: list[dict]) -> dict:
@@ -130,11 +130,11 @@ class AsyncRewardClient:
             task = asyncio.create_task(self._score(data))
             self._pending.add(task)
             try:
-                return await _await_owned(task)
+                return await await_owned(task)
             finally:
                 self._pending.remove(task)
 
     async def close(self) -> None:
         """Fence new submissions and wait for accepted group RPCs to settle."""
         self._closed = True
-        await _await_owned(asyncio.gather(*self._pending, return_exceptions=True))
+        await await_owned(asyncio.gather(*self._pending, return_exceptions=True))
