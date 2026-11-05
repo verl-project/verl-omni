@@ -151,6 +151,16 @@ Validated with the tiny-random GPU smoke tests on Arc Pro B60 and B70: FlowGRPO
 DiffusionNFT, online DPO, and BAGEL FlowGRPO. Full-size recipes have not been
 validated yet.
 
+FlowGRPO with the trainer and rollout on separate GPUs, synchronous and fully
+async (`run_flowgrpo_qwen_image_separate.sh` and
+`run_flowgrpo_qwen_image_v1_separate_async.sh`), also runs on Arc Pro B60 and
+B70 with the sleep mode overrides above. Weights sync through the XCCL
+checkpoint engine from verl-hardware-plugin, which registers under both `nccl`
+and `xccl`, so recipes keep the default `checkpoint_engine.backend=nccl`. The
+two smoke scripts pre-check `nccl` by importing the CUDA engine, so on Intel GPU
+run them with `CKPT_BACKEND=xccl`, which selects the XCCL engine and pre-checks
+it instead.
+
 Not yet supported on Intel GPU:
 
 * The VeOmni engine backend.
