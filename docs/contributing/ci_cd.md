@@ -8,7 +8,7 @@ VeRL-Omni uses layered CI/CD checks so fast CPU feedback and expensive GPU or co
 | --- | --- | --- | --- | --- | --- |
 | L1 CPU API tests | Validate CPU-only APIs, configs, data utilities, adapters, rewards, and unit behavior | Pull requests with `ready-for-ci`, pushes to `main` and release branches | CPU | Required before merge | Pass/fail and coverage artifacts |
 | L2 GPU smoke tests | Validate tiny-random GPU end-to-end training paths | Pull requests with `ready-for-ci`, usually after L1 is green | GPU | Required before merge for GPU-touching changes | Smoke logs and summaries |
-| L3 nightly regression | Detect numerical drift and performance regressions | Scheduled or manual | Fixed GPU runners | Nightly regression signal | Metrics and baseline comparisons |
+| L3 nightly regression | Detect numerical drift and performance regressions | Scheduled or manual | Fixed GPU runners | Nightly regression signal | Metrics, baseline comparisons, and the dashboard |
 | L4 convergence tests | Validate real recipe convergence | Weekly, release candidate, or manual | Production GPU cluster | Release readiness gate | Reward/loss curves and convergence reports |
 
 L3 has one runnable scheduled workflow. It runs different algorithm cases on the v1 sync trainer. L4 remains a planned layer.
@@ -59,9 +59,7 @@ input options.
 Run one case manually with:
 
 ```bash
-bash tests/nightly/qwen_image_flowgrpo/run_qwen_image_flowgrpo.sh
-bash tests/nightly/qwen_image_diffusion_nft/run_qwen_image_diffusion_nft.sh
-bash tests/nightly/qwen_image_online_dpo/run_qwen_image_online_dpo.sh
+bash tests/nightly/model_name_my_algo/run_model_name_my_algo.sh
 ```
 
 The GitHub workflow is `.github/workflows/l3_nightly.yml`. The job runs the
@@ -88,6 +86,51 @@ metrics, reports, and logs as artifacts even when the regression fails.
 Until the baseline policy, artifact retention, ownership, and fixed runner
 capacity are stable, L3 should remain outside the fast pull-request loop and
 should be treated as a regression signal rather than a required merge gate.
+
+
+### L3 Dashboard
+
+The dashboard is a static page of performance and precision trends for nightly cases (view the [dashboard Github Pages](https://verl-project.github.io/verl-omni/dashboard/pages)). 
+
+[`build_dashboard.py`](https://github.com/verl-project/verl-omni/blob/dashboard/build_dashboard.py) on **dashboard** branch downloads the shared `l3-nightly-reports-*` and `l3-nightly-baseline` artifacts, reads each case's `metrics.json` and `dump_compare.json`, and merges those points with the previously published [`history.json`](https://verl-project.github.io/verl-omni/dashboard/pages/history.json). The history file is what keeps runs visible after the Actions artifacts expire. 
+
+[`.github/workflows/publish_dispatch.yml`](../../.github/workflows/publish_dispatch.yml) triggers publish workflow on dashboard branch every day at 08:00 Asia/Shanghai and rebuilds the page on pushes to the `dashboard` branch and publishes it to [GitHub Pages](https://verl-project.github.io/verl-omni/dashboard/pages/).
+
+#### Register a New Nightly Case
+Register every new nightly case in that same change. The report upload already picks up `current/**/metrics.json` and `current/**/dump_compare.json`, but the page charts a run only when the case id is listed in `EXPERIMENTS`. The id is the parent directory of those two files. The runner sets it with `L3_TEST_CASE`, which selects:
+
+```text
+${OUTPUT_ROOT}/current/${L3_TEST_CASE}/metrics.json
+${OUTPUT_ROOT}/current/${L3_TEST_CASE}/dump_compare.json
+${OUTPUT_ROOT}/baseline/${L3_TEST_CASE}/metrics.json
+```
+
+After adding a new test case, add the case object to `EXPERIMENTS` in [`build_dashboard.py`](https://github.com/verl-project/verl-omni/blob/dashboard/build_dashboard.py). Keep `layer` as `l3-nightly` for a case on the current nightly workflow. `label` is the experiment button text. A new case follows the same three fields. For a case whose directory is `model_name_my_algo`, the new entry is:
+
+```python
+EXPERIMENTS = [
+    {
+        "id": "qwen_image_flowgrpo",
+        "label": "Qwen-Image + FlowGRPO",
+        "layer": "l3-nightly",
+    },
+    ...
+    { # new entry
+        "id": "model_name_my_algo",
+        "label": "Model Name + My Algo",
+        "layer": "l3-nightly",
+    },
+]
+```
+
+`id` must equal `L3_TEST_CASE` and the directory name under both `current/` and `baseline/`. The builder stores that directory name as `case` and keeps the row only when `case` equals `experiment["id"]`.
+
+Two further edits are needed only in these cases:
+
+- Add a `{ "id", "label" }` entry to `LAYERS` when the case belongs to a new CI layer, and set the experiment `layer` to that id. Another L3 case stays on the existing `l3-nightly` layer.
+- Add a metric key to `PERF_CHART_KEYS` when the case should plot a timing series that is not already listed. Keys under `timing_per_image_ms/` are drawn in milliseconds. Every other listed key is drawn in seconds. `metrics.json` still has to expose that key as `summary_for_compare.<key>.mean`. Precision charts need no key list: each numeric `mean_abs_err` in `dump_compare.json` becomes one series.
+
+Leave `history.json` and `publish.yml` unchanged for a new case. The next dashboard build writes `experiments.<id>.rows` and `experiments.<id>.baseline` from the report and baseline artifacts. The baseline line comes from `baseline/<id>/metrics.json` inside `l3-nightly-baseline`.
 
 ## L4 Convergence Tests
 
