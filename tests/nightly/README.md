@@ -23,6 +23,9 @@ The v0 trainer is not used.
 | Qwen-Image | `qwen_image_online_dpo` | Online DPO, OCR reward | 1 | `tests/nightly/qwen_image_online_dpo/run_qwen_image_online_dpo.sh` |
 
 Case-specific precision tensors and ordering notes are in each case README.
+The workflow baseline check and run loop both read `ALL_L3_CASES` in
+`.github/workflows/l3_nightly.yml`. Add a case there and to the `case` input
+options. The script path is `tests/nightly/<case>/run_<case>.sh`.
 
 ## CI Status
 
@@ -198,19 +201,16 @@ cover driver-forward, actor-forward, and LoRA-gradient payloads for
 `DEBUG_DUMP_STEPS`, which defaults to `1,2`.
 
 The nightly dataset writes `extra_info.repeat_index` on each repeated prompt.
-The training batch is ordered by a per-run `uuid4` uid. Online DPO and
-DiffusionNFT draw noise or a timestep permutation in actor-batch order, so the
-nightly debug hook stable-sorts rows onto `repeat_index` before
-`prepare_actor_batch`. Dump comparison also reorders both payloads onto that
-index before comparing row for row. When either side lacks the key, or the two
-key sets differ, comparison falls back to raw file order and prints a
-`row order not realigned` warning. Rows without the field stay in uid order;
-normal training does not load the hook. Online DPO also records
-`prepare_actor_batch_selected_indices`. When that list is a full permutation of
-the dumped rows, comparison restores the pre-pair order before the
-`repeat_index` sort. The nightly online-DPO case uses `rollout.n=4`, which
-drops rows during pairing, so that restore is skipped and alignment is
-`repeat_index` only.
+Online DPO and DiffusionNFT draw noise or timesteps in actor-batch order. That
+batch arrives in per-run `uuid4` uid order, so the nightly hook sorts it onto
+`repeat_index` before `prepare_actor_batch`. Dump comparison realigns rows by
+the same key. Online DPO keeps the top and bottom reward of each prompt. The
+nightly random reward model returns stable scores, so chosen and rejected stay in the
+same order across runs. FlowGRPO binds `log_probs`, latents, and timesteps at
+rollout; comparison-time `repeat_index` alignment is enough for that case.
+Missing or mismatched keys fall back to raw file order with a
+`row order not realigned` warning. Normal training does not load the hook and
+stays in uid order.
 
 Actor-forward tensors are every tensor returned by the diffusion FSDP engine
 forward/backward batch output. LoRA-gradient tensors are every available LoRA

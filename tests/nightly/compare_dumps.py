@@ -99,86 +99,32 @@ def _sort_rows(keys: list[int]) -> list[int]:
     return sorted(range(len(keys)), key=lambda i: keys[i])
 
 
-def _take_rows(value: Any, order: list[int]) -> Any:
-    """Reorder one batch-aligned sequence. Leave other values unchanged."""
-    n = len(order)
-    if isinstance(value, torch.Tensor) and value.ndim >= 1 and value.shape[0] == n:
-        return value[order]
-    shape = getattr(value, "shape", None)
-    if shape is not None and len(shape) >= 1 and int(shape[0]) == n and not isinstance(value, torch.Tensor):
-        try:
-            return value[order]
-        except (TypeError, IndexError, ValueError):
-            return value
-    if isinstance(value, list) and len(value) == n:
-        return [value[index] for index in order]
-    if isinstance(value, tuple) and len(value) == n:
-        return tuple(value[index] for index in order)
-    return value
-
-
 def _apply_row_order(payload: Any, order: list[int]) -> Any:
-    if not isinstance(payload, dict):
-        return payload
     aligned = dict(payload)
     batch = payload.get("batch") or {}
-    if isinstance(batch, dict):
-        aligned["batch"] = {key: _take_rows(value, order) for key, value in batch.items()}
-    non_tensor = payload.get("non_tensor") or {}
-    if isinstance(non_tensor, dict):
-        aligned["non_tensor"] = {key: _take_rows(value, order) for key, value in non_tensor.items()}
+    aligned["batch"] = {
+        key: (
+            value[order]
+            if isinstance(value, torch.Tensor) and value.ndim >= 1 and value.shape[0] == len(order)
+            else value
+        )
+        for key, value in batch.items()
+    }
     return aligned
-
-
-def _selected_indices(payload: Any) -> list[int] | None:
-    """Return a full pre-pair permutation, or None when the dump has no pairing."""
-    if not isinstance(payload, dict):
-        return None
-    raw = payload.get("selected_indices")
-    if raw is None:
-        return None
-    try:
-        selected = [int(index) for index in list(raw)]
-    except (TypeError, ValueError):
-        return None
-    if not selected or sorted(selected) != list(range(len(selected))):
-        return None
-    return selected
-
-
-def _restore_pre_pair_order(payload: Any) -> tuple[Any, bool]:
-    """Undo online-DPO chosen/rejected ordering so rows match rollout sessions.
-
-    ``selected_indices[k]`` is the pre-pair row that landed at paired position
-    ``k``. Restoring that permutation makes two runs comparable even when OCR
-    scores swap the winner. FlowGRPO and DiffusionNFT dumps omit the key.
-    """
-    selected = _selected_indices(payload)
-    if selected is None:
-        return payload, False
-    inverse = [0] * len(selected)
-    for paired_row, original_row in enumerate(selected):
-        inverse[original_row] = paired_row
-    return _apply_row_order(payload, inverse), True
 
 
 def _align_rows(baseline_payload: Any, current_payload: Any) -> tuple[Any, Any, str | None]:
     """Reorder both payloads onto their shared run-stable row order."""
-    baseline_payload, baseline_restored = _restore_pre_pair_order(baseline_payload)
-    current_payload, current_restored = _restore_pre_pair_order(current_payload)
-    if baseline_restored != current_restored:
-        return baseline_payload, current_payload, None
     baseline_keys = _row_group_keys(baseline_payload)
     current_keys = _row_group_keys(current_payload)
     if baseline_keys is None or current_keys is None:
         return baseline_payload, current_payload, None
     if sorted(baseline_keys) != sorted(current_keys):
         return baseline_payload, current_payload, None
-    alignment = "selected_indices+extra_info.repeat_index" if baseline_restored else "extra_info.repeat_index"
     return (
         _apply_row_order(baseline_payload, _sort_rows(baseline_keys)),
         _apply_row_order(current_payload, _sort_rows(current_keys)),
-        alignment,
+        "extra_info.repeat_index",
     )
 
 
@@ -398,8 +344,7 @@ def _print_conclusion(passed: bool, results: dict, report_path: Path) -> None:
     if unaligned:
         print(
             "[DUMP] WARNING: row order not realigned for "
-            f"{len(unaligned)} file(s) (missing/differing extra_info.repeat_index "
-            "or selected_indices): "
+            f"{len(unaligned)} file(s) (missing/differing extra_info.repeat_index): "
             f"{unaligned[:3]}"
         )
     print(f"[DUMP] Report: {report_path}")

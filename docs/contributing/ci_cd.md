@@ -53,6 +53,9 @@ Supported cases:
 | `qwen_image_diffusion_nft` | `tests/nightly/qwen_image_diffusion_nft/run_qwen_image_diffusion_nft.sh` | 1 | DiffusionNFT, OCR reward, old-adapter rollout |
 | `qwen_image_online_dpo` | `tests/nightly/qwen_image_online_dpo/run_qwen_image_online_dpo.sh` | 1 | Online DPO, OCR reward |
 
+The workflow runs the ids in `ALL_L3_CASES`. Add a case there and to the `case`
+input options.
+
 Run one case manually with:
 
 ```bash
@@ -60,10 +63,6 @@ bash tests/nightly/qwen_image_flowgrpo/run_qwen_image_flowgrpo.sh
 bash tests/nightly/qwen_image_diffusion_nft/run_qwen_image_diffusion_nft.sh
 bash tests/nightly/qwen_image_online_dpo/run_qwen_image_online_dpo.sh
 ```
-
-`python3 tests/nightly/sanity.py` checks that every case stays on the v1
-trainer, that the repeated-prompt dataset is written, and that online-DPO row
-alignment restores session order. It does not start a GPU run.
 
 The GitHub workflow is `.github/workflows/l3_nightly.yml`. The job runs the
 three cases sequentially in strict nightly mode every day at 22:00

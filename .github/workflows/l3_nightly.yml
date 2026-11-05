@@ -75,6 +75,7 @@ env:
   REPORT_ARTIFACT_PREFIX: l3-nightly-reports
   RUN_MODE: ${{ github.event_name == 'schedule' && 'nightly' || github.event_name == 'pull_request' && 'nightly' || github.event.inputs.mode || 'nightly' }}
   L3_CASE: ${{ github.event.inputs.case || 'all' }}
+  ALL_L3_CASES: qwen_image_flowgrpo qwen_image_diffusion_nft qwen_image_online_dpo
   NUM_GPUS: ${{ github.event.inputs.num_gpus || '1' }}
   MODEL_PATH: ${{ github.event.inputs.model_path || '' }}
   REWARD_MODEL_PATH: ${{ github.event.inputs.reward_model_path || '' }}
@@ -94,6 +95,22 @@ jobs:
       mlp-task-id: ${{ steps.create-runner.outputs.mlp-task-id }}
       baseline-found: ${{ steps.baseline.outputs.found }}
     steps:
+      - name: Check L3_CASE
+        run: |
+          set -euo pipefail
+
+          read -r -a all_cases <<< "${ALL_L3_CASES}"
+          if [ "${L3_CASE}" = "all" ]; then
+            exit 0
+          fi
+          for case_name in "${all_cases[@]}"; do
+            if [ "${case_name}" = "${L3_CASE}" ]; then
+              exit 0
+            fi
+          done
+          echo "L3_CASE=${L3_CASE} is not in ALL_L3_CASES (${ALL_L3_CASES})."
+          exit 1
+
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - id: baseline
@@ -140,8 +157,9 @@ jobs:
         run: |
           set -euo pipefail
 
+          read -r -a all_cases <<< "${ALL_L3_CASES}"
           if [ "${L3_CASE}" = "all" ]; then
-            cases=(qwen_image_flowgrpo qwen_image_diffusion_nft qwen_image_online_dpo)
+            cases=("${all_cases[@]}")
           else
             cases=("${L3_CASE}")
           fi
@@ -259,20 +277,20 @@ jobs:
           # NUM_GPUS is the workflow input (default 1) and applies to every case.
           # L3_CASE=all runs every case. A named case skips the others, so a
           # baseline run replaces only that case inside the downloaded artifact.
-          run_case() {
-            local case_name="$1"
-            local script="$2"
+          read -r -a all_cases <<< "${ALL_L3_CASES}"
+          for case_name in "${all_cases[@]}"; do
             if [ "${L3_CASE}" != "all" ] && [ "${L3_CASE}" != "${case_name}" ]; then
               echo "[NIGHTLY] skip ${case_name}; L3_CASE=${L3_CASE}"
-              return 0
+              continue
+            fi
+            script="tests/nightly/${case_name}/run_${case_name}.sh"
+            if [ ! -f "${script}" ]; then
+              echo "Missing nightly script for ${case_name}: ${script}"
+              exit 1
             fi
             ray stop --force || true
             bash "${script}"
-          }
-
-          run_case qwen_image_flowgrpo tests/nightly/qwen_image_flowgrpo/run_qwen_image_flowgrpo.sh
-          run_case qwen_image_diffusion_nft tests/nightly/qwen_image_diffusion_nft/run_qwen_image_diffusion_nft.sh
-          run_case qwen_image_online_dpo tests/nightly/qwen_image_online_dpo/run_qwen_image_online_dpo.sh
+          done
 
       - name: Upload current nightly artifacts
         if: always() && env.RUN_MODE == 'nightly'
@@ -285,7 +303,7 @@ jobs:
           retention-days: 30
 
       - name: Upload baseline artifact
-        if: always() && env.RUN_MODE == 'baseline'
+        if: success() && env.RUN_MODE == 'baseline'
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.BASELINE_ARTIFACT_NAME }}
