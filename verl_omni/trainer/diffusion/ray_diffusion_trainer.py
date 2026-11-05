@@ -93,11 +93,8 @@ from verl_omni.utils.net_utils import worker_group_port_ranges
 from verl_omni.utils.tracking import (
     _export_video,
     batch_items,
-    log_swanlab_media,
-    log_wandb_media,
+    log_val_samples,
     validate_audio_batch,
-    wrap_val_samples_for_swanlab,
-    wrap_val_samples_for_wandb,
 )
 from verl_omni.workers.config.reward import reward_is_enabled, reward_role_required, streaming_reward_enabled
 from verl_omni.workers.rollout.replica import DiffusionLLMServerManager as LLMServerManager
@@ -669,8 +666,6 @@ class BaseRayDiffusionTrainer(ABC):
         else:
             _validate_generation_outputs(outputs)
 
-        import shutil
-
         import numpy as np
 
         audios = batch_items(audios, len(inputs), "audio")
@@ -687,61 +682,15 @@ class BaseRayDiffusionTrainer(ABC):
         # Take first N samples after shuffling
         samples = samples[:generations_to_log]
 
-        # SwanLab's table takes text and its media types differ, so it gets its own rows.
-        table_loggers = self.config.trainer.logger
-        swanlab_rows = None
-        swanlab_media = {}
-        if "swanlab" in table_loggers:
-            table_loggers = [name for name in table_loggers if name != "swanlab"]
-            swanlab_rows, swanlab_media = wrap_val_samples_for_swanlab(
-                samples,
-                fps=int(self.config.trainer.get("video_fps", 24)),
-                media_kinds=[sample[5] for sample in samples],
-            )
-
-        # Wrap only retained samples; keep wandb videos in persistent storage.
-        video_tmp_dir = None
-        wandb_media = {}
-        if "wandb" in table_loggers:
-            validation_data_dir = self.config.trainer.get("validation_data_dir", None)
-            default_local_dir = self.config.trainer.get("default_local_dir", None)
-            wandb_video_dir = validation_data_dir or default_local_dir
-            if wandb_video_dir:
-                wandb_video_dir = os.path.join(wandb_video_dir, "wandb_val_media", f"global_step_{self.global_steps}")
-            samples, video_tmp_dir, wandb_media = wrap_val_samples_for_wandb(
-                samples,
-                fps=int(self.config.trainer.get("video_fps", 24)),
-                output_dir=wandb_video_dir,
-                media_kinds=[sample[5] for sample in samples],
-            )
-        else:
-            samples = [
-                (input_, output.data if previews is not None else output, score)
-                for input_, output, score, *_ in samples
-            ]
-
-        # Log to each configured logger
-        try:
-            try:
-                log_wandb_media(wandb_media, self.global_steps)
-            except Exception as error:
-                sys_logger.warning("Skipping validation media log at step %s: %s", self.global_steps, error)
-            try:
-                log_swanlab_media(swanlab_media, self.global_steps)
-            except Exception as error:
-                sys_logger.warning("Skipping SwanLab validation media log at step %s: %s", self.global_steps, error)
-            try:
-                self.validation_generations_logger.log(table_loggers, samples, self.global_steps)
-            except Exception as error:
-                sys_logger.warning("Skipping validation table log at step %s: %s", self.global_steps, error)
-            if swanlab_rows is not None:
-                try:
-                    self.validation_generations_logger.log(["swanlab"], swanlab_rows, self.global_steps)
-                except Exception as error:
-                    sys_logger.warning("Skipping SwanLab validation table log at step %s: %s", self.global_steps, error)
-        finally:
-            if video_tmp_dir is not None:
-                shutil.rmtree(video_tmp_dir, ignore_errors=True)
+        log_val_samples(
+            self.validation_generations_logger,
+            self.config.trainer.logger,
+            samples,
+            self.global_steps,
+            fps=int(self.config.trainer.get("video_fps", 24)),
+            media_root=self.config.trainer.get("validation_data_dir", None)
+            or self.config.trainer.get("default_local_dir", None),
+        )
 
     def _get_gen_batch(self, batch: DataProto) -> DataProto:
         reward_keys = set({"data_source", "reward_model", "extra_info", "uid"}) & batch.non_tensor_batch.keys()

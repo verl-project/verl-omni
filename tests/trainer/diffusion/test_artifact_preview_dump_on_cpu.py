@@ -212,8 +212,8 @@ def test_intentionally_absent_previews_skip_validation_logging(monkeypatch, vers
     media_logger = Mock()
     validate_outputs = Mock()
     monkeypatch.setattr(tracking, "_export_video", encoder)
-    monkeypatch.setattr(v0, "wrap_val_samples_for_wandb", wrapper)
-    monkeypatch.setattr(v0, "log_wandb_media", media_logger)
+    monkeypatch.setattr(tracking, "wrap_val_samples_for_wandb", wrapper)
+    monkeypatch.setattr(tracking, "log_wandb_media", media_logger)
     monkeypatch.setattr(v0, "_validate_generation_outputs", validate_outputs)
     log = v0.BaseRayDiffusionTrainer._maybe_log_val_generations if version == 0 else V1._maybe_log_val_generations
     latents = torch.zeros(2, 16, 2, 2, dtype=torch.bfloat16)

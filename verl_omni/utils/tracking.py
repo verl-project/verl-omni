@@ -405,3 +405,73 @@ def log_swanlab_media(media: dict[str, Any], step: int) -> None:
     import swanlab
 
     swanlab.log(media, step=step)
+
+
+def log_val_samples(
+    generations_logger: Any,
+    loggers: Sequence[str],
+    samples: Sequence[Sequence[Any]],
+    step: int,
+    *,
+    fps: int = 24,
+    media_root: str | None = None,
+) -> None:
+    """Log validation samples and their media to every configured logger.
+
+    Media and table logging failures are logged instead of propagating into the
+    training loop.
+
+    Args:
+        generations_logger: Table logger with a ``log(loggers, samples, step)`` method.
+        loggers: Configured logger names.
+        samples: Retained ``(input, output, score, audio, audio_sample_rate, media_kind)`` rows.
+        step: Global step of the samples.
+        fps: Fallback frame rate for video outputs.
+        media_root: Directory that keeps W&B videos for its asynchronous upload.
+            They go to a temporary directory when it is unset.
+    """
+    media_kinds = [sample[5] for sample in samples]
+
+    # SwanLab's table takes text and its media types differ, so it gets its own rows.
+    table_loggers = loggers
+    swanlab_rows = None
+    swanlab_media = {}
+    if "swanlab" in loggers:
+        table_loggers = [name for name in loggers if name != "swanlab"]
+        swanlab_rows, swanlab_media = wrap_val_samples_for_swanlab(samples, fps=fps, media_kinds=media_kinds)
+
+    # Keep wandb videos in persistent storage.
+    video_tmp_dir = None
+    wandb_media = {}
+    if "wandb" in table_loggers:
+        wandb_video_dir = os.path.join(media_root, "wandb_val_media", f"global_step_{step}") if media_root else None
+        rows, video_tmp_dir, wandb_media = wrap_val_samples_for_wandb(
+            samples, fps=fps, output_dir=wandb_video_dir, media_kinds=media_kinds
+        )
+    else:
+        rows = [
+            (input_, output.data if isinstance(output, MediaArtifact) else output, score)
+            for input_, output, score, *_ in samples
+        ]
+
+    try:
+        try:
+            log_wandb_media(wandb_media, step)
+        except Exception as error:
+            logger.warning("Skipping validation media log at step %s: %s", step, error)
+        try:
+            log_swanlab_media(swanlab_media, step)
+        except Exception as error:
+            logger.warning("Skipping SwanLab validation media log at step %s: %s", step, error)
+        try:
+            generations_logger.log(table_loggers, rows, step)
+        except Exception as error:
+            logger.warning("Skipping validation table log at step %s: %s", step, error)
+        if swanlab_rows is not None:
+            try:
+                generations_logger.log(["swanlab"], swanlab_rows, step)
+            except Exception as error:
+                logger.warning("Skipping SwanLab validation table log at step %s: %s", step, error)
+    finally:
+        if video_tmp_dir is not None:
+            shutil.rmtree(video_tmp_dir, ignore_errors=True)
