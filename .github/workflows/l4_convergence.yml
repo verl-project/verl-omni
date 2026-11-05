@@ -4,13 +4,10 @@ on:
   workflow_dispatch:
     inputs:
       case:
-        description: "L4 convergence case(s) to run"
+        description: "L4 convergence case to run, or 'all' (free string validated by run_l4_convergence.sh against its case registry)"
         required: true
         default: all
-        type: choice
-        options:
-          - all
-          - sd35_medium_ocr_lora_v1
+        type: string
       run_npu:
         description: "Also run the selected case(s) on Ascend NPU"
         required: false
