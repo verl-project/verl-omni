@@ -45,6 +45,7 @@ thing, the guide wins and the file links to it.
 | [run-cpu-tests](skills/run-cpu-tests/SKILL.md)       | what the CPU job does that `testing_guide.md`'s local commands don't |
 | [self-review](skills/code-review/SKILL.md)           | report-only review: purpose, code quality, goal completeness, and validation/accountability; severity separate from category |
 | [profile](skills/profile/SKILL.md)                  | select a profiler and capture the relevant processes/workload |
+| [perf-tuning](skills/perf-tuning/SKILL.md)          | measured, regression-safe workflow for speeding up a Python/PyTorch hot path |
 | [train-infer-consistency](skills/train-infer-consistency/SKILL.md) | rollout / actor consistency collection and analysis using MindStudio skills |
 
 `commit-and-pr` holds the authoritative module list; other files link to it rather
