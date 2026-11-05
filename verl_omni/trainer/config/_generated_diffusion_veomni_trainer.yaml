@@ -628,6 +628,7 @@ reward:
   accelerator_workers:
     enabled: false
   reward_functions: {}
+  multi_reward_concurrency: 1
   models: {}
   aggregation: weighted_sum
   reward_manager:
@@ -741,6 +742,16 @@ trainer:
   device: cuda
   use_v1: true
   v1:
+    watchdog:
+      enabled: false
+      window_size: 3
+      warmup_steps: 5
+      cooldown_steps: 20
+      reward_std_max: 1.0e-08
+      grad_norm_max: 1.0e-12
+      ratio_lower: 0.5
+      ratio_upper: 2.0
+      max_staleness: null
     trainer_mode: sync
     sync: {}
     colocate_async:
@@ -829,8 +840,46 @@ skip:
     dump_dir: ~/.verl/rollout_dump
     steps: []
     action: cache
+  rollout_tq:
+    enable: false
+    dump_dir: ~/.verl/rollout_dump
+    steps: []
+    action: cache
   async_rollout:
     enable: false
     dump_dir: ~/.verl/rollout_dump
     steps: []
     action: cache
+omni_skip:
+  _target_: verl_omni.utils.skip.OmniSkipConfig
+  reward:
+    enable: false
+    dump_dir: ~/.verl/stage_dump
+    steps: []
+    action: cache
+  old_log_prob:
+    enable: false
+    dump_dir: ~/.verl/stage_dump
+    steps: []
+    action: cache
+  ref_log_prob:
+    enable: false
+    dump_dir: ~/.verl/stage_dump
+    steps: []
+    action: cache
+  advantage:
+    enable: false
+    dump_dir: ~/.verl/stage_dump
+    steps: []
+    action: cache
+  actor_update:
+    enable: false
+    dump_dir: ~/.verl/stage_dump
+    steps: []
+    action: empty
+  weight_sync:
+    enable: false
+    dump_dir: ~/.verl/stage_dump
+    steps: []
+    action: empty
+    ack_stale_weights: false

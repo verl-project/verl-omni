@@ -16,11 +16,32 @@
 
 import base64
 import math
+from collections.abc import Callable
+from functools import lru_cache
 from io import BytesIO
 from numbers import Real
 
 import torch
 from PIL import Image
+
+
+@lru_cache
+def resolve_prompt_builder(spec: str) -> Callable:
+    """Resolve a ``pkg://<module>.<function>`` prompt builder spec."""
+    if not isinstance(spec, str) or not spec.startswith("pkg://"):
+        raise ValueError(f"Prompt builder spec must start with 'pkg://', got {spec!r}")
+    module_name, separator, object_name = spec.removeprefix("pkg://").rpartition(".")
+    if not separator or not module_name or not object_name:
+        raise ValueError(f"Prompt builder spec must be 'pkg://<module>.<function>', got {spec!r}")
+    try:
+        from verl.utils.import_utils import load_extern_object
+
+        builder = load_extern_object(f"pkg://{module_name}", object_name)
+    except Exception as error:
+        raise ValueError(f"Failed to load prompt builder from {spec!r}: {error}") from error
+    if not callable(builder):
+        raise ValueError(f"Prompt builder from {spec!r} is not callable")
+    return builder
 
 
 def audio_info_from_batch(extra_info: dict | None, batch, *, scorer: str) -> dict:

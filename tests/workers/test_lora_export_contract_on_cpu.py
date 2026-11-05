@@ -17,7 +17,8 @@ Pins, for both engines behind one implementation:
 - the dtype matrix (adapter tensors keep training dtype; full-weight DTensor
   gathers cast floating point to bf16; plain tensors pass through),
 - merged streams materialize inside ``merged_lora_context`` and stay valid
-  after the actor is restored,
+  after the actor is restored; on FSDP2 with vanilla LoRA they are computed per
+  tensor, bitwise equal to PEFT's merge, without modifying the module,
 - engine memory management runs at the right point of each path,
 - the colocated sync ordering rows (base before adapter; single full sync in
   merge/non-LoRA modes).
@@ -243,6 +244,132 @@ def test_non_merged_offload_runs_before_return(monkeypatch):
 
     dict(params)
     assert offloads == [1]
+
+
+def _lora_model(**lora_kwargs):
+    from peft import LoraConfig, get_peft_model
+
+    torch.manual_seed(0)
+    base = torch.nn.Sequential()
+    base.add_module("up", torch.nn.Linear(16, 32, bias=False))
+    base.add_module("down", torch.nn.Linear(32, 16, bias=False))
+    model = get_peft_model(base, LoraConfig(r=4, lora_alpha=8, target_modules=["up", "down"], **lora_kwargs))
+    with torch.no_grad():
+        for name, param in model.named_parameters():
+            if "lora_B" in name:
+                param.normal_()  # B starts at zero; a zero delta would hide a missing merge
+    return model
+
+
+def _fail_merged_context(actor, backup_adapters):
+    raise AssertionError("the per-tensor path must not merge in place")
+
+
+def test_fsdp2_merged_stream_matches_peft_merge_without_touching_module(monkeypatch):
+    import copy
+
+    model = _lora_model()
+    expected = copy.deepcopy(model).merge_and_unload().state_dict()
+    before = {name: param.detach().clone() for name, param in model.named_parameters()}
+    monkeypatch.setattr(lora_export, "fsdp_version", lambda module: 2)
+    monkeypatch.setattr(lora_export, "merged_lora_context", _fail_merged_context)
+    _patch_export_machinery(monkeypatch)
+    offloads = []
+
+    params, peft_config = export_lora_for_sync(
+        model,
+        model_config=_model_config(merge=True),
+        base_sync_done=True,
+        is_diffusers=False,
+        offload_fn=lambda: offloads.append(1),
+    )
+    assert offloads == []
+    weights = dict(params)
+
+    assert peft_config is None
+    assert offloads == [1]
+    assert set(weights) == set(expected)
+    for name, tensor in expected.items():
+        assert torch.equal(weights[name], tensor), name
+    for name, param in model.named_parameters():
+        assert torch.equal(param, before[name]), name
+    assert not any(getattr(module, "merged", False) for module in model.modules())
+
+
+def test_fsdp2_merged_stream_owns_merged_storage(monkeypatch):
+    """A sender may flush after the stream ends; merged tensors must not alias
+    live parameters that later in-place writes could overwrite."""
+    import copy
+
+    model = _lora_model()
+    expected = copy.deepcopy(model).merge_and_unload().state_dict()
+    monkeypatch.setattr(lora_export, "fsdp_version", lambda module: 2)
+    monkeypatch.setattr(lora_export, "merged_lora_context", _fail_merged_context)
+    _patch_export_machinery(monkeypatch)
+
+    params, _ = export_lora_for_sync(
+        model, model_config=_model_config(merge=True), base_sync_done=True, is_diffusers=False
+    )
+    held = list(params)
+    live = {param.untyped_storage().data_ptr() for param in model.parameters()}
+    with torch.no_grad():
+        for param in model.parameters():
+            param.zero_()
+
+    assert {name for name, _ in held} == set(expected)
+    for name, tensor in held:
+        assert tensor.untyped_storage().data_ptr() not in live, name
+        assert torch.equal(tensor, expected[name]), name
+
+
+@pytest.mark.parametrize("lora_kwargs", [{"use_dora": True}, {"lora_bias": True}])
+def test_fsdp2_merged_stream_falls_back_for_unsupported_lora(monkeypatch, lora_kwargs):
+    model = _lora_model(**lora_kwargs)
+    merged_context = MagicMock(return_value=contextlib.nullcontext())
+    monkeypatch.setattr(lora_export, "fsdp_version", lambda module: 2)
+    monkeypatch.setattr(lora_export, "merged_lora_context", merged_context)
+    _patch_export_machinery(monkeypatch)
+
+    params, _ = export_lora_for_sync(
+        model, model_config=_model_config(merge=True), base_sync_done=True, is_diffusers=False
+    )
+    dict(params)
+
+    merged_context.assert_called_once()
+
+
+@pytest.mark.parametrize("target_modules", [["up", "mid"], ["up"]], ids=["lora_lora", "lora_plain"])
+def test_fsdp2_merged_stream_merges_shared_base_weight_once(monkeypatch, target_modules):
+    """A tied base weight receives every delta in the in-place merge, and all of
+    its keys stream that one tensor; a clone per key would miss the other deltas."""
+    import copy
+
+    from peft import LoraConfig, get_peft_model
+
+    torch.manual_seed(0)
+    base = torch.nn.Sequential()
+    base.add_module("up", torch.nn.Linear(16, 16, bias=False))
+    base.add_module("mid", torch.nn.Linear(16, 16, bias=False))
+    base.mid.weight = base.up.weight
+    model = get_peft_model(base, LoraConfig(r=4, lora_alpha=8, target_modules=target_modules))
+    with torch.no_grad():
+        for name, param in model.named_parameters():
+            if "lora_B" in name:
+                param.normal_()
+    expected = copy.deepcopy(model).merge_and_unload().state_dict()
+    monkeypatch.setattr(lora_export, "fsdp_version", lambda module: 2)
+    monkeypatch.setattr(lora_export, "merged_lora_context", _fail_merged_context)
+    _patch_export_machinery(monkeypatch)
+
+    params, _ = export_lora_for_sync(
+        model, model_config=_model_config(merge=True), base_sync_done=True, is_diffusers=False
+    )
+    weights = dict(params)
+
+    assert set(weights) == set(expected) == {"up.weight", "mid.weight"}
+    for name, tensor in expected.items():
+        assert torch.equal(weights[name], tensor), name
+    assert not torch.equal(weights["up.weight"], base.up.weight)
 
 
 def test_merged_export_rejects_named_adapter(monkeypatch):

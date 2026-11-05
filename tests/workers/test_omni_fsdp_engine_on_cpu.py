@@ -193,7 +193,7 @@ def test_engine_registered_via_decorator():
                     kwargs_found += 1
             if kw.arg == "device" and isinstance(kw.value, ast.List):
                 vals = [e.value for e in kw.value.elts if isinstance(e, ast.Constant)]
-                if set(vals) == {"cuda", "npu", "xpu"}:
+                if set(vals) == {"cuda", "npu", "xpu", "mlu"}:
                     kwargs_found += 1
         assert kwargs_found >= 2, (
             f"@EngineRegistry.register missing expected kwargs (model_type/backend/device); found {kwargs_found}/3"
@@ -216,7 +216,7 @@ def test_engine_registered_for_fsdp_and_fsdp2_backends():
 
     for backend in ("fsdp", "fsdp2"):
         assert backend in omni_registry, f"'{backend}' not registered for omni_model; registered: {list(omni_registry)}"
-        for device in ("cuda", "npu", "xpu"):
+        for device in ("cuda", "npu", "xpu", "mlu"):
             entry = omni_registry[backend].get(device)
             assert entry is not None, f"No engine for omni_model/{backend}/{device}"
             assert entry.__name__ == "OmniFSDPEngine", (
@@ -224,13 +224,14 @@ def test_engine_registered_for_fsdp_and_fsdp2_backends():
             )
 
 
-def test_engine_get_engine_cls_resolves_to_omni_fsdp_engine():
+@pytest.mark.parametrize("device", ["cuda", "npu", "xpu", "mlu"])
+def test_engine_get_engine_cls_resolves_to_omni_fsdp_engine(device):
     """``EngineRegistry.get_engine_cls`` returns ``OmniFSDPEngine``."""
     from verl.workers.engine.base import EngineRegistry
 
     _get_omni_impl_module()
 
-    with patch("verl.workers.engine.base.get_device_name", return_value="cuda"):
+    with patch("verl.workers.engine.base.get_device_name", return_value=device):
         for backend in ("fsdp", "fsdp2"):
             cls = EngineRegistry.get_engine_cls("omni_model", backend)
             assert cls.__name__ == "OmniFSDPEngine", (
@@ -476,6 +477,57 @@ def test_build_module_calls_adapter_selected_auto_model_loader():
     )
     adapter_cls.configure_model.assert_called_once_with(loaded_module, model_config)
     assert result is configured_module
+
+
+def _build_on_meta_rank(auto_model_cls):
+    """Run ``_build_module`` as a rank that verl initializes on meta (``init_empty_weights``)."""
+    omni_impl = _get_omni_impl_module()
+    model_config = _make_mock_model_config()
+    # Supported split: hf_config_path (name_or_path) differs from the checkpoint.
+    model_config.hf_config.name_or_path = "/fake/config/dir"
+    configured_module = MagicMock(spec=torch.nn.Module)
+    configured_module.named_parameters.return_value = []
+    adapter_cls = MagicMock()
+    adapter_cls.auto_model_class = auto_model_cls
+    adapter_cls.configure_model.return_value = configured_module
+    model_base_mod = sys.modules["verl_omni.pipelines.model_base"]
+
+    with (
+        patch.object(model_base_mod.OmniModelBase, "get_class_by_name", return_value=adapter_cls),
+        patch.object(omni_impl, "get_init_weight_context_manager", return_value=omni_impl.init_empty_weights),
+        patch("verl.utils.torch_dtypes.PrecisionType") as precision_type,
+    ):
+        precision_type.to_dtype.side_effect = lambda value: value
+        engine = object.__new__(omni_impl.OmniFSDPEngine)
+        engine.model_config = model_config
+        engine.engine_config = MagicMock(model_dtype=None, forward_only=False)
+        engine.engine_config.strategy = "fsdp2"
+        engine.device_mesh = None
+        engine._build_module()
+    return model_config, adapter_cls
+
+
+def test_build_module_on_meta_rank_builds_from_config_without_reading_the_checkpoint():
+    auto_model_cls = MagicMock()
+    model_config, adapter_cls = _build_on_meta_rank(auto_model_cls)
+
+    auto_model_cls.from_pretrained.assert_not_called()
+    assert model_config.hf_config.name_or_path == model_config.local_path
+    auto_model_cls.from_config.assert_called_once_with(
+        model_config.hf_config,
+        torch_dtype=torch.float32,
+        trust_remote_code=model_config.trust_remote_code,
+    )
+    adapter_cls.configure_model.assert_called_once_with(auto_model_cls.from_config.return_value, model_config)
+
+
+def test_build_module_on_meta_rank_loads_through_a_loader_without_from_config():
+    class PretrainedOnlyLoader:
+        from_pretrained = MagicMock()
+
+    _build_on_meta_rank(PretrainedOnlyLoader)
+
+    PretrainedOnlyLoader.from_pretrained.assert_called_once()
 
 
 def test_build_module_rejects_mixed_frozen_parameters_without_fsdp1_orig_params():

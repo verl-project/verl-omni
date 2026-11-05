@@ -138,17 +138,16 @@ def bind_agentic_image_gen(config: Any) -> None:
     """Store ``config.agentic_image_gen`` for process-local readers.
 
     Args:
-        config: Hydra config (or ``None``). Missing node still marks bound and
+        config: Hydra config. Missing node still marks bound and
             clears overrides so readers see yaml defaults.
 
     Returns:
         None.
     """
     global _cfg, _bound
-    _bound = True
     if config is None:
-        _cfg = {}
-        return
+        raise ValueError("bind_agentic_image_gen requires a config, got None")
+    _bound = True
     try:
         node = config.get("agentic_image_gen")
     except (AttributeError, TypeError, KeyError):
