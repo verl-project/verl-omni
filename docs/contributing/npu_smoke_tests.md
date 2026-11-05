@@ -1,6 +1,6 @@
 # NPU Smoke Tests
 
-Last updated: 11/04/2026.
+Last updated: 10/29/2026.
 
 This guide explains how to add CI test cases for Huawei Ascend devices in verl-omni.
 

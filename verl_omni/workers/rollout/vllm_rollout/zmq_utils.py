@@ -14,6 +14,7 @@
 
 
 import os
+from pathlib import Path
 
 
 def _ipc_handle(path: str) -> str:
@@ -25,12 +26,13 @@ def _ipc_handle(path: str) -> str:
 def make_base_zmq_handle(job_id: str, replica_rank: int | str, local_rank: int) -> str:
     """Return a colocated weight route under VERL_ZMQ_DIR, defaulting to /tmp."""
     directory = os.environ.get("VERL_ZMQ_DIR") or "/tmp"
+    directory_path = Path(directory)
     if os.environ.get("VERL_ZMQ_DIR") and (
         not os.path.isabs(directory)
         or not os.path.isdir(directory)
-        or os.path.islink(directory.rstrip(os.sep) or os.sep)
+        or any(path.is_symlink() for path in (directory_path, *directory_path.parents))
     ):
-        raise ValueError("VERL_ZMQ_DIR must be an existing absolute directory, not a symbolic link.")
+        raise ValueError("VERL_ZMQ_DIR must be an existing absolute directory without symbolic-link components.")
     name = f"rl-colocate-zmq-{job_id}-replica-{replica_rank}-rank-{local_rank}.sock"
     return _ipc_handle(os.path.join(directory, name))
 
