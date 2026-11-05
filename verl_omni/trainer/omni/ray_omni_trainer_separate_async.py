@@ -21,7 +21,6 @@ from verl.utils.config import omega_conf_to_dataclass
 from verl.workers.rollout.llm_server import LLMServerManager
 from verl.workers.rollout.utils import update_prometheus_config
 
-from verl_omni.trainer.omni.proximal_actor_reuse import ProximalActorReuseMixin
 from verl_omni.trainer.omni.trainer_base import OmniPPOTrainer
 from verl_omni.workers.checkpoint_engine import OmniCheckpointEngineManager
 from verl_omni.workers.config import OmniModelConfig
@@ -29,7 +28,7 @@ from verl_omni.workers.omni_engine_workers import OmniDetachActorWorker
 
 
 @register_trainer("omni_separate_async")
-class OmniPPOTrainerSeparateAsync(ProximalActorReuseMixin, OmniPPOTrainer, PPOTrainerSeparateAsync):
+class OmniPPOTrainerSeparateAsync(OmniPPOTrainer, PPOTrainerSeparateAsync):
     """``PPOTrainerSeparateAsync`` with omni tokenizer/processor wiring and LoRA-aware weight sync."""
 
     def __init__(self, config):
@@ -38,6 +37,27 @@ class OmniPPOTrainerSeparateAsync(ProximalActorReuseMixin, OmniPPOTrainer, PPOTr
         # parent syncs on v1.separate_async; use the validated key. ReplayBuffer
         # staleness is gated by max_off_policy_threshold alone — do not write this knob.
         self.parameter_sync_step = config.trainer.v1.separate_async.get("parameter_sync_step", 1)
+        from verl_omni.pipelines.step_extension import resolve_step_extension
+
+        self._step_extension = resolve_step_extension(self)
+
+    def _compute_old_log_prob(self, batch, metrics):
+        native = super()._compute_old_log_prob
+        if self._step_extension is None:
+            return native(batch, metrics)
+        return self._step_extension._compute_old_log_prob(batch, metrics, native)
+
+    def _compute_advantage(self, batch, metrics):
+        native = super()._compute_advantage
+        if self._step_extension is None:
+            return native(batch, metrics)
+        return self._step_extension._compute_advantage(batch, metrics, native)
+
+    def _update_actor(self, batch, metrics):
+        native = super()._update_actor
+        if self._step_extension is None:
+            return native(batch, metrics)
+        return self._step_extension._update_actor(batch, metrics, native)
 
     def _init_tokenizer(self):
         # Skip super(): OmniModelConfig loads tokenizer/processor via the registered adapter.

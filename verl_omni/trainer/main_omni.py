@@ -336,9 +336,13 @@ def uses_v1_trainer(config) -> bool:
 
 def run_omni(config, task_runner_class=None) -> None:
     """Initialize Ray and run distributed Omni training."""
+    from verl_omni.pipelines.step_extension import validate_step_extension_mode
+
+    is_v1 = uses_v1_trainer(config)
+    validate_step_extension_mode(config, uses_v1=is_v1)
     enable_rl_insight(config)
 
-    if uses_v1_trainer(config):
+    if is_v1:
         from verl.trainer.main_ppo import TaskRunnerV1, run_ppo
 
         config.trainer.use_v1 = True

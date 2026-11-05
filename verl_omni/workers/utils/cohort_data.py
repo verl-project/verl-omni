@@ -19,15 +19,17 @@ hidden, or object repr/pickle used as an identity. Unsupported media objects
 must take the ordinary path before a cohort is reserved.
 """
 
+import copy
 import hashlib
 import json
 import math
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields, is_dataclass, replace
 
 import numpy as np
 import torch
 from tensordict import TensorDict, TensorDictBase
 from tensordict.tensorclass import NonTensorData, NonTensorStack
+from verl.utils import tensordict_utils as tu
 
 from verl_omni.workers.utils.cohort_lease import ShardIdentity
 
@@ -37,7 +39,10 @@ def value_digest(value) -> str:
     digest = hashlib.sha256()
 
     def emit(tag, payload=b""):
-        digest.update(tag.encode() + b":" + str(len(payload)).encode() + b":" + payload)
+        # Keep the immutable payload snapshot while avoiding a second copy
+        # when framing large materialized media for hashing.
+        digest.update(tag.encode() + b":" + str(len(payload)).encode() + b":")
+        digest.update(payload)
 
     def visit(item):
         if isinstance(item, NonTensorStack):
@@ -115,6 +120,64 @@ def _row_digests(data, fields):
             raise ValueError("Cohort column has the wrong number of rows")
         columns[field] = rows
     return tuple(value_digest({field: columns[field][i] for field in fields}) for i in range(len(data)))
+
+
+def _copy_snapshot_value(value):
+    """Copy supported materialized values without sharing mutable row payloads."""
+    if isinstance(value, TensorDictBase):
+        return freeze_cohort_data(value)
+    if isinstance(value, torch.Tensor):
+        if value.device.type != "cpu":
+            raise ValueError("Cohort snapshot requires materialized CPU tensors")
+        return value.detach().clone()
+    if type(value) is np.ndarray:
+        if not value.dtype.hasobject:
+            return value.copy()
+        result = np.empty(value.shape, dtype=value.dtype)
+        for index in np.ndindex(value.shape):
+            result[index] = _copy_snapshot_value(value[index])
+        return result
+    if isinstance(value, np.generic):
+        return copy.deepcopy(value)
+    if type(value) is dict:
+        if not all(isinstance(key, str) for key in value):
+            raise TypeError("Cohort mappings require string keys")
+        return {key: _copy_snapshot_value(item) for key, item in value.items()}
+    if type(value) is list:
+        return [_copy_snapshot_value(item) for item in value]
+    if type(value) is tuple:
+        return tuple(_copy_snapshot_value(item) for item in value)
+    if is_dataclass(value) and not isinstance(value, type):
+        return replace(
+            value, **{field.name: _copy_snapshot_value(getattr(value, field.name)) for field in fields(value)}
+        )
+    if value is None or type(value) in (str, bool, int, float, bytes):
+        return value
+    raise TypeError(f"Unsupported cohort snapshot value: {type(value)}")
+
+
+def freeze_cohort_data(data: TensorDictBase) -> TensorDictBase:
+    """Copy materialized inputs for a later update, without media aliasing.
+
+    TensorDict's generic deepcopy can retain shared objects inside
+    ``NonTensorStack``; rebuild those rows and scalar metadata explicitly.
+    Unsupported values fail closed before any actor update begins.
+    """
+    if not isinstance(data, TensorDictBase):
+        raise TypeError("A materialized TensorDict is required")
+    fields_before = row_fields(data)
+    rows_before = _row_digests(data, fields_before)
+    result = copy.deepcopy(data)
+    for key, value in data.items():
+        if isinstance(value, NonTensorStack):
+            tu.assign_non_tensor_stack(result, key, [_copy_snapshot_value(row) for row in value.tolist()])
+        elif isinstance(value, NonTensorData):
+            tu.assign_non_tensor_data(result, key, _copy_snapshot_value(value.data))
+        elif isinstance(value, TensorDictBase):
+            result.set(key, freeze_cohort_data(value))
+    if row_fields(result) != fields_before or _row_digests(result, fields_before) != rows_before:
+        raise ValueError("Cohort snapshot changed materialized input rows")
+    return result
 
 
 @dataclass(frozen=True)

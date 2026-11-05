@@ -21,14 +21,31 @@ establish algorithm, model, data and execution-shape eligibility first.
 
 from contextlib import contextmanager
 from contextvars import ContextVar
+from functools import partial
 
 import torch
 from verl.workers.utils.padding import no_padding_2_padding, response_to_nested
 
 from verl_omni.workers.utils.parameter_revision import ParameterRevision
 
-_ANCHOR_LEASE = ContextVar("verl_proximal_anchor_lease", default=None)
+_ANCHOR_LEASE: ContextVar[ParameterRevision | None] = ContextVar("verl_proximal_anchor_lease", default=None)
 _DIAGNOSTIC_ENTROPY = ContextVar("verl_proximal_diagnostic_entropy", default=False)
+
+
+@contextmanager
+def proximal_worker_loss_scope(actor, tracker, *, diagnostic_entropy=False):
+    """Temporarily install proximal loss inside a qualified actor update."""
+    from verl.workers.utils.losses import ppo_loss
+
+    original = actor.loss_fn
+    if not isinstance(original, partial) or original.func is not ppo_loss or original.args:
+        raise ValueError("Proximal reuse requires the native PPO loss")
+    with proximal_anchor_loss_scope(tracker, diagnostic_entropy=diagnostic_entropy):
+        actor.loss_fn = partial(proximal_ppo_loss, **original.keywords)
+        try:
+            yield
+        finally:
+            actor.loss_fn = original
 
 
 @contextmanager

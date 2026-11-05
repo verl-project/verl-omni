@@ -28,11 +28,14 @@ def get_training_output_metrics(output: TensorDict | KVBatchMeta, batch: KVBatch
     metrics already include the engine's DP aggregation; averaging that list
     again would change the existing behavior. Reuse native scalar collection.
     """
-    if not isinstance(output, KVBatchMeta):
-        return output["metrics"]
-    if output.partition_id != batch.partition_id or list(output.keys) != list(batch.keys):
-        raise ValueError("Training output partition and ordered keys must match the input batch")
-    metrics = output.extra_info.get("metrics")
+    if isinstance(output, KVBatchMeta):
+        if output.partition_id != batch.partition_id or list(output.keys) != list(batch.keys):
+            raise ValueError("Training output partition and ordered keys must match the input batch")
+        metrics = output.extra_info.get("metrics")
+    else:
+        # A TensorDict with row-shaped outputs can expose NonTensorStack as a
+        # per-row list; unwrap it before applying native scalar collection.
+        metrics = tu.get(output, "metrics")
     if isinstance(metrics, list | tuple):
         if not metrics or not all(isinstance(item, Mapping) for item in metrics):
             raise ValueError("Training output must include nonempty source-rank metrics mappings")

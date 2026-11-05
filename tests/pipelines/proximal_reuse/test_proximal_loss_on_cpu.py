@@ -15,6 +15,8 @@
 """CPU math/data contracts; no Ray, CUDA or new Omni V1 qualification."""
 
 import copy
+from functools import partial
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -25,11 +27,44 @@ from verl.workers.config.actor import ActorConfig, PolicyLossConfig
 from verl.workers.utils.losses import ppo_loss as native_ppo_loss
 from verl.workers.utils.padding import response_from_nested
 
-from tests.workers.test_omni_output_version_on_cpu import assert_equal as assert_state_equal
+from tests.workers.utils.test_parameter_revision_training_output_on_cpu import assert_equal as assert_state_equal
+from verl_omni.pipelines.proximal_reuse.anchor import (
+    prepare_proximal_loss,
+    proximal_anchor_loss_scope,
+    proximal_worker_loss_scope,
+)
+from verl_omni.pipelines.proximal_reuse.anchor import proximal_ppo_loss as ppo_loss
 from verl_omni.workers.utils.cohort_data import CohortData, value_digest
 from verl_omni.workers.utils.parameter_revision import ParameterRevision
-from verl_omni.workers.utils.proximal_anchor import prepare_proximal_loss, proximal_anchor_loss_scope
-from verl_omni.workers.utils.proximal_anchor import proximal_ppo_loss as ppo_loss
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_native_loss_restored_after_proximal_worker_scope(fail):
+    tracker = ParameterRevision()
+    config = object()
+    original = partial(native_ppo_loss, config=config)
+    actor = SimpleNamespace(loss_fn=original)
+    with pytest.raises(RuntimeError, match="failure" if fail else "exactly one"):
+        with tracker.update(tracker.version(), "cohort"):
+            with proximal_worker_loss_scope(actor, tracker):
+                assert actor.loss_fn.func is ppo_loss
+                assert actor.loss_fn.keywords["config"] is config
+                if fail:
+                    raise RuntimeError("failure")
+    assert actor.loss_fn is original
+
+
+def test_native_loss_restored_after_successful_proximal_update():
+    tracker = ParameterRevision()
+    original = partial(native_ppo_loss, config=object())
+    actor = SimpleNamespace(loss_fn=original)
+    with tracker.update(tracker.version(), "success"):
+        with proximal_worker_loss_scope(actor, tracker):
+            assert actor.loss_fn.func is ppo_loss
+            with tracker.mutation("optimizer"):
+                pass
+        assert actor.loss_fn is original
+    assert tracker.version().revision == 1
 
 
 def nested(rows):

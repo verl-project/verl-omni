@@ -25,7 +25,7 @@ def cohort_transport(method):
     def wrapped(self, data):
         if not isinstance(data, BatchMeta | KVBatchMeta):
             raise TypeError("Cohort RPC requires actual dispatched batch metadata")
-        key = "_proximal_transport_identity"
+        key = "_step_transport_identity"
         if key in data.extra_info:
             raise ValueError("Caller-supplied transport identity is forbidden")
         # Native dispatch resolves keys to storage indexes before chunking.

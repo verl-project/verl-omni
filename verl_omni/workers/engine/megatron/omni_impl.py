@@ -9,6 +9,11 @@ import verl.utils.torch_functional as verl_F
 from verl.utils import tensordict_utils as tu
 from verl.utils.dataset.dataset_utils import DatasetPadMode
 from verl.utils.device import get_device_id
+from verl.utils.megatron_utils import (
+    get_megatron_module_device,
+    load_megatron_model_to_gpu,
+    offload_megatron_model_to_cpu,
+)
 from verl.workers.engine.base import EngineRegistry
 from verl.workers.engine.megatron.transformer_impl import MegatronEngineWithLMHead
 
@@ -21,16 +26,53 @@ from verl_omni.workers.utils.training_output import detach_microbatch_outputs
 class OmniMegatronEngine(ParameterTrackingMixin, MegatronEngineWithLMHead):
     """Use verl's LM flow with the registered pipeline's Megatron model call."""
 
-    def proximal_execution(self):
-        from verl_omni.workers.utils.proximal_execution import megatron_proximal_execution
-
-        return megatron_proximal_execution(self)
-
     def __init__(self, model_config, engine_config, optimizer_config, checkpoint_config):
         self.model_adapter_cls = OmniModelBase.get_class(model_config)
         model_config = self.model_adapter_cls.prepare_megatron_config(model_config, engine_config)
         self.model_forward = self.model_adapter_cls.get_megatron_forward()
         super().__init__(model_config, engine_config, optimizer_config, checkpoint_config)
+
+    def save_checkpoint(
+        self,
+        local_path: str,
+        hdfs_path: str | None = None,
+        global_step: int = 0,
+        max_ckpt_to_keep: int | None = None,
+        **kwargs,
+    ) -> None:
+        """Preserve native checkpoint ordering while tracking device moves."""
+        tracker = getattr(self, "_parameter_revision", None)
+        if tracker is None:
+            return super().save_checkpoint(local_path, hdfs_path, global_step, max_ckpt_to_keep, **kwargs)
+        # The native checkpoint entry calls free movement helpers, bypassing
+        # the tracked to() method. Storage errors alone do not poison weights.
+        with tracker.access():
+            origin_module_device = get_megatron_module_device(self.module)
+            if self._is_offload_param or origin_module_device == "cpu":
+                with tracker.device_transition():
+                    load_megatron_model_to_gpu(self.module, load_grad=True)
+            self.checkpoint_mananager.save_checkpoint(
+                local_path=local_path,
+                hdfs_path=hdfs_path,
+                global_step=global_step,
+                max_ckpt_to_keep=max_ckpt_to_keep,
+            )
+            torch.distributed.barrier()
+            if self._is_offload_param:
+                with tracker.device_transition():
+                    offload_megatron_model_to_cpu(self.module)
+
+    def supports_detached_training_output(self):
+        """Qualify the tested engine and its supported training configuration.
+
+        A subclass must explicitly opt in after qualifying its own output
+        semantics; inheriting this implementation alone is not sufficient.
+        """
+        return (
+            type(self) is OmniMegatronEngine
+            and not self.engine_config.forward_only
+            and not self.engine_config.dynamic_context_parallel
+        )
 
     def postprocess_micro_batch_func(self, output, data, forward_only, loss_function, local_cp_size=None):
         result = super().postprocess_micro_batch_func(

@@ -19,13 +19,9 @@ trainer step counters. This module does not compute those fingerprints or
 establish that an algorithm is eligible to omit its old-policy forward.
 """
 
-from collections.abc import Callable
-from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 
-import torch.distributed as dist
-
-from verl_omni.workers.utils.parameter_revision import ParameterRevision, ParameterVersion
+from verl_omni.workers.utils.parameter_revision import ParameterVersion
 
 
 @dataclass(frozen=True)
@@ -64,7 +60,7 @@ class CohortPlan:
             raise ValueError("A worker incarnation is reused by multiple training ranks")
         if len({version.revision for version in self.versions}) != 1:
             raise ValueError("Training ranks have different parameter-writing histories")
-        keys = []
+        keys: list[str] = []
         for shard in self.shards:
             if not shard.keys or any(not isinstance(key, str) or not key for key in shard.keys):
                 raise ValueError("Empty shard or sample key")
@@ -93,56 +89,3 @@ def validate_observations(plan: CohortPlan, observations: list[dict]):
         }
         if observation != expected:
             raise ValueError(f"Rank {rank} actor version, topology or shard identity differs")
-
-
-def _gather(value, group):
-    observations = [None] * dist.get_world_size(group)
-    dist.all_gather_object(observations, value, group=group)
-    return observations
-
-
-@contextmanager
-def collective_update(
-    tracker: ParameterRevision,
-    plan: CohortPlan,
-    actual_shard: ShardIdentity | Callable[[], ShardIdentity],
-    dp_rank: int,
-    *,
-    group,
-):
-    """Reject every rank before model work if any local version/shard check fails.
-
-    The supplied group must contain exactly the training workers. It must not
-    include colocated rollout workers. A failed/partial update poisons all
-    participating trackers; it is never automatically retried. Broken model
-    collectives still depend on the framework/process-group failure timeout.
-    """
-    rank, size = dist.get_rank(group), dist.get_world_size(group)
-    with ExitStack() as stack:
-        try:
-            plan.validate(size)
-            actual_shard = actual_shard() if callable(actual_shard) else actual_shard
-            version = tracker.version()
-            stack.enter_context(tracker.update(plan.versions[rank], plan.cohort_id))
-            observation = {
-                "rank": rank,
-                "dp_rank": dp_rank,
-                "cohort_id": plan.cohort_id,
-                "partition_id": plan.partition_id,
-                "version": version,
-                "shard": actual_shard,
-            }
-        except Exception as exc:
-            observation = {"error": f"{type(exc).__name__}: {exc}"}
-        # Local rejection must still enter this collective, before any engine
-        # context, forward or gradient communication on another rank.
-        validate_observations(plan, _gather(observation, group))
-        failure = None
-        try:
-            yield
-            tracker.assert_update_complete()
-        except BaseException as exc:
-            failure = exc
-        statuses = _gather(None if failure is None else f"{type(failure).__name__}: {failure}", group)
-        if any(status is not None for status in statuses):
-            raise RuntimeError(f"Atomic cohort failed on training ranks: {statuses}") from failure

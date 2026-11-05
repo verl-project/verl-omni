@@ -22,6 +22,7 @@ from . import (
     minicpm,
     minimax_h3_diffusion_nft,
     minimax_h3_flow_grpo,
+    proximal_reuse,
     qwen3_omni,
     qwen3_tts,
     qwen_image_diffusion_nft,
@@ -68,6 +69,7 @@ __all__ += list(ltx2_omni_nft.__all__)
 __all__ += list(minicpm.__all__)
 __all__ += list(minimax_h3_diffusion_nft.__all__)
 __all__ += list(minimax_h3_flow_grpo.__all__)
+__all__ += list(proximal_reuse.__all__)
 __all__ += list(sd3_dgpo.__all__)
 __all__ += list(sd3_dpo.__all__)
 __all__ += list(sd3_flow_grpo.__all__)

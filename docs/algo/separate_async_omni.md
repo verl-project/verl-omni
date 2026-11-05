@@ -238,6 +238,49 @@ For a parity check against the synchronous baseline, run the same recipe with
 `trainer.v1.trainer_mode=omni_sync` and compare reward curves; at
 `parameter_sync_step=1` they should overlap within noise.
 
+## Optional proximal actor reuse
+
+For qualified one-update Megatron steps, an opt-in training-step extension can
+reuse the actor forward pass as the detached proximal policy anchor. Set
+`trainer.v1.step_extension=proximal_actor_reuse` with
+`trainer.v1.trainer_mode=omni_separate_async`. The default is `null`, which
+keeps the native path. The earlier
+`+trainer.v1.reuse_proximal_actor_forward=true` spelling is also accepted.
+
+The extension keeps the existing PPO/GSPO objective and its importance ratios.
+It falls back to the native old-policy forward for unsupported configurations,
+including expert parallelism greater than one and multiple updates per batch.
+The AVQA Megatron example defaults to expert parallelism four, so enabling the
+extension on that unchanged recipe does not activate this optimization.
+Unsupported trainer modes fail at launch rather than silently ignoring the
+setting. A single-update smoke does not establish multi-step convergence parity.
+
+For an explicit EP1 variant, use
+`examples/gspo_trainer/qwen3_omni/run_qwen3_omni_megatron_avqa_proximal_reuse.sh`.
+It reuses the image+audio AVQA launcher, keeps its clipping and response budgets,
+and selects the extension with one PPO epoch and no actor minibatch shuffle.
+The base recipe supplies equal training/minibatch sizes and
+`parameter_sync_step=1`. Required paths and GPU layout are the same as the base
+recipe; caller Hydra overrides remain last.
+The variant defaults `NVTE_ALLOW_NONDETERMINISTIC_ALGO=0` for the driver and
+Ray workers, as required by the Transformer Engine attention qualification.
+An explicit environment override is preserved; setting it to `1` disables
+reuse qualification for that attention backend.
+
+```bash
+MODEL_PATH=/path/to/Qwen3-Omni \
+TRAIN_FILE=/path/to/train.parquet \
+VAL_FILE=/path/to/validation.parquet \
+AVQA_CONFIG_ONLY=1 \
+bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_megatron_avqa_proximal_reuse.sh
+```
+
+Remove `AVQA_CONFIG_ONLY=1` to train. Configuration composition checks the launch
+arguments but does not qualify actor numerics. Check the runtime
+`training/proximal_anchor_reuse` metric: selecting the extension alone does not
+guarantee reuse. EP>1, multiple updates and other unsupported settings still
+use the native path; this example does not extend their numerical support.
+
 ## Limitations
 
 - **Abort semantics.** Weight sync is

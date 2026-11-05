@@ -72,6 +72,9 @@ trainer:
     # Use the omni trainer mode for omni models.
     trainer_mode: omni_sync
 
+    # Optional registered training-step extension; null retains the native path.
+    step_extension: null
+
 
 # Config for the algorithm.
 algorithm:

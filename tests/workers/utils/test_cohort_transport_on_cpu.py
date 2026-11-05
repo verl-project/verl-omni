@@ -29,7 +29,7 @@ from verl.utils.transferqueue_utils import BatchMeta, KVBatchMeta
 
 from verl_omni.workers.utils.cohort_transport import cohort_transport
 
-IDENTITY = "_proximal_transport_identity"
+IDENTITY = "_step_transport_identity"
 
 
 @pytest.fixture

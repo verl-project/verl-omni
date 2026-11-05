@@ -13,19 +13,30 @@
 # limitations under the License.
 from contextlib import nullcontext
 from functools import wraps
-from typing import Optional
+from typing import Any, Optional
 
 import torch
 from omegaconf import DictConfig
 from verl.experimental.separation.engine_workers import DetachActorWorker
-from verl.single_controller.base.decorator import Dispatch, make_nd_compute_dataproto_dispatch_fn, register
+from verl.single_controller.base.decorator import (
+    Dispatch,
+    collect_all_to_all,
+    make_nd_compute_dataproto_dispatch_fn,
+    register,
+)
 from verl.workers.config import DistillationConfig
 
 from verl_omni.workers.engine_workers import ActorRolloutRefWorker
 from verl_omni.workers.utils.cohort_transport import cohort_transport
 from verl_omni.workers.utils.parameter_revision import parameter_access
+from verl_omni.workers.utils.step_extension_transport import step_extension_transport
 
 __all__ = ["OmniDetachActorWorker"]
+
+_STAGE_DISPATCH = {
+    **make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"),
+    "collect_fn": collect_all_to_all,
+}
 
 
 class OmniDetachActorWorker(ActorRolloutRefWorker, DetachActorWorker):
@@ -41,7 +52,7 @@ class OmniDetachActorWorker(ActorRolloutRefWorker, DetachActorWorker):
         self, config: DictConfig, role: str, distillation_config: Optional[DistillationConfig] = None, **kwargs
     ):
         ActorRolloutRefWorker.__init__(self, config, role, distillation_config=distillation_config, **kwargs)
-        self._strategy_handlers = None
+        self._strategy_handlers: tuple[Any, Any] | None = None
 
     def _get_strategy_handlers(self):
         if self._strategy_handlers is None:
@@ -56,15 +67,6 @@ class OmniDetachActorWorker(ActorRolloutRefWorker, DetachActorWorker):
         return self._strategy_handlers
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
-    def get_parameter_version(self):
-        """Explicitly enable tracking and return this worker's current version."""
-        from verl_omni.workers.engine.megatron.omni_impl import OmniMegatronEngine
-
-        if type(self.actor.engine) is not OmniMegatronEngine:
-            raise ValueError("Parameter tracking requires the Omni Megatron engine")
-        return self.actor.engine.enable_parameter_tracking().version()
-
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     @parameter_access("actor.engine")
     def save_model_to_cpu(self, n):
         return super().save_model_to_cpu(n)
@@ -72,36 +74,44 @@ class OmniDetachActorWorker(ActorRolloutRefWorker, DetachActorWorker):
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def restore_model_from_cpu(self, n):
         tracker = getattr(self.actor.engine, "_parameter_revision", None)
-        with tracker.mutation("restore") if tracker is not None else nullcontext():
+        with tracker.access(internal=True) if tracker is not None else nullcontext():
             if tracker is not None and n not in getattr(self, "cpu_saved_models", {}):
                 raise ValueError("The requested CPU snapshot does not exist")
-            return super().restore_model_from_cpu(n)
+            with tracker.mutation("restore") if tracker is not None else nullcontext():
+                return super().restore_model_from_cpu(n)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     @parameter_access("actor.engine")
     def clear_cpu_model(self, n):
         return super().clear_cpu_model(n)
 
+    @step_extension_transport
+    @cohort_transport
+    @register(dispatch_mode=_STAGE_DISPATCH, blocking=False)
+    def stage_step_extension(self, data):
+        """Dispatch an extension stage over the actor mesh."""
+        from verl.utils import tensordict_utils as tu
+
+        from verl_omni.pipelines.step_extension import SELECTOR_KEY, invoke_worker_extension
+
+        selector = tu.get_non_tensor_data(data, SELECTOR_KEY, default=None)
+        if not isinstance(selector, tuple) or len(selector) != 2:
+            raise ValueError("Invalid worker extension selector")
+        return invoke_worker_extension(selector[0], "stage", selector[1], self, data)
+
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
-    @parameter_access("actor.engine")
-    def qualify_proximal_actor(self):
-        from verl_omni.workers.utils.proximal_rpc import qualify_actor
+    def control_step_extension(self, name, operation, payload=None):
+        """Dispatch a synchronous all-worker extension control operation."""
+        from verl_omni.pipelines.step_extension import invoke_worker_extension
 
-        return qualify_actor(self)
+        return invoke_worker_extension(name, "control", operation, self, payload)
 
-    @cohort_transport
-    @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
-    def prepare_proximal_actor(self, data):
-        from verl_omni.workers.utils.proximal_rpc import prepare_actor
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
+    def commit_step_extension(self, name, operation, payload=None):
+        """Dispatch an all-worker extension commit without implicit retries."""
+        from verl_omni.pipelines.step_extension import invoke_worker_extension
 
-        return prepare_actor(self, data, group=torch.distributed.group.WORLD)
-
-    @cohort_transport
-    @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
-    def update_proximal_actor(self, data):
-        from verl_omni.workers.utils.proximal_rpc import update_actor
-
-        return update_actor(self, data, group=torch.distributed.group.WORLD)
+        return invoke_worker_extension(name, "commit", operation, self, payload)
 
 
 def _owning_cpu_state(value):
