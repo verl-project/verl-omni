@@ -186,8 +186,9 @@ def test_tracking_explicit_layout_bypasses_legacy_normalizer(monkeypatch):
     canonical = torch.arange(3 * 3 * 2 * 5, dtype=torch.uint8).reshape(3, 3, 2, 5)
     preview = MediaArtifact(MediaSpec("video", "decoded", "TCHW", fps=24), canonical)
     frames, width, height = tracking._video_tensor_to_rgb24(preview)
+    frames = torch.stack([torch.from_numpy(frame) for frame in frames])
     assert frames.shape == (3, 2, 5, 3) and (width, height) == (5, 2)
-    torch.testing.assert_close(torch.from_numpy(frames).permute(0, 3, 1, 2), canonical)
+    torch.testing.assert_close(frames.permute(0, 3, 1, 2), canonical)
 
 
 @pytest.mark.parametrize("version", [0, 1])

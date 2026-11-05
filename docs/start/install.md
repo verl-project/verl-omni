@@ -215,7 +215,8 @@ export WANDB_API_KEY=<your_wandb_api_key>
 ```
 
 SwanLab works where W&B is not reachable. Install its extra, set the key, and pick
-the logger on the training command:
+the logger on the training command. swanlab pins `protobuf<7`, so in a shared env the
+extra moves protobuf from 7.x to 6.x:
 
 ```bash
 uv pip install -e ".[swanlab]"

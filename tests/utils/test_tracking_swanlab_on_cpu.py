@@ -116,6 +116,33 @@ def test_large_video_is_downscaled_keeping_its_aspect_ratio():
     assert Image.open(io.BytesIO(media["val/videos/sample_1"].buffer.getvalue())).size == (512, 288)
 
 
+def test_large_video_frames_are_downscaled_before_the_next_one_converts(monkeypatch):
+    images = []
+    full_size_images = []
+    fromarray = Image.fromarray
+
+    def tracking_fromarray(frame, *args, **kwargs):
+        full_size_images.append(sum(image.size != (512, 32) for image in images))
+        images.append(fromarray(frame, *args, **kwargs))
+        return images[-1]
+
+    monkeypatch.setattr(Image, "fromarray", tracking_fromarray)
+
+    wrap_val_samples_for_swanlab([("prompt", _warm_clip(t=8, h=64, w=1024), 1.0)], media_kinds=["video"])
+
+    assert len(images) == 8
+    assert max(full_size_images) == 0
+
+
+def test_image_sample_audio_is_not_logged_like_the_wandb_path():
+    sample = ("prompt", _warm_image(), 1.0, torch.zeros(1, 800), 8000)
+
+    rows, media = wrap_val_samples_for_swanlab([sample], media_kinds=["image"])
+
+    assert rows[0][1] == "val/images/sample_1"
+    assert set(media) == {"val/images/sample_1"}
+
+
 def test_audio_goes_to_its_own_key_next_to_the_video():
     waveform = torch.linspace(-0.5, 0.5, 800).unsqueeze(0)
     sample = ("prompt", _warm_clip(), 1.0, waveform, 8000)
