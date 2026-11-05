@@ -140,7 +140,7 @@ class OmniFSDPRewardLoopWorker(OmniRewardLoopWorker):
         self.reward_manager.set_reward_executors({}, self.native_reward_executors)
 
     def ready(self):
-        """Acknowledge successful facade construction before ownership is transferred."""
+        """Acknowledge successful facade construction."""
         return self._replica.worker_group.world_size
 
 
@@ -358,22 +358,18 @@ class OmniRewardLoopManager(RewardLoopManager):
             collective_timeout=model.fsdp.collective_timeout,
             bundle_indices=model.placement.bundle_indices,
         )
-        worker = None
+        owner = self.multi_reward_model_manager.models[model.name]
         try:
-            self.multi_reward_model_manager.models[model.name].bind_rank_workers(replica.worker_group.workers)
+            owner.bind_rank_workers(replica.worker_group.workers)
             worker = ray.remote(OmniFSDPRewardLoopWorker).remote(
                 config, {model.name: spec}, replica.worker_group.workers, processor_path, model.fsdp.timeout
             )
+            owner.bind_workers([worker])
             ray.get(worker.ready.remote(), timeout=model.fsdp.timeout)
         except BaseException as exc:
             errors = [exc]
-            if worker is not None:
-                try:
-                    ray.kill(worker, no_restart=True)
-                except BaseException as cleanup:
-                    errors.append(cleanup)
             try:
-                replica.close()
+                owner._terminate_owned()
             except BaseException as cleanup:
                 errors.append(cleanup)
             raise BaseExceptionGroup("FSDP scoring worker construction failed", errors) from None

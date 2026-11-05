@@ -20,6 +20,7 @@ import pytest
 from omegaconf import OmegaConf
 
 from verl_omni.reward_loop import native_fsdp
+from verl_omni.reward_loop import reward_loop as reward_loop_module
 from verl_omni.reward_loop.reward_loop import OmniRewardLoopManager
 from verl_omni.reward_loop.reward_model import MultiRewardModelManager
 from verl_omni.trainer.main_diffusion_v1 import finish_training_resources
@@ -238,3 +239,111 @@ async def test_owner_cleanup_attempts_ranks_after_facade_termination_error(monke
     assert str(error.value.exceptions[0]) == "primary" and calls == [[facade], ranks]
     with pytest.raises(BaseExceptionGroup, match="owner cleanup failed"):
         await owner.close()
+
+
+@pytest.fixture
+def construction(monkeypatch):
+    cfg = config()
+    manager = object.__new__(OmniRewardLoopManager)
+    manager.multi_reward_model_manager = MultiRewardModelManager(cfg, SimpleNamespace(world_size=2))
+    owner = manager.multi_reward_model_manager.models["pickscore"]
+    model = parse_reward_model_config("pickscore", cfg.reward.models.pickscore)
+    state = SimpleNamespace(
+        cfg=cfg,
+        manager=manager,
+        owner=owner,
+        model=model,
+        spec=manager.multi_reward_model_manager.reward_model_specs["pickscore"],
+        failure=None,
+        cleanup_failure=None,
+        primary=RuntimeError("construction failed"),
+        events=[],
+        bound_at_ready=[],
+        dead=set(),
+    )
+
+    def ready():
+        if not owner._closed:
+            state.bound_at_ready.append(owner._workers == [state.facade])
+            if state.failure == "ready_submission":
+                raise state.primary
+        return "facade"
+
+    state.facade = SimpleNamespace(ready=SimpleNamespace(remote=ready))
+    state.ranks = [
+        SimpleNamespace(status=SimpleNamespace(remote=lambda rank=rank: rank)) for rank in ("rank0", "rank1")
+    ]
+
+    def submit(*args):
+        if state.failure == "facade_submission":
+            raise state.primary
+        return state.facade
+
+    def get(ref, **kwargs):
+        if not owner._closed:
+            if state.failure in {"ready_error", "ready_timeout"}:
+                raise state.primary
+            return True
+        state.events.append(("confirm", ref))
+        if (ref == "facade" and state.cleanup_failure in {"facade_probe", "both_probes"}) or (
+            ref == "rank1" and state.cleanup_failure in {"rank_probe", "both_probes"}
+        ):
+            raise TimeoutError(f"{ref} death unconfirmed")
+        assert ref in state.dead
+        raise native_fsdp.ray.exceptions.RayActorError()
+
+    def kill(actor, **kwargs):
+        name = "facade" if actor is state.facade else "rank0" if actor is state.ranks[0] else "rank1"
+        state.events.append(("kill", name))
+        state.dead.add(name)
+        if name == "facade" and state.cleanup_failure == "facade_kill":
+            raise RuntimeError("facade kill failed")
+
+    monkeypatch.setattr(
+        native_fsdp,
+        "build_replica",
+        lambda *args, **kwargs: SimpleNamespace(worker_group=SimpleNamespace(workers=state.ranks)),
+    )
+    monkeypatch.setattr(reward_loop_module.ray, "remote", lambda cls: SimpleNamespace(remote=submit))
+    monkeypatch.setattr(reward_loop_module.ray, "get", get)
+    monkeypatch.setattr(reward_loop_module.ray, "kill", kill)
+    return state
+
+
+def test_facade_is_owned_before_successful_readiness(construction):
+    state = construction
+    assert state.manager._create_fsdp_worker(state.cfg, state.spec, state.model) == [state.facade]
+    assert state.bound_at_ready == [True]
+    assert state.owner.rank_workers == state.ranks and state.owner._workers == [state.facade]
+    assert not state.events and not state.owner._closed
+
+
+@pytest.mark.parametrize("failure", ["facade_submission", "ready_submission", "ready_error", "ready_timeout"])
+@pytest.mark.parametrize("cleanup_failure", [None, "facade_kill", "facade_probe", "rank_probe", "both_probes"])
+@pytest.mark.asyncio
+async def test_construction_failure_confirms_every_owned_actor(construction, failure, cleanup_failure):
+    state = construction
+    state.failure, state.cleanup_failure = failure, cleanup_failure
+    if failure == "ready_timeout":
+        state.primary = native_fsdp.ray.exceptions.GetTimeoutError("readiness deadline")
+    with pytest.raises(BaseExceptionGroup) as error:
+        state.manager._create_fsdp_worker(state.cfg, state.spec, state.model)
+    assert error.value.exceptions[0] is state.primary
+    expected = ["rank0", "rank1"] if failure == "facade_submission" else ["facade", "rank0", "rank1"]
+    assert [name for event, name in state.events if event == "kill"] == expected
+    assert [name for event, name in state.events if event == "confirm"] == expected
+    assert state.owner._closed
+    if failure != "facade_submission":
+        assert state.bound_at_ready == [True]
+        assert state.owner._workers == [state.facade]
+    failed_cleanup = cleanup_failure in {"rank_probe", "both_probes"} or (
+        failure != "facade_submission" and cleanup_failure is not None
+    )
+    if failed_cleanup:
+        assert error.value.exceptions[1] is state.owner._termination_error
+        with pytest.raises(BaseExceptionGroup) as repeated:
+            await state.owner.close()
+        assert repeated.value is state.owner._termination_error
+    else:
+        assert len(error.value.exceptions) == 1 and state.owner._termination_error is None
+        await state.owner.close()
