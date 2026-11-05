@@ -7,6 +7,13 @@ REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 : "${MODEL_PATH:?Set MODEL_PATH to a Qwen3-Omni checkpoint}"
 : "${TRAIN_FILE:?Set TRAIN_FILE to prepared original AVQA video train.parquet}"
 : "${VAL_FILE:?Set VAL_FILE to prepared original AVQA video validation.parquet}"
+if [[ ${AVQA_VIDEO_CONFIG_ONLY:-0} != 1 ]]; then
+  [[ -f "$TRAIN_FILE" ]] || { echo "TRAIN_FILE must be an existing regular file: $TRAIN_FILE" >&2; exit 2; }
+  [[ -f "$VAL_FILE" ]] || { echo "VAL_FILE must be an existing regular file: $VAL_FILE" >&2; exit 2; }
+  [[ ! "$TRAIN_FILE" -ef "$VAL_FILE" ]] || { echo "TRAIN_FILE and VAL_FILE must be different files" >&2; exit 2; }
+  TRAIN_FILE="$(cd -- "$(dirname -- "$TRAIN_FILE")" && pwd -P)/$(basename -- "$TRAIN_FILE")"
+  VAL_FILE="$(cd -- "$(dirname -- "$VAL_FILE")" && pwd -P)/$(basename -- "$VAL_FILE")"
+fi
 ROLLOUT_GPUS=${ROLLOUT_GPUS:-4}
 ROLLOUT_TP=${ROLLOUT_TP:-4}
 for value in "$ROLLOUT_GPUS" "$ROLLOUT_TP"; do

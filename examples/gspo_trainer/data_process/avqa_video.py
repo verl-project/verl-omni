@@ -8,9 +8,15 @@ import json
 from collections import Counter
 from numbers import Integral
 from pathlib import Path
-from tempfile import TemporaryDirectory
+from shutil import copy2, rmtree
+from tempfile import mkdtemp
 
 import pandas as pd
+
+if __package__:
+    from .nextqa import probe_audio_stream
+else:
+    from nextqa import probe_audio_stream
 
 SYSTEM_PROMPT = (
     "Consider both the visual and audio information in the video. Explain your reasoning inside "
@@ -137,6 +143,7 @@ def convert_split(input_json, video_root, output, split, fps=1.0, max_frames=32)
     """Write valid original annotations with exact kept/dropped counts."""
     records = read_annotations(input_json)
     rows, dropped = [], Counter()
+    audio_status_by_video = {}
     for index, record in enumerate(records):
         if not isinstance(record, dict):
             dropped["invalid_record"] += 1
@@ -144,6 +151,13 @@ def convert_split(input_json, video_root, output, split, fps=1.0, max_frames=32)
         row, reason = build_rl_row(record, video_root, split, index, fps, max_frames)
         if row is None:
             dropped[reason] += 1
+            continue
+        video_path = row["videos"][0]["video"]
+        if video_path not in audio_status_by_video:
+            audio_status_by_video[video_path] = probe_audio_stream(video_path)
+        audio_reason = audio_status_by_video[video_path]
+        if audio_reason is not None:
+            dropped[audio_reason] += 1
             continue
         rows.append(row)
     if not rows:
@@ -183,9 +197,9 @@ def main():
         **audit_annotation_splits(args.train_json, args.validation_json),
     }
     output.parent.mkdir(parents=True, exist_ok=True)
-    # Conversion failures must not leave partial outputs or replace existing data.
-    with TemporaryDirectory(prefix=f".{output.name}-", dir=output.parent) as temporary:
-        staging = Path(temporary)
+    staging = Path(mkdtemp(prefix=f".{output.name}-", dir=output.parent))
+    retain_backups = False
+    try:
         for split, source, filename in (
             ("train", args.train_json, "train.parquet"),
             ("validation", args.validation_json, "validation.parquet"),
@@ -195,8 +209,40 @@ def main():
             )
         (staging / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
         output.mkdir(parents=True, exist_ok=True)
+        backup = staging / "originals"
+        backup.mkdir()
         for filename in ("train.parquet", "validation.parquet", "manifest.json"):
-            (staging / filename).replace(output / filename)
+            target = output / filename
+            if target.exists() or target.is_symlink():
+                copy2(target, backup / filename, follow_symlinks=False)
+        published = []
+        try:
+            for filename in ("train.parquet", "validation.parquet", "manifest.json"):
+                published.append(filename)
+                (staging / filename).replace(output / filename)
+        except BaseException as error:
+            # Roll back on interruption as well as filesystem errors.
+            retain_backups = True
+            rollback_errors = []
+            for filename in reversed(published):
+                original = backup / filename
+                try:
+                    if original.exists() or original.is_symlink():
+                        original.replace(output / filename)
+                    else:
+                        (output / filename).unlink(missing_ok=True)
+                except OSError as rollback_error:
+                    rollback_errors.append(f"{filename}: {rollback_error}")
+            if rollback_errors:
+                raise RuntimeError(
+                    f"Publication failed and rollback is incomplete; original files retained at {backup}: "
+                    + "; ".join(rollback_errors)
+                ) from error
+            retain_backups = False
+            raise
+    finally:
+        if not retain_backups:
+            rmtree(staging)
     print(json.dumps(manifest, indent=2))
 
 

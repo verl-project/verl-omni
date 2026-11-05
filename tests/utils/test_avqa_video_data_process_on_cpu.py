@@ -5,7 +5,9 @@
 import hashlib
 import importlib.util
 import json
+import sys
 from pathlib import Path
+from unittest.mock import patch
 
 import pandas as pd
 import pytest
@@ -14,7 +16,14 @@ path = Path(__file__).parents[2] / "examples/gspo_trainer/data_process/avqa_vide
 spec = importlib.util.spec_from_file_location("avqa_video_data_process", path)
 avqa_video = importlib.util.module_from_spec(spec)
 assert spec.loader is not None
-spec.loader.exec_module(avqa_video)
+with patch.object(sys, "path", [str(path.parent), *sys.path]):
+    spec.loader.exec_module(avqa_video)
+
+
+@pytest.fixture(autouse=True)
+def decodable_fixture_media(monkeypatch):
+    """Annotation tests use empty files; audio probing is tested separately."""
+    monkeypatch.setattr(avqa_video, "probe_audio_stream", lambda video: None)
 
 
 def record(**changes):
