@@ -1,6 +1,6 @@
 # RFC: Native FSDP2 reward replicas
 
-Last updated: 11/03/2026.
+Last updated: 11/05/2026.
 
 ## Summary
 
@@ -218,12 +218,17 @@ instead of continuing with a changing set of healthy replicas after failure.
 
 | State / operation | Required behavior |
 | --- | --- |
-| Construct | Validate placement/executor before allocation; retain handles as each group is created. Roll back every created facade and rank if later construction fails. |
+| Construct | Validate placement/executor before allocation; retain every rank/facade handle immediately, before readiness. Confirm termination of all created actors on failure. |
 | Asleep → wake | Load and shard both ranks before acknowledging readiness. Repeated resident wake is idempotent. |
 | Awake → infer | Hold the replica lock through preprocessing, submission and both replies. Reject inference while asleep or closed. |
 | Awake → sleep | Wait behind accepted inference, discard weights on every rank and acknowledge the unloaded state. Retain process groups for wake. |
 | Close | Drain ordered work, unload weights, destroy process groups, terminate owned actors and confirm death. Close is idempotent after successful termination. |
 | Invalidated | Stop new deployment RPCs and terminate every group. Never reuse a failed process group. Retain cleanup failures for later close calls. |
+
+The deployment owner records each facade before submitting its readiness RPC. Readiness acknowledges construction;
+it does not transfer ownership. Constructor errors, readiness submission errors and readiness deadlines use the same
+bounded owner termination path as runtime failures. Facade cleanup failure still permits every rank cleanup attempt;
+construction and cleanup errors remain observable together, including on a later close.
 
 `offload=true` reconstructs from the original checkpoint on the next wake; it does not retain a mutable CPU copy
 of reward weights. `offload=false` suppresses phase unload in a dedicated pool; explicit final close still destroys
@@ -327,12 +332,17 @@ replica groups, 20-cycle reloads and actual rank/facade failures. Four-GPU CLIPS
 absolute error `3.814697265625e-6` and score error `2.980232238769531e-7`; four-GPU PickScore reached
 `5.900859832763672e-6` and `1.1920928955078125e-7` respectively. These are observed errors, not new scorer tolerances.
 
+Construction rollback additionally passed actual constructor/readiness errors and hangs with one and two groups;
+the two-group cases confirmed all six owned actors DEAD. The corrected single-replica candidate completed dedicated
+SD3.5 Medium training and checkpoint 2→3 continuation at 256×256/eight denoising steps, with finite optimizer/model
+tensors, changed LoRA tensors, unchanged frozen tensors and exact Adam step progression.
+
 Separate shared-phase and streaming integrations completed short real SD3.5 Medium FlowGRPO training/resume runs
 at 256×256 with eight denoising steps. GPU streaming evidence covers one two-rank group and one agent worker.
 Shared four-GPU normal training covers two groups, FSDP2 actors and KL disabled. These runs establish functional
 updates and continuation for those configurations; they do not establish general release readiness.
 
-Remaining gates include real second-group construction rollback; GPU streaming with two groups and multiple agent
+Remaining gates include GPU streaming with two groups and multiple agent
 workers; fatal two-group shared-training failures; reference/KL or FSDP1 actor acceptance if claimed; physical
 multi-node and NPU execution; and longer runs at the intended production resolution/denoising workload.
 Final execution evidence must identify the complete candidate, helper scripts, runtime, configuration, model and

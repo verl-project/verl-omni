@@ -140,7 +140,7 @@ class OmniFSDPRewardLoopWorker(OmniRewardLoopWorker):
         self.reward_manager.set_reward_executors({}, self.native_reward_executors)
 
     def ready(self):
-        """Acknowledge successful facade construction before ownership is transferred."""
+        """Acknowledge successful facade construction."""
         return self._replica.worker_group.world_size
 
 

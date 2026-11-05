@@ -1,6 +1,6 @@
 # Native FSDP reward validation
 
-Last updated: 11/03/2026.
+Last updated: 11/05/2026.
 
 ## Acceptance boundary
 
@@ -41,8 +41,8 @@ rank order, process group and facade; each pair's local DTensor element counts s
 Production dispatch checks preserve sample order across batches 1/3/16/17, reordered/repeated samples and long text.
 
 Actual rank or facade death invalidates the entire deployment and terminates both groups before Ray shutdown.
-A CPU contract test covers failure while constructing a second group after a first group exists. The equivalent
-real multi-group constructor-failure/rollback case remains a GPU acceptance gate.
+Four actual four-GPU cases now cover second-facade constructor/readiness errors and hangs after the first group
+has been confirmed alive. Every case retained both groups' handles and confirmed all six owned actors DEAD.
 
 ### CLIPScore and PickScore parity
 
@@ -74,7 +74,7 @@ scoring and the existing unsharded reference. It reserves zero GPUs and checks a
 CPU image inputs are deterministic RGB tensors. Tiny-model execution validates mechanisms; pretrained runs validate
 actual checkpoint loading and model parity. Neither establishes CPU diffusion-training or NPU support.
 
-## Candidate verification
+## Previously published inference-extension verification
 
 The split candidates are checked independently using their own source snapshots. The combined candidate additionally
 checks feature interaction. Test and execution manifests identify source/helper hashes, commands and results;
@@ -92,6 +92,65 @@ All 12 repository pre-commit hooks passed on the foundation update, the three fe
 
 All accelerator checks require actual idle devices and confirm their physical UUIDs. Manual validators write
 results outside the repository. A skipped or mocked accelerator path is not counted as an accelerator pass.
+
+## Construction rollback verification
+
+The construction rollback change records each facade with the existing deployment owner before readiness and
+reuses its bounded termination/death-confirmation path. The following results concern this change and its
+separately synchronized extension snapshots. The preceding tables retain their previously published candidates.
+
+| Check | Result |
+| --- | --- |
+| Regression before correction | All 21 new ownership/readiness/cleanup assertions failed on the prior foundation. |
+| Foundation contract tests after correction | 67 passed; readiness/submission failures, both cleanup roles, primary-error preservation and sticky close errors. |
+| Foundation related CPU regression | 1592 passed. |
+| Real Ray CPU control plane | Constructor error/hang and ready error/hang; each case confirmed three owned actors DEAD before shutdown. |
+| Automatic CPU coverage | Four real-Ray cases in `test_native_fsdp_construction_ray_on_cpu.py` passed with accelerators hidden. These test process ownership, not CPU FSDP computation. |
+| Actual two-GPU construction rollback | Four constructor/readiness error/hang cases passed on CUDA/NCCL ranks; each confirmed its facade and both ranks DEAD before shutdown. |
+| Actual four-GPU second-group rollback | Four constructor/readiness error/hang cases passed with four distinct physical GPU UUIDs. The first group's facade/ranks were alive before the second facade failed; all six owned actors were DEAD before shutdown in every case. |
+| Pretrained PickScore inference | 20 load/score/unload cycles and actual rank failure passed; maximum score absolute error `1.7881393432617188e-7`. |
+| Production-manager PickScore regression | Actual two-GPU sharding and normal manager scoring, 20 cycles, batches 1/3/16/17 and actual facade exit passed. Maximum raw-feature error `7.62939453125e-6`, score error `2.384185791015625e-7`; both ranks retained exactly `8519680` allocated bytes after each unload, and all owned actors died before shutdown. |
+| Replica-group contract tests | 119 passed, including 16 second-facade failure/cleanup cases and complete ownership of both groups. |
+| CLIPScore contract tests | 126 passed on the isolated CLIPScore extension. |
+| CPU/Gloo contract tests | 134 passed on the combined inference snapshot. |
+| Real pretrained CPU/Gloo regression | Four CLIP ranks, two groups, two cycles and actual rank exit; score error `2.980232238769531e-7`, all actors dead before shutdown. |
+| Combined inference CPU regression | 1634 passed; the four new real-Ray cases were also executed separately. |
+| Dedicated V1 training and resume | Actual SD3.5 Medium FlowGRPO, rank-4 LoRA, 256×256, eight denoising steps, two updates and checkpoint 2→3 continuation passed. Each step produced four rollout and two validation images; reward and queue actors were DEAD before shutdown. |
+| Training tensors | Both 1→2 and 2→3 transitions changed 484 nonempty LoRA tensors and preserved 909 frozen tensors. All model/optimizer tensors were finite; Adam steps were exactly 1→2→3. Gradient norms were `0.0145263671875`, `0.023681640625` and `0.00982666015625`. |
+| Repository checks | All 12 pre-commit hooks passed independently on the foundation, replica-group, CLIPScore, CPU/Gloo and combined snapshots, including generated-config verification. |
+
+The manual construction validator waits for an explicit fault-entry marker before applying its three-second
+readiness deadline, separating worker cold start from the injected failure. GPU ranks are initialized through the
+production factory. The facade fault follows actual rank attachment; pretrained inference is checked separately.
+The test-only facade introduces no production fault settings. Physical UUIDs and actor states are recorded.
+
+The two-group unit cases cover second-facade submission, ready submission, ready error and ready timeout, including
+facade/rank termination-confirmation failures. The actual four-GPU rollback and dedicated V1 training/resume runs
+above executed the corrected candidate. Earlier streaming/shared-phase results below retain their own sources.
+
+Dedicated training used one FSDP2 actor rank and two reward ranks on three distinct GPUs, two prompts × two responses,
+BF16 actor parameters, actor parameter/optimizer offload, KL disabled and per-step validation/checkpoints. The resumed
+job loaded checkpoint 2 on a different three-GPU selection. Selected GPUs were idle at launch; independent jobs later
+appeared on two training GPUs. These runs establish functional updates and continuation, not isolated performance or
+memory savings. Execution records include candidate/helper hashes, runtime, overrides, model/data and checkpoint identities.
+
+Run from the repository root with two idle visible GPUs and local checkpoints:
+
+```bash
+CUDA_VISIBLE_DEVICES="$GPU_PAIR" PYTHONPATH="$PWD" HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 \
+  "$PYTHON" -m tests.reward_loop.validate_native_fsdp_construction \
+  --model-path "$PICKSCORE_MODEL" --processor-path "$PICKSCORE_PROCESSOR" \
+  --replicas 1 --output "$CONSTRUCTION_OUTPUT"
+
+CUDA_VISIBLE_DEVICES='' PYTHONPATH="$PWD" PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
+  "$PYTHON" -m pytest -p pytest_asyncio.plugin \
+  tests/reward_loop/test_native_fsdp_integration_on_cpu.py \
+  tests/reward_loop/test_native_fsdp_construction_ray_on_cpu.py \
+  tests/reward_loop/test_native_fsdp_prototype_on_cpu.py -q --asyncio-mode=auto
+```
+
+On the replica-group extension, `--replicas 2` requires four distinct idle GPUs and injects failure into the second
+facade after confirming the first group's ranks and facade are alive. All six owned actors must then be DEAD.
 
 ## Independent training integrations
 
@@ -175,7 +234,6 @@ logical bundles. `--fault facade_exit` and `--fault facade_hang` exercise facade
 
 | Scope | Gate before claiming support |
 | --- | --- |
-| Multi-group construction | Real second-group constructor failure and rollback of all previously created actors. |
 | GPU streaming | Two groups, deployment-wide faults, multiple agent workers and measured aggregate pending work. |
 | Shared two-group training | Actual scoring/unload failure; no actor-update entry; all groups terminated; checkpoint unchanged. |
 | Other training combinations | Reference/KL and FSDP1 actor acceptance if included; DPO requires its own algorithm acceptance. |
