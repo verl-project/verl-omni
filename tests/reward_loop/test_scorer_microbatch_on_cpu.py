@@ -216,14 +216,167 @@ async def test_caller_cancellation_does_not_disturb_settlement_of_accepted_work(
     await asyncio.sleep(0)
     await asyncio.sleep(0)
     cancelled.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await cancelled
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert not cancelled.done(), "settlement must precede the cancellation"
 
     follower = asyncio.create_task(microbatcher.submit({"i": 1}))
     await asyncio.sleep(0)
     release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await cancelled
     assert await follower == {"score": 1}
     assert settled == [0, 1]
+
+
+@pytest.mark.asyncio
+async def test_caller_cancellation_withdraws_a_queued_request_before_dequeue():
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    calls = []
+
+    async def score_batch(requests):
+        calls.extend(request["i"] for request in requests)
+        entered.set()
+        await release.wait()
+        return [{"score": request["i"]} for request in requests]
+
+    # Unbatched forward so exactly one request is accepted while the other queues.
+    microbatcher = ScorerMicrobatcher(score_batch, max_batch_size=None, name="m")
+    await microbatcher.start()
+    accepted = asyncio.create_task(microbatcher.submit({"i": 0}))
+    await asyncio.wait_for(entered.wait(), 5)
+
+    queued = asyncio.create_task(microbatcher.submit({"i": 1}))
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert len(microbatcher._queue) == 1
+
+    queued.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await queued
+    assert not microbatcher._queue, "the withdrawn request must leave the queue"
+
+    release.set()
+    assert await accepted == {"score": 0}
+    assert await microbatcher.submit({"i": 2}) == {"score": 2}
+    assert calls == [0, 2], "a withdrawn request is never scored"
+
+
+@pytest.mark.asyncio
+async def test_caller_cancellation_while_capacity_blocked_never_queues_the_request():
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    calls = []
+
+    async def score_batch(requests):
+        calls.extend(request["i"] for request in requests)
+        entered.set()
+        await release.wait()
+        return [{"score": request["i"]} for request in requests]
+
+    microbatcher = ScorerMicrobatcher(score_batch, max_batch_size=None, max_inflight=1, name="m")
+    await microbatcher.start()
+    accepted = asyncio.create_task(microbatcher.submit({"i": 0}))
+    await asyncio.wait_for(entered.wait(), 5)
+
+    queued = asyncio.create_task(microbatcher.submit({"i": 1}))
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert len(microbatcher._queue) == 1
+    blocked = asyncio.create_task(microbatcher.submit({"i": 2}))
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert not blocked.done(), "the submitter must park on the full queue"
+
+    blocked.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await blocked
+
+    release.set()
+    assert await accepted == {"score": 0}
+    assert await queued == {"score": 1}
+    assert calls == [0, 1], "the capacity-blocked request is never scored"
+
+
+@pytest.mark.asyncio
+async def test_withdrawal_frees_the_capacity_slot_for_blocked_submitters():
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    calls = []
+
+    async def score_batch(requests):
+        calls.extend(request["i"] for request in requests)
+        entered.set()
+        await release.wait()
+        return [{"score": request["i"]} for request in requests]
+
+    microbatcher = ScorerMicrobatcher(score_batch, max_batch_size=None, max_inflight=1, name="m")
+    await microbatcher.start()
+    accepted = asyncio.create_task(microbatcher.submit({"i": 0}))
+    await asyncio.wait_for(entered.wait(), 5)
+
+    queued = asyncio.create_task(microbatcher.submit({"i": 1}))
+    for _ in range(10):
+        await asyncio.sleep(0)
+    blocked = asyncio.create_task(microbatcher.submit({"i": 2}))
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert not blocked.done(), "the submitter must park on the full queue"
+
+    queued.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await queued
+    release.set()
+    assert await accepted == {"score": 0}
+    assert await asyncio.wait_for(blocked, 5) == {"score": 2}, "the withdrawal must free the slot"
+    assert calls == [0, 2]
+
+
+@pytest.mark.asyncio
+async def test_repeated_cancellation_cannot_abort_the_withdrawal(monkeypatch):
+    """A second cancel landing while _withdraw waits on the condition lock
+    must not leave the cancelled request queued (and later scored)."""
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    calls = []
+
+    async def score_batch(requests):
+        calls.extend(request["i"] for request in requests)
+        entered.set()
+        await release.wait()
+        return [{"score": request["i"]} for request in requests]
+
+    # Unbatched forward so the consumer stays busy while request 1 queues.
+    microbatcher = ScorerMicrobatcher(score_batch, max_batch_size=None, name="m")
+    await microbatcher.start()
+    accepted = asyncio.create_task(microbatcher.submit({"i": 0}))
+    await asyncio.wait_for(entered.wait(), 5)
+    queued = asyncio.create_task(microbatcher.submit({"i": 1}))
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert len(microbatcher._queue) == 1
+
+    real_withdraw = microbatcher._withdraw
+    attempts = []
+
+    async def cancel_then_withdraw(entry):
+        attempts.append(entry)
+        if len(attempts) == 1:
+            raise asyncio.CancelledError  # a second cancel hits mid-acquire
+        return await real_withdraw(entry)
+
+    monkeypatch.setattr(microbatcher, "_withdraw", cancel_then_withdraw)
+    queued.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await queued
+    assert len(attempts) == 2, "the withdrawal must retry, not abort"
+    assert not microbatcher._queue, "the cancelled request must leave the queue"
+
+    release.set()
+    assert await accepted == {"score": 0}
+    assert await microbatcher.submit({"i": 2}) == {"score": 2}
+    assert calls == [0, 2], "the withdrawn request is never scored"
 
 
 @pytest.mark.asyncio

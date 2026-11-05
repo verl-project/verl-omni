@@ -92,10 +92,12 @@ class NativeRewardExecutor:
       every in-flight call to settle. On the scorer path they stop microbatcher
       admission *before* that wait, so queued and capacity-blocked work fails
       retryably instead of being scored out under it.
-    - ``await_owned`` keeps an accepted operation running to settlement even
-      when its caller is cancelled. A synchronous ``score_batch`` thread
-      stays owned through consumer cancellation, so sleep/close never
-      offload weights under a live forward.
+    - Caller cancellation stops at the microbatcher's acceptance boundary: a
+      request not yet dequeued is withdrawn and never scored, while an accepted
+      one — including its synchronous ``score_batch`` thread, owned through
+      consumer cancellation — settles before the cancellation re-raises, so
+      sleep/close never offload weights under a live forward. Lifecycle ops
+      and the legacy ``infer()`` path keep their ``await_owned`` shield.
     - The executor binds to the loop of its first use and never crosses loops:
       the sync entrypoint pins one loop per process, and the worker path runs
       on the worker's stable loop.
@@ -144,7 +146,8 @@ class NativeRewardExecutor:
             self._inflight += 1
             self._idle.clear()
             microbatcher = self._microbatcher
-        return await await_owned(self._score_owned(microbatcher, request))
+        # Ownership lives in submit(): withdraw before acceptance, settle-then-cancel after.
+        return await self._score_owned(microbatcher, request)
 
     async def infer(self, *args, **kwargs):
         """Run the frozen ``infer()`` adapter path — dropped at post-window cleanup (#723)."""
@@ -377,6 +380,9 @@ class ScorerMicrobatcher:
       not-yet-accepted requests; submitters beyond the cap await a free slot.
     - A request is **accepted** when the consumer dequeues it into a microbatch;
       accepted work settles whatever happens to its submitter.
+    - Caller cancellation before acceptance withdraws the request — it is never
+      scored; after acceptance, settlement completes first, its outcome is
+      consumed, and the cancellation re-raises.
     - ``pause`` (executor sleep): stops admission, fails queued-but-unaccepted
       requests and capacity-blocked submitters with a retryable ``RuntimeError``
       (scoring may resume after wake), drains accepted work, joins the
@@ -460,31 +466,67 @@ class ScorerMicrobatcher:
             RuntimeError: admission stopped by :meth:`pause` (retry after wake)
                 or the microbatcher closed before this request was accepted —
                 including via a consumer that was cancelled.
-            asyncio.CancelledError: the caller left; settlement of accepted
-                work continues regardless.
+            asyncio.CancelledError: the caller left. A request not yet accepted
+                is withdrawn (never scored); an accepted one settles first —
+                its outcome is consumed — and the cancellation re-raises after.
         """
+        entry: tuple[dict[str, Any], asyncio.Future] | None = None
+        future: asyncio.Future | None = None
+        try:
+            async with self._cond:
+                if self._state == "running" and self._consumer.done():
+                    # A consumer cancelled before its first step settles nothing itself.
+                    for _, done in self._settle_closed_locked([]):
+                        if not done.done():
+                            done.set_exception(RuntimeError(f"Reward scorer {self._name!r} consumer was cancelled"))
+                    raise RuntimeError(f"Reward scorer {self._name!r} consumer was cancelled")
+                while self._state == "running" and len(self._queue) >= self._max_inflight:
+                    await self._cond.wait()
+                if self._state == "paused":
+                    raise RuntimeError(f"Reward scorer {self._name!r} is asleep; retry after wake_up")
+                if self._state == "closed":
+                    raise RuntimeError(f"Reward scorer {self._name!r} is closed")
+                if self._state != "running":
+                    raise RuntimeError(f"Reward scorer microbatcher {self._name!r} is not started")
+                future = asyncio.get_running_loop().create_future()
+                # An abandoned (caller-cancelled) future never awaits its exception;
+                # marking it retrieved at creation keeps every settlement site plain.
+                future.add_done_callback(lambda f: f.cancelled() or f.exception())
+                entry = (request, future)
+                self._queue.append(entry)
+                self._cond.notify_all()
+            # Shielded: a caller cancel must not cancel the future itself — it
+            # is the settlement signal an accepted request waits on.
+            return await asyncio.shield(future)
+        except asyncio.CancelledError:
+            # Unaccepted work is withdrawn; accepted work settles before the
+            # cancellation re-raises — the boundary is the consumer's dequeue.
+            if entry is not None:
+                if not await self._withdraw_owned(entry):
+                    try:
+                        await await_owned(future)
+                    except BaseException:
+                        pass
+            raise
+
+    async def _withdraw_owned(self, entry: tuple[dict[str, Any], asyncio.Future]) -> bool:
+        """Withdrawal that repeated caller cancellation cannot abort."""
+        while True:
+            try:
+                return await self._withdraw(entry)
+            except asyncio.CancelledError:
+                continue
+
+    async def _withdraw(self, entry: tuple[dict[str, Any], asyncio.Future]) -> bool:
+        """Remove a queued-but-unaccepted entry; False once the consumer dequeues it."""
         async with self._cond:
-            if self._state == "running" and self._consumer.done():
-                # A consumer cancelled before its first step settles nothing itself.
-                for _, future in self._settle_closed_locked([]):
-                    if not future.done():
-                        future.set_exception(RuntimeError(f"Reward scorer {self._name!r} consumer was cancelled"))
-                raise RuntimeError(f"Reward scorer {self._name!r} consumer was cancelled")
-            while self._state == "running" and len(self._queue) >= self._max_inflight:
-                await self._cond.wait()
-            if self._state == "paused":
-                raise RuntimeError(f"Reward scorer {self._name!r} is asleep; retry after wake_up")
-            if self._state == "closed":
-                raise RuntimeError(f"Reward scorer {self._name!r} is closed")
-            if self._state != "running":
-                raise RuntimeError(f"Reward scorer microbatcher {self._name!r} is not started")
-            future = asyncio.get_running_loop().create_future()
-            # An abandoned (caller-cancelled) future never awaits its exception;
-            # marking it retrieved at creation keeps every settlement site plain.
-            future.add_done_callback(lambda f: f.cancelled() or f.exception())
-            self._queue.append((request, future))
+            try:
+                self._queue.remove(entry)
+            except ValueError:
+                return False
+            # A withdrawn request frees a capacity slot for blocked submitters.
             self._cond.notify_all()
-        return await future
+            return True
 
     async def pause(self) -> None:
         """Stop admission, fail unaccepted requests, drain accepted work, join the consumer."""

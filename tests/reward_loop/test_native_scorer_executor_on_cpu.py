@@ -368,6 +368,84 @@ async def test_close_fails_queued_requests_and_closes_after_the_accepted_forward
 
 
 @pytest.mark.asyncio
+async def test_caller_cancellation_withdraws_a_queued_request_before_dequeue(monkeypatch):
+    executor = _executor(monkeypatch, f"{_TEST_MODULE}:GatedScorer")
+    await executor.wake_up()
+    scorer = executor._model
+    accepted = asyncio.create_task(executor.score({"i": 0}))
+    await asyncio.wait_for(scorer.entered.wait(), 5)
+    queued = asyncio.create_task(executor.score({"i": 1}))
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert len(executor._microbatcher._queue) == 1
+
+    queued.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await queued
+    assert not executor._microbatcher._queue, "the withdrawn request must leave the queue"
+
+    scorer.release.set()
+    assert await accepted == {"score": 0}
+    assert await executor.score({"i": 2}) == {"score": 2}
+    assert scorer.batches == [[0], [2]], "a withdrawn request is never scored"
+    await executor.close()
+
+
+@pytest.mark.asyncio
+async def test_caller_cancellation_while_capacity_blocked_never_queues_the_request(monkeypatch):
+    executor = _executor(monkeypatch, f"{_TEST_MODULE}:GatedScorer")
+    await executor.wake_up()
+    scorer = executor._model
+    accepted = asyncio.create_task(executor.score({"i": 0}))
+    await asyncio.wait_for(scorer.entered.wait(), 5)
+
+    queued = [asyncio.create_task(executor.score({"i": i})) for i in range(1, 65)]
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert len(executor._microbatcher._queue) == 64, "default max_inflight"
+    blocked = asyncio.create_task(executor.score({"i": 100}))
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert not blocked.done(), "the submitter must park on the full queue"
+
+    blocked.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await blocked
+    assert len(executor._microbatcher._queue) == 64, "the cancelled submit must not occupy a slot"
+
+    scorer.release.set()
+    assert await accepted == {"score": 0}
+    outcomes = await asyncio.gather(*queued, return_exceptions=True)
+    assert outcomes == [{"score": i} for i in range(1, 65)]
+    assert scorer.batches == [[0]] + [[4 * k + j for j in range(1, 5)] for k in range(16)], (
+        "max_batch_size packs the drained queue; the capacity-blocked request is never scored"
+    )
+    await executor.close()
+
+
+@pytest.mark.asyncio
+async def test_caller_cancellation_after_acceptance_settles_the_forward_first(monkeypatch):
+    executor = _executor(monkeypatch, f"{_TEST_MODULE}:GatedScorer")
+    await executor.wake_up()
+    scorer = executor._model
+    accepted = asyncio.create_task(executor.score({"i": 0}))
+    await asyncio.wait_for(scorer.entered.wait(), 5)
+
+    accepted.cancel()
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert not accepted.done(), "cancellation must wait for the accepted forward to settle"
+    assert not executor._idle.is_set(), "in-flight accounting must hold sleep/close back"
+
+    scorer.release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await accepted
+    assert scorer.batches == [[0]], "the accepted forward still ran to settlement"
+    assert await executor.score({"i": 1}) == {"score": 1}
+    await executor.close()
+
+
+@pytest.mark.asyncio
 async def test_consumer_cancellation_keeps_the_sync_forward_owned_until_the_thread_settles(monkeypatch):
     executor = _executor(monkeypatch, f"{_TEST_MODULE}:GatedScorer")
     await executor.wake_up()
