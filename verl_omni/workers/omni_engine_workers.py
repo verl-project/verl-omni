@@ -71,10 +71,11 @@ class OmniDetachActorWorker(ActorRolloutRefWorker, DetachActorWorker):
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def restore_model_from_cpu(self, n):
         tracker = getattr(self.actor.engine, "_parameter_revision", None)
-        with tracker.mutation("restore") if tracker is not None else nullcontext():
+        with tracker.access(internal=True) if tracker is not None else nullcontext():
             if tracker is not None and n not in getattr(self, "cpu_saved_models", {}):
                 raise ValueError("The requested CPU snapshot does not exist")
-            return super().restore_model_from_cpu(n)
+            with tracker.mutation("restore") if tracker is not None else nullcontext():
+                return super().restore_model_from_cpu(n)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     @parameter_access("actor.engine")

@@ -73,7 +73,7 @@ from verl_omni.workers.config.diffusion import DiffusionDistillationTeacherModel
 from verl_omni.workers.rollout.base import get_rollout_sequence_parallel_size
 from verl_omni.workers.rollout.vllm_rollout.zmq_utils import make_update_zmq_handle, make_update_zmq_id
 from verl_omni.workers.utils.losses import diffusion_loss, omni_loss
-from verl_omni.workers.utils.parameter_revision import parameter_access
+from verl_omni.workers.utils.parameter_revision import parameter_access, parameter_to_thread
 from verl_omni.workers.utils.training_output import prepare_single_update_batch, restore_single_update_output
 
 logger = logging.getLogger(__file__)
@@ -204,12 +204,9 @@ class TrainingWorker(Worker, DistProfilerExtension):
         self.loss_fn = None
 
     def _check_training_output_support(self):
-        from verl_omni.workers.engine.megatron.omni_impl import OmniMegatronEngine
-
-        if type(self.engine) is not OmniMegatronEngine:
-            raise ValueError("Training outputs are qualified only for the Omni Megatron engine")
-        if self.engine_config.forward_only or self.engine_config.dynamic_context_parallel:
-            raise ValueError("Training outputs require a training engine without dynamic CP")
+        capability = getattr(self.engine, "supports_detached_training_output", None)
+        if not callable(capability) or capability() is not True:
+            raise ValueError("The engine does not support detached training outputs in this configuration")
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     @parameter_access()
@@ -1208,7 +1205,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                     finally:
                         self._offload_actor_and_empty_cache(timings)
 
-                gather_task = asyncio.create_task(asyncio.to_thread(run_on_caller_device, gather_then_offload))
+                gather_task = parameter_to_thread(run_on_caller_device, gather_then_offload)
                 try:
                     lora_weights, peft_config = await asyncio.shield(gather_task)
                 except asyncio.CancelledError as cancelled:
@@ -1232,13 +1229,11 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             else:
                 # Preserve gather/resume and offload/IPC overlap when the actor
                 # does not offload parameters.
-                gather_task = asyncio.create_task(asyncio.to_thread(run_on_caller_device, self._gather_lora_weights))
+                gather_task = parameter_to_thread(run_on_caller_device, self._gather_lora_weights)
                 if resume_weights_task is not None:
                     await resume_weights_task
                 lora_weights, peft_config = await gather_task
-                offload_task = asyncio.create_task(
-                    asyncio.to_thread(run_on_caller_device, self._offload_actor_and_empty_cache)
-                )
+                offload_task = parameter_to_thread(run_on_caller_device, self._offload_actor_and_empty_cache)
             log_gpu_memory_usage("After resume weights", logger=logger)
 
             # Use ZMQ IPC to transfer LoRA weights, bypassing Ray serialization.

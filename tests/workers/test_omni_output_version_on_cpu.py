@@ -16,6 +16,7 @@
 
 import asyncio
 import copy
+import threading
 
 import pytest
 import torch
@@ -50,6 +51,63 @@ class CPUBackend:
 
 class TrackedCPU(revision.ParameterTrackingMixin, CPUBackend):
     pass
+
+
+def test_checkpoint_argument_error_does_not_invalidate_parameters():
+    engine = TrackedCPU()
+    tracker = engine.enable_parameter_tracking()
+    before = tracker.version()
+    with pytest.raises(TypeError):
+        engine.load_checkpoint()
+    assert tracker.version() == before
+    engine.load_checkpoint(copy.deepcopy(engine.model.state_dict()))
+    assert tracker.version() != before
+
+
+@pytest.mark.parametrize("method", ["initialize", "optimizer_step"])
+def test_writer_argument_error_does_not_invalidate_parameters(method):
+    engine = TrackedCPU()
+    tracker = engine.enable_parameter_tracking()
+    before = tracker.version()
+    with pytest.raises(TypeError):
+        getattr(engine, method)(unexpected=True)
+    assert tracker.version() == before
+
+
+def test_checkpoint_backend_failure_still_invalidates_parameters():
+    engine = TrackedCPU()
+    tracker = engine.enable_parameter_tracking()
+    with pytest.raises(RuntimeError):
+        engine.load_checkpoint({})
+    with pytest.raises(RuntimeError, match="Partial actor operation"):
+        tracker.version()
+
+
+def test_uninspectable_checkpoint_keeps_conservative_guard(monkeypatch):
+    engine = TrackedCPU()
+    tracker = engine.enable_parameter_tracking()
+
+    def unavailable(_):
+        raise ValueError("signature unavailable")
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(revision.inspect, "signature", unavailable)
+        with pytest.raises(TypeError):
+            engine.load_checkpoint()
+    with pytest.raises(RuntimeError, match="Partial actor operation"):
+        tracker.version()
+
+
+def test_disabled_tracking_does_not_inspect_backend(monkeypatch):
+    engine = TrackedCPU()
+
+    def unexpected(_):
+        raise AssertionError("signature inspection must be opt-in")
+
+    monkeypatch.setattr(revision.inspect, "signature", unexpected)
+    engine.initialize()
+    engine.load_checkpoint(copy.deepcopy(engine.model.state_dict()))
+    engine.optimizer_step()
 
 
 def assert_equal(a, b):
@@ -135,6 +193,440 @@ def test_partial_writer_poisoned_and_not_retried():
     with pytest.raises(RuntimeError, match="Partial"):
         engine.optimizer_step()
     assert engine.calls == 1
+
+
+@pytest.mark.parametrize("operation", ["save_checkpoint", "infer_batch"])
+def test_failed_read_only_access_leaves_tracker_usable(operation):
+    tracker = revision.ParameterRevision()
+    before = tracker.version()
+    with pytest.raises(ValueError, match=operation):
+        with tracker.access():
+            raise ValueError(operation)
+    assert tracker.version() == before
+    with tracker.mutation("optimizer"):
+        pass
+    assert tracker.version().revision == before.revision + 1
+
+
+def test_failed_engine_offload_poisons_even_inside_read_access():
+    class PartialMoveBackend(CPUBackend):
+        def to(self, *args, **kwargs):
+            raise RuntimeError("partial device move")
+
+    class TrackedMove(revision.ParameterTrackingMixin, PartialMoveBackend):
+        pass
+
+    engine = TrackedMove()
+    tracker = engine.enable_parameter_tracking()
+    with pytest.raises(RuntimeError, match="partial device move"):
+        with tracker.access():
+            engine.to("cpu")
+    with pytest.raises(RuntimeError, match="Partial actor"):
+        tracker.version()
+
+
+def test_offload_on_export_thread_inside_actor_access():
+    class MoveBackend(CPUBackend):
+        def to(self, device):
+            return device
+
+    class TrackedMove(revision.ParameterTrackingMixin, MoveBackend):
+        pass
+
+    class Exporter:
+        def __init__(self):
+            self.engine = TrackedMove()
+            self.tracker = self.engine.enable_parameter_tracking()
+
+        @revision.parameter_access()
+        async def export(self):
+            return await asyncio.shield(revision.parameter_to_thread(self.engine.to, "cpu"))
+
+    async def run():
+        worker = Exporter()
+        assert await worker.export() == "cpu"
+        worker.tracker.version()
+
+    asyncio.run(run())
+
+
+def test_guarded_parameter_thread_requires_async_lifetime_manager():
+    tracker = revision.ParameterRevision()
+    with tracker.access(), pytest.raises(RuntimeError, match="live async access guard"):
+        revision.parameter_to_thread(lambda: None)
+    tracker.version()
+
+
+def test_inherited_expired_access_cannot_start_a_parameter_thread():
+    class Exporter:
+        def __init__(self):
+            self.engine = TrackedCPU()
+            self.tracker = self.engine.enable_parameter_tracking()
+            self.release = asyncio.Event()
+
+        @revision.parameter_access()
+        async def export(self):
+            async def late_request():
+                await self.release.wait()
+                revision.parameter_to_thread(lambda: None)
+
+            return asyncio.create_task(late_request())
+
+    async def run():
+        worker = Exporter()
+        late = await worker.export()
+        worker.release.set()
+        with pytest.raises(RuntimeError, match="live async access guard"):
+            await late
+        worker.tracker.version()
+
+    asyncio.run(run())
+
+
+def test_delegated_parameter_threads_are_serialized():
+    first_started, second_started, release = threading.Event(), threading.Event(), threading.Event()
+
+    def first():
+        first_started.set()
+        assert release.wait(timeout=5)
+
+    def second():
+        second_started.set()
+
+    class Exporter:
+        def __init__(self):
+            self.engine = TrackedCPU()
+            self.tracker = self.engine.enable_parameter_tracking()
+
+        @revision.parameter_access()
+        async def export(self):
+            first_task = revision.parameter_to_thread(first)
+            assert await asyncio.to_thread(first_started.wait, 5)
+            second_task = revision.parameter_to_thread(second)
+            await asyncio.gather(first_task, second_task)
+
+    async def run():
+        worker = Exporter()
+        task = asyncio.create_task(worker.export())
+        assert await asyncio.to_thread(first_started.wait, 5)
+        try:
+            await asyncio.sleep(0.05)
+            assert not second_started.is_set()
+        finally:
+            release.set()
+        await task
+        assert second_started.is_set()
+        worker.tracker.version()
+
+    asyncio.run(run())
+
+
+def test_access_drains_parameter_threads_registered_during_cleanup():
+    first_started, first_release = threading.Event(), threading.Event()
+    second_started, second_release = threading.Event(), threading.Event()
+
+    def first():
+        first_started.set()
+        assert first_release.wait(timeout=5)
+
+    def second():
+        second_started.set()
+        assert second_release.wait(timeout=5)
+
+    class Exporter:
+        def __init__(self):
+            self.engine = TrackedCPU()
+            self.engine.enable_parameter_tracking()
+            self.scheduled = asyncio.Event()
+
+        @revision.parameter_access()
+        async def export(self):
+            revision.parameter_to_thread(first)
+
+            async def schedule_during_cleanup():
+                assert await asyncio.to_thread(first_started.wait, 5)
+                revision.parameter_to_thread(second)
+                self.scheduled.set()
+
+            asyncio.create_task(schedule_during_cleanup())
+
+    async def run():
+        worker = Exporter()
+        task = asyncio.create_task(worker.export())
+        try:
+            await asyncio.wait_for(worker.scheduled.wait(), timeout=5)
+            first_release.set()
+            assert await asyncio.to_thread(second_started.wait, 5)
+            await asyncio.sleep(0.05)
+            assert not task.done(), "Access ended with an active registered worker"
+        finally:
+            first_release.set()
+            second_release.set()
+            await task
+
+    asyncio.run(run())
+
+
+def test_nested_async_access_drains_only_its_own_parameter_threads():
+    started, release = threading.Event(), threading.Event()
+
+    def background_read():
+        started.set()
+        assert release.wait(timeout=5)
+
+    class Exporter:
+        def __init__(self):
+            self.engine = TrackedCPU()
+            self.tracker = self.engine.enable_parameter_tracking()
+            self.inner_done = asyncio.Event()
+
+        @revision.parameter_access()
+        async def inner(self):
+            return None
+
+        @revision.parameter_access()
+        async def outer(self):
+            task = revision.parameter_to_thread(background_read)
+            assert await asyncio.to_thread(started.wait, 5)
+            await self.inner()
+            self.inner_done.set()
+            await task
+
+    async def run():
+        worker = Exporter()
+        task = asyncio.create_task(worker.outer())
+        assert await asyncio.to_thread(started.wait, 5)
+        await asyncio.sleep(0.05)
+        observed_inner_done = worker.inner_done.is_set()
+        release.set()
+        await task
+        assert observed_inner_done, "Nested read waited for an unrelated outer worker"
+        worker.tracker.version()
+
+    asyncio.run(run())
+
+
+def test_direct_device_move_rejects_active_delegated_parameter_thread():
+    started, release = threading.Event(), threading.Event()
+
+    class MoveBackend(CPUBackend):
+        def to(self, device):
+            return device
+
+    class TrackedMove(revision.ParameterTrackingMixin, MoveBackend):
+        pass
+
+    def background_read():
+        started.set()
+        assert release.wait(timeout=5)
+
+    class Exporter:
+        def __init__(self):
+            self.engine = TrackedMove()
+            self.tracker = self.engine.enable_parameter_tracking()
+
+        @revision.parameter_access()
+        async def export(self):
+            task = revision.parameter_to_thread(background_read)
+            assert await asyncio.to_thread(started.wait, 5)
+            try:
+                with pytest.raises(RuntimeError, match="Concurrent parameter thread"):
+                    self.engine.to("cpu")
+            finally:
+                release.set()
+            await task
+
+    async def run():
+        worker = Exporter()
+        await worker.export()
+        worker.tracker.version()
+
+    asyncio.run(run())
+
+
+def test_failed_delegated_offload_poisons_tracker():
+    class PartialMoveBackend(CPUBackend):
+        def to(self, device):
+            raise RuntimeError("partial worker offload")
+
+    class TrackedMove(revision.ParameterTrackingMixin, PartialMoveBackend):
+        pass
+
+    class Exporter:
+        def __init__(self):
+            self.engine = TrackedMove()
+            self.tracker = self.engine.enable_parameter_tracking()
+
+        @revision.parameter_access()
+        async def export(self):
+            return await asyncio.shield(revision.parameter_to_thread(self.engine.to, "cpu"))
+
+    async def run():
+        worker = Exporter()
+        with pytest.raises(RuntimeError, match="partial worker offload"):
+            await worker.export()
+        with pytest.raises(RuntimeError, match="Partial actor"):
+            worker.tracker.version()
+
+    asyncio.run(run())
+
+
+def test_cancelled_async_export_holds_access_until_worker_thread_finishes():
+    started = threading.Event()
+    release = threading.Event()
+
+    def background_read():
+        started.set()
+        assert release.wait(timeout=5)
+
+    class Exporter:
+        def __init__(self):
+            self.engine = TrackedCPU()
+            self.tracker = self.engine.enable_parameter_tracking()
+
+        @revision.parameter_access()
+        async def export(self):
+            await asyncio.shield(revision.parameter_to_thread(background_read))
+
+    async def run():
+        worker = Exporter()
+        task = asyncio.create_task(worker.export())
+        assert await asyncio.to_thread(started.wait, 5)
+        task.cancel()
+        try:
+            await asyncio.sleep(0.05)
+            assert not task.done(), "The parameter guard was released before the worker thread stopped"
+            task.cancel()
+            await asyncio.sleep(0.05)
+            assert not task.done(), "Repeated cancellation released the parameter guard"
+            with pytest.raises(RuntimeError, match="Concurrent"):
+                worker.tracker.version()
+        finally:
+            release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        worker.tracker.version()
+
+    asyncio.run(run())
+
+
+def test_failed_resume_waits_for_parameter_thread_and_preserves_error():
+    started = threading.Event()
+    release = threading.Event()
+
+    def background_read():
+        started.set()
+        assert release.wait(timeout=5)
+
+    class Exporter:
+        def __init__(self):
+            self.engine = TrackedCPU()
+            self.tracker = self.engine.enable_parameter_tracking()
+
+        @revision.parameter_access()
+        async def export(self):
+            revision.parameter_to_thread(background_read)
+            assert await asyncio.to_thread(started.wait, 5)
+            raise ValueError("resume failed")
+
+    async def run():
+        worker = Exporter()
+        task = asyncio.create_task(worker.export())
+        assert await asyncio.to_thread(started.wait, 5)
+        try:
+            await asyncio.sleep(0.05)
+            assert not task.done()
+            with pytest.raises(RuntimeError, match="Concurrent"):
+                worker.tracker.version()
+        finally:
+            release.set()
+        with pytest.raises(ValueError, match="resume failed"):
+            await task
+        worker.tracker.version()
+
+    asyncio.run(run())
+
+
+def test_resume_error_remains_primary_when_background_worker_also_fails():
+    started = threading.Event()
+    release = threading.Event()
+
+    def background_read():
+        started.set()
+        assert release.wait(timeout=5)
+        raise OSError("gather failed")
+
+    class Exporter:
+        def __init__(self):
+            self.engine = TrackedCPU()
+            self.tracker = self.engine.enable_parameter_tracking()
+
+        @revision.parameter_access()
+        async def export(self):
+            revision.parameter_to_thread(background_read)
+            assert await asyncio.to_thread(started.wait, 5)
+            raise ValueError("resume failed")
+
+    async def run():
+        loop = asyncio.get_running_loop()
+        diagnostics = []
+        previous = loop.get_exception_handler()
+        loop.set_exception_handler(lambda _loop, details: diagnostics.append(details))
+        worker = Exporter()
+        task = asyncio.create_task(worker.export())
+        try:
+            assert await asyncio.to_thread(started.wait, 5)
+            await asyncio.sleep(0.05)
+            assert not task.done()
+            release.set()
+            with pytest.raises(ValueError, match="resume failed"):
+                await task
+            await asyncio.sleep(0)
+            assert not diagnostics
+            worker.tracker.version()
+        finally:
+            release.set()
+            loop.set_exception_handler(previous)
+
+    asyncio.run(run())
+
+
+def test_cancelling_parameter_thread_wait_does_not_cancel_the_tracked_thread():
+    started = threading.Event()
+    release = threading.Event()
+
+    def background_read():
+        started.set()
+        assert release.wait(timeout=5)
+
+    class Exporter:
+        def __init__(self):
+            self.engine = TrackedCPU()
+            self.tracker = self.engine.enable_parameter_tracking()
+
+        @revision.parameter_access()
+        async def export(self):
+            handle = revision.parameter_to_thread(background_read)
+            assert await asyncio.to_thread(started.wait, 5)
+            handle.cancel()
+            await handle
+
+    async def run():
+        worker = Exporter()
+        task = asyncio.create_task(worker.export())
+        assert await asyncio.to_thread(started.wait, 5)
+        try:
+            await asyncio.sleep(0.05)
+            assert not task.done()
+            with pytest.raises(RuntimeError, match="Concurrent"):
+                worker.tracker.version()
+        finally:
+            release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        worker.tracker.version()
+
+    asyncio.run(run())
 
 
 def test_duplicate_or_unannotated_writer_refused():
@@ -269,3 +761,86 @@ def test_microbatch_detach_keeps_jagged_rows_and_metadata():
     assert torch.equal(detached.values(), nested.values()) and not detached.requires_grad
     loss.backward()
     assert torch.equal(values.grad, 2 * values.detach())
+
+
+def test_untracked_parameter_thread_retains_native_task_cancellation():
+    import asyncio
+    import threading
+
+    from verl_omni.workers.utils.parameter_revision import parameter_to_thread
+
+    async def run():
+        started, release = threading.Event(), threading.Event()
+
+        def work():
+            started.set()
+            release.wait(timeout=5)
+
+        task = parameter_to_thread(work)
+        try:
+            assert await asyncio.to_thread(started.wait, 5)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            assert isinstance(task, asyncio.Task)
+            assert task.cancelled()
+        finally:
+            release.set()
+
+    asyncio.run(run())
+
+
+def test_invalid_device_move_arguments_do_not_poison_before_call():
+    class Backend(CPUBackend):
+        def to(self, device):
+            raise AssertionError("The method must not be entered")
+
+    class Engine(revision.ParameterTrackingMixin, Backend):
+        pass
+
+    engine = Engine()
+    tracker = engine.enable_parameter_tracking()
+    before = tracker.version()
+    with pytest.raises(TypeError):
+        engine.to("cpu", unexpected=True)
+    assert tracker.version() == before
+
+
+def test_device_move_without_inspectable_signature_still_executes():
+    class Move:
+        __signature__ = object()
+
+        def __call__(self, device):
+            return device
+
+    class Backend(CPUBackend):
+        to = Move()
+
+    class Engine(revision.ParameterTrackingMixin, Backend):
+        pass
+
+    engine = Engine()
+    tracker = engine.enable_parameter_tracking()
+    assert engine.to("cpu") == "cpu"
+    assert tracker.version().revision == 0
+
+
+def test_uninspectable_failed_device_move_remains_fail_closed():
+    class Move:
+        __signature__ = object()
+
+        def __call__(self, device):
+            raise RuntimeError("uncertain partial move")
+
+    class Backend(CPUBackend):
+        to = Move()
+
+    class Engine(revision.ParameterTrackingMixin, Backend):
+        pass
+
+    engine = Engine()
+    tracker = engine.enable_parameter_tracking()
+    with pytest.raises(RuntimeError, match="uncertain partial move"):
+        engine.to("cpu")
+    with pytest.raises(RuntimeError, match="Partial actor"):
+        tracker.version()

@@ -19,7 +19,10 @@ not Ray dispatch, TransferQueue, distributed Megatron or end-to-end acceptance.
 """
 
 import ast
+import asyncio
 import copy
+import logging
+import threading
 from contextlib import nullcontext
 from itertools import chain
 from pathlib import Path
@@ -34,7 +37,7 @@ from verl.utils import tensordict_utils as tu
 from verl.utils.metric import Metric
 
 from tests.workers.test_omni_output_version_on_cpu import CPUBackend, assert_equal
-from verl_omni.workers.utils.parameter_revision import ParameterTrackingMixin, parameter_access
+from verl_omni.workers.utils.parameter_revision import ParameterTrackingMixin, parameter_access, parameter_to_thread
 from verl_omni.workers.utils.training_output import prepare_single_update_batch, restore_single_update_output
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -93,6 +96,67 @@ class SnapshotFixture:
         self.cpu_saved_models.pop(n, None)
 
 
+@pytest.mark.parametrize("tracked", [False, True])
+@pytest.mark.parametrize("actor_facade", [False, True])
+def test_checkpoint_save_failure_through_worker_allows_retry(monkeypatch, tracked, actor_facade):
+    worker_cls = extracted("verl_omni/workers/engine_workers.py", "TrainingWorker", {"save_checkpoint"})
+    worker = worker_cls()
+    engine = CPUEngine()
+    engine.initialize()
+    worker.engine = engine
+    tracker = engine.enable_parameter_tracking() if tracked else None
+    before = tracker.version() if tracked else None
+    calls = []
+
+    def save(local_path, hdfs_path, global_step, max_ckpt_to_keep):
+        calls.append((local_path, hdfs_path, global_step, max_ckpt_to_keep))
+        if len(calls) == 1:
+            raise OSError("checkpoint storage unavailable")
+        return "saved"
+
+    monkeypatch.setattr(engine, "save_checkpoint", save, raising=False)
+    entry = worker
+    if actor_facade:
+        facade_cls = extracted("verl_omni/workers/engine_workers.py", "ActorRolloutRefWorker", {"save_checkpoint"})
+        entry = facade_cls()
+        entry.role = "actor"
+        entry.actor = worker
+    with pytest.raises(OSError, match="storage unavailable"):
+        entry.save_checkpoint("checkpoint", "remote", 7, 2)
+    if tracked:
+        assert tracker.version() == before
+    result = entry.save_checkpoint("checkpoint", "remote", 7, 2)
+    assert result == (None if actor_facade else "saved")
+    assert calls == [("checkpoint", "remote", 7, 2)] * 2
+    if tracked:
+        assert tracker.version() == before
+    engine.backward(torch.ones(5, 3, dtype=torch.float64))
+    engine.optimizer_step()
+    assert engine.calls == 1
+    if tracked:
+        assert tracker.version().revision == before.revision + 1
+
+
+def test_checkpoint_save_with_failed_device_transition_still_fences_worker(monkeypatch):
+    worker_cls = extracted("verl_omni/workers/engine_workers.py", "TrainingWorker", {"save_checkpoint"})
+    worker = worker_cls()
+    worker.engine = CPUEngine()
+    tracker = worker.engine.enable_parameter_tracking()
+    calls = []
+
+    def save(*args):
+        calls.append(args)
+        with tracker.device_transition():
+            raise RuntimeError("interrupted device transition")
+
+    monkeypatch.setattr(worker.engine, "save_checkpoint", save, raising=False)
+    with pytest.raises(RuntimeError, match="interrupted device transition"):
+        worker.save_checkpoint("checkpoint")
+    with pytest.raises(RuntimeError, match="Partial actor operation"):
+        worker.save_checkpoint("checkpoint")
+    assert len(calls) == 1
+
+
 def test_owned_snapshot_restore_invalidates_previous_version_and_retains_copy():
     cls = extracted(
         "verl_omni/workers/omni_engine_workers.py",
@@ -119,8 +183,173 @@ def test_owned_snapshot_restore_invalidates_previous_version_and_retains_copy():
     worker.clear_cpu_model(0)
     with pytest.raises(ValueError, match="does not exist"):
         worker.restore_model_from_cpu(0)
-    with pytest.raises(RuntimeError, match="Partial"):
+    after_missing = tracker.version()
+    worker.save_model_to_cpu(1)
+    worker.restore_model_from_cpu(1)
+    assert tracker.version().revision == after_missing.revision + 1
+
+
+def test_failed_snapshot_write_still_poisoned():
+    class PartialSnapshot(SnapshotFixture):
+        def restore_model_from_cpu(self, n):
+            with torch.no_grad():
+                self.actor.engine.model.weight.add_(1)
+            raise RuntimeError("partial restore")
+
+    cls = extracted(
+        "verl_omni/workers/omni_engine_workers.py",
+        "OmniDetachActorWorker",
+        {"restore_model_from_cpu"},
+        PartialSnapshot,
+    )
+    worker = cls()
+    engine = CPUEngine()
+    worker.actor = SimpleNamespace(engine=engine)
+    worker.cpu_saved_models = {0: {}}
+    tracker = engine.enable_parameter_tracking()
+    with pytest.raises(RuntimeError, match="partial restore"):
+        worker.restore_model_from_cpu(0)
+    with pytest.raises(RuntimeError, match="Partial actor"):
         tracker.version()
+
+
+@pytest.mark.parametrize("failure", ["resume", "cancel"])
+def test_actual_update_weights_drains_gather_before_unlock(failure):
+    started, release = threading.Event(), threading.Event()
+
+    async def timed_await(_name, _timings, value):
+        return await value
+
+    class Rollout:
+        async def resume(self, **_kwargs):
+            assert await asyncio.to_thread(started.wait, 5)
+            if failure == "resume":
+                raise ValueError("resume failed")
+            await asyncio.Event().wait()
+
+    cls = extracted(
+        "verl_omni/workers/engine_workers.py",
+        "ActorRolloutRefWorker",
+        {"update_weights"},
+        extra={
+            "asyncio": asyncio,
+            "parameter_to_thread": parameter_to_thread,
+            "time": __import__("time"),
+            "logger": logging.getLogger(__name__),
+            "_get_engine_lora_config": lambda *_args: object(),
+            "_timed_await": timed_await,
+            "set_expandable_segments": lambda *_args: None,
+            "log_gpu_memory_usage": lambda *_args, **_kwargs: None,
+            "get_torch_device": lambda: SimpleNamespace(is_available=lambda: False),
+        },
+    )
+    worker = cls()
+    engine = CPUEngine()
+    engine.is_param_offload_enabled = False
+    tracker = engine.enable_parameter_tracking()
+    worker.actor = SimpleNamespace(engine=engine)
+    worker.rollout = Rollout()
+    worker.rollout_adapter = "default"
+    worker.peft_merge = False
+    worker.base_sync_done = True
+    worker.config = SimpleNamespace(rollout=SimpleNamespace(free_cache_engine=True))
+
+    def gather(_timings):
+        started.set()
+        assert release.wait(timeout=5)
+        return {}, None
+
+    worker._gather_lora_weights = gather
+
+    async def run():
+        task = asyncio.create_task(worker.update_weights(mode="naive"))
+        assert await asyncio.to_thread(started.wait, 5)
+        if failure == "cancel":
+            task.cancel()
+        try:
+            await asyncio.sleep(0.05)
+            assert not task.done()
+            if failure == "cancel":
+                task.cancel()
+                await asyncio.sleep(0.05)
+                assert not task.done()
+            with pytest.raises(RuntimeError, match="Concurrent"):
+                tracker.version()
+        finally:
+            release.set()
+        if failure == "resume":
+            with pytest.raises(ValueError, match="resume failed"):
+                await task
+        else:
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        tracker.version()
+
+    asyncio.run(run())
+
+
+def test_actual_update_weights_ipc_failure_drains_offload_before_unlock():
+    started, release = threading.Event(), threading.Event()
+
+    class Rollout:
+        zmq_handle = "handle"
+        use_shm = False
+
+        async def _execute_method(self, *_args, **_kwargs):
+            assert await asyncio.to_thread(started.wait, 5)
+            raise OSError("ipc failed")
+
+    cls = extracted(
+        "verl_omni/workers/engine_workers.py",
+        "ActorRolloutRefWorker",
+        {"update_weights"},
+        extra={
+            "asyncio": asyncio,
+            "parameter_to_thread": parameter_to_thread,
+            "time": __import__("time"),
+            "logger": logging.getLogger(__name__),
+            "_get_engine_lora_config": lambda *_args: object(),
+            "set_expandable_segments": lambda *_args: None,
+            "log_gpu_memory_usage": lambda *_args, **_kwargs: None,
+            "get_torch_device": lambda: SimpleNamespace(is_available=lambda: False),
+            "make_update_zmq_id": lambda *_args: "id",
+            "make_update_zmq_handle": lambda *_args: "handle",
+        },
+    )
+    worker = cls()
+    engine = CPUEngine()
+    engine.is_param_offload_enabled = False
+    tracker = engine.enable_parameter_tracking()
+    worker.actor = SimpleNamespace(engine=engine)
+    worker.rollout = Rollout()
+    worker.rollout_adapter = "default"
+    worker.peft_merge = False
+    worker.base_sync_done = True
+    worker._zmq_update_seq = 0
+    worker.config = SimpleNamespace(rollout=SimpleNamespace(free_cache_engine=False))
+    worker._gather_lora_weights = lambda _timings: ({}, None)
+
+    def offload(_timings):
+        started.set()
+        assert release.wait(timeout=5)
+
+    worker._offload_actor_and_empty_cache = offload
+
+    async def run():
+        task = asyncio.create_task(worker.update_weights(mode="naive"))
+        assert await asyncio.to_thread(started.wait, 5)
+        try:
+            await asyncio.sleep(0.05)
+            assert not task.done()
+            with pytest.raises(RuntimeError, match="Concurrent"):
+                tracker.version()
+        finally:
+            release.set()
+        with pytest.raises(OSError, match="ipc failed"):
+            await task
+        tracker.version()
+
+    asyncio.run(run())
 
 
 def append_to_dict(target, source):
@@ -183,3 +412,50 @@ def test_owned_worker_rejects_multiple_updates_before_forward():
     with pytest.raises(ValueError, match="one optimizer update"):
         instance.train_mini_batch(data)
     assert instance.engine.calls == 0
+
+
+def test_untracked_update_weights_keeps_native_gather_cancellation():
+    started, release = threading.Event(), threading.Event()
+    cls = extracted(
+        "verl_omni/workers/engine_workers.py",
+        "ActorRolloutRefWorker",
+        {"update_weights"},
+        extra={
+            "asyncio": asyncio,
+            "parameter_to_thread": parameter_to_thread,
+            "time": __import__("time"),
+            "logger": logging.getLogger(__name__),
+            "_get_engine_lora_config": lambda *_args: object(),
+            "set_expandable_segments": lambda *_args: None,
+            "log_gpu_memory_usage": lambda *_args, **_kwargs: None,
+            "get_torch_device": lambda: SimpleNamespace(is_available=lambda: False),
+        },
+    )
+    worker = cls()
+    engine = CPUEngine()
+    engine.is_param_offload_enabled = False
+    worker.actor = SimpleNamespace(engine=engine)
+    worker.rollout = SimpleNamespace()
+    worker.rollout_adapter = "default"
+    worker.peft_merge = False
+    worker.base_sync_done = True
+    worker.config = SimpleNamespace(rollout=SimpleNamespace(free_cache_engine=False))
+
+    def gather(_timings):
+        started.set()
+        assert release.wait(timeout=5)
+        return {}, None
+
+    worker._gather_lora_weights = gather
+
+    async def run():
+        task = asyncio.create_task(worker.update_weights(mode="naive"))
+        try:
+            assert await asyncio.to_thread(started.wait, 5)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, timeout=0.5)
+        finally:
+            release.set()
+
+    asyncio.run(run())
