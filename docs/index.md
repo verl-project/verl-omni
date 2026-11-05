@@ -31,6 +31,7 @@ start/engine_backends.md
 start/install_npu.md
 start/install_rocm.md
 start/install_xpu.md
+start/install_mlu.md
 start/models.md
 start/flowgrpo_quickstart.md
 start/diffusion_v1.md
@@ -105,6 +106,7 @@ examples/qwen_image/flowgrpo_trainer_qwen_image.md
 examples/qwen_image_edit/flowgrpo_trainer_qwen_image_edit.md
 examples/ltx2/flowgrpo_trainer_ltx2.md
 examples/ltx2/omninft_trainer_ltx2.md
+examples/ltx2/diffusionopd_trainer_ltx2.md
 examples/minimax_h3/flowgrpo_trainer_minimax_h3.md
 examples/minimax_h3/diffusionnft_trainer_minimax_h3.md
 examples/boogu_image/flowgrpo_trainer_boogu_image.md
@@ -113,6 +115,7 @@ examples/bagel/flowgrpo_trainer_bagel.md
 examples/gspo_trainer.md
 examples/qwen3_omni/gspo_trainer_qwen3_omni.md
 examples/dapo_trainer.md
+examples/stage_skip.md
 examples/qwen3_tts/grpo_trainer_qwen3_tts.md
 ```
 
@@ -121,6 +124,7 @@ examples/qwen3_tts/grpo_trainer_qwen3_tts.md
 :caption: Performance Tuning Guide
 
 perf/tuning_guide.md
+perf/offline_microbatch_tuner.md
 perf/diffusion_mfu.md
 perf/profiler.md
 perf/diffusion_consistency.md

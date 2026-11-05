@@ -91,6 +91,7 @@ dev = [
     "py-spy",
     "pytest-asyncio",
     "pytest-rerunfailures",
+    "pytest-xdist",
 ]
 ocr = [
     "Levenshtein",
