@@ -243,8 +243,6 @@ def supervise(group: str, repo: Path, state_path: Path) -> int:
         os.close(descriptor)
         os.execvp("bash", ["bash", f"tests/npu_smoke/run_npu_smoke_{group}.sh", "--num-npus", os.environ["NUM_NPUS"]])
     runner_identity = process_identity(runner)
-    state.update(phase="running", runner=runner)
-    _write_state(state_path, state)
     raw_status = None
     completed = False
 
@@ -261,6 +259,8 @@ def supervise(group: str, repo: Path, state_path: Path) -> int:
                 raw_status = os.waitstatus_to_exitcode(status)
 
     try:
+        state.update(phase="running", runner=runner)
+        _write_state(state_path, state)
         while raw_status is None and not cancelled:
             reap()
             if raw_status is not None:
