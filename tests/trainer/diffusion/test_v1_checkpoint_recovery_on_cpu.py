@@ -19,6 +19,7 @@ from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import torch
 import transfer_queue as tq
@@ -165,6 +166,7 @@ def test_reissue_restarts_only_inflight_prompt_groups(monkeypatch):
     trainer = object.__new__(PolicyGradientDiffusionTrainerV1SeparateAsync)
     trainer.trainer_mode = "separate_async"
     trainer.global_steps = 8
+    trainer.config = OmegaConf.create({"actor_rollout_ref": {"rollout": {"seed": None}}})
     trainer.agent_loop_manager = SimpleNamespace(generate_sequences=submitted.append)
 
     assert trainer._reissue_inflight_prompts() == 2
@@ -180,6 +182,49 @@ def test_reissue_restarts_only_inflight_prompt_groups(monkeypatch):
     assert submitted == [prompt_batch]
 
 
+def test_reissue_restamps_rollout_seed_for_the_current_step(monkeypatch):
+    # The TQ round trip keeps tensor fields only: ``rollout_seed`` is gone and
+    # ``rollout_seed_index`` still holds the positions from the original step.
+    inflight = ["pending", "running"]
+    items = {uid: {"is_prompt": True, "status": "pending", "global_steps": 2} for uid in inflight}
+    prompt_batch = tu.get_tensordict(
+        {
+            "uid": inflight,
+            "raw_prompt": ["prompt-pending", "prompt-running"],
+            "index": torch.tensor([0, 0]),
+            "rollout_seed_index": torch.tensor([4, 5]),
+        }
+    )
+    updated = []
+    submitted = []
+
+    monkeypatch.setattr(trainer_base_module, "_tq_supports_checkpoint", lambda: True)
+    monkeypatch.setattr(trainer_base_module.tq, "kv_list", lambda partition_id: {partition_id: deepcopy(items)})
+    monkeypatch.setattr(trainer_base_module.tq, "kv_batch_get", lambda *, keys, partition_id: prompt_batch)
+    monkeypatch.setattr(trainer_base_module.tq, "kv_batch_put", lambda **kwargs: updated.append(kwargs))
+
+    trainer = object.__new__(PolicyGradientDiffusionTrainerV1SeparateAsync)
+    trainer.trainer_mode = "separate_async"
+    trainer.global_steps = 8
+    trainer.config = OmegaConf.create({"data": {"train_batch_size": 2}, "actor_rollout_ref": {"rollout": {"seed": 7}}})
+    trainer._rollout_seed_step = None
+    trainer._rollout_seed_next_index = 0
+    trainer.agent_loop_manager = SimpleNamespace(generate_sequences=submitted.append)
+
+    assert trainer._reissue_inflight_prompts() == 2
+    assert int(submitted[0]["rollout_seed"]) == 7 + 8 - 1
+    assert [int(v) for v in submitted[0]["rollout_seed_index"]] == [0, 1]
+    assert [int(v) for v in updated[0]["fields"]["rollout_seed_index"]] == [0, 1]
+
+    # Warmup prompts submitted after the reissue in the same step take the next positions.
+    trainer.train_dataloader_it = iter([{"raw_prompt": np.array(["p0", "p1"], dtype=object)}])
+    trainer._gen_batch_seq = 0
+    trainer._effective_generation_batch_size = 2
+    warmup = trainer._next_train_batch()
+    assert int(warmup["rollout_seed"]) == 7 + 8 - 1
+    assert [int(v) for v in warmup["rollout_seed_index"]] == [2, 3]
+
+
 @requires_tq_checkpoint
 def test_transfer_queue_checkpoint_roundtrip_and_reissue(initialized_tq, tmp_path):
     partition_id = f"test-{uuid.uuid4().hex}"
@@ -189,6 +234,7 @@ def test_transfer_queue_checkpoint_roundtrip_and_reissue(initialized_tq, tmp_pat
             "uid": [pending, finished],
             "raw_prompt": ["pending prompt", "finished prompt"],
             "index": torch.tensor([0, 1]),
+            "rollout_seed_index": torch.tensor([4, 5]),
         }
     )
     tq.kv_batch_put(
@@ -219,6 +265,9 @@ def test_transfer_queue_checkpoint_roundtrip_and_reissue(initialized_tq, tmp_pat
     trainer = object.__new__(PolicyGradientDiffusionTrainerV1SeparateAsync)
     trainer.trainer_mode = "separate_async"
     trainer.global_steps = 4
+    trainer.config = OmegaConf.create({"actor_rollout_ref": {"rollout": {"seed": 7}}})
+    trainer._rollout_seed_step = None
+    trainer._rollout_seed_next_index = 0
     trainer.agent_loop_manager = SimpleNamespace(generate_sequences=submitted.append)
     try:
         assert trainer._reissue_inflight_prompts(partition_id) == 1
@@ -230,10 +279,13 @@ def test_transfer_queue_checkpoint_roundtrip_and_reissue(initialized_tq, tmp_pat
         assert list(submitted[0]["uid"]) == [pending]
         assert list(submitted[0]["raw_prompt"]) == ["pending prompt"]
         assert int(submitted[0]["global_steps"]) == 4
+        assert int(submitted[0]["rollout_seed"]) == 7 + 4 - 1
+        assert [int(v) for v in submitted[0]["rollout_seed_index"]] == [0]
         persisted_prompt = tq.kv_batch_get(keys=[pending], partition_id=partition_id)
         assert list(persisted_prompt["uid"]) == [pending]
         assert list(persisted_prompt["raw_prompt"]) == ["pending prompt"]
         assert int(persisted_prompt["index"][0]) == 0
+        assert [int(v) for v in persisted_prompt["rollout_seed_index"]] == [0]
     finally:
         tq.kv_clear(keys=list(tq.kv_list(partition_id)[partition_id]), partition_id=partition_id)
 
