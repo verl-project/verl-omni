@@ -58,6 +58,16 @@ EXPERIMENTS = [
         "label": "Qwen-Image + FlowGRPO",
         "layer": "l3-nightly",
     },
+    {
+        "id": "qwen_image_diffusion_nft",
+        "label": "Qwen-Image + Diffusion NFT",
+        "layer": "l3-nightly",
+    },
+    {
+        "id": "qwen_image_online_dpo",
+        "label": "Qwen-Image + Online DPO",
+        "layer": "l3-nightly",
+    },
 ]
 PERF_CHART_KEYS = {
     "perf/time_per_step",
@@ -67,6 +77,8 @@ PERF_CHART_KEYS = {
     "timing_s/update_actor",
     "timing_s/update_weights",
     "timing_s/step",
+    "timing_s/prepare_actor_batch",
+    "timing_s/ref",
     "timing_per_image_ms/gen",
     "timing_per_image_ms/old_log_prob",
     "timing_per_image_ms/update_actor",
