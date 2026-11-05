@@ -60,6 +60,23 @@ def cast_adapter_params_to_base(module: torch.nn.Module) -> None:
                     )
 
 
+def apply_lora_dtype(module: torch.nn.Module, target_dtype: torch.dtype) -> None:
+    """Cast every LoRA adapter parameter to ``target_dtype`` and pin adapter inputs.
+
+    Covers inactive adapters too: peft marks only the active adapter trainable,
+    so a requires_grad-filtered cast leaves "old" policy adapters in the base
+    dtype and mixes dtypes inside FSDP wrapping units and optimizer states.
+    """
+    from peft.tuners.tuners_utils import BaseTunerLayer
+
+    for name, param in module.named_parameters():
+        if ".lora_" in name or name.startswith("lora_"):
+            param.data = param.data.to(target_dtype)
+    for submodule in module.modules():
+        if isinstance(submodule, BaseTunerLayer):
+            submodule.cast_input_dtype_enabled = False
+
+
 class LoRAAdapterMixin:
     """Backend-agnostic helpers for named PEFT/LoRA policy adapters."""
 
@@ -103,19 +120,9 @@ class LoRAAdapterMixin:
 
         lora_dtype = getattr(self.model_config, "lora_dtype", None)
         if lora_dtype is not None:
-            from peft.tuners.tuners_utils import BaseTunerLayer
             from verl.utils.torch_dtypes import PrecisionType
 
-            target_dtype = PrecisionType.to_dtype(lora_dtype)
-            for name, param in module.named_parameters():
-                if param.requires_grad:
-                    orig_dtype = param.dtype
-                    param.data = param.data.to(target_dtype)
-                    logger.debug("LoRA param %s: %s -> %s", name, orig_dtype, param.dtype)
-
-            for submodule in module.modules():
-                if isinstance(submodule, BaseTunerLayer):
-                    submodule.cast_input_dtype_enabled = False
+            apply_lora_dtype(module, PrecisionType.to_dtype(lora_dtype))
 
         return module
 

@@ -162,3 +162,47 @@ def test_meta_rank_adapters_beyond_the_first_match_base_dtype_and_device():
     for name, param in module.named_parameters():
         assert param.dtype == torch.bfloat16, name
         assert param.device.type == "meta", name
+
+
+def test_lora_dtype_casts_every_adapter_including_inactive_policy_states():
+    """lora_dtype must reach inactive adapters or optimizer states split dtypes.
+
+    peft marks only the active adapter trainable, so a requires_grad-filtered
+    cast leaves the "old" policy adapter in the base dtype.
+    """
+    from diffusers import QwenImageTransformer2DModel
+    from peft import LoraConfig
+    from peft.tuners.tuners_utils import BaseTunerLayer
+
+    from verl_omni.workers.engine.lora_adapter_mixin import apply_lora_dtype, cast_adapter_params_to_base
+
+    config = {
+        "patch_size": 2,
+        "in_channels": 64,
+        "out_channels": 16,
+        "num_layers": 2,
+        "attention_head_dim": 16,
+        "num_attention_heads": 2,
+        "joint_attention_dim": 32,
+        "guidance_embeds": False,
+        "axes_dims_rope": (4, 6, 6),
+    }
+    with init_empty_weights():
+        module = QwenImageTransformer2DModel.from_config(config).to(torch.bfloat16)
+    lora = LoraConfig(r=4, lora_alpha=8, init_lora_weights=False, target_modules="all-linear")
+    module.add_adapter(lora, adapter_name="default")
+    module.add_adapter(lora, adapter_name="old")
+    module.set_adapter("default")
+
+    cast_adapter_params_to_base(module)
+    apply_lora_dtype(module, torch.float32)
+
+    adapter_dtypes = {p.dtype for name, p in module.named_parameters() if ".lora_" in name}
+    base_dtypes = {p.dtype for name, p in module.named_parameters() if ".lora_" not in name}
+    assert adapter_dtypes == {torch.float32}
+    assert base_dtypes == {torch.bfloat16}
+    assert all(
+        submodule.cast_input_dtype_enabled is False
+        for submodule in module.modules()
+        if isinstance(submodule, BaseTunerLayer)
+    )

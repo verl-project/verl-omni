@@ -41,7 +41,7 @@ from verl.workers.engine.fsdp.utils import get_sharding_strategy
 
 from verl_omni.utils.fsdp_utils import apply_fsdp2
 from verl_omni.workers.config import OmniModelConfig
-from verl_omni.workers.engine.lora_adapter_mixin import cast_adapter_params_to_base
+from verl_omni.workers.engine.lora_adapter_mixin import apply_lora_dtype, cast_adapter_params_to_base
 from verl_omni.workers.engine.lora_export import export_lora_for_sync
 
 logger = logging.getLogger(__name__)
@@ -226,19 +226,9 @@ class OmniFSDPEngine(FSDPEngineWithLMHead):
 
         lora_dtype = getattr(self.model_config, "lora_dtype", None)
         if lora_dtype is not None:
-            from peft.tuners.tuners_utils import BaseTunerLayer
             from verl.utils.torch_dtypes import PrecisionType
 
-            target_dtype = PrecisionType.to_dtype(lora_dtype)
-            for name, param in module.named_parameters():
-                if param.requires_grad:
-                    orig_dtype = param.dtype
-                    param.data = param.data.to(target_dtype)
-                    logger.debug("LoRA param %s: %s -> %s", name, orig_dtype, param.dtype)
-
-            for submodule in module.modules():
-                if isinstance(submodule, BaseTunerLayer):
-                    submodule.cast_input_dtype_enabled = False
+            apply_lora_dtype(module, PrecisionType.to_dtype(lora_dtype))
 
         return module
 
