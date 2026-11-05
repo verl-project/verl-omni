@@ -195,7 +195,7 @@ fit memory.
 The launcher enables console, TensorBoard, and W&B logging by default. The
 first command overrides this with `trainer.logger=console` so it can run
 without W&B credentials. To use the launcher's default loggers, export
-`WANDB_API_KEY` before starting training. To track with SwanLab where W&B is not reachable, run `uv pip install -e ".[swanlab]"`, set `SWANLAB_API_KEY`, and append `trainer.logger='["console","swanlab"]'`.
+`WANDB_API_KEY` before starting training.
 
 For `ACTOR_SP > 1`, use the SP-capable attention backends on both actor and
 rollout:

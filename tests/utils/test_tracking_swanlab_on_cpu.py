@@ -19,21 +19,16 @@ import wave
 
 import numpy as np
 import pytest
+import swanlab
 import torch
 from PIL import Image
 
 pytest.importorskip("diffusers")
 
-from tests.utils.swanlab_stub import use_swanlab  # noqa: E402
 from verl_omni.pipelines.rollout_media import MediaArtifact, MediaSpec  # noqa: E402
 from verl_omni.utils.tracking import log_swanlab_media, wrap_val_samples_for_swanlab  # noqa: E402
 
 WARM = (191, 89, 38)
-
-
-@pytest.fixture(autouse=True)
-def swanlab(monkeypatch):
-    return use_swanlab(monkeypatch)
 
 
 def _warm_image(channels=3, h=32, w=48):
@@ -82,7 +77,7 @@ def test_decoded_image_artifact_uses_its_declared_modality():
     assert "val/images/sample_1" in media
 
 
-def test_video_sample_becomes_a_decodable_gif(swanlab):
+def test_video_sample_becomes_a_decodable_gif():
     rows, media = wrap_val_samples_for_swanlab([("prompt", _warm_clip(t=5), 1.0)], fps=10, media_kinds=["video"])
 
     assert rows == [("prompt", "val/videos/sample_1", 1.0)]
@@ -175,7 +170,7 @@ def test_bad_audio_keeps_the_video():
     assert set(media) == {"val/videos/sample_1"}
 
 
-def test_one_failed_video_is_skipped_and_the_others_continue(monkeypatch, swanlab):
+def test_one_failed_video_is_skipped_and_the_others_continue(monkeypatch):
     real_video = swanlab.Video
     calls = []
 
@@ -195,7 +190,7 @@ def test_one_failed_video_is_skipped_and_the_others_continue(monkeypatch, swanla
     assert list(media) == ["val/videos/sample_2"]
 
 
-def test_failed_image_conversion_is_reported_in_its_row(monkeypatch, swanlab):
+def test_failed_image_conversion_is_reported_in_its_row(monkeypatch):
     def broken_image(*args, **kwargs):
         raise OSError("cannot encode")
 
@@ -219,7 +214,7 @@ def test_contract_errors_raise_like_the_wandb_path(output, media_kind, match):
         wrap_val_samples_for_swanlab([("prompt", output, 0.5)], media_kinds=[media_kind])
 
 
-def test_log_swanlab_media_passes_the_step_and_skips_empty_media(monkeypatch, swanlab):
+def test_log_swanlab_media_passes_the_step_and_skips_empty_media(monkeypatch):
     logged = []
     monkeypatch.setattr(swanlab, "log", lambda data, step=None: logged.append((data, step)))
 

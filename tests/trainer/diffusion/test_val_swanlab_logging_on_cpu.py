@@ -18,6 +18,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import swanlab
 import torch
 from PIL import Image
 
@@ -26,14 +27,8 @@ wandb = pytest.importorskip("wandb")
 from omegaconf import OmegaConf  # noqa: E402  (after importorskip guards)
 from verl.utils.tracking import Tracking, ValidationGenerationsLogger  # noqa: E402
 
-from tests.utils.swanlab_stub import use_swanlab  # noqa: E402
 from verl_omni.pipelines.rollout_media import MediaArtifact, MediaSpec  # noqa: E402
 from verl_omni.trainer.diffusion.ray_diffusion_trainer import BaseRayDiffusionTrainer  # noqa: E402
-
-
-@pytest.fixture
-def swanlab(monkeypatch):
-    return use_swanlab(monkeypatch)
 
 
 class _RecordingValLogger:
@@ -76,7 +71,7 @@ def _log(stub, outputs, **kwargs):
     )
 
 
-def test_swanlab_only_logs_media_and_gives_the_table_text_rows(monkeypatch, swanlab):
+def test_swanlab_only_logs_media_and_gives_the_table_text_rows(monkeypatch):
     logged = []
     monkeypatch.setattr(swanlab, "log", lambda data, step=None: logged.append((data, step)))
     val_logger = _RecordingValLogger()
@@ -92,7 +87,7 @@ def test_swanlab_only_logs_media_and_gives_the_table_text_rows(monkeypatch, swan
     assert sorted(row[1] for row in rows) == ["val/videos/sample_1", "val/videos/sample_2"]
 
 
-def test_wandb_and_swanlab_each_get_their_own_rows(monkeypatch, tmp_path, swanlab):
+def test_wandb_and_swanlab_each_get_their_own_rows(monkeypatch, tmp_path):
     monkeypatch.setattr(wandb, "run", object())
     monkeypatch.setattr(wandb, "log", lambda *args, **kwargs: None)
     monkeypatch.setattr(wandb, "Video", lambda path, **kwargs: SimpleNamespace(path=path))
@@ -119,7 +114,7 @@ def test_config_logger_list_passes_through_without_swanlab():
     assert isinstance(val_logger.calls[0][1][0][1], torch.Tensor)
 
 
-def test_swanlab_log_failure_does_not_stop_the_table(monkeypatch, swanlab):
+def test_swanlab_log_failure_does_not_stop_the_table(monkeypatch):
     def fail(*args, **kwargs):
         raise RuntimeError("no active run")
 
@@ -131,7 +126,7 @@ def test_swanlab_log_failure_does_not_stop_the_table(monkeypatch, swanlab):
     assert [call[0] for call in val_logger.calls] == [[], ["swanlab"]]
 
 
-def test_swanlab_previews_replace_outputs(monkeypatch, swanlab):
+def test_swanlab_previews_replace_outputs(monkeypatch):
     logged = []
     monkeypatch.setattr(swanlab, "log", lambda data, step=None: logged.append(data))
     val_logger = _RecordingValLogger()
@@ -144,7 +139,6 @@ def test_swanlab_previews_replace_outputs(monkeypatch, swanlab):
 
 
 def test_a_real_offline_run_writes_scalars_and_media(monkeypatch, tmp_path):
-    pytest.importorskip("swanlab")
     monkeypatch.setenv("SWANLAB_MODE", "offline")
     monkeypatch.setenv("SWANLAB_LOG_DIR", str(tmp_path))
     monkeypatch.delenv("SWANLAB_API_KEY", raising=False)

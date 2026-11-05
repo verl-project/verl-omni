@@ -76,7 +76,6 @@ docker run -it --rm \
   -e WORKSPACE="$WORKSPACE" \
   -e HF_HOME=/root/.cache/huggingface \
   -e WANDB_API_KEY="${WANDB_API_KEY:-}" \
-  -e SWANLAB_API_KEY="${SWANLAB_API_KEY:-}" \
   -w /workspace/verl-omni \
   verl-omni:rocm \
   bash
@@ -157,8 +156,6 @@ first step from timing out.
 ```bash
 export WANDB_API_KEY=<your_wandb_api_key>
 ```
-
-To track with SwanLab where W&B is not reachable, run `uv pip install -e ".[swanlab]"`, set `SWANLAB_API_KEY`, and append `trainer.logger='["console","swanlab"]'`.
 
 Without a key the run aborts at logger init with
 `wandb.errors.UsageError: No API key configured`. To run without W&B, append

@@ -173,8 +173,6 @@ Set your W&B credentials before launching if you want remote tracking:
 export WANDB_API_KEY=<your_wandb_api_key>
 ```
 
-To track with SwanLab where W&B is not reachable, run `uv pip install -e ".[swanlab]"`, set `SWANLAB_API_KEY`, and append `trainer.logger='["console","swanlab"]'`.
-
 You can also override `trainer.project_name` and `trainer.experiment_name` from the command line to organize runs under your own project names.
 
 ## Further reading
