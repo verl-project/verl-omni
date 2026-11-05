@@ -158,6 +158,75 @@ def test_second_replica_construction_failure_rolls_back_previous_facade_and_rank
     assert killed == [[facade], ["g0r0", "g0r1"]]
 
 
+@pytest.mark.parametrize("failure", ["submission", "ready_submission", "ready_error", "ready_timeout"])
+@pytest.mark.parametrize("cleanup_failure", [None, "facades", "ranks", "both"])
+@pytest.mark.asyncio
+async def test_second_facade_failure_retains_and_terminates_both_groups(monkeypatch, failure, cleanup_failure):
+    cfg = multi_config()
+    manager = object.__new__(OmniRewardLoopManager)
+    manager.multi_reward_model_manager = MultiRewardModelManager(cfg, SimpleNamespace(world_size=4))
+    owner = manager.multi_reward_model_manager.models["pickscore"]
+    model = parse_reward_model_config("pickscore", cfg.reward.models.pickscore)
+    spec = manager.multi_reward_model_manager.reward_model_specs["pickscore"]
+    primary = (
+        reward_loop.ray.exceptions.GetTimeoutError("second facade readiness")
+        if failure == "ready_timeout"
+        else (RuntimeError("second facade construction failed"))
+    )
+    ranks = [["g0r0", "g0r1"], ["g1r0", "g1r1"]]
+    facades, built, terminated = [], [], []
+
+    def build(*args, **kwargs):
+        index = len(built)
+        built.append(index)
+        return SimpleNamespace(worker_group=SimpleNamespace(workers=ranks[index]))
+
+    def submit(*args):
+        index = len(facades)
+        if index == 1 and failure == "submission":
+            assert owner.rank_workers == ranks[0] + ranks[1]
+            raise primary
+
+        def ready():
+            assert owner._workers == facades
+            if index == 1 and failure == "ready_submission":
+                raise primary
+            return index
+
+        actor = SimpleNamespace(ready=SimpleNamespace(remote=ready))
+        facades.append(actor)
+        return actor
+
+    def get(ref, **kwargs):
+        if ref == 1:
+            assert owner._workers == facades and owner.rank_workers == ranks[0] + ranks[1]
+            raise primary
+        return True
+
+    def terminate(actors, timeout, status_method):
+        terminated.append(list(actors))
+        role = "facades" if status_method == "ready" else "ranks"
+        if cleanup_failure in {role, "both"}:
+            raise TimeoutError(f"{role} death unconfirmed")
+
+    monkeypatch.setattr(native_fsdp, "build_replica", build)
+    monkeypatch.setattr(reward_loop.ray, "remote", lambda cls: SimpleNamespace(remote=submit))
+    monkeypatch.setattr(reward_loop.ray, "get", get)
+    monkeypatch.setattr(native_fsdp, "terminate_ranks", terminate)
+    with pytest.raises(BaseExceptionGroup) as error:
+        manager._create_fsdp_worker(cfg, spec, model)
+    assert error.value.exceptions[0] is primary
+    assert built == [0, 1] and terminated == [facades, ranks[0] + ranks[1]]
+    assert owner._closed
+    if cleanup_failure is not None:
+        assert error.value.exceptions[1] is owner._termination_error
+        with pytest.raises(BaseExceptionGroup) as repeated:
+            await owner.close()
+        assert repeated.value is owner._termination_error
+    else:
+        await owner.close()
+
+
 @pytest.mark.asyncio
 async def test_lifecycle_reaches_every_facade_and_resident_wake_is_idempotent():
     cfg = multi_config()
