@@ -41,7 +41,6 @@ dependencies = [
     "transformers>=5.13.0,<=5.14.1",
     "wandb",
     "swanlab>=0.10.3",
-    # swanlab.Audio writes wav through soundfile, which swanlab only pulls in with its large [media] extra.
     "soundfile>=0.12.1",
     "packaging>=20.0",
     "uvicorn",
