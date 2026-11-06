@@ -1155,6 +1155,8 @@ agentic_image_gen:
   good_enough_threshold: 0.8
   score_backend: unified_reward
   unified_good_enough_threshold: 0.62
+  gen_rubric_weight: 0.5
+  stop_requires_rubric: true
   pickscore_good_enough_threshold: 1.0
   block_generate_after_yes: true
   block_generate_after_max_passes: true

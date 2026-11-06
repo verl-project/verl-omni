@@ -38,6 +38,8 @@ def bagel_scorer_knobs_from_config(config: Any) -> dict[str, Any]:
         "corl_reward_version",
         "unified_good_enough_threshold",
         "pickscore_good_enough_threshold",
+        "gen_rubric_weight",
+        "stop_requires_rubric",
     ):
         knobs[key] = node.get(key, defaults[key]) if isinstance(node, Mapping) else getattr(node, key, defaults[key])
     return knobs

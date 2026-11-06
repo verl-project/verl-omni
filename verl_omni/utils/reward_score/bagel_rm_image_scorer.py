@@ -97,6 +97,13 @@ DEFAULT_PICKSCORE_GOOD_ENOUGH = 1.0
 # ``rubric_model``, or bypass the pool entirely with ``rubric_vllm_url``.
 DEFAULT_RUBRIC_MODEL = "ca_judge"
 
+# Share of the rubric verdict ``(C + A) / 2`` in each image's score under
+# ``unified_reward_rubric``. UnifiedReward alone is blind to exact strings and counts: on
+# ``bagel_corl_plateaufix_4567`` it rose 0.58 -> 0.63 on sample_9001 while the requested
+# footer got *more* wrong, and the rubric judge, which saw that, had no say in the GEN
+# reward. The UnifiedReward half keeps the within-group variance FlowGRPO needs.
+DEFAULT_GEN_RUBRIC_WEIGHT = 0.5
+
 
 def _mid_loop_payload(extra_info: Any) -> dict[str, Any] | None:
     """Return the in-loop payload riding ``extra_info``, or ``None`` for episodes."""
@@ -398,9 +405,9 @@ def compute_score(
             f"bagel_rm_image_scorer: unknown score_backend {backend!r}; "
             "expected 'unified_reward', 'unified_reward_rubric', 'vlm_judge' or 'pickscore'"
         )
-    # ``unified_reward_rubric``: the reward stays UnifiedReward's point score, and the same
-    # reward-pool model is asked the Mode-2a C/A rubric a second time, for the
-    # ``judge_image`` response and the stop verdict only.
+    # ``unified_reward_rubric``: UnifiedReward scores the image, and the reward-pool
+    # judge is asked the Mode-2a C/A rubric for the ``judge_image`` response. The
+    # rubric also shares the image score and, on v2, the stop verdict.
     version = str(knobs.get("corl_reward_version", "v1"))
     if version not in ("v1", "v2"):
         raise ValueError("corl_reward_version must be v1 or v2")
@@ -409,6 +416,14 @@ def compute_score(
     if version == "v2":
         image_prompt = user_request
     with_rubric = backend == "unified_reward_rubric"
+    rubric_weight = float(knobs.get("gen_rubric_weight", DEFAULT_GEN_RUBRIC_WEIGHT)) if with_rubric else 0.0
+    if not 0.0 <= rubric_weight <= 1.0:
+        raise ValueError(f"gen_rubric_weight must be in [0, 1], got {rubric_weight}")
+    # v2 used to stop on the UnifiedReward cut alone and show that YES next to the judge's
+    # C/A, so the policy read "C=0.68 ... good_enough=YES" with findings listing a wrong
+    # string. On the 60-step run 468 of 883 shown YES verdicts were ones the judge itself
+    # scored below its own bar.
+    stop_requires_rubric = bool(knobs.get("stop_requires_rubric", True))
     # The user's request is the fixed target across rewrite passes; the policy's own
     # diffusion prompt would move it every pass.
     caption = user_request or image_prompt
@@ -462,12 +477,18 @@ def compute_score(
                     extra_info=_rubric_knobs(knobs),
                 )
                 if judged is not None and judged.get("ok"):
-                    sample_judge.append(_rubric_row(judged))
+                    row = _rubric_row(judged)
+                    sample_judge.append(row)
+                    rubric_yes = bool(judged.get("good_enough", False))
                     if version == "v1":
-                        good_enough = bool(judged.get("good_enough", False))
+                        good_enough = rubric_yes
+                    elif stop_requires_rubric:
+                        good_enough = good_enough and rubric_yes
+                    ca = 0.5 * (row["correctness"] + row["aesthetics"])
+                    score = (1.0 - rubric_weight) * score + rubric_weight * ca
                 else:
-                    # The reward is already scored; an unparsed rubric only costs this
-                    # image its written verdict, so fall back to the axes text.
+                    # An unparsed rubric costs this image its written verdict and its
+                    # rubric share; the UnifiedReward score alone still stands.
                     logger.warning("unified_reward_rubric: rubric judge failed for %s; using axes", path)
                     sample_judge.append(None)
         if not math.isfinite(float(score)):

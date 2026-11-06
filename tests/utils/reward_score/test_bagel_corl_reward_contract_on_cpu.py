@@ -121,7 +121,8 @@ def test_v2_rubric_disagreement_keeps_score_stop(monkeypatch):
         },
     }
     result = scorer.compute_score(extra_info={"bagel_corl": payload})
-    assert result["score"] == pytest.approx(0.7)
+    # Each image is 0.5 * UnifiedReward + 0.5 * (C + A) / 2 = (0.75 + 0.95) / 2.
+    assert result["score"] == pytest.approx(0.85)
     assert result["sample_good_enough"] == [False, True]
     assert result["good_enough"] is False
     assert seen == ["original", "original"]
@@ -131,6 +132,67 @@ def test_v2_rubric_disagreement_keeps_score_stop(monkeypatch):
     payload["extra_info"] = {"user_prompt": "original Keep any private thinking short.", "raw_prompt": "original"}
     scorer.compute_score(extra_info={"bagel_corl": payload})
     assert seen == ["original", "original"]
+
+
+def _rubric_scorer(monkeypatch, verdict):
+    import sys
+
+    client = SimpleNamespace(call_reflect_vlm=lambda **kw: verdict)
+    monkeypatch.setitem(sys.modules, "verl_omni.utils.reward_score.agentic_image_judge_client", client)
+    scorer = load_module("verl_omni/utils/reward_score/bagel_rm_image_scorer.py")
+    monkeypatch.setattr(scorer, "_score_image_unified", lambda **kw: (0.6, True, {"alignment": 3.4}))
+    return scorer
+
+
+def _rubric_payload(**knobs):
+    return {
+        "image_paths": ["a"],
+        "extra_info": {"raw_prompt": "a poster that reads 'OPEN AT 7 AM'"},
+        "scorer_knobs": {
+            "good_enough_threshold": 0.8,
+            "score_backend": "unified_reward_rubric",
+            "corl_reward_version": "v2",
+            **knobs,
+        },
+    }
+
+
+def test_v2_rubric_no_vetoes_the_unified_reward_yes(monkeypatch):
+    """sample_9001: UnifiedReward clears its cut, the judge scores C=0.68 (< 0.8) and says NO."""
+    verdict = {"ok": True, "correctness": 0.68, "aesthetics": 0.76, "good_enough": False}
+    scorer = _rubric_scorer(monkeypatch, verdict)
+
+    result = scorer.compute_score(extra_info={"bagel_corl": _rubric_payload()})
+    assert result["sample_good_enough"] == [False]
+    assert result["score"] == pytest.approx(0.5 * 0.6 + 0.5 * 0.72)
+
+    legacy = scorer.compute_score(
+        extra_info={"bagel_corl": _rubric_payload(stop_requires_rubric=False, gen_rubric_weight=0.0)}
+    )
+    assert legacy["sample_good_enough"] == [True]
+    assert legacy["score"] == pytest.approx(0.6)
+
+
+def test_v2_rubric_yes_and_unified_yes_stop(monkeypatch):
+    verdict = {"ok": True, "correctness": 0.84, "aesthetics": 0.8, "good_enough": True}
+    scorer = _rubric_scorer(monkeypatch, verdict)
+    result = scorer.compute_score(extra_info={"bagel_corl": _rubric_payload(gen_rubric_weight=1.0)})
+    assert result["sample_good_enough"] == [True]
+    assert result["score"] == pytest.approx(0.82)
+
+
+def test_v2_rubric_failure_keeps_the_unified_reward_score_and_stop(monkeypatch):
+    scorer = _rubric_scorer(monkeypatch, None)
+    result = scorer.compute_score(extra_info={"bagel_corl": _rubric_payload()})
+    assert result["sample_good_enough"] == [True]
+    assert result["score"] == pytest.approx(0.6)
+    assert result["sample_judge"] == [None]
+
+
+def test_gen_rubric_weight_out_of_range_fails_loud(monkeypatch):
+    scorer = _rubric_scorer(monkeypatch, {"ok": True, "correctness": 0.8, "aesthetics": 0.8, "good_enough": True})
+    with pytest.raises(ValueError, match="gen_rubric_weight"):
+        scorer.compute_score(extra_info={"bagel_corl": _rubric_payload(gen_rubric_weight=1.5)})
 
 
 def test_rubric_goes_to_the_sibling_judge_and_the_score_stays_on_the_image_rm(monkeypatch):

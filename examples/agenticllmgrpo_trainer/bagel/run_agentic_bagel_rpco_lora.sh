@@ -309,6 +309,10 @@ JUDGE_GOOD_ENOUGH_THRESHOLD=${JUDGE_GOOD_ENOUGH_THRESHOLD:-0.80}
 PICKSCORE_GOOD_ENOUGH_THRESHOLD=${PICKSCORE_GOOD_ENOUGH_THRESHOLD:-1.0}
 # 0.56 is the observed batch-mean image score, so the YES stop is reachable.
 UNIFIED_GOOD_ENOUGH_THRESHOLD=${UNIFIED_GOOD_ENOUGH_THRESHOLD:-0.56}
+# Rubric judge (ca_judge) share of each GEN image score, and whether its own YES is
+# required to stop; see image_gen_tools.yaml.
+GEN_RUBRIC_WEIGHT=${GEN_RUBRIC_WEIGHT:-0.5}
+STOP_REQUIRES_RUBRIC=${STOP_REQUIRES_RUBRIC:-true}
 # The judge shares the last visible device (the emptiest); override JUDGE_GPU to move it.
 if [[ -z "${JUDGE_GPU:-}" ]]; then
   JUDGE_GPU="${CUDA_VISIBLE_DEVICES##*,}"
@@ -527,6 +531,8 @@ export BAGEL_CORL_DIVERGENCE_ABORT="${BAGEL_CORL_DIVERGENCE_ABORT:-1}"
     agentic_image_gen.score_backend=${SCORE_BACKEND:-unified_reward_rubric} \
     agentic_image_gen.corl_reward_version=$CORL_REWARD_VERSION \
     agentic_image_gen.unified_good_enough_threshold=$UNIFIED_GOOD_ENOUGH_THRESHOLD \
+    agentic_image_gen.gen_rubric_weight=$GEN_RUBRIC_WEIGHT \
+    agentic_image_gen.stop_requires_rubric=$STOP_REQUIRES_RUBRIC \
     agentic_image_gen.pickscore_good_enough_threshold=$PICKSCORE_GOOD_ENOUGH_THRESHOLD \
     trainer.v1.trainer_mode=bagel_corl_sync \
     algorithm.adv_estimator=$ADV_ESTIMATOR \

@@ -97,6 +97,16 @@ score_backend: unified_reward
 # raise toward good_enough_threshold as the GEN lane improves.
 unified_good_enough_threshold: 0.62
 
+# ``unified_reward_rubric`` only: share of the rubric verdict (C + A) / 2 in each image's
+# score, the rest being UnifiedReward. UnifiedReward does not check exact strings or
+# counts, so with 0 the GEN lane never learns what the rubric judge flags.
+gen_rubric_weight: 0.5
+
+# ``unified_reward_rubric`` + v2: good_enough=YES needs the rubric judge's own YES
+# (C and A >= good_enough_threshold) as well as the UnifiedReward cut. With false the
+# stop follows UnifiedReward alone and can contradict the C/A shown beside it.
+stop_requires_rubric: true
+
 # Min PickScore for client-side good_enough=YES when ``score_backend: pickscore``. On
 # PickScore's ``raw / 26`` scale. Unlike ``unified_good_enough_threshold`` this is not
 # calibrated against a measured distribution yet -- PickScore is a *relative* ranker,

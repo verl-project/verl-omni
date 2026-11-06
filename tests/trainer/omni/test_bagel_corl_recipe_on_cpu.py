@@ -97,6 +97,8 @@ def test_defaults_and_caller_precedence(launch):
         "algorithm.adv_estimator=grpo_std_floor",
         "algorithm.adv_std_floor=0.05",
         "agentic_image_gen.unified_good_enough_threshold=0.56",
+        "agentic_image_gen.gen_rubric_weight=0.5",
+        "agentic_image_gen.stop_requires_rubric=true",
         "actor_rollout_ref.actor.use_kl_loss=True",
         "actor_rollout_ref.actor.kl_loss_coef=0.001",
         "+actor_rollout_ref.actor.diffusion_loss.clip_ratio=0.02",

@@ -31,6 +31,8 @@ def test_bagel_scorer_overrides_survive_the_shared_component_boundary():
                 "corl_reward_version": "v2",
                 "unified_good_enough_threshold": 0.71,
                 "pickscore_good_enough_threshold": 0.91,
+                "gen_rubric_weight": 0.25,
+                "stop_requires_rubric": False,
                 "vllm_url": "http://judge",
                 "good_enough_threshold": 0.83,
             }
@@ -41,6 +43,8 @@ def test_bagel_scorer_overrides_survive_the_shared_component_boundary():
     assert knobs["corl_reward_version"] == "v2"
     assert knobs["unified_good_enough_threshold"] == 0.71
     assert knobs["pickscore_good_enough_threshold"] == 0.91
+    assert knobs["gen_rubric_weight"] == 0.25
+    assert knobs["stop_requires_rubric"] is False
     assert knobs["vllm_url"] == "http://judge"
     assert knobs["good_enough_threshold"] == 0.83
 
@@ -51,6 +55,8 @@ def test_bagel_scorer_defaults_and_missing_config():
     assert knobs["corl_reward_version"] == "v1"
     assert knobs["unified_good_enough_threshold"] == 0.62
     assert knobs["pickscore_good_enough_threshold"] == 1.0
+    assert knobs["gen_rubric_weight"] == 0.5
+    assert knobs["stop_requires_rubric"] is True
     with pytest.raises(ValueError):
         bagel_scorer_knobs_from_config(None)
 
