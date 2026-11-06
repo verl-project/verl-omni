@@ -15,7 +15,7 @@
 
 Pins, for both engines behind one implementation:
 - the dtype matrix (adapter tensors keep training dtype; full-weight DTensor
-  gathers cast floating point to bf16; plain tensors pass through),
+  gathers use the requested dtype, defaulting to bf16; plain tensors pass through),
 - merged streams materialize inside ``merged_lora_context`` and stay valid
   after the actor is restored; on FSDP2 with vanilla LoRA they are computed per
   tensor, bitwise equal to PEFT's merge, without modifying the module,
@@ -129,6 +129,26 @@ def test_full_weight_export_casts_only_floating_dtensors(monkeypatch, is_diffuse
     assert weights["dti" if not is_diffusers else "transformer.dti"].dtype is torch.int64
 
 
+def test_ar_full_weight_export_preserves_fp32_dtensor(monkeypatch):
+    floating = _floating_dtensor(1.0001)
+    integer = _integer_dtensor()
+    _patch_export_machinery(monkeypatch, collect=MagicMock(return_value={"weight": floating, "count": integer}))
+    monkeypatch.setattr(lora_export, "replace_lora_wrapper", lambda name, config: name)
+
+    params, _ = export_lora_for_sync(
+        _peft_module(),
+        model_config=_model_config(),
+        base_sync_done=False,
+        is_diffusers=False,
+        full_weight_dtype=torch.float32,
+    )
+
+    weights = dict(params)
+    torch.testing.assert_close(weights["weight"], torch.tensor([1.0001]), atol=0, rtol=0)
+    assert weights["weight"].dtype is torch.float32
+    assert weights["count"].dtype is torch.int64
+
+
 def test_non_lora_full_weights_cast_policy(monkeypatch):
     plain = torch.tensor([1.5], dtype=torch.float32)
     module = _plain_module()
@@ -191,6 +211,29 @@ def test_merged_stream_materializes_inside_context(monkeypatch):
     assert peft_config is None  # merge mode routes the rollout to a full-weight sync
     torch.testing.assert_close(weights["weight"], torch.tensor([2.0]))  # merged value, not restored base
     torch.testing.assert_close(module.weight, torch.tensor([1.0]))  # actor restored after the stream
+
+
+@pytest.mark.parametrize("full_weight_dtype", [torch.bfloat16, torch.float32])
+def test_merged_dtensor_uses_full_weight_dtype(monkeypatch, full_weight_dtype):
+    module = _FakeModule()
+    floating = _floating_dtensor(1.0001)
+    monkeypatch.setattr(module, "state_dict", lambda: {"weight": floating})
+    monkeypatch.setattr(lora_export, "merged_lora_context", _merged_context(module))
+    monkeypatch.setattr(lora_export, "normalize_peft_param_name", lambda state: state)
+    _patch_export_machinery(monkeypatch)
+
+    params, _ = export_lora_for_sync(
+        module,
+        model_config=_model_config(merge=True),
+        base_sync_done=True,
+        is_diffusers=False,
+        full_weight_dtype=full_weight_dtype,
+    )
+
+    weights = dict(params)
+    expected = torch.tensor([1.0001]).to(full_weight_dtype)
+    torch.testing.assert_close(weights["weight"], expected, atol=0, rtol=0)
+    assert weights["weight"].dtype is full_weight_dtype
 
 
 def test_merged_stream_keeps_prefix(monkeypatch):
@@ -320,6 +363,43 @@ def test_fsdp2_merged_stream_owns_merged_storage(monkeypatch):
     for name, tensor in held:
         assert tensor.untyped_storage().data_ptr() not in live, name
         assert torch.equal(tensor, expected[name]), name
+
+
+def test_fsdp2_per_tensor_stream_casts_floating_dtensors(monkeypatch):
+    """The per-tensor merged path must honor full_weight_dtype too, not just the
+    in-place path; a DTensor outside the LoRA bases exercises its cast site."""
+    from peft import LoraConfig, get_peft_model
+
+    torch.manual_seed(0)
+    base = torch.nn.Sequential()
+    base.add_module("up", torch.nn.Linear(16, 32, bias=False))
+    base.add_module("tail", torch.nn.Linear(32, 16, bias=False))
+    model = get_peft_model(base, LoraConfig(r=4, lora_alpha=8, target_modules=["up"]))
+    monkeypatch.setattr(lora_export, "fsdp_version", lambda module: 2)
+    monkeypatch.setattr(lora_export, "merged_lora_context", _fail_merged_context)
+    _patch_export_machinery(monkeypatch)
+
+    floating = _floating_dtensor(1.0001)
+    state = dict(model.state_dict())
+    plain = next(name for name in state if "lora" not in name and name.endswith("tail.weight"))
+    state[plain] = floating
+    monkeypatch.setattr(model, "state_dict", lambda: dict(state))
+
+    params, _ = export_lora_for_sync(
+        model,
+        model_config=_model_config(merge=True),
+        base_sync_done=True,
+        is_diffusers=False,
+        full_weight_dtype=torch.float32,
+    )
+    weights = dict(params)
+    # convert_weight_keys renames keys on export; match by suffix.
+    plain_out = next(name for name in weights if name.endswith("tail.weight"))
+    torch.testing.assert_close(weights[plain_out], torch.tensor([1.0001]), atol=0, rtol=0)
+    assert weights[plain_out].dtype is torch.float32
+    # The LoRA bases still stream through the per-tensor merge, proving the
+    # fast path (not the in-place fallback) produced this result.
+    assert any(name.endswith("up.weight") for name in weights)
 
 
 @pytest.mark.parametrize("lora_kwargs", [{"use_dora": True}, {"lora_bias": True}])
