@@ -43,6 +43,12 @@ _PRIMARY_MODALITY = [
         "image",
     ),
     ("verl_omni.pipelines.qwen_image_dpo.vllm_omni_rollout_adapter", "QwenImagePipeline", "dpo", "image"),
+    (
+        "verl_omni.pipelines.qwen_image_diffusion_art.vllm_omni_rollout_adapter",
+        "QwenImagePipeline",
+        "diffusion_art",
+        "image",
+    ),
     # dual_grpo / mix_grpo subclass QwenImagePipelineWithLogProb and inherit the spec.
     ("verl_omni.pipelines.qwen_image_dual_grpo.vllm_omni_rollout_adapter", "QwenImagePipeline", "dual_grpo", "image"),
     ("verl_omni.pipelines.qwen_image_mix_grpo.vllm_omni_rollout_adapter", "QwenImagePipeline", "mix_grpo", "image"),
@@ -59,11 +65,18 @@ _PRIMARY_MODALITY = [
     ("verl_omni.pipelines.wan22_dance_grpo.vllm_omni_rollout_adapter", "WanPipeline", "dance_grpo", "video"),
     ("verl_omni.pipelines.ltx2_flow_grpo.vllm_omni_rollout_adapter", "LTX2Pipeline", "flow_grpo", "video"),
     ("verl_omni.pipelines.ltx2_omni_nft.vllm_omni_rollout_adapter", "LTX2Pipeline", "omni_nft", "video"),
+    ("verl_omni.pipelines.ltx2_diffusion_art.vllm_omni_rollout_adapter", "LTX2Pipeline", "diffusion_art", "video"),
     ("verl_omni.pipelines.minimax_h3_flow_grpo.vllm_omni_rollout_adapter", "MiniMaxH3Pipeline", "flow_grpo", "video"),
     (
         "verl_omni.pipelines.minimax_h3_diffusion_nft.vllm_omni_rollout_adapter",
         "MiniMaxH3Pipeline",
         "diffusion_nft",
+        "video",
+    ),
+    (
+        "verl_omni.pipelines.minimax_h3_diffusion_art.vllm_omni_rollout_adapter",
+        "MiniMaxH3Pipeline",
+        "diffusion_art",
         "video",
     ),
 ]
@@ -79,6 +92,13 @@ _JOINT_AUDIO_SAMPLE_RATE = [
     ),
     ("verl_omni.pipelines.ltx2_flow_grpo.vllm_omni_rollout_adapter", "LTX2Pipeline", "flow_grpo", 24000),
     ("verl_omni.pipelines.ltx2_omni_nft.vllm_omni_rollout_adapter", "LTX2Pipeline", "omni_nft", 24000),
+    (
+        "verl_omni.pipelines.minimax_h3_diffusion_art.vllm_omni_rollout_adapter",
+        "MiniMaxH3Pipeline",
+        "diffusion_art",
+        32000,
+    ),
+    ("verl_omni.pipelines.ltx2_diffusion_art.vllm_omni_rollout_adapter", "LTX2Pipeline", "diffusion_art", 24000),
 ]
 
 

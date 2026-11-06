@@ -58,11 +58,19 @@ algorithm:
   train_timestep_range: null
   train_timestep_count: null
   adv_mode: continuous
+  art_pairwise_reward: false
+  art_exclude_final_step: true
+  art_log_rollout_velocity_gap: false
+  art_modality_reward_weights: null
+  art_sample_log_dir: null
+  art_split_groups_across_updates: true
+  art_restore_zero_signal: false
+  art_timestep_selection: configured
   paired_preference: false
   rollout_correction: { ... }   # mirrors upstream RolloutCorrectionConfig
 ```
 
-- `algorithm.trainer_type`: Trainer loop. `policy_gradient` (FlowGRPO, MixGRPO, Flow-DPPO, …) or `direct_preference` (DPO, DiffusionNFT, AWM).
+- `algorithm.trainer_type`: Trainer loop. `policy_gradient` (FlowGRPO, MixGRPO, Flow-DPPO, …) or `direct_preference` (DPO, DiffusionNFT, AWM, DiffusionART).
 - `algorithm.sample_source`: `online` (rollout + reward engines) or `offline` (actor-only, precomputed batches).
 - `algorithm.adv_estimator`: Advantage estimator name; defaults to `actor_rollout_ref.model.algorithm` (e.g. `flow_grpo`).
 - `algorithm.norm_adv_by_std_in_grpo`: Normalize advantages by within-group std (GRPO-style).
@@ -74,6 +82,14 @@ algorithm:
 - `algorithm.train_timestep_range`: DGPO and AWM only. Rollout schedule indices `[start, end)` that training timesteps are drawn from; `null` uses the whole schedule.
 - `algorithm.train_timestep_count`: DGPO and AWM only. Number of schedule indices drawn per step and shared by the batch; `null` applies `timestep_fraction`.
 - `algorithm.adv_mode`: Advantage mapping before reward-probability scaling. One of `continuous`, `positive_only`, `negative_only`, `one_only`, `binary`.
+- `algorithm.art_pairwise_reward`: DiffusionART only. Random disjoint win/lose labels replace the scalar rewards in the guidance covariance.
+- `algorithm.art_exclude_final_step`: DiffusionART only. Drop the last ODE position from the trainable states.
+- `algorithm.art_log_rollout_velocity_gap`: DiffusionART only. Ship the next ODE state so the actor logs `old_rollout_gap`; doubles state memory.
+- `algorithm.art_modality_reward_weights`: DiffusionART only. Audio-video reward routing `{video: {name: w}, audio: {name: w}}`; `null` reads `reward_functions.*.routing_weights`.
+- `algorithm.art_sample_log_dir`: DiffusionART only. Directory for per-sample training records (`step_<N>.jsonl`); `null` disables.
+- `algorithm.art_split_groups_across_updates`: DiffusionART only. Give every optimizer update `n / updates` trajectories of every prompt; needs `rollout.n` divisible by the number of updates and `actor.shuffle=false`.
+- `algorithm.art_restore_zero_signal`: DiffusionART only. In scalar mode, constant-reward groups train toward `v_old` instead of contributing zero.
+- `algorithm.art_timestep_selection`: DiffusionART only. `configured` (`timestep_fraction` of the pool) or `high_noise` (DiffusionART-Flash: two of the first four ODE positions per rollout).
 - `algorithm.paired_preference`: `true` for pair-based algorithms (e.g. offline DPO); doubles actor batch size and disables shuffle.
 - `algorithm.rollout_correction.*`: Experimental IS / RS correction. Schema mirrors upstream verl; see {doc}`../algo/rollout_correction` and [verl Rollout Correction](https://verl.readthedocs.io/en/latest/algo/rollout_corr.html).
 
@@ -171,7 +187,7 @@ actor_rollout_ref:
 
 - `actor_rollout_ref.model.model_type`: Dispatch key; must be `diffusion_model` for the diffusion agent loop.
 - `actor_rollout_ref.model.path`: HuggingFace / local diffusion pipeline root.
-- `actor_rollout_ref.model.algorithm`: RL algorithm name (also drives default `diffusion_loss.loss_mode` / `adv_estimator`). Examples: `flow_grpo`, `mix_grpo`, `flow_dppo`, `diffusion_nft`, `dgpo`, `awm`, `dpo`, `dance_grpo`.
+- `actor_rollout_ref.model.algorithm`: RL algorithm name (also drives default `diffusion_loss.loss_mode` / `adv_estimator`). Examples: `flow_grpo`, `mix_grpo`, `flow_dppo`, `diffusion_nft`, `dgpo`, `awm`, `diffusion_art`, `dpo`, `dance_grpo`.
 - `actor_rollout_ref.model.tokenizer_path`: Optional tokenizer path if not under `path` (falls back to `<path>/tokenizer` or `path`).
 - `actor_rollout_ref.model.config_path`: Optional transformer config path. If null, backends use `<path>/<transformer_subfolder>`.
 - `actor_rollout_ref.model.transformer_subfolder`: Subfolder with diffusion transformer weights/config (default `transformer`).
@@ -243,6 +259,14 @@ actor_rollout_ref:
       dgpo_clip_range: 0.01
       awm_clip_range: 1e-4
       awm_kl_coef: 0.1
+      art_guidance_gain: 1.0
+      art_loss_space: velocity_linear_sigma
+      art_mask_metric: sde_kl
+      art_mask_threshold: 1e-5
+      art_reference_noise_level: 0.8
+      art_corrective_mask_enabled: true
+      art_video_weight: 1.0
+      art_audio_weight: 1.0
       kl_mask_threshold: 1e-5
       add_kl_coefficient: true
     loss_scale_factor: null
@@ -255,7 +279,7 @@ actor_rollout_ref:
 
 #### `diffusion_loss` — `DiffusionLossConfig`
 
-- `actor_rollout_ref.actor.diffusion_loss.loss_mode`: Loss registry key. One of `flow_grpo`, `flow_dppo`, `grpo_guard`, `diffusion_nft`, `omni_nft`, `dgpo`, `awm`, `dpo`, `dmd2`, `dance_grpo`, `distill_kl`, `distill_fm_mse`.
+- `actor_rollout_ref.actor.diffusion_loss.loss_mode`: Loss registry key. One of `flow_grpo`, `flow_dppo`, `grpo_guard`, `diffusion_nft`, `omni_nft`, `dgpo`, `awm`, `diffusion_art`, `dpo`, `dmd2`, `dance_grpo`, `distill_kl`, `distill_fm_mse`.
 - `actor_rollout_ref.actor.diffusion_loss.clip_ratio`: PPO-style clip ratio for diffusion policy loss (FlowGRPO default is very small, e.g. `1e-4`).
 - `actor_rollout_ref.actor.diffusion_loss.adv_clip_max`: Max absolute advantage before computing the policy loss (must be `> 0`).
 - `actor_rollout_ref.actor.diffusion_loss.mix_beta`: DiffusionNFT β for positive / implicit-negative prediction mixing (must be `> 0`).
@@ -266,6 +290,13 @@ actor_rollout_ref:
 - `actor_rollout_ref.actor.diffusion_loss.dgpo_clip_range`: DGPO old-policy ratio clip range; `0` disables clipping (must be `>= 0`).
 - `actor_rollout_ref.actor.diffusion_loss.awm_clip_range`: AWM PPO-style clip range on the old-policy flow-matching ratio `exp(old_dsm - dsm)`; `0` disables clipping (must be `>= 0`).
 - `actor_rollout_ref.actor.diffusion_loss.awm_kl_coef`: AWM coefficient of the velocity-space MSE toward the EMA (`old`) adapter (must be `>= 0`).
+- `actor_rollout_ref.actor.diffusion_loss.art_guidance_gain`: DiffusionART multiplier on the unit-RMS guidance direction (must be `> 0`).
+- `actor_rollout_ref.actor.diffusion_loss.art_loss_space`: DiffusionART MSE weighting. One of `velocity_linear_sigma` (weight `t`, paper), `velocity_uniform`.
+- `actor_rollout_ref.actor.diffusion_loss.art_mask_metric`: DiffusionART trust-region drift metric. One of `sde_kl` (paper), `fixed_mse`.
+- `actor_rollout_ref.actor.diffusion_loss.art_mask_threshold`: DiffusionART drift threshold above which outward updates are masked (must be `> 0`).
+- `actor_rollout_ref.actor.diffusion_loss.art_reference_noise_level`: DiffusionART reference-SDE noise level used by `sde_kl` (must be `> 0`).
+- `actor_rollout_ref.actor.diffusion_loss.art_corrective_mask_enabled`: DiffusionART trust-region mask on/off (`false` ablates it).
+- `actor_rollout_ref.actor.diffusion_loss.art_video_weight` / `art_audio_weight`: DiffusionART per-modality loss weights for audio-video latents (non-negative, positive sum).
 - `actor_rollout_ref.actor.diffusion_loss.kl_mask_threshold`: Flow-DPPO divergence threshold for masking high-KL updates (must be `> 0`).
 - `actor_rollout_ref.actor.diffusion_loss.add_kl_coefficient`: Whether Flow-DPPO normalizes mean drift by the scheduler SDE noise scale.
 

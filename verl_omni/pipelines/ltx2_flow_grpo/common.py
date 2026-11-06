@@ -51,6 +51,18 @@ LTX2_LORA_TARGET_MODULES = [
 ]
 
 
+#: Neutral values of the LTX-2.3 guidance terms beyond CFG. RL rollouts whose training forward reproduces CFG only
+#: (FlowGRPO, DiffusionART) must keep STG, modality and rescale guidance here.
+LTX_NEUTRAL_GUIDANCE: dict[str, float] = {
+    "video_stg_scale": 0.0,
+    "audio_stg_scale": 0.0,
+    "video_modality_scale": 1.0,
+    "audio_modality_scale": 1.0,
+    "video_rescale_scale": 0.0,
+    "audio_rescale_scale": 0.0,
+}
+
+
 def normalize_ltx_output_type(output_type: str | None) -> str | None:
     """Translate the generic image default to an LTX video tensor output."""
     return "pt" if output_type == "image" else output_type

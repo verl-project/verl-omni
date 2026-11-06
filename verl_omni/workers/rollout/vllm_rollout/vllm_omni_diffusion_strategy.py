@@ -19,6 +19,7 @@ from typing import Any, Optional
 
 import numpy as np
 import torch
+from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.import_utils import import_external_libs
 from vllm_omni.inputs.data import OmniDiffusionSamplingParams
 from vllm_omni.lora.request import LoRARequest
@@ -227,6 +228,16 @@ class DiffusionStrategy(OmniStrategyBase):
 
     rollout_config_cls = DiffusionRolloutConfig
     model_config_cls = DiffusionModelConfig
+
+    def init_model_config(self, model_config: Any) -> DiffusionModelConfig:
+        """Honor ``_target_`` like the trainer-side readers, so ``model.pipeline`` may name a subclass.
+
+        A structured merge into ``DiffusionModelConfig`` types ``pipeline`` as the base
+        ``DiffusionPipelineConfig`` and rejects subclass fields such as LTX ``video_cfg_scale``.
+        """
+        if not isinstance(model_config, DiffusionModelConfig) and "_target_" in model_config:
+            return omega_conf_to_dataclass(model_config)
+        return super().init_model_config(model_config)
 
     def worker_extension_cls(self, device_type: str) -> str:
         if device_type == "npu":

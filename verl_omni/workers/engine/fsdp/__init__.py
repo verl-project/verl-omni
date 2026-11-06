@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from .diffusers_impl import (  # noqa: F401
+    ARTDiffusersFSDPEngine,
     CompositeARFSDPEngineWithLMHead,
     CompositeFSDPEngine,
     DiffusersFSDPEngine,
@@ -26,6 +27,7 @@ __all__ = [
     "CompositeARFSDPEngineWithLMHead",
     "CompositeFSDPEngine",
     "PPODiffusersFSDPEngine",
+    "ARTDiffusersFSDPEngine",
     "DPODiffusersFSDPEngine",
     "NFTDiffusersFSDPEngine",
     "DiffusersFSDPEngine",

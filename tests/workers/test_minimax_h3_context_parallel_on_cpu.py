@@ -16,7 +16,7 @@
 import pytest
 import torch
 
-from tests.special_e2e.run_flowgrpo_minimax_h3_tiny import _hydra_overrides, _validate_actor_sp
+from tests.special_e2e.run_flowgrpo_minimax_h3_tiny import _hydra_overrides, _train_batch_size, _validate_actor_sp
 from verl_omni.pipelines.minimax_h3_diffusion_nft.common import (
     TEXT_TAG,
     h3_ulysses_forward,
@@ -183,3 +183,36 @@ def test_minimax_h3_smoke_config_enables_sp_for_each_task(task, train_batch_size
 def test_minimax_h3_smoke_config_rejects_invalid_sp_partition() -> None:
     with pytest.raises(ValueError, match="must be divisible"):
         _validate_actor_sp(num_gpus=4, actor_sp=3)
+
+
+@pytest.mark.parametrize("num_gpus", [2, 8])
+@pytest.mark.parametrize("algorithm", ["flow_grpo", "diffusion_art"])
+def test_minimax_h3_smoke_dummy_data_covers_one_rollout_batch(num_gpus, algorithm) -> None:
+    """The dummy parquet is sized by ``_train_batch_size``; it must equal the trainer's ``data.train_batch_size``.
+
+    Regression: the parquet was once sized without DiffusionART's batch, so at 8 GPUs the dataloader was empty
+    (``steps_per_epoch == 0`` -> ZeroDivisionError in ``fit``). DiffusionART's batch is two mini batches of prompts
+    (two disjoint updates, each with one of every prompt's two t2va trajectories); FlowGRPO's is ``n`` of them.
+    """
+    expected = num_gpus * 2  # mini batch = num_gpus prompts; two ART updates / t2va samples two responses
+    assert _train_batch_size(num_gpus, "t2va", algorithm) == expected
+    overrides = _hydra_overrides(
+        algorithm=algorithm,
+        tiny_model_dir="/tmp/tiny",
+        train_parquet="/tmp/train.parquet",
+        val_parquet="/tmp/test.parquet",
+        reward_stub_path="/tmp/reward.py",
+        output_dir="/tmp/out",
+        task="t2va",
+        num_gpus=num_gpus,
+        actor_sp=1,
+        rollout_tp=1,
+        text_encoder_tp=1,
+        total_training_steps=1,
+        ray_num_cpus=4,
+        height=160,
+        width=288,
+        num_frames=97,
+        num_inference_steps=2,
+    )
+    assert f"data.train_batch_size={expected}" in overrides

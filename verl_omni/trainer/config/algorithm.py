@@ -41,6 +41,14 @@ class DiffusionAlgoConfig(BaseConfig):
     train_timestep_range: Optional[list[int]] = None
     train_timestep_count: Optional[int] = None
     adv_mode: str = "continuous"
+    art_pairwise_reward: bool = False
+    art_exclude_final_step: bool = True
+    art_log_rollout_velocity_gap: bool = False
+    art_modality_reward_weights: Optional[dict] = None
+    art_sample_log_dir: Optional[str] = None
+    art_split_groups_across_updates: bool = True
+    art_restore_zero_signal: bool = False
+    art_timestep_selection: str = "configured"
     paired_preference: bool = False  # True for pair-based algorithms (e.g. DPO)
     rollout_correction: RolloutCorrectionConfig = field(default_factory=RolloutCorrectionConfig)
 
@@ -57,6 +65,10 @@ class DiffusionAlgoConfig(BaseConfig):
             raise ValueError(f"old_policy_decay must be in [0, 1], got {self.old_policy_decay}.")
         if self.old_policy_update_interval <= 0:
             raise ValueError(f"old_policy_update_interval must be positive, got {self.old_policy_update_interval}.")
+        if self.art_timestep_selection not in ("configured", "high_noise"):
+            raise ValueError(
+                f"art_timestep_selection must be configured or high_noise, got {self.art_timestep_selection!r}."
+            )
         if not 0 < self.timestep_fraction <= 1:
             raise ValueError(f"timestep_fraction must be in (0, 1], got {self.timestep_fraction}.")
         if self.train_timestep_range is not None:
@@ -69,6 +81,15 @@ class DiffusionAlgoConfig(BaseConfig):
                 )
         if self.train_timestep_count is not None and self.train_timestep_count <= 0:
             raise ValueError(f"train_timestep_count must be positive, got {self.train_timestep_count}.")
+        if self.art_modality_reward_weights is not None:
+            for modality, weights in dict(self.art_modality_reward_weights).items():
+                if modality not in ("video", "audio") or not isinstance(weights, dict) or not weights:
+                    raise ValueError(
+                        "art_modality_reward_weights must map 'video' / 'audio' to non-empty {reward_name: weight} "
+                        f"dicts, got {self.art_modality_reward_weights}."
+                    )
+                if any(float(value) < 0 for value in weights.values()):
+                    raise ValueError(f"art_modality_reward_weights.{modality} must be non-negative, got {weights}.")
 
 
 @dataclass

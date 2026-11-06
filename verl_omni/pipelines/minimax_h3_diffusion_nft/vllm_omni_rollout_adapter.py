@@ -133,12 +133,46 @@ class MiniMaxH3DiffusionNFTPipeline(MiniMaxH3RolloutWeightSyncMixin, MiniMaxH3Pi
                 )
             ref_block_meta, ref_block_count = serialize_ref_blocks(ref_blocks)
 
-        self._nft_capture = {
+        self._nft_capture = self._capture_for_training(
+            kwargs,
+            video_latent,
+            audio_latent,
+            task=task,
+            condition_video_rows=condition_rows,
+            condition_audio_rows=condition_audio_rows,
+            keyframe_frame_indices=keyframe_indices,
+            ref_block_meta=ref_block_meta,
+            ref_block_count=ref_block_count,
+        )
+        return video_latent, audio_latent
+
+    def _capture_for_training(
+        self,
+        kwargs: dict[str, Any],
+        video_latent: torch.Tensor,
+        audio_latent: torch.Tensor,
+        *,
+        task: str,
+        condition_video_rows: torch.Tensor | None = None,
+        condition_audio_rows: torch.Tensor | None = None,
+        keyframe_frame_indices: list[int] | None = None,
+        ref_block_meta: Any = None,
+        ref_block_count: int = 0,
+    ) -> dict[str, Any]:
+        """Actor-side state ``forward`` publishes for one rollout; the defaults describe a t2va request.
+
+        Shared with the DiffusionART adapter, so a key added here reaches both training paths.
+        """
+        if condition_video_rows is None:
+            condition_video_rows = video_latent.new_zeros((0, 96), dtype=torch.float32)
+        if condition_audio_rows is None:
+            condition_audio_rows = audio_latent.new_zeros((0, AUDIO_ROW_WIDTH), dtype=torch.float32)
+        return {
             "video_latent": video_latent,
             "audio_latent": audio_latent,
-            "condition_video_rows": condition_rows,
+            "condition_video_rows": condition_video_rows,
             "condition_audio_rows": condition_audio_rows,
-            "keyframe_frame_indices": keyframe_indices,
+            "keyframe_frame_indices": list(keyframe_frame_indices or []),
             "ref_block_meta": ref_block_meta,
             "ref_block_count": ref_block_count,
             "task": task,
@@ -152,7 +186,6 @@ class MiniMaxH3DiffusionNFTPipeline(MiniMaxH3RolloutWeightSyncMixin, MiniMaxH3Pi
             "video_shift": float(kwargs.get("video_shift", self.default_video_shift)),
             "base_schedule": kwargs.get("base_schedule"),
         }
-        return video_latent, audio_latent
 
     def forward(self, request: Any):
         """Generate video+audio and attach DiffusionNFT training tensors."""

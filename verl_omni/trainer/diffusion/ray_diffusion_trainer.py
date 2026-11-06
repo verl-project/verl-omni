@@ -1934,6 +1934,12 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
                                     {k: np.array(v) for k, v in reward_extra_infos_dict.items()}
                                 )
                             batch = self._prepare_actor_batch(batch, reward_tensor)
+                            if reward_extra_infos_dict and len(batch) == len(reward_tensor):
+                                # The loss may reorder rows (DiffusionART splits every prompt across the updates);
+                                # read the per-sample infos back from the batch so the rollout dump stays aligned.
+                                reward_extra_infos_dict = {
+                                    k: batch.non_tensor_batch.get(k, v) for k, v in reward_extra_infos_dict.items()
+                                }
 
                         batch.batch["sample_level_rewards"] = batch.batch["sample_level_scores"]
                         if self.use_reference_policy:

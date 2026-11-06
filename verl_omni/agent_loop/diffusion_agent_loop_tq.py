@@ -72,6 +72,9 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
             sampling_params.update(_config_to_sampling_dict(config.val_kwargs.algo))
             sampling_params["seed"] = config.val_kwargs.seed
             sampling_params["logprobs"] = False
+            # Validation requests also carry global_steps below; adapters that capture training-only payloads
+            # (DiffusionART trajectories) tell them apart by this marker.
+            sampling_params["verl_validate"] = True
             # Re-assert global_steps in case the val_kwargs update above is ever
             # extended to carry a "global_steps" key in the future.
             if global_steps is not None:
