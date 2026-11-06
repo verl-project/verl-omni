@@ -308,7 +308,7 @@ def test_sender_and_receiver_share_base_route(monkeypatch, private_zmq_directory
 @pytest.mark.parametrize(
     "private,extras", [(False, " KEEP,OTHER "), (True, ""), (True, " KEEP,OTHER "), (True, "KEEP,VERL_ZMQ_DIR")]
 )
-def test_private_zmq_directory_is_forwarded_to_vllm_ray_workers(monkeypatch, private_zmq_directory, private, extras):
+def test_private_zmq_directory_updates_vllm_ray_copy_list(monkeypatch, private_zmq_directory, private, extras):
     from verl_omni.workers.rollout.vllm_rollout import vllm_omni_async_server as module
 
     monkeypatch.setattr(module.vLLMHttpServer, "_post_init", lambda self, devices: None)

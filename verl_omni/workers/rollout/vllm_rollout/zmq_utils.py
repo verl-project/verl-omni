@@ -24,7 +24,13 @@ def _ipc_handle(path: str) -> str:
 
 
 def make_base_zmq_handle(job_id: str, replica_rank: int | str, local_rank: int) -> str:
-    """Return a colocated weight route under VERL_ZMQ_DIR, defaulting to /tmp."""
+    """Return a colocated weight route under ``VERL_ZMQ_DIR``, defaulting to ``/tmp``.
+
+    Raises:
+        ValueError: A nonempty directory override is relative, missing, or has
+            symbolic-link components. Also raised if the generated socket path
+            contains NUL or occupies at least 108 filesystem-encoded bytes.
+    """
     directory = os.environ.get("VERL_ZMQ_DIR") or "/tmp"
     directory_path = Path(directory)
     if os.environ.get("VERL_ZMQ_DIR") and (

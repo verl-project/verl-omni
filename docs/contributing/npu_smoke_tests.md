@@ -277,6 +277,7 @@ shell-runner interface in this part:
 | `NPU_SMOKE_PARALLEL_CHILD` | Controller-generated `1`; rejects nested controllers. |
 | `NPU_SMOKE_FIXTURE_ROOT`, `NPU_SMOKE_MASTER_PORT_RANGE` | Generated per-lane fixture/port settings; workload consumers follow with activation. |
 | `LOG_DIR`, `TMPDIR`, `RAY_TMPDIR` | Per-lane logs and short private temporary directories; `VERL_ZMQ_DIR` uses the same private runtime. |
+| `RAY_ADDRESS` | Removed from lane environments so each lane starts its own Ray cluster instead of attaching to a caller-specified one. |
 | `NPU_SMOKE_CONTROLLER_PID`, `NPU_SMOKE_CONTROLLER_START` | Generated parent identity for supervisor checks; do not set manually. |
 | `NPU_SMOKE_SUPERVISOR_PID`, `NPU_SMOKE_SUPERVISOR_START`, `NPU_SMOKE_SUPERVISOR_STATE`, `NPU_SMOKE_SUPERVISOR_TOKEN` | Generated identity, private metadata path and authentication token; do not set manually. |
 | `RAY_EXPERIMENTAL_NOSET_*`, `RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO` | Partitioned lanes clear Ray's visibility-suppression flags and set the zero-resource override to `0`; exclusive/serial lanes preserve caller policy. |
