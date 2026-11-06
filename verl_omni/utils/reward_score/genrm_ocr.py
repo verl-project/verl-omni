@@ -12,85 +12,45 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""OCR scoring backed by a generative reward model (GRM).
+"""Compatibility wrapper for the OCR generative reward-model scorer.
 
-The :func:`compute_score_ocr` function sends a generated image to a vision
-language model served behind an OpenAI-compatible router and uses the model's
-transcription, compared to a ground truth, to produce a score in ``[0, 1]``.
+New code should import :func:`verl_omni.utils.reward_score.vlm_as_a_judge.compute_score_ocr`.
+This module stays importable for existing ``pkg://`` configs and file-path loads.
 """
 
-import json
-import os
-import re
 from typing import Optional
 
-import aiohttp
 import numpy as np
 import torch
 from openai.types.chat import ChatCompletion
-from PIL import Image
 from transformers import PreTrainedTokenizer
 
-DEFAULT_GRM_PROMPT = (
-    "Please output only the text content from the image without any additional descriptions or formatting."
+from verl_omni.utils.reward_score.vlm_as_a_judge import (
+    DEFAULT_GRM_MODEL_PATH,
+    DEFAULT_GRM_PROMPT,
+    DEFAULT_SAMPLING_PARAMS,
+    _levenshtein_score,
+    _sampling_params,
+    _to_pil,
 )
-DEFAULT_GRM_MODEL_PATH = "~/models/tiny-random/qwen3-vl"
-DEFAULT_SAMPLING_PARAMS = {"temperature": 0.7, "top_p": 0.8, "max_tokens": 4096}
+
+__all__ = [
+    "DEFAULT_GRM_MODEL_PATH",
+    "DEFAULT_GRM_PROMPT",
+    "DEFAULT_SAMPLING_PARAMS",
+    "compute_score_ocr",
+    # Re-exported for callers that imported these helpers from this module.
+    "_levenshtein_score",
+    "_sampling_params",
+    "_to_pil",
+]
 
 
 async def _chat_complete(router_address: str, chat_complete_request: dict) -> ChatCompletion:
-    """POST a chat completion request to the GRM router and parse the response."""
-    url = f"http://{router_address}/v1/chat/completions"
-    timeout = aiohttp.ClientTimeout(total=None)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        async with session.post(url, json=chat_complete_request) as resp:
-            output = await resp.text()
-    return ChatCompletion(**json.loads(output))
+    """POST a chat completion request through the shared implementation."""
+    from verl_omni.utils.reward_score import vlm_as_a_judge
 
-
-def _to_pil(image) -> Image.Image:
-    """Convert a uint8 tensor / array / PIL image to an RGB PIL image."""
-    if isinstance(image, torch.Tensor):
-        image = image.permute(1, 2, 0).cpu().numpy()
-    if isinstance(image, np.ndarray):
-        assert image.shape[-1] == 3, "must be in HWC format"
-        image = Image.fromarray(image)
-    assert isinstance(image, Image.Image)
-    return image
-
-
-def _levenshtein_score(text: str, ground_truth: str) -> float:
-    """Compute a normalized OCR score in ``[0, 1]`` from raw GRM text."""
-    import Levenshtein
-
-    gt = re.sub(r"\s+", "", ground_truth).lower()
-    text = re.sub(r"\s+", "", text).lower()
-    if gt in text:
-        dist = 0
-    else:
-        dist = Levenshtein.distance(text, gt)
-    # If GRM hallucinates many extra characters, only apply a one-character penalty.
-    dist = min(dist, len(gt))
-    if len(gt) > 0:
-        return 1 - dist / len(gt)
-    # Empty ground truth: only an empty transcription is a perfect match.
-    return 1.0 if len(text) == 0 else 0.0
-
-
-def _sampling_params() -> dict:
-    params = dict(DEFAULT_SAMPLING_PARAMS)
-    env_overrides = {
-        "temperature": ("GENRM_OCR_TEMPERATURE", float),
-        "top_p": ("GENRM_OCR_TOP_P", float),
-        "max_tokens": ("GENRM_OCR_MAX_TOKENS", int),
-        "seed": ("GENRM_OCR_SEED", int),
-    }
-    for key, (env_name, parser) in env_overrides.items():
-        raw_value = os.environ.get(env_name)
-        if raw_value is None:
-            continue
-        params[key] = parser(raw_value)
-    return params
+    return await vlm_as_a_judge._chat_complete(router_address, chat_complete_request)
 
 
 async def compute_score_ocr(
@@ -133,55 +93,17 @@ async def compute_score_ocr(
     Returns:
         dict: ``{"score": float, "genrm_response": str}``.
     """
-    from verl.utils.ray_utils import get_event_loop
+    from verl_omni.utils.reward_score import vlm_as_a_judge
 
-    from verl_omni.utils.reward_score.reward_utils import (
-        pil_image_to_base64,
-        resolve_prompt_builder,
-        visual_reward_frames,
+    return await vlm_as_a_judge._compute_score_ocr_impl(
+        data_source,
+        solution_image,
+        ground_truth,
+        extra_info,
+        reward_router_address,
+        reward_model_tokenizer,
+        model_name,
+        sampling_params,
+        user_prompt=user_prompt,
+        transport=_chat_complete,
     )
-
-    solution_image = visual_reward_frames(solution_image, extra_info, extra_info.get("frame_interval", 4))
-
-    model_name = model_name or os.path.expanduser(DEFAULT_GRM_MODEL_PATH)
-    if user_prompt is None:
-        user_prompt = DEFAULT_GRM_PROMPT
-    elif user_prompt.startswith("pkg://"):
-        user_prompt = resolve_prompt_builder(user_prompt)()
-    loop = get_event_loop()
-
-    grm_response = ""
-    scores = []
-    for image in solution_image:
-        pil_image = _to_pil(image)
-        image_base64 = await loop.run_in_executor(None, pil_image_to_base64, pil_image)
-
-        messages = [
-            {"role": "system", "content": "You are a helpful assistant."},
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image_url", "image_url": {"url": image_base64}},
-                    {"type": "text", "text": user_prompt},
-                ],
-            },
-        ]
-        params = _sampling_params()
-        if sampling_params is not None:
-            params.update(sampling_params)
-            if "seed" not in sampling_params:
-                params.pop("seed", None)
-        chat_complete_request = {
-            "messages": messages,
-            "model": model_name,
-            **params,
-        }
-        result = await _chat_complete(
-            router_address=reward_router_address,
-            chat_complete_request=chat_complete_request,
-        )
-        grm_response = result.choices[0].message.content
-        scores.append(_levenshtein_score(grm_response, ground_truth))
-
-    score = sum(scores) / len(scores)
-    return {"score": score, "genrm_response": grm_response}
