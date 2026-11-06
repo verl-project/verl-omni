@@ -152,6 +152,29 @@ def test_teacher_model_loading_inherits_engine_trust_without_overwriting_explici
         assert "trust_remote_code" not in config
 
 
+@pytest.mark.parametrize("engine_kwargs", [None, {"vllm_omni": None}])
+def test_teacher_model_loading_tolerates_null_engine_kwargs(monkeypatch, engine_kwargs):
+    # A teacher config may leave engine_kwargs unset or explicitly null; the lookup
+    # must default to empty and skip the ar-only rewrite instead of raising.
+    import verl_omni.workers.rollout.vllm_rollout.vllm_omni_async_server as module
+
+    init = MagicMock(return_value=None)
+
+    def fake_init(self, *args):
+        init(*args)
+        # The real base __init__ sets self.config, which the SP footprint check reads.
+        self.config = SimpleNamespace()
+
+    monkeypatch.setattr(module.vLLMReplica, "__init__", fake_init)
+    monkeypatch.setattr(module.ray, "remote", lambda cls: cls)
+    rollout = SimpleNamespace(engine_kwargs=engine_kwargs)
+    config = OmegaConf.create({"_target_": "verl.workers.config.HFModelConfig", "path": "teacher"})
+
+    vLLMOmniReplica(0, rollout, config, is_teacher_model=True)
+
+    assert init.call_args.args[2]._target_ == "verl.workers.config.HFModelConfig"
+
+
 def test_teacher_replica_passes_identity_to_upstream(monkeypatch):
     import verl_omni.workers.rollout.vllm_rollout.vllm_omni_async_server as module
 

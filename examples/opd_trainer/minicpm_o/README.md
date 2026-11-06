@@ -45,7 +45,7 @@ python examples/gspo_trainer/data_process/mmk12.py \
   --local_save_dir ~/data/mmk12
 ```
 
-GSM8K (text-only math) is the verification task: the first-step reward equals the base model's measured accuracy exactly, with headroom to the teacher — MMK12's 0.34 plateau leaves no readable climb. Scoring rides verl's built-in gsm8k reward — `data_source="openai/gsm8k"` with the model asked to end with `#### <number>` — the same wiring as the Qwen3-Omni GSM8K recipe. Prepare the data with verl's upstream converter, as the [gspo_trainer README](../../gspo_trainer/README.md#training-with-gsm8k) documents (run from a verl checkout):
+GSM8K (text-only math) is the verification task: the first-step reward equals the base model's measured accuracy exactly, with headroom to the teacher — MMK12's 0.34 plateau leaves no readable climb. Scoring rides verl's built-in gsm8k reward — `data_source="openai/gsm8k"` with the model asked to end with `#### <number>` — the same wiring as the Qwen3-Omni GSM8K recipe. Prepare the data with verl's upstream converter, as the [gspo_trainer README](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/README.md#training-with-gsm8k) documents (run from a verl checkout):
 
 ```bash
 python examples/data_preprocess/gsm8k.py \

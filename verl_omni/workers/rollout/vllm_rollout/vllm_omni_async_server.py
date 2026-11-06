@@ -676,7 +676,7 @@ class vLLMOmniReplica(vLLMReplica):
         name_suffix: str = "",
     ):
         if is_teacher_model and isinstance(model_config, dict | DictConfig):
-            engine_kwargs = config.engine_kwargs.get("vllm_omni", {})
+            engine_kwargs = (config.engine_kwargs or {}).get("vllm_omni") or {}
             if engine_kwargs.get("output_mode") == "ar":
                 # Checkpoint workers construct the model config before the HTTP server does.
                 model_config = OmegaConf.merge(
