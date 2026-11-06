@@ -75,7 +75,8 @@ These constraints prevent the added packages from replacing the installed
 stack; an incompatibility should fail resolution rather than change torch.
 The backend check passed on two GB200 GPUs with torch 2.13.0+cu130, locally
 built flash-attn 2.8.3.post1, liger-kernel 0.8.3, Triton 3.7.1 and Transformers
-5.14.1 through normal package initialization. This uses a tiny random
+5.14.1 (recorded at the vLLM 0.30 pin) through normal package
+initialization. This uses a tiny random
 checkpoint, not the full 30B model. Do not install a torch 2.11 FA2 wheel into
 a torch 2.14 environment.
 

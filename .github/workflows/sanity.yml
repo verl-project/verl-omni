@@ -14,6 +14,7 @@ on:
       - "**/*.py"
       - .github/vllm_ascend_pin.txt
       - .github/vllm_omni_pin.txt
+      - .github/triton_cpu_pin.txt
       - .github/verl_pin.txt
       - .github/workflows/*.yml
       - .readthedocs.yaml
@@ -46,6 +47,7 @@ jobs:
           cache: pip
           cache-dependency-path: |
             pyproject.toml
+            .github/triton_cpu_pin.txt
             .github/vllm_omni_pin.txt
             .github/verl_pin.txt
       - name: Verify vLLM-Ascend pin

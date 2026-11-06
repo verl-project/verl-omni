@@ -1,6 +1,6 @@
 # GPU Smoke Tests
 
-Last updated: 10/13/2026.
+Last updated: 11/06/2026.
 
 GPU smoke tests validate GPU-only trainer, rollout, worker, reward, and
 agent-loop paths with small workloads. They are intentionally lightweight: use

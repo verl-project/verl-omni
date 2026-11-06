@@ -67,7 +67,7 @@ In the cuda-compat environment, pass `--python "$CONDA_PREFIX/bin/python"` and u
 
 | Extra       | Adds                                                          | When                     |
 | ----------- | ------------------------------------------------------------- | ------------------------ |
-| `gpu`       | `kernels==0.16.0`, `liger-kernel`, `cupy-cuda13x` | CUDA rollout + actor FA3 |
+| `gpu`       | `kernels==0.16.1`, `liger-kernel`, `cupy-cuda13x` | CUDA rollout + actor FA3 |
 | `omni`      | omni-trainer runtime (`librosa`, `torchaudio`, `av`, …)       | Omni-modality training   |
 | `fa2`       | `flash-attn` (source build, needs a CUDA toolkit)             | Omni trainer FA2 default |
 | `audio`     | `qwen-omni-utils`, `audioread`                                 | Audio parsing (omni data) |
@@ -76,7 +76,7 @@ In the cuda-compat environment, pass `--python "$CONDA_PREFIX/bin/python"` and u
 
 ### Flash Attention 3
 
-The `gpu` extra pulls `kernels==0.16.0` for Diffusers actor FA3 (`attn_backend=_flash_3_varlen_hub`).
+The `gpu` extra pulls `kernels==0.16.1` for Diffusers actor FA3 (`attn_backend=_flash_3_varlen_hub`).
 Defaults pair actor and rollout on the same Hub kernel backend:
 
 ```bash

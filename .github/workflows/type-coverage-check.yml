@@ -8,6 +8,7 @@ on:
     types: [labeled]
     paths:
       - "**/*.py"
+      - .github/triton_cpu_pin.txt
       - .github/verl_pin.txt
       - .github/vllm_omni_pin.txt
       - .github/workflows/type-coverage-check.yml
@@ -38,6 +39,7 @@ jobs:
           cache: pip
           cache-dependency-path: |
             pyproject.toml
+            .github/triton_cpu_pin.txt
             .github/vllm_omni_pin.txt
             .github/verl_pin.txt
       - name: Install dependencies

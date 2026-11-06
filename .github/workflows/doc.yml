@@ -13,6 +13,7 @@ on:
       - "docs/**"
       # Example READMEs are the Sphinx sources via git symlinks under docs/examples/.
       - "examples/**"
+      - .github/triton_cpu_pin.txt
       - .github/verl_pin.txt
       - .github/vllm_omni_pin.txt
       - .github/workflows/doc.yml
@@ -43,6 +44,7 @@ jobs:
           cache: pip
           cache-dependency-path: |
             pyproject.toml
+            .github/triton_cpu_pin.txt
             .github/vllm_omni_pin.txt
             .github/verl_pin.txt
       - name: Install dependencies

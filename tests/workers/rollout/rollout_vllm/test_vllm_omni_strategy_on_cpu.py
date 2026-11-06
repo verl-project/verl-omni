@@ -1393,9 +1393,9 @@ def test_drop_defaulted_engine_args_keeps_only_explicit_overrides():
     assert "_api_process_count" not in filtered
     assert "_api_process_rank" not in filtered
     assert "convert" not in filtered
-    # The serialized default fault-tolerance dict must not survive either: upstream
-    # gates fault tolerance on the enable flag, and forwarding the default dict is
-    # how fault tolerance used to auto-enable without a load balancer.
+    # The serialized default fault-tolerance dict must not survive either: vLLM
+    # auto-enables fault tolerance whenever a config dict arrives, so forwarding
+    # the default would enable it without a load balancer.
     assert "fault_tolerance_config" not in filtered
     # ... including OrchestratorArgs parser defaults (the ownership check
     # flags every non-None value, even False).

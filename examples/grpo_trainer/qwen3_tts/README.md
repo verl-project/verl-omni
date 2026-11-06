@@ -42,12 +42,12 @@ uv pip install --no-deps --reinstall \
 
 The pinned Qwen3-TTS revision is the upstream Transformers 5 support change
 from Qwen3-TTS PR #360. Its package metadata requires Transformers 5.15.1 or
-newer, while this repository intentionally caps Transformers at 5.14.1. The
+newer, which the repository range (`>=5.16.1,<5.20.0`) satisfies. The
 commit archive keeps the exact revision installable even when its source branch
-is no longer advertised by the upstream Git remote. The `--no-deps` flag
-preserves the repository-wide cap; the `omni` extra owns the
-runtime dependencies, including `torchaudio>=2.11.0` (vLLM's own
-`torchaudio==2.11.0` requirement governs the version in the GPU env),
+is no longer advertised by the upstream Git remote. The `--no-deps` flag keeps
+the archive's own pins — for example `accelerate==1.12.0`, below the
+repository's `accelerate>=1.14.0` — from reshuffling the stack; the `omni` extra
+owns the runtime dependencies, including `torchaudio>=2.11.0`,
 and CI tests the exact Qwen3-TTS revision from `.github/qwen_tts_pin.txt` on this
 stack. The released `qwen-tts==0.1.1` source targets Transformers 4.57.3 and
 cannot be imported unchanged here. The adapter registers the upstream config

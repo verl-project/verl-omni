@@ -11,6 +11,7 @@ on:
       - "pyproject.toml"
       - .github/workflows/cpu_unit_tests.yml
       - .github/qwen_tts_pin.txt
+      - .github/triton_cpu_pin.txt
       - .github/vllm_omni_pin.txt
       - .github/verl_pin.txt
   pull_request:
@@ -24,6 +25,7 @@ on:
       - "pyproject.toml"
       - .github/workflows/cpu_unit_tests.yml
       - .github/qwen_tts_pin.txt
+      - .github/triton_cpu_pin.txt
       - .github/vllm_omni_pin.txt
       - .github/verl_pin.txt
 
@@ -59,6 +61,7 @@ jobs:
           cache-dependency-path: |
             pyproject.toml
             .github/qwen_tts_pin.txt
+            .github/triton_cpu_pin.txt
             .github/vllm_omni_pin.txt
             .github/verl_pin.txt
       - name: Install dependencies

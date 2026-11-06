@@ -14,7 +14,7 @@ build:
       - pip install "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@$(cat .github/vllm_omni_pin.txt)"
       - pip install --no-deps "verl @ git+https://github.com/verl-project/verl.git@$(cat .github/verl_pin.txt)"
       - pip install uv
-      - uv pip install --python "$(command -v python)" -e .
+      - uv pip install --python "$(command -v python)" --constraint .github/triton_cpu_pin.txt -e .
 
 sphinx:
   configuration: docs/conf.py

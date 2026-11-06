@@ -16,7 +16,8 @@
 set -euo pipefail
 
 # vLLM's allocator extension uses the pip-provided CUDA 13 runtime even
-# when PyTorch itself is a cu129 build. Make those shared libraries discoverable.
+# when PyTorch is built against a different CUDA minor version. Make those
+# shared libraries discoverable.
 cuda13_lib=$(python3 - <<'PY'
 from importlib.metadata import PackageNotFoundError, distribution
 

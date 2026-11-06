@@ -66,7 +66,7 @@ Historical validation environment (Diffusers 0.40.0; recorded before the project
 minimum to 0.41.0).
 
 - 1x NVIDIA A100-SXM4-40GB (Colab Pro), driver 580.82, Linux, BF16
-- Python 3.12, torch 2.14.0+cu130, vllm 0.33.0, vllm-omni 0.33.0rc2.dev41+g6e8c1097c,
+- Python 3.12, torch 2.13.0+cu132, vllm 0.30.0, vllm-omni 0.30.1.dev29+g12e928001,
   diffusers 0.40.0, transformers 5.14.1
 - `NUM_GPUS_ACTOR_ROLLOUT=1` with the reward model colocated on the same GPU
   (`reward.reward_model.enable_resource_pool=False`, `reward.models.ocr.offload=True`)

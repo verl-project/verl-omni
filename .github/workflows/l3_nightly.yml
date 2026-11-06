@@ -214,7 +214,7 @@ jobs:
       UV_SYSTEM_PYTHON: "1"
       UV_BREAK_SYSTEM_PACKAGES: "1"
       PIP_BREAK_SYSTEM_PACKAGES: "1"
-      NIGHTLY_PIN_TRANSFORMERS: "5.14.1"
+      NIGHTLY_PIN_TRANSFORMERS: "5.19.0"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
