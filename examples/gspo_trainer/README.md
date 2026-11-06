@@ -1,6 +1,6 @@
 # Qwen3-Omni Thinker GSPO Trainer
 
-Last updated: 10/24/2026
+Last updated: 10/27/2026
 
 This example shows how to post-train the **Qwen3-Omni-30B-A3B Thinker** with
 **GSPO** on multimodal reasoning tasks, using FSDP for the actor and `vllm-omni` as
@@ -717,9 +717,11 @@ bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_veomni.sh
 ```
 
 The full text backbone is trainable; vision/audio encoders remain frozen.
-Supported inputs are **text and images**, with packed inputs and Ulysses size 1.
-Audio/video inputs, Talker training, LoRA and direct-preference training are
-not supported. Defaults use rollout TP=2 and actor EP=8; EP must divide the
+This recipe uses **text and images**, with packed inputs and Ulysses size 1.
+The adapter also supports audio packing and video features for the
+[standalone NExT-QA NPU recipe](qwen3_omni/README.md#next-qa-with-veomni-on-ascend-npu),
+with user-reported NExT-QA NPU training results and validation limits documented there. Talker training, LoRA and
+direct-preference training are not supported. Defaults use rollout TP=2 and actor EP=8; EP must divide the
 GPU world size and expert count.
 
 The recipe uses LR `2e-6` with cosine decay to zero and no warmup. Validation

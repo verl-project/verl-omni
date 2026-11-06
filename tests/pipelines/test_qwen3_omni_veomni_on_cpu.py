@@ -20,6 +20,7 @@ from unittest.mock import patch
 
 import pytest
 import torch
+from tensordict import TensorDict
 
 # Load the CPU helpers without importing optional rollout packages.
 _path = Path(__file__).resolve().parents[2] / "verl_omni/pipelines/qwen3_omni/veomni.py"
@@ -193,6 +194,7 @@ def test_causal_mask_shim_drops_only_cache_position():
     with patch.dict(
         sys.modules,
         {
+            "veomni.utils.device": SimpleNamespace(IS_NPU_AVAILABLE=False),
             "transformers.masking_utils": SimpleNamespace(create_causal_mask=create_causal_mask),
             "veomni.models.transformers.qwen3_omni_moe.generated": SimpleNamespace(
                 patched_modeling_qwen3_omni_moe_gpu=modeling
@@ -214,6 +216,7 @@ def test_causal_mask_shim_leaves_compatible_signature_unchanged():
     with patch.dict(
         sys.modules,
         {
+            "veomni.utils.device": SimpleNamespace(IS_NPU_AVAILABLE=False),
             "transformers.masking_utils": SimpleNamespace(create_causal_mask=create_causal_mask),
             "veomni.models.transformers.qwen3_omni_moe.generated": SimpleNamespace(
                 patched_modeling_qwen3_omni_moe_gpu=modeling
@@ -222,3 +225,98 @@ def test_causal_mask_shim_leaves_compatible_signature_unchanged():
     ):
         assert not adapter.patch_veomni_causal_mask_kwargs()
         assert modeling.create_causal_mask is create_causal_mask
+
+
+def test_npu_causal_mask_does_not_import_gpu_modeling():
+    with patch.dict(
+        sys.modules,
+        {
+            "veomni.utils.device": SimpleNamespace(IS_NPU_AVAILABLE=True),
+            "veomni.models.transformers.qwen3_omni_moe.generated": None,
+        },
+    ):
+        assert not adapter.patch_veomni_causal_mask_kwargs()
+
+
+def _multimodal_batch(sequences, response_lengths):
+    return TensorDict(
+        {
+            "input_ids": torch.nested.as_nested_tensor([torch.tensor(seq) for seq in sequences], layout=torch.jagged),
+            "response_mask": torch.nested.as_nested_tensor(
+                [torch.ones(length, dtype=torch.bool) for length in response_lengths], layout=torch.jagged
+            ),
+        },
+        batch_size=len(sequences),
+    )
+
+
+def test_audio_packing_preserves_clip_order_and_gradient():
+    batch = _multimodal_batch([[151675, 1, 151675], [151675, 2]], [1, 1])
+    features = torch.arange(24.0).reshape(3, 2, 4).requires_grad_()
+    feature_mask = torch.tensor([[1, 1, 0, 0], [0, 0, 0, 0], [1, 1, 1, 0]])
+    inputs = {
+        "input_ids": batch["input_ids"].values().unsqueeze(0),
+        "input_features": features,
+        "feature_attention_mask": feature_mask,
+    }
+    result = adapter.prepare_inputs(inputs, batch, SimpleNamespace(hf_config=_config()))
+    expected = torch.cat([features[0, :, :2].T, features[2, :, :3].T])
+    torch.testing.assert_close(result["input_features"], expected)
+    torch.testing.assert_close(result["audio_feature_lengths"], torch.tensor([2, 3]))
+    torch.testing.assert_close(result["audio_mask"], torch.tensor([[True, False, False, True, False]]))
+    assert "feature_attention_mask" not in result
+    result["input_features"].sum().backward()
+    torch.testing.assert_close(features.grad, feature_mask[:, None, :].expand_as(features).float())
+
+
+def test_video_inputs_preserve_grids_features_and_prompt_boundaries():
+    batch = _multimodal_batch([[151656, 151656, 1, 151656], [151656, 2]], [1, 1])
+    pixels = torch.randn(12, 3)
+    grids = torch.tensor([[2, 2, 2], [1, 2, 2]])
+    inputs = {
+        "input_ids": batch["input_ids"].values().unsqueeze(0),
+        "pixel_values_videos": pixels,
+        "video_grid_thw": grids,
+    }
+    result = adapter.prepare_inputs(inputs, batch, SimpleNamespace(hf_config=_config()))
+    assert result["pixel_values_videos"] is pixels
+    assert result["video_grid_thw"] is grids
+    torch.testing.assert_close(result["video_mask"], torch.tensor([[True, True, False, False, True, False]]))
+
+
+def test_empty_audio_features_are_omitted_for_video_without_audio():
+    batch = _multimodal_batch([[151656, 1]], [1])
+    result = adapter.prepare_inputs(
+        {
+            "input_ids": batch["input_ids"].values().unsqueeze(0),
+            "pixel_values_videos": torch.ones(4, 3),
+            "video_grid_thw": torch.tensor([[1, 2, 2]]),
+            "input_features": torch.zeros(1, 2, 4),
+            "feature_attention_mask": torch.zeros(1, 4),
+        },
+        batch,
+        SimpleNamespace(hf_config=_config()),
+    )
+    assert "input_features" not in result
+    assert "audio_feature_lengths" not in result
+    assert not result["audio_mask"].any()
+
+
+@pytest.mark.parametrize("mask", [None, torch.ones(2, 3)])
+def test_audio_packing_rejects_missing_or_mismatched_mask(mask):
+    with pytest.raises(ValueError, match="feature_attention_mask"):
+        adapter.prepare_inputs(
+            {"input_features": torch.ones(2, 2, 4), "feature_attention_mask": mask},
+            {},
+            SimpleNamespace(hf_config=_config()),
+        )
+
+
+@pytest.mark.parametrize("freeze_vision, freeze_audio", [(True, False), (False, True), (False, False)])
+def test_selective_tower_freezing(freeze_vision, freeze_audio):
+    model = torch.nn.Module()
+    model.visual = torch.nn.Linear(2, 2)
+    model.audio_tower = torch.nn.Linear(2, 2)
+    freeze_modality_towers(model, freeze_vision=freeze_vision, freeze_audio=freeze_audio)
+    assert model.visual.weight.requires_grad is not freeze_vision
+    assert model.audio_tower.weight.requires_grad is not freeze_audio

@@ -1,6 +1,6 @@
 # How to Add a New Omni Model
 
-Last updated: 09/22/2026.
+Last updated: 10/21/2026.
 
 This guide walks through adding a new omni (multimodal autoregressive) model to
 the verl-omni training framework. It uses the Qwen3-Omni Thinker adapter as a
@@ -356,12 +356,15 @@ as a model-specific reference:
   tokens sampled into a response cannot consume prompt image features.
 - Weight export expands fused gate/up and down tensors to Hugging Face
   per-expert weights, including EP rank offsets, for vLLM-Omni updates.
-- Setup accepts policy-gradient Thinker training with packed text/image
+- Setup accepts policy-gradient Thinker training with packed multimodal
   inputs and Ulysses size 1. It rejects direct-preference batches, unsupported
   stages and LoRA, including a nonempty `lora_adapter_path` with rank zero.
-  Input preparation rejects audio/video features.
-- Before creating the optimizer, the adapter freezes vision/audio encoders
-  and rejects a loaded graph containing `talker`, `code2wav`, `code_predictor`
+  Input preparation packs HF padded audio features into VeOmni's frame-major
+  layout with clip lengths, and retains video features/grids and prompt-only masks.
+- Before creating the optimizer, the adapter freezes vision/audio encoders by
+  default; `model.override_config.freeze_vision_tower` and `freeze_audio_tower`
+  select the towers explicitly (also honored by the native FSDP adapter).
+  It rejects a loaded graph containing `talker`, `code2wav`, `code_predictor`
   or `has_talker=True`. VeOmni 0.1.12 constructs only the Thinker even when
   the checkpoint config enables speech; the guard detects changes to that
   behavior. These are the same excluded-module names used by the FSDP adapter.
