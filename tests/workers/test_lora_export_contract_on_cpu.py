@@ -19,22 +19,20 @@ Pins, for both engines behind one implementation:
 - merged streams materialize inside ``merged_lora_context`` and stay valid
   after the actor is restored; on FSDP2 with vanilla LoRA they are computed per
   tensor, bitwise equal to PEFT's merge, without modifying the module,
-- engine memory management runs at the right point of each path,
-- the colocated sync ordering rows (base before adapter; single full sync in
-  merge/non-LoRA modes).
+- engine memory management runs at the right point of each path.
+
+The colocated sync ordering rows live in ``test_lora_sync_plan_on_cpu.py``.
 """
 
-import asyncio
 import contextlib
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 import torch
 from torch.distributed.tensor import DTensor
 
 import verl_omni.workers.engine.lora_export as lora_export
-import verl_omni.workers.engine_workers as ew
 from verl_omni.workers.engine.lora_export import export_lora_for_sync
 
 # ---------------------------------------------------------------------------
@@ -462,88 +460,3 @@ def test_collect_receives_diffusers_layer_prefixes(monkeypatch):
 
     export_lora_for_sync(_peft_module(), model_config=_model_config(), base_sync_done=True, is_diffusers=False)
     assert collect.call_args.kwargs["layer_prefixes"] == ("transformer_blocks.",)
-
-
-# ---------------------------------------------------------------------------
-# Colocated sync ordering (real worker, mocked engine/rollout)
-# ---------------------------------------------------------------------------
-
-
-class _NoopRLInsight:
-    @staticmethod
-    def trace_state(*args, **kwargs):
-        return contextlib.nullcontext()
-
-
-def _slow_path_worker(*, has_lora: bool, peft_merge: bool, base_sync_done: bool):
-    worker = object.__new__(ew.ActorRolloutRefWorker)
-
-    engine = MagicMock(spec=["module", "get_per_tensor_param", "get_lora_peft_config"])
-    engine.module = _peft_module() if has_lora else _plain_module()
-    # A merged engine's export returns peft_config=None (the rollout gets a
-    # plain full-weight update), so the probe cannot discover adapter mode.
-    peft_config = {"r": 8} if has_lora and not peft_merge else None
-    engine.get_lora_peft_config = MagicMock(return_value=peft_config)
-
-    def _get_per_tensor_param(*, layered_summon=False, base_sync_done=True, adapter_name="default", **kwargs):
-        tensors = [("adapter.lora_A.weight", torch.zeros(1))] if base_sync_done else [("base.weight", torch.zeros(1))]
-        return (iter(tensors), peft_config)
-
-    engine.get_per_tensor_param = MagicMock(side_effect=_get_per_tensor_param)
-    worker.actor = SimpleNamespace(engine=engine)
-
-    rollout = AsyncMock()
-    rollout.resume = AsyncMock()
-    rollout.update_weights = AsyncMock()
-    rollout.sleep_level = 2
-    worker.rollout = rollout
-
-    worker.config = SimpleNamespace(rollout=SimpleNamespace(free_cache_engine=False))
-    worker.peft_merge = peft_merge
-    worker.base_sync_done = base_sync_done
-    worker.layered_summon = False
-    worker.rollout_adapter = "default"
-    worker._rank = 0  # update_weights stamps timings/metrics with f"rank_{self.rank}"
-    worker._offload_actor_and_empty_cache = lambda *args, **kwargs: None
-    return worker
-
-
-def _run_naive_update(monkeypatch, worker):
-    monkeypatch.setattr(ew, "RLInsightLogger", _NoopRLInsight)
-    monkeypatch.setattr(ew, "set_expandable_segments", MagicMock())
-    monkeypatch.setattr(ew, "log_gpu_memory_usage", MagicMock())
-    asyncio.run(ew.ActorRolloutRefWorker.update_weights(worker, mode="naive", global_steps=3))
-    return worker
-
-
-def test_adapter_mode_first_sync_sends_base_then_adapter(monkeypatch):
-    worker = _run_naive_update(monkeypatch, _slow_path_worker(has_lora=True, peft_merge=False, base_sync_done=False))
-
-    engine = worker.actor.engine
-    assert engine.get_per_tensor_param.call_count == 2
-    probe, base = engine.get_per_tensor_param.call_args_list
-    assert probe.kwargs["base_sync_done"] is True
-    assert base.kwargs["base_sync_done"] is False
-    assert worker.rollout.update_weights.await_count == 2
-    first, second = worker.rollout.update_weights.await_args_list
-    assert first.kwargs["base_sync_done"] is False  # base weights first
-    assert second.kwargs["base_sync_done"] is True  # then adapter deltas
-    assert worker.rollout.sleep_level == 1  # adapter mode pins level-1 sleep
-
-
-def test_merge_mode_sends_single_full_sync(monkeypatch):
-    worker = _run_naive_update(monkeypatch, _slow_path_worker(has_lora=True, peft_merge=True, base_sync_done=False))
-
-    engine = worker.actor.engine
-    assert engine.get_per_tensor_param.call_count == 1
-    worker.rollout.update_weights.assert_awaited_once()
-    assert worker.rollout.update_weights.await_args.kwargs["base_sync_done"] is True
-    assert worker.rollout.sleep_level == 2  # untouched: merged sync is a plain full update
-
-
-def test_non_lora_sends_single_sync(monkeypatch):
-    worker = _run_naive_update(monkeypatch, _slow_path_worker(has_lora=False, peft_merge=False, base_sync_done=False))
-
-    worker.rollout.update_weights.assert_awaited_once()
-    assert worker.rollout.update_weights.await_args.kwargs["base_sync_done"] is True
-    assert worker.rollout.sleep_level == 2
