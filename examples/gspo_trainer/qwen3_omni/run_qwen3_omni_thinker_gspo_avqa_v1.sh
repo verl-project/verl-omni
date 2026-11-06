@@ -2,9 +2,11 @@
 # Qwen3-Omni Thinker GSPO full-parameter AVQA training with the omni V1 trainer.
 # Modalities: text + image + audio -> text.
 # Hardware: A5 (8 × Ascend 950 96GB).
+# PIECEWISE avoids the FULL_AND_PIECEWISE decode hang on this A5 setup.
 set -x
 
 export CPATH=/usr/include${CPATH:+:$CPATH}
+export PYTHONUNBUFFERED=1
 export VERL_USE_EXTERNAL_MODULES=verl_omni
 
 # DEVICE is auto-detected by querying npu-smi; override only for special cases.
@@ -14,20 +16,15 @@ if [[ "${DEVICE}" != "npu" && "${DEVICE}" != "gpu" ]]; then
     exit 2
 fi
 
-if [[ "${DEVICE}" == "npu" ]]; then
-    ASCEND_HOME_PATH=${ASCEND_HOME_PATH:-/usr/local/Ascend/cann-9.1.0}
-    source "${ASCEND_HOME_PATH}/set_env.sh"
-    source "${ASCEND_HOME_PATH}/../nnal/atb/set_env.sh"
-fi
-
 # Setting actor_rollout_ref.actor.fsdp_config.use_no_sync_for_gradient_accumulation=false
 # requires verl commit a0feb78fe8229fde644aec3bbec20b5dc4583509 or later.
 
 MODEL_PATH=${MODEL_PATH:-"Qwen/Qwen3-Omni-30B-A3B-Instruct"}
 TRAIN_FILE=${TRAIN_FILE:-"$HOME/data/avqa_r1_6k/train.parquet"}
 VAL_FILE=${VAL_FILE:-"$HOME/data/avqa_r1_6k/validation.parquet"}
+VAL_BEFORE_TRAIN=${VAL_BEFORE_TRAIN:-false}
 
-NUM_GPUS_ACTOR_ROLLOUT_REWARD=${NUM_GPUS_ACTOR_ROLLOUT_REWARD:-16}
+NUM_GPUS_ACTOR_ROLLOUT_REWARD=${NUM_GPUS_ACTOR_ROLLOUT_REWARD:-8}
 ROLLOUT_TP=${ROLLOUT_TP:-2}
 
 python3 -m verl_omni.trainer.main_omni \
@@ -47,7 +44,7 @@ python3 -m verl_omni.trainer.main_omni \
     data.custom_cls.name=QwenOmniRLHFDataset \
     ++data.mm_processor_kwargs.sampling_rate=16000 \
     actor_rollout_ref.model.path="${MODEL_PATH}" \
-    +actor_rollout_ref.model.override_config.attn_implementation=sdpa \
+    ++actor_rollout_ref.model.override_config.attn_implementation=flash_attention_2 \
     actor_rollout_ref.model.lora_rank=0 \
     actor_rollout_ref.model.enable_gradient_checkpointing=true \
     actor_rollout_ref.model.use_remove_padding=true \
@@ -70,9 +67,9 @@ python3 -m verl_omni.trainer.main_omni \
     actor_rollout_ref.actor.loss_agg_mode=seq-mean-token-mean \
     actor_rollout_ref.actor.fsdp_config.param_offload=true \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=true \
-    actor_rollout_ref.actor.fsdp_config.use_no_sync_for_gradient_accumulation=false \
     actor_rollout_ref.actor.fsdp_config.model_dtype=bfloat16 \
     actor_rollout_ref.actor.fsdp_config.use_orig_params=true \
+    ++actor_rollout_ref.actor.fsdp_config.use_no_sync_for_gradient_accumulation=false \
     actor_rollout_ref.actor.fsdp_config.use_torch_compile=False \
     actor_rollout_ref.rollout.name=vllm_omni \
     actor_rollout_ref.rollout.mode=async \
@@ -80,6 +77,8 @@ python3 -m verl_omni.trainer.main_omni \
     actor_rollout_ref.rollout.tensor_model_parallel_size=${ROLLOUT_TP} \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
     actor_rollout_ref.rollout.max_num_seqs=128 \
+    actor_rollout_ref.rollout.enable_chunked_prefill=true \
+    actor_rollout_ref.rollout.max_num_batched_tokens=1536 \
     actor_rollout_ref.rollout.enforce_eager=false \
     actor_rollout_ref.rollout.load_format=safetensors \
     actor_rollout_ref.rollout.prompt_length=4160 \
@@ -87,10 +86,12 @@ python3 -m verl_omni.trainer.main_omni \
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=20480 \
     actor_rollout_ref.rollout.enable_prefix_caching=false \
     actor_rollout_ref.rollout.agent.num_workers=$((NUM_GPUS_ACTOR_ROLLOUT_REWARD / ROLLOUT_TP)) \
-    +actor_rollout_ref.rollout.engine_kwargs.vllm_omni.output_mode=ar \
-    +actor_rollout_ref.rollout.engine_kwargs.vllm_omni.pipeline_name=qwen3_omni_moe \
     ++actor_rollout_ref.rollout.engine_kwargs.vllm_omni.additional_config.weight_nz_mode=0 \
     ++actor_rollout_ref.rollout.engine_kwargs.vllm_omni.compilation_config.cudagraph_mode=PIECEWISE \
+    ++actor_rollout_ref.rollout.engine_kwargs.vllm_omni.compilation_config.cudagraph_capture_sizes='[1,16,128,1536]' \
+    ++actor_rollout_ref.rollout.engine_kwargs.vllm_omni.compilation_config.max_cudagraph_capture_size=1536 \
+    +actor_rollout_ref.rollout.engine_kwargs.vllm_omni.output_mode=ar \
+    +actor_rollout_ref.rollout.engine_kwargs.vllm_omni.pipeline_name=qwen3_omni_moe \
     actor_rollout_ref.rollout.val_kwargs.n=1 \
     actor_rollout_ref.rollout.val_kwargs.temperature=0 \
     actor_rollout_ref.rollout.val_kwargs.top_p=1.0 \
@@ -105,7 +106,7 @@ python3 -m verl_omni.trainer.main_omni \
     reward.reward_manager.name=naive \
     reward.custom_reward_function.path=verl_omni/utils/reward_score/choice_reward.py \
     reward.custom_reward_function.name=compute_score \
-    trainer.val_before_train=true \
+    trainer.val_before_train="${VAL_BEFORE_TRAIN}" \
     trainer.balance_batch=true \
     trainer.critic_warmup=0 \
     trainer.logger='["console","tensorboard"]' \
@@ -113,8 +114,8 @@ python3 -m verl_omni.trainer.main_omni \
     trainer.experiment_name=gspo_avqa_npu \
     trainer.n_gpus_per_node=${NUM_GPUS_ACTOR_ROLLOUT_REWARD} \
     trainer.nnodes=1 \
-    trainer.save_freq=50 \
-    trainer.test_freq=10 \
+    trainer.save_freq=500 \
+    trainer.test_freq=1000 \
     trainer.total_epochs=10 \
     "$@" \
-    2>&1 | tee run_qwen3omni_npu_avqa_v1.log
+    2>&1 | tee "run_qwen3omni_npu_avqa_v1_$(date +%Y%m%d_%H%M%S).log"
