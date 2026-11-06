@@ -56,8 +56,24 @@ case "${DATASET}" in
         export VAL_FILE=${VAL_FILE:-"$HOME/data/gsm8k/test.parquet"}
         # data_source="openai/gsm8k" dispatches to verl's built-in gsm8k reward;
         # null out the AVQA base's choice reward so the dispatch takes over.
+        # The OPD path runs unpacked (use_remove_padding=false below), so the
+        # log-prob/update passes materialize dense bsz x response_len x vocab
+        # tensors: the base recipe's 20480-token chunks and AVQA windows OOM
+        # GSM8K batches (~30 GiB single softmaxes, vocab 151748). GSM8K prompts
+        # are <=~280 tokens with template and CoT answers < ~400, so sized
+        # windows and 4096-token chunks keep transients under ~7 GiB. Other
+        # short-task datasets need the same sizing (see README).
         DATASET_ARGS=(
             reward.custom_reward_function.path=null
+            data.max_prompt_length=512
+            data.max_response_length=1024
+            actor_rollout_ref.rollout.prompt_length=640
+            actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=4096
+            actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=4096
+            actor_rollout_ref.actor.ppo_max_token_len_per_gpu=4096
+            distillation.teacher_models.teacher_model.inference.prompt_length=640
+            distillation.teacher_models.teacher_model.inference.response_length=1024
+            distillation.teacher_models.teacher_model.inference.max_model_len=2048
         )
         EXPERIMENT_NAME=minicpm_o_4_5_thinker_lora_gsm8k_opd
         ;;

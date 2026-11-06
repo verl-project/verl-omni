@@ -1,6 +1,6 @@
 # MiniCPM-o 4.5 simplex thinker OPD
 
-Last updated: 11/03/2026.
+Last updated: 11/05/2026.
 
 This recipe implements the first, thinker-stage part of [RFC #565](https://github.com/verl-project/verl-omni/issues/565), under [#345](https://github.com/verl-project/verl-omni/issues/345). The student generates a complete text response; a frozen teacher scores the same tokens and verl's on-policy distillation loss updates the student.
 
@@ -74,13 +74,15 @@ bash examples/opd_trainer/minicpm_o/run_simplex_opd_lora.sh
 
 The student uses the GSPO recipe's four GPUs and settings; the teacher adds `TEACHER_GPUS` (default 4) GPUs with `TEACHER_TP` (default 2) per replica on the same node. `DATASET` (`avqa` by default, `mmk12`, or `gsm8k`) selects the data and reward; `TRAIN_FILE` / `VAL_FILE` select other data, and extra CLI arguments override the defaults.
 
+`DATASET=gsm8k` additionally overrides the base recipe's length windows and chunk budgets (512-token prompts, 1024-token responses, 640-token rollout prompts, matching teacher windows, 4096-token log-prob/update chunks). The OPD path runs unpacked (`use_remove_padding=false`), so those passes materialize dense `bsz x response_len x vocab` logits and softmaxes — with the AVQA-sized windows and 20480-token chunks a GSM8K batch builds 30+ GiB single tensors and OOMs. Sized for GSM8K's short chains of thought, every transient stays under ~7 GiB. Short-task datasets beyond GSM8K need the same sizing.
+
 The default objective is task reward plus OPD, with `loss_mode=kl` and `use_policy_gradient=true`. For teacher-only OPD, add `distillation.distillation_loss.use_task_rewards=false`. Rewards decode through the GSPO recipe's `minicpm_naive` manager, which keeps MiniCPM's `<answer>` tags.
 
 | Setting | Value |
 | --- | --- |
 | `distillation.teacher_models.teacher_model.inference.name` | `vllm_omni` |
 | teacher `engine_kwargs.vllm_omni` | `output_mode=ar`, `pipeline_name=minicpmo_4_5`, `trust_remote_code=true` |
-| teacher `prompt_length` / `response_length` | the student's, 4160 / 12288; `max_model_len` 16640 |
+| teacher `prompt_length` / `response_length` | the student's, 4160 / 12288 (640 / 1024 under `DATASET=gsm8k`); `max_model_len` 16640 (2048) |
 | `distillation.distillation_loss` | `loss_mode=kl`, `use_policy_gradient=true` |
 
 Using an identical unperturbed checkpoint on both sides is a consistency smoke test, **not evidence of useful distillation**.

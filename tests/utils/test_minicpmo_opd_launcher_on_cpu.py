@@ -110,5 +110,38 @@ def test_gsm8k_branch_relies_on_verls_builtin_reward():
     assert "reward.custom_reward_function.name=" not in branch
 
 
+def test_gsm8k_branch_sizes_windows_and_chunks_for_the_unpacked_path():
+    # use_remove_padding=false (set by this wrapper) makes the log-prob and
+    # update passes materialize dense bsz x response_len x vocab tensors; with
+    # the base recipe's AVQA windows and 20480-token chunks a GSM8K batch
+    # builds 30+ GiB tensors and OOMs. The branch must ship sized windows,
+    # reduced chunk budgets, and matching teacher windows.
+    branch = _branch("gsm8k")
+    for arg in (
+        "data.max_prompt_length=512",
+        "data.max_response_length=1024",
+        "actor_rollout_ref.rollout.prompt_length=640",
+        "actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=4096",
+        "actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=4096",
+        "actor_rollout_ref.actor.ppo_max_token_len_per_gpu=4096",
+        "distillation.teacher_models.teacher_model.inference.prompt_length=640",
+        "distillation.teacher_models.teacher_model.inference.response_length=1024",
+        "distillation.teacher_models.teacher_model.inference.max_model_len=2048",
+    ):
+        # whole lines, so `512` cannot match a future `5120`
+        assert re.search(rf"^\s*{re.escape(arg)}$", branch, re.MULTILINE), arg
+
+
+def test_dataset_args_follow_the_hardcoded_teacher_windows():
+    # DATASET_ARGS rides the exec line after the wrapper's hardcoded teacher
+    # windows, so the per-dataset overrides win without extra precedence
+    # machinery, and trailing "$@" still wins over both.
+    text = _active_text()
+    assert text.index("distillation.teacher_models.teacher_model.inference.response_length=12288") < text.index(
+        '${DATASET_ARGS[@]+"${DATASET_ARGS[@]}"}'
+    )
+    assert text.index('${DATASET_ARGS[@]+"${DATASET_ARGS[@]}"}') < text.index('"$@"')
+
+
 def test_unknown_dataset_is_rejected():
     assert re.search(r"DATASET must be avqa, mmk12, or gsm8k", _active_text())
