@@ -391,7 +391,7 @@ class CompositeAgentLoopWorker(DiffusionAgentLoopWorker):
     ) -> None:
         """Populate AR ``rm_scores`` from per-image ``reward/ar`` in diffusion reward extras.
 
-        Mirrors ``PolicyGradientRayTrainer._extract_ar_reward_tensor`` for a single AR row
+        Mirrors ``CompositePolicyGradientRayTrainer._extract_ar_reward_tensor`` for a single AR row
         and ``len(diffusion_internals)`` diffusion samples.
         """
         if output.ar_reward_score is not None or self.reward_loop_worker_handles is None or not diffusion_internals:

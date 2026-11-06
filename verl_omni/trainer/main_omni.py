@@ -38,8 +38,10 @@ from verl.utils.device import auto_set_device, is_cuda_available
 
 import verl_omni.trainer.omni  # noqa: F401  — registers @register_trainer("omni_sync")
 from verl_omni.trainer.diffusion.ray_diffusion_trainer import (
+    CompositePolicyGradientRayTrainer,
     DirectPreferenceRayTrainer,
     PolicyGradientRayTrainer,
+    uses_composite_policy_gradient,
 )
 from verl_omni.utils.config import (
     resolve_lora_config,
@@ -63,9 +65,14 @@ __all__ = [
 
 
 def get_ray_trainer_cls(config):
-    """Return the trainer class selected by ``algorithm.trainer_type`` and model type."""
+    """Return the trainer class selected by ``algorithm.trainer_type`` and model type.
+
+    ``trainer.train_ar`` selects ``CompositePolicyGradientRayTrainer`` for DualGRPO.
+    """
     trainer_type = config.algorithm.trainer_type
     if trainer_type == "policy_gradient":
+        if uses_composite_policy_gradient(config):
+            return CompositePolicyGradientRayTrainer
         return PolicyGradientRayTrainer
     if trainer_type == "direct_preference":
         if config.actor_rollout_ref.model.get("model_type", "language_model") == "omni_model":

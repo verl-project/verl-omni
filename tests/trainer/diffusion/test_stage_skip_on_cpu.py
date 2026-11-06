@@ -31,6 +31,7 @@ from verl.utils.skip.rollout_skip import RolloutTqSkip
 
 from verl_omni.trainer.diffusion.ray_diffusion_trainer import (
     BaseRayDiffusionTrainer,
+    CompositePolicyGradientRayTrainer,
     DirectPreferenceRayTrainer,
     PolicyGradientRayTrainer,
 )
@@ -374,6 +375,8 @@ def test_misspelled_action_rejected_even_when_disabled(tmp_path, reset_skip_mana
         (BaseRayDiffusionTrainer, "_update_actor", "actor_update"),
         (PolicyGradientRayTrainer, "_compute_old_log_prob", "old_log_prob"),
         (PolicyGradientRayTrainer, "_compute_ref_log_prob", "ref_log_prob"),
+        (CompositePolicyGradientRayTrainer, "_compute_ar_old_log_prob", "old_log_prob"),
+        (CompositePolicyGradientRayTrainer, "_update_ar_actor", "actor_update"),
         (DirectPreferenceRayTrainer, "_update_actor", "actor_update"),
         (DirectPreferenceRayTrainer, "_compute_ref_noise_pred", "ref_log_prob"),
     ],
