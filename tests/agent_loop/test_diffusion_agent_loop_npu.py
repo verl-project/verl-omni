@@ -108,7 +108,9 @@ def npu_rollout_config():
             "DEVICE_NAME": "npu",
             "ASCEND_RT_VISIBLE_DEVICES": visible_devices,
             "ASCEND_VISIBLE_DEVICES": os.getenv("ASCEND_VISIBLE_DEVICES") or visible_devices,
-            "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES": "1",
+            "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES": os.environ.get(
+                "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES", "1"
+            ),
             "HCCL_NPU_SOCKET_PORT_RANGE": os.getenv("HCCL_NPU_SOCKET_PORT_RANGE") or "auto",
             "TOKENIZERS_PARALLELISM": "true",
             "VLLM_LOGGING_LEVEL": "INFO",

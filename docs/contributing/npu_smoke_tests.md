@@ -1,6 +1,6 @@
 # NPU Smoke Tests
 
-Last updated: 10/29/2026.
+Last updated: 11/06/2026.
 
 This guide explains how to add CI test cases for Huawei Ascend devices in verl-omni.
 
@@ -253,6 +253,36 @@ The NPU runner executes the job in a container, so repository-local composite
 actions may otherwise be resolved against a different host workspace.
 
 ## Runtime Cleanup, Results, and Artifacts
+
+### Process and IPC isolation foundations
+
+This part adds controller/supervisor modules; shell dispatch and parallel-lane
+activation follow separately. The existing group runners remain serial.
+
+`VERL_ZMQ_DIR` optionally replaces `/tmp` for colocated weight-transfer sockets.
+Use an existing absolute directory without symlink components, visible at the
+same path to sender and receiver; the final socket path must be under 108 bytes.
+Unset or empty keeps `/tmp`. The server appends this variable to
+`VLLM_RAY_EXTRA_ENV_VARS_TO_COPY`, preserving caller entries, so Ray stage
+workers use the same directory. Replica and rank naming stay unchanged.
+
+The foundation modules use these environment variables; they are not a new
+shell-runner interface in this part:
+
+| Variable | Meaning |
+|---|---|
+| `NUM_NPUS`, `ASCEND_RT_VISIBLE_DEVICES`, `ASCEND_VISIBLE_DEVICES` | Lane size, ordered runtime mask, and physical allocation; defaults derive from `--num-npus`. |
+| `NPU_SMOKE_TEST_IDS` | Distinct registered IDs, or all group IDs when unset/empty; shell filtering follows with activation. |
+| `NPU_SMOKE_FULL_TOPOLOGY` | Default `0`; `1` requires the controller's serial mode. |
+| `NPU_SMOKE_PARALLEL_CHILD` | Controller-generated `1`; rejects nested controllers. |
+| `NPU_SMOKE_FIXTURE_ROOT`, `NPU_SMOKE_MASTER_PORT_RANGE` | Generated per-lane fixture/port settings; workload consumers follow with activation. |
+| `LOG_DIR`, `TMPDIR`, `RAY_TMPDIR` | Per-lane logs and short private temporary directories; `VERL_ZMQ_DIR` uses the same private runtime. |
+| `RAY_ADDRESS` | Removed from lane environments so each lane starts its own Ray cluster instead of attaching to a caller-specified one. |
+| `NPU_SMOKE_CONTROLLER_PID`, `NPU_SMOKE_CONTROLLER_START` | Generated parent identity for supervisor checks; do not set manually. |
+| `NPU_SMOKE_SUPERVISOR_PID`, `NPU_SMOKE_SUPERVISOR_START`, `NPU_SMOKE_SUPERVISOR_STATE`, `NPU_SMOKE_SUPERVISOR_TOKEN` | Generated identity, private metadata path and authentication token; do not set manually. |
+| `RAY_EXPERIMENTAL_NOSET_*`, `RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO` | Partitioned lanes clear Ray's visibility-suppression flags and set the zero-resource override to `0`; exclusive/serial lanes preserve caller policy. |
+
+### Group results
 
 Before each test, the shared library stops Ray, terminates stale
 DiffusionWorker, VLLMWorker, and vLLMOmniHttpServer processes, waits five
