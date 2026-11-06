@@ -22,7 +22,9 @@ from pathlib import Path
 import pytest
 from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
+from transformers import T5Tokenizer
 
+from tests.special_e2e.build_sd3_tiny_random import _build_tiny_t5_tokenizer
 from verl_omni.trainer.diffusion.diffusion_algos import CRDLoss, DGPOLoss
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -144,11 +146,11 @@ def capture_launcher(tmp_path):
         "GROUP_SIZE": "2",
     }
 
-    def run(script, *overrides, exit_code=0):
+    def run(script, *overrides, exit_code=0, env_overrides=None):
         captured.write_text("")
         result = subprocess.run(
             ["bash", str(ROOT / script), *overrides],
-            env={**env, "CRD_TRAINER_EXIT": str(exit_code)},
+            env={**env, **(env_overrides or {}), "CRD_TRAINER_EXIT": str(exit_code)},
             capture_output=True,
             text=True,
             cwd=ROOT,
@@ -158,12 +160,16 @@ def capture_launcher(tmp_path):
     return run
 
 
-def test_tiny_gpu_smoke_composes_crd_and_runs_checkpoint_regression(capture_launcher):
-    result, calls = capture_launcher("tests/special_e2e/run_crd_sd35.sh")
+def test_tiny_gpu_smoke_composes_crd_and_runs_checkpoint_regression(capture_launcher, tmp_path):
+    result, calls = capture_launcher("tests/special_e2e/run_crd_sd35.sh", env_overrides={"MODEL_PATH": ""})
     assert result.returncode == 0, result.stderr
     trainer_args = next(args for args in calls if args[:2] == ["-m", "verl_omni.trainer.main_diffusion_v1"])
     config = compose_recipe(trainer_args)
     CRDLoss.validate_trainer_config(config)
+    model_path = Path(config.actor_rollout_ref.model.path)
+    assert model_path.name == "model"
+    assert model_path.parent.name.startswith("crd-e2e.")
+    assert calls[0] == ["tests/special_e2e/build_sd3_tiny_random.py", "--output-dir", str(model_path)]
     assert config.trainer.n_gpus_per_node == 2
     assert config.reward.models == {}
     assert config.reward.custom_reward_function.path.endswith("crd_smoke_reward.py")
@@ -179,6 +185,10 @@ def test_tiny_gpu_smoke_composes_crd_and_runs_checkpoint_regression(capture_laun
     }
     assert calls[-1][:2] == ["-m", "torch.distributed.run"]
     assert "tests/workers/crd_fsdp_checkpoint.py" in calls[-1]
+    tokenizer = _build_tiny_t5_tokenizer()
+    tokenizer.save_pretrained(tmp_path / "tokenizer_3")
+    restored = T5Tokenizer.from_pretrained(tmp_path / "tokenizer_3", local_files_only=True)
+    assert restored("a red circle")["input_ids"] == tokenizer("a red circle")["input_ids"]
 
 
 @pytest.mark.parametrize(

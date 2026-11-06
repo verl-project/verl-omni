@@ -8,8 +8,8 @@ if [[ ! "$NUM_GPUS" =~ ^[1-9][0-9]*$ ]]; then
     echo "NUM_GPUS must be a positive integer." >&2
     exit 1
 fi
-MODEL_PATH=${MODEL_PATH:-"$HOME/models/tiny-random/stable-diffusion-3-tiny-random"}
 smoke_dir=$(mktemp -d "${TMPDIR:-/tmp}/crd-e2e.XXXXXXXX")
+MODEL_PATH=${MODEL_PATH:-"$smoke_dir/model"}
 max_prompt_length=64
 python3 tests/special_e2e/build_sd3_tiny_random.py --output-dir "$MODEL_PATH"
 python3 tests/special_e2e/create_dummy_diffusion_data.py \
