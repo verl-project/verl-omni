@@ -93,8 +93,12 @@ To run only L1-style tests locally:
 
 ```bash
 printf '[pytest]\npython_files = *_on_cpu.py\n' > pytest.ini
-pytest -s -x --asyncio-mode=auto --cov=verl_omni --cov-report=term-missing --cov-report=xml:coverage.xml tests/
+pytest -s -x --asyncio-mode=auto -n auto --dist loadfile --cov=verl_omni --cov-report=term-missing --cov-report=xml:coverage.xml tests/
 ```
+
+`-n auto --dist loadfile` mirrors CI: `pytest-xdist` (from the `dev` extra) runs
+one worker per CPU core and keeps each test file inside a single worker, so
+file-local shared state behaves as in the sequential run.
 
 To run a single new L1 test file while iterating:
 
@@ -120,7 +124,7 @@ test layer. L2 and L3 checks may exist as GPU smoke or nightly regression jobs,
 but they should stay outside the fast PR loop until their ownership, trigger
 rules, baseline policy, runner capacity, and artifact retention are stable.
 
-For the current CI layer overview and the runnable L3 nightly case, see
+For the current CI layer overview and the runnable L3 nightly cases, see
 `ci_cd.md`.
 
 When adding a new layer section, include:
