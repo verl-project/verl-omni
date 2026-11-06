@@ -465,3 +465,104 @@ def test_repeated_offloaded_updates_do_not_keep_old_tasks_or_weights():
     assert _names(events).count("send") == 2
     assert worker._zmq_update_seq == 2
     assert worker.rollout.server_handle.set_global_steps.remote.await_args.args == (8,)
+
+
+@pytest.mark.parametrize("failure", ["resume", "cancel"])
+def test_tracked_actual_worker_keeps_access_until_gather_thread_finishes(failure):
+    from verl_omni.workers.utils.parameter_revision import ParameterRevision
+
+    worker, _events, _adapter, _peft_config = _worker(offload=False, free_cache=True)
+    tracker = ParameterRevision()
+    worker.actor.engine._parameter_revision = tracker
+    started, release = threading.Event(), threading.Event()
+
+    def gather(_timings):
+        started.set()
+        if not release.wait(timeout=10):
+            raise RuntimeError("test failed to release gather")
+        return {}, {"r": 8}
+
+    async def resume(**_kwargs):
+        if not await asyncio.to_thread(started.wait, 5):
+            raise RuntimeError("gather did not start")
+        if failure == "resume":
+            raise ValueError("resume failed")
+        await asyncio.Event().wait()
+
+    worker._gather_lora_weights = gather
+    worker.rollout.resume = AsyncMock(side_effect=resume)
+
+    async def run():
+        task = asyncio.create_task(worker.update_weights(mode="naive"))
+        try:
+            assert await asyncio.to_thread(started.wait, 5)
+            if failure == "cancel":
+                task.cancel()
+            await asyncio.sleep(0.05)
+            assert not task.done()
+            if failure == "cancel":
+                task.cancel()
+                await asyncio.sleep(0.05)
+                assert not task.done()
+            with pytest.raises(RuntimeError, match="Concurrent"):
+                tracker.version()
+        finally:
+            release.set()
+        if failure == "resume":
+            with pytest.raises(ValueError, match="resume failed"):
+                await task
+        else:
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        assert tracker.version().revision == 0
+
+    with (
+        patch.object(ew, "log_gpu_memory_usage", MagicMock()),
+        patch.object(ew, "set_expandable_segments", MagicMock()),
+        patch.object(ew, "get_torch_device", return_value=SimpleNamespace(is_available=lambda: False)),
+    ):
+        asyncio.run(run())
+
+
+def test_tracked_actual_worker_drains_offload_after_ipc_failure():
+    from verl_omni.workers.utils.parameter_revision import ParameterRevision
+
+    worker, _events, _adapter, _peft_config = _worker(offload=False, free_cache=False)
+    tracker = ParameterRevision()
+    worker.actor.engine._parameter_revision = tracker
+    started, release = threading.Event(), threading.Event()
+    worker._gather_lora_weights = lambda _timings: ({}, {"r": 8})
+
+    def offload(_timings):
+        started.set()
+        if not release.wait(timeout=10):
+            raise RuntimeError("test failed to release offload")
+
+    async def fail_ipc(*_args, **_kwargs):
+        if not await asyncio.to_thread(started.wait, 5):
+            raise RuntimeError("offload did not start")
+        raise OSError("ipc failed")
+
+    worker._offload_actor_and_empty_cache = offload
+    worker.rollout._execute_method = AsyncMock(side_effect=fail_ipc)
+
+    async def run():
+        task = asyncio.create_task(worker.update_weights(mode="naive"))
+        try:
+            assert await asyncio.to_thread(started.wait, 5)
+            await asyncio.sleep(0.05)
+            assert not task.done()
+            with pytest.raises(RuntimeError, match="Concurrent"):
+                tracker.version()
+        finally:
+            release.set()
+        with pytest.raises(OSError, match="ipc failed"):
+            await task
+        assert tracker.version().revision == 0
+
+    with (
+        patch.object(ew, "log_gpu_memory_usage", MagicMock()),
+        patch.object(ew, "set_expandable_segments", MagicMock()),
+        patch.object(ew, "get_torch_device", return_value=SimpleNamespace(is_available=lambda: False)),
+    ):
+        asyncio.run(run())
