@@ -17,7 +17,7 @@ L3 has one runnable scheduled workflow. It runs different algorithm cases on the
 
 L1 is the default merge gate for code that can be validated without GPU hardware. Tests must run on CPU, avoid Ray clusters, avoid real checkpoint downloads, and use mocks or tiny in-memory fixtures when model boundaries need to be exercised.
 
-The L1 workflow is `[.github/workflows/cpu_unit_tests.yml](../../.github/workflows/cpu_unit_tests.yml)`. It selects files ending in `_on_cpu.py`, runs `pytest` with coverage enabled for `verl_omni`, uploads coverage artifacts, and writes a short summary to the GitHub job summary. Tests run in parallel via `pytest-xdist` (one worker per runner core, test files distributed whole with `--dist loadfile`).
+The L1 workflow is `[.github/workflows/cpu_unit_tests.yml](../../.github/workflows/cpu_unit_tests.yml)`. It selects files ending in `_on_cpu.py`, runs `pytest` with coverage enabled for `verl_omni`, uploads coverage artifacts, and writes a short summary to the GitHub job summary. Tests run in parallel via `pytest-xdist` (one worker per runner core, test files distributed whole with `--dist loadfile`). L1 tests must not use Ray: worker processes are shared across files and Ray state is process-global. The single exception is `tests/reward_loop/test_cpu_native_reward_ray_on_cpu.py`, which runs as its own sequential pytest invocation in a fresh process.
 
 Add or update L1 tests when changing:
 

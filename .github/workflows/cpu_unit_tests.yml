@@ -42,7 +42,7 @@ jobs:
       github.event_name != 'pull_request' ||
       contains(join(github.event.pull_request.labels.*.name, ','), 'ci')
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     strategy:
       matrix:
         python-version: ["3.12"]
@@ -88,7 +88,14 @@ jobs:
             --cov-report=term-missing \
             --cov-report=xml:coverage.xml \
             --ignore=tests/models/test_flash_attention_3_graph_break_on_cpu.py \
+            --ignore=tests/reward_loop/test_cpu_native_reward_ray_on_cpu.py \
             tests/ | tee pytest-coverage.txt
+      - name: Run real-Ray reward loop tests
+        # The sole L1 file allowed to use Ray (see
+        # docs/contributing/testing_guide.md). Ray state is process-global,
+        # so it gets a fresh sequential pytest invocation.
+        run: |
+          pytest -s -x --asyncio-mode=auto tests/reward_loop/test_cpu_native_reward_ray_on_cpu.py
       - name: Add coverage summary
         if: always()
         run: |
