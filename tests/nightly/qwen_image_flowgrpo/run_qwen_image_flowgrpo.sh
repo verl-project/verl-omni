@@ -59,10 +59,6 @@ export NIGHTLY_DETERMINISTIC_SEED
 export PYTHONHASHSEED=${PYTHONHASHSEED:-${NIGHTLY_DETERMINISTIC_SEED}}
 export CUBLAS_WORKSPACE_CONFIG=${CUBLAS_WORKSPACE_CONFIG:-:4096:8}
 export TOKENIZERS_PARALLELISM=${TOKENIZERS_PARALLELISM:-false}
-export GENRM_OCR_TEMPERATURE=${GENRM_OCR_TEMPERATURE:-0.0}
-export GENRM_OCR_TOP_P=${GENRM_OCR_TOP_P:-1.0}
-export GENRM_OCR_MAX_TOKENS=${GENRM_OCR_MAX_TOKENS:-32}
-export GENRM_OCR_SEED=${GENRM_OCR_SEED:-${NIGHTLY_DETERMINISTIC_SEED}}
 
 rm -rf "${CURRENT_DUMP_DIR}"
 mkdir -p "${CURRENT_DUMP_DIR}" "${BASELINE_DUMP_DIR}" "${LOG_DIR}"
@@ -149,6 +145,8 @@ python3 "${SCRIPT_DIR}/run.py" \
     reward.reward_model.rollout.enforce_eager=True \
     reward.reward_model.rollout.do_sample=False \
     reward.reward_model.rollout.temperature=0.0 \
+    reward.reward_model.rollout.full_determinism=True \
+    reward.reward_model.rollout.seed=${NIGHTLY_DETERMINISTIC_SEED} \
     reward.reward_model.rollout.prompt_length=${MAX_PROMPT_LENGTH} \
     reward.reward_model.rollout.response_length=32 \
     reward.custom_reward_function.path=verl_omni/utils/reward_score/genrm_ocr.py \

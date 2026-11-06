@@ -26,8 +26,22 @@ from .media import _reward_extra_info
 
 
 def _sampling_params_from_rollout(rollout_config) -> dict:
-    """Build the OCR-compatible generation overrides from a rollout config."""
+    """Build judge generation overrides from a reward rollout config.
+
+    The response length is always forwarded. Temperature and top-p are
+    forwarded together once either is tuned away from the upstream rollout
+    defaults, and top-k is forwarded when it is set. Configs that keep the
+    upstream defaults retain the scorer's own sampling setup.
+    """
     params = {"max_tokens": rollout_config.get("response_length") or 4096}
+    top_k = rollout_config.get("top_k", -1)
+    if top_k != -1:
+        params["top_k"] = top_k
+    temperature = rollout_config.get("temperature", 1.0)
+    top_p = rollout_config.get("top_p", 1.0)
+    if temperature != 1.0 or top_p != 1.0:
+        params["temperature"] = temperature
+        params["top_p"] = top_p
     if rollout_config.get("full_determinism", False):
         params["seed"] = rollout_config.get("seed", 42)
     return params
@@ -114,7 +128,7 @@ class VisualRewardManager(RewardManagerBase):
         extra_info["rollout_reward_scores"] = rollout_reward_scores
 
         rm_rollout = self.config.reward.reward_model.rollout
-        # Keep the scorer's own sampling defaults and only override the length/seed.
+        # Unset rollout sampling fields keep the scorer's own tuned defaults.
         sampling_params = _sampling_params_from_rollout(rm_rollout)
 
         extra_reward_kwargs = (

@@ -42,7 +42,6 @@ DEFAULT_GRM_PROMPT = (
 DEFAULT_GRM_MODEL_PATH = "~/models/tiny-random/qwen3-vl"
 DEFAULT_SAMPLING_PARAMS = {"temperature": 0.7, "top_p": 0.8, "max_tokens": 4096}
 DEFAULT_UNIFIED_REWARD_MODEL_PATH = "CodeGoat24/UnifiedReward-2.0-qwen3vl-2b"
-DEFAULT_UNIFIED_REWARD_SAMPLING_PARAMS = {"temperature": 0.0, "top_p": 1.0, "max_tokens": 512}
 UNIFIED_REWARD_SCORE_PATTERN = re.compile(
     r"(Alignment|Coherence|Style)\s+Score\s*(?:\(1-5\))?\s*:\s*"
     r"([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)",
@@ -55,7 +54,17 @@ async def _post_chat_completion(
     chat_complete_request: dict,
     session: aiohttp.ClientSession | None = None,
 ) -> ChatCompletion:
-    """POST a chat completion request to an OpenAI-compatible router."""
+    """POST a chat completion request to an OpenAI-compatible router.
+
+    Args:
+        router_address: ``host:port`` of the router.
+        chat_complete_request: Request body sent to ``/v1/chat/completions``.
+        session: Optional shared session. When omitted, the request owns its
+            session.
+
+    Returns:
+        The parsed chat completion.
+    """
     url = f"http://{router_address}/v1/chat/completions"
     if session is None:
         timeout = aiohttp.ClientTimeout(total=None)
@@ -68,20 +77,6 @@ async def _post_chat_completion(
     return ChatCompletion(**json.loads(output))
 
 
-async def _chat_complete(router_address: str, chat_complete_request: dict) -> ChatCompletion:
-    """POST a chat completion request with a per-request session."""
-    return await _post_chat_completion(router_address, chat_complete_request)
-
-
-async def _chat_complete_with_session(
-    router_address: str,
-    chat_complete_request: dict,
-    session: aiohttp.ClientSession | None = None,
-) -> ChatCompletion:
-    """POST a chat completion request, optionally reusing a shared session."""
-    return await _post_chat_completion(router_address, chat_complete_request, session=session)
-
-
 def _to_pil(image) -> Image.Image:
     """Convert a uint8 tensor / array / PIL image to an RGB PIL image."""
     if isinstance(image, torch.Tensor):
@@ -91,6 +86,84 @@ def _to_pil(image) -> Image.Image:
         image = Image.fromarray(image)
     assert isinstance(image, Image.Image)
     return image
+
+
+def _sampling_params(sampling_params: dict | None = None) -> dict:
+    """Merge caller overrides into the shared VLM sampling defaults.
+
+    Args:
+        sampling_params: Optional overrides applied on top of
+            :data:`DEFAULT_SAMPLING_PARAMS`.
+
+    Returns:
+        A new request-ready sampling parameter dict.
+    """
+    params = dict(DEFAULT_SAMPLING_PARAMS)
+    if sampling_params is not None:
+        params.update(sampling_params)
+    return params
+
+
+def _prepare_solution_frames(solution_image, frame_interval: int, *, extra_info: dict):
+    """Select canonical frames from the declared decoded visual artifact."""
+    from verl_omni.utils.reward_score.reward_utils import visual_reward_frames
+
+    return visual_reward_frames(solution_image, extra_info, frame_interval)
+
+
+async def _score_vlm_frame(
+    image,
+    prompt: str,
+    *,
+    router_address: str,
+    model_name: str,
+    sampling_params: dict,
+    system_prompt: str | None = None,
+    session: aiohttp.ClientSession | None = None,
+) -> str | None:
+    """Encode one frame, build its chat request, and return the judge text.
+
+    Args:
+        image: A ``(C, H, W)`` uint8 tensor, HWC array, or PIL image.
+        prompt: User text sent after the image.
+        router_address: ``host:port`` of the OpenAI-compatible router.
+        model_name: Model name or path sent in the request.
+        sampling_params: Sampling fields merged into the request body.
+        system_prompt: Optional system message placed before the user turn.
+        session: Optional shared aiohttp session.
+
+    Returns:
+        The assistant text, or ``None`` when the judge returns no content.
+    """
+    from verl.utils.ray_utils import get_event_loop
+
+    from verl_omni.utils.reward_score.reward_utils import pil_image_to_base64
+
+    loop = get_event_loop()
+    image_base64 = await loop.run_in_executor(None, pil_image_to_base64, _to_pil(image))
+    messages = []
+    if system_prompt is not None:
+        messages.append({"role": "system", "content": system_prompt})
+    messages.append(
+        {
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": image_base64}},
+                {"type": "text", "text": prompt},
+            ],
+        }
+    )
+    chat_complete_request = {
+        "messages": messages,
+        "model": model_name,
+        **sampling_params,
+    }
+    result = await _post_chat_completion(
+        router_address=router_address,
+        chat_complete_request=chat_complete_request,
+        session=session,
+    )
+    return result.choices[0].message.content
 
 
 def _levenshtein_score(text: str, ground_truth: str) -> float:
@@ -109,90 +182,6 @@ def _levenshtein_score(text: str, ground_truth: str) -> float:
         return 1 - dist / len(gt)
     # Empty ground truth: only an empty transcription is a perfect match.
     return 1.0 if len(text) == 0 else 0.0
-
-
-def _sampling_params() -> dict:
-    params = dict(DEFAULT_SAMPLING_PARAMS)
-    env_overrides = {
-        "temperature": ("GENRM_OCR_TEMPERATURE", float),
-        "top_p": ("GENRM_OCR_TOP_P", float),
-        "max_tokens": ("GENRM_OCR_MAX_TOKENS", int),
-        "seed": ("GENRM_OCR_SEED", int),
-    }
-    for key, (env_name, parser) in env_overrides.items():
-        raw_value = os.environ.get(env_name)
-        if raw_value is None:
-            continue
-        params[key] = parser(raw_value)
-    return params
-
-
-async def _compute_score_ocr_impl(
-    data_source: str,
-    solution_image: np.ndarray | torch.Tensor,
-    ground_truth: str,
-    extra_info: dict,
-    reward_router_address: str,
-    reward_model_tokenizer: PreTrainedTokenizer = None,
-    model_name: Optional[str] = None,
-    sampling_params: dict = None,
-    *,
-    user_prompt: Optional[str] = None,
-    transport,
-):
-    """Shared OCR scoring implementation with an injectable chat transport."""
-    from verl.utils.ray_utils import get_event_loop
-
-    from verl_omni.utils.reward_score.reward_utils import (
-        pil_image_to_base64,
-        resolve_prompt_builder,
-        visual_reward_frames,
-    )
-
-    solution_image = visual_reward_frames(solution_image, extra_info, extra_info.get("frame_interval", 4))
-
-    model_name = model_name or os.path.expanduser(DEFAULT_GRM_MODEL_PATH)
-    if user_prompt is None:
-        user_prompt = DEFAULT_GRM_PROMPT
-    elif user_prompt.startswith("pkg://"):
-        user_prompt = resolve_prompt_builder(user_prompt)()
-    loop = get_event_loop()
-
-    grm_response = ""
-    scores = []
-    for image in solution_image:
-        pil_image = _to_pil(image)
-        image_base64 = await loop.run_in_executor(None, pil_image_to_base64, pil_image)
-
-        messages = [
-            {"role": "system", "content": "You are a helpful assistant."},
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image_url", "image_url": {"url": image_base64}},
-                    {"type": "text", "text": user_prompt},
-                ],
-            },
-        ]
-        params = _sampling_params()
-        if sampling_params is not None:
-            params.update(sampling_params)
-            if "seed" not in sampling_params:
-                params.pop("seed", None)
-        chat_complete_request = {
-            "messages": messages,
-            "model": model_name,
-            **params,
-        }
-        result = await transport(
-            router_address=reward_router_address,
-            chat_complete_request=chat_complete_request,
-        )
-        grm_response = result.choices[0].message.content
-        scores.append(_levenshtein_score(grm_response, ground_truth))
-
-    score = sum(scores) / len(scores)
-    return {"score": score, "genrm_response": grm_response}
 
 
 async def compute_score_ocr(
@@ -225,9 +214,8 @@ async def compute_score_ocr(
             for interface consistency.
         model_name: Name or path of the GRM. Defaults to
             ``DEFAULT_GRM_MODEL_PATH``.
-        sampling_params: Override the defaults from :func:`_sampling_params`.
-            An explicit ``seed`` opts in to reproducible sampling; without one
-            any env-inherited seed is dropped.
+        sampling_params: Overrides applied on top of the shared sampling
+            defaults.
         user_prompt: User prompt for the GRM. Defaults to
             ``DEFAULT_GRM_PROMPT``. A ``pkg://`` spec names a zero-argument
             prompt builder.
@@ -235,25 +223,36 @@ async def compute_score_ocr(
     Returns:
         dict: ``{"score": float, "genrm_response": str}``.
     """
-    return await _compute_score_ocr_impl(
-        data_source,
-        solution_image,
-        ground_truth,
-        extra_info,
-        reward_router_address,
-        reward_model_tokenizer,
-        model_name,
-        sampling_params,
-        user_prompt=user_prompt,
-        transport=_chat_complete,
+    from verl_omni.utils.reward_score.reward_utils import resolve_prompt_builder
+
+    solution_image = _prepare_solution_frames(
+        solution_image, extra_info.get("frame_interval", 4), extra_info=extra_info
     )
 
+    model_name = model_name or os.path.expanduser(DEFAULT_GRM_MODEL_PATH)
+    if user_prompt is None:
+        prompt = DEFAULT_GRM_PROMPT
+    elif user_prompt.startswith("pkg://"):
+        prompt = resolve_prompt_builder(user_prompt)()
+    else:
+        prompt = user_prompt
+    params = _sampling_params(sampling_params)
 
-def _prepare_solution_frames(solution_image, frame_interval: int, *, extra_info: dict):
-    """Select canonical frames from the declared decoded visual artifact."""
-    from verl_omni.utils.reward_score.reward_utils import visual_reward_frames
+    grm_response = ""
+    scores = []
+    for image in solution_image:
+        grm_response = await _score_vlm_frame(
+            image,
+            prompt,
+            router_address=reward_router_address,
+            model_name=model_name,
+            sampling_params=params,
+            system_prompt="You are a helpful assistant.",
+        )
+        scores.append(_levenshtein_score(grm_response, ground_truth))
 
-    return visual_reward_frames(solution_image, extra_info, frame_interval)
+    score = sum(scores) / len(scores)
+    return {"score": score, "genrm_response": grm_response}
 
 
 def _build_unified_reward_prompt(caption: str) -> str:
@@ -300,41 +299,25 @@ def _aggregate_unified_reward_scores(scores: dict[str, float]) -> tuple[float, f
     return normalized_score, raw_score
 
 
-async def _score_single_image(
+async def _score_unified_reward_frame(
     image,
     prompt: str,
+    *,
     router_address: str,
     model_name: str,
-    loop,
+    sampling_params: dict,
     session: aiohttp.ClientSession,
-    *,
-    transport,
-) -> tuple[float, float, str]:
-    """Score one image frame against ``prompt`` via UnifiedReward."""
-    from verl_omni.utils.reward_score.reward_utils import pil_image_to_base64
-
-    pil_image = _to_pil(image)
-    image_base64 = await loop.run_in_executor(None, pil_image_to_base64, pil_image)
-    messages = [
-        {
-            "role": "user",
-            "content": [
-                {"type": "image_url", "image_url": {"url": image_base64}},
-                {"type": "text", "text": prompt},
-            ],
-        },
-    ]
-    chat_complete_request = {
-        "messages": messages,
-        "model": model_name,
-        **DEFAULT_UNIFIED_REWARD_SAMPLING_PARAMS,
-    }
-    result = await transport(
+) -> tuple[float, float, str] | None:
+    """Score one frame, returning ``None`` when the judge output is malformed."""
+    unified_reward_response = await _score_vlm_frame(
+        image,
+        prompt,
         router_address=router_address,
-        chat_complete_request=chat_complete_request,
+        model_name=model_name,
+        sampling_params=sampling_params,
         session=session,
     )
-    unified_reward_response = result.choices[0].message.content or ""
+    unified_reward_response = unified_reward_response or ""
     axis_scores = _parse_unified_reward_scores(unified_reward_response)
     if not axis_scores:
         return None
@@ -342,7 +325,7 @@ async def _score_single_image(
     return normalized_score, raw_score, unified_reward_response
 
 
-async def _compute_score_unified_reward_impl(
+async def compute_score_unified_reward(
     data_source: str,
     solution_image: np.ndarray | torch.Tensor,
     ground_truth: str,
@@ -350,13 +333,34 @@ async def _compute_score_unified_reward_impl(
     reward_router_address: str,
     reward_model_tokenizer: PreTrainedTokenizer = None,
     model_name: Optional[str] = None,
+    sampling_params: dict = None,
     *,
     user_prompt: Optional[str] = None,
-    transport,
 ):
-    """Shared UnifiedReward scoring implementation with an injectable transport."""
-    from verl.utils.ray_utils import get_event_loop
+    """Compute a human-preference score via UnifiedReward 2.0.
 
+    The reward model scores the generated image against its text caption on
+    Alignment, Coherence, and Style axes. The returned ``score`` is the mean of
+    those axes normalized from the model's 1-5 scale to ``[0, 1]``.
+
+    Args:
+        data_source: Source dataset identifier. Unused, kept for interface
+            consistency.
+        solution_image: The solution image or video to be evaluated.
+        ground_truth: Fallback caption when ``extra_info`` has no prompt.
+        extra_info: Additional information; ``frame_interval`` controls video
+            frame subsampling.
+        reward_router_address: ``host:port`` of the judge router.
+        reward_model_tokenizer: Tokenizer for the reward model. Unused, kept
+            for interface consistency.
+        model_name: Name or path of the judge. Defaults to
+            ``DEFAULT_UNIFIED_REWARD_MODEL_PATH``.
+        sampling_params: Overrides applied on top of the UnifiedReward sampling
+            defaults.
+        user_prompt: Overrides the default prompt. A ``pkg://`` spec names a
+            builder called with ``caption``; literal text replaces
+            ``{caption}``.
+    """
     from verl_omni.utils.reward_score.reward_utils import resolve_prompt_builder
 
     del data_source, reward_model_tokenizer
@@ -374,20 +378,22 @@ async def _compute_score_unified_reward_impl(
         prompt = user_prompt.replace("{caption}", caption)
 
     model_name = model_name or DEFAULT_UNIFIED_REWARD_MODEL_PATH
-    loop = get_event_loop()
+    unified_sampling_params = {"temperature": 0.0, "top_p": 1.0, "max_tokens": 512}
+    if sampling_params is not None:
+        unified_sampling_params.update(sampling_params)
+    params = _sampling_params(unified_sampling_params)
 
     timeout = aiohttp.ClientTimeout(total=None)
     async with aiohttp.ClientSession(timeout=timeout) as session:
         frame_results = await asyncio.gather(
             *[
-                _score_single_image(
-                    image=image,
-                    prompt=prompt,
+                _score_unified_reward_frame(
+                    image,
+                    prompt,
                     router_address=reward_router_address,
                     model_name=model_name,
-                    loop=loop,
+                    sampling_params=params,
                     session=session,
-                    transport=transport,
                 )
                 for image in solution_image
             ]
@@ -419,45 +425,11 @@ async def _compute_score_unified_reward_impl(
     }
 
 
-async def compute_score_unified_reward(
-    data_source: str,
-    solution_image: np.ndarray | torch.Tensor,
-    ground_truth: str,
-    extra_info: dict,
-    reward_router_address: str,
-    reward_model_tokenizer: PreTrainedTokenizer = None,
-    model_name: Optional[str] = None,
-    *,
-    user_prompt: Optional[str] = None,
-):
-    """Compute a human-preference score via UnifiedReward 2.0.
-
-    The reward model scores the generated image against its text caption on
-    Alignment, Coherence, and Style axes. The returned ``score`` is the mean of
-    those axes normalized from the model's 1-5 scale to ``[0, 1]``.
-
-    ``user_prompt`` overrides the default prompt. A ``pkg://`` spec names a
-    builder called with ``caption``; literal text replaces ``{caption}``.
-    """
-    return await _compute_score_unified_reward_impl(
-        data_source,
-        solution_image,
-        ground_truth,
-        extra_info,
-        reward_router_address,
-        reward_model_tokenizer,
-        model_name,
-        user_prompt=user_prompt,
-        transport=_chat_complete_with_session,
-    )
-
-
 __all__ = [
     "DEFAULT_GRM_MODEL_PATH",
     "DEFAULT_GRM_PROMPT",
     "DEFAULT_SAMPLING_PARAMS",
     "DEFAULT_UNIFIED_REWARD_MODEL_PATH",
-    "DEFAULT_UNIFIED_REWARD_SAMPLING_PARAMS",
     "UNIFIED_REWARD_SCORE_PATTERN",
     "compute_score_ocr",
     "compute_score_unified_reward",

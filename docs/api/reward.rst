@@ -69,7 +69,7 @@ VLM-as-a-Judge Scorers
 ^^^^^^^^^^^^^^^^^^^^^^
 
 The generative-judge scorers live in one module. ``genrm_ocr`` and
-``unified_reward`` still work as import paths and forward to it.
+``unified_reward`` remain importable aliases for the shared entrypoints.
 
 .. automodule:: verl_omni.utils.reward_score.vlm_as_a_judge
    :members: compute_score_ocr, compute_score_unified_reward
