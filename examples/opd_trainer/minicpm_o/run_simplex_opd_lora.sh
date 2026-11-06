@@ -12,10 +12,12 @@
 #                        --local_save_dir ~/data/mmk12
 #                  TRAIN_FILE, VAL_FILE and REWARD_FUNCTION_PATH override the defaults.
 #   DATASET=gsm8k  text-only math scored by verl's built-in gsm8k reward —
-#                  the verification task: the thinker's initial accuracy is
-#                  high, so reward curves are interpretable from the first
-#                  steps. Prepare the data once (no extra deps):
-#                    python examples/gspo_trainer/data_process/gsm8k.py \
+#                  the verification task: the first-step reward equals the
+#                  base model's measured accuracy, so the curve is readable
+#                  from step one. Prepare the data once by running verl's
+#                  examples/data_preprocess/gsm8k.py from a verl checkout
+#                  (as the gspo_trainer README documents):
+#                    python examples/data_preprocess/gsm8k.py \
 #                        --local_save_dir ~/data/gsm8k
 #                  TRAIN_FILE, VAL_FILE override the defaults.
 #

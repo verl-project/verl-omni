@@ -1,6 +1,6 @@
 # MiniCPM-o 4.5 simplex thinker OPD
 
-Last updated: 11/05/2026.
+Last updated: 11/06/2026.
 
 This recipe implements the first, thinker-stage part of [RFC #565](https://github.com/verl-project/verl-omni/issues/565), under [#345](https://github.com/verl-project/verl-omni/issues/345). The student generates a complete text response; a frozen teacher scores the same tokens and verl's on-policy distillation loss updates the student.
 
@@ -45,10 +45,10 @@ python examples/gspo_trainer/data_process/mmk12.py \
   --local_save_dir ~/data/mmk12
 ```
 
-GSM8K (text-only math) is the verification task: the thinker's initial accuracy is high, so reward curves are readable from the first steps instead of saturating low like MMK12. Scoring rides verl's built-in gsm8k reward — `data_source="openai/gsm8k"` with the model asked to end with `#### <number>` — the same wiring as the Qwen3-Omni GSM8K recipe; no extra dependencies:
+GSM8K (text-only math) is the verification task: the first-step reward equals the base model's measured accuracy exactly, with headroom to the teacher — MMK12's 0.34 plateau leaves no readable climb. Scoring rides verl's built-in gsm8k reward — `data_source="openai/gsm8k"` with the model asked to end with `#### <number>` — the same wiring as the Qwen3-Omni GSM8K recipe. Prepare the data with verl's upstream converter, as the [gspo_trainer README](../../gspo_trainer/README.md#training-with-gsm8k) documents (run from a verl checkout):
 
 ```bash
-python examples/gspo_trainer/data_process/gsm8k.py \
+python examples/data_preprocess/gsm8k.py \
   --local_save_dir ~/data/gsm8k
 ```
 
@@ -102,8 +102,7 @@ TORCH_COMPILE_DISABLE=1 TORCHINDUCTOR_DISABLE=1 python -m pytest -q --asyncio-mo
   tests/trainer/omni/test_omni_distillation_on_cpu.py \
   tests/workers/rollout/rollout_vllm/test_omni_teacher_on_cpu.py \
   tests/utils/test_minicpm_rl_dataset_on_cpu.py \
-  tests/utils/test_minicpmo_opd_launcher_on_cpu.py \
-  tests/utils/test_gsm8k_data_process_on_cpu.py
+  tests/utils/test_minicpmo_opd_launcher_on_cpu.py
 ```
 
 GSM8K runs are text-only: the first batch is worth a glance to confirm requests carry no media streams and the teacher scores them normally.
