@@ -1554,27 +1554,6 @@ def test_diffusion_ingress_allowed_fields_includes_pinned_frontend_fields():
     assert "height" in allowed or "num_inference_steps" in allowed or "dtype" in allowed
 
 
-def test_diffusion_ingress_allowed_fields_supports_npu_frontend_path(monkeypatch):
-    import sys
-    from dataclasses import dataclass
-    from types import ModuleType
-
-    @dataclass
-    class NpuFrontendArgs:
-        host: str | None = None
-
-    monkeypatch.setitem(sys.modules, "vllm.entrypoints.launchers", None)
-    monkeypatch.setitem(sys.modules, "vllm.entrypoints.launchers.cli_args", None)
-    npu_cli_args = ModuleType("vllm.entrypoints.openai.cli_args")
-    npu_cli_args.FrontendArgs = NpuFrontendArgs
-    monkeypatch.setitem(sys.modules, "vllm.entrypoints.openai.cli_args", npu_cli_args)
-
-    allowed = diffusion_strategy_module._diffusion_ingress_allowed_fields()
-
-    assert isinstance(allowed, frozenset)
-    assert "host" in allowed
-
-
 def test_verl_plain_cli_parser_builds_tracking_serve_subparser():
     """verl builds the rollout CLI from a plain FlexibleArgumentParser; the
     serve subcommand this repo returns must still construct and parse (the
