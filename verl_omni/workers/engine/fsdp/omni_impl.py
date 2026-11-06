@@ -101,16 +101,19 @@ class OmniFSDPEngine(FSDPEngineWithLMHead):
 
         The inherited export (``state_dict`` + ``convert_weight_keys``, identity
         coordinates) matches this engine's full export only for full-weight,
-        non-QAT runs:
+        non-QAT, bf16 runs:
 
         - LoRA (either merge mode): the full export ships adapter weights
           (``collect_lora_params``) or merged, name-normalized tensors, never a
           plain ``state_dict``;
         - QAT: the full export applies ``quantize_with_fusion`` after conversion,
-          which renames and repacks tensors the shard export emits unquantized.
+          which renames and repacks tensors the shard export emits unquantized;
+        - non-bf16 ``param_dtype``: the full export honors ``mixed_precision.param_dtype``
+          while the inherited shard export casts every floating shard to bfloat16,
+          so the seed and steady syncs would diverge in dtype.
 
-        Both would silently break the delta contract (seed and steady exports must
-        share names and coordinates), so fail closed.
+        All three would silently break the delta contract (seed and steady exports
+        must share names, coordinates, and dtype), so fail closed.
         """
         if getattr(self, "_qat_enabled", False):
             raise NotImplementedError("omni_delta_sharded shard export does not support QAT exports.")
@@ -118,6 +121,16 @@ class OmniFSDPEngine(FSDPEngineWithLMHead):
         if hasattr(peft_model, "peft_config"):
             raise NotImplementedError(
                 "omni_delta_sharded shard export supports full-weight training only (no LoRA adapters)."
+            )
+        from verl.utils.torch_dtypes import PrecisionType
+
+        mixed_precision = self.engine_config.mixed_precision or {}
+        full_weight_dtype = PrecisionType.to_dtype(mixed_precision.get("param_dtype", "bf16"))
+        if full_weight_dtype != torch.bfloat16:
+            raise NotImplementedError(
+                "omni_delta_sharded shard export casts floating shards to bfloat16 while the full "
+                f"export uses param_dtype={mixed_precision.get('param_dtype', 'bf16')}: seed and steady "
+                "dtypes would diverge. Use param_dtype=bf16 or a non-delta checkpoint backend."
             )
         return super().get_per_tensor_param_shard(**kwargs)
 

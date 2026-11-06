@@ -499,6 +499,39 @@ def test_actor_model_cast_preserves_rotary_frequencies(monkeypatch, dtype):
     assert not any("inv_freq" in key for key in model.state_dict())
 
 
+def test_repeated_configure_model_keeps_rotary_wrapper_idempotent(monkeypatch):
+    # A second configure_model pass must not wrap the wrapper: the pristine
+    # bound _apply stays _verl_omni_original_apply, so a later dtype cast
+    # cannot recurse through the wrapper into itself.
+    from transformers import Qwen3Config, Qwen3ForCausalLM
+
+    import verl_omni.pipelines.minicpm.thinker_training_adapter as adapter
+
+    monkeypatch.setattr(adapter, "_apply_remote_code_patches", lambda module: None)
+    config = Qwen3Config(
+        vocab_size=32,
+        hidden_size=64,
+        intermediate_size=128,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=16,
+        rope_theta=1000000.0,
+    )
+    model = torch.nn.Module()
+    model.config = SimpleNamespace()
+    model.llm = Qwen3ForCausalLM(config)
+    rotary = model.llm.model.rotary_emb
+
+    MiniCPMThinkerAdapter.configure_model(model, SimpleNamespace())
+    original_apply = rotary._verl_omni_original_apply
+    MiniCPMThinkerAdapter.configure_model(model, SimpleNamespace())
+
+    assert rotary._verl_omni_original_apply is original_apply
+    model.to(dtype=torch.bfloat16)  # returns instead of recursing
+    assert rotary.inv_freq.dtype == torch.float32
+
+
 def test_remote_loader_restores_nonpersistent_resampler_positions(monkeypatch, tmp_path):
     from transformers import AutoModel, PretrainedConfig, PreTrainedModel
 

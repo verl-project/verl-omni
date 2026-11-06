@@ -820,7 +820,8 @@ class TestAdapterNameForwarding:
 
 class TestDeltaShardExportGate:
     """The omni engine's inherited shard export is valid only for full-weight,
-    non-QAT runs; the other export paths rename/revalue tensors (RFC #38 audit)."""
+    non-QAT, bf16 runs; the other export paths rename/revalue tensors or cast to
+    a different dtype (RFC #38 audit)."""
 
     def test_shard_export_fails_closed_under_qat(self):
         omni_impl = _get_omni_impl_module()
@@ -837,8 +838,20 @@ class TestDeltaShardExportGate:
         with pytest.raises(NotImplementedError, match="full-weight"):
             engine.get_per_tensor_param_shard()
 
+    def test_shard_export_fails_closed_under_non_bf16_param_dtype(self):
+        # The inherited shard export casts floating shards to bfloat16; with a
+        # config-derived full-export dtype the seed and steady syncs would
+        # diverge in dtype, so the gate must reject anything but bf16.
+        omni_impl = _get_omni_impl_module()
+        engine = object.__new__(omni_impl.OmniFSDPEngine)
+        engine._qat_enabled = False
+        engine.module = types.SimpleNamespace()
+        engine.engine_config = types.SimpleNamespace(mixed_precision={"param_dtype": "fp32"})
+        with pytest.raises(NotImplementedError, match="bfloat16"):
+            engine.get_per_tensor_param_shard()
+
     def test_shard_export_delegates_to_verl_when_full_weight(self, monkeypatch):
-        """Full-weight, non-QAT: the inherited export yields identity-named local
+        """Full-weight, non-QAT, bf16: the inherited export yields identity-named local
         shards matching the plain state_dict (the audit's positive case)."""
         omni_impl = _get_omni_impl_module()
         from verl.workers.engine.fsdp import transformer_impl
@@ -850,6 +863,7 @@ class TestDeltaShardExportGate:
         engine._uses_fsdp2_cpu_offload_policy = False
         engine._is_offload_param = False
         engine.module = torch.nn.Linear(3, 2, bias=False)
+        engine.engine_config = types.SimpleNamespace(mixed_precision=None)
 
         ((name, local, spec),) = list(engine.get_per_tensor_param_shard()[0])
         assert name == "weight"  # no conversion mapping, no prefix on the omni path

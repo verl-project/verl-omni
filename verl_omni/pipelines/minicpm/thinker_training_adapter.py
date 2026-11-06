@@ -228,7 +228,8 @@ def _keep_rotary_frequencies_dtype(module) -> None:
     from transformers.models.qwen3.modeling_qwen3 import Qwen3RotaryEmbedding
 
     for child in module.llm.modules():
-        if isinstance(child, Qwen3RotaryEmbedding):
+        # Guarded so a repeated configure_model pass cannot wrap the wrapper and recurse.
+        if isinstance(child, Qwen3RotaryEmbedding) and not hasattr(child, "_verl_omni_original_apply"):
             child._verl_omni_original_apply = child._apply
             child._apply = types.MethodType(_rotary_apply_keeping_dtype, child)
 
