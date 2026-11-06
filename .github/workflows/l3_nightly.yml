@@ -238,7 +238,7 @@ jobs:
           uv pip install --system --break-system-packages -e ".[gpu,dev,audio,ocr]"
           # veomni's [gpu] extra pins torch 2.11 and would conflict with the vLLM stack.
           # See docs/start/engine_backends.md.
-          # TODO: rm --no-deps when VeOmni supports the vLLM torch pin (torch 2.13 as of vLLM 0.30).
+          # TODO: rm --no-deps when VeOmni supports the vLLM torch pin (torch 2.14 as of vLLM 0.33).
           uv pip install --system --break-system-packages veomni==0.1.12 --no-deps
           uv pip install --system --break-system-packages torchcodec librosa soundfile av audioread
           uv pip install --system --break-system-packages "transformers[mistral-common]==${NIGHTLY_PIN_TRANSFORMERS}"

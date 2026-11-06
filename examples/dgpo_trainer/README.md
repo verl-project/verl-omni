@@ -52,7 +52,7 @@ Historical validation environment (Diffusers 0.40.0; recorded before the project
 minimum to 0.41.0).
 
 - 2x NVIDIA A800 80GB PCIe (no NVLink) with an Intel Xeon Gold 6336Y, Linux, BF16
-- Python 3.12, vllm 0.30.0, vllm-omni 0.30.1.dev29+g12e928001, torch 2.13.0+cu132,
+- Python 3.12, vllm 0.33.0, vllm-omni 0.33.0rc2.dev41+g6e8c1097c, torch 2.14.0+cu130,
   diffusers 0.40.0, transformers 5.14.1
 - `NUM_GPUS_ACTOR_ROLLOUT=1 NUM_GPUS_REWARD=1`, attention `native` with rollout
   `TORCH_SDPA`, and `actor_rollout_ref.rollout.free_cache_engine=False` (keeps the

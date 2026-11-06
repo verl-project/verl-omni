@@ -56,7 +56,8 @@ logger.setLevel(logging.INFO)
 _LORA_REQUEST_CACHE_MISS = object()
 
 # Lazily-computed upstream argument defaults, used to forward only explicitly
-# set engine arguments (see ``_drop_defaulted_engine_args``; tracked in vllm-omni#8503).
+# set engine arguments — unowned LLM-only defaults are rejected at stage ingress
+# (see ``_drop_defaulted_engine_args``).
 _ENGINE_ARGS_DEFAULTS: dict | None = None
 
 
@@ -218,13 +219,6 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         engine_args = OmniEngineArgs.from_cli_args(args)
         engine_args = asdict(engine_args)
 
-        # TODO (mike): drop this patch once vllm-omni strips the serialized default
-        # fault_tolerance_config at its kwargs boundary, or vLLM defaults it to None —
-        # any dict is read as an explicit --fault-tolerance-config and auto-enabled,
-        # failing without an external load balancer.
-        if not engine_args.get("enable_fault_tolerance"):
-            engine_args.pop("fault_tolerance_config", None)
-
         # ``from_cli_args`` only retains OmniEngineArgs fields. Restore the
         # OrchestratorArgs fields forwarded by verl before creating AsyncOmni.
         for key in orchestrator_field_names() - engine_args.keys():
@@ -232,10 +226,10 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             if value is not None:
                 engine_args[key] = value
 
-        # Restore raw user mapping so compilation runtime fields do not fail stage config validation.
+        # Forward only explicitly-set engine args: the stage-config boundary rejects both
+        # unowned defaults and asdict-expanded compilation configs, so restore the raw
+        # user mapping first.
         _restore_raw_compilation_config(engine_args, args)
-
-        # Forward only explicitly-set engine args; stage config rejects unowned defaults.
         engine_args = _drop_defaulted_engine_args(engine_args)
         # This rollout setting is explicit even when its value matches the
         # OmniEngineArgs default, so restore it after default filtering.

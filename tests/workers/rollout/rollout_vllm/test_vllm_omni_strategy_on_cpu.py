@@ -1377,7 +1377,7 @@ def test_diffusion_rejects_non_tensor_named_payload_with_context():
 
 
 def test_drop_defaulted_engine_args_keeps_only_explicit_overrides():
-    """Only explicitly-set engine args may reach AsyncOmni (12e9280+)."""
+    """Only explicitly-set engine args may reach AsyncOmni (6e8c1097+)."""
     from dataclasses import asdict
 
     from vllm_omni.engine.arg_utils import OmniEngineArgs
@@ -1393,6 +1393,10 @@ def test_drop_defaulted_engine_args_keeps_only_explicit_overrides():
     assert "_api_process_count" not in filtered
     assert "_api_process_rank" not in filtered
     assert "convert" not in filtered
+    # The serialized default fault-tolerance dict must not survive either: upstream
+    # gates fault tolerance on the enable flag, and forwarding the default dict is
+    # how fault tolerance used to auto-enable without a load balancer.
+    assert "fault_tolerance_config" not in filtered
     # ... including OrchestratorArgs parser defaults (the ownership check
     # flags every non-None value, even False).
     engine_args["ulysses_mode"] = "strict"
@@ -1494,6 +1498,33 @@ def test_ar_deploy_config_omits_text_encoder_tp_size_on_ar_stages(tmp_path, monk
     stages = {stage["stage_id"]: stage for stage in deploy["stages"]}
     assert "text_encoder_tp_size" not in stages[0]
     assert stages[1]["text_encoder_tp_size"] == 1
+
+
+def test_stage_config_boundary_rejects_expanded_compilation_config(monkeypatch):
+    """The pin's stage config rejects asdict-expanded compilation configs.
+
+    The rollout always re-expands vLLM's compilation_config (EngineArgs dict→object
+    coercion followed by ``asdict`` in default filtering); because this boundary
+    rejects the expanded shape, ``_restore_raw_compilation_config`` must keep
+    restoring the raw user mapping before stage-config construction.
+    """
+    from dataclasses import asdict
+
+    import pydantic
+    from vllm.config import CompilationConfig
+    from vllm_omni import platforms
+    from vllm_omni.config.omni_config import VllmOmniDiffusionStageConfig
+    from vllm_omni.config.stage_config import StagePipelineConfig
+
+    platform = platforms.current_omni_platform
+    monkeypatch.setattr(platform, "device_name", "cpu", raising=False)
+    monkeypatch.setattr(platform, "device_type", "cpu", raising=False)
+
+    with pytest.raises(pydantic.ValidationError, match="compilation_config"):
+        VllmOmniDiffusionStageConfig(
+            stage_pipeline_config=StagePipelineConfig(stage_id=0, model_stage="model", final_output=True),
+            compilation_config=asdict(CompilationConfig()),
+        )
 
 
 def test_restore_raw_compilation_config_keeps_user_mapping():

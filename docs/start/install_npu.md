@@ -51,7 +51,7 @@ source "${ASCEND_HOME_PATH:-/usr/local/Ascend/ascend-toolkit/latest}/set_env.sh"
 source /usr/local/Ascend/nnal/atb/set_env.sh
 
 cd ..
-git clone --depth 1 -b v0.30.0 https://github.com/vllm-project/vllm.git
+git clone --depth 1 -b v0.33.0 https://github.com/vllm-project/vllm.git
 cd vllm
 VLLM_TARGET_DEVICE=empty uv pip install -e ".[audio]"
 uv pip uninstall -y triton || true

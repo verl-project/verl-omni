@@ -93,7 +93,7 @@ jobs:
     runs-on: linux-aarch64-a2b4-8
     timeout-minutes: 120
     container:
-      image: swr.cn-north-4.myhuaweicloud.com/mindspeed/pr-verl-omni-a2:v010-vllm030-omni030
+      image: swr.cn-north-4.myhuaweicloud.com/mindspeed/pr-verl-omni-a2:v011-vllm033-omni033
       options: >-
         --shm-size 16g
     env:
