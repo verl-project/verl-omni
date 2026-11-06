@@ -12,14 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from transformers.models.mimi.configuration_mimi import MimiConfig
+from verl_omni.utils.vllm_omni.patch import patch_qwen3_tts_default_rope_read
 
 from .omni_rollout_adapter import Qwen3TTSRolloutAdapter
 from .talker_training_adapter import Qwen3TTSTalkerAdapter
 
-# The pinned qwen-tts installs a process-global default-rope initializer that
-# reads the bare rope_theta attribute; transformers 5.19 moved Mimi's theta
-# into rope_parameters, so restore the attribute the hook reads.
-MimiConfig.rope_theta = 10_000.0
+# qwen_tts installs a process-global default-rope initializer; the wrapper makes
+# its bare rope_theta read tolerate configs that moved the value (see patch).
+patch_qwen3_tts_default_rope_read()
 
 __all__ = ["Qwen3TTSTalkerAdapter", "Qwen3TTSRolloutAdapter"]

@@ -21,11 +21,12 @@ from pathlib import Path
 
 import torch
 from safetensors.torch import save_file
-from transformers.models.mimi.configuration_mimi import MimiConfig
 
-# The pinned qwen-tts installs a process-global default-rope initializer that
-# reads the bare rope_theta attribute this config class no longer declares.
-MimiConfig.rope_theta = 10_000.0
+from verl_omni.utils.vllm_omni.patch import patch_qwen3_tts_default_rope_read
+
+# The pinned qwen-tts's default-rope hook reads a bare rope_theta; the wrapper
+# falls back to rope_parameters (see patch_qwen3_tts_default_rope_read).
+patch_qwen3_tts_default_rope_read()
 
 
 def _copy_files(source: Path, destination: Path, names: tuple[str, ...]) -> None:

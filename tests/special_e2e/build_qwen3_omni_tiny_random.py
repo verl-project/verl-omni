@@ -42,11 +42,12 @@ from tokenizers.models import BPE
 from tokenizers.pre_tokenizers import ByteLevel as ByteLevelPreTokenizer
 from tokenizers.trainers import BpeTrainer
 from transformers import AutoModelForMultimodalLM, Qwen2TokenizerFast
-from transformers.models.qwen3_omni_moe.configuration_qwen3_omni_moe import Qwen3OmniMoeTextConfig
 
-# The pinned qwen-tts installs a process-global default-rope initializer that
-# reads the bare rope_theta attribute this config class no longer declares.
-Qwen3OmniMoeTextConfig.rope_theta = 1_000_000.0
+from verl_omni.utils.vllm_omni.patch import patch_qwen3_tts_default_rope_read
+
+# The pinned qwen-tts's default-rope hook reads a bare rope_theta; the wrapper
+# falls back to rope_parameters (see patch_qwen3_tts_default_rope_read).
+patch_qwen3_tts_default_rope_read()
 
 DEFAULT_OUTPUT_DIR = os.path.expanduser("~/models/tiny-random/Qwen3-Omni")
 
