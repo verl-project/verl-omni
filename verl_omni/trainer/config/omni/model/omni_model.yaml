@@ -10,6 +10,9 @@ _target_: verl_omni.workers.config.omni.OmniModelConfig
 # verl-omni dispatch key for engine and trainer routing
 model_type: omni_model
 
+# Bagel Co-RL (Joint-Training) dual UND+GEN loss; null for standard omni AR
+composite_mode: null
+
 # path to the huggingface model
 path: ???
 
