@@ -40,6 +40,7 @@ from vllm_omni.engine.arg_utils import OmniEngineArgs, OrchestratorArgs, orchest
 from vllm_omni.entrypoints import AsyncOmni
 from vllm_omni.entrypoints.openai.api_server import omni_init_app_state
 from vllm_omni.lora.request import LoRARequest
+from vllm_omni.utils.tracking_parser import TrackingArgumentParser
 
 from verl_omni.utils.net_utils import get_non_ephemeral_free_port
 from verl_omni.workers.config import DiffusionModelConfig, DiffusionRolloutConfig, OmniModelConfig
@@ -119,6 +120,53 @@ def _drop_defaulted_engine_args(engine_args: dict) -> dict:
         for key, value in engine_args.items()
         if key == "model" or key not in defaults or not _is_defaulted_value(key, value, defaults[key])
     }
+
+
+class _TrackingSubparsers:
+    """Create tracking parsers from a plain argparse subparsers action."""
+
+    def __init__(self, subparsers: argparse._SubParsersAction):
+        self._subparsers = subparsers
+
+    def add_parser(self, name: str, *args: Any, **kwargs: Any) -> TrackingArgumentParser:
+        # ``add_parser`` builds kwargs for its fixed parser class, so construct
+        # and register the tracking parser here instead.
+        kwargs.pop("parser_class", None)
+        kwargs.setdefault("prog", f"{self._subparsers._prog_prefix} {name}")
+        parser = TrackingArgumentParser(**kwargs)
+        self._subparsers._name_parser_map[name] = parser
+        return parser
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._subparsers, name)
+
+
+class _TrackingCliCommand:
+    """Build one vllm-omni CLI command's subparser as a tracking parser.
+
+    verl's launcher constructs the rollout CLI from a plain
+    FlexibleArgumentParser, while the pinned vllm-omni's serve subparser
+    only accepts TrackingArgumentParser (its explicit-args machinery).
+    """
+
+    def __init__(self, command):
+        self._command = command
+
+    def subparser_init(self, subparsers: argparse._SubParsersAction) -> TrackingArgumentParser:
+        return self._command.subparser_init(_TrackingSubparsers(subparsers))
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._command, name)
+
+
+class _TrackingCliModule:
+    """Present vllm-omni's CLI modules with tracking-parser subcommands."""
+
+    def __init__(self, module):
+        self._module = module
+
+    def cmd_init(self) -> list:
+        return [_TrackingCliCommand(command) for command in self._module.cmd_init()]
 
 
 class vLLMOmniHttpServer(vLLMHttpServer):
@@ -203,7 +251,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         return self._generate_strategy.worker_extension_cls(device_type)
 
     def _get_cli_modules(self) -> list:
-        return [vllm_omni.entrypoints.cli.serve]
+        return [_TrackingCliModule(vllm_omni.entrypoints.cli.serve)]
 
     def _get_cli_description(self) -> str:
         return "vLLM-Omni CLI"

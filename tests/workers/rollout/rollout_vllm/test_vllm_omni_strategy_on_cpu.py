@@ -1573,3 +1573,25 @@ def test_diffusion_ingress_allowed_fields_supports_npu_frontend_path(monkeypatch
 
     assert isinstance(allowed, frozenset)
     assert "host" in allowed
+
+
+def test_verl_plain_cli_parser_builds_tracking_serve_subparser():
+    """verl builds the rollout CLI from a plain FlexibleArgumentParser; the
+    serve subcommand this repo returns must still construct and parse (the
+    pin's serve rejects non-tracking subparsers)."""
+    import vllm_omni.entrypoints.cli.serve
+    from vllm.utils.argparse_utils import FlexibleArgumentParser
+
+    from verl_omni.workers.rollout.vllm_rollout.vllm_omni_async_server import _TrackingCliModule
+
+    parser = FlexibleArgumentParser(description="verl launch_server equivalent")
+    subparsers = parser.add_subparsers(required=False, dest="subparser")
+    cmds = {}
+    for command in _TrackingCliModule(vllm_omni.entrypoints.cli.serve).cmd_init():
+        command.subparser_init(subparsers).set_defaults(dispatch_function=command.cmd)
+        cmds[command.name] = command
+
+    parsed = parser.parse_args(["serve", "dummy-model"])
+
+    assert parsed.subparser == "serve"
+    assert parsed.model_tag == "dummy-model"
