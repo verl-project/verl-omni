@@ -28,6 +28,7 @@ from verl.trainer.ppo.reward import resolve_reward_manager_cls
 from verl_omni.workers.config.reward import (
     accelerator_workers_enabled,
     get_reward_model_entries,
+    has_fsdp_reward_models,
     has_reward_models,
     parse_reward_model_config,
     resolve_reward_model_name,
@@ -126,6 +127,23 @@ class OmniRewardLoopWorker(RewardLoopWorker):
                 raise result
 
 
+class OmniFSDPRewardLoopWorker(OmniRewardLoopWorker):
+    """One CPU scoring facade represents one complete FSDP rank group."""
+
+    def __init__(self, config, specs, workers, processor_path, timeout):
+        from .native_fsdp import NativeFSDPExecutor, attach_replica
+
+        self._replica = attach_replica(workers, processor_path, timeout)
+        super().__init__(config, reward_model_specs=specs)
+        name = next(iter(specs))
+        self.native_reward_executors = {name: NativeFSDPExecutor(self._replica)}
+        self.reward_manager.set_reward_executors({}, self.native_reward_executors)
+
+    def ready(self):
+        """Acknowledge successful facade construction."""
+        return self._replica.worker_group.world_size
+
+
 class OmniRewardLoopManager(RewardLoopManager):
     """RewardLoopManager that can start/stop the profiler on the reward-model rollout servers.
 
@@ -222,14 +240,21 @@ class OmniRewardLoopManager(RewardLoopManager):
                 group_config = self._copy_reward_config(terms)
                 with open_dict(group_config.reward):
                     group_config.reward.num_workers = (
-                        placement.num_replicas if placement.is_cpu else len(placement.devices)
+                        len(placement.replica_groups)
+                        if placement.replica_groups
+                        else placement.num_replicas
+                        if placement.is_cpu
+                        else len(placement.devices)
                     )
-                workers = self._create_native_workers(
-                    group_config,
-                    {model_name: specs[model_name]},
-                    model_name,
-                    f"native_reward_loop_worker_{model_name}",
-                )
+                if model_config.placement.replica_groups:
+                    workers = self._create_fsdp_worker(group_config, specs[model_name], model_config)
+                else:
+                    workers = self._create_native_workers(
+                        group_config,
+                        {model_name: specs[model_name]},
+                        model_name,
+                        f"native_reward_loop_worker_{model_name}",
+                    )
                 self._register_worker_group(model_name, workers, group_config)
                 self.multi_reward_model_manager.bind_native_workers(model_name, workers)
 
@@ -319,6 +344,40 @@ class OmniRewardLoopManager(RewardLoopManager):
             worker_name_prefix=name_prefix,
         )
 
+    def _create_fsdp_worker(self, config, spec, model):
+        from verl_omni.utils.reward_score.pickscore_reward import _PROCESSOR_PATH
+
+        from .native_fsdp import build_replica
+
+        processor_path = model.executor.kwargs.get("processor_path", _PROCESSOR_PATH)
+        owner = self.multi_reward_model_manager.models[model.name]
+        workers = []
+        try:
+            for indices in model.placement.replica_groups:
+                replica = build_replica(
+                    self.multi_reward_model_manager.resource_pool,
+                    model.model_path,
+                    processor_path,
+                    timeout=model.fsdp.timeout,
+                    collective_timeout=model.fsdp.collective_timeout,
+                    bundle_indices=indices,
+                )
+                owner.bind_rank_workers(replica.worker_group.workers)
+                worker = ray.remote(OmniFSDPRewardLoopWorker).remote(
+                    config, {model.name: spec}, replica.worker_group.workers, processor_path, model.fsdp.timeout
+                )
+                workers.append(worker)
+                owner.bind_workers(workers)
+                ray.get(worker.ready.remote(), timeout=model.fsdp.timeout)
+        except BaseException as exc:
+            errors = [exc]
+            try:
+                owner._terminate_owned()
+            except BaseException as cleanup:
+                errors.append(cleanup)
+            raise BaseExceptionGroup("FSDP scoring worker construction failed", errors) from None
+        return workers
+
     def compute_rm_score(self, data):
         """Synchronous compatibility entrypoint for current trainers."""
         if not self.multi_reward_model_manager.models:
@@ -367,9 +426,17 @@ class OmniRewardLoopManager(RewardLoopManager):
                     logger.exception("Failed to sleep reward models after scoring failed")
 
     async def _compute_named_model_scores(self, data: DataProto) -> DataProto:
-        group_outputs = await dispatch_reward_groups(
-            data, self._reward_worker_groups, self._reward_dispatch_batch_sizes
-        )
+        if has_fsdp_reward_models(self.config):
+            group_outputs = await dispatch_reward_groups(
+                data,
+                self._reward_worker_groups,
+                self._reward_dispatch_batch_sizes,
+                rpc_owners=self.multi_reward_model_manager.models,
+            )
+        else:
+            group_outputs = await dispatch_reward_groups(
+                data, self._reward_worker_groups, self._reward_dispatch_batch_sizes
+            )
 
         merged_scores = []
         merged_infos = []
