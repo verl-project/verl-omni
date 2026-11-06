@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Real Ray CPU processes exercise facade construction ownership and termination."""
+"""Explicit real-Ray CPU integration tests; excluded from the lightweight L1 selector."""
 
 import asyncio
 import tempfile
@@ -54,15 +54,15 @@ class _ControlFacade:
 
 @pytest.fixture(scope="module")
 def construction_cluster():
-    ray.init(
-        address="local",
-        num_cpus=6,
-        num_gpus=0,
-        include_dashboard=False,
-        object_store_memory=128 * 1024**2,
-        _temp_dir=tempfile.mkdtemp(prefix="nf-construction-cpu-"),
-    )
     try:
+        ray.init(
+            address="local",
+            num_cpus=6,
+            num_gpus=0,
+            include_dashboard=False,
+            object_store_memory=128 * 1024**2,
+            _temp_dir=tempfile.mkdtemp(prefix="nf-construction-cpu-"),
+        )
         yield
     finally:
         ray.shutdown()
@@ -78,30 +78,33 @@ def test_real_ray_construction_rollback_confirms_owned_actor_death(construction_
     model = parse_reward_model_config("pickscore", cfg.reward.models.pickscore)
     spec = manager.multi_reward_model_manager.reward_model_specs["pickscore"]
     remote, get = ray.remote, ray.get
-    ranks = [remote(_ControlRank).options(num_cpus=1, num_gpus=0).remote() for _ in range(2)]
-    facades, observed = [], []
-    get([rank.status.remote() for rank in ranks], timeout=90)
-
-    def submit(*args):
-        actor = remote(_ControlFacade).options(num_cpus=1, num_gpus=0).remote(*args, mode=mode, markers=str(tmp_path))
-        facades.append(actor)
-        return actor
-
-    def observe_get(ref, **kwargs):
-        if not observed:
-            wait_for_marker(tmp_path / "fault_entered")
-            assert owner._workers == facades
-            observed.append(time.monotonic())
-        return get(ref, **kwargs)
-
-    monkeypatch.setattr(
-        native_fsdp,
-        "build_replica",
-        lambda *args, **kwargs: SimpleNamespace(worker_group=SimpleNamespace(workers=ranks)),
-    )
-    monkeypatch.setattr(reward_loop.ray, "remote", lambda cls: SimpleNamespace(remote=submit))
-    monkeypatch.setattr(reward_loop.ray, "get", observe_get)
+    ranks, facades, observed = [], [], []
     try:
+        for _ in range(2):
+            ranks.append(remote(_ControlRank).options(num_cpus=1, num_gpus=0).remote())
+        get([rank.status.remote() for rank in ranks], timeout=90)
+
+        def submit(*args):
+            actor = (
+                remote(_ControlFacade).options(num_cpus=1, num_gpus=0).remote(*args, mode=mode, markers=str(tmp_path))
+            )
+            facades.append(actor)
+            return actor
+
+        def observe_get(ref, **kwargs):
+            if not observed:
+                wait_for_marker(tmp_path / "fault_entered")
+                assert owner._workers == facades
+                observed.append(time.monotonic())
+            return get(ref, **kwargs)
+
+        monkeypatch.setattr(
+            native_fsdp,
+            "build_replica",
+            lambda *args, **kwargs: SimpleNamespace(worker_group=SimpleNamespace(workers=ranks)),
+        )
+        monkeypatch.setattr(reward_loop.ray, "remote", lambda cls: SimpleNamespace(remote=submit))
+        monkeypatch.setattr(reward_loop.ray, "get", observe_get)
         with pytest.raises(BaseExceptionGroup) as error:
             manager._create_fsdp_worker(cfg, spec, model)
         assert owner._closed and owner._termination_error is None

@@ -105,7 +105,7 @@ separately synchronized extension snapshots. The preceding tables retain their p
 | Foundation contract tests after correction | 67 passed; readiness/submission failures, both cleanup roles, primary-error preservation and sticky close errors. |
 | Foundation related CPU regression | 1592 passed. |
 | Real Ray CPU control plane | Constructor error/hang and ready error/hang; each case confirmed three owned actors DEAD before shutdown. |
-| Automatic CPU coverage | Four real-Ray cases in `test_native_fsdp_construction_ray_on_cpu.py` passed with accelerators hidden. These test process ownership, not CPU FSDP computation. |
+| Real-Ray integration coverage | Four cases in `test_native_fsdp_construction_ray.py` run explicitly with accelerators hidden, outside the lightweight `*_on_cpu.py` L1 selector. They test process ownership, not CPU FSDP computation. |
 | Actual two-GPU construction rollback | Four constructor/readiness error/hang cases passed on CUDA/NCCL ranks; each confirmed its facade and both ranks DEAD before shutdown. |
 | Actual four-GPU second-group rollback | Four constructor/readiness error/hang cases passed with four distinct physical GPU UUIDs. The first group's facade/ranks were alive before the second facade failed; all six owned actors were DEAD before shutdown in every case. |
 | Pretrained PickScore inference | 20 load/score/unload cycles and actual rank failure passed; maximum score absolute error `1.7881393432617188e-7`. |
@@ -145,8 +145,10 @@ CUDA_VISIBLE_DEVICES="$GPU_PAIR" PYTHONPATH="$PWD" HF_HUB_OFFLINE=1 TRANSFORMERS
 CUDA_VISIBLE_DEVICES='' PYTHONPATH="$PWD" PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
   "$PYTHON" -m pytest -p pytest_asyncio.plugin \
   tests/reward_loop/test_native_fsdp_integration_on_cpu.py \
-  tests/reward_loop/test_native_fsdp_construction_ray_on_cpu.py \
   tests/reward_loop/test_native_fsdp_prototype_on_cpu.py -q --asyncio-mode=auto
+
+CUDA_VISIBLE_DEVICES='' PYTHONPATH="$PWD" PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
+  "$PYTHON" -m pytest tests/reward_loop/test_native_fsdp_construction_ray.py -q
 ```
 
 On the replica-group extension, `--replicas 2` requires four distinct idle GPUs and injects failure into the second
