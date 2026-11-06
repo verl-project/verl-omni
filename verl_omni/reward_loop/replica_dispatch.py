@@ -18,7 +18,9 @@ import asyncio
 from verl.protocol import DataProto, pad_dataproto_to_divisor
 
 
-async def dispatch_reward_groups(data: DataProto, worker_groups: dict, batch_sizes: dict[str, int]) -> dict[str, list]:
+async def dispatch_reward_groups(
+    data: DataProto, worker_groups: dict, batch_sizes: dict[str, int], rpc_owners: dict | None = None
+) -> dict[str, list]:
     """Score groups, restore sample order and drain accepted RPCs before returning.
 
     Groups absent from ``batch_sizes`` retain static padded splitting. Other
@@ -55,7 +57,11 @@ async def dispatch_reward_groups(data: DataProto, worker_groups: dict, batch_siz
                     stop = min(start + batch_sizes[name], len(data))
                     next_index[name] = stop
                     chunk = data[start:stop]
-                result = await worker.compute_score_batch.remote(chunk)
+                owner = (rpc_owners or {}).get(name)
+                if owner is None:
+                    result = await worker.compute_score_batch.remote(chunk)
+                else:
+                    result = await owner.run_rpc("compute_score_batch", chunk)
                 if len(result) != len(chunk):
                     raise ValueError(
                         f"Reward worker group {name!r} returned {len(result)} results for {len(chunk)} samples"
