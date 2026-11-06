@@ -65,12 +65,12 @@ jobs:
         run: |
           pip install --extra-index-url https://download.pytorch.org/whl/cpu "https://github.com/vllm-project/vllm/releases/download/v0.33.0rc3/vllm-0.33.0+cpu-cp38-abi3-manylinux_2_39_x86_64.whl"
           pip install uv
-          uv pip install --python "$(command -v python)" -e ".[omni,dev,ocr]"
+          uv pip install --python "$(command -v python)" --constraint .github/triton_cpu_pin.txt -e ".[omni,dev,ocr]"
           pip install --no-deps \
             "qwen-tts @ https://github.com/QwenLM/Qwen3-TTS/archive/$(cat .github/qwen_tts_pin.txt).tar.gz"
       - name: Verify the documented install resolves
         run: |
-          uv pip install --dry-run --python "$(command -v python)" -e .
+          uv pip install --dry-run --python "$(command -v python)" --constraint .github/triton_cpu_pin.txt -e .
       - name: Run CPU torch.compile contract tests
         env:
           TORCH_COMPILE_DISABLE: "0"
