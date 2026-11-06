@@ -411,6 +411,7 @@ def main() -> int:
     )
     args = parser.parse_args()
     controller = None
+    status = 2
     try:
         full_topology = os.environ.get("NPU_SMOKE_FULL_TOPOLOGY", "0")
         if args.num_npus <= 0 or full_topology not in ("0", "1"):
@@ -440,13 +441,19 @@ def main() -> int:
         if (log_dir / "summary.log").exists() or (log_dir / ".processes").exists():
             raise ValueError(f"Refusing to reuse parallel smoke results: {log_dir}")
         controller = _Controller(args.group, log_dir, devices)
-        return controller.run(selected, serial=args.serial)
+        status = controller.run(selected, serial=args.serial)
     except InterruptedError as error:
         print(f"[FAIL] {error}", file=sys.stderr)
-        return 128 + controller.cancel_signal
+        status = 128 + controller.cancel_signal if controller is not None else 2
     except (OSError, ValueError, RuntimeError) as error:
         print(f"[FAIL] {error}", file=sys.stderr)
-        return 2
+        status = 2
     finally:
         if controller is not None:
-            controller.close()
+            try:
+                controller.close()
+            except (OSError, RuntimeError) as error:
+                print(f"[FAIL] cleanup: {error}", file=sys.stderr)
+                if status == 0:
+                    status = 2
+    return status
