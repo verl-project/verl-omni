@@ -1574,3 +1574,21 @@ def test_verl_plain_cli_parser_builds_tracking_serve_subparser():
 
     assert parsed.subparser == "serve"
     assert parsed.model_tag == "dummy-model"
+
+
+def test_rollout_logging_level_canonicalized_for_diffusion_workers(monkeypatch):
+    """verl pins VLLM_LOGGING_LEVEL=WARN; vLLM's LoggingConfig accepts only
+    canonical level names, and diffusion workers validate the env on boot."""
+    import os
+
+    from vllm.config.logging import LoggingConfig
+
+    from verl_omni.workers.rollout.vllm_rollout.vllm_omni_async_server import (
+        _normalize_rollout_logging_level,
+    )
+
+    monkeypatch.setenv("VLLM_LOGGING_LEVEL", "WARN")
+    _normalize_rollout_logging_level()
+
+    assert os.environ["VLLM_LOGGING_LEVEL"] == "WARNING"
+    LoggingConfig(log_level=os.environ["VLLM_LOGGING_LEVEL"])

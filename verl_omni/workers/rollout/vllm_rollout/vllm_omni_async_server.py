@@ -122,6 +122,17 @@ def _drop_defaulted_engine_args(engine_args: dict) -> dict:
     }
 
 
+def _normalize_rollout_logging_level() -> None:
+    """Canonicalize VLLM_LOGGING_LEVEL before diffusion workers spawn.
+
+    verl's rollout env pins ``WARN``; vLLM's LoggingConfig at this pin accepts
+    only canonical level names, and vllm-omni's diffusion workers validate the
+    environment value on boot.
+    """
+    if os.environ.get("VLLM_LOGGING_LEVEL", "").upper() == "WARN":
+        os.environ["VLLM_LOGGING_LEVEL"] = "WARNING"
+
+
 class _TrackingSubparsers:
     """Create tracking parsers from a plain argparse subparsers action."""
 
@@ -202,6 +213,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
 
     def _post_init(self, cuda_visible_devices: str) -> None:
         """Run strategy post-init and preserve the replica device list."""
+        _normalize_rollout_logging_level()
         if get_rollout_sequence_parallel_size(self.config) > 1:
             self.replica_world_size = get_rollout_world_size(self.config)
             profiler = self.profiler_controller
