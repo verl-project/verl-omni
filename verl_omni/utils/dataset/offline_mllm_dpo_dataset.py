@@ -753,6 +753,18 @@ class OfflineMLLMDPODataset(MultiTurnSFTDataset):
             raise ValueError(f"sequence_length={sequence_length} is larger than self.max_length={self.max_length}")
         if sequence_length > self.max_length:
             media_tokens_before = _media_placeholder_counts(res)
+            multi_modal_inputs = res.get("multi_modal_inputs") or {}
+            if not media_tokens_before and any(value is not None for value in multi_modal_inputs.values()):
+                # This transform emits no bool modality masks (e.g. ``process_minicpm_sample``),
+                # so a placeholder cut cannot be detected. Fail closed instead of skipping the
+                # check and letting a desynchronised sample through.
+                raise ValueError(
+                    f"truncation={self.truncation!r} to max_length={self.max_length} may cut placeholder "
+                    f"runs of the media inputs: this transform emits no bool image_mask/video_mask/audio_mask, "
+                    f"so the cut cannot be verified while multi_modal_inputs keeps their features, and the "
+                    f"sample would reach the model desynchronised. Raise max_length, shorten the "
+                    f"prompt/response, or use truncation='error'."
+                )
             for key in _TEXT_MODEL_KEYS:
                 if key in res:
                     res[key] = self._truncate_sequence_value(key, res[key], self.max_length, self.truncation)

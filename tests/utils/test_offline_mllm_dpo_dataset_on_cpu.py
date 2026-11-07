@@ -962,7 +962,7 @@ def _truncation_branch(placeholders: int, total_length: int, start: int = 4) -> 
     [
         ("right", 12),  # cuts the placeholder run in half
         ("right", 2),  # drops the image entirely
-        ("left", 10),  # keeps the tail of the placeholder run
+        ("left", 50),  # keeps 6/16 placeholders: partial left cut, not a full drop
         ("left", 2),  # drops the image entirely
     ],
 )
@@ -975,6 +975,26 @@ def test_prepare_branch_inputs_rejects_truncation_that_cuts_media_placeholders(t
 
     with pytest.raises(ValueError, match="cut placeholder runs"):
         dataset._prepare_branch_inputs(_truncation_branch(placeholders=16, total_length=64))
+
+
+def test_prepare_branch_inputs_fails_closed_when_transform_emits_no_modality_masks():
+    """A branch with media but no bool modality masks must not skip the check.
+
+    ``process_minicpm_sample`` emits no ``image_mask``/``video_mask``/``audio_mask``, so
+    ``_media_placeholder_counts`` is empty and the desync guard used to no-op.
+    """
+    dataset = object.__new__(dataset_mod.OfflineMLLMDPODataset)
+    dataset.pad_mode = dataset_mod.DatasetPadMode.NO_PADDING
+    dataset.max_length = 10
+    dataset.truncation = "right"
+    dataset.tokenizer = MagicMock()
+
+    branch = _truncation_branch(placeholders=16, total_length=64)
+    for key in dataset_mod._MEDIA_MASK_KEYS:
+        branch.pop(key)
+
+    with pytest.raises(ValueError, match="cut placeholder runs"):
+        dataset._prepare_branch_inputs(branch)
 
 
 def test_prepare_branch_inputs_truncates_when_media_placeholders_survive():
@@ -998,7 +1018,13 @@ def test_prepare_branch_inputs_still_truncates_text_only_branches():
     dataset.truncation = "left"
     dataset.tokenizer = MagicMock()
 
-    branch = {"input_ids": torch.arange(10), "labels": torch.arange(10)}
+    # Processors may report media keys as ``None`` for text-only rows; that must not
+    # trip the no-modality-mask guard.
+    branch = {
+        "input_ids": torch.arange(10),
+        "labels": torch.arange(10),
+        "multi_modal_inputs": {"pixel_values": None},
+    }
     prepared = dataset._prepare_branch_inputs(branch)
 
     torch.testing.assert_close(prepared["input_ids"], torch.arange(10)[-4:])
