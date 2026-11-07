@@ -992,6 +992,11 @@ def test_prepare_branch_inputs_fails_closed_when_transform_emits_no_modality_mas
     branch = _truncation_branch(placeholders=16, total_length=64)
     for key in dataset_mod._MEDIA_MASK_KEYS:
         branch.pop(key)
+    # Same shape as the MiniCPM image branch: empty ``image_bound`` plus real pixels.
+    branch["multi_modal_inputs"] = {
+        "image_bound": torch.zeros(0, 2, dtype=torch.long),
+        "pixel_values": torch.ones(1, 3, 4, 4),
+    }
 
     with pytest.raises(ValueError, match="cut placeholder runs"):
         dataset._prepare_branch_inputs(branch)
@@ -1018,12 +1023,15 @@ def test_prepare_branch_inputs_still_truncates_text_only_branches():
     dataset.truncation = "left"
     dataset.tokenizer = MagicMock()
 
-    # Processors may report media keys as ``None`` for text-only rows; that must not
-    # trip the no-modality-mask guard.
+    # MiniCPM emits an empty ``image_bound`` tensor even for text-only rows, and
+    # processors may report media keys as ``None``; neither counts as media.
     branch = {
         "input_ids": torch.arange(10),
         "labels": torch.arange(10),
-        "multi_modal_inputs": {"pixel_values": None},
+        "multi_modal_inputs": {
+            "image_bound": torch.zeros(0, 2, dtype=torch.long),
+            "pixel_values": None,
+        },
     }
     prepared = dataset._prepare_branch_inputs(branch)
 

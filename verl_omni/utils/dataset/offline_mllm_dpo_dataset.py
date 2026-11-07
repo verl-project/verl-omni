@@ -440,6 +440,25 @@ def _media_placeholders_dropped(before: dict[str, int], after: dict[str, int]) -
     return ", ".join(dropped)
 
 
+def _has_media_features(multi_modal_inputs: dict[str, Any]) -> bool:
+    """Whether the branch actually carries a media payload.
+
+    MiniCPM always emits an empty ``image_bound`` tensor, text-only rows included, so
+    checking for non-``None`` values alone would block text-only truncation.
+    """
+    for value in multi_modal_inputs.values():
+        if value is None:
+            continue
+        if isinstance(value, torch.Tensor):
+            if value.numel() > 0:
+                return True
+            continue
+        if isinstance(value, list | tuple | dict) and not value:
+            continue
+        return True
+    return False
+
+
 def _pad_mode_value(pad_mode: DatasetPadMode | str) -> str:
     return str(getattr(pad_mode, "value", pad_mode))
 
@@ -754,7 +773,7 @@ class OfflineMLLMDPODataset(MultiTurnSFTDataset):
         if sequence_length > self.max_length:
             media_tokens_before = _media_placeholder_counts(res)
             multi_modal_inputs = res.get("multi_modal_inputs") or {}
-            if not media_tokens_before and any(value is not None for value in multi_modal_inputs.values()):
+            if not media_tokens_before and _has_media_features(multi_modal_inputs):
                 # This transform emits no bool modality masks (e.g. ``process_minicpm_sample``),
                 # so a placeholder cut cannot be detected. Fail closed instead of skipping the
                 # check and letting a desynchronised sample through.
