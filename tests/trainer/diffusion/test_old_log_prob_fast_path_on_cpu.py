@@ -156,7 +156,7 @@ class TestV1TrainerSkipBranch:
         )
         monkeypatch.setattr(
             "verl_omni.trainer.diffusion.v1.trainer_base.diffusion_tq_batch_to_dataproto",
-            lambda meta, pad_token_id: data,
+            lambda meta, pad_token_id, timing_raw=None: data,
         )
         monkeypatch.setattr(
             "verl_omni.trainer.diffusion.v1.trainer_base.extract_reward",
