@@ -151,6 +151,7 @@ class NonDiffusersModelBase(nn.Module, metaclass=ABCMeta):
 
         lora_config = LoraConfig.from_pretrained(adapter_path)
 
+        requires_grad_before = [(param, param.requires_grad) for param in self.parameters()]
         self.add_adapter(lora_config, adapter_name=adapter_name)
 
         # Load adapter weights into the newly created parameters.
@@ -162,9 +163,12 @@ class NonDiffusersModelBase(nn.Module, metaclass=ABCMeta):
         unexpected_load = set(adapter_state_dict.keys()) - set(current_state.keys())
 
         if unexpected_load:
-            # The keys are only known after injection, so undo it before raising.
+            # The keys are only known after injection, so undo it before raising,
+            # including the requires_grad flags it changed on the existing weights.
             delete_adapter(self, adapter_name, prefix="lora_")
             del self.peft_config[adapter_name]
+            for param, requires_grad in requires_grad_before:
+                param.requires_grad_(requires_grad)
             raise ValueError(
                 f"Failed to load LoRA adapter {adapter_name!r} from {adapter_path}: {len(unexpected_load)} "
                 f"checkpoint keys are not in the model, e.g. {sorted(unexpected_load)[:5]}. Ensure the adapter "

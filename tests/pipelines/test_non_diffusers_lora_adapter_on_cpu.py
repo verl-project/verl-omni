@@ -81,6 +81,7 @@ def test_rejected_checkpoint_leaves_no_adapter_behind(tmp_path):
 
     assert "default" not in model.peft_config
     assert "default" not in model.proj.lora_A
+    assert all(param.requires_grad for param in model.parameters())
     model.load_lora_adapter(_write_adapter(tmp_path / "good", state))
     loaded = get_peft_model_state_dict(model)
     for key, value in state.items():
