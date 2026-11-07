@@ -1,6 +1,6 @@
 # NPU Smoke Tests
 
-Last updated: 10/29/2026.
+Last updated: 11/06/2026.
 
 This guide explains how to add CI test cases for Huawei Ascend devices in verl-omni.
 
@@ -221,7 +221,7 @@ Each group job uses eight NPUs on linux-aarch64-a2b4-8, a 120 minute timeout,
 16 GiB shared memory, and this image:
 
 ```text
-swr.cn-north-4.myhuaweicloud.com/mindspeed/pr-verl-omni-a2:v010-vllm030-omni030
+swr.cn-north-4.myhuaweicloud.com/mindspeed/pr-verl-omni-a2:v011-vllm033-omni033
 ```
 
 The workflow prints CANN details, npu-smi output, relevant Ascend variables,

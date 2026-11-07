@@ -15,19 +15,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Temporary CUDA Graph and LoRA compatibility for the pinned vLLM-Omni stack."""
+"""Temporary LoRA and rope-read compatibility for the pinned vLLM-Omni stack."""
 
-from collections.abc import Sequence
+import functools
 
-import torch
 from vllm.config.utils import config
 from vllm.model_executor.models.utils import WeightsMapper
-from vllm.sequence import IntermediateTensors
 from vllm_omni.config import omni_config
 from vllm_omni.config.stage_config import StageExecutionType
-from vllm_omni.model_executor.models.qwen3_omni.qwen3_omni_moe_thinker import Qwen3MoeLLMModel
-
-_ORIGINAL_THINKER_FORWARD = Qwen3MoeLLMModel.forward
 
 
 # TODO: Remove when the pin includes the LLM LoRA owner from
@@ -66,33 +61,62 @@ def patch_vllm_lora_weights_mapper() -> None:
         WeightsMapper.get_unstacked_mapper = WeightsMapper.get_rename_mapper
 
 
-def patch_qwen3_omni_thinker_forward() -> None:
-    """Wrap the pinned Thinker forward before model construction in each worker."""
-    if "update" in Qwen3MoeLLMModel.forward.__code__.co_names:
-        Qwen3MoeLLMModel.forward = _qwen3_omni_thinker_forward
+class _RopeFallbackRegistry(dict):
+    """Wrap registered default-rope initializers so a bare rope_theta read falls
+    back to rope_parameters, where Transformers 5.16+ moved the value."""
+
+    def __setitem__(self, key, value):
+        if key == "default":
+            value = _rope_theta_from_parameters_on_miss(value)
+        super().__setitem__(key, value)
+
+    def setdefault(self, key, default=None):
+        # dict.setdefault bypasses __setitem__; qwen-tts registers through it.
+        if key not in self:
+            self[key] = default
+        return dict.__getitem__(self, key)
 
 
-# Dynamo inlines the upstream call, consuming its local dict.update during tracing.
-# Real buffer mutations still emit update in transformed bytecode and retain vLLM's guard.
-# TODO: Remove when the pin fixes the local dict.update introduced by
-# https://github.com/vllm-project/vllm-omni/pull/7345 and the unwrapped forward compiles.
-def _qwen3_omni_thinker_forward(
-    self,
-    input_ids: torch.Tensor,
-    positions: torch.Tensor,
-    intermediate_tensors: IntermediateTensors | None = None,
-    inputs_embeds: torch.Tensor | None = None,
-    capture_layer_indices: Sequence[int] | None = None,
-    return_hidden_states: bool = False,
-    deepstack_input_embeds: IntermediateTensors | None = None,
-) -> torch.Tensor | IntermediateTensors:
-    return _ORIGINAL_THINKER_FORWARD(
-        self,
-        input_ids=input_ids,
-        positions=positions,
-        intermediate_tensors=intermediate_tensors,
-        inputs_embeds=inputs_embeds,
-        capture_layer_indices=capture_layer_indices,
-        return_hidden_states=return_hidden_states,
-        deepstack_input_embeds=deepstack_input_embeds,
-    )
+def _rope_theta_from_parameters_on_miss(rope_fn):
+    if rope_fn is None or getattr(rope_fn, "_rope_fallback_wrapped", False):
+        return rope_fn
+
+    @functools.wraps(rope_fn)
+    def wrapper(config, *args, **kwargs):
+        if not hasattr(config, "rope_theta"):
+            theta = (getattr(config, "rope_parameters", None) or {}).get("rope_theta")
+            if theta is not None:
+                config.rope_theta = theta
+        return rope_fn(config, *args, **kwargs)
+
+    wrapper._rope_fallback_wrapped = True
+    return wrapper
+
+
+def patch_qwen3_tts_default_rope_read() -> None:
+    """Intercept default-rope registrations in Transformers' rope registry.
+
+    The pinned qwen-tts installs a process-global default-rope initializer that
+    reads the bare rope_theta attribute; Transformers 5.16+ moved that value
+    into rope_parameters on several config classes, so an unwrapped read kills
+    every default-rope model build in a process that imported qwen_tts.
+    """
+    import sys
+
+    from transformers import modeling_rope_utils
+
+    registry = modeling_rope_utils.ROPE_INIT_FUNCTIONS
+    if isinstance(registry, _RopeFallbackRegistry):
+        return
+    wrapped = _RopeFallbackRegistry()
+    for key, value in registry.items():
+        wrapped[key] = value
+    modeling_rope_utils.ROPE_INIT_FUNCTIONS = wrapped
+    # Modules that bound the original dict by reference keep reading it;
+    # rebind every holder so later registrations wrap too.
+    for module in tuple(sys.modules.values()):
+        if module is None:
+            continue
+        for name, value in vars(module).items():
+            if value is registry:
+                setattr(module, name, wrapped)

@@ -773,6 +773,25 @@ def test_denoise_accepts_unused_forwarded_inputs_set_to_none() -> None:
         _diffuse_with_forwarded(**dict.fromkeys(_EDIT_ROW_KEYS))
 
 
+def test_denoise_accepts_the_pins_default_control_and_sampler_plumbing() -> None:
+    """The pin's denoise inputs carry ControlNet/sampler plumbing with non-None defaults."""
+    with pytest.raises(_InputsAccepted):
+        _diffuse_with_forwarded(control_context_scale=1.0, sampler="euler", request_context={})
+
+
+@pytest.mark.parametrize(
+    ("overrides", "rejected"),
+    [
+        ({"control_context_scale": 0.5}, "control_context_scale"),
+        ({"sampler": "res_multistep"}, "sampler"),
+    ],
+)
+def test_denoise_rejects_non_neutral_control_and_sampler_values(overrides, rejected) -> None:
+    """Non-default ControlNet scale or a non-euler sampler changes trajectory math this rollout does not implement."""
+    with pytest.raises(NotImplementedError, match=rejected):
+        _diffuse_with_forwarded(**overrides)
+
+
 def _batched_actor_payload(batch_size: int = 2) -> dict[str, torch.Tensor]:
     """Repeat a valid single-sample rollout payload into one Actor micro-batch."""
     payload = _trajectory()

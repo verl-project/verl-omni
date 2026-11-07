@@ -14,7 +14,7 @@ For NVIDIA GPU, see the {doc}`GPU installation guide <install>`. For Ascend NPU,
 
 On Intel GPU the Docker image is the supported path. It builds on vLLM's official
 XPU image, which already ships torch for XPU, oneCCL, the Intel GPU user-mode
-driver and vLLM 0.30.0.
+driver and vLLM 0.33.0.
 
 ```bash
 git clone https://github.com/verl-project/verl-omni.git
@@ -29,12 +29,12 @@ Build context is controlled by the repo-root [`.dockerignore`](https://github.co
 
 | Argument       | Default                                              | Purpose                                         |
 | -------------- | ---------------------------------------------------- | ----------------------------------------------- |
-| `BASE_IMAGE`   | `vllm/vllm-openai-xpu:v0.30.0`                       | torch for XPU, oneCCL, Intel GPU driver, vLLM   |
+| `BASE_IMAGE`   | `vllm/vllm-openai-xpu:v0.33.0`                       | torch for XPU, oneCCL, Intel GPU driver, vLLM   |
 | `VERL_GIT_REF` | [`.github/verl_pin.txt`](../../.github/verl_pin.txt) | verl commit to install                          |
 
 ### Install into an existing vLLM XPU environment
 
-The same steps work in any environment that already has `vllm==0.30.0+xpu`.
+The same steps work in any environment that already has `vllm==0.33.0+xpu`.
 Pin the XPU builds first, so the resolver cannot replace them with CUDA or CPU wheels:
 
 ```bash

@@ -14,7 +14,7 @@ ARG MOONCAKE_INDEX_URL="https://mirrors.aliyun.com/pypi/web/simple"
 ARG MOONCAKE_TAG="0.3.11.post1"
 
 ARG VLLM_REPO="https://github.com/vllm-project/vllm.git"
-ARG VLLM_REF="v0.30.0"
+ARG VLLM_REF="v0.33.0"
 
 ARG VLLM_ASCEND_REPO="https://github.com/vllm-project/vllm-ascend.git"
 ARG VLLM_ASCEND_REF=""
@@ -181,7 +181,7 @@ RUN git clone \
 # --no-deps skips verl-omni's own pins. verl leaves transformers<5.11,
 # which breaks kernels 0.16.1, and does not install TransferQueue.
 RUN python3 -m pip install \
-        'transformers>=5.13.0,<=5.14.1' \
+        'transformers>=5.16.1,<5.20.0' \
         'TransferQueue==0.1.9'
 
 RUN python3 -m pip install --force-reinstall \

@@ -386,7 +386,7 @@ class TestVllmManagerInterplay:
     @pytest.fixture()
     def match(self):
         pytest.importorskip("vllm_omni")
-        from vllm_omni.diffusion.lora.utils import _match_target_modules
+        from vllm_omni.lora.binding import _match_target_modules
 
         return _match_target_modules
 

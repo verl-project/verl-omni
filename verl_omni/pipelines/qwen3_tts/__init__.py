@@ -12,7 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from verl_omni.utils.vllm_omni.patch import patch_qwen3_tts_default_rope_read
+
 from .omni_rollout_adapter import Qwen3TTSRolloutAdapter
 from .talker_training_adapter import Qwen3TTSTalkerAdapter
+
+# qwen_tts installs a process-global default-rope initializer; the wrapper makes
+# its bare rope_theta read tolerate configs that moved the value (see patch).
+patch_qwen3_tts_default_rope_read()
 
 __all__ = ["Qwen3TTSTalkerAdapter", "Qwen3TTSRolloutAdapter"]

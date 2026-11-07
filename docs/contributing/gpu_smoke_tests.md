@@ -1,6 +1,6 @@
 # GPU Smoke Tests
 
-Last updated: 10/13/2026.
+Last updated: 11/06/2026.
 
 GPU smoke tests validate GPU-only trainer, rollout, worker, reward, and
 agent-loop paths with small workloads. They are intentionally lightweight: use
@@ -87,7 +87,7 @@ Smoke tests need a working CUDA environment, Ray, and the pinned `verl` /
 `vllm-omni` dependencies. From the repo root:
 
 ```bash
-uv pip install vllm==0.30.0 --torch-backend=auto
+uv pip install vllm==0.33.0 --torch-backend=auto
 uv pip install -e ".[gpu,audio,omni,dev]" --torch-backend=auto
 ```
 

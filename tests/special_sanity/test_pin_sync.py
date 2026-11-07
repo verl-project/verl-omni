@@ -19,7 +19,8 @@ direct-URL git pins, while CI workflows and the ROCm/NPU Dockerfiles install
 the same packages from .github/vllm_omni_pin.txt and .github/verl_pin.txt.
 A drift between the two sources silently splits the stack; this check makes
 it a failure. Also enforces that vllm cpu wheel URLs in CI/RTD carry the
-toml's vllm version.
+toml's vllm version, and that the nightly env pin and the NPU/ROCm Dockerfile
+re-statements of pyproject pins stay inside pyproject's own bounds.
 """
 
 import re
@@ -80,3 +81,50 @@ def test_vllm_cpu_wheel_urls_match_toml() -> None:
                 f"{path.relative_to(REPO_ROOT)} pins vllm-{ver}+cpu but pyproject pins vllm=={toml_vllm}"
             )
     assert checked > 0, "no vllm cpu wheel URLs found to check"
+
+
+def _version(v: str) -> tuple[int, ...]:
+    return tuple(int(p) for p in v.split("."))
+
+
+def _spec_bounds(spec: str) -> tuple[tuple[int, ...], tuple[int, ...], bool]:
+    """Return ``(lower, upper, upper_inclusive)`` for a ``>=X,<=?Y`` requirement."""
+    lo = re.search(r">=\s*([0-9.]+)", spec)
+    hi = re.search(r"(<=|<)\s*([0-9.]+)", spec)
+    assert lo and hi, f"unparsable version spec: {spec}"
+    upper_inclusive = hi.group(1) == "<="
+    return _version(lo.group(1)), _version(hi.group(2)), upper_inclusive
+
+
+def test_secondary_pin_surfaces_track_pyproject() -> None:
+    """Restatements of pyproject pins (nightly env, NPU/ROCm Dockerfiles) must not drift outside them."""
+    pyproject = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text())
+    reqs: list[str] = list(pyproject["project"]["dependencies"])
+    for deps in pyproject["project"]["optional-dependencies"].values():
+        reqs.extend(deps)
+    tf_spec = next(r for r in reqs if r.startswith("transformers"))
+    kernels_pin = next(r for r in reqs if r.startswith("kernels==")).split("==")[1]
+    py_lo, py_hi, py_hi_incl = _spec_bounds(tf_spec)
+
+    nightly = re.search(
+        r'NIGHTLY_PIN_TRANSFORMERS:\s*"([0-9.]+)"',
+        (REPO_ROOT / ".github/workflows/l3_nightly.yml").read_text(),
+    ).group(1)
+    v = _version(nightly)
+    assert py_lo <= v and (v <= py_hi if py_hi_incl else v < py_hi), (
+        f"l3_nightly.yml NIGHTLY_PIN_TRANSFORMERS {nightly} falls outside pyproject's {tf_spec}"
+    )
+
+    npu_spec = re.search(
+        r"transformers\s*(>=\s*[0-9.]+\s*,\s*<=?\s*[0-9.]+)",
+        (REPO_ROOT / "docker/Dockerfile.npu").read_text(),
+    ).group(1)
+    npu_lo, npu_hi, _ = _spec_bounds(npu_spec)
+    assert py_lo <= npu_lo and npu_hi <= py_hi, (
+        f"docker/Dockerfile.npu transformers '{npu_spec}' extends outside pyproject's {tf_spec}"
+    )
+
+    rocm_kernels = re.search(r"kernels==([0-9.]+)", (REPO_ROOT / "docker/Dockerfile.rocm").read_text()).group(1)
+    assert rocm_kernels == kernels_pin, (
+        f"docker/Dockerfile.rocm pins kernels=={rocm_kernels} but pyproject pins kernels=={kernels_pin}"
+    )

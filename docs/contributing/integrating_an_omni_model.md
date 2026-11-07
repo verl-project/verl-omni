@@ -367,9 +367,10 @@ as a model-specific reference:
   behavior. These are the same excluded-module names used by the FSDP adapter.
 - The version-sensitive `create_causal_mask` shim drops the obsolete
   `cache_position` keyword from VeOmni 0.1.12's generated GPU model when the
-  Transformers signature no longer accepts it, validated with Transformers
-  5.14.1. Compatible signatures are unchanged and other unknown arguments
-  still raise. Recheck this shim when either dependency is upgraded.
+  Transformers signature no longer accepts it. The masked signature was
+  re-verified at Transformers 5.19.0; end-to-end behavior was last validated
+  at Transformers 5.14.1. Compatible signatures are unchanged and other
+  unknown arguments still raise.
 
 #### Select native operators
 
