@@ -35,14 +35,13 @@ from pathlib import Path
 import numpy as np
 import pytest
 import ray
-import torch
 from omegaconf import DictConfig, open_dict
 from PIL import Image
 from verl.protocol import DataProto
 from verl.workers.rollout.llm_server import LLMServerManager
 
 from tests.special_e2e.build_qwen3_omni_tiny_random import ensure_tiny_qwen3_omni_checkpoint
-from tests.utils.gpu_test_topology import resolve_requested_num_gpus
+from tests.utils.gpu_test_topology import empty_gpu_cache, enabled_gpu_count, resolve_requested_num_gpus
 from verl_omni.agent_loop.omni_agent_loop import OmniAgentLoopManager, OmniAgentLoopWorker
 from verl_omni.tools.trajectory import resolve_run_dir
 
@@ -56,7 +55,7 @@ def _register_vllm_omni_rollout_on_ray_worker() -> None:
     import verl_omni.workers.rollout.base  # noqa: F401
 
 
-pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for L2 agent-loop smoke")
+pytestmark = pytest.mark.skipif(not enabled_gpu_count(), reason="GPU required for L2 agent-loop smoke")
 
 
 def _png_b64(color=(12, 34, 56)) -> str:
@@ -116,7 +115,7 @@ def init_config(tmp_path_factory) -> tuple[DictConfig, Path]:
 
     requested_gpus = resolve_requested_num_gpus(default_num_gpus=2)
     if requested_gpus < 1:
-        pytest.skip("No CUDA devices visible")
+        pytest.skip("No GPU devices visible")
     tp_size = min(2, requested_gpus)
 
     model_path = ensure_tiny_qwen3_omni_checkpoint(
@@ -289,5 +288,4 @@ def test_omni_agent_loop_worker_image_gen_generate_sequences(init_config):
         finally:
             ray.shutdown()
             gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            empty_gpu_cache()

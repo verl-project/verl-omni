@@ -1,8 +1,8 @@
 # Installation (Intel GPU)
 
-Last updated: 10/20/2026
+Last updated: 10/29/2026
 
-For NVIDIA GPU, see the {doc}`GPU installation guide <install>`. For Ascend NPU, see the {doc}`NPU installation guide <install_npu>`. For AMD GPU, see the {doc}`ROCm installation guide <install_rocm>`.
+For NVIDIA GPU, see the {doc}`GPU installation guide <install>`. For Ascend NPU, see the {doc}`NPU installation guide <install_npu>`. For AMD GPU, see the {doc}`ROCm installation guide <install_rocm>`. For Cambricon MLU, see the {doc}`MLU installation guide <install_mlu>`.
 
 ## Requirements
 
@@ -150,6 +150,16 @@ Validated with the tiny-random GPU smoke tests on Arc Pro B60 and B70: FlowGRPO
 (FSDP and FSDP2, rollout TP 1 and 2, rule-based and vLLM-served reward models),
 DiffusionNFT, online DPO, and BAGEL FlowGRPO. Full-size recipes have not been
 validated yet.
+
+FlowGRPO with the trainer and rollout on separate GPUs, synchronous and fully
+async (`run_flowgrpo_qwen_image_separate.sh` and
+`run_flowgrpo_qwen_image_v1_separate_async.sh`), also runs on Arc Pro B60 and
+B70 with the sleep mode overrides above. Weights sync through the XCCL
+checkpoint engine from verl-hardware-plugin, which registers under both `nccl`
+and `xccl`, so recipes keep the default `checkpoint_engine.backend=nccl`. The
+two smoke scripts pre-check `nccl` by importing the CUDA engine, so on Intel GPU
+run them with `CKPT_BACKEND=xccl`, which selects the XCCL engine and pre-checks
+it instead.
 
 Not yet supported on Intel GPU:
 

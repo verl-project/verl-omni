@@ -114,6 +114,9 @@ class TestDiffusionLossRegistry(unittest.TestCase):
     def test_builtin_dance_grpo_registered(self):
         assert "dance_grpo" in DIFFUSION_LOSS_REGISTRY
 
+    def test_builtin_dual_grpo_registered(self):
+        assert "dual_grpo" in DIFFUSION_LOSS_REGISTRY
+
     def test_builtin_kl_registered(self):
         assert "kl" in DIFFUSION_LOSS_REGISTRY
 

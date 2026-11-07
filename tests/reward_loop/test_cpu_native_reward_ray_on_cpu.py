@@ -11,7 +11,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Real-Ray integration checks for CPU-native reward workers."""
+"""Real-Ray integration checks for CPU-native reward workers.
+
+The only L1 file that uses Ray: it runs as a dedicated sequential pytest
+invocation in ``cpu_unit_tests`` (fresh process — Ray state is process-global
+and cannot share a pytest process with other files).
+"""
 
 import asyncio
 import os
@@ -32,6 +37,21 @@ from verl import DataProto
 from verl_omni.reward_loop.reward_loop import OmniRewardLoopManager, OmniRewardLoopWorker
 from verl_omni.reward_loop.reward_model_executor import NativeRewardExecutor
 from verl_omni.workers.config.reward import RewardModelSpec, parse_reward_model_config
+
+
+@pytest.fixture(autouse=True)
+def _clean_ray_state():
+    """Guarantee a fresh Ray runtime around every test.
+
+    A cluster left initialized by an earlier test turns the next ``ray.init``
+    into "Maybe you called ray.init twice"; CI avoids the sharing entirely by
+    giving this file its own pytest process, and this fixture is the backstop.
+    """
+    if ray.is_initialized():
+        ray.shutdown()
+    yield
+    if ray.is_initialized():
+        ray.shutdown()
 
 
 class _CpuModel:

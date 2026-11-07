@@ -129,7 +129,7 @@ def test_video_tensor_to_rgb24_requires_canonical_or_declared_layout(monkeypatch
     frames, width, height = tracking._video_tensor_to_rgb24(canonical_artifact)
 
     assert (width, height) == (5, 4)
-    assert frames.tobytes() == canonical.permute(0, 2, 3, 1).contiguous().numpy().tobytes()
+    assert b"".join(frame.tobytes() for frame in frames) == canonical.permute(0, 2, 3, 1).contiguous().numpy().tobytes()
 
 
 def test_export_video_pads_odd_dimensions_and_preserves_video_when_audio_is_short(monkeypatch, tmp_path):
