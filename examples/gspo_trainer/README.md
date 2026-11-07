@@ -1,6 +1,6 @@
 # Qwen3-Omni Thinker GSPO Trainer
 
-Last updated: 10/24/2026
+Last updated: 11/03/2026
 
 This example shows how to post-train the **Qwen3-Omni-30B-A3B Thinker** with
 **GSPO** on multimodal reasoning tasks, using FSDP for the actor and `vllm-omni` as
@@ -142,6 +142,67 @@ Healthy signals (gsm8k, 4×H800, LoRA r=32):
 - `actor/loss` ≈ 1e-5, `actor/grad_norm` ∈ [1e-3, 1e-2], no OOM
   (`actor/perf/max_memory_allocated_gb` < 45).
 - `val-core/openai/gsm8k/acc/mean@1` rising with steps.
+
+## Training with `math_dapo`
+
+Pure-text math data with the built-in `math_dapo` reward: rule-based `\boxed{}`
+exact match, `+1` correct / `-1` wrong. No reward model and no critic. Select it
+with `reward.reward_manager.name=dapo` — the name refers to the dataset reward,
+not to the policy loss; the launcher below trains with **GSPO**.
+
+### Prepare the dataset
+
+Each parquet row needs `data_source="math_dapo"`, `reward_model.ground_truth`,
+and a chat-style `prompt` column. Point the launcher at the converted files:
+
+```bash
+TRAIN_FILE=~/data/dapo_math/train.parquet \
+VAL_FILE=~/data/dapo_math/val.parquet \
+bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_math_dapo_separate_async_npu_v1.sh
+```
+
+### Run training on Ascend NPU (separate-async)
+
+16 NPUs split into a 12-die rollout pool and a 4-die FSDP2 trainer. Rollout uses
+TP=2 (6 replicas) and generates one batch ahead of training;
+`parameter_sync_step=4` syncs weights every four trainer steps.
+
+```bash
+bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_math_dapo_separate_async_npu_v1.sh \
+    TOTAL_TRAINING_STEPS=100
+```
+
+The launcher enforces the V1 constraint
+`train_batch_size == parameter_sync_step * ppo_mini_batch_size` (`64 == 4 * 16`)
+and exposes `TRAINER_DIES`, `ROLLOUT_DIES`, `ROLLOUT_TP`, and `PARAM_SYNC_STEP`
+for other topologies. Source the CANN `set_env.sh` on every Ray node before
+launching; the script itself does not touch the CANN environment.
+
+### Measured step time
+
+Same model, data, batch shape (64 prompts × 16 responses), LoRA r=32,
+`max_response_length=16384`, 100 steps on 16 Ascend 910C NPUs (CANN 9.1,
+vllm-omni 0.28.0rc1). Step 1 is excluded from the averages (warm-up).
+
+| topology | step (s) | rollout residual (s) | old_log_prob (s) | update_actor (s) | update_weights (s) |
+| --- | --- | --- | --- | --- | --- |
+| async 12 rollout / 4 train | 2160 | 432 | 451 | 1243 | 30 |
+| sync 16 shared | 2508 | — | 126 | 360 | 18 |
+
+In the async layout the trainer pool is the bottleneck: `old_log_prob +
+update_actor` is ~78% of the step, and the rollout pool stays busy enough that
+the training-side wait (`timing_s/gen`) is ~430 s. In sync mode generation takes
+~2000 s and the update ~500 s. Reported async `timing_s/gen` is the residual
+wait, not full generation time.
+
+Validation uses 30 AIME-2024 prompts with greedy decoding (`n=1`,
+`do_sample=false`, `temperature=0`): one problem is 3.3 accuracy points and the
+binomial standard error near p≈0.3 is ~8 points. Across ten evaluations both
+layouts scored 5-14 of 30 (async mean 9.0, sync mean 8.4); the difference is well
+inside that noise, while training reward rose from ~0.45 to ~0.68 on both.
+
+Set `trainer.save_freq` to a positive value: `0` disables checkpointing entirely
+in this trainer, including the final step.
 
 ## Training with `MMK12`
 
@@ -754,6 +815,7 @@ examples/gspo_trainer/
 │   ├── run_qwen3_omni_thinker_gspo_lora_mmk12_v1_nitrobrew_opd_npu.sh  ← V1 OPD script (NPU, MMK12, full-vocabulary)
 │   ├── run_qwen3_omni_thinker_gspo_avqa_v1.sh    ← V1 launch script (NPU, AVQA)
 │   ├── run_qwen3_omni_thinker_gspo_npu_nextqa_v1.sh  ← V1 launch script (NPU, NExT-QA)
+│   ├── run_qwen3_omni_thinker_gspo_lora_math_dapo_separate_async_npu_v1.sh  ← V1 launch script (NPU, separate-async, math_dapo)
 ├── data_process/
 │   ├── mmk12.py                                      ← MMK12 → verl RL parquet converter
 │   ├── avqa.py                                       ← AVQA → verl RL parquet converter
