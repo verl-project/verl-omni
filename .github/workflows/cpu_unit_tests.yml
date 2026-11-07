@@ -42,7 +42,7 @@ jobs:
       github.event_name != 'pull_request' ||
       contains(join(github.event.pull_request.labels.*.name, ','), 'ci')
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     strategy:
       matrix:
         python-version: ["3.12"]
@@ -63,28 +63,39 @@ jobs:
             .github/verl_pin.txt
       - name: Install dependencies
         run: |
-          pip install --extra-index-url https://download.pytorch.org/whl/cpu "https://github.com/vllm-project/vllm/releases/download/v0.28.0/vllm-0.28.0+cpu-cp38-abi3-manylinux_2_34_x86_64.whl"
-          pip install "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@$(cat .github/vllm_omni_pin.txt)"
-          pip install TransferQueue==0.1.8
-          pip install --no-deps "verl @ git+https://github.com/verl-project/verl.git@$(cat .github/verl_pin.txt)"
-          pip install ".[omni,dev]"
+          pip install --extra-index-url https://download.pytorch.org/whl/cpu "https://github.com/vllm-project/vllm/releases/download/v0.30.0/vllm-0.30.0+cpu-cp38-abi3-manylinux_2_39_x86_64.whl"
+          pip install uv
+          uv pip install --python "$(command -v python)" -e ".[omni,dev,ocr]"
           pip install --no-deps \
             "qwen-tts @ https://github.com/QwenLM/Qwen3-TTS/archive/$(cat .github/qwen_tts_pin.txt).tar.gz"
-          pip install --no-deps -e .
-      - name: Verify the documented train install resolves
+      - name: Verify the documented install resolves
         run: |
-          pip install uv
-          uv pip install --dry-run --python "$(command -v python)" -e ".[train]"
+          uv pip install --dry-run --python "$(command -v python)" -e .
+      - name: Run CPU torch.compile contract tests
+        env:
+          TORCH_COMPILE_DISABLE: "0"
+          TORCHINDUCTOR_DISABLE: "0"
+        run: |
+          pytest -s -x tests/models/test_flash_attention_3_graph_break_on_cpu.py
       - name: Run CPU unit tests
         run: |
           echo '[pytest]' > pytest.ini
           echo 'python_files = *_on_cpu.py' >> pytest.ini
           set -o pipefail
           pytest -s -x --asyncio-mode=auto \
+            -n auto --dist loadfile \
             --cov=verl_omni \
             --cov-report=term-missing \
             --cov-report=xml:coverage.xml \
+            --ignore=tests/models/test_flash_attention_3_graph_break_on_cpu.py \
+            --ignore=tests/reward_loop/test_cpu_native_reward_ray_on_cpu.py \
             tests/ | tee pytest-coverage.txt
+      - name: Run real-Ray reward loop tests
+        # The sole L1 file allowed to use Ray (see
+        # docs/contributing/testing_guide.md). Ray state is process-global,
+        # so it gets a fresh sequential pytest invocation.
+        run: |
+          pytest -s -x --asyncio-mode=auto tests/reward_loop/test_cpu_native_reward_ray_on_cpu.py
       - name: Add coverage summary
         if: always()
         run: |

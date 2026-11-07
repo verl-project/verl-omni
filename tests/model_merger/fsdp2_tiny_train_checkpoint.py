@@ -21,6 +21,7 @@ from pathlib import Path
 import torch
 import torch.distributed as dist
 from model_fixtures import forward_inputs, tiny_transformer
+from peft import LoraConfig
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import fully_shard
 from verl.utils.checkpoint.fsdp_checkpoint_manager import FSDPCheckpointManager
@@ -47,9 +48,15 @@ def _patch_diffusers_checkpoint_config(model) -> None:
     model.can_generate = lambda: False
 
 
-def _run_one(architecture: str, root: Path, mesh) -> None:
+def _run_one(architecture: str, root: Path, mesh, lora: bool) -> None:
     rank = dist.get_rank()
     model = tiny_transformer(architecture)
+    if lora:
+        # Train ``default`` while DiffusionNFT-style ``old`` stays frozen in the same checkpoint.
+        targets = [name for name, module in model.named_modules() if isinstance(module, torch.nn.Linear)]
+        for name in ("default", "old"):
+            model.add_adapter(LoraConfig(r=4, lora_alpha=8, target_modules=targets), adapter_name=name)
+        model.set_adapter("default")
     if architecture != "BooguImagePipeline":
         model.set_attention_backend("native")
     _patch_diffusers_checkpoint_config(model)
@@ -83,6 +90,12 @@ def _run_one(architecture: str, root: Path, mesh) -> None:
         checkpoint_config={"save_contents": ["model"], "load_contents": ["model"]},
     )
     manager.save_checkpoint(str(output / "actor"), global_step=1)
+    if lora:
+        FSDPCheckpointManager(
+            model=model,
+            optimizer=optimizer,
+            checkpoint_config={"save_contents": ["model"], "load_contents": ["model"], "save_lora_only": True},
+        ).save_checkpoint(str(output / "actor_lora_only"), global_step=1)
     dist.barrier()
     del manager, optimizer, model, before, after, outputs, loss
     gc.collect()
@@ -93,12 +106,13 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("root", type=Path)
     parser.add_argument("architectures", nargs="+")
+    parser.add_argument("--lora", action="store_true", help="Train LoRA adapters and also save a LoRA-only checkpoint")
     args = parser.parse_args()
     dist.init_process_group("gloo")
     try:
         mesh = init_device_mesh("cpu", (dist.get_world_size(),), mesh_dim_names=("fsdp",))
         for architecture in args.architectures:
-            _run_one(architecture, args.root, mesh)
+            _run_one(architecture, args.root, mesh, args.lora)
     finally:
         dist.destroy_process_group()
 

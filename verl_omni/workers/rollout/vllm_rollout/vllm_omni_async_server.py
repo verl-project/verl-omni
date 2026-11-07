@@ -13,6 +13,7 @@
 # limitations under the License.
 import argparse
 import asyncio
+import json
 import logging
 import os
 from dataclasses import asdict
@@ -21,10 +22,13 @@ from typing import Any, Optional
 import ray
 import torch
 import vllm_omni.entrypoints.cli.serve
+from omegaconf import DictConfig, OmegaConf
+from verl.utils.profiler import build_rollout_dist_profiler
 from verl.utils.tracking import RLInsightLogger
 from verl.workers.config import RolloutConfig
 from verl.workers.rollout.replica import RolloutMode, TokenOutput
 from verl.workers.rollout.utils import run_uvicorn
+from verl.workers.rollout.vllm_rollout import ServerAdapter
 from verl.workers.rollout.vllm_rollout.utils import (
     VLLM_LORA_INT_ID,
     VLLM_LORA_NAME,
@@ -32,13 +36,14 @@ from verl.workers.rollout.vllm_rollout.utils import (
 )
 from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMHttpServer, vLLMReplica
 from vllm.entrypoints.openai.api_server import build_app
-from vllm_omni.engine.arg_utils import OmniEngineArgs, orchestrator_field_names
+from vllm_omni.engine.arg_utils import OmniEngineArgs, OrchestratorArgs, orchestrator_field_names
 from vllm_omni.entrypoints import AsyncOmni
 from vllm_omni.entrypoints.openai.api_server import omni_init_app_state
 from vllm_omni.lora.request import LoRARequest
 
 from verl_omni.utils.net_utils import get_non_ephemeral_free_port
 from verl_omni.workers.config import DiffusionModelConfig, DiffusionRolloutConfig, OmniModelConfig
+from verl_omni.workers.rollout.base import get_rollout_sequence_parallel_size, get_rollout_world_size
 from verl_omni.workers.rollout.replica import DiffusionOutput
 from verl_omni.workers.rollout.vllm_rollout.vllm_omni_ar_strategy import ARStrategy
 from verl_omni.workers.rollout.vllm_rollout.vllm_omni_diffusion_strategy import DiffusionStrategy
@@ -47,7 +52,72 @@ logger = logging.getLogger(__file__)
 logger.setLevel(logging.INFO)
 
 # Sentinel: ``None`` is a valid cached value (LoRA not loaded).
+# TODO: Move LoRA request cache resolution/invalidation upstream to AsyncOmni.
 _LORA_REQUEST_CACHE_MISS = object()
+
+# Lazily-computed upstream argument defaults, used to forward only explicitly
+# set engine arguments (see ``_drop_defaulted_engine_args``; tracked in vllm-omni#8503).
+_ENGINE_ARGS_DEFAULTS: dict | None = None
+
+
+def _validate_collective_rpc_reply(method: str, result: Any) -> None:
+    """Reject worker ``error``, ``todo``, and ``supported=False`` replies; allow ``None``."""
+    if isinstance(result, list | tuple):
+        if not result:
+            raise RuntimeError(f"{method} failed: empty worker results")
+        for item in result:
+            _validate_collective_rpc_reply(method, item)
+    elif isinstance(result, dict):
+        if result.get("error") or result.get("todo") or result.get("supported") is False:
+            raise RuntimeError(f"{method} failed: {result}")
+
+
+def _is_defaulted_value(key: str, value: Any, default: Any) -> bool:
+    """Return True if *value* matches the upstream default for *key*."""
+    if value == default:
+        if isinstance(value, bool) != isinstance(default, bool):
+            return False
+        return True
+    if default is None and value in ("", {}, []):
+        return True
+    if isinstance(default, str) and isinstance(value, dict | list):
+        try:
+            return json.loads(default) == value
+        except (ValueError, TypeError):
+            return False
+    if isinstance(value, str) and isinstance(default, dict | list):
+        try:
+            return json.loads(value) == default
+        except (ValueError, TypeError):
+            return False
+    return False
+
+
+def _restore_raw_compilation_config(engine_args: dict, args: Any) -> None:
+    """Restore the raw user ``compilation_config`` dict to pass strict stage validation."""
+    raw_compilation_config = getattr(args, "compilation_config", None)
+    if raw_compilation_config is None:
+        engine_args.pop("compilation_config", None)
+    else:
+        if isinstance(raw_compilation_config, str):
+            raw_compilation_config = json.loads(raw_compilation_config)
+        engine_args["compilation_config"] = raw_compilation_config
+
+
+def _drop_defaulted_engine_args(engine_args: dict) -> dict:
+    """Keep only explicitly-set engine arguments, dropping upstream defaults."""
+    global _ENGINE_ARGS_DEFAULTS
+    if _ENGINE_ARGS_DEFAULTS is None:
+        model = engine_args.get("model", "")
+        defaults = asdict(OmniEngineArgs(model=model))
+        defaults.update(asdict(OrchestratorArgs()))
+        _ENGINE_ARGS_DEFAULTS = defaults
+    defaults = _ENGINE_ARGS_DEFAULTS
+    return {
+        key: value
+        for key, value in engine_args.items()
+        if key == "model" or key not in defaults or not _is_defaulted_value(key, value, defaults[key])
+    }
 
 
 class vLLMOmniHttpServer(vLLMHttpServer):
@@ -83,6 +153,15 @@ class vLLMOmniHttpServer(vLLMHttpServer):
 
     def _post_init(self, cuda_visible_devices: str) -> None:
         """Run strategy post-init and preserve the replica device list."""
+        if get_rollout_sequence_parallel_size(self.config) > 1:
+            self.replica_world_size = get_rollout_world_size(self.config)
+            profiler = self.profiler_controller
+            self.profiler_controller = build_rollout_dist_profiler(
+                self.replica_rank,
+                self.replica_world_size,
+                config=self.config.profiler if profiler.config is not None else None,
+                tool_config=profiler.tool_config,
+            )
         if getattr(self.config, "full_determinism", False):
             from verl.workers.engine.utils import enable_full_determinism
 
@@ -138,7 +217,6 @@ class vLLMOmniHttpServer(vLLMHttpServer):
     async def run_server(self, args: argparse.Namespace):
         engine_args = OmniEngineArgs.from_cli_args(args)
         engine_args = asdict(engine_args)
-        engine_args["log_stats"] = not self.config.disable_log_stats
 
         # TODO (mike): drop this patch once vllm-omni strips the serialized default
         # fault_tolerance_config at its kwargs boundary, or vLLM defaults it to None —
@@ -153,6 +231,15 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             value = getattr(args, key, None)
             if value is not None:
                 engine_args[key] = value
+
+        # Restore raw user mapping so compilation runtime fields do not fail stage config validation.
+        _restore_raw_compilation_config(engine_args, args)
+
+        # Forward only explicitly-set engine args; stage config rejects unowned defaults.
+        engine_args = _drop_defaulted_engine_args(engine_args)
+        # This rollout setting is explicit even when its value matches the
+        # OmniEngineArgs default, so restore it after default filtering.
+        engine_args["log_stats"] = not self.config.disable_log_stats
 
         deploy_config = getattr(args, "deploy_config", None)
         if deploy_config:
@@ -197,6 +284,9 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             self._temp_deploy_ctx = None
 
         self.engine = engine_client
+        if isinstance(self._generate_strategy, ARStrategy):
+            # attach engine-level monkey patches
+            await self.collective_rpc(method="monkey_patch_model")
         self._server_port, self._server_task = await run_uvicorn(app, args, self._server_address)
 
     async def run_headless(self, args: argparse.Namespace):
@@ -210,15 +300,50 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         timeout: float | None = None,
         args: tuple = (),
         kwargs: dict[str, Any] | None = None,
+        *,
+        require_ack: bool = False,
     ):
         """Dispatch a shared RPC to the stages selected by the active strategy."""
-        await self.engine.collective_rpc(
+        stage_ids = self._generate_strategy.collective_rpc_stage_ids(method)
+        if require_ack:
+            return await self._collective_rpc_with_ack(method, timeout, args, kwargs, stage_ids)
+        return await self.engine.collective_rpc(
             method=method,
             timeout=timeout,
             args=args,
             kwargs=kwargs,
-            stage_ids=self._generate_strategy.collective_rpc_stage_ids(method),
+            stage_ids=stage_ids,
         )
+
+    async def _collective_rpc_with_ack(
+        self, method: Any, timeout: float | None, args: tuple, kwargs: dict[str, Any] | None, stage_ids: Any
+    ) -> list[Any]:
+        """Validate one stage at a time because the pinned reply omits stage IDs."""
+        num_stages = getattr(self.engine, "num_stages", None)
+        if type(num_stages) is not int or num_stages <= 0:
+            raise RuntimeError(f"{method} failed: unknown stage topology")
+        if stage_ids is None:
+            stage_ids = list(range(num_stages))
+        if not isinstance(stage_ids, list | tuple) or not stage_ids:
+            raise RuntimeError(f"{method} failed: no selected stages")
+        if any(type(stage_id) is not int or not 0 <= stage_id < num_stages for stage_id in stage_ids):
+            raise RuntimeError(f"{method} failed: unknown selected stage")
+
+        # The pinned flattened reply has no stage IDs. Check each stage separately.
+        replies: list[Any] = []
+        for stage_id in dict.fromkeys(stage_ids):
+            results = await self.engine.collective_rpc(
+                method=method,
+                timeout=timeout,
+                args=args,
+                kwargs=kwargs,
+                stage_ids=[stage_id],
+            )
+            if not isinstance(results, list | tuple) or not results:
+                raise RuntimeError(f"{method} failed: missing replica results for stage {stage_id}")
+            _validate_collective_rpc_reply(method, results)
+            replies.extend(results)
+        return replies
 
     # -----------------------------------------------------------------------
     # wake_up hook: full wake must include kv_cache
@@ -263,14 +388,6 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             self._invalidate_lora_request_cache()
         await super().set_global_steps(global_steps)
 
-    async def _reset_frontend_mm_cache(self) -> None:
-        """Clear the frontend multimodal cache; EngineCore.sleep wipes only the engine-side copy."""
-        # Diffusion-only engines build no InputProcessor, so renderer is None.
-        # TODO (mike): drop after vllm-omni fixes AsyncOmni.reset_mm_cache.
-        renderer = self.engine.renderer
-        if renderer is not None:
-            await renderer.clear_mm_cache_async()
-
     async def sleep(self):
         if self.node_rank != 0 or not self.config.free_cache_engine:
             return
@@ -280,7 +397,6 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         with RLInsightLogger.trace_state("vllm_sleep", state_lane_id=f"replica_{self.replica_rank}"):
             acks = await self.engine.sleep(level=self._resolve_sleep_level())
             self._validate_acks("sleep", acks)
-            await self._reset_frontend_mm_cache()
             self._invalidate_lora_request_cache()
 
     async def release_kv_cache(self):
@@ -298,7 +414,6 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         with RLInsightLogger.trace_state("vllm_release_kv_cache", state_lane_id=f"replica_{self.replica_rank}"):
             acks = await self.engine.sleep(level=self._resolve_sleep_level())
             self._validate_acks("sleep", acks)
-            await self._reset_frontend_mm_cache()
             self._invalidate_lora_request_cache()
             acks = await self.engine.wake_up(tags=["weights"])
             self._validate_acks("wake_up", acks)
@@ -420,7 +535,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         in_flight: list[tuple[str, str, Any]] = []
         seen: set[str] = set()
         for state in engine.request_states.values():
-            if state.external_request_id in seen:
+            if not state.external_request_id or state.external_request_id in seen:
                 continue
             seen.add(state.external_request_id)
             in_flight.append((state.request_id, state.external_request_id, state))
@@ -429,10 +544,6 @@ class vLLMOmniHttpServer(vLLMHttpServer):
 
         aborted = False
         try:
-            # TODO (mike): multi-stage AR abort is broken upstream — the engine's
-            # abort fallback terminal is stage_id=0 and the consume loop breaks on
-            # finished non-final messages, so generate() exits empty. Single-stage /
-            # thinker-only is correct here; needs a vllm-omni fix + pin bump.
             await asyncio.wait_for(
                 engine.abort(request_ids), timeout=float(os.getenv("VERL_OMNI_ABORT_ACK_TIMEOUT_S", "120"))
             )
@@ -442,18 +553,13 @@ class vLLMOmniHttpServer(vLLMHttpServer):
                 mode="abort", wait_for_inflight_requests=False, clear_cache=reset_prefix_cache
             )
         except Exception:
-            # Nothing engine-side enqueued terminals — synthesize them so
-            # generate() cannot hang on queue.get.
+            # If the engine abort RPC fails or times out, upstream has not
+            # delivered terminals to waiting generator coroutines. Enqueue
+            # synthetic abort outputs so active generators unblock and exit.
             if not aborted:
                 for internal_id, _, state in in_flight:
                     self._enqueue_abort_output(internal_id, state)
             raise
-
-        if reset_prefix_cache:
-            # pause_generation(clear_cache=True) wiped the engine-side mm cache;
-            # drop the frontend copy too, or hash-only follow-ups finish empty.
-            # TODO (mike): drop after vllm-omni fixes AsyncOmni.reset_mm_cache.
-            await self._reset_frontend_mm_cache()
 
         logger.info("Aborted %d request(s): %s", len(request_ids), request_ids)
         return {"aborted_count": len(request_ids), "request_ids": request_ids}
@@ -461,11 +567,8 @@ class vLLMOmniHttpServer(vLLMHttpServer):
     def _enqueue_abort_output(self, internal_id: str, req_state: Any) -> None:
         """Synthesize a terminal abort OutputMessage and put it into a per-request queue.
 
-        ``_process_orchestrator_results`` reads from ``req_state.queue`` and
-        expects ``OutputMessage`` (or ``ErrorMessage``) objects. We build a
-        minimal ``OmniRequestOutput`` with ``finish_reason="abort"`` so that
-        ``_process_single_result`` yields it and the active generation strategy maps it
-        to ``stop_reason="aborted"``.
+        Ensures active generators in ``_process_orchestrator_results`` unblock from
+        ``queue.get()`` and clean up if the orchestrator abort RPC raises or times out.
         """
         from vllm.outputs import CompletionOutput
         from vllm_omni.engine.messages import OutputMessage
@@ -494,7 +597,9 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             engine_outputs=omni_output,
             finished=True,
         )
-        req_state.queue.put_nowait(msg)
+        queue = getattr(req_state, "queue", None)
+        if queue is not None:
+            queue.put_nowait(msg)
 
     async def abort_request(self, request_id: str, reset_prefix_cache: bool = True) -> dict[str, Any]:
         """Abort a single in-flight request on the AsyncOmni engine."""
@@ -521,6 +626,44 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         return {"aborted": True, "request_id": request_id}
 
 
+class vLLMOmniServerAdapter(ServerAdapter):
+    """Reuse verl's transport with SP-aware replica and IPC rank mapping."""
+
+    async def _execute_method(
+        self,
+        method: str,
+        non_block: bool = False,
+        timeout: Optional[float] = None,
+        args: tuple = (),
+        kwargs: Optional[dict] = None,
+    ):
+        """Require checked replies for IPC weight updates through the inherited sender."""
+        if method != "update_weights_from_ipc":
+            return await super()._execute_method(method, non_block=non_block, timeout=timeout, args=args, kwargs=kwargs)
+        if not self._ensure_server_handle():
+            return None
+        future = self.server_handle.collective_rpc.remote(
+            method, timeout=timeout, args=args, kwargs=kwargs, require_ack=True
+        )
+        return future if non_block else await future
+
+    def __init__(self, config, model_config, device_mesh, replica_rank: int = -1):
+        super().__init__(config, model_config, device_mesh, replica_rank=replica_rank)
+        if get_rollout_sequence_parallel_size(self.config) == 1:
+            return
+
+        rank = int(os.environ["RANK"])
+        local_world_size = int(os.environ["RAY_LOCAL_WORLD_SIZE"])
+        world_size = get_rollout_world_size(self.config)
+        self.replica_rank = rank // world_size if replica_rank == -1 else replica_rank
+        self.rollout_rank = rank % world_size
+        self.node_rank = self.rollout_rank // local_world_size
+        self._has_server = self.rollout_rank == 0
+        local_rank = self.rollout_rank % local_world_size
+        job_id = ray.get_runtime_context().get_job_id()
+        self.zmq_handle = f"ipc:///tmp/rl-colocate-zmq-{job_id}-replica-{self.replica_rank}-rank-{local_rank}.sock"
+
+
 class vLLMOmniReplica(vLLMReplica):
     def __init__(
         self,
@@ -532,10 +675,30 @@ class vLLMOmniReplica(vLLMReplica):
         is_teacher_model: bool = False,
         name_suffix: str = "",
     ):
+        if is_teacher_model and isinstance(model_config, dict | DictConfig):
+            engine_kwargs = (config.engine_kwargs or {}).get("vllm_omni") or {}
+            if engine_kwargs.get("output_mode") == "ar":
+                # Checkpoint workers construct the model config before the HTTP server does.
+                model_config = OmegaConf.merge(
+                    {"trust_remote_code": engine_kwargs.get("trust_remote_code", False)},
+                    model_config,
+                    {"_target_": "verl_omni.workers.config.OmniModelConfig"},
+                )
         super().__init__(
             replica_rank, config, model_config, gpus_per_node, is_reward_model, is_teacher_model, name_suffix
         )
+        if get_rollout_sequence_parallel_size(self.config) > 1:
+            self.world_size = get_rollout_world_size(self.config)
+            self.gpus_per_replica_node = min(gpus_per_node, self.world_size)
+            if self.world_size % self.gpus_per_replica_node:
+                raise ValueError(f"Replica size {self.world_size} must be divisible by GPUs per node {gpus_per_node}.")
+            self.nnodes = self.world_size // self.gpus_per_replica_node
         self.server_class = ray.remote(vLLMOmniHttpServer)
+
+    # The rollout worker actor class is verl's default
+    # (ray.remote(CheckpointEngineWorker)): the omni_delta_sharded backend
+    # passes verl's sglang-only "delta_sharded" gate by name and resolves
+    # through CheckpointEngineRegistry like any other backend.
 
     def _get_server_name_prefix(self) -> str:
         return "vllm_omni_"

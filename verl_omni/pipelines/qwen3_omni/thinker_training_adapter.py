@@ -41,8 +41,42 @@ class Qwen3OmniThinkerAdapter(OmniModelBase):
     """
 
     @classmethod
+    def setup_veomni(cls, model_config, engine_config) -> None:
+        from .veomni import setup_backend
+
+        setup_backend(model_config, engine_config)
+
+    @classmethod
+    def prepare_veomni_inputs(cls, model_inputs, micro_batch, model_config) -> dict:
+        from .veomni import prepare_inputs
+
+        return prepare_inputs(model_inputs, micro_batch, model_config)
+
+    @classmethod
+    def configure_veomni_trainable_params(cls, module, model_config) -> None:
+        from .veomni import freeze_modality_towers, validate_thinker_only
+
+        validate_thinker_only(module, cls.get_strip_modules(model_config))
+        frozen = freeze_modality_towers(module)
+        logger.info("Frozen Qwen3-Omni modality towers before optimizer creation: %s", frozen)
+
+    @classmethod
     def get_strip_modules(cls, model_config) -> list[str]:
         return ["talker", "code2wav", "code_predictor"]
+
+    @classmethod
+    def prepare_megatron_config(cls, model_config, engine_config):
+        """Validate the Thinker BSHD path and expose its nested text config."""
+        from .megatron_inputs import prepare_qwen3_omni_megatron_config
+
+        return prepare_qwen3_omni_megatron_config(model_config, engine_config)
+
+    @classmethod
+    def get_megatron_forward(cls):
+        """Select the direct Thinker BSHD forward without eager Megatron imports."""
+        from .megatron_inputs import qwen3_omni_forward_model_engine
+
+        return qwen3_omni_forward_model_engine
 
     @classmethod
     def configure_model(cls, module, model_config):

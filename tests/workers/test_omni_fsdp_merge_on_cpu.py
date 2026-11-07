@@ -13,15 +13,19 @@
 # limitations under the License.
 
 from contextlib import contextmanager
+from types import SimpleNamespace
 
 import torch
 
 import verl_omni.workers.engine.fsdp.omni_impl as omni_impl
+import verl_omni.workers.engine.lora_export as lora_export
 
 
 class _FakeModule:
     def __init__(self):
         self.weight = torch.tensor([1.0])
+        # ``peft_config`` is what routes the export onto the merged-LoRA stream.
+        self.peft_config = {"default": SimpleNamespace(to_dict=lambda: {"r": 8})}
 
     def state_dict(self):
         # Match torch state_dict semantics: returned tensors alias live storage.
@@ -41,17 +45,23 @@ def test_merged_weights_materialized_before_actor_restore(monkeypatch):
         finally:
             module.weight.fill_(1.0)
 
-    monkeypatch.setattr(omni_impl, "merged_lora_context", merged_context)
-    monkeypatch.setattr(omni_impl, "normalize_peft_param_name", lambda state: state)
-    monkeypatch.setattr(omni_impl, "convert_weight_keys", lambda state, model: state)
+    monkeypatch.setattr(lora_export, "merged_lora_context", merged_context)
+    monkeypatch.setattr(lora_export, "normalize_peft_param_name", lambda state: state)
+    monkeypatch.setattr(lora_export, "convert_weight_keys", lambda state, model: state)
+    monkeypatch.setattr(lora_export, "get_device_id", lambda: torch.device("cpu"))
     monkeypatch.setattr(omni_impl, "log_gpu_memory_usage", lambda *args, **kwargs: None)
-    monkeypatch.setattr(omni_impl, "get_device_id", lambda: torch.device("cpu"))
 
     engine = object.__new__(omni_impl.OmniFSDPEngine)
     engine.module = module
+    engine.model_config = SimpleNamespace(lora={"merge": True})
+    engine.engine_config = SimpleNamespace(mixed_precision=None)
     engine._is_offload_param = False
+    engine._uses_fsdp2_cpu_offload_policy = True
+    engine._qat_enabled = False
 
-    merged_weights = dict(engine._merged_lora_per_tensor_param())
+    params, peft_config = engine.get_per_tensor_param(base_sync_done=True)
+    merged_weights = dict(params)
 
+    assert peft_config is None
     assert torch.equal(merged_weights["weight"], torch.tensor([2.0]))
     assert torch.equal(module.weight, torch.tensor([1.0]))

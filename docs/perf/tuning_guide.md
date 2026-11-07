@@ -1,13 +1,14 @@
 (tuning_guide)=
 # Performance Tuning Guide
 
-Last updated: 09/14/2026
+Last updated: 10/17/2026
 
 This page is the starting point for tuning a VeRL-Omni diffusion RL run. It
 does not repeat the detail already covered by the more specific pages —
 instead it gives you a decision order and links to the right page for each
 decision, plus a troubleshooting checklist for the OOM/throughput problems
-that come up across all of them.
+that come up across all of them. For omni-modality (AR) runs, start with
+section 5.
 
 ## Where time actually goes
 
@@ -113,6 +114,19 @@ Symptoms that show up regardless of which stage causes them:
   [Diffusion V1 training](../start/diffusion_v1.md) for `sync` vs.
   `separate_async` mode and how the replay buffer moves trajectories into
   the training loop.
+- Trim the replay buffer's polling cadence with
+  `trainer.v1.sampler.poll_interval` (default `null`: 0.05 in `sync` mode,
+  2.0 in `separate_async`): each wait loop polls
+  TransferQueue for finished prompt groups, so a large interval adds dead
+  wall-clock time after rollout lands, and a very small one adds metadata
+  syncs. Halving it typically pays off when `parameter_sync_step > 1`
+  because every local update waits once.
+- Check what actually crosses TransferQueue per step. The rollout dump read
+  is field-projected (latents/embeds stay in TransferQueue); validation
+  deliberately stays a full read because the colocated reward model receives
+  that DataProto and may read any pipeline-emitted field. Trajectory writes
+  are batched per prompt group; if you add custom reads, pass `select_fields`
+  rather than fetching full rows.
 
 **Step time dominated by reward scoring**
 - Confirm with a profiler trace (recipe 6 in [profiler.md](profiler.md)) before
@@ -124,6 +138,22 @@ Symptoms that show up regardless of which stage causes them:
   scoring overlaps generation instead of gating it; see
   [Async Reward](../algo/async_reward.md).
 
+**Reward or optimizer step is CPU-bound and much slower than a standalone benchmark**
+- Check the CPU threads per worker. Uncapped, PyTorch starts one intra-op thread
+  per physical core in every Ray worker, so colocated reward, actor, and rollout
+  workers oversubscribe the host. Reward-model preprocessing (PIL resize,
+  normalize) and the CPU-offloaded optimizer step are hit hardest. Symptoms: a
+  reward worker at 1000-2000% CPU, and per-chunk scoring time that varies
+  2-3x between steps.
+- Cap the threads before launch, e.g. `export OMP_NUM_THREADS=8`. Workers of a
+  local Ray cluster inherit the launcher's environment, or pass it explicitly
+  with `+ray_kwargs.ray_init.runtime_env.env_vars.OMP_NUM_THREADS="'8'"` (Ray
+  requires string values).
+- Measured on a 224-vCPU, 4-GPU host with the Boogu-Image HPSv2.1 + PickScore +
+  CLIPScore NFT recipe (384 images/step): the reward stage fell from 87-157 s to
+  ~4 s, `update_actor` from ~337 s to ~320 s, and the V1 sync step from
+  505-604 s to 408-423 s. V0 gains the same.
+
 **MFU looks implausibly low or above 1.0**
 - See [How FLOPs are computed](diffusion_mfu.md#how-flops-are-computed) first
   — if `perf/mfu/actor > 1.0`, the two documented causes are a mis-identified
@@ -131,6 +161,48 @@ Symptoms that show up regardless of which stage causes them:
   `VERL_OMNI_DEVICE_FLOPS_TFLOPS`) and a missing DP gather of sequence
   lengths, not the LoRA vs. full-FT FLOPs caveat — that one only matters when
   comparing LoRA against full FT, not as a path to MFU above 1.0.
+
+## 5. Tuning omni-modality (AR) runs
+
+The sections above are written against diffusion RL, where the rollout
+engine generates images/video/audio with a diffusion pipeline. Omni-modality
+runs (Qwen3-Omni thinker with GSPO/DAPO, Qwen3-TTS with GRPO) use the
+`main_omni` entrypoint with an autoregressive vLLM-Omni rollout, and the
+tuning surfaces differ accordingly:
+
+- **Layout.** Colocated vs. disaggregated reward still applies, but AR runs
+  add the separate-async option for the actor/rollout split itself —
+  [Separate-Async Omni Training](../algo/separate_async_omni.md) documents
+  that layout, when to prefer it, and how to balance the two pools. The
+  megatron separate-async recipes in
+  the [Qwen3-Omni README](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/qwen3_omni/README.md)
+  are the reference setups (experimental; see the reproducibility notes in
+  [models catalogue](../start/models.md)).
+- **Rollout.** AR rollout has no denoising-step knob; concurrency is
+  governed by the vLLM-Omni engine (`max_num_seqs`,
+  `engine_kwargs.vllm_omni.*`) — the same knobs introduced in step 2 above,
+  minus the diffusion-specific batching modes. {ref}`rollout_batching`
+  remains the authoritative description of those two modes.
+- **Actor.** The FSDP knobs documented in
+  [Tuning and Improving MFU](diffusion_mfu.md#tuning-and-improving-mfu)
+  (offload flags, sequence parallelism, micro-batch size) apply to the omni
+  actor as well, but the reference measurements on that page are
+  diffusion-specific; the omni recipes in [models catalogue](../start/models.md) list their own
+  validated GPU configs (H100/H200, plus NPU variants).
+- **Reward.** Text and multimodal reward servers are profiled and scaled the
+  same way as diffusion reward pools — see
+  [Async Reward](../algo/async_reward.md) and
+  [HTTP Scorer](../start/http_scorer.md).
+- **Monitoring and profiling.** [RL-Insight](../start/rl_insight.md) works
+  for `main_omni` runs. For step-based profiling, omni PPO V1 is supported
+  while diffusion V1 is not — see the caveat in
+  [profiler.md](profiler.md).
+
+The only measured omni throughput reference points are in
+[Separate-Async Omni Training](../algo/separate_async_omni.md) — the
+MiniCPM-o 4.5 colocated-vs-separate-async split ladder on 4 × 80 GB; beyond
+that, treat every knob above as requiring measurement on your own workload
+before drawing conclusions.
 
 ## See also
 

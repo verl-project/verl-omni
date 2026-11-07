@@ -1,6 +1,6 @@
 # MiniMax H3 T2VA, FL2VA, and Ref2VA FlowGRPO
 
-Last updated: 09/14/2026
+Last updated: 10/29/2026
 
 These recipes train `MiniMaxAI/MiniMax-H3` LoRA adapters with FlowGRPO for
 text-to-audio-video (T2VA), first-frame image-to-audio-video (FL2VA), and
@@ -8,39 +8,18 @@ reference-to-audio-video (Ref2VA) generation. The launchers configure a
 Diffusers H3 Actor and vLLM-Omni rollout for joint video and audio generation,
 with CLAP and ImageBind as the default rewards.
 
-T2VA supports NVIDIA GPUs and Ascend NPUs. The FL2VA and full multimodal
-Ref2VA paths target NVIDIA GPUs.
+| Platform | T2VA | FL2VA | Ref2VA |
+| --- | --- | --- | --- |
+| NVIDIA GPU | ✅ | ✅ | ✅ |
+| Ascend NPU | ✅ | — | — |
+| Cambricon MLU | ✅ | — | — |
 
 ## Install
 
-Follow the project [installation guide](../../../docs/start/install.md). In
-particular, install the platform backend, the repository-pinned vLLM-Omni
-revision, and the training dependencies in that order. Run the commands below
-from the verl-omni repository root.
-
-For NVIDIA GPU:
-
-```bash
-uv pip install -e ".[gpu]" --torch-backend=auto
-uv pip install "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@$(cat .github/vllm_omni_pin.txt)"
-uv pip install -e ".[train,dev]"
-```
-
-For Ascend NPU:
-
-```bash
-uv pip install vllm==0.28.0
-uv pip install "vllm-ascend @ git+https://github.com/vllm-project/vllm-ascend.git@$(cat .github/vllm_ascend_pin.txt)"
-uv pip install "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@$(cat .github/vllm_omni_pin.txt)"
-uv pip install -e ".[train,dev]"
-```
-
-Install the tested Diffusers revision that provides
-`MiniMaxH3Transformer3DModel`:
-
-```bash
-uv pip install "diffusers @ git+https://github.com/huggingface/diffusers.git@d6726f38a0c5ca6c06a8f227fb7bade3486ed98d"
-```
+Follow the installation guide for your platform:
+[NVIDIA GPU](../../../docs/start/install.md),
+[Ascend NPU](../../../docs/start/install_npu.md), or
+[Cambricon MLU](../../../docs/start/install_mlu.md).
 
 ## Prepare the checkpoint
 
@@ -92,7 +71,7 @@ Convert the splits to verl-omni parquet files:
 export RAW_PROMPT_DIR=/path/to/raw_prompts
 export DATA_DIR="$HOME/data/vid_prompt/verl_omni"
 
-python3 examples/diffusionnft_trainer/minimax_h3/prepare_t2av_data.py \
+python3 examples/diffusionnft_trainer/minimax_h3/prepare_t2va_data.py \
   --input_dir "$RAW_PROMPT_DIR" \
   --output_dir "$DATA_DIR"
 ```
@@ -171,13 +150,58 @@ export IMAGEBIND_MODEL_PATH=/path/to/imagebind_huge.pth
 ```
 
 By default, CLAP runs on `$REWARD_DEVICE:0` and ImageBind on
-`$REWARD_DEVICE:1`, where `REWARD_DEVICE` is `cuda` for the GPU launcher and
-`npu` for the NPU launcher. Both devices must be visible to the reward worker.
+`$REWARD_DEVICE:1`, where `REWARD_DEVICE` is `cuda` for the GPU launcher,
+`npu` for the NPU launcher, and `mlu` for the MLU launcher. Both devices must
+be visible to the reward worker.
 These rewards validate generated audio/video alignment but do not directly
 measure fidelity to the supplied references.
 
 
 ## Launch
+
+### Rollout VAE and sequence parallelism
+
+The GPU T2VA launcher exposes `ROLLOUT_USP`/`ROLLOUT_RING` (default `1`),
+`VAE_PATCH_PARALLEL_SIZE` (default `1`), `VAE_PARALLEL_MODE` (default `tile`),
+and `VAE_USE_TILING` (default `False`). Encoder TP defaults to the full
+`ROLLOUT_TP * ROLLOUT_USP * ROLLOUT_RING` group. Existing TP-only defaults remain
+unchanged. For TP=4 with parallel VAE decode, use
+`ROLLOUT_TP=4 VAE_PATCH_PARALLEL_SIZE=4 VAE_USE_TILING=True`.
+
+Pure Ulysses uses `ROLLOUT_TP=1 ROLLOUT_USP=4 ROLLOUT_RING=1`, with
+`TEXT_ENCODER_TP=4 VAE_PATCH_PARALLEL_SIZE=4 VAE_USE_TILING=True`. Local rollout
+subclasses account for SP ranks without patching verl; TP remains the actual
+engine TP degree. GPU acceptance for this topology on the current PR head
+remains pending. H3 requires VAE mode `tile`, VAE parallel size `1` or the full
+DiT group, CFG parallel size `1`, and no hybrid Ulysses x Ring. Encoder TP must
+be `1` or the full DiT group and must divide 8.
+
+Other GPU launchers can use the typed Hydra fields directly, without these
+T2VA environment shortcuts. See the
+[configuration reference](../../../docs/examples/config.md#rollout-sequence-and-vae-parallelism)
+for GPU allocation, encoder-group validation and the small-tile VAE fallback.
+
+### Actor FSDP sequence parallelism
+
+The NVIDIA T2VA, FL2VA, and Ref2VA launchers accept `ACTOR_SP` (default `1`).
+Set it to a divisor of the GPU count to shard each Actor's joint
+text/video/audio sequence with Diffusers Ulysses context parallelism:
+
+```bash
+ACTOR_SP=2 bash examples/flowgrpo_trainer/minimax_h3/run_minimax_h3_t2va_lora.sh
+```
+
+This uses the same standard equal-partition Ulysses path as Qwen-Image and
+changes Actor FSDP data parallelism to `NUM_GPUS / ACTOR_SP`; it does not change
+rollout `ROLLOUT_TP` or text-encoder `TEXT_ENCODER_TP`. `ACTOR_SP` must divide
+the model's attention-head count (56 for the released H3 checkpoint). When a
+packed layout's length is not a multiple of `ACTOR_SP`, the adapter appends
+padding rows and masks them as attention keys; real rows attend exactly as
+without padding and padding outputs are discarded, so arbitrary prompt and
+reference lengths are supported. Use an attention backend that accepts key
+masks under context parallelism (`native`, `flash_varlen_hub`, or
+`_flash_3_varlen_hub`). Keep timestep staging disabled. FlowGRPO micro-batches must still share one packed layout; sequence
+parallelism does not relax that replay contract.
 
 ### NVIDIA GPU
 
@@ -248,6 +272,20 @@ bash examples/flowgrpo_trainer/minimax_h3/run_minimax_h3_t2va_lora_v1.sh
 bash examples/flowgrpo_trainer/minimax_h3/run_minimax_h3_fl2va_lora_v1.sh
 ```
 
+The Ref2VA V1 launcher mirrors the same sync settings on top of the V0
+Ref2VA recipe (reference-image short edge, `MAX_PROMPT_EMBEDS`, and
+`video_flow_shift`), with training hyperparameters aligned to the FL2VA V1
+recipe:
+
+```bash
+MODEL_PATH="$MODEL_ROOT" \
+DATA_DIR="$HOME/data/minimax_h3_ref2va" \
+IMAGEBIND_MODEL_PATH=/path/to/imagebind_huge.pth \
+REF_IMAGE_SHORT_EDGE=512 \
+VAL_REF_IMAGE_SHORT_EDGE=768 \
+bash examples/flowgrpo_trainer/minimax_h3/run_minimax_h3_ref2va_lora_v1.sh
+```
+
 These recipes use the same GPU topology as their V0 counterparts. A
 `separate_async` MiniMax H3 recipe is not provided: it requires dedicated
 actor/rollout pools and checkpoint-engine synchronization rather than a
@@ -267,7 +305,39 @@ parameter and optimizer offload. It sources the Ascend toolkit and ATB
 environments from `ASCEND_HOME_PATH`, which defaults to
 `/usr/local/Ascend/ascend-toolkit`.
 
-Both launchers default to online W&B logging. Set `WANDB_MODE=offline` to keep
+For two eight-device FSDP groups on a 16-NPU node, explicitly enable the
+FSDP2 CPU-offload policy:
+
+```bash
+MODEL_PATH="$MODEL_ROOT/FL2VA" \
+DATA_DIR=/path/to/t2va/verl_omni \
+IMAGEBIND_MODEL_PATH=/path/to/imagebind_huge.pth \
+NUM_GPUS=16 ROLLOUT_TP=4 TEXT_ENCODER_TP=4 \
+bash examples/flowgrpo_trainer/minimax_h3/run_minimax_h3_t2va_lora_npu.sh \
+  actor_rollout_ref.actor.fsdp_config.fsdp_size=8 \
+  actor_rollout_ref.actor.fsdp_config.offload_policy=True \
+  actor_rollout_ref.actor.fsdp_config.reshard_after_forward=True
+```
+
+`fsdp_size` is the shard-group size, not the total number of devices.
+This uses two replicas of eight shards; rollout TP remains four. The
+existing FlowGRPO reward and SDE-window defaults are unchanged.
+
+### Cambricon MLU
+
+```bash
+MODEL_PATH="$MODEL_ROOT/FL2VA" \
+DATA_DIR="$HOME/data/vid_prompt/verl_omni" \
+IMAGEBIND_MODEL_PATH=/path/to/imagebind_huge.pth \
+bash examples/flowgrpo_trainer/minimax_h3/run_minimax_h3_t2va_lora_v1_mlu.sh
+```
+
+The MLU V1 launcher uses the synchronous TransferQueue trainer with FSDP2 on
+one node with eight MLU devices. It uses Actor `native`, rollout `TORCH_SDPA`,
+and Actor parameter offload. For the V0 trainer, use `run_minimax_h3_t2va_lora_mlu.sh` with the same
+environment variables.
+
+The launchers default to online W&B logging. Set `WANDB_MODE=offline` to keep
 metrics local. Checkpoints and logs are written under
 `outputs/<launcher-name>/` unless `OUTPUT_DIR` is set.
 
@@ -275,9 +345,9 @@ metrics local. Checkpoints and logs are written under
 
 | Setting | Default |
 | --- | --- |
-| Devices | 8 GPU / 16 NPU |
-| Rollout DiT TP | 2 GPU / 4 NPU |
-| Text-encoder TP | Same as rollout TP |
+| Devices | 8 GPU / 16 NPU / 8 MLU |
+| Rollout DiT TP | 2 GPU / 4 NPU / 2 MLU |
+| Text-encoder TP | Same as rollout TP with SP disabled |
 | Training batch size | 32 |
 | PPO mini-batch / per-device micro-batch | 16 / 1 |
 | Rollouts per prompt | 8 |
@@ -295,13 +365,18 @@ and Actor micro-batch 1. It enables layerwise rollout offload and FSDP2 Actor
 parameter/optimizer offload because reference presentations can be much longer
 than T2VA prompts.
 
-`NUM_GPUS` must be divisible by `ROLLOUT_TP`. `TEXT_ENCODER_TP` defaults to
-`ROLLOUT_TP` and is forwarded as `actor_rollout_ref.rollout.text_encoder_tp_size`
+Without sequence parallelism, `NUM_GPUS` must be divisible by `ROLLOUT_TP`
+and `TEXT_ENCODER_TP` defaults to `ROLLOUT_TP`. The GPU T2VA launcher includes
+sequence parallelism in that default: `ROLLOUT_TP * ROLLOUT_USP * ROLLOUT_RING`.
+`TEXT_ENCODER_TP` is forwarded as `actor_rollout_ref.rollout.text_encoder_tp_size`
 (without `+`), using the same diffusion engine path as NFT. With the pinned
-backend, ETP must be 1 or exactly equal to rollout TP.
-For example, `ROLLOUT_TP=4 TEXT_ENCODER_TP=4` shards the encoder across all four
-DiT ranks, while `TEXT_ENCODER_TP=1` disables encoder sharding. ETP is independent
-of CPU/layerwise offload. This applies to the GPU, V1 sync, and NPU launchers.
+backend, ETP must be `1` or the complete DiT group size
+`ROLLOUT_TP * ROLLOUT_USP * ROLLOUT_RING`, and must divide 8 for H3.
+For example, `ROLLOUT_TP=1 ROLLOUT_USP=4 ROLLOUT_RING=1 TEXT_ENCODER_TP=4`
+shards the encoder across all four DiT ranks. Without SP,
+`ROLLOUT_TP=4 TEXT_ENCODER_TP=4` also uses four ranks; `TEXT_ENCODER_TP=1`
+disables encoder sharding. ETP is independent of CPU/layerwise offload.
+The V1 sync and NPU launchers retain their TP-only environment defaults.
 
 The legacy `+actor_rollout_ref.rollout.engine_kwargs.vllm_omni.text_encoder_tp_size`
 override remains supported; conflicting values fail at startup. The fix for
@@ -333,7 +408,7 @@ Common environment overrides are:
 | `REF_IMAGE_SHORT_EDGE` | Ref2VA training image short edge; defaults to 2048 |
 | `VAL_REF_IMAGE_SHORT_EDGE` | Ref2VA validation image short edge; defaults to the training value |
 | `REWARD_NUM_WORKERS` | Number of reward workers |
-| `REWARD_DEVICE` | Reward device type, such as `cuda` or `npu` |
+| `REWARD_DEVICE` | Reward device type, such as `cuda`, `npu`, or `mlu` |
 | `CLAP_MODEL_PATH` | CLAP model ID or local path |
 | `IMAGEBIND_MODEL_PATH` | Local ImageBind checkpoint path |
 | `ASPECT_RATIO` | Named H3 canvas ratio |

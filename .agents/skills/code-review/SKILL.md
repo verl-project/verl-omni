@@ -1,133 +1,153 @@
 ---
 name: self-review
-description: "Review your own verl-omni branch against the project rubric before opening or updating a PR. Use before submitting a contribution, or whenever asked to self-review. Report-only: it groups findings by severity, gives a READY / NEEDS CHANGES verdict, and never edits files. Mirrors the checks a maintainer applies, over your whole diff."
+description: "Review your own verl-omni branch against the project rubric before opening or updating a PR. Use before submitting a contribution, or whenever asked to self-review. Report-only: covers technical purpose, code quality, goal completeness and validation evidence, with a READY / NEEDS CHANGES verdict. Never edits files."
 ---
 
 # Self-review
 
-Catch issues before a maintainer does, over your **whole** PR diff. You are
-already on the branch with the project conventions available, so: get the diff →
-review it against the rubric and the guides for the areas you touched → report →
-iterate with the contributor until it is ready, then remind them to put the
-notes on the PR.
+Review the **whole** change, not only its latest commit. Keep the report
+proportional to the diff; a small fix does not need a technical essay.
 
 Report-only — do **not** edit, commit, or push as part of reviewing. Once the
 contributor makes fixes, load [commit-and-pr](../commit-and-pr/SKILL.md) for the
-commit/PR conventions and [run-cpu-tests](../run-cpu-tests/SKILL.md) for the
-tests you cite.
+commit/PR conventions and [run-cpu-tests](../run-cpu-tests/SKILL.md) for tests.
 
-## 1. Get the diff
+## 1. Establish scope
 
-Identify the remote that points to `verl-project/verl-omni` (do not assume it is
-named `origin`), then diff the whole branch against its base:
+Identify the intended base and its remote; a stacked PR may not target `main`.
+Record the exact base and head SHAs, then inspect the whole three-dot diff:
 
 ```bash
 git remote -v
-git fetch <upstream-remote> main
-git diff <upstream-remote>/main...HEAD        # whole branch, not just the last commit
+git fetch <base-remote> <base-branch>
+git rev-parse <base-ref> HEAD
+git diff <base-ref>...HEAD
 ```
 
-If the branch trails `main` and the diff looks polluted with unrelated merged
-files, scope to your own commits instead: `git log <upstream-remote>/main..HEAD
---oneline`, then `git show <commit>`.
+Do not replace this with a last-commit review. A two-dot comparison against newer
+`main` includes main-only changes; check the merge base before calling those
+regressions. Use individual commits for history, not to omit parts of the final
+diff. For local uncommitted work, also inspect `git diff --cached` and `git diff`.
+Re-check affected evidence if the reviewed head changes.
 
-## 2. Read the rules for what you touched
+## 2. Read the applicable rules
 
-Review against the project rules, not a remembered copy. `AGENTS.md` is the
-top-level contract; then read the guide for each area you changed:
+`AGENTS.md` is the top-level contract. Read the current guides, not a remembered
+copy. Formatting and project-specific conventions belong to these sources:
 
 | Area | Guide |
 | --- | --- |
-| config dataclasses / generated yaml | `.agents/rules/config.md` |
-| code style / `# Copied from` | `.agents/rules/code-style.md` |
+| code style, runtime boundaries, shell recipes | `.agents/rules/code-style.md` |
+| config dataclasses / generated YAML | `.agents/rules/config.md` |
 | diffusion pipelines / adapters | `.agents/rules/pipelines.md`, `docs/contributing/integrating_a_diffusion_model.md` |
-| diffusion algorithm (policy-gradient vs direct-preference) | `docs/contributing/integrating_a_new_policy_gradient_algorithm_for_diffusion_model.md`, `docs/contributing/integrating_a_new_direct_preference_algorithm_for_diffusion_model.md` (let [add-pipeline](../add-pipeline/SKILL.md) classify which one) |
+| diffusion algorithm | [add-pipeline](../add-pipeline/SKILL.md) selects the policy-gradient or direct-preference guide |
 | reward scorers | `.agents/rules/reward.md` |
 | tests | `.agents/rules/testing.md`, `docs/contributing/testing_guide.md` |
 | recurring traps | `docs/contributing/common_pitfalls.md` |
 | CI / GPU smoke | `docs/contributing/ci_cd.md`, `docs/contributing/gpu_smoke_tests.md` |
 
-## 3. verl-omni rubric
+## 3. Review and report in four parts
 
-Beyond generic correctness, these project-specific traps are the ones a generic
-review misses — each has bitten a real PR and none is obvious from the diff
-alone:
+### A. Purpose and technical background
 
-- **Silent field loss / wire compatibility** — the rollout request/output path
-  threads private engine keys (`prompt_token_ids`, the dual-written
-  `multi_modal_data`, `extra_fields`). Keep valid requests byte-identical on the
-  wire and fail closed on conflicting/unsupported fields rather than dropping or
-  overwriting them.
-- **Shape guessing** — flag new `ndim==5` / `shape[1]==3`-style modality or
-  layout inference; the declared media contract (`DiffusionIOSpec`, `media_kind`)
-  should drive it instead.
-- **Sanity gates the CPU job skips** — changed `config` dataclasses need the
-  regenerated `_generated_*.yaml` (`scripts/generate_trainer_config.sh`);
-  `check_dataproto_usage.py`, `check_device_api_usage.py` (no literal `cuda` /
-  `nccl` / `.cuda`), `check_docstrings.py`, `check_license.py`, and
-  `validate_structure.py` each run as their own job.
-- **Pin-induced false failures** — a red test may be a local `verl` /
-  `vllm-omni` pin mismatch, not the diff. Confirm the env matches
-  `.github/*_pin.txt` before treating it as a finding.
-- **Don't overstate GPU evidence** — "reached engine init" is not "end-to-end
-  passed"; cite only what a run actually completed.
-- **Surgical diff** — every changed line should trace to the stated goal; flag
-  unrelated refactors, reformatting, and orphaned dead code (unused imports,
-  variables, functions left by your own change).
+Summarize the problem, the mechanism being changed, and why the change is needed.
+Trace the relevant callers and consumers: e.g. config → allocation → worker,
+rollout → replay → loss, or adapter export → binding → forward. Check whether an
+existing implementation already solves it before recommending another abstraction.
 
-## 4. Route reviewers for documentation changes
+### B. Code quality and correctness
 
-When the diff changes documentation, identify the responsible people and
-include an explicit mention in the discussion. Do not guess from recent
-contributors; use the repository's ownership sources in this order:
+Inspect changed lines **and their execution context**, using the code-style rules.
+Classify findings by subject; these categories are not severity levels:
 
-1. Read `docs/community/governance.md`. Its **Path Ownership** table is the
-   source of truth for subsystem boundaries and its **Active Committers** list
-   gives the matching GitHub usernames.
-2. Check `.github/CODEOWNERS` for the operational path-based reviewer route.
-   Apply the last matching rule; a more specific path overrides a broader one.
-3. Deduplicate usernames and tag at most two maintainers. Prefer the owner
-   from the governance path table; add one topic owner only when the document
-   materially covers that subsystem. If the mapping is unclear, use the
-   governance owner rather than inventing a reviewer.
+| Category | Inspect |
+| --- | --- |
+| Correctness | tensor shape/dtype/device, gradients, wire compatibility, concurrency and resource lifetime |
+| Performance | host/device synchronization, allocation, hot-loop overhead and measured workload equivalence |
+| Maintainability | ownership, reuse, imports, naming and unnecessary abstractions |
+| Style | clarity, useful comments/types and consistency beyond automated formatting |
+| Process | reproducible tests, dependency compatibility and evidence for the claimed scope |
 
-## 5. Report
+Mark an issue **blocking** or **non-blocking** from its impact, independently of
+category. Missing critical validation can block; a naming preference usually
+cannot. Do not invent findings to avoid saying the code is sound, or impose
+source-line limits, blanket bans on framework hooks, or formatter-only nits.
 
-- **Blocking** — numbered. Each: title → explanation → `file.py:line` → impact.
-  Cite the rule, e.g. *Per `.agents/rules/config.md`: regenerate the yaml.*
-- **Non-blocking** — same format, lower severity: raise with the reviewer rather
-  than guess at now.
-- **Dead code (advisory)** — a short table: `path:line` · Likely-dead / Used ·
-  reason.
-- **Summary** — a short synthesis and a verdict (**READY** / **NEEDS CHANGES**),
-  spelling out what to **fix before submitting** vs what to **leave for the
-  actual review**.
+Project-specific checks:
 
-Be concrete, cite the rule, review the whole diff, and don't invent issues or
-flag pure style the formatter already enforces.
+- **Wire compatibility:** for protocol-preserving refactors, keep valid
+  `prompt_token_ids`, `multi_modal_data` and `extra_fields` intact end to end.
+  Unsupported or conflicting fields must not disappear silently.
+- **Media contracts:** use `DiffusionIOSpec` / `media_kind` rather than guessing
+  modality from `ndim` or a dimension equal to three.
+- **Distributed paths:** verify actual replica/rank allocation, sample ordering
+  and loss normalization, not just a parsed config or a printed parallel degree.
+- **Weight sync:** trace export, name/shape/scaling conversion, binding and use.
+  A tensor count or active adapter ID alone cannot prove value-correct binding.
+- **Surgical scope:** flag unrelated cleanup and orphaned code caused by this
+  change; do not demand refactoring pre-existing debt unrelated to the goal.
 
-### Evidence rule (mandatory)
+Each finding needs: **severity + category + evidence tag → `path:line` → triggering
+input/path → impact and why → concrete fix or next verification step**.
 
-Self-review is prone to confident guessing. Every finding and every claim must
-be grounded, or explicitly marked as ungrounded:
+### C. Goal completeness
 
-- Tag each finding with its evidence basis: **[verified]** (you read the exact
-  `file.py:line` and it shows the problem), **[likely]** (inferred from the diff
-  but not confirmed at the source), or **[unchecked]** (rubric item you did not
-  actually inspect). A `file.py:line` with no matching read is not `[verified]`.
-- **Never claim a check passed that you did not run.** State the exact command
-  and its result, or write "not run". Do not report "CPU tests pass", "ruff
-  clean", or "config regenerated" from assumption.
-- **Separate verified vs unverified in the summary.** List what actually ran
-  (command + outcome) apart from what remains unverified (e.g. GPU end-to-end,
-  untested pipelines). A **READY** verdict must name what it does *not* cover.
-- If you could not open a file or run a check, say so plainly rather than
-  producing a plausible-sounding finding. An honest gap beats a fabricated one.
+Compare the final diff with the issue and PR description. List unmet requirements,
+unsupported configurations, prerequisite PRs and changed defaults/compatibility.
+An intentional limitation is not a proven bug, but must not be presented as
+implemented or validated support. Check that examples and docs use the same
+contract as the code.
 
-## 6. Iterate, then share
+### D. Validation and accountability
 
-Expect several rounds: the contributor fixes findings, you review again. Keep
-going until the verdict is **READY** — only the *leave for the actual review*
-items should reach the reviewer unresolved. End by reminding the contributor to
-put the final summary in the PR description or a comment; it saves the reviewer a
-round-trip. Never commit the review notes as part of the diff.
+Separate what you ran from author-reported evidence and untested paths. Choose the
+required layer from the testing guide; CPU tests, GPU trainer completion,
+performance and convergence are different claims, not interchangeable badges.
+
+- Tag findings **[verified]** (read exact source or reproduced), **[likely]**
+  (inferred, with the missing check named), or **[unchecked]** (not inspected).
+  Keep unchecked items as coverage gaps, not confirmed defects.
+- Give the exact command and result, or **not run**. Associate test logs with the
+  tested SHA/config; a previous head's green check is not current-head evidence.
+- Check `.github/*_pin.txt` and the interpreter/worker source binding before
+  attributing an import or runtime failure to the patch. Compare with the base
+  when needed; a dependency mismatch is not automatically a code regression.
+- Read the automated gates' actual scope. CPU selection does not replace the
+  config-doc, generated-config, device-API, DataProto or other sanity checks.
+- "Engine initialized" is not a completed GPU e2e. For timing claims identify
+  the baseline, workload, hardware, warmup and all measured samples; distinguish
+  actor-only from whole-training time and disclose contention.
+- Assess concrete problems such as swallowed errors, unnecessary fallbacks or
+  unsupported claims; **do not infer AI authorship from code style**. Follow
+  `AGENTS.md` for disclosure and human accountability, and never check off human
+  review on someone else's behalf.
+
+End with **READY / NEEDS CHANGES**, blocking actions, and residual risks. READY
+means no blockers for the stated scope, not proof of untested GPU behavior or
+convergence. If required evidence is missing, explain why it blocks. If there
+are no findings, say what supports that conclusion rather than just "LGTM".
+
+## 4. Handoff, not automatic publication
+
+Iterate after the contributor fixes findings. Keep review notes out of the code
+diff. Suggest updating the PR description when scope or evidence changes.
+
+Publishing follows the accountability rules in `AGENTS.md`: draft review
+comments and replies for the user, and post only what they asked for and
+approved word for word.
+
+When asked to suggest reviewers, use `docs/community/governance.md` for ownership
+and `.github/CODEOWNERS` for path routing (last matching rule wins). Suggest at
+most two relevant owners; do not automatically tag them.
+
+## Template provenance
+
+The four-part review structure is adapted from
+[Code Review Style Guide](https://github.com/zhaochenyang20/sglang-diffusion-routing/issues/32).
+Project rules take precedence: categories are separate from severity, abstraction
+is contextual, and evidence replaces speculative AI-code detection.
+
+<!--
+MAINTAINER GUIDE — Keep rule details in .agents/rules/ and procedures in docs/.
+Recheck this rubric when review permissions, wire contracts or CI gates change.
+-->

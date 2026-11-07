@@ -15,6 +15,7 @@
 
 from abc import ABC, abstractmethod
 from collections import defaultdict
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Callable, Optional
@@ -22,9 +23,10 @@ from typing import Any, Callable, Optional
 import numpy as np
 import torch
 import torch.nn.functional as F
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 from tensordict import TensorDict
 from verl import DataProto
+from verl.trainer.ppo.core_algos import get_policy_loss_fn
 from verl.utils import tensordict_utils as tu
 
 from verl_omni.workers.config import DiffusionActorConfig
@@ -59,6 +61,13 @@ class DiffusionLossFn(ABC):
     # trainer, e.g. ``old_log_probs``, ``advantages``). Same early-check
     # contract as ``required_model_output_keys`` for batch-side inputs.
     required_data_keys: tuple[str, ...] = ()
+    # Whether the loss trains against the LoRA ``old`` adapter that the rollout samples with.
+    uses_old_adapter: bool = False
+    # Extra EMA snapshots: (adapter name, algorithm config prefix).
+    extra_ema_adapters: tuple[tuple[str, str], ...] = ()
+    # Whether the loss reduces over whole rollout groups inside a micro batch, so the
+    # trainer must not shuffle samples across micro batches.
+    requires_whole_groups: bool = False
 
     def validate_inputs(
         self,
@@ -121,6 +130,19 @@ class DiffusionLossFn(ABC):
         rollouts and rewards into loss-specific actor tensors.
         """
         return batch
+
+    @staticmethod
+    def validate_trainer_config(config: Any) -> None:
+        """Fail at trainer start on settings this loss cannot honour.
+
+        Called by the direct-preference trainers at start. DGPO, AWM and CRD consume
+        ``algorithm.train_timestep_range`` and ``algorithm.train_timestep_count``, so the other direct-preference
+        losses reject them instead of silently ignoring them.
+        """
+        algorithm_cfg = config.algorithm
+        for key in ("train_timestep_range", "train_timestep_count"):
+            if getattr(algorithm_cfg, key, None) is not None:
+                raise ValueError(f"algorithm.{key} is only used by the dgpo, awm and crd losses.")
 
 
 DIFFUSION_LOSS_REGISTRY: dict[str, DiffusionLossFn] = {}
@@ -782,6 +804,7 @@ class DPOLoss(DiffusionLossFn):
 class DiffusionNFTLoss(DiffusionLossFn):
     """DiffusionNFT forward-process direct-preference objective."""
 
+    uses_old_adapter = True
     required_model_output_keys = (
         "forward_prediction",
         "old_prediction",
@@ -805,7 +828,19 @@ class DiffusionNFTLoss(DiffusionLossFn):
         reward_prob: torch.Tensor,
         config: DiffusionActorConfig,
     ) -> tuple[torch.Tensor, dict[str, Any]]:
-        """Compute the DiffusionNFT policy loss and auxiliary metrics."""
+        """Compute the DiffusionNFT policy loss and auxiliary metrics.
+
+        `dL/dv_theta` decomposes into exactly two parts, because `old` is detached and only
+        `v_theta` moves both x0 estimates (with `dx0_pos/dv_theta = -t*beta` and
+        `dx0_neg/dv_theta = +t*beta`, which cancels the `1/beta` in the loss):
+
+            dL/dv_theta  ~  A*2/w * ( [ beta * t * (v_theta - v_old) ]  -  [ 2*(r-0.5) * (x0_old - x0) ] )
+                                      \\____________ A * beta ____________/     \\_______ adv, no A _______/
+
+        Only the first term grows with `A * beta`; the second is the whole learning signal, and
+        `A` cancels out of it because `r - 0.5 = adv / (2*A)`. `log10_signal_ratio` reports the
+        two scales separately, since the `1/beta` scaling of the loss values hides that balance.
+        """
         loss_cfg = config.diffusion_loss
         beta = loss_cfg.mix_beta
 
@@ -846,11 +881,27 @@ class DiffusionNFTLoss(DiffusionLossFn):
         loss = policy_loss + loss_cfg.ref_kl_coef * ref_kl_loss
 
         with torch.no_grad():
+            # The two gradient-scale terms of the decomposition in the docstring: the reward-free
+            # contraction onto `v_old`, and the reward term, from which `adv_clip_max` cancels.
+            x0_old = xt - t_expanded * old_prediction
+            reward_weight_col = reward_weight.view(-1, *([1] * (x0.ndim - 1)))
+            contraction = loss_cfg.adv_clip_max * beta * t_expanded * (forward_prediction - old_prediction)
+            reward_term = loss_cfg.adv_clip_max * 2.0 * (reward_weight_col - 0.5) * (x0_old - x0)
+            contraction_scale = contraction.abs().mean()
+            reward_term_scale = reward_term.abs().mean()
             metrics = {
                 "actor/policy_loss": policy_loss.detach().item(),
                 "actor/positive_loss": positive_loss.mean().detach().item(),
                 "actor/negative_loss": negative_loss.mean().detach().item(),
+                "actor/contraction_scale": contraction_scale.detach().item(),
+                "actor/reward_term_scale": reward_term_scale.detach().item(),
+                "actor/log10_signal_ratio": (
+                    (torch.log10(reward_term_scale.clamp(min=1e-30)) - torch.log10(contraction_scale.clamp(min=1e-30)))
+                    .detach()
+                    .item()
+                ),
                 "actor/ref_kl_loss": ref_kl_loss.detach().item(),
+                "actor/ref_kl_contribution": (loss_cfg.ref_kl_coef * ref_kl_loss).detach().item(),
                 "actor/old_deviate": ((forward_prediction - old_prediction) ** 2).mean().detach().item(),
                 "actor/reward_prob_mean": reward_weight.mean().detach().item(),
                 "actor/total_loss": loss.detach().item(),
@@ -1010,6 +1061,1032 @@ class DiffusionNFTLoss(DiffusionLossFn):
         return batch
 
 
+@register_diffusion_loss("omni_nft")
+class OmniNFTLoss(DiffusionNFTLoss):
+    """Two-branch DiffusionNFT objective for joint audio-video generation."""
+
+    @classmethod
+    def validate_trainer_config(cls, config: Any) -> None:
+        """Reject single-latent timestep staging before starting OmniNFT workers."""
+        super().validate_trainer_config(config)
+        if config.actor_rollout_ref.actor.get("enable_timestep_staging", False):
+            raise ValueError(
+                "OmniNFT does not support timestep staging for joint video/audio inputs; "
+                "set actor_rollout_ref.actor.enable_timestep_staging=False."
+            )
+
+    required_model_output_keys = (
+        "video_forward_prediction",
+        "video_old_prediction",
+        "video_ref_forward_prediction",
+        "video_x0",
+        "video_xt",
+        "video_t_expanded",
+        "audio_forward_prediction",
+        "audio_old_prediction",
+        "audio_ref_forward_prediction",
+        "audio_x0",
+        "audio_xt",
+        "audio_t_expanded",
+    )
+    required_data_keys = ("reward_prob",)
+
+    @staticmethod
+    def _compute_modality_loss(
+        *,
+        forward_prediction: torch.Tensor,
+        old_prediction: torch.Tensor,
+        ref_forward_prediction: torch.Tensor,
+        x0: torch.Tensor,
+        xt: torch.Tensor,
+        t_expanded: torch.Tensor,
+        reward_prob: torch.Tensor,
+        config: DiffusionActorConfig,
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]:
+        """Compute NFT policy loss and reference velocity MSE for one modality.
+
+        Adaptive weights use detached FP64 mean absolute errors. Only current
+        predictions carry gradients; ``ref_kl_loss`` is the legacy MSE metric name.
+        """
+        loss_cfg = config.diffusion_loss
+        beta = loss_cfg.mix_beta
+        old_prediction = old_prediction.detach()
+        ref_forward_prediction = ref_forward_prediction.detach()
+
+        reward_weight = reward_prob
+        if reward_weight.ndim > 1:
+            reward_weight = reward_weight.flatten(1).mean(dim=1)
+        reward_weight = reward_weight.to(device=x0.device, dtype=x0.dtype)
+
+        reduce_dims = tuple(range(1, x0.ndim))
+        positive_prediction = beta * forward_prediction + (1.0 - beta) * old_prediction
+        negative_prediction = (1.0 + beta) * old_prediction - beta * forward_prediction
+        positive_x0 = xt - t_expanded * positive_prediction
+        negative_x0 = xt - t_expanded * negative_prediction
+
+        with torch.no_grad():
+            positive_weight = (
+                torch.abs(positive_x0.double() - x0.double())
+                .mean(dim=reduce_dims, keepdim=True)
+                .clamp_min(loss_cfg.adaptive_weight_min)
+                .to(dtype=positive_x0.dtype)
+            )
+            negative_weight = (
+                torch.abs(negative_x0.double() - x0.double())
+                .mean(dim=reduce_dims, keepdim=True)
+                .clamp_min(loss_cfg.adaptive_weight_min)
+                .to(dtype=negative_x0.dtype)
+            )
+
+        positive_loss = ((positive_x0 - x0).square() / positive_weight).mean(dim=reduce_dims)
+        negative_loss = ((negative_x0 - x0).square() / negative_weight).mean(dim=reduce_dims)
+        policy_per_sample = reward_weight * positive_loss / beta + (1.0 - reward_weight) * negative_loss / beta
+        policy_loss = (policy_per_sample * loss_cfg.adv_clip_max).mean()
+        ref_loss = (forward_prediction - ref_forward_prediction).square().mean()
+        details = {
+            "positive_loss": positive_loss.mean(),
+            "negative_loss": negative_loss.mean(),
+            "ref_kl_loss": ref_loss,
+            "old_deviate": (forward_prediction - old_prediction).square().mean(),
+            "reward_prob_mean": reward_weight.mean(),
+        }
+        return policy_loss, ref_loss, details
+
+    @classmethod
+    def compute_loss(
+        cls,
+        *,
+        video_forward_prediction: torch.Tensor,
+        video_old_prediction: torch.Tensor,
+        video_ref_forward_prediction: torch.Tensor,
+        video_x0: torch.Tensor,
+        video_xt: torch.Tensor,
+        video_t_expanded: torch.Tensor,
+        video_reward_prob: torch.Tensor,
+        audio_forward_prediction: torch.Tensor,
+        audio_old_prediction: torch.Tensor,
+        audio_ref_forward_prediction: torch.Tensor,
+        audio_x0: torch.Tensor,
+        audio_xt: torch.Tensor,
+        audio_t_expanded: torch.Tensor,
+        audio_reward_prob: torch.Tensor,
+        config: DiffusionActorConfig,
+    ) -> tuple[torch.Tensor, dict[str, Any]]:
+        """Combine modality policy losses and reference MSEs with separate coefficients.
+
+        Modality loss weights are independent of reward-routing weights.
+        """
+        video_policy, video_ref, video_details = cls._compute_modality_loss(
+            forward_prediction=video_forward_prediction,
+            old_prediction=video_old_prediction,
+            ref_forward_prediction=video_ref_forward_prediction,
+            x0=video_x0,
+            xt=video_xt,
+            t_expanded=video_t_expanded,
+            reward_prob=video_reward_prob,
+            config=config,
+        )
+        audio_policy, audio_ref, audio_details = cls._compute_modality_loss(
+            forward_prediction=audio_forward_prediction,
+            old_prediction=audio_old_prediction,
+            ref_forward_prediction=audio_ref_forward_prediction,
+            x0=audio_x0,
+            xt=audio_xt,
+            t_expanded=audio_t_expanded,
+            reward_prob=audio_reward_prob,
+            config=config,
+        )
+        loss_cfg = config.diffusion_loss
+        modality_weight_sum = max(loss_cfg.video_weight + loss_cfg.audio_weight, 1e-8)
+        total_loss = (
+            loss_cfg.video_weight * (video_policy + loss_cfg.video_ref_kl_coef * video_ref)
+            + loss_cfg.audio_weight * (audio_policy + loss_cfg.audio_ref_kl_coef * audio_ref)
+        ) / modality_weight_sum
+
+        metrics = {
+            "actor/video/policy_loss": video_policy.detach().item(),
+            "actor/audio/policy_loss": audio_policy.detach().item(),
+            "actor/total_loss": total_loss.detach().item(),
+        }
+        for modality, details in (("video", video_details), ("audio", audio_details)):
+            for name, value in details.items():
+                metrics[f"actor/{modality}/{name}"] = value.detach().item()
+        return total_loss, metrics
+
+    def __call__(
+        self,
+        *,
+        config: DiffusionActorConfig,
+        model_output: dict[str, Any],
+        data: TensorDict,
+    ) -> DiffusionLossResult:
+        """Validate single-step ``reward_prob[B, 2]`` and dispatch video/audio losses."""
+        self.validate_inputs(loss_name="omni_nft", model_output=model_output, data=data)
+        reward_prob = data["reward_prob"]
+        if reward_prob.ndim != 2 or reward_prob.shape[1] != 2:
+            raise ValueError(
+                "OmniNFT reward_prob must have shape [B, 2] with columns ordered as video, audio; "
+                f"got {tuple(reward_prob.shape)}."
+            )
+        loss, metrics = self.compute_loss(
+            **{key: model_output[key] for key in self.required_model_output_keys},
+            video_reward_prob=reward_prob[:, 0],
+            audio_reward_prob=reward_prob[:, 1],
+            config=config,
+        )
+        return DiffusionLossResult(loss=loss, metrics=metrics)
+
+    @staticmethod
+    def _compute_component_advantages(
+        scores: torch.Tensor,
+        uid: Sequence[Any],
+        *,
+        norm_by_std: bool,
+        global_std: bool,
+        epsilon: float = 1e-4,
+    ) -> torch.Tensor:
+        """Center each reward component by prompt group and optionally normalize it.
+
+        Use population standard deviation, either per group or across the full
+        batch. Normalize components before routing them to video/audio.
+        """
+        if scores.ndim != 2:
+            raise ValueError(f"OmniNFT reward scores must have shape [B, K], got {tuple(scores.shape)}.")
+        if scores.shape[1] == 0:
+            raise ValueError("OmniNFT reward scores must contain at least one component.")
+        if len(uid) != scores.shape[0]:
+            raise ValueError(f"OmniNFT uid count {len(uid)} does not match reward batch size {scores.shape[0]}.")
+        if epsilon <= 0:
+            raise ValueError(f"OmniNFT advantage epsilon must be positive, got {epsilon}.")
+
+        scores = scores.detach().float()
+        groups: dict[Any, list[int]] = defaultdict(list)
+        for index, group_id in enumerate(uid):
+            groups[group_id].append(index)
+
+        advantages = torch.empty_like(scores)
+        batch_std = scores.std(dim=0, correction=0) if global_std and norm_by_std else None
+        for indices in groups.values():
+            index_tensor = torch.tensor(indices, device=scores.device)
+            group_scores = scores.index_select(0, index_tensor)
+            centered = group_scores - group_scores.mean(dim=0, keepdim=True)
+            if norm_by_std:
+                std = batch_std if batch_std is not None else group_scores.std(dim=0, correction=0)
+                centered = centered / (std.unsqueeze(0) + epsilon)
+            advantages.index_copy_(0, index_tensor, centered)
+        return advantages
+
+    @staticmethod
+    def _build_reward_routing_matrix(
+        *,
+        reward_names: Sequence[str],
+        reward_functions: Mapping[str, Any],
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        """Build routing weights in reward_names order with video/audio columns.
+
+        Return ``[K, 2]`` on the requested device/dtype. Reward names must be
+        unique and exactly match configuration keys; each row requires
+        nonnegative video/audio weights with at least one nonzero entry.
+        Weights are not normalized.
+        """
+        reward_names = list(reward_names)
+        if not reward_names or len(reward_names) != len(set(reward_names)):
+            raise ValueError("OmniNFT reward_names must be non-empty and unique.")
+        if set(reward_functions) != set(reward_names):
+            raise ValueError("OmniNFT reward_names must match reward.reward_functions keys.")
+
+        rows: list[list[float]] = []
+        for name in reward_names:
+            entry = reward_functions[name]
+            routing_weights = entry.get("routing_weights")
+            if routing_weights is None:
+                raise ValueError(f"Reward '{name}' must define routing_weights.video and routing_weights.audio.")
+            row = []
+            for modality in ("video", "audio"):
+                value = routing_weights.get(modality)
+                if value is None:
+                    raise ValueError(f"Reward '{name}' must define routing_weights.{modality}.")
+                if value < 0:
+                    raise ValueError(f"Reward '{name}' routing weight for {modality} must be non-negative.")
+                row.append(float(value))
+            if not any(row):
+                raise ValueError(f"Reward '{name}' must route to at least one modality.")
+            rows.append(row)
+        return torch.tensor(rows, device=device, dtype=dtype)
+
+    @classmethod
+    def prepare_actor_batch(cls, batch: DataProto, reward_tensor: torch.Tensor, config: Any) -> DataProto:
+        """Normalize reward components, route them to modalities, and select timesteps.
+
+        Store per-step video/audio reward probabilities for the actor, plus
+        reward summaries, advantages, and returns for existing metric consumers.
+        """
+        if "uid" not in batch.non_tensor_batch:
+            raise ValueError("OmniNFT actor batch requires `uid` in non_tensor_batch.")
+        for key in ("video_latents_clean", "audio_latents_clean", "train_timesteps"):
+            if key not in batch.batch:
+                raise ValueError(f"OmniNFT actor batch requires `{key}` from rollout.")
+        if "rm_scores" not in batch.batch:
+            raise ValueError("OmniNFT actor batch requires `rm_scores` from the batch Reward Manager.")
+
+        scores = batch.batch["rm_scores"].detach().float()
+        if reward_tensor.ndim == 1 and scores.ndim == 2 and scores.shape[1] == 1:
+            reward_tensor = reward_tensor.unsqueeze(-1)
+        if reward_tensor.shape != scores.shape:
+            raise ValueError(
+                f"OmniNFT extracted reward shape {tuple(reward_tensor.shape)} does not match "
+                f"rm_scores {tuple(scores.shape)}."
+            )
+        valid_mask = batch.batch.get("reward_valid_mask")
+        if valid_mask is not None and (valid_mask.shape != scores.shape or not valid_mask.all()):
+            raise ValueError("OmniNFT requires a fully valid reward_valid_mask matching rm_scores.")
+
+        algorithm_cfg = config.algorithm
+        actor_cfg = config.actor_rollout_ref.actor
+        reward_cfg = config.reward
+        reward_names = batch.meta_info.get("reward_names")
+        if reward_names is None:
+            raise ValueError("OmniNFT actor batch requires reward_names in meta_info.")
+        reward_names = list(reward_names)
+
+        reward_advantages = cls._compute_component_advantages(
+            scores=scores,
+            uid=batch.non_tensor_batch["uid"],
+            norm_by_std=algorithm_cfg.norm_adv_by_std_in_grpo,
+            global_std=algorithm_cfg.global_std,
+        )
+        routing_matrix = cls._build_reward_routing_matrix(
+            reward_names=reward_names,
+            reward_functions=reward_cfg.reward_functions,
+            device=reward_advantages.device,
+            dtype=reward_advantages.dtype,
+        )
+        if routing_matrix.shape != (reward_advantages.shape[1], 2):
+            raise ValueError(
+                f"OmniNFT routing matrix must have shape {(reward_advantages.shape[1], 2)}, "
+                f"got {tuple(routing_matrix.shape)}."
+            )
+        modality_advantages = reward_advantages @ routing_matrix
+        modality_reward_probs = cls._advantage_to_reward_prob(
+            modality_advantages,
+            adv_clip_max=actor_cfg.diffusion_loss.adv_clip_max,
+            adv_mode=algorithm_cfg.adv_mode,
+        )
+        train_timesteps = DiffusionNFTLoss._select_train_timesteps(
+            batch.batch["train_timesteps"],
+            timestep_fraction=algorithm_cfg.timestep_fraction,
+            seed=actor_cfg.data_loader_seed,
+        )
+        num_steps = train_timesteps.shape[1]
+        timestep_modality_reward_probs = modality_reward_probs[:, None, :].expand(-1, num_steps, -1)
+        summary_advantages = modality_advantages.mean(dim=1, keepdim=True).expand(-1, num_steps)
+
+        batch.batch["train_timesteps"] = train_timesteps
+        batch.batch["reward_prob"] = timestep_modality_reward_probs
+        batch.batch["advantages"] = summary_advantages
+        batch.batch["returns"] = summary_advantages
+        batch.batch["sample_level_rewards"] = scores
+        return batch
+
+
+@register_diffusion_loss("dgpo")
+class DGPOLoss(DiffusionLossFn):
+    """DGPO group-level direct preference objective (Luo et al., arXiv:2510.08425).
+
+    Every rollout group (one prompt, ``n`` images) shares its forward noise and timestep.
+    Per sample ``i`` in group ``g`` with advantage ``A_i`` and flow-matching error
+    ``dsm_i = ||v - v_theta(x_t)||^2`` (``ref_dsm_i`` under the reference model)::
+
+        s_g  = sum_{i in g} A_i * beta * (dsm_i - ref_dsm_i) / |g|      (detached)
+        loss = mean_i( sigmoid(s_g) * A_i * dsm_i )
+
+    ``dsm_i`` is detached where the old-policy ratio ``exp(old_dsm_i - dsm_i)`` leaves
+    ``[1 - clip_range, 1 + clip_range]`` in the direction of ``A_i``. The group sum is
+    computed locally, so each micro batch must hold whole groups; the loss raises otherwise.
+    """
+
+    uses_old_adapter = True
+    requires_whole_groups = True
+    required_model_output_keys = (
+        "forward_prediction",
+        "old_prediction",
+        "ref_forward_prediction",
+        "x0",
+        "xt",
+        "t_expanded",
+    )
+    required_data_keys = ("advantages", "group_index", "group_size")
+
+    @classmethod
+    def compute_loss(
+        cls,
+        *,
+        forward_prediction: torch.Tensor,
+        old_prediction: torch.Tensor,
+        ref_forward_prediction: torch.Tensor,
+        x0: torch.Tensor,
+        xt: torch.Tensor,
+        t_expanded: torch.Tensor,
+        advantages: torch.Tensor,
+        group_index: torch.Tensor,
+        group_size: torch.Tensor,
+        config: DiffusionActorConfig,
+    ) -> tuple[torch.Tensor, dict[str, Any]]:
+        """Compute the DGPO loss for one micro batch of whole groups at one shared timestep."""
+        loss_cfg = config.diffusion_loss
+        reduce_dims = tuple(range(1, x0.ndim))
+        # xt = (1 - t) * x0 + t * noise, so the flow-matching target noise - x0 is (xt - x0) / t.
+        target = ((xt.float() - x0.float()) / t_expanded.float()).detach()
+        advantages = advantages.to(device=x0.device, dtype=torch.float32)
+        if advantages.ndim > 1:
+            advantages = advantages.flatten(1).mean(dim=1)
+        advantages = advantages.clamp(-loss_cfg.adv_clip_max, loss_cfg.adv_clip_max)
+
+        dsm = ((target - forward_prediction.float()) ** 2).mean(dim=reduce_dims)
+        with torch.no_grad():
+            ref_dsm = ((target - ref_forward_prediction.detach().float()) ** 2).mean(dim=reduce_dims)
+            old_dsm = ((target - old_prediction.detach().float()) ** 2).mean(dim=reduce_dims)
+
+            group_index = group_index.to(device=x0.device).long().flatten()
+            group_size = group_size.to(device=x0.device).long().flatten()
+            groups, inverse = torch.unique(group_index, return_inverse=True)
+            counts = torch.bincount(inverse, minlength=groups.numel())
+            expected = torch.zeros_like(counts).scatter_(0, inverse, group_size)
+            if not torch.equal(counts, expected):
+                raise ValueError(
+                    "DGPO needs every rollout group whole inside one micro batch; got group sizes "
+                    f"{counts.tolist()} where {expected.tolist()} were expected. Use a micro batch size that is a "
+                    "multiple of actor_rollout_ref.rollout.n and keep actor shuffling off."
+                )
+
+            per_sample = advantages * loss_cfg.dgpo_beta * (dsm.detach() - ref_dsm) / group_size.float()
+            group_sums = torch.zeros(groups.numel(), device=x0.device, dtype=torch.float32)
+            group_sums.index_add_(0, inverse, per_sample)
+            group_weights = torch.sigmoid(group_sums)
+            weights = group_weights[inverse]
+
+            if loss_cfg.dgpo_clip_range > 0:
+                ratio = torch.exp(old_dsm - dsm.detach())
+                should_clip = torch.where(
+                    advantages > 0, ratio > 1.0 + loss_cfg.dgpo_clip_range, ratio < 1.0 - loss_cfg.dgpo_clip_range
+                )
+            else:
+                should_clip = torch.zeros_like(dsm, dtype=torch.bool)
+
+        clipped_dsm = torch.where(should_clip, dsm.detach(), dsm)
+        policy_loss = (weights * advantages * clipped_dsm).mean()
+        ref_kl_loss = ((forward_prediction.float() - ref_forward_prediction.detach().float()) ** 2).mean()
+        loss = policy_loss + loss_cfg.ref_kl_coef * ref_kl_loss
+
+        metrics = {
+            "actor/policy_loss": policy_loss.detach().item(),
+            "actor/dsm_loss": dsm.detach().mean().item(),
+            "actor/ref_dsm_loss": ref_dsm.mean().item(),
+            "actor/old_dsm_loss": old_dsm.mean().item(),
+            "actor/group_weight_mean": group_weights.mean().item(),
+            # Mean distance from the neutral weight 0.5; stays meaningful when metrics are averaged across ranks.
+            "actor/group_weight_dev": (group_weights - 0.5).abs().mean().item(),
+            "actor/clip_frac": should_clip.float().mean().item(),
+            "actor/ref_kl_loss": ref_kl_loss.detach().item(),
+            "actor/total_loss": loss.detach().item(),
+        }
+        return loss, metrics
+
+    def __call__(
+        self,
+        *,
+        config: DiffusionActorConfig,
+        model_output: dict[str, Any],
+        data: TensorDict,
+    ) -> DiffusionLossResult:
+        loss, metrics = self.compute_loss(
+            forward_prediction=model_output["forward_prediction"],
+            old_prediction=model_output["old_prediction"],
+            ref_forward_prediction=model_output["ref_forward_prediction"],
+            x0=model_output["x0"],
+            xt=model_output["xt"],
+            t_expanded=model_output["t_expanded"],
+            advantages=data["advantages"],
+            group_index=data["group_index"],
+            group_size=data["group_size"],
+            config=config,
+        )
+        return DiffusionLossResult(loss=loss, metrics=metrics)
+
+    @staticmethod
+    def validate_trainer_config(config: Any) -> None:
+        """Fail at trainer start on configs DGPO cannot train, instead of after the first rollout.
+
+        ``actor_rollout_ref.model.algorithm`` selects the rollout and training adapters, so it must name ``dgpo``
+        when this loss is selected. Each rank receives a contiguous ``batch * n / dp`` slice of the update batch
+        and of every mini batch and cuts it into contiguous micro batches, so groups stay whole only when every
+        division is exact in units of ``n``. The loss also needs the LoRA ``old`` adapter for rollout and the
+        reference forward, complete groups from the v1 sampler, the unstaged NFT engine path, and training
+        timesteps that fit the rollout schedule.
+        """
+        actor_cfg = config.actor_rollout_ref.actor
+        model_cfg = config.actor_rollout_ref.model
+        rollout_cfg = config.actor_rollout_ref.rollout
+        n = int(rollout_cfg.n)
+        micro = actor_cfg.get("ppo_micro_batch_size_per_gpu", None)
+        sp_size = OmegaConf.select(actor_cfg, "fsdp_config.ulysses_sequence_parallel_size", default=1) or 1
+        dp_size = int(config.trainer.n_gpus_per_node) * int(config.trainer.nnodes) // int(sp_size)
+        use_v1 = bool(OmegaConf.select(config, "trainer.use_v1", default=False))
+        update_prompts = int(config.data.train_batch_size)
+        if use_v1:
+            mode = OmegaConf.select(config, "trainer.v1.trainer_mode", default="sync")
+            update_prompts //= int(OmegaConf.select(config, f"trainer.v1.{mode}.parameter_sync_step", default=1) or 1)
+        problems = []
+        if model_cfg.get("algorithm", None) != "dgpo":
+            problems.append(
+                "actor_rollout_ref.model.algorithm must be dgpo when diffusion_loss.loss_mode is dgpo, got "
+                f"{model_cfg.get('algorithm', None)}"
+            )
+        if micro is None or int(micro) % n != 0:
+            problems.append(f"ppo_micro_batch_size_per_gpu={micro} must be a multiple of rollout.n={n}")
+        if int(actor_cfg.ppo_mini_batch_size) % dp_size != 0:
+            mini = actor_cfg.ppo_mini_batch_size
+            problems.append(f"ppo_mini_batch_size={mini} must be divisible by dp size {dp_size}")
+        if update_prompts % dp_size != 0:
+            problems.append(f"the {update_prompts} prompts per actor update must be divisible by dp size {dp_size}")
+        if actor_cfg.get("use_dynamic_bsz", False):
+            problems.append("use_dynamic_bsz must be False")
+        if not int(model_cfg.get("lora_rank", 0) or 0) > 0:
+            problems.append("actor_rollout_ref.model.lora_rank must be > 0 (DGPO trains LoRA adapters)")
+        if "old" not in tuple(model_cfg.get("policy_state_adapters", ("default",))):
+            problems.append('actor_rollout_ref.model.policy_state_adapters must include "old"')
+        if rollout_cfg.get("rollout_adapter", None) != "old":
+            problems.append("actor_rollout_ref.rollout.rollout_adapter must be old")
+        if actor_cfg.get("use_kl_loss", False):
+            problems.append("actor_rollout_ref.actor.use_kl_loss must be False (use diffusion_loss.ref_kl_coef)")
+        if actor_cfg.get("enable_timestep_staging", False):
+            problems.append("actor_rollout_ref.actor.enable_timestep_staging must be False")
+        if use_v1 and not OmegaConf.select(config, "trainer.v1.sampler.drop_incomplete_groups", default=False):
+            problems.append("trainer.v1.sampler.drop_incomplete_groups must be True so groups arrive complete")
+        num_steps = OmegaConf.select(rollout_cfg, "pipeline.num_inference_steps", default=None)
+        timestep_range = OmegaConf.select(config, "algorithm.train_timestep_range", default=None)
+        count = OmegaConf.select(config, "algorithm.train_timestep_count", default=None)
+        if num_steps is not None:
+            num_steps = int(num_steps)
+            if timestep_range is None:
+                start, end = 0, num_steps
+            elif len(timestep_range) == 2:
+                start, end = int(timestep_range[0]), int(timestep_range[1])
+            else:
+                start, end = 0, 0
+            if not 0 <= start < end <= num_steps:
+                problems.append(f"train_timestep_range {timestep_range} must satisfy 0 <= start < end <= {num_steps}")
+            elif count is not None and not 1 <= int(count) <= end - start:
+                problems.append(f"train_timestep_count={count} must be between 1 and {end - start}, the range width")
+        if problems:
+            raise ValueError("DGPO config is not supported: " + "; ".join(problems) + ".")
+
+    @staticmethod
+    def _first_appearance_index(uid: np.ndarray) -> np.ndarray:
+        """Number groups 0, 1, ... in the order their uid first appears."""
+        _, first, inverse = np.unique(uid, return_index=True, return_inverse=True)
+        rank = np.empty_like(first)
+        rank[np.argsort(first, kind="stable")] = np.arange(first.size)
+        return rank[inverse.reshape(-1)]
+
+    @staticmethod
+    def _make_groups_contiguous(batch: DataProto, reward_tensor: torch.Tensor) -> tuple[torch.Tensor, np.ndarray]:
+        """Keep prompt groups whole in contiguous micro batches, preserving reward alignment."""
+        group_index = DGPOLoss._first_appearance_index(batch.non_tensor_batch["uid"])
+        if np.any(np.diff(group_index) < 0):
+            order = np.argsort(group_index, kind="stable")
+            batch.reorder(torch.from_numpy(order))
+            reward_tensor = reward_tensor[torch.from_numpy(order).to(reward_tensor.device)]
+            group_index = group_index[order]
+        return reward_tensor, group_index
+
+    @staticmethod
+    def _select_shared_timesteps(
+        schedule: torch.Tensor,
+        timestep_range: Optional[list[int]],
+        count: Optional[int],
+        timestep_fraction: float,
+        generator: Optional[torch.Generator] = None,
+        *,
+        min_timestep: int = 1,
+        loss_name: str = "DGPO",
+    ) -> torch.Tensor:
+        """Draw schedule indices once and apply them to every row, so groups share timesteps."""
+        if schedule.ndim != 2:
+            raise ValueError(f"{loss_name} rollout timesteps must have shape [B, T], got {tuple(schedule.shape)}.")
+        if not torch.equal(schedule, schedule[:1].expand_as(schedule)):
+            raise ValueError(
+                f"{loss_name} shares timesteps across the batch, so every rollout must use the same schedule."
+            )
+        num_steps = schedule.shape[1]
+        start, end = (0, num_steps) if timestep_range is None else (int(timestep_range[0]), int(timestep_range[1]))
+        if not 0 <= start < end <= num_steps:
+            raise ValueError(f"train_timestep_range {timestep_range} must satisfy 0 <= start < end <= {num_steps}.")
+        width = end - start
+        if count is not None and not 1 <= int(count) <= width:
+            raise ValueError(f"train_timestep_count={count} must be between 1 and {width}, the range width.")
+        count = max(1, int(width * timestep_fraction)) if count is None else int(count)
+        index = torch.randperm(width, generator=generator)[:count] + start
+        selected = schedule[:, index.to(schedule.device)]
+        # DGPO divides by t; CRD constructs the velocity target directly and allows t=0.
+        if (selected < min_timestep).any():
+            raise ValueError(
+                f"{loss_name} training timesteps must be >= {min_timestep}; "
+                "narrow train_timestep_range to skip the last step."
+            )
+        return selected
+
+    @staticmethod
+    def prepare_actor_batch(
+        batch: DataProto,
+        reward_tensor: torch.Tensor,
+        config: Any,
+    ) -> DataProto:
+        """Turn ODE rollouts into DGPO actor tensors: advantages, groups, shared timesteps and noise."""
+        algorithm_cfg = config.algorithm
+        if "uid" not in batch.non_tensor_batch:
+            raise ValueError("DGPO actor batch requires `uid` in non_tensor_batch.")
+        if "latents_clean" not in batch.batch.keys():
+            raise ValueError("DGPO actor batch requires `latents_clean` from rollout.")
+        timestep_key = next((key for key in ("train_timesteps", "all_timesteps") if key in batch.batch.keys()), None)
+        if timestep_key is None:
+            raise ValueError("DGPO actor batch requires `train_timesteps` or `all_timesteps` from rollout.")
+
+        reward_tensor, group_index = DGPOLoss._make_groups_contiguous(batch, reward_tensor)
+
+        uid = batch.non_tensor_batch["uid"]
+        counts = np.bincount(group_index)
+        group_size = torch.from_numpy(counts[group_index]).long()
+        group_index = torch.from_numpy(group_index).long()
+
+        advantages = DiffusionNFTLoss._compute_group_advantages(
+            rewards=reward_tensor,
+            uid=uid,
+            norm_by_std=algorithm_cfg.norm_adv_by_std_in_grpo,
+            global_std=algorithm_cfg.global_std,
+        )
+        train_timesteps = DGPOLoss._select_shared_timesteps(
+            batch.batch[timestep_key],
+            timestep_range=getattr(algorithm_cfg, "train_timestep_range", None),
+            count=getattr(algorithm_cfg, "train_timestep_count", None),
+            timestep_fraction=algorithm_cfg.timestep_fraction,
+        ).long()
+        latents = batch.batch["latents_clean"]
+        num_steps = train_timesteps.shape[1]
+        group_noise = torch.randn(int(counts.size), num_steps, *latents.shape[1:], dtype=torch.float32)
+        forward_noise = group_noise[group_index]
+
+        batch.batch["train_timesteps"] = train_timesteps
+        batch.batch["forward_noise"] = forward_noise
+        batch.batch["group_index"] = group_index
+        batch.batch["group_size"] = group_size
+        batch.batch["advantages"] = advantages[:, None].expand(-1, num_steps)
+        batch.batch["returns"] = batch.batch["advantages"]
+        batch.batch["sample_level_rewards"] = reward_tensor[:, None].expand(-1, num_steps)
+        return batch
+
+
+@register_diffusion_loss("awm")
+class AWMLoss(DiffusionLossFn):
+    """Advantage Weighted Matching (Xue et al., arXiv:2509.25050).
+
+    Each rollout sample's clean latent is re-noised at a forward timestep and its flow-matching
+    error ``dsm_i = mean(||(noise - x0^i) - v_theta(x_t^i)||^2)`` stands in for ``-log pi_theta(x^i)``.
+    With the rollout (``old``) adapter error ``old_dsm_i`` and the GRPO group advantage ``A_i``::
+
+        ratio_i = exp(old_dsm_i - dsm_i)
+        loss = mean_i( max(-A_i * ratio_i, -A_i * clip(ratio_i, 1 - eps, 1 + eps)) )
+               + awm_kl_coef * mean(||v_theta - v_old||^2) + ref_kl_coef * mean(||v_theta - v_ref||^2)
+
+    The ``old`` adapter is the EMA of the trained adapter (``algorithm.old_policy_decay`` or
+    ``old_policy_decay_schedule``), so the ``awm_kl_coef`` term is the paper's velocity-space KL to an
+    EMA copy of the policy. Under the default ``copy`` schedule ``old == default`` when a step starts,
+    so the first ``ppo_epochs`` pass is the on-policy advantage-weighted flow-matching update and the
+    ratio and KL only act on later passes. Training timesteps are shared across the batch and drawn
+    from ``algorithm.train_timestep_range`` / ``train_timestep_count`` / ``timestep_fraction`` exactly
+    as for DGPO; the forward noise is drawn per sample by the engine. Timestep weighting ``w(t)`` is
+    uniform (``w(t) = 1``).
+    """
+
+    uses_old_adapter = True
+    required_model_output_keys = (
+        "forward_prediction",
+        "old_prediction",
+        "ref_forward_prediction",
+        "x0",
+        "xt",
+        "t_expanded",
+    )
+    required_data_keys = ("advantages",)
+
+    @classmethod
+    def compute_loss(
+        cls,
+        *,
+        forward_prediction: torch.Tensor,
+        old_prediction: torch.Tensor,
+        ref_forward_prediction: torch.Tensor,
+        x0: torch.Tensor,
+        xt: torch.Tensor,
+        t_expanded: torch.Tensor,
+        advantages: torch.Tensor,
+        config: DiffusionActorConfig,
+    ) -> tuple[torch.Tensor, dict[str, Any]]:
+        """Compute the AWM clipped surrogate plus the EMA and reference velocity regularizers."""
+        loss_cfg = config.diffusion_loss
+        reduce_dims = tuple(range(1, x0.ndim))
+        # xt = (1 - t) * x0 + t * noise, so the flow-matching target noise - x0 is (xt - x0) / t.
+        target = ((xt.float() - x0.float()) / t_expanded.float()).detach()
+        advantages = advantages.to(device=x0.device, dtype=torch.float32)
+        if advantages.ndim > 1:
+            advantages = advantages.flatten(1).mean(dim=1)
+        advantages = advantages.clamp(-loss_cfg.adv_clip_max, loss_cfg.adv_clip_max)
+        old_prediction = old_prediction.detach().float()
+        ref_forward_prediction = ref_forward_prediction.detach().float()
+
+        dsm = ((target - forward_prediction.float()) ** 2).mean(dim=reduce_dims)
+        with torch.no_grad():
+            old_dsm = ((target - old_prediction) ** 2).mean(dim=reduce_dims)
+        ratio = torch.exp(old_dsm - dsm)
+        clip_range = loss_cfg.awm_clip_range
+        if clip_range > 0:
+            clipped_ratio = ratio.clamp(1.0 - clip_range, 1.0 + clip_range)
+            policy_loss = torch.maximum(-advantages * ratio, -advantages * clipped_ratio).mean()
+        else:
+            policy_loss = (-advantages * ratio).mean()
+        ema_kl_loss = ((forward_prediction.float() - old_prediction) ** 2).mean()
+        ref_kl_loss = ((forward_prediction.float() - ref_forward_prediction) ** 2).mean()
+        loss = policy_loss + loss_cfg.awm_kl_coef * ema_kl_loss + loss_cfg.ref_kl_coef * ref_kl_loss
+
+        with torch.no_grad():
+            # Samples whose surrogate is the clipped constant, i.e. that receive no policy gradient.
+            if clip_range > 0:
+                should_clip = torch.where(advantages > 0, ratio > 1.0 + clip_range, ratio < 1.0 - clip_range)
+            else:
+                should_clip = torch.zeros_like(ratio, dtype=torch.bool)
+            metrics = {
+                "actor/policy_loss": policy_loss.item(),
+                "actor/dsm_loss": dsm.mean().item(),
+                "actor/old_dsm_loss": old_dsm.mean().item(),
+                "actor/ratio_mean": ratio.mean().item(),
+                "actor/clip_frac": should_clip.float().mean().item(),
+                "actor/ema_kl_loss": ema_kl_loss.item(),
+                "actor/ref_kl_loss": ref_kl_loss.item(),
+                "actor/total_loss": loss.item(),
+            }
+        return loss, metrics
+
+    def __call__(
+        self,
+        *,
+        config: DiffusionActorConfig,
+        model_output: dict[str, Any],
+        data: TensorDict,
+    ) -> DiffusionLossResult:
+        """Compute the AWM loss from the engine's model output and the per-step batch tensors."""
+        loss, metrics = self.compute_loss(
+            forward_prediction=model_output["forward_prediction"],
+            old_prediction=model_output["old_prediction"],
+            ref_forward_prediction=model_output["ref_forward_prediction"],
+            x0=model_output["x0"],
+            xt=model_output["xt"],
+            t_expanded=model_output["t_expanded"],
+            advantages=data["advantages"],
+            config=config,
+        )
+        return DiffusionLossResult(loss=loss, metrics=metrics)
+
+    @staticmethod
+    def validate_trainer_config(config: Any) -> None:
+        """Fail at trainer start without the LoRA ``old`` adapter, with timestep staging, or a bad timestep window.
+
+        ``actor_rollout_ref.model.algorithm`` selects the rollout and training adapters, so it must name ``awm``
+        when this loss is selected. The staged NFT engine path expects a per-step ``reward_prob`` tensor that
+        AWM does not produce.
+        """
+        actor_cfg = config.actor_rollout_ref.actor
+        model_cfg = config.actor_rollout_ref.model
+        rollout_cfg = config.actor_rollout_ref.rollout
+        problems = []
+        if model_cfg.get("algorithm", None) != "awm":
+            problems.append(
+                "actor_rollout_ref.model.algorithm must be awm when diffusion_loss.loss_mode is awm, got "
+                f"{model_cfg.get('algorithm', None)}"
+            )
+        if not int(model_cfg.get("lora_rank", 0) or 0) > 0:
+            problems.append("actor_rollout_ref.model.lora_rank must be > 0 (AWM trains LoRA adapters)")
+        if "old" not in tuple(model_cfg.get("policy_state_adapters", ("default",))):
+            problems.append('actor_rollout_ref.model.policy_state_adapters must include "old"')
+        if rollout_cfg.get("rollout_adapter", None) != "old":
+            problems.append("actor_rollout_ref.rollout.rollout_adapter must be old")
+        if actor_cfg.get("use_kl_loss", False):
+            problems.append("actor_rollout_ref.actor.use_kl_loss must be False (use diffusion_loss.ref_kl_coef)")
+        if actor_cfg.get("enable_timestep_staging", False):
+            problems.append("actor_rollout_ref.actor.enable_timestep_staging must be False")
+        num_steps = OmegaConf.select(rollout_cfg, "pipeline.num_inference_steps", default=None)
+        timestep_range = OmegaConf.select(config, "algorithm.train_timestep_range", default=None)
+        count = OmegaConf.select(config, "algorithm.train_timestep_count", default=None)
+        if num_steps is not None:
+            num_steps = int(num_steps)
+            if timestep_range is None:
+                start, end = 0, num_steps
+            elif len(timestep_range) == 2:
+                start, end = int(timestep_range[0]), int(timestep_range[1])
+            else:
+                start, end = 0, 0
+            if not 0 <= start < end <= num_steps:
+                problems.append(f"train_timestep_range {timestep_range} must satisfy 0 <= start < end <= {num_steps}")
+            elif count is not None and not 1 <= int(count) <= end - start:
+                problems.append(f"train_timestep_count={count} must be between 1 and {end - start}, the range width")
+        if problems:
+            raise ValueError("AWM config is not supported: " + "; ".join(problems) + ".")
+
+    @staticmethod
+    def prepare_actor_batch(
+        batch: DataProto,
+        reward_tensor: torch.Tensor,
+        config: Any,
+    ) -> DataProto:
+        """Turn ODE rollouts into AWM actor tensors: GRPO group advantages and shared training timesteps."""
+        algorithm_cfg = config.algorithm
+        if "uid" not in batch.non_tensor_batch:
+            raise ValueError("AWM actor batch requires `uid` in non_tensor_batch.")
+        if "latents_clean" not in batch.batch.keys():
+            raise ValueError("AWM actor batch requires `latents_clean` from rollout.")
+        timestep_key = next((key for key in ("train_timesteps", "all_timesteps") if key in batch.batch.keys()), None)
+        if timestep_key is None:
+            raise ValueError("AWM actor batch requires `train_timesteps` or `all_timesteps` from rollout.")
+        advantages, _ = compute_flow_grpo_outcome_advantage(
+            reward_tensor.float().view(-1, 1),
+            index=batch.non_tensor_batch["uid"],
+            norm_adv_by_std_in_grpo=algorithm_cfg.norm_adv_by_std_in_grpo,
+            global_std=algorithm_cfg.global_std,
+        )
+        train_timesteps = DGPOLoss._select_shared_timesteps(
+            batch.batch[timestep_key],
+            timestep_range=getattr(algorithm_cfg, "train_timestep_range", None),
+            count=getattr(algorithm_cfg, "train_timestep_count", None),
+            timestep_fraction=algorithm_cfg.timestep_fraction,
+        ).long()
+        num_steps = train_timesteps.shape[1]
+        batch.batch["train_timesteps"] = train_timesteps
+        batch.batch["advantages"] = advantages.expand(-1, num_steps)
+        batch.batch["returns"] = batch.batch["advantages"]
+        batch.batch["sample_level_rewards"] = reward_tensor[:, None].expand(-1, num_steps)
+        return batch
+
+
+@register_diffusion_loss("crd")
+class CRDLoss(DiffusionLossFn):
+    """Centered Reward Distillation (Zhu et al., arXiv:2603.14128).
+
+    Centers rewards within prompt groups rather than the reference code's gathered
+    batch. The recipe uses CFG=1 sampling and a CFG=4.5 pretrained anchor; the
+    reference recipe uses guided sampling and an unguided anchor.
+    """
+
+    uses_old_adapter = True
+    extra_ema_adapters = (("moving_reference", "reference_policy"),)
+    requires_whole_groups = True
+    required_model_output_keys = ("forward_prediction", "old_prediction", "ref_forward_prediction", "velocity_target")
+    required_data_keys = ("advantages", "raw_rewards", "group_index", "group_size")
+
+    @classmethod
+    def compute_loss(
+        cls,
+        *,
+        forward_prediction: torch.Tensor,
+        old_prediction: torch.Tensor,
+        ref_forward_prediction: torch.Tensor,
+        velocity_target: torch.Tensor,
+        advantages: torch.Tensor,
+        raw_rewards: torch.Tensor,
+        group_index: torch.Tensor,
+        group_size: torch.Tensor,
+        config: DiffusionActorConfig,
+    ) -> tuple[torch.Tensor, dict[str, Any]]:
+        """Match centered rewards using (B, ...) velocities and (B,) group metadata."""
+        cfg = config.diffusion_loss
+        prediction = forward_prediction.float()
+        target = velocity_target.detach().float()
+        old = old_prediction.detach().float()
+        anchor = ref_forward_prediction.detach().float()
+        dims = tuple(range(1, prediction.ndim))
+        # The released estimator divides each MSE by its own detached mean absolute error.
+        with torch.no_grad():
+            norm = (prediction.double() - target.double()).abs().mean(dims).clamp_min(cfg.adaptive_weight_min)
+            old_norm = (old.double() - target.double()).abs().mean(dims).clamp_min(cfg.adaptive_weight_min)
+        implicit = (old - target).square().mean(dims) / old_norm - (prediction - target).square().mean(dims) / norm
+        rewards = advantages.detach().to(implicit).flatten().clamp(-cfg.adv_clip_max, cfg.adv_clip_max)
+        rewards = (rewards / cfg.adv_clip_max + 1) / 2
+        raw_rewards = raw_rewards.detach().to(implicit).flatten()
+        groups, inverse = torch.unique(group_index.to(prediction.device).long().flatten(), return_inverse=True)
+        counts = torch.bincount(inverse, minlength=groups.numel())
+        expected = group_size.to(counts).flatten()
+        if not torch.equal(counts[inverse], expected) or (counts < 2).any():
+            raise ValueError("CRD requires complete prompt groups of at least two samples in each micro batch.")
+        means = torch.zeros(groups.numel(), device=prediction.device, dtype=implicit.dtype)
+        reward_means = means.clone().index_add_(0, inverse, rewards) / counts
+        model_means = means.index_add_(0, inverse, implicit.detach()) / counts
+        residual = cfg.crd_beta * (implicit - model_means[inverse]) - (rewards - reward_means[inverse])
+        policy_loss = residual.square().mean() * cfg.adv_clip_max / cfg.crd_beta
+        kl = (prediction - anchor).square().mean(dims)
+        coefficient = cfg.crd_kl_min + raw_rewards * (cfg.ref_kl_coef - cfg.crd_kl_min)
+        kl_loss = (coefficient * kl).mean()
+        loss = policy_loss + kl_loss
+        return loss, {
+            "actor/crd_policy_loss": policy_loss.detach().item(),
+            "actor/crd_kl_loss": kl_loss.detach().item(),
+            "actor/crd_kl_coefficient": coefficient.mean().item(),
+            "actor/crd_implicit_reward": implicit.detach().mean().item(),
+            "actor/crd_loss": loss.detach().item(),
+        }
+
+    def __call__(self, *, config, model_output, data) -> DiffusionLossResult:
+        """Dispatch the CRD forward-process objective."""
+        self.validate_inputs(loss_name="crd", model_output=model_output, data=data)
+        loss, metrics = self.compute_loss(
+            **{key: model_output[key] for key in self.required_model_output_keys},
+            **{key: data[key] for key in self.required_data_keys},
+            config=config,
+        )
+        return DiffusionLossResult(loss=loss, metrics=metrics)
+
+    @staticmethod
+    def validate_trainer_config(config: Any) -> None:
+        """Require whole groups, independent adapters and the V1 synchronous LoRA path."""
+        actor = config.actor_rollout_ref.actor
+        model = config.actor_rollout_ref.model
+        rollout = config.actor_rollout_ref.rollout
+        n = int(rollout.n)
+        if n < 2:
+            raise ValueError("CRD requires rollout.n >= 2.")
+        micro = actor.get("ppo_micro_batch_size_per_gpu", None)
+        sp_size = OmegaConf.select(actor, "fsdp_config.ulysses_sequence_parallel_size", default=1) or 1
+        dp_size = int(config.trainer.n_gpus_per_node) * int(config.trainer.nnodes) // int(sp_size)
+        use_v1 = bool(OmegaConf.select(config, "trainer.use_v1", default=False))
+        update_prompts = int(config.data.train_batch_size)
+        if use_v1:
+            mode = OmegaConf.select(config, "trainer.v1.trainer_mode", default="sync")
+            update_prompts //= int(OmegaConf.select(config, f"trainer.v1.{mode}.parameter_sync_step", default=1) or 1)
+        problems = []
+        if micro is None or int(micro) % n != 0:
+            problems.append(f"ppo_micro_batch_size_per_gpu={micro} must be a multiple of rollout.n={n}")
+        if int(actor.ppo_mini_batch_size) % dp_size != 0:
+            mini = actor.ppo_mini_batch_size
+            problems.append(f"ppo_mini_batch_size={mini} must be divisible by dp size {dp_size}")
+        if update_prompts % dp_size != 0:
+            problems.append(f"the {update_prompts} prompts per actor update must be divisible by dp size {dp_size}")
+        if actor.get("use_dynamic_bsz", False):
+            problems.append("use_dynamic_bsz must be False")
+        if not int(model.get("lora_rank", 0) or 0) > 0:
+            problems.append("actor_rollout_ref.model.lora_rank must be > 0 (CRD trains LoRA adapters)")
+        if "old" not in tuple(model.get("policy_state_adapters", ("default",))):
+            problems.append('actor_rollout_ref.model.policy_state_adapters must include "old"')
+        if rollout.get("rollout_adapter", None) != "old":
+            problems.append("actor_rollout_ref.rollout.rollout_adapter must be old")
+        if actor.get("use_kl_loss", False):
+            problems.append("actor_rollout_ref.actor.use_kl_loss must be False (use diffusion_loss.ref_kl_coef)")
+        if actor.get("enable_timestep_staging", False):
+            problems.append("actor_rollout_ref.actor.enable_timestep_staging must be False")
+        if use_v1 and not OmegaConf.select(config, "trainer.v1.sampler.drop_incomplete_groups", default=False):
+            problems.append("trainer.v1.sampler.drop_incomplete_groups must be True so groups arrive complete")
+        num_steps = OmegaConf.select(rollout, "pipeline.num_inference_steps", default=None)
+        timestep_range = OmegaConf.select(config, "algorithm.train_timestep_range", default=None)
+        count = OmegaConf.select(config, "algorithm.train_timestep_count", default=None)
+        if num_steps is not None:
+            num_steps = int(num_steps)
+            if timestep_range is None:
+                start, end = 0, num_steps
+            elif len(timestep_range) == 2:
+                start, end = int(timestep_range[0]), int(timestep_range[1])
+            else:
+                start, end = 0, 0
+            if not 0 <= start < end <= num_steps:
+                problems.append(f"train_timestep_range {timestep_range} must satisfy 0 <= start < end <= {num_steps}")
+            elif count is not None and not 1 <= int(count) <= end - start:
+                problems.append(f"train_timestep_count={count} must be between 1 and {end - start}, the range width")
+        if (
+            not OmegaConf.select(config, "trainer.use_v1", default=False)
+            or OmegaConf.select(config, "trainer.v1.trainer_mode", default="sync") != "sync"
+        ):
+            problems.append("CRD requires V1 sync training")
+        if config.algorithm.sample_source != "online" or config.algorithm.trainer_type != "direct_preference":
+            problems.append("CRD requires online direct_preference training")
+        if model.algorithm != "crd" or model.model_type != "diffusion_nft_model":
+            problems.append("set model.algorithm=crd and model.model_type=diffusion_nft_model")
+        if "moving_reference" not in model.policy_state_adapters:
+            problems.append("policy_state_adapters must include moving_reference")
+        if OmegaConf.select(model, "lora.merge", default=False):
+            problems.append("named sampling adapters require lora.merge=False")
+        if config.algorithm.get("paired_preference", False):
+            problems.append("CRD requires paired_preference=False")
+        if config.algorithm.adv_mode != "continuous":
+            problems.append("CRD supports adv_mode=continuous")
+        if actor.strategy not in ("fsdp", "fsdp2"):
+            problems.append("CRD requires fsdp or fsdp2")
+        scale = float(model.pipeline.reference_guidance_scale)
+        if not np.isfinite(scale) or scale < 1:
+            problems.append("reference_guidance_scale must be finite and >= 1")
+        if problems:
+            raise ValueError("CRD config is not supported: " + "; ".join(problems) + ".")
+
+    @staticmethod
+    def prepare_actor_batch(batch: DataProto, reward_tensor: torch.Tensor, config: Any) -> DataProto:
+        """Keep complete prompt groups and draw independent forward noise per sample."""
+        algorithm_cfg = config.algorithm
+        if "uid" not in batch.non_tensor_batch:
+            raise ValueError("CRD actor batch requires `uid` in non_tensor_batch.")
+        if "latents_clean" not in batch.batch.keys():
+            raise ValueError("CRD actor batch requires `latents_clean` from rollout.")
+        timestep_key = next((key for key in ("train_timesteps", "all_timesteps") if key in batch.batch.keys()), None)
+        if timestep_key is None:
+            raise ValueError("CRD actor batch requires `train_timesteps` or `all_timesteps` from rollout.")
+
+        reward_tensor, group_index = DGPOLoss._make_groups_contiguous(batch, reward_tensor)
+
+        uid = batch.non_tensor_batch["uid"]
+        counts = np.bincount(group_index)
+        group_size = torch.from_numpy(counts[group_index]).long()
+        group_index = torch.from_numpy(group_index).long()
+
+        advantages = DiffusionNFTLoss._compute_group_advantages(
+            rewards=reward_tensor,
+            uid=uid,
+            norm_by_std=algorithm_cfg.norm_adv_by_std_in_grpo,
+            global_std=algorithm_cfg.global_std,
+        )
+        train_timesteps = DGPOLoss._select_shared_timesteps(
+            batch.batch[timestep_key],
+            timestep_range=getattr(algorithm_cfg, "train_timestep_range", None),
+            count=getattr(algorithm_cfg, "train_timestep_count", None),
+            timestep_fraction=algorithm_cfg.timestep_fraction,
+            min_timestep=0,
+            loss_name="CRD",
+        )
+        latents = batch.batch["latents_clean"]
+        num_steps = train_timesteps.shape[1]
+        forward_noise = torch.randn(len(latents), num_steps, *latents.shape[1:], dtype=torch.float32)
+
+        batch.batch["train_timesteps"] = train_timesteps
+        batch.batch["forward_noise"] = forward_noise
+        batch.batch["group_index"] = group_index
+        batch.batch["group_size"] = group_size
+        batch.batch["advantages"] = advantages[:, None].expand(-1, num_steps)
+        batch.batch["returns"] = batch.batch["advantages"]
+        batch.batch["sample_level_rewards"] = reward_tensor[:, None].expand(-1, num_steps)
+        expected = int(config.actor_rollout_ref.rollout.n)
+        if (batch.batch["group_size"] != expected).any():
+            raise ValueError("CRD actor batch must contain exactly rollout.n samples per prompt group.")
+        rewards = batch.batch["sample_level_rewards"][:, 0].detach()
+        if not torch.isfinite(rewards).all() or ((rewards < 0) | (rewards > 1)).any():
+            raise ValueError("CRD requires raw rewards in [0, 1]; normalize the reward scorer before training.")
+        batch.batch["raw_rewards"] = rewards
+        return batch
+
+
 @register_diffusion_loss("kl")
 class KLLoss(DiffusionLossFn):
     """KL divergence between current and reference reverse-SDE means."""
@@ -1139,14 +2216,17 @@ class DistillKLLoss(DiffusionLossFn):
     ) -> tuple[torch.Tensor, dict[str, Any]]:
         """Compute KL divergence given student and teacher previous sample means.
 
+        Deterministic (ODE) steps have ``std_dev_t == 0``; there the loss is the
+        unit-variance surrogate ``0.5 * ||mu - mu_teacher||^2``. Elsewhere the
+        variance is floored at ``1e-8``.
+
         Args:
             prev_sample_mean: (torch.Tensor) shape is (bs, s, c)
             teacher_prev_sample_mean: (torch.Tensor) shape is (bs, s, c)
             std_dev_t: (torch.Tensor) shape is (bs, 1, 1)
         """
-        kl_loss = ((prev_sample_mean - teacher_prev_sample_mean) ** 2).mean(dim=(1, 2), keepdim=True) / (
-            2 * std_dev_t**2
-        )
+        variance = torch.where(std_dev_t > 0, std_dev_t**2, torch.ones_like(std_dev_t)).clamp(min=1e-8)
+        kl_loss = ((prev_sample_mean - teacher_prev_sample_mean) ** 2).mean(dim=(1, 2), keepdim=True) / (2 * variance)
         metrics = {"actor/distill_kl_loss": kl_loss.mean().detach().item()}
         return kl_loss.mean(), metrics
 
@@ -1201,3 +2281,87 @@ class DistillFlowMatchingMSELoss(DiffusionLossFn):
             teacher_noise_pred=data["teacher_noise_pred"],
         )
         return DiffusionLossResult(loss=distill_loss, metrics=metrics)
+
+
+@register_diffusion_loss("dual_grpo")
+class DualGRPOLoss(DiffusionLossFn):
+    """Dispatch DualGRPO by forward type: token PPO for AR, FlowGRPO for DiT.
+
+    The AR branch calls verl's registered vanilla policy loss, including its
+    dual-clip cap (``clip_ratio_c``). The DiT branch reuses :class:`FlowGRPOLoss`
+    and ``diffusion_loss.clip_ratio``.
+    """
+
+    required_model_output_keys = ("log_probs",)
+    required_data_keys = ("old_log_probs", "advantages")
+
+    @classmethod
+    def compute_loss(cls, **kwargs: Any) -> tuple[torch.Tensor, dict[str, Any]]:
+        """Not used. DualGRPO selects FlowGRPO or token PPO inside ``__call__``."""
+        raise NotImplementedError("DualGRPOLoss dispatches in __call__ from model_output, not compute_loss.")
+
+    def __call__(
+        self,
+        *,
+        config: DiffusionActorConfig,
+        model_output: dict[str, Any],
+        data: TensorDict,
+    ) -> DiffusionLossResult:
+        # Return whether this forward is the text-encoder AR stage.
+        # DiT forwards include ``prev_sample_mean`` and a rank-1 per-step ``log_probs``.
+        # AR forwards return token log-probs aligned with ``responses`` of shape
+        # ``(batch, response_length)`` and do not include ``prev_sample_mean``.
+        if model_output.get("prev_sample_mean", None) is not None:
+            is_ar_token = False
+        else:
+            log_probs = model_output["log_probs"]
+            if log_probs.is_nested or log_probs.ndim == 2:
+                is_ar_token = True
+            else:
+                raise ValueError(
+                    "dual_grpo could not tell an AR token forward from a DiT step forward. "
+                    "DiT outputs include prev_sample_mean; AR outputs are rank-2 token log-probs "
+                    f"matching responses of shape (batch, response_length). Got log_probs shape "
+                    f"{tuple(log_probs.shape)} and model_output keys {sorted(model_output)}."
+                )
+
+        # Call the appropriate loss function based on the forward type.
+        if is_ar_token:
+            return self._ar_token_ppo(config=config, model_output=model_output, data=data)
+        else:
+            return get_diffusion_loss_fn("flow_grpo")(config=config, model_output=model_output, data=data)
+
+    @staticmethod
+    def _ar_token_ppo(
+        *,
+        config: DiffusionActorConfig,
+        model_output: dict[str, Any],
+        data: TensorDict,
+    ) -> DiffusionLossResult:
+        if "response_mask" not in data:
+            raise KeyError(
+                "dual_grpo AR token PPO requires data['response_mask'] aligned with token log-probs. "
+                f"Available data keys: {_format_available_keys(data)}."
+            )
+
+        # Mirror verl.workers.utils.losses.ppo_loss: vanilla agg_loss reads
+        # config.global_batch_info. Without this fill, token-mean falls back to the
+        # local micro-batch mask sum, so the AR gradient scales with the number of
+        # micro-batches / local tokens. The DiT path cannot cover this — only
+        # DiffusersFSDPEngine sets gradient_accumulation_steps.
+        config.global_batch_info["dp_size"] = tu.get_non_tensor_data(data, "dp_size", default=1)
+        config.global_batch_info["batch_num_tokens"] = tu.get_non_tensor_data(data, "batch_num_tokens", default=None)
+        config.global_batch_info["global_batch_size"] = tu.get_non_tensor_data(data, "global_batch_size", default=None)
+        config.global_batch_info["loss_scale_factor"] = config.loss_scale_factor
+
+        policy_loss_fn = get_policy_loss_fn("vanilla")
+        pg_loss, pg_metrics = policy_loss_fn(
+            old_log_prob=data["old_log_probs"],
+            log_prob=model_output["log_probs"],
+            advantages=data["advantages"],
+            response_mask=data["response_mask"].to(dtype=torch.bool),
+            loss_agg_mode=config.loss_agg_mode,
+            config=config,
+            rollout_is_weights=data.get("rollout_is_weights", None),
+        )
+        return DiffusionLossResult(loss=pg_loss, metrics=pg_metrics)

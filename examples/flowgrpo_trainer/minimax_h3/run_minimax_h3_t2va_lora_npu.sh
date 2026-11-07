@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # MiniMax H3 T2VA LoRA FlowGRPO with CLAP and ImageBind rewards (Ascend NPU).
+# Defaults below are 16 NPUs with ROLLOUT_TP=4. On Atlas A5, NUM_GPUS=8 and
+# ROLLOUT_TP=2 is enough; TEXT_ENCODER_TP follows ROLLOUT_TP.
 set -x
 
 export WANDB_MODE=${WANDB_MODE:-online}
@@ -53,6 +55,7 @@ exec > >(tee -a "$log_file") 2>&1
 h3_lora_targets="['to_q','to_k','to_v','to_out.0','ff.net.0.proj','ff.net.2']"
 
 python3 -m verl_omni.trainer.main_diffusion \
+    trainer.use_v1=false \
     trainer.device=npu \
     data.train_files=$train_path \
     data.val_files=$test_path \

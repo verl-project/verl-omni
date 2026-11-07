@@ -119,6 +119,7 @@ def _trainer(
     trainer._standalone_paused = False
     trainer.global_steps = global_steps
     trainer.total_training_steps = total_training_steps
+    trainer.prev_step_profile = False
     trainer.timing_raw = {}
     trainer.current_mode = HybridEngineMode.ROLLOUT
     trainer.replay_buffer = _RecordingReplayBuffer(eviction_metrics, sampleable_count)
@@ -305,10 +306,11 @@ def test_disabled_switch_first_step_reclaims_hybrid_without_waiting():
     assert trainer.checkpoint_manager.sleep_calls == 1
 
 
-def test_disabled_switch_reclaims_hybrid_before_the_warmup_feed():
+def test_disabled_switch_reclaims_hybrid_before_the_warmup_feed(monkeypatch):
     trainer = _trainer(enable_switch=False)
     trainer.config.trainer.v1 = {"separate_async": {"num_warmup_batches": 2}}
     trainer._add_batch_to_generate = lambda: trainer.events.append("feed")
+    monkeypatch.setattr(trainer_module.tq, "kv_list", lambda partition_id: {})
 
     trainer.on_train_begin()
 
@@ -319,15 +321,33 @@ def test_disabled_switch_reclaims_hybrid_before_the_warmup_feed():
     assert trainer.checkpoint_manager.sleep_calls == 1
 
 
-def test_enabled_switch_keeps_hybrid_lent_through_the_warmup_feed():
+def test_enabled_switch_keeps_hybrid_lent_through_the_warmup_feed(monkeypatch):
     trainer = _trainer()
     trainer.config.trainer.v1 = {"separate_async": {"num_warmup_batches": 1}}
     trainer._add_batch_to_generate = lambda: trainer.events.append("feed")
+    monkeypatch.setattr(trainer_module.tq, "kv_list", lambda partition_id: {})
 
     trainer.on_train_begin()
 
     assert trainer.events == ["feed"]
     assert trainer.current_mode == HybridEngineMode.ROLLOUT
+
+
+@pytest.mark.parametrize("enable_switch", [False, True])
+@pytest.mark.parametrize("inflight_prompts", [0, 63])
+def test_rollout_replay_suppresses_full_and_partial_warmup(monkeypatch, enable_switch, inflight_prompts):
+    trainer = _trainer(enable_switch=enable_switch)
+    trainer.config.trainer.v1 = {"separate_async": {"num_warmup_batches": 1}}
+    trainer.config.skip = {"rollout_tq": {"enable": True}}
+    trainer._add_batch_to_generate = lambda: trainer.events.append("feed")
+    trainer._add_prompts_to_generate = lambda count: trainer.events.append(f"feed_{count}")
+    queue_items = {f"prompt-{i}": {"is_prompt": True, "status": "running"} for i in range(inflight_prompts)}
+    monkeypatch.setattr(trainer_module.tq, "kv_list", lambda partition_id: {partition_id: queue_items})
+
+    trainer.on_train_begin()
+
+    assert trainer.events == ([] if enable_switch else ["remove", "hybrid_abort", "hybrid_sleep"])
+    assert trainer.current_mode == (HybridEngineMode.ROLLOUT if enable_switch else HybridEngineMode.TRAINER)
 
 
 def test_step_lends_the_engine_out_and_reclaims_it_exactly_once():

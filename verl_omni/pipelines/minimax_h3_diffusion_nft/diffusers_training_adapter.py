@@ -17,15 +17,14 @@ from typing import Optional
 
 import torch
 from tensordict import TensorDict
+from verl.utils import tensordict_utils as tu
 
-from verl_omni.pipelines.model_base import DiffusionModelBase
-from verl_omni.workers.config import DiffusionModelConfig
-
-from .common import (
+from verl_omni.pipelines.minimax_h3_diffusion_nft.common import (
     build_layout_from_meta,
     build_ref2va_layout_from_meta,
     build_row_timesteps,
     h3_dit_timestep,
+    h3_ulysses_forward,
     h3_velocity_to_flow_match,
     keyframe_indices_to_anchors,
     pack_video_audio_rows,
@@ -34,6 +33,8 @@ from .common import (
     unpack_video_audio_rows,
     validate_lora_target_modules,
 )
+from verl_omni.pipelines.model_base import DiffusionModelBase
+from verl_omni.workers.config import DiffusionModelConfig
 
 __all__ = ["MiniMaxH3DiffusionNFT"]
 
@@ -44,7 +45,7 @@ class MiniMaxH3DiffusionNFT(DiffusionModelBase):
 
     @classmethod
     def validate_lora_config(cls, model_config: DiffusionModelConfig) -> None:
-        """Reject LoRA targets the rollout weight sync cannot transport (shares common.py whitelist)."""
+        """Reject LoRA targets the rollout weight sync cannot transport (shares the weight-sync whitelist)."""
         if model_config.lora_rank > 0:
             validate_lora_target_modules(model_config.target_modules)
 
@@ -113,6 +114,7 @@ class MiniMaxH3DiffusionNFT(DiffusionModelBase):
             "encoder_mask": prompt_embeds_mask,
             "timestep": h3_dit_timestep(timesteps.float()),
             "latent_meta": meta,
+            "_h3_sp_size": tu.get_non_tensor_data(micro_batch, "sp_size", default=1),
         }
         return model_inputs, None
 
@@ -140,6 +142,7 @@ class MiniMaxH3DiffusionNFT(DiffusionModelBase):
         encoder_mask = model_inputs["encoder_mask"]
         timestep = model_inputs["timestep"]
         meta = model_inputs["latent_meta"]
+        sp_size = model_inputs.get("_h3_sp_size", 1)
         device = video_rows.device
         raw_patch = getattr(getattr(module, "config", None), "patch_size", (1, 2, 2))
         patch_size = (int(raw_patch[0]), int(raw_patch[1]), int(raw_patch[2]))
@@ -205,18 +208,22 @@ class MiniMaxH3DiffusionNFT(DiffusionModelBase):
                 condition_video_timestep=max(video_t, 0.999),
                 condition_audio_timestep=1.0 if ref_block_meta is not None else video_t,
             )
-            result = module(
-                hidden_states=full_video_rows,
-                audio_hidden_states=full_audio_rows,
-                encoder_hidden_states=encoder_hidden_states[index : index + 1, :num_text_tokens],
-                timestep=unique_timesteps.to(device),
-                timestep_indices=timestep_indices.to(device),
-                token_tags=token_tags.to(device),
-                position_ids=position_ids.to(device),
-                video_indices=video_indices.to(device),
-                audio_indices=audio_indices.to(device),
-                text_indices=text_indices.to(device),
-                return_dict=False,
+            result = h3_ulysses_forward(
+                module,
+                {
+                    "hidden_states": full_video_rows,
+                    "audio_hidden_states": full_audio_rows,
+                    "encoder_hidden_states": encoder_hidden_states[index : index + 1, :num_text_tokens],
+                    "timestep": unique_timesteps.to(device),
+                    "timestep_indices": timestep_indices.to(device),
+                    "token_tags": token_tags.to(device),
+                    "position_ids": position_ids.to(device),
+                    "video_indices": video_indices.to(device),
+                    "audio_indices": audio_indices.to(device),
+                    "text_indices": text_indices.to(device),
+                    "return_dict": False,
+                },
+                sp_size,
             )
             v_video, v_audio = split_dual_velocity(result)
             v_video = v_video[:, num_cond_video:]

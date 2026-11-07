@@ -36,6 +36,54 @@ EXEMPT_DOCS_PAGES = frozenset(
 
 GIT_SYMLINK_MODE = "120000"
 
+MD_LINK_RE = re.compile(r"\[([^\]]*)\]\(([^)\s]+)\)")
+
+
+def strip_markdown_code(text: str) -> str:
+    """Blank out fenced blocks and inline code spans so links inside them are ignored."""
+    lines: list[str] = []
+    in_fence = False
+    for line in text.splitlines():
+        if line.lstrip().startswith("```"):
+            in_fence = not in_fence
+            lines.append("")
+            continue
+        lines.append("" if in_fence else re.sub(r"`[^`]*`", "", line))
+    return "\n".join(lines)
+
+
+def check_relative_links(
+    docs_path: str,
+    readme_rel: str,
+    staged: dict[str, tuple[str, str]],
+    errors: list[str],
+) -> int:
+    """Relative links inside a docs/examples symlinked page resolve against
+    docs/examples/ in the Sphinx tree, so they cannot reach examples/**.
+    Require absolute GitHub URLs (or links that resolve within docs/)."""
+    meta = staged.get(readme_rel)
+    if meta is None:
+        return 0
+    text = strip_markdown_code(blob_text(meta[1]))
+    checked = 0
+    for match in MD_LINK_RE.finditer(text):
+        target = match.group(2)
+        if target.startswith(("http://", "https://", "mailto:", "#")):
+            continue
+        checked += 1
+        path_part = target.split("#", 1)[0]
+        if not path_part:
+            continue
+        resolved = _normalize_relpath(docs_path, path_part)
+        if resolved in staged:
+            continue
+        errors.append(
+            f"{docs_path}: relative link {target!r} does not resolve in the docs tree "
+            f"(resolves to {resolved!r}); use an absolute https://github.com/... URL — "
+            "relative links cannot reach examples/** from docs/examples/ (see PR #316)"
+        )
+    return checked
+
 
 def _run_git(*args: str) -> str:
     result = subprocess.run(
@@ -162,6 +210,7 @@ def main() -> int:
             )
 
     example_readme_set = set(example_readmes)
+    link_checked = 0
     for docs_path, (mode, sha) in docs_example_files.items():
         if docs_path in EXEMPT_DOCS_PAGES:
             continue
@@ -176,6 +225,8 @@ def main() -> int:
             )
         elif rel not in example_readme_set:
             errors.append(f"{docs_path} is a dangling git symlink to missing {rel}")
+        else:
+            link_checked += check_relative_links(docs_path, rel, all_staged, errors)
 
     if errors:
         print("Example README docs-symlink check FAILED:")
@@ -183,7 +234,10 @@ def main() -> int:
             print(f"  - {err}")
         return 1
 
-    print(f"OK: {len(example_readmes)} examples/**/README.md pages are git-symlinked under docs/examples/")
+    print(
+        f"OK: {len(example_readmes)} examples/**/README.md pages are git-symlinked "
+        f"under docs/examples/ ({link_checked} relative links validated)"
+    )
     return 0
 
 

@@ -23,6 +23,7 @@ import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 import torch
 
 import verl_omni.workers.engine_workers as ew
@@ -31,8 +32,9 @@ import verl_omni.workers.engine_workers as ew
 def _fast_path_worker(rollout_rank=0):
     worker = object.__new__(ew.ActorRolloutRefWorker)
 
-    engine = MagicMock()
-    engine.module = SimpleNamespace(peft_config={"default": object()})  # actor_has_lora
+    engine = MagicMock(spec=["module", "get_per_tensor_param", "is_param_offload_enabled"])
+    engine.is_param_offload_enabled = False
+    engine.module = SimpleNamespace(peft_config={"default": SimpleNamespace(to_dict=lambda: {"r": 8})})
     engine.get_per_tensor_param.return_value = (iter([("w", torch.zeros(1))]), {"r": 8})
     worker.actor = SimpleNamespace(engine=engine)
 
@@ -65,7 +67,7 @@ def _fast_path_worker(rollout_rank=0):
     return worker
 
 
-def _run_update(worker, **kwargs):
+def _run_update(worker, *, entry=None, **kwargs):
     # This regression test covers weight-version stamping, not background thread scheduling.
     async def run_in_event_loop(function, *args, **kwargs):
         return function(*args, **kwargs)
@@ -77,9 +79,26 @@ def _run_update(worker, **kwargs):
         patch.object(ew.asyncio, "to_thread", run_in_event_loop),
         patch.object(ew, "log_gpu_memory_usage", MagicMock()),
         patch.object(ew, "set_expandable_segments", MagicMock()),
+        patch.object(ew, "get_torch_device", return_value=MagicMock(current_device=MagicMock(return_value=0))),
     ):
-        asyncio.run(ew.ActorRolloutRefWorker.update_weights(worker, mode="naive", **kwargs))
+        update = entry or ew.ActorRolloutRefWorker.update_weights
+        asyncio.run(update(worker, mode="naive", **kwargs))
     return sender
+
+
+@pytest.mark.parametrize("has_lora,merge", [(False, False), (True, False), (True, True)])
+def test_non_naive_sync_preserves_peft_and_full_weight_paths(has_lora, merge):
+    worker = _fast_path_worker()
+    if not has_lora:
+        worker.actor.engine.module = torch.nn.Linear(2, 2)
+    worker.peft_merge = merge
+    worker.checkpoint_engine = SimpleNamespace(send_weights=AsyncMock())
+    asyncio.run(worker.update_weights(mode="nccl", global_steps=3))
+    expected = {"adapter_name": "default"}
+    if has_lora and not merge:
+        expected["base_sync_done"] = True
+    worker.actor.engine.get_per_tensor_param.assert_called_once_with(**expected)
+    worker.checkpoint_engine.send_weights.assert_awaited_once()
 
 
 def test_lora_fast_path_stamps_global_steps_and_clears_kv_cache():
@@ -105,5 +124,105 @@ def test_lora_fast_path_stamp_gated_to_rollout_rank_zero():
     worker = _fast_path_worker(rollout_rank=1)
     _run_update(worker, global_steps=7)
 
+    worker.rollout.server_handle.clear_kv_cache.remote.assert_not_awaited()
+    worker.rollout.server_handle.set_global_steps.remote.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "reply,stage_ids",
+    [
+        ([{"supported": False, "error": "receiver failed"}], [0]),
+        ([], [0]),
+        ([[]], [0]),
+        ([[None], [{"error": "second replica failed"}]], [0]),
+        ([None, None], [0, 1]),
+    ],
+)
+def test_lora_fast_path_rejected_rpc_does_not_publish_weight_version(reply, stage_ids):
+    from verl_omni.workers.rollout.vllm_rollout.vllm_omni_async_server import (
+        vLLMOmniHttpServer,
+        vLLMOmniServerAdapter,
+    )
+
+    worker = _fast_path_worker()
+    server = object.__new__(vLLMOmniHttpServer)
+    server.engine = SimpleNamespace(
+        num_stages=2,
+        collective_rpc=AsyncMock(side_effect=lambda **kwargs: reply if kwargs["stage_ids"] == [0] else []),
+    )
+    server._generate_strategy = SimpleNamespace(collective_rpc_stage_ids=lambda method: stage_ids)
+
+    rollout = object.__new__(vLLMOmniServerAdapter)
+    rollout.zmq_handle = worker.rollout.zmq_handle
+    rollout.use_shm = worker.rollout.use_shm
+    rollout.rollout_rank = worker.rollout.rollout_rank
+    rollout._ensure_server_handle = MagicMock(return_value=True)
+    rpc_calls = []
+
+    def remote(method, **kwargs):
+        rpc_calls.append((method, kwargs))
+        return asyncio.create_task(server.collective_rpc(method, **kwargs))
+
+    rollout.server_handle = SimpleNamespace(
+        collective_rpc=SimpleNamespace(remote=remote),
+        clear_kv_cache=SimpleNamespace(remote=AsyncMock()),
+        set_global_steps=SimpleNamespace(remote=AsyncMock()),
+    )
+    worker.rollout = rollout
+    with pytest.raises(RuntimeError, match="update_weights_from_ipc failed"):
+        _run_update(worker, global_steps=7)
+
+    assert len(rpc_calls) == 1
+    assert rpc_calls[0][0] == "update_weights_from_ipc"
+    assert rpc_calls[0][1]["require_ack"] is True
+    assert server.engine.collective_rpc.await_count == len(stage_ids)
+    worker.rollout.server_handle.clear_kv_cache.remote.assert_not_awaited()
+    worker.rollout.server_handle.set_global_steps.remote.assert_not_awaited()
+
+
+def test_lora_fast_path_cancelled_rpc_does_not_publish_weight_version():
+    worker = _fast_path_worker()
+
+    async def execute(method, non_block, kwargs):
+        async def cancelled_rpc():
+            raise asyncio.CancelledError
+
+        return asyncio.create_task(cancelled_rpc())
+
+    worker.rollout._execute_method = AsyncMock(side_effect=execute)
+    with pytest.raises(asyncio.CancelledError):
+        _run_update(worker, global_steps=7)
+
+    worker.rollout.server_handle.clear_kv_cache.remote.assert_not_awaited()
+    worker.rollout.server_handle.set_global_steps.remote.assert_not_awaited()
+
+
+def test_lora_fast_path_active_caller_cancellation_does_not_publish_weight_version():
+    worker = _fast_path_worker()
+
+    async def cancel_active_update(worker, **kwargs):
+        entered = asyncio.Event()
+        pending = []
+
+        async def execute(method, non_block, kwargs):
+            async def blocked_rpc():
+                entered.set()
+                await asyncio.Event().wait()
+
+            future = asyncio.create_task(blocked_rpc())
+            pending.append(future)
+            return future
+
+        worker.rollout._execute_method = AsyncMock(side_effect=execute)
+        task = asyncio.create_task(ew.ActorRolloutRefWorker.update_weights(worker, **kwargs))
+        await entered.wait()
+        assert not task.done()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert len(pending) == 1
+        assert pending[0].cancelled()
+
+    _run_update(worker, entry=cancel_active_update, global_steps=7)
     worker.rollout.server_handle.clear_kv_cache.remote.assert_not_awaited()
     worker.rollout.server_handle.set_global_steps.remote.assert_not_awaited()

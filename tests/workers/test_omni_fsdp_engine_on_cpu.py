@@ -15,7 +15,7 @@
 
 Loads ``omni_impl.py`` via ``importlib`` with pre-mocked ``sys.modules`` to
 bypass ``vllm_omni`` (CUDA-only). Verifies registration, import sources,
-``_build_module`` dispatch, LoRA dtype handling, and merged-weight streaming.
+``_build_module`` dispatch, LoRA dtype handling, and export delegation.
 """
 
 import ast
@@ -193,7 +193,7 @@ def test_engine_registered_via_decorator():
                     kwargs_found += 1
             if kw.arg == "device" and isinstance(kw.value, ast.List):
                 vals = [e.value for e in kw.value.elts if isinstance(e, ast.Constant)]
-                if set(vals) == {"cuda", "npu"}:
+                if set(vals) == {"cuda", "npu", "xpu", "mlu"}:
                     kwargs_found += 1
         assert kwargs_found >= 2, (
             f"@EngineRegistry.register missing expected kwargs (model_type/backend/device); found {kwargs_found}/3"
@@ -216,7 +216,7 @@ def test_engine_registered_for_fsdp_and_fsdp2_backends():
 
     for backend in ("fsdp", "fsdp2"):
         assert backend in omni_registry, f"'{backend}' not registered for omni_model; registered: {list(omni_registry)}"
-        for device in ("cuda", "npu"):
+        for device in ("cuda", "npu", "xpu", "mlu"):
             entry = omni_registry[backend].get(device)
             assert entry is not None, f"No engine for omni_model/{backend}/{device}"
             assert entry.__name__ == "OmniFSDPEngine", (
@@ -224,13 +224,14 @@ def test_engine_registered_for_fsdp_and_fsdp2_backends():
             )
 
 
-def test_engine_get_engine_cls_resolves_to_omni_fsdp_engine():
+@pytest.mark.parametrize("device", ["cuda", "npu", "xpu", "mlu"])
+def test_engine_get_engine_cls_resolves_to_omni_fsdp_engine(device):
     """``EngineRegistry.get_engine_cls`` returns ``OmniFSDPEngine``."""
     from verl.workers.engine.base import EngineRegistry
 
     _get_omni_impl_module()
 
-    with patch("verl.workers.engine.base.get_device_name", return_value="cuda"):
+    with patch("verl.workers.engine.base.get_device_name", return_value=device):
         for backend in ("fsdp", "fsdp2"):
             cls = EngineRegistry.get_engine_cls("omni_model", backend)
             assert cls.__name__ == "OmniFSDPEngine", (
@@ -328,24 +329,28 @@ def test_prepare_model_inputs_applies_registered_adapter_hook():
     assert output_args == {"base": True}
 
 
-def test_weight_sync_casts_floating_dtensor_to_bfloat16():
+@pytest.mark.parametrize(
+    ("mixed_precision", "expected_dtype"),
+    [(None, torch.bfloat16), ({"param_dtype": "bf16"}, torch.bfloat16), ({"param_dtype": "fp32"}, torch.float32)],
+)
+def test_weight_sync_uses_actor_compute_dtype(mixed_precision, expected_dtype):
     omni_impl = _get_omni_impl_module()
-    tensor = torch.tensor([1.25], dtype=torch.float32)
+    engine = object.__new__(omni_impl.OmniFSDPEngine)
+    engine.engine_config = types.SimpleNamespace(mixed_precision=mixed_precision)
+    engine.module = MagicMock()
+    engine.model_config = _make_mock_model_config()
+    engine._uses_fsdp2_cpu_offload_policy = True
+    engine._is_offload_param = False
+    engine._qat_enabled = False
 
-    synced = omni_impl.OmniFSDPEngine._cast_dtensor_weight_for_sync(tensor)
+    with (
+        patch.object(omni_impl, "log_gpu_memory_usage"),
+        patch.object(omni_impl, "export_lora_for_sync", return_value=(iter(()), None)) as export,
+    ):
+        engine.get_per_tensor_param(base_sync_done=True)
 
-    assert synced.dtype is torch.bfloat16
-    assert synced.item() == pytest.approx(1.25)
-
-
-def test_weight_sync_keeps_integer_dtensor_buffers():
-    omni_impl = _get_omni_impl_module()
-    tensor = torch.tensor([1, 2], dtype=torch.int64)
-
-    synced = omni_impl.OmniFSDPEngine._cast_dtensor_weight_for_sync(tensor)
-
-    assert synced is tensor
-    assert synced.dtype is torch.int64
+    assert export.call_args.kwargs["full_weight_dtype"] is expected_dtype
+    assert export.call_args.kwargs["is_diffusers"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -354,12 +359,11 @@ def test_weight_sync_keeps_integer_dtensor_buffers():
 
 
 def test_uses_verl_omni_collect_lora_params():
-    """``omni_impl.collect_lora_params`` is ``verl_omni.utils.fsdp_utils`` (not verl)."""
+    """The shared export uses ``verl_omni.utils.fsdp_utils`` collect (not verl's)."""
+    import verl_omni.workers.engine.lora_export as lora_export
     from verl_omni.utils.fsdp_utils import collect_lora_params as expected_func
 
-    omni_impl = _get_omni_impl_module()
-
-    assert omni_impl.collect_lora_params is expected_func, "omni_impl.collect_lora_params is not the verl_omni copy"
+    assert lora_export.collect_lora_params is expected_func, "lora_export.collect_lora_params is not the verl_omni copy"
 
 
 def test_collect_lora_params_import_not_from_verl():
@@ -499,6 +503,57 @@ def test_build_module_calls_adapter_selected_auto_model_loader():
     assert result is configured_module
 
 
+def _build_on_meta_rank(auto_model_cls):
+    """Run ``_build_module`` as a rank that verl initializes on meta (``init_empty_weights``)."""
+    omni_impl = _get_omni_impl_module()
+    model_config = _make_mock_model_config()
+    # Supported split: hf_config_path (name_or_path) differs from the checkpoint.
+    model_config.hf_config.name_or_path = "/fake/config/dir"
+    configured_module = MagicMock(spec=torch.nn.Module)
+    configured_module.named_parameters.return_value = []
+    adapter_cls = MagicMock()
+    adapter_cls.auto_model_class = auto_model_cls
+    adapter_cls.configure_model.return_value = configured_module
+    model_base_mod = sys.modules["verl_omni.pipelines.model_base"]
+
+    with (
+        patch.object(model_base_mod.OmniModelBase, "get_class_by_name", return_value=adapter_cls),
+        patch.object(omni_impl, "get_init_weight_context_manager", return_value=omni_impl.init_empty_weights),
+        patch("verl.utils.torch_dtypes.PrecisionType") as precision_type,
+    ):
+        precision_type.to_dtype.side_effect = lambda value: value
+        engine = object.__new__(omni_impl.OmniFSDPEngine)
+        engine.model_config = model_config
+        engine.engine_config = MagicMock(model_dtype=None, forward_only=False)
+        engine.engine_config.strategy = "fsdp2"
+        engine.device_mesh = None
+        engine._build_module()
+    return model_config, adapter_cls
+
+
+def test_build_module_on_meta_rank_builds_from_config_without_reading_the_checkpoint():
+    auto_model_cls = MagicMock()
+    model_config, adapter_cls = _build_on_meta_rank(auto_model_cls)
+
+    auto_model_cls.from_pretrained.assert_not_called()
+    assert model_config.hf_config.name_or_path == model_config.local_path
+    auto_model_cls.from_config.assert_called_once_with(
+        model_config.hf_config,
+        torch_dtype=torch.float32,
+        trust_remote_code=model_config.trust_remote_code,
+    )
+    adapter_cls.configure_model.assert_called_once_with(auto_model_cls.from_config.return_value, model_config)
+
+
+def test_build_module_on_meta_rank_loads_through_a_loader_without_from_config():
+    class PretrainedOnlyLoader:
+        from_pretrained = MagicMock()
+
+    _build_on_meta_rank(PretrainedOnlyLoader)
+
+    PretrainedOnlyLoader.from_pretrained.assert_called_once()
+
+
 def test_build_module_rejects_mixed_frozen_parameters_without_fsdp1_orig_params():
     omni_impl = _get_omni_impl_module()
     model_config = _make_mock_model_config()
@@ -629,128 +684,6 @@ def test_build_lora_module_skips_when_lora_dtype_none():
 
 
 # ---------------------------------------------------------------------------
-# ``_merged_lora_per_tensor_param`` streams merged weights
-# ---------------------------------------------------------------------------
-
-
-def _make_toy_module():
-    """Return a simple module with predictable ``state_dict``."""
-
-    class ToyModule(torch.nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.weight = torch.nn.Parameter(torch.tensor([3.0, 4.0]))
-            self.bias = torch.nn.Parameter(torch.tensor([0.5]))
-
-    return ToyModule()
-
-
-def test_merged_lora_per_tensor_param_yields_name_param_tuples():
-    """``_merged_lora_per_tensor_param`` yields ``(name, param)`` tuples."""
-    omni_impl = _get_omni_impl_module()
-    module = _make_toy_module()
-
-    with (
-        patch.object(omni_impl, "merged_lora_context", MagicMock()),
-        patch.object(omni_impl, "normalize_peft_param_name", side_effect=lambda state: state),
-        patch.object(omni_impl, "convert_weight_keys", side_effect=lambda state, model: state),
-        patch.object(omni_impl, "log_gpu_memory_usage", MagicMock()),
-        patch.object(omni_impl, "get_device_id", return_value=torch.device("cpu")),
-    ):
-        engine = object.__new__(omni_impl.OmniFSDPEngine)
-        engine.module = module
-        engine._is_offload_param = False
-
-        merged_weights = dict(engine._merged_lora_per_tensor_param())
-
-        assert "weight" in merged_weights
-        assert "bias" in merged_weights
-        assert torch.equal(merged_weights["weight"], module.weight.data)
-        assert torch.equal(merged_weights["bias"], module.bias.data)
-
-
-def test_merged_lora_per_tensor_param_offload_on_finally():
-    """``offload_fsdp_model_to_cpu`` called in ``finally`` when offload enabled."""
-    omni_impl = _get_omni_impl_module()
-    module = _make_toy_module()
-    offload_calls = []
-
-    with (
-        patch.object(omni_impl, "merged_lora_context", MagicMock()),
-        patch.object(omni_impl, "normalize_peft_param_name", side_effect=lambda state: state),
-        patch.object(omni_impl, "convert_weight_keys", side_effect=lambda state, model: state),
-        patch.object(omni_impl, "log_gpu_memory_usage", MagicMock()),
-        patch.object(omni_impl, "get_device_id", return_value=torch.device("cpu")),
-        patch.object(
-            omni_impl,
-            "offload_fsdp_model_to_cpu",
-            side_effect=lambda m: offload_calls.append(m),
-        ),
-    ):
-        engine = object.__new__(omni_impl.OmniFSDPEngine)
-        engine.module = module
-        engine._is_offload_param = True
-
-        merged_weights = list(engine._merged_lora_per_tensor_param())
-
-        assert len(merged_weights) == 2  # weight + bias
-        assert len(offload_calls) == 1
-        assert offload_calls[0] is module
-
-
-def test_merged_lora_per_tensor_param_skip_offload_when_false():
-    """``offload_fsdp_model_to_cpu`` NOT called when ``_is_offload_param=False``."""
-    omni_impl = _get_omni_impl_module()
-    module = _make_toy_module()
-
-    with (
-        patch.object(omni_impl, "merged_lora_context", MagicMock()),
-        patch.object(omni_impl, "normalize_peft_param_name", side_effect=lambda state: state),
-        patch.object(omni_impl, "convert_weight_keys", side_effect=lambda state, model: state),
-        patch.object(omni_impl, "log_gpu_memory_usage", MagicMock()),
-        patch.object(omni_impl, "get_device_id", return_value=torch.device("cpu")),
-        patch.object(omni_impl, "offload_fsdp_model_to_cpu") as mock_offload,
-    ):
-        engine = object.__new__(omni_impl.OmniFSDPEngine)
-        engine.module = module
-        engine._is_offload_param = False
-
-        list(engine._merged_lora_per_tensor_param())
-        mock_offload.assert_not_called()
-
-
-def test_merged_lora_per_tensor_param_with_lora_context_manager():
-    """``merged_lora_context`` entered with ``backup_adapters=True``."""
-    omni_impl = _get_omni_impl_module()
-    module = _make_toy_module()
-
-    entered = []
-
-    @contextmanager
-    def fake_merged_context(actor, backup_adapters=True):
-        entered.append((actor, backup_adapters))
-        yield
-
-    with (
-        patch.object(omni_impl, "merged_lora_context", fake_merged_context),
-        patch.object(omni_impl, "normalize_peft_param_name", side_effect=lambda state: state),
-        patch.object(omni_impl, "convert_weight_keys", side_effect=lambda state, model: state),
-        patch.object(omni_impl, "log_gpu_memory_usage", MagicMock()),
-        patch.object(omni_impl, "get_device_id", return_value=torch.device("cpu")),
-    ):
-        engine = object.__new__(omni_impl.OmniFSDPEngine)
-        engine.module = module
-        engine._is_offload_param = False
-
-        list(engine._merged_lora_per_tensor_param())
-
-        assert len(entered) == 1
-        actor, backup = entered[0]
-        assert actor is module
-        assert backup is True
-
-
-# ---------------------------------------------------------------------------
 # Direct preference forward lifecycle
 # ---------------------------------------------------------------------------
 
@@ -860,6 +793,7 @@ class TestAdapterNameForwarding:
         engine = object.__new__(omni_impl.OmniFSDPEngine)
         engine.module = module
         engine.model_config = _make_mock_model_config()
+        engine.engine_config = types.SimpleNamespace(mixed_precision=None)
         engine._uses_fsdp2_cpu_offload_policy = True
         engine._is_offload_param = False
         engine._qat_enabled = False
@@ -870,13 +804,268 @@ class TestAdapterNameForwarding:
             captured["adapter_name"] = adapter_name
             return {"w": torch.zeros(1)}
 
+        import verl_omni.workers.engine.lora_export as lora_export
+
         with (
             patch.object(omni_impl, "log_gpu_memory_usage", MagicMock()),
-            patch.object(omni_impl, "collect_lora_params", side_effect=fake_collect),
-            patch.object(omni_impl, "convert_weight_keys", side_effect=lambda params, module: params),
+            patch.object(lora_export, "collect_lora_params", side_effect=fake_collect),
+            patch.object(lora_export, "convert_weight_keys", side_effect=lambda params, module: params),
         ):
             per_tensor_param, peft_config = engine.get_per_tensor_param(base_sync_done=True, adapter_name="old")
 
         assert captured["adapter_name"] == "old"
         assert peft_config == {"adapter": "old"}
         assert dict(per_tensor_param).keys() == {"w"}
+
+
+class TestDeltaShardExportGate:
+    """The omni engine's inherited shard export is valid only for full-weight,
+    non-QAT, bf16 runs; the other export paths rename/revalue tensors or cast to
+    a different dtype (RFC #38 audit)."""
+
+    def test_shard_export_fails_closed_under_qat(self):
+        omni_impl = _get_omni_impl_module()
+        engine = object.__new__(omni_impl.OmniFSDPEngine)
+        engine._qat_enabled = True
+        with pytest.raises(NotImplementedError, match="QAT"):
+            engine.get_per_tensor_param_shard()
+
+    def test_shard_export_fails_closed_under_lora(self):
+        omni_impl = _get_omni_impl_module()
+        engine = object.__new__(omni_impl.OmniFSDPEngine)
+        engine._qat_enabled = False
+        engine.module = types.SimpleNamespace(peft_config={"default": object()})
+        with pytest.raises(NotImplementedError, match="full-weight"):
+            engine.get_per_tensor_param_shard()
+
+    def test_shard_export_fails_closed_under_non_bf16_param_dtype(self):
+        # The inherited shard export casts floating shards to bfloat16; with a
+        # config-derived full-export dtype the seed and steady syncs would
+        # diverge in dtype, so the gate must reject anything but bf16.
+        omni_impl = _get_omni_impl_module()
+        engine = object.__new__(omni_impl.OmniFSDPEngine)
+        engine._qat_enabled = False
+        engine.module = types.SimpleNamespace()
+        engine.engine_config = types.SimpleNamespace(mixed_precision={"param_dtype": "fp32"})
+        with pytest.raises(NotImplementedError, match="bfloat16"):
+            engine.get_per_tensor_param_shard()
+
+    def test_shard_export_delegates_to_verl_when_full_weight(self, monkeypatch):
+        """Full-weight, non-QAT, bf16: the inherited export yields identity-named local
+        shards matching the plain state_dict (the audit's positive case)."""
+        omni_impl = _get_omni_impl_module()
+        from verl.workers.engine.fsdp import transformer_impl
+
+        monkeypatch.setattr(transformer_impl, "get_device_id", lambda: torch.device("cpu"))
+
+        engine = object.__new__(omni_impl.OmniFSDPEngine)
+        engine._qat_enabled = False
+        engine._uses_fsdp2_cpu_offload_policy = False
+        engine._is_offload_param = False
+        engine.module = torch.nn.Linear(3, 2, bias=False)
+        engine.engine_config = types.SimpleNamespace(mixed_precision=None)
+
+        ((name, local, spec),) = list(engine.get_per_tensor_param_shard()[0])
+        assert name == "weight"  # no conversion mapping, no prefix on the omni path
+        assert spec.full_shape == (2, 3)
+        assert torch.equal(local, engine.module.weight.reshape(-1).to(torch.bfloat16))
+
+
+def _fsdp2_engine(omni_impl, module, ignored_names, strategy="fsdp2"):
+    """A bare engine whose adapter returns ``ignored_names`` from the model-base hook."""
+    engine = object.__new__(omni_impl.OmniFSDPEngine)
+    engine.model_config = _make_mock_model_config()
+    engine.model_config.enable_activation_offload = False
+    engine.model_config.enable_gradient_checkpointing = False
+    engine.device_mesh = None
+    adapter_cls = MagicMock()
+    adapter_cls.get_fsdp_ignored_module_names.return_value = ignored_names or []
+    engine.model_adapter_cls = adapter_cls
+    engine.engine_config = types.SimpleNamespace(
+        strategy=strategy,
+        mixed_precision=None,
+        offload_policy=False,
+        forward_only=False,
+        reshard_after_forward=True,
+        forward_prefetch=False,
+        use_orig_params=True,
+        wrap_policy={},
+        get=lambda key, default=None: {},
+    )
+    return engine
+
+
+def _patch_process_group_and_mesh_helpers(monkeypatch, omni_impl):
+    """Stub the module-level pieces that need a process group / real device on CPU."""
+    monkeypatch.setattr(omni_impl, "get_sharding_strategy", lambda mesh, zero3_enable: None)
+    monkeypatch.setattr(omni_impl, "get_fsdp_wrap_policy", lambda **kwargs: None)
+    monkeypatch.setattr(omni_impl, "fsdp2_load_full_state_dict", lambda *args, **kwargs: None)
+    monkeypatch.setattr(omni_impl, "get_device_id", lambda: 0)
+    monkeypatch.setattr(torch.distributed, "get_world_size", lambda: 1)
+
+
+class _FrozenTowerModule(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.tower = torch.nn.Linear(4, 4)
+        # Ignored subtrees must be frozen: FSDP2 never syncs their gradients.
+        self.tower.requires_grad_(False)
+        self.llm = torch.nn.Module()
+        self.llm.layer = torch.nn.Linear(4, 4)
+        self._no_split_modules = ["DecoderLayer"]
+
+
+def test_build_fsdp_module_injects_ignored_params_on_root_only(monkeypatch):
+    omni_impl = _get_omni_impl_module()
+    module = _FrozenTowerModule()
+
+    class _Layer(torch.nn.Module):
+        pass
+
+    wrap_target = _Layer()
+    module.llm.layer = wrap_target
+    calls = []
+
+    def fake_fully_shard(target, **kwargs):
+        calls.append((target, kwargs.get("ignored_params")))
+        return target
+
+    import verl.utils.fsdp_utils as verl_fsdp_utils
+    import verl.utils.torch_dtypes as torch_dtypes
+
+    monkeypatch.setattr(torch.distributed.fsdp, "fully_shard", fake_fully_shard)
+    monkeypatch.setattr(verl_fsdp_utils, "_select_fsdp2_wrap_targets", lambda model, names: [wrap_target])
+    monkeypatch.setattr(verl_fsdp_utils, "maybe_patch_fsdp_module", lambda model: contextmanager(lambda: (yield))())
+    monkeypatch.setattr(torch_dtypes.PrecisionType, "to_dtype", staticmethod(lambda name: torch.bfloat16))
+    _patch_process_group_and_mesh_helpers(monkeypatch, omni_impl)
+
+    engine = _fsdp2_engine(omni_impl, module, ["tower"])
+    result = engine._build_fsdp_module(module)
+
+    assert result is module
+    assert len(calls) == 2
+    # Nested wrap target never carries the root's ignored set...
+    assert calls[0][0] is wrap_target and calls[0][1] is None
+    # ...only the root fully_shard call gets the tower parameters.
+    assert calls[1][0] is module
+    assert calls[1][1] == set(module.tower.parameters())
+
+    # No adapter-declared subtrees: the override still runs the fsdp2 build rather
+    # than delegating, with an empty ignored set.
+    delegated = []
+    monkeypatch.setattr(
+        omni_impl.OmniFSDPEngine.__bases__[0], "_build_fsdp_module", lambda self, m: delegated.append(m)
+    )
+    engine = _fsdp2_engine(omni_impl, module, None)
+    engine._build_fsdp_module(module)
+    assert delegated == []
+    assert calls[-1][1] == set()
+
+
+def test_build_fsdp_module_fsdp1_branch(monkeypatch):
+    # fsdp1 stays available for adapters declaring no ignored subtrees, and
+    # fails closed when they do (this override only implements the fsdp2 wrap).
+    omni_impl = _get_omni_impl_module()
+    module = _FrozenTowerModule()
+    captured = {}
+
+    def fake_fsdp(model, **kwargs):
+        captured.update(kwargs)
+        return model
+
+    monkeypatch.setattr(omni_impl, "FSDP", fake_fsdp)
+    monkeypatch.setattr(omni_impl, "init_fn", lambda *args, **kwargs: None)
+    _patch_process_group_and_mesh_helpers(monkeypatch, omni_impl)
+
+    engine = _fsdp2_engine(omni_impl, module, None, strategy="fsdp")
+    assert engine._build_fsdp_module(module) is module
+    assert captured["use_orig_params"] is True
+    assert captured["mixed_precision"].buffer_dtype == torch.float32  # upstream's default
+    assert captured["cpu_offload"] is None  # forward_only=False
+
+    engine = _fsdp2_engine(omni_impl, module, ["tower"], strategy="fsdp")
+    with pytest.raises(NotImplementedError, match="strategy=fsdp2"):
+        engine._build_fsdp_module(module)
+
+
+def test_build_fsdp_module_rejects_trainable_ignored_params(monkeypatch):
+    # FSDP2 never communicates gradients for ignored params; a trainable one
+    # would silently diverge across ranks on a multi-rank mesh.
+    omni_impl = _get_omni_impl_module()
+    module = _FrozenTowerModule()
+    module.tower.requires_grad_(True)  # e.g. a LoRA target/exclude drift
+
+    import verl.utils.fsdp_utils as verl_fsdp_utils
+    import verl.utils.torch_dtypes as torch_dtypes
+
+    monkeypatch.setattr(torch.distributed.fsdp, "fully_shard", lambda target, **kwargs: target)
+    monkeypatch.setattr(verl_fsdp_utils, "_select_fsdp2_wrap_targets", lambda model, names: [])
+    monkeypatch.setattr(verl_fsdp_utils, "maybe_patch_fsdp_module", lambda model: contextmanager(lambda: (yield))())
+    monkeypatch.setattr(torch_dtypes.PrecisionType, "to_dtype", staticmethod(lambda name: torch.bfloat16))
+    _patch_process_group_and_mesh_helpers(monkeypatch, omni_impl)
+
+    engine = _fsdp2_engine(omni_impl, module, ["tower"])
+    engine.device_mesh = types.SimpleNamespace(size=lambda: 2)
+    with pytest.raises(ValueError, match="FSDP2-ignored parameters must be frozen"):
+        engine._build_fsdp_module(module)
+
+
+class _TowerWithEmbeddingModule(torch.nn.Module):
+    """An ignored tower holding an nn.Embedding leaf that verl's selector blanket-wraps."""
+
+    def __init__(self):
+        super().__init__()
+        self.tower = torch.nn.Module()
+        self.tower.embed_positions = torch.nn.Embedding(16, 4)  # blanket-wrapped by verl's selector
+        self.tower.conv1 = torch.nn.Linear(4, 4)
+        # Ignored subtrees must be frozen: FSDP2 never syncs their gradients.
+        self.tower.requires_grad_(False)
+        self.llm = torch.nn.Module()
+        self.llm.layer = torch.nn.Linear(4, 4)
+        self.model = torch.nn.Module()
+        self.model.embed_tokens = torch.nn.Embedding(16, 4)  # top-level embedding, NOT ignored
+        self._no_split_modules = ["DecoderLayer"]
+
+
+def test_build_fsdp_module_skips_wrap_targets_under_ignored_subtrees(monkeypatch):
+    omni_impl = _get_omni_impl_module()
+    module = _TowerWithEmbeddingModule()
+
+    calls = []
+
+    def fake_fully_shard(target, **kwargs):
+        calls.append((target, kwargs.get("ignored_params")))
+        return target
+
+    import verl.utils.fsdp_utils as verl_fsdp_utils
+    import verl.utils.torch_dtypes as torch_dtypes
+
+    # verl's selector blanket-wraps every nn.Embedding, including tower.embed_positions.
+    monkeypatch.setattr(
+        verl_fsdp_utils,
+        "_select_fsdp2_wrap_targets",
+        lambda model, names: [module.llm.layer, module.tower.embed_positions, module.model.embed_tokens],
+    )
+    monkeypatch.setattr(torch.distributed.fsdp, "fully_shard", fake_fully_shard)
+    monkeypatch.setattr(verl_fsdp_utils, "maybe_patch_fsdp_module", lambda model: contextmanager(lambda: (yield))())
+    monkeypatch.setattr(torch_dtypes.PrecisionType, "to_dtype", staticmethod(lambda name: torch.bfloat16))
+    _patch_process_group_and_mesh_helpers(monkeypatch, omni_impl)
+
+    engine = _fsdp2_engine(omni_impl, module, ["tower"])
+    engine._build_fsdp_module(module)
+
+    wrapped = [target for target, _ in calls[:-1]]
+    assert module.llm.layer in wrapped
+    assert module.model.embed_tokens in wrapped  # top-level embedding still wrapped
+    # The ignored-subtree embedding is never claimed by a nested fully_shard...
+    assert module.tower.embed_positions not in wrapped
+    # ...so the root's ignored set owns every tower param, embed_positions included.
+    root_ignored = calls[-1][1]
+    assert module.tower.embed_positions.weight in root_ignored
+    assert module.tower.conv1.weight in root_ignored
+
+    # Identity when nothing is ignored, so adapters declaring nothing wrap every target.
+    from verl_omni.utils.fsdp_utils import _filter_ignored_wrap_targets
+
+    targets = [module.llm.layer, module.tower.embed_positions]
+    assert _filter_ignored_wrap_targets(targets, module, []) == targets

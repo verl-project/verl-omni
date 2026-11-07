@@ -1,9 +1,54 @@
 # Qwen-Image FlowGRPO
 
-Last updated: 09/10/2026
+Last updated: 09/23/2026
 
 See the [FlowGRPO trainer guide](../../../docs/examples/flowgrpo_trainer.md) for installation, OCR data and
 reward-model setup.
+
+## VeOmni LoRA
+
+VeOmni 0.1.12 or newer is required for native LoRA injection and adapter-to-rollout synchronization. Install it
+as described in [Installing VeOmni alongside vLLM 0.30.0](../../../docs/start/engine_backends.md#installing-veomni-alongside-vllm-0300):
+
+```bash
+bash examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora_veomni.sh
+```
+
+The recipe mirrors `run_qwen_image_ocr_lora.sh` and replaces the actor and reference backends with VeOmni.
+It keeps vLLM-Omni for rollout and uses explicit LoRA target modules because VeOmni does not support the
+`all-linear` shorthand. It runs the legacy (v0) trainer; VeOmni LoRA has not been validated with the V1 trainer.
+With VeOmni, actor and reference attention come from `veomni_config.attn_implementation`, not
+`model.attn_backend`. The VeOmni engine accepts `eager`, `flash_attention_2_hub`, and
+`flash_attention_3_hub` for every model (the recipe uses `flash_attention_3_hub`, matching the rollout's
+`FLASH_ATTN_3_HUB`).
+
+The tiny LoRA smoke is a standalone script and is not part of the GPU smoke CI:
+
+```bash
+NUM_GPUS=2 BACKEND=veomni bash tests/special_e2e/run_flowgrpo_qwen_image_veomni_lora.sh
+# Check the existing FSDP2 export/binding path with the same smoke:
+NUM_GPUS=2 BACKEND=fsdp2 bash tests/special_e2e/run_flowgrpo_qwen_image_veomni_lora.sh
+```
+
+## Regional compilation
+
+For FSDP2 with `ulysses_sequence_parallel_size=1`, regional compilation can
+compile the repeated Qwen-Image transformer blocks to improve training
+performance. The benchmark recipe enables the configuration validated with
+FA3:
+
+```bash
+bash examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_fsdp2_benchmark.sh
+```
+
+Set `actor_rollout_ref.model.use_regional_compile=true` to enable the feature.
+The benchmark uses `fullgraph=false` because the current FA3 path requires a
+graph break, and `dynamic=true` for prompt-dependent input shapes. Append
+`actor_rollout_ref.model.use_regional_compile=false` to the benchmark command
+to compare against eager execution. Other compiler options can be customized
+through `actor_rollout_ref.model.regional_compile_options`; see the
+[configuration reference](../../../docs/examples/config.md#actor_rollout_refmodel--diffusionmodelconfig)
+for all defaults and current constraints.
 
 ## Optional timestep input staging
 

@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# FlowGRPO diffusion e2e smoke test for Qwen-Image-Edit-Plus (vllm_omni rollout).
+# FlowGRPO diffusion v1 sync e2e smoke test for Qwen-Image-Edit-Plus
+# (vllm_omni rollout).
 #
-# Exercises the FlowGRPO pipeline with image editing model:
+# Exercises the FlowGRPO pipeline with image editing model on the V1
+# trainer (TransferQueue + ReplayBuffer, sync mode):
 #   parquet load (with condition_image) -> vllm_omni rollout -> visual reward
 #   (jpeg_compressibility, no reward model) -> flow_grpo -> FSDP LoRA -> sync.
 #
@@ -61,7 +63,7 @@ python3 tests/special_e2e/create_dummy_image_edit_data.py \
     --image-height "${COND_HEIGHT}"
 
 # FlowGRPO with jpeg_compressibility rule reward and no reward model.
-python3 -m verl_omni.trainer.main_diffusion \
+python3 -m verl_omni.trainer.main_diffusion_v1 \
     data.train_files=${dummy_train_path} \
     data.val_files=${dummy_test_path} \
     data.train_batch_size=${train_batch_size} \
@@ -108,7 +110,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     reward.reward_model.enable=False \
     trainer.logger=console \
     trainer.project_name=verl-test \
-    trainer.experiment_name=flowgrpo-qwen-image-edit-e2e \
+    trainer.experiment_name=flowgrpo-qwen-image-edit-v1-sync-e2e \
     trainer.log_val_generations=0 \
     trainer.n_gpus_per_node=${NUM_GPUS} \
     trainer.nnodes=1 \
@@ -117,6 +119,8 @@ python3 -m verl_omni.trainer.main_diffusion \
     trainer.save_freq=-1 \
     trainer.resume_mode=disable \
     trainer.total_training_steps=${TOTAL_TRAIN_STEPS} \
+    trainer.use_v1=true \
+    trainer.v1.trainer_mode=sync \
     "$@"
 
-echo "FlowGRPO Qwen-Image-Edit e2e test passed (training completed successfully)."
+echo "FlowGRPO Qwen-Image-Edit v1 sync e2e test passed (training completed successfully)."

@@ -19,14 +19,26 @@ from typing import Any, Optional
 
 import numpy as np
 import torch
-import torchvision.transforms as T
 from verl.utils.import_utils import import_external_libs
-from vllm_omni.inputs.data import OmniCustomPrompt, OmniDiffusionSamplingParams
+from vllm_omni.inputs.data import OmniDiffusionSamplingParams
 from vllm_omni.lora.request import LoRARequest
+from vllm_omni.outputs import OmniRequestOutput
 
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
-from verl_omni.pipelines.rollout_media import DiffusionIOSpec
-from verl_omni.pipelines.rollout_request import OmniRolloutRequest
+from verl_omni.pipelines.rollout_media import (
+    ARTIFACT_PREFIX,
+    ARTIFACT_SPECS,
+    PRIMARY_ARTIFACT,
+    ArtifactContractError,
+    DiffusionIOSpec,
+    MediaArtifact,
+    artifacts_from_fields,
+    is_decoded_visual,
+    requested_artifact_names,
+    select_artifact,
+)
+from verl_omni.pipelines.rollout_request import OmniRolloutRequest, _alias_values_match
+from verl_omni.utils.config import coerce_expert_parallel_size
 from verl_omni.workers.config import DiffusionModelConfig, DiffusionRolloutConfig
 from verl_omni.workers.rollout.replica import DiffusionOutput
 from verl_omni.workers.rollout.vllm_rollout.vllm_omni_strategy_base import OmniStrategyBase
@@ -38,22 +50,61 @@ _GPU_WORKER_EXTENSION = "verl_omni.workers.rollout.vllm_rollout.utils.vLLMOmniCo
 _NPU_WORKER_EXTENSION = "verl_omni.workers.rollout.vllm_rollout.npu_utils.vLLMOmniNPUColocateWorkerExtension"
 
 
+def _diffusion_ingress_allowed_fields() -> frozenset[str]:
+    """Mirror vllm-omni's diffusion ingress allowlist.
+
+    TODO (vllm-omni): Clean up OmniEngineArgs boundary; tracked in
+    https://github.com/vllm-project/vllm-omni/issues/8503.
+    """
+    from dataclasses import fields
+    from typing import Any, cast
+
+    import vllm_omni.config.omni_config as omni_config_mod
+    from vllm_omni.config import VllmOmniOrchestratorConfig
+    from vllm_omni.diffusion.data import OmniDiffusionConfig
+    from vllm_omni.engine.arg_utils import orchestrator_field_names
+
+    try:
+        from vllm.entrypoints.launchers.cli_args import FrontendArgs
+    except ModuleNotFoundError as error:
+        if error.name not in {"vllm.entrypoints.launchers", "vllm.entrypoints.launchers.cli_args"}:
+            raise
+        # The Ascend NPU smoke image can expose frontend args at the
+        # pre-launchers path even though the GPU v0.30 wheel uses launchers.
+        from vllm.entrypoints.openai.cli_args import FrontendArgs
+
+    frontend_fields = {f.name for f in fields(FrontendArgs)}
+
+    def _get_fields(attr: str) -> set[str]:
+        return set(getattr(omni_config_mod, attr, ()))
+
+    stage_fields = (
+        {f.name for f in fields(OmniDiffusionConfig)}
+        | _get_fields("_DIFFUSION_OWNED_STAGE_ENGINE_FIELDS")
+        | _get_fields("_STAGE_DEPLOY_ENGINE_FIELDS")
+        | _get_fields("_PIPELINE_DEPLOY_CLI_FIELDS")
+        | _get_fields("_DIFFUSION_STAGE_METADATA_FIELDS")
+        | _get_fields("_DIFFUSION_DEFAULT_FACTORY_FIELDS")
+    )
+    infra_fields = (
+        _get_fields("_DIFFUSION_SHARED_ONLY_ENGINE_FIELDS")
+        | _get_fields("_NON_STAGE_ENGINE_CLI_FIELDS")
+        | frontend_fields
+        | {f.name for f in fields(cast(Any, VllmOmniOrchestratorConfig))}
+        | orchestrator_field_names()
+    )
+    return frozenset(stage_fields | infra_fields)
+
+
 def _diffusion_output_type(sampling_params: dict[str, Any]) -> str:
     output_type = sampling_params.get("output_type")
     if output_type is None:
         output_type = (sampling_params.get("extra_args") or {}).get("output_type")
-    return output_type or "image"
-
-
-def _pixel_output_to_uint8(output: torch.Tensor) -> torch.Tensor:
-    """Quantize a rollout pixel tensor from float ``[0, 1]`` to uint8 once."""
-    if output.dtype == torch.uint8:
-        return output
-    output = output.detach().to(dtype=torch.float32, copy=True)
-    if not bool(torch.isfinite(output).all()):
-        raise ValueError("Pixel rollout output must contain only finite values")
-    output = output.clamp_(0, 1)
-    return output.mul_(255).round_().to(dtype=torch.uint8)
+    if output_type is None:
+        return "image"
+    if not isinstance(output_type, str) or output_type not in ("image", "pt", "np", "pil", "both", "latent"):
+        raise ValueError(f"Unsupported diffusion output_type: {output_type!r}")
+    return output_type
 
 
 def _rollout_metadata_groups(multimodal_output: Any) -> tuple[Mapping[str, Any], ...]:
@@ -70,16 +121,99 @@ def _rollout_metadata_groups(multimodal_output: Any) -> tuple[Mapping[str, Any],
     return tuple(groups)
 
 
-def _maybe_unbatch(value: Any) -> Any:
-    if value is None:
-        return None
-    if isinstance(value, torch.Tensor):
-        return value[0] if value.dim() > 0 else value
-    if isinstance(value, np.ndarray):
-        return value[0] if value.ndim > 0 else value
+def _unbatch_training_field(value: Any, *, context: str, name: str) -> Any:
+    """Training groups declare B-leading tensors/lists; the RPC returns exactly one sample."""
+    if isinstance(value, torch.Tensor | np.ndarray):
+        if value.ndim == 0:
+            return value
+        if value.shape[0] != 1:
+            raise ValueError(f"{context}, field={name!r}: expected batch size 1, got shape={tuple(value.shape)}")
+        return value[0]
     if isinstance(value, list | tuple):
-        return value[0] if value else None
+        if len(value) != 1:
+            raise ValueError(f"{context}, field={name!r}: expected one batched item, got {len(value)}")
+        return value[0]
     return value
+
+
+def _media_artifact_header(multimodal: Any, *, context: str) -> Mapping[str, Any] | None:
+    """Validate the named header before interpreting any engine payload."""
+    metadata = multimodal.get("metadata", {}) if isinstance(multimodal, Mapping) else {}
+    header = metadata.get("media_artifacts") if isinstance(metadata, Mapping) else None
+    if header is None:
+        if isinstance(multimodal, Mapping) and multimodal.keys() - {"metadata"}:
+            raise ValueError(f"{context}: named media_artifacts declaration required")
+        return None
+    if not isinstance(header, Mapping) or not {"primary", "specs", "preview", "audio"} <= header.keys():
+        raise ValueError(f"{context}: invalid media_artifacts header")
+    if not isinstance(header["specs"], Mapping) or header["primary"] not in header["specs"]:
+        raise ValueError(f"{context}: invalid named artifact declarations/primary")
+    return header
+
+
+def _merge_artifact_sources(sources: list[Mapping[str, Any]], *, context: str) -> dict[str, torch.Tensor]:
+    """Merge complementary engine sources, rejecting non-tensors and conflicting aliases."""
+    payload = {}
+    for source in sources:
+        for name, tensor in source.items():
+            if not isinstance(name, str):
+                raise ValueError(f"{context}: artifact names must be strings, got {name!r}")
+            if not isinstance(tensor, torch.Tensor):
+                raise TypeError(f"{context}, artifact={name!r}: expected tensor, got {type(tensor).__name__}")
+            if name in payload and (
+                payload[name].dtype != tensor.dtype or not _alias_values_match(payload[name], tensor)
+            ):
+                raise ValueError(f"{context}: conflicting artifact={name!r} in multimodal_output and images")
+            payload[name] = tensor
+    if not payload:
+        raise ValueError(f"{context}: expected one named artifact payload")
+    return payload
+
+
+def _collect_artifact_payload(
+    final_res: OmniRequestOutput, header: Mapping[str, Any], *, context: str
+) -> dict[str, torch.Tensor]:
+    """Read the pinned formatter's named mappings and explicitly labelled images fallback."""
+    sources = []
+    specs = header["specs"]
+    for key, value in final_res.multimodal_output.items():
+        if key in {"metadata", "audio_sample_rate", "fps", "trajectory"}:
+            continue
+        if key in ("image", "video", "audio") and isinstance(value, Mapping | list):
+            if isinstance(value, list):
+                if len(value) != 1:
+                    raise ValueError(f"{context}: expected one named artifact payload")
+                value = value[0]
+            if not isinstance(value, Mapping):
+                raise ValueError(f"{context}: invalid named {key} payload")
+            sources.append(value)
+        elif key in specs:
+            sources.append({key: value})
+        else:
+            raise ValueError(f"{context}: undeclared multimodal output {key!r}")
+    if final_res.images:
+        if len(final_res.images) != 1:
+            raise ValueError(f"{context}: expected one named artifact payload")
+        image_payload = final_res.images[0]
+        if not isinstance(image_payload, Mapping):
+            primary = header["primary"]
+            expected_kind = specs[primary]["modality"]
+            if final_res.final_output_type != expected_kind:
+                raise ValueError(f"{context}: images fallback requires explicit final_output_type={expected_kind}")
+            image_payload = {primary: image_payload}
+        sources.append(image_payload)
+    return _merge_artifact_sources(sources, context=context)
+
+
+def _finish_reason(final_res: OmniRequestOutput | None, *, default: str) -> str:
+    """Read completion state when supplied; pure diffusion outputs may omit it."""
+    if final_res is None:
+        return default
+    if final_res.outputs:
+        return final_res.outputs[0].finish_reason or default
+    if hasattr(final_res, "finish_reason"):
+        return final_res.finish_reason or default
+    return default
 
 
 class DiffusionStrategy(OmniStrategyBase):
@@ -94,27 +228,103 @@ class DiffusionStrategy(OmniStrategyBase):
     rollout_config_cls = DiffusionRolloutConfig
     model_config_cls = DiffusionModelConfig
 
-    def post_init(self, cuda_visible_devices: str) -> None:
-        self.server._to_tensor = T.PILToTensor()
-
     def worker_extension_cls(self, device_type: str) -> str:
         if device_type == "npu":
             return _NPU_WORKER_EXTENSION
         return _GPU_WORKER_EXTENSION
 
+    def validate_configs(self) -> None:
+        """Refuse expert parallelism the diffusion rollout cannot honor.
+
+        No diffusion stage reads ``expert_parallel_size``, and vLLM-Omni enables
+        diffusion EP only for pipelines that opt in through their own stage
+        config. The rollout copies ``engine_kwargs.vllm_omni`` into the engine
+        verbatim, so both engine-flag spellings are refused here as well.
+
+        Raises:
+            ValueError: If EP is requested, by size or by either engine flag.
+        """
+        config = self.server.config
+        # The launcher compares this field, so an unset value must become 1.
+        if config.expert_parallel_size is None:
+            config.expert_parallel_size = 1
+        ep_size = coerce_expert_parallel_size(config.expert_parallel_size)
+        omni_kwargs = config.engine_kwargs.get("vllm_omni", {}) or {}
+        parallel_config = omni_kwargs.get("parallel_config") or {}
+        nested_flag = hasattr(parallel_config, "get") and bool(parallel_config.get("enable_expert_parallel", False))
+        flat_flag = bool(omni_kwargs.get("enable_expert_parallel", False))
+        stage_flag = any(
+            hasattr(overrides, "get") and bool(overrides.get("enable_expert_parallel", False))
+            for overrides in (omni_kwargs.get("stage_overrides") or {}).values()
+        )
+        if ep_size == 1 and not (nested_flag or flat_flag or stage_flag):
+            return
+        raise ValueError(
+            "Expert parallelism is not wired for the diffusion rollout: no diffusion stage consumes "
+            "actor_rollout_ref.rollout.expert_parallel_size, and vLLM-Omni enables diffusion EP only for "
+            "pipelines that opt in through their own stage config. Leave expert_parallel_size=1 and drop "
+            "any enable_expert_parallel entry from engine_kwargs.vllm_omni (flat key, parallel_config, "
+            "or stage_overrides)."
+        )
+
     def prepare_engine_args(self, engine_args: dict[str, Any], args: Namespace) -> None:
-        # TODO(vllm-omni#7564): Drop this pin-compat shim; tracked in verl-omni#445.
-        text_encoder_tp = self.server.config.text_encoder_tp_size
+        config = self.server.config
+        parallel_config = engine_args.get("parallel_config")
+        if parallel_config is not None:
+            parallel_config = dict(parallel_config) if isinstance(parallel_config, Mapping) else asdict(parallel_config)
+
+        # Resource-bearing degrees must agree with the config used by verl's allocator.
+        topology = {
+            "tensor_parallel_size": config.tensor_model_parallel_size,
+            "ulysses_degree": config.ulysses_degree,
+            "ring_degree": config.ring_degree,
+            "sequence_parallel_size": config.ulysses_degree * config.ring_degree,
+            "data_parallel_size": config.data_parallel_size,
+            "pipeline_parallel_size": config.pipeline_model_parallel_size,
+        }
+        explicit_kwargs = {
+            key.replace("-", "_"): value for key, value in (config.engine_kwargs.get("vllm_omni", {}) or {}).items()
+        }
+        for key, value in topology.items():
+            cli_value = getattr(args, key, None)
+            nested_value = (parallel_config or {}).get(key)
+            aliases = {"ulysses_degree": "usp", "ring_degree": "ring"}
+            explicit = key in explicit_kwargs or aliases.get(key) in explicit_kwargs
+            if (cli_value is not None and cli_value != value and (explicit or cli_value != 1)) or (
+                nested_value is not None and nested_value != value
+            ):
+                raise ValueError(
+                    f"Conflicting {key}; configure topology through actor_rollout_ref.rollout, not engine_kwargs."
+                )
+            engine_args[key] = value
+            if parallel_config is not None:
+                parallel_config[key] = value
+
+        for key, default in (("vae_patch_parallel_size", 1), ("vae_parallel_mode", "tile"), ("vae_use_tiling", False)):
+            value = getattr(config, key)
+            cli_value = getattr(args, key, None)
+            if cli_value is not None and (cli_value != default or key in explicit_kwargs):
+                if value not in (default, cli_value):
+                    raise ValueError(f"Conflicting {key} in rollout config and engine_kwargs.")
+                value = cli_value
+            if key != "vae_use_tiling" and parallel_config is not None:
+                nested_value = parallel_config.get(key)
+                if nested_value is not None and (nested_value != getattr(config, key) or nested_value != value):
+                    raise ValueError(f"Conflicting {key} in rollout config and parallel_config.")
+                parallel_config[key] = value
+            engine_args[key] = value
+
+        # Upstream vllm-omni#7652 resolved vllm-omni#7564 (tracked in verl-omni#445 P31);
+        # text_encoder_tp_size is now preserved natively in OmniEngineArgs.
+        text_encoder_tp = config.text_encoder_tp_size
         cli_text_encoder_tp = getattr(args, "text_encoder_tp_size", None)
         if cli_text_encoder_tp is not None:
             if text_encoder_tp not in (1, cli_text_encoder_tp):
                 raise ValueError("Conflicting text_encoder_tp_size in rollout config and engine_kwargs.")
             text_encoder_tp = cli_text_encoder_tp
 
-        parallel_config = engine_args.get("parallel_config")
-        tp_size = self.server.config.tensor_model_parallel_size
+        dit_world_size = config.tensor_model_parallel_size * config.ulysses_degree * config.ring_degree
         if parallel_config is not None:
-            parallel_config = dict(parallel_config) if isinstance(parallel_config, Mapping) else asdict(parallel_config)
             nested_text_encoder_tp = parallel_config.get("text_encoder_tp_size")
             if nested_text_encoder_tp is not None:
                 if nested_text_encoder_tp != text_encoder_tp and (
@@ -122,11 +332,19 @@ class DiffusionStrategy(OmniStrategyBase):
                 ):
                     raise ValueError("Conflicting text_encoder_tp_size in rollout/engine_kwargs and parallel_config.")
                 text_encoder_tp = nested_text_encoder_tp
-            tp_size = parallel_config.get("tensor_parallel_size", tp_size)
 
-        if text_encoder_tp < 1 or text_encoder_tp not in (1, tp_size):
-            raise ValueError(f"text_encoder_tp_size must be 1 or equal to tensor parallel size ({tp_size}).")
+        if text_encoder_tp < 1 or text_encoder_tp not in (1, dit_world_size):
+            raise ValueError(f"text_encoder_tp_size must be 1 or equal to DiT group size ({dit_world_size}).")
         engine_args["text_encoder_tp_size"] = text_encoder_tp
+        if config.ulysses_degree * config.ring_degree > 1:
+            for key in ("cfg_parallel_size", "allgather_degree"):
+                value = (parallel_config or {}).get(key, getattr(args, key, None))
+                if value not in (None, 1):
+                    raise ValueError(f"Rollout sequence parallelism requires {key}=1.")
+            num_gpus = engine_args.get("num_gpus")
+            if num_gpus not in (None, dit_world_size):
+                raise ValueError(f"num_gpus must match the allocated DiT group size ({dit_world_size}).")
+            engine_args["num_gpus"] = dit_world_size
         if parallel_config is not None:
             parallel_config["text_encoder_tp_size"] = text_encoder_tp
             engine_args["parallel_config"] = parallel_config
@@ -139,7 +357,6 @@ class DiffusionStrategy(OmniStrategyBase):
         )
         # TODO (mike): read custom_pipeline from engine_args.
         if pipeline_path is not None:
-            engine_args["enable_dummy_pipeline"] = True
             engine_args["custom_pipeline_args"] = {"pipeline_class": pipeline_path}
 
             pipeline_cls = VllmOmniPipelineBase.get_class(
@@ -162,47 +379,50 @@ class DiffusionStrategy(OmniStrategyBase):
         engine_args["enable_prompt_embed_cache"] = self.server.config.enable_prompt_embed_cache
         engine_args["prompt_embed_cache_size"] = self.server.config.prompt_embed_cache_size
 
+        # Strip LLM-only fields from OmniEngineArgs before passing to diffusion ingress.
+        # Tracked upstream in https://github.com/vllm-project/vllm-omni/issues/8503.
+        allowed = _diffusion_ingress_allowed_fields()
+        dropped = sorted(key for key in engine_args if key not in allowed)
+        for key in dropped:
+            del engine_args[key]
+        if dropped:
+            logger.info("Dropping LLM-only engine args rejected by diffusion ingress: %s", dropped)
+
     def preprocess_input(
         self,
         request: OmniRolloutRequest,
         sampling_params: dict[str, Any],
         lora_request: Optional[LoRARequest],
-    ) -> tuple[OmniCustomPrompt, list[Any]]:
-        prompt_ids = request.prompt.token_ids
-        prompt_mask = request.prompt.mask
-        negative_prompt_ids = request.prompt.negative_token_ids
-        extra_prompt_ids = request.prompt.extra_token_ids
-        negative_extra_prompt_ids = request.prompt.negative_extra_token_ids
-        mm_processor_kwargs = request.prompt.mm_processor_kwargs
-        multi_modal_data = request.multi_modal_data()
-
+    ) -> tuple[dict[str, Any], list[Any]]:
         default_params_list = self.server.engine.default_sampling_params_list
-
-        custom_prompt: OmniCustomPrompt = {"prompt_token_ids": prompt_ids}
-        if prompt_mask is not None:
-            custom_prompt["prompt_mask"] = prompt_mask
-        if len(default_params_list) > 1:
+        custom_prompt = dict(request.to_diffusion_prompt())
+        if self.server.engine.engine.get_stage_metadata(0).stage_type != "diffusion":
+            # Match AsyncOmniEngine's stage-0 preprocessing gate, independently of stage count.
+            custom_prompt["prompt_token_ids"] = custom_prompt.pop("prompt_ids")
             custom_prompt["modalities"] = ["image"]
-        if negative_prompt_ids is not None:
-            custom_prompt["negative_prompt_ids"] = negative_prompt_ids
-        if extra_prompt_ids is not None:
-            custom_prompt["extra_prompt_ids"] = extra_prompt_ids
-        if negative_extra_prompt_ids is not None:
-            custom_prompt["negative_extra_prompt_ids"] = negative_extra_prompt_ids
-        if multi_modal_data:
-            custom_prompt["multi_modal_data"] = multi_modal_data
-            custom_prompt["extra_args"] = {"multi_modal_data": multi_modal_data}
-        if mm_processor_kwargs:
-            # Reference fps / sampling_rate must reach the pipeline (mirrors ARStrategy).
-            custom_prompt["mm_processor_kwargs"] = mm_processor_kwargs
 
         sampling_kwargs: dict[str, Any] = {}
-        extra_args: dict[str, Any] = {}
+        explicit_extra = sampling_params.get("extra_args") or {}
+        if not isinstance(explicit_extra, Mapping):
+            raise TypeError("Diffusion sampling extra_args must be a mapping")
+        extra_args: dict[str, Any] = dict(explicit_extra)
+        _diffusion_output_type(sampling_params)
         for key, value in sampling_params.items():
+            if key == "extra_args":
+                continue
+            if key in extra_args:
+                if not _alias_values_match(value, extra_args[key]):
+                    raise ValueError(f"Conflicting diffusion sampling field {key!r} and extra_args.{key}")
+                del extra_args[key]
             if hasattr(OmniDiffusionSamplingParams, key):
                 sampling_kwargs[key] = value
             else:
                 extra_args[key] = value
+        requested = requested_artifact_names(extra_args.get("requested_outputs"), context="diffusion request")
+        if requested:
+            io_spec = self._diffusion_io_spec()
+            if io_spec is not None and (unknown := set(requested) - io_spec.artifacts.keys()):
+                raise ValueError(f"Diffusion request asks for undeclared artifacts: {sorted(unknown)}")
         sampling_kwargs["extra_args"] = extra_args
         if lora_request is not None:
             sampling_kwargs["lora_request"] = lora_request
@@ -229,110 +449,150 @@ class DiffusionStrategy(OmniStrategyBase):
         )
 
     def _diffusion_io_spec(self) -> Optional[DiffusionIOSpec]:
-        """Resolve the adapter-declared media I/O spec for the active pipeline.
-
-        The spec lets a diffusion adapter declare its auxiliary media streams
-        (e.g. joint audio and its sample rate) so this strategy does not have to
-        hard-code model-specific tuple positions or sample rates. Returns
-        ``None`` when the pipeline (or a bare test server) declares no spec.
-        """
-        model_config = getattr(self.server, "model_config", None)
+        """Resolve the adapter's available named artifacts, independent of engine wire layout."""
+        model_config = self.server.model_config
         if model_config is None:
             return None
         pipeline_cls = VllmOmniPipelineBase.get_class(
             architecture=model_config.architecture,
             algorithm=model_config.algorithm,
         )
-        return getattr(pipeline_cls, "diffusion_io_spec", None)
+        if pipeline_cls is None or not hasattr(pipeline_cls, "diffusion_io_spec"):
+            return None
+        return pipeline_cls.diffusion_io_spec
 
-    def process_output(self, final_res: Any, params: Any, sampling_params: dict[str, Any]) -> DiffusionOutput:
+    def _parse_media_artifacts(
+        self,
+        final_res: OmniRequestOutput,
+        header: Mapping[str, Any],
+        sampling_params: dict[str, Any],
+        *,
+        context: str,
+    ) -> dict[str, MediaArtifact]:
+        """Validate merged named media against requested outputs and adapter declarations."""
+        payload = _collect_artifact_payload(final_res, header, context=context)
+        primary_name = header["primary"]
+        artifacts = artifacts_from_fields(
+            {
+                ARTIFACT_SPECS: header["specs"],
+                PRIMARY_ARTIFACT: primary_name,
+                **{ARTIFACT_PREFIX + name: tensor for name, tensor in payload.items()},
+            },
+            context=context,
+        )
+        requested = requested_artifact_names(
+            sampling_params.get(
+                "requested_outputs", (sampling_params.get("extra_args") or {}).get("requested_outputs")
+            ),
+            context=context,
+        )
+        absent = set(requested) - artifacts.keys()
+        if absent:
+            raise ArtifactContractError(f"{context}: requested artifacts absent: {sorted(absent)}")
+        preview_name = header["preview"]
+        if preview_name is not None and not is_decoded_visual(artifacts.get(preview_name)):
+            raise ValueError(f"{context}: preview artifact={preview_name!r} must name decoded visual media")
+        primary = artifacts[primary_name]
+        expected_representation = "latent" if _diffusion_output_type(sampling_params) == "latent" else "decoded"
+        if primary.spec.representation != expected_representation:
+            raise ValueError(
+                f"{context}, artifact={primary_name!r}: expected {expected_representation}, got {primary.spec}"
+            )
+        io_spec = self._diffusion_io_spec()
+        if io_spec is not None:
+            for name, artifact in artifacts.items():
+                expected = io_spec.artifacts.get(name)
+                if expected is None:
+                    raise ValueError(f"{context}: undeclared artifact={name!r}")
+                actual = artifact.spec
+                if (actual.modality, actual.representation, actual.layout) != (
+                    expected.modality,
+                    expected.representation,
+                    expected.layout,
+                ) or (expected.sample_rate is not None and actual.sample_rate != expected.sample_rate):
+                    raise ValueError(f"{context}, artifact={name!r}: expected {expected}, got {actual}")
+        return artifacts
+
+    def _training_output_fields(self, final_res: OmniRequestOutput, *, context: str) -> dict[str, Any]:
+        """Remove only declared training batch axes and preserve algorithm-owned keys."""
+        fields: dict[str, Any] = {"global_steps": self.server.global_steps}
+        for name, source, value in (
+            ("all_latents", "trajectory_latents", final_res.trajectory_latents),
+            ("all_timesteps", "trajectory_timesteps", final_res.trajectory_timesteps),
+        ):
+            if value is not None:
+                fields[name] = _unbatch_training_field(value, context=context, name=source)
+        for metadata_group in _rollout_metadata_groups(final_res.multimodal_output):
+            for key, value in metadata_group.items():
+                if key in fields:
+                    raise ValueError(f"Duplicate rollout metadata field: {key}")
+                fields[key] = _unbatch_training_field(value, context=context, name=key)
+        return fields
+
+    def process_output(
+        self, final_res: OmniRequestOutput | None, params: Any, sampling_params: dict[str, Any]
+    ) -> DiffusionOutput:
         output_type = _diffusion_output_type(sampling_params)
-        if final_res is None or not final_res.images:
-            finish_reason = "abort"
-            if final_res is not None:
-                req_out = getattr(final_res, "request_output", None) or final_res
-                if hasattr(req_out, "outputs") and req_out.outputs:
-                    finish_reason = getattr(req_out.outputs[0], "finish_reason", None) or "abort"
-                else:
-                    finish_reason = getattr(req_out, "finish_reason", None) or "abort"
+        model_config = self.server.model_config
+        pipeline = f"{model_config.architecture}/{model_config.algorithm}" if model_config is not None else "unknown"
+        request_output = final_res
+        if final_res is not None and hasattr(final_res, "request_output"):
+            request_output = final_res.request_output or final_res
+        request_id = request_output.request_id if request_output is not None else "unknown"
+        context = f"pipeline={pipeline}, request_id={request_id}"
+        header = _media_artifact_header(final_res.multimodal_output if final_res is not None else None, context=context)
+        if header is None:
+            if final_res is not None and final_res.images:
+                raise ValueError(
+                    f"{context}: named media_artifacts declaration required; legacy tensor/tuple output is unsupported"
+                )
+            finish_reason = _finish_reason(request_output, default="abort")
             stop_reason = self._map_stop_reason(finish_reason)
             logger.debug(
                 "diffusion rollout produced no image (finish_reason=%s); returning %s", finish_reason, stop_reason
             )
+            extra_fields: dict[str, Any] = {"global_steps": self.server.global_steps}
+            if final_res is not None:
+                for metadata_group in _rollout_metadata_groups(final_res.multimodal_output):
+                    for key, value in metadata_group.items():
+                        if key in extra_fields:
+                            raise ValueError(f"Duplicate rollout metadata field: {key}")
+                        extra_fields[key] = _unbatch_training_field(value, context=context, name=key)
             return DiffusionOutput(
-                diffusion_output=torch.empty(
-                    0,
-                    dtype=torch.float32 if output_type == "latent" else torch.uint8,
-                ),
+                diffusion_output=torch.empty(0, dtype=torch.float32 if output_type == "latent" else torch.uint8),
                 log_probs=None,
                 stop_reason=stop_reason,
                 num_preempted=None,
-                extra_fields={"global_steps": self.server.global_steps},
+                extra_fields=extra_fields,
             )
 
-        diffusion_output = final_res.images[0]
-        if isinstance(diffusion_output, dict):
-            for key in ("video", "image", "output", "audio"):
-                if key in diffusion_output and diffusion_output[key] is not None:
-                    diffusion_output = diffusion_output[key]
-                    break
-        io_spec = self._diffusion_io_spec()
-        audio_sample_rate: Optional[int] = None
-        rollout_audio: Any = None
-        if isinstance(diffusion_output, tuple | list):
-            rollout_audio = diffusion_output[1] if len(diffusion_output) > 1 else None
-            diffusion_output = diffusion_output[0]
-            if io_spec is not None:
-                audio_spec = next((spec for spec in io_spec.auxiliary if spec.modality == "audio"), None)
-                if audio_spec is not None:
-                    audio_sample_rate = audio_spec.sample_rate
-        if output_type == "latent":
-            diffusion_output = torch.as_tensor(diffusion_output).float()
-        else:
-            if isinstance(diffusion_output, np.ndarray):
-                diffusion_output = torch.from_numpy(diffusion_output)
-            elif not isinstance(diffusion_output, torch.Tensor):
-                diffusion_output = self.server._to_tensor(diffusion_output)
-            diffusion_output = _pixel_output_to_uint8(diffusion_output)
-
-        if sampling_params.get("logprobs", False):
-            log_probs = _maybe_unbatch(final_res.trajectory_log_probs)
-        else:
-            log_probs = None
-
-        extra_fields: dict[str, Any] = {"global_steps": self.server.global_steps}
-        if final_res.trajectory_latents is not None:
-            extra_fields["all_latents"] = _maybe_unbatch(final_res.trajectory_latents)
-        if final_res.trajectory_timesteps is not None:
-            extra_fields["all_timesteps"] = _maybe_unbatch(final_res.trajectory_timesteps)
-        for metadata_group in _rollout_metadata_groups(final_res.multimodal_output):
-            for key, value in metadata_group.items():
-                if key in extra_fields:
-                    raise ValueError(f"Duplicate rollout metadata field: {key}")
-                extra_fields[key] = _maybe_unbatch(value)
-        if rollout_audio is not None:
-            extra_fields["audio"] = _maybe_unbatch(rollout_audio)
-            # The audio sample rate is declared by the adapter's DiffusionIOSpec
-            # (or provided at runtime through rollout metadata); no model-specific
-            # default lives in this shared strategy.
-            if audio_sample_rate is not None:
-                extra_fields.setdefault("audio_sample_rate", audio_sample_rate)
-
-        req_output = getattr(final_res, "request_output", None) or final_res
-        if hasattr(req_output, "outputs") and req_output.outputs:
-            finish_reason = req_output.outputs[0].finish_reason or "stop"
-        elif hasattr(req_output, "finish_reason"):
-            finish_reason = req_output.finish_reason or "stop"
-        else:
-            finish_reason = "stop"
-
-        stop_reason = self._map_stop_reason(finish_reason)
-        num_preempted = self._extract_num_preempted(req_output)
-
+        artifacts = self._parse_media_artifacts(final_res, header, sampling_params, context=context)
+        primary_name = header["primary"]
+        primary = artifacts[primary_name]
+        fields = self._training_output_fields(final_res, context=context)
+        if fields.get("media_kind", primary.spec.modality) != primary.spec.modality:
+            raise ValueError(f"{context}: media_kind conflicts with primary artifact")
+        fields["media_kind"] = primary.spec.modality
+        if header["audio"] is not None:
+            audio = select_artifact(artifacts, name=header["audio"], modality="audio", representation="decoded")
+            if "audio" in fields and not torch.equal(torch.as_tensor(fields["audio"]), audio.data):
+                raise ValueError(f"{context}: audio metadata conflicts with named audio artifact")
+            if fields.get("audio_sample_rate", audio.spec.sample_rate) != audio.spec.sample_rate:
+                raise ValueError(f"{context}: audio_sample_rate conflicts with named audio artifact")
+            fields["audio"] = audio.data
+            fields["audio_sample_rate"] = audio.spec.sample_rate
+        log_probs = (
+            _unbatch_training_field(final_res.trajectory_log_probs, context=context, name="trajectory_log_probs")
+            if sampling_params.get("logprobs", False)
+            else None
+        )
         return DiffusionOutput(
-            diffusion_output=diffusion_output,
+            artifacts=artifacts,
+            primary_artifact=primary_name,
+            preview_artifact=header["preview"],
+            diffusion_output=primary.data,
             log_probs=log_probs,
-            stop_reason=stop_reason,
-            num_preempted=num_preempted,
-            extra_fields=extra_fields,
+            stop_reason=self._map_stop_reason(_finish_reason(request_output, default="stop")),
+            num_preempted=self._extract_num_preempted(request_output),
+            extra_fields=fields,
         )

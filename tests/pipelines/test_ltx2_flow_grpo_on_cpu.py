@@ -33,6 +33,7 @@ from vllm_omni.diffusion.models.ltx2.ltx2_guidance import LTXGuidanceExecutor
 from vllm_omni.diffusion.models.ltx2.ltx2_latents import LTXAVState
 from vllm_omni.diffusion.models.ltx2.ltx2_recipes import LTXPhaseRecipe
 from vllm_omni.diffusion.worker.request_batch import DiffusionRequestBatch
+from vllm_omni.inputs.data import OmniDiffusionSamplingParams
 
 from verl_omni.pipelines.ltx2_flow_grpo.agent_loop import LTX2DiffusionSingleTurnAgentLoop, _messages_to_text
 from verl_omni.pipelines.ltx2_flow_grpo.common import (
@@ -103,7 +104,7 @@ def test_ltx2_ti2va_default_dataset_forwards_image_without_hf_processor(tmp_path
     server = SimpleNamespace(
         generate=AsyncMock(
             return_value=SimpleNamespace(
-                diffusion_output=torch.zeros(1), log_probs=None, num_preempted=None, extra_fields={}
+                artifacts={}, diffusion_output=torch.zeros(1), log_probs=None, num_preempted=None, extra_fields={}
             )
         )
     )
@@ -951,10 +952,16 @@ def test_ltx2_rollout_forward_attaches_trajectory_and_metadata() -> None:
 
     req = MagicMock(spec=DiffusionRequestBatch)
     req.num_reqs = 1
-    req.requests = [MagicMock()]
+    req.requests = [
+        SimpleNamespace(
+            request_id="ltx",
+            sampling_params=OmniDiffusionSamplingParams(output_type="pt", extra_args={}, frame_rate=24),
+        )
+    ]
+    pipeline.distributed_video_decode = False
 
     # Mock super().forward
-    video_tensor = torch.randn(1, 3, 16, 64, 64)
+    video_tensor = torch.rand(1, 16, 3, 64, 64)
     audio_tensor = torch.randn(1, 2, 24000)
     mock_base_output = DiffusionOutput(output=(video_tensor, audio_tensor))
 
@@ -978,10 +985,78 @@ def test_ltx2_rollout_forward_attaches_trajectory_and_metadata() -> None:
     assert metadata["rl"]["video_seq_len"].item() == 5
     assert metadata["rl"]["condition_image_latents"].shape == (1, 2, 32)
     assert metadata["rl"]["audio_sample_rate"] == 24000
+    assert metadata["media_artifacts"]["specs"]["audio"]["sample_rate"] == 24000
+    assert metadata["media_artifacts"]["specs"]["audio_latent"]["layout"] == "CTF"
     assert "audio_prompt_embeds" in metadata["prompt_embeddings"]
+
+
+def test_ltx_phase_passes_declared_sampler_to_pinned_forward_context(monkeypatch):
+    pipeline = object.__new__(LTX23PipelineWithLogProb)
+    pipeline.device = torch.device("cpu")
+    pipeline._flow_grpo_task = None
+    pipeline._select_sde_steps = lambda count, device: [0]
+    phase_recipe = SimpleNamespace(sampler="euler", adapter_slot=None)
+    sentinel = object()
+
+    def run_parent(self, *args, **kwargs):
+        assert kwargs["phase_recipe"] is phase_recipe
+        pipeline._current_latents = [torch.zeros(1, 2, 3)]
+        pipeline._next_latents = [torch.zeros(1, 2, 3)]
+        pipeline._selected_timesteps = [torch.tensor(1.0)]
+        pipeline._log_probs = []
+        pipeline._flow_grpo_video_seq_len = 2
+        pipeline._flow_grpo_condition_image_latents = torch.zeros(1, 1, 3)
+        return sentinel
+
+    monkeypatch.setattr(LTX23PipelineWithLogProb.__bases__[0], "run_phase", run_parent)
+    result = pipeline.run_phase(
+        SimpleNamespace(),
+        SimpleNamespace(num_inference_steps=2),
+        noise_scale=1.0,
+        sigmas=None,
+        timesteps=None,
+        attention_kwargs=None,
+        phase_recipe=phase_recipe,
+        prompt_context=SimpleNamespace(),
+    )
+
+    assert result is sentinel
+
+
+def test_ltx_warmup_does_not_emit_serving_media_without_request_metadata():
+    from vllm_omni.diffusion.request import DUMMY_DIFFUSION_REQUEST_ID
+
+    pipeline = object.__new__(LTX23PipelineWithLogProb)
+    pipeline._configure_flow_grpo = MagicMock()
+    pipeline._inject_precomputed_prompt_embeds = MagicMock()
+    request = SimpleNamespace(
+        request_id=DUMMY_DIFFUSION_REQUEST_ID, sampling_params=SimpleNamespace(output_type=None, extra_args={})
+    )
+    batch = SimpleNamespace(num_reqs=1, requests=[request])
+    native = DiffusionOutput(output=(torch.zeros(1, 2, 3, 4, 4), torch.zeros(1, 2, 16)))
+    with unittest_mock_super_forward(pipeline, native):
+        result = pipeline.forward(batch)
+    assert result.output is None
+    assert pipeline._flow_grpo_native_latents is None
 
 
 def unittest_mock_super_forward(target, return_value):
     from unittest.mock import patch
 
-    return patch.object(LTX23PipelineWithLogProb.__bases__[0], "forward", return_value=return_value)
+    def forward(*args, **kwargs):
+        target._flow_grpo_native_latents = (torch.zeros(1, 4, 2, 4, 4), torch.zeros(1, 8, 5, 16))
+        return return_value
+
+    return patch.object(LTX23PipelineWithLogProb.__bases__[0], "forward", side_effect=forward)
+
+
+def test_ltx2_agent_loop_registered_in_agent_loop_package() -> None:
+    from verl.experimental.agent_loop.agent_loop import _agent_loop_registry
+
+    from verl_omni.agent_loop import LTX2DiffusionSingleTurnAgentLoop
+
+    assert LTX2DiffusionSingleTurnAgentLoop is not None
+    assert "ltx2_diffusion_single_turn_agent" in _agent_loop_registry
+    assert _agent_loop_registry["ltx2_diffusion_single_turn_agent"]["_target_"] == (
+        f"{LTX2DiffusionSingleTurnAgentLoop.__module__}.{LTX2DiffusionSingleTurnAgentLoop.__qualname__}"
+    )

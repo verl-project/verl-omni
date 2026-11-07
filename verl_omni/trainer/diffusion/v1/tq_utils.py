@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import dataclasses
 import logging
 import os
 from typing import Any, Literal
@@ -24,6 +25,8 @@ from transfer_queue import KVBatchMeta
 from verl.protocol import DataProto
 from verl.utils import tensordict_utils as tu
 
+from verl_omni.trainer.diffusion.diffusion_trainer_utils import MEDIA_ARTIFACT_FIELD_PREFIX
+
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
@@ -31,12 +34,62 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 def diffusion_persisted_tq_fields(
     algorithm: Literal["policy_gradient", "direct_preference"],
 ) -> list[str]:
-    """Return trainer-computed fields persisted after a diffusion update."""
+    """Return trainer-computed fields persisted after a diffusion update.
+
+    ``old_log_probs`` is not persisted: every consumer recomputes it from the
+    actor (or falls back to ``rollout_log_probs`` in bypass mode), so writing
+    the [batch, num_timesteps] tensor back would be dead TQ traffic.
+    """
     if algorithm == "policy_gradient":
-        return ["old_log_probs", "advantages", "returns", "sample_level_scores", "sample_level_rewards"]
+        return ["advantages", "returns", "sample_level_scores", "sample_level_rewards"]
     if algorithm == "direct_preference":
         return ["sample_level_scores", "sample_level_rewards"]
     raise ValueError(f"Unsupported diffusion trainer algorithm: {algorithm}")
+
+
+# Fields consumed by the post-step rollout-dump read. Selecting them
+# explicitly keeps the dump from re-pulling the trainer-only compute payloads
+# (all_latents, prompt_embeds, ...) which dominate row size. Absent optional
+# fields are silently skipped by TransferQueue's field selection:
+# ``sample_level_scores`` is persisted by the colocated-reward trainer before
+# the dump (its preferred scores source), while async-reward rows carry only
+# ``rm_scores`` and keep that fallback.
+DIFFUSION_DUMP_TQ_FIELDS = (
+    "prompts",
+    "responses",
+    "rm_scores",
+    "sample_level_scores",
+    "reward_model",
+    "data_source",
+    "extra_info",
+    "raw_prompt",
+    "__num_turns__",
+    "uid",
+    "extra_fields",
+    "tool_extra_fields",
+    "image",
+    "video",
+    "output",
+    "audio",
+    "audio_sample_rate",
+    "media_kind",
+)
+
+
+def diffusion_dump_tq_fields(batch_meta: KVBatchMeta) -> list[str]:
+    """Return the rollout-dump projection, including every stored media artifact.
+
+    Artifact names are adapter-defined (``DiffusionIOSpec``) and their
+    declarations ride ``extra_fields``; ``validate_artifacts`` raises on any
+    declared artifact whose ``media_artifact__<name>`` tensor is missing from
+    the read, so the names come from the stored schema, not a fixed list.
+    """
+    stored = (
+        tq.get_client()
+        .kv_retrieve_meta(keys=list(batch_meta.keys), partition_id=batch_meta.partition_id, create=False)
+        .field_names
+    )
+    return [*DIFFUSION_DUMP_TQ_FIELDS, *(name for name in stored if name.startswith(MEDIA_ARTIFACT_FIELD_PREFIX))]
 
 
 def diffusion_metric_tq_fields(
@@ -128,7 +181,8 @@ def diffusion_tq_batch_to_dataproto(
         responses, rollout_log_probs, rm_scores, embeds, ...) and whose
         ``non_tensor_batch`` carries uid/reward_model/data_source/extra_fields.
     """
-    keys = list(batch_meta.keys)
+    sort_idx = sort_diffusion_tq_keys(list(batch_meta.keys))
+    keys = [batch_meta.keys[i] for i in sort_idx]
     partition_id = batch_meta.partition_id
 
     data = tq.kv_batch_get(
@@ -162,7 +216,7 @@ def diffusion_tq_batch_to_dataproto(
                 continue
             for k, v in extra.items():
                 if k not in non_tensor_batch:
-                    non_tensor_batch[k] = np.empty(len(extra_fields_arr), dtype=object)
+                    non_tensor_batch[k] = np.full(len(extra_fields_arr), None, dtype=object)
                 non_tensor_batch[k][i] = v
 
     batch = TensorDict(batch_dict, batch_size=len(keys))
@@ -189,8 +243,10 @@ def put_dataproto_fields_to_tq(
         output[field] = data.batch[field]
     if not output:
         return
+    sort_idx = sort_diffusion_tq_keys(list(batch_meta.keys))
+    sorted_keys = [batch_meta.keys[i] for i in sort_idx]
     tq.kv_batch_put(
-        keys=list(batch_meta.keys),
+        keys=sorted_keys,
         partition_id=batch_meta.partition_id,
         fields=tu.get_tensordict(output),
     )
@@ -205,11 +261,51 @@ def sort_diffusion_tq_keys(keys: list[str]) -> list[int]:
     Returns:
         Permutation indices that reorder ``keys`` by ``(uid, rollout, output)``.
     """
-    sort_keys = []
-    for key in keys:
-        parts = key.rsplit("_", 2)
-        if len(parts) == 3:
-            sort_keys.append((parts[0], int(parts[1]), int(parts[2])))
-        else:
-            sort_keys.append((key, 0, 0))
-    return sorted(range(len(keys)), key=lambda i: sort_keys[i])
+    return sorted(range(len(keys)), key=lambda i: _parse_tq_key(keys[i]))
+
+
+def _parse_tq_key(key: str) -> tuple[str, int, int]:
+    """Split a ``{uid}_{session}_{output}`` TransferQueue key."""
+    parts = key.rsplit("_", 2)
+    if len(parts) == 3:
+        try:
+            return parts[0], int(parts[1]), int(parts[2])
+        except ValueError:
+            return key, 0, 0
+    return key, 0, 0
+
+
+def canonicalize_diffusion_tq_meta(batch_meta: KVBatchMeta) -> KVBatchMeta:
+    """Return a copy of ``batch_meta`` with rows in v0 rollout order.
+
+    Upstream ``_materialize_batch`` emits trajectory keys in TransferQueue
+    ``kv_list`` iteration order, which is storage-arbitrary and differs per
+    run, while the v0 trainer produced rows prompt-major in dataset order
+    (``prompt_index * rollout.n + session``). ``prompt_index`` is unique only
+    within one generation batch, so rows carry ``(gen_batch_seq,
+    prompt_index)`` — the per-run generation-batch number plus the position
+    inside it — which stays unique across every path that can mix batches in
+    one sample (DAPO speculative refills, incomplete-group replacement,
+    multi-chunk generation dispatches). Rows whose tag predates the pair fall
+    back to uid order, which is deterministic but not dataset order.
+    """
+    if len(batch_meta.keys) < 2:
+        return batch_meta
+
+    def sort_key(i: int) -> tuple:
+        uid, session, output = _parse_tq_key(batch_meta.keys[i])
+        tag = batch_meta.tags[i]
+        prompt_index = tag.get("prompt_index") if isinstance(tag, dict) else None
+        gen_batch_seq = tag.get("gen_batch_seq") if isinstance(tag, dict) else None
+        if prompt_index is None or gen_batch_seq is None:
+            return (1, uid, session, output)
+        return (0, int(gen_batch_seq), int(prompt_index), session, output)
+
+    perm = sorted(range(len(batch_meta.keys)), key=sort_key)
+    # replace() carries fields/extra_info over so future consumers reading
+    # them (e.g. a kv_batch_get driven by batch_meta.fields) see real values.
+    return dataclasses.replace(
+        batch_meta,
+        keys=[batch_meta.keys[i] for i in perm],
+        tags=[batch_meta.tags[i] for i in perm],
+    )

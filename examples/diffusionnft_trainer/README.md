@@ -1,6 +1,6 @@
 # DiffusionNFT Trainer
 
-Last updated: 09/10/2026
+Last updated: 10/15/2026
 
 This example shows how to post-train `Qwen-Image` with DiffusionNFT on an OCR-style image generation task using `vllm-omni` rollout and a visual generative reward model (`Qwen3-VL-8B-Instruct` in this example).
 
@@ -9,13 +9,20 @@ DiffusionNFT is a direct-preference / forward-process algorithm. Unlike PPO-styl
 MiniMax H3 DiffusionNFT recipes support text-to-audio-video (T2VA), first-frame
 image-to-audio-video (FL2VA), and multimodal reference-to-audio-video (Ref2VA):
 
-- [`minimax_h3/run_minimax_h3_t2va_lora.sh`](minimax_h3/run_minimax_h3_t2va_lora.sh)
-- [`minimax_h3/run_minimax_h3_fl2va_lora.sh`](minimax_h3/run_minimax_h3_fl2va_lora.sh)
-- [`minimax_h3/run_minimax_h3_ref2va_lora.sh`](minimax_h3/run_minimax_h3_ref2va_lora.sh)
+- [`minimax_h3/run_minimax_h3_t2va_lora.sh`](https://github.com/verl-project/verl-omni/blob/main/examples/diffusionnft_trainer/minimax_h3/run_minimax_h3_t2va_lora.sh)
+- [`minimax_h3/run_minimax_h3_fl2va_lora.sh`](https://github.com/verl-project/verl-omni/blob/main/examples/diffusionnft_trainer/minimax_h3/run_minimax_h3_fl2va_lora.sh)
+- [`minimax_h3/run_minimax_h3_ref2va_lora.sh`](https://github.com/verl-project/verl-omni/blob/main/examples/diffusionnft_trainer/minimax_h3/run_minimax_h3_ref2va_lora.sh)
 
 They use the dedicated token-ID-native H3 AgentLoop; see the
-[MiniMax H3 recipe README](minimax_h3/README.md) for model staging, data
+[MiniMax H3 recipe README](https://github.com/verl-project/verl-omni/blob/main/examples/diffusionnft_trainer/minimax_h3/README.md) for model staging, data
 preparation, and launch instructions.
+
+Boogu-Image-0.1-Base has a DiffusionNFT recipe as well:
+[`boogu_image/run_boogu_image_ocr_lora.sh`](https://github.com/verl-project/verl-omni/blob/main/examples/diffusionnft_trainer/boogu_image/run_boogu_image_ocr_lora.sh),
+and a CFG-free HPSv2.1 + PickScore + CLIPScore recipe on Pick-a-Pic prompts:
+[`boogu_image/run_boogu_image_pickapic_preference_lora_v1.sh`](https://github.com/verl-project/verl-omni/blob/main/examples/diffusionnft_trainer/boogu_image/run_boogu_image_pickapic_preference_lora_v1.sh). See the
+[Boogu-Image recipe README](https://github.com/verl-project/verl-omni/blob/main/examples/diffusionnft_trainer/boogu_image/README.md) for its guided-CFG and LoRA-target
+constraints.
 
 For the full installation guide, see [Installation](../../docs/start/install.md). For implementation details on adding or extending direct-preference diffusion algorithms, see `docs/contributing/integrating_a_new_direct_preference_algorithm_for_diffusion_model.md`.
 
@@ -23,14 +30,14 @@ For the full installation guide, see [Installation](../../docs/start/install.md)
 
 For optional Qwen-Image timestep input staging, use
 `actor_rollout_ref.actor.enable_timestep_staging=true` and follow the
-[shared staging contract](../flowgrpo_trainer/qwen_image/README.md#optional-timestep-input-staging).
+[shared staging contract](https://github.com/verl-project/verl-omni/blob/main/examples/flowgrpo_trainer/qwen_image/README.md#optional-timestep-input-staging).
 This validation scope is Qwen-Image with FSDP/FSDP2 on GPU, SP=1; it does not
 extend to the MiniMax H3 recipes above.
 
 Follow the [installation guide](../../docs/start/install.md) to set up the base environment, then install the OCR reward dependency:
 
 ```bash
-pip install Levenshtein
+uv pip install -e ".[ocr]"
 ```
 
 The provided script is configured for a single node with `4` GPUs.
@@ -83,6 +90,35 @@ Launch the example from the repository root:
 bash examples/diffusionnft_trainer/qwen_image/run_qwen_image_ocr_lora.sh
 ```
 
+### NVIDIA GPU: V1 sync
+
+The V1 counterpart uses TransferQueue and ReplayBuffer with the synchronous
+trainer. Launch it from the repository root with the same prepared data and
+model dependencies:
+
+```bash
+bash examples/diffusionnft_trainer/qwen_image/run_qwen_image_ocr_lora_v1.sh
+```
+
+It selects `verl_omni.trainer.main_diffusion_v1`, `trainer.use_v1=true`, and
+`trainer.v1.trainer_mode=sync`. Its experiment name is `qwen_image_ocr_lora_v1`.
+The model, reward model, four-GPU layout, optimizer, and NFT settings match the
+V0 recipe: train the `default` adapter, sample with `old`, disable rollout
+log-probabilities, and refresh `old` every two steps using
+`delayed_linear_to_0_999`. This schedule starts with copies and begins EMA
+updates after step 75.
+
+Hydra overrides are forwarded in the same way as in V0. For a configuration
+check without launching training:
+
+```bash
+bash examples/diffusionnft_trainer/qwen_image/run_qwen_image_ocr_lora_v1.sh --cfg job --resolve
+```
+
+Keep the V0 entrypoint for matched comparisons. The performance table below
+reports the existing V0 measurements; it does not establish V1 convergence or
+throughput. A tiny-checkpoint smoke also does not reproduce the full OCR setup.
+
 ### NPU
 
 For Huawei Ascend NPUs, use the NPU-optimized script:
@@ -111,7 +147,7 @@ The script runs `python3 -m verl_omni.trainer.main_diffusion` with DiffusionNFT-
 - `actor_rollout_ref.model.policy_state_adapters='["default","old"]'`
 - `actor_rollout_ref.rollout.calculate_log_probs=False`
 - `actor_rollout_ref.rollout.rollout_adapter=old`
-- `actor_rollout_ref.rollout.n=24`
+- `actor_rollout_ref.rollout.n=16`
 - `algorithm.timestep_fraction=1.0`
 - `algorithm.old_policy_decay_schedule=delayed_linear_to_0_999`
 - `algorithm.old_policy_update_interval=2`
@@ -149,12 +185,14 @@ See the [Metrics Documentation](../../docs/start/metrics.md) for a full descript
 
 ## Performance
 
-> All experiments were conducted on *NVIDIA H200* GPUs using the OCR reward. NPU experiments use *16× Ascend NPUs*.
+> All experiments were conducted on *NVIDIA H200* GPUs using the OCR reward, unless a row states otherwise. NPU experiments use *16× Ascend NPUs*.
 
 | Script | Model | Algorithm | Hybrid Engine | # Cards | Reward Fn | # Cards for Actor | # Cards for Rollout | # Cards for Async Reward | Batch Size | `rollout.n` | lr   | # Val Samples | Training Samples per Step | `ppo_micro_batch_size_per_gpu` | Throughput (Samples / Card / Seconds) | Time per Step (Seconds) |
 | --- | --- | --- | --- | --- | --- | --- | --- |-------------------------| --- | --- |------| --- | --- | --- |------------------------------| --------------------------------|
 | `examples/diffusionnft_trainer/qwen_image/run_qwen_image_ocr_lora.sh` | Qwen-Image | DiffusionNFT | True | 4 (NVIDIA) | qwenvl-ocr-vllm | 4 | 4 | 0 (sync)                | 24 | 16 | 3e-4 | 1k (full set) | 24×16=384 | 12 | 0.166                        | 570 |
 | `examples/diffusionnft_trainer/qwen_image/run_qwen_image_ocr_lora_npu.sh` | Qwen-Image | DiffusionNFT | True | 16 (NPU) | qwenvl-ocr-vllm | 16 | 16 | 0 (sync)               | 24 | 16 | 3e-4 | 1k (full set) | 24×16=384 | 12 | 0.049                      | 490 |
+| `examples/diffusionnft_trainer/boogu_image/run_boogu_image_ocr_lora.sh` | Boogu-Image | DiffusionNFT | True | 4 (H800) | qwenvl-ocr-vllm | 4 | 4 | 0 (sync)                | 24 | 16 | 1e-4 | 256 (subset) | 24×16=384 | 12 | 0.114                      | 839 |
+| `examples/diffusionnft_trainer/boogu_image/run_boogu_image_pickapic_preference_lora_v1.sh` | Boogu-Image | DiffusionNFT | True | 4 (L20X) | HPSv2.1 + PickScore + CLIPScore | 4 | 4 | 0 (sync)                | 24 | 16 | 3e-4 | 256 (subset) | 24×16=384 | 12 | 0.239                      | 402 |
 
 <table align="center" style="border: none;">
   <tr style="border: none;">

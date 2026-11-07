@@ -22,16 +22,24 @@ from pathlib import Path
 
 import torch
 from safetensors import safe_open
+from safetensors.torch import load_file
 from torch.distributed.tensor import DTensor, Replicate, Shard
+
+from verl_omni.utils.fsdp_utils import export_fsdp_lora_adapter
 
 from .architectures import _PIPELINES, _TRANSFORMERS
 from .base_model_merger import BaseModelMerger, MergeResult
+from .lora import LORA_METADATA_NAME, LoRAPlan, fuse_lora, plan_lora_fusion
+from .output_validation import validate_artifact
 from .utils import (
     MANIFEST_NAME,
+    detect_lora_checkpoint,
+    extract_base_state_dict,
     fingerprint,
     inventory,
     publication_directory,
     read_json,
+    tensor_spec,
     tree_files,
     weight_files,
     write_json,
@@ -472,8 +480,11 @@ def _check_h3_pipeline(base: Path) -> None:
 class FSDPModelMerger(BaseModelMerger):
     """Recover FSDP checkpoints and publish canonical Diffusers or native H3 artifacts."""
 
+    # Manifest record of the most recent LoRA fusion, set while rank files are open.
+    lora_fusion: dict | None = None
+
     @contextmanager
-    def _rank_states(self, expected_shapes: Mapping[str, tuple[int, ...]]):
+    def _rank_states(self, expected_shapes: Mapping[str, tuple[int, ...]], lora_metadata: Mapping | None = None):
         states = []
         try:
             for path in model_rank_files(Path(self.config.local_dir)):
@@ -482,15 +493,33 @@ class FSDPModelMerger(BaseModelMerger):
                 state = torch.load(path, map_location="cpu", weights_only=False, mmap=True)
                 if not isinstance(state, Mapping) or not all(isinstance(key, str) for key in state):
                     raise ValueError("Expected a flat state dict in each model rank file")
-                if any("lora_" in key or ".base_layer." in key for key in state):
-                    raise ValueError("Adapter-bearing checkpoints require the future LoRA export mode")
-                if set(state) != set(expected_shapes):
-                    raise ValueError(
-                        f"Incomplete transformer state: missing={sorted(set(expected_shapes) - set(state))[:8]}, "
-                        f"unexpected={sorted(set(state) - set(expected_shapes))[:8]}"
-                    )
+                if lora_metadata is not None:
+                    normalized = {}
+                    for key, value in state.items():
+                        name = key.replace("_fsdp_wrapped_module.", "").removeprefix("base_model.model.")
+                        if name in normalized:
+                            raise ValueError(f"Ambiguous LoRA checkpoint tensor: {name}")
+                        normalized[name] = value
+                    state = normalized
+                elif any("lora_" in key for key in state):
+                    state = extract_base_state_dict(state)
+                if states and set(state) != set(states[0]):
+                    raise ValueError("Model rank files disagree on tensor names")
                 states.append(state)
-            yield states
+            keys = set(states[0])
+            plan = None
+            if lora_metadata is not None:
+                shapes = {key: tuple(value.shape) for key, value in states[0].items()}
+                plan = plan_lora_fusion(shapes, expected_shapes, lora_metadata, self.config.adapter_name)
+            elif any("lora_" in key or ".base_layer." in key for key in keys):
+                raise ValueError(f"Adapter-bearing checkpoints require {LORA_METADATA_NAME}")
+            elif keys != set(expected_shapes):
+                raise ValueError(
+                    f"Incomplete transformer state: missing={sorted(set(expected_shapes) - keys)[:8]}, "
+                    f"unexpected={sorted(keys - set(expected_shapes))[:8]}"
+                )
+            self.lora_fusion = plan.record if plan is not None else None
+            yield states, plan
         finally:
             states.clear()
 
@@ -501,11 +530,37 @@ class FSDPModelMerger(BaseModelMerger):
         except (TypeError, ValueError) as exc:
             raise ValueError(f"Cannot reconstruct {key}: {exc}") from exc
 
-    def iter_merged_weights(self, expected_shapes: Mapping[str, tuple[int, ...]]) -> Iterator[tuple[str, torch.Tensor]]:
+    def _schema_tensor(
+        self,
+        states,
+        plan: LoRAPlan | None,
+        key: str,
+        shape: tuple[int, ...],
+        base_mapping: Mapping[str, Path] | None,
+    ) -> torch.Tensor:
+        """Return one complete schema tensor, folding the selected LoRA update into its base weight."""
+        if plan is None:
+            return self._merged_tensor(states, key, shape)
+        if plan.sources:
+            value = self._merged_tensor(states, plan.sources[key], shape)
+        else:
+            # LoRA-only checkpoint: frozen base weights come from the validated base transformer.
+            value = _local_tensor(_read_weight(base_mapping, key))
+        if key not in plan.updates:
+            return value
+        lora_a, lora_b = (self._merged_tensor(states, name, plan.shapes[name]) for name in plan.updates[key])
+        return fuse_lora(value, lora_a, lora_b, plan.scaling)
+
+    def iter_merged_weights(
+        self,
+        expected_shapes: Mapping[str, tuple[int, ...]],
+        lora_metadata: Mapping | None = None,
+        base_mapping: Mapping[str, Path] | None = None,
+    ) -> Iterator[tuple[str, torch.Tensor]]:
         """Mmap rank files and yield complete schema-checked weights without initializing distributed."""
-        with self._rank_states(expected_shapes) as states:
+        with self._rank_states(expected_shapes, lora_metadata) as (states, plan):
             for key, shape in sorted(expected_shapes.items()):
-                yield key, self._merged_tensor(states, key, shape)
+                yield key, self._schema_tensor(states, plan, key, shape, base_mapping)
 
     def iter_h3_native_weights(
         self,
@@ -513,6 +568,7 @@ class FSDPModelMerger(BaseModelMerger):
         source_config: Mapping,
         native_mapping: Mapping[str, Path],
         native_shapes: Mapping[str, tuple[int, ...]],
+        lora_metadata: Mapping | None = None,
     ) -> Iterator[tuple[str, torch.Tensor]]:
         """Convert complete Diffusers H3 tensors to the native fused checkpoint layout."""
         plan = _h3_conversion_plan(source_shapes)
@@ -527,7 +583,9 @@ class FSDPModelMerger(BaseModelMerger):
         ff_half = int(source_config["ffn_dim"])
         rope_len = int(source_config["rope_freq_dim"])
         rope_theta = float(source_config.get("rope_theta", 10000.0))
-        with self._rank_states(source_shapes) as states:
+        with self._rank_states(source_shapes, lora_metadata) as (states, lora_plan):
+            if lora_plan is not None and not lora_plan.sources:
+                raise ValueError("LoRA-only checkpoints cannot be fused into a native MiniMax H3 pipeline")
             for target in sorted(native_shapes):
                 if target == "rope.inv_freq":
                     value = rope_theta ** (-(torch.arange(0, 2 * rope_len, 2, dtype=torch.float32) / (2 * rope_len)))
@@ -535,7 +593,7 @@ class FSDPModelMerger(BaseModelMerger):
                         raise ValueError("MiniMax H3 base rope.inv_freq conflicts with the actor config")
                 else:
                     kind, names = plan[target]
-                    values = [self._merged_tensor(states, name, source_shapes[name]) for name in names]
+                    values = [self._schema_tensor(states, lora_plan, name, source_shapes[name], None) for name in names]
                     if kind == "qkv":
                         if any(value.shape[0] != heads * head_dim for value in values):
                             raise ValueError(f"MiniMax H3 QKV shape mismatch: {target}")
@@ -554,10 +612,43 @@ class FSDPModelMerger(BaseModelMerger):
                     raise ValueError(f"MiniMax H3 native tensor shape mismatch: {target}")
                 yield target, value
 
+    def save_lora_adapter(self, target: Path) -> None:
+        """Export the selected adapter using checkpoint LoRA metadata."""
+        export_fsdp_lora_adapter(
+            self.config.local_dir,
+            target,
+            self.config.base_model,
+            adapter_name=self.config.adapter_name,
+        )
+        # verl defaults missing task types to CAUSAL_LM when saving checkpoint metadata. That is
+        # only right for omni actors, whose saved HF config is a transformers config.
+        adapter_config = read_json(target / "adapter_config.json")
+        actor_config_path = Path(self.config.hf_model_config_path) / "config.json"
+        if not actor_config_path.is_file():
+            raise FileNotFoundError(actor_config_path)
+        actor_config = read_json(actor_config_path)
+        causal_lm = "model_type" in actor_config and "_class_name" not in actor_config
+        adapter_config["task_type"] = "CAUSAL_LM" if causal_lm else None
+        write_json(target / "adapter_config.json", adapter_config)
+        weights = load_file(target / "adapter_model.safetensors")
+        manifest = {
+            "schema_version": 1,
+            "artifact_type": "peft_adapter",
+            "architecture": "peft",
+            "backend": "fsdp",
+            "trained_components": ["transformer"],
+            "tensor_directory": ".",
+            "adapter_name": self.config.adapter_name,
+            "weight_layout": "peft",
+            "task_type": adapter_config["task_type"],
+            "files": inventory(target, tree_files(target)),
+            "tensors": {key: tensor_spec(value) for key, value in weights.items()},
+        }
+        write_json(target / MANIFEST_NAME, manifest)
+        validate_artifact(target)
+
     def merge_and_save(self) -> MergeResult | dict:
         if self.config.operation == "test":
-            from .output_validation import validate_artifact
-
             if not self.config.test_hf_dir:
                 raise ValueError("test operation requires test_hf_dir")
             return validate_artifact(self.config.test_hf_dir)
@@ -566,6 +657,16 @@ class FSDPModelMerger(BaseModelMerger):
         if not self.config.hf_model_config_path:
             raise ValueError("merge operation requires hf_model_config_path")
         source = Path(self.config.local_dir).resolve(strict=True)
+        rank_paths = model_rank_files(source)
+        has_lora, lora_only = detect_lora_checkpoint(rank_paths[0])
+        if self.config.fuse_lora and not has_lora:
+            raise ValueError("--fuse-lora requires a LoRA checkpoint")
+        if lora_only and not self.config.fuse_lora:
+            target = Path(self.config.target_dir).resolve()
+            with publication_directory(target) as staging:
+                self.save_lora_adapter(staging / "lora_adapter")
+            self.upload_to_huggingface(target)
+            return MergeResult(target / "lora_adapter", target / "lora_adapter" / MANIFEST_NAME)
         base = Path(self.config.base_model).resolve(strict=True)
         source_config_path = Path(self.config.hf_model_config_path).resolve(strict=True) / "config.json"
         if not source_config_path.is_file():
@@ -588,10 +689,11 @@ class FSDPModelMerger(BaseModelMerger):
             raise ValueError("Actor config and target directories must not overlap")
         if (source / "merge_source.json").exists():
             raise ValueError("Save-time merge_source schemas are not supported by this initial exporter")
-        if (source / "lora_train_meta.json").exists():
-            raise ValueError("LoRA checkpoint metadata requires the future adapter export mode")
-
-        source_files = model_rank_files(source) + [source / "fsdp_config.json"]
+        lora_metadata_path = source / LORA_METADATA_NAME
+        lora_metadata = read_json(lora_metadata_path) if self.config.fuse_lora else None
+        source_files = rank_paths + [source / "fsdp_config.json"]
+        if has_lora:
+            source_files.append(lora_metadata_path)
         index_path = base / "model_index.json"
         index = read_json(index_path) if index_path.is_file() else None
         pipeline_output = self.config.output_format == "pipeline"
@@ -629,15 +731,18 @@ class FSDPModelMerger(BaseModelMerger):
             source_shapes, keep_fp32, source_config, native_mapping, native_shapes = _h3_source_schema(
                 source_config_path, model_root
             )
-            raw_weights = self.iter_h3_native_weights(source_shapes, source_config, native_mapping, native_shapes)
+            raw_weights = self.iter_h3_native_weights(
+                source_shapes, source_config, native_mapping, native_shapes, lora_metadata
+            )
             trained_weight_files = set(native_mapping.values())
             native_weight_name = "model.safetensors"
         else:
             if pipeline_output:
                 _check_pipeline(base, architecture, component)
             source_shapes, keep_fp32 = _transformer_schema(model_root, source_config_path, architecture)
-            raw_weights = self.iter_merged_weights(source_shapes)
-            trained_weight_files = set(weight_files(model_root).values())
+            base_mapping = weight_files(model_root)
+            raw_weights = self.iter_merged_weights(source_shapes, lora_metadata, base_mapping)
+            trained_weight_files = set(base_mapping.values())
 
         for suffix in ("diffusion_pytorch_model.safetensors.index.json", "model.safetensors.index.json"):
             path = model_root / suffix
@@ -682,6 +787,8 @@ class FSDPModelMerger(BaseModelMerger):
                         rewritten.append(relative.as_posix())
                         continue
                 shutil.copyfile(path, destination)
+            if has_lora and not self.config.fuse_lora:
+                self.save_lora_adapter(staging / "lora_adapter")
             output_inventory = inventory(staging, tree_files(staging))
             for name, digest in copied.items():
                 if name not in rewritten and output_inventory.get(name) != digest:
@@ -694,7 +801,7 @@ class FSDPModelMerger(BaseModelMerger):
                 or (index is not None and read_json(index_path) != index)
             ):
                 raise ValueError("Source/base inputs changed during export")
-            if model_rank_files(source) != source_files[:-1]:
+            if model_rank_files(source) != rank_paths:
                 raise ValueError("Model rank inventory changed during export")
             import diffusers
 
@@ -734,9 +841,9 @@ class FSDPModelMerger(BaseModelMerger):
                     "runtime": "not_run",
                 },
             }
+            if self.lora_fusion is not None:
+                manifest["lora_fusion"] = self.lora_fusion
             write_json(staging / MANIFEST_NAME, manifest)
-            from .output_validation import validate_artifact
-
             validate_artifact(staging)
         result = MergeResult(target, target / MANIFEST_NAME)
         self.upload_to_huggingface(result.output_dir)

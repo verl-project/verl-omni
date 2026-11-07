@@ -1,6 +1,6 @@
 # DiffusionNFT
 
-Last updated: 06/03/2026.
+Last updated: 10/15/2026.
 
 DiffusionNFT ([paper](https://arxiv.org/abs/2509.16117),
 [code](https://github.com/NVlabs/DiffusionNFT),
@@ -97,6 +97,30 @@ After actor updates, the trainer refreshes the `old` adapter from `default`
 using `algorithm.old_policy_decay_schedule` and
 `algorithm.old_policy_update_interval`.
 
+DiffusionNFT and OmniNFT share `NFTDiffusersFSDPEngine`, selected by
+`model_type=diffusion_nft_model`. The engine resolves the model adapter through
+`DiffusionModelBase`'s `(architecture, algorithm)` registry. For each selected
+training timestep, the adapter prepares noisy latents and loss context; the
+engine runs the old, current and reference policies; then the adapter assembles
+the predictions and per-step reward inputs for the configured loss. The engine
+handles policy switching and backward execution, while the current-policy
+prediction retains its gradients.
+
+The default methods in `verl_omni/pipelines/model_base.py` implement the
+single-latent path used by DiffusionNFT and DGPO. The LTX OmniNFT adapter in
+[PR #750](https://github.com/verl-project/verl-omni/pull/750) overrides these methods
+to noise video and audio latents independently, pack the model inputs, and map
+joint predictions to the two modality losses. Reward routing happens during
+actor-batch preparation, and `OmniNFTLoss` combines the weighted modality losses.
+The trainer logs reward summaries directly from reward extra info.
+
+The engine also calls the resolved adapter to validate its engine configuration
+and configure gradient checkpointing when enabled. The LTX OmniNFT adapter
+requires FSDP2 without Ulysses and installs its non-reentrant checkpointing dtype
+wrapper before LoRA, compilation and FSDP wrapping. OmniNFT timestep staging is
+currently unsupported: the trainer rejects
+`actor_rollout_ref.actor.enable_timestep_staging=True` before starting workers.
+
 ## Configuration
 
 The reference Qwen-Image OCR recipe selects DiffusionNFT with:
@@ -144,7 +168,7 @@ First install the OCR reward dependency after setting up the base VeRL-Omni
 environment:
 
 ```bash
-pip install Levenshtein
+uv pip install -e ".[ocr]"
 ```
 
 Obtain the raw OCR dataset from the original Flow-GRPO repository

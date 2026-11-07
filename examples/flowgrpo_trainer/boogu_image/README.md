@@ -1,6 +1,6 @@
 # Train Boogu-Image with FlowGRPO
 
-Last updated: 08/19/2026
+Last updated: 10/17/2026
 
 RL post-training for [Boogu-Image-0.1-Base](https://huggingface.co/Boogu/Boogu-Image-0.1-Base)
 (text-to-image) and [Boogu-Image-0.1-Edit](https://huggingface.co/Boogu/Boogu-Image-0.1-Edit)
@@ -44,6 +44,57 @@ prompt distribution and collapses rewards.
 ```bash
 bash examples/flowgrpo_trainer/boogu_image/run_boogu_image_ocr_lora.sh
 ```
+
+### GPU (V1 sync)
+
+```bash
+bash examples/flowgrpo_trainer/boogu_image/run_boogu_image_ocr_lora_v1.sh
+```
+
+This is the v1 counterpart of the GPU recipe. It uses
+`verl_omni.trainer.main_diffusion_v1` with `trainer.use_v1=true` and
+`trainer.v1.trainer_mode=sync`. TransferQueue is force-enabled by the
+entrypoint and retains the colocated 4-GPU actor/rollout/reward layout. See
+[Diffusion V1 training](../../../docs/start/diffusion_v1.md) for the shared
+v1 contract.
+
+### V1 convergence trial
+
+The v1 defaults are a conservative 100-step trial, pending real-model GPU
+validation. They have not demonstrated convergence.
+
+| Setting | Legacy recipe | V1 trial | Rationale |
+| --- | --- | --- | --- |
+| Learning rate | `3e-4` | `1e-4` | Reduce the size of LoRA updates. |
+| Warmup | None | 10 scheduler steps | Ramp up updates during early training. |
+| PPO minibatch (prompts) | 16 | 32 | Use all 32 prompt groups in one minibatch, reducing updates before weight sync from two to one with one PPO epoch. |
+| Actor microbatch per GPU | 16 | `MAX_NUM_SEQS` (8) | Match rollout and log-prob recomputation batch shapes to reduce bf16 discrepancies. |
+| Training steps | 300 | 100 | Start with the validation horizon requested in PR #649. |
+| Validation / checkpoint interval | 30 / 30 | 25 / 50 | Collect a baseline and four validation points while limiting checkpoint storage. |
+
+Each rollout still contains 32 prompts with 16 samples each (512 images).
+The LoRA rank, guidance, SDE settings, and image resolution are unchanged.
+Microbatch accumulation preserves the global minibatch. Validation retains
+50 denoising steps and zero SDE noise; training retains the pipeline default
+of 10 denoising steps, so training and validation rewards are different measurements.
+Validation images are saved under
+`$WORKSPACE/outputs/boogu_image_ocr_lora_v1_convergence/validation` by default.
+Choose a separate directory and experiment name for each comparison:
+
+```bash
+bash examples/flowgrpo_trainer/boogu_image/run_boogu_image_ocr_lora_v1.sh \
+    trainer.experiment_name=boogu_v1_lr1e4_seed42 \
+    trainer.validation_data_dir=/path/to/results/boogu_v1_lr1e4_seed42
+```
+
+Additional Hydra arguments override the defaults. For a matched v0/v1
+comparison, pass these same hyperparameters, validation settings, and artifact
+directories to the v0 launcher. Keep the dataset splits, model revisions, and
+seeds fixed. Compare held-out OCR reward against step 0, inspect saved images
+for legibility and diversity, and retain per-step reward, gradient-norm,
+clipping, and timing metrics. A rising training reward alone does not establish
+convergence or improved image quality. If the curve is unstable, compare
+`actor_rollout_ref.actor.optim.lr=3e-5` with the same evaluation protocol.
 
 Model-specific constraints baked into the recipe:
 

@@ -16,6 +16,7 @@
 import json
 import os
 import socket
+import warnings
 
 import hydra
 import ray
@@ -30,7 +31,7 @@ from verl_omni.trainer.diffusion.ray_diffusion_trainer import (
     PolicyGradientRayTrainer,
     validate_separate_config,
 )
-from verl_omni.utils.config import validate_config
+from verl_omni.utils.config import resolve_lora_config, validate_config
 from verl_omni.utils.diffusion_attention import validate_attention_consistency
 from verl_omni.utils.rl_insight import enable_rl_insight
 from verl_omni.workers.config.reward import reward_pool_is_separate, reward_role_required
@@ -97,6 +98,34 @@ def _validate_grm_reward_function(config) -> None:
         )
 
 
+def uses_v1_trainer(config) -> bool:
+    """Return True unless the config selects offline direct preference training.
+
+    Offline DPO has no V1 equivalent and stays on the legacy trainer by design
+    (verl-project/verl-omni#389), mirroring ``main_omni.uses_v1_trainer``.
+    """
+    sample_source = OmegaConf.select(config, "algorithm.sample_source", default="online")
+    trainer_type = OmegaConf.select(config, "algorithm.trainer_type", default="policy_gradient")
+    return not (sample_source == "offline" and trainer_type == "direct_preference")
+
+
+def _deprecate_v0_trainer(config) -> None:
+    """Warn on legacy-trainer launches that have a V1 equivalent.
+
+    Always normalizes ``trainer.use_v1`` to False so validation and the printed
+    config reflect the code path this entrypoint actually runs.
+    """
+    if uses_v1_trainer(config):
+        warnings.warn(
+            "The legacy (v0) diffusion trainer is deprecated and will be removed in a future release. "
+            "The V1 trainer (TransferQueue + ReplayBuffer) is the default since v0.3.0; launch "
+            "`python -m verl_omni.trainer.main_diffusion_v1` to use it.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+    config.trainer.use_v1 = False
+
+
 def run_diffusion(config, task_runner_class=None) -> None:
     """Initialize Ray and run distributed diffusion training.
 
@@ -107,6 +136,7 @@ def run_diffusion(config, task_runner_class=None) -> None:
         task_runner_class: For recipe to change TaskRunner.
     """
     OmegaConf.resolve(config)
+    _deprecate_v0_trainer(config)
     validate_separate_config(config)
     enable_rl_insight(config)
     _validate_grm_reward_function(config)
@@ -193,10 +223,7 @@ class TaskRunner:
         actor_rollout_cls = ActorRolloutRefWorker
         ray_worker_group_cls = RayWorkerGroup
 
-        lora_rank = config.actor_rollout_ref.model.get("lora", {}).get("rank", 0)
-        if lora_rank <= 0:
-            lora_rank = config.actor_rollout_ref.model.get("lora_rank", 0)
-        ref_in_actor = lora_rank > 0 or config.actor_rollout_ref.model.get("lora_adapter_path") is not None
+        ref_in_actor = resolve_lora_config(config.actor_rollout_ref.model).enabled
 
         separate = config.actor_rollout_ref.get("separate", False)
         if separate:
@@ -280,11 +307,7 @@ class TaskRunner:
         if not config.actor_rollout_ref.get("separate", False) or not need_reference_policy(config):
             return
 
-        lora_rank = config.actor_rollout_ref.model.get("lora", {}).get("rank", 0)
-        if lora_rank <= 0:
-            lora_rank = config.actor_rollout_ref.model.get("lora_rank", 0)
-        ref_in_actor = lora_rank > 0 or config.actor_rollout_ref.model.get("lora_adapter_path") is not None
-        if ref_in_actor:
+        if resolve_lora_config(config.actor_rollout_ref.model).enabled:
             return
 
         from verl.trainer.ppo.ray_trainer import Role

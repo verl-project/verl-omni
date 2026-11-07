@@ -16,13 +16,15 @@ import asyncio
 import gc
 import logging
 import os
+from contextlib import nullcontext
 
 import aiohttp
-import numpy as np
 import torch
 from PIL import Image
 from transformers import CLIPModel, CLIPProcessor
 from verl.utils.device import get_device_id, get_device_name
+
+from verl_omni.utils.reward_score.image_preference_utils import clip_feature_tensor, decoded_reward_image, to_rgb_image
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
@@ -38,16 +40,26 @@ _consumer_started = False
 _consumer_lock = asyncio.Lock()
 
 
-def _feature_tensor(features):
-    if isinstance(features, torch.Tensor):
-        return features
-    if hasattr(features, "image_embeds") and features.image_embeds is not None:
-        return features.image_embeds
-    if hasattr(features, "text_embeds") and features.text_embeds is not None:
-        return features.text_embeds
-    if hasattr(features, "pooler_output") and features.pooler_output is not None:
-        return features.pooler_output
-    raise TypeError(f"Unsupported CLIP feature return type: {type(features)!r}")
+async def _await_owned(awaitable):
+    """Finish an accepted transition before reporting caller cancellation."""
+    task = asyncio.ensure_future(awaitable)
+    cancelled = False
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if asyncio.current_task().cancelling():
+                cancelled = True
+        except BaseException:
+            if not task.done():
+                raise
+    if cancelled:
+        try:
+            task.result()
+        except BaseException:
+            pass
+        raise asyncio.CancelledError
+    return task.result()
 
 
 def _pairwise_pickscore(
@@ -59,7 +71,8 @@ def _pairwise_pickscore(
     """Compute paired PickScore values from text and image embeddings."""
     if score_divisor == 0:
         raise ValueError("PickScore score_divisor must be non-zero")
-    cosine = torch.nn.functional.cosine_similarity(text_embeddings, image_embeddings, dim=-1)
+    # In bf16 the cosine rounds to ~4e-3 after scaling, a third of the within-group reward spread.
+    cosine = torch.nn.functional.cosine_similarity(text_embeddings.float(), image_embeddings.float(), dim=-1)
     return torch.as_tensor(logit_scale, device=cosine.device, dtype=cosine.dtype) * cosine / score_divisor
 
 
@@ -105,8 +118,8 @@ class _PickScoreInferencer:
         )
         text_inputs = {k: v.to(device=self.device) for k, v in text_inputs.items()}
 
-        image_embs = _feature_tensor(self.model.get_image_features(**image_inputs))
-        text_embs = _feature_tensor(self.model.get_text_features(**text_inputs))
+        image_embs = clip_feature_tensor(self.model.get_image_features(**image_inputs))
+        text_embs = clip_feature_tensor(self.model.get_text_features(**text_inputs))
         text_embs = text_embs[prompt_indices]
 
         return {
@@ -134,9 +147,16 @@ class PickScoreNativeModel:
         processor_path: str = _PROCESSOR_PATH,
         device=None,
         dtype=torch.float32,
+        retain_weights_on_cpu: bool = False,
     ):
+        if type(retain_weights_on_cpu) is not bool:
+            raise TypeError("retain_weights_on_cpu must be a bool")
+        target_device = torch.device(device) if device is not None else torch.device(get_device_name(), get_device_id())
+        if retain_weights_on_cpu and target_device.type not in ("cuda", "xpu"):
+            raise ValueError("retain_weights_on_cpu requires a CUDA or Intel GPU device")
+        self.supports_cpu_offload = retain_weights_on_cpu
         self._inferencer = _PickScoreInferencer(
-            device=device,
+            device=target_device,
             dtype=dtype,
             model_path=model_path,
             processor_path=processor_path,
@@ -144,23 +164,24 @@ class PickScoreNativeModel:
         self._score_queue = asyncio.Queue()
         self._consumer_task = None
         self._consumer_lock = asyncio.Lock()
+        self._lifecycle_lock = asyncio.Lock()
         self._closed = False
+        self._asleep = False
+        self._target_device = target_device
 
-    async def _ensure_consumer(self):
-        if self._closed:
-            raise RuntimeError("PickScore native model is closed")
+    def _ensure_consumer_locked(self):
+        if self._closed or self._asleep:
+            raise RuntimeError("PickScore native model is closed or asleep")
         if self._consumer_task is not None and not self._consumer_task.done():
             return
-        async with self._consumer_lock:
-            if self._closed:
-                raise RuntimeError("PickScore native model is closed")
-            if self._consumer_task is None or self._consumer_task.done():
-                self._consumer_task = asyncio.create_task(self._consumer_loop())
+        self._consumer_task = asyncio.create_task(self._consumer_loop())
 
     def _infer_requests(self, requests):
         prompts = [prompt for prompt, _, _ in requests]
         images = [image for _, image, _ in requests]
-        output = self._inferencer.infer(prompts, images)
+        device_context = torch.cuda.device(self._target_device) if self._target_device.type == "cuda" else nullcontext()
+        with device_context:
+            output = self._inferencer.infer(prompts, images)
         return [
             {
                 "text_embeddings": output["text_embeddings"][index],
@@ -208,39 +229,100 @@ class PickScoreNativeModel:
         images = list(images)
         if len(prompts) != len(images):
             raise ValueError("PickScore prompts and images must have the same length")
-        await self._ensure_consumer()
         loop = asyncio.get_running_loop()
         futures = []
-        for prompt, image in zip(prompts, images, strict=True):
-            future = loop.create_future()
-            futures.append(future)
-            await self._score_queue.put((prompt, image, future))
+        async with self._consumer_lock:
+            self._ensure_consumer_locked()
+            for prompt, image in zip(prompts, images, strict=True):
+                future = loop.create_future()
+                futures.append(future)
+                self._score_queue.put_nowait((prompt, image, future))
         return await asyncio.gather(*futures)
 
+    async def sleep(self):
+        await _await_owned(self._sleep())
+
+    async def _sleep(self):
+        if not self.supports_cpu_offload:
+            raise RuntimeError("PickScore CPU retention is not enabled")
+        async with self._lifecycle_lock:
+            async with self._consumer_lock:
+                if self._closed:
+                    return
+                if self._asleep:
+                    return
+                self._asleep = True
+                consumer = self._consumer_task
+                if consumer is not None and not consumer.done():
+                    self._score_queue.put_nowait((None, None, None))
+            try:
+                if consumer is not None:
+                    await consumer
+                self._consumer_task = None
+                await asyncio.to_thread(self._inferencer.model.to, "cpu")
+                self._inferencer.device = torch.device("cpu")
+            except BaseException:
+                try:
+                    await self._terminal_close()
+                except BaseException:
+                    pass
+                raise
+
+    async def wake_up(self):
+        await _await_owned(self._wake_up())
+
+    async def _wake_up(self):
+        if not self.supports_cpu_offload:
+            raise RuntimeError("PickScore CPU retention is not enabled")
+        async with self._lifecycle_lock:
+            if self._closed:
+                raise RuntimeError("PickScore native model is closed")
+            if not self._asleep:
+                return
+            try:
+                await asyncio.to_thread(self._inferencer.model.to, self._target_device)
+                self._inferencer.device = self._target_device
+                async with self._consumer_lock:
+                    self._asleep = False
+            except BaseException:
+                try:
+                    await self._terminal_close()
+                except BaseException:
+                    pass
+                raise
+
     async def close(self):
-        self._closed = True
-        if self._consumer_task is not None and not self._consumer_task.done():
-            await self._score_queue.put((None, None, None))
-            await self._consumer_task
-        self._consumer_task = None
-        if hasattr(self, "_inferencer"):
-            del self._inferencer
-        gc.collect()
-        accelerator = getattr(torch, get_device_name(), None)
-        empty_cache = getattr(accelerator, "empty_cache", None)
-        if callable(empty_cache) and getattr(accelerator, "is_available", lambda: False)():
-            empty_cache()
+        await _await_owned(self._close())
 
+    async def _close(self):
+        async with self._lifecycle_lock:
+            await self._terminal_close()
 
-def _to_pil_hwc(image) -> Image.Image:
-    if isinstance(image, torch.Tensor):
-        image = image.cpu().numpy()
-    if isinstance(image, np.ndarray):
-        if image.ndim == 3 and image.shape[0] in (1, 3):
-            image = image.transpose(1, 2, 0)
-        image = Image.fromarray(image)
-    assert isinstance(image, Image.Image)
-    return image
+    async def _terminal_close(self):
+        async with self._consumer_lock:
+            if self._closed:
+                return
+            self._closed = True
+            consumer = self._consumer_task
+            if consumer is not None and not consumer.done():
+                self._score_queue.put_nowait((None, None, None))
+        try:
+            if consumer is not None:
+                await consumer
+        finally:
+            self._consumer_task = None
+            if hasattr(self, "_inferencer"):
+                backend_tokenizer = getattr(self._inferencer.processor.tokenizer, "backend_tokenizer", None)
+                # CLIP's decode wrapper captures a native tokenizer that Python GC cannot traverse.
+                if backend_tokenizer is not None and "decode" in vars(backend_tokenizer):
+                    del backend_tokenizer.decode
+                del self._inferencer
+                del backend_tokenizer
+            gc.collect()
+            accelerator = getattr(torch, get_device_name(), None)
+            empty_cache = getattr(accelerator, "empty_cache", None)
+            if callable(empty_cache) and getattr(accelerator, "is_available", lambda: False)():
+                empty_cache()
 
 
 def _score_batch(requests) -> list[float | Exception]:
@@ -252,7 +334,7 @@ def _score_batch(requests) -> list[float | Exception]:
 
     for index, (prompt, solution_image, _) in enumerate(requests):
         try:
-            images.append(_to_pil_hwc(solution_image))
+            images.append(to_rgb_image(solution_image))
             prompts.append(prompt)
             valid_indices.append(index)
         except Exception as e:
@@ -325,6 +407,7 @@ async def compute_score_pickscore(
     device: str | None = None,
     **kwargs,
 ) -> dict:
+    solution_image = decoded_reward_image(solution_image, extra_info, scorer="PickScore")
     await _ensure_consumer(device)
 
     prompt = ground_truth if ground_truth else ""
@@ -345,9 +428,9 @@ async def compute_score_pickscore_native(
     score_divisor: float = 26.0,
 ) -> dict:
     """Compute PickScore from outputs produced by a native named reward model."""
-    del data_source, extra_info
+    del data_source
     prompt = ground_truth or ""
-    image = _to_pil_hwc(solution_image)
+    image = decoded_reward_image(solution_image, extra_info, scorer="PickScore")
     outputs = await reward_model.infer(prompts=[prompt], images=[image])
     output = outputs[0]
     raw_score = _pairwise_pickscore(
@@ -376,7 +459,8 @@ async def compute_score_pickscore_engine(
     ``logit_scale`` is explicit because vLLM CLIP pooling does not restore the
     PickScore checkpoint's parameter.
     """
-    del data_source, extra_info
+    del data_source
+    image = decoded_reward_image(solution_image, extra_info, scorer="PickScore")
     if not reward_router_address:
         raise ValueError("PickScore engine reward requires reward_router_address")
     if not model_name:
@@ -385,7 +469,6 @@ async def compute_score_pickscore_engine(
     from verl_omni.utils.reward_score.reward_utils import pil_image_to_base64
 
     prompt = ground_truth or ""
-    image = _to_pil_hwc(solution_image)
     loop = asyncio.get_running_loop()
     image_url = await loop.run_in_executor(None, pil_image_to_base64, image)
     text_payload = {"model": model_name, "input": prompt, "encoding_format": "float"}

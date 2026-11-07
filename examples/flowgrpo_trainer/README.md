@@ -11,7 +11,7 @@ For the full installation and quickstart guide, see [Quickstart: FlowGRPO traini
 Follow the [installation guide](../../docs/start/install.md) to set up the base environment, then install the FlowGRPO-specific dependency:
 
 ```bash
-pip install Levenshtein
+uv pip install -e ".[ocr]"
 ```
 
 The provided script is configured for a single node with `4` GPUs.
@@ -43,16 +43,18 @@ This produces:
 
 ## Run training
 
-Launch the example from the repository root:
-
-```bash
-bash examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora.sh
-```
-
-For the V1 trainer (TransferQueue + ReplayBuffer, sync mode):
+Launch the example from the repository root. The default is the V1 trainer
+(TransferQueue + ReplayBuffer, sync mode; `trainer.use_v1=true` since v0.3.0):
 
 ```bash
 bash examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora_v1.sh
+```
+
+The legacy v0 script below is **deprecated** (a `DeprecationWarning` is emitted
+at launch) and remains only until the v0 trainer is removed:
+
+```bash
+bash examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora.sh
 ```
 
 GPU training defaults to matched kernels FA3 in config (`attn_backend: _flash_3_varlen_hub`;
@@ -75,7 +77,8 @@ The script runs `python3 -m verl_omni.trainer.main_diffusion` with:
 - `trainer.n_gpus_per_node=4`
 
 The V1 script uses `python3 -m verl_omni.trainer.main_diffusion_v1` with the same
-model/LoRA/reward knobs plus `trainer.use_v1=true` and `trainer.v1.trainer_mode=sync`,
+model/LoRA/reward knobs plus `trainer.use_v1=true` and `trainer.v1.trainer_mode=sync`
+(both defaults since v0.3.0),
 including the v0 micro-batch sizes: between phases the v1 trainer sleeps the rollout
 engine, and a vllm-omni level-1 sleep offloads the whole pipeline (transformer + text
 encoder + VAE) to pinned host memory, so the actor update runs next to only a few GB
@@ -114,7 +117,7 @@ All example scripts in this directory:
 
 | Variant | Script | GPUs | Notes |
 |---------|--------|------|-------|
-| LoRA (baseline) | `examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora.sh` | 4×GPU | Standard LoRA FlowGRPO + OCR reward |
+| LoRA (v0, deprecated) | `examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora.sh` | 4×GPU | Standard LoRA FlowGRPO + OCR reward |
 | LoRA (V1 sync) | `examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora_v1.sh` | 4×GPU | V1 trainer (`main_diffusion_v1`, TransferQueue + ReplayBuffer) |
 | LoRA + async reward | `examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora_async_reward.sh` | 5×GPU | Dedicated GPU pool for reward model |
 | LoRA + SP=2 | `examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora_sp2.sh` | 4×GPU | Ulysses sequence parallelism |
@@ -141,7 +144,9 @@ All example scripts in this directory:
 
 | Variant | Script | GPUs | Notes |
 |---------|--------|------|-------|
+| T2AV LoRA (V1 Sync) | `examples/flowgrpo_trainer/ltx2/run_ltx2_3_t2av_lora_v1.sh` | 8×GPU | V1 sync trainer with TransferQueue + ReplayBuffer |
 | T2AV LoRA | `examples/flowgrpo_trainer/ltx2/run_ltx2_3_t2av_lora.sh` | 8×GPU | Joint audio-video CPS, CLAP + ImageBind rewards |
+| TI2VA LoRA (V1 sync) | `examples/flowgrpo_trainer/ltx2/run_ltx2_3_ti2va_lora_v1.sh` | 8×GPU | First-frame-conditioned joint audio-video CPS with TransferQueue + ReplayBuffer |
 
 ### BAGEL
 

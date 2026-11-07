@@ -116,6 +116,10 @@ Thanks for submitting a PR! To streamline reviews:
 
 ## AI-Assisted Contributions
 
+You are the author of everything you post. If an agent drafted your PR
+description, commit messages, replies or code comments, read them properly and
+revise until they are concise and say what you would write yourself.
+
 See
 
 - [`AGENTS.md`](AGENTS.md) for rules that all AI coding agents must follow

@@ -1,7 +1,7 @@
 (diffusion_mfu)=
 # Diffusion FLOPs / MFU
 
-Last updated: 09/06/2026
+Last updated: 09/28/2026
 
 VeRL-Omni reports **Model FLOPs Utilization (MFU)** for diffusion RL
 training using the same actor keys upstream
@@ -53,11 +53,12 @@ The registry (`verl_omni.utils.mfu.diffusion_flops_counter._REGISTRY`) currently
 | Architecture | Registry key(s) | Attention topology |
 |---|---|---|
 | Qwen-Image | `QwenImagePipeline`, `QwenImagePipelineWithLogProb` | dual-stream joint full attention |
+| Boogu-Image | `BooguImagePipeline`, `BooguImagePipelineWithLogProb` | mixed double-/single-stream: joint full attention over `[instruct + img]` in the double-stream blocks plus an image-only self-attention, then fused single-stream blocks; refiners self-attend on their own stream |
 | Stable Diffusion 3 / 3.5 (no `dual_attention_layers`) | `StableDiffusion3Pipeline`, `StableDiffusion3PipelineWithLogProb` | dual-stream joint full attention, `context_pre_only` last block |
 | Wan2.1 / Wan2.2 | `WanPipeline` | single-stream self-attention + cross-attention to text |
 | MiniMax-H3 | `MiniMaxH3Pipeline` | packed text/video/audio full self-attention with a text-only token refiner |
 
-Any other architecture (Bagel, Boogu-Image, LTX2, SD3.5's
+Any other architecture (Bagel, LTX2, SD3.5's
 `dual_attention_layers` variant, Qwen-Image-Edit, Qwen3-Omni, ...) is not
 yet registered; `DiffusionFlopsCounter` degrades to `MFU=0` with a
 `RuntimeWarning` for those until an estimator is added. See [Adding a new
@@ -589,13 +590,20 @@ For diffusion RL workloads (like FlowGRPO), achieving high MFU requires balancin
   over-estimate ($\le 2\times$). The pipeline can override the
   detection with an explicit `pipeline.num_forward_passes: 1` field.
 - **Image-edit / Img2Img / Inpaint / ControlNet variants are not yet
-  estimated.** These pipelines concatenate reference latents to the
+  estimated** *for the pipelines whose base architecture has no estimator*
+  (notably Qwen-Image-Edit). These pipelines concatenate reference latents to the
   denoise-target latents along the sequence dim, so the effective
   `latent_seqlens` is larger than the spatial-dim product of the
   denoise-target tensor alone; the current registry warns + reports
   MFU=0 for them rather than under-counting silently. See [Adding a
   new architecture](#adding-a-new-architecture) for the override
   pattern.
+  The Boogu-Image estimator *does* cover its TI2I/edit path: the rollout
+  adapter parks the reference latents under `condition_image_latents`, and
+  `BooguImageFlops` folds them into `latent_seqlens` (they share the image-side
+  linears) while emitting the reference/denoise split as an extra
+  `ref_seqlens` field so the three refiners — which see each subset separately —
+  are charged their own sequence lengths.
 - **Rollout FLOPs are out of scope.** vLLM-Omni runs the rollout
   decoder outside the `TrainingWorker.Timer` block and on possibly
   different hardware; attributing FLOPs there is a follow-up.

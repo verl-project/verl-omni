@@ -12,26 +12,31 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# The MiniMax H3 agent loop lives in its pipeline package; import it here so the
-# @register decorator fires when the agent_loop package is imported. Do not
-# re-export the class from the pipeline package __init__ (import cycle).
+# The MiniMax H3 and LTX-2.3 agent loops live in their pipeline packages; import
+# them here so the @register decorator fires when the agent_loop package is
+# imported. Do not re-export the classes from the pipeline package __init__
+# (import cycle).
+from verl_omni.pipelines.ltx2_flow_grpo.agent_loop import LTX2DiffusionSingleTurnAgentLoop
 from verl_omni.pipelines.minimax_h3_diffusion_nft.agent_loop import MiniMaxH3DiffusionSingleTurnAgentLoop
 
-from .composite_agent_loop import CompositeAgentLoopWorker
+from .composite_agent_loop import CompositeAgentLoopManager, CompositeAgentLoopWorker
 from .diffusion_agent_loop import DiffusionAgentLoopOutput, DiffusionAgentLoopWorker
 from .diffusion_agent_loop_tq import (
     DiffusionAgentLoopWorkerTQ,
     create_diffusion_agent_loop_manager,
 )
-from .single_turn_agent_loop import DiffusionSingleTurnAgentLoop, OmniSingleTurnAgentLoop
+from .single_turn_agent_loop import CompositeSingleTurnAgentLoop, DiffusionSingleTurnAgentLoop, OmniSingleTurnAgentLoop
 
 __all__ = [
+    "CompositeAgentLoopManager",
     "CompositeAgentLoopWorker",
     "DiffusionAgentLoopOutput",
     "DiffusionAgentLoopWorker",
     "DiffusionAgentLoopWorkerTQ",
     "create_diffusion_agent_loop_manager",
+    "CompositeSingleTurnAgentLoop",
     "DiffusionSingleTurnAgentLoop",
     "OmniSingleTurnAgentLoop",
+    "LTX2DiffusionSingleTurnAgentLoop",
     "MiniMaxH3DiffusionSingleTurnAgentLoop",
 ]

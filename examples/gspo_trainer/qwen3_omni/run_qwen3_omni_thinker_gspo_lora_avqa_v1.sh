@@ -6,8 +6,8 @@
 #       --output_dir ~/data/avqa_r1_6k
 #
 # Runtime dependencies (all Ray worker nodes):
-#   pip install -e ".[audio]"  # installs qwen-omni-utils only (see pyproject [audio] extra); audio parsing in QwenOmniRLHFDataset
-#   pip install qwen-vl-utils   # multimodal data processing (NOT in the [audio] extra; install separately)
+#   uv pip install -e ".[audio]"  # audio parsing in QwenOmniRLHFDataset
+#   uv pip install -e ".[omni]"   # multimodal data processing (qwen-vl-utils)
 
 set -x
 

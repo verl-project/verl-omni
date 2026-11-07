@@ -1,6 +1,6 @@
 # Qwen3-Omni Thinker GSPO Trainer
 
-Last updated: 09/14/2026
+Last updated: 10/24/2026
 
 This example shows how to post-train the **Qwen3-Omni-30B-A3B Thinker** with
 **GSPO** on multimodal reasoning tasks, using FSDP for the actor and `vllm-omni` as
@@ -13,28 +13,30 @@ Both **GPU** and **NPU** training platforms are supported:
 
 - `examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_v1.sh`
   — **GPU**, **LoRA (r=32)** on a single node with **4 × H800 80GB**.
-- [`run_qwen3_omni_thinker_gspo_lora_avqa_v1.sh`](qwen3_omni/run_qwen3_omni_thinker_gspo_lora_avqa_v1.sh)
+- [`run_qwen3_omni_thinker_gspo_lora_avqa_v1.sh`](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_avqa_v1.sh)
   — **GPU**, **LoRA (r=32) V1** for text + image + audio AVQA training.
-- [`run_qwen3_omni_thinker_gspo_npu_avqa_v1.sh`](qwen3_omni/run_qwen3_omni_thinker_gspo_npu_avqa_v1.sh)
+- [`run_qwen3_omni_thinker_gspo_avqa_v1.sh`](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_avqa_v1.sh)
   — **NPU**, **full-parameter V1** for text + image + audio AVQA training.
-- [`run_qwen3_omni_thinker_gspo_npu_nextqa_v1.sh`](qwen3_omni/run_qwen3_omni_thinker_gspo_npu_nextqa_v1.sh)
+- [`run_qwen3_omni_thinker_gspo_npu_nextqa_v1.sh`](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_npu_nextqa_v1.sh)
   — **NPU**, **full-parameter V1** for video and soundtrack NExT-QA training.
 
 For the base environment setup, see the [installation guide](../../docs/start/install.md).
 
+For **Megatron full-parameter separate-async RL**, see the
+[AudioMCQ and image+audio AVQA recipes](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/qwen3_omni/README.md). The AudioMCQ
+recipe includes an offline toy-model smoke; the AVQA recipe adds a strict
+train/validation media split. Both are experimental and are not reproducible
+from the current public pins; the FSDP recipes above remain the supported
+default.
+
 ## Installation
 
 Follow the [installation guide](../../docs/start/install.md) to set up the base
-environment. In short:
+environment, then add the `[omni]` and `[fa2]` extras — the omni trainer's
+actor defaults to flash attention 2:
 
 ```bash
-git clone https://github.com/verl-project/verl-omni.git && cd verl-omni
-uv venv --python 3.12 --seed && source .venv/bin/activate
-uv pip install -e ".[gpu]" --torch-backend=auto
-uv pip install "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@$(cat .github/vllm_omni_pin.txt)"
-uv pip install -e ".[train,dev]"
-# flash-attn is required for GPU training
-uv pip install flash-attn>=2.8.3
+uv pip install -e ".[omni,fa2]"
 ```
 
 > **Tested with** `transformers==5.13.1`, `accelerate==1.14.0`, `peft==0.19.1`.
@@ -52,7 +54,7 @@ monkey-patches through `external_lib`.
 
 The launchers colocate the FSDP actor and the `vllm-omni` rollout on the same
 devices. `run_qwen3_omni_thinker_gspo_lora_v1.sh` targets a single node with
-**4 × H800 80GB**; `run_qwen3_omni_thinker_gspo_npu_avqa_v1.sh` targets a single
+**4 × H800 80GB**; `run_qwen3_omni_thinker_gspo_avqa_v1.sh` targets a single
 **Atlas 800T A3** node with **16 × Ascend 910C 64GB**. It dynamically generates
 a thinker-only deploy config for each rollout replica from that replica's
 visible devices, avoiding cross-replica device-rank collisions.
@@ -91,7 +93,7 @@ Launch from the repository root — pick the flavor that matches your hardware:
 bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_v1.sh
 
 # NPU, AVQA, Atlas 800T A3 (16 × Ascend 910C 64GB) — V1 trainer
-bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_npu_avqa_v1.sh
+bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_avqa_v1.sh
 ```
 
 The V1 launchers use pure CLI overrides on `verl_omni.trainer.main_omni`
@@ -171,13 +173,7 @@ in [`examples/gspo_trainer/data_process/mmk12.py`](https://github.com/verl-proje
 ### Run training
 
 The MMK12 reward scorer grades responses with
-[`math_verify`](https://github.com/huggingface/math-verify). Multimodal data
-processing also requires [`qwen-vl-utils`](https://github.com/QwenLM/Qwen2.5-VL)
-for vision info extraction. Install both explicitly:
-
-```bash
-pip install math-verify qwen-vl-utils
-```
+[`math_verify`](https://github.com/huggingface/math_verify).
 
 Then launch the MMK12 V1 training script:
 
@@ -208,7 +204,8 @@ bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_mmk12_v1_
 Compared with the GPU script, the NPU variant includes two important Ascend
 settings:
 
-- `export VLLM_ASCEND_ENABLE_NZ=0` disables the NZ format in vLLM Ascend.
+- `++actor_rollout_ref.rollout.engine_kwargs.vllm_omni.additional_config.weight_nz_mode=0`
+  disables the NZ format in vLLM Ascend.
 - `actor_rollout_ref.rollout.cudagraph_capture_sizes` limits the graph shapes
   captured by the rollout engine. Capturing too many shapes can cause runtime
   errors, so keep this list sparse. The current script uses capture sizes
@@ -248,6 +245,45 @@ The script sets `distillation.enabled=true` with a `vllm_omni` teacher
 (`loss_mode=kl`, `use_policy_gradient=true`). Teacher and student must share
 the same tokenizer (same model family).
 
+### MMK12 Full-Vocabulary On-Policy Distillation (nitrobrew)
+
+A variant of the OPD recipe replaces the sampled / top-k teacher signal with an
+**exact KL over the full vocabulary**. The teacher serves its Thinker last-layer
+hidden states instead of log-probs, and the actor reconstructs the teacher
+logits as `h @ W.T` from the teacher's `lm_head` in vocabulary chunks of 1024
+with a single online-softmax pass — peak extra memory is `O(N × 1024)` instead of
+`O(N × 151936)`. The loss is supervised (`use_policy_gradient=false`), so the
+whole-vocabulary signal is backpropagated directly instead of being folded into
+the policy-gradient reward.
+
+Same student (25% weight noise), same teacher (the un-noised model) and the same
+2 × Ascend 910C topology as the OPD recipe above:
+
+```bash
+# 1. On the master node (node 1): ray start --head
+# 2. On the slave node (node 2): ray start --address='<head_ip>:<port>'
+# 3. Run on the master node:
+bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_mmk12_v1_nitrobrew_opd_npu.sh
+```
+
+`STUDENT_MODEL`, `TEACHER_MODEL`, `TRAIN_FILE`, `VAL_FILE` and
+`REWARD_FUNCTION_PATH` are overridable the same way as in the other MMK12
+scripts. Beyond the teacher block shared with the OPD recipe, the script sets:
+
+- `distillation.distillation_loss.loss_mode=nitrobrew` with
+  `use_policy_gradient=false`. `nitrobrew_reverse_kl` selects `KL(p_S ‖ p_T)`
+  instead of the default forward `KL(p_T ‖ p_S)`.
+- `+actor_rollout_ref.rollout.agent.agent_loop_manager_class=verl_omni.experimental.nitrobrew_opd_agent_loop.NitrobrewOPDAgentLoopManagerTQ`
+  — the agent loop that asks the teacher for hidden states and lifts them onto
+  the batch as a first-class tensor field.
+- `+...rollout.engine_kwargs.vllm_omni.block_size=128`, and the teacher's
+  `enable_chunked_prefill=false`: hidden states are only emitted for the tokens
+  scheduled in the step that finishes prefill, so a chunked prefill would
+  return partial tensors.
+
+See [`docs/algo/omni_opd.md`](../../docs/algo/omni_opd.md#full-vocabulary-opd-nitrobrew)
+for the mechanism and the additional config keys.
+
 ## Training with `AVQA-R1-6K`
 
 The AVQA recipe trains the Qwen3-Omni Thinker to answer a four-way question
@@ -271,7 +307,7 @@ Image and audio paths are decoded by Qwen's `qwen_omni_utils.process_mm_info`
 through
 [`QwenOmniRLHFDataset`](../../verl_omni/utils/dataset/omni_rl_datasets.py). Install
 the official media loader without changing the NPU engine stack with
-`pip install -e ".[audio]"`. `ffmpeg` is only required when the dataset carries
+`uv pip install -e ".[audio]"`. `ffmpeg` is only required when the dataset carries
 compressed audio (mp3/m4a/aac/ogg) or http(s) audio URLs — those go through
 `audioread`/ffmpeg. Plain local WAV files decode via `librosa`/`soundfile`
 (libsndfile) and need no ffmpeg.
@@ -311,7 +347,7 @@ existing generic NPU script.
 TRAIN_FILE=$HOME/data/avqa_r1_6k/train.parquet \
 VAL_FILE=$HOME/data/avqa_r1_6k/validation.parquet \
 MODEL_PATH=/path/to/Qwen3-Omni-30B-A3B-Instruct \
-bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_npu_avqa_v1.sh
+bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_avqa_v1.sh
 ```
 
 The launcher uses a 4096-token multimodal prompt budget, a 12288-token response
@@ -408,10 +444,9 @@ Video sampling uses 1 FPS, 32--128 visual tokens per frame (`25088--100352` pixe
 Install the Qwen Omni media loader with:
 
 ```bash
-pip install -e ".[audio]"
+uv pip install -e ".[audio]"
 ```
 
-The `audio` extra already installs `qwen-omni-utils>=0.0.9`.
 Install the system FFmpeg package on the conversion host and every Ray worker;
 both `ffmpeg` and `ffprobe` must be available in `PATH`. For Ubuntu/Debian:
 
@@ -499,9 +534,9 @@ python -m pip install --no-deps --force-reinstall \
     "verl @ git+https://github.com/verl-project/verl.git@a0feb78fe8229fde644aec3bbec20b5dc4583509"
 ```
 
-Restart the training processes and Ray workers after updating. Installing
-`.[train]` again may restore the repository's older pin; apply the recipe-specific
-verl update after that installation.
+Restart the training processes and Ray workers after updating. Reinstalling
+the repository (`uv pip install -e .`) may restore the repository's older pin;
+apply the recipe-specific verl update after that installation.
 
 Launch with the original full model checkpoint:
 
@@ -570,6 +605,70 @@ outputs go to `${OUTPUT_DIR}/checkpoints` and `${OUTPUT_DIR}/validation`.
 Logging uses console and TensorBoard; the launcher also writes
 `run_qwen3omni_npu_nextqa_full_ms_16.log` in the repository root.
 
+## Training with MiniCPM-o 4.5 (AVQA)
+
+Same AVQA-R1-6K data, same reward, and the same recipe as Qwen3-Omni above,
+with four model-specific changes: the checkpoint path,
+`trust_remote_code=True`, `pipeline_name="minicpmo_4_5"`, and
+[`MiniCPMORLHFDataset`](../../verl_omni/utils/dataset/omni_rl_datasets.py),
+which reads the image and audio blocks without a Qwen dependency.
+
+```bash
+bash examples/gspo_trainer/minicpm/run_minicpmo_4_5_thinker_gspo_lora_avqa_v1.sh
+```
+
+The recipe trains the thinker (`llm` = dense Qwen3-8B). The vision and audio
+towers (`vpm`/`apm`) stay frozen and unsharded under FSDP2, and the rollout
+serves a one-stage thinker-only pipeline (text output) with
+`model_arch=MiniCPMO45OmniLLMForConditionalGeneration` for logprob support.
+Keep `flash_attention_2`: sdpa breaks train/rollout consistency. See the
+[integrating guide](../../docs/contributing/integrating_an_omni_model.md) for
+the rollout memory-sizing knobs the script sets.
+
+### Run disaggregated (separate-async)
+
+```bash
+bash examples/gspo_trainer/minicpm/run_minicpmo_4_5_thinker_gspo_lora_avqa_separate_async_v1.sh
+```
+
+The same recipe on the `omni_separate_async` trainer: the FSDP trainer and the
+vLLM-Omni rollout run on **separate GPU pools** (single node, 4 × 80GB = 2
+train + 2 rollout), generation runs one batch ahead of training through the
+replay buffer, and weights sync to the standalone replicas every
+`parameter_sync_step=8` inner steps (128 = 8 × 16, unchanged from both parent
+recipes). Data, reward, LoRA targets, and the GSPO block are identical to the
+colocated script; only the disaggregation lines differ:
+
+| knob | colocated | separate-async | why |
+| --- | --- | --- | --- |
+| `trainer.v1.trainer_mode` | `omni_sync` | `omni_separate_async` | trainer selection |
+| GPU split | 4 colocated | 2 train + 2 rollout (`rollout.nnodes=1`, `n_gpus_per_node=2`) | disaggregation |
+| Rollout topology | TP=2, colocated | `tensor_model_parallel_size=1` → two standalone replicas | independent rollout capacity |
+| `model.lora.merge` | `True` (merged full-weight IPC sync) | `True` — merged full weights via the NCCL engine | accuracy parity with the colocated reference (see the sync note below) |
+| `rollout.checkpoint_engine.backend` | — (naive colocated sync) | `nccl` | required non-naive backend |
+| `actor.fsdp_config.param_offload` / `optimizer_offload` | `true` — vacate shared GPUs for the rollout | `false` — dropped, not inherited | trainer GPUs are dedicated |
+| `rollout.gpu_memory_utilization` | 0.7 | 0.7 | the hybrid-replica wake on the trainer GPUs must fit next to the resident actor |
+| `trainer.v1.sampler.max_off_policy_threshold` | — (default 8) | pinned `8` | explicit staleness budget: drops groups spanning more than 8 outer weight versions (one-batch-ahead traffic spans 2) |
+
+LoRA sync note: this recipe ships `lora.merge=True` — merged full weights over
+the NCCL engine, the same semantics as the colocated recipe — so the first
+separate-async run stays directly comparable with the colocated reference. The
+performance flip, `lora.merge=False` (adapter deltas via `add_lora`, ~100 MB vs
+~19 GB per sync), is config-only: the actor's `llm.*` adapter keys align with
+the rollout class's `llm.`-prefixed backbone (pinned by
+`tests/pipelines/test_minicpm_lora_sync_names_on_cpu.py`; see
+[separate-async omni](../../docs/algo/separate_async_omni.md)).
+
+If the two-replica shape misbehaves (generation stalls around weight syncs),
+fall back to one TP=2 replica — the validated Qwen3-Omni topology — by
+overriding `actor_rollout_ref.rollout.tensor_model_parallel_size=2`.
+
+Reward placement rule under this trainer mode: any future GPU reward model
+(judge models, RLAIF-V judges) must live on the standalone/dedicated pool or
+its own — never the trainer pool (the standalone rollout never pauses to free
+memory; colocated RMs are rejected at startup). This recipe's rule-based
+`minicpm_naive` reward needs no placement.
+
 ## Performance
 
 All GPU results measured on a single node of **4 × H800 80GB**, actor and
@@ -600,6 +699,38 @@ binary `<answer>` exact-match reward): `critic/rewards/mean` rose from ~0.73 to
 ~0.94, `val-core/avqa_r1_6k/reward/mean@1` reached **0.877**.
 `rollout_corr/log_ppl_diff` stayed near zero (~0.007).
 
+## VeOmni full-parameter Thinker training
+
+[`run_qwen3_omni_thinker_gspo_veomni.sh`](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_veomni.sh)
+uses VeOmni **0.1.12** (PyPI) with FSDP2 and expert parallelism for the
+actor/reference, and vLLM-Omni for text rollout. Follow the
+[installation guide](../../docs/start/install.md#optional-engine-backends) on
+every node and prepare the MMK12 parquet files above. The Ray cluster must
+already span the requested nodes.
+
+```bash
+MODEL_PATH=Qwen/Qwen3-Omni-30B-A3B-Instruct \
+TRAIN_FILE=$HOME/data/mmk12/train.parquet \
+VAL_FILE=$HOME/data/mmk12/test.parquet \
+NUM_GPUS=8 NNODES=2 ACTOR_EP=8 \
+bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_veomni.sh
+```
+
+The full text backbone is trainable; vision/audio encoders remain frozen.
+Supported inputs are **text and images**, with packed inputs and Ulysses size 1.
+Audio/video inputs, Talker training, LoRA and direct-preference training are
+not supported. Defaults use rollout TP=2 and actor EP=8; EP must divide the
+GPU world size and expert count.
+
+The recipe uses LR `2e-6` with cosine decay to zero and no warmup. Validation
+explicitly sets `temperature=0.0`. Hydra overrides go last, for example
+`trainer.total_training_steps=2` or `--cfg job` to inspect the configuration.
+This recipe does not claim numerical equivalence to PR #231 or the LoRA
+curves above.
+
+See the [VeOmni integration guide](../../docs/contributing/integrating_an_omni_model.md#veomni-backend-optional)
+for backend configuration and adapter integration.
+
 ## Logging
 
 The NExT-QA launcher uses console and TensorBoard logging. For launchers
@@ -618,11 +749,19 @@ examples/gspo_trainer/
 │   ├── run_qwen3_omni_thinker_gspo_lora_v1.sh       ← V1 launch script (GPU, LoRA r=32, text)
 │   ├── run_qwen3_omni_thinker_gspo_lora_mmk12_v1.sh  ← V1 launch script (GPU, LoRA r=32, image)
 │   ├── run_qwen3_omni_thinker_gspo_lora_avqa_v1.sh   ← V1 launch script (GPU, LoRA r=32, audio + image)
-│   ├── run_qwen3_omni_thinker_gspo_npu_avqa_v1.sh    ← V1 launch script (NPU, AVQA)
+│   ├── run_qwen3_omni_thinker_gspo_lora_mmk12_v1_npu.sh        ← V1 launch script (NPU, MMK12)
+│   ├── run_qwen3_omni_thinker_gspo_lora_mmk12_v1_opd_npu.sh    ← V1 OPD script (NPU, MMK12, top-k teacher)
+│   ├── run_qwen3_omni_thinker_gspo_lora_mmk12_v1_nitrobrew_opd_npu.sh  ← V1 OPD script (NPU, MMK12, full-vocabulary)
+│   ├── run_qwen3_omni_thinker_gspo_avqa_v1.sh    ← V1 launch script (NPU, AVQA)
 │   ├── run_qwen3_omni_thinker_gspo_npu_nextqa_v1.sh  ← V1 launch script (NPU, NExT-QA)
 ├── data_process/
 │   ├── mmk12.py                                      ← MMK12 → verl RL parquet converter
 │   ├── avqa.py                                       ← AVQA → verl RL parquet converter
 │   └── nextqa.py                                     ← NExT-QA → verl RL parquet converter
+├── minicpm/
+│   ├── run_minicpmo_4_5_thinker_gspo_lora_avqa_v1.sh ← V1 launch script (MiniCPM-o 4.5, LoRA r=32, audio + image)
+│   └── run_minicpmo_4_5_thinker_gspo_lora_avqa_separate_async_v1.sh ← V1 launch script (same, disaggregated 2+2 GPUs)
 └── README.md                                         ← (this file)
 ```
+
+For the GPU Megatron Geo3K image-conditioned recipe, see the [Qwen3-Omni guide](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/qwen3_omni/README.md#geo3k-image-conditioned-megatron-separate-async).

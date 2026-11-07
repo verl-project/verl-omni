@@ -1,9 +1,17 @@
 (metrics)=
 # Training Metrics
 
-Last updated: 05/15/2026
+Last updated: 10/24/2026
 
-The table below describes metrics specific to diffusion FlowGRPO / GRPO-Guard training, logged each step to your configured backend (console / W&B).
+Metrics are logged each step to your configured backend (console / W&B). The diffusion RL
+trainers share the group-statistic metrics, and each objective adds its own block below. Names
+are shortened from their log keys: the actor-side rows are logged under `actor/`, the
+reward-group statistics under `critic/rewards/`, and the timing and throughput rows under their
+own prefixes.
+
+## FlowGRPO / GRPO-Guard
+
+The table below describes metrics specific to diffusion FlowGRPO / GRPO-Guard training.
 
 | Metric | Definition | Interpretation |
 |--------|------------|----------------|
@@ -26,3 +34,101 @@ The table below describes metrics specific to diffusion FlowGRPO / GRPO-Guard tr
 - $\varepsilon$ — clip ratio
 - $N$ — number of GPUs
 - $t_\mathrm{step}$ — wall-clock time per training step
+
+## DiffusionNFT
+
+DiffusionNFT consumes the same rollouts and group statistics, but replaces the PPO-style
+ratio objective with a reward-weighted two-branch fit to the clean latent. One branch
+(`positive_loss`) pulls the prediction toward the rewarded direction and the other
+(`negative_loss`) pushes an implicit negative away from it, blended by the reward probability
+$r_i$. The remaining metrics report the two gradient-scale terms that balance that update and
+the reference anchor.
+
+With $\hat{x}_0^{\pm}$ the two branch targets, the branch losses are
+$L_i^{\pm} = \mathrm{mean}\left((\hat{x}_0^{\pm} - x_0)^2 / w^{\pm}\right)$, where
+$w^{\pm} = \max\left(\overline{\lvert \hat{x}_0^{\pm} - x_0 \rvert}, \epsilon_w\right)$ is an
+adaptive per-sample weight that keeps early-training gradients from being dominated by the
+largest residuals.
+
+| Metric | Definition | Interpretation |
+|--------|------------|----------------|
+| total_loss | $\text{policy loss} + \lambda \cdot \text{ref KL loss}$ | The objective actually backpropagated. Read it next to `policy_loss` to see how much of the step is the reference anchor rather than the reward. |
+| policy_loss | $A \cdot \overline{\dfrac{r_i L_i^{+} + (1 - r_i) L_i^{-}}{\beta}}$ | The reward-weighted fit that drives learning; should track the reward curves. A flat or rising series while reward improves means the learning rate or `ref_kl_coef` is holding the update back. |
+| positive_loss | $\overline{L_i^{+}}$ | Loss of the rewarded branch. Falling values mean the policy reproduces the rewarded sample more closely. |
+| negative_loss | $\overline{L_i^{-}}$ | Loss of the implicit negative branch. This branch, not `positive_loss`, is what makes DiffusionNFT preference-like rather than plain distillation; if it stops moving, the negative side of the objective has collapsed. |
+| reward_prob_mean | $\overline{r_i}$ | Mean reward weight, with $r_i = \mathrm{clip}(A_i / A, -1, 1) / 2 + \tfrac{1}{2} \in [0, 1]$. Near $0.5$ is expected for group-normalized advantages. A persistent excursion toward $0$ or $1$ means the group statistics have collapsed to a single sign and the batch carries little contrast. |
+| contraction_scale | $\overline{\lvert A \beta t (v_\theta - v_\mathrm{old}) \rvert}$ | The reward-free term pulling the policy back toward the rollout policy. It grows with the policy's drift and is a stabilizer, not learning signal. |
+| reward_term_scale | $\overline{\lvert 2 A (r_i - \tfrac{1}{2})(\hat{x}_0^{\text{old}} - x_0) \rvert}$ | Magnitude of the reward-driven term, i.e. the whole learning signal. $A$ cancels out of it, so reading this next to `contraction_scale` shows which of the two dominates. |
+| log10_signal_ratio | $\log_{10}(\text{reward term}) - \log_{10}(\text{contraction term})$ | How far the reward term dominates the contraction; roughly $\ge 0$ means the reward, not the pull-back, is steering the update. Logged in log space because `contraction_scale` is exactly $0$ on a micro-batch whose $v_\theta - v_\mathrm{old}$ rounds to zero (common right after a LoRA re-init), and a raw ratio would then poison the batch mean. Recover the ratio as $10^{\text{log10 signal ratio}}$. |
+| old_deviate | $\overline{(v_\theta - v_\mathrm{old})^2}$ | Squared drift from the rollout policy, the quantity `contraction_scale` penalizes. A rising trend warns the update has moved too far off-policy. |
+| ref_kl_loss | $\overline{(v_\theta - v_\mathrm{ref})^2}$ | Deviation from the reference policy. Named `kl`, but implemented as a mean squared difference. |
+| ref_kl_contribution | $\lambda \cdot \text{ref KL loss}$ | The reference anchor's share of `total_loss`. It should shape the update without swamping the reward signal; compare it against `policy_loss`. |
+
+**Variables.**
+
+- $v_\theta$ — velocity predicted by the policy being trained
+- $v_\mathrm{old}$ — velocity predicted by the rollout (old) policy
+- $v_\mathrm{ref}$ — velocity predicted by the reference policy
+- $\hat{x}_0^{\pm}$ — clean-latent target of the positive / negative branch
+- $L_i^{\pm}$, $w^{\pm}$ — adaptive-weighted branch loss and its weight, defined above
+- $\epsilon_w$ — the adaptive weight floor (`adaptive_weight_min`)
+- $r_i$ — reward probability of sample $i$, mapped from the clipped advantage
+- $\beta$ — `mix_beta`
+- $A$ — `adv_clip_max`
+- $\lambda$ — `ref_kl_coef`
+- $t$ — flow time
+
+## DGPO
+
+DGPO consumes the same rollouts and group statistics as DiffusionNFT, but weights each sample's
+flow-matching error by a sigmoid of its whole group's preference score. With
+$d_i = \mathrm{mean}\left((v - v_\theta)^2\right)$ the per-sample error against the target velocity
+$v$, and $d_i^{\mathrm{ref}}$, $d_i^{\mathrm{old}}$ the same error under the reference and rollout
+policies, the group score is $s_G = \tfrac{\beta}{|G|}\sum_{i \in G} A_i (d_i - d_i^{\mathrm{ref}})$
+and the group weight is $w_G = \sigma(s_G)$.
+
+| Metric | Definition | Interpretation |
+|--------|------------|----------------|
+| total_loss | $\text{policy loss} + \lambda \cdot \text{ref KL loss}$ | The objective actually backpropagated. |
+| policy_loss | $\overline{w_G A_i d_i}$ | The group-weighted fit that drives learning. Its sign follows which samples dominate the batch and is not itself a progress measure; read the reward curves. |
+| dsm_loss | $\overline{d_i}$ | Mean flow-matching error of the trained policy on the rollout samples. |
+| ref_dsm_loss | $\overline{d_i^{\mathrm{ref}}}$ | The same error under the reference policy; `dsm_loss - ref_dsm_loss` is what the group score is built from. |
+| old_dsm_loss | $\overline{d_i^{\mathrm{old}}}$ | The same error under the rollout policy, used by the clip. |
+| group_weight_mean | $\overline{w_G}$ | Mean group weight. Exactly $0.5$ while the policy equals the reference (before the first optimizer update of a fresh LoRA). |
+| group_weight_dev | $\overline{\lvert w_G - 0.5 \rvert}$ | How far groups have moved from the neutral weight. Near $0$ means the policy barely differs from the reference on these samples; near $0.5$ means the weights saturate and `dgpo_beta` may be too large. |
+| clip_frac | fraction of samples with $\exp(d_i^{\mathrm{old}} - d_i)$ outside $[1 - \epsilon_c, 1 + \epsilon_c]$ in the direction of $A_i$ | Share of samples whose error was detached by the clip. A value climbing toward $1$ means the update outruns the rollout policy. |
+| ref_kl_loss | $\overline{(v_\theta - v_\mathrm{ref})^2}$ | Deviation from the reference policy, implemented as a mean squared difference. |
+
+**Variables.** $A_i$ — clipped group-normalized advantage; $\beta$ — `dgpo_beta`; $\epsilon_c$ —
+`dgpo_clip_range`; $\lambda$ — `ref_kl_coef`; $v_\theta$, $v_\mathrm{ref}$ — velocities of the
+trained and reference policies.
+
+## CRD
+
+`old_policy/*` reports sampling-adapter refreshes; `reference_policy/*` reports moving-reference
+refreshes. Each includes `update_applied`, `copy_update`, `ema_update`, and `decay` for that iteration.
+
+CRD matches within-prompt centered rewards to implicit rewards estimated from denoising
+errors. With $d_i^\theta$ and $d_i^{\mathrm{moving}}$ the adaptive-normalized denoising errors
+of the trained policy and moving reference, the implicit reward is
+$u_i = d_i^{\mathrm{moving}} - d_i^\theta$. The bounded target reward is
+$q_i = \tfrac12 + \mathrm{clip}(A_i, -C, C)/(2C)$.
+The centered values are $\widetilde u_i = u_i - \operatorname{sg}(\overline u_G)$ and
+$\widetilde q_i = q_i - \overline q_G$, where $G$ is the sample's prompt group.
+
+| Metric | Definition | Interpretation |
+|--------|------------|----------------|
+| crd_loss | $\text{crd policy loss} + \text{crd KL loss}$ | The objective actually backpropagated. |
+| crd_policy_loss | $\dfrac{C}{\beta}\operatorname{mean}_i[(\beta\widetilde u_i - \widetilde q_i)^2]$ | Error in matching the centered implicit rewards to the centered target rewards. |
+| crd_kl_loss | $\operatorname{mean}_i[\lambda_i\operatorname{mean}((v_\theta - v_{\mathrm{init}}^\gamma)^2)]$ | Weighted pretrained-anchor penalty. Compare with `crd_policy_loss` to see the anchor's contribution to the update. |
+| crd_kl_coefficient | $\operatorname{mean}_i[\lambda_i]$ | Mean anchor strength, with $\lambda_i = \lambda_{\min} + r_i(\lambda_{\max} - \lambda_{\min})$. Higher raw rewards increase this coefficient. |
+| crd_implicit_reward | $\operatorname{mean}_i[u_i]$ | Mean reduction in adaptive-normalized denoising error relative to the moving reference, before centering. |
+
+**Variables.**
+
+- $A_i$ — group-normalized advantage; $C$ — `adv_clip_max`
+- $\beta$ — `crd_beta`; $r_i$ — raw reward in $[0,1]$
+- $\lambda_{\min}$ — `crd_kl_min`; $\lambda_{\max}$ — `ref_kl_coef`
+- $v_\theta$ — trained-policy velocity; $v_{\mathrm{init}}^\gamma$ — frozen pretrained velocity with CFG scale $\gamma$
+- $d_i^\phi$ — mean squared velocity error divided by an adaptive denominator: the detached mean absolute error floored at `adaptive_weight_min`
+- $\overline u_G$, $\overline q_G$ — within-prompt group means; $\operatorname{sg}$ — stop-gradient

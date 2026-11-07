@@ -13,8 +13,7 @@
 # limitations under the License.
 """CPU tests for the MiniMax H3 DiffusionNFT adapter."""
 
-import sys
-from types import ModuleType, SimpleNamespace
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -281,6 +280,31 @@ class TestMiniMaxH3Forward:
         assert module.call_args_list[0].kwargs["encoder_hidden_states"].shape == (1, 5, _TEXT_DIM)
         assert module.call_args_list[1].kwargs["encoder_hidden_states"].shape == (1, _TEXT_LEN, _TEXT_DIM)
 
+    def test_forward_routes_each_sample_through_the_actor_sp_padding_runner(self, monkeypatch):
+        import verl_omni.pipelines.minimax_h3_diffusion_nft.diffusers_training_adapter as adapter
+
+        calls = []
+
+        def _runner(module, model_inputs, sp_size):
+            calls.append((model_inputs["position_ids"].shape[0], sp_size))
+            return module(**model_inputs)
+
+        monkeypatch.setattr(adapter, "h3_ulysses_forward", _runner)
+        video_rows, audio_rows = _rows()
+        mask = torch.zeros(_BATCH, _TEXT_LEN, dtype=torch.int32)
+        mask[:, :5] = 1
+        model_inputs, _ = _prepared_inputs(video_rows, audio_rows, timesteps=torch.tensor([500.0, 250.0]), mask=mask)
+        model_inputs["_h3_sp_size"] = 2
+
+        MiniMaxH3DiffusionNFT.forward(
+            module=_module(_identity),
+            model_config=MagicMock(),
+            model_inputs=model_inputs,
+            negative_model_inputs=None,
+        )
+
+        assert calls == [(15, 2)] * _BATCH
+
     def test_fl2va_injects_condition_rows_and_crops_their_velocity(self):
         video_rows, audio_rows = _rows(batch=1)
         condition_rows = torch.randn(1, 8, VIDEO_ROW_WIDTH)
@@ -368,6 +392,12 @@ class _StubSyncPipeline(MiniMaxH3RolloutWeightSyncMixin, _RecordingLoader):
         self.transformer.arch.attention_head_dim = _HEAD_DIM
         self.transformer.arch.ffn_hidden_size = _FF_HALF
         self.transformer.arch.rope_inv_freq_len = _ROPE_LEN
+        self.qkv = MagicMock()
+        self.fc1 = MagicMock()
+        self.transformer.named_parameters.return_value = [
+            ("blocks.0.attn.qkv_proj.weight", self.qkv),
+            ("blocks.0.mlp.fc1.weight", self.fc1),
+        ]
 
 
 class TestMiniMaxH3RolloutWeightSync:
@@ -388,32 +418,36 @@ class TestMiniMaxH3RolloutWeightSync:
 
         assert pipeline.received == []
 
-    def test_qkv_fuses_per_head_across_sync_buckets(self):
-        """The base sync arrives in buckets, so one block's q/k/v may span several calls."""
+    def test_qkv_shards_use_native_loader_across_sync_buckets(self):
+        """The native loader handles TP slicing without a cross-bucket tensor cache."""
         pipeline = _StubSyncPipeline()
         width = _HEADS * _HEAD_DIM
         parts = {c: torch.randn(width, width) for c in ("q", "k", "v")}
 
         pipeline.load_weights([(f"transformer.transformer_blocks.0.attn.to_{c}.weight", parts[c]) for c in ("q", "k")])
-        assert not any("qkv_proj" in name for name, _ in pipeline.received)
+        assert pipeline.qkv.weight_loader.call_count == 2
         pipeline.load_weights([("transformer.transformer_blocks.0.attn.to_v.weight", parts["v"])])
 
-        fused = dict(pipeline.received)["transformer.blocks.0.attn.qkv_proj.weight"]
-        assert fused.shape == (3 * width, width)
-        for head in range(_HEADS):
-            for offset, comp in enumerate(("q", "k", "v")):
-                start = (head * 3 + offset) * _HEAD_DIM
-                expected = parts[comp][head * _HEAD_DIM : (head + 1) * _HEAD_DIM]
-                torch.testing.assert_close(fused[start : start + _HEAD_DIM], expected)
+        calls = pipeline.qkv.weight_loader.call_args_list
+        assert len(calls) == 3
+        for call, comp in zip(calls, ("q", "k", "v"), strict=True):
+            assert call.args[0] is pipeline.qkv
+            assert call.args[2] == comp
+            torch.testing.assert_close(call.args[1], parts[comp], rtol=0, atol=0)
+        assert not hasattr(pipeline, "_qkv_buffer")
 
-    def test_geglu_halves_are_swapped(self):
+    def test_geglu_halves_use_native_gate_then_up_shards(self):
         pipeline = _StubSyncPipeline()
         proj = torch.randn(2 * _FF_HALF, 4)
 
         pipeline.load_weights([("transformer.transformer_blocks.0.ff.net.0.proj.weight", proj)])
 
-        swapped = dict(pipeline.received)["transformer.blocks.0.mlp.fc1.weight"]
-        torch.testing.assert_close(swapped, torch.cat([proj[_FF_HALF:], proj[:_FF_HALF]]))
+        calls = pipeline.fc1.weight_loader.call_args_list
+        assert len(calls) == 2
+        for call, shard, expected in zip(calls, (0, 1), (proj[_FF_HALF:], proj[:_FF_HALF]), strict=True):
+            assert call.args[0] is pipeline.fc1
+            assert call.args[2] == shard
+            torch.testing.assert_close(call.args[1], expected, rtol=0, atol=0)
 
     @pytest.mark.parametrize(
         ("diffusers_name", "vllm_name"),
@@ -459,7 +493,7 @@ class TestMiniMaxH3TokenIdNativePrompt:
     def test_empty_prompt_ids_are_rejected(self):
         pipeline = _StubSyncPipeline()
 
-        with pytest.raises(ValueError, match="non-empty prompt_token_ids"):
+        with pytest.raises(ValueError, match="non-empty prompt_ids"):
             pipeline._ensure_prompt_text(self._request({"prompt_token_ids": []}))
 
     def test_generic_agent_loop_ids_are_rejected(self):
@@ -480,31 +514,28 @@ class TestMiniMaxH3TokenIdNativePrompt:
 
         assert pipeline._h3_prompt_ids is None
 
-    def test_t2va_encoder_consumes_exact_request_ids(self, monkeypatch):
-        module_name = "vllm_omni.diffusion.models.minimax_h3.pipeline_minimax_h3"
-        pipeline_module = ModuleType(module_name)
-        pipeline_module._dit_rank_world = lambda: (None, 0, 1)
-        pipeline_module._broadcast_tensor = lambda value, **kwargs: value
-        # Unused on the t2va path; a placeholder suffices.
-        pipeline_module.minimax_h3_multi_image_presentation = lambda tokenizer, *, prompt, image_token_counts: (
-            torch.tensor([], dtype=torch.long),
-            torch.tensor([], dtype=torch.long),
-        )
-        monkeypatch.setitem(sys.modules, module_name, pipeline_module)
+    def test_t2va_encoder_consumes_exact_request_ids(self):
+        class Parent:
+            def encode_prompt(self, prepared):
+                ids = torch.tensor(self.tokenizer(prepared.prompt)["input_ids"])
+                return ids[:, None].float(), torch.ones_like(ids)
 
-        pipeline = _StubSyncPipeline()
+        class Stub(MiniMaxH3RolloutWeightSyncMixin, Parent):
+            pass
+
+        pipeline = Stub()
         pipeline._h3_prompt_ids = torch.tensor([101, 17, 202])
-        pipeline.text_encoder_tp_size = 1
-        pipeline.device = torch.device("cpu")
-        pipeline._distribute_encode_inputs = lambda ids, vision_kwargs: ids
-        pipeline._encode_text_hidden = lambda ids, vision_kwargs: ids[:, None].float()
+        pipeline.tokenizer = lambda text: {"input_ids": [999]}
+        original_tokenizer = pipeline.tokenizer
 
         hidden, tags = pipeline.encode_prompt(
-            task="t2va",
-            prompt="[pretokenized]",
-            image=None,
-            prepared_videos=None,
+            SimpleNamespace(
+                prompt="[pretokenized]",
+                media=SimpleNamespace(task="t2va"),
+                images=[],
+            )
         )
 
         assert hidden[:, 0].tolist() == [101.0, 17.0, 202.0]
         assert tags.tolist() == [1, 1, 1]
+        assert pipeline.tokenizer is original_tokenizer

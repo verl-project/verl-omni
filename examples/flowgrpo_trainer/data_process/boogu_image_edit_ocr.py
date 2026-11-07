@@ -15,11 +15,6 @@
 
 The task is *text editing*: each sample carries a source image that already
 contains rendered text, plus an instruction asking for that text to be replaced.
-The reward is the existing OCR GenRM (``compute_score_ocr``), which transcribes
-the rollout image and compares it to ``ground_truth`` — the text the edit was
-supposed to produce. No new reward code is needed, and unlike a preference
-scorer this reward *is* edit-aware for this task: the edit only scores if the
-requested text actually appears.
 
 Input layout (mirrors ``examples/flowgrpo_trainer/qwen_image_edit/prepare_data.py``)::
 
@@ -31,21 +26,24 @@ Input layout (mirrors ``examples/flowgrpo_trainer/qwen_image_edit/prepare_data.p
 first double-quoted span of the instruction, the same convention the T2I
 converter uses (``boogu_image_ocr.py::extract_solution``).
 
-Prompt conventions differ from the Qwen-Image-Edit converter in two ways that
-both silently corrupt training if copied over unchanged:
+``reward_model.ground_truth`` holds whatever the selected reward reads
+(``--reward``): with ``pickscore`` (the default) the **instruction**, because
+``pickscore_reward.py`` CLIP-encodes ``ground_truth`` as the *prompt* and measures
+its similarity to the generated image -- the same contract as the verified
+Qwen-Image-Edit recipe -- and with ``ocr`` the bare ``target_text``, because
+``genrm_ocr.py`` transcribes the generated image and string-compares it. Storing
+the wrong one scores the image against text that was never asked for;
+``ground_truth_for`` keeps the mapping in one place so the two arms cannot drift.
+``target_text`` is still kept in ``extra_info`` for inspection and for the
+rollout log/validation tables.
 
-- **Both** the positive and the negative prompt use the *TI2I unified* system
-  prompt. For T2I only the empty negative prompt hits that template; on the
-  editing path it is the positive template too.
-- The negative prompt carries **no** ``<image>`` placeholder. Upstream defaults
-  to ``use_input_images_4_neg_instruct=False``, so the rollout adapter encodes
-  the negative instruction text-only (``vllm_omni_rollout_adapter.py``). A
-  placeholder here would never be expanded into image features.
-
-Condition images are letterboxed onto a square canvas. Boogu-Image-Edit derives
-its output resolution from the VAE-preprocessed reference (``align_res``), so
-mixed source aspect ratios would produce mixed output resolutions inside a
-rollout batch. A fixed square canvas pins the output to ``image_size``.
+The negative prompt is **text-only**: guided TI2I encodes the negative instruction
+without the reference image (upstream default
+``use_input_images_4_neg_instruct=False``), so an ``<image>`` placeholder here would
+be tokenized but never expanded into image features. That satisfies the media-count
+check while quietly shifting the guidance, so the row deliberately references
+**fewer** media than it carries — which ``RLHFDataset._build_messages`` permits for
+the negative key and for no other.
 """
 
 import argparse
@@ -89,7 +87,21 @@ def load_condition_image(image_path: Path, image_size: int) -> bytes:
     return buffer.getvalue()
 
 
-def convert_split(input_dir: Path, split: str, max_samples: int, image_size: int) -> pd.DataFrame:
+REWARD_CHOICES = ("ocr", "pickscore")
+
+
+def ground_truth_for(reward: str, instruction: str, target_text: str) -> str:
+    """Return the text ``reward`` actually compares against (see the module docstring)."""
+    if reward == "ocr":
+        # genrm_ocr.py transcribes the generated image and string-compares it.
+        return target_text
+    if reward == "pickscore":
+        # pickscore_reward.py does `prompt = ground_truth` and CLIP-encodes it.
+        return instruction
+    raise ValueError(f"unknown reward {reward!r}; expected one of {REWARD_CHOICES}")
+
+
+def convert_split(input_dir: Path, split: str, max_samples: int, image_size: int, reward: str) -> pd.DataFrame:
     jsonl_path = input_dir / f"{split}.jsonl"
     image_dir = input_dir / "images"
     rows = []
@@ -107,20 +119,30 @@ def convert_split(input_dir: Path, split: str, max_samples: int, image_size: int
 
             rows.append(
                 {
-                    "data_source": "flow_grpo/ocr_edit",
+                    # Names the reward, so it stays in step with ground_truth below.
+                    "data_source": reward,
                     "prompt": [
                         {"role": "system", "content": BOOGU_SYSTEM_PROMPT_TI2I},
                         {"role": "user", "content": f"Picture 1: <image>{instruction}"},
                     ],
-                    # Text-only: upstream does not feed the reference image to the
-                    # negative branch, so no <image> placeholder here.
+                    # Text-only: the reference image is not fed to the negative branch
+                    # (upstream `use_input_images_4_neg_instruct=False`), so no `<image>`
+                    # placeholder here. `RLHFDataset._build_messages` allows the negative
+                    # key to consume fewer media than the row carries for exactly this
+                    # reason; adding a placeholder back would satisfy that check while
+                    # handing the negative encode a token that is never expanded.
                     "negative_prompt": [
                         {"role": "system", "content": BOOGU_SYSTEM_PROMPT_TI2I},
                         {"role": "user", "content": ""},
                     ],
                     "ability": "image_edit",
                     "images": [{"bytes": load_condition_image(image_path, image_size)}],
-                    "reward_model": {"style": "model", "ground_truth": target_text},
+                    # Which text the reward compares against: the instruction for
+                    # PickScore, the bare target word for OCR. See the module docstring.
+                    "reward_model": {
+                        "style": "model",
+                        "ground_truth": ground_truth_for(reward, instruction, target_text),
+                    },
                     "extra_info": {
                         "split": split,
                         "index": index,
@@ -140,6 +162,16 @@ def main() -> None:
     parser.add_argument("--train_size", type=int, default=-1)
     parser.add_argument("--val_size", type=int, default=-1)
     parser.add_argument(
+        "--reward",
+        choices=REWARD_CHOICES,
+        default="pickscore",
+        help=(
+            "Which reward will score this data. Sets both `reward_model.ground_truth` and "
+            "`data_source`, so the validation metric key reads `<val-core>/<reward>/...`. "
+            "'pickscore' stores the instruction (CLIP prompt); 'ocr' stores the bare target word."
+        ),
+    )
+    parser.add_argument(
         "--image_size",
         type=int,
         default=512,
@@ -151,11 +183,14 @@ def main() -> None:
         raise ValueError(f"--image_size must be a multiple of 16 in (0, 2048]; got {args.image_size}")
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    train = convert_split(args.input_dir.expanduser(), "train", args.train_size, args.image_size)
-    validation = convert_split(args.input_dir.expanduser(), "test", args.val_size, args.image_size)
+    train = convert_split(args.input_dir.expanduser(), "train", args.train_size, args.image_size, args.reward)
+    validation = convert_split(args.input_dir.expanduser(), "test", args.val_size, args.image_size, args.reward)
     train.to_parquet(args.output_dir / "train.parquet", row_group_size=500)
     validation.to_parquet(args.output_dir / "test.parquet", row_group_size=500)
-    print(f"Wrote {len(train)} training and {len(validation)} validation samples to {args.output_dir}")
+    print(
+        f"Wrote {len(train)} training and {len(validation)} validation samples to {args.output_dir} "
+        f"(reward={args.reward})"
+    )
 
 
 if __name__ == "__main__":

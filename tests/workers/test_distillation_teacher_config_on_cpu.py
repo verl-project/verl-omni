@@ -20,7 +20,7 @@ from hydra import compose, initialize_config_dir
 
 import verl_omni
 from verl_omni.workers.config import DiffusionModelConfig
-from verl_omni.workers.config.diffusion import DiffusionDistillationTeacherModelConfig
+from verl_omni.workers.config.diffusion import DiffusionDistillationTeacherModelConfig, DiffusionPipelineConfig
 from verl_omni.workers.engine_workers import build_teacher_training_config
 
 CONFIG_DIR = os.path.join(os.path.dirname(os.path.abspath(verl_omni.__file__)), "trainer", "config")
@@ -48,6 +48,7 @@ def test_teacher_training_config_derivation(actor_rollout_ref_config, tmp_path):
         load_tokenizer=False,
         transformer_config={},
         lora_rank=32,
+        lora={"rank": 32},
     )
     teacher_training_config = build_teacher_training_config(
         config=actor_rollout_ref_config,
@@ -58,10 +59,44 @@ def test_teacher_training_config_derivation(actor_rollout_ref_config, tmp_path):
     assert teacher_training_config.model_config.path == str(teacher_dir)
     assert teacher_training_config.model_config.lora_rank == 0
     assert teacher_training_config.model_config.lora_adapter_path is None
+    # the nested Megatron grammar is stripped too, so the resolver sees no LoRA at all
+    assert teacher_training_config.model_config.lora == {}
     assert teacher_training_config.model_config.load_tokenizer is False
     assert teacher_training_config.engine_config.forward_only is True
     # ref gives no scoring micro-batch by default, so the actor training micro-batch applies
     assert teacher_training_config.engine_config.infer_micro_batch_size_per_gpu == 8
+
+
+def _student_model_config(student_dir, guidance_scale):
+    return DiffusionModelConfig(
+        path=str(student_dir),
+        architecture="StableDiffusion3Pipeline",
+        algorithm="flow_grpo",
+        attn_backend="native",
+        load_tokenizer=False,
+        transformer_config={},
+        pipeline=DiffusionPipelineConfig(height=512, width=512, guidance_scale=guidance_scale),
+    )
+
+
+def test_teacher_guidance_scale_overrides_student_pipeline(actor_rollout_ref_config, tmp_path):
+    teacher_training_config = build_teacher_training_config(
+        config=actor_rollout_ref_config,
+        model_config=_student_model_config(tmp_path, guidance_scale=4.5),
+        teacher_model_config=DiffusionDistillationTeacherModelConfig(model_path=str(tmp_path), guidance_scale=1.0),
+    )
+    pipeline = teacher_training_config.model_config.pipeline
+    assert pipeline.guidance_scale == 1.0
+    assert (pipeline.height, pipeline.width) == (512, 512)
+
+
+def test_teacher_guidance_scale_defaults_to_student(actor_rollout_ref_config, tmp_path):
+    teacher_training_config = build_teacher_training_config(
+        config=actor_rollout_ref_config,
+        model_config=_student_model_config(tmp_path, guidance_scale=4.5),
+        teacher_model_config=DiffusionDistillationTeacherModelConfig(model_path=str(tmp_path)),
+    )
+    assert teacher_training_config.model_config.pipeline.guidance_scale == 4.5
 
 
 def test_infer_teacher_batch_routes_by_teacher_key():

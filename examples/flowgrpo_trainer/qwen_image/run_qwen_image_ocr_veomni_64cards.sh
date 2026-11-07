@@ -9,8 +9,8 @@
 #   actor_rollout_ref.ref.veomni_config.strategy=veomni
 #
 # Requires VeOmni installed alongside the verl-omni base environment; see
-# docs/start/install.md "Optional engine backends" for the install workaround
-# (veomni 0.1.11's `[gpu]` extra pins torch 2.9 and conflicts with vllm 0.20.2).
+# docs/start/engine_backends.md for the install workaround
+# (veomni 0.1.12's `[gpu]` extra pins torch 2.11 and conflicts with vllm 0.30.0).
 set -x
 
 # Set WORKSPACE to any writable directory; defaults to $HOME
@@ -36,6 +36,7 @@ TRAINER_BACKEND=veomni
 
 
 python3 -m verl_omni.trainer.main_diffusion \
+    trainer.use_v1=false \
     diffusion/model_engine=veomni_diffusion \
     algorithm.adv_estimator=flow_grpo \
     data.train_files=$ocr_train_path \

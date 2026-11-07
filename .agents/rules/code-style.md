@@ -17,9 +17,9 @@ Formatting is handled by the tools below; this file covers conventions they do
 | Hook                       | What it actually enforces                                                  |
 | -------------------------- | -------------------------------------------------------------------------- |
 | `ruff` / `ruff-format`     | Lint + format, `line-length = 120` (scope below)                           |
-| `mypy`                     | Static typing                                                              |
-| `check-license`            | Apache header on every git-tracked `.py`; accepts `Copyright 2024/2025/2026 Bytedance …` |
-| `autogen-trainer-cfg`      | `verl_omni/trainer/config/_generated_*.yaml` matches the dataclasses       |
+| `mypy`                     | Errors enabled only in configured module overrides; global `ignore_errors = true` |
+| `check-license`            | Accepted copyright text in tracked `.py` files; does not validate the full license header |
+| `autogen-trainer-cfg`      | `_generated_*.yaml` matches flattened Hydra source configs |
 | `check-docstrings`         | Presence (not style) of docstrings, in a hardcoded file list — see below     |
 | `check-naming-conventions` | **Spelling only** — two project names, see below                          |
 | `validate-structure`       | Test files must live in `tests/<module>/` (see [testing.md](testing.md))    |
@@ -28,8 +28,13 @@ Formatting is handled by the tools below; this file covers conventions they do
 | `compileall`               | Every `.py` byte-compiles with `PYTHONWARNINGS=error`                      |
 | `check-docs-time-info`     | `Last updated` info in docs                                                |
 
+A green hook covers only its configured scope. Read `[tool.mypy]` and its
+overrides in `pyproject.toml` before claiming type coverage; new public contracts
+still need explicit types. Formatting is not a correctness check.
+
 Never hand-edit `_generated_*.yaml` — regenerate via
-`scripts/generate_trainer_config.sh` (see [config.md](config.md)).
+`scripts/generate_trainer_config.sh` with the pinned dependencies installed
+(see [config.md](config.md)).
 
 ## Spelling (enforced, repo-wide grep)
 
@@ -44,30 +49,16 @@ a rejected spelling in order to document it fails the hook too:
 grep -A6 'id: check-naming-conventions' .pre-commit-config.yaml
 ```
 
-Its `--exclude-dir` list covers `.git`, `.github`, `.specstory`, `.venv`, and
-`__pycache__` — nothing else, so this directory is in scope.
+Its `--exclude-dir` list covers `.git`, `.github`, `.specstory`, `venv`, `.venv`,
+and `__pycache__` — nothing else, so this directory is in scope.
 
 ## License Header (mandatory)
 
-Every git-tracked `.py` file must start with the Apache 2.0 header. The checker
-accepts 2024/2025/2026; every file under `verl_omni/` uses 2026, so use `2026` for
-new files:
-
-```python
-# Copyright 2026 Bytedance Ltd. and/or its affiliates
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-```
+Every new `.py` file needs the full Apache 2.0 header, following a neighboring
+module. Preserve existing authorship and upstream attribution when adapting code.
+The hook's accepted copyright strings are in
+`tests/special_sanity/check_license.py`; passing its substring check is not a
+substitute for the complete header.
 
 ## Docstrings
 
@@ -83,7 +74,8 @@ It does **not** check docstring style, and does **not** cover the rest of the
 repo. The following are therefore **conventions** (follow them; they are what
 reviewers ask for), not automated gates:
 
-- Public functions/classes get a docstring.
+- Public functions/classes get a docstring. A `_` prefix marks module-private
+  scope; do not add one just to exempt a function from the gate.
 - Google-style `Args:` / `Returns:` / `Raises:` sections.
 - Document tensor shapes and dtypes explicitly, e.g. `(C, H, W)` or `(N, C, H, W)`.
 - Credit upstream in the module docstring when code is adapted
@@ -93,23 +85,11 @@ reviewers ask for), not automated gates:
 
 ## Comments
 
-This tree comments **sparsely** — about 4% of non-blank lines under `verl_omni/`,
-license headers excluded. Measure it rather than trusting this number:
+Keep comments brief and explain what the code cannot. Comment density is not a
+quality threshold: a subtle tensor layout or synchronization contract can need
+more explanation than ordinary plumbing.
 
-```bash
-find verl_omni -name '*.py' | xargs awk 'FNR>15 && /^[[:space:]]*#/ {c++} FNR>15 && NF {t++} END {printf "%.1f%%\n", 100*c/t}'
-```
-
-A patch that arrives at 15–20% comment density does not look like this codebase, and
-reviewers say so.
-
-Roughly one comment in eight is a **trailing** comment rather than one on its own line:
-
-```bash
-find verl_omni -name '*.py' | xargs awk 'FNR>15 && /^[[:space:]]*#/ {o++} FNR>15 && /[^[:space:]]  #/ {r++} END {printf "%d own-line, %d trailing\n", o, r}'
-```
-
-What the existing comments actually do:
+Useful comments:
 
 - **Explain why**, where the code cannot — `# Free cached GPU memory so colocated
   vLLM processes can see it via cudaMemGetInfo`, `# to spare GPU memory for reward
@@ -129,48 +109,34 @@ What the existing comments actually do:
 
 What to delete before sending a patch:
 
-- Comments that restate the line below (`# increment the counter`,
-  `# return the result`). If the code says it, the comment is noise.
-- A block comment above a list, dict, or argument group whose note really belongs to
-  individual entries. Annotate the entries; a header covering some-but-not-all of
-  them makes the reader count lines to match reason to entry. Repeating the same
-  trailing comment on two adjacent entries is fine and already in the tree.
+- Comments that restate the line below (`# increment the counter`) or the adjacent
+  docstring. If the code already says it, the comment is noise.
+- Group comments that obscure which entries they describe. Annotate individual
+  entries where needed. Source YAML has a different, enforced comment format;
+  follow [config.md](config.md#hand-written-yaml-has-an-enforced-doc-format).
 - Narration of your own edit (`# Added handling for the new config field`,
   `# Changed to use the batched path`). Git records that; the file should read as
   if it always looked this way.
 - Section banners around every few lines. The `# ---------` rule appears only where
   it separates top-level groups in the tree's longest modules; that is the ceiling,
   not a template.
-- Restating a docstring in a comment directly above or below it.
 
 Long-form explanation belongs in the docstring or in `docs/`, not in a comment
 block above the function.
 
-## Ruff lint scope
+## Imports and lint scope
 
-`[tool.ruff.lint]` selects `E, F, UP, B, I, G` and **ignores**:
-`F403`, `F405` (star imports — **allowed**), `E731`, `B007`, `UP032`, `G004`
-(f-strings in `.log()` are fine), `UP045`, `UP035`. `line-length = 120`.
-`isort` treats `verl_omni` as first-party.
+Read the selected and ignored rules off `[tool.ruff.lint]` in `pyproject.toml`.
+Two ignores shape style: star imports (F403/F405) and f-strings in logging calls
+(G004) are allowed.
 
-## Imports
-
-- Group: stdlib, third-party, `verl_omni` (ruff `isort` handles ordering).
-- `from x import *` is **not linted against** here (F403/F405 ignored) and is
-  used in some `__init__`/config modules; prefer explicit imports for clarity in
-  new code, but it is not a hard rule.
-- Prefer **lazy imports inside functions** for heavy optional deps (diffusers,
-  vllm_omni, flash-attn). This is the established pattern in the pipeline
-  adapters and the reward dispatcher, and it is what keeps CPU import paths
-  cheap:
-  ```python
-  if data_source == "jpeg_compressibility":
-      from verl_omni.utils.reward_score import jpeg_compressibility
-  ```
-  Note the individual reward scorers do **not** follow it — `pickscore_reward.py`
-  and `hpsv3_reward.py` import transformers models at module level. Those files
-  are only imported when the reward is configured, so treat lazy importing as
-  required on paths a CPU test touches and optional elsewhere.
+- Ruff `isort` orders stdlib, third-party, then first-party `verl_omni`.
+- Prefer explicit imports in new code; star imports remain in some `__init__` and
+  config re-export modules.
+- Keep heavy optional imports behind their feature boundary so unrelated CPU
+  paths remain importable. A selected scorer may import its own model dependencies
+  at module scope. Do not hide a broken installation of a required dependency
+  behind an unrelated fallback.
 
 ## Naming Conventions
 
@@ -189,6 +155,10 @@ consistently followed:
 CPU-test naming is load-bearing, not cosmetic — CI selects tests by that suffix
 ([testing.md](testing.md)). The handful of non-`_on_cpu` test files are GPU/NPU tests,
 `tests/special_sanity/` checks, and a few older `tests/workers/` files.
+
+Name local values for what they hold — `noisy_latents`, `prompt_embeds`,
+`sample_level_rewards` — not `x`, `h` or `out`. Short symbols such as `sigma` or
+`dt` are fine where the code transcribes a cited equation.
 
 ## Device handling
 
@@ -224,34 +194,97 @@ block:
    `QwenImageTokenIdPromptMixin` (defined in `qwen_image_flow_grpo/common.py`) is
    mixed into two unrelated rollout pipelines; `NPUColocateWorkerMixin` was
    extracted the same way (#82).
-4. **A `refactor:` commit.** It is a first-class type in the title convention and
-   is used often — #287 folded Qwen-Image step execution into both FlowGRPO and
-   MixGRPO, #96 unified Diffusion-DPO with DiffusionNFT, #56 dropped duplicated
-   reward-loop patches. Consolidating on the way past is welcome; a *pure*
-   mechanical cleanup on its own is not (`AGENTS.md` §1).
+4. **A scoped refactor.** Consolidate shared behavior needed by the change; do not
+   bundle neighboring cleanups. Follow `AGENTS.md`'s contribution policy.
 
-Practical threshold: if you are about to copy more than a few lines from a sibling
-directory, import them instead — and if the sibling's version needs a parameter to
-serve both callers, add the parameter there rather than forking the function.
+Extract genuinely shared behavior, not merely similar-looking lines. There is no
+fixed duplicate-line, function-length, or file-length threshold for source code.
+Split by responsibility when it improves understanding; do not create a generic
+framework or boolean-switch API just to meet a size target.
 
 Two caveats, so this is not applied blindly:
 
 - **Don't invent a shared abstraction for a single caller.** Most pipeline packages
-  have no `common.py` — they had nothing worth sharing yet.
+  have no `common.py` — they had nothing worth sharing yet. The same holds for a
+  private helper with one caller and no test of its own: inline it until a second
+  caller appears.
 - **Don't merge across a registry boundary.** Each `(architecture, algorithm)` pair
   registers its own adapter ([pipelines.md](pipelines.md)); collapsing two of them
   into one class with an `if algorithm == ...` switch defeats the dispatch.
+
+## Signatures and control flow
+
+- Pass tunables down from the config dataclass
+  ([pipelines.md](pipelines.md#tunables-and-imports)); a lower layer takes the value
+  as an argument instead of redeclaring the default. A one-use constant lives at
+  its use site.
+- When you own a signature, remove a parameter the function no longer uses instead
+  of keeping it and `del`-ing it. An override keeps the signature its base defines.
+- End an `if`/`elif` dispatch over a closed set of values with an `else` that raises,
+  so a value added to the set later cannot fall through silently. A guard clause
+  that returns or raises early needs no `else`.
+- When porting research code, keep only the path this integration runs; drop the
+  training, ablation and debug branches the adapter never takes.
+
+## Runtime boundaries and state
+
+- Validate user config, media metadata, and cross-process payloads at their entry
+  points. Reject unsupported or conflicting values with actionable exceptions;
+  do not silently drop fields or invent defaults for required replay data.
+  Internal helpers can rely on the established contract instead of rechecking it.
+- Keep exception handlers narrow. Fallbacks must be part of the documented
+  contract, not a way to turn an invalid request into apparent success.
+- Prefer explicit interfaces. `getattr`/`setattr` are appropriate for a verified
+  optional-dependency capability or framework hook, not to conceal missing
+  required state. Document the compatibility boundary, not every attribute access.
+- Avoid mutating caller-owned configs during normalization. If shared state must
+  change temporarily, define its owner and concurrency scope and restore it in
+  `finally`. A lock must cover the protected state's whole use, without unrelated
+  work inside it; neither locks nor in-place tensor operations are blanket bans.
+- Give long-lived caches a bound or eviction policy and resources a clear owner.
+  Do not scatter `empty_cache()` calls as speculative memory fixes.
+
+## Example shell recipes
+
+These are review conventions, not new lint gates. Keep recipes in the existing
+algorithm/model directory and match the neighboring `run_*.sh` entrypoints.
+
+- Group environment defaults near the top; document required paths and what each
+  path points to. Do not embed local model, dataset, venv, or credential paths.
+  Use the existing entrypoint and plain Hydra overrides for declared fields;
+  reserve `+` for new keys (see [config.md](config.md)).
+- Preserve caller overrides with `"$@"` last and quote each path-bearing argument,
+  e.g. `"actor_rollout_ref.model.path=$MODEL_PATH"`. Keep output directories
+  attributable to the recipe and overridable rather than sharing a fixed run path.
+- For new scripts use a Bash shebang and `set -euo pipefail`, with explicit handling
+  of intentionally recoverable commands. Debug tracing is optional; do not expose
+  credentials. Preserve the trainer's failure status, including through `tee`.
+- Validate positive parallel degrees and GPU divisibility before shell arithmetic.
+  Derived replica/worker counts must agree with runtime topology; an engine flag
+  alone does not allocate GPUs. State prerequisite patches or unsupported modes.
+- Reuse the base recipe when a variant only selects a few overrides. Resolve that
+  recipe relative to the script; document whether data/reward paths require a
+  repo-root working directory. Do not build a new launcher framework.
+- Let the scheduler or parent launcher own log redirection when it already does;
+  avoid nesting process-substitution `tee` redirection in that case. Cleanup must
+  target only the launched job, not every Ray or GPU process on the host.
+- Check `bash -n` and capture argv with a stub trainer to verify defaults, quoting,
+  caller precedence and exit propagation without launching GPUs. That does not
+  establish runtime correctness; use the [testing guide](../../docs/contributing/testing_guide.md)
+  for the required acceptance layer.
 
 ## Performance Patterns
 
 Conventions, not gated:
 
-- Avoid needless GPU→CPU syncs (`.item()`, `.tolist()`, `print(tensor)`) in hot
-  paths.
-- Prefer batched tensor ops over Python loops over elements — recent review
-  feedback explicitly asked for whole-tensor `permute/sanitize/quantize` instead
-  of per-frame loops (#311).
+- Avoid needless GPU→CPU syncs (`.item()`, `.cpu()`, `.tolist()`, `print(tensor)`)
+  in hot paths; distinguish required boundary work from per-token/per-frame work.
+- Prefer batched tensor ops over Python loops over elements. Preserve sample
+  boundaries, ordering and loss normalization when batching.
 - Be explicit about `dtype`/`device`; do not rely on implicit promotion.
+- Measure suspected bottlenecks before adding caches, memory cleanup or alternate
+  kernels. Use the [profile skill](../skills/profile/SKILL.md); compare matched
+  workloads and distinguish actor-only timing from whole-training throughput.
 
 ## Modules
 

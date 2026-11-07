@@ -13,15 +13,31 @@
 # limitations under the License.
 
 import logging
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 
 import numpy as np
 import pytest
 import torch
+from omegaconf import OmegaConf
+from transfer_queue import KVBatchMeta
 from verl import DataProto
 
+from verl_omni.pipelines.rollout_media import ARTIFACT_PREFIX, previews_from_batch
+from verl_omni.trainer.diffusion.diffusion_trainer_utils import MEDIA_ARTIFACT_FIELD_PREFIX
 from verl_omni.trainer.diffusion.v1 import tq_utils
 from verl_omni.trainer.diffusion.v1 import trainer_base as trainer_base_module
+
+
+def _stub_tq_stored_fields(monkeypatch, field_names):
+    """Stub the metadata-only schema lookup used to discover artifact fields."""
+    calls = []
+
+    def kv_retrieve_meta(**kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(field_names=sorted(field_names))
+
+    monkeypatch.setattr(tq_utils.tq, "get_client", lambda: SimpleNamespace(kv_retrieve_meta=kv_retrieve_meta))
+    return calls
 
 
 def test_tq_conversion_forwards_field_projection_and_unpacks_extra_fields(monkeypatch):
@@ -56,12 +72,221 @@ def test_tq_conversion_forwards_field_projection_and_unpacks_extra_fields(monkey
     assert data.non_tensor_batch["reward_extra_info"].tolist() == [{"ocr": 0.25}, {"ocr": 0.75}]
 
 
+def test_canonicalize_orders_rows_prompt_major_and_keeps_tag_alignment():
+    meta = KVBatchMeta(
+        partition_id="train",
+        keys=[
+            "aaa_2_0",
+            "bbb_0_0",
+            "aaa_0_0",
+            "legacy",
+            "bbb_1_0",
+            "aaa_1_0",
+        ],
+        tags=[
+            {"gen_batch_seq": 7, "prompt_index": 0, "seq_len": 1},
+            {"gen_batch_seq": 7, "prompt_index": 1, "seq_len": 2},
+            {"gen_batch_seq": 7, "prompt_index": 0, "seq_len": 3},
+            {"seq_len": 4},
+            {"gen_batch_seq": 7, "prompt_index": 1, "seq_len": 5},
+            {"gen_batch_seq": 7, "prompt_index": 0, "seq_len": 6},
+        ],
+        fields=["prompts", "responses"],
+        extra_info={"source": "nightly"},
+    )
+
+    ordered = tq_utils.canonicalize_diffusion_tq_meta(meta)
+
+    assert list(ordered.keys) == [
+        "aaa_0_0",
+        "aaa_1_0",
+        "aaa_2_0",
+        "bbb_0_0",
+        "bbb_1_0",
+        "legacy",
+    ]
+    # Tags travel with their keys so later tag-indexed consumers stay aligned.
+    assert [tag["seq_len"] for tag in ordered.tags] == [3, 6, 1, 2, 5, 4]
+    assert ordered.partition_id == "train"
+    # fields/extra_info ride along on the reordered copy.
+    assert ordered.fields == ["prompts", "responses"]
+    assert ordered.extra_info == {"source": "nightly"}
+    # The input meta is left untouched (callers may still hold it).
+    assert meta.keys[0] == "aaa_2_0"
+
+
+def test_canonicalize_breaks_prompt_index_ties_by_gen_batch_seq_not_uid():
+    # Two generation batches selected into one sample: both number their first
+    # prompt prompt_index=0, and uid order disagrees with dispatch order.
+    # Sorting ties by uid (the pre-gen_batch_seq tie-break) would swap the
+    # batches; dispatch order must win.
+    meta = KVBatchMeta(
+        partition_id="train",
+        keys=[
+            "aaa_0_0",
+            "zzz_0_0",
+            "mmm_0_0",
+        ],
+        tags=[
+            {"gen_batch_seq": 1, "prompt_index": 0},
+            {"gen_batch_seq": 0, "prompt_index": 0},
+            {"gen_batch_seq": 1, "prompt_index": 1},
+        ],
+    )
+
+    ordered = tq_utils.canonicalize_diffusion_tq_meta(meta)
+
+    assert list(ordered.keys) == ["zzz_0_0", "aaa_0_0", "mmm_0_0"]
+
+
+def test_canonicalize_passthrough_for_singleton_batches():
+    meta = SimpleNamespace(partition_id="val", keys=["only_0_0"], tags=[{"prompt_index": 0}])
+
+    ordered = tq_utils.canonicalize_diffusion_tq_meta(meta)
+
+    assert list(ordered.keys) == ["only_0_0"]
+
+
+def test_fetch_one_gen_batch_stamps_monotonic_gen_batch_seq():
+    trainer = SimpleNamespace(
+        train_dataloader_it=iter(
+            [
+                {"raw_prompt": np.array(["p0", "p1"], dtype=object)},
+                {"raw_prompt": np.array(["p2"], dtype=object)},
+            ]
+        ),
+        _gen_batch_seq=0,
+    )
+
+    first = trainer_base_module.PolicyGradientDiffusionTrainerV1._fetch_one_gen_batch(trainer)
+    second = trainer_base_module.PolicyGradientDiffusionTrainerV1._fetch_one_gen_batch(trainer)
+
+    # index stays batch-local (v0 seed semantics); gen_batch_seq is unique per
+    # generation batch so (gen_batch_seq, index) identifies every prompt.
+    assert [int(v) for v in first["index"]] == [0, 1]
+    assert [int(v) for v in first["gen_batch_seq"]] == [0, 0]
+    assert [int(v) for v in second["index"]] == [0]
+    assert [int(v) for v in second["gen_batch_seq"]] == [1]
+
+
+@pytest.mark.parametrize("gen_batch_size", [1, 2])
+def test_next_train_batch_rollout_seed_index_is_unique_within_a_step(gen_batch_size):
+    cls = trainer_base_module.PolicyGradientDiffusionTrainerV1
+    trainer = SimpleNamespace(
+        config=OmegaConf.create({"data": {"train_batch_size": 2}, "actor_rollout_ref": {"rollout": {"seed": 7}}}),
+        train_dataloader_it=iter(
+            [{"raw_prompt": np.array([f"p{i}_{j}" for j in range(gen_batch_size)], dtype=object)} for i in range(5)]
+        ),
+        _gen_batch_seq=0,
+        _effective_generation_batch_size=gen_batch_size,
+        _rollout_seed_step=None,
+        _rollout_seed_next_index=0,
+        global_steps=3,
+    )
+    trainer._generation_batch_size = MethodType(cls._generation_batch_size, trainer)
+    trainer._fetch_one_gen_batch = MethodType(cls._fetch_one_gen_batch, trainer)
+    trainer._assign_rollout_seed = MethodType(cls._assign_rollout_seed, trainer)
+
+    first = cls._next_train_batch(trainer)
+    refill = cls._next_train_batch(trainer, gen_batch_size)
+    trainer.global_steps = 4
+    next_step = cls._next_train_batch(trainer)
+
+    # ``index`` restarts per generation batch; the seed position must not repeat
+    # within a step (multi-batch fetches and same-step refills) and restarts with
+    # the next step's seed base. With one batch per step it equals ``index``.
+    assert [int(v) for v in first["rollout_seed_index"]] == [0, 1]
+    assert [int(v) for v in refill["rollout_seed_index"]] == list(range(2, 2 + gen_batch_size))
+    assert [int(v) for v in next_step["rollout_seed_index"]] == [0, 1]
+    if gen_batch_size == 2:
+        assert [int(v) for v in first["index"]] == [0, 1]
+
+
+def test_next_train_batch_without_rollout_seed_stays_unseeded():
+    cls = trainer_base_module.PolicyGradientDiffusionTrainerV1
+    trainer = SimpleNamespace(
+        config=OmegaConf.create({"data": {"train_batch_size": 2}, "actor_rollout_ref": {"rollout": {"seed": None}}}),
+        train_dataloader_it=iter([{"raw_prompt": np.array(["p0", "p1"], dtype=object)}]),
+        _gen_batch_seq=0,
+        _effective_generation_batch_size=2,
+        global_steps=3,
+    )
+    trainer._generation_batch_size = MethodType(cls._generation_batch_size, trainer)
+    trainer._fetch_one_gen_batch = MethodType(cls._fetch_one_gen_batch, trainer)
+    trainer._assign_rollout_seed = MethodType(cls._assign_rollout_seed, trainer)
+
+    batch = cls._next_train_batch(trainer)
+
+    assert "rollout_seed" not in batch.keys()
+    assert "rollout_seed_index" not in batch.keys()
+
+
 @pytest.mark.parametrize("algorithm", ["policy_gradient", "direct_preference"])
 def test_metric_projection_is_subset_of_persisted_and_rollout_fields(algorithm):
     rollout_fields = {"uid", "extra_fields"}
     available_fields = set(tq_utils.diffusion_persisted_tq_fields(algorithm)) | rollout_fields
 
     assert set(tq_utils.diffusion_metric_tq_fields(algorithm)).issubset(available_fields)
+
+
+def test_rollout_dump_fetches_only_dump_fields(monkeypatch):
+    """The dump re-read must project fields instead of re-pulling latents/embeds.
+
+    The stub honors the projection, so the colocated-reward case is exercised
+    for real: TransferQueue carries the persisted ``sample_level_scores`` and
+    no ``rm_scores``, and the dump must record those scores, not zeros.
+    """
+    tensors = {
+        "prompts": torch.zeros(2, 4, dtype=torch.int64),
+        "responses": torch.zeros(2, 3, 8, 8, dtype=torch.uint8),
+        "sample_level_scores": torch.tensor([[3.0], [7.0]]),
+    }
+    non_tensors = {
+        "reward_model": np.array([{"ground_truth": "gt"}, {"ground_truth": "gt"}], dtype=object),
+    }
+    captured = {}
+
+    def get_data(batch_meta, pad_token_id, select_fields):
+        captured.update(select_fields=select_fields, pad_token_id=pad_token_id)
+        # Mimic kv_batch_get's field selection: return only requested fields.
+        return DataProto.from_dict(
+            tensors={name: value for name, value in tensors.items() if name in select_fields},
+            non_tensors={name: value for name, value in non_tensors.items() if name in select_fields},
+        )
+
+    monkeypatch.setattr(trainer_base_module, "diffusion_tq_batch_to_dataproto", get_data)
+    schema_calls = _stub_tq_stored_fields(
+        monkeypatch, [*tensors, *non_tensors, "all_latents", "prompt_embeds", "old_log_probs"]
+    )
+    dumps = []
+    trainer = SimpleNamespace(
+        tokenizer=SimpleNamespace(pad_token_id=7, batch_decode=lambda ids, **kwargs: ["p", "p"]),
+        config=SimpleNamespace(trainer={}),
+        _dump_generations=lambda **kwargs: dumps.append(kwargs),
+    )
+    batch_meta = SimpleNamespace(
+        keys=["prompt_1_0", "prompt_0_0"],
+        tags=[
+            {"is_padding": False, "response_shape": (3, 8, 8)},
+            {"is_padding": False, "response_shape": (3, 8, 8)},
+        ],
+        partition_id="train",
+    )
+
+    trainer_base_module.PolicyGradientDiffusionTrainerV1._log_rollout_data(trainer, batch_meta, {}, "/tmp/dump")
+
+    assert schema_calls == [{"keys": ["prompt_1_0", "prompt_0_0"], "partition_id": "train", "create": False}]
+    assert set(captured["select_fields"]) == set(tq_utils.DIFFUSION_DUMP_TQ_FIELDS)
+    assert "sample_level_scores" in captured["select_fields"]
+    assert captured["pad_token_id"] == 7
+    # Trainer-only compute payloads stay out of the dump read.
+    assert "all_latents" not in captured["select_fields"]
+    assert "prompt_embeds" not in captured["select_fields"]
+    assert "old_log_probs" not in captured["select_fields"]
+    assert len(dumps) == 1
+    # Rows are sorted by uid (prompt_0_0 first); the persisted
+    # sample_level_scores are dumped, not the [0.0, 0.0] no-scores fallback.
+    assert dumps[0]["scores"] == [7.0, 3.0]
 
 
 @pytest.mark.parametrize("policy_gradient", [True, False])
@@ -97,6 +322,7 @@ def test_metrics_fetches_only_metric_fields_and_preserves_outputs(monkeypatch, c
         tokenizer=SimpleNamespace(pad_token_id=7),
         _get_n_gpus_for_throughput=lambda: 2,
         _is_direct_preference=not policy_gradient,
+        _nonfinite_grad_streak=0,
     )
     batch_meta = SimpleNamespace(
         keys=["prompt_0_0", "prompt_1_0"],
@@ -174,6 +400,7 @@ def test_metrics_keeps_training_when_response_shape_telemetry_is_unavailable(mon
         tokenizer=SimpleNamespace(pad_token_id=0),
         _get_n_gpus_for_throughput=lambda: 1,
         _is_direct_preference=True,
+        _nonfinite_grad_streak=0,
     )
     tags = []
     for response_shape in response_shapes:
@@ -218,6 +445,7 @@ def test_metrics_ignores_padding_without_response_shape(monkeypatch, caplog):
         tokenizer=SimpleNamespace(pad_token_id=0),
         _get_n_gpus_for_throughput=lambda: 1,
         _is_direct_preference=True,
+        _nonfinite_grad_streak=0,
     )
     batch_meta = SimpleNamespace(
         keys=["sample_0_0", "padding_0_0"],
@@ -247,3 +475,96 @@ def test_metrics_ignores_padding_without_response_shape(monkeypatch, caplog):
     assert metrics["training/tq_response_shape_unavailable"] == 0.0
     assert "response_shape telemetry is unavailable" not in caplog.text
     assert "2 trajectories, 1 real images, responses shape=(1, 3, 256, 256)" in caplog.text
+
+
+@pytest.mark.parametrize("preview_name", ["video_preview", "custom_preview"])
+def test_rollout_dump_projection_restores_media_artifacts(monkeypatch, preview_name):
+    """Declared media artifacts must survive the dump's field projection.
+
+    Regression test: the projection restored the extra_fields declarations
+    but dropped the media_artifact__* tensors, so previews_from_batch raised
+    "declared artifacts missing" and failed the training step's rollout dump
+    (MiniMax-H3 T2VA e2e). Artifact names are adapter-defined, so a custom
+    name must be carried as well as the in-tree ones.
+    """
+    specs = {
+        preview_name: {
+            "modality": "video",
+            "representation": "decoded",
+            "layout": "THWC",
+            "sample_rate": None,
+            "fps": 24.0,
+        },
+        "audio": {
+            "modality": "audio",
+            "representation": "decoded",
+            "layout": "CT",
+            "sample_rate": 32000,
+            "fps": None,
+        },
+        "video_latent": {
+            "modality": "video",
+            "representation": "latent",
+            "layout": "CTHW",
+            "sample_rate": None,
+            "fps": None,
+        },
+        "audio_latent": {
+            "modality": "audio",
+            "representation": "latent",
+            "layout": "CLT",
+            "sample_rate": None,
+            "fps": None,
+        },
+    }
+    envelope = {
+        "media_artifact_specs": specs,
+        "primary_artifact": "video_latent",
+        "preview_artifact": preview_name,
+        "media_artifact_context": "pipeline=MiniMaxH3Pipeline/flow_grpo, request_id=test",
+        "min_global_steps": 1,
+        "max_global_steps": 1,
+    }
+    stored = {
+        "prompts": torch.zeros(2, 4, dtype=torch.int64),
+        "responses": torch.zeros(2, 3, 8, 8, dtype=torch.uint8),
+        "uid": ["first", "second"],
+        "extra_fields": [dict(envelope), dict(envelope)],
+        "all_latents": torch.zeros(2, 3, 2, 4, 8, 8, dtype=torch.float32),
+        f"media_artifact__{preview_name}": torch.zeros(2, 4, 8, 8, 3, dtype=torch.uint8),
+        "media_artifact__audio": torch.zeros(2, 1, 16000, dtype=torch.float32),
+        "media_artifact__video_latent": torch.zeros(2, 2, 4, 8, 8, dtype=torch.float32),
+        "media_artifact__audio_latent": torch.zeros(2, 1, 400, 24, dtype=torch.float32),
+    }
+
+    def get_fields(select_fields=None, **kwargs):
+        # Mimic kv_batch_get's field selection: keep only requested fields,
+        # silently skipping absent ones (TransferQueue's documented contract).
+        if select_fields is None:
+            return stored
+        return {name: value for name, value in stored.items() if name in select_fields}
+
+    monkeypatch.setattr(tq_utils.tq, "kv_batch_get", get_fields)
+    _stub_tq_stored_fields(monkeypatch, stored)
+    batch_meta = SimpleNamespace(keys=["first_0_0", "second_0_0"], partition_id="train")
+
+    select_fields = tq_utils.diffusion_dump_tq_fields(batch_meta)
+    assert f"media_artifact__{preview_name}" in select_fields
+    assert "all_latents" not in select_fields
+
+    data = tq_utils.diffusion_tq_batch_to_dataproto(batch_meta, select_fields=select_fields)
+
+    previews = previews_from_batch(data)
+    assert previews is not None
+    assert len(previews) == 2
+    for preview in previews:
+        assert preview.spec.modality == "video"
+        assert preview.spec.representation == "decoded"
+        # THWC is normalized to the canonical TCHW preview layout.
+        assert preview.spec.layout == "TCHW"
+        assert preview.data.shape == (4, 3, 8, 8)
+
+
+def test_dump_artifact_prefix_matches_rollout_media():
+    assert MEDIA_ARTIFACT_FIELD_PREFIX == ARTIFACT_PREFIX
+    assert tq_utils.MEDIA_ARTIFACT_FIELD_PREFIX is MEDIA_ARTIFACT_FIELD_PREFIX

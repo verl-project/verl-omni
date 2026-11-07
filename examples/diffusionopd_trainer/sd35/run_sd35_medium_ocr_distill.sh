@@ -7,6 +7,9 @@
 # never enters the loss -- so the reward curve shows the student reaching the
 # teacher's reward level through distillation alone.
 #
+# Operating point: deterministic 10-step sampling (noise_level=0, CFG 4.5, 512px)
+# with no SDE window, so every step but the last is distilled.
+#
 # Set TEACHER_PATH to the merged teacher checkpoint. Data layout and the reward
 # model follow examples/flowgrpo_trainer/sd35/run_sd35_medium_ocr_lora.sh.
 set -x
@@ -26,7 +29,7 @@ NUM_GPUS_ACTOR_ROLLOUT=2
 NUM_GPUS_REWARD=1
 ROLLOUT_TP=1
 REWARD_TP=1
-IMAGE_RESOLUTION=384
+IMAGE_RESOLUTION=512
 TOTAL_TRAINING_STEPS=100
 ATTN_BACKEND=native
 
@@ -45,7 +48,7 @@ REWARD_ENGINE=vllm
 python3 -m verl_omni.trainer.main_diffusion_v1 \
     data.train_files=$ocr_train_path \
     data.val_files=$ocr_test_path \
-    data.train_batch_size=8 \
+    data.train_batch_size=64 \
     data.val_max_samples=32 \
     data.max_prompt_length=512 \
     data.truncation=error \
@@ -66,7 +69,7 @@ python3 -m verl_omni.trainer.main_diffusion_v1 \
     actor_rollout_ref.actor.kl_loss_coef=0.0 \
     actor_rollout_ref.actor.optim.lr=1e-4 \
     actor_rollout_ref.actor.optim.weight_decay=0.0001 \
-    actor_rollout_ref.actor.ppo_mini_batch_size=4 \
+    actor_rollout_ref.actor.ppo_mini_batch_size=32 \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=8 \
     actor_rollout_ref.actor.strategy=fsdp2 \
     actor_rollout_ref.actor.fsdp_config.param_offload=False \
@@ -77,20 +80,18 @@ python3 -m verl_omni.trainer.main_diffusion_v1 \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=8 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=$ROLLOUT_TP \
     actor_rollout_ref.rollout.name=$ENGINE \
-    actor_rollout_ref.rollout.n=8 \
+    actor_rollout_ref.rollout.n=1 \
     actor_rollout_ref.rollout.seed=42 \
     actor_rollout_ref.rollout.agent.num_workers=$((NUM_GPUS_ACTOR_ROLLOUT / ROLLOUT_TP)) \
     actor_rollout_ref.rollout.load_format=safetensors \
     actor_rollout_ref.rollout.pipeline.height=$IMAGE_RESOLUTION \
     actor_rollout_ref.rollout.pipeline.width=$IMAGE_RESOLUTION \
     actor_rollout_ref.rollout.pipeline.num_inference_steps=10 \
-    actor_rollout_ref.rollout.pipeline.guidance_scale=1.0 \
+    actor_rollout_ref.rollout.pipeline.guidance_scale=4.5 \
     actor_rollout_ref.rollout.pipeline.max_sequence_length=256 \
     actor_rollout_ref.rollout.max_prompt_embed_length=333 \
-    actor_rollout_ref.rollout.algo.noise_level=0.8 \
+    actor_rollout_ref.rollout.algo.noise_level=0.0 \
     actor_rollout_ref.rollout.algo.sde_type="cps" \
-    actor_rollout_ref.rollout.algo.sde_window_size=3 \
-    actor_rollout_ref.rollout.algo.sde_window_range="[0,5]" \
     ++actor_rollout_ref.rollout.engine_kwargs.vllm_omni.max_num_seqs=${MAX_NUM_SEQS} \
     ++actor_rollout_ref.rollout.engine_kwargs.vllm_omni.request_batch_max_wait_ms=${REQUEST_BATCH_MAX_WAIT_MS} \
     actor_rollout_ref.rollout.val_kwargs.pipeline.num_inference_steps=28 \

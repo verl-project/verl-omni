@@ -19,7 +19,7 @@ import json
 import os
 import shutil
 import tempfile
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 
@@ -30,6 +30,25 @@ from safetensors.torch import save_file
 MANIFEST_NAME = "merge_manifest.json"
 WEIGHTS_NAME = "diffusion_pytorch_model.safetensors"
 INDEX_NAME = WEIGHTS_NAME + ".index.json"
+
+
+def detect_lora_checkpoint(rank_path: Path) -> tuple[bool, bool]:
+    """Return (has_lora, lora_only) after checking that LoRA metadata is present when needed."""
+    state = torch.load(rank_path, map_location="cpu", weights_only=False, mmap=True)
+    has_lora = any("lora_" in key for key in state)
+    lora_only = has_lora and all("lora_" in key for key in state)
+    if has_lora != (rank_path.parent / "lora_train_meta.json").is_file():
+        raise ValueError("LoRA weights and lora_train_meta.json must both be present")
+    return has_lora, lora_only
+
+
+def extract_base_state_dict(state: Mapping[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    """Select base weights and remove FSDP/PEFT wrappers without changing tensors."""
+    return {
+        key.replace("_fsdp_wrapped_module.", "").removeprefix("base_model.model.").replace(".base_layer.", "."): value
+        for key, value in state.items()
+        if "lora_" not in key
+    }
 
 
 def read_json(path: Path) -> dict:

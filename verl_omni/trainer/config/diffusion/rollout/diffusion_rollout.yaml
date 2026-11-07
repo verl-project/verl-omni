@@ -59,8 +59,23 @@ free_cache_engine: True
 # TP size for rollout
 tensor_model_parallel_size: 2
 
-# Text-encoder TP shard size: 1 or tensor_model_parallel_size.
+# Ulysses sequence parallelism; multiplies the replica GPU footprint.
+ulysses_degree: 1
+
+# Ring sequence parallelism; multiplies the replica GPU footprint.
+ring_degree: 1
+
+# Text-encoder TP: 1 or the full TP * Ulysses * Ring DiT group.
 text_encoder_tp_size: 1
+
+# VAE patch parallelism reuses the DiT group.
+vae_patch_parallel_size: 1
+
+# VAE decode parallel mode; supported modes depend on the pipeline.
+vae_parallel_mode: tile
+
+# Enable tiled VAE execution.
+vae_use_tiling: false
 
 # DP size for rollout
 data_parallel_size: 1
@@ -88,7 +103,7 @@ step_execution: False
 enable_chunked_prefill: True
 
 # Prefix caching kv-cache blocks is a popular optimization in LLM inference to avoid redundant prompt computations.
-enable_prefix_caching: True
+enable_prefix_caching: False
 
 # logprobs mode for rollout logprobs
 logprobs_mode: processed_logprobs
@@ -111,6 +126,9 @@ disable_log_stats: True
 
 # number of responses (i.e. num sample times). > 1 for grpo
 n: 1
+
+# Optional stage 2: number of diffusion responses (i.e. num sample times). > 1 for grpo
+m: 1
 
 # Base seed for deterministic training rollout RNG.
 # Per-step base is ``seed + global_step - 1``. null disables rollout seeding.
@@ -152,6 +170,9 @@ val_kwargs:
   # whether to repeat n times for validation
   n: 1
 
+  # AR stage: number of samples per prompt during validation (composite rollouts)
+  m: 1
+
   # Pipeline configuration for validation
   pipeline:
 
@@ -166,6 +187,9 @@ val_kwargs:
 
     # number of inference steps for diffusion model validation
     num_inference_steps: 50
+
+    # Additional named artifacts required during validation
+    requested_outputs: ${oc.select:actor_rollout_ref.rollout.pipeline.requested_outputs,null}
 
     # Classifier-free guidance scale (true CFG); values > 1.0 enable CFG with negative prompt
     true_cfg_scale: ${oc.select:actor_rollout_ref.rollout.pipeline.true_cfg_scale,1.0}
@@ -197,7 +221,7 @@ val_kwargs:
     # Named canvas aspect ratio for compatible pipelines (validation)
     aspect_ratio: ${oc.select:actor_rollout_ref.rollout.pipeline.aspect_ratio,null}
 
-# Rollout Algorithm configuration for validation
+  # Rollout Algorithm configuration for validation
   algo:
 
     # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
@@ -217,6 +241,27 @@ val_kwargs:
 
     # Whether selected SDE steps must form one consecutive window
     sde_contiguous: ${oc.select:actor_rollout_ref.rollout.algo.sde_contiguous,true}
+
+  # Optional. AR part rollout configuration for validation
+  ar:
+
+    # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+    _target_: verl_omni.workers.config.diffusion.DiffusionARConfig
+
+    # Sampling temperature for rollout.
+    temperature: ${oc.select:actor_rollout_ref.rollout.ar.temperature,1.0}
+
+    # Top-k sampling parameter. 0 for HF rollout.
+    top_k: ${oc.select:actor_rollout_ref.rollout.ar.top_k,0}
+
+    # Top-p sampling parameter. Default 1.0.
+    top_p: ${oc.select:actor_rollout_ref.rollout.ar.top_p,1.0}
+
+    # Repetition penalty parameter. Default to 1.0 (no panelty)
+    repetition_penalty: ${oc.select:actor_rollout_ref.rollout.ar.repetition_penalty,1.0}
+
+    # Max number of newly generated tokens for validation
+    response_length: ${oc.select:actor_rollout_ref.rollout.ar.response_length,1024}
 
 # Rollout Algorithm configuration
 algo:
@@ -266,6 +311,9 @@ pipeline:
   # number of inference steps for diffusion model rollout
   num_inference_steps: 10
 
+  # Additional named artifacts required by rewards/logging (for example a decoded preview with latent primary)
+  requested_outputs: null
+
   # Classifier-free guidance scale (true CFG); values > 1.0 enable CFG with negative prompt
   true_cfg_scale: 1.0
 
@@ -274,6 +322,9 @@ pipeline:
 
   # Distilled guidance scale for models with guidance_embeds; null to disable
   guidance_scale: null
+
+  # CFG for the frozen pretrained anchor in forward-process training.
+  reference_guidance_scale: 4.5
 
   # Reference-image short edge for compatible pipelines
   reference_image_short_edge: null
@@ -296,26 +347,32 @@ pipeline:
   # Named canvas aspect ratio for compatible pipelines
   aspect_ratio: null
 
+# Optional. AR part rollout use.
+ar:
+
+  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+  _target_: verl_omni.workers.config.diffusion.DiffusionARConfig
+
+  # Sampling temperature for rollout.
+  temperature: 1.0
+
+  # Top-k sampling parameter. 0 for HF rollout.
+  top_k: 0
+
+  # Top-p sampling parameter. Default 1.0.
+  top_p: 1.0
+
+  # Repetition penalty parameter. Default to 1.0 (no panelty)
+  repetition_penalty: 1.0
+
+  # Max number of newly generated tokens
+  response_length: 1024
+
 # support logging rollout prob for debugging purpose
 calculate_log_probs: False
 
-# Optional. LLM generation use
-llm_calculate_log_probs: False
-
-# Optional. LLM generation use
-temperature: 1.0
-
-# Optional. LLM generation use
-top_k: 0
-
-# Optional. LLM generation use
-top_p: 1.0
-
-# Optional. LLM generation use
-repetition_penalty: 1.0
-
-# Optional. Max number of LLM generated tokens
-max_new_tokens: 256
+# Support token-level log prob return in rollout
+ar_calculate_log_probs: False
 
 # Named adapter used by rollout generation
 rollout_adapter: default
@@ -338,7 +395,9 @@ checkpoint_engine:
   # Target class for checkpoint engine config
   _target_: verl.workers.config.CheckpointEngineConfig
 
-  # Backend for checkpoint engine: naive, nccl, nixl, hccl
+  # Backend for checkpoint engine: naive, nccl, nixl, hccl, omni_delta_sharded.
+  # omni_delta_sharded broadcasts only the weights that changed since the last
+  # sync; full-weight v1 separate_async runs only (see docs/start/diffusion_v1.md).
   backend: naive
 
   # Specifies the tensor bucket size (in megabytes) for batch weight updates during rollout operations.

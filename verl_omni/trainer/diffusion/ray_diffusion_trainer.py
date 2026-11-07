@@ -51,9 +51,16 @@ from verl.utils.debug import marked_timer
 from verl.utils.import_utils import load_class_from_fqn
 from verl.utils.metric import reduce_metrics
 from verl.utils.py_functional import rename_dict
+from verl.utils.skip import SkipManager
 from verl.utils.tracking import ValidationGenerationsLogger
-from verl.workers.rollout.llm_server import LLMServerManager
 
+from verl_omni.pipelines.rollout_media import (
+    previews_from_batch,
+    resolve_batch_media_kind,
+    resolve_is_video,
+    validate_previews,
+    validate_visual_media_batch_rank,
+)
 from verl_omni.trainer.config import DiffusionAlgoConfig
 from verl_omni.trainer.diffusion.diffusion_algos import (
     DiffusionAdvantageEstimator,
@@ -71,8 +78,9 @@ from verl_omni.trainer.diffusion.diffusion_trainer_utils import (
     NoOpCheckpointManager,
     _to_diffusion_worker_tensordict,
     old_policy_decay,
+    skip_old_log_prob,
+    track_nonfinite_grad_streak,
     validate_distillation_config,
-    worker_group_port_ranges,
 )
 from verl_omni.trainer.diffusion.rollout_correction import (
     apply_bypass_mode_to_diffusion_batch,
@@ -81,11 +89,33 @@ from verl_omni.trainer.diffusion.rollout_correction import (
     rollout_correction_enabled,
 )
 from verl_omni.trainer.diffusion.teacher_manager import DiffusionTeacherManager
-from verl_omni.utils.tracking import _export_video, batch_items, log_wandb_media, wrap_val_samples_for_wandb
+from verl_omni.utils.config import resolve_lora_config
+from verl_omni.utils.net_utils import worker_group_port_ranges
+from verl_omni.utils.skip import init_skip_manager, log_skip_summary
+from verl_omni.utils.tracking import (
+    _export_video,
+    batch_items,
+    log_val_samples,
+    validate_audio_batch,
+)
 from verl_omni.workers.config.reward import reward_is_enabled, reward_role_required, streaming_reward_enabled
+from verl_omni.workers.rollout.replica import DiffusionLLMServerManager as LLMServerManager
 from verl_omni.workers.utils.padding import embeds_padding_2_no_padding
 
 sys_logger = logging.getLogger(__name__)
+
+
+def _json_encode_default(obj):
+    """Encode NumPy values retained in rollout metadata for JSONL dumps."""
+    if isinstance(obj, np.integer):
+        return int(obj)
+    if isinstance(obj, np.floating):
+        return float(obj)
+    if isinstance(obj, np.bool_):
+        return bool(obj)
+    if hasattr(obj, "tolist"):
+        return obj.tolist()
+    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
 
 
 def validate_separate_config(config) -> None:
@@ -103,16 +133,19 @@ def validate_separate_config(config) -> None:
     if config.actor_rollout_ref.hybrid_engine:
         raise ValueError("Separate mode requires actor_rollout_ref.hybrid_engine=false.")
 
-    model = config.actor_rollout_ref.model
-    lora_rank = (model.get("lora") or {}).get("rank", 0) or 0
-    legacy_lora_rank = model.get("lora_rank", 0) or 0
-    lora_adapter_path = model.get("lora_adapter_path")
-    if lora_rank > 0 or legacy_lora_rank > 0 or lora_adapter_path is not None:
-        raise ValueError(
-            "Separate mode currently supports full finetuning only; "
-            "actor_rollout_ref.model.lora.rank, actor_rollout_ref.model.lora_rank, and "
-            "actor_rollout_ref.model.lora_adapter_path must respectively be 0, 0, and null."
-        )
+    # A resolver ValueError means LoRA was requested in some spelling; its flat-key
+    # hint is a dead end where the flat key is refused too.
+    separate_lora_error = (
+        "Separate mode currently supports full finetuning only; "
+        "actor_rollout_ref.model.lora.rank, actor_rollout_ref.model.lora_rank, and "
+        "actor_rollout_ref.model.lora_adapter_path must respectively be 0, 0, and null."
+    )
+    try:
+        lora_settings = resolve_lora_config(config.actor_rollout_ref.model)
+    except ValueError as e:
+        raise ValueError(separate_lora_error) from e
+    if lora_settings.enabled:
+        raise ValueError(separate_lora_error)
 
     rollout = config.actor_rollout_ref.rollout
     if rollout.nnodes <= 0 or rollout.n_gpus_per_node <= 0:
@@ -169,6 +202,186 @@ def compute_advantage(
     data.batch["advantages"] = advantages
     data.batch["returns"] = returns
     return data
+
+
+def _validate_generation_outputs(outputs) -> None:
+    """Reject non-pixel outputs before best-effort logging or async submission."""
+    if not isinstance(outputs, torch.Tensor) or outputs.dtype != torch.uint8:
+        dtype = getattr(outputs, "dtype", type(outputs))
+        raise ValueError(f"Expected generation outputs to be a uint8 tensor, got {dtype}.")
+
+
+def _media_values_match(left, right) -> bool:
+    """Compare rollout media from the tensor and metadata envelopes."""
+    if isinstance(left, torch.Tensor) and isinstance(right, torch.Tensor):
+        return left.device == right.device and torch.equal(left, right)
+    try:
+        return np.array_equal(left, right)
+    except (TypeError, ValueError):
+        return False
+
+
+def _resolve_rollout_media_field(batch: DataProto, tool_extra, key: str):
+    """Prefer current batch media and reject conflicting tool-envelope values."""
+    sources = [batch.batch.get(key), batch.non_tensor_batch.get(key)]
+    if tool_extra is not None:
+        sources.append([item.get(key) if isinstance(item, dict) else None for item in tool_extra])
+
+    values = [None] * len(batch)
+    for source in sources:
+        if source is None:
+            continue
+        for index, value in enumerate(batch_items(source, len(batch), key)):
+            if value is None:
+                continue
+            if values[index] is not None and not _media_values_match(values[index], value):
+                raise ValueError(f"Conflicting rollout media field {key!r} in batch and tool_extra_fields")
+            if values[index] is None:
+                values[index] = value
+    return values
+
+
+def dump_generations(
+    global_steps,
+    inputs,
+    outputs,
+    gts,
+    scores,
+    reward_extra_infos_dict,
+    dump_path,
+    max_samples=None,
+    fps=24,
+    audios=None,
+    audio_sample_rates=None,
+    media_kind=None,
+    previews=None,
+):
+    """Dump samples to disk as media files plus a JSONL index.
+
+    Named decoded ``previews`` take precedence over ``outputs``. Legacy ``outputs``
+    is a batch of images ``[N, C, H, W]`` (-> ``{i}.jpg``) or videos
+    ``[N, T, C, H, W]`` (-> ``{i}.mp4`` at ``fps``). ``max_samples`` caps how many
+    are written (``None`` = all). Optional generated audio is muxed into video files.
+    Failed video exports are preserved as ``{i}.pt`` fallback payloads when possible.
+    Media failures are recorded in JSONL; filesystem failures warn and skip the dump.
+    """
+    previews = validate_previews(previews, len(inputs))
+    if previews == []:
+        return
+    if previews is not None:
+        # Previews are already validated and normalized; stacking them would abort the
+        # dump when one sample's resolution or frame count differs from another's.
+        batch_ndim = previews[0].data.ndim + 1
+        media_kind = previews[0].spec.modality
+        n_full = len(previews)
+    else:
+        _validate_generation_outputs(outputs)
+        batch_ndim = outputs.ndim
+        n_full = outputs.shape[0]
+    visual_folder = os.path.join(dump_path, f"{global_steps}")
+
+    n = n_full if max_samples is None else min(max_samples, n_full)
+    # Prefer the adapter-declared media kind over legacy rank/layout inference.
+    validate_visual_media_batch_rank(batch_ndim, media_kind)
+    is_video = resolve_is_video(media_kind)
+
+    if is_video:
+        audios, audio_sample_rates = validate_audio_batch(audios, audio_sample_rates, n_full, context="generation dump")
+
+    try:
+        os.makedirs(visual_folder, exist_ok=True)
+    except OSError as error:
+        sys_logger.warning("Skipping media dump at step %s: %s", global_steps, error)
+        return
+
+    output_paths = []
+    output_fallback_paths = [None] * n
+    video_export_errors = [None] * n
+    image_export_errors = [None] * n
+    if is_video:
+        for i in range(n):
+            video_path = os.path.join(visual_folder, f"{i}.mp4")
+            try:
+                _export_video(
+                    previews[i] if previews is not None else outputs[i],
+                    video_path,
+                    fps=fps,
+                    audio=audios[i],
+                    audio_sample_rate=audio_sample_rates[i],
+                )
+            except (OSError, subprocess.SubprocessError, ValueError) as error:
+                error_message = f"{type(error).__name__}: {error}"
+                fallback_path = os.path.join(visual_folder, f"{i}.pt")
+                fallback_audio = audios[i]
+                if isinstance(fallback_audio, torch.Tensor):
+                    fallback_audio = fallback_audio.detach().cpu()
+                fallback = {
+                    "video": (previews[i].data if previews is not None else outputs[i]).detach().cpu(),
+                    "audio": fallback_audio,
+                    "audio_sample_rate": audio_sample_rates[i],
+                }
+                try:
+                    torch.save(fallback, fallback_path)
+                except Exception as fallback_error:
+                    fallback_path = None
+                    error_message = (
+                        f"{error_message}; fallback save failed: {type(fallback_error).__name__}: {fallback_error}"
+                    )
+                else:
+                    output_fallback_paths[i] = fallback_path
+                video_export_errors[i] = error_message
+                sys_logger.warning(
+                    "Failed to export rollout video at step %s sample %s: %s",
+                    global_steps,
+                    i,
+                    error_message,
+                )
+                output_paths.append(None)
+            else:
+                output_paths.append(video_path)
+    else:
+        for i in range(n):
+            image_path = os.path.join(visual_folder, f"{i}.jpg")
+            try:
+                pixels = previews[i].data if previews is not None else outputs[i]
+                image = pixels.detach().cpu().permute(1, 2, 0).numpy()
+                image = Image.fromarray(image.squeeze(-1) if image.shape[-1] == 1 else image)
+                image.convert("RGB").save(image_path)
+            except (OSError, TypeError, ValueError, RuntimeError) as error:
+                image_export_errors[i] = f"{type(error).__name__}: {error}"
+                sys_logger.warning("Failed to export rollout image at step %s sample %s: %s", global_steps, i, error)
+                output_paths.append(None)
+            else:
+                output_paths.append(image_path)
+
+    filename = os.path.join(dump_path, f"{global_steps}.jsonl")
+    base_data = {
+        "input": list(inputs)[:n],
+        "output": output_paths,
+        "gts": list(gts)[:n],
+        "score": list(scores)[:n],
+        "step": [global_steps] * n,
+    }
+    for k, v in reward_extra_infos_dict.items():
+        if len(v) == n_full:
+            base_data[k] = list(v)[:n]
+    if any(video_export_errors):
+        base_data["output_fallback"] = output_fallback_paths
+        base_data["video_export_error"] = video_export_errors
+    if any(image_export_errors):
+        base_data["image_export_error"] = image_export_errors
+
+    try:
+        lines = []
+        for i in range(n):
+            entry = {k: v[i] for k, v in base_data.items()}
+            lines.append(json.dumps(entry, ensure_ascii=False, default=_json_encode_default))
+        with open(filename, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+    except (OSError, TypeError, ValueError) as error:
+        sys_logger.warning("Skipping media index at step %s (%s): %s", global_steps, filename, error)
+        return
+    print(f"Dumped generations to {filename}")
 
 
 class BaseRayDiffusionTrainer(ABC):
@@ -245,10 +458,7 @@ class BaseRayDiffusionTrainer(ABC):
         )
 
         # if ref_in_actor is True, the reference policy will be actor without lora applied
-        lora_rank = config.actor_rollout_ref.model.get("lora", {}).get("rank", 0)
-        if lora_rank <= 0:
-            lora_rank = config.actor_rollout_ref.model.get("lora_rank", 0)
-        self.ref_in_actor = lora_rank > 0 or config.actor_rollout_ref.model.get("lora_adapter_path") is not None
+        self.ref_in_actor = resolve_lora_config(config.actor_rollout_ref.model).enabled
         if self.separate and self.use_reference_policy and not self.ref_in_actor:
             if Role.RefPolicy not in role_worker_mapping:
                 raise ValueError(
@@ -259,6 +469,9 @@ class BaseRayDiffusionTrainer(ABC):
         self.use_teacher_policy = is_distillation_enabled(config.get("distillation"))
         self.distillation_config = omega_conf_to_dataclass(config.distillation) if self.use_teacher_policy else None
         validate_distillation_config(config)
+        self.skip_old_log_prob = skip_old_log_prob(config)
+        if self.skip_old_log_prob:
+            sys_logger.info("The actor loss reads no log-probs; skipping the old_log_prob stage.")
 
         self._create_dataloader(train_dataset, val_dataset, collate_fn, train_sampler)
 
@@ -273,6 +486,9 @@ class BaseRayDiffusionTrainer(ABC):
             and controller_nsight_options.get("capture-range") == "cudaProfilerApi"
         )
         self._controller_nsys_profile_active = False
+
+        # initialize SkipManager (verl rollout skip + verl-omni stage skip; no-op until configured).
+        init_skip_manager(self.config)
 
     def _create_dataloader(self, train_dataset, val_dataset, collate_fn, train_sampler: Optional[Sampler]):
         """
@@ -364,113 +580,25 @@ class BaseRayDiffusionTrainer(ABC):
         fps=24,
         audios=None,
         audio_sample_rates=None,
+        media_kind=None,
+        previews=None,
     ):
-        """Dump samples to disk as media files plus a JSONL index.
-
-        ``outputs`` is a batch of images ``[N, C, H, W]`` (-> ``{i}.jpg``) or videos
-        ``[N, T, C, H, W]`` (-> ``{i}.mp4`` at ``fps``). ``max_samples`` caps how many
-        are written (``None`` = all). Optional generated audio is muxed into video files.
-        Failed video exports are preserved as ``{i}.pt`` fallback payloads and recorded
-        in the JSONL instead of terminating training.
-        """
-        if not isinstance(outputs, torch.Tensor) or outputs.dtype != torch.uint8:
-            dtype = getattr(outputs, "dtype", type(outputs))
-            raise ValueError(f"Expected generation outputs to be a uint8 tensor, got {dtype}.")
-
-        os.makedirs(dump_path, exist_ok=True)
-
-        visual_folder = os.path.join(dump_path, f"{self.global_steps}")
-        os.makedirs(visual_folder, exist_ok=True)
-
-        n_full = outputs.shape[0]
-        n = n_full if max_samples is None else min(max_samples, n_full)
-        if outputs.ndim == 6:
-            # Per-sample batch dim from single-seq rollouts: [N, 1, T, C, H, W].
-            outputs = outputs.squeeze(1)
-        if outputs.ndim == 5 and outputs.shape[1] == 3 and outputs.shape[2] != 3:
-            # Channels-first [N, C, T, H, W] -> [N, T, C, H, W].
-            outputs = outputs.permute(0, 2, 1, 3, 4)
-        is_video = outputs.ndim == 5  # [N, T, C, H, W] vs image [N, C, H, W]
-
-        output_paths = []
-        output_fallback_paths = [None] * n
-        video_export_errors = [None] * n
-        if is_video:
-            audios = batch_items(audios, n_full, "audio")
-            audio_sample_rates = batch_items(audio_sample_rates, n_full, "audio_sample_rate")
-            for i in range(n):
-                video_path = os.path.join(visual_folder, f"{i}.mp4")
-                try:
-                    _export_video(
-                        outputs[i],
-                        video_path,
-                        fps=fps,
-                        audio=audios[i],
-                        audio_sample_rate=audio_sample_rates[i],
-                    )
-                except (OSError, subprocess.SubprocessError, ValueError) as error:
-                    error_message = f"{type(error).__name__}: {error}"
-                    fallback_path = os.path.join(visual_folder, f"{i}.pt")
-                    fallback_audio = audios[i]
-                    if isinstance(fallback_audio, torch.Tensor):
-                        fallback_audio = fallback_audio.detach().cpu()
-                    fallback = {
-                        "video": outputs[i].detach().cpu(),
-                        "audio": fallback_audio,
-                        "audio_sample_rate": audio_sample_rates[i],
-                    }
-                    try:
-                        torch.save(fallback, fallback_path)
-                    except Exception as fallback_error:
-                        fallback_path = None
-                        error_message = (
-                            f"{error_message}; fallback save failed: {type(fallback_error).__name__}: {fallback_error}"
-                        )
-                    else:
-                        output_fallback_paths[i] = fallback_path
-                    video_export_errors[i] = error_message
-                    sys_logger.warning(
-                        "Failed to export rollout video at step %s sample %s: %s",
-                        self.global_steps,
-                        i,
-                        error_message,
-                    )
-                    output_paths.append(None)
-                else:
-                    output_paths.append(video_path)
-        else:
-            images_pil = outputs[:n].cpu().permute(0, 2, 3, 1).numpy()
-            for i, image in enumerate(images_pil):
-                image_path = os.path.join(visual_folder, f"{i}.jpg")
-                Image.fromarray(image).save(image_path)
-                output_paths.append(image_path)
-
-        filename = os.path.join(dump_path, f"{self.global_steps}.jsonl")
-
-        base_data = {
-            "input": list(inputs)[:n],
-            "output": output_paths,
-            "gts": list(gts)[:n],
-            "score": list(scores)[:n],
-            "step": [self.global_steps] * n,
-        }
-
-        for k, v in reward_extra_infos_dict.items():
-            if len(v) == n_full:
-                base_data[k] = list(v)[:n]
-        if any(video_export_errors):
-            base_data["output_fallback"] = output_fallback_paths
-            base_data["video_export_error"] = video_export_errors
-
-        lines = []
-        for i in range(n):
-            entry = {k: v[i] for k, v in base_data.items()}
-            lines.append(json.dumps(entry, ensure_ascii=False))
-
-        with open(filename, "w", encoding="utf-8") as f:
-            f.write("\n".join(lines) + "\n")
-
-        print(f"Dumped generations to {filename}")
+        """Dump media with the shared exporter at the current training step."""
+        return dump_generations(
+            self.global_steps,
+            inputs,
+            outputs,
+            gts,
+            scores,
+            reward_extra_infos_dict,
+            dump_path,
+            max_samples=max_samples,
+            fps=fps,
+            audios=audios,
+            audio_sample_rates=audio_sample_rates,
+            media_kind=media_kind,
+            previews=previews,
+        )
 
     def _log_rollout_data(
         self, batch: DataProto, reward_extra_infos_dict: dict, timing_raw: dict, rollout_data_dir: str
@@ -497,19 +625,11 @@ class BaseRayDiffusionTrainer(ABC):
                     batch.non_tensor_batch["request_id"].tolist(),
                 )
 
-            # Audio rides in tool_extra_fields dicts from the agent loop;
-            # extract it so _dump_generations can mux it into the mp4 files.
             tool_extra = batch.non_tensor_batch.get("tool_extra_fields", None)
-            if tool_extra is not None:
-                audios_to_dump = [item.get("audio") if isinstance(item, dict) else None for item in tool_extra]
-                audio_rates_to_dump = [
-                    item.get("audio_sample_rate") if isinstance(item, dict) else None for item in tool_extra
-                ]
-            else:
-                audios_to_dump = batch.batch.get("audio", batch.non_tensor_batch.get("audio"))
-                audio_rates_to_dump = batch.non_tensor_batch.get(
-                    "audio_sample_rate", batch.batch.get("audio_sample_rate")
-                )
+            audios_to_dump = _resolve_rollout_media_field(batch, tool_extra, "audio")
+            audio_rates_to_dump = _resolve_rollout_media_field(batch, tool_extra, "audio_sample_rate")
+            media_kind_values = _resolve_rollout_media_field(batch, tool_extra, "media_kind")
+            media_kind = resolve_batch_media_kind(media_kind_values or [])
 
             self._dump_generations(
                 inputs=inputs,
@@ -522,23 +642,42 @@ class BaseRayDiffusionTrainer(ABC):
                 fps=int(self.config.trainer.get("video_fps", 24)),
                 audios=audios_to_dump,
                 audio_sample_rates=audio_rates_to_dump,
+                media_kind=media_kind,
+                previews=previews_from_batch(batch),
             )
 
-    def _maybe_log_val_generations(self, inputs, outputs, scores, audios=None, audio_sample_rates=None):
-        """Log a table of validation samples to the configured logger (wandb or swanlab)"""
+    def _maybe_log_val_generations(
+        self,
+        inputs,
+        outputs,
+        scores,
+        audios=None,
+        audio_sample_rates=None,
+        media_kinds=None,
+        previews=None,
+    ):
+        """Log a table of validation samples to the configured logger (wandb or swanlab)."""
 
         generations_to_log = self.config.trainer.log_val_generations
 
-        if generations_to_log == 0:
+        if generations_to_log == 0 or len(inputs) == 0:
             return
-
-        import shutil
+        previews = validate_previews(previews, len(inputs))
+        if previews == []:
+            return
+        if previews is not None:
+            outputs = previews
+            media_kinds = [preview.spec.modality for preview in previews]
+        else:
+            _validate_generation_outputs(outputs)
 
         import numpy as np
 
         audios = batch_items(audios, len(inputs), "audio")
         audio_sample_rates = batch_items(audio_sample_rates, len(inputs), "audio_sample_rate")
-        samples = list(zip(inputs, list(outputs), scores, audios, audio_sample_rates, strict=True))
+        media_kinds = batch_items(media_kinds, len(inputs), "media_kind")
+        resolve_batch_media_kind(media_kinds)
+        samples = list(zip(inputs, list(outputs), scores, audios, audio_sample_rates, media_kinds, strict=True))
         samples.sort(key=lambda x: x[0])  # Sort by input text
 
         # Use fixed random seed for deterministic shuffling
@@ -548,28 +687,15 @@ class BaseRayDiffusionTrainer(ABC):
         # Take first N samples after shuffling
         samples = samples[:generations_to_log]
 
-        # Wrap only retained samples; keep wandb videos in persistent storage.
-        video_tmp_dir = None
-        wandb_media = {}
-        if "wandb" in self.config.trainer.logger:
-            validation_data_dir = self.config.trainer.get("validation_data_dir", None)
-            default_local_dir = self.config.trainer.get("default_local_dir", None)
-            wandb_video_dir = validation_data_dir or default_local_dir
-            if wandb_video_dir:
-                wandb_video_dir = os.path.join(wandb_video_dir, "wandb_val_media", f"global_step_{self.global_steps}")
-            samples, video_tmp_dir, wandb_media = wrap_val_samples_for_wandb(
-                samples, fps=int(self.config.trainer.get("video_fps", 24)), output_dir=wandb_video_dir
-            )
-        else:
-            samples = [(input_, output, score) for input_, output, score, _, _ in samples]
-
-        # Log to each configured logger
-        try:
-            log_wandb_media(wandb_media, self.global_steps)
-            self.validation_generations_logger.log(self.config.trainer.logger, samples, self.global_steps)
-        finally:
-            if video_tmp_dir is not None:
-                shutil.rmtree(video_tmp_dir, ignore_errors=True)
+        log_val_samples(
+            self.validation_generations_logger,
+            self.config.trainer.logger,
+            samples,
+            self.global_steps,
+            fps=int(self.config.trainer.get("video_fps", 24)),
+            media_root=self.config.trainer.get("validation_data_dir", None)
+            or self.config.trainer.get("default_local_dir", None),
+        )
 
     def _get_gen_batch(self, batch: DataProto) -> DataProto:
         reward_keys = set({"data_source", "reward_model", "extra_info", "uid"}) & batch.non_tensor_batch.keys()
@@ -587,6 +713,7 @@ class BaseRayDiffusionTrainer(ABC):
 
         return gen_batch
 
+    @SkipManager.annotate(role="reward")
     def _compute_reward_colocate(self, batch: DataProto) -> tuple[torch.Tensor, dict[str, Any]] | torch.Tensor:
         """
         compute reward use colocate reward model
@@ -604,6 +731,8 @@ class BaseRayDiffusionTrainer(ABC):
         sample_outputs = []
         sample_audios = []
         sample_audio_sample_rates = []
+        sample_media_kinds = []
+        sample_previews = []
         sample_gts = []
         sample_scores = []
         sample_turns = []
@@ -641,6 +770,8 @@ class BaseRayDiffusionTrainer(ABC):
             test_output_gen_batch_padded = self.async_rollout_manager.generate_sequences(test_gen_batch_padded)
 
             if self.use_rm and "rm_scores" not in test_output_gen_batch_padded.batch.keys():
+                # Stage-skip decorators bypass marked calls: validation must never poison training caches.
+                test_output_gen_batch_padded.meta_info["validate"] = True
                 # for colocate reward models, we need to sleep rollout model
                 # to spare GPU memory for reward model
                 if not self.separate:
@@ -660,15 +791,13 @@ class BaseRayDiffusionTrainer(ABC):
             # Store generated outputs
             output_images = test_output_gen_batch.batch["responses"]
             sample_outputs.append(output_images)
-            batch_size = len(output_images)
-            sample_audios.extend(batch_items(test_output_gen_batch.batch.get("audio"), batch_size, "audio"))
+            sample_previews.extend(previews_from_batch(test_output_gen_batch) or [None] * len(output_images))
+            tool_extra = test_output_gen_batch.non_tensor_batch.get("tool_extra_fields")
+            sample_audios.extend(_resolve_rollout_media_field(test_output_gen_batch, tool_extra, "audio"))
             sample_audio_sample_rates.extend(
-                batch_items(
-                    test_output_gen_batch.non_tensor_batch.get("audio_sample_rate"),
-                    batch_size,
-                    "audio_sample_rate",
-                )
+                _resolve_rollout_media_field(test_output_gen_batch, tool_extra, "audio_sample_rate")
             )
+            sample_media_kinds.extend(_resolve_rollout_media_field(test_output_gen_batch, tool_extra, "media_kind"))
 
             test_batch = test_batch.union(test_output_gen_batch)
             test_batch.meta_info["validate"] = True
@@ -707,6 +836,8 @@ class BaseRayDiffusionTrainer(ABC):
             scores=sample_scores,
             audios=sample_audios,
             audio_sample_rates=sample_audio_sample_rates,
+            media_kinds=sample_media_kinds,
+            previews=sample_previews,
         )
 
         # dump generations
@@ -723,6 +854,8 @@ class BaseRayDiffusionTrainer(ABC):
                 fps=int(self.config.trainer.get("video_fps", 24)),
                 audios=sample_audios,
                 audio_sample_rates=sample_audio_sample_rates,
+                media_kind=resolve_batch_media_kind(sample_media_kinds),
+                previews=sample_previews,
             )
 
         for key_info, lst in reward_extra_infos_dict.items():
@@ -1066,6 +1199,7 @@ class BaseRayDiffusionTrainer(ABC):
         else:
             print(f"Warning: No dataloader state found at {dataloader_local_path}, will start from scratch")
 
+    @SkipManager.annotate(role="actor_update")
     def _update_actor(self, batch: DataProto) -> DataProto:
         rollout_config = self.config.actor_rollout_ref.rollout
         batch.meta_info["multi_turn"] = rollout_config.multi_turn.enable
@@ -1153,6 +1287,7 @@ class BaseRayDiffusionTrainer(ABC):
 class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
     """Policy-gradient diffusion trainer for FlowGRPO, MixGRPO, DanceGRPO, GRPO-Guard, etc."""
 
+    @SkipManager.annotate(role="ref_log_prob")
     def _compute_ref_log_prob(self, batch: DataProto) -> DataProto:
         batch_td = _to_diffusion_worker_tensordict(batch)
         batch_td = embeds_padding_2_no_padding(batch_td)
@@ -1177,6 +1312,7 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
         )
         return DataProto.from_tensordict(ref_log_prob)
 
+    @SkipManager.annotate(role="old_log_prob")
     def _compute_old_log_prob(self, batch: DataProto) -> tuple[DataProto, Optional[float]]:
         batch_td = _to_diffusion_worker_tensordict(batch)
         batch_td = embeds_padding_2_no_padding(batch_td)
@@ -1237,8 +1373,10 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
 
         # we start from step 1
         self.global_steps += 1
+        SkipManager.set_step(self.global_steps)
         last_val_metrics = None
         self.max_steps_duration = 0
+        self._nonfinite_grad_streak = 0
 
         # Profiler step state machine. Mirrors verl/trainer/ppo/ray_trainer.py.
         prev_step_profile = False
@@ -1330,14 +1468,13 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
                     bypass_recomputing_logprobs = rollout_corr_config and rollout_corr_config.get("bypass_mode", False)
                     if bypass_recomputing_logprobs:  # Use `rollout_log_probs`
                         apply_bypass_mode_to_diffusion_batch(batch)
-                    else:  # Recompute old_log_probs
+                    elif not self.skip_old_log_prob:  # Recompute old_log_probs
                         with marked_timer("old_log_prob", timing_raw, color="blue"):
                             old_log_prob, old_log_prob_mfu = self._compute_old_log_prob(batch)
                             if old_log_prob_mfu is not None:
                                 metrics.update({"perf/mfu/actor_infer": old_log_prob_mfu})
                             batch = batch.union(old_log_prob)
-
-                    assert "old_log_probs" in batch.batch, f'"old_log_probs" not in {batch.batch.keys()=}'
+                        assert "old_log_probs" in batch.batch, f'"old_log_probs" not in {batch.batch.keys()=}'
 
                     metrics.update(
                         compute_rollout_corr_metrics_from_batch(
@@ -1374,7 +1511,7 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
                         if reward_extra_infos_dict:
                             batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})
 
-                        num_timesteps = batch.batch["old_log_probs"].shape[1]
+                        num_timesteps = batch.batch["all_timesteps"].shape[1]
                         batch.batch["sample_level_rewards"] = batch.batch["sample_level_scores"].expand(
                             -1, num_timesteps
                         )
@@ -1475,15 +1612,19 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
                 # compute variance proxy metrics
                 gradient_norm = metrics.get("actor/grad_norm", None)
                 metrics.update(compute_variance_proxy_metrics(batch=batch, gradient_norm=gradient_norm))
+                self._nonfinite_grad_streak = track_nonfinite_grad_streak(self._nonfinite_grad_streak, gradient_norm)
+                metrics["train/nonfinite_grad_steps"] = self._nonfinite_grad_streak
 
                 logger.log(data=metrics, step=self.global_steps)
 
                 progress_bar.update(1)
                 self.global_steps += 1
+                SkipManager.set_step(self.global_steps)
 
                 if is_last_step:
                     if hasattr(self.actor_rollout_wg, "async_calls_finalize_fn_exec"):
                         self.actor_rollout_wg.async_calls_finalize_fn_exec(blocking=True)
+                    log_skip_summary(logger, self.global_steps)
                     pprint(f"Final validation metrics: {last_val_metrics}")
                     progress_bar.close()
                     return
@@ -1509,21 +1650,21 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
         loss_mode = config.actor_rollout_ref.actor.diffusion_loss.loss_mode
         # DPO needs trainer-side ref noise preds; DiffusionNFT computes ref in the actor engine.
         self.use_reference_policy = need_reference_policy(self.config) or (loss_mode == "dpo")
-        self._has_old_adapter = "old" in tuple(
-            config.actor_rollout_ref.model.get("policy_state_adapters", ("default",))
-        )
+        self._has_old_adapter = "old" in resolve_lora_config(config.actor_rollout_ref.model).adapters
         if self._has_old_adapter:
             self._validate_old_adapter_config()
         self._loss_fn = get_diffusion_loss_fn(loss_mode)
+        self._loss_fn.validate_trainer_config(config)
 
     def _validate_old_adapter_config(self):
         rollout_cfg = self.config.actor_rollout_ref.rollout
         actor_loss_cfg = self.config.actor_rollout_ref.actor.diffusion_loss
         if rollout_cfg.rollout_adapter != "old":
             raise ValueError("Old-adapter algorithms require actor_rollout_ref.rollout.rollout_adapter=old.")
-        if actor_loss_cfg.loss_mode != "diffusion_nft":
+        if not get_diffusion_loss_fn(actor_loss_cfg.loss_mode).uses_old_adapter:
             raise ValueError(
-                "Old-adapter algorithms require actor_rollout_ref.actor.diffusion_loss.loss_mode=diffusion_nft."
+                "Old-adapter algorithms require an actor_rollout_ref.actor.diffusion_loss.loss_mode that trains "
+                f"against the old adapter, got {actor_loss_cfg.loss_mode}."
             )
 
     def init_workers(self):
@@ -1543,6 +1684,7 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
             return {"val/offline/skipped": 1.0}
         return super()._validate()
 
+    @SkipManager.annotate(role="actor_update")
     def _update_actor(self, batch: DataProto) -> DataProto:
         rollout_config = self.config.actor_rollout_ref.rollout
         batch.meta_info["multi_turn"] = rollout_config.multi_turn.enable
@@ -1556,10 +1698,13 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
         ppo_epochs = self.config.actor_rollout_ref.actor.ppo_epochs
         seed = self.config.actor_rollout_ref.actor.data_loader_seed
         shuffle = self.config.actor_rollout_ref.actor.shuffle
-        if paired and shuffle:
+        loss_mode = OmegaConf.select(self.config, "actor_rollout_ref.actor.diffusion_loss.loss_mode")
+        keep_groups = paired or (loss_mode is not None and get_diffusion_loss_fn(loss_mode).requires_whole_groups)
+        if keep_groups and shuffle:
             sys_logger.warning(
                 "Shuffle is not supported for direct preference during actor update."
-                "This is to prevent the chosen/rejected pairs from being split across different micro batches."
+                "This is to prevent chosen/rejected pairs and rollout groups from being split across "
+                "different micro batches."
                 "Setting shuffle to False."
             )
             shuffle = False
@@ -1583,6 +1728,7 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
             actor_output["perf/mfu/actor"] = actor_mfu
         return DataProto.from_single_dict(data={}, meta_info={"metrics": actor_output})
 
+    @SkipManager.annotate(role="ref_log_prob")
     def _compute_ref_noise_pred(self, batch: DataProto) -> Optional[DataProto]:
         """Reference transformer output and shared flow tensors."""
         batch_td = _to_diffusion_worker_tensordict(batch)
@@ -1681,8 +1827,10 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
 
         # we start from step 1
         self.global_steps += 1
+        SkipManager.set_step(self.global_steps)
         last_val_metrics = None
         self.max_steps_duration = 0
+        self._nonfinite_grad_streak = 0
 
         # Profiler step state machine. Mirrors verl/trainer/ppo/ray_trainer.py.
         prev_step_profile = False
@@ -1883,18 +2031,22 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
                 )
                 metrics.update(compute_timing_metrics_diffusion(timing_raw=timing_raw, num_images=num_images))
                 metrics.update(compute_throughput_metrics_diffusion(batch=batch, timing_raw=timing_raw, n_gpus=n_gpus))
+                gradient_norm = metrics.get("actor/grad_norm", None)
                 if "advantages" in batch.batch:
-                    gradient_norm = metrics.get("actor/grad_norm", None)
                     metrics.update(compute_variance_proxy_metrics(batch=batch, gradient_norm=gradient_norm))
+                self._nonfinite_grad_streak = track_nonfinite_grad_streak(self._nonfinite_grad_streak, gradient_norm)
+                metrics["train/nonfinite_grad_steps"] = self._nonfinite_grad_streak
 
                 logger.log(data=metrics, step=self.global_steps)
 
                 progress_bar.update(1)
                 self.global_steps += 1
+                SkipManager.set_step(self.global_steps)
 
                 if is_last_step:
                     if hasattr(self.actor_rollout_wg, "async_calls_finalize_fn_exec"):
                         self.actor_rollout_wg.async_calls_finalize_fn_exec(blocking=True)
+                    log_skip_summary(logger, self.global_steps)
                     pprint(f"Final validation metrics: {last_val_metrics}")
                     progress_bar.close()
                     return

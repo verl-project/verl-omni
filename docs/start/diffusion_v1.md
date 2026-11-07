@@ -1,6 +1,6 @@
 # Diffusion V1 training
 
-Last updated: 09/15/2026
+Last updated: 11/03/2026
 
 This guide runs the diffusion V1 trainer in synchronous or separate-asynchronous
 mode using the provided Stable Diffusion 3.5 Medium FlowGRPO OCR recipes.
@@ -10,9 +10,55 @@ the training loop. Synchronous mode waits for a complete rollout batch before
 each training step. Wan2.2 DanceGRPO on CUDA also defaults to the V1 sync
 recipe; see {doc}`../examples/dancegrpo_trainer`.
 
+Since v0.3.0 the V1 trainer is the **default for every diffusion model**:
+`trainer.use_v1` defaults to `true`, and `python -m verl_omni.trainer.main_diffusion_v1`
+launches it without extra flags. The legacy v0 trainer
+(`python -m verl_omni.trainer.main_diffusion` or `trainer.use_v1=false`) is
+**deprecated** — see [Legacy v0 trainer (deprecated)](#legacy-v0-trainer-deprecated).
+
 The examples support a single-node NVIDIA GPU setup. Sync mode uses two GPUs for
 the colocated actor and rollout plus one reward GPU. Separate-async mode also
 requires dedicated standalone rollout GPUs.
+
+## Architecture
+
+![VeRL-Omni Diffusion V1 training architecture](../assets/diffusion_v1_arch.svg)
+
+`main_diffusion_v1` starts the Ray task runner, enables TransferQueue, and selects
+the `sync` or `separate_async` trainer. The diffusion agent loop samples media
+trajectories through the configured rollout backend (commonly vLLM-Omni).
+TransferQueue is the center of the online experience data path. A row can hold
+prompt/group/session identity, generated media or latents, rollout
+log-probabilities, reward scores, extra fields, and policy-step metadata. In
+`separate_async`, prompt records and statuses can also be queued while generation
+is pending.
+
+Reward workers called by the agent loop receive the prompt and generated output;
+their score returns to the agent loop and is stored with the trajectory row. An
+optional colocated reward scorer runs trainer-side after the row is read. The
+trainer then writes selected score, advantage, and return fields back to that
+same queue row. ReplayBuffer samples and groups queue rows for actor training;
+the trainer computes configured advantages and diffusion loss, then updates the
+actor policy.
+
+The main implementation points are `main_diffusion_v1.py`,
+`agent_loop/diffusion_agent_loop_tq.py::_write_trajectories_to_tq`,
+`trainer/diffusion/v1/trainer_base.py::_train_sampled_batch`, and
+`trainer/diffusion/v1/tq_utils.py::put_dataproto_fields_to_tq`. The trainer's
+checkpoint manager handles actor/dataloader checkpoints and rollout weight
+sync; separate-async checkpoints can also snapshot TransferQueue state. Training
+rows are cleared after metric and rollout-dump handling.
+
+In `sync`, rollout and actor workers are colocated, and each training step waits
+for a complete rollout batch before updating the actor and refreshing rollout
+weights. In `separate_async`, standalone rollout workers can generate while the
+actor trains; `parameter_sync_step` controls how many local actor updates happen
+before rollout weights are refreshed. Set `sync_compatible=true` to pause
+standalone generation during actor updates. The replay buffer handles
+asynchronous batch availability and rollout staleness.
+
+The diagram shows the shared online diffusion RL path. Optional old/reference
+policy scoring, rollout correction, and reward components depend on the recipe.
 
 ## Prerequisites
 
@@ -77,6 +123,9 @@ python3 -m verl_omni.trainer.main_diffusion_v1
 trainer.use_v1=true
 trainer.v1.trainer_mode=sync
 ```
+
+`trainer.use_v1=true` and `trainer.v1.trainer_mode=sync` are the defaults since
+v0.3.0; the scripts keep them for explicitness.
 Hydra settings can be appended to the command. For example, to run fewer steps
 and disable W&B:
 
@@ -119,6 +168,59 @@ See {doc}`../examples/dancegrpo_trainer` for dataset and HPSv3 setup. The
 legacy v0 auto-detect script (`run_wan22_5b_t2v_hpsv3_auto.sh`) is
 **deprecated** for CUDA and remains for NPU.
 
+## Optional training watchdog
+
+The reporting-only watchdog is disabled by default. Enable it with ordinary Hydra
+overrides, for example:
+
+```bash
+bash examples/flowgrpo_trainer/sd35/run_sd35_medium_ocr_lora_v1.sh \
+  trainer.v1.watchdog.enabled=true \
+  trainer.v1.watchdog.window_size=3 \
+  trainer.v1.watchdog.warmup_steps=5
+```
+
+It reads already reduced scalar metrics after each V1 training step. Warnings
+include the rule, triggering step, consecutive evidence window and scalar values;
+the existing logger also receives `watchdog/alerts`, per-rule
+`watchdog/coverage/<rule>`, `watchdog/warmup_remaining`, `watchdog/ignored_step`
+and `watchdog/processing_time_s`. Coverage zero means evidence is unavailable or
+the loss does not support that rule, not a healthy result.
+
+The rules distinguish numerical failure from sustained risk signals:
+
+- Nonfinite `actor/grad_norm` warns immediately, including during warmup.
+- For `flow_grpo`, `dance_grpo`, `flow_dppo` and `grpo_guard`, a complete window
+  jointly requires zero reward variation in every prompt group, average group
+  size greater than one, reward std at most `reward_std_max` and gradient norm
+  at most `grad_norm_max`. Flat reward alone, singleton groups and a single
+  zero-gradient step are not proof of collapse.
+- Those ratio-producing losses also warn on a complete window of
+  `actor/ratio_mean` outside `[ratio_lower, ratio_upper]`. Other losses, including
+  DiffusionNFT and distillation, do not receive ratio or grouped-reward warnings.
+- `max_staleness=null` disables the staleness rule. Set an explicit budget to
+  warn on sustained `training/off_policy/trajectory_staleness_worst/max` above
+  it. The metric is `(global_steps - 1) - min_global_steps` over each nonpadding
+  trajectory, then the batch maximum. An on-policy `sync` batch can report
+  `-1`: this is valid healthy coverage and can end an alert episode. For example,
+  `max_staleness=2` warns after a complete window above `2`, not at `2` or
+  `-1`: a submission three outer steps behind the current step has lag `2`
+  and is still within that budget. This model-version lag differs from the replay-buffer span
+  `global_steps - prompt_global_steps + 1`; the budget is not a span limit.
+
+In `separate_async`, ratio and gradient warnings use metrics aggregated for the
+outer training step, not each local actor update.
+
+Defaults are configurable diagnostic heuristics, not CI gates or validated
+collapse thresholds. Sustained rules skip five accepted observations after
+start/resume, then need three consecutive complete observations. Missing or
+invalid prerequisites and forward step gaps break consecutive evidence;
+duplicate/older steps are ignored. An episode emits once and can rearm after a
+known recovery, with `cooldown_steps=20` between reports. Diagnostics reset on
+each `fit`, including checkpoint resume, and are not checkpointed. Only bounded
+scalar history is retained; the watchdog never changes training inputs, RNG,
+optimizer state, checkpoints, scheduling or job lifetime, and needs no LLM service.
+
 ## Run V1 separate-async mode
 
 Launch the separate-async recipe:
@@ -149,6 +251,118 @@ bash examples/flowgrpo_trainer/sd35/run_sd35_medium_ocr_lora_v1_separate_async.s
 `sync_compatible=true` pauses standalone generation during actor updates. It
 requires `num_warmup_batches=0`; set it to `false` to retain rollout/training
 overlap.
+
+### Weight-sync backends
+
+Separate-async mode requires a non-naive
+`actor_rollout_ref.rollout.checkpoint_engine.backend` for the trainer ->
+standalone rollout weight sync. `nccl` (the default in the recipes above)
+broadcasts the full model every sync. `omni_delta_sharded` instead broadcasts
+only the weights that changed since the last sync: the first (seed) sync
+streams the full export, steady syncs ship sparse (position, value) updates,
+and the rollout verifies a per-flush checksum and applies them in place. RL
+updates are highly sparse in BF16, so steady-state payloads shrink to the
+per-step changed ratio while the rollout weights stay bit-identical to a full
+broadcast.
+
+The backend is a verl-omni subclass of verl's `DeltaShardedCheckpointEngine`
+(verl gates the raw `delta_sharded` name to sglang rollouts, so
+`omni_delta_sharded` resolves through verl's `CheckpointEngineRegistry`). The
+subclass re-declares the wire as the stock `named_tensors` bucketed stream and
+flattens each flush's sentinel tensors into it. verl's `CheckpointEngineWorker`
+and the inherited vLLM `ServerAdapter` weight sender drive the sync; the omni
+adapter requests checked replies for IPC updates. The vllm-omni worker
+extension routes the stream by sniffing the first bucket and
+applies flushes in place through verl's delta loader.
+
+`omni_delta_sharded` is gated: it requires `separate_async` mode and full-weight
+training (LoRA configs raise at startup, since adapter sync is already small),
+QAT exports are refused, and fused-MoE rollout models raise at the first sync
+(the sparse in-place apply does not reproduce their checkpoint-layout reload).
+The SD3.5-Medium full-weight recipe is:
+
+```bash
+bash examples/flowgrpo_trainer/sd35/run_sd35_medium_ocr_v1_separate_async_delta.sh
+```
+
+This backend is covered by CPU unit tests only so far; the sparsity preflight
+and a bit-exact GPU smoke against the `nccl` backend are pending (RFC #38).
+The same recipe doubles as the A/B harness: `CKPT_BACKEND=nccl` runs the
+identical full-weight configuration over a full broadcast.
+
+```bash
+CKPT_BACKEND=nccl bash examples/flowgrpo_trainer/sd35/run_sd35_medium_ocr_v1_separate_async_delta.sh
+```
+
+Watch `checkpoint_engine/changed_ratio` and `checkpoint_engine/payload_mbytes`
+in the trainer metrics to confirm the sparsity premise holds for a given model
+and optimizer before relying on the speedup.
+
+### Model-agnostic LoRA policy snapshots
+
+With FSDP2, a single `default` LoRA adapter, and sequence parallel size 1,
+separate-async CPU snapshots retain only the trainable parameters regardless of
+model architecture. This includes any trainable parameters outside the LoRA
+layers. The cycle-start `π_old` and current-actor restoration semantics are
+unchanged; no new configuration is required.
+
+This reduces the snapshot payload, not the cost of materializing the actor
+when manual parameter offload is enabled. FSDP1 and other backends, multiple
+policy adapters, native FSDP2 CPU offload policy, and full-parameter training
+retain full snapshots. Changing the trainable parameter set or shard layout
+within a snapshot's lifetime is unsupported and fails before restore. Qwen-Image
+is the validation fixture, not an eligibility restriction. FSDP snapshot copy
+and restore failures are reported across actor ranks before the RPC returns.
+A failed save preserves the previous snapshot. A restore can fail after some
+local shards were copied: the training step fails rather than continuing with
+mixed weights; this does not provide transactional rollback or recovery from
+a failed process or accelerator collective.
+
+For steady-state, unmerged LoRA weight synchronization with manual actor
+parameter offload, the actor first gathers independent CPU adapter tensors and
+offloads parameters and runs synchronized cache cleanup before waking rollout weights.
+This avoids overlapping actor and colocated rollout weight residency. It trades
+gather/wakeup overlap for GPU memory headroom; it does not change snapshot
+contents or guarantee that every model/configuration fits. First base sync,
+merged LoRA and non-offloaded paths retain their existing synchronization order.
+
+To measure snapshot overhead with a locally available pretrained Qwen-Image
+checkpoint, run the standalone benchmark outside fast CI:
+
+```bash
+torchrun --standalone --nproc-per-node=2 scripts/benchmark_trainable_snapshot.py \
+    --model /path/to/Qwen-Image --output /tmp/qwen-snapshot-60-offload \
+    --run-id qwen-image-depth60-offload-20260911-a \
+    --checkpoint-revision FULL_MODEL_COMMIT --source-revision FULL_CODE_COMMIT \
+    --checkpoint-manifest /path/to/transformer-shards.manifest \
+    --layers 60 --lora-rank 64 --sync-steps 3 --warmup 2 --repeats 10 --offload
+```
+
+Use a fresh output directory for each run. Omit `--offload` for GPU-resident
+parameters. Depths 10 and 30 select prefixes of the original pretrained
+transformer, preserving its width; these are not full-model quality benchmarks.
+The script requires Linux/glibc and exactly two CUDA ranks. Budget host memory
+for two retained snapshots, temporary cloning, and manual offload, in addition
+to model loading; the tiny regression's memory allocation is not sufficient.
+Both source and model directories must be Git checkouts at the declared
+revisions. The manifest has one `path|bytes|sha256` row per transformer shard,
+obtained from that revision's Git LFS pointers. Every shard is hashed before
+loading; the source/metrics bundle is also digested. The fixed matrix uses
+depth 10/30/60, rank 64, seed 20260911, sync steps 3, two warmup pairs and ten
+timed pairs. Change the experiment contract before adding another setting.
+Before CUDA or NCCL initialization, rank zero creates the output directory,
+verifies all pinned metadata and shard hashes, and atomically publishes a
+self-identifying run manifest plus preflight status. Other ranks independently
+verify their imported source checkouts and wait up to 900 seconds for that
+same run ID. Every partial and final result references the manifest digest.
+
+The benchmark loads once per depth/offload run and alternates full/trainable
+snapshot pairs. `summary.json` reports the slowest-rank latency per pair;
+`result-rank*.json` retains raw timings, exact tensor payloads, and a separate
+5-ms sampled RSS/GPU-memory pass. RSS is allocator-sensitive and sampled, not
+an exact peak. Bootstrap intervals describe repeats in that allocation, not
+independent runs. Forward/backward, rollout and reward are excluded, so
+`training_cycle_fraction` is unavailable and no end-to-end speedup is implied.
 
 ### Hybrid rollout switching
 
@@ -188,6 +402,26 @@ Logged metrics: `timing_s/switch_wait`, `timing_s/switch_to_rollout`,
 `timing_s/switch_to_trainer`, `separate_async/switch/*`, and
 `separate_async/decision/*`.
 
+This is the v1 analog of verl's fully_async_policy
+`DynamicResourceController` (verl#6556). That controller is not wired on
+`main_diffusion_v1`; setting `async_training.use_dynamic_resource_scheduling=true`
+raises at startup.
+
+### Checkpoint recovery
+
+Separate-async checkpoints save TransferQueue next to the actor and
+dataloader (`global_step_N/transfer_queue/`). Resume with
+`trainer.resume_mode=auto` (or `resume_path`) restores queued prompt groups,
+re-issues pending and running groups, and tops warmup up to
+`num_warmup_batches * train_batch_size` instead of enqueueing that many new
+batches. Requires TransferQueue 0.1.9. Sync mode does not write a queue
+snapshot. Old checkpoints without `transfer_queue/` warn and start the queue
+empty.
+
+Streaming refill already uses `data.gen_batch_size=1` in `separate_async`
+(and whenever exact incomplete-group refill is on). Do not set a larger
+`gen_batch_size` expecting it to stick; the trainer overrides it.
+
 Throughput metrics of every `separate_async` run, with switching on or off, now
 also count the standalone rollout GPUs in the denominator, so they read lower
 than earlier runs of the same recipe.
@@ -202,10 +436,43 @@ ENABLE_SWITCH=1 NUM_WARMUP_BATCHES=1 \
 bash tests/special_e2e/run_flowgrpo_qwen_image_v1_separate_async.sh
 ```
 
+## How TransferQueue supports the V1 trainer
+
+TransferQueue (pip package `TransferQueue`, imported as `transfer_queue`) is the
+streaming queue the V1 control plane uses to hand rollout data to the trainer.
+Every V1 diffusion run depends on it:
+
+1. **Force-enabled lifecycle.** The yaml default `transfer_queue.enable` is
+   `false`, but a V1 launch force-sets it to `true` before `ray.init()` — a V1
+   run cannot start without TransferQueue. `ray.init` then exports
+   `TRANSFER_QUEUE_ENABLE=1` through the Ray runtime env so all workers join the
+   same queue, and the task runner wraps training in `tq.init(config.transfer_queue)`
+   … `tq.close()`. If Ray workers report `ModuleNotFoundError: No module named
+   'transfer_queue'`, stop the cluster (`ray stop`) and relaunch from the
+   environment where TransferQueue is installed.
+2. **Rollout-side producer.** The diffusion agent loop ships a TransferQueue
+   writer (`diffusion_agent_loop_tq.py`) that serializes each finished rollout
+   session — prompts, latents, rewards, and an explicit allowlist of extra
+   fields (e.g. `img_shapes` for Qwen-Image 2D RoPE). The allowlist is
+   intentional: silently forwarding unknown fields has broken metadata before,
+   so new fields must be added there explicitly.
+3. **Trainer-side consumer.** The trainer converts queued rows back to
+   `DataProto` batches (`tq_utils.diffusion_tq_batch_to_dataproto`) and feeds
+   them to the ReplayBuffer, which drives `sync` batching, staleness eviction,
+   and `separate_async` partial rollout.
+4. **Tuning.** `transfer_queue.backend.SimpleStorage.total_storage_size` caps
+   how many experience samples the default backend holds;
+   `num_data_storage_units` sets the in-memory storage units; metrics can be
+   exposed via `transfer_queue.metrics.*`. See [Important settings](#important-settings).
+
+Omni models get the same support through verl's `TaskRunnerV1`
+(`python -m verl_omni.trainer.main_omni`); omni inherits verl's TransferQueue
+setup and requires TransferQueue >= 0.1.9 for async checkpoint resume.
+
 ## Important settings
 
-- `trainer.use_v1=true` selects the V1 trainer instead of the legacy diffusion
-  trainer.
+- `trainer.use_v1` (default `true` since v0.3.0) selects the V1 trainer; setting
+  it to `false` explicitly selects the deprecated legacy v0 trainer.
 - `trainer.v1.trainer_mode` selects `sync` or `separate_async`.
 - `trainer.v1.separate_async.parameter_sync_step` controls the number of local
   actor updates per rollout-weight synchronization cycle.
@@ -230,11 +497,37 @@ The configurable incomplete-group refill policy above applies to `sync` mode.
 In `separate_async`, the upstream async replay buffer automatically evicts and
 replaces stale or failed prompt groups. `colocate_async` is not yet supported.
 
-## Troubleshooting
+## Legacy v0 trainer (deprecated)
 
-`ModuleNotFoundError: No module named 'transfer_queue'`
-: Install TransferQueue in the same environment used to launch Ray, then run
-  the import verification command above.
+The legacy v0 diffusion trainer — launched by
+`python -m verl_omni.trainer.main_diffusion` or by
+`trainer.use_v1=false` — is **deprecated for every model** since v0.3.0:
+
+- Every v0 launch of a path that has a V1 equivalent emits a
+  `DeprecationWarning`; the v0 trainer will be removed in a future release.
+- Models without a landed V1 recipe (tracked in
+  [verl-project/verl-omni#389](https://github.com/verl-project/verl-omni/issues/389))
+  keep working on v0 until their port lands; the warning is expected there.
+  Their scripts pin `trainer.use_v1=false` explicitly, so the launch stays on
+  v0 even if the entrypoint is swapped to `main_diffusion_v1`.
+- **Stays on v0 by design** (no warning, no V1 planned): diffusion offline DPO
+  (`examples/dpo_trainer/sd35/`) and omni offline DPO
+  (`algorithm.sample_source=offline` + `algorithm.trainer_type=direct_preference`).
+
+Migrating a v0 recipe to V1 sync takes three lines — swap the entrypoint and
+the two (now-default) switches:
+
+```text
+python3 -m verl_omni.trainer.main_diffusion   ->  python3 -m verl_omni.trainer.main_diffusion_v1
+trainer.use_v1=false                          ->  trainer.use_v1=true
+trainer.v1.trainer_mode=sync
+```
+
+Batch math is unchanged for `sync`; `separate_async` adds the
+`train_batch_size = parameter_sync_step * ppo_mini_batch_size` identity
+described above.
+
+## Troubleshooting
 
 Ray workers cannot import `transfer_queue`
 : Stop the existing Ray cluster with `ray stop`, activate the environment where

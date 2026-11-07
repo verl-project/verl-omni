@@ -49,7 +49,8 @@ from collections import deque
 from enum import Enum
 
 import ray
-from omegaconf import DictConfig
+import transfer_queue as tq
+from omegaconf import DictConfig, OmegaConf
 from transfer_queue import KVBatchMeta
 from verl import DataProto
 from verl.checkpoint_engine import CheckpointEngineManager
@@ -57,7 +58,6 @@ from verl.trainer.config import HybridRolloutSwitchConfig
 from verl.trainer.ppo.utils import Role
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.debug import marked_timer
-from verl.workers.rollout.llm_server import LLMServerManager
 
 from verl_omni.trainer.diffusion.v1.trainer_base import (
     PolicyGradientDiffusionTrainerV1,
@@ -67,6 +67,7 @@ from verl_omni.workers.checkpoint_engine import OmniCheckpointEngineManager
 from verl_omni.workers.config.reward import reward_role_required, streaming_reward_enabled
 from verl_omni.workers.detach_actor_worker import DiffusionDetachActorWorker
 from verl_omni.workers.rollout.diffusion_llm_server import DiffusionWholeSampleRetryLLMServerClient
+from verl_omni.workers.rollout.replica import DiffusionLLMServerManager as LLMServerManager
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
@@ -91,7 +92,8 @@ class PolicyGradientDiffusionTrainerV1SeparateAsync(PolicyGradientDiffusionTrain
       checkpoint managers.
     - ``on_train_begin``: with switching disabled, reclaim the colocated
       replicas first so no warmup request is routed to a replica that is about
-      to be aborted; then enqueue ``num_warmup_batches`` prompt batches.
+      to be aborted; then top up the configured warmup depth after restoring
+      in-flight prompts.
     - ``on_step_begin``: reclaim the colocated replicas (abort + sleep, remove
       from the balancer) when switching is disabled or the replay buffer already
       holds the switch threshold; otherwise ``prepare_step`` submits this step's
@@ -181,7 +183,13 @@ class PolicyGradientDiffusionTrainerV1SeparateAsync(PolicyGradientDiffusionTrain
         self._scaling_factor = (hybrid_gpus + standalone_gpus) / standalone_gpus
 
     def _compute_old_log_prob(self, data: DataProto) -> DataProto:
-        """Compute every local update's proximal log-probs with cycle-start weights."""
+        """Compute every local update's proximal log-probs with cycle-start weights.
+
+        Not annotated directly: the base method already carries the
+        ``old_log_prob`` annotation and this override reaches it through
+        ``super()``, so skipping and dumping happen exactly once per call while
+        the snapshot lifecycle here always runs.
+        """
         if self.parameter_sync_step == 1:
             return super()._compute_old_log_prob(data)
 
@@ -295,15 +303,41 @@ class PolicyGradientDiffusionTrainerV1SeparateAsync(PolicyGradientDiffusionTrain
         self.standalone_checkpoint_manager.update_weights(self.global_steps)
         self.checkpoint_manager.update_weights(self.global_steps)
 
+    def _rollout_server_managers(self) -> list:
+        # Unlike the PPO trainer, diffusion must exclude hybrid replicas when
+        # switching is disabled; only standalone replicas generate in that mode.
+        managers = super()._rollout_server_managers() if self.hybrid_rollout_config.enable_switch else []
+        standalone = getattr(self, "standalone_server_manager", None)
+        if standalone is not None:
+            managers.append(standalone)
+        return managers
+
     def on_train_begin(self):
         if not self.hybrid_rollout_config.enable_switch and self.current_mode == HybridEngineMode.ROLLOUT:
             # Reclaim before the warmup feed so no warmup request is routed to a replica about to sleep.
             logger.info("Switching hybrid engine to trainer mode before the warmup feed")
             self.switch_to_trainer()
+        if OmegaConf.select(self.config, "skip.rollout_tq.enable", default=False):
+            return
         num_warmup_batches = self.config.trainer.v1.separate_async.num_warmup_batches
-        for _ in range(num_warmup_batches):
+        train_batch_size = self.config.data.train_batch_size
+        target_warmup_prompts = num_warmup_batches * train_batch_size
+        queue_state = tq.kv_list("train") or {}
+        restored_inflight_prompts = sum(
+            tag.get("is_prompt", False) and tag.get("status") in ("pending", "running")
+            for tag in queue_state.get("train", {}).values()
+        )
+        prompts_to_add = max(0, target_warmup_prompts - restored_inflight_prompts)
+        full_batches, remaining_prompts = divmod(prompts_to_add, train_batch_size)
+        for _ in range(full_batches):
             self._add_batch_to_generate()
-        logger.info(f"Added {num_warmup_batches} warmup batches to the agent loop manager")
+        if remaining_prompts:
+            self._add_prompts_to_generate(remaining_prompts)
+        logger.info(
+            "Added %d warmup prompts to the agent loop manager; restored %d in-flight prompts",
+            prompts_to_add,
+            restored_inflight_prompts,
+        )
 
     def on_validate_begin(self):
         if self.current_mode == HybridEngineMode.TRAINER:
@@ -405,6 +439,10 @@ class PolicyGradientDiffusionTrainerV1SeparateAsync(PolicyGradientDiffusionTrain
         )
 
     def on_step_end(self):
+        # _stop_profiling() already moved this step's flag to prev_step_profile.
+        if self.prev_step_profile:
+            self._stop_rollout_profiling()
+
         config = self.hybrid_rollout_config
         with marked_timer("update_weights", self.timing_raw, color="red"):
             self._pending_sync_metrics = dict(

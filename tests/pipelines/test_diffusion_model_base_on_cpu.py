@@ -13,6 +13,8 @@
 # limitations under the License.
 """CPU tests for DiffusionModelBase registration and dispatch."""
 
+from types import SimpleNamespace
+
 import pytest
 
 from verl_omni.pipelines.model_base import DiffusionModelBase, VllmOmniPipelineBase
@@ -80,6 +82,28 @@ class TestDiffusionModelBaseRegistry:
         assert _Impl.__name__ == "_Impl"
         assert issubclass(_Impl, DiffusionModelBase)
 
+    def test_fsdp_ignore_hook_defaults_to_empty_list(self):
+        """The hook is declared on the base: adapters opt in, others declare nothing."""
+        assert DiffusionModelBase.get_fsdp_ignored_module_names(SimpleNamespace()) == []
+
+        @DiffusionModelBase.register("_TestIgnoreArch_CPU", algorithm="flow_grpo")
+        class _Impl(DiffusionModelBase):
+            @classmethod
+            def build_scheduler(cls, model_config):
+                pass
+
+            @classmethod
+            def set_timesteps(cls, scheduler, model_config, device):
+                pass
+
+            @classmethod
+            def prepare_model_inputs(cls, module, model_config, *args, **kwargs):
+                pass
+
+        # An adapter that does not opt in inherits the empty default.
+        cfg = _make_model_config("_TestIgnoreArch_CPU")
+        assert DiffusionModelBase.get_class(cfg).get_fsdp_ignored_module_names(cfg) == []
+
 
 class TestVllmOmniPipelineBaseRegistry:
     def test_builtin_qwen_rollout_algorithms_registered(self):
@@ -91,6 +115,31 @@ class TestVllmOmniPipelineBaseRegistry:
 
         assert VllmOmniPipelineBase.get_class("QwenImagePipeline", "flow_grpo") is QwenImagePipelineWithLogProb
         assert VllmOmniPipelineBase.get_class("QwenImagePipeline", "diffusion_nft") is QwenImageDiffusionNFTPipeline
+
+    def test_ar_position_ids_default_is_1d_and_dual_grpo_uses_mrope(self):
+        pytest.importorskip("vllm_omni")
+        import torch
+
+        from verl_omni.pipelines.qwen_image_dual_grpo.vllm_omni_rollout_adapter import (
+            QwenImagePipelineWithDualLogProb,
+        )
+
+        # left-padded prompt (2 pads) + response (3 tokens)
+        attention_mask = torch.tensor([[0, 0, 1, 1, 1]], dtype=torch.long)
+
+        default_ids = VllmOmniPipelineBase.build_ar_position_ids(attention_mask)
+        assert default_ids.shape == (1, 5)
+        assert default_ids.tolist() == [[0, 0, 0, 1, 2]]
+
+        unresolved = VllmOmniPipelineBase.resolve_ar_position_ids(None, None, attention_mask)
+        assert unresolved.shape == (1, 5)
+
+        dual_ids = VllmOmniPipelineBase.resolve_ar_position_ids("QwenImagePipeline", "dual_grpo", attention_mask)
+        assert VllmOmniPipelineBase.get_class("QwenImagePipeline", "dual_grpo") is QwenImagePipelineWithDualLogProb
+        assert dual_ids.shape == (1, 4, 5)
+        assert dual_ids[0, 0].tolist() == [1, 1, 0, 1, 2]
+        assert torch.equal(dual_ids[0, 0], dual_ids[0, 1])
+        assert torch.equal(dual_ids[0, 0], dual_ids[0, 3])
 
     def test_diffusion_nft_rollout_does_not_override_sde_trajectory_loop(self):
         pytest.importorskip("vllm_omni")
@@ -117,21 +166,28 @@ class TestVllmOmniPipelineBaseRegistry:
 
             return image_postprocess
 
+        from verl_omni.pipelines.diffusion_rollout_output import install_rollout_postprocessor
+
         monkeypatch.setattr(
-            vllm_omni_rollout_adapter,
-            "_SD3_IMAGE_POST_PROCESS_FUNC",
+            vllm_omni_rollout_adapter.pipeline_sd3,
+            "get_sd3_image_post_process_func",
             image_postprocess_factory,
         )
-
-        assert (
-            vllm_omni_rollout_adapter.pipeline_sd3.get_sd3_image_post_process_func
-            is vllm_omni_rollout_adapter.get_latent_post_process_func
-        )
-
-        postprocess = vllm_omni_rollout_adapter.get_latent_post_process_func(od_config=None)
+        install_rollout_postprocessor(vllm_omni_rollout_adapter.pipeline_sd3, "get_sd3_image_post_process_func")
+        postprocess = vllm_omni_rollout_adapter.pipeline_sd3.get_sd3_image_post_process_func(od_config=None)
         latent = torch.zeros(1, 16, 2, 2)
         image = torch.zeros(1, 3, 2, 2)
-        assert postprocess(latent) is latent
+        from verl_omni.pipelines.diffusion_rollout_output import rollout_output, with_visual_artifacts
+
+        named = with_visual_artifacts(
+            rollout_output(media=latent),
+            decoded=None,
+            latents=latent,
+            latent_layout="CHW",
+            output_type="latent",
+            context="SD3 test",
+        ).output
+        assert postprocess(named) is named
         assert postprocess(image) == "decoded"
         assert len(image_outputs) == 1
         assert image_outputs[0] is image

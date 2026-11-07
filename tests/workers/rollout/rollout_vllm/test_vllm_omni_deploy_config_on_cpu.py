@@ -1,4 +1,5 @@
 # Copyright (c) 2026, NVIDIA CORPORATION. All rights reserved.
+# Copyright 2026 Bytedance Ltd. and/or its affiliates
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,21 +13,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""CPU checks that the generated deploy config forwards text-encoder TP.
-
-Regression coverage for the bug where ``text_encoder_tp_size`` was passed as a
-top-level engine flag and silently dropped by vLLM-Omni's stage/parallel-config
-resolution, leaving the diffusion text encoder unsharded (resident on DiT rank
-0). The rollout config now carries ``text_encoder_tp_size`` and it must land in
-every generated stage so it reaches ``DiffusionParallelConfig``.
-"""
+"""CPU checks for vLLM-Omni deploy configs, replica allocation and SP rank mapping."""
 
 import types
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
+import pytest
 import yaml
+from omegaconf import OmegaConf
 from verl.utils.device import get_visible_devices_keyword
+from verl.workers.rollout import utils as verl_rollout_utils
+from vllm_omni.config.stage_config import StageExecutionType
 
 from verl_omni.pipelines.model_base import OmniRolloutPipelineBase
+from verl_omni.workers.config import DiffusionRolloutConfig
 from verl_omni.workers.rollout.vllm_rollout.vllm_omni_ar_strategy import ARStrategy
 
 
@@ -46,6 +47,7 @@ def _run_write_deploy_config(
             return [
                 types.SimpleNamespace(
                     stage_id=0,
+                    execution_type=StageExecutionType.DIFFUSION,
                     final_output=True,
                     final_output_type="audio",
                     sampling_constraints={},
@@ -84,3 +86,355 @@ def test_deploy_config_stage_defaults_when_config_lacks_text_encoder_tp_size(mon
     deploy = _run_write_deploy_config(monkeypatch, tensor_parallel_size=2, include_text_encoder_tp_size=False)
     for stage in deploy["stages"]:
         assert stage["text_encoder_tp_size"] == 1
+
+
+def test_sp_does_not_require_a_verl_patch(monkeypatch):
+    monkeypatch.delattr(verl_rollout_utils, "get_rollout_sequence_parallel_size", raising=False)
+    config = DiffusionRolloutConfig(name="vllm_omni", tensor_model_parallel_size=1, ulysses_degree=4)
+    assert config.tensor_model_parallel_size == 1
+
+
+@pytest.mark.parametrize("tp,usp,ring", [(2, 1, 1), (1, 4, 1), (2, 2, 1), (1, 1, 4), (1, 8, 1)])
+@pytest.mark.parametrize("standalone", [False, True])
+async def test_manager_replica_and_worker_slices(monkeypatch, tp, usp, ring, standalone):
+    from verl_omni.workers.rollout import replica as replica_module
+    from verl_omni.workers.rollout.vllm_rollout.vllm_omni_async_server import vLLMOmniReplica
+
+    class RecordingReplica(vLLMOmniReplica):
+        async def launch_servers(self):
+            self._server_handle = f"handle-{self.replica_rank}"
+            self._server_address = f"address-{self.replica_rank}"
+
+        async def init_standalone(self):
+            # No Ray cluster: record the resource shape consumed by the inherited method.
+            self.resource_shape = [self.gpus_per_replica_node] * self.nnodes
+            await self.launch_servers()
+
+    rollout = OmegaConf.create(
+        {
+            "_target_": "verl_omni.workers.config.DiffusionRolloutConfig",
+            "name": "vllm_omni",
+            "tensor_model_parallel_size": tp,
+            "ulysses_degree": usp,
+            "ring_degree": ring,
+            "data_parallel_size": 1,
+            "pipeline_model_parallel_size": 1,
+            "n_gpus_per_node": 4,
+            "nnodes": 2,
+            "disable_log_stats": True,
+            "prometheus": {"enable": False},
+            "disaggregation": {"enabled": False},
+            "engine_kwargs": {},
+        }
+    )
+    workers = list(range(8))
+    group = None if standalone else SimpleNamespace(world_size=8, workers=workers)
+    manager = replica_module.DiffusionLLMServerManager(
+        SimpleNamespace(actor_rollout_ref=SimpleNamespace(rollout=rollout, model=None)),
+        worker_group=group,
+    )
+    manager.rollout_replica_class = RecordingReplica
+    monkeypatch.setattr(replica_module.RLInsightLogger, "enabled", lambda: False)
+    await manager._initialize_llm_servers()
+    width = tp * usp * ring
+    assert len(manager.get_replicas()) == 8 // width
+    for rank, replica in enumerate(manager.get_replicas()):
+        assert replica.world_size == width
+        assert replica.config.tensor_model_parallel_size == tp
+        assert replica.nnodes == max(1, width // 4)
+        if standalone:
+            assert sum(replica.resource_shape) == width
+        else:
+            assert replica.workers == workers[rank * width : (rank + 1) * width]
+    assert len(manager.server_handles) == len(manager.server_addresses) == 8 // width
+    configs = [replica.config for replica in manager.get_replicas()]
+    assert len({id(config) for config in configs}) == len(configs)
+    configs[0].engine_kwargs["replica_local"] = True
+    assert "replica_local" not in rollout.engine_kwargs
+    assert all("replica_local" not in config.engine_kwargs for config in configs[1:])
+
+
+@pytest.mark.parametrize("tp,usp,ring", [(2, 1, 1), (1, 4, 1), (2, 2, 1), (1, 1, 4), (1, 8, 1)])
+@pytest.mark.parametrize("explicit_replica", [-1, 5])
+def test_registered_adapter_rank_and_ipc_mapping(monkeypatch, tp, usp, ring, explicit_replica):
+    import verl.workers.rollout.base as base
+    import verl.workers.rollout.vllm_rollout.vllm_rollout as upstream
+
+    from verl_omni.workers.rollout.vllm_rollout.vllm_omni_async_server import vLLMOmniServerAdapter
+
+    monkeypatch.setattr(base, "omega_conf_to_dataclass", lambda config: config)
+    monkeypatch.setattr(upstream.ray, "get_runtime_context", lambda: SimpleNamespace(get_job_id=lambda: "test"))
+    monkeypatch.setattr(upstream, "is_support_ipc", lambda: True)
+    monkeypatch.setenv("RAY_LOCAL_WORLD_SIZE", "4")
+    rollout = DiffusionRolloutConfig(
+        name="vllm_omni",
+        tensor_model_parallel_size=tp,
+        ulysses_degree=usp,
+        ring_degree=ring,
+    )
+    assert base.get_rollout_class("vllm_omni", "async") is vLLMOmniServerAdapter
+    width = tp * usp * ring
+    for rank in range(8 if explicit_replica == -1 else width):
+        monkeypatch.setenv("RANK", str(rank))
+        adapter = vLLMOmniServerAdapter(rollout, None, None, replica_rank=explicit_replica)
+        replica_rank = rank // width if explicit_replica == -1 else explicit_replica
+        local = rank % width
+        assert (adapter.replica_rank, adapter.rollout_rank, adapter.node_rank) == (replica_rank, local, local // 4)
+        assert adapter._has_server == (local == 0)
+        assert adapter.config.tensor_model_parallel_size == tp
+        assert adapter.zmq_handle == f"ipc:///tmp/rl-colocate-zmq-test-replica-{replica_rank}-rank-{local % 4}.sock"
+
+
+async def test_sp_one_manager_delegates(monkeypatch):
+    from verl.workers.rollout.llm_server import LLMServerManager
+
+    from verl_omni.workers.rollout.replica import DiffusionLLMServerManager
+
+    original = AsyncMock()
+    monkeypatch.setattr(LLMServerManager, "_initialize_llm_servers", original)
+    manager = object.__new__(DiffusionLLMServerManager)
+    manager.rollout_config = DiffusionRolloutConfig()
+    await manager._initialize_llm_servers(start_rank=3)
+    original.assert_awaited_once_with(start_rank=3)
+
+
+async def test_sp_pool_divisibility_fails_before_launch():
+    from verl_omni.workers.rollout.replica import DiffusionLLMServerManager
+
+    rollout = DiffusionRolloutConfig(name="vllm_omni", tensor_model_parallel_size=1, ulysses_degree=4)
+    manager = DiffusionLLMServerManager(
+        SimpleNamespace(actor_rollout_ref=SimpleNamespace(rollout=rollout, model=None)),
+        worker_group=SimpleNamespace(world_size=6),
+    )
+    manager.rollout_replica_class = Mock(side_effect=AssertionError("must not launch"))
+    with pytest.raises(ValueError, match="divisible"):
+        await manager._initialize_llm_servers()
+    manager.rollout_replica_class.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"name": "vllm"},
+        {"data_parallel_size": 2},
+        {"name": "trtllm"},
+        {"engine_kwargs": {"vllm_omni": {"output_mode": "ar"}}},
+        {"disaggregation": {"enabled": True}},
+    ],
+)
+def test_sp_rejects_unsupported_modes(overrides):
+    config = dict(name="vllm_omni", tensor_model_parallel_size=1, ulysses_degree=4)
+    config.update(overrides)
+    with pytest.raises(ValueError, match="sequence parallelism"):
+        DiffusionRolloutConfig(**config)
+
+
+def test_sp_rejects_pipeline_parallelism():
+    with pytest.raises(NotImplementedError, match="pipeline_model_parallel_size"):
+        DiffusionRolloutConfig(name="vllm_omni", ulysses_degree=4, pipeline_model_parallel_size=2)
+
+
+def test_http_profiler_uses_sp_footprint(monkeypatch):
+    from verl.utils.profiler import ProfilerConfig
+    from verl.utils.profiler.config import TorchProfilerToolConfig
+
+    from verl_omni.workers.rollout.vllm_rollout import vllm_omni_async_server as module
+
+    server = object.__new__(module.vLLMOmniHttpServer)
+    server.config = DiffusionRolloutConfig(
+        name="vllm_omni",
+        tensor_model_parallel_size=1,
+        ulysses_degree=4,
+        profiler=ProfilerConfig(tool="torch", ranks=[4]),
+    )
+    server.replica_rank = 1
+    server.replica_world_size = 1
+    server.profiler_controller = SimpleNamespace(
+        config=ProfilerConfig(tool="torch", ranks=[4]),
+        tool_config=TorchProfilerToolConfig(),
+    )
+    server._generate_strategy = SimpleNamespace(post_init=Mock())
+    monkeypatch.setenv("VERL_ZMQ_BASE_VISIBLE_DEVICES", "")
+    monkeypatch.setattr(module.vLLMHttpServer, "_post_init", lambda *_: None)
+    server._post_init("0,1,2,3")
+    assert server.replica_world_size == 4
+    assert server.profiler_controller.config.ranks == [1]
+    assert server.config.profiler.ranks == [4]
+
+
+@pytest.mark.parametrize("standalone", [False, True])
+@pytest.mark.parametrize(
+    "prometheus_enabled,insight_enabled", [(False, False), (True, False), (False, True), (True, True)]
+)
+@pytest.mark.parametrize("start_rank", [None, 5])
+@pytest.mark.parametrize("fail_init", [False, True])
+async def test_manager_start_rank_and_metrics_match_pinned_lifecycle(
+    monkeypatch, standalone, prometheus_enabled, insight_enabled, start_rank, fail_init
+):
+    from verl.workers.config.rollout import PrometheusConfig
+    from verl.workers.rollout import llm_server as upstream
+
+    from verl_omni.workers.rollout import replica as replica_module
+
+    trace = Mock()
+    monkeypatch.setattr(replica_module, "update_prometheus_config", trace.prometheus)
+    monkeypatch.setattr(upstream, "update_prometheus_config", trace.prometheus)
+    monkeypatch.setattr(replica_module.RLInsightLogger, "enabled", lambda: insight_enabled)
+    monkeypatch.setattr(replica_module.RLInsightLogger, "register_rollout_metrics", trace.insight)
+    group = None if standalone else SimpleNamespace(world_size=8, workers=list(range(8)))
+    results = []
+    for manager_class, tp, usp in ((upstream.LLMServerManager, 4, 1), (replica_module.DiffusionLLMServerManager, 1, 4)):
+        rollout = DiffusionRolloutConfig(
+            name="vllm_omni",
+            tensor_model_parallel_size=tp,
+            ulysses_degree=usp,
+            nnodes=1,
+            n_gpus_per_node=8,
+            disable_log_stats=False,
+            prometheus=PrometheusConfig(enable=prometheus_enabled),
+        )
+        cfg = SimpleNamespace(actor_rollout_ref=SimpleNamespace(rollout=rollout, model=None))
+        manager = manager_class(cfg, worker_group=group, start_rank=3)
+
+        def make_replica(*, replica_rank, config, model_config, gpus_per_node, expected_config=rollout):
+            trace.construct(replica_rank, config is expected_config, model_config, gpus_per_node)
+
+            async def init(*args):
+                trace.init(replica_rank, *args)
+                if fail_init:
+                    raise RuntimeError("launch failed")
+
+            return SimpleNamespace(
+                replica_rank=replica_rank,
+                init_standalone=init,
+                init_hybrid=init,
+                _server_handle=f"h{replica_rank}",
+                _server_address=f"a{replica_rank}",
+            )
+
+        manager.rollout_replica_class = make_replica
+        if fail_init:
+            with pytest.raises(RuntimeError, match="launch failed"):
+                await manager._initialize_llm_servers(start_rank=start_rank)
+            trace.prometheus.assert_not_called()
+            trace.insight.assert_not_called()
+        else:
+            await manager._initialize_llm_servers(start_rank=start_rank)
+            first = 3 if start_rank is None else start_rank
+            assert [r.replica_rank for r in manager.get_replicas()] == [first, first + 1]
+            assert manager.server_handles == [f"h{first}", f"h{first + 1}"]
+            assert manager.server_addresses == [f"a{first}", f"a{first + 1}"]
+            if prometheus_enabled:
+                trace.prometheus.assert_called_once_with(rollout.prometheus, manager.server_addresses, "vllm_omni")
+            if insight_enabled:
+                trace.insight.assert_called_once_with(
+                    manager.server_addresses, "vllm_omni", labels=[{"replica": first}, {"replica": first + 1}]
+                )
+        results.append(list(trace.mock_calls))
+        trace.reset_mock()
+    assert results[0] == results[1]
+
+
+async def test_inherited_standalone_allocates_all_sp_ranks(monkeypatch):
+    from verl.workers.rollout import replica as upstream
+
+    from verl_omni.workers.rollout.vllm_rollout.vllm_omni_async_server import vLLMOmniReplica
+
+    config = DiffusionRolloutConfig(name="vllm_omni", tensor_model_parallel_size=1, ulysses_degree=8)
+    replica = vLLMOmniReplica(2, config, None, gpus_per_node=4)
+    pool = object()
+    pool_manager = Mock(
+        return_value=SimpleNamespace(
+            create_resource_pool=Mock(),
+            resource_pool_dict={"rollout_pool_2": pool},
+        )
+    )
+    worker_group = Mock(return_value=SimpleNamespace(workers=list(range(8))))
+    monkeypatch.setattr(upstream, "ResourcePoolManager", pool_manager)
+    monkeypatch.setattr(upstream, "RayWorkerGroup", worker_group)
+    monkeypatch.setattr(upstream, "get_device_name", lambda: "cpu")
+    replica.get_ray_class_with_init_args = Mock(return_value="worker-class")
+    replica.launch_servers = AsyncMock()
+    await replica.init_standalone()
+    assert pool_manager.call_args.kwargs["resource_pool_spec"] == {"rollout_pool_2": [4, 4]}
+    assert worker_group.call_args.kwargs["resource_pool"] is pool
+    assert replica.workers == list(range(8))
+    replica.launch_servers.assert_awaited_once()
+
+
+def test_ar_adapter_keeps_parent_state(monkeypatch):
+    import verl.workers.rollout.base as base
+    import verl.workers.rollout.vllm_rollout.vllm_rollout as upstream
+    from verl.workers.config import RolloutConfig
+
+    from verl_omni.workers.rollout.vllm_rollout.vllm_omni_async_server import vLLMOmniServerAdapter
+
+    monkeypatch.setattr(base, "omega_conf_to_dataclass", lambda config: config)
+    monkeypatch.setattr(upstream.ray, "get_runtime_context", lambda: SimpleNamespace(get_job_id=lambda: "test"))
+    monkeypatch.setattr(upstream, "is_support_ipc", lambda: True)
+    monkeypatch.setenv("RAY_LOCAL_WORLD_SIZE", "4")
+    monkeypatch.setenv("RANK", "3")
+    config = RolloutConfig(name="vllm_omni", tensor_model_parallel_size=2)
+    parent = upstream.ServerAdapter(config, None, None)
+    local = vLLMOmniServerAdapter(config, None, None)
+    assert vars(local) == vars(parent)
+
+
+@pytest.mark.parametrize("module_name", ["ray_diffusion_trainer", "v1.trainer_base", "v1.trainer_separate_async"])
+def test_diffusion_trainers_select_local_manager(module_name):
+    import importlib
+
+    from verl_omni.workers.rollout.replica import DiffusionLLMServerManager
+
+    trainer = importlib.import_module(f"verl_omni.trainer.diffusion.{module_name}")
+    assert trainer.LLMServerManager is DiffusionLLMServerManager
+
+
+def _run_ar_write_deploy_config(monkeypatch, *, expert_parallel_stage_ids):
+    """Generate a deploy config for a two-stage AR pipeline (Thinker-like)."""
+    fake_self = types.SimpleNamespace(config=types.SimpleNamespace(tensor_model_parallel_size=2))
+
+    class Adapter(OmniRolloutPipelineBase):
+        @classmethod
+        def build_stage_configs(cls, pipeline_mode="thinker_only"):
+            return [
+                types.SimpleNamespace(
+                    stage_id=0,
+                    execution_type=StageExecutionType.LLM_AR,
+                    final_output=True,
+                    final_output_type="text",
+                    sampling_constraints={},
+                ),
+                types.SimpleNamespace(
+                    stage_id=1,
+                    execution_type=StageExecutionType.LLM_AR,
+                    final_output=False,
+                    final_output_type=None,
+                    sampling_constraints={},
+                ),
+            ]
+
+        @classmethod
+        def get_pipeline_id(cls, pipeline_mode="thinker_only"):
+            return "qwen3_omni_moe"
+
+    monkeypatch.setenv(get_visible_devices_keyword(), "0,1")
+
+    engine_kwargs: dict = {}
+    strategy = ARStrategy(fake_self)
+    strategy._expert_parallel_stage_ids = expert_parallel_stage_ids
+    strategy._write_deploy_config(engine_kwargs, "qwen3_omni_moe", Adapter, "thinker_only")
+    with open(engine_kwargs["deploy_config"]) as f:
+        return yaml.safe_load(f)
+
+
+def test_deploy_config_marks_only_opted_in_stages_with_expert_parallel(monkeypatch):
+    """vLLM-Omni reads EP as a per-stage flag, so only the Thinker stage gets it."""
+    deploy = _run_ar_write_deploy_config(monkeypatch, expert_parallel_stage_ids=frozenset({0}))
+    assert deploy["stages"][0]["enable_expert_parallel"] is True
+    assert "enable_expert_parallel" not in deploy["stages"][1]
+
+
+def test_deploy_config_omits_expert_parallel_by_default(monkeypatch):
+    deploy = _run_ar_write_deploy_config(monkeypatch, expert_parallel_stage_ids=frozenset())
+    assert all("enable_expert_parallel" not in stage for stage in deploy["stages"])

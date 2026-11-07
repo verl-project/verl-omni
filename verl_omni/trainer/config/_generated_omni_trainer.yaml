@@ -119,6 +119,7 @@ actor_rollout_ref:
       load_contents: ${.save_contents}
       async_save: false
       strict: true
+      save_lora_only: false
     use_fused_kernels: ${oc.select:actor_rollout_ref.model.use_fused_kernels,false}
     profiler:
       _target_: verl.utils.profiler.ProfilerConfig
@@ -801,7 +802,20 @@ reward:
         all_ranks: false
         ranks: []
         save_path: ${oc.select:global_profiler.save_path,outputs/profile}/reward_model
+        relocate_results: ${oc.select:global_profiler.relocate_results,false}
+        finish_hook_cmd: ${oc.select:global_profiler.finish_hook_cmd,null}
+        finish_hook_all_ranks: ${oc.select:global_profiler.finish_hook_all_ranks,false}
+        finish_hook_ranks: ${oc.select:global_profiler.finish_hook_ranks,[]}
         tool_config:
+          npu:
+            _target_: verl.utils.profiler.config.NPUToolConfig
+            contents: []
+            level: level0
+            analysis: true
+            discrete: false
+            profile_token_start: null
+            profile_token_end: null
+            name: npu
           nsys:
             _target_: verl.utils.profiler.config.NsightToolConfig
             discrete: ${oc.select:global_profiler.global_tool_config.nsys.discrete,false}
@@ -874,6 +888,7 @@ reward:
   accelerator_workers:
     enabled: false
   reward_functions: {}
+  multi_reward_concurrency: 1
   models: {}
   aggregation: weighted_sum
   reward_manager:
@@ -927,7 +942,7 @@ distillation:
   _target_: verl.workers.config.DistillationConfig
   enabled: false
   distillation_loss:
-    _target_: verl.workers.config.DistillationLossConfig
+    _target_: verl_omni.workers.config.omni.distillation.OmniDistillationLossConfig
     loss_mode: k3
     topk: 32
     use_task_rewards: true
@@ -939,6 +954,7 @@ distillation:
     clip_ratio: 0.2
     clip_ratio_low: 0.2
     clip_ratio_high: 0.2
+    kd_temperature: 1.0
   n_gpus_per_node: 8
   nnodes: 0
   teacher_models:
@@ -1047,6 +1063,7 @@ trainer:
         path: null
         name: null
       sampler_kwargs: {}
+  ray_master_port_range: null
 global_profiler:
   _target_: verl.utils.profiler.ProfilerConfig
   tool: null
@@ -1107,3 +1124,32 @@ ray_kwargs:
     runtime_env:
       py_executable: null
   timeline_json_file: null
+agentic_image_gen:
+  vllm_omni_url: ''
+  qwen_image_url: ''
+  qwen_image_seed: null
+  qwen_image_diversify_seed: true
+  qwen_image_height: 512
+  qwen_image_width: 512
+  qwen_image_steps: 20
+  qwen_image_true_cfg_scale: 4.0
+  diffusion_tool_url: ''
+  diffusion_tool_token: null
+  diffusion_tool_timeout: 900
+  vllm_url: ''
+  vllm_model: ''
+  reflect_max_new_tokens: 1024
+  judge_parse_retries: 1
+  reflect_vlm_timeout: 120
+  judge_enable_thinking: false
+  good_enough_threshold: 0.8
+  block_generate_after_yes: true
+  block_generate_after_max_passes: true
+  max_generate_image_passes: 3
+  force_first_generate: false
+  force_first_warmup_steps: 10
+  force_first_end_step: 20
+  force_reflection_after_judge: true
+  rewrite_judge_before_generate: true
+  e2e_root: null
+  run_dir: null

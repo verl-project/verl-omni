@@ -56,7 +56,8 @@ activation_gpu_limit: 0.0
 # The backend strategy registered in EngineRegistry.
 strategy: veomni
 
-# Qwen-Image currently uses eager attention in VeOmni.
+# Actor/ref attention; model.attn_backend applies to FSDP only. The VeOmni engine accepts
+# eager (native SDPA), flash_attention_2_hub and flash_attention_3_hub for every model.
 attn_implementation: eager
 
 # MoE backend selector.

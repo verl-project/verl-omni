@@ -16,6 +16,7 @@ model_name=stabilityai/stable-diffusion-3.5-medium
 NUM_NPUS_ACTOR=1
 
 python3 -m verl_omni.trainer.main_diffusion --config-name=offline_dpo_trainer \
+    trainer.use_v1=false \
     data.train_files=$offline_train_path \
     data.val_files=$offline_test_path \
     trainer.resume_mode=enable \

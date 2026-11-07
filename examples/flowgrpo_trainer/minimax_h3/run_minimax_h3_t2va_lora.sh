@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# DEPRECATED (v0): superseded by run_minimax_h3_t2va_lora_v1.sh (V1 sync, the default since v0.3.0).
 # MiniMax H3 T2VA LoRA FlowGRPO with CLAP and ImageBind rewards.
 set -x
 
@@ -11,8 +12,23 @@ CLAP_MODEL_PATH=${CLAP_MODEL_PATH:-laion/larger_clap_general}
 IMAGEBIND_MODEL_PATH=${IMAGEBIND_MODEL_PATH:-.checkpoints/imagebind_huge.pth}
 ACTOR_CONFIG_PATH=${ACTOR_CONFIG_PATH:-$(dirname "$MODEL_PATH")/transformer}
 NUM_GPUS=${NUM_GPUS:-8}
+ACTOR_SP=${ACTOR_SP:-1}
+if (( ACTOR_SP <= 0 || NUM_GPUS % ACTOR_SP != 0 )); then
+    echo "NUM_GPUS (${NUM_GPUS}) must be a positive multiple of ACTOR_SP ($ACTOR_SP)." >&2
+    exit 1
+fi
 ROLLOUT_TP=${ROLLOUT_TP:-2}
-TEXT_ENCODER_TP=${TEXT_ENCODER_TP:-$ROLLOUT_TP}
+ROLLOUT_USP=${ROLLOUT_USP:-1}
+ROLLOUT_RING=${ROLLOUT_RING:-1}
+ROLLOUT_GROUP_SIZE=$((ROLLOUT_TP * ROLLOUT_USP * ROLLOUT_RING))
+TEXT_ENCODER_TP=${TEXT_ENCODER_TP:-$ROLLOUT_GROUP_SIZE}
+VAE_PATCH_PARALLEL_SIZE=${VAE_PATCH_PARALLEL_SIZE:-1}
+VAE_PARALLEL_MODE=${VAE_PARALLEL_MODE:-tile}
+VAE_USE_TILING=${VAE_USE_TILING:-False}
+if ((ROLLOUT_TP < 1 || ROLLOUT_USP < 1 || ROLLOUT_RING < 1 || NUM_GPUS % ROLLOUT_GROUP_SIZE != 0)); then
+  echo "NUM_GPUS must be divisible by a positive TP * USP * Ring group size." >&2
+  exit 1
+fi
 REWARD_DEVICE=${REWARD_DEVICE:-cuda}
 REWARD_NUM_WORKERS=${REWARD_NUM_WORKERS:-1}
 TOTAL_TRAINING_STEPS=${TOTAL_TRAINING_STEPS:-100}
@@ -48,6 +64,7 @@ exec > >(tee -a "$log_file") 2>&1
 h3_lora_targets="['to_q','to_k','to_v','to_out.0','ff.net.0.proj','ff.net.2']"
 
 python3 -m verl_omni.trainer.main_diffusion \
+    trainer.use_v1=false \
     data.train_files=$train_path \
     data.val_files=$test_path \
     data.train_batch_size=32 \
@@ -75,14 +92,19 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
     actor_rollout_ref.actor.use_kl_loss=False \
     actor_rollout_ref.actor.fsdp_config.model_dtype=bfloat16 \
-    actor_rollout_ref.actor.fsdp_config.ulysses_sequence_parallel_size=1 \
+    actor_rollout_ref.actor.fsdp_config.ulysses_sequence_parallel_size=$ACTOR_SP \
     actor_rollout_ref.rollout.name=vllm_omni \
     actor_rollout_ref.rollout.rollout_attn_backend=FLASH_ATTN_3_HUB \
     actor_rollout_ref.rollout.tensor_model_parallel_size=$ROLLOUT_TP \
     actor_rollout_ref.rollout.text_encoder_tp_size=$TEXT_ENCODER_TP \
+    actor_rollout_ref.rollout.ulysses_degree=$ROLLOUT_USP \
+    actor_rollout_ref.rollout.ring_degree=$ROLLOUT_RING \
+    actor_rollout_ref.rollout.vae_patch_parallel_size=$VAE_PATCH_PARALLEL_SIZE \
+    actor_rollout_ref.rollout.vae_parallel_mode=$VAE_PARALLEL_MODE \
+    actor_rollout_ref.rollout.vae_use_tiling=$VAE_USE_TILING \
     actor_rollout_ref.rollout.n=8 \
     actor_rollout_ref.rollout.seed=42 \
-    actor_rollout_ref.rollout.agent.num_workers=$((NUM_GPUS / ROLLOUT_TP)) \
+    actor_rollout_ref.rollout.agent.num_workers=$((NUM_GPUS / ROLLOUT_GROUP_SIZE)) \
     actor_rollout_ref.rollout.agent.default_agent_loop=minimax_h3_diffusion_single_turn_agent \
     actor_rollout_ref.rollout.max_prompt_embed_length=1024 \
     actor_rollout_ref.rollout.load_format=safetensors \

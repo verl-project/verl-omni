@@ -14,6 +14,7 @@ custom_chat_template='{% for message in messages %}{% if message['\''role'\''] =
 NUM_GPUS_ACTOR=1
 
 python3 -m verl_omni.trainer.main_diffusion \
+    trainer.use_v1=false \
     algorithm.trainer_type=direct_preference \
     algorithm.sample_source=offline \
     algorithm.paired_preference=true \

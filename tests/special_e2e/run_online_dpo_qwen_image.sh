@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Qwen-Image online DPO e2e smoke test (minimal runtime), vllm_omni rollout + OCR reward.
+# Qwen-Image online DPO e2e smoke test (minimal runtime), V1 sync trainer,
+# vllm_omni rollout + OCR reward.
 #
 # Flow: dummy OCR parquet -> vllm_omni rollout -> genrm_ocr reward (vllm Qwen3-VL) ->
 #       online DPO pairing -> ref noise pred -> FSDP LoRA actor update.
@@ -47,7 +48,7 @@ python3 tests/special_e2e/create_dummy_diffusion_data.py \
     --train_size "${train_batch_size}" \
     --val_size 4
     
-python3 -m verl_omni.trainer.main_diffusion \
+python3 -m verl_omni.trainer.main_diffusion_v1 \
     algorithm.trainer_type=direct_preference \
     algorithm.sample_source=online \
     algorithm.paired_preference=true \
@@ -101,7 +102,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     reward.custom_reward_function.name=compute_score_ocr \
     trainer.logger=console \
     trainer.project_name=verl-test \
-    trainer.experiment_name=qwen-image-online-dpo-ocr-e2e \
+    trainer.experiment_name=qwen-image-online-dpo-ocr-v1-sync-e2e \
     trainer.log_val_generations=0 \
     trainer.n_gpus_per_node=${NUM_GPUS} \
     trainer.nnodes=1 \
@@ -110,6 +111,8 @@ python3 -m verl_omni.trainer.main_diffusion \
     trainer.save_freq=-1 \
     trainer.resume_mode=disable \
     trainer.total_training_steps=${TOTAL_TRAIN_STEPS} \
+    trainer.use_v1=true \
+    trainer.v1.trainer_mode=sync \
     "$@"
 
 echo "Qwen-Image online DPO OCR e2e test passed (training completed successfully)."

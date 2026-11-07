@@ -123,32 +123,32 @@ def _sample(trainer, batch_size):
 
 
 def test_wandb_validation_logging_rejects_non_uint8_images():
+    calls = []
     trainer = SimpleNamespace(
-        config=OmegaConf.create({"trainer": {"log_val_generations": 1, "logger": ["wandb"]}}),
+        config=OmegaConf.create(
+            {
+                "trainer": {
+                    "log_val_generations": 1,
+                    "logger": ["wandb"],
+                    "video_fps": 24,
+                    "validation_data_dir": None,
+                    "default_local_dir": None,
+                }
+            }
+        ),
+        global_steps=1,
+        validation_generations_logger=SimpleNamespace(log=lambda *args: calls.append(args)),
     )
 
-    with pytest.raises(ValueError, match=r"Expected a uint8 image tensor, got torch\.float32\."):
+    with pytest.raises(ValueError, match="uint8"):
         PolicyGradientDiffusionTrainerV1._maybe_log_val_generations(
             trainer,
             inputs=["prompt"],
             outputs=torch.zeros(1, 3, 8, 8),
             scores=[0.0],
+            media_kinds=["image"],
         )
-
-
-def test_v1_generation_dump_rejects_non_uint8_outputs_before_submission():
-    trainer = SimpleNamespace()
-
-    with pytest.raises(ValueError, match=r"Expected generation outputs to be a uint8 tensor, got torch\.float32\."):
-        PolicyGradientDiffusionTrainerV1._dump_generations(
-            trainer,
-            inputs=["prompt"],
-            outputs=torch.zeros(1, 3, 8, 8),
-            gts=[""],
-            scores=[0.0],
-            reward_extra_infos_dict={},
-            dump_path="unused",
-        )
+    assert calls == []
 
 
 def test_sample_evicts_partial_failure_and_refills_exact_prompt_count(monkeypatch):
@@ -354,6 +354,35 @@ def test_trainer_factory_uses_upstream_replay_buffer(trainer_mode, drop_incomple
     replay_buffer = PolicyGradientDiffusionTrainerV1._build_replay_buffer(trainer)
 
     assert type(replay_buffer) is expected_type
+
+
+@pytest.mark.parametrize(
+    ("trainer_mode", "expected_poll_interval"),
+    [
+        ("sync", 0.05),
+        ("separate_async", 2.0),
+    ],
+)
+def test_trainer_factory_poll_interval_defaults_by_mode(trainer_mode, expected_poll_interval):
+    config = _make_config(drop_incomplete_groups=False, trainer_mode=trainer_mode)
+    trainer = SimpleNamespace(config=config, trainer_mode=trainer_mode, _add_prompts_to_generate=lambda count: count)
+
+    replay_buffer = PolicyGradientDiffusionTrainerV1._build_replay_buffer(trainer)
+
+    assert replay_buffer.poll_interval == expected_poll_interval
+
+
+def test_trainer_factory_respects_explicit_poll_interval():
+    for trainer_mode, expected in (("sync", 0.5), ("separate_async", 0.5)):
+        config = _make_config(drop_incomplete_groups=False, trainer_mode=trainer_mode)
+        config.trainer.v1.sampler.poll_interval = 0.5
+        trainer = SimpleNamespace(
+            config=config, trainer_mode=trainer_mode, _add_prompts_to_generate=lambda count: count
+        )
+
+        replay_buffer = PolicyGradientDiffusionTrainerV1._build_replay_buffer(trainer)
+
+        assert replay_buffer.poll_interval == expected
 
 
 def test_sample_rejects_non_exact_refill_result(monkeypatch):

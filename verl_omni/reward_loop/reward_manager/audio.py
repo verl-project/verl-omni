@@ -16,7 +16,6 @@
 import asyncio
 import inspect
 import math
-from collections.abc import Mapping
 from functools import partial
 
 import numpy as np
@@ -24,6 +23,8 @@ import torch
 from verl import DataProto
 from verl.experimental.reward_loop.reward_manager.base import RewardManagerBase
 from verl.utils.reward_score import default_compute_score as _upstream_default_compute_score
+
+from verl_omni.reward_loop.reward_manager.media import _reward_extra_info
 
 
 class AudioRewardManager(RewardManagerBase):
@@ -40,16 +41,6 @@ class AudioRewardManager(RewardManagerBase):
         self.is_async_reward_score = inspect.iscoroutinefunction(compute_score)
         self.reward_router_address = reward_router_address
         self.reward_model_tokenizer = reward_model_tokenizer
-
-    @staticmethod
-    def _mapping(value):
-        if isinstance(value, np.ndarray) and value.shape == ():
-            value = value.item()
-        if value is None:
-            return {}
-        if not isinstance(value, Mapping):
-            raise TypeError(f"Audio reward metadata must be a mapping, got {type(value).__name__}.")
-        return dict(value)
 
     @classmethod
     def _extract_audio(cls, extra_info):
@@ -94,11 +85,7 @@ class AudioRewardManager(RewardManagerBase):
             raise ValueError(f"AudioRewardManager scores one sample at a time, got batch size {len(data)}.")
         item = data[0]
         batch = item.non_tensor_batch
-        extra_info = self._mapping(batch.get("extra_info", {}))
-        extra_info.update(self._mapping(batch.get("tool_extra_fields")))
-        for key in ("audio", "audio_sample_rate"):
-            if key in batch and batch[key] is not None:
-                extra_info[key] = batch[key]
+        extra_info = _reward_extra_info(item)
         if "__num_turns__" in batch:
             extra_info["num_turns"] = batch["__num_turns__"]
         if "global_steps" in batch:

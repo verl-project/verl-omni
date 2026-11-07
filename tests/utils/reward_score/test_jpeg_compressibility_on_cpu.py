@@ -47,7 +47,23 @@ def test_jpeg_compressibility_is_negative_scaled_incompressibility():
 def test_compute_score_accepts_single_image_tensor():
     image = torch.zeros(3, 8, 8, dtype=torch.uint8)
 
-    score = compute_score(image)
+    score = compute_score(image, extra_info={"media_kind": "image"})
 
     assert isinstance(score, float)
     assert score < 0
+
+
+def test_compute_score_video_preserves_first_frame_reward():
+    generator = torch.Generator().manual_seed(17)
+    video = torch.stack(
+        [
+            torch.zeros(3, 32, 32, dtype=torch.uint8),
+            torch.randint(0, 256, (3, 32, 32), generator=generator, dtype=torch.uint8),
+        ]
+    )
+    scores, _ = jpeg_compressibility()(video, prompts=None)
+    assert scores[0] != scores[1]
+
+    score = compute_score(video, extra_info={"media_kind": "video", "fps": 24})
+
+    assert score == float(scores[0])

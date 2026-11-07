@@ -1,6 +1,6 @@
 # MiniMax H3 T2VA, FL2VA, and Ref2VA DiffusionNFT
 
-Last updated: 09/14/2026
+Last updated: 09/23/2026
 
 These recipes train rank-64 MiniMax H3 LoRA adapters with online DiffusionNFT
 for text-to-audio-video (T2VA), first-frame image-to-audio-video (FL2VA), and
@@ -56,19 +56,7 @@ published at https://huggingface.co/datasets/zyfenghit/dancegrpo-t2av
 
 ## Install
 
-Follow the project [installation guide](../../../docs/start/install.md),
-then install the repository-pinned vLLM-Omni revision:
-
-```bash
-uv pip install -e ".[gpu]" --torch-backend=auto
-uv pip install "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@$(cat .github/vllm_omni_pin.txt)"
-uv pip install -e ".[train,dev]"
-uv pip install "diffusers @ git+https://github.com/huggingface/diffusers.git@d6726f38a0c5ca6c06a8f227fb7bade3486ed98d"
-```
-
-The explicit Diffusers revision is the tested API target that provides
-`MiniMaxH3Transformer3DModel` and the MiniMax H3 reference-conditioning
-components used by Ref2VA.
+Follow the project [installation guide](../../../docs/start/install.md).
 
 ## Checkpoint
 
@@ -185,13 +173,35 @@ python3 examples/diffusionnft_trainer/minimax_h3/build_fl2va_jsonl.py \
 
 ## Launch
 
+### Rollout VAE and sequence parallelism
+
+The T2VA launcher accepts `ROLLOUT_USP`/`ROLLOUT_RING` (both default `1`),
+`VAE_PATCH_PARALLEL_SIZE` (default `1`), `VAE_PARALLEL_MODE` (default `tile`),
+and `VAE_USE_TILING` (default `False`). Existing TP-only behavior is unchanged.
+For example, add `ROLLOUT_TP=4 VAE_PATCH_PARALLEL_SIZE=4 VAE_USE_TILING=True`
+to reuse a four-rank TP group for tiled VAE decode.
+
+Pure Ulysses uses `ROLLOUT_TP=1 ROLLOUT_USP=4 ROLLOUT_RING=1`, with
+`TEXT_ENCODER_TP=4 VAE_PATCH_PARALLEL_SIZE=4 VAE_USE_TILING=True`. Local rollout
+subclasses account for SP ranks without patching verl; TP remains the actual
+engine TP degree. GPU validation is pending. H3 only permits VAE mode `tile`,
+VAE parallel size `1` or the full DiT
+group, and no hybrid Ulysses x Ring. Encoder TP must divide 8.
+
+FL2VA/Ref2VA and V1 users can pass the typed Hydra fields directly; their
+launchers do not yet provide these environment shortcuts. See the
+[configuration reference](../../../docs/examples/config.md#rollout-sequence-and-vae-parallelism)
+for allocation semantics and the native VAE's small-tile fallback.
+
 ### Text-encoder tensor parallelism
 
-All H3 NFT launchers use `TEXT_ENCODER_TP=${TEXT_ENCODER_TP:-$ROLLOUT_TP}`,
-forwarded as `actor_rollout_ref.rollout.text_encoder_tp_size` (without `+`).
+With sequence parallelism disabled, H3 NFT launchers default `TEXT_ENCODER_TP`
+to `ROLLOUT_TP`, forwarded as `actor_rollout_ref.rollout.text_encoder_tp_size`
+(without `+`). The T2VA launcher uses the full `TP * USP * Ring` group when SP
+is configured.
 For example, `ROLLOUT_TP=4 TEXT_ENCODER_TP=4` shards the encoder across all four
-DiT ranks; `TEXT_ENCODER_TP=1` keeps it unsharded. With the pinned backend, use
-ETP=1 or exactly ETP=rollout TP, not an intermediate subgroup. This applies to
+DiT ranks; `TEXT_ENCODER_TP=1` keeps it unsharded. Use ETP=1 or the complete
+DiT group, not an intermediate subgroup. This applies to
 T2VA, FL2VA, and Ref2VA and is independent of CPU/layerwise offload.
 
 > [!IMPORTANT]
@@ -204,6 +214,29 @@ override remains supported. Prefer the typed field and do not set conflicting
 values through both paths. The fix for [#563](https://github.com/verl-project/verl-omni/issues/563)
 retains ETP through CLI conversion into the fused diffusion engine's parallel
 config; a CLI argument alone was not evidence that the encoder was sharded.
+
+### Actor FSDP sequence parallelism
+
+The T2VA, FL2VA, and Ref2VA launchers accept `ACTOR_SP` (default `1`). Set it
+to a divisor of the GPU count to shard each Actor's joint
+text/video/audio sequence with Diffusers Ulysses context parallelism:
+
+```bash
+ACTOR_SP=2 bash examples/diffusionnft_trainer/minimax_h3/run_minimax_h3_t2va_lora.sh
+```
+
+This uses the same standard equal-partition Ulysses path as Qwen-Image and
+changes Actor FSDP data parallelism to `NUM_GPUS / ACTOR_SP`; it does not change
+rollout `ROLLOUT_TP` or text-encoder `TEXT_ENCODER_TP`. `ACTOR_SP` must divide
+the model's attention-head count (56 for the released H3 checkpoint). When a
+packed layout's length is not a multiple of `ACTOR_SP`, the adapter appends
+padding rows and masks them as attention keys; real rows attend exactly as
+without padding and padding outputs are discarded, so arbitrary prompt and
+reference lengths are supported. Use an attention backend that accepts key
+masks under context parallelism (`native`, `flash_varlen_hub`, or
+`_flash_3_varlen_hub`). Keep timestep staging disabled. DiffusionNFT retains its per-sample H3 forward loop, so SP reduces the
+memory of each compatible long packed sequence but does not combine
+heterogeneous samples into one transformer call.
 
 ### T2VA
 
@@ -231,6 +264,57 @@ NUM_GPUS=8 ROLLOUT_TP=4 ROLLOUT_N=4 INFER_STEPS=50 \
 TOTAL_TRAINING_STEPS=100 OUTPUT_DIR=/path/to/output \
 bash examples/diffusionnft_trainer/minimax_h3/run_minimax_h3_t2va_lora.sh
 ```
+
+### Ascend NPU: 16 devices with FSDP8
+
+The Ascend T2VA launcher reuses the DiffusionNFT recipe above and selects
+FSDP2 with CPU parameter offload, optimizer offload, gradient checkpointing,
+and a per-device micro-batch of one. On 16 NPUs, `fsdp_size=8` creates two
+replicas, each sharded across eight devices. Rollout DiT and text-encoder
+TP are both four. These are LoRA reinforcement-learning updates with an
+ImageBind reward, not supervised fine-tuning.
+
+Install the Ascend runtime and compatible `torch_npu`, vLLM-Ascend, and
+vLLM-Omni packages following the
+[installation guide](https://github.com/verl-project/verl-omni/blob/main/docs/start/install.md).
+Use the checkpoint layout and T2VA parquet preparation described above.
+`MODEL_PATH` is the parent directory containing both `FL2VA/` and `transformer/`.
+
+```bash
+MODEL_PATH=/path/to/MiniMax-H3 \
+DATA_DIR=/path/to/t2va/verl_omni \
+IMAGEBIND_MODEL_PATH=/path/to/imagebind_huge.pth \
+WANDB_MODE=offline \
+NUM_GPUS=16 FSDP_SIZE=8 \
+TOTAL_EPOCHS=30 TOTAL_TRAINING_STEPS=30 \
+bash examples/diffusionnft_trainer/minimax_h3/run_minimax_h3_t2va_lora_npu.sh
+```
+
+For a one-update smoke check, set both `TOTAL_EPOCHS=1` and
+`TOTAL_TRAINING_STEPS=1`. Training stops at whichever limit is reached first;
+30 epochs equal 30 updates only when the training dataloader has one batch.
+The example defaults to 32 prompts, eight rollouts per prompt, 10 inference
+steps, and `TIMESTEP_FRACTION=0.34`: three of the nine eligible training
+noise levels per sample. Set `TIMESTEP_FRACTION=1.0` to train all nine.
+
+The Ascend example uses ImageBind with text-video weight 0.8 and audio-video
+weight 0.2; CLAP is omitted. It therefore has a different reward from the
+GPU recipe's default. Training output is 256x384 with 121 frames. The
+launcher uses Actor `_native_npu` and rollout `TORCH_SDPA`, and sources CANN
+and ATB from `ASCEND_HOME_PATH` (default `/usr/local/Ascend/ascend-toolkit`).
+Set `OUTPUT_DIR` to choose a fresh checkpoint, log, and video directory.
+Profiling is not enabled by this launcher.
+
+The Ascend wrapper fixes `ACTOR_SP=1`, `ACTOR_ATTN_BACKEND=_native_npu`,
+and `ROLLOUT_ATTN_BACKEND=TORCH_SDPA`; exporting those environment variables
+before launching does not override them. These are the settings used in the
+validated NPU run.
+
+FSDP2's CPU-offload policy must manage parameter placement during old-policy
+adapter copy/EMA updates. Manually moving the module in that context can
+leave DTensor device metadata inconsistent with its local CPU shard and
+break subsequent adapter export. The adapter-state helper skips that move
+when the policy is active.
 
 ## FL2VA (image-conditioned) training
 

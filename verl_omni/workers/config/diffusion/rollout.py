@@ -27,6 +27,7 @@ from verl.workers.config.rollout import (
 )
 
 __all__ = [
+    "DiffusionARConfig",
     "DiffusionRolloutAlgoConfig",
     "DiffusionPipelineConfig",
     "DiffusionSamplingConfig",
@@ -63,9 +64,13 @@ class DiffusionPipelineConfig(BaseConfig):
     width: int = 512
     num_inference_steps: int = 10
     output_type: str = "image"
+    # Additional named artifacts required by rewards/logging, including previews with a latent primary.
+    requested_outputs: Optional[list[str]] = None
     true_cfg_scale: float = 1.0
     max_sequence_length: int = 512
     guidance_scale: Optional[float] = None
+    # CFG for the frozen pretrained anchor in forward-process training.
+    reference_guidance_scale: float = 4.5
     reference_image_short_edge: Optional[int] = None
 
     # Wan2.2 video generation: number of frames (81 = ~3s at 24fps)
@@ -89,17 +94,25 @@ class DiffusionPipelineConfig(BaseConfig):
 
 
 @dataclass
-class DiffusionSamplingConfig(BaseConfig):
-    # for validation only
-    n: int = 1
-    seed: int = 42
-    pipeline: DiffusionPipelineConfig = field(default_factory=DiffusionPipelineConfig)
-    algo: DiffusionRolloutAlgoConfig = field(default_factory=DiffusionRolloutAlgoConfig)
-
-    # for llm part when needed
+class DiffusionARConfig(BaseConfig):
+    # AR part sampling config
+    # text generation when needed
     temperature: float = 1.0
     top_k: int = 0
     top_p: float = 1.0
+    repetition_penalty: float = 1.0
+    response_length: int = 1024
+
+
+@dataclass
+class DiffusionSamplingConfig(BaseConfig):
+    # for validation only
+    n: int = 1
+    m: int = 1  # Optional. AR stage 1, number of samples per prompt
+    seed: int = 42
+    pipeline: DiffusionPipelineConfig = field(default_factory=DiffusionPipelineConfig)
+    algo: DiffusionRolloutAlgoConfig = field(default_factory=DiffusionRolloutAlgoConfig)
+    ar: DiffusionARConfig = field(default_factory=DiffusionARConfig)
 
 
 @dataclass
@@ -120,13 +133,7 @@ class DiffusionRolloutConfig(BaseConfig):
     nnodes: int = 0
     n_gpus_per_node: int = 8
     n: int = 1
-
-    # for llm part when needed
-    temperature: float = 1.0
-    top_k: int = 0
-    top_p: float = 1.0
-    repetition_penalty: float = 1.0
-    max_new_tokens: int = 256
+    m: int = 1  # Optional. AR stage 1, number of samples per prompt
 
     # Base seed for deterministic training rollout RNG. Per-step base is
     # ``seed + global_step - 1``. null disables rollout seeding.
@@ -151,8 +158,15 @@ class DiffusionRolloutConfig(BaseConfig):
     data_parallel_size: int = 1
     expert_parallel_size: int = 1
     tensor_model_parallel_size: int = 2
-    # Text-encoder TP shard size: 1 or tensor_model_parallel_size (validated below).
+    # Ulysses and Ring multiply the DiT tensor-parallel footprint.
+    ulysses_degree: int = 1
+    ring_degree: int = 1
+    # Text-encoder TP reuses the DiT group: 1 or its full size.
     text_encoder_tp_size: int = 1
+    # VAE parallelism reuses the DiT ranks rather than allocating extra GPUs.
+    vae_patch_parallel_size: int = 1
+    vae_parallel_mode: str = "tile"
+    vae_use_tiling: bool = False
     pipeline_model_parallel_size: int = 1
     max_num_batched_tokens: int = 8192
     logprobs_mode: Optional[str] = "processed_logprobs"
@@ -183,7 +197,7 @@ class DiffusionRolloutConfig(BaseConfig):
     pipeline: DiffusionPipelineConfig = field(default_factory=DiffusionPipelineConfig)
 
     calculate_log_probs: bool = False
-    llm_calculate_log_probs: bool = False
+    ar_calculate_log_probs: bool = False
 
     rollout_adapter: str = "default"
 
@@ -199,7 +213,8 @@ class DiffusionRolloutConfig(BaseConfig):
 
     enable_chunked_prefill: bool = True
 
-    enable_prefix_caching: bool = True
+    # Diffusion models generate latents without autoregressive token prefix caching; keep False.
+    enable_prefix_caching: bool = False
 
     load_format: str = "dummy"
 
@@ -222,6 +237,9 @@ class DiffusionRolloutConfig(BaseConfig):
     disaggregation: DisaggregationConfig = field(default_factory=DisaggregationConfig)
 
     external_lib: Optional[str] = None
+
+    # For multi-stage generation (e.g, text rewriting -> image generation)
+    ar: Optional[DiffusionARConfig] = field(default_factory=DiffusionARConfig)
 
     def to_vllm_omni_attention_config(self) -> dict:
         """Convert the rollout backend to vLLM-Omni's canonical config form."""
@@ -250,13 +268,26 @@ class DiffusionRolloutConfig(BaseConfig):
                     f"Current rollout {self.name=} not implemented pipeline_model_parallel_size > 1 yet."
                 )
 
-        if self.text_encoder_tp_size < 1:
-            raise ValueError(f"text_encoder_tp_size must be >= 1, got {self.text_encoder_tp_size}.")
-        if self.text_encoder_tp_size not in (1, self.tensor_model_parallel_size):
-            # vLLM-Omni only builds a valid text-encoder group for tp_size == 1 or
-            # tp_size == tensor_model_parallel_size; intermediate sizes leave the
-            # out-of-group ranks without a device group and crash during init.
+        for name in ("ulysses_degree", "ring_degree", "vae_patch_parallel_size", "text_encoder_tp_size"):
+            value = getattr(self, name)
+            if type(value) is not int or value < 1:
+                raise ValueError(f"{name} must be >= 1 and an integer, got {value!r}.")
+        if self.vae_parallel_mode not in {"tile", "spatial_shard_height", "spatial_shard_width"}:
+            raise ValueError(f"Invalid vae_parallel_mode: {self.vae_parallel_mode!r}.")
+        dit_world_size = self.tensor_model_parallel_size * self.ulysses_degree * self.ring_degree
+        if self.text_encoder_tp_size not in (1, dit_world_size):
             raise ValueError(
-                "text_encoder_tp_size must be either 1 or equal to tensor_model_parallel_size "
-                f"({self.tensor_model_parallel_size}), got {self.text_encoder_tp_size}."
+                "text_encoder_tp_size must be either 1 or equal to the DiT group size "
+                f"(tensor_model_parallel_size * ulysses_degree * ring_degree = {dit_world_size}), "
+                f"got {self.text_encoder_tp_size}."
             )
+        if self.ulysses_degree * self.ring_degree > 1:
+            omni_kwargs = (self.engine_kwargs or {}).get("vllm_omni", {}) or {}
+            if (
+                self.name != "vllm_omni"
+                or self.data_parallel_size != 1
+                or self.pipeline_model_parallel_size != 1
+                or omni_kwargs.get("output_mode") == "ar"
+                or (self.disaggregation and self.disaggregation.get("enabled", False))
+            ):
+                raise ValueError("Rollout sequence parallelism requires vllm_omni diffusion with DP=PP=1 and no PD.")

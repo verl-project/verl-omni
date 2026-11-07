@@ -12,13 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import functools
 import logging
 from abc import ABC, abstractmethod
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import torch
 from diffusers import ModelMixin, SchedulerMixin
 from tensordict import TensorDict
+from verl.utils import tensordict_utils as tu
 
 from verl_omni.workers.config import DiffusionModelConfig
 
@@ -90,6 +92,74 @@ class DiffusionModelBase(ABC):
                 f"Set ``external_lib`` in DiffusionModelConfig to load your implementation."
             ) from None
 
+    @staticmethod
+    def _flow_time(micro_batch, step, scheduler):
+        timestep = micro_batch["train_timesteps"][:, step]
+        scale = getattr(scheduler.config, "num_train_timesteps", None)
+        if scale is None:
+            raise ValueError(
+                "Converting `train_timesteps` to flow time requires "
+                f"scheduler.config.num_train_timesteps, but {type(scheduler).__name__} does not define it."
+            )
+        tu.assign_non_tensor(micro_batch, num_train_timesteps=int(scale))
+        return timestep, timestep.float() / float(scale)
+
+    @staticmethod
+    def _noise_latents(micro_batch, clean_key, noise_key, step, time):
+        x0 = micro_batch[clean_key]
+        t = time.view(-1, *([1] * (x0.ndim - 1)))
+        noise = micro_batch.get(noise_key, None)
+        if noise is None:
+            noise = torch.randn_like(x0.float())
+        elif noise.ndim == x0.ndim + 1:
+            noise = noise[:, step]
+        return {"x0": x0, "xt": (1.0 - t) * x0 + t * noise, "t_expanded": t}
+
+    # Adapter used for the detached loss-reference prediction.
+    old_policy_adapter: str = "old"
+
+    @classmethod
+    def forward_reference(cls, module, model_config, model_inputs, negative_model_inputs):
+        """Forward for the adapter-disabled pretrained reference."""
+        return cls.forward(module, model_config, model_inputs, negative_model_inputs)
+
+    @classmethod
+    def validate_engine_config(cls, engine_config) -> None:
+        """Validate adapter requirements before NFT engine initialization."""
+        return
+
+    @classmethod
+    def configure_gradient_checkpointing(cls, module, engine_config) -> None:
+        """Enable standard checkpointing unless the NFT adapter overrides it."""
+        module.enable_gradient_checkpointing()
+
+    @classmethod
+    def prepare_training_inputs(
+        cls, micro_batch: TensorDict, step: int, scheduler
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
+        """Prepare the default NFT noising context using the scheduler's timestep scale."""
+        timestep, time = cls._flow_time(micro_batch, step, scheduler)
+        context = cls._noise_latents(micro_batch, "latents_clean", "forward_noise", step, time)
+        return context["xt"], timestep, context
+
+    @staticmethod
+    def prepare_model_outputs(predictions: dict, loss_context: dict) -> dict:
+        """Combine policy predictions with algorithm-owned loss context."""
+        return {**loss_context, **predictions}
+
+    @staticmethod
+    def prepare_loss_inputs(micro_batch: TensorDict, step: int) -> dict:
+        """Slice per-timestep fields and retain per-sample group metadata."""
+        inputs = {
+            key: micro_batch[key][:, step]
+            for key in ("reward_prob", "advantages")
+            if micro_batch.get(key, None) is not None
+        }
+        inputs.update(
+            {key: micro_batch[key] for key in ("group_index", "group_size") if micro_batch.get(key, None) is not None}
+        )
+        return inputs
+
     @classmethod
     def build_module(cls, model_config: DiffusionModelConfig, torch_dtype: torch.dtype) -> Optional[torch.nn.Module]:
         """Load the model without ``diffusers.AutoModel``.
@@ -112,6 +182,18 @@ class DiffusionModelBase(ABC):
         parameters should override this and return ``False``.
         """
         return True
+
+    @classmethod
+    def get_fsdp_ignored_module_names(cls, model_config) -> list[str]:
+        """Submodule name components to leave unsharded under FSDP2 (default: none).
+
+        FSDP2 only — under ``strategy=fsdp`` the engine raises when a
+        non-empty list is declared. Declare a subtree whose forward is
+        skipped for some micro-batches: unsharded forwards emit no
+        collectives, so the skip cannot desync ranks. Ignored parameters
+        must stay frozen — FSDP2 does not synchronize their gradients.
+        """
+        return []
 
     @classmethod
     def validate_lora_config(cls, model_config: DiffusionModelConfig) -> None:
@@ -410,6 +492,60 @@ class DiffusionI2IModelBase(DiffusionModelBase):
         return model_inputs, negative_model_inputs
 
 
+def _with_rollout_sp_context(method: Callable) -> Callable:
+    @functools.wraps(method)
+    def wrapped(*args, **kwargs):
+        from vllm_omni.diffusion.forward_context import get_forward_context
+
+        ctx = get_forward_context()
+        previous = ctx.sp_plan_hooks_applied
+        ctx.sp_plan_hooks_applied = True
+        try:
+            return method(*args, **kwargs)
+        finally:
+            ctx.sp_plan_hooks_applied = previous
+
+    return wrapped
+
+
+def apply_rollout_parallel_setup(pipeline: Any, od_config: Any) -> None:
+    """Apply the VAE and DiT sequence-parallel setup that custom pipeline loading skips."""
+    # TODO: drop once the custom_pipeline loader runs initialize_model's setup, including VAE slicing.
+    from vllm_omni.diffusion.distributed.autoencoders.distributed_vae_executor import DistributedVaeMixin
+    from vllm_omni.diffusion.distributed.sp_plan import SequenceParallelConfig, get_sp_plan_from_model
+    from vllm_omni.diffusion.hooks.sequence_parallel import apply_sequence_parallel
+
+    parallel_config = od_config.parallel_config
+    vae = getattr(pipeline, "vae", None)
+    if parallel_config.vae_patch_parallel_size > 1:
+        if not isinstance(vae, DistributedVaeMixin):
+            raise ValueError(f"{type(pipeline).__name__} does not support vae_patch_parallel_size > 1.")
+        od_config.vae_use_tiling = True
+        vae.set_parallel_size(parallel_config.vae_patch_parallel_size, mode=parallel_config.vae_parallel_mode)
+    if od_config.vae_use_tiling and hasattr(vae, "use_tiling"):
+        vae.use_tiling = True  # Only honor an explicit request; keep each VAE's constructor default otherwise.
+
+    if parallel_config.sequence_parallel_size <= 1:
+        return
+    dits = {name: getattr(pipeline, name, None) for name in getattr(pipeline, "_dit_modules", ())}
+    dits = {name: dit for name, dit in dits.items() if dit is not None}
+    if not dits or any(not get_sp_plan_from_model(dit) for dit in dits.values()):
+        raise ValueError(f"{type(pipeline).__name__} does not support rollout sequence parallelism.")
+    sp_config = SequenceParallelConfig(
+        ulysses_degree=parallel_config.ulysses_degree,
+        ring_degree=parallel_config.ring_degree,
+        allgather_degree=parallel_config.allgather_degree,
+    )
+    for dit in dits.values():
+        apply_sequence_parallel(dit, sp_config, get_sp_plan_from_model(dit))
+
+    # Inference creates fresh contexts after load_model's context has exited.
+    for name in ("forward", "denoise_step", "post_decode"):
+        method = getattr(pipeline, name, None)
+        if method is not None:
+            setattr(pipeline, name, _with_rollout_sp_context(method))
+
+
 class VllmOmniPipelineBase:
     """Registry base for vllm-omni custom diffusion pipeline classes.
 
@@ -436,6 +572,21 @@ class VllmOmniPipelineBase:
             if "supports_request_batch" not in subclass.__dict__:
                 subclass.supports_request_batch = False
             cls._registry[(architecture, algorithm)] = subclass
+            if subclass.__dict__.get("_rollout_parallel_init_wrapped", False):
+                return subclass
+            init = subclass.__init__
+
+            @functools.wraps(init)
+            def __init__(self, *args, **kwargs):
+                od_config = kwargs.get("od_config")
+                if od_config is None:
+                    raise TypeError("Registered rollout pipelines require od_config as a keyword argument.")
+                init(self, *args, **kwargs)
+                if type(self) is subclass:  # registered subclasses of registered classes apply it once
+                    apply_rollout_parallel_setup(self, od_config)
+
+            subclass.__init__ = __init__
+            subclass._rollout_parallel_init_wrapped = True
             return subclass
 
         return decorator
@@ -452,6 +603,33 @@ class VllmOmniPipelineBase:
         if pipeline_cls is None:
             return None
         return f"{pipeline_cls.__module__}.{pipeline_cls.__qualname__}"
+
+    @staticmethod
+    def build_ar_position_ids(attention_mask: torch.Tensor) -> torch.Tensor:
+        """Build AR ``position_ids`` for one padded sample.
+
+        Default is standard 1D text positions of shape ``(1, seq_len)``. Composite
+        AR+DiT adapters that need a model-specific layout (e.g. multi-channel
+        M-RoPE) override this as a ``@staticmethod`` on the registered pipeline
+        class; :meth:`resolve_ar_position_ids` dispatches to that override.
+        """
+        from verl.utils.model import compute_position_id_with_mask
+
+        return compute_position_id_with_mask(attention_mask)
+
+    @classmethod
+    def resolve_ar_position_ids(
+        cls,
+        architecture: str | None,
+        algorithm: str | None,
+        attention_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        """Dispatch AR ``position_ids`` to the registered rollout adapter, if any."""
+        pipeline_cls = cls.get_class(architecture, algorithm) if architecture and algorithm else None
+        builder = getattr(pipeline_cls, "build_ar_position_ids", None) if pipeline_cls is not None else None
+        if builder is None:
+            return cls.build_ar_position_ids(attention_mask)
+        return builder(attention_mask)
 
 
 class OmniModelBase(ABC):
@@ -553,6 +731,35 @@ class OmniModelBase(ABC):
             ) from None
 
     @classmethod
+    def setup_veomni(cls, model_config, engine_config) -> None:
+        """Opt into VeOmni before model loading; validate settings and install integrations.
+
+        Override in the existing (architecture, stage) adapter. Keep optional
+        VeOmni imports inside the hook so FSDP users do not need that package.
+        The default rejects unported adapters instead of silently selecting an
+        incompatible model implementation.
+        """
+        raise NotImplementedError(f"{cls.__name__} does not support the VeOmni backend.")
+
+    @classmethod
+    def prepare_veomni_inputs(cls, model_inputs: dict[str, Any], micro_batch, model_config) -> dict[str, Any]:
+        """Adapt packed inputs after verl's VeOmni transforms, before LM loss inputs.
+
+        This hook may modify the input dictionary or return a replacement.
+        The shared ``prepare_model_inputs`` replay hook still runs afterwards.
+        """
+        return model_inputs
+
+    @classmethod
+    def configure_veomni_trainable_params(cls, module: torch.nn.Module, model_config) -> None:
+        """Set requires_grad after VeOmni parallelization, before optimizer creation.
+
+        Do not replace modules here: VeOmni already owns their distributed
+        layout. This hook is not called for forward-only reference engines.
+        """
+        return
+
+    @classmethod
     def register_auto_classes(cls) -> None:
         """Register optional model-package classes with Transformers auto APIs."""
         return
@@ -643,6 +850,38 @@ class OmniModelBase(ABC):
                 delattr(module, submod_name)
 
         return module
+
+    @classmethod
+    def prepare_megatron_config(cls, model_config, engine_config):
+        """Validate Megatron support and return the backend's model-config view.
+
+        Called before the Megatron engine initializes. Implementations must
+        reject unsupported configurations and preserve the original config
+        used by the processor and rollout. FSDP adapters need not implement it.
+        """
+        raise NotImplementedError(f"{cls.__name__} does not support Megatron training.")
+
+    @classmethod
+    def get_megatron_forward(cls) -> Callable:
+        """Return the pipeline's model-forward callable for the BSHD LM engine.
+
+        The callable consumes the prepared token and multimodal inputs plus
+        verl's logits-processing arguments, and returns BSHD-postprocessed
+        output. Import optional Megatron dependencies inside the override.
+        """
+        raise NotImplementedError(f"{cls.__name__} does not provide a Megatron forward.")
+
+    @classmethod
+    def get_fsdp_ignored_module_names(cls, model_config) -> list[str]:
+        """Submodule name components to leave unsharded under FSDP2 (default: none).
+
+        FSDP2 only — under ``strategy=fsdp`` the engine raises when a
+        non-empty list is declared. Declare a subtree whose forward is
+        skipped for some micro-batches: unsharded forwards emit no
+        collectives, so the skip cannot desync ranks. Ignored parameters
+        must stay frozen — FSDP2 does not synchronize their gradients.
+        """
+        return []
 
     @classmethod
     def prepare_model_inputs(cls, model_inputs: dict[str, Any], micro_batch, model_config) -> dict[str, Any]:
@@ -763,6 +1002,37 @@ class OmniRolloutPipelineBase:
         return None
 
     @classmethod
+    def expert_parallel_stage_ids(cls, pipeline_mode="thinker_only") -> frozenset[int]:
+        """Return stages whose MoE layers may run under expert parallelism.
+
+        vLLM-Omni takes EP as a per-stage flag over the ranks that stage already
+        spans, so the deploy config carries a flag rather than a size. The default
+        empty set keeps dense pipelines on the fail-closed path.
+
+        Args:
+            pipeline_mode: The mode used to build the stages.
+
+        Returns:
+            frozenset[int]: Stage IDs that may receive ``enable_expert_parallel``.
+        """
+        return frozenset()
+
+    @classmethod
+    def expert_parallel_pipelines(cls) -> dict[str, frozenset[int]]:
+        """Return registered pipelines that opt into expert parallelism.
+
+        Returns:
+            dict[str, frozenset[int]]: Pipeline model_type to its EP stage IDs,
+            omitting pipelines that opt out.
+        """
+        supported: dict[str, frozenset[int]] = {}
+        for model_type, adapter_cls in cls._registry.items():
+            stage_ids = adapter_cls.expert_parallel_stage_ids()
+            if stage_ids:
+                supported[model_type] = stage_ids
+        return supported
+
+    @classmethod
     def policy_stage_id(cls, pipeline_mode="thinker_only") -> int:
         """Return the stage whose sampling parameters and logprobs define the policy."""
         return 0
@@ -848,3 +1118,77 @@ class OmniRolloutPipelineBase:
                 "An omni rollout adapter with multiple final outputs must implement combine_engine_outputs()."
             )
         return outputs[0], {}
+
+
+class DiffusionModelARBase:
+    """Base class for composite AR training adapters.
+
+    Used only when ``model_type=diffusion_composite_model``. DiT setup stays on
+    ``DiffusionModelBase``; this class configures the AR module built by
+    ``CompositeARFSDPEngineWithLMHead``. Packages that do not train the AR must
+    not register a subclass — ``peek_class`` returns ``None`` and the engine
+    skips AR setup.
+
+    Register with ``@DiffusionModelARBase.register(architecture, algorithm)``.
+    The worked example is Qwen-Image Dual-GRPO's ``ar_training_adapter.py``.
+
+    Note that ``model_config`` here reuses diffusion model configurations.
+    """
+
+    _registry: dict[tuple[str, str], type["DiffusionModelARBase"]] = {}
+
+    @classmethod
+    def register(cls, architecture: str, algorithm: str):
+        """Class decorator that registers a subclass for ``(architecture, algorithm)``."""
+
+        def decorator(subclass: type["DiffusionModelARBase"]) -> type["DiffusionModelARBase"]:
+            cls._registry[(architecture, algorithm)] = subclass
+            return subclass
+
+        return decorator
+
+    @classmethod
+    def peek_class(cls, model_config) -> Optional[type["DiffusionModelARBase"]]:
+        """Return the registered AR adapter, or ``None`` when AR is not trained."""
+        external_lib: Optional[str] = getattr(model_config, "external_lib", None)
+        if external_lib is not None:
+            from verl.utils.import_utils import import_external_libs
+
+            import_external_libs(external_lib)
+        return cls._registry.get((model_config.architecture, model_config.algorithm))
+
+    @classmethod
+    def get_class(cls, model_config) -> type["DiffusionModelARBase"]:
+        """Return the registered AR adapter, or raise when none is registered."""
+        adapter = cls.peek_class(model_config)
+        if adapter is None:
+            registered = sorted(cls._registry.keys())
+            raise NotImplementedError(
+                f"No composite AR adapter registered for "
+                f"(architecture={model_config.architecture!r}, "
+                f"algorithm={model_config.algorithm!r}). Registered: {registered}. "
+                f"Add ``ar_training_adapter.py`` only when the text encoder is trained."
+            )
+        return adapter
+
+    @classmethod
+    def configure_module(cls, module: torch.nn.Module, model_config) -> None:
+        """Post-build AR setup before FSDP wrap. Default is a no-op."""
+        return
+
+    @classmethod
+    def maybe_configure_module(cls, module: torch.nn.Module, model_config) -> None:
+        """Run ``configure_module`` when an AR adapter is registered; otherwise no-op."""
+        adapter = cls.peek_class(model_config)
+        if adapter is not None:
+            adapter.configure_module(module, model_config)
+
+    @classmethod
+    def get_fsdp_ignored_module_names(cls, model_config) -> list[str]:
+        """Submodule name components to leave unsharded under FSDP2 (default: none).
+
+        FSDP2 only. Declare a frozen subtree whose forward is skipped on some
+        micro-batches so the skip cannot desync ranks. Ignored parameters must
+        stay frozen — FSDP2 does not synchronize their gradients.
+        """
+        return []

@@ -12,12 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .agent_loop import LTX2DiffusionSingleTurnAgentLoop
 from .diffusers_training_adapter import LTX23FlowGRPO
 from .vllm_omni_rollout_adapter import LTX23PipelineWithLogProb
 
 __all__ = [
-    "LTX2DiffusionSingleTurnAgentLoop",
     "LTX23FlowGRPO",
     "LTX23PipelineWithLogProb",
 ]

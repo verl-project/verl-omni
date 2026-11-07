@@ -1,11 +1,21 @@
 # Supported Models
 
-Last updated: 09/09/2026.
+Last updated: 10/29/2026.
 
 VeRL-Omni supports RL post-training for generative models across image, video,
 audio, and omni modalities. This page catalogues every model with a ready-to-run
 example, its architecture and pipeline details, supported trainers, and hardware
 requirements.
+
+> **The V1 trainer is the default since v0.3.0.** Scripts named `*_v1.sh`
+> (diffusion, entrypoint `main_diffusion_v1`) and online omni training
+> (`main_omni`) run the V1 trainer (TransferQueue + ReplayBuffer). The
+> remaining CUDA v0 launchers and the `main_diffusion` entrypoint are
+> **deprecated** and emit a `DeprecationWarning` until their V1 port lands
+> ([#389](https://github.com/verl-project/verl-omni/issues/389)); those
+> scripts pin `trainer.use_v1=false` explicitly. Offline DPO
+> recipes (SD3.5 diffusion DPO, Qwen3-Omni offline DPO) stay on the v0 trainer
+> by design. See {doc}`diffusion_v1` for the V1 guide and the migration recipe.
 
 ---
 
@@ -26,7 +36,7 @@ requirements.
 
 | Trainer | Example script | GPU config |
 |---------|---------------|------------|
-| Flow-GRPO (LoRA) | `examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora.sh` | 4×GPU |
+| Flow-GRPO (LoRA, V1 sync — default) | `examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora_v1.sh` | 4×GPU |
 | Flow-GRPO (full) | `examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr.sh` | 4×H200 |
 | Flow-GRPO (async) | `examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora_async_reward.sh` | 5×GPU |
 | Flow-GRPO (multi-node) | `examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora_multi_node.sh` | 2×4 GPU |
@@ -37,8 +47,8 @@ requirements.
 | Flow-DPPO | `examples/flowdppo_trainer/qwen_image/run_qwen_image_ocr_lora.sh` | 4×GPU |
 | GRPO-Guard | `examples/grpoguard_trainer/qwen_image/run_qwen_image_ocr_lora.sh` | 4×GPU |
 | Mix-GRPO | `examples/mixgrpo_trainer/qwen_image/run_qwen_image_ocr_lora_mixgrpo.sh` | 4×GPU |
-| Diffusion-DPO | `examples/dpo_trainer/qwen_image/run_qwen_image_online_dpo_lora.sh` | 4×GPU |
-| DiffusionNFT | `examples/diffusionnft_trainer/qwen_image/run_qwen_image_ocr_lora.sh` | 4×GPU |
+| Diffusion-DPO (V1 sync — default) | `examples/dpo_trainer/qwen_image/run_qwen_image_online_dpo_lora_v1.sh` | 4×GPU |
+| DiffusionNFT (V1 sync — default) | `examples/diffusionnft_trainer/qwen_image/run_qwen_image_ocr_lora_v1.sh` | 4×GPU |
 
 **Reward model:** `Qwen/Qwen3-VL-8B-Instruct` (OCR VLM judge, TP=4 colocated).
 
@@ -61,13 +71,14 @@ Qwen-Image T2I helpers). Rollout uses vLLM-Omni
 `QwenImageEditPipeline` architecture is not supported.
 
 For dataset layout, launch overrides, and sequence-parallel constraints, see
-[Examples - Qwen-Image-Edit-2511 FlowGRPO training](../../examples/flowgrpo_trainer/qwen_image_edit/README.md).
+[Examples - Qwen-Image-Edit-2511 FlowGRPO training](../examples/qwen_image_edit/flowgrpo_trainer_qwen_image_edit.md).
 
 **Supported trainers:**
 
 | Trainer | Example script | GPU config |
 |---------|---------------|------------|
 | Flow-GRPO (LoRA) | `examples/flowgrpo_trainer/qwen_image_edit/run_qwen_image_edit_lora.sh` | 8×GPU |
+| Flow-GRPO (LoRA, V1 sync, NPU) | `examples/flowgrpo_trainer/qwen_image_edit/run_qwen_image_edit_lora_v1_npu.sh` | 16×NPU |
 
 **Reward model:** PickScore (`yuvalkirstain/PickScore_v1`) — CLIP preference
 scorer, async workers (default 4). PickScore measures instruction/image
@@ -89,13 +100,15 @@ alignment and does not directly enforce source-image preservation.
 
 | Trainer | Example script | GPU config |
 |---------|---------------|------------|
-| Flow-GRPO (LoRA) | `examples/flowgrpo_trainer/sd35/run_sd35_medium_ocr_lora.sh` | 3×GPU (2 actor+rollout, 1 reward) |
+| Flow-GRPO (LoRA, V1 sync — default) | `examples/flowgrpo_trainer/sd35/run_sd35_medium_ocr_lora_v1.sh` | 3×GPU (2 actor+rollout, 1 reward) |
 | Flow-GRPO (DiNa-LRM) | `examples/flowgrpo_trainer/sd35/run_sd35_medium_drm_lora.sh` | 8×GPU (7 actor+rollout, 1 latent-reward server) |
-| Diffusion-DPO (offline) | `examples/dpo_trainer/sd35/run_sd35_medium_offline_dpo_lora.sh` | 3×GPU |
+| Diffusion-DPO (offline, v0 by design) | `examples/dpo_trainer/sd35/run_sd35_medium_offline_dpo_lora.sh` | 3×GPU |
 | [DiffusionOPD](../algo/diffusion_opd.md) (single teacher, OCR) | `examples/diffusionopd_trainer/sd35/run_sd35_medium_ocr_distill.sh` | 3×GPU (2 actor+rollout+teacher, 1 reward) |
 | [DiffusionOPD](../algo/diffusion_opd.md) (multi-teacher / MOPD) | `examples/diffusionopd_trainer/sd35/run_sd35_medium_mopd_distill.sh` | 3×GPU (2 actor+rollout+teachers, 1 reward) |
+| [CRD](../algo/crd.md) (SD3.5-Medium LoRA, V1 sync) | `examples/crd_trainer/sd35/run_sd35_medium_ocr_lora_v1.sh` | 2×GPU (1 actor/rollout, 1 reward) |
+| [DGPO](../algo/dgpo.md) (LoRA, V1 sync) | `examples/dgpo_trainer/sd35/run_sd35_medium_ocr_lora_v1.sh` | 3×GPU (2 actor+rollout, 1 reward) |
 
-**Reward model:** `Qwen/Qwen2.5-VL-3B-Instruct` (OCR VLM judge, TP=1, dedicated pool) for Flow-GRPO OCR and DiffusionOPD. The DiNa-LRM recipe scores clean latents over HTTP instead of decoding images; see [SD3.5 FlowGRPO with a latent reward model](../examples/flowgrpo_trainer_sd35_drm.md). DiffusionOPD monitors OCR (and PickScore on the mixed-task recipe) but does not put those scores in the loss — see [Diffusion On-Policy Distillation](../algo/diffusion_opd.md).
+**Reward model:** `Qwen/Qwen2.5-VL-3B-Instruct` (OCR VLM judge, TP=1, dedicated pool) for Flow-GRPO OCR, DGPO and DiffusionOPD. The DiNa-LRM recipe scores clean latents over HTTP instead of decoding images; see [SD3.5 FlowGRPO with a latent reward model](../examples/flowgrpo_trainer_sd35_drm.md). DiffusionOPD monitors OCR (and PickScore on the mixed-task recipe) but does not put those scores in the loss — see [Diffusion On-Policy Distillation](../algo/diffusion_opd.md).
 
 ---
 
@@ -136,14 +149,15 @@ The HPSv3 reward is the only validated configuration. Other reward functions
 
 | Property | Detail |
 |----------|--------|
-| **Hugging Face ID** | `dg845/LTX-2.3-Diffusers` |
+| **Hugging Face ID** | FlowGRPO: `dg845/LTX-2.3-Diffusers`; OmniNFT: `diffusers/LTX-2.3-Diffusers` |
 | **Architecture** | LTX-2 DiT; checkpoint `_class_name` is `LTX2Pipeline` (rollout uses vLLM-Omni `LTX23Pipeline`) |
 | **Modality** | Text → Video + Audio; Text + first-frame image → Video + Audio |
-| **Pipeline** | Flow-matching with joint audio-video CPS transitions |
-| **Default recipe** | `sde_window_size=3`, `sde_window_range=[0,10]`, `sde_contiguous=False` |
+| **Pipeline** | Flow-matching with joint audio-video rollouts |
+| **Algorithms** | FlowGRPO with CPS transitions; online OmniNFT forward-process training |
 
 For dataset layout and launch overrides, see
-[Examples - LTX-2.3 FlowGRPO](../../examples/flowgrpo_trainer/ltx2/README.md).
+[Examples - LTX-2.3 FlowGRPO](../examples/ltx2/flowgrpo_trainer_ltx2.md) and
+[Examples - LTX-2.3 OmniNFT](../examples/ltx2/omninft_trainer_ltx2.md).
 
 **Supported trainers:**
 
@@ -152,9 +166,17 @@ For dataset layout and launch overrides, see
 | Flow-GRPO (T2AV LoRA) | `examples/flowgrpo_trainer/ltx2/run_ltx2_3_t2av_lora.sh` | 8×GPU (TP=2) |
 | Flow-GRPO (TI2VA LoRA) | `examples/flowgrpo_trainer/ltx2/run_ltx2_3_ti2va_lora.sh` | 8×GPU (TP=1) |
 | Flow-GRPO (T2AV LoRA, NPU) | `examples/flowgrpo_trainer/ltx2/run_ltx2_3_t2av_lora_npu.sh` | 16×NPU (TP=4) |
+| Flow-GRPO (T2AV LoRA, v1 sync) | `examples/flowgrpo_trainer/ltx2/run_ltx2_3_t2av_lora_v1.sh` | 16×NPU (TP=4) or 8×GPU (TP=1) |
+| OmniNFT (T2AV LoRA, NPU) | `examples/omninft_trainer/ltx2/run_ltx2_3_omninft_lora_npu.sh` | 16×NPU (TP=4) |
+| [DiffusionOPD](../algo/diffusion_opd.md) (T2AV, single teacher) | `examples/diffusionopd_trainer/ltx2/run_ltx2_3_t2av_opd_npu.sh` | 16×NPU (TP=4, teacher colocated) |
 
-**Reward models:** CLAP (`laion/larger_clap_general`) and ImageBind (local
-`.pth`, CC-BY-NC-SA 4.0) for audio-video alignment.
+**Reward models:** FlowGRPO uses CLAP (`laion/larger_clap_general`) and
+ImageBind (local `.pth`, CC-BY-NC-SA 4.0) for audio-video alignment. OmniNFT
+keeps separate VideoAlign, HPSv3, AudioBox Aesthetics, CLAP-unfused, and
+Synchformer DeSync components and routes their normalized advantages to the
+video and audio loss branches. The DiffusionOPD recipe monitors CLAP and
+ImageBind but does not put their scores in the loss — see
+[Diffusion On-Policy Distillation](../algo/diffusion_opd.md).
 
 ### MiniMax-H3
 
@@ -166,15 +188,19 @@ For dataset layout and launch overrides, see
 | **Pipeline** | Online DiffusionNFT with joint video and audio rollouts |
 | **Agent loop** | `minimax_h3_diffusion_single_turn_agent` (tokenizes text once for the H3 text encoder) |
 
-FlowGRPO for MiniMax-H3 is still WIP. For checkpoint layout, data prep, and
-Diffusers pin, see
-[Examples - MiniMax-H3 DiffusionNFT](../../examples/diffusionnft_trainer/minimax_h3/README.md).
+FlowGRPO for MiniMax-H3 runs on the V1 sync trainer. For checkpoint layout,
+data prep, and Diffusers pin, see
+[Examples - MiniMax-H3 DiffusionNFT](../examples/minimax_h3/diffusionnft_trainer_minimax_h3.md).
 
 **Supported trainers:**
 
 | Trainer | Example script | GPU config |
 |---------|---------------|------------|
+| Flow-GRPO (T2VA LoRA, V1 sync — default) | `examples/flowgrpo_trainer/minimax_h3/run_minimax_h3_t2va_lora_v1.sh` | 8×GPU (TP=2) |
+| Flow-GRPO (FL2VA LoRA, V1 sync — default) | `examples/flowgrpo_trainer/minimax_h3/run_minimax_h3_fl2va_lora_v1.sh` | 8×GPU (TP=4) |
+| Flow-GRPO (T2VA LoRA, V1 sync, Cambricon MLU) | `examples/flowgrpo_trainer/minimax_h3/run_minimax_h3_t2va_lora_v1_mlu.sh` | 8×MLU (TP=2) |
 | DiffusionNFT (T2VA LoRA) | `examples/diffusionnft_trainer/minimax_h3/run_minimax_h3_t2va_lora.sh` | 8×GPU (TP=2) |
+| DiffusionNFT (T2VA LoRA, Ascend NPU) | `examples/diffusionnft_trainer/minimax_h3/run_minimax_h3_t2va_lora_npu.sh` | 16×NPU (FSDP=8, TP=4, CPU offload) |
 | DiffusionNFT (FL2VA LoRA) | `examples/diffusionnft_trainer/minimax_h3/run_minimax_h3_fl2va_lora.sh` | 8×GPU (TP=4) |
 
 **Reward models:** CLAP and ImageBind (audio-video alignment), same pair as LTX-2.3.
@@ -219,20 +245,23 @@ BAGEL uses a per-stage deploy YAML that overrides top-level vLLM engine argument
 | **Stage config** | Auto-generated deploy config via `+actor_rollout_ref.rollout.engine_kwargs.vllm_omni.pipeline_name="qwen3_omni_moe"` |
 
 For version requirements and detailed setup instructions, see
-[Examples - Qwen3-Omni Thinker GSPO Trainer](../../examples/gspo_trainer/README.md).
+[Examples - Qwen3-Omni Thinker GSPO Trainer](../examples/gspo_trainer.md).
 
 **Supported trainers:**
 
 | Trainer | Example script | GPU config |
 |---------|---------------|------------|
 | GSPO (text) | `examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_v1.sh` | 4×H100/H200 80GB |
+| GSPO (full, VeOmni 0.1.12; text/image) | `examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_veomni.sh` | 2×8 GPU (recipe default) |
 | GSPO (image) | `examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_mmk12_v1.sh` | 4×H100/H200 80GB |
-| GSPO (AVQA, NPU) | `examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_npu_avqa_v1.sh` | 16×NPU (Atlas 800T A3) |
+| GSPO (AVQA, NPU) | `examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_avqa_v1.sh` | 16×NPU (Atlas 800T A3) |
 | Offline DPO (LoRA) | `examples/dpo_trainer/qwen3_omni/qwen3_omni/run_qwen3_omni_omni_preference_lora.sh` | 4×H800 |
 | [GSPO OPD (image, NPU)](../algo/omni_opd.md) | `examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_mmk12_v1_opd_npu.sh` | 32×NPU (2 x Atlas 800T A3) |
+| GSPO (AudioMCQ, Megatron, separate-async) | `examples/gspo_trainer/qwen3_omni/run_qwen3_omni_megatron_audiomcq_separate_async.sh` | 32×A100 80GB (4 train + 4 rollout GPUs/node). Experimental; not reproducible from the current public pins. See the [AudioMCQ recipe](../examples/qwen3_omni/gspo_trainer_qwen3_omni.md). |
+| GSPO (AVQA image+audio, Megatron, separate-async) | `examples/gspo_trainer/qwen3_omni/run_qwen3_omni_megatron_avqa_separate_async.sh` | 8 GPUs by default (4 actor + 4 rollout); optional 6-GPU layout. Validated on H200 with development dependencies; experimental, public-pin reproducibility remains unverified. See the [AVQA recipe](../examples/qwen3_omni/gspo_trainer_qwen3_omni.md). |
 
-The GSPO actor (FSDP2, 30B + LoRA r=32 with offloading) and vLLM-Omni rollout (TP=2)
-colocate on the same 4 GPUs. The rollout deploy config is auto-generated from
+The default GSPO actor (FSDP2, 30B + LoRA r=32 with offloading) and vLLM-Omni rollout (TP=2)
+colocate on the same 4 GPUs. Megatron full-parameter is a separate-async variant, not a replacement for FSDP2 LoRA. The rollout deploy config is auto-generated from
 `pipeline_name=qwen3_omni_moe` — tune rollout memory/batching through standard
 verl CLI overrides (e.g. `actor_rollout_ref.rollout.gpu_memory_utilization=0.4`)
 rather than a separate per-stage YAML file. Offline DPO reads Omni-Preference
@@ -253,7 +282,7 @@ parquet pairs and does not start rollout or reward workers.
 Both examples use two training GPUs and an independently deployed audio scorer.
 The Hindi recipe starts from the public Hindi SFT adapter merged into the Base,
 then trains a fresh rank-8 GRPO LoRA on IndicVoices-R prompts.
-See [Qwen3-TTS GRPO with an audio reward](../../examples/grpo_trainer/qwen3_tts/README.md).
+See [Qwen3-TTS GRPO with an audio reward](../examples/qwen3_tts/grpo_trainer_qwen3_tts.md).
 
 **Supported trainers:**
 
@@ -286,9 +315,14 @@ See [Qwen3-TTS GRPO with an audio reward](../../examples/grpo_trainer/qwen3_tts/
 | Reward model | HF ID / Source | Modality | Used by | Deployment |
 |-------------|---------------|----------|---------|------------|
 | Qwen3-VL-8B-Instruct | `Qwen/Qwen3-VL-8B-Instruct` | Vision-Language | Qwen-Image (all trainers) | vLLM, TP=4, colocated |
-| Qwen2.5-VL-3B-Instruct | `Qwen/Qwen2.5-VL-3B-Instruct` | Vision-Language | SD3.5 (Flow-GRPO, DiffusionOPD) | vLLM, TP=1, dedicated pool |
+| Qwen2.5-VL-3B-Instruct | `Qwen/Qwen2.5-VL-3B-Instruct` | Vision-Language | SD3.5 (Flow-GRPO, DGPO, DiffusionOPD) | vLLM, TP=1, dedicated pool |
 | PickScore | `yuvalkirstain/PickScore_v1` | Vision (preference) | Qwen-Image-Edit (Flow-GRPO), BAGEL (PickScore recipe), SD3.5 (MOPD monitor) | Local CLIP load, async workers |
 | HPSv3 | Local `.safetensors` | Vision (aesthetic) | Wan2.2 (DanceGRPO) | Local safetensors load |
+| VideoAlign | OmniNFT VideoReward checkpoint + Qwen2-VL-2B | Video + Text | LTX-2.3 (OmniNFT) | Native named-model workers |
+| HPSv3 (OmniNFT definition) | Local `.safetensors` + Qwen2-VL-7B | Video + Text | LTX-2.3 (OmniNFT) | Native named-model workers |
+| AudioBox Aesthetics | Local `audiobox-aesthetics` checkpoint | Audio + Text | LTX-2.3 (OmniNFT) | Native named-model workers |
+| CLAP (OmniNFT definition) | Local HTSAT-unfused checkpoint | Audio + Text | LTX-2.3 (OmniNFT) | Native named-model workers |
+| Synchformer DeSync | OmniNFT Synchformer checkpoint | Audio + Video | LTX-2.3 (OmniNFT) | Native named-model workers |
 | CLAP | `laion/larger_clap_general` | Audio | LTX-2.3 (Flow-GRPO), MiniMax-H3 (DiffusionNFT) | Local transformers load |
 | ImageBind | Local `.pth` | Audio + Video | LTX-2.3 (Flow-GRPO), MiniMax-H3 (DiffusionNFT) | Local ImageBind package (CC-BY-NC-SA 4.0) |
 | DiNa-LRM | HTTP latent scorer | Diffusion latents | SD3.5 (Flow-GRPO DRM) | Separate `diffusion-rm` process, safetensors HTTP |
@@ -306,16 +340,19 @@ trainer's README in `examples/`.
 
 | Algorithm | Qwen-Image | Qwen-Image-Edit | SD3.5 | Wan2.2 | LTX-2.3 | MiniMax-H3 | BAGEL | Qwen3-Omni | Qwen3-TTS |
 |-----------|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| GRPO | — | — | — | — | — | — | — | — | ✅ |
-| Flow-GRPO | ✅ | ✅ | ✅ | — | ✅ | WIP | ✅ | — | — |
-| Flow-DPPO | ✅ | — | — | — | — | — | — | — | — |
-| GRPO-Guard | ✅ | — | — | — | — | — | — | — | — |
-| Mix-GRPO | ✅ | — | — | — | — | — | — | — | — |
-| DanceGRPO | — | — | — | ✅ | — | — | — | — | — |
-| DPO | ✅ | — | ✅ | — | — | — | — | ✅ | WIP |
-| DiffusionNFT | ✅ | — | — | — | — | ✅ | — | — | — |
-| [DiffusionOPD](../algo/diffusion_opd.md) (incl. MOPD) | — | — | ✅ | — | — | — | — | — | — |
-| GSPO (incl. OPD) | — | — | — | — | — | — | — | ✅ | WIP |
+| GRPO | — | — | — | — | — | — | — | — | GPU ✅ |
+| Flow-GRPO | NPU ✅<br>GPU ✅ | NPU ✅<br>GPU ✅ | GPU ✅ | — | NPU ✅<br>GPU ✅ | NPU ✅<br>GPU ✅<br>MLU ✅ | NPU ✅<br>GPU ✅ | — | — |
+| Flow-DPPO | GPU ✅ | — | — | — | — | — | — | — | — |
+| GRPO-Guard | NPU ✅<br>GPU ✅ | — | — | — | — | — | — | — | — |
+| Mix-GRPO | NPU ✅<br>GPU ✅ | — | — | — | — | — | — | — | — |
+| DanceGRPO | — | — | — | NPU ✅<br>GPU ✅ | — | — | — | — | — |
+| DPO | NPU ✅<br>GPU ✅ | — | GPU ✅ | — | — | — | — | GPU ✅ | — |
+| DiffusionNFT | NPU ✅<br>GPU ✅ | — | — | — | — | NPU ✅ (T2VA)<br>GPU ✅ | — | — | — |
+| OmniNFT | — | — | — | — | ✅ | — | — | — | — |
+| [CRD](../algo/crd.md) | — | — | GPU ✅ (Medium LoRA, FSDP2) | — | — | — | — | — | — |
+| [DGPO](../algo/dgpo.md) | — | — | GPU ✅ | — | — | — | — | — | — |
+| [DiffusionOPD](../algo/diffusion_opd.md) (incl. MOPD) | — | — | GPU ✅ | — | NPU ✅ | — | — | — | — |
+| GSPO (incl. OPD) | — | — | — | — | — | — | — | NPU ✅<br>GPU ✅ | — |
 
 HunyuanImage-3.0 (MixGRPO / SRPO) appears on the project README as Planned or
 WIP and does not yet have a ready-to-run recipe, so it is omitted from the

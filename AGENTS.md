@@ -26,10 +26,23 @@ Do not open one-off PRs for tiny edits (single typo, isolated style change, one 
 
 - Pure code-agent PRs are **not allowed**. A human submitter must understand and defend the change end-to-end.
 - The submitting human must review every changed line and run relevant tests.
+- Everything a reviewer reads — commit messages, code comments and docstrings, the PR title and description, and any comment, review or reply — must be written by that human or approved by them word for word. Agents keep drafts short and hand them over; they do not commit without an approved message, and do not push, open or mark ready a PR, post on GitHub, request reviewers, change labels or trigger CI unless the user asks for that specific action.
 - PR descriptions for AI-assisted work **must** include:
   - Why this is not duplicating an existing PR.
   - Test commands run and results.
   - Clear statement that AI assistance was used.
+
+### Protected surfaces
+
+Never edit CI or repository infrastructure — `.github/workflows/`,
+`.github/actions/`, `.github/CODEOWNERS`, and PR/issue templates — unless the
+user explicitly asks for that exact change in the current session. If a task seems
+to require it, stop and ask instead.
+
+The agent-instruction layer itself — `AGENTS.md`/`CLAUDE.md` and `.agents/`
+(rules and skills) — follows the same rule: edit it only when the user explicitly
+asks for that change, then follow
+[`docs/contributing/editing-agent-instructions.md`](docs/contributing/editing-agent-instructions.md).
 
 ### Fail-closed behavior
 
@@ -42,10 +55,9 @@ If work is duplicate/trivial busywork, **do not proceed**. Return a short explan
 ### Environment setup
 
 ```bash
-# GPU (two steps — engine stack first, then rollout + train)
-uv pip install -e ".[gpu]" --torch-backend=auto
-uv pip install "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@$(cat .github/vllm_omni_pin.txt)"
-uv pip install -e ".[train,dev]"
+# GPU
+uv pip install vllm==0.30.0 --torch-backend=auto
+uv pip install -e ".[gpu,dev]" --torch-backend=auto
 
 pre-commit install
 ```
@@ -99,6 +111,13 @@ change and explain why**.
 - **Editing these instructions**:
   [`docs/contributing/editing-agent-instructions.md`](docs/contributing/editing-agent-instructions.md)
   — Rules for modifying AGENTS.md or any domain-specific guide it references.
+- **Path-scoped rules**: [`.agents/rules/`](.agents/rules/) — invariants whose
+  `paths:` frontmatter names the files they govern. Some harnesses auto-load them;
+  whatever harness you run in, **read the rule file(s) covering a path before editing
+  it**.
+- **Shared training core** (`verl_omni/trainer/`, `verl_omni/workers/`,
+  `verl_omni/agent_loop/`): [`.agents/rules/trainer.md`](.agents/rules/trainer.md)
+  — the core stays model- and algorithm-agnostic; extend via registries, not forks.
 
 ## Acknowledgements
 

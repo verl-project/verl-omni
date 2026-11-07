@@ -20,8 +20,17 @@ from .fsdp import (  # noqa: F401
 from .fsdp.omni_impl import OmniFSDPEngine  # noqa: F401
 
 try:
-    from .veomni import VeOmniDiffusionEngine  # noqa: F401
+    from .megatron import OmniMegatronEngine  # noqa: F401
+except ModuleNotFoundError as error:
+    # Megatron-Core / Transformer Engine are optional in CPU and FSDP installs.
+    if (error.name or "").split(".")[0] not in {"megatron", "transformer_engine", "transformer_engine_torch"}:
+        raise
+    OmniMegatronEngine = None
+
+try:
+    from .veomni import OmniVeOmniEngine, VeOmniDiffusionEngine  # noqa: F401
 except ImportError:
+    OmniVeOmniEngine = None
     VeOmniDiffusionEngine = None
 
 __all__ = [
@@ -29,6 +38,10 @@ __all__ = [
     "DPODiffusersFSDPEngine",
     "NFTDiffusersFSDPEngine",
     "DiffusersFSDPEngine",
+    "OmniVeOmniEngine",
     "VeOmniDiffusionEngine",
     "OmniFSDPEngine",
 ]
+
+if OmniMegatronEngine is not None:
+    __all__.append("OmniMegatronEngine")

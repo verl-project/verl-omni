@@ -1,10 +1,11 @@
 (separate_async_omni)=
-# Separate-Async RL Training for Qwen3-Omni
+# Separate-Async RL Training for Omni AR Models
 
-Last updated: 09/08/2026
+Last updated: 10/07/2026
 
 `trainer.v1.trainer_mode=omni_separate_async` runs training and rollout on
-separate GPU pools for omni AR models (Qwen3-Omni thinker). Standalone rollout
+separate GPU pools for omni AR models (Qwen3-Omni thinker, MiniCPM-o 4.5
+thinker). Standalone rollout
 replicas generate one batch ahead of training; the trainer pushes weights to
 them every `trainer.v1.separate_async.parameter_sync_step` steps over a
 non-naive checkpoint engine (nccl/nixl/...). Generations aborted by a weight
@@ -16,8 +17,9 @@ every sample.
 
 - Long-tail completions (large `rollout.n`, high length variance) leave the
   trainer or rollout GPUs idle in `omni_sync`.
-- Multimodal prefill (image/video/audio encoders) makes generation the
-  dominant phase of the step.
+- Multimodal prefill (image/video/audio encoders) can make generation the
+  dominant phase of the step — measure which phase dominates before splitting
+  GPUs (see Balancing below).
 
 Off-policyness is bounded by the one-batch-ahead pipeline: a sample is trained
 at most one weight version after it was generated (at
@@ -28,11 +30,53 @@ for staleness; the replay buffer's
 
 ## GPU layout
 
-`trainer.n_gpus_per_node × trainer.nnodes` GPUs run the FSDP actor;
+`trainer.n_gpus_per_node × trainer.nnodes` GPUs run the actor (FSDP2 LoRA by
+default, or Megatron for the full-parameter AudioMCQ and AVQA recipes);
 `actor_rollout_ref.rollout.n_gpus_per_node × actor_rollout_ref.rollout.nnodes`
 additional GPUs run standalone rollout replicas
 (`n_gpus_per_node / tensor_model_parallel_size` replicas per node). Single-node
 replicas only for AR omni today (`run_headless` is not implemented upstream).
+
+### Balancing the actor and rollout pools
+
+Rollout generates one batch ahead of training, so the step time is bounded by
+the **slower** pool — and which one is slower is a property of the workload,
+so measure before moving GPUs: `timing_s/gen` is the trainer's wait for
+samples (~0 = generation fully hidden, trainer-bound) and per-role GPU duty
+shows the idle side (see Monitor).
+
+- **Actor pool** (`trainer.n_gpus_per_node × trainer.nnodes`): FSDP2 shards
+  the actor across the pool — more GPUs mean more headroom and more training
+  throughput. `ppo_mini_batch_size × rollout.n` must shard evenly across the
+  pool's DP ranks (a 3-GPU pool needs the `120 = 8 × 15` batch reshape, not
+  the default 16 × 16 = 256).
+- **Rollout pool** (`rollout.n_gpus_per_node × rollout.nnodes`): each replica
+  holds the whole model, TP-sharded — model size sets the minimum TP, and
+  GPUs beyond that buy more replicas (`n_gpus_per_node / TP` per node): more
+  batches in flight, not a faster single batch. A replica never spans nodes.
+
+Measured on MiniCPM-o 4.5 AVQA (4 × 80 GB, 45-step probes — a trainer-bound
+workload):
+
+| layout | s/step | GPU duty |
+| --- | --- | --- |
+| colocated 4+0 | 181.5 | 76–77% on all four |
+| separate-async 3+1 | 192.2 | 70% / 39% |
+| separate-async 2+2 | ~273 | 77% / 16% |
+
+A trainer-bound workload favors colocated — shrinking the trainer pool costs
+more than overlap recovers — and flips to favoring separation when generation
+dominates, the regime disaggregation exists for. The shipped recipes start
+half/half (2+2 LoRA, 4+4 and 16+16 Megatron); skew from there toward the
+measured slower pool. One TP=2 replica (`rollout.tensor_model_parallel_size=2`,
+the validated Qwen3-Omni 30B shape) is the fallback if the multi-replica
+rollout stalls around weight syncs.
+
+Without re-splitting GPUs: lend trainer GPUs to generation when the buffer
+runs short (`trainer.v1.separate_async.hybrid_rollout.enable_switch=true`,
+not yet GPU-verified on omni); `parameter_sync_step` changes how often
+weights travel, not pool speed; GPU reward models live on the standalone pool
+or their own, never the trainer pool.
 
 ## Run
 
@@ -41,13 +85,52 @@ bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_mmk12_sep
 ```
 
 The example splits 4 GPUs into 2 trainer + 2 rollout (one TP=2 replica) and
-uses GSPO + GRPO advantages with LoRA. Key overrides:
+uses GSPO + GRPO advantages with LoRA.
+
+### Offload on the trainer pool: a throughput/memory trade-off
+
+Decoupled-PPO CPU snapshots own their storage in `OmniDetachActorWorker`, so
+`param_offload`/`optimizer_offload` are **safe at any model size** — pick
+them by memory arithmetic, not correctness. Two constraints rule the
+offload-free shape, and `gpu_memory_utilization` (one knob for the standalone
+and hybrid pools) must satisfy both:
+
+1. The hybrid replicas that briefly share the trainer GPUs (first sampling
+   window, validation) map their full engine budget when they wake, next to
+   the now-resident actor: `utilization × card + actor weights + caches` must
+   fit on the trainer cards.
+2. Every rollout engine needs `utilization × card` to cover its model
+   weights, activation/graph overhead and KV cache; below that floor it dies
+   at init with `No available memory for the cache blocks`.
+
+A bigger actor pushes the first constraint up until the second can no longer
+hold — no utilization works, so keep the colocated offload flags: the actor
+vacates during rollout, both pools get their full budget, and the only cost is
+the CPU↔GPU weight swap per local update. A small actor leaves a wide window:
+drop offload and keep the swaps out of the step time entirely (measured ~1.4×
+faster with a 4.5B actor, validation matching the colocated baseline).
+
+Full-parameter Megatron uses the same
+`trainer.v1.trainer_mode=omni_separate_async` path:
+
+```bash
+bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_megatron_audiomcq_separate_async.sh
+```
+
+That launcher is Thinker-only, BSHD, PP=CP=1, AudioMCQ. It is experimental and
+not clean-checkout reproducible yet; see
+[`examples/gspo_trainer/qwen3_omni/README.md`](../examples/qwen3_omni/gspo_trainer_qwen3_omni.md).
+The same trainer mode also has an image+audio AVQA Megatron launcher using
+shared configuration. Development-environment GPU results and the remaining
+public-dependency limitations are documented in that README.
+FSDP LoRA remains the default. Key overrides:
 
 | knob | default | meaning |
 |---|---|---|
 | `trainer.v1.separate_async.num_warmup_batches` | 4 | prompt batches submitted before the first step |
 | `trainer.v1.separate_async.parameter_sync_step` | 4 | push weights to standalone replicas every N steps |
-| `actor_rollout_ref.rollout.checkpoint_engine.backend` | — | must be non-naive (`nccl`, `nixl`, `mooncake`) |
+| `actor_rollout_ref.rollout.checkpoint_engine.backend` | — | must be non-naive (`nccl`, `nixl`, `mooncake`, `omni_delta_sharded`) |
+| `trainer.v1.separate_async.hybrid_rollout.enable_switch` | false | lend colocated trainer GPUs to generation when the replay buffer is short |
 
 Constraints enforced at startup: rollout GPUs > 0, a non-naive checkpoint
 backend, and `data.train_batch_size == parameter_sync_step * ppo_mini_batch_size`.
@@ -55,27 +138,94 @@ The trainer reads `parameter_sync_step` from `v1.separate_async` (the key the
 parent validates and syncs on), not from a mode-specific stub. The MMK12
 example sets `parameter_sync_step=8` so `128 == 8 * 16`.
 
+MiniCPM-o 4.5 runs the same trainer with the AVQA recipe (2 trainer + 2
+rollout GPUs as **two TP=1 replicas**; fall back to one TP=2 replica by
+overriding `rollout.tensor_model_parallel_size` if the multi-replica shape
+misbehaves):
+
+```bash
+bash examples/gspo_trainer/minicpm/run_minicpmo_4_5_thinker_gspo_lora_avqa_separate_async_v1.sh
+```
+
 LoRA recipes should set `actor_rollout_ref.model.lora.merge=False` so weight
 sync ships only adapter tensors (applied on the replicas via the LoRA-aware
 checkpoint engine manager).
 
+The actor-side peft keys resolve onto both rollout classes without a remap —
+Qwen3-Omni through transformers' `_checkpoint_conversion_mapping` strip,
+MiniCPM-o natively because the actor's `MiniCPMO.llm.*` tree matches the
+`llm.`-prefixed registration in `MiniCPMO45OmniLLMForConditionalGeneration`
+(pinned by `tests/pipelines/test_minicpm_lora_sync_names_on_cpu.py`). The
+MiniCPM AVQA recipe currently ships `merge=True` — merged full weights through
+the same NCCL manager — to keep its first run directly comparable with the
+colocated reference; flipping to adapter deltas later is config-only.
+
+`omni_delta_sharded` (RFC #38) broadcasts only the weights that changed since
+the last sync instead of the full model (a verl-omni subclass of verl's
+`DeltaShardedCheckpointEngine`; verl gates the raw `delta_sharded` name to
+sglang rollouts): a dense seed sync, then sparse
+(position, value) flushes with a per-flush checksum, applied in place on the
+replicas. It requires full-weight training, so it composes with neither the
+LoRA path above nor QAT; both raise at startup. It also raises at the first
+sync on fused-MoE rollout models such as the Qwen3-Omni thinker: the
+full-weight path reloads `RoutedExperts` modules through vLLM's
+checkpoint-layout restore, which the sparse in-place apply does not reproduce.
+The omni engine audit behind the other gates: `OmniFSDPEngine` inherits verl's
+shard export (`state_dict` + `convert_weight_keys`, identity coordinates),
+which matches its own full export only for full-weight, non-QAT runs. The
+adapter export (`collect_lora_params`) and the merged-LoRA export
+(`normalize_peft_param_name`) produce different names, and QAT's
+`quantize_with_fusion` renames and repacks after conversion, so the engine
+additionally fails closed on those paths. Like the diffusion side, the omni
+delta path is CPU-test-covered but not yet GPU-verified.
+
+## Checkpoint recovery and dynamic GPU lending
+
+`OmniPPOTrainerSeparateAsync` does not override save/load. After TransferQueue
+0.1.9 it inherits verl's async queue snapshot (verl#7037): resume restores
+queued prompt groups and re-issues pending/running ones. Sync mode does not
+write a queue snapshot.
+
+Dynamic GPU lending on this v1 trainer is
+`trainer.v1.separate_async.hybrid_rollout.enable_switch` (verl#7373), default
+off. That is the analog of verl's fully_async_policy
+`DynamicResourceController` (verl#6556, -15.3% on an LLM). `main_omni` does
+not construct that controller; `async_training.use_dynamic_resource_scheduling=true`
+raises and points at `hybrid_rollout.enable_switch`. Omni VL/audio fully-async
+rollout (upstream #399 / #413) is a separate stack.
+
+To lend colocated trainer GPUs when the replay buffer is short:
+
+```bash
+bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_mmk12_separate_async_v1.sh \
+    trainer.v1.separate_async.hybrid_rollout.enable_switch=true
+```
+
+This override is not GPU-verified on omni yet. `enable_switch=true` requires
+`sync_compatible=false`.
+
 ## Monitor
 
-Watch `training/off_policy/*` metrics (staleness mean/max, dropped samples)
-and `timing_s/update_weights`. If weight sync stalls dominate, raise
-`parameter_sync_step` or shorten `data.max_response_length`.
+Watch `training/off_policy/*` metrics (staleness mean/max, dropped samples),
+`timing_s/gen` (trainer wait for samples; ~0 means generation is fully
+hidden — see Balancing above), and `timing_s/update_weights`. If weight sync
+stalls dominate, raise `parameter_sync_step` or shorten
+`data.max_response_length`.
 
 ## Test
 
 CPU (no GPU required; covers registration, the `parameter_sync_step` key fix,
 LoRA-aware worker/manager wiring, CPU save/restore wiring, recovery-client
-contracts, and the `adapter_name` forwarding fix):
+contracts, the `adapter_name` forwarding fix, and the MiniCPM recipe contract
++ adapter-delta key alignment):
 
 ```bash
 pytest -s --asyncio-mode=auto \
     tests/trainer/omni/test_ray_omni_trainer_separate_async_on_cpu.py \
     tests/workers/rollout/test_omni_rollout_recovery_on_cpu.py \
-    tests/workers/test_omni_fsdp_engine_on_cpu.py
+    tests/workers/test_omni_fsdp_engine_on_cpu.py \
+    tests/utils/test_minicpmo_gspo_separate_async_launcher_on_cpu.py \
+    tests/pipelines/test_minicpm_lora_sync_names_on_cpu.py
 ```
 
 GPU smoke (2 GPUs, tiny-random Qwen3-Omni, 3 separate-async steps):

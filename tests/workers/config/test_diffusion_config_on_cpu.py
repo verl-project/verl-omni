@@ -33,6 +33,27 @@ from verl_omni.workers.config.diffusion.rollout import (
 # ---------------------------------------------------------------------------
 
 
+def test_requested_artifacts_are_available_in_rollout_validation_and_model_configs():
+    from pathlib import Path
+
+    from hydra import compose, initialize_config_dir
+    from verl.utils.config import omega_conf_to_dataclass
+
+    config_dir = str(Path(__file__).resolve().parents[3] / "verl_omni/trainer/config")
+    with initialize_config_dir(config_dir=config_dir, version_base=None):
+        config = compose(
+            config_name="diffusion_trainer",
+            overrides=[
+                "actor_rollout_ref.rollout.pipeline.requested_outputs=[image_preview]",
+            ],
+        )
+    assert list(config.actor_rollout_ref.rollout.val_kwargs.pipeline.requested_outputs) == ["image_preview"]
+    assert list(config.actor_rollout_ref.model.pipeline.requested_outputs) == ["image_preview"]
+    pipeline = omega_conf_to_dataclass(config.actor_rollout_ref.rollout.pipeline)
+    assert pipeline.requested_outputs == ["image_preview"]
+    assert DiffusionPipelineConfig().requested_outputs is None
+
+
 class TestDiffusionLossConfig:
     def test_defaults(self):
         cfg = DiffusionLossConfig()
@@ -215,7 +236,7 @@ class TestDiffusionRolloutConfig:
 
     @pytest.mark.parametrize("etp", [2, 3])
     def test_intermediate_text_encoder_tp_size_is_rejected(self, etp):
-        with pytest.raises(ValueError, match="must be either 1 or equal to tensor_model_parallel_size"):
+        with pytest.raises(ValueError, match="must be either 1 or equal to the DiT group size"):
             DiffusionRolloutConfig(name="vllm_omni", tensor_model_parallel_size=4, text_encoder_tp_size=etp)
 
     def test_non_positive_text_encoder_tp_size_is_rejected(self):
@@ -315,6 +336,7 @@ class TestFSDPDiffusionActorConfig:
 
         assert actor_cfg.strategy == "fsdp"
         assert actor_cfg.ppo_micro_batch_size_per_gpu == 4
+        assert actor_cfg.use_no_sync_for_gradient_accumulation is False
         assert isinstance(actor_cfg.diffusion_loss, DiffusionLossConfig)
 
     def test_engine_strategy_synced(self):

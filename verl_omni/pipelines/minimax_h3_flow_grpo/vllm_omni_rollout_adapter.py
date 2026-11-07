@@ -44,10 +44,15 @@ from vllm_omni.diffusion.models.minimax_h3.packed_tokens import (
 from vllm_omni.diffusion.request import OmniDiffusionRequest
 from vllm_omni.diffusion.worker.request_batch import DiffusionRequestBatch
 
-from verl_omni.pipelines.diffusion_rollout_output import with_rollout_data
+from verl_omni.pipelines.diffusion_rollout_output import (
+    contains_meta_tensor,
+    with_batched_media_artifacts,
+    with_rollout_data,
+)
 from verl_omni.pipelines.minimax_h3_diffusion_nft.common import (
     ref2va_reference_image_short_edge,
     serialize_ref_blocks,
+    validate_h3_parallel_config,
     validate_ref2va_reference_image_short_edge,
 )
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
@@ -61,6 +66,7 @@ from .common import (
     configure_flow_scheduler,
     flatten_joint_latents,
     h3_sigma_schedules,
+    h3_transition_count,
     sample_h3_transition,
 )
 from .weight_sync import MiniMaxH3WeightSyncMixin
@@ -91,11 +97,16 @@ class MiniMaxH3PipelineWithLogProb(MiniMaxH3WeightSyncMixin, MiniMaxH3Pipeline):
     supports_request_batch = False
 
     diffusion_io_spec = DiffusionIOSpec(
-        primary=MediaSpec("video"),
-        auxiliary=(MediaSpec("audio", sample_rate=32000),),
+        artifacts={
+            "video_preview": MediaSpec("video", "decoded", "TCHW"),
+            "audio": MediaSpec("audio", "decoded", "CT", sample_rate=32000),
+            "video_latent": MediaSpec("video", "latent", "CTHW"),
+            "audio_latent": MediaSpec("audio", "latent", "CLT"),
+        }
     )
 
     def __init__(self, *, od_config: OmniDiffusionConfig, prefix: str = ""):
+        validate_h3_parallel_config(od_config.parallel_config)
         self._reference_image_short_edge = validate_ref2va_reference_image_short_edge()
         super().__init__(od_config=od_config, prefix=prefix)
         self.install_h3_lora_layout()
@@ -238,7 +249,15 @@ class MiniMaxH3PipelineWithLogProb(MiniMaxH3WeightSyncMixin, MiniMaxH3Pipeline):
         audio_condition_lengths: list[int] | None = None,
         keyframe_frame_indices: list[int] | None = None,
         base_schedule: Sequence[float] | None = None,
+        pad_seq_len: int | None = None,
+        locked_audio_rows: torch.Tensor | None = None,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        # vLLM-Omni forwards every denoise input key and sets the unused ones to None. FlowGRPO rollouts have
+        # no edit path, so a real value here must fail instead of silently producing plain generation.
+        unsupported = sorted(name for name, value in kwargs.items() if value is not None)
+        if unsupported:
+            raise NotImplementedError(f"MiniMax H3 FlowGRPO rollout does not support {', '.join(unsupported)}.")
         target_video_rows, target_audio_rows = self._initial_noise(
             seed=seed,
             latent_t=latent_t,
@@ -259,6 +278,7 @@ class MiniMaxH3PipelineWithLogProb(MiniMaxH3WeightSyncMixin, MiniMaxH3Pipeline):
                 latent_w=latent_w,
                 audio_t=audio_t,
                 ref_blocks=ref_blocks,
+                seq_len=pad_seq_len,
             )
         elif task in {"t2va", "fl2va"}:
             keyframe_indices = list(keyframe_frame_indices or [])
@@ -271,6 +291,7 @@ class MiniMaxH3PipelineWithLogProb(MiniMaxH3WeightSyncMixin, MiniMaxH3Pipeline):
                 include_keyframe_cond=task == "fl2va",
                 keyframe_frame_indices=keyframe_indices if task == "fl2va" else None,
                 frame_count=num_frames if task == "fl2va" else None,
+                seq_len=pad_seq_len,
             )
         else:
             raise NotImplementedError(f"MiniMax H3 FlowGRPO supports t2va, fl2va, and ref2va, got {task!r}.")
@@ -292,6 +313,16 @@ class MiniMaxH3PipelineWithLogProb(MiniMaxH3WeightSyncMixin, MiniMaxH3Pipeline):
             token_tags=tags,
             device=self.device,
         )
+
+        if locked_audio_rows is not None:
+            expected = (2 * audio_t, 32)
+            if tuple(locked_audio_rows.shape) != expected:
+                raise ValueError(
+                    f"MiniMax H3 locked_audio_rows shape {tuple(locked_audio_rows.shape)} "
+                    f"does not match expected {expected}."
+                )
+            target_audio_rows = locked_audio_rows.to(device=self.device, dtype=target_audio_rows.dtype)
+            branch.locked_audio_rows = target_audio_rows
 
         visual_anchor = visual_condition
         if task == "fl2va" and (visual_anchor is None or not keyframe_indices):
@@ -358,7 +389,8 @@ class MiniMaxH3PipelineWithLogProb(MiniMaxH3WeightSyncMixin, MiniMaxH3Pipeline):
         audio_scheduler = FlowMatchSDEDiscreteScheduler()
         configure_flow_scheduler(video_scheduler, video_sigmas, self.device)
         configure_flow_scheduler(audio_scheduler, audio_sigmas, self.device)
-        num_transitions = num_steps - 1
+        # Take the step count from the schedule, not from num_steps: its boundary count is an upstream convention.
+        num_transitions = h3_transition_count(video_sigmas, audio_sigmas)
         if self._flow_grpo_window_size is None:
             selected = set(range(num_transitions))
         else:
@@ -422,6 +454,7 @@ class MiniMaxH3PipelineWithLogProb(MiniMaxH3WeightSyncMixin, MiniMaxH3Pipeline):
                         noise_level=self._flow_grpo_noise_level if is_selected else 0.0,
                         sde_type=self._flow_grpo_sde_type,
                         generator=generator,
+                        prev_sample=target_audio_rows.unsqueeze(0) if locked_audio_rows is not None else None,
                         return_log_prob=is_selected,
                     )
                     next_video_rows = video_rows.clone()
@@ -429,7 +462,10 @@ class MiniMaxH3PipelineWithLogProb(MiniMaxH3WeightSyncMixin, MiniMaxH3Pipeline):
                     if visual_anchor is not None:
                         next_video_rows[~branch.update_mask_dev] = visual_anchor
                     next_audio_rows = audio_rows.clone()
-                    next_audio_rows[branch.audio_update_mask_dev] = audio_transition[0][0]
+                    if locked_audio_rows is not None:
+                        next_audio_rows[branch.audio_update_mask_dev] = target_audio_rows
+                    else:
+                        next_audio_rows[branch.audio_update_mask_dev] = audio_transition[0][0]
                     if audio_anchor is not None:
                         next_audio_rows[~branch.audio_update_mask_dev] = audio_anchor
                     if is_selected:
@@ -482,7 +518,11 @@ class MiniMaxH3PipelineWithLogProb(MiniMaxH3WeightSyncMixin, MiniMaxH3Pipeline):
             "all_timesteps": (1.0 - torch.tensor(selected_video_sigmas, device=self.device)).unsqueeze(0),
             "all_log_probs": torch.stack(log_probs, dim=1),
             "h3_step_indices": torch.tensor(step_indices, device=self.device).unsqueeze(0),
-            "h3_audio_timesteps": (1.0 - torch.tensor(selected_audio_sigmas, device=self.device)).unsqueeze(0),
+            "h3_audio_timesteps": (
+                torch.ones((1, len(selected_audio_sigmas)), device=self.device)
+                if locked_audio_rows is not None
+                else (1.0 - torch.tensor(selected_audio_sigmas, device=self.device)).unsqueeze(0)
+            ),
             **replay_outputs,
         }
 
@@ -496,6 +536,7 @@ class MiniMaxH3PipelineWithLogProb(MiniMaxH3WeightSyncMixin, MiniMaxH3Pipeline):
             audio_t=audio_t * 2,
             audio_channel=2,
         )
+        self._flow_grpo_final_latents = (video_latent, audio_latent)
         return video_latent, audio_latent
 
     @torch.no_grad()
@@ -504,6 +545,7 @@ class MiniMaxH3PipelineWithLogProb(MiniMaxH3WeightSyncMixin, MiniMaxH3Pipeline):
             raise ValueError(f"MiniMax H3 FlowGRPO expects one request, got {len(request.requests)}.")
         req = request.requests[0]
         self._configure_flow_grpo(req)
+        self._flow_grpo_final_latents = None
         extra_args = req.sampling_params.extra_args or {}
         short_edge = extra_args.get(
             "reference_image_short_edge",
@@ -546,7 +588,10 @@ class MiniMaxH3PipelineWithLogProb(MiniMaxH3WeightSyncMixin, MiniMaxH3Pipeline):
             "ref_block_count",
         )
         replay_fields = tuple(key for key in replay_fields if key in trajectory)
-        return with_rollout_data(
+        # With model-level CPU offload, vLLM-Omni leaves a meta placeholder on ranks that do not reply;
+        # DiffusionOutput(to_cpu=True) cannot copy it. The trajectory tensors above are already on CPU.
+        has_meta_output = contains_meta_tensor(output.output)
+        result = with_rollout_data(
             output,
             trajectory_latents=trajectory["all_latents"],
             trajectory_log_probs=trajectory["all_log_probs"],
@@ -556,5 +601,41 @@ class MiniMaxH3PipelineWithLogProb(MiniMaxH3WeightSyncMixin, MiniMaxH3Pipeline):
                 "prompt_embeds_mask": trajectory["prompt_embeds_mask"],
             },
             rl={key: trajectory[key] for key in replay_fields},
-            to_cpu=True,
+            to_cpu=not has_meta_output,
+        )
+        if self._flow_grpo_final_latents is None:
+            raise RuntimeError("MiniMax H3 rollout did not capture final native latents")
+        video_latent, audio_latent = self._flow_grpo_final_latents
+        self._flow_grpo_final_latents = None
+        if has_meta_output:
+            # A non-replying offload rank carries a placeholder, not servable media.
+            return result
+        video, audio = output.output
+        sampling = req.sampling_params
+        extra_args = sampling.extra_args or {}
+        output_type = extra_args.get("output_type", sampling.output_type)
+        return with_batched_media_artifacts(
+            result,
+            data={
+                "video_preview": video,
+                "audio": audio,
+                "video_latent": video_latent,
+                "audio_latent": audio_latent.unsqueeze(0),
+            },
+            specs={
+                "video_preview": MediaSpec(
+                    "video",
+                    "decoded",
+                    "THWC",
+                    fps=24 if sampling.resolved_frame_rate is None else sampling.resolved_frame_rate,
+                ),
+                "audio": MediaSpec("audio", "decoded", "CT", sample_rate=32000),
+                "video_latent": MediaSpec("video", "latent", "CTHW"),
+                "audio_latent": MediaSpec("audio", "latent", "CLT"),
+            },
+            primary="video_latent" if output_type == "latent" else "video_preview",
+            preview="video_preview",
+            audio="audio",
+            context=f"pipeline={type(self).__name__}, request_id={req.request_id}",
+            requested=extra_args.get("requested_outputs"),
         )

@@ -41,16 +41,20 @@ then `examples/flowgrpo_trainer/data_process/qwenimage_ocr.py` to write
 
 #### NVIDIA GPU
 
+The default is CUDA V1 sync (TransferQueue + ReplayBuffer; `trainer.use_v1=true`
+since v0.3.0):
+
 ```bash
-bash examples/dpo_trainer/qwen_image/run_qwen_image_online_dpo_lora.sh \
+bash examples/dpo_trainer/qwen_image/run_qwen_image_online_dpo_lora_v1.sh \
   data.train_files=$WORKSPACE/data/ocr/qwen_image/train.parquet \
   data.val_files=$WORKSPACE/data/ocr/qwen_image/test.parquet
 ```
 
-For CUDA V1 sync (TransferQueue + ReplayBuffer), use `examples/dpo_trainer/qwen_image/run_qwen_image_online_dpo_lora_v1.sh`.
+The legacy v0 script below is **deprecated** (a `DeprecationWarning` is emitted
+at launch) and remains only until the v0 trainer is removed:
 
 ```bash
-bash examples/dpo_trainer/qwen_image/run_qwen_image_online_dpo_lora_v1.sh \
+bash examples/dpo_trainer/qwen_image/run_qwen_image_online_dpo_lora.sh \
   data.train_files=$WORKSPACE/data/ocr/qwen_image/train.parquet \
   data.val_files=$WORKSPACE/data/ocr/qwen_image/test.parquet
 ```
@@ -105,7 +109,7 @@ with the omni DPO loss.
 ### Dataset
 
 Prepare Omni-Preference parquet files by following
-[`data_process/omni_preference_dpo_dataset.md`](data_process/omni_preference_dpo_dataset.md).
+[`data_process/omni_preference_dpo_dataset.md`](https://github.com/verl-project/verl-omni/blob/main/examples/dpo_trainer/data_process/omni_preference_dpo_dataset.md).
 The training script expects:
 
 ```text
@@ -216,7 +220,7 @@ Evaluation is staged so expensive generation can be resumed and inspected:
 is `<output>.jsonl`. All stages iterate samples in dataset order and use
 `(data_file, index, uid)` as the stable join key.
 
-The repository root [`eval_vlm_as_judge.sh`](qwen3_omni/eval_vlm_as_judge.sh) is the runnable example.
+The repository root [`eval_vlm_as_judge.sh`](https://github.com/verl-project/verl-omni/blob/main/examples/dpo_trainer/qwen3_omni/eval_vlm_as_judge.sh) is the runnable example.
 It keeps reference and trained generation as resumable cache stages, then runs
 the judge stage over the cached outputs. Adjust the path variables, checkpoint
 steps, modalities, and judge address for your environment:

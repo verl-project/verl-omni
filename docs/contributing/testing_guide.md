@@ -52,7 +52,7 @@ Use L1 for lightweight coverage of:
 - Loss functions, advantage computation, registries, and metric utilities.
 - Pipeline or adapter boundary behavior that can be tested with mocks.
 
-Do not use L1 for GPU kernels, Ray clusters, rollout engines, real checkpoints, or full trainer smoke scripts. Put those in L2 or above.
+Do not use L1 for GPU kernels, Ray clusters, rollout engines, real checkpoints, or full trainer smoke scripts. Put those in L2 or above. The one Ray exception is `tests/reward_loop/test_cpu_native_reward_ray_on_cpu.py` (real actor cancel/restart semantics); it runs in a dedicated sequential pytest step, and every other L1 file must stay Ray-free.
 
 ### File Naming
 
@@ -93,7 +93,19 @@ To run only L1-style tests locally:
 
 ```bash
 printf '[pytest]\npython_files = *_on_cpu.py\n' > pytest.ini
-pytest -s -x --asyncio-mode=auto --cov=verl_omni --cov-report=term-missing --cov-report=xml:coverage.xml tests/
+pytest -s -x --asyncio-mode=auto -n auto --dist loadfile --cov=verl_omni --cov-report=term-missing --cov-report=xml:coverage.xml \
+  --ignore=tests/models/test_flash_attention_3_graph_break_on_cpu.py \
+  --ignore=tests/reward_loop/test_cpu_native_reward_ray_on_cpu.py tests/
+```
+
+`-n auto --dist loadfile` mirrors CI: `pytest-xdist` (from the `dev` extra) runs
+one worker per CPU core and keeps each test file inside a single worker, so
+file-local shared state behaves as in the sequential run. The real-Ray reward
+loop file is excluded above and runs in its own invocation, matching CI — Ray
+state is process-global and cannot share a pytest process with other files:
+
+```bash
+pytest -s -x --asyncio-mode=auto tests/reward_loop/test_cpu_native_reward_ray_on_cpu.py
 ```
 
 To run a single new L1 test file while iterating:
@@ -157,7 +169,7 @@ Conventions for this layer:
 `tests/convergence/` is registered as an exempt CI-layer folder, like
 `tests/special_e2e/`, so its runners and CPU tests can live together.
 
-For the current CI layer overview and the runnable L3 nightly case, see
+For the current CI layer overview and the runnable L3 nightly cases, see
 `ci_cd.md`.
 
 When adding a new layer section, include:
