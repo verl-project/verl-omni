@@ -1,6 +1,6 @@
 # Config Explanation
 
-Last updated: 10/21/2026
+Last updated: 10/25/2026
 
 VeRL-Omni builds on [verl](https://github.com/verl-project/verl) and reuses the
 same Hydra config surface for shared RL trainer fields (`data`, FSDP actor /
@@ -67,12 +67,15 @@ algorithm:
 - `algorithm.adv_estimator`: Advantage estimator name; defaults to `actor_rollout_ref.model.algorithm` (e.g. `flow_grpo`).
 - `algorithm.norm_adv_by_std_in_grpo`: Normalize advantages by within-group std (GRPO-style).
 - `algorithm.global_std`: Use a global (cross-group) std for advantage normalization.
-- `algorithm.old_policy_decay_schedule`: DiffusionNFT/DGPO/AWM old-policy EMA schedule. One of `copy`, `linear_to_0_5`, `linear_to_0_3`, `delayed_linear_to_0_999`.
+- `algorithm.old_policy_decay_schedule`: DiffusionNFT/DGPO/AWM/CRD sampling-policy EMA schedule. One of `copy`, `linear_to_0_5`, `linear_to_0_3`, `linear_from_0_25_to_0_5`, `delayed_linear_to_0_999`.
 - `algorithm.old_policy_decay`: Fixed old-policy EMA decay in `[0, 1]`. When set, overrides `old_policy_decay_schedule`.
-- `algorithm.old_policy_update_interval`: DiffusionNFT optimizer steps between old-policy adapter refreshes (must be `> 0`).
+- `algorithm.old_policy_update_interval`: Trainer iterations between sampling-policy adapter refreshes (must be `> 0`).
+- `algorithm.reference_policy_decay_schedule`: Independent EMA schedule for CRD's `moving_reference` adapter (default `linear_from_0_25_to_0_5`).
+- `algorithm.reference_policy_decay`: Optional fixed moving-reference decay in `[0, 1]`.
+- `algorithm.reference_policy_update_interval`: Trainer iterations between moving-reference refreshes.
 - `algorithm.timestep_fraction`: Fraction of rollout timesteps used for forward-process training, in `(0, 1]`.
-- `algorithm.train_timestep_range`: DGPO and AWM only. Rollout schedule indices `[start, end)` that training timesteps are drawn from; `null` uses the whole schedule.
-- `algorithm.train_timestep_count`: DGPO and AWM only. Number of schedule indices drawn per step and shared by the batch; `null` applies `timestep_fraction`.
+- `algorithm.train_timestep_range`: DGPO/AWM/CRD. Rollout schedule indices `[start, end)` that training timesteps are drawn from; `null` uses the whole schedule.
+- `algorithm.train_timestep_count`: DGPO/AWM/CRD. Number of schedule indices drawn per step and shared by the batch; `null` applies `timestep_fraction`.
 - `algorithm.adv_mode`: Advantage mapping before reward-probability scaling. One of `continuous`, `positive_only`, `negative_only`, `one_only`, `binary`.
 - `algorithm.paired_preference`: `true` for pair-based algorithms (e.g. offline DPO); doubles actor batch size and disables shuffle.
 - `algorithm.rollout_correction.*`: Experimental IS / RS correction. Schema mirrors upstream verl; see {doc}`../algo/rollout_correction` and [verl Rollout Correction](https://verl.readthedocs.io/en/latest/algo/rollout_corr.html).
@@ -255,13 +258,16 @@ actor_rollout_ref:
 
 #### `diffusion_loss` — `DiffusionLossConfig`
 
-- `actor_rollout_ref.actor.diffusion_loss.loss_mode`: Loss registry key. One of `flow_grpo`, `flow_dppo`, `grpo_guard`, `diffusion_nft`, `omni_nft`, `dgpo`, `awm`, `dpo`, `dmd2`, `dance_grpo`, `distill_kl`, `distill_fm_mse`.
+- `actor_rollout_ref.actor.diffusion_loss.loss_mode`: Loss registry key. One of `flow_grpo`, `flow_dppo`, `grpo_guard`, `diffusion_nft`, `omni_nft`, `dgpo`, `crd`, `awm`, `dpo`, `dmd2`, `dance_grpo`, `distill_kl`, `distill_fm_mse`.
 - `actor_rollout_ref.actor.diffusion_loss.clip_ratio`: PPO-style clip ratio for diffusion policy loss (FlowGRPO default is very small, e.g. `1e-4`).
 - `actor_rollout_ref.actor.diffusion_loss.adv_clip_max`: Max absolute advantage before computing the policy loss (must be `> 0`).
 - `actor_rollout_ref.actor.diffusion_loss.mix_beta`: DiffusionNFT β for positive / implicit-negative prediction mixing (must be `> 0`).
 - `actor_rollout_ref.actor.diffusion_loss.ref_kl_coef`: DiffusionNFT prediction-space reference MSE coefficient.
 - `actor_rollout_ref.actor.diffusion_loss.adaptive_weight_min`: DiffusionNFT minimum adaptive denominator for x0 reconstruction losses (must be `> 0`).
 - `actor_rollout_ref.actor.diffusion_loss.dpo_beta`: DPO inverse temperature for pairwise flow-matching preference loss.
+- `actor_rollout_ref.actor.diffusion_loss.crd_beta`: CRD implicit reward scale (finite, positive; default `1.0`).
+- `actor_rollout_ref.actor.diffusion_loss.crd_kl_min`: Minimum reward-adaptive anchor coefficient, between zero and `ref_kl_coef`.
+- `actor_rollout_ref.model.pipeline.reference_guidance_scale`: CRD pretrained-anchor CFG, independent of sampling CFG (default `4.5`).
 - `actor_rollout_ref.actor.diffusion_loss.dgpo_beta`: DGPO β in the group preference score (must be `> 0`).
 - `actor_rollout_ref.actor.diffusion_loss.dgpo_clip_range`: DGPO old-policy ratio clip range; `0` disables clipping (must be `>= 0`).
 - `actor_rollout_ref.actor.diffusion_loss.awm_clip_range`: AWM PPO-style clip range on the old-policy flow-matching ratio `exp(old_dsm - dsm)`; `0` disables clipping (must be `>= 0`).

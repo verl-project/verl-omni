@@ -84,8 +84,17 @@ algorithm:
   # DiffusionNFT fixed old-policy EMA decay; null uses old_policy_decay_schedule.
   old_policy_decay: null
 
-  # DiffusionNFT optimizer steps between old-policy adapter refreshes
+  # Trainer iterations between sampling-policy adapter refreshes.
   old_policy_update_interval: 1
+
+  # Independent moving-reference EMA schedule for forward-process losses.
+  reference_policy_decay_schedule: linear_from_0_25_to_0_5
+
+  # Fixed moving-reference decay, or null to use the schedule.
+  reference_policy_decay: null
+
+  # Actor-update interval for refreshing the moving reference.
+  reference_policy_update_interval: 1
 
   # DiffusionNFT fraction of rollout timesteps used for forward-process training
   timestep_fraction: 1.0
