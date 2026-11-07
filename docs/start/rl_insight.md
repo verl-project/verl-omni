@@ -100,7 +100,7 @@ python3 -m verl_omni.trainer.main_diffusion_v1 \
     trainer.project_name=verl_omni \
     trainer.experiment_name=flowgrpo_v1_rl_insight \
     actor_rollout_ref.rollout.disable_log_stats=False \
-    transfer_queue.metrics.enabled=True \
+    ++transfer_queue.metrics.enabled=True \
     ...
 ```
 
@@ -112,7 +112,7 @@ python3 -m verl_omni.trainer.main_omni \
     trainer.project_name=verl_omni \
     trainer.experiment_name=omni_rl_insight \
     actor_rollout_ref.rollout.disable_log_stats=False \
-    transfer_queue.metrics.enabled=True \
+    ++transfer_queue.metrics.enabled=True \
     ...
 ```
 
@@ -144,7 +144,7 @@ actor_rollout_ref.rollout.disable_log_stats=False
 For V1 training, expose the TransferQueue metrics endpoint with:
 
 ```bash
-transfer_queue.metrics.enabled=True
+++transfer_queue.metrics.enabled=True
 ```
 
 This is independent of `transfer_queue.enable`: the V1 entrypoint enables TransferQueue itself, while `transfer_queue.metrics.enabled` controls whether its Prometheus endpoint is exposed and registered.
@@ -200,7 +200,7 @@ Example views from the RL-Insight integration:
 ### TransferQueue metrics do not appear
 
 - Use the V1 trainer.
-- Set `transfer_queue.metrics.enabled=True`.
+- Set `++transfer_queue.metrics.enabled=True`.
 - Confirm that the TransferQueue metrics endpoint is reachable from the RL-Insight/Prometheus host.
 
 ### Traces are missing but scalar metrics are visible

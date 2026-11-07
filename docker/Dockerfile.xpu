@@ -5,7 +5,7 @@
 #
 # Override the verl pin:
 #   docker build -f docker/Dockerfile.xpu -t verl-omni:xpu \
-#     --build-arg VERL_GIT_REF=fefb080262e1c015a0ea05f958822a6a512dc795 .
+#     --build-arg VERL_GIT_REF=2ab35292039a51175a4b3d3b3b2d76e951a0d3e4 .
 #
 # Run:
 #   docker run --device /dev/dri -v /dev/dri/by-path:/dev/dri/by-path --ipc=host \

@@ -15,6 +15,7 @@ on:
       - "pyproject.toml"
       - ".github/workflows/npu_smoke.yml"
       - .github/vllm_omni_pin.txt
+      - .github/verl_pin.txt
   pull_request:
     branches:
       - main
@@ -30,6 +31,7 @@ on:
       - "pyproject.toml"
       - ".github/workflows/npu_smoke.yml"
       - .github/vllm_omni_pin.txt
+      - .github/verl_pin.txt
 
 # Declare permissions just read content and PR file metadata.
 permissions:
@@ -104,6 +106,13 @@ jobs:
       TRANSFORMERS_VERBOSITY: 'error'
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install the pinned verl over the image's stack
+        shell: bash
+        run: |
+          pip install --no-deps --force-reinstall "verl @ git+https://github.com/verl-project/verl.git@$(cat .github/verl_pin.txt)"
+          # The image predates the pin bump and still ships TransferQueue 0.1.9;
+          # verl requires >=0.1.11, and --no-deps above skips it.
+          pip install "TransferQueue==0.1.11"
       - name: Check NPU and CANN info
         shell: bash
         run: |
