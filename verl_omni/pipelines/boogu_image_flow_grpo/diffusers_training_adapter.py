@@ -49,8 +49,8 @@ def _load_vae_scale_factor(model_path: str) -> int:
     try:
         with open(vae_config_path) as f:
             vae_config = json.load(f)
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-        return 8
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"Failed to load Boogu VAE config from {vae_config_path}: {exc}") from exc
     channels = vae_config.get("block_out_channels")
     return 2 ** (len(channels) - 1) if channels else 8
 
