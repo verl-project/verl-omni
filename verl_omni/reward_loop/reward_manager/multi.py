@@ -297,12 +297,13 @@ class MultiRewardManager(RewardManagerBase, ABC):
                     except Exception as exc:
                         results = [exc]
 
+                for result in results:
+                    if isinstance(result, ArtifactContractError):
+                        raise result
                 for term, result in zip(window, results, strict=True):
                     key = term["key"]
                     if isinstance(result, BaseException):
                         if not isinstance(result, Exception):
-                            raise result
-                        if isinstance(result, ArtifactContractError):
                             raise result
                         if term["required"]:
                             raise RuntimeError(f"Required sub-reward '{key}' failed: {result}") from result

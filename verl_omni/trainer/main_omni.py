@@ -49,7 +49,12 @@ from verl_omni.utils.config import (
 )
 from verl_omni.utils.fs import resolve_model_local_dir
 from verl_omni.utils.rl_insight import enable_rl_insight
-from verl_omni.workers.config.reward import reward_pool_is_separate, reward_role_required
+from verl_omni.workers.config.reward import (
+    get_streaming_reward_config,
+    reward_pool_is_separate,
+    reward_role_required,
+    streaming_reward_enabled,
+)
 
 __all__ = [
     "RayTrainerTaskRunner",
@@ -336,6 +341,12 @@ def uses_v1_trainer(config) -> bool:
 
 def run_omni(config, task_runner_class=None) -> None:
     """Initialize Ray and run distributed Omni training."""
+    streaming_reward_enabled(config)
+    if get_streaming_reward_config(config).enabled:
+        raise ValueError(
+            "The Omni entrypoint does not support named reward streaming; "
+            "use verl_omni.trainer.main_diffusion_v1 for V1 synchronous diffusion training"
+        )
     enable_rl_insight(config)
 
     if uses_v1_trainer(config):
