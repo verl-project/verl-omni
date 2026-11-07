@@ -20,6 +20,7 @@ from unittest.mock import Mock
 import pytest
 from omegaconf import OmegaConf
 
+from verl_omni.trainer.diffusion.performance_watchdog import StepTimePerformanceWatchdog
 from verl_omni.trainer.diffusion.v1 import trainer_base, trainer_separate_async, trainer_sync
 from verl_omni.trainer.diffusion.v1.trainer_separate_async import PolicyGradientDiffusionTrainerV1SeparateAsync
 from verl_omni.trainer.diffusion.v1.trainer_sync import PolicyGradientDiffusionTrainerV1Sync
@@ -49,6 +50,7 @@ def make_trainer(monkeypatch, *, mode="sync", continuous=False, fail_at=None, re
     trainer.use_critic = False
     trainer.sync_compatible = False
     trainer._training_watchdog = None
+    trainer._performance_watchdog = None
     trainer.global_steps = resumed_step
     trainer.steps_per_epoch = 4
     trainer.total_training_steps = 4
@@ -139,3 +141,55 @@ def test_async_without_hybrid_only_profiles_standalone(monkeypatch):
     trainer.fit(Mock())
     assert not any(e[0] == "rollout" for e in events)
     assert events.count(("standalone", "start", {})) == 3
+
+
+def test_performance_watchdog_profiles_only_the_next_step(monkeypatch, caplog):
+    trainer, events = make_trainer(monkeypatch)
+    trainer.config.global_profiler.steps = []
+    trainer.config.global_profiler.profile_continuous_steps = False
+    trainer.config.global_profiler.tool = "torch"
+    trainer.config.global_profiler.save_path = "outputs/profile"
+    trainer.config.trainer.v1 = {"performance_watchdog": {"regression_ratio": 1.5}}
+    trainer._performance_watchdog = StepTimePerformanceWatchdog(
+        warmup_steps=0,
+        baseline_window_size=2,
+        minimum_observations=1,
+        regression_window_size=1,
+        regression_ratio=1.5,
+        cooldown_steps=10,
+    )
+    trainer._performance_profile_step = None
+    trainer._pending_performance_profile_report = None
+    trainer._completed_performance_profile_report = None
+    trainer._profiled_step_this_iteration = False
+    trainer._last_performance_insufficient_reason = None
+    trainer._performance_profile_tool = "torch"
+    trainer._performance_profile_roles = ("actor", "rollout")
+    trainer.parameter_sync_step = 1
+    trainer._performance_watchdog_workload = {"train_batch_size": 4, "parameter_sync_step": 1}
+
+    def compute_metrics(_batch, metrics, _timing, step, _epoch):
+        step_time = {1: 1.0, 2: 1.0, 3: 2.0, 4: 30.0}[step]
+        metrics.update(
+            {
+                "perf/time_per_step": step_time,
+                "perf/total_num_images": 4,
+                "timing_s/gen": step_time / 2,
+                "training/global_step": step,
+            }
+        )
+
+    monkeypatch.setattr(trainer, "_compute_metrics", compute_metrics)
+    with caplog.at_level("WARNING", logger=trainer_base.logger.name):
+        trainer.fit(Mock())
+
+    actor_profiles = [event for event in events if event[:2] == ("actor", "start")]
+    assert [event[2]["profile_step"] for event in actor_profiles] == [4]
+    assert len([event for event in events if event[:2] == ("actor", "stop")]) == 1
+    assert events.count(("rollout", "start", {})) == 1
+    assert events.count(("rollout", "stop")) == 1
+    assert trainer.profile_stop_calls == [("actor", {"run_command": True})]
+    assert "status=captured" in caplog.text
+    assert "capture_step=4" in caplog.text
+    assert "artifact_ref=outputs/profile" in caplog.text
+    assert "excludes checkpoint" in caplog.text
