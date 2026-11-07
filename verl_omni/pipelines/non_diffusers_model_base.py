@@ -133,10 +133,12 @@ class NonDiffusersModelBase(nn.Module, metaclass=ABCMeta):
 
         Reads ``adapter_config.json`` and ``adapter_model.safetensors``,
         injects the adapter, then copies weights in.  Checkpoint keys the model
-        does not have raise ``ValueError``; model keys missing from the
-        checkpoint keep their initial values with a warning.
+        does not have raise ``ValueError`` after the injected adapter is removed
+        again; model keys missing from the checkpoint keep their initial values
+        with a warning.
         """
         from peft import LoraConfig, get_peft_model_state_dict
+        from peft.functional import delete_adapter
         from safetensors.torch import load_file as safetensors_load_file
 
         adapter_config_path = os.path.join(adapter_path, "adapter_config.json")
@@ -160,6 +162,9 @@ class NonDiffusersModelBase(nn.Module, metaclass=ABCMeta):
         unexpected_load = set(adapter_state_dict.keys()) - set(current_state.keys())
 
         if unexpected_load:
+            # The keys are only known after injection, so undo it before raising.
+            delete_adapter(self, adapter_name, prefix="lora_")
+            del self.peft_config[adapter_name]
             raise ValueError(
                 f"Failed to load LoRA adapter {adapter_name!r} from {adapter_path}: {len(unexpected_load)} "
                 f"checkpoint keys are not in the model, e.g. {sorted(unexpected_load)[:5]}. Ensure the adapter "

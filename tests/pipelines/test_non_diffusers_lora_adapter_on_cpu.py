@@ -72,6 +72,21 @@ def test_load_lora_adapter_rejects_checkpoint_keys_the_model_lacks(tmp_path):
         _TinyModel().load_lora_adapter(_write_adapter(tmp_path / "adapter", state))
 
 
+def test_rejected_checkpoint_leaves_no_adapter_behind(tmp_path):
+    state = _trained_adapter_state()
+    model = _TinyModel()
+
+    with pytest.raises(ValueError):
+        model.load_lora_adapter(_write_adapter(tmp_path / "bad", state | {"other.lora_A.weight": torch.zeros(2, 4)}))
+
+    assert "default" not in model.peft_config
+    assert "default" not in model.proj.lora_A
+    model.load_lora_adapter(_write_adapter(tmp_path / "good", state))
+    loaded = get_peft_model_state_dict(model)
+    for key, value in state.items():
+        torch.testing.assert_close(loaded[key], value)
+
+
 def test_load_lora_adapter_keeps_initial_values_for_keys_missing_from_checkpoint(tmp_path, caplog):
     state = _trained_adapter_state()
     missing_key = next(key for key in state if "lora_B" in key)
