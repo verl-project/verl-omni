@@ -555,7 +555,9 @@ profiling.
 ### Adapting to other recipes
 
 The `trainer.*`, `global_profiler.*` and `*.profiler.*` overrides above work
-unchanged for any recipe. Re-derive the footprint overrides from the
+unchanged for any recipe. See the [Qwen3-Omni AVQA profiling
+launcher](../../examples/gspo_trainer/qwen3_omni/profile_qwen3_omni_thinker_gspo_lora_avqa_v1.sh)
+for a multimodal V1 example. Re-derive the footprint overrides from the
 recipe's own values, minding two couplings:
 
 - **Denoising steps vs. SDE window**: a window reaching past the last
