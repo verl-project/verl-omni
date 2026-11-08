@@ -133,12 +133,12 @@ class NonDiffusersModelBase(nn.Module, metaclass=ABCMeta):
 
         Reads ``adapter_config.json`` and ``adapter_model.safetensors``,
         injects the adapter, then copies weights in.  Checkpoint keys the model
-        does not have raise ``ValueError`` after the injected adapter is removed
-        again; model keys missing from the checkpoint keep their initial values
-        with a warning.
+        does not have raise ``ValueError`` after the module is restored to its
+        state before the call; model keys missing from the checkpoint keep their
+        initial values with a warning.
         """
         from peft import LoraConfig, get_peft_model_state_dict
-        from peft.functional import delete_adapter
+        from peft.tuners.tuners_utils import BaseTunerLayer
         from safetensors.torch import load_file as safetensors_load_file
 
         adapter_config_path = os.path.join(adapter_path, "adapter_config.json")
@@ -152,6 +152,12 @@ class NonDiffusersModelBase(nn.Module, metaclass=ABCMeta):
         lora_config = LoraConfig.from_pretrained(adapter_path)
 
         requires_grad_before = [(param, param.requires_grad) for param in self.parameters()]
+        modules_before = dict(self.named_modules())
+        active_before = {
+            name: list(module.active_adapters)
+            for name, module in modules_before.items()
+            if isinstance(module, BaseTunerLayer)
+        }
         self.add_adapter(lora_config, adapter_name=adapter_name)
 
         # Load adapter weights into the newly created parameters.
@@ -163,9 +169,17 @@ class NonDiffusersModelBase(nn.Module, metaclass=ABCMeta):
         unexpected_load = set(adapter_state_dict.keys()) - set(current_state.keys())
 
         if unexpected_load:
-            # The keys are only known after injection, so undo it before raising,
-            # including the requires_grad flags it changed on the existing weights.
-            delete_adapter(self, adapter_name, prefix="lora_")
+            # The keys are only known after injection, so undo it before raising: injection
+            # activates the new adapter, wraps new layers and freezes the existing weights.
+            for name, module in list(self.named_modules()):
+                if not isinstance(module, BaseTunerLayer):
+                    continue
+                if name in active_before:
+                    module.set_adapter(active_before[name])
+                    module.delete_adapter(adapter_name)
+                else:
+                    parent_name, _, child_name = name.rpartition(".")
+                    setattr(self.get_submodule(parent_name), child_name, modules_before[name])
             del self.peft_config[adapter_name]
             for param, requires_grad in requires_grad_before:
                 param.requires_grad_(requires_grad)

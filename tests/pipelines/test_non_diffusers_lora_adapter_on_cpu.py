@@ -37,18 +37,25 @@ class _TinyModel(NonDiffusersModelBase):
         return self.proj(hidden_states)
 
 
-def _lora_config() -> LoraConfig:
-    return LoraConfig(r=2, lora_alpha=2, target_modules=["proj"])
+class _ThreeLayerModel(_TinyModel):
+    def __init__(self):
+        super().__init__()
+        self.other = nn.Linear(4, 4)
+        self.lora_head = nn.Linear(4, 4)
 
 
-def _trained_adapter_state() -> dict[str, torch.Tensor]:
-    donor = _TinyModel()
-    donor.add_adapter(_lora_config())
+def _lora_config(target_modules=("proj",)) -> LoraConfig:
+    return LoraConfig(r=2, lora_alpha=2, target_modules=list(target_modules))
+
+
+def _trained_adapter_state(model_cls=_TinyModel, config=None) -> dict[str, torch.Tensor]:
+    donor = model_cls()
+    donor.add_adapter(config or _lora_config())
     return {key: torch.full_like(value, 0.5) for key, value in get_peft_model_state_dict(donor).items()}
 
 
-def _write_adapter(adapter_dir, state_dict: dict[str, torch.Tensor]) -> str:
-    _lora_config().save_pretrained(str(adapter_dir))
+def _write_adapter(adapter_dir, state_dict: dict[str, torch.Tensor], config=None) -> str:
+    (config or _lora_config()).save_pretrained(str(adapter_dir))
     save_file(state_dict, str(adapter_dir / "adapter_model.safetensors"))
     return str(adapter_dir)
 
@@ -80,12 +87,30 @@ def test_rejected_checkpoint_leaves_no_adapter_behind(tmp_path):
         model.load_lora_adapter(_write_adapter(tmp_path / "bad", state | {"other.lora_A.weight": torch.zeros(2, 4)}))
 
     assert "default" not in model.peft_config
-    assert "default" not in model.proj.lora_A
+    assert type(model.proj) is nn.Linear
     assert all(param.requires_grad for param in model.parameters())
     model.load_lora_adapter(_write_adapter(tmp_path / "good", state))
     loaded = get_peft_model_state_dict(model)
     for key, value in state.items():
         torch.testing.assert_close(loaded[key], value)
+
+
+def test_rejected_checkpoint_restores_existing_adapters_and_layers(tmp_path):
+    model = _ThreeLayerModel()
+    model.add_adapter(_lora_config(), adapter_name="a")
+    model.add_adapter(_lora_config(), adapter_name="b")
+    model.set_adapter("b")
+    keys_before = set(model.state_dict())
+    config = _lora_config(["proj", "other", "lora_head"])
+    state = _trained_adapter_state(_ThreeLayerModel, config) | {"missing.lora_A.weight": torch.zeros(2, 4)}
+
+    with pytest.raises(ValueError):
+        model.load_lora_adapter(_write_adapter(tmp_path / "bad", state, config), adapter_name="c")
+
+    assert model.proj.active_adapters == ["b"]
+    assert type(model.other) is nn.Linear and type(model.lora_head) is nn.Linear
+    assert set(model.state_dict()) == keys_before
+    assert set(model.peft_config) == {"a", "b"}
 
 
 def test_load_lora_adapter_keeps_initial_values_for_keys_missing_from_checkpoint(tmp_path, caplog):
