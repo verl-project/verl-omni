@@ -113,6 +113,28 @@ def test_rejected_checkpoint_restores_existing_adapters_and_layers(tmp_path):
     assert set(model.peft_config) == {"a", "b"}
 
 
+def test_tensor_copy_failure_restores_existing_adapters_and_layers(tmp_path):
+    model = _ThreeLayerModel()
+    model.add_adapter(_lora_config(), adapter_name="a")
+    model.add_adapter(_lora_config(), adapter_name="b")
+    model.set_adapter("b")
+    state_before = {key: value.clone() for key, value in model.state_dict().items()}
+    requires_grad_before = {name: param.requires_grad for name, param in model.named_parameters()}
+    config = _lora_config(["proj", "other", "lora_head"])
+    state = _trained_adapter_state(_ThreeLayerModel, config)
+    state[next(iter(state))] = torch.zeros(3, 3)
+
+    with pytest.raises(RuntimeError):
+        model.load_lora_adapter(_write_adapter(tmp_path / "bad", state, config), adapter_name="c")
+
+    assert model.proj.active_adapters == ["b"]
+    assert type(model.other) is nn.Linear and type(model.lora_head) is nn.Linear
+    assert set(model.peft_config) == {"a", "b"}
+    assert {name: param.requires_grad for name, param in model.named_parameters()} == requires_grad_before
+    for key, value in state_before.items():
+        torch.testing.assert_close(model.state_dict()[key], value)
+
+
 def test_load_lora_adapter_keeps_initial_values_for_keys_missing_from_checkpoint(tmp_path, caplog):
     state = _trained_adapter_state()
     missing_key = next(key for key in state if "lora_B" in key)

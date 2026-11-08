@@ -133,9 +133,9 @@ class NonDiffusersModelBase(nn.Module, metaclass=ABCMeta):
 
         Reads ``adapter_config.json`` and ``adapter_model.safetensors``,
         injects the adapter, then copies weights in.  Checkpoint keys the model
-        does not have raise ``ValueError`` after the module is restored to its
-        state before the call; model keys missing from the checkpoint keep their
-        initial values with a warning.
+        does not have raise ``ValueError``.  Checkpoint validation and tensor-copy
+        failures restore the module to its state before the call; model keys missing
+        from the checkpoint keep their initial values with a warning.
         """
         from peft import LoraConfig, get_peft_model_state_dict
         from peft.tuners.tuners_utils import BaseTunerLayer
@@ -160,17 +160,32 @@ class NonDiffusersModelBase(nn.Module, metaclass=ABCMeta):
         }
         self.add_adapter(lora_config, adapter_name=adapter_name)
 
-        # Load adapter weights into the newly created parameters.
-        adapter_state_dict = safetensors_load_file(adapter_weights_path)
-        current_state = get_peft_model_state_dict(self, adapter_name=adapter_name)
+        try:
+            # Load adapter weights into the newly created parameters.
+            adapter_state_dict = safetensors_load_file(adapter_weights_path)
+            current_state = get_peft_model_state_dict(self, adapter_name=adapter_name)
 
-        loadable_keys = set(adapter_state_dict.keys()) & set(current_state.keys())
-        missing_load = set(current_state.keys()) - set(adapter_state_dict.keys())
-        unexpected_load = set(adapter_state_dict.keys()) - set(current_state.keys())
+            loadable_keys = set(adapter_state_dict.keys()) & set(current_state.keys())
+            missing_load = set(current_state.keys()) - set(adapter_state_dict.keys())
+            unexpected_load = set(adapter_state_dict.keys()) - set(current_state.keys())
 
-        if unexpected_load:
-            # The keys are only known after injection, so undo it before raising: injection
-            # activates the new adapter, wraps new layers and freezes the existing weights.
+            if unexpected_load:
+                raise ValueError(
+                    f"Failed to load LoRA adapter {adapter_name!r} from {adapter_path}: {len(unexpected_load)} "
+                    f"checkpoint keys are not in the model, e.g. {sorted(unexpected_load)[:5]}. Ensure the adapter "
+                    "was trained for this model with the same target modules."
+                )
+            if missing_load:
+                logger.warning(
+                    "LoRA adapter %r: %d keys in model but not in checkpoint. They will keep their initial values.",
+                    adapter_name,
+                    len(missing_load),
+                )
+
+            for key in loadable_keys:
+                current_state[key].copy_(adapter_state_dict[key])
+        except Exception:
+            # Injection activates the new adapter, wraps new layers and freezes existing weights.
             for name, module in list(self.named_modules()):
                 if not isinstance(module, BaseTunerLayer):
                     continue
@@ -183,20 +198,7 @@ class NonDiffusersModelBase(nn.Module, metaclass=ABCMeta):
             del self.peft_config[adapter_name]
             for param, requires_grad in requires_grad_before:
                 param.requires_grad_(requires_grad)
-            raise ValueError(
-                f"Failed to load LoRA adapter {adapter_name!r} from {adapter_path}: {len(unexpected_load)} "
-                f"checkpoint keys are not in the model, e.g. {sorted(unexpected_load)[:5]}. Ensure the adapter "
-                "was trained for this model with the same target modules."
-            )
-        if missing_load:
-            logger.warning(
-                "LoRA adapter %r: %d keys in model but not in checkpoint. They will keep their initial values.",
-                adapter_name,
-                len(missing_load),
-            )
-
-        for key in loadable_keys:
-            current_state[key].copy_(adapter_state_dict[key])
+            raise
 
     def set_adapter(self, adapter_name: str) -> None:
         """Activate a named PEFT adapter across all submodules."""
