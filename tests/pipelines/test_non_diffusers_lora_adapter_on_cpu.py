@@ -131,6 +131,7 @@ def test_tensor_copy_failure_restores_existing_adapters_and_layers(tmp_path):
     assert type(model.other) is nn.Linear and type(model.lora_head) is nn.Linear
     assert set(model.peft_config) == {"a", "b"}
     assert {name: param.requires_grad for name, param in model.named_parameters()} == requires_grad_before
+    assert model.state_dict().keys() == state_before.keys()
     for key, value in state_before.items():
         torch.testing.assert_close(model.state_dict()[key], value)
 
