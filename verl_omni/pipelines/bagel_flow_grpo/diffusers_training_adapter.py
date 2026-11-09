@@ -270,6 +270,16 @@ class BagelDiffusion(DiffusionModelBase):
         scale = (norm_v_t / (norm_v_t_ + 1e-8)).clamp(min=cfg_renorm_min, max=1.0)
         return v_t_ * scale
 
+    @staticmethod
+    def _select_scheduler_tokens(
+        sample: torch.Tensor,
+        model_output: torch.Tensor,
+        prev_sample: torch.Tensor,
+        scheduler_inputs: TensorDict | dict[str, torch.Tensor],
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Select stochastic tokens after the complete model forward and CFG."""
+        return sample, model_output, prev_sample
+
     @classmethod
     def forward_and_sample_previous_step(
         cls,
@@ -317,12 +327,15 @@ class BagelDiffusion(DiffusionModelBase):
                 cfg_renorm_min=cfg["cfg_renorm_min"],
             )
 
+        sample, noise_pred, prev_sample = cls._select_scheduler_tokens(
+            latents[:, step].float(), noise_pred.float(), latents[:, step + 1].float(), scheduler_inputs
+        )
         _, log_prob, prev_sample_mean, std_dev_t, sqrt_dt = scheduler.sample_previous_step(
-            sample=latents[:, step].float(),
-            model_output=noise_pred.float(),
+            sample=sample,
+            model_output=noise_pred,
             timestep=timesteps[:, step],
             noise_level=model_config.algo.noise_level,
-            prev_sample=latents[:, step + 1].float(),
+            prev_sample=prev_sample,
             sde_type=model_config.algo.sde_type,
             return_logprobs=True,
             return_sqrt_dt=True,
