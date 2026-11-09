@@ -33,7 +33,7 @@ bash "$(dirname "$0")/run_qwen_image_ocr_lora_v1.sh" \
     reward.reward_model.rollout.max_model_len=8192 \
     reward.reward_model.rollout.gpu_memory_utilization=0.85 \
     reward.reward_model.rollout.free_cache_engine=false \
-    trainer.experiment_name=qwen_image_ocr_lora_v1_5090 \
+    trainer.experiment_name=qwen_image_ocr_lora_v1_fsdp2 \
     trainer.val_before_train=true \
     trainer.save_freq=20 \
     trainer.test_freq=20 \

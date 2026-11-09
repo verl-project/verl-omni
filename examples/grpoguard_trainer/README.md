@@ -37,9 +37,9 @@ This produces:
 
 ## Prepare the models
 
-**Policy model (Qwen-Image):** the scripts use the Hugging Face Hub ID `Qwen/Qwen-Image` directly — no manual download is required. For the V1 script, set `MODEL_PATH` to use a local copy.
+**Policy model (Qwen-Image):** the script uses the Hugging Face Hub ID `Qwen/Qwen-Image` directly — no manual download is required. Hugging Face will cache the weights automatically on first run. To use a local copy instead, edit the `model_name` variable in the script directly.
 
-**Reward model (Qwen3-VL-8B-Instruct):** the scripts default to the Hugging Face Hub ID `Qwen/Qwen3-VL-8B-Instruct`. For the V1 script, set `REWARD_MODEL_PATH` to use a local copy.
+**Reward model (Qwen3-VL-8B-Instruct):** the script defaults to the Hugging Face Hub ID `Qwen/Qwen3-VL-8B-Instruct`, so no manual download is required — Hugging Face will cache it automatically on first run. To use a local copy instead, edit the `reward_model_name` variable in the script directly.
 
 ## Run training
 
@@ -59,11 +59,11 @@ bash examples/grpoguard_trainer/qwen_image/run_qwen_image_ocr_lora_v1.sh
 
 The V1 recipe keeps the V0 GRPO-Guard loss, SDE, LoRA, reward, and batch settings. It uses `main_diffusion_v1`, `model.algorithm=flow_grpo`, and `trainer.v1.trainer_mode=sync`. Set `NUM_GPUS_ACTOR_ROLLOUT_REWARD`, `ROLLOUT_TP`, and `REWARD_TP` for a different GPU layout; for example, `8`, `2`, and `4` respectively.
 
-For three RTX 5090 GPUs, a separate candidate recipe uses two actor/rollout GPUs and one OCR reward GPU, with FSDP2 and rollout CPU offload:
+Tested with three RTX 5090 GPUs, a separate candidate recipe uses two actor/rollout GPUs and one OCR reward GPU, with FSDP2 and rollout CPU offload:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1,2 \
-bash examples/grpoguard_trainer/qwen_image/run_qwen_image_ocr_lora_v1_5090.sh
+bash examples/grpoguard_trainer/qwen_image/run_qwen_image_ocr_lora_v1_fsdp2.sh
 ```
 
 This candidate uses four prompts and four images per prompt, a learning rate of `3e-5`, and 512×512 images with ten denoising steps. Allow at least 300 GiB of available host memory before starting the offloaded workload. It validates before training and every 20 steps, retaining one checkpoint. The lower learning rate and larger sampling group are being evaluated after the batch-4/group-2 run at `3e-4` lost validation reward; convergence has not yet been established. The original V1 recipe above preserves the V0 defaults.
