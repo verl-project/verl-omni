@@ -91,24 +91,25 @@ def test_reverse_kl_updates_only_valid_student_actions(same_policy):
     assert teacher.grad is None
 
 
-def test_teacher_padding_reuses_shared_template_and_preserves_source():
-    from verl.trainer.ppo import padding_utils
+def test_synthetic_padding_neutralizes_teacher_fields_and_preserves_source():
+    from verl.trainer.ppo.padding_utils import SYNTHETIC_PADDING_SEQ_LEN, construct_minimal_padding_template
 
-    from verl_omni.workers.utils.padding import patched_padding_template
-
-    wrapper = padding_utils.construct_minimal_padding_template
-    assert wrapper is patched_padding_template
     source = {
         "input_ids": torch.arange(5),
         "teacher_ids": torch.ones(5, 2, dtype=torch.long),
         "teacher_logprobs": torch.full((5, 2), -0.7),
         "multi_modal_inputs": {"image": "data"},
     }
-    sample, tag = wrapper(source, {}, 9)
-    assert sample["teacher_ids"].shape == sample["teacher_logprobs"].shape == (2, 2)
-    assert sample["teacher_ids"].tolist() == [[9, 9], [9, 9]]
-    torch.testing.assert_close(sample["teacher_logprobs"], torch.zeros(2, 2))
+    sample, tag = construct_minimal_padding_template(source, {}, 9)
+    seq_len = SYNTHETIC_PADDING_SEQ_LEN
+    assert sample["input_ids"].shape == (seq_len,)
+    assert sample["teacher_ids"].shape == sample["teacher_logprobs"].shape == (seq_len, 2)
+    assert sample["teacher_ids"].tolist() == [[9, 9]] * seq_len
+    torch.testing.assert_close(sample["teacher_logprobs"], torch.zeros(seq_len, 2))
     assert not sample["loss_mask"].any()
     assert sample["multi_modal_inputs"] == {}
     assert tag["is_padding"]
+    assert tag["seq_len"] == seq_len
+    assert source["teacher_ids"].tolist() == [[1, 1]] * 5
+    torch.testing.assert_close(source["teacher_logprobs"], torch.full((5, 2), -0.7))
     assert source["teacher_ids"].shape == (5, 2)
