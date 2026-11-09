@@ -54,6 +54,7 @@ def test_merged_weights_materialized_before_actor_restore(monkeypatch):
     engine = object.__new__(omni_impl.OmniFSDPEngine)
     engine.module = module
     engine.model_config = SimpleNamespace(lora={"merge": True})
+    engine.engine_config = SimpleNamespace(mixed_precision=None)
     engine._is_offload_param = False
     engine._uses_fsdp2_cpu_offload_policy = True
     engine._qat_enabled = False

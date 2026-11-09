@@ -14,6 +14,7 @@
 import copy
 import json
 import logging
+import math
 import os
 import tempfile
 from argparse import Namespace
@@ -31,6 +32,7 @@ from vllm_omni.lora.request import LoRARequest
 
 from verl_omni.pipelines.model_base import OmniRolloutPipelineBase
 from verl_omni.pipelines.rollout_request import OmniRolloutRequest
+from verl_omni.utils.config import reject_engine_side_expert_parallel, validate_expert_parallel_degree
 from verl_omni.workers.config import OmniModelConfig
 from verl_omni.workers.rollout.vllm_rollout.process_hidden_states import (
     RETURN_FLAG_KEY,
@@ -42,6 +44,7 @@ logger = logging.getLogger(__file__)
 logger.setLevel(logging.INFO)
 
 _WORKER_EXTENSION = "verl_omni.workers.rollout.vllm_rollout.utils.vLLMOmniColocateWorkerExtension"
+_SCORED_PROMPT_IDS_KEY = "_verl_omni_scored_prompt_ids"  # popped before the engine call
 
 
 def _drop_none_mapping_values(value: Any) -> Any:
@@ -71,10 +74,71 @@ class ARStrategy(OmniStrategyBase):
         self._rollout_fields_by_request_id: dict[str, dict[str, Any]] = {}
         self._policy_stage_index = 0
         self._policy_sampling_constraints: dict[str, Any] = {}
+        self._expert_parallel_stage_ids: frozenset[int] = frozenset()
 
     def validate_configs(self) -> None:
-        if self.server.config.max_model_len is None:
-            self.server.config.max_model_len = self.server.config.prompt_length + self.server.config.response_length
+        config = self.server.config
+        if config.max_model_len is None:
+            config.max_model_len = config.prompt_length + config.response_length
+        # The launcher compares this field, so an unset value must become 1.
+        if config.expert_parallel_size is None:
+            config.expert_parallel_size = 1
+        reject_engine_side_expert_parallel(self._omni_engine_kwargs())
+        pipeline_name, pipeline_mode = self._pipeline_selection()
+        self._expert_parallel_stage_ids = self._resolve_expert_parallel_stage_ids(pipeline_name, pipeline_mode)
+
+    def _omni_engine_kwargs(self) -> Any:
+        """Return the configured ``engine_kwargs.vllm_omni`` mapping."""
+        return (self.server.config.engine_kwargs or {}).get("vllm_omni", {}) or {}
+
+    def _pipeline_selection(self) -> tuple[Any, str]:
+        """Return the configured ``(pipeline_name, pipeline_mode)``."""
+        omni_kwargs = self._omni_engine_kwargs()
+        return omni_kwargs.get("pipeline_name"), omni_kwargs.get("pipeline_mode", "thinker_only")
+
+    def _resolve_expert_parallel_stage_ids(self, pipeline_name: Any, pipeline_mode: str) -> frozenset[int]:
+        """Return the stages to run with expert parallelism, or refuse EP>1.
+
+        vLLM-Omni takes EP as a per-stage boolean over the ranks a stage already
+        spans, so it is honored only when the selected pipeline opts its policy
+        stage in.
+
+        Args:
+            pipeline_name: The configured ``engine_kwargs.vllm_omni.pipeline_name``.
+            pipeline_mode: The configured ``engine_kwargs.vllm_omni.pipeline_mode``.
+
+        Returns:
+            frozenset[int]: Stage IDs that may receive ``enable_expert_parallel``.
+
+        Raises:
+            ValueError: If the size is invalid or the pipeline does not opt in.
+        """
+        config = self.server.config
+        ep_size = validate_expert_parallel_degree(
+            config.expert_parallel_size,
+            int(config.tensor_model_parallel_size),
+            int(config.data_parallel_size),
+        )
+        if ep_size == 1:
+            return frozenset()
+
+        adapter_cls = OmniRolloutPipelineBase.get_class(pipeline_name)
+        hook = getattr(adapter_cls, "expert_parallel_stage_ids", None)
+        if hook is not None:
+            supported = hook(pipeline_mode)
+            policy_stage_id = adapter_cls.policy_stage_id(pipeline_mode=pipeline_mode)
+            if policy_stage_id in supported:
+                return frozenset({policy_stage_id})
+
+        supported_pipelines = ", ".join(sorted(OmniRolloutPipelineBase.expert_parallel_pipelines())) or "none"
+        raise ValueError(
+            f"actor_rollout_ref.rollout.expert_parallel_size={ep_size} is not supported by the selected "
+            f"rollout pipeline (pipeline_name={pipeline_name!r}, pipeline_mode={pipeline_mode!r}). "
+            "vLLM-Omni enables expert parallelism per stage through the generated deploy config, so a "
+            "pipeline has to opt its policy stage in. Set "
+            "actor_rollout_ref.rollout.engine_kwargs.vllm_omni.pipeline_name to an expert-parallel "
+            f"pipeline ({supported_pipelines}), or leave expert_parallel_size=1."
+        )
 
     def apply_quantization(self) -> tuple[str | None, dict[str, Any]]:
         return vLLMHttpServer._apply_quantization(self.server)
@@ -130,9 +194,14 @@ class ARStrategy(OmniStrategyBase):
                 engine_kwargs[underscore_key.replace("_", "-")] = engine_kwargs.pop(underscore_key)
 
     def _write_deploy_config(
-        self, engine_kwargs: dict[str, Any], pipeline_name: str, adapter_cls: Any, pipeline_mode: str
+        self,
+        engine_kwargs: dict[str, Any],
+        pipeline_name: str,
+        adapter_cls: Any,
+        pipeline_mode: str,
     ) -> None:
         """Write a deploy config YAML from the adapter's stage topology."""
+        expert_parallel_stage_ids = self._expert_parallel_stage_ids
         adapter_cls.ensure_pipeline_registered(pipeline_mode)
         stages = adapter_cls.build_stage_configs(pipeline_mode=pipeline_mode)
         stage_ids = [stage.stage_id for stage in stages]
@@ -204,6 +273,10 @@ class ARStrategy(OmniStrategyBase):
                         if getattr(stage, "execution_type", None) == StageExecutionType.DIFFUSION
                         else {}
                     ),
+                    # vLLM-Omni takes expert parallelism as a per-stage flag over
+                    # the ranks the stage already spans; the size itself is not a
+                    # world dimension, so only opted-in stages get the flag.
+                    **({"enable_expert_parallel": True} if stage.stage_id in expert_parallel_stage_ids else {}),
                     "engine_extras": stage_extras[stage.stage_id],
                 }
                 for stage in stages
@@ -227,6 +300,14 @@ class ARStrategy(OmniStrategyBase):
         engine_kwargs["deploy_config"] = deploy_path
 
     def prepare_engine_args(self, engine_args: dict[str, Any], args: Namespace) -> None:
+        """Apply mode-specific engine arguments before the engine is created.
+
+        Expert parallelism is owned by the generated per-stage deploy config, so
+        the global ``enable_expert_parallel`` engine arg is dropped here: applied
+        globally it would reach every stage that owns the field, including
+        non-MoE stages that cannot shard experts.
+        """
+        engine_args.pop("enable_expert_parallel", None)
         if engine_args.get("enable_lora"):
             from verl_omni.utils.vllm_omni.patch import patch_vllm_omni_lora_config
 
@@ -350,6 +431,10 @@ class ARStrategy(OmniStrategyBase):
             prompt.setdefault("multi_modal_data", multi_modal_data)
         if mm_processor_kwargs and not adapter_prepared_prompt:
             prompt.setdefault("mm_processor_kwargs", mm_processor_kwargs)
+        if policy_params.prompt_logprobs is not None:
+            # A teacher scores the request's own ids; the engine re-expands media itself,
+            # so run_generation checks that it scored exactly these.
+            prompt[_SCORED_PROMPT_IDS_KEY] = list(request.prompt.token_ids)
         if return_hidden:
             policy_stage_params = params[self._policy_stage_index] if isinstance(params, list) else params
             extra_args = dict(policy_stage_params.extra_args or {})
@@ -365,6 +450,7 @@ class ARStrategy(OmniStrategyBase):
         lora_request: Optional[LoRARequest],
         priority: int,
     ) -> Any:
+        scored_prompt_ids = prompt.pop(_SCORED_PROMPT_IDS_KEY, None)
         generate_kwargs = dict(
             prompt=prompt,
             sampling_params_list=params,
@@ -376,15 +462,22 @@ class ARStrategy(OmniStrategyBase):
             generate_kwargs["output_modalities"] = self._rollout_output_modalities
         generator = self.server.engine.generate(**generate_kwargs)
         if self._rollout_output_modalities is None:
-            return await self._collect_last_output(generator)
-
-        outputs = []
-        async for output in generator:
-            outputs.append(output)
-        if self._rollout_adapter is None:
-            raise RuntimeError("Retaining multiple stage outputs requires a registered rollout adapter.")
-        final_res, rollout_fields = self._rollout_adapter.combine_engine_outputs(outputs, prompt)
-        self._rollout_fields_by_request_id[request_id] = rollout_fields
+            final_res = await self._collect_last_output(generator)
+        else:
+            outputs = []
+            async for output in generator:
+                outputs.append(output)
+            if self._rollout_adapter is None:
+                raise RuntimeError("Retaining multiple stage outputs requires a registered rollout adapter.")
+            final_res, rollout_fields = self._rollout_adapter.combine_engine_outputs(outputs, prompt)
+            self._rollout_fields_by_request_id[request_id] = rollout_fields
+        if scored_prompt_ids is not None and final_res is not None:
+            req_output = getattr(final_res, "request_output", None) or final_res
+            if list(getattr(req_output, "prompt_token_ids", None) or []) != scored_prompt_ids:
+                raise RuntimeError(
+                    "The omni teacher scored a different token sequence than the request carried; "
+                    "its prompt log probabilities would not align with the student's tokens."
+                )
         return final_res
 
     def process_output(
@@ -411,14 +504,6 @@ class ARStrategy(OmniStrategyBase):
         extra_fields = {"global_steps": self.server.global_steps}
         extra_fields.update(rollout_fields)
 
-        num_prompt_logprobs = getattr(params, "prompt_logprobs", None)
-        if num_prompt_logprobs is not None and hasattr(req_output, "prompt_logprobs"):
-            extract_prompt_logprobs(
-                output=req_output,
-                num_prompt_logprobs=num_prompt_logprobs,
-                result_dict=extra_fields,
-            )
-
         # Teacher hidden states ride CompletionOutput.multimodal_output when the
         # request opted in via sampling_params["return_hidden_states"].
         hidden = extract_hidden_states(req_output)
@@ -427,6 +512,13 @@ class ARStrategy(OmniStrategyBase):
         token_ids = req_output.outputs[0].token_ids
         log_probs = None
         policy_params = params[self._policy_stage_index] if isinstance(params, list) else params
+        num_prompt_logprobs = getattr(policy_params, "prompt_logprobs", None)
+        if num_prompt_logprobs is not None:
+            if getattr(req_output, "prompt_logprobs", None) is None:
+                raise RuntimeError("The omni teacher did not return requested prompt log probabilities.")
+            extract_prompt_logprobs(req_output, num_prompt_logprobs, extra_fields)
+            if not all(math.isfinite(logprob) for row in extra_fields["prompt_logprobs"] for logprob in row):
+                raise RuntimeError("The omni teacher returned non-finite prompt log probabilities.")
         if policy_params.logprobs is not None:
             log_probs = [
                 logprobs[token_ids[index]].logprob for index, logprobs in enumerate(req_output.outputs[0].logprobs)
