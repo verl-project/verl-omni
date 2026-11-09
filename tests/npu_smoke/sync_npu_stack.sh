@@ -14,8 +14,9 @@
 # triton-ascend-last ordering. Deviations, all deliberate:
 # - vllm-ascend is installed pure-python (COMPILE_CUSTOM_KERNELS=0,
 #   --no-deps): the smoke suite runs tiny models through the native op path,
-#   and an in-job aclnn ops build would cost most of the job timeout. The
-#   vllm_ascend_C module that sleep mode needs is still built, see below.
+#   and the full aclnn ops build would cost most of the job timeout. The
+#   vllm_ascend_C module and the one aclnn op the suite needs are still
+#   built in-job, see below.
 # - memfabric-hybrid/memcache-hybrid (vllm-ascend kv-offload lazy imports)
 #   are not installed: no smoke test exercises kv offload.
 # - fastapi is pinned to the window vllm-ascend's requirements state; the
@@ -130,6 +131,19 @@ log "installing vllm-ascend ${VLLM_ASCEND_PIN} (pure-python)"
     cmake --build "${VA_BUILD_DIR}" --target vllm_ascend_C -j "$(nproc)"
     cmake --install "${VA_BUILD_DIR}"
     python3 -c "import vllm_ascend.vllm_ascend_C as c; assert c.python_create_and_map"
+
+    # git clean wiped the image's _cann_ops_custom; the reward-model engine
+    # resolves aclnnAddRmsNormBias from it, not stock CANN — rebuild just that op.
+    git config --global --add safe.directory "${PWD}"
+    CATLASS_INCLUDE="${PWD}/csrc/third_party/catlass/include"
+    export CPATH="${CATLASS_INCLUDE}${CPATH:+:${CPATH}}"
+    (
+        cd csrc
+        bash build.sh --pkg --ops=add_rms_norm_bias --soc=ascend910b -j"$(nproc)"
+        find ../vllm_ascend/_cann_ops_custom -mindepth 1 -maxdepth 1 ! -name '.gitkeep' -exec rm -rf -- {} +
+        bash build/cann-ops-transformer*.run --install-path="${OLDPWD}/vllm_ascend/_cann_ops_custom"
+    )
+    test -f vllm_ascend/_cann_ops_custom/vendors/custom_transformer/op_api/lib/libcust_opapi.so
 )
 
 # 4. vllm-omni at the pin, npu target.

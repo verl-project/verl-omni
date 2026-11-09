@@ -232,9 +232,10 @@ torch-npu/triton-ascend/fla-npu mirroring `docker/Dockerfile.npu` — on top of
 it, so the jobs run the pinned stack even when the registry image for that
 generation has not been rebuilt yet. The sync installs vllm-ascend pure-python
 (`COMPILE_CUSTOM_KERNELS=0`) because the smoke suite runs tiny models through
-the native op path and an in-job aclnn ops build would cost most of the job
-timeout; the small `vllm_ascend_C` module, which rollout sleep/wake_up
-requires, is still built in-job.
+the native op path and the full aclnn ops build would cost most of the job
+timeout; the `vllm_ascend_C` module (rollout sleep/wake_up) and the
+`add_rms_norm_bias` aclnn op (the reward-model engine) are still built
+in-job.
 
 When the registry image at the current generation exists, the workflow pins
 its tag directly and the sync step is dropped.
