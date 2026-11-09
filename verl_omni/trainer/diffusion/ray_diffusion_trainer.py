@@ -118,6 +118,17 @@ def _json_encode_default(obj):
     raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
 
 
+def use_composite_policy_gradient(config) -> bool:
+    """Return whether this run trains an AR and a diffusion together.
+
+    Joint-training sets ``trainer.train_ar=True``.
+    TODO: use ``trainer.freeze_diffusion`` for AR training only.
+    """
+    train_ar = bool(OmegaConf.select(config, "trainer.train_ar", default=False))
+    freeze_diffusion = bool(OmegaConf.select(config, "trainer.freeze_diffusion", default=False))
+    return train_ar and not freeze_diffusion
+
+
 def validate_separate_config(config) -> None:
     """Validate the synchronous separate trainer/generator topology."""
     separate = OmegaConf.select(config, "actor_rollout_ref.separate", default=False)
@@ -2236,13 +2247,20 @@ class CompositePolicyGradientRayTrainer(PolicyGradientRayTrainer):
         rng = np.random.RandomState(42)
         rng.shuffle(samples)
         samples = samples[:generations_to_log]
+
         ar_logger = self.config.trainer.logger.copy()
         if "wandb" in ar_logger:
             from verl_omni.utils.tracking import log_ar_generations_to_wandb
 
             ar_logger.remove("wandb")  # table set output as wandb image already
             log_ar_generations_to_wandb(self.validation_generations_logger, samples, self.global_steps)
-        self.validation_generations_logger.log(ar_logger, samples, self.global_steps)
+        if "swanlab" in ar_logger:
+            from verl_omni.utils.tracking import log_ar_generations_to_swanlab
+
+            ar_logger.remove("swanlab")  # "val-generations" table set output as media already
+            log_ar_generations_to_swanlab(self.validation_generations_logger, samples, self.global_steps)
+
+        self.validation_generations_logger.log(ar_logger, samples, self.global_steps)  # other loggers
 
     def _dump_ar_generations(self, inputs, outputs, gts, scores, reward_extra_infos_dict, dump_path):
         """Dump rollout/validation samples as JSONL."""
@@ -2348,6 +2366,7 @@ class CompositePolicyGradientRayTrainer(PolicyGradientRayTrainer):
             )
             sample_media_kinds.extend(_resolve_rollout_media_field(test_output_gen_batch, tool_extra, "media_kind"))
 
+            # copy batch
             ar_test_batch = DataProto(
                 batch=test_batch.batch.copy(),
                 non_tensor_batch=test_batch.non_tensor_batch.copy(),
@@ -2380,12 +2399,15 @@ class CompositePolicyGradientRayTrainer(PolicyGradientRayTrainer):
                 sample_turns.append(test_batch.non_tensor_batch["__num_turns__"])
             data_source_lst.append(test_batch.non_tensor_batch.get("data_source", ["unknown"] * reward_tensor.shape[0]))
 
+            # AR part
+            # store generated outputs
             ar_sample_outputs.extend(ar_batch.non_tensor_batch["text_encoder_responses"].tolist())
             ar_input_ids = ar_batch.batch["prompts"]
             ar_input_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in ar_input_ids]
             ar_sample_inputs.extend(ar_input_texts)
             ar_sample_uids.extend(ar_batch.non_tensor_batch["uid"])
 
+            # evaluate using reward_function
             ar_reward_tensor, ar_reward_extra_info = extract_reward(ar_batch)
             ar_scores = ar_reward_tensor.sum(-1).cpu().tolist()
             ar_sample_scores.extend(ar_scores)
@@ -2547,8 +2569,8 @@ class CompositePolicyGradientRayTrainer(PolicyGradientRayTrainer):
                 if rollout_seed_cfg is not None:
                     gen_batch.meta_info["rollout_seed"] = int(rollout_seed_cfg) + self.global_steps - 1
 
-                rollout_n = self.config.actor_rollout_ref.rollout.n
                 rollout_m = self.config.actor_rollout_ref.rollout.m
+                rollout_n = self.config.actor_rollout_ref.rollout.n
                 gen_batch_for_rollout = gen_batch.repeat(repeat_times=rollout_m, interleave=True)
                 gen_batch_for_rollout.non_tensor_batch["_rollout_seed_global_idx"] = np.arange(
                     len(gen_batch_for_rollout), dtype=np.int64
@@ -2577,6 +2599,7 @@ class CompositePolicyGradientRayTrainer(PolicyGradientRayTrainer):
                         gen_batch_output.meta_info.pop("timing", None)
 
                     batch = batch.repeat(repeat_times=rollout_m, interleave=True)
+                    # copy batch
                     ar_batch = DataProto(
                         batch=batch.batch.copy(),
                         non_tensor_batch=batch.non_tensor_batch.copy(),
@@ -2623,6 +2646,7 @@ class CompositePolicyGradientRayTrainer(PolicyGradientRayTrainer):
                     assert "old_log_probs" in ar_batch.batch, f'"old_log_probs" not in {ar_batch.batch.keys()=}'
                     assert "old_log_probs" in batch.batch, f'"old_log_probs" not in {batch.batch.keys()=}'
 
+                    # TODO: add AR rollout correction metrics computation
                     metrics.update(
                         compute_rollout_corr_metrics_from_batch(
                             batch,
@@ -2639,16 +2663,17 @@ class CompositePolicyGradientRayTrainer(PolicyGradientRayTrainer):
                             )
                             metrics.update(rollout_corr_metrics)
 
-                    if self.use_reference_policy:
-                        # compute reference log_prob
-                        with marked_timer(str(Role.RefPolicy), timing_raw, color="olive"):
-                            ref_log_prob = self._compute_ref_log_prob(batch)
-                            batch = batch.union(ref_log_prob)
+                    # TODO: add reference policy and teacher policy computation
+                    # if self.use_reference_policy:
+                    #     # compute reference log_prob
+                    #     with marked_timer(str(Role.RefPolicy), timing_raw, color="olive"):
+                    #         ref_log_prob = self._compute_ref_log_prob(batch)
+                    #         batch = batch.union(ref_log_prob)
 
-                    if self.use_teacher_policy:
-                        # score the rollout trajectories with the frozen teacher
-                        with marked_timer("teacher", timing_raw, color="olive"):
-                            batch = batch.union(self.teacher_model_manager.compute_prev_sample_mean(batch))
+                    # if self.use_teacher_policy:
+                    #     # score the rollout trajectories with the frozen teacher
+                    #     with marked_timer("teacher", timing_raw, color="olive"):
+                    #         batch = batch.union(self.teacher_model_manager.compute_prev_sample_mean(batch))
 
                     with marked_timer("adv", timing_raw, color="brown"):
                         # we combine with rule-based rm
@@ -2675,6 +2700,7 @@ class CompositePolicyGradientRayTrainer(PolicyGradientRayTrainer):
                             global_std=self.config.algorithm.global_std,
                             config=self.config.algorithm,
                         )
+
                         # One scalar per trace. Repeating it across response tokens before
                         # the group std counts each reward once per token, including pads.
                         ar_scores = ar_reward_tensor

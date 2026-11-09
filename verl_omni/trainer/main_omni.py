@@ -41,7 +41,7 @@ from verl_omni.trainer.diffusion.ray_diffusion_trainer import (
     CompositePolicyGradientRayTrainer,
     DirectPreferenceRayTrainer,
     PolicyGradientRayTrainer,
-    uses_composite_policy_gradient,
+    use_composite_policy_gradient,
 )
 from verl_omni.utils.config import (
     resolve_lora_config,
@@ -71,7 +71,7 @@ def get_ray_trainer_cls(config):
     """
     trainer_type = config.algorithm.trainer_type
     if trainer_type == "policy_gradient":
-        if uses_composite_policy_gradient(config):
+        if use_composite_policy_gradient(config):
             return CompositePolicyGradientRayTrainer
         return PolicyGradientRayTrainer
     if trainer_type == "direct_preference":

@@ -16,6 +16,11 @@
 #
 # Override via env: NUM_GPUS, NUM_GPUS_ACTOR, NUM_GPUS_REWARD, MODEL_PATH,
 #                   REWARD_MODEL_PATH, DATA_DIR, TOTAL_TRAIN_STEPS, ...
+# Usage:
+#     CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" \
+#     bash tests/special_e2e/run_dual_grpo_qwen_image_async_reward.sh
+# Note: it is not added into GPU CI list since FA2 is not supported.
+
 set -euo pipefail
 
 NUM_GPUS=${NUM_GPUS:-4}
@@ -111,6 +116,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.rollout.m=${rollout_m} \
     actor_rollout_ref.rollout.n=${rollout_n} \
     actor_rollout_ref.rollout.agent.num_workers=1 \
+    +actor_rollout_ref.rollout.agent.agent_loop_manager_class=verl_omni.agent_loop.composite_agent_loop.CompositeSingleTurnAgentLoopManager \
     actor_rollout_ref.rollout.agent.default_agent_loop=composite_single_turn_agent \
     actor_rollout_ref.rollout.ar.response_length=32 \
     actor_rollout_ref.rollout.load_format=safetensors \

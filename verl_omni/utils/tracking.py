@@ -505,3 +505,19 @@ def log_ar_generations_to_wandb(logger_cls, samples, step):
     if wandb.run is not None:
         wandb.log({"ar-val/generations": new_table}, step=step)
     logger_cls.ar_validation_table = new_table
+
+
+def log_ar_generations_to_swanlab(logger_cls, samples, step):
+    """Log samples to swanlab as text"""
+    import swanlab
+
+    swanlab_table = swanlab.echarts.Table()
+
+    # Create column names
+    headers = ["step", "input", "output", "score"]
+
+    swanlab_row_list = [[step, *sample] for sample in samples]
+    swanlab_table.add(headers=headers, rows=swanlab_row_list)
+
+    # Log to swanlab into a different table than the "val-generations" table
+    swanlab.log({"ar-val/generations": swanlab_table}, step=step)
