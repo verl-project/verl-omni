@@ -84,8 +84,17 @@ algorithm:
   # DiffusionNFT fixed old-policy EMA decay; null uses old_policy_decay_schedule.
   old_policy_decay: null
 
-  # DiffusionNFT optimizer steps between old-policy adapter refreshes
+  # Trainer iterations between sampling-policy adapter refreshes.
   old_policy_update_interval: 1
+
+  # Independent moving-reference EMA schedule for forward-process losses.
+  reference_policy_decay_schedule: linear_from_0_25_to_0_5
+
+  # Fixed moving-reference decay, or null to use the schedule.
+  reference_policy_decay: null
+
+  # Actor-update interval for refreshing the moving reference.
+  reference_policy_update_interval: 1
 
   # DiffusionNFT fraction of rollout timesteps used for forward-process training
   timestep_fraction: 1.0
@@ -147,7 +156,7 @@ trainer:
   # Experiment name for run identification in tracking tools (diffusion / FlowGRPO examples)
   experiment_name: ocr
 
-  # Logging backends to use: "console", "wandb", etc.
+  # Logging backends to use: "console", "wandb", "swanlab", etc.
   logger: ["console", "wandb"]
 
   # Number of generations to log during validation
@@ -160,7 +169,7 @@ trainer:
   validation_data_dir: null
 
   # Frames per second for videos saved to rollout_data_dir/validation_data_dir and logged
-  # to wandb (image runs ignore this)
+  # to wandb or swanlab (image runs ignore this)
   video_fps: 24
 
   # Dump train rollout data every N steps (1 = every step, <=0 = never). Larger values

@@ -71,6 +71,7 @@ algo/flowdppo.md
 algo/diffusion_dpo.md
 algo/diffusionnft.md
 algo/dgpo.md
+algo/crd.md
 algo/grpo_guard.md
 algo/mixgrpo.md
 algo/diffusion_opd.md
@@ -99,6 +100,7 @@ examples/mixgrpo_trainer.md
 examples/diffusionnft_trainer.md
 examples/omninft_trainer.md
 examples/dgpo_trainer.md
+examples/crd_trainer.md
 examples/awm_trainer.md
 examples/diffusionopd_trainer.md
 examples/flowgrpo_trainer_sd35_drm.md
@@ -117,6 +119,7 @@ examples/qwen3_omni/gspo_trainer_qwen3_omni.md
 examples/dapo_trainer.md
 examples/stage_skip.md
 examples/qwen3_tts/grpo_trainer_qwen3_tts.md
+examples/minicpm_o/opd_trainer_minicpm_o.md
 ```
 
 ```{toctree}

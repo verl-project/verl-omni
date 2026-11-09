@@ -50,10 +50,19 @@ def test_adapter_declared_video_is_exported_without_axis_guessing():
         context="adapter", name="video_preview"
     )
     frames, width, height = _video_tensor_to_rgb24(preview)
+    frames = np.stack(list(frames))
 
     assert frames.shape == (5, 8, 12, 3)
     assert (width, height) == (12, 8)
     np.testing.assert_array_equal(frames[0, 0, 0], np.array([191, 89, 38], dtype=np.uint8))
+
+
+def test_rgb24_frames_are_converted_one_at_a_time():
+    frames, width, height = _video_tensor_to_rgb24(_warm_clip(t=3, h=8, w=12))
+
+    assert iter(frames) is frames
+    assert (width, height) == (12, 8)
+    assert [frame.shape for frame in frames] == [(8, 12, 3)] * 3
 
 
 def test_video_samples_become_wandb_video_with_a_real_mp4_in_output_dir(monkeypatch, tmp_path):
