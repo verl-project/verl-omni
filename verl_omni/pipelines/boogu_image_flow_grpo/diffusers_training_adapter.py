@@ -51,8 +51,9 @@ def _load_vae_scale_factor(model_path: str) -> int:
             vae_config = json.load(f)
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise RuntimeError(f"Failed to load Boogu VAE config from {vae_config_path}: {exc}") from exc
-    channels = vae_config.get("block_out_channels")
-    return 2 ** (len(channels) - 1) if channels else 8
+    if "block_out_channels" not in vae_config:
+        return 8
+    return 2 ** (len(vae_config["block_out_channels"]) - 1)
 
 
 def _make_config_checkpointable(module: torch.nn.Module) -> None:

@@ -146,13 +146,26 @@ def test_vae_scale_factor_rejects_unreadable_config(tmp_path, vae_config):
 
 @pytest.mark.parametrize(
     ("vae_config", "expected"),
-    [({"block_out_channels": [128, 256, 512, 512]}, 8), ({"block_out_channels": [64] * 5}, 16), ({}, 8)],
+    [
+        ({"block_out_channels": [128, 256, 512, 512]}, 8),
+        ({"block_out_channels": [64] * 5}, 16),
+        ({"block_out_channels": []}, 0.5),
+        ({}, 8),
+    ],
 )
 def test_vae_scale_factor_reads_block_out_channels(tmp_path, vae_config, expected):
     (tmp_path / "vae").mkdir()
     (tmp_path / "vae" / "config.json").write_text(json.dumps(vae_config), encoding="utf-8")
 
     assert _load_vae_scale_factor(str(tmp_path)) == expected
+
+
+def test_vae_scale_factor_does_not_treat_null_channels_as_missing(tmp_path):
+    (tmp_path / "vae").mkdir()
+    (tmp_path / "vae" / "config.json").write_text('{"block_out_channels": null}', encoding="utf-8")
+
+    with pytest.raises(TypeError):
+        _load_vae_scale_factor(str(tmp_path))
 
 
 # -------------------------------------------------------------------- text CFG
