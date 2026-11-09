@@ -69,7 +69,7 @@ pip_install "torch-npu==${TORCH_NPU_PIN}"
 if [[ ! -d "${SRC_ROOT}/vllm/.git" ]]; then
     git clone --depth 1 -b "${VLLM_TAG}" https://github.com/vllm-project/vllm.git "${SRC_ROOT}/vllm"
 else
-    git -C "${SRC_ROOT}/vllm" fetch --depth 1 origin "tag ${VLLM_TAG}"
+    git -C "${SRC_ROOT}/vllm" fetch --depth 1 origin "refs/tags/${VLLM_TAG}:refs/tags/${VLLM_TAG}"
     git -C "${SRC_ROOT}/vllm" checkout --detach "${VLLM_TAG}"
 fi
 log "installing vllm ${VLLM_TAG} (empty target)"
