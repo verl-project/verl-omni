@@ -35,6 +35,7 @@ from vllm_omni.diffusion.request import OmniDiffusionRequest
 
 from verl_omni.pipelines.bagel_flow_grpo.common import (
     BAGEL_FLOWGRPO_CFG_DEFAULTS,
+    BAGEL_TIMESTEP_SHIFT,
     maybe_to_cpu,
     setup_bagel_sigmas,
 )
@@ -203,6 +204,37 @@ class _BagelSchedulerAdapter:
         return _AdapterStepOutput(prev_sample=prev_sample, log_prob=log_prob)
 
 
+def _slice_trajectory_to_window(
+    latents: Any,
+    timesteps: Any,
+    log_probs: Any,
+    sde_window: tuple[int, int],
+) -> tuple[Any, Any, Any]:
+    """Keep the ``[begin, end)`` steps of a time-major trajectory.
+
+    Latents keep one extra entry (the state after the last window step).
+    Log-probs need care: the scheduler adapter returns one only inside the
+    window and the pipeline drops the ``None`` entries, so the record is
+    normally already window-aligned and must not be sliced again; a record
+    covering the whole trajectory is sliced like the timesteps.
+    """
+    begin, end = sde_window
+    n_steps = len(timesteps) if timesteps is not None else None
+    if latents is not None:
+        latents = latents[begin : end + 1]
+    if timesteps is not None:
+        timesteps = timesteps[begin:end]
+    if log_probs is not None:
+        if n_steps is not None and len(log_probs) == n_steps:
+            log_probs = log_probs[begin:end]
+        elif len(log_probs) != end - begin:
+            raise ValueError(
+                f"expected {end - begin} in-window log-probs or {n_steps} for the whole "
+                f"trajectory, got {len(log_probs)}"
+            )
+    return latents, timesteps, log_probs
+
+
 def _pick_sde_window(
     window_size: Optional[int],
     window_range: Optional[Any],
@@ -253,6 +285,13 @@ class BagelPipelineWithLogProb(BagelPipeline):
             "image_latent": MediaSpec("image", "latent", "LC"),
         }
     )
+
+    flowgrpo_timestep_shift: float = BAGEL_TIMESTEP_SHIFT
+
+    @classmethod
+    def flowgrpo_setup_sigmas(cls, scheduler: FlowMatchSDEDiscreteScheduler, num_steps: int, shift: float) -> None:
+        """Configure the model's denoising schedule before rollout."""
+        setup_bagel_sigmas(scheduler, num_steps, shift=shift)
 
     def __init__(self, *, od_config: OmniDiffusionConfig, prefix: str = ""):
         super().__init__(od_config=od_config, prefix=prefix)
@@ -364,9 +403,12 @@ class BagelPipelineWithLogProb(BagelPipeline):
         self.scheduler_kwargs["include_logprob_normalizer"] = False
 
         # Per-request scheduler setup matching training-side sigma schedule.
+        # Pin the pipeline's own shift to the same value so the sigmas the
+        # scheduler holds and the ones the pipeline steps through cannot drift.
         assert req.sampling_params.num_inference_steps is not None, "num_inference_steps must be set for RL rollouts"
         bagel_num_timesteps = int(req.sampling_params.num_inference_steps)
-        setup_bagel_sigmas(self.scheduler._inner, bagel_num_timesteps)
+        timestep_shift = float(extra_args.setdefault("timestep_shift", self.flowgrpo_timestep_shift))
+        self.flowgrpo_setup_sigmas(self.scheduler._inner, bagel_num_timesteps, timestep_shift)
 
         # Reset adapter state *after* set_timesteps so inner step_index is None.
         self.scheduler.begin_forward(
@@ -389,13 +431,9 @@ class BagelPipelineWithLogProb(BagelPipeline):
         traj_latents, traj_timesteps, traj_log_probs = _extract_bagel_trajectory(output)
 
         if sde_window is not None:
-            begin, end = sde_window
-            if traj_latents is not None:
-                traj_latents = traj_latents[begin : end + 1]
-            if traj_timesteps is not None:
-                traj_timesteps = traj_timesteps[begin:end]
-            if traj_log_probs is not None:
-                traj_log_probs = traj_log_probs[begin:end]
+            traj_latents, traj_timesteps, traj_log_probs = _slice_trajectory_to_window(
+                traj_latents, traj_timesteps, traj_log_probs, sde_window
+            )
 
         # BAGEL trajectories are time-major; add a batch axis for training consumers.
         if traj_latents is not None:
