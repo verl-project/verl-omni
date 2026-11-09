@@ -69,6 +69,8 @@ class DiffusionPipelineConfig(BaseConfig):
     true_cfg_scale: float = 1.0
     max_sequence_length: int = 512
     guidance_scale: Optional[float] = None
+    # CFG for the frozen pretrained anchor in forward-process training.
+    reference_guidance_scale: float = 4.5
     reference_image_short_edge: Optional[int] = None
 
     # Wan2.2 video generation: number of frames (81 = ~3s at 24fps)

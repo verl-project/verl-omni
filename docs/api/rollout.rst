@@ -85,9 +85,3 @@ vLLM-Omni Utilities
 
 .. autoclass:: verl_omni.workers.rollout.vllm_rollout.utils.vLLMOmniColocateWorkerExtension
    :members: update_weights_from_ipc
-
-Colocated Weight IPC Routes
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-.. automodule:: verl_omni.workers.rollout.vllm_rollout.zmq_utils
-   :members: make_base_zmq_handle, make_update_zmq_id, make_update_zmq_handle

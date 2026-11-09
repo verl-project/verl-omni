@@ -262,9 +262,19 @@ class PolicyGradientDiffusionTrainerV1(ABC):
     def init(self):
         """Initialize workers, rollout server, reward loop, checkpoint engine."""
         self._setup()
-        if self._has_old_adapter:
-            self.actor_rollout_wg.copy_adapter(source="default", target="old")
         self.on_init_end()
+
+    def _policy_adapter_specs(self) -> tuple[tuple[str, str], ...]:
+        """Return adapter names and their algorithm config prefixes."""
+        specs = self._loss_fn.extra_ema_adapters if self._loss_fn is not None else ()
+        if self._has_old_adapter:
+            specs += (("old", "old_policy"),)
+        return specs
+
+    def _initialize_policy_adapters(self):
+        """Initialize snapshots before checkpoint restoration can replace them."""
+        for target, _ in self._policy_adapter_specs():
+            self.actor_rollout_wg.copy_adapter(source="default", target=target)
 
     def _rollout_server_managers(self) -> list:
         """LLM server managers whose inference engines take part in rollout profiling.
@@ -731,21 +741,25 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         }
         return DataProto.from_tensordict(tu.get_tensordict(ref_output))
 
-    def _update_old_policy(self) -> tuple[bool, float, str]:
-        """Refresh the NFT old-policy adapter (copy or EMA)."""
+    def _update_policy_adapters(self) -> dict[str, float]:
+        """Refresh each policy snapshot on its own schedule and report its metrics."""
         algo_cfg = self.config.algorithm
-        if self.global_steps % algo_cfg.old_policy_update_interval != 0:
-            return False, 0.0, "none"
-
-        decay = algo_cfg.old_policy_decay
-        if decay is None:
-            decay = old_policy_decay(self.global_steps, algo_cfg.old_policy_decay_schedule)
-
-        if decay == 0:
-            self.actor_rollout_wg.copy_adapter(source="default", target="old")
-            return True, float(decay), "copy"
-        self.actor_rollout_wg.ema_update_adapter(source="default", target="old", decay=decay)
-        return True, float(decay), "ema"
+        metrics = {}
+        for target, prefix in self._policy_adapter_specs():
+            if self.global_steps % getattr(algo_cfg, f"{prefix}_update_interval") != 0:
+                metrics.update(compute_old_policy_metrics((False, 0.0, "none"), prefix=prefix))
+                continue
+            decay = getattr(algo_cfg, f"{prefix}_decay")
+            if decay is None:
+                decay = old_policy_decay(self.global_steps, getattr(algo_cfg, f"{prefix}_decay_schedule"))
+            if decay == 0:
+                self.actor_rollout_wg.copy_adapter(source="default", target=target)
+                update_type = "copy"
+            else:
+                self.actor_rollout_wg.ema_update_adapter(source="default", target=target, decay=decay)
+                update_type = "ema"
+            metrics.update(compute_old_policy_metrics((True, float(decay), update_type), prefix=prefix))
+        return metrics
 
     def _train_direct_preference_batch(
         self, metrics: dict, timing_raw: dict, batch_meta: KVBatchMeta, data: DataProto
@@ -783,8 +797,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             actor_output = self._update_actor(data)
             actor_metrics = reduce_metrics(actor_output.meta_info["metrics"])
             metrics.update(actor_metrics)
-            if self._has_old_adapter:
-                metrics.update(compute_old_policy_metrics(self._update_old_policy()))
+            metrics.update(self._update_policy_adapters())
 
         return batch_meta
 
@@ -860,6 +873,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         actor_rollout_resource_pool = self._init_colocated_workers()
         self._init_online_rollout_stack(actor_rollout_resource_pool)
         self.checkpoint_manager.sleep_replicas()
+        self._initialize_policy_adapters()
         self._load_checkpoint()
 
         logger.info("diffusion v1 trainer initialized, ready to fit")
@@ -965,6 +979,9 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         # Per-run monotonic generation-batch number; pairs with the batch-local
         # ``index`` so TQ row ordering survives multi-batch sampling paths.
         self._gen_batch_seq = 0
+        # Prompts already given a rollout seed position in ``_rollout_seed_step``.
+        self._rollout_seed_step = None
+        self._rollout_seed_next_index = 0
         val_batch_size = self.config.data.val_batch_size or len(self.val_dataset)
         self.val_dataloader = StatefulDataLoader(
             dataset=self.val_dataset,
@@ -1247,10 +1264,22 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         chunks = [self._fetch_one_gen_batch() for _ in range(num_prompts // gen_batch_size)]
         batch = chunks[0] if len(chunks) == 1 else tu.concat_tensordict(chunks)
         tu.assign_non_tensor_data(batch, "global_steps", self.global_steps)
-        rollout_seed_cfg = self.config.actor_rollout_ref.rollout.get("seed")
-        if rollout_seed_cfg is not None:
-            tu.assign_non_tensor_data(batch, "rollout_seed", int(rollout_seed_cfg) + self.global_steps - 1)
+        self._assign_rollout_seed(batch, num_prompts)
         return batch
+
+    def _assign_rollout_seed(self, batch: tu.TensorDict, num_prompts: int) -> None:
+        rollout_seed_cfg = self.config.actor_rollout_ref.rollout.get("seed")
+        if rollout_seed_cfg is None:
+            return
+        tu.assign_non_tensor_data(batch, "rollout_seed", int(rollout_seed_cfg) + self.global_steps - 1)
+        # ``index`` restarts in every generation batch, and refills reuse this
+        # step's seed base, so seed from the position among the step's prompts.
+        if self._rollout_seed_step != self.global_steps:
+            self._rollout_seed_step = self.global_steps
+            self._rollout_seed_next_index = 0
+        start = self._rollout_seed_next_index
+        self._rollout_seed_next_index += num_prompts
+        batch["rollout_seed_index"] = torch.arange(start, start + num_prompts, dtype=torch.int64)
 
     @staticmethod
     def _trajectory_uid(key: str) -> str:
@@ -1712,7 +1741,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         media_kinds=None,
         previews=None,
     ):
-        """Use the shared image/video W&B path with declared media metadata."""
+        """Use the shared image/video tracker path with declared media metadata."""
         return BaseRayDiffusionTrainer._maybe_log_val_generations(
             self,
             inputs,
@@ -2075,6 +2104,10 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             tq.kv_clear(keys=partial_trajectory_keys, partition_id=partition_id)
 
         tu.assign_non_tensor_data(batch, "global_steps", self.global_steps)
+        # The TQ round trip drops ``rollout_seed`` (NonTensorData). Re-stamp the seed
+        # positions too: prompts submitted later in this step count from the same
+        # step-wide counter and would otherwise reuse the restored ones.
+        self._assign_rollout_seed(batch, len(inflight_uids))
         tags = [{"is_prompt": True, "status": "pending", "global_steps": self.global_steps} for _ in inflight_uids]
         from tensordict.tensorclass import NonTensorData
 

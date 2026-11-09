@@ -22,6 +22,7 @@ from typing import Any, Optional
 import ray
 import torch
 import vllm_omni.entrypoints.cli.serve
+from omegaconf import DictConfig, OmegaConf
 from verl.utils.profiler import build_rollout_dist_profiler
 from verl.utils.tracking import RLInsightLogger
 from verl.workers.config import RolloutConfig
@@ -46,7 +47,6 @@ from verl_omni.workers.rollout.base import get_rollout_sequence_parallel_size, g
 from verl_omni.workers.rollout.replica import DiffusionOutput
 from verl_omni.workers.rollout.vllm_rollout.vllm_omni_ar_strategy import ARStrategy
 from verl_omni.workers.rollout.vllm_rollout.vllm_omni_diffusion_strategy import DiffusionStrategy
-from verl_omni.workers.rollout.vllm_rollout.zmq_utils import make_base_zmq_handle
 
 logger = logging.getLogger(__file__)
 logger.setLevel(logging.INFO)
@@ -172,12 +172,6 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         # Set before vllm-omni narrows per-stage visible devices; stage workers
         # remap their ZMQ ranks through this replica-level list.
         os.environ["VERL_ZMQ_BASE_VISIBLE_DEVICES"] = cuda_visible_devices
-        if os.environ.get("VERL_ZMQ_DIR"):
-            copied = {
-                key.strip() for key in os.environ.get("VLLM_RAY_EXTRA_ENV_VARS_TO_COPY", "").split(",") if key.strip()
-            }
-            copied.add("VERL_ZMQ_DIR")
-            os.environ["VLLM_RAY_EXTRA_ENV_VARS_TO_COPY"] = ",".join(sorted(copied))
         self._generate_strategy.post_init(cuda_visible_devices)
         self._lora_request_cache: LoRARequest | None | object = _LORA_REQUEST_CACHE_MISS
         self._lora_resolve_lock = asyncio.Lock()
@@ -655,17 +649,19 @@ class vLLMOmniServerAdapter(ServerAdapter):
 
     def __init__(self, config, model_config, device_mesh, replica_rank: int = -1):
         super().__init__(config, model_config, device_mesh, replica_rank=replica_rank)
+        if get_rollout_sequence_parallel_size(self.config) == 1:
+            return
+
+        rank = int(os.environ["RANK"])
         local_world_size = int(os.environ["RAY_LOCAL_WORLD_SIZE"])
-        if get_rollout_sequence_parallel_size(self.config) > 1:
-            rank = int(os.environ["RANK"])
-            world_size = get_rollout_world_size(self.config)
-            self.replica_rank = rank // world_size if replica_rank == -1 else replica_rank
-            self.rollout_rank = rank % world_size
-            self.node_rank = self.rollout_rank // local_world_size
-            self._has_server = self.rollout_rank == 0
+        world_size = get_rollout_world_size(self.config)
+        self.replica_rank = rank // world_size if replica_rank == -1 else replica_rank
+        self.rollout_rank = rank % world_size
+        self.node_rank = self.rollout_rank // local_world_size
+        self._has_server = self.rollout_rank == 0
         local_rank = self.rollout_rank % local_world_size
         job_id = ray.get_runtime_context().get_job_id()
-        self.zmq_handle = make_base_zmq_handle(job_id, self.replica_rank, local_rank)
+        self.zmq_handle = f"ipc:///tmp/rl-colocate-zmq-{job_id}-replica-{self.replica_rank}-rank-{local_rank}.sock"
 
 
 class vLLMOmniReplica(vLLMReplica):
@@ -679,6 +675,15 @@ class vLLMOmniReplica(vLLMReplica):
         is_teacher_model: bool = False,
         name_suffix: str = "",
     ):
+        if is_teacher_model and isinstance(model_config, dict | DictConfig):
+            engine_kwargs = (config.engine_kwargs or {}).get("vllm_omni") or {}
+            if engine_kwargs.get("output_mode") == "ar":
+                # Checkpoint workers construct the model config before the HTTP server does.
+                model_config = OmegaConf.merge(
+                    {"trust_remote_code": engine_kwargs.get("trust_remote_code", False)},
+                    model_config,
+                    {"_target_": "verl_omni.workers.config.OmniModelConfig"},
+                )
         super().__init__(
             replica_rank, config, model_config, gpus_per_node, is_reward_model, is_teacher_model, name_suffix
         )

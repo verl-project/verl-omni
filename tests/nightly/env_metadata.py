@@ -24,7 +24,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-_REPO_ROOT = Path(__file__).resolve().parents[3]
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 _GIT_PIN_FILES = {
     "vllm_omni_git": _REPO_ROOT / ".github" / "vllm_omni_pin.txt",
     "verl_git": _REPO_ROOT / ".github" / "verl_pin.txt",

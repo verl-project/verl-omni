@@ -250,7 +250,7 @@ def test_validation_logger_failures_are_best_effort(monkeypatch, tmp_path, caplo
 
     import verl_omni.utils.tracking as tracking
 
-    caplog.set_level(logging.WARNING, logger=ray_diffusion_trainer.sys_logger.name)
+    caplog.set_level(logging.WARNING, logger=tracking.logger.name)
     trainer = SimpleNamespace(global_steps=7)
     trainer.config = OmegaConf.create({"trainer": {"logger": ["wandb"], "log_val_generations": 1}})
     video_dir = tmp_path / "temporary-video"
@@ -261,13 +261,12 @@ def test_validation_logger_failures_are_best_effort(monkeypatch, tmp_path, caplo
         raise OSError("simulated logger failure")
 
     monkeypatch.setattr(
-        ray_diffusion_trainer,
+        tracking,
         "wrap_val_samples_for_wandb",
         lambda *args, **kwargs: ([("prompt", "video", 1.0)], str(video_dir), {"val/videos/1": "video"}),
     )
     monkeypatch.setattr(wandb, "run", object())
     monkeypatch.setattr(wandb, "log", fail if failure == "media" else lambda *args, **kwargs: None)
-    monkeypatch.setattr(ray_diffusion_trainer, "log_wandb_media", tracking.log_wandb_media)
     trainer.validation_generations_logger = SimpleNamespace(
         log=fail if failure == "table" else lambda *args: table_calls.append(args)
     )

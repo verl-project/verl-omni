@@ -13,22 +13,14 @@
 # limitations under the License.
 
 import os
-import socket
-import tempfile
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-import pytest
 from verl.utils.device import get_visible_devices_keyword
 from verl.workers.rollout.vllm_rollout import bucketed_weight_transfer
 
 from verl_omni.workers.rollout.vllm_rollout.utils import vLLMOmniColocateWorkerExtension
-from verl_omni.workers.rollout.vllm_rollout.zmq_utils import (
-    make_base_zmq_handle,
-    make_update_zmq_handle,
-    make_update_zmq_id,
-)
+from verl_omni.workers.rollout.vllm_rollout.zmq_utils import make_update_zmq_handle, make_update_zmq_id
 
 _VISIBLE_DEVICES = get_visible_devices_keyword()
 
@@ -173,155 +165,3 @@ def test_device_uuid_is_remapped_by_position_in_replica_list():
     )
 
     assert handle == "ipc:///tmp/rl-colocate-zmq-job-replica-0-rank-2.sock"
-
-
-@pytest.fixture(autouse=True)
-def _clear_zmq_directory(monkeypatch):
-    monkeypatch.delenv("VERL_ZMQ_DIR", raising=False)
-
-
-@pytest.fixture
-def private_zmq_directory():
-    with tempfile.TemporaryDirectory(prefix="vnp-", dir="/tmp") as directory:
-        yield Path(directory).resolve()
-
-
-@pytest.mark.parametrize("override", [None, ""])
-def test_base_zmq_handle_keeps_legacy_default(monkeypatch, override):
-    if override is not None:
-        monkeypatch.setenv("VERL_ZMQ_DIR", override)
-    assert make_base_zmq_handle("job", 2, 3) == "ipc:///tmp/rl-colocate-zmq-job-replica-2-rank-3.sock"
-
-
-def test_base_zmq_handle_accepts_root_directory(monkeypatch):
-    monkeypatch.setenv("VERL_ZMQ_DIR", "/")
-    assert make_base_zmq_handle("job", 0, 0) == "ipc:///rl-colocate-zmq-job-replica-0-rank-0.sock"
-
-
-def test_independent_directories_allow_identical_job_ids(monkeypatch, private_zmq_directory):
-    with tempfile.TemporaryDirectory(prefix="vnp-", dir="/tmp") as second:
-        sockets, routes = [], []
-        try:
-            for directory in (private_zmq_directory, Path(second).resolve()):
-                monkeypatch.setenv("VERL_ZMQ_DIR", str(directory))
-                base = make_base_zmq_handle("00000001", 0, 0)
-                route = make_update_zmq_handle(base, make_update_zmq_id(1, 1))
-                listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-                sockets.append(listener)
-                listener.bind(route.removeprefix("ipc://"))
-                routes.append(route)
-            assert routes[0] != routes[1]
-        finally:
-            for listener in sockets:
-                listener.close()
-
-
-@pytest.mark.parametrize(
-    "kind,suffix",
-    [(kind, "") for kind in ("relative", "missing", "file")]
-    + [("symlink", suffix) for suffix in ("", "/", "///", "/.", "/..", "/child")],
-)
-def test_base_zmq_handle_rejects_invalid_directory(monkeypatch, tmp_path, private_zmq_directory, kind, suffix):
-    if kind == "relative":
-        directory = "relative"
-    elif kind == "missing":
-        directory = str(tmp_path / "missing")
-    elif kind == "file":
-        path = tmp_path / "file"
-        path.write_text("not a directory")
-        directory = str(path)
-    else:
-        (private_zmq_directory / "child").mkdir()
-        path = private_zmq_directory / "link"
-        path.symlink_to(private_zmq_directory, target_is_directory=True)
-        directory = str(path) + suffix
-    monkeypatch.setenv("VERL_ZMQ_DIR", directory)
-    with pytest.raises(ValueError, match="VERL_ZMQ_DIR"):
-        make_base_zmq_handle("job", 0, 0)
-
-
-def test_base_zmq_handle_checks_socket_path_bytes(monkeypatch, private_zmq_directory):
-    monkeypatch.setenv("VERL_ZMQ_DIR", str(private_zmq_directory))
-    fixed_size = len(os.fsencode(make_base_zmq_handle("", 0, 0).removeprefix("ipc://")))
-    job_length = 107 - fixed_size
-    assert job_length > 0
-    handle = make_base_zmq_handle("j" * job_length, 0, 0)
-    assert len(os.fsencode(handle.removeprefix("ipc://"))) == 107
-    with pytest.raises(ValueError, match="shorter than 108 bytes"):
-        make_base_zmq_handle("j" * (job_length + 1), 0, 0)
-    with pytest.raises(ValueError, match="shorter than 108 bytes"):
-        make_base_zmq_handle("é" * job_length, 0, 0)
-    with pytest.raises(ValueError, match="no NUL"):
-        make_base_zmq_handle("job\0", 0, 0)
-
-
-def test_update_zmq_handle_validates_final_socket_path(monkeypatch, private_zmq_directory):
-    monkeypatch.setenv("VERL_ZMQ_DIR", str(private_zmq_directory))
-    fixed_size = len(os.fsencode(make_base_zmq_handle("", 0, 0).removeprefix("ipc://")))
-    base = make_base_zmq_handle("j" * (107 - fixed_size), 0, 0)
-    with pytest.raises(ValueError, match="shorter than 108 bytes"):
-        make_update_zmq_handle(base, make_update_zmq_id(1, 1))
-
-
-@pytest.mark.parametrize("sp", [1, 2])
-@pytest.mark.parametrize("private", [False, True])
-@pytest.mark.parametrize("explicit_replica", [-1, 5])
-def test_sender_and_receiver_share_base_route(monkeypatch, private_zmq_directory, sp, private, explicit_replica):
-    import verl.workers.rollout.base as base
-    import verl.workers.rollout.vllm_rollout.vllm_rollout as upstream
-
-    from verl_omni.workers.config import DiffusionRolloutConfig
-    from verl_omni.workers.rollout.vllm_rollout.vllm_omni_async_server import vLLMOmniServerAdapter
-
-    monkeypatch.setattr(base, "omega_conf_to_dataclass", lambda config: config)
-    monkeypatch.setattr(upstream.ray, "get_runtime_context", lambda: SimpleNamespace(get_job_id=lambda: "job"))
-    monkeypatch.setattr(upstream, "is_support_ipc", lambda: True)
-    monkeypatch.setenv("RAY_LOCAL_WORLD_SIZE", "4")
-    width = 2 * sp
-    monkeypatch.setenv("RANK", str(2 * width - 1))
-    if private:
-        monkeypatch.setenv("VERL_ZMQ_DIR", str(private_zmq_directory))
-    config = DiffusionRolloutConfig(name="vllm_omni", tensor_model_parallel_size=2, ulysses_degree=sp)
-    sender = vLLMOmniServerAdapter(config, None, None, replica_rank=explicit_replica)
-    replica = 1 if explicit_replica == -1 else explicit_replica
-    stage_devices = ",".join(str(device) for device in range(8 + width - 2, 8 + width))
-    replica_devices = ",".join(str(device) for device in range(8, 8 + width))
-    receiver = _get_handle(
-        1,
-        {
-            "VERL_REPLICA_RANK": str(replica),
-            _VISIBLE_DEVICES: stage_devices,
-            "VERL_ZMQ_BASE_VISIBLE_DEVICES": replica_devices,
-        },
-    )
-    assert sender.zmq_handle == receiver
-    assert sender.rollout_rank == width - 1
-    assert sender.replica_rank == replica
-    assert sender.node_rank == 0
-    assert sender._has_server is False
-    expected_dir = private_zmq_directory if private else Path("/tmp")
-    assert receiver == f"ipc://{expected_dir}/rl-colocate-zmq-job-replica-{replica}-rank-{width - 1}.sock"
-    update_id = make_update_zmq_id(1, 1)
-    assert make_update_zmq_handle(sender.zmq_handle, update_id) == make_update_zmq_handle(receiver, update_id)
-
-
-@pytest.mark.parametrize(
-    "private,extras", [(False, " KEEP,OTHER "), (True, ""), (True, " KEEP,OTHER "), (True, "KEEP,VERL_ZMQ_DIR")]
-)
-def test_private_zmq_directory_updates_vllm_ray_copy_list(monkeypatch, private_zmq_directory, private, extras):
-    from verl_omni.workers.rollout.vllm_rollout import vllm_omni_async_server as module
-
-    monkeypatch.setattr(module.vLLMHttpServer, "_post_init", lambda self, devices: None)
-    monkeypatch.setenv("VLLM_RAY_EXTRA_ENV_VARS_TO_COPY", extras)
-    if private:
-        monkeypatch.setenv("VERL_ZMQ_DIR", str(private_zmq_directory))
-    server = object.__new__(module.vLLMOmniHttpServer)
-    server.config = SimpleNamespace(ulysses_degree=1, ring_degree=1, full_determinism=False)
-    server._generate_strategy = SimpleNamespace(post_init=lambda devices: None)
-    server._post_init("0,1")
-    forwarded = os.environ["VLLM_RAY_EXTRA_ENV_VARS_TO_COPY"]
-    if private:
-        assert set(forwarded.split(",")) == {key.strip() for key in extras.split(",") if key.strip()} | {"VERL_ZMQ_DIR"}
-        assert forwarded.split(",").count("VERL_ZMQ_DIR") == 1
-    else:
-        assert forwarded == extras
