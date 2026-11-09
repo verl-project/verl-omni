@@ -31,9 +31,11 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SRC_ROOT="${NPU_SYNC_SRC_ROOT:-/workspace/src}"
 
-# Mirrors docker/Dockerfile.npu (test_pin_sync.py asserts equality).
+# Mirrors docker/Dockerfile.npu (test_pin_sync.py asserts the shared pins
+# stay in sync). The a2 variant matches this CI pool's 910B4 devices.
 TORCH_NPU_PIN="2.10.0.post7"
 TRITON_ASCEND_PIN="3.6.0.post2"
+FLA_NPU_PIN="flash-linear-attention-npu-a2==26.9.1"
 
 PIP_INDEX_URL="${PIP_INDEX_URL:-https://pypi.org/simple}"
 ASCEND_PIP_INDEX_URL="${ASCEND_PIP_INDEX_URL:-https://mirrors.huaweicloud.com/ascend/repos/pypi}"
@@ -100,6 +102,8 @@ log "installing vllm-ascend ${VLLM_ASCEND_PIN} (pure-python)"
     # clobber triton-ascend's triton/ tree.
     python3 -m pip uninstall -y triton triton-ascend || true
     pip_install "triton-ascend==${TRITON_ASCEND_PIN}"
+    # Kernel operators vllm-ascend's worker init imports on A2/A3/950.
+    pip_install --no-deps "${FLA_NPU_PIN}"
 )
 
 # 4. vllm-omni at the pin, npu target.

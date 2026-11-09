@@ -151,6 +151,14 @@ def test_npu_stack_surfaces_agree() -> None:
         f"tests/npu_smoke/sync_npu_stack.sh pins {sorted(triton_sync)}"
     )
 
+    # FLA NPU variant differs per SOC lane; the version must not.
+    fla_docker = set(re.findall(r"flash-linear-attention-npu-a\d==([0-9.]+)", dockerfile))
+    fla_sync = set(re.findall(r"flash-linear-attention-npu-a\d==([0-9.]+)", sync_script))
+    assert fla_docker and fla_docker == fla_sync, (
+        f"docker/Dockerfile.npu flash-linear-attention-npu versions {sorted(fla_docker)} != "
+        f"tests/npu_smoke/sync_npu_stack.sh versions {sorted(fla_sync)}"
+    )
+
     workflow_tag = re.search(r"image:\s*\S*pr-verl-omni-a2:(\S+)", workflow)
     doc_tag = re.search(r"pr-verl-omni-a2:(\S+)", doc)
     assert workflow_tag and doc_tag, "npu smoke image tag missing from workflow or docs"

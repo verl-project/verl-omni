@@ -19,6 +19,10 @@ ARG VLLM_REF="v0.33.0"
 ARG VLLM_ASCEND_REPO="https://github.com/vllm-project/vllm-ascend.git"
 ARG VLLM_ASCEND_REF=""
 
+# Kernel-acceleration package vllm-ascend's worker init imports on
+# A2/A3/950; match the variant to the SOC lane (a2 for 910b, a5 for 950DT).
+ARG FLA_NPU_PACKAGE="flash-linear-attention-npu-a3==26.9.1"
+
 ARG VLLM_OMNI_REPO="https://github.com/vllm-project/vllm-omni.git"
 ARG VLLM_OMNI_REF=""
 
@@ -141,6 +145,9 @@ RUN VLLM_ASCEND_REF="${VLLM_ASCEND_REF:-$(tr -d '[:space:]' < /workspace/pins/vl
     python3 -m pip uninstall -y triton triton-ascend || true && \
     python3 -m pip install \
         triton-ascend==3.6.0.post2 \
+        --extra-index-url ${ASCEND_PIP_INDEX_URL} && \
+    python3 -m pip install --no-deps \
+        ${FLA_NPU_PACKAGE} \
         --extra-index-url ${ASCEND_PIP_INDEX_URL} && \
     python3 -m pip install concurrent-log-handler
 

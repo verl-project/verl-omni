@@ -69,6 +69,10 @@ uv pip install -e . \
 cd ..
 uv pip install --reinstall --no-deps triton-ascend==3.6.0.post2 \
     --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
+# Kernel operators vllm-ascend's worker init imports on Ascend A2/A3/950 —
+# swap the -a2 suffix for your device's variant (-a3 / -a5).
+uv pip install --no-deps "flash-linear-attention-npu-a2==26.9.1" \
+    --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
 cd verl-omni
 ```
 
@@ -110,7 +114,9 @@ for all supported Ascend devices. The image includes CANN, `torch-npu`,
 
 ### Build
 
-Pass `BASE_IMAGE` and `SOC_VERSION` from the same row. The Dockerfile has a
+Pass `BASE_IMAGE` and `SOC_VERSION` from the same row, and set
+`FLA_NPU_PACKAGE` to the row's `flash-linear-attention-npu-<variant>`
+(`a2`/`a3`/`a5`, same version). The Dockerfile has a
 single `FROM`, so the build pulls only that image. Omitting both build args
 uses the A3 row.
 
