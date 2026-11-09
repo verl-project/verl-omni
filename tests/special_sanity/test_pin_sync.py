@@ -128,3 +128,33 @@ def test_secondary_pin_surfaces_track_pyproject() -> None:
     assert rocm_kernels == kernels_pin, (
         f"docker/Dockerfile.rocm pins kernels=={rocm_kernels} but pyproject pins kernels=={kernels_pin}"
     )
+
+
+def test_npu_stack_surfaces_agree() -> None:
+    """The NPU image, in-job sync, and docs must restate one stack."""
+    dockerfile = (REPO_ROOT / "docker/Dockerfile.npu").read_text()
+    sync_script = (REPO_ROOT / "tests/npu_smoke/sync_npu_stack.sh").read_text()
+    workflow = (REPO_ROOT / ".github/workflows/npu_smoke.yml").read_text()
+    doc = (REPO_ROOT / "docs/contributing/npu_smoke_tests.md").read_text()
+
+    torch_npu_docker = re.findall(r"torch-npu==([0-9a-z.]+)", dockerfile)
+    torch_npu_sync = re.findall(r"TORCH_NPU_PIN=\"([0-9a-z.]+)\"", sync_script)
+    assert torch_npu_docker and set(torch_npu_docker) == set(torch_npu_sync), (
+        f"docker/Dockerfile.npu torch-npu pins {sorted(set(torch_npu_docker))} != "
+        f"tests/npu_smoke/sync_npu_stack.sh pins {sorted(set(torch_npu_sync))}"
+    )
+
+    triton_docker = set(re.findall(r"triton-ascend==([0-9a-z.]+)", dockerfile))
+    triton_sync = set(re.findall(r"TRITON_ASCEND_PIN=\"([0-9a-z.]+)\"", sync_script))
+    assert triton_docker and triton_docker == triton_sync, (
+        f"docker/Dockerfile.npu triton-ascend pins {sorted(triton_docker)} != "
+        f"tests/npu_smoke/sync_npu_stack.sh pins {sorted(triton_sync)}"
+    )
+
+    workflow_tag = re.search(r"image:\s*\S*pr-verl-omni-a2:(\S+)", workflow)
+    doc_tag = re.search(r"pr-verl-omni-a2:(\S+)", doc)
+    assert workflow_tag and doc_tag, "npu smoke image tag missing from workflow or docs"
+    assert workflow_tag.group(1) == doc_tag.group(1), (
+        f".github/workflows/npu_smoke.yml runs pr-verl-omni-a2:{workflow_tag.group(1)} but "
+        f"docs/contributing/npu_smoke_tests.md documents pr-verl-omni-a2:{doc_tag.group(1)}"
+    )

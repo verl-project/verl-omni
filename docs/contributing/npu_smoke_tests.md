@@ -1,6 +1,6 @@
 # NPU Smoke Tests
 
-Last updated: 11/06/2026.
+Last updated: 11/09/2026.
 
 This guide explains how to add CI test cases for Huawei Ascend devices in verl-omni.
 
@@ -150,7 +150,7 @@ If the new test lives outside current path filters, add its path. Current
 filters include verl_omni/**, tests/npu_smoke/**, tests/agent_loop/**,
 tests/reward_loop/**, tests/workers/**, tests/special_e2e/**, pyproject.toml,
 .github/workflows/npu_smoke.yml,
-and .github/vllm_omni_pin.txt.
+.github/vllm_omni_pin.txt, and .github/vllm_ascend_pin.txt.
 
 ### 5. Handle models and datasets
 
@@ -221,11 +221,24 @@ Each group job uses eight NPUs on linux-aarch64-a2b4-8, a 120 minute timeout,
 16 GiB shared memory, and this image:
 
 ```text
-swr.cn-north-4.myhuaweicloud.com/mindspeed/pr-verl-omni-a2:v011-vllm033-omni033
+swr.cn-north-4.myhuaweicloud.com/mindspeed/pr-verl-omni-a2:v010-vllm030-omni030
 ```
 
+The image carries the previous generation of the pinned stack (CANN, torch,
+torch-npu, triton-ascend, editable vllm / vllm-ascend / vllm-omni / verl).
+After checkout, `tests/npu_smoke/sync_npu_stack.sh` reinstalls the pinned
+generation from `.github/*_pin.txt` and `pyproject.toml` on top of it, so the
+jobs run the pinned stack even when the registry image for that generation
+has not been rebuilt yet. The sync installs vllm-ascend pure-python
+(`COMPILE_CUSTOM_KERNELS=0`): the smoke suite runs tiny models through the
+native op path, and an in-job AscendC build would cost most of the job
+timeout.
+
+When the registry image at the current generation exists, the workflow pins
+its tag directly and the sync step is dropped.
+
 The workflow prints CANN details, npu-smi output, relevant Ascend variables,
-and installed vLLM component versions.
+and the synced vLLM component versions.
 
 The FlowGRPO and DanceGRPO end-to-end launchers source CANN and ATB before
 starting the workload:

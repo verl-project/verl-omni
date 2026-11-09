@@ -15,7 +15,7 @@
 
 from types import SimpleNamespace
 
-from verl_omni.utils.vllm_omni.patch import patch_qwen3_tts_default_rope_read
+from verl_omni.models.transformers.qwen3_tts import patch_qwen3_tts_default_rope_read
 
 
 def test_default_rope_registry_wraps_bare_rope_theta_reads():

@@ -15,6 +15,7 @@ on:
       - "pyproject.toml"
       - ".github/workflows/npu_smoke.yml"
       - .github/vllm_omni_pin.txt
+      - .github/vllm_ascend_pin.txt
   pull_request:
     branches:
       - main
@@ -30,6 +31,7 @@ on:
       - "pyproject.toml"
       - ".github/workflows/npu_smoke.yml"
       - .github/vllm_omni_pin.txt
+      - .github/vllm_ascend_pin.txt
 
 # Declare permissions just read content and PR file metadata.
 permissions:
@@ -93,7 +95,11 @@ jobs:
     runs-on: linux-aarch64-a2b4-8
     timeout-minutes: 120
     container:
-      image: swr.cn-north-4.myhuaweicloud.com/mindspeed/pr-verl-omni-a2:v011-vllm033-omni033
+      # Previous-generation image that exists in the registry; the pinned
+      # stack is synced onto it by tests/npu_smoke/sync_npu_stack.sh.
+      # TODO (mike): flip to the v011-vllm033-omni033 tag once the registry
+      # image is rebuilt from docker/Dockerfile.npu, and drop the sync step.
+      image: swr.cn-north-4.myhuaweicloud.com/mindspeed/pr-verl-omni-a2:v010-vllm030-omni030
       options: >-
         --shm-size 16g
     env:
@@ -111,12 +117,10 @@ jobs:
           npu-smi info
           echo "===== Ascend/NPU environment ====="
           env | LC_ALL=C sort | grep -E "(/usr/local/Ascend/|^(ASCEND|ATB|HCCL|NPU|DEVICE_|RANK_TABLE|RAY_EXPERIMENTAL_NOSET_ASCEND))" || true
-      - name: Print vLLM stack versions
+      - name: Sync pinned NPU stack onto the base image
         shell: bash
         run: |
-          pip show vllm || true
-          pip show vllm-ascend || true
-          pip show vllm-omni || true
+          bash tests/npu_smoke/sync_npu_stack.sh
       - name: Prepare tiny Qwen-Image checkpoint
         shell: bash
         run: |

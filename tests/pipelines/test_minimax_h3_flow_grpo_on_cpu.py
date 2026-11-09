@@ -784,10 +784,11 @@ def test_denoise_accepts_the_pins_default_control_and_sampler_plumbing() -> None
     [
         ({"control_context_scale": 0.5}, "control_context_scale"),
         ({"sampler": "res_multistep"}, "sampler"),
+        ({"request_context": {"cond_image": "ref.png"}}, "request_context"),
     ],
 )
-def test_denoise_rejects_non_neutral_control_and_sampler_values(overrides, rejected) -> None:
-    """Non-default ControlNet scale or a non-euler sampler changes trajectory math this rollout does not implement."""
+def test_denoise_rejects_non_neutral_and_edit_path_inputs(overrides, rejected) -> None:
+    """ControlNet scale, sampler, or a non-empty request_context changes what this rollout would produce."""
     with pytest.raises(NotImplementedError, match=rejected):
         _diffuse_with_forwarded(**overrides)
 

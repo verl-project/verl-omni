@@ -108,7 +108,7 @@ RUN python3 -m pip install --force-reinstall \
         torchaudio==2.10.0+cpu \
         --index-url ${PYTORCH_CPU_INDEX_URL} && \
     python3 -m pip install --force-reinstall \
-        torch-npu==2.10.0.post4 \
+        torch-npu==2.10.0.post7 \
         --extra-index-url ${ASCEND_PIP_INDEX_URL} \
         --extra-index-url ${PYTORCH_CPU_INDEX_URL}
 
@@ -140,7 +140,7 @@ RUN VLLM_ASCEND_REF="${VLLM_ASCEND_REF:-$(tr -d '[:space:]' < /workspace/pins/vl
         --extra-index-url ${PYTORCH_CPU_INDEX_URL} && \
     python3 -m pip uninstall -y triton triton-ascend || true && \
     python3 -m pip install \
-        triton-ascend==3.2.2 \
+        triton-ascend==3.6.0.post2 \
         --extra-index-url ${ASCEND_PIP_INDEX_URL} && \
     python3 -m pip install concurrent-log-handler
 
@@ -190,7 +190,7 @@ RUN python3 -m pip install --force-reinstall \
         torchaudio==2.10.0+cpu \
         --index-url ${PYTORCH_CPU_INDEX_URL} && \
     python3 -m pip install --force-reinstall \
-        torch-npu==2.10.0.post4 \
+        torch-npu==2.10.0.post7 \
         --extra-index-url ${ASCEND_PIP_INDEX_URL} \
         --extra-index-url ${PYTORCH_CPU_INDEX_URL} && \
     python3 -m pip install --upgrade onnxruntime

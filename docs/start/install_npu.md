@@ -1,6 +1,6 @@
 # Installation (NPU)
 
-Last updated: 10/29/2026
+Last updated: 11/09/2026
 
 For NVIDIA GPU, see the {doc}`GPU installation guide <install>`. For AMD GPU, see the {doc}`ROCm installation guide <install_rocm>`. For Intel GPU, see the {doc}`Intel GPU installation guide <install_xpu>`. For Cambricon MLU, see the {doc}`MLU installation guide <install_mlu>`.
 
@@ -34,7 +34,7 @@ uv pip install --force-reinstall \
     torch==2.10.0+cpu torchvision==0.25.0+cpu torchaudio==2.10.0+cpu \
     --extra-index-url https://download.pytorch.org/whl/cpu/ \
     --index-strategy unsafe-best-match
-uv pip install --force-reinstall torch-npu==2.10.0.post4 \
+uv pip install --force-reinstall torch-npu==2.10.0.post7 \
     --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi \
     --extra-index-url https://download.pytorch.org/whl/cpu/ \
     --index-strategy unsafe-best-match
@@ -67,7 +67,7 @@ uv pip install -e . \
     --extra-index-url https://download.pytorch.org/whl/cpu/ \
     --index-strategy unsafe-best-match
 cd ..
-uv pip install --reinstall --no-deps triton-ascend==3.2.2 \
+uv pip install --reinstall --no-deps triton-ascend==3.6.0.post2 \
     --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
 cd verl-omni
 ```

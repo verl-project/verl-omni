@@ -125,14 +125,21 @@ def _drop_defaulted_engine_args(engine_args: dict) -> dict:
 def _normalize_rollout_logging_level() -> None:
     """Canonicalize VLLM_LOGGING_LEVEL before diffusion workers spawn.
 
-    verl's rollout env pins ``WARN``; vLLM's LoggingConfig at this pin accepts
-    only canonical level names, and vllm-omni's diffusion workers validate the
-    environment value on boot.
+    verl's rollout env pins ``WARN`` (verl/trainer/constants_ppo.py); vLLM's
+    LoggingConfig at this pin accepts only canonical level names, and
+    vllm-omni's diffusion workers feed the environment value straight into
+    it. Only the alias is rewritten — an explicit user level passes through.
+
+    TODO (mike): drop once verl sets ``WARNING`` directly in its rollout env
+    (its constants_ppo.py pins the ``WARN`` alias).
     """
     if os.environ.get("VLLM_LOGGING_LEVEL", "").upper() == "WARN":
         os.environ["VLLM_LOGGING_LEVEL"] = "WARNING"
 
 
+# TODO (mike): drop these wrappers once vllm-omni's serve CLI accepts plain
+# argparse subparsers (it only recognizes TrackingArgumentParser, while
+# verl's launcher builds the rollout CLI with FlexibleArgumentParser).
 class _TrackingSubparsers:
     """Create tracking parsers from a plain argparse subparsers action."""
 

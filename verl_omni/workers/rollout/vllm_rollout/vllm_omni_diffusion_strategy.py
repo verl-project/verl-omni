@@ -55,8 +55,8 @@ def _diffusion_ingress_allowed_fields() -> frozenset[str]:
 
     The ingress validator rejects every field without an owner, and LLM-only
     OmniEngineArgs fields have none on diffusion stages — this mirror is what
-    strips them. TODO (vllm-omni): drop the hand-copy once upstream exposes
-    the ingress allowlist as a public getter.
+    strips them. TODO (mike): drop the hand-copy once upstream exposes the
+    diffusion ingress allowlist as a public getter.
     """
     from dataclasses import fields
     from typing import Any, cast
