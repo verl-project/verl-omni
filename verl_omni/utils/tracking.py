@@ -20,12 +20,13 @@ import shutil
 import subprocess
 import tempfile
 import wave
-from collections.abc import Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import torch
+from PIL import Image
 
 from verl_omni.pipelines.rollout_media import MediaArtifact, MediaSpec, resolve_is_video, validate_audio
 from verl_omni.utils.reward_score.reward_utils import normalize_video_tensor
@@ -33,6 +34,8 @@ from verl_omni.utils.reward_score.reward_utils import normalize_video_tensor
 logger = logging.getLogger(__name__)
 
 _FFMPEG_TIMEOUT_S = 600
+# GIF is far larger than H.264 at the same size, so SwanLab previews are capped.
+_SWANLAB_GIF_MAX_SIDE = 512
 
 
 def batch_items(values: Any, batch_size: int, name: str) -> list[Any]:
@@ -79,7 +82,8 @@ def _temp_path_beside(path: Path, suffix: str) -> Path:
     return Path(temp_path)
 
 
-def _write_wav(audio: Any, sample_rate: Any, path: Path) -> None:
+def _audio_to_pcm16(audio: Any, sample_rate: Any) -> tuple[np.ndarray, int]:
+    """Return ``[T, C]`` 16-bit PCM (at most two channels) and the integer sample rate."""
     waveform = torch.as_tensor(audio).detach().cpu().float()
     while waveform.ndim > 2 and waveform.shape[0] == 1:
         waveform = waveform[0]
@@ -94,6 +98,11 @@ def _write_wav(audio: Any, sample_rate: Any, path: Path) -> None:
     if sample_rate <= 0:
         raise ValueError(f"Audio sample rate must be positive, got {sample_rate}.")
     pcm = (torch.nan_to_num(waveform).clamp(-1, 1).transpose(0, 1).numpy() * 32767).round().astype("<i2")
+    return pcm, sample_rate
+
+
+def _write_wav(audio: Any, sample_rate: Any, path: Path) -> None:
+    pcm, sample_rate = _audio_to_pcm16(audio, sample_rate)
     with wave.open(str(path), "wb") as wav_file:
         wav_file.setnchannels(pcm.shape[1])
         wav_file.setsampwidth(2)
@@ -101,8 +110,23 @@ def _write_wav(audio: Any, sample_rate: Any, path: Path) -> None:
         wav_file.writeframes(pcm.tobytes())
 
 
-def _video_tensor_to_rgb24(video: torch.Tensor | MediaArtifact) -> tuple[np.ndarray, int, int]:
-    """Return a contiguous RGB24 array from a supported RGB video layout."""
+def _resolve_video_fps(video: Any, fps: Any) -> int | float:
+    """Return a video artifact's declared fps, or the positive integer fallback."""
+    if isinstance(video, MediaArtifact) and video.spec.fps is not None:
+        fps = video.spec.fps
+    else:
+        fps = int(fps)
+    if fps <= 0:
+        raise ValueError(f"fps must be positive, got {fps}.")
+    return fps
+
+
+def _video_tensor_to_rgb24(video: torch.Tensor | MediaArtifact) -> tuple[Iterator[np.ndarray], int, int]:
+    """Validate a supported RGB video layout and return lazy RGB24 frames with the width and height.
+
+    Each ``[H, W, 3]`` frame is converted when it is consumed, so an export never
+    holds a second full-resolution copy of the clip.
+    """
     if isinstance(video, MediaArtifact):
         if (video.spec.modality, video.spec.representation) != ("video", "decoded"):
             raise ValueError(f"Video export requires a decoded video artifact, got {video.spec}")
@@ -113,8 +137,9 @@ def _video_tensor_to_rgb24(video: torch.Tensor | MediaArtifact) -> tuple[np.ndar
             video = video[:, :3]  # RGB24 has no alpha channel.
     else:
         video = normalize_video_tensor(video)
-    frames = video.detach().permute(0, 2, 3, 1).to(device="cpu").contiguous().numpy()
-    return frames, int(frames.shape[2]), int(frames.shape[1])
+    video = video.detach()
+    frames = (frame.permute(1, 2, 0).to(device="cpu").contiguous().numpy() for frame in video)
+    return frames, int(video.shape[3]), int(video.shape[2])
 
 
 def _export_video(
@@ -141,12 +166,7 @@ def _export_video(
     # CPython only uses posix_spawn for an executable given by path.
     ffmpeg_exe = os.path.abspath(shutil.which(ffmpeg_exe) or ffmpeg_exe)
 
-    if isinstance(output, MediaArtifact) and output.spec.fps is not None:
-        fps = output.spec.fps
-    else:
-        fps = int(fps)
-    if fps <= 0:
-        raise ValueError(f"fps must be positive, got {fps}.")
+    fps = _resolve_video_fps(output, fps)
 
     frames, width, height = _video_tensor_to_rgb24(output)
     output_path = Path(output_path)
@@ -171,7 +191,11 @@ def _export_video(
         str(frames_path),
     ]
     try:
-        frames.tofile(frames_path)
+        frame_count = 0
+        with open(frames_path, "wb") as frames_file:
+            for frame in frames:
+                frame.tofile(frames_file)
+                frame_count += 1
         if audio is None:
             command.append("-an")
         else:
@@ -197,7 +221,7 @@ def _export_video(
         if audio is not None:
             # Keep the full video even when generated audio is shorter, and do not
             # extend the artifact when audio is longer.
-            command.extend(["-c:a", "aac", "-t", str(frames.shape[0] / fps)])
+            command.extend(["-c:a", "aac", "-t", str(frame_count / fps)])
         command.append(str(output_path))
         try:
             # No pipes, and close_fds=False lets CPython use posix_spawn, which creates no
@@ -210,6 +234,28 @@ def _export_video(
         frames_path.unlink(missing_ok=True)
         if audio_path is not None:
             audio_path.unlink(missing_ok=True)
+
+
+def _validated_val_output(out: Any, media_kind: str | None, *, fps: int, context: str) -> tuple[Any, bool]:
+    """Validate one decoded validation output and return it with whether it is a video."""
+    if isinstance(out, MediaArtifact):
+        out.validate(context=context, name="preview")
+        if out.spec.representation != "decoded" or out.spec.modality not in ("image", "video"):
+            raise ValueError(f"{context} requires a decoded visual artifact, got {out.spec}")
+        media_kind = out.spec.modality
+        if media_kind == "image":
+            out = out.normalized(context=context, name="preview").data
+    output_ndim = getattr(out, "ndim", -1)
+    is_video = resolve_is_video(media_kind)
+    if is_video and output_ndim == 5:
+        # Batched video [B, T, C, H, W]; TCHW is validated below.
+        out = out[0]
+    if not isinstance(out, MediaArtifact):
+        MediaArtifact(
+            MediaSpec(media_kind, "decoded", "TCHW" if is_video else "CHW", fps=fps if is_video else None),
+            out,
+        ).validate(context=context, name="preview")
+    return out, is_video
 
 
 def wrap_val_samples_for_wandb(samples, fps=24, output_dir=None, media_kinds=None):
@@ -235,23 +281,7 @@ def wrap_val_samples_for_wandb(samples, fps=24, output_dir=None, media_kinds=Non
         inp, out, score = sample[:3]
         audio = sample[3] if len(sample) > 3 else None
         audio_sample_rate = sample[4] if len(sample) > 4 else None
-        if isinstance(out, MediaArtifact):
-            out.validate(context="W&B", name="preview")
-            if out.spec.representation != "decoded" or out.spec.modality not in ("image", "video"):
-                raise ValueError(f"W&B requires a decoded visual artifact, got {out.spec}")
-            media_kind = out.spec.modality
-            if media_kind == "image":
-                out = out.normalized(context="W&B", name="preview").data
-        output_ndim = getattr(out, "ndim", -1)
-        is_video = resolve_is_video(media_kind)
-        if is_video and output_ndim == 5:
-            # Batched video [B, T, C, H, W]; TCHW is validated below.
-            out = out[0]
-        if not isinstance(out, MediaArtifact):
-            MediaArtifact(
-                MediaSpec(media_kind, "decoded", "TCHW" if is_video else "CHW", fps=fps if is_video else None),
-                out,
-            ).validate(context="W&B", name="preview")
+        out, is_video = _validated_val_output(out, media_kind, fps=fps, context="W&B")
         if is_video:
             try:
                 validate_audio(audio, audio_sample_rate, context="W&B")
@@ -270,8 +300,6 @@ def wrap_val_samples_for_wandb(samples, fps=24, output_dir=None, media_kinds=Non
                 media = f"[validation media unavailable: {type(error).__name__}: {error}]"
         else:
             try:
-                if not isinstance(out, torch.Tensor) or out.dtype != torch.uint8:
-                    raise ValueError(f"Expected a uint8 image tensor, got {getattr(out, 'dtype', type(out))}.")
                 media = wandb.Image(out, file_type="jpg")
             except Exception as error:
                 logger.warning("Could not log validation sample %d image: %s", len(wrapped), error)
@@ -289,6 +317,164 @@ def log_wandb_media(media: dict[str, Any], step: int) -> None:
 
     if wandb.run is not None:
         wandb.log(media, step=step, commit=False)
+
+
+def _swanlab_image(output: Any, swanlab: Any) -> Any:
+    """Build a ``swanlab.Image`` from a uint8 ``[C, H, W]`` tensor."""
+    frame = output.detach().permute(1, 2, 0).cpu().numpy()
+    # JPEG has no alpha channel, and swanlab.Image takes grayscale as [H, W].
+    frame = frame[..., 0] if frame.shape[-1] == 1 else frame[..., :3]
+    return swanlab.Image(frame, file_type="jpg")
+
+
+def _swanlab_gif(output: Any, swanlab: Any, *, fps: int) -> Any:
+    """Build a looping-GIF ``swanlab.Video``, the only video format SwanLab accepts."""
+    fps = _resolve_video_fps(output, fps)
+    frames, _, _ = _video_tensor_to_rgb24(output)
+    images = []
+    for frame in frames:
+        # Downscale before keeping the frame, so only capped previews wait for the encode.
+        image = Image.fromarray(frame)
+        image.thumbnail((_SWANLAB_GIF_MAX_SIDE, _SWANLAB_GIF_MAX_SIDE))
+        images.append(image)
+    # swanlab.Video reads the file while it is constructed, so the temp file can go right after.
+    with tempfile.TemporaryDirectory(prefix="val_gif_") as gif_dir:
+        gif_path = os.path.join(gif_dir, "sample.gif")
+        images[0].save(
+            gif_path,
+            format="GIF",
+            save_all=True,
+            append_images=images[1:],
+            duration=round(1000 / fps),
+            loop=0,
+        )
+        return swanlab.Video(gif_path)
+
+
+def wrap_val_samples_for_swanlab(
+    samples: Iterable[Sequence[Any]], fps: int = 24, media_kinds: Any = None
+) -> tuple[list[tuple[Any, str, Any]], dict[str, Any]]:
+    """Prepare validation samples for SwanLab's text table and top-level media.
+
+    SwanLab tables only hold text, so each row names the media key that was
+    logged for that sample. GIF, the only video format ``swanlab.Video`` takes,
+    has no audio track, so optional tuple elements four and five (audio and its
+    sample rate) go to their own key. As on W&B, only video samples carry audio.
+    Media conversion failures are represented in the table and logged instead of
+    propagating into the training loop.
+    """
+    import swanlab
+
+    samples = list(samples)
+    media_kinds = batch_items(media_kinds, len(samples), "media_kind")
+    rows = []
+    media_to_log = {}
+    for sample, media_kind in zip(samples, media_kinds, strict=True):
+        inp, out, score = sample[:3]
+        audio = sample[3] if len(sample) > 3 else None
+        audio_sample_rate = sample[4] if len(sample) > 4 else None
+        sample_number = len(rows) + 1
+        out, is_video = _validated_val_output(out, media_kind, fps=fps, context="SwanLab")
+        try:
+            if is_video:
+                media = _swanlab_gif(out, swanlab, fps=fps)
+                cell = f"val/videos/sample_{sample_number}"
+            else:
+                media = _swanlab_image(out, swanlab)
+                cell = f"val/images/sample_{sample_number}"
+            media_to_log[cell] = media
+        except Exception as error:
+            logger.warning("Could not log validation sample %d media to SwanLab: %s", len(rows), error)
+            cell = f"[validation media unavailable: {type(error).__name__}: {error}]"
+        if is_video and audio is not None:
+            try:
+                validate_audio(audio, audio_sample_rate, context="SwanLab")
+                pcm, rate = _audio_to_pcm16(audio, audio_sample_rate)
+                media_to_log[f"val/audios/sample_{sample_number}"] = swanlab.Audio(pcm.T, sample_rate=rate)
+            except Exception as error:
+                logger.warning("Could not log validation sample %d audio to SwanLab: %s", len(rows), error)
+        rows.append((inp, cell, score))
+    return rows, media_to_log
+
+
+def log_swanlab_media(media: dict[str, Any], step: int) -> None:
+    """Log top-level SwanLab media for the validation table at ``step``."""
+    if not media:
+        return
+
+    import swanlab
+
+    swanlab.log(media, step=step)
+
+
+def log_val_samples(
+    generations_logger: Any,
+    loggers: Sequence[str],
+    samples: Sequence[Sequence[Any]],
+    step: int,
+    *,
+    fps: int = 24,
+    media_root: str | None = None,
+) -> None:
+    """Log validation samples and their media to every configured logger.
+
+    Media and table logging failures are logged instead of propagating into the
+    training loop.
+
+    Args:
+        generations_logger: Table logger with a ``log(loggers, samples, step)`` method.
+        loggers: Configured logger names.
+        samples: Retained ``(input, output, score, audio, audio_sample_rate, media_kind)`` rows.
+        step: Global step of the samples.
+        fps: Fallback frame rate for video outputs.
+        media_root: Directory that keeps W&B videos for its asynchronous upload.
+            They go to a temporary directory when it is unset.
+    """
+    media_kinds = [sample[5] for sample in samples]
+
+    # SwanLab's table takes text and its media types differ, so it gets its own rows.
+    table_loggers = loggers
+    swanlab_rows = None
+    swanlab_media = {}
+    if "swanlab" in loggers:
+        table_loggers = [name for name in loggers if name != "swanlab"]
+        swanlab_rows, swanlab_media = wrap_val_samples_for_swanlab(samples, fps=fps, media_kinds=media_kinds)
+
+    # Keep wandb videos in persistent storage.
+    video_tmp_dir = None
+    wandb_media = {}
+    if "wandb" in table_loggers:
+        wandb_video_dir = os.path.join(media_root, "wandb_val_media", f"global_step_{step}") if media_root else None
+        rows, video_tmp_dir, wandb_media = wrap_val_samples_for_wandb(
+            samples, fps=fps, output_dir=wandb_video_dir, media_kinds=media_kinds
+        )
+    else:
+        rows = [
+            (input_, output.data if isinstance(output, MediaArtifact) else output, score)
+            for input_, output, score, *_ in samples
+        ]
+
+    try:
+        try:
+            log_wandb_media(wandb_media, step)
+        except Exception as error:
+            logger.warning("Skipping validation media log at step %s: %s", step, error)
+        try:
+            log_swanlab_media(swanlab_media, step)
+        except Exception as error:
+            logger.warning("Skipping SwanLab validation media log at step %s: %s", step, error)
+        try:
+            generations_logger.log(table_loggers, rows, step)
+        except Exception as error:
+            logger.warning("Skipping validation table log at step %s: %s", step, error)
+        if swanlab_rows is not None:
+            try:
+                generations_logger.log(["swanlab"], swanlab_rows, step)
+            except Exception as error:
+                logger.warning("Skipping SwanLab validation table log at step %s: %s", step, error)
+    finally:
+        if video_tmp_dir is not None:
+            shutil.rmtree(video_tmp_dir, ignore_errors=True)
 
 
 def log_ar_generations_to_wandb(logger_cls, samples, step):

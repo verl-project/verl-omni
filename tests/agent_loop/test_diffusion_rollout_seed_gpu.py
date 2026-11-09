@@ -29,12 +29,12 @@ from verl.workers.rollout.llm_server import LLMServerManager
 
 from verl_omni.agent_loop import DiffusionAgentLoopWorker
 
-from ..utils.gpu_test_topology import resolve_diffusion_agent_loop_gpu_topology
+from ..utils.gpu_test_topology import enabled_gpu_count, resolve_diffusion_agent_loop_gpu_topology
 
 MODEL_PATH = os.path.expanduser("~/models/tiny-random/Qwen-Image")
 
 pytestmark = [
-    pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA"),
+    pytest.mark.skipif(not enabled_gpu_count(), reason="requires a GPU"),
     pytest.mark.skipif(not os.path.isdir(MODEL_PATH), reason=f"tiny model missing at {MODEL_PATH}"),
 ]
 
@@ -146,7 +146,7 @@ def _build_seed_rollout_config(tmp_dir: str, *, default_num_gpus: int, num_worke
 
 @pytest.fixture
 def multi_worker_seed_rollout_config() -> DictConfig:
-    if torch.cuda.device_count() < 2:
+    if enabled_gpu_count() < 2:
         pytest.skip("requires >= 2 GPUs for multi-worker agent loop")
     with tempfile.TemporaryDirectory() as tmp_dir:
         yield _build_seed_rollout_config(tmp_dir, default_num_gpus=2, num_workers=2)

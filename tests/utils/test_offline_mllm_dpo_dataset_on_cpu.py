@@ -939,3 +939,100 @@ def test_offline_mllm_dpo_collate_fn_squeezes_position_ids():
     batch = dataset_mod.offline_mllm_dpo_collate_fn(features, pad_mode="right")
 
     assert batch["position_ids"].shape == (2, 3, 4)
+
+
+def _truncation_branch(placeholders: int, total_length: int, start: int = 4) -> dict:
+    ids = torch.arange(total_length)
+    image_mask = torch.zeros(total_length, dtype=torch.bool)
+    image_mask[start : start + placeholders] = True
+    return {
+        "input_ids": ids,
+        "attention_mask": torch.ones(total_length, dtype=torch.long),
+        "labels": torch.full((total_length,), -100, dtype=torch.long),
+        "position_ids": torch.zeros(3, total_length, dtype=torch.long),
+        "image_mask": image_mask,
+        "video_mask": torch.zeros(total_length, dtype=torch.bool),
+        "audio_mask": torch.zeros(total_length, dtype=torch.bool),
+        "multi_modal_inputs": {"image_grid_thw": torch.tensor([[1, 8, 8]])},
+    }
+
+
+@pytest.mark.parametrize(
+    "truncation,max_length",
+    [
+        ("right", 12),  # cuts the placeholder run in half
+        ("right", 2),  # drops the image entirely
+        ("left", 50),  # keeps 6/16 placeholders: partial left cut, not a full drop
+        ("left", 2),  # drops the image entirely
+    ],
+)
+def test_prepare_branch_inputs_rejects_truncation_that_cuts_media_placeholders(truncation, max_length):
+    dataset = object.__new__(dataset_mod.OfflineMLLMDPODataset)
+    dataset.pad_mode = dataset_mod.DatasetPadMode.NO_PADDING
+    dataset.max_length = max_length
+    dataset.truncation = truncation
+    dataset.tokenizer = MagicMock()
+
+    with pytest.raises(ValueError, match="cut placeholder runs"):
+        dataset._prepare_branch_inputs(_truncation_branch(placeholders=16, total_length=64))
+
+
+def test_prepare_branch_inputs_fails_closed_when_transform_emits_no_modality_masks():
+    """A branch with media but no bool modality masks must not skip the check.
+
+    ``process_minicpm_sample`` emits no ``image_mask``/``video_mask``/``audio_mask``, so
+    ``_media_placeholder_counts`` is empty and the desync guard used to no-op.
+    """
+    dataset = object.__new__(dataset_mod.OfflineMLLMDPODataset)
+    dataset.pad_mode = dataset_mod.DatasetPadMode.NO_PADDING
+    dataset.max_length = 10
+    dataset.truncation = "right"
+    dataset.tokenizer = MagicMock()
+
+    branch = _truncation_branch(placeholders=16, total_length=64)
+    for key in dataset_mod._MEDIA_MASK_KEYS:
+        branch.pop(key)
+    # Same shape as the MiniCPM image branch: empty ``image_bound`` plus real pixels.
+    branch["multi_modal_inputs"] = {
+        "image_bound": torch.zeros(0, 2, dtype=torch.long),
+        "pixel_values": torch.ones(1, 3, 4, 4),
+    }
+
+    with pytest.raises(ValueError, match="cut placeholder runs"):
+        dataset._prepare_branch_inputs(branch)
+
+
+def test_prepare_branch_inputs_truncates_when_media_placeholders_survive():
+    dataset = object.__new__(dataset_mod.OfflineMLLMDPODataset)
+    dataset.pad_mode = dataset_mod.DatasetPadMode.NO_PADDING
+    dataset.max_length = 40
+    dataset.truncation = "right"
+    dataset.tokenizer = MagicMock()
+
+    prepared = dataset._prepare_branch_inputs(_truncation_branch(placeholders=16, total_length=64))
+
+    assert prepared["input_ids"].shape == (40,)
+    assert int(prepared["image_mask"].sum()) == 16
+    assert prepared["multi_modal_inputs"] is not None
+
+
+def test_prepare_branch_inputs_still_truncates_text_only_branches():
+    dataset = object.__new__(dataset_mod.OfflineMLLMDPODataset)
+    dataset.pad_mode = dataset_mod.DatasetPadMode.RIGHT
+    dataset.max_length = 4
+    dataset.truncation = "left"
+    dataset.tokenizer = MagicMock()
+
+    # MiniCPM emits an empty ``image_bound`` tensor even for text-only rows, and
+    # processors may report media keys as ``None``; neither counts as media.
+    branch = {
+        "input_ids": torch.arange(10),
+        "labels": torch.arange(10),
+        "multi_modal_inputs": {
+            "image_bound": torch.zeros(0, 2, dtype=torch.long),
+            "pixel_values": None,
+        },
+    }
+    prepared = dataset._prepare_branch_inputs(branch)
+
+    torch.testing.assert_close(prepared["input_ids"], torch.arange(10)[-4:])
