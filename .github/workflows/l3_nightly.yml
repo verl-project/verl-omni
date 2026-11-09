@@ -277,7 +277,10 @@ jobs:
           # NUM_GPUS is the workflow input (default 1) and applies to every case.
           # L3_CASE=all runs every case. A named case skips the others, so a
           # baseline run replaces only that case inside the downloaded artifact.
+          # Keep running remaining cases after a failure; fail the step at the end.
           read -r -a all_cases <<< "${ALL_L3_CASES}"
+          failed=0
+          failed_names=()
           for case_name in "${all_cases[@]}"; do
             if [ "${L3_CASE}" != "all" ] && [ "${L3_CASE}" != "${case_name}" ]; then
               echo "[NIGHTLY] skip ${case_name}; L3_CASE=${L3_CASE}"
@@ -289,8 +292,19 @@ jobs:
               exit 1
             fi
             ray stop --force || true
-            bash "${script}"
+            if bash "${script}"; then
+              echo "[NIGHTLY][PASS] ${case_name}"
+            else
+              echo "[NIGHTLY][FAIL] ${case_name}"
+              failed=1
+              failed_names+=("${case_name}")
+            fi
           done
+
+          if [ "${failed}" -ne 0 ]; then
+            echo "[NIGHTLY] failed cases: ${failed_names[*]}"
+            exit 1
+          fi
 
       - name: Upload current nightly artifacts
         if: always() && env.RUN_MODE == 'nightly'
