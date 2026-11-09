@@ -97,7 +97,7 @@ def _spec_bounds(spec: str) -> tuple[tuple[int, ...], tuple[int, ...], bool]:
 
 
 def test_secondary_pin_surfaces_track_pyproject() -> None:
-    """Restatements of pyproject pins (nightly env, NPU/ROCm Dockerfiles) must not drift outside them."""
+    """Restatements of pyproject pins (nightly env, NPU/ROCm Dockerfiles, NPU sync) must not drift outside them."""
     pyproject = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text())
     reqs: list[str] = list(pyproject["project"]["dependencies"])
     for deps in pyproject["project"]["optional-dependencies"].values():
@@ -115,13 +115,37 @@ def test_secondary_pin_surfaces_track_pyproject() -> None:
         f"l3_nightly.yml NIGHTLY_PIN_TRANSFORMERS {nightly} falls outside pyproject's {tf_spec}"
     )
 
+    npu_dockerfile = (REPO_ROOT / "docker/Dockerfile.npu").read_text()
     npu_spec = re.search(
         r"transformers\s*(>=\s*[0-9.]+\s*,\s*<=?\s*[0-9.]+)",
-        (REPO_ROOT / "docker/Dockerfile.npu").read_text(),
+        npu_dockerfile,
     ).group(1)
     npu_lo, npu_hi, _ = _spec_bounds(npu_spec)
     assert py_lo <= npu_lo and npu_hi <= py_hi, (
         f"docker/Dockerfile.npu transformers '{npu_spec}' extends outside pyproject's {tf_spec}"
+    )
+
+    sync_script = (REPO_ROOT / "tests/npu_smoke/sync_npu_stack.sh").read_text()
+    sync_spec = re.search(
+        r"pip_install\s+'transformers\s*(>=\s*[0-9.]+\s*,\s*<=?\s*[0-9.]+)",
+        sync_script,
+    ).group(1)
+    sync_lo, sync_hi, _ = _spec_bounds(sync_spec)
+    assert py_lo <= sync_lo and sync_hi <= py_hi, (
+        f"tests/npu_smoke/sync_npu_stack.sh transformers '{sync_spec}' extends outside pyproject's {tf_spec}"
+    )
+
+    transferqueue_pin = next(r for r in reqs if r.startswith("TransferQueue==")).split("==")[1]
+    sync_transferqueue = re.search(r"TransferQueue==([0-9.]+)", sync_script).group(1)
+    assert sync_transferqueue == transferqueue_pin, (
+        f"tests/npu_smoke/sync_npu_stack.sh pins TransferQueue=={sync_transferqueue} "
+        f"but pyproject pins TransferQueue=={transferqueue_pin}"
+    )
+
+    docker_transferqueue = re.search(r"TransferQueue==([0-9.]+)", npu_dockerfile).group(1)
+    assert docker_transferqueue == transferqueue_pin, (
+        f"docker/Dockerfile.npu pins TransferQueue=={docker_transferqueue} "
+        f"but pyproject pins TransferQueue=={transferqueue_pin}"
     )
 
     rocm_kernels = re.search(r"kernels==([0-9.]+)", (REPO_ROOT / "docker/Dockerfile.rocm").read_text()).group(1)

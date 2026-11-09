@@ -1,6 +1,6 @@
 # Qwen-Image FlowGRPO
 
-Last updated: 09/23/2026
+Last updated: 11/09/2026
 
 See the [FlowGRPO trainer guide](../../../docs/examples/flowgrpo_trainer.md) for installation, OCR data and
 reward-model setup.

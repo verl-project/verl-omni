@@ -373,9 +373,8 @@ class DiffusionStrategy(OmniStrategyBase):
         engine_args["enable_prompt_embed_cache"] = self.server.config.enable_prompt_embed_cache
         engine_args["prompt_embed_cache_size"] = self.server.config.prompt_embed_cache_size
 
-        # Strip LLM-only fields from OmniEngineArgs before passing to diffusion ingress —
-        # the validator rejects every field without an owner, and LLM-only fields have none
-        # on diffusion stages.
+        # Strip LLM-only fields before diffusion ingress: the validator rejects
+        # every field without an owner, and LLM-only fields have none there.
         allowed = _diffusion_ingress_allowed_fields()
         dropped = sorted(key for key in engine_args if key not in allowed)
         for key in dropped:

@@ -20,9 +20,9 @@
 #   are not installed: no smoke test exercises kv offload.
 # - fastapi is pinned to the window vllm-ascend's requirements state; the
 #   base image may sit below its floor.
-# - torch/torch-npu are not force-reinstalled at the end: nothing in the
-#   pinned chain requires a torch version, and the base image already
-#   carries torch 2.10.0+cpu with torch-npu installed by this script.
+# - torch/torch-npu are not force-reinstalled at the end: vllm-ascend's
+#   requirements pin torch==2.10.0, but --no-deps keeps it inert and the base
+#   image already carries torch 2.10.0+cpu with torch-npu installed above.
 #
 # TODO (mike): drop this script and its workflow step once the registry image
 # at the current generation exists; the workflow then pins that tag directly.
@@ -110,6 +110,8 @@ log "installing vllm-ascend ${VLLM_ASCEND_PIN} (pure-python)"
     # ops, but sleep mode asserts on that module. Build it directly; the
     # vllm_ascend_C target only pulls in the four bgmv/sgmv AscendC kernels
     # it links, not the aclnn ops batch.
+    # Upper-bound both: cmake 4 drops pre-3.5 compatibility and pybind11 3 is
+    # untested against CANN's ascendc cmake files.
     pip_install 'cmake<4' 'pybind11<3'
     VA_BUILD_DIR="build/vllm_ascend_C"
     TORCH_NPU_PATH="$(python3 -m pip show torch-npu | awk '/^Location:/ {print $2}')/torch_npu"

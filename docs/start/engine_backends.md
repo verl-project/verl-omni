@@ -1,6 +1,6 @@
 # Optional Engine Backends
 
-Last updated: 11/06/2026
+Last updated: 11/09/2026
 
 VeRL-Omni defaults to **FSDP2** as the training engine for the policy and reference models. The diffusion trainer and Qwen3-Omni Thinker can alternatively use [**VeOmni**](https://github.com/ByteDance-Seed/VeOmni). The engine is selected at the Hydra command line — see [`examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_veomni.sh`](https://github.com/verl-project/verl-omni/blob/main/examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_veomni.sh) for a complete recipe.
 
@@ -27,8 +27,9 @@ python -c "import veomni; print('veomni', veomni.__version__)"
 python -c "from veomni.distributed.offloading import load_model_to_gpu, load_optimizer, offload_model_to_cpu, offload_optimizer; print('VeOmni offloading helpers OK')"
 ```
 
-The two-GPU Thinker backend check and two-step V1 smoke pass with torch 2.13
-and vLLM 0.30, including forward, backward, optimizer updates, EP weight export
+The two-GPU Thinker backend check and two-step V1 smoke passed with torch
+2.13 and vLLM 0.30 (recorded at the vLLM 0.30 pin), including forward,
+backward, optimizer updates, EP weight export
 and full-weight rollout synchronization. These checks use tiny random weights;
 they do not validate the full 30B checkpoint or convergence. The base
 import/offloading checks above do not exercise these training paths.

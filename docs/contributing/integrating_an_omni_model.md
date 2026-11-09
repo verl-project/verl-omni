@@ -1,6 +1,6 @@
 # How to Add a New Omni Model
 
-Last updated: 09/22/2026.
+Last updated: 11/09/2026.
 
 This guide walks through adding a new omni (multimodal autoregressive) model to
 the verl-omni training framework. It uses the Qwen3-Omni Thinker adapter as a

@@ -138,7 +138,7 @@ def test_adapter_sync_exports_peft_formatted_lora_tensors(monkeypatch):
 def test_adapter_sync_keys_resolve_in_actual_diffusion_lora_manager(monkeypatch):
     from vllm.lora.lora_model import LoRAModel
     from vllm.lora.peft_helper import PEFTHelper
-    from vllm_omni.diffusion.lora.manager import DiffusionLoRAManager
+    from vllm_omni.lora.manager import DiffusionLoRAManager
 
     engine = make_veomni_engine(_lora_module(), lora_rank=4, target_modules=["to_q", "to_k"])
     params, config = export_veomni_params(engine, monkeypatch, base_sync_done=True)

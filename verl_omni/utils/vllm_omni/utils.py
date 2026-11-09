@@ -57,7 +57,7 @@ class VLLMOmniHijack:
 
         def hijack__load_adapter(self, lora_request: OmniTensorLoRARequest) -> tuple[LoRAModel, PEFTHelper]:
             """
-            based on vllm_omni.diffusion.lora.manager.DiffusionLoRAManager._load_adapter,
+            based on vllm_omni.lora.manager.DiffusionLoRAManager._load_adapter,
             support load adapter with lora tensors
 
             Reason:

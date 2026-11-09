@@ -227,9 +227,10 @@ swr.cn-north-4.myhuaweicloud.com/mindspeed/pr-verl-omni-a2:v010-vllm030-omni030
 The image carries the previous generation of the pinned stack (CANN, torch,
 torch-npu, triton-ascend, editable vllm / vllm-ascend / vllm-omni / verl).
 After checkout, `tests/npu_smoke/sync_npu_stack.sh` reinstalls the pinned
-generation from `.github/*_pin.txt` and `pyproject.toml` on top of it, so the
-jobs run the pinned stack even when the registry image for that generation
-has not been rebuilt yet. The sync installs vllm-ascend pure-python
+generation — `.github/*_pin.txt`, the `pyproject.toml` vllm pin, and
+torch-npu/triton-ascend/fla-npu mirroring `docker/Dockerfile.npu` — on top of
+it, so the jobs run the pinned stack even when the registry image for that
+generation has not been rebuilt yet. The sync installs vllm-ascend pure-python
 (`COMPILE_CUSTOM_KERNELS=0`) because the smoke suite runs tiny models through
 the native op path and an in-job aclnn ops build would cost most of the job
 timeout; the small `vllm_ascend_C` module, which rollout sleep/wake_up

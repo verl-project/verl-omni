@@ -57,8 +57,7 @@ logger.setLevel(logging.INFO)
 _LORA_REQUEST_CACHE_MISS = object()
 
 # Lazily-computed upstream argument defaults, used to forward only explicitly
-# set engine arguments — unowned LLM-only defaults are rejected at stage ingress
-# (see ``_drop_defaulted_engine_args``).
+# set engine arguments (see ``_drop_defaulted_engine_args``).
 _ENGINE_ARGS_DEFAULTS: dict | None = None
 
 
@@ -293,9 +292,8 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             if value is not None:
                 engine_args[key] = value
 
-        # Forward only explicitly-set engine args: the stage-config boundary rejects both
-        # unowned defaults and asdict-expanded compilation configs, so restore the raw
-        # user mapping first.
+        # The stage-config boundary rejects asdict-expanded compilation configs,
+        # so restore the raw user mapping before dropping unowned defaults.
         _restore_raw_compilation_config(engine_args, args)
         engine_args = _drop_defaulted_engine_args(engine_args)
         # This rollout setting is explicit even when its value matches the
