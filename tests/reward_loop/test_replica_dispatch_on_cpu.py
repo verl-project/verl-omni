@@ -47,6 +47,28 @@ def _recording_worker(calls: list[list[int]]):
 
 
 @pytest.mark.asyncio
+async def test_group_rpc_owner_owns_submission_and_sample_order():
+    calls = []
+
+    async def run_rpc(method, data, replica_index=0):
+        assert method == "compute_score_batch"
+        values = _sample_ids(data)
+        calls.append(values)
+        return values
+
+    def unguarded(*args):
+        pytest.fail("owned group submitted outside its RPC owner")
+
+    result = await dispatch_reward_groups(
+        _data(5),
+        {"fsdp": [_worker(unguarded)]},
+        {"fsdp": 2},
+        rpc_owners={"fsdp": SimpleNamespace(run_rpc=run_rpc)},
+    )
+    assert result == {"fsdp": list(range(5))} and calls == [[0, 1], [2, 3], [4]]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(("size", "replicas"), [(0, 3), (1, 3), (3, 5), (7, 4)])
 async def test_static_dispatch_preserves_padded_one_chunk_per_replica(size, replicas):
     calls = [[] for _ in range(replicas)]
