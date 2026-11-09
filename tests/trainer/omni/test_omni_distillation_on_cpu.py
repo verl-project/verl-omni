@@ -112,4 +112,3 @@ def test_synthetic_padding_neutralizes_teacher_fields_and_preserves_source():
     assert tag["seq_len"] == seq_len
     assert source["teacher_ids"].tolist() == [[1, 1]] * 5
     torch.testing.assert_close(source["teacher_logprobs"], torch.full((5, 2), -0.7))
-    assert source["teacher_ids"].shape == (5, 2)

@@ -481,6 +481,8 @@ transfer_queue:
   # Whether to enable TransferQueue.
   enable: false
 
+  # Other settings use TransferQueue defaults; override them with ++transfer_queue.<key>=<value>.
+
   # Pluggable storage and transport backend for TransferQueue.
   backend:
 

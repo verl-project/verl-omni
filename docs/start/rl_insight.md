@@ -1,6 +1,6 @@
 # Monitor Training with RL-Insight
 
-Last updated: 08/27/2026.
+Last updated: 11/09/2026.
 
 [RL-Insight](https://github.com/verl-project/rl-insight) provides online observability for RL training. In VeRL-Omni, it can receive trainer scalar metrics, vLLM-Omni rollout engine metrics, TransferQueue metrics, and rollout state traces, then display them in Grafana dashboards managed by the RL-Insight server.
 
