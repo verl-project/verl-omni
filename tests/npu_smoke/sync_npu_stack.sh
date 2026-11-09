@@ -49,8 +49,11 @@ VLLM_TAG="$(sed -n 's/.*"vllm==\([0-9][0-9.]*\)".*/v\1/p' "${REPO_ROOT}/pyprojec
 
 log "pins: vllm ${VLLM_TAG}, vllm-ascend ${VLLM_ASCEND_PIN}, vllm-omni ${VLLM_OMNI_PIN}, verl ${VERL_PIN}"
 
+# Ascend env scripts read unbound shell variables; suspend -u while sourcing.
+set +u
 source "${ASCEND_HOME_PATH:-/usr/local/Ascend/ascend-toolkit/latest}/set_env.sh"
 source /usr/local/Ascend/nnal/atb/set_env.sh
+set -u
 
 pip_install() {
     python3 -m pip install "$@" \
