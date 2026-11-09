@@ -230,9 +230,10 @@ After checkout, `tests/npu_smoke/sync_npu_stack.sh` reinstalls the pinned
 generation from `.github/*_pin.txt` and `pyproject.toml` on top of it, so the
 jobs run the pinned stack even when the registry image for that generation
 has not been rebuilt yet. The sync installs vllm-ascend pure-python
-(`COMPILE_CUSTOM_KERNELS=0`): the smoke suite runs tiny models through the
-native op path, and an in-job AscendC build would cost most of the job
-timeout.
+(`COMPILE_CUSTOM_KERNELS=0`) because the smoke suite runs tiny models through
+the native op path and an in-job aclnn ops build would cost most of the job
+timeout; the small `vllm_ascend_C` module, which rollout sleep/wake_up
+requires, is still built in-job.
 
 When the registry image at the current generation exists, the workflow pins
 its tag directly and the sync step is dropped.

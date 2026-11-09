@@ -14,7 +14,8 @@
 # triton-ascend-last ordering. Deviations, all deliberate:
 # - vllm-ascend is installed pure-python (COMPILE_CUSTOM_KERNELS=0,
 #   --no-deps): the smoke suite runs tiny models through the native op path,
-#   and an in-job AscendC build would cost most of the job timeout.
+#   and an in-job aclnn ops build would cost most of the job timeout. The
+#   vllm_ascend_C module that sleep mode needs is still built, see below.
 # - memfabric-hybrid/memcache-hybrid (vllm-ascend kv-offload lazy imports)
 #   are not installed: no smoke test exercises kv offload.
 # - fastapi is pinned to the window vllm-ascend's requirements state; the
@@ -104,6 +105,29 @@ log "installing vllm-ascend ${VLLM_ASCEND_PIN} (pure-python)"
     pip_install "triton-ascend==${TRITON_ASCEND_PIN}"
     # Kernel operators vllm-ascend's worker init imports on A2/A3/950.
     pip_install --no-deps "${FLA_NPU_PIN}"
+
+    # COMPILE_CUSTOM_KERNELS=0 skips vllm_ascend_C together with the aclnn
+    # ops, but sleep mode asserts on that module. Build it directly; the
+    # vllm_ascend_C target only pulls in the four bgmv/sgmv AscendC kernels
+    # it links, not the aclnn ops batch.
+    pip_install 'cmake<4' 'pybind11<3'
+    VA_BUILD_DIR="build/vllm_ascend_C"
+    TORCH_NPU_PATH="$(python3 -m pip show torch-npu | awk '/^Location:/ {print $2}')/torch_npu"
+    # Mirrors vllm-ascend setup.py cmake_build_ext.configure(); SOC_VERSION
+    # matches this pool's 910B4 (the a2 lane, like FLA_NPU_PIN above).
+    cmake -S . -B "${VA_BUILD_DIR}" \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX="${PWD}/vllm_ascend" \
+        -DCMAKE_PREFIX_PATH="$(python3 -m pybind11 --cmakedir)" \
+        -DPYTHON_EXECUTABLE="$(command -v python3)" \
+        -DPYTHON_INCLUDE_PATH="$(python3 -c 'from sysconfig import get_paths; print(get_paths()["include"])')" \
+        -DASCEND_HOME_PATH="${ASCEND_HOME_PATH:-/usr/local/Ascend/ascend-toolkit/latest}" \
+        -DSOC_VERSION=ascend910b1 \
+        -DTORCH_NPU_PATH="${TORCH_NPU_PATH}" \
+        -DFETCHCONTENT_BASE_DIR="${PWD}/.deps"
+    cmake --build "${VA_BUILD_DIR}" --target vllm_ascend_C -j "$(nproc)"
+    cmake --install "${VA_BUILD_DIR}"
+    python3 -c "import vllm_ascend.vllm_ascend_C as c; assert c.python_create_and_map"
 )
 
 # 4. vllm-omni at the pin, npu target.
