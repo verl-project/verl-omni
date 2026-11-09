@@ -249,6 +249,8 @@ async def compute_score_ocr(
             sampling_params=params,
             system_prompt="You are a helpful assistant.",
         )
+        # An empty judge reply is a valid (empty) transcription, not a failure.
+        grm_response = grm_response or ""
         scores.append(_levenshtein_score(grm_response, ground_truth))
 
     score = sum(scores) / len(scores)

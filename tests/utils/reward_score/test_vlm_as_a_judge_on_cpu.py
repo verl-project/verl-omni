@@ -359,6 +359,19 @@ async def test_ocr_sampling_params_override_defaults(monkeypatch, scorer):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("scorer", OCR_SCORERS)
+async def test_ocr_none_judge_response_scores_as_empty(monkeypatch, scorer):
+    async def transport(router_address, chat_complete_request, session=None):
+        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=None))])
+
+    monkeypatch.setattr(vlm_as_a_judge, "_post_chat_completion", transport)
+
+    result = await _score_ocr(scorer)
+
+    assert result == {"score": 0.0, "genrm_response": ""}
+
+
+@pytest.mark.asyncio
 async def test_genrm_ocr_environment_variables_are_ignored(monkeypatch):
     requests = _capture(monkeypatch)
     monkeypatch.setenv("GENRM_OCR_TEMPERATURE", "0.0")
