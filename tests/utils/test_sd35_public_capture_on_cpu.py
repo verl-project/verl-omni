@@ -207,7 +207,8 @@ def test_admit_shell_masks_cuda_visibility():
     assert 'CUDA_VISIBLE_DEVICES=\'\' "$PYTHON" "$recipe/capture.py" --role admit' in source
 
 
-def test_rollout_offload_config_and_invalid_mode():
+def test_rollout_offload_config_and_invalid_mode(monkeypatch):
+    monkeypatch.syspath_prepend(str(RECIPE))
     capture = module("capture")
     assert capture.rollout_offload_kwargs("none") == {}
     assert capture.rollout_offload_kwargs("dit-layerwise") == {

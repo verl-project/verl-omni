@@ -182,32 +182,37 @@ def test_cli_replays_unchanged_bytes_after_relocation(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "change",
+    ("change", "expected_error"),
     [
-        "corrupt",
-        "sample",
-        "policy",
-        "ordering",
-        "seed",
-        "prompt",
-        "source",
-        "provenance",
-        "tolerance",
-        "pin_digest",
-        "existing",
+        ("corrupt", "pinned byte mismatch: actor/comparison.pt"),
+        ("sample", "capture sample/timestep input mismatch"),
+        ("policy", "actor capture identity invalid"),
+        ("ordering", "producer request map differs from fixed two-prompt recipe"),
+        ("seed", "producer request map differs from fixed two-prompt recipe"),
+        ("prompt", "producer request map differs from fixed two-prompt recipe"),
+        ("source", "producer source_manifest_sha256 invalid"),
+        ("provenance", "producer probe_sha256 invalid"),
+        ("tolerance", "producer tolerance differs from fixed recipe"),
+        ("pin_digest", "independent pin digest mismatch"),
+        ("existing", "output must be fresh"),
     ],
 )
-def test_cli_rejects_bad_source_or_destination(tmp_path, change):
+def test_cli_rejects_bad_source_or_destination(tmp_path, change, expected_error):
     root = fixture(tmp_path)
     sha = pin(root)
     output = tmp_path / "report"
     if change == "corrupt":
         (root / "actor/comparison.pt").write_bytes(b"corrupt")
     elif change in ("sample", "policy"):
+        field = "sample_id" if change == "sample" else "policy_id"
         path = root / "actor/captures/actor/capture-id/record.json"
         row = json.loads(path.read_text())
-        row["sample_id" if change == "sample" else "policy_id"] = "wrong"
+        row[field] = "wrong"
         put_json(path, row)
+        path = root / "actor/comparison.json"
+        metadata = json.loads(path.read_text())
+        metadata["capture_record"][field] = "wrong"
+        put_json(path, metadata)
         sha = pin(root)
     elif change in ("ordering", "seed", "prompt", "source", "provenance", "tolerance"):
         path = root / "rollout/manifest.json"
@@ -239,6 +244,7 @@ def test_cli_rejects_bad_source_or_destination(tmp_path, change):
         output.mkdir()
     result = run(root, sha, output)
     assert result.returncode != 0
+    assert result.stderr.rstrip().splitlines()[-1:] == [f"ValueError: {expected_error}"], result.stderr
     assert not (output / "report.json").exists()
 
 
