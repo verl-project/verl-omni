@@ -1,6 +1,6 @@
 # NPU Smoke Tests
 
-Last updated: 11/10/2026.
+Last updated: 11/11/2026.
 
 This guide explains how to add CI test cases for Huawei Ascend devices in verl-omni.
 
@@ -286,6 +286,8 @@ the native op path and the full aclnn ops build would cost most of the job
 timeout; the `vllm_ascend_C` module (rollout sleep/wake_up) and the
 `add_rms_norm_bias` aclnn op (the reward-model engine) are still built
 in-job.
+Native builds use at most eight available CPUs by default, independently of
+model OpenMP settings. Set `CMAKE_BUILD_PARALLEL_LEVEL` to override this build limit.
 
 When the registry image at the current generation exists, the workflow pins
 its tag directly and the sync step is dropped.
