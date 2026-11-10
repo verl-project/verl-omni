@@ -48,6 +48,9 @@ _MISSING = object()
 SCORER_KNOB_KEYS: tuple[str, ...] = (
     "vllm_url",
     "vllm_model",
+    "rubric_model",
+    "rubric_vllm_url",
+    "rubric_vllm_model",
     "reflect_max_new_tokens",
     "judge_parse_retries",
     "reflect_vlm_timeout",

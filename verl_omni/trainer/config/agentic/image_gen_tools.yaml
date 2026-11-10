@@ -47,6 +47,20 @@ vllm_url: ""
 # Optional model id for the judge OpenAI chat payload.
 vllm_model: ""
 
+# Which reward-pool model answers the C/A rubric when the pool serves several
+# (``reward.models.<name>``). The image score stays on the model the reward function is
+# bound to; the rubric goes to this sibling (a general VLM, e.g. Qwen3.5-9B). Ignored
+# when the pool has no model by this name, in which case the rubric uses the scoring
+# endpoint, as before.
+rubric_model: ca_judge
+
+# Optional external OpenAI chat base URL for the C/A rubric only. Wins over
+# ``rubric_model``; empty means "use the pool".
+rubric_vllm_url: ""
+
+# Model id sent to ``rubric_vllm_url``; ignored when the rubric rides the pool.
+rubric_vllm_model: ""
+
 # Max new tokens for judge / reflect VLM calls.
 reflect_max_new_tokens: 1024
 
@@ -83,6 +97,16 @@ score_backend: unified_reward
 # raise toward good_enough_threshold as the GEN lane improves.
 unified_good_enough_threshold: 0.62
 
+# ``unified_reward_rubric`` only: share of the rubric verdict (C + A) / 2 in each image's
+# score, the rest being UnifiedReward. UnifiedReward does not check exact strings or
+# counts, so with 0 the GEN lane never learns what the rubric judge flags.
+gen_rubric_weight: 0.5
+
+# ``unified_reward_rubric`` + v2: good_enough=YES needs the rubric judge's own YES
+# (C and A >= good_enough_threshold) as well as the UnifiedReward cut. With false the
+# stop follows UnifiedReward alone and can contradict the C/A shown beside it.
+stop_requires_rubric: true
+
 # Min PickScore for client-side good_enough=YES when ``score_backend: pickscore``. On
 # PickScore's ``raw / 26`` scale. Unlike ``unified_good_enough_threshold`` this is not
 # calibrated against a measured distribution yet -- PickScore is a *relative* ranker,
@@ -118,10 +142,7 @@ rewrite_judge_before_generate: true
 # Optional dump root for traj / hermes / images (null → repo ``outputs/e2e``).
 e2e_root: null
 
-# Optional explicit run dir holding ``rollout_trajectories/``, ``rollout_images/`` and
-# ``hermes_actions/``. null → ``<e2e_root>/<experiment_name>/`` (runs that share an
-# experiment_name are namespaced apart). Set → used verbatim, with no experiment_name
-# appended, so a launcher can place the three trees directly in its own run dir.
+# Explicit run directory (null → e2e_root / trainer.experiment_name).
 run_dir: null
 
 # Co-RL objective contract: v1 baseline or opt-in v2 final quality/call cost.

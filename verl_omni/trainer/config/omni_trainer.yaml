@@ -69,6 +69,12 @@ actor_rollout_ref:
     # Shuffle training data across PPO epochs.
     shuffle: false
 
+    # Checkpoint config.
+    checkpoint:
+
+      # Save only LoRA model weights with the FSDP checkpoint saver.
+      save_lora_only: false
+
 # Trainer configuration.
 trainer:
 
@@ -112,6 +118,9 @@ algorithm:
 
   # Bagel Co-RL GEN-lane override of norm_adv_by_std_in_grpo; null inherits it.
   gen_norm_adv_by_std_in_grpo: null
+
+  # Per-group std floor for adv_estimator=grpo_std_floor: A = (r - mean) / max(std, floor).
+  adv_std_floor: 0.05
 
 
 # Distillation config. Overrides only the teacher _target_ so vllm_omni is

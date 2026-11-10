@@ -143,13 +143,13 @@ def test_judge_image_stub_without_vllm():
 
 def test_expand_judge_user_request_placeholders():
     bound = "A vertical artistic cafe poster."
-    token = trajectory.active_user_prompt.set(bound)
+    token = trajectory.set_active_user_prompt(bound)
     try:
         assert image_gen._expand_judge_user_request("same as user message") == bound
         assert image_gen._expand_judge_user_request("last") == bound
         assert image_gen._expand_judge_user_request("some other task text") == "some other task text"
     finally:
-        trajectory.active_user_prompt.reset(token)
+        trajectory.reset_active_user_prompt(token)
     assert image_gen._expand_judge_user_request("raw without binding") == "raw without binding"
 
 
@@ -176,10 +176,10 @@ def test_clear_latest_image_prunes_only_active_rollout_registry(tmp_path):
         with trajectory.episode_scope(trajectory.EpisodeState(episode_id="b")):
             trajectory.register_tool_artifact(prompt="prompt b", paths=[str(png_b)], backend="qwen_image")
             assert trajectory.count_live_generate_artifacts_for_active_rollout() == 1
-            trajectory.clear_latest_tool_image_for_active_rollout()
+            trajectory.clear_tool_artifacts_for_active_rollout()
             assert trajectory.count_live_generate_artifacts_for_active_rollout() == 0
         assert trajectory.count_live_generate_artifacts_for_active_rollout() == 1
-        trajectory.clear_latest_tool_image_for_active_rollout()
+        trajectory.clear_tool_artifacts_for_active_rollout()
         assert trajectory.count_live_generate_artifacts_for_active_rollout() == 0
 
 
@@ -217,12 +217,11 @@ def test_count_live_generate_artifacts_unbound_rid_is_zero(tmp_path):
 
     png = tmp_path / "orphan.png"
     png.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 16)
-    # Register with an explicit rid while nothing is active on this task.
+    # An unbound standalone call has no rollout identity to count.
     trajectory.register_tool_artifact(
         prompt="orphan",
         paths=[str(png)],
         backend="qwen_image",
-        rollout_id="some_other_rollout",
     )
     assert trajectory.get_active_rollout_id() is None
     assert trajectory.count_live_generate_artifacts_for_active_rollout() == 0

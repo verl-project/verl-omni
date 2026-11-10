@@ -94,13 +94,15 @@ from verl_omni.utils.reward_score.agentic_multidim_reward import (
     _tokens as _tokens,
 )
 
-DIMS = ("reflect", "plan", "format", "protocol", "tool", "result", "image", "done")
+DIMS = ("reflect", "plan", "format", "protocol", "tool", "result", "image", "ca", "done")
 #: Default weight per dim when the row carries no ``w_<dim>``. The five original
 #: dims keep 1.0 so existing recipes are not rescaled relative to each other;
 #: ``image`` is deliberately heavier because it is the only dim with a continuous,
 #: task-specific magnitude -- the rest are mostly protocol gates that saturate.
 #: ``done``/``protocol`` are 1.0 so termination and parse validity are trained at
 #: the same order of magnitude as the behaviour dims they replace.
+#: ``ca`` is the rubric judge's correctness/aesthetics verdict on the final image, kept
+#: separate so a continuous ``image`` scorer cannot drop it. Weighted in v2 only.
 DEFAULT_DIM_WEIGHTS: dict[str, float] = {
     "reflect": 1.0,
     "plan": 1.0,
@@ -109,6 +111,7 @@ DEFAULT_DIM_WEIGHTS: dict[str, float] = {
     "tool": 1.0,
     "result": 1.0,
     "image": 3.0,
+    "ca": 1.0,
     "done": 1.0,
 }
 # Names consumed by AgenticMetricsAgentLoopManager when PR1 and PR3 are
@@ -599,28 +602,27 @@ def _result_reward(
 ) -> float:
     if blocked or not terminal_done or successful_generates < 1 or rewrite_after_yes > 0:
         return 0.0
+    submission_images = successful_generates
+    if graded_plan:
+        # Rewrites after a NO verdict repair the submission rather than adding a subtask.
+        judges = _successful_judges(text)
+        first_verdict_end = judges[0][3] if judges else len(text)
+        submission_images = min(
+            successful_generates,
+            sum(
+                1
+                for _, end, call in _extract_tool_calls(text)
+                if _tool_name(call) == "generate_image" and end <= first_verdict_end
+            ),
+        )
     if task_type == "plan":
         if graded_plan:
-            # Exact-count-or-zero is unreachable from a one-image policy: every sibling scores
-            # 0 and the group carries no signal toward the second image. Only the subtask
-            # images rendered before the first verdict are the plan; a rewrite after a NO
-            # verdict is the reflection the harness asks for, not an extra subtask.
-            judges = _successful_judges(text)
-            first_verdict_end = judges[0][3] if judges else len(text)
-            subtask_images = min(
-                successful_generates,
-                sum(
-                    1
-                    for _, end, call in _extract_tool_calls(text)
-                    if _tool_name(call) == "generate_image" and end <= first_verdict_end
-                ),
-            )
-            return subtask_images / expected if subtask_images <= expected else 0.0
+            return submission_images / expected if submission_images <= expected else 0.0
         return 1.0 if successful_generates == expected else 0.0
     judges = _successful_judges(text)
     final_yes = bool(judges) and judges[-1][2] is True
     # Fail closed on a terminal NO: early-stop alone is not a free result point.
-    return 1.0 if final_yes and successful_generates <= expected else 0.0
+    return 1.0 if final_yes and submission_images <= expected else 0.0
 
 
 def _protocol_reward(
@@ -684,6 +686,15 @@ def _active_weights(
         if value > 0:
             weights[dim] = value
     return weights
+
+
+def _ca_reward(text: str) -> float:
+    """``(correctness + aesthetics) / 2`` from the last trusted judge verdict; 0 when none parsed."""
+    judges = _successful_judges(text)
+    if not judges:
+        return 0.0
+    correctness, aesthetics, _, _ = judges[-1]
+    return 0.5 * (correctness + aesthetics)
 
 
 def _trusted_v2_reward(metadata):
@@ -862,6 +873,7 @@ def compute_score(
             blocked=blocked,
             rewrite_after_yes=rewrites_after_yes,
         ),
+        "ca": _ca_reward(text),
         "done": float(closed),
     }
     if trusted is not None:
@@ -880,6 +892,11 @@ def compute_score(
             # half the coverage of empty policy prose: a coarse copy of ``image``, not a
             # policy-controllable dimension.
             weights.pop("reflect", None)
+        # Autonomous termination is diagnostic when the harness forces reflection.
+        weights.pop("done", None)
+    else:
+        # v1 ``image`` already is the rubric verdict; scoring ``ca`` too would count it twice.
+        weights.pop("ca", None)
     weight_sum = sum(weights.values())
     score = sum(weights[dim] * rewards[dim] for dim in weights) / weight_sum if weight_sum else 0.0
     result.update(

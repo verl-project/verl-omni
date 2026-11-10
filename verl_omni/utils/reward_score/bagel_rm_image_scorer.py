@@ -90,6 +90,20 @@ BAGEL_RM_EXTRA_INFO_KEY = "bagel_corl"
 # unified cut was derived.
 DEFAULT_PICKSCORE_GOOD_ENOUGH = 1.0
 
+# Which reward-pool model answers the Mode-2a C/A rubric when the pool serves more than
+# one (``reward.models.<name>``). The image score stays on the model this reward function
+# is bound to; the rubric goes to this sibling, which is the general VLM judge rather than
+# the continuous image-reward model. Override with ``scorer_knobs``/``extra_info``
+# ``rubric_model``, or bypass the pool entirely with ``rubric_vllm_url``.
+DEFAULT_RUBRIC_MODEL = "ca_judge"
+
+# Share of the rubric verdict ``(C + A) / 2`` in each image's score under
+# ``unified_reward_rubric``. UnifiedReward alone is blind to exact strings and counts: on
+# ``bagel_corl_plateaufix_4567`` it rose 0.58 -> 0.63 on sample_9001 while the requested
+# footer got *more* wrong, and the rubric judge, which saw that, had no say in the GEN
+# reward. The UnifiedReward half keeps the within-group variance FlowGRPO needs.
+DEFAULT_GEN_RUBRIC_WEIGHT = 0.5
+
 
 def _mid_loop_payload(extra_info: Any) -> dict[str, Any] | None:
     """Return the in-loop payload riding ``extra_info``, or ``None`` for episodes."""
@@ -105,11 +119,79 @@ def _mid_loop_payload(extra_info: Any) -> dict[str, Any] | None:
     return payload
 
 
+def _resolve_rubric_endpoint(knobs: dict[str, Any], manager_kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Point the C/A rubric at the reward pool's *second* engine model, when it has one.
+
+    The image score and the rubric are asked to different models on purpose: the score
+    stays on a continuous image-reward model (UnifiedReward), while the rubric verdict
+    comes from a general VLM whose correctness/aesthetics read is the ``ca`` dim. The
+    reward loop gives each term exactly one ``reward_router_address`` -- its own model --
+    so the sibling router arrives in ``reward_router_addresses``, keyed by
+    ``reward.models.<name>`` and selected by the ``rubric_model`` knob.
+
+    An explicitly configured ``rubric_vllm_url`` (an outside sidecar) wins, and with
+    neither the rubric keeps using the scoring endpoint, which is the single-model
+    behaviour every existing recipe relies on.
+    """
+    if str(knobs.get("rubric_vllm_url") or "").strip():
+        return knobs
+    knobs.pop("rubric_vllm_model", None)
+    peers = manager_kwargs.get("reward_router_addresses")
+    if not isinstance(peers, dict) or not peers:
+        return knobs
+    key = str(knobs.get("rubric_model") or DEFAULT_RUBRIC_MODEL).strip()
+    address = str(peers.get(key) or "").strip()
+    if not address:
+        return knobs
+    knobs["rubric_vllm_url"] = address if address.startswith(("http://", "https://")) else f"http://{address}"
+    paths = manager_kwargs.get("reward_model_paths")
+    model = str(paths.get(key) or "").strip() if isinstance(paths, dict) else ""
+    if model:
+        knobs["rubric_vllm_model"] = model
+    logger.info(
+        "bagel_rm_image_scorer: C/A rubric routed to reward model %r (%s); image score stays on %s",
+        key,
+        knobs["rubric_vllm_url"],
+        knobs.get("vllm_url") or "<unset>",
+    )
+    return knobs
+
+
+def _rubric_knobs(knobs: dict[str, Any]) -> dict[str, Any]:
+    """The knob set one rubric call needs: ``vllm_url``/``vllm_model`` aimed at the judge."""
+    url = str(knobs.get("rubric_vllm_url") or "").strip()
+    if not url:
+        return knobs
+    out = dict(knobs)
+    out["vllm_url"] = url
+    # Never let the scoring model's id leak onto the rubric endpoint: an external sidecar
+    # serves its own checkpoint, and vLLM rejects a foreign model id.
+    out["vllm_model"] = str(knobs.get("rubric_vllm_model") or "").strip()
+    return out
+
+
 def _resolve_judge_endpoint(knobs: dict[str, Any], manager_kwargs: dict[str, Any]) -> dict[str, Any]:
-    """Point the judge at the reward pool's own router when the manager offers one."""
+    """Point the judge at the reward pool's own router when the manager offers one.
+
+    ``VisualRewardManager`` passes ``reward_router_address`` (and ``model_name``)
+    whenever a reward model is deployed: the manager builds a router in front of the
+    RM replicas (``RewardModelManager._initialize_router`` -> a catch-all proxy) and
+    hands our function its ``host:port``. That router speaks OpenAI
+    ``/v1/chat/completions``, so the SAME scoring path the frozen sidecar served can be
+    served by the reward pool itself — no second model, no second process, and the
+    Yes/No (``good_enough``) flag comes back through the identical parse.
+
+    The router wins over the configured ``vllm_url`` on purpose: the config knob is the
+    external judge, and an operator who sets both has almost certainly left the knob
+    behind. Passing no router (no reward model enabled) leaves ``knobs`` untouched and
+    the configured sidecar, if any, keeps working as a fallback.
+
+    The rubric endpoint is resolved separately (``_resolve_rubric_endpoint``), because a
+    two-model pool must score on one model and judge on the other.
+    """
     router = str(manager_kwargs.get("reward_router_address") or "").strip()
     if not router:
-        return knobs
+        return _resolve_rubric_endpoint(dict(knobs), manager_kwargs)
     out = dict(knobs)
     out["vllm_url"] = router if router.startswith(("http://", "https://")) else f"http://{router}"
     model_name = str(manager_kwargs.get("model_name") or "").strip()
@@ -117,7 +199,7 @@ def _resolve_judge_endpoint(knobs: dict[str, Any], manager_kwargs: dict[str, Any
         # vLLM serves the checkpoint path as its model id; an empty model id is rejected
         # by the OpenAI route, so carry the RM's own path through.
         out["vllm_model"] = model_name
-    return out
+    return _resolve_rubric_endpoint(out, manager_kwargs)
 
 
 def _score_image_unified(
@@ -323,9 +405,9 @@ def compute_score(
             f"bagel_rm_image_scorer: unknown score_backend {backend!r}; "
             "expected 'unified_reward', 'unified_reward_rubric', 'vlm_judge' or 'pickscore'"
         )
-    # ``unified_reward_rubric``: the reward stays UnifiedReward's point score, and the same
-    # reward-pool model is asked the Mode-2a C/A rubric a second time, for the
-    # ``judge_image`` response and the stop verdict only.
+    # ``unified_reward_rubric``: UnifiedReward scores the image, and the reward-pool
+    # judge is asked the Mode-2a C/A rubric for the ``judge_image`` response. The
+    # rubric also shares the image score and, on v2, the stop verdict.
     version = str(knobs.get("corl_reward_version", "v1"))
     if version not in ("v1", "v2"):
         raise ValueError("corl_reward_version must be v1 or v2")
@@ -334,6 +416,14 @@ def compute_score(
     if version == "v2":
         image_prompt = user_request
     with_rubric = backend == "unified_reward_rubric"
+    rubric_weight = float(knobs.get("gen_rubric_weight", DEFAULT_GEN_RUBRIC_WEIGHT)) if with_rubric else 0.0
+    if not 0.0 <= rubric_weight <= 1.0:
+        raise ValueError(f"gen_rubric_weight must be in [0, 1], got {rubric_weight}")
+    # v2 used to stop on the UnifiedReward cut alone and show that YES next to the judge's
+    # C/A, so the policy read "C=0.68 ... good_enough=YES" with findings listing a wrong
+    # string. On the 60-step run 468 of 883 shown YES verdicts were ones the judge itself
+    # scored below its own bar.
+    stop_requires_rubric = bool(knobs.get("stop_requires_rubric", True))
     # The user's request is the fixed target across rewrite passes; the policy's own
     # diffusion prompt would move it every pass.
     caption = user_request or image_prompt
@@ -351,7 +441,7 @@ def compute_score(
                 image_prompt=image_prompt,
                 notes=notes,
                 image_path=path,
-                extra_info=dict(knobs),
+                extra_info=_rubric_knobs(knobs),
             )
             if judged is None or not judged.get("ok"):
                 failed.append(path)
@@ -384,15 +474,21 @@ def compute_score(
                     image_prompt=image_prompt,
                     notes=notes,
                     image_path=path,
-                    extra_info=dict(knobs),
+                    extra_info=_rubric_knobs(knobs),
                 )
                 if judged is not None and judged.get("ok"):
-                    sample_judge.append(_rubric_row(judged))
+                    row = _rubric_row(judged)
+                    sample_judge.append(row)
+                    rubric_yes = bool(judged.get("good_enough", False))
                     if version == "v1":
-                        good_enough = bool(judged.get("good_enough", False))
+                        good_enough = rubric_yes
+                    elif stop_requires_rubric:
+                        good_enough = good_enough and rubric_yes
+                    ca = 0.5 * (row["correctness"] + row["aesthetics"])
+                    score = (1.0 - rubric_weight) * score + rubric_weight * ca
                 else:
-                    # The reward is already scored; an unparsed rubric only costs this
-                    # image its written verdict, so fall back to the axes text.
+                    # An unparsed rubric costs this image its written verdict and its
+                    # rubric share; the UnifiedReward score alone still stands.
                     logger.warning("unified_reward_rubric: rubric judge failed for %s; using axes", path)
                     sample_judge.append(None)
         if not math.isfinite(float(score)):

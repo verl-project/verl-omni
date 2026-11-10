@@ -29,13 +29,20 @@ Wire contract returned to the sync orchestrator:
 
 from __future__ import annotations
 
+from collections import Counter
 from contextlib import nullcontext
+from dataclasses import dataclass, field
 from typing import Callable, Iterator
 
 import torch
 from torch.distributed.tensor import DTensor
 from verl.utils.device import get_device_id
-from verl.utils.fsdp_utils import merged_lora_context, normalize_peft_param_name, replace_lora_wrapper
+from verl.utils.fsdp_utils import (
+    fsdp_version,
+    merged_lora_context,
+    normalize_peft_param_name,
+    replace_lora_wrapper,
+)
 from verl.utils.model import convert_weight_keys
 
 from verl_omni.utils.config import resolve_lora_config
@@ -55,6 +62,101 @@ def _cast_for_sync(tensor: torch.Tensor) -> torch.Tensor:
 
 def _merged_lora_stream(module, *, key_prefix: str = "", offload_fn: Callable[[], None] | None = None):
     """Stream merged (base + LoRA) weights for rollout weight sync.
+
+    FSDP2 modules whose LoRA layers are all vanilla ``lora.Linear`` compute each
+    merged weight per tensor while streaming; everything else goes through
+    ``merged_lora_context``.
+    """
+    lora_merges = _vanilla_lora_linears(module) if fsdp_version(module) == 2 else None
+    if lora_merges is not None and lora_merges.keys() <= module.state_dict().keys():
+        return _merged_lora_stream_per_tensor(module, lora_merges, key_prefix=key_prefix, offload_fn=offload_fn)
+    return _merged_lora_stream_in_place(module, key_prefix=key_prefix, offload_fn=offload_fn)
+
+
+@dataclass(eq=False)
+class _LoraMerge:
+    """One LoRA base weight and every ``(LoRA layer, adapters)`` that merges into
+    it, in module order. A tied base weight has several layers and several keys."""
+
+    weight: torch.nn.Parameter
+    layers: list[tuple[torch.nn.Module, list[str]]] = field(default_factory=list)
+
+    def merge(self) -> torch.Tensor:
+        weight = self.weight.data.clone()
+        for layer, adapters in self.layers:
+            for adapter in adapters:
+                weight += layer.get_delta_weight(adapter)
+        return weight
+
+
+def _vanilla_lora_linears(module) -> dict[str, _LoraMerge] | None:
+    """``{state_dict key: merge}`` for every key that references a LoRA base weight,
+    including keys of other modules tied to it.
+
+    ``None`` if any LoRA layer is not a plain ``lora.Linear`` that PEFT merges as
+    ``weight += get_delta_weight(adapter)`` (LoRA variants such as DoRA,
+    ``lora_bias``, other layer types, or an already merged layer).
+    """
+    from peft.tuners.lora import Linear as LoraLinear
+    from peft.tuners.lora import LoraLayer
+
+    merges = {}
+    for submodule in module.modules():
+        if not isinstance(submodule, LoraLayer):
+            continue
+        if type(submodule) is not LoraLinear or submodule.merged:
+            return None
+        adapters = [adapter for adapter in submodule.active_adapters if adapter in submodule.lora_A]
+        if any(adapter in submodule.lora_variant or submodule.lora_bias[adapter] for adapter in adapters):
+            return None
+        weight = submodule.get_base_layer().weight
+        merges.setdefault(id(weight), _LoraMerge(weight)).layers.append((submodule, adapters))
+    return {
+        name: merges[id(param)]
+        for name, param in module.named_parameters(remove_duplicate=False)
+        if id(param) in merges
+    }
+
+
+def _merged_lora_stream_per_tensor(
+    module,
+    lora_merges: dict[str, _LoraMerge],
+    *,
+    key_prefix: str = "",
+    offload_fn: Callable[[], None] | None = None,
+):
+    """Merged weights without touching the module: no CPU backup of the base
+    weights, no in-place merge and no restore. Each LoRA base weight is cloned
+    and receives the same ``+= get_delta_weight(adapter)`` that PEFT's in-place
+    merge applies, on the same (sharded) tensors and in the same layer order, so
+    the bits match ``_merged_lora_stream_in_place``. A tied base weight is merged
+    once and streamed under each of its keys.
+    """
+    try:
+        state_dict = module.state_dict()
+        state_dict.update(lora_merges)
+        params = normalize_peft_param_name(state_dict)
+        params = convert_weight_keys(params, getattr(module, "_fsdp_wrapped_module", module))
+        pending = Counter(entry for entry in params.values() if isinstance(entry, _LoraMerge))
+        merged = {}
+        with torch.no_grad():
+            for name, entry in params.items():
+                if isinstance(entry, _LoraMerge):
+                    if entry not in merged:
+                        merged[entry] = entry.merge()
+                    pending[entry] -= 1
+                    weight = merged[entry] if pending[entry] else merged.pop(entry)
+                    tensor = _cast_for_sync(weight) if isinstance(weight, DTensor) else weight
+                else:
+                    tensor = _cast_for_sync(entry) if isinstance(entry, DTensor) else entry.detach().clone()
+                yield f"{key_prefix}{name}", tensor
+    finally:
+        if offload_fn is not None:
+            offload_fn()
+
+
+def _merged_lora_stream_in_place(module, *, key_prefix: str = "", offload_fn: Callable[[], None] | None = None):
+    """Merge LoRA into the module, stream, then restore the base weights.
 
     ``state_dict()`` returns tensors that alias the live FSDP parameter storage,
     and ``merged_lora_context`` restores the un-merged base weights when it

@@ -165,11 +165,20 @@ class EngineRewardModelConfig(RewardModelConfig):
     n_gpus_per_node: int | None = None
     nnodes: int | None = None
     rollout: dict[str, Any] = field(default_factory=dict)
+    #: Share the parent pool's leading bundles with the other sharing engine models
+    #: instead of claiming a disjoint slice. Two colocated judges (an image scorer and
+    #: a rubric VLM) that each want the whole 4-GPU pool at TP=4 cannot both get a
+    #: disjoint split; with ``share_pool`` each is placed on the same bundles as a
+    #: separate colocated worker group, which the parent placement group must leave
+    #: room for (``max_colocate_count``).
+    share_pool: bool = False
 
     def __post_init__(self) -> None:
         super().__post_init__()
         if self.backend != "engine":
             raise ValueError(f"Engine reward model {self.name!r} requires backend='engine'")
+        if not isinstance(self.share_pool, bool):
+            raise TypeError(f"Engine reward model {self.name!r} share_pool must be a boolean")
         _validate_positive_int(self.replicas, f"Engine reward model {self.name!r} replicas")
         if (self.n_gpus_per_node is None) != (self.nnodes is None):
             raise ValueError(f"Engine reward model {self.name!r} must set both n_gpus_per_node and nnodes")
@@ -199,6 +208,7 @@ class EngineRewardModelConfig(RewardModelConfig):
             "n_gpus_per_node",
             "nnodes",
             "rollout",
+            "share_pool",
         }
         _reject_unknown_fields(name, model, allowed)
         return cls(
@@ -210,6 +220,7 @@ class EngineRewardModelConfig(RewardModelConfig):
             n_gpus_per_node=model.get("n_gpus_per_node"),
             nnodes=model.get("nnodes"),
             rollout=to_mapping(model.get("rollout")),
+            share_pool=model.get("share_pool", False),
         )
 
     def rollout_world_size(self, base_config) -> int:

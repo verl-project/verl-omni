@@ -39,10 +39,10 @@ EXPECTED_SAMPLE_INDICES = [9001, 9002, 9003, 9004]
 
 @pytest.mark.parametrize("sample_index", EXPECTED_SAMPLE_INDICES)
 def test_poster_images_are_persisted_under_the_case_identity(tmp_path, monkeypatch, sample_index):
-    from verl_omni.tools.trajectory import paths
+    from verl_omni.utils.agentic import artifacts
     from verl_omni.utils.agentic_val_viz import save_val_viz_images
 
-    monkeypatch.setattr(paths, "resolve_rollout_images_root", lambda: tmp_path / "rollout_images")
+    monkeypatch.setattr(artifacts, "resolve_rollout_images_root", lambda: tmp_path / "rollout_images")
     source = tmp_path / "scratch.png"
     source.write_bytes(b"poster pixels")
     relpath = f"step_000030/sample_{sample_index}.01"

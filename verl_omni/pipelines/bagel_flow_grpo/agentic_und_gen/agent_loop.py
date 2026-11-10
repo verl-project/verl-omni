@@ -30,6 +30,7 @@ from verl.experimental.agent_loop.agent_loop import AgentLoopBase, AgentLoopMetr
 from verl.utils.tokenizer import normalize_token_ids
 
 from verl_omni.agent_loop.utils import derive_rollout_seed
+from verl_omni.pipelines.bagel_flow_grpo.agentic_und_gen.config import bagel_scorer_knobs_from_config
 from verl_omni.pipelines.bagel_flow_grpo.agentic_und_gen.episode import (  # noqa: F401
     GENERATE_IMAGE_TOOL_SCHEMA,
     JUDGE_IMAGE_TOOL_SCHEMA,
@@ -49,6 +50,7 @@ from verl_omni.pipelines.bagel_flow_grpo.agentic_und_gen.episode import (  # noq
 from verl_omni.pipelines.bagel_flow_grpo.agentic_und_gen.episode import (
     with_reflection_system_prompt as _with_reflection_system_prompt,
 )
+from verl_omni.pipelines.bagel_flow_grpo.agentic_und_gen.prompts import prepare_bagel_prompt
 from verl_omni.pipelines.bagel_flow_grpo.agentic_und_gen.reward import get_bagel_rm_gen_handle, make_rm_score_fn
 from verl_omni.pipelines.bagel_flow_grpo.agentic_und_gen.serving import (
     build_gen_sampling_params,
@@ -64,7 +66,7 @@ from verl_omni.utils.agentic.artifacts import (
     build_trajectory_relpath,
     rollout_id_from_relpath,
 )
-from verl_omni.utils.agentic.config import agentic_get, agentic_scorer_knobs_from_config
+from verl_omni.utils.agentic.config import agentic_get
 from verl_omni.utils.agentic.image_gen_rollout_parse import last_user_prompt
 from verl_omni.utils.agentic_val_viz import VAL_VIZ_PROMPT_KEY, save_val_viz_images
 
@@ -283,6 +285,11 @@ class BagelMultiturnAgentLoop(AgentLoopBase):
         # Transformers 4/5: tokenize=True may return BatchEncoding; list(enc) would iterate keys ('input_ids', ...)
         # and crash normalize_token_ids on the server.
         prompt_ids = kwargs.get("prompt_ids")
+        task_type = resolve_task_type(extra_info=kwargs.get("extra_info"), ground_truth=kwargs.get("ground_truth"))
+        prepared_prompt = prepare_bagel_prompt(raw_prompt, task_type=task_type, extra_info=kwargs.get("extra_info"))
+        if prepared_prompt is not raw_prompt:
+            raw_prompt = prepared_prompt
+            prompt_ids = None
         injected_tools = False
         if (
             _inject_tools_schema_enabled()
@@ -295,7 +302,6 @@ class BagelMultiturnAgentLoop(AgentLoopBase):
             # ``task_type`` decides whether the dataset's own system turn survives: plan rows must
             # keep ``PLAN_SYSTEM_PROMPT`` (see ``with_reflection_system_prompt``), whose
             # numbered-plan sentence is what makes ``R_plan`` / ``R_result`` reachable.
-            task_type = resolve_task_type(extra_info=kwargs.get("extra_info"), ground_truth=kwargs.get("ground_truth"))
             encoded = self.tokenizer.apply_chat_template(
                 _with_reflection_system_prompt(raw_prompt, task_type=task_type),
                 tools=[GENERATE_IMAGE_TOOL_SCHEMA, JUDGE_IMAGE_TOOL_SCHEMA],
@@ -369,7 +375,7 @@ class BagelMultiturnAgentLoop(AgentLoopBase):
                 rm_handle,
                 get_reference_paths=lambda: list(self._rm_reference_paths),
                 get_extra_info=lambda: {**self._rm_extra_info, "user_prompt": get_active_user_prompt() or ""},
-                get_scorer_knobs=lambda: dict(agentic_scorer_knobs_from_config(self.config)),
+                get_scorer_knobs=lambda: dict(bagel_scorer_knobs_from_config(self.config)),
                 get_image_prompt=lambda: get_latest_generate_prompt_for_active_rollout() or "",
                 # The RM worker's reward manager validates the row's ``responses``
                 # against the rollout pipeline's response kind, so the un-used
@@ -526,7 +532,7 @@ class BagelMultiturnAgentLoop(AgentLoopBase):
                 non_image_reward=float(non_image_reward) if non_image_reward is not None else None,
                 good_enough_threshold=good_enough_threshold,
                 good_enough_reduction=good_enough_reduction,
-                corl_reward_version=str(agentic_scorer_knobs_from_config(self.config).get("corl_reward_version", "v1")),
+                corl_reward_version=str(bagel_scorer_knobs_from_config(self.config).get("corl_reward_version", "v1")),
                 fixed_gen_prompt=str(self.config.actor_rollout_ref.rollout.agent.get("corl_fixed_gen_prompt", "")),
                 task_type=episode_ground_truth.get("task_type"),
                 expected_num_images=expected_num_images,

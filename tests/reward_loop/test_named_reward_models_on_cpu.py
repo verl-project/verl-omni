@@ -893,7 +893,95 @@ def test_engine_executor_exposes_only_router_arguments():
     assert executor.reward_kwargs() == {
         "reward_router_address": "router:8000",
         "model_name": "/models/pickscore",
+        "reward_router_addresses": {"pickscore": "router:8000"},
+        "reward_model_paths": {"pickscore": "/models/pickscore"},
     }
+
+
+def test_engine_executors_expose_every_engine_peer_router():
+    """A scorer bound to one engine can address its colocated sibling (the C/A judge)."""
+    specs = {
+        "image_rm": RewardModelSpec(
+            name="image_rm", backend="engine", model_path="/models/ur", router_address="ur:8000", executor_config={}
+        ),
+        "ca_judge": RewardModelSpec(
+            name="ca_judge", backend="engine", model_path="/models/q9b", router_address="q9b:8001", executor_config={}
+        ),
+        "native": RewardModelSpec(name="native", backend="native", model_path=None, executor_config={}),
+    }
+
+    executors = build_engine_reward_executors(specs)
+
+    assert set(executors) == {"image_rm", "ca_judge"}
+    kwargs = executors["image_rm"].reward_kwargs()
+    assert kwargs["reward_router_address"] == "ur:8000"
+    assert kwargs["model_name"] == "/models/ur"
+    assert kwargs["reward_router_addresses"] == {"image_rm": "ur:8000", "ca_judge": "q9b:8001"}
+    assert kwargs["reward_model_paths"] == {"image_rm": "/models/ur", "ca_judge": "/models/q9b"}
+
+
+def test_pool_sharing_engine_models_overlap_on_the_leading_bundles(monkeypatch):
+    """Two ``share_pool`` engines at TP=4 both fit a 4-bundle pool, each on bundles [0, 4)."""
+    manager = object.__new__(MultiRewardModelManager)
+    parent = SimpleNamespace(world_size=4)
+    manager.resource_pool = parent
+    manager.native_device_assignments = {}
+    calls = []
+
+    def fake_split(pool, sizes):
+        calls.append(list(sizes))
+        return [f"sub-{len(calls)}-{index}" for index in range(len(sizes))]
+
+    monkeypatch.setattr(reward_model_module, "split_resource_pool", fake_split)
+    config = _config(
+        {
+            "image_rm": {"backend": "engine", "share_pool": True, "rollout": {"tensor_model_parallel_size": 4}},
+            "ca_judge": {"backend": "engine", "share_pool": True, "rollout": {"tensor_model_parallel_size": 4}},
+        }
+    )
+    entries = _parsed_models(config)
+
+    engine_pools, native_pools = manager._split_model_resource_pools(entries, [], {"rollout": {}})
+
+    assert native_pools == {}
+    assert calls == [[4], [4]]
+    assert engine_pools == {"image_rm": "sub-1-0", "ca_judge": "sub-2-0"}
+
+
+def test_pool_sharing_engine_model_wider_than_the_pool_is_rejected():
+    manager = object.__new__(MultiRewardModelManager)
+    manager.resource_pool = SimpleNamespace(world_size=2)
+    manager.native_device_assignments = {}
+    config = _config(
+        {"ca_judge": {"backend": "engine", "share_pool": True, "rollout": {"tensor_model_parallel_size": 4}}}
+    )
+
+    with pytest.raises(ValueError, match="Pool-sharing reward model 'ca_judge' requests 4 devices"):
+        manager._split_model_resource_pools(_parsed_models(config), [], {"rollout": {}})
+
+
+def test_disjoint_engine_models_are_laid_out_after_the_shared_span(monkeypatch):
+    manager = object.__new__(MultiRewardModelManager)
+    manager.resource_pool = SimpleNamespace(world_size=4)
+    manager.native_device_assignments = {}
+    calls = []
+
+    def fake_split(pool, sizes):
+        calls.append(list(sizes))
+        return [f"sub-{len(calls)}-{index}" for index in range(len(sizes))]
+
+    monkeypatch.setattr(reward_model_module, "split_resource_pool", fake_split)
+    config = _config(
+        {
+            "shared": {"backend": "engine", "share_pool": True, "rollout": {"tensor_model_parallel_size": 2}},
+            "alone": {"backend": "engine", "rollout": {"tensor_model_parallel_size": 1}},
+        }
+    )
+
+    engine_pools, _ = manager._split_model_resource_pools(_parsed_models(config), [], {"rollout": {}})
+
+    assert calls == [[2, 2], [2, 1, 1]]
+    assert engine_pools == {"shared": "sub-1-0", "alone": "sub-2-1"}
 
 
 @pytest.mark.parametrize(

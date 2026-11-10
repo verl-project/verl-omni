@@ -16,7 +16,9 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
+import re
 from abc import ABC, abstractmethod
 from typing import Any
 
@@ -163,8 +165,23 @@ class MultiRewardModelManager:
         if self.resource_pool is None:
             raise ValueError("Named reward models require a parent resource pool selected by the trainer")
 
-        engine_requested_sizes = [model.requested_resource_size(base_config) for _, model in engine_entries]
-        engine_requested = sum(engine_requested_sizes)
+        # Pool-sharing engine models are each placed on the pool's leading bundles as their
+        # own colocated worker group; they overlap each other and are not part of the
+        # disjoint split below. The disjoint models are laid out after the widest sharer so
+        # a mixed table cannot stack a disjoint model onto the shared bundles.
+        shared_entries = [(name, model) for name, model in engine_entries if model.share_pool]
+        disjoint_entries = [(name, model) for name, model in engine_entries if not model.share_pool]
+        shared_sizes = {name: model.requested_resource_size(base_config) for name, model in shared_entries}
+        shared_span = max(shared_sizes.values(), default=0)
+        if shared_span > self.resource_pool.world_size:
+            widest = max(shared_sizes, key=shared_sizes.get)
+            raise ValueError(
+                f"Pool-sharing reward model {widest!r} requests {shared_span} devices, but the parent reward "
+                f"pool has only {self.resource_pool.world_size}"
+            )
+
+        engine_requested_sizes = [model.requested_resource_size(base_config) for _, model in disjoint_entries]
+        engine_requested = shared_span + sum(engine_requested_sizes)
         if engine_requested > self.resource_pool.world_size:
             raise ValueError(
                 f"Named reward models request {engine_requested} devices, but the parent reward pool has only "
@@ -189,15 +206,75 @@ class MultiRewardModelManager:
             native_pools[name] = _IndexedResourcePool(self.resource_pool, devices)
 
         engine_pools = {}
+        for name, size in shared_sizes.items():
+            # Each sharer gets its own view of bundles ``[0, size)``; the views overlap on
+            # purpose and the placement group's ``max_colocate_count`` is what admits them.
+            split_sizes = [size]
+            if size < self.resource_pool.world_size:
+                split_sizes.append(self.resource_pool.world_size - size)
+            engine_pools[name] = split_resource_pool(self.resource_pool, split_sizes)[0]
         if engine_requested_sizes:
             split_sizes = list(engine_requested_sizes)
-            if engine_requested < self.resource_pool.world_size:
-                split_sizes.append(self.resource_pool.world_size - engine_requested)
-            sub_pools = split_resource_pool(self.resource_pool, split_sizes)
-            engine_pools = {
-                name: pool for (name, _), pool in zip(engine_entries, sub_pools[: len(engine_entries)], strict=True)
-            }
+            leading = [shared_span] if shared_span else []
+            trailing = (
+                [self.resource_pool.world_size - engine_requested]
+                if engine_requested < self.resource_pool.world_size
+                else []
+            )
+            sub_pools = split_resource_pool(self.resource_pool, leading + split_sizes + trailing)
+            offset = len(leading)
+            engine_pools.update(
+                {
+                    name: pool
+                    for (name, _), pool in zip(
+                        disjoint_entries, sub_pools[offset : offset + len(disjoint_entries)], strict=True
+                    )
+                }
+            )
         return engine_pools, native_pools
+
+
+def _model_name_suffix(name: str) -> str:
+    """Ray-safe suffix for one engine model's colocated worker group names."""
+    return re.sub(r"[^0-9A-Za-z_]", "_", str(name)) or "model"
+
+
+@contextlib.contextmanager
+def _suffixed_rollout_replica_names(name: str):
+    """Make this engine model's colocated rollout actors uniquely named.
+
+    Upstream names a reward replica's worker group and vLLM server
+    ``rollout_reward_colocate_{replica_rank}`` / ``vllm_server_...`` with no model
+    identity, so a second ``RewardModelManager`` in the same parent pool (the C/A
+    rubric judge next to the image scorer) builds the *same* actor names and Ray
+    rejects the second ``init_colocated`` with "The name ... is already taken".
+
+    The replica class already takes ``name_suffix`` for exactly this reason; the
+    upstream manager just never passes one. Patching the factory inside this
+    construction window hands it over without forking upstream's replica setup, and
+    the patch is restored even if construction raises. The controller calls this on
+    the driver only, one model at a time.
+    """
+    import verl.experimental.reward_loop.reward_model as upstream
+
+    original = upstream.get_rollout_replica_class
+    suffix = _model_name_suffix(name)
+
+    def _factory(rollout_name):
+        base = original(rollout_name)
+        base_init = base.__init__
+
+        def __init__(self, *args, **kwargs):
+            kwargs.setdefault("name_suffix", suffix)
+            base_init(self, *args, **kwargs)
+
+        return type(f"{base.__name__}_{suffix}", (base,), {"__init__": __init__, "__module__": base.__module__})
+
+    upstream.get_rollout_replica_class = _factory
+    try:
+        yield
+    finally:
+        upstream.get_rollout_replica_class = original
 
 
 class ManagedRewardModel(ABC):
@@ -232,7 +309,8 @@ class EngineManagedRewardModel(ManagedRewardModel):
             model = parse_reward_model_config(name, model)
         offload = model.resolved_offload
         config = _prepare_engine_config(model, base_config, fallback_model)
-        self.reward_model_manager = RewardModelManager(config, resource_pool)
+        with _suffixed_rollout_replica_names(name):
+            self.reward_model_manager = RewardModelManager(config, resource_pool)
         super().__init__(
             RewardModelSpec(
                 name=name,

@@ -1,6 +1,6 @@
 # BAGEL Co-RL (joint UND + GEN) training
 
-Last updated: 10/27/2026
+Last updated: 11/10/2026
 
 One BAGEL-7B-MoT actor learns Hermes tool-calling UND turns with token GRPO and
 `generate_image` calls with GEN FlowGRPO. The entrypoint is

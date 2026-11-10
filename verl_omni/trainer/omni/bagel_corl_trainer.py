@@ -41,6 +41,7 @@ from verl_omni.trainer.omni.bagel_corl_gen_adv import (
     fold_gen_prompt_token_ids,
 )
 from verl_omni.trainer.omni.bagel_corl_replay_buffer import install_auxiliary_row_filter
+from verl_omni.trainer.omni.bagel_corl_und_adv import GRPO_STD_FLOOR  # noqa: F401  (registers the estimator)
 from verl_omni.trainer.omni.ray_omni_trainer import OmniPPOTrainerSync
 from verl_omni.workers.config import DiffusionModelConfig
 from verl_omni.workers.config.diffusion import DiffusionRolloutConfig, DiffusionSamplingConfig
@@ -349,7 +350,7 @@ class OmniBagelCoRLTrainerSync(OmniPPOTrainerSync):
         rollout_filtered["free_cache_engine"] = True
         rollout_filtered.setdefault("enable_sleep_mode", True)
         agent = dict(rollout_filtered.get("agent") or {})
-        agent["_target_"] = "verl_omni.workers.config.omni.BagelCorlAgentLoopConfig"
+        agent["_target_"] = "verl_omni.pipelines.bagel_flow_grpo.agentic_und_gen.config.BagelCorlAgentLoopConfig"
         # RFC §5: ``gen_samples_per_call`` / ``max_generate_passes`` /
         # ``max_und_turns`` have a single SoT of
         # ``actor_rollout_ref.rollout.agent.*`` and **no code fallback** — the recipe
@@ -505,6 +506,17 @@ class OmniBagelCoRLTrainerSync(OmniPPOTrainerSync):
         import ray
 
         super()._init_resource_pool_mgr()
+        # The V1 base builds its own ``ResourcePoolManager`` with the upstream default of
+        # three colocated worker groups per GPU bundle (``main_omni.init_resource_pool_mgr``
+        # is not on this trainer's path). A second colocated reward engine
+        # (``reward.models.*.share_pool``) needs a fourth slot; without it the extra group
+        # waits forever on a fractional-GPU bundle that is already fully subscribed -- no
+        # error, no "infeasible" report, just a silent hang before step 0.
+        raw = self.config.trainer.get("max_colocate_count", None)
+        max_colocate_count = 3 if raw is None else int(raw)
+        if max_colocate_count < 1:
+            raise ValueError("config.trainer.max_colocate_count must be >= 1")
+        self.resource_pool_manager.max_colocate_count = max_colocate_count
         from verl_omni.workers.engine_workers import ActorRolloutRefWorker as OmniActorRolloutRefWorker
 
         remote_cls = ray.remote(OmniActorRolloutRefWorker)
@@ -1686,13 +1698,59 @@ class OmniBagelCoRLTrainerSync(OmniPPOTrainerSync):
         )
 
     def _bagel_rm_enabled(self) -> bool:
+        """Whether this run deploys a colocated reward model at all.
+
+        Two config shapes mean yes: the legacy single-model switch
+        (``reward.reward_model.enable``) and the named-model table
+        (``reward.models``), which is how a run hosts the C/A rubric judge next to
+        the image scorer. ``reward.reward_model.enable`` alone is *not* the answer
+        for the second shape -- the two are mutually exclusive by validation, so
+        reading only the legacy flag would silently skip the whole reward loop.
+        """
         reward_cfg = getattr(self.config, "reward", None)
         if reward_cfg is None:
             return False
         try:
-            return bool(reward_cfg.get("reward_model", {}).get("enable", False))
+            if bool(reward_cfg.get("reward_model", {}).get("enable", False)):
+                return True
+            return bool(reward_cfg.get("models", {}) or {})
         except (AttributeError, TypeError):
             return False
+
+    def _named_reward_models_enabled(self) -> bool:
+        reward_cfg = getattr(self.config, "reward", None)
+        try:
+            return bool(reward_cfg is not None and (reward_cfg.get("models", {}) or {}))
+        except (AttributeError, TypeError):
+            return False
+
+    def _setup(self) -> None:
+        """Parent V1 setup, with the named-model reward loop in place of upstream's.
+
+        Upstream's ``_setup`` (step 7) always builds a plain ``RewardLoopManager``
+        from ``reward.reward_model.enable``. In the dual-engine layout that switch is off
+        (it is mutually exclusive with ``reward.models``), so upstream would deploy no
+        reward engine at all and still spawn ``reward.num_workers`` idle CPU workers whose
+        manager has no executors bound -- the first score would fail with "Reward model
+        'image_rm' is not available in this worker". The named models live in
+        ``OmniRewardLoopManager``, so build the parent with zero upstream reward workers
+        and install the omni manager right after. The legacy single-engine layout is
+        untouched: upstream's manager is the one that run uses.
+        """
+        if not self._named_reward_models_enabled():
+            super()._setup()
+            return
+        reward_cfg = self.config.reward
+        num_workers = reward_cfg.num_workers
+        try:
+            with open_dict(reward_cfg):
+                reward_cfg.num_workers = 0
+            super()._setup()
+        finally:
+            with open_dict(reward_cfg):
+                reward_cfg.num_workers = num_workers
+        self.reward_loop_manager = None
+        self._ensure_reward_loop_manager()
 
     def _ensure_reward_loop_manager(self):
         """Create the colocated ``OmniRewardLoopManager`` (RFC §4.2).
@@ -1708,7 +1766,9 @@ class OmniBagelCoRLTrainerSync(OmniPPOTrainerSync):
         from verl_omni.reward_loop import OmniRewardLoopManager
 
         resource_pool = None
-        if getattr(self, "use_rm", False) and getattr(self, "resource_pool_manager", None) is not None:
+        # ``use_rm`` only tracks the legacy switch, so ask the config directly: a
+        # named-model run needs the same parent pool to split between its models.
+        if self._bagel_rm_enabled() and getattr(self, "resource_pool_manager", None) is not None:
             resource_pool = self.resource_pool_manager.get_resource_pool(Role.RewardModel)
         self.reward_loop_manager = OmniRewardLoopManager(config=self.config, rm_resource_pool=resource_pool)
         return self.reward_loop_manager

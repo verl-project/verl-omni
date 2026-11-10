@@ -133,7 +133,20 @@ class RayTrainerTaskRunner:
 
         from verl.trainer.ppo.ray_trainer import ResourcePoolManager
 
-        return ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=self.mapping)
+        # Number of colocated worker groups one GPU bundle admits (the bundle's CPU count
+        # and the ``1/max_colocate_count`` GPU share each group takes). The upstream default
+        # of 3 covers actor+rollout, a second rollout replica and one reward model; a run
+        # that colocates a *second* reward engine on the same bundles (``reward.models.*.
+        # share_pool``) needs one more slot, otherwise its placement silently never
+        # schedules. Set ``+trainer.max_colocate_count=4`` for that layout.
+        max_colocate_count = int(config.trainer.get("max_colocate_count", 3) or 3)
+        if max_colocate_count < 1:
+            raise ValueError("config.trainer.max_colocate_count must be >= 1")
+        return ResourcePoolManager(
+            resource_pool_spec=resource_pool_spec,
+            mapping=self.mapping,
+            max_colocate_count=max_colocate_count,
+        )
 
     def add_reward_model_resource_pool(self, config):
         """Register reward-model GPU pool for online sampling."""

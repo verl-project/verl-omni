@@ -148,7 +148,7 @@ def _update_traj_meta(traj_dir: Path, entry: dict) -> None:
     else:
         meta = {}
     meta.setdefault("trajectory", traj_dir.name)
-    meta.setdefault("experiment", traj_paths.run_name or "agentic_run")
+    meta.setdefault("experiment", traj_paths.get_run_name())
     user_prompt = entry.get("user_prompt") or get_active_user_prompt() or ""
     if user_prompt:
         meta["user_prompt"] = user_prompt
@@ -251,8 +251,6 @@ def _save_images(images: list[Image.Image], prompt: str, *, backend: str, tool_s
             backend=backend,
             tool_stubbed=tool_stubbed,
             artifact_id=artifact_ids[0] if artifact_ids else None,
-            trajectory_relpath=relpath,
-            rollout_id=get_active_rollout_id(),
         )
         return paths
 
@@ -263,7 +261,7 @@ def _save_images(images: list[Image.Image], prompt: str, *, backend: str, tool_s
         "backend": backend,
         "tool_stubbed": tool_stubbed,
         "num_images": len(images),
-        "experiment": traj_paths.run_name or "agentic_run",
+        "experiment": traj_paths.get_run_name(),
         "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
     }
     for i, img in enumerate(images):

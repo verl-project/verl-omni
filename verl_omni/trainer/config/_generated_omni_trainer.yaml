@@ -119,6 +119,7 @@ actor_rollout_ref:
       load_contents: ${.save_contents}
       async_save: false
       strict: true
+      save_lora_only: false
     use_fused_kernels: ${oc.select:actor_rollout_ref.model.use_fused_kernels,false}
     profiler:
       _target_: verl.utils.profiler.ProfilerConfig
@@ -891,6 +892,7 @@ reward:
   accelerator_workers:
     enabled: false
   reward_functions: {}
+  multi_reward_concurrency: 1
   models: {}
   aggregation: weighted_sum
   reward_manager:
@@ -941,6 +943,7 @@ algorithm:
   paired_preference: false
   global_std: true
   gen_norm_adv_by_std_in_grpo: null
+  adv_std_floor: 0.05
 distillation:
   _target_: verl.workers.config.DistillationConfig
   enabled: false
@@ -1142,6 +1145,9 @@ agentic_image_gen:
   diffusion_tool_timeout: 900
   vllm_url: ''
   vllm_model: ''
+  rubric_model: ca_judge
+  rubric_vllm_url: ''
+  rubric_vllm_model: ''
   reflect_max_new_tokens: 1024
   judge_parse_retries: 1
   reflect_vlm_timeout: 120
@@ -1149,6 +1155,8 @@ agentic_image_gen:
   good_enough_threshold: 0.8
   score_backend: unified_reward
   unified_good_enough_threshold: 0.62
+  gen_rubric_weight: 0.5
+  stop_requires_rubric: true
   pickscore_good_enough_threshold: 1.0
   block_generate_after_yes: true
   block_generate_after_max_passes: true

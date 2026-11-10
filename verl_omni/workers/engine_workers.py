@@ -14,6 +14,7 @@
 import asyncio
 import functools
 import logging
+import math
 import os
 import time
 from contextlib import nullcontext
@@ -1241,6 +1242,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         # 3. sync weights.
         offloaded = False
         offload_task = None
+        kv_cache_resumed = False
         if use_lora_fast_path:
             self.rollout.sleep_level = 1
             torch_device = get_torch_device()
@@ -1281,7 +1283,10 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 offloaded = True
                 log_gpu_memory_usage("After actor offload before resume weights", logger=logger)
                 if self.config.rollout.free_cache_engine:
-                    await _timed_await("resume_weights", timings, self.rollout.resume(tags=["weights"]))
+                    # The actor is released and the IPC bucket holds only the adapter, so the cache
+                    # fits now; one server wake handshake replaces two on every sync.
+                    await _timed_await("resume_weights", timings, self.rollout.resume(tags=["weights", "kv_cache"]))
+                    kv_cache_resumed = True
             else:
                 # Preserve gather/resume and offload/IPC overlap when the actor
                 # does not offload parameters.
@@ -1294,41 +1299,51 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 )
             log_gpu_memory_usage("After resume weights", logger=logger)
 
-            # Use ZMQ IPC to transfer LoRA weights, bypassing Ray serialization.
-            # Broadcast only the update id. Each vLLM worker combines it with its
-            # rank-local base handle, preserving the one-sender/one-receiver route.
-            sync_start = time.perf_counter()
-            # update_weights is dispatched ONE_TO_ALL, so every actor rank advances
-            # this sequence exactly once for the same LoRA update.
-            zmq_update_id = make_update_zmq_id(global_steps, self._zmq_update_seq)
-            self._zmq_update_seq += 1
-            zmq_handle = make_update_zmq_handle(self.rollout.zmq_handle, zmq_update_id)
-            future = await self.rollout._execute_method(
-                "update_weights_from_ipc",
-                non_block=True,
-                kwargs={
-                    "peft_config": peft_config,
-                    "base_sync_done": True,
-                    "use_shm": self.rollout.use_shm,
-                    "zmq_update_id": zmq_update_id,
-                },
-            )
-            bucket_size_mb = self.config.rollout.checkpoint_engine.update_weights_bucket_megabytes
-            sender = BucketedWeightSender(
-                zmq_handle=zmq_handle,
-                bucket_size_mb=bucket_size_mb,
-                use_shm=self.rollout.use_shm,
-            )
-            with RLInsightLogger.trace_state("update_weights", state_lane_id=f"rank_{self.rank}"):
-                await sender.async_send_weights(lora_weights.items())
-                if future is not None:
-                    await future
-            # Mirror ServerAdapter.update_weights: reset caches and stamp the weight version.
-            if self.rollout.rollout_rank == 0 and self.rollout._ensure_server_handle():
-                await self.rollout.server_handle.clear_kv_cache.remote()
-                if global_steps is not None:
-                    await self.rollout.server_handle.set_global_steps.remote(global_steps)
-            timings["update_weights_sync"] = time.perf_counter() - sync_start
+            try:
+                # Use ZMQ IPC to transfer LoRA weights, bypassing Ray serialization.
+                # Broadcast only the update id. Each vLLM worker combines it with its
+                # rank-local base handle, preserving the one-sender/one-receiver route.
+                sync_start = time.perf_counter()
+                # update_weights is dispatched ONE_TO_ALL, so every actor rank advances
+                # this sequence exactly once for the same LoRA update.
+                zmq_update_id = make_update_zmq_id(global_steps, self._zmq_update_seq)
+                self._zmq_update_seq += 1
+                zmq_handle = make_update_zmq_handle(self.rollout.zmq_handle, zmq_update_id)
+                future = await self.rollout._execute_method(
+                    "update_weights_from_ipc",
+                    non_block=True,
+                    kwargs={
+                        "peft_config": peft_config,
+                        "base_sync_done": True,
+                        "use_shm": self.rollout.use_shm,
+                        "zmq_update_id": zmq_update_id,
+                    },
+                )
+                # The sender allocates and IPC-maps a device buffer of the bucket size on every sync;
+                # size it to the adapter payload rather than the full-weight bucket the config carries.
+                lora_mb = math.ceil(sum(t.numel() * t.element_size() for t in lora_weights.values()) / (1 << 20))
+                configured_mb = self.config.rollout.checkpoint_engine.update_weights_bucket_megabytes
+                bucket_size_mb = max(1, min(configured_mb, lora_mb))
+                sender = BucketedWeightSender(
+                    zmq_handle=zmq_handle,
+                    bucket_size_mb=bucket_size_mb,
+                    use_shm=self.rollout.use_shm,
+                )
+                with RLInsightLogger.trace_state("update_weights", state_lane_id=f"rank_{self.rank}"):
+                    await sender.async_send_weights(lora_weights.items())
+                    if future is not None:
+                        await future
+                # Mirror ServerAdapter.update_weights: reset caches and stamp the weight version.
+                if self.rollout.rollout_rank == 0 and self.rollout._ensure_server_handle():
+                    await self.rollout.server_handle.clear_kv_cache.remote()
+                    if global_steps is not None:
+                        await self.rollout.server_handle.set_global_steps.remote(global_steps)
+                timings["update_weights_sync"] = time.perf_counter() - sync_start
+            except BaseException:
+                if kv_cache_resumed:
+                    # Sleep the rollout again so a failed sync cannot generate on stale weights.
+                    await self.rollout.release()
+                raise
         else:
             # Normal path: resume rollout weight memory, gather actor params and
             # sync via the standard bucketed-IPC pipeline.
@@ -1375,7 +1390,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         log_gpu_memory_usage("After offload model to cpu", logger=logger)
 
         # 5. resume kv_cache
-        if self.config.rollout.free_cache_engine:
+        if self.config.rollout.free_cache_engine and not kv_cache_resumed:
             await _resume_rollout_vram_safe(self.rollout, ["kv_cache"], timings, "resume_kv_cache")
         log_gpu_memory_usage("After resume kv_cache", logger=logger)
 

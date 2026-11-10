@@ -18,19 +18,34 @@ from .episode import current_episode
 
 
 def set_good_enough_yes_reached(reached: bool) -> None:
+    """Update the current owner's stop latch without recording a judgment.
+
+    Args:
+        reached: Whether to block further generation; creates a local owner if unbound.
+
+    Returns:
+        None.
+    """
     state = current_episode(create=True)
-    latest = state.latest_generation
-    if latest is not None:
-        state.record_judgment(latest.call_id, good_enough=reached)
     state.set_good_enough(reached)
 
 
 def get_good_enough_yes_reached() -> bool:
+    """Read the current owner's stop latch.
+
+    Returns:
+        True when generation is blocked by YES; False when unbound or cleared.
+    """
     state = current_episode()
     return state.good_enough if state else False
 
 
 def clear_good_enough_yes_reached() -> None:
+    """Clear the current owner's stop latch without changing judgment history.
+
+    Returns:
+        None. Does nothing when no episode is bound.
+    """
     state = current_episode()
     if state is not None:
         state.set_good_enough(False)

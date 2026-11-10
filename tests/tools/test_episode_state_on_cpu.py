@@ -154,40 +154,42 @@ def test_frozen_judge_feedback_is_associated_with_its_generated_image(tmp_path, 
         assert state.good_enough
 
 
-def test_worker_config_and_artifact_bindings_share_compatibility_imports():
-    from verl_omni.tools.trajectory import hydra_env, paths
-    from verl_omni.utils.agentic import artifacts, config
+@pytest.mark.parametrize("reached", [False, True])
+def test_compatibility_latch_setter_preserves_real_judgment_history(reached):
+    with trajectory.episode_scope(episode("latch")) as state:
+        state.record_generation(call_id="generated", prompt="p", paths=[])
+        state.record_judgment("generated", good_enough=True)
+        history = tuple(state.judgments)
 
-    assert hydra_env is config
-    assert paths is artifacts
-    config.clear_agentic_image_gen()
-    with pytest.raises(RuntimeError, match="unbound"):
-        hydra_env.agentic_get("max_generate_image_passes")
+        trajectory.set_good_enough_yes_reached(reached)
+
+        assert state.good_enough is reached
+        assert tuple(state.judgments) == history
 
 
 def test_legacy_prompt_binding_stays_local_to_a_copied_thread_context():
     with trajectory.episode_scope(episode("outer")) as state:
-        asyncio.run(asyncio.to_thread(trajectory.active_user_prompt.set, "thread prompt"))
-        assert trajectory.active_user_prompt.get() == "outer"
+        asyncio.run(asyncio.to_thread(trajectory.set_active_user_prompt, "thread prompt"))
+        assert trajectory.get_active_user_prompt() == "outer"
         assert trajectory.current_episode() is state
 
 
 def test_overlapping_legacy_prompt_bindings_restore_each_task_and_parent():
     async def child(prompt):
-        token = trajectory.active_user_prompt.set(prompt)
+        token = trajectory.set_active_user_prompt(prompt)
         try:
             await asyncio.sleep(0)
-            assert trajectory.active_user_prompt.get() == prompt
+            assert trajectory.get_active_user_prompt() == prompt
         finally:
-            trajectory.active_user_prompt.reset(token)
-        assert trajectory.active_user_prompt.get() == "outer"
+            trajectory.reset_active_user_prompt(token)
+        assert trajectory.get_active_user_prompt() == "outer"
 
     async def run():
         await asyncio.gather(child("a"), child("b"))
 
     with trajectory.episode_scope(episode("outer")):
         asyncio.run(run())
-        assert trajectory.active_user_prompt.get() == "outer"
+        assert trajectory.get_active_user_prompt() == "outer"
 
 
 @pytest.mark.parametrize("nested", [False, True])
@@ -201,7 +203,7 @@ def test_legacy_direct_path_binding_updates_identity_and_restores_owner(tmp_path
     parent = episode("outer") if nested else None
     with trajectory.episode_scope(parent) if parent else nullcontext():
         relpath = "step_000001/sample_0.00"
-        token = trajectory.active_trajectory_relpath.set(relpath)
+        token = trajectory.set_active_trajectory_relpath(relpath)
         child = trajectory.current_episode()
         try:
             assert trajectory.get_active_rollout_id() == rollout_id_from_relpath(relpath)
@@ -209,6 +211,31 @@ def test_legacy_direct_path_binding_updates_identity_and_restores_owner(tmp_path
             trajectory.register_tool_artifact(prompt="p", paths=[str(image)])
             assert trajectory.count_live_generate_artifacts_for_active_rollout() == 1
         finally:
-            trajectory.active_trajectory_relpath.reset(token)
+            trajectory.reset_active_trajectory_relpath(token)
         assert child.closed
         assert trajectory.current_episode() is parent
+
+
+def test_prompt_binding_from_unbound_context_releases_its_scratch_owner():
+    """Prompt reset restores no owner and cannot leak artifacts or a YES latch."""
+    from contextvars import Context
+
+    def run():
+        assert trajectory.current_episode() is None
+        outer = trajectory.set_active_user_prompt("outer")
+        state = trajectory.current_episode()
+        try:
+            state.record_generation(call_id="generated", prompt="p", paths=[])
+            trajectory.set_good_enough_yes_reached(True)
+            inner = trajectory.set_active_user_prompt("inner")
+            trajectory.reset_active_user_prompt(inner)
+            assert trajectory.current_episode() is state and not state.closed
+            assert trajectory.get_active_user_prompt() == "outer"
+        finally:
+            trajectory.reset_active_user_prompt(outer)
+        assert trajectory.current_episode() is None
+        assert trajectory.get_active_user_prompt() is None
+        assert not trajectory.get_good_enough_yes_reached()
+        assert state.closed and not state.generations
+
+    Context().run(run)

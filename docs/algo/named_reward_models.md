@@ -1,6 +1,6 @@
 # Named Reward Models
 
-Last updated: 10/23/2026
+Last updated: 10/27/2026
 
 This guide describes how to configure and extend named model-backed rewards
 under `reward.models` in `verl-omni`. For the general Reward Loop interface and
@@ -258,7 +258,57 @@ final_reward = sum(term.weight * term.score)
 
 `required=true` makes a scoring failure fatal. An optional term records the
 error and contributes zero. Model setup and lifecycle failures are always
-fatal.
+fatal. `ArtifactContractError` is fatal for every term, including optional
+terms, so missing or invalid named media cannot silently contribute zero.
+
+## Concurrent independent reward terms
+
+By default, reward terms run in configuration order within each sample, while
+separate samples retain their existing concurrency. To overlap independent
+terms, set a worker-wide cap above one and opt in each term:
+
+```yaml
+reward:
+  multi_reward_concurrency: 2
+  reward_functions:
+    first:
+      path: pkg://my_package.rewards
+      name: score_first
+      independent: true
+    second:
+      path: pkg://my_package.rewards
+      name: score_second
+      independent: true
+```
+
+`independent` must be a boolean and defaults to `false`. Eligible terms use
+coroutine score functions with no named model (for example, an external HTTP
+scorer) or an `engine` named model. Native model terms and synchronous score
+functions cannot opt in. Opting in asserts that score functions treat sample
+inputs as read-only, do not share mutable state, and have no dependencies on
+other reward terms. The manager passes the same input objects to each scorer;
+it does not copy large image or other payloads.
+
+Adjacent independent terms execute in windows of at most
+`multi_reward_concurrency`; any other term is an ordering barrier for its
+sample. When the cap is above one, it bounds active independent scorer calls
+across all samples handled by one reward worker. Barriers do not use the cap
+and retain cross-sample concurrency, even while independent calls are active.
+Each window waits for all its terms to settle before admitting the next window
+for that sample, even if one term finishes and frees a semaphore permit while
+another is still running. This bounds the number of admitted tasks rather than
+enqueueing every term at once; a freed permit remains available to independent
+terms from other samples.
+Scores, diagnostics, and required/optional error handling remain in
+configuration order. The cap does not limit reward workers, barrier calls, or
+engine-side requests. Increasing it does not establish a throughput
+improvement by itself. Cancelling a serial synchronous scorer stops its caller
+without waiting for its executor thread; the thread may continue until the
+scorer returns.
+An admitted window settles all its terms before reporting a contract error.
+Independent async scorers must cooperate with cancellation. A scorer that
+swallows `CancelledError` can block window drain and permit release; the manager
+does not impose a timeout or preempt it.
 
 ## Component rewards and consumer support
 

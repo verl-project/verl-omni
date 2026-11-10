@@ -121,7 +121,8 @@ def test_v2_rubric_disagreement_keeps_score_stop(monkeypatch):
         },
     }
     result = scorer.compute_score(extra_info={"bagel_corl": payload})
-    assert result["score"] == pytest.approx(0.7)
+    # Each image is 0.5 * UnifiedReward + 0.5 * (C + A) / 2 = (0.75 + 0.95) / 2.
+    assert result["score"] == pytest.approx(0.85)
     assert result["sample_good_enough"] == [False, True]
     assert result["good_enough"] is False
     assert seen == ["original", "original"]
@@ -131,6 +132,126 @@ def test_v2_rubric_disagreement_keeps_score_stop(monkeypatch):
     payload["extra_info"] = {"user_prompt": "original Keep any private thinking short.", "raw_prompt": "original"}
     scorer.compute_score(extra_info={"bagel_corl": payload})
     assert seen == ["original", "original"]
+
+
+def _rubric_scorer(monkeypatch, verdict):
+    import sys
+
+    client = SimpleNamespace(call_reflect_vlm=lambda **kw: verdict)
+    monkeypatch.setitem(sys.modules, "verl_omni.utils.reward_score.agentic_image_judge_client", client)
+    scorer = load_module("verl_omni/utils/reward_score/bagel_rm_image_scorer.py")
+    monkeypatch.setattr(scorer, "_score_image_unified", lambda **kw: (0.6, True, {"alignment": 3.4}))
+    return scorer
+
+
+def _rubric_payload(**knobs):
+    return {
+        "image_paths": ["a"],
+        "extra_info": {"raw_prompt": "a poster that reads 'OPEN AT 7 AM'"},
+        "scorer_knobs": {
+            "good_enough_threshold": 0.8,
+            "score_backend": "unified_reward_rubric",
+            "corl_reward_version": "v2",
+            **knobs,
+        },
+    }
+
+
+def test_v2_rubric_no_vetoes_the_unified_reward_yes(monkeypatch):
+    """sample_9001: UnifiedReward clears its cut, the judge scores C=0.68 (< 0.8) and says NO."""
+    verdict = {"ok": True, "correctness": 0.68, "aesthetics": 0.76, "good_enough": False}
+    scorer = _rubric_scorer(monkeypatch, verdict)
+
+    result = scorer.compute_score(extra_info={"bagel_corl": _rubric_payload()})
+    assert result["sample_good_enough"] == [False]
+    assert result["score"] == pytest.approx(0.5 * 0.6 + 0.5 * 0.72)
+
+    legacy = scorer.compute_score(
+        extra_info={"bagel_corl": _rubric_payload(stop_requires_rubric=False, gen_rubric_weight=0.0)}
+    )
+    assert legacy["sample_good_enough"] == [True]
+    assert legacy["score"] == pytest.approx(0.6)
+
+
+def test_v2_rubric_yes_and_unified_yes_stop(monkeypatch):
+    verdict = {"ok": True, "correctness": 0.84, "aesthetics": 0.8, "good_enough": True}
+    scorer = _rubric_scorer(monkeypatch, verdict)
+    result = scorer.compute_score(extra_info={"bagel_corl": _rubric_payload(gen_rubric_weight=1.0)})
+    assert result["sample_good_enough"] == [True]
+    assert result["score"] == pytest.approx(0.82)
+
+
+def test_v2_rubric_failure_keeps_the_unified_reward_score_and_stop(monkeypatch):
+    scorer = _rubric_scorer(monkeypatch, None)
+    result = scorer.compute_score(extra_info={"bagel_corl": _rubric_payload()})
+    assert result["sample_good_enough"] == [True]
+    assert result["score"] == pytest.approx(0.6)
+    assert result["sample_judge"] == [None]
+
+
+def test_gen_rubric_weight_out_of_range_fails_loud(monkeypatch):
+    scorer = _rubric_scorer(monkeypatch, {"ok": True, "correctness": 0.8, "aesthetics": 0.8, "good_enough": True})
+    with pytest.raises(ValueError, match="gen_rubric_weight"):
+        scorer.compute_score(extra_info={"bagel_corl": _rubric_payload(gen_rubric_weight=1.5)})
+
+
+def test_rubric_goes_to_the_sibling_judge_and_the_score_stays_on_the_image_rm(monkeypatch):
+    """Dual reward pool: UnifiedReward scores, the ``ca_judge`` engine answers the rubric."""
+    import sys
+
+    rubric_calls = []
+
+    def fake_rubric(**kw):
+        rubric_calls.append(kw["extra_info"])
+        return {"ok": True, "correctness": 0.8, "aesthetics": 0.6, "good_enough": False}
+
+    client = SimpleNamespace(call_reflect_vlm=fake_rubric)
+    monkeypatch.setitem(sys.modules, "verl_omni.utils.reward_score.agentic_image_judge_client", client)
+    scorer = load_module("verl_omni/utils/reward_score/bagel_rm_image_scorer.py")
+    unified_calls = []
+
+    def unified(**kw):
+        unified_calls.append(kw["knobs"])
+        return 0.7, True, {"alignment": 4.0, "coherence": 4.0, "style": 4.0}
+
+    monkeypatch.setattr(scorer, "_score_image_unified", unified)
+    payload = {
+        "image_paths": ["a"],
+        "image_prompt": "policy target",
+        "extra_info": {"raw_prompt": "original"},
+        "scorer_knobs": {
+            "good_enough_threshold": 0.8,
+            "score_backend": "unified_reward_rubric",
+            "corl_reward_version": "v2",
+            "rubric_model": "ca_judge",
+        },
+    }
+    manager_kwargs = {
+        "reward_router_address": "ur-router:8000",
+        "model_name": "/models/unified_reward",
+        "reward_router_addresses": {"image_rm": "ur-router:8000", "ca_judge": "judge-router:8001"},
+        "reward_model_paths": {"image_rm": "/models/unified_reward", "ca_judge": "/models/qwen3.5-9b"},
+    }
+    result = scorer.compute_score(extra_info={"bagel_corl": payload}, **manager_kwargs)
+
+    assert result["score"] == pytest.approx(0.7)
+    assert unified_calls[0]["vllm_url"] == "http://ur-router:8000"
+    assert unified_calls[0]["vllm_model"] == "/models/unified_reward"
+    assert rubric_calls[0]["vllm_url"] == "http://judge-router:8001"
+    assert rubric_calls[0]["vllm_model"] == "/models/qwen3.5-9b"
+    assert result["sample_judge"][0]["correctness"] == 0.8
+
+    # Single-engine pool: no sibling by that name, the rubric rides the scoring endpoint.
+    rubric_calls.clear()
+    single = {"reward_router_address": "ur-router:8000", "model_name": "/models/unified_reward"}
+    scorer.compute_score(extra_info={"bagel_corl": payload}, **single)
+    assert rubric_calls[0]["vllm_url"] == "http://ur-router:8000"
+
+    # An explicit external rubric endpoint wins over the pool.
+    rubric_calls.clear()
+    payload["scorer_knobs"]["rubric_vllm_url"] = "http://sidecar:9000"
+    scorer.compute_score(extra_info={"bagel_corl": payload}, **manager_kwargs)
+    assert rubric_calls[0]["vllm_url"] == "http://sidecar:9000"
 
 
 def test_posthoc_v2_uses_same_stored_image_scores_and_keeps_structure(monkeypatch):

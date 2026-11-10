@@ -17,11 +17,6 @@
 The loop owns ``episode_scope``; nested tools reuse its owner across awaits and
 ``asyncio.to_thread`` callbacks. Each concurrent episode needs a fresh state.
 Scope exit releases references, leaves saved files alone, and rejects late writes.
-
-Mode (2b) and Mode (3) adapters retain their own trainability, tensor and reward
-contracts. This binding is process-local: pass immutable records or the existing
-rollout payload across Ray boundaries, never the state and its lock.
-Worker configuration and optional output paths live in ``utils.agentic``.
 """
 
 from __future__ import annotations
@@ -37,7 +32,16 @@ from typing import Iterator, Sequence
 
 @dataclass(frozen=True)
 class GenerationRecord:
-    """One generation call and its samples; training tensors stay in the rollout adapter."""
+    """Immutable metadata for one generation call; contains no training tensors.
+
+    Attributes:
+        call_id: Unique call identifier within the owning episode.
+        prompt: Stripped generation prompt.
+        paths: Saved sample paths in backend order; recording does not create files.
+        artifact_ids: Optional identifiers aligned one-to-one with ``paths``.
+        backend: Generation service name, used for provenance and live-call counting.
+        tool_stubbed: Whether the call used a stub rather than live generation.
+    """
 
     call_id: str
     prompt: str
@@ -49,7 +53,12 @@ class GenerationRecord:
 
 @dataclass(frozen=True)
 class JudgmentRecord:
-    """A runtime judgment associated with a specific generation call."""
+    """Immutable feedback for a generation registered in the same episode.
+
+    Attributes:
+        call_id: Identifier of the generation being judged; unknown IDs are rejected.
+        good_enough: Whether this judgment requests the sticky YES latch.
+    """
 
     call_id: str
     good_enough: bool
@@ -57,7 +66,18 @@ class JudgmentRecord:
 
 @dataclass
 class EpisodeState:
-    """Own the small runtime state shared by an episode's loop and tool callbacks."""
+    """Own generation history, judgments, image lookup, and the episode stop latch.
+
+    Attributes:
+        episode_id: Optional rollout identity; independent episodes need distinct owners.
+        artifact_relpath: Optional path relative to the run's artifact trees.
+        user_prompt: Original user request shared with tool callbacks.
+
+    ``record_judgment`` rejects unknown call IDs. Explicit image IDs resolve only
+    within this owner and return ``None`` when unknown. Closing clears records and
+    the latch without deleting saved files; subsequent record/latch/image writes
+    raise ``RuntimeError``. The owning ``episode_scope`` closes on every exit.
+    """
 
     episode_id: str | None = None
     artifact_relpath: str | None = None

@@ -82,6 +82,17 @@ def test_v2_score_ignores_reflect_when_the_harness_wrote_the_reflection():
     assert heavy["score"] == pytest.approx(light["score"])
 
 
+def test_v2_score_keeps_the_ca_dim_under_a_forced_reflection():
+    """The rubric verdict is not a copy of the continuous ``image`` envelope, so it stays."""
+    gt = {"task_type": "reflect"}
+    light = v2(forced_transcript(), {**gt, "w_ca": 0.0})
+    heavy = v2(forced_transcript(), {**gt, "w_ca": 5.0})
+    assert light["forced_reflection_context"] == 1
+    assert heavy["reward_ca"] > 0
+    assert heavy["reward_ca"] != pytest.approx(heavy["reward_image"])
+    assert heavy["score"] != pytest.approx(light["score"])
+
+
 def test_v1_score_still_weights_the_forced_reflect_dim():
     module_ = scorer()
     gt = {"task_type": "reflect"}
@@ -162,10 +173,8 @@ def test_v2_extra_fields_stack_across_episodes_with_different_call_counts():
 
 
 def test_plan_system_prompt_example_parses_as_plan_and_generate_call():
-    builder = module(
-        "verl_omni/utils/dataset/visual_reflection/build_unicot_agentic_rl.py", "isolated_v2_plateau_builder"
-    )
-    example = builder.PLAN_SYSTEM_PROMPT.split("Start your reply like this", 1)[1].split("\n", 1)[1]
+    prompts = module("verl_omni/pipelines/bagel_flow_grpo/agentic_und_gen/prompts.py", "isolated_v2_plateau_prompts")
+    example = prompts.BAGEL_PLAN_SYSTEM_PROMPT.split("Start your reply like this", 1)[1].split("\n", 1)[1]
     filled = re.sub(r"<complete image prompt for subtask (\d)>", r"a red fox standing in snowy woods \1", example)
     module_ = scorer()
     assert module_._extract_initial_plan_lines(filled) == [
