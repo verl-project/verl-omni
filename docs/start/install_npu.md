@@ -1,6 +1,6 @@
 # Installation (NPU)
 
-Last updated: 11/09/2026
+Last updated: 11/10/2026
 
 For NVIDIA GPU, see the {doc}`GPU installation guide <install>`. For AMD GPU, see the {doc}`ROCm installation guide <install_rocm>`. For Intel GPU, see the {doc}`Intel GPU installation guide <install_xpu>`. For Cambricon MLU, see the {doc}`MLU installation guide <install_mlu>`.
 
@@ -76,6 +76,31 @@ uv pip install --no-deps "flash-linear-attention-npu-a2==26.9.1" \
 cd verl-omni
 ```
 
+The `uv pip install -e .` on vLLM-Ascend is a full source build:
+`COMPILE_CUSTOM_KERNELS` defaults to `1`, compiling the `vllm_ascend_C` C++
+extension and the AscendC custom-op package (`vllm_ascend/_cann_ops_custom`).
+It needs the CANN environment sourced above plus `cmake` and a C++ toolchain,
+and takes tens of minutes. If `npu-smi` is unreachable on the build host (for
+example a CPU-only machine), export `SOC_VERSION` first — `ascend910b1` on A2,
+`ascend910_9391` on A3 — or the build aborts with "Could not determine chip
+type automatically via 'npu-smi'".
+
+```{warning}
+Setting `COMPILE_CUSTOM_KERNELS=0` installs vLLM-Ascend pure-python and skips
+**both** compiled artifacts:
+
+- `vllm_ascend_C`: sleep mode (colocated rollout `sleep`/`wake_up`) asserts
+  with `camem allocator is not available` without it.
+- the `_cann_ops_custom` aclnn-op package: Qwen2.5-VL-class reward engines
+  fail with `aclnnAddRmsNormBias ... not in libopapi.so`, because that op is
+  resolved from this package, not from stock CANN.
+
+If you skipped compilation, `tests/npu_smoke/sync_npu_stack.sh` is the
+reference recipe for building `vllm_ascend_C` (targeted cmake) and the
+`add_rms_norm_bias` op (`csrc/build.sh --pkg`) after the fact. Prebuilt
+vLLM-Ascend wheels ship both artifacts.
+```
+
 4. Install vLLM-Omni and VeRL-Omni
 
 ```bash
@@ -101,6 +126,8 @@ python -c "from importlib.metadata import version; import torch, torch_npu; prin
 python -c "import vllm; print('vllm', vllm.__version__)"
 python -c "import triton; from triton.backends import backends; print('triton', triton.__version__, sorted(backends))"
 python -c "from importlib.metadata import version; import vllm_ascend; print('vllm-ascend', version('vllm-ascend'))"
+python -c "import vllm_ascend.vllm_ascend_C; print('vllm_ascend_C ok')"
+python -c "import os, vllm_ascend; p = os.path.join(os.path.dirname(vllm_ascend.__file__), '_cann_ops_custom/vendors/custom_transformer/op_api/lib/libcust_opapi.so'); assert os.path.exists(p), f'missing aclnn op library: {p}'; print('aclnn custom ops ok')"
 python -c "from importlib.metadata import version; import vllm_omni; print('vllm-omni', version('vllm-omni'))"
 python -c "import verl; print('verl', verl.__version__)"
 python -c "import verl_omni; print('VeRL-Omni ready')"
