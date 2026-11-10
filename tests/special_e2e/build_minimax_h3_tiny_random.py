@@ -18,8 +18,10 @@ The checkpoint is suitable for T2VA, image-conditioned FL2VA, and
 reference-conditioned Ref2VA GPU smoke runs. It never reads, copies, or
 symlinks a real MiniMax-H3 checkpoint.
 
-It starts from a pinned ``tiny-random/minimax-h3`` snapshot for the tiny DiT
-weights and processor metadata. vLLM-Omni's native MiniMax-H3 pipeline differs
+By default it starts from a pinned ``tiny-random/minimax-h3`` snapshot for the
+tiny DiT weights and processor metadata. ``--offline`` instead generates
+deterministic random weights with the same geometry and a local processor.
+vLLM-Omni's native MiniMax-H3 pipeline differs
 from that Diffusers checkpoint in three relevant ways:
 
 * it consumes 24 video-latent channels and 32 audio-latent channels, while the
@@ -72,6 +74,7 @@ import argparse
 import json
 import os
 import shutil
+import tempfile
 from pathlib import Path
 
 import torch
@@ -98,6 +101,7 @@ _PATCH_VOLUME = 4  # MiniMax-H3 uses a (1, 2, 2) video patch.
 _CHECKPOINT_FORMAT_VERSION = 5
 _VLLM_TEXT_VOCAB_SIZE = 512
 _VLLM_TEXT_NUM_LAYERS = 1
+_OFFLINE_SOURCE = "local-random-v1"
 
 # Diffusers-format field -> vLLM-Omni fused-arch field. Keys with the same name
 # in both schemas are copied unchanged below.
@@ -459,6 +463,96 @@ def _download_hf_tiny(cache_dir: str | None) -> Path:
     )
 
 
+def _write_offline_source(source: Path) -> None:
+    """Recreate the pinned tiny geometry with deterministic local random weights."""
+    from diffusers import MiniMaxH3Transformer3DModel
+    from transformers import Qwen2TokenizerFast, Qwen2VLImageProcessor, Qwen3VLProcessor, Qwen3VLVideoProcessor
+
+    # Match tiny-random/minimax-h3@9018dbdc, without downloading its weights.
+    transformer_config = dict(
+        in_channels=8,
+        audio_in_channels=8,
+        num_layers=2,
+        num_refiner_layers=1,
+        hidden_size=64,
+        num_attention_heads=2,
+        attention_head_dim=32,
+        ffn_dim=128,
+        text_dim=32,
+        freq_dim=64,
+        time_embed_hidden_dim=64,
+        time_embed_dim=32,
+        rope_freq_dim=4,
+        patch_size=(1, 2, 2),
+        rope_theta=10000.0,
+        norm_eps=1e-5,
+        qk_norm_eps=1e-5,
+        final_norm_eps=1e-5,
+    )
+    with torch.random.fork_rng(devices=[]):
+        for index, name in enumerate(("transformer", "transformer_ref")):
+            torch.manual_seed(_SEED + index)
+            MiniMaxH3Transformer3DModel(**transformer_config).to(dtype=torch.bfloat16).save_pretrained(source / name)
+    text_config = Qwen3VLTextConfig(
+        hidden_size=32,
+        intermediate_size=64,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=8,
+        rms_norm_eps=1e-6,
+        rope_parameters={
+            "rope_type": "default",
+            "rope_theta": 5000000,
+            "mrope_interleaved": True,
+            "mrope_section": [2, 1, 1],
+        },
+    )
+    vision_config = Qwen3VLVisionConfig(
+        hidden_size=64,
+        intermediate_size=128,
+        depth=1,
+        num_heads=4,
+        in_channels=3,
+        patch_size=16,
+        spatial_merge_size=2,
+        temporal_patch_size=2,
+        out_hidden_size=32,
+    )
+    Qwen3VLConfig(text_config=text_config, vision_config=vision_config).save_pretrained(source / "text_encoder")
+    # H3 consumes raw prompt token IDs; this template is tokenizer metadata only.
+    chat_template = (
+        "{% for message in messages %}{{ '<|im_start|>' + message['role'] + '\\n' "
+        "+ message['content'] + '<|im_end|>\\n' }}{% endfor %}"
+        "{% if add_generation_prompt %}{{ '<|im_start|>assistant\\n' }}{% endif %}"
+    )
+    template_path = source / "chat_template.jinja"
+    template_path.write_text(chat_template)
+    _write_vllm_tokenizer(source / "tokenizer", template_path)
+    tokenizer = Qwen2TokenizerFast.from_pretrained(source / "tokenizer", local_files_only=True)
+    processor = Qwen3VLProcessor(
+        tokenizer=tokenizer,
+        image_processor=Qwen2VLImageProcessor(
+            patch_size=16,
+            temporal_patch_size=2,
+            merge_size=2,
+            size={"longest_edge": 16777216, "shortest_edge": 65536},
+            image_mean=[0.5, 0.5, 0.5],
+            image_std=[0.5, 0.5, 0.5],
+        ),
+        video_processor=Qwen3VLVideoProcessor(
+            patch_size=16,
+            temporal_patch_size=2,
+            merge_size=2,
+            size={"longest_edge": 25165824, "shortest_edge": 4096},
+            image_mean=[0.5, 0.5, 0.5],
+            image_std=[0.5, 0.5, 0.5],
+        ),
+        chat_template=chat_template,
+    )
+    processor.save_pretrained(source / "processor")
+
+
 def _expanded_transformer_config(source: Path, *, text_hidden_size: int) -> dict:
     config = json.loads(source.read_text())
     config["in_channels"] = _VIDEO_LATENT_CHANNELS
@@ -650,11 +744,13 @@ def ensure_tiny_minimax_h3_checkpoint(
     source_fl2va: str | None = None,
     hf_cache_dir: str | None = None,
     skip_if_exists: bool = True,
+    offline: bool = False,
 ) -> str:
     """Build the self-contained checkpoint, or return an existing complete one.
 
-    ``source_fl2va`` is accepted for backward compatibility with the original
-    H3 smoke runner and is deliberately ignored.
+    ``offline`` generates weights locally with the pinned source's geometry.
+    It refuses to replace paths that do not belong to this offline builder.
+    ``source_fl2va`` is retained for backward compatibility and is ignored.
     """
     del source_fl2va
     output = Path(os.path.expanduser(output_dir))
@@ -662,7 +758,25 @@ def ensure_tiny_minimax_h3_checkpoint(
         print(f"tiny MiniMax-H3 checkpoint already present at {output}", flush=True)
         return str(output)
 
-    hf_root = _download_hf_tiny(hf_cache_dir)
+    if offline:
+        if output.is_symlink():
+            raise ValueError(f"Refusing to rebuild the symlink {output}.")
+        if output.exists() and any(output.iterdir()):
+            marker = output / "tiny_checkpoint.json"
+            try:
+                owned = json.loads(marker.read_text()).get("source") == _OFFLINE_SOURCE
+            except (OSError, ValueError):
+                owned = False
+            if not owned:
+                raise ValueError(f"Refusing to replace a directory not created by the offline H3 builder: {output}")
+        with tempfile.TemporaryDirectory(prefix="minimax-h3-source-") as source_dir:
+            hf_root = Path(source_dir)
+            _write_offline_source(hf_root)
+            return _build_checkpoint_from_source(output, hf_root, source=_OFFLINE_SOURCE)
+    return _build_checkpoint_from_source(output, _download_hf_tiny(hf_cache_dir), source=_HF_TINY_REVISION)
+
+
+def _build_checkpoint_from_source(output: Path, hf_root: Path, *, source: str) -> str:
     source_qwen_config = Qwen3VLConfig.from_pretrained(
         hf_root / "text_encoder",
         local_files_only=True,
@@ -670,6 +784,8 @@ def ensure_tiny_minimax_h3_checkpoint(
     if output.exists():
         shutil.rmtree(output)
     output.mkdir(parents=True)
+    if source == _OFFLINE_SOURCE:
+        (output / "tiny_checkpoint.json").write_text(json.dumps({"source": source}) + "\n")
 
     _write_partition(
         output,
@@ -703,6 +819,7 @@ def ensure_tiny_minimax_h3_checkpoint(
         json.dumps(
             {
                 "format_version": _CHECKPOINT_FORMAT_VERSION,
+                "source": source,
                 "text_hidden_size": int(source_qwen_config.text_config.hidden_size),
                 "text_num_attention_heads": int(source_qwen_config.text_config.num_attention_heads),
                 "text_num_key_value_heads": int(source_qwen_config.text_config.num_key_value_heads),
@@ -723,11 +840,13 @@ def main() -> None:
     parser.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--hf-cache-dir", default=None)
     parser.add_argument("--force", action="store_true", help="Rebuild even if the checkpoint is complete.")
+    parser.add_argument("--offline", action="store_true", help="Generate the tiny weights locally without downloads.")
     args = parser.parse_args()
     ensure_tiny_minimax_h3_checkpoint(
         args.output_dir,
         hf_cache_dir=args.hf_cache_dir,
         skip_if_exists=not args.force,
+        offline=args.offline,
     )
 
 
