@@ -49,7 +49,7 @@ from verl.trainer.distillation import is_distillation_enabled
 from verl.trainer.ppo.metric_utils import compute_variance_proxy_metrics, process_validation_metrics
 from verl.trainer.ppo.reward import extract_reward
 from verl.trainer.ppo.utils import Role, need_reference_policy
-from verl.trainer.ppo.v1.replay_buffer import ReplayBuffer, ReplayBufferAsync
+from verl.trainer.ppo.v1.replay_buffer import ReplayBuffer
 from verl.trainer.ppo.v1.utils import MetricsAggregator
 from verl.utils import tensordict_utils as tu
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
@@ -98,6 +98,12 @@ from verl_omni.trainer.diffusion.rollout_correction import (
 )
 from verl_omni.trainer.diffusion.teacher_manager import DiffusionTeacherManager
 from verl_omni.trainer.diffusion.training_watchdog import TrainingWatchdog
+from verl_omni.trainer.diffusion.v1.async_profiling import (
+    TQ_COUNTER_METRICS,
+    ProfiledReplayBufferAsync,
+    aggregate_tq_write_stats,
+    derive_tq_put_rate,
+)
 from verl_omni.trainer.diffusion.v1.tq_utils import (
     canonicalize_diffusion_tq_meta,
     diffusion_dump_tq_fields,
@@ -123,6 +129,26 @@ from verl_omni.workers.utils.padding import embeds_padding_2_no_padding
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
+
+
+def configure_step_metrics_aggregator(aggregator: MetricsAggregator) -> MetricsAggregator:
+    """Pin the aggregation rules for one outer step's local-update metrics.
+
+    The aggregator's default rule is weighted_avg, but per-update totals must
+    sum across the ``parameter_sync_step`` updates: transfer counters
+    (:data:`TQ_COUNTER_METRICS`) and the rollout-failure counters would
+    otherwise undercount every step with more than one update.
+    """
+    aggregator.aggregation_rules["sum"].extend(
+        [
+            *TQ_COUNTER_METRICS,
+            "training/rollout_failure/evicted_groups",
+            "training/rollout_failure/evicted_trajectories",
+            "training/rollout_failure/refilled_prompts",
+            "training/rollout_failure/refill_rounds",
+        ]
+    )
+    return aggregator
 
 
 def _tq_supports_checkpoint() -> bool:
@@ -239,7 +265,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             if isinstance(max_refill_rounds, bool) or not isinstance(max_refill_rounds, int) or max_refill_rounds <= 0:
                 raise ValueError("max_incomplete_group_refill_rounds must be a positive integer")
 
-        replay_buffer_cls = ReplayBufferAsync if self.trainer_mode == "separate_async" else ReplayBuffer
+        replay_buffer_cls = ProfiledReplayBufferAsync if self.trainer_mode == "separate_async" else ReplayBuffer
         # ReplayBuffer.sample() discovers finished groups by sleeping a fixed
         # poll_interval between tq.kv_list() calls. The upstream 2.0s default
         # quantizes sync gen: sample() returns only on a poll boundary, so a
@@ -494,15 +520,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
 
         prepare_metrics = self.prepare_step()
 
-        metrics_aggregator = MetricsAggregator()
-        metrics_aggregator.aggregation_rules["sum"].extend(
-            [
-                "training/rollout_failure/evicted_groups",
-                "training/rollout_failure/evicted_trajectories",
-                "training/rollout_failure/refilled_prompts",
-                "training/rollout_failure/refill_rounds",
-            ]
-        )
+        metrics_aggregator = configure_step_metrics_aggregator(MetricsAggregator())
         if prepare_metrics:
             metrics_aggregator.add_step_metrics(prepare_metrics)
         prefetched_batches = None
@@ -512,7 +530,11 @@ class PolicyGradientDiffusionTrainerV1(ABC):
                 self.on_sample_begin()
                 for trigger_idx in range(self.parameter_sync_step):
                     self.local_trigger_step = trigger_idx
-                    prefetched_batches.append(self._sample_training_batch(sample_batch_size))
+                    batch_meta, off_policy_metrics = self._sample_training_batch(sample_batch_size)
+                    # Record each profile before the next sample overwrites the
+                    # buffer's last_sample_timing; the metrics ride the pair.
+                    self._record_async_sample_profile(off_policy_metrics, timing_raw, batch_meta)
+                    prefetched_batches.append((batch_meta, off_policy_metrics))
                 self.on_sample_end()
 
         combined_keys: list = []
@@ -534,6 +556,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             combined_partition_id = batch.partition_id
 
         metrics.update(metrics_aggregator.get_aggregated_metrics())
+        derive_tq_put_rate(metrics)
         return KVBatchMeta(partition_id=combined_partition_id, keys=combined_keys, tags=combined_tags)
 
     def prepare_step(self) -> dict:
@@ -551,10 +574,16 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         # One-step-off: teacher scoring of the batch sampled here overlaps the actor
         # update on the previously sampled batch. The first step samples twice to
         # fill the pipeline; the last sampled batch is never trained.
-        prev, self._pending_teacher_batch = self._pending_teacher_batch, self._convert_and_dispatch(batch_meta)
+        prev, self._pending_teacher_batch = (
+            self._pending_teacher_batch,
+            self._convert_and_dispatch(batch_meta, timing_raw),
+        )
         if prev is None:
             next_meta = self._sample_batch(metrics, timing_raw, sample_batch_size)
-            prev, self._pending_teacher_batch = self._pending_teacher_batch, self._convert_and_dispatch(next_meta)
+            prev, self._pending_teacher_batch = (
+                self._pending_teacher_batch,
+                self._convert_and_dispatch(next_meta, timing_raw),
+            )
         batch_meta, data, teacher_handle = prev
         return self._train_sampled_batch(metrics, timing_raw, batch_meta, data=data, teacher_handle=teacher_handle)
 
@@ -564,12 +593,49 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             self.on_sample_begin()
             batch_meta, off_policy_metrics = self._sample_training_batch(sample_batch_size)
             metrics.update(off_policy_metrics)
+            self._record_async_sample_profile(metrics, timing_raw, batch_meta)
             self.on_sample_end()
         return batch_meta
 
-    def _convert_and_dispatch(self, batch_meta: KVBatchMeta):
+    def _record_async_sample_profile(self, metrics: dict, timing_raw: dict, batch_meta: KVBatchMeta) -> None:
+        """Fold the async sample-wait decomposition and rollout-side TQ write
+        stats into this step's metrics (issue #712).
+
+        A sync-mode buffer has no ``last_sample_timing``; that read defaults
+        to empty.
+        """
+        sample_timing = getattr(self.replay_buffer, "last_sample_timing", None)
+        if sample_timing:
+            polls = float(sample_timing.get("sample_wait/polls", 0.0))
+            for name, value in sample_timing.items():
+                if not name.startswith("sample_wait/buffer_"):
+                    # Wall-time segments and the poll count sum across the
+                    # step's local updates into the same timing_raw.
+                    timing_raw[name] = timing_raw.get(name, 0.0) + value
+                elif name.endswith("_mean"):
+                    # Weight this sample's mean by its poll count; the polls
+                    # entry already holds it, so subtract it first.
+                    prev = timing_raw.get(name)
+                    if prev is None:
+                        timing_raw[name] = value
+                    else:
+                        prev_polls = timing_raw.get("sample_wait/polls", 0.0) - polls
+                        total = prev_polls + polls
+                        timing_raw[name] = (prev * prev_polls + value * polls) / total if total > 0 else value
+                elif name.endswith("_min"):
+                    timing_raw[name] = value if name not in timing_raw else min(timing_raw[name], value)
+                else:
+                    timing_raw[name] = value if name not in timing_raw else max(timing_raw[name], value)
+        # Sum, don't replace: one-step-off's first step samples twice into
+        # one iter_metrics, and both samples' counters must survive.
+        for name, value in aggregate_tq_write_stats(batch_meta).items():
+            metrics[name] = metrics.get(name, 0.0) + value
+
+    def _convert_and_dispatch(self, batch_meta: KVBatchMeta, timing_raw: dict | None = None):
         """Convert a sampled batch and start teacher scoring without waiting on it."""
-        data = diffusion_tq_batch_to_dataproto(batch_meta, pad_token_id=self.tokenizer.pad_token_id or 0)
+        data = diffusion_tq_batch_to_dataproto(
+            batch_meta, pad_token_id=self.tokenizer.pad_token_id or 0, timing_raw=timing_raw
+        )
         return batch_meta, data, self.teacher_model_manager.dispatch_prev_sample_mean(data)
 
     def _train_sampled_batch(
@@ -584,15 +650,15 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         # Convert TQ rows to diffusion DataProto; from here on the driver owns the
         # DataProto compute contract (no KVBatchMeta passed to diffusion workers).
         if data is None:
-            data = diffusion_tq_batch_to_dataproto(batch_meta, pad_token_id=self.tokenizer.pad_token_id or 0)
+            data = diffusion_tq_batch_to_dataproto(
+                batch_meta, pad_token_id=self.tokenizer.pad_token_id or 0, timing_raw=timing_raw
+            )
 
         # [OPTIONAL] colocated reward model
         if self.reward_loop_manager.reward_loop_worker_handles is None and self.use_rm:
             with marked_timer("reward", timing_raw, color="yellow"):
-                # Sync sampling hooks already put colocated rollout replicas to
-                # sleep. Sleeping them again can unmap the same accelerator
-                # memory twice. Async modes still need the explicit mid-cycle
-                # sleep because they do not share the sync hook guarantee.
+                # Sync sampling hooks already sleep colocated replicas;
+                # sleeping again would unmap the same memory twice.
                 if self.trainer_mode != "sync":
                     self.checkpoint_manager.sleep_replicas()
                 data = data.union(self._compute_reward_colocate(data))
@@ -1960,6 +2026,19 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             real_images,
             responses_shape,
         )
+        # Pairs with the cumulative timing_s/tq_get from the same reads; a
+        # byte count must never render as a timing_s/* metric.
+        metrics["tq/get/bytes"] = float(timing_raw.pop("tq_get_bytes", 0.0))
+        # Trainer idle share of the step, decomposed by the profiled buffer;
+        # not timing_s/gen, which also covers row materialization (work).
+        if self.trainer_mode != "sync" and timing_raw.get("step", 0.0) > 0:
+            step_seconds = timing_raw["step"]
+            sample_wait = timing_raw.get("sample_wait/total", 0.0)
+            metrics["separate_async/trainer_idle_ratio"] = max(0.0, min(1.0, sample_wait / step_seconds))
+            for segment in ("generation_bound", "detection", "metadata_sync", "eviction"):
+                seconds = timing_raw.get(f"sample_wait/{segment}", 0.0)
+                if seconds > 0:
+                    metrics[f"separate_async/idle_ratio/{segment}"] = seconds / step_seconds
         metrics.update(compute_timing_metrics_diffusion(timing_raw=timing_raw, num_images=num_images))
         metrics.update(compute_throughput_metrics_diffusion(batch=data, timing_raw=timing_raw, n_gpus=n_gpus))
         reward_extra_infos_dict = {}
