@@ -24,5 +24,4 @@ run_test 6 "seeded multi-worker rollout reproducibility" \
 run_test 7 "standalone vLLM reward engine startup + OCR scoring" \
     env ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES}" NUM_NPUS="${NUM_NPUS}" \
     python3 -m pytest -s tests/reward_loop/test_reward_engine_npu.py
-cleanup_runtime
 print_summary

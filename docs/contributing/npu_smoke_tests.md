@@ -14,7 +14,7 @@ into these runners:
 
 ## Test Cases
 
-| ID | Group | Name | Test entry point | Default NPUs |
+| ID | Group | Name | Test entry point | NPUs (single-group run) |
 |---|---|---|---|---:|
 | 0 | core | vLLM-Omni rollout + sleep/wake-up | tests/workers/rollout/rollout_vllm/test_vllm_omni_generate_npu.py | 8 |
 | 3 | core | Diffusers FSDP engine inference and training | tests/workers/test_diffusers_fsdp_engine_npu.py | 8 |
@@ -122,8 +122,9 @@ MODEL_PATH=/path/to/Qwen-Image-Edit NUM_NPUS=8 \
 ```
 
 Entries 18-21 default to rollout TP=2; entries 18/20 also use reward TP=2.
-`ROLLOUT_TP` and `REWARD_TP` override these defaults. Actor rank counts,
-training steps and sample counts are unchanged.
+`ROLLOUT_TP` and `REWARD_TP` override these defaults. Single-group runs retain
+the eight-NPU training allocation. Full-CI shards use four NPUs per group;
+launchers derive their batches from that allocation and retain the training steps.
 
 ## Add a New NPU Smoke Test
 
@@ -167,9 +168,11 @@ devices, validate it in the test entry point and fail with a clear message.
 
 The Resolve NPU CI groups step maps labels to groups as listed in
 [CI Triggers](#ci-triggers). Multiple labels produce the union of their groups.
-Selected groups run in separate containers on independent eight-NPU runners,
-in parallel when runner capacity is available. The setup_runner check succeeds
-only when all selected groups pass.
+When both groups are selected, two eight-NPU jobs partition the test IDs into
+even and odd shards. Each job runs its core cases on NPUs 0-3 and its e2e cases
+on NPUs 4-7 concurrently; trainers within a shard remain sequential. A single
+group label retains the eight-NPU group job. The setup_runner check succeeds
+only when every selected job passes.
 
 If the new test lives outside current path filters, add its path. Current
 filters include verl_omni/**, tests/npu_smoke/**, tests/agent_loop/**,
@@ -207,15 +210,24 @@ To run both groups concurrently in one dedicated eight-NPU CI container:
 NPU_SMOKE_PARALLEL=1 bash tests/npu_smoke/run_npu_smoke_tests.sh --num-npus 8
 ```
 
-Core uses NPUs `0,1`; e2e uses `2,3,4,5,6,7`. This does not replace per-case
+Core uses NPUs `0,1,2,3`; e2e uses `4,5,6,7`. This does not replace per-case
 eight-rank coverage from the sequential command. The e2e trainers remain
 sequential; this layout does not support concurrent colocated training jobs.
 
 Unset shared `MODEL_PATH`, `TOKENIZER_PATH`, `DATA_DIR`, `TRAIN_FILES`,
 `VAL_FILES` and `NPU_SMOKE_TEST_IDS` overrides before parallel execution. Use a
 dedicated test environment because final cleanup stops its Ray/model processes.
-Native aborts and log-writing failures remain failures. The GitHub Actions
-workflow retains its existing separate eight-NPU core/e2e jobs.
+Native aborts and log-writing failures remain failures. To reproduce the two
+CI jobs on one host, run the following commands sequentially (both must pass):
+
+```bash
+NPU_SMOKE_PARALLEL=1 NPU_SMOKE_SHARD_INDEX=0 bash tests/npu_smoke/run_npu_smoke_tests.sh --num-npus 8
+NPU_SMOKE_PARALLEL=1 NPU_SMOKE_SHARD_INDEX=1 bash tests/npu_smoke/run_npu_smoke_tests.sh --num-npus 8
+```
+
+Without a shard index, all entries run. With both CI groups selected, these
+commands run on separate runners when both machines are available; otherwise
+the queued job waits for a runner.
 
 Run one group:
 
@@ -258,7 +270,7 @@ runs both groups.
 
 ## Runtime Environment
 
-Each group job uses eight NPUs on linux-aarch64-a2b4-8, a 120 minute timeout,
+Each job reserves eight NPUs on linux-aarch64-a2b4-8, a 120 minute timeout,
 16 GiB shared memory, and this image:
 
 ```text
@@ -308,9 +320,9 @@ logs/npu_smoke/<group>/<timestamp>/
 Each test writes test_<id>.log and each group writes summary.log. The workflow
 also writes group console logs under logs/npu_smoke/parallel/.
 
-Each group's actions/upload-artifact step runs even after failure and uploads
-logs/npu_smoke/** as npu-smoke-logs-core or npu-smoke-logs-e2e. A failed group
-does not cancel the other selected group.
+Each job uploads logs/npu_smoke/** even after failure, as
+npu-smoke-logs-core/e2e for single-group runs or npu-smoke-logs-shard-0/1 for
+full CI. A failed job does not cancel the other selected job.
 
 Every nonzero test exit, including native abort 134 after a pytest or training
 completion message, remains a failure. Keep the raw exit code and full log
