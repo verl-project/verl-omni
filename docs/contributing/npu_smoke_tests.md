@@ -1,6 +1,6 @@
 # NPU Smoke Tests
 
-Last updated: 11/09/2026.
+Last updated: 11/10/2026.
 
 This guide explains how to add CI test cases for Huawei Ascend devices in verl-omni.
 
@@ -24,11 +24,23 @@ into these runners:
 | 5 | core | Unseeded multi-worker rollout diversity | tests/agent_loop/test_diffusion_agent_loop_npu.py::test_rollout_without_seed_npu | 8 |
 | 6 | core | Seeded multi-worker rollout reproducibility | tests/agent_loop/test_diffusion_agent_loop_npu.py::test_rollout_seed_reproducibility_npu | 8 |
 | 7 | core | Standalone vLLM reward engine and OCR scoring | tests/reward_loop/test_reward_engine_npu.py | 8 |
+| 11 | core | Reward restart determinism and JPEG rule scoring | tests/reward_loop/test_reward_engine_npu.py | 8 |
+| 12 | core | Request batching and step-execution output contracts | tests/workers/rollout/rollout_vllm/test_vllm_omni_generate_contracts_npu.py | 8 |
+| 13 | core | FSDP/FSDP2 engine inference and training with SP=2 | tests/workers/test_diffusers_fsdp_engine_sp_npu.py | 8 |
+| 14 | core | Ulysses SP=2/SP=4 forward and backward equivalence | tests/workers/test_diffusers_ulysses.py | 8 |
+| 15 | core | FSDP2 trainable snapshot restore | tests/workers/test_trainable_snapshot_gpu.py | 8 |
+| 17 | core | Omni tool-agent image generation | tests/agent_loop/test_omni_agent_loop_worker_npu.py | 8 |
+| 28 | core | FSDP2 LoRA adapter switch and EMA | tests/workers/test_diffusers_fsdp_lora_adapter.py | 8 |
+| 30 | core | Image previews and H3 offload placeholders | tests/trainer/diffusion/test_artifact_preview_dump_npu.py; tests/pipelines/test_minimax_h3_meta_output_npu.py | 8 |
 
-The combined runner has eight entries: six core (0, 3, 4, 5, 6, 7) and two e2e
-(1, 2). The core group collects seven pytest cases because entry 4 is
-parametrized into request and step execution. The two e2e entries each run a
+The combined runner has 16 entries: 14 core and two e2e (1, 2). Several core
+entries contain multiple parameterized cases. The two e2e entries each run a
 trainer workload; they are not pytest cases.
+
+The additional core entries reuse the GPU assertion paths with Ascend device
+placement and local tiny checkpoints. Entry 14 requires at least four NPUs for
+SP=4. Entry 28 covers FSDP2; its two FSDP1 adapter parameters remain excluded.
+These checks establish execution and tensor contracts, not model convergence.
 
 Test 3 ports the `fsdp` case of `tests/workers/test_diffusers_fsdp_engine.py`
 (GPU core ID 2). It reuses the GPU test's synthetic trajectories and engine
@@ -148,7 +160,8 @@ only when all selected groups pass.
 
 If the new test lives outside current path filters, add its path. Current
 filters include verl_omni/**, tests/npu_smoke/**, tests/agent_loop/**,
-tests/reward_loop/**, tests/workers/**, tests/special_e2e/**, pyproject.toml,
+tests/reward_loop/**, tests/workers/**, tests/trainer/**, tests/pipelines/**,
+tests/special_e2e/**, pyproject.toml,
 .github/workflows/npu_smoke.yml,
 and .github/vllm_omni_pin.txt.
 
@@ -182,7 +195,7 @@ To run both groups concurrently in one dedicated eight-NPU CI container:
 NPU_SMOKE_PARALLEL=1 bash tests/npu_smoke/run_npu_smoke_tests.sh --num-npus 8
 ```
 
-Core uses NPUs `0,1`; e2e uses `2,3,4,5,6,7`. This does not replace per-case
+Core uses NPUs `0,1,2,3`; e2e uses `4,5,6,7` so core can exercise SP=4. This does not replace per-case
 eight-rank coverage from the sequential command. The e2e trainers remain
 sequential; this layout does not support concurrent colocated training jobs.
 
