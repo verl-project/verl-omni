@@ -6,6 +6,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib_npu_e2e.sh"
 
 export NUM_GPUS="${NUM_NPUS}"
+export ROLLOUT_TP="${ROLLOUT_TP:-2}"
 DATA_DIR="${DATA_DIR:-$(mktemp -d "${TMPDIR:-/tmp}/verl-omni-flowgrpo-edit-npu.XXXXXX")}"
 export DATA_DIR
 unset TRAIN_FILES VAL_FILES

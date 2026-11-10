@@ -17,6 +17,11 @@ into these runners:
 | ID | Group | Name | Test entry point | Default NPUs |
 |---|---|---|---|---:|
 | 0 | core | vLLM-Omni rollout + sleep/wake-up | tests/workers/rollout/rollout_vllm/test_vllm_omni_generate_npu.py | 8 |
+| 3 | core | Diffusers FSDP engine inference and training | tests/workers/test_diffusers_fsdp_engine_npu.py | 8 |
+| 4 | core | Diffusion agent loop, request and step execution | tests/agent_loop/test_diffusion_agent_loop_npu.py::test_diffusion_single_turn_npu | 2 |
+| 5 | core | Unseeded multi-worker rollout diversity | tests/agent_loop/test_diffusion_agent_loop_npu.py::test_rollout_without_seed_npu | 2 |
+| 6 | core | Seeded multi-worker rollout reproducibility | tests/agent_loop/test_diffusion_agent_loop_npu.py::test_rollout_seed_reproducibility_npu | 2 |
+| 7 | core | Standalone vLLM reward engine and OCR scoring | tests/reward_loop/test_reward_engine_npu.py | 2 |
 | 1 | e2e | Qwen-Image FlowGRPO trainer | tests/special_e2e/run_flowgrpo_qwen_image_npu.sh | 8 |
 | 2 | e2e | Wan2.2 DanceGRPO trainer with Qwen2.5-VL reward | tests/special_e2e/run_dancegrpo_wan22_npu.sh | 8 |
 | 18 | e2e | Qwen-Image FlowGRPO V1 sync | tests/special_e2e/run_flowgrpo_qwen_image_v1_npu.sh | 8 |
@@ -24,16 +29,12 @@ into these runners:
 | 20 | e2e | Qwen-Image online DPO V1 sync | tests/special_e2e/run_online_dpo_qwen_image_npu.sh | 8 |
 | 21 | e2e | Qwen-Image DiffusionNFT V1 sync | tests/special_e2e/run_diffusionnft_qwen_image_npu.sh | 8 |
 | 22 | e2e | Qwen-Image FlowGRPO V1 separate-async | tests/special_e2e/run_flowgrpo_qwen_image_v1_separate_async_npu.sh | 8 |
-| 3 | core | Diffusers FSDP engine inference and training | tests/workers/test_diffusers_fsdp_engine_npu.py | 8 |
-| 4 | core | Diffusion agent loop, request and step execution | tests/agent_loop/test_diffusion_agent_loop_npu.py::test_diffusion_single_turn_npu | 8 |
-| 5 | core | Unseeded multi-worker rollout diversity | tests/agent_loop/test_diffusion_agent_loop_npu.py::test_rollout_without_seed_npu | 8 |
-| 6 | core | Seeded multi-worker rollout reproducibility | tests/agent_loop/test_diffusion_agent_loop_npu.py::test_rollout_seed_reproducibility_npu | 8 |
-| 7 | core | Standalone vLLM reward engine and OCR scoring | tests/reward_loop/test_reward_engine_npu.py | 8 |
 
 The combined runner has 13 entries: six core (0, 3, 4, 5, 6, 7) and seven e2e
 (1, 2, 18, 19, 20, 21, 22). The core group collects seven pytest cases because entry 4 is
 parametrized into request and step execution. The e2e entries each run a
-trainer workload; they are not pytest cases.
+trainer workload; they are not pytest cases. IDs stay stable across follow-up
+PRs, so gaps in the numbering are intentional.
 
 Test 3 ports the `fsdp` case of `tests/workers/test_diffusers_fsdp_engine.py`
 (GPU core ID 2). It reuses the GPU test's synthetic trajectories and engine
@@ -60,7 +61,10 @@ explicitly rather than producing an all-skipped smoke success.
 
 Tests 4-6 reuse the GPU cases to check request/step execution, unseeded rollout
 diversity, and seeded reproducibility. They use tiny Qwen-Image, rollout TP=2,
-and two agent-loop workers. `NUM_NPUS` must be even and at least 2.
+and two agent-loop workers. The default uses one TP=2 replica; `NUM_NPUS`
+remains the available budget and must be even and at least 2. Set
+`NPU_SMOKE_FULL_TOPOLOGY=1` to exercise every allocated device in tests 4-7.
+FSDP and trainer tests continue to use their full configured allocations.
 
 The workflow prepares the local checkpoint. For a local run, prepare it first:
 
@@ -87,8 +91,9 @@ For a two-device local check, set both visibility variables to `0,1` and
 ### Standalone reward engine
 
 Test 7 checks standalone vLLM reward-server startup and OCR scoring with a tiny
-random Qwen2.5-VL model generated offline. Eight NPUs run four TP=2 reward
-replicas, without an actor rollout server. This is an execution smoke test.
+random Qwen2.5-VL model generated offline. It starts one TP=2 reward replica
+by default, without an actor rollout server. The first server uses a cold
+inspection cache; later restarts in the same pytest module reuse that cache.
 
 After configuring the [runtime environment](#runtime-environment), run:
 
@@ -107,24 +112,18 @@ when needed. The test must complete training and exit 0.
 
 ### Qwen-Image V1 trainer variants
 
-Entries 18-22 reuse the GPU trainer workloads with native NPU attention,
-local tiny checkpoints and isolated per-entry datasets. Entries 18 and 20 use
-the tiny Qwen2.5-VL OCR reward model. Entry 19 prepares an image-edit checkpoint
-and requires `qwen-vl-utils==0.0.14`, installed by the e2e workflow without
-changing the inference-stack dependencies. Entries 18 and 20 build their default
-reward checkpoint in an e2e-only cache, separate from the core reward tests.
-Entry 22 splits an even NPU budget between actor and standalone rollout.
-
-The e2e group clears `MODEL_PATH` for entries 18-22 to select independent model
-fixtures. To reuse an existing image-edit checkpoint, invoke its launcher
-directly after configuring the runtime below:
+Entry 19 requires `qwen-vl-utils==0.0.14`; the e2e workflow installs it.
+Grouped entries 18-22 choose their own local fixtures. To reuse an existing
+image-edit checkpoint, invoke its launcher directly:
 
 ```bash
 MODEL_PATH=/path/to/Qwen-Image-Edit NUM_NPUS=8 \
   bash tests/special_e2e/run_flowgrpo_qwen_image_edit_npu.sh
 ```
 
-All trainer and builder failures remain failures, including exit 134.
+Entries 18-21 default to rollout TP=2; entries 18/20 also use reward TP=2.
+`ROLLOUT_TP` and `REWARD_TP` override these defaults. Actor rank counts,
+training steps and sample counts are unchanged.
 
 ## Add a New NPU Smoke Test
 

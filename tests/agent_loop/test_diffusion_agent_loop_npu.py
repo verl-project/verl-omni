@@ -20,6 +20,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.utils.npu_test_topology import inference_npu_count
+
 
 @pytest.fixture
 def npu_rollout_config():
@@ -36,13 +38,8 @@ def npu_rollout_config():
 
     if not torch.npu.is_available():
         pytest.fail("These smoke tests require Ascend NPUs and torch-npu.")
-    available = torch.npu.device_count()
-    try:
-        requested = int(os.getenv("NUM_NPUS", str(available)))
-    except ValueError:
-        pytest.fail("NUM_NPUS must be an integer.")
-    if requested < 2 or requested > available or requested % 2:
-        pytest.fail(f"TP=2 requires an even NUM_NPUS between 2 and {available}, got {requested}.")
+    requested = inference_npu_count(torch.npu.device_count())
+    print(f"Agent-loop smoke: {requested // 2} TP=2 replica(s), two agent workers.")
 
     model_path = Path(os.getenv("MODEL_PATH", "~/.cache/modelscope/hub/models/tiny-random/Qwen-Image"))
     model_path = model_path.expanduser().resolve()

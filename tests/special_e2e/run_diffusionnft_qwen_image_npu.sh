@@ -14,5 +14,6 @@ unset TRAIN_FILES VAL_FILES
 
 exec bash "${SCRIPT_DIR}/run_diffusionnft_qwen_image.sh" \
     "${NPU_RUNTIME_ARGS[@]}" \
+    "actor_rollout_ref.rollout.tensor_model_parallel_size=${ROLLOUT_TP:-2}" \
     trainer.experiment_name=diffusionnft-diffusion-v1-sync-npu-e2e \
     "$@"

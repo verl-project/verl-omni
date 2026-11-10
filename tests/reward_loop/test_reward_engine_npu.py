@@ -18,14 +18,22 @@ from pathlib import Path
 
 import pytest
 
+from tests.utils.npu_test_topology import inference_npu_count
+
+
+@pytest.fixture(scope="module")
+def npu_reward_inspection_cache(tmp_path_factory):
+    """Start cold once per module; retain inspection results across server restarts."""
+    return tmp_path_factory.mktemp("reward-registry")
+
 
 @pytest.fixture
-def npu_reward_checkpoint(monkeypatch, tmp_path_factory):
-    """Prepare a reusable checkpoint and a fresh model-inspection cache.
+def npu_reward_checkpoint(monkeypatch, npu_reward_inspection_cache):
+    """Prepare a reusable checkpoint and a module-owned model-inspection cache.
 
     NPU_REWARD_MODEL_PATH selects a test-owned checkpoint directory. The builder
-    rejects unrelated or incomplete contents. A fresh VLLM_CACHE_ROOT exercises
-    cold inspection; monkeypatch restores the environment after the test.
+    rejects unrelated or incomplete contents. The first server exercises cold
+    inspection; monkeypatch restores the environment after each test.
     """
     try:
         requested = int(os.environ.get("NUM_NPUS", "8"))
@@ -45,7 +53,7 @@ def npu_reward_checkpoint(monkeypatch, tmp_path_factory):
         "TRANSFORMERS_OFFLINE": "1",
         "TOKENIZERS_PARALLELISM": "false",
         "VLLM_ASCEND_ENABLE_NZ": "0",
-        "VLLM_CACHE_ROOT": str(tmp_path_factory.mktemp("reward-registry")),
+        "VLLM_CACHE_ROOT": str(npu_reward_inspection_cache),
     }
     for key, value in env_vars.items():
         monkeypatch.setenv(key, value)
@@ -55,6 +63,8 @@ def npu_reward_checkpoint(monkeypatch, tmp_path_factory):
 
     if not torch.npu.is_available() or requested > torch.npu.device_count():
         pytest.fail("The standalone reward smoke requires at least NUM_NPUS visible Ascend NPUs.")
+    requested = inference_npu_count(torch.npu.device_count())
+    print(f"Standalone reward smoke: {requested // 2} TP=2 replica(s).")
 
     from tests.reward_loop.build_qwen25_vl_reward_tiny_random import ensure_tiny_qwen25_vl_reward_checkpoint
 
