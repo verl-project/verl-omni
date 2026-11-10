@@ -150,7 +150,7 @@ If the new test lives outside current path filters, add its path. Current
 filters include verl_omni/**, tests/npu_smoke/**, tests/agent_loop/**,
 tests/reward_loop/**, tests/workers/**, tests/special_e2e/**, pyproject.toml,
 .github/workflows/npu_smoke.yml,
-and .github/vllm_omni_pin.txt.
+.github/vllm_omni_pin.txt, and .github/vllm_ascend_pin.txt.
 
 ### 5. Handle models and datasets
 
@@ -240,8 +240,24 @@ Each group job uses eight NPUs on linux-aarch64-a2b4-8, a 120 minute timeout,
 swr.cn-north-4.myhuaweicloud.com/mindspeed/pr-verl-omni-a2:v010-vllm030-omni030
 ```
 
+The image carries the previous generation of the pinned stack (CANN, torch,
+torch-npu, triton-ascend, editable vllm / vllm-ascend / vllm-omni / verl).
+After checkout, `tests/npu_smoke/sync_npu_stack.sh` reinstalls the pinned
+generation — `.github/*_pin.txt`, the `pyproject.toml` vllm pin, and
+torch-npu/triton-ascend/fla-npu mirroring `docker/Dockerfile.npu` — on top of
+it, so the jobs run the pinned stack even when the registry image for that
+generation has not been rebuilt yet. The sync installs vllm-ascend pure-python
+(`COMPILE_CUSTOM_KERNELS=0`) because the smoke suite runs tiny models through
+the native op path and the full aclnn ops build would cost most of the job
+timeout; the `vllm_ascend_C` module (rollout sleep/wake_up) and the
+`add_rms_norm_bias` aclnn op (the reward-model engine) are still built
+in-job.
+
+When the registry image at the current generation exists, the workflow pins
+its tag directly and the sync step is dropped.
+
 The workflow prints CANN details, npu-smi output, relevant Ascend variables,
-and installed vLLM component versions.
+and the synced vLLM component versions.
 
 The FlowGRPO and DanceGRPO end-to-end launchers source CANN and ATB before
 starting the workload:
