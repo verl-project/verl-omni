@@ -280,17 +280,16 @@ data prep, and Diffusers pin, see
 | Trainer | Example script | GPU config |
 |---------|---------------|------------|
 | Flow-GRPO (LoRA, OCR) | `examples/flowgrpo_trainer/bagel/run_bagel_ocr_lora.sh` | 4×GPU |
-| Flow-GRPO (LoRA, OCR, NPU — see caveat below) | `examples/flowgrpo_trainer/bagel/run_bagel_ocr_lora_npu.sh` | 8×NPU |
 | Flow-GRPO (LoRA, PickScore) | `examples/flowgrpo_trainer/bagel/run_bagel_pickscore_lora.sh` | 4×GPU |
 
 BAGEL uses a per-stage deploy YAML that overrides top-level vLLM engine arguments
 — tune `gpu_memory_utilization` and batch sizes directly in the stage config file.
 
-**NPU caveat (unvalidated):** on vLLM-Omni ≥ 0.24, BAGEL LoRA requires merged
-weight sync (`actor_rollout_ref.model.lora.merge=true`) — adapter sync
-silently binds zero modules on the fused MoT layout and reward stays flat.
-The NPU launcher does not enable merged sync because NPU validation is
-pending; it prints this warning at launch.
+**NPU is not supported yet:** on vLLM-Omni ≥ 0.24, BAGEL LoRA requires merged
+weight sync (`actor_rollout_ref.model.lora.merge=true`) — adapter sync silently
+binds zero modules on the fused MoT layout and reward stays flat — and merged
+sync is not validated on NPU. An NPU launcher exists in `examples/` but is not
+a supported recipe until that validation lands.
 
 ---
 
@@ -435,7 +434,7 @@ trainer's README in `examples/`.
 | Algorithm | Qwen-Image | Qwen-Image-Edit | SD3.5 | Boogu-Image | FLUX.1-dev | Wan2.2 | LTX-2.3 | MiniMax-H3 | BAGEL | Qwen3-Omni | MiniCPM-o 4.5 | Qwen3-TTS |
 |-----------|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
 | GRPO | — | — | — | — | — | — | — | — | — | — | — | GPU ✅ |
-| Flow-GRPO | NPU ✅<br>GPU ✅ | NPU ✅<br>GPU ✅ | GPU ✅ | GPU ✅ | — | — | NPU ✅<br>GPU ✅ | NPU ✅<br>GPU ✅<br>MLU ✅ | NPU ⚠️<br>GPU ✅ | — | — | — |
+| Flow-GRPO | NPU ✅<br>GPU ✅ | NPU ✅<br>GPU ✅ | GPU ✅ | GPU ✅ | — | — | NPU ✅<br>GPU ✅ | NPU ✅<br>GPU ✅<br>MLU ✅ | GPU ✅ | — | — | — |
 | Flow-DPPO | GPU ✅ | — | — | — | — | — | — | — | — | — | — | — |
 | GRPO-Guard | NPU ✅<br>GPU ✅ | — | — | — | — | — | — | — | — | — | — | — |
 | Mix-GRPO | NPU ✅<br>GPU ✅ | — | — | — | — | — | — | — | — | — | — | — |
@@ -451,5 +450,4 @@ trainer's README in `examples/`.
 HunyuanImage-3.0 (MixGRPO / SRPO) appears on the project README as Planned or
 WIP and does not yet have a ready-to-run recipe, so it is omitted from the
 catalogue above. Qwen3-TTS DPO and GSPO remain WIP; its ready-to-run GRPO recipe
-is listed above. `⚠️` marks an unvalidated combination — BAGEL NPU LoRA runs
-without merged weight sync (validation pending; see the BAGEL NPU caveat).
+is listed above.
