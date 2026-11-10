@@ -1,3 +1,16 @@
+# Copyright 2026 Bytedance Ltd. and/or its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 """MiniMax H3 image training adapter for DiffusionNFT."""
 
 import os
@@ -251,6 +264,11 @@ class MiniMaxH3ImageDiffusionNFT(DiffusionModelBase):
         Every op of the DiT is row-wise except attention, which runs per document (``ATTENTION_SEGMENTS``), and the
         per-step output head (``pdd_segments``).
         """
+        if getattr(module, "gradient_checkpointing", False) and torch.is_grad_enabled():
+            raise NotImplementedError(
+                "VERL_OMNI_H3_IMAGE_PACK_MICRO_BATCH=1 requires gradient checkpointing off: the recomputed "
+                "attention would not see the per-document segments."
+            )
         image_rows = model_inputs["image_rows"]
         condition_rows = model_inputs["condition_rows"]
         condition_row_count = model_inputs["condition_row_count"]

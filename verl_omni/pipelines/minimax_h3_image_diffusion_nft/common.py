@@ -1,3 +1,16 @@
+# Copyright 2026 Bytedance Ltd. and/or its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 """Shared MiniMax H3 image policies: PDD step grid, per-step output heads and the audio-free layout.
 
 The image release is a 6-step PDD student: one backbone and one fused output head per denoise
@@ -72,10 +85,12 @@ def parse_image_latent_meta(latent_meta: torch.Tensor) -> tuple[int, int, int]:
 
 
 def pdd_train_timesteps(run_sigmas: Sequence[float] | torch.Tensor) -> torch.Tensor:
-    """``sigma * 1000`` of the grid points the rollout evaluated (every point but the final 0)."""
+    """``sigma * 1000`` of the grid points the rollout evaluated; ``run_sigmas`` excludes the final 0."""
     sigmas = torch.as_tensor(run_sigmas, dtype=torch.float32).reshape(-1)
     if sigmas.numel() < 1:
         raise ValueError("MiniMax H3 image PDD grid has no denoise step.")
+    if float(sigmas[-1]) == 0.0:
+        raise ValueError("pdd_train_timesteps takes the evaluated sigmas only; drop the final 0.")
     return sigmas * PDD_TIMESTEP_SCALE
 
 

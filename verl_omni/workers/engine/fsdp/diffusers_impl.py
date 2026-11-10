@@ -128,19 +128,31 @@ def _replicate_frozen_requested() -> bool:
     return os.environ.get("VERL_OMNI_FSDP_REPLICATE_FROZEN", "0") == "1"
 
 
+def _replicate_frozen_enabled(engine) -> bool:
+    """Whether this engine keeps its frozen base replicated (env flag, FSDP2, LoRA, no CPU offload)."""
+    if not _replicate_frozen_requested() or engine.model_config.lora_rank <= 0:
+        return False
+    if engine.engine_config.strategy != "fsdp2":
+        raise ValueError("VERL_OMNI_FSDP_REPLICATE_FROZEN=1 requires strategy=fsdp2.")
+    if resolve_lora_config(engine.model_config).merge:
+        raise ValueError("VERL_OMNI_FSDP_REPLICATE_FROZEN=1 does not support model.lora.merge=True.")
+    if engine.engine_config.param_offload:
+        raise ValueError("VERL_OMNI_FSDP_REPLICATE_FROZEN=1 requires param_offload=False.")
+    return not (engine.engine_config.offload_policy or engine.engine_config.forward_only)
+
+
 def _check_replicated_params(module) -> None:
-    """Fail at init if any rank holds a non-finite tensor or an all-zero one where weights are expected."""
-    bad = []
+    """Fail on every rank at init unless all ranks hold finite, identical parameters."""
     with torch.no_grad():
-        for name, param in module.named_parameters():
-            data = param.detach()
-            if not bool(torch.isfinite(data).all()):
-                bad.append(f"{name}: non-finite")
-            elif "lora_B" not in name and "audio_proj" not in name and not bool(data.ne(0).any()):
-                bad.append(f"{name}: all zero")
-    if bad:
-        rank = torch.distributed.get_rank()
-        raise RuntimeError(f"Replicated Actor parameters are invalid on rank {rank}: {bad[:8]} ({len(bad)} tensors)")
+        sums = torch.stack([param.detach().float().sum() for param in module.parameters()])
+    reference = sums.clone()
+    torch.distributed.broadcast(reference, src=0)
+    ok = torch.tensor(float(bool(torch.isfinite(sums).all()) and torch.equal(reference, sums)), device=sums.device)
+    torch.distributed.all_reduce(ok, op=torch.distributed.ReduceOp.MIN)
+    if ok.item() == 0:
+        raise RuntimeError(
+            "VERL_OMNI_FSDP_REPLICATE_FROZEN=1: replicated parameters differ across ranks or are non-finite."
+        )
 
 
 class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
@@ -325,7 +337,7 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
             return module
 
         # Default path: load via diffusers AutoModel
-        replicate_frozen = _replicate_frozen_requested() and self.model_config.lora_rank > 0
+        replicate_frozen = _replicate_frozen_enabled(self)
         init_context = get_init_weight_context_manager(use_meta_tensor=not replicate_frozen, mesh=self.device_mesh)
 
         with init_context(), warnings.catch_warnings():
@@ -468,7 +480,7 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
                 "offload_policy": offload_policy,
                 "reshard_after_forward": self.engine_config.reshard_after_forward,
             }
-            if _replicate_frozen_requested() and self.model_config.lora_rank > 0:
+            if _replicate_frozen_enabled(self):
                 module = module.to(device=get_device_id())
                 for _, param in sorted(
                     ((n, p) for n, p in module.named_parameters() if "lora_" in n), key=lambda item: item[0]

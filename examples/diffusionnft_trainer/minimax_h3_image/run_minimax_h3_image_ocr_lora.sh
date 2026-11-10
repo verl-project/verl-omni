@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# MiniMax H3 image dense-text DiffusionNFT LoRA recipe: OCR x layout guard x HPSv2.1 quality gate.
+# MiniMax H3 image dense-text DiffusionNFT LoRA recipe.
+# Reward: 0.5 * PickScore + 0.2 * (OCR x layout guard) + 0.3 * HPSv2.1 (ocr_preference_reward.py).
 #
 # Default cell: 512x512 generated directly (no upscale), dense-text tier t20.
 #
@@ -18,10 +19,10 @@ set -euo pipefail
 export VERL_OMNI_FSDP_REPLICATE_FROZEN=1
 export VERL_OMNI_H3_IMAGE_PACK_MICRO_BATCH=1
 export GENRM_OCR_TEMPERATURE=0
-export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2}
-export QUALITY_GATE_GPU=${QUALITY_GATE_GPU:-3}
+export VLLM_ENGINE_READY_TIMEOUT_S=${VLLM_ENGINE_READY_TIMEOUT_S:-3600}
 : "${PPOCR_MODEL_DIR:?Set PPOCR_MODEL_DIR to the PP-OCRv6 medium ONNX directory}"
-: "${HPSV2_CLIP_PATH:?Set HPSV2_CLIP_PATH to the OpenCLIP ViT-H-14 open_clip_pytorch_model.bin}"
+: "${PICKSCORE_PATH:?Set PICKSCORE_PATH to yuvalkirstain/PickScore_v1}"
+: "${CLIP_H14_PATH:?Set CLIP_H14_PATH to laion/CLIP-ViT-H-14-laion2B-s32B-b79K}"
 : "${HPSV2_CHECKPOINT:?Set HPSV2_CHECKPOINT to HPS_v2.1_compressed.pt}"
 
 export WANDB_MODE=${WANDB_MODE:-offline}
@@ -29,8 +30,8 @@ export RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO=0
 export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
 export OMP_NUM_THREADS=${OMP_NUM_THREADS:-8}
 
-TRAIN_FILES=${TRAIN_FILES:-${DATA_DIR:?Set DATA_DIR or TRAIN_FILES and VAL_FILES}/train_t20.parquet}
-VAL_FILES=${VAL_FILES:-$DATA_DIR/test_t20.parquet}
+export TRAIN_FILES=${TRAIN_FILES:-${DATA_DIR:?Set DATA_DIR or TRAIN_FILES and VAL_FILES}/train_t20.parquet}
+export VAL_FILES=${VAL_FILES:-$DATA_DIR/test_t20.parquet}
 : "${MODEL_PATH:?Set MODEL_PATH to the native MiniMax H3 image release root}"
 : "${ACTOR_PATH:?Set ACTOR_PATH to the converted Diffusers-layout transformer directory}"
 for required in "$MODEL_PATH/pdd_config.json" "$MODEL_PATH/pdd_fused_heads.safetensors" "$ACTOR_PATH/config.json"; do
@@ -41,6 +42,12 @@ REWARD_TP=${REWARD_TP:-1}
 REWARD_GPU_MEM_UTIL=${REWARD_GPU_MEM_UTIL:-0.15}
 
 N_GPUS=${N_GPUS:-3}
+export PREFERENCE_SCORER_GPU=${PREFERENCE_SCORER_GPU:-$N_GPUS}
+export CUDA_VISIBLE_DEVICES=$(seq -s, 0 $((N_GPUS - 1)))
+if (( PREFERENCE_SCORER_GPU < N_GPUS )); then
+    echo "PREFERENCE_SCORER_GPU=$PREFERENCE_SCORER_GPU must not be one of the $N_GPUS trainer GPUs" >&2
+    exit 1
+fi
 ROLLOUT_TP=${ROLLOUT_TP:-1}
 TEXT_ENCODER_TP=${TEXT_ENCODER_TP:-$ROLLOUT_TP}
 TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-12}
@@ -54,6 +61,7 @@ TOTAL_TRAINING_STEPS=${TOTAL_TRAINING_STEPS:-50}
 EXPERIMENT_NAME=${EXPERIMENT_NAME:-minimax_h3_image_ocr_lora}
 
 script_path=$(readlink -f "$0")
+reward_file="$(dirname "$script_path")/ocr_preference_reward.py"
 output_dir=${OUTPUT_DIR:-$(dirname "$script_path")/outputs/$EXPERIMENT_NAME}
 mkdir -p "$output_dir/checkpoints"
 
@@ -145,9 +153,21 @@ ${VERL_OMNI_ENTRY:-python3 -m verl_omni.trainer.main_diffusion} \
     reward.reward_model.rollout.gpu_memory_utilization="$REWARD_GPU_MEM_UTIL" \
     reward.reward_model.rollout.max_model_len=8192 \
     reward.reward_model.rollout.response_length=160 \
-    reward.custom_reward_function.path="$(dirname "$script_path")/ocr_quality_reward.py" \
-    reward.custom_reward_function.name=compute_score \
-    trainer.logger='["console","tensorboard","wandb"]' \
+    reward.custom_reward_function.path=pkg://verl_omni.reward_loop.reward_manager.multi \
+    reward.custom_reward_function.name=_multi_reward_placeholder \
+    reward.reward_manager.name=MultiVisualRewardManager \
+    reward.reward_manager.module.path=pkg://verl_omni.reward_loop.reward_manager \
+    "+reward.reward_functions.pick.path=$reward_file" \
+    +reward.reward_functions.pick.name=term_pickscore \
+    +reward.reward_functions.pick.weight=0.5 \
+    "+reward.reward_functions.ocr.path=$reward_file" \
+    +reward.reward_functions.ocr.name=term_ocr_guarded \
+    +reward.reward_functions.ocr.weight=0.2 \
+    "+reward.reward_functions.aes.path=$reward_file" \
+    +reward.reward_functions.aes.name=term_hpsv2 \
+    +reward.reward_functions.aes.weight=0.3 \
+    reward.aggregation=weighted_sum \
+    trainer.logger='["console","tensorboard"]' \
     trainer.project_name=diffusion_nft \
     trainer.experiment_name="$EXPERIMENT_NAME" \
     trainer.default_local_dir="$output_dir/checkpoints" \
