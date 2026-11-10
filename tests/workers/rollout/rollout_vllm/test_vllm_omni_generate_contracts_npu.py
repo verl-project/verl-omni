@@ -59,6 +59,7 @@ _TOKENIZER = None
 
 
 def _get_tokenizer():
+    """Lazily reuse the local smoke checkpoint's tokenizer."""
     global _TOKENIZER
     if _TOKENIZER is None:
         _TOKENIZER = AutoTokenizer.from_pretrained(os.path.join(MODEL_PATH, "tokenizer"), trust_remote_code=True)
@@ -80,6 +81,7 @@ def _tokenize_prompt(text: str) -> list[int]:
 
 
 def _require_visible_npus() -> None:
+    """Fail rather than skip when the selected NPU workload lacks prerequisites."""
     import torch_npu  # noqa: F401
 
     if not torch.npu.is_available() or torch.npu.device_count() < 1:
@@ -90,6 +92,7 @@ def _require_visible_npus() -> None:
 
 
 def _build_rollout_cfg(*, step_execution: bool = False) -> Any:
+    """Select request batching or step execution for a single-NPU tiny rollout."""
     cfg: dict[str, Any] = {
         "_target_": "verl_omni.workers.config.diffusion.DiffusionRolloutConfig",
         "name": "vllm_omni",
@@ -133,6 +136,7 @@ def _build_rollout_cfg(*, step_execution: bool = False) -> Any:
 
 
 def _build_model_cfg(*, algorithm: str = "flow_grpo") -> Any:
+    """Bind the local checkpoint to the requested replay algorithm and NPU attention."""
     return OmegaConf.create(
         {
             "_target_": "verl_omni.workers.config.diffusion.DiffusionModelConfig",
@@ -147,6 +151,7 @@ def _build_model_cfg(*, algorithm: str = "flow_grpo") -> Any:
 
 
 def _launch_server(*, step_execution: bool = False, algorithm: str = "flow_grpo"):
+    """Start a standalone Ray rollout server on the first visible NPU."""
     visible_devices = os.getenv("ASCEND_RT_VISIBLE_DEVICES", "0")
     first_device = visible_devices.split(",")[0]
     ray.init(
@@ -187,6 +192,7 @@ def _launch_server(*, step_execution: bool = False, algorithm: str = "flow_grpo"
 
 
 def _shutdown_server() -> None:
+    """Release the test's Ray actors and cached NPU allocations."""
     ray.shutdown()
     gc.collect()
     if hasattr(torch, "npu") and torch.npu.is_available():
@@ -227,6 +233,7 @@ def _generate_concurrent(
     logprobs_first_only: bool = True,
     sampling_overrides: dict[str, Any] | None = None,
 ) -> list[DiffusionOutput]:
+    """Submit distinct request IDs concurrently and retain request-specific sampling."""
     sampling_overrides = sampling_overrides or {}
     refs = []
     for i, prompt in enumerate(prompts):

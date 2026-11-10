@@ -293,5 +293,6 @@ def run_omni_agent_loop_image_gen(config, ray_runtime_env):
 
 
 def test_omni_agent_loop_worker_image_gen_generate_sequences(init_config):
+    """Exercise the shared image-generation contract with the GPU runtime."""
     config, _run_root = init_config
     run_omni_agent_loop_image_gen(config, _gpu_ray_runtime_env())

@@ -25,6 +25,7 @@ from test_minimax_h3_rollout_contract_on_cpu import _make_h3_rollout_output
 
 @pytest.mark.parametrize("algorithm", ["diffusion_nft", "flow_grpo"])
 def test_meta_placeholder_with_npu_training_inputs(monkeypatch, algorithm):
+    """Keep the meta preview while exporting algorithm-specific training tensors."""
     import torch_npu  # noqa: F401
 
     assert torch.npu.is_available()

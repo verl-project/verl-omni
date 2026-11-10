@@ -50,12 +50,14 @@ _FILL_STEP = -0.1
 
 
 def _skip_or_fail(reason: str) -> None:
+    """Treat missing prerequisites as failures in an explicitly selected NPU smoke."""
     if os.environ.get("DEVICE_NAME") == "npu" or get_device_name() == "npu":
         pytest.fail(reason)
     pytest.skip(reason)
 
 
 def _require_model_path() -> str:
+    """Resolve the NPU checkpoint override while retaining the GPU fixture default."""
     model_path = _DEFAULT_MODEL_PATH
     if os.environ.get("DEVICE_NAME") == "npu" or get_device_name() == "npu":
         model_path = os.path.expanduser(os.environ.get("MODEL_PATH", model_path))
@@ -156,6 +158,7 @@ def _assert_ema_blend(
 
 
 def _resolve_lora_test_device_count(strategy: str) -> int:
+    """Validate the requested device count against LoRA sharding and SP requirements."""
     visible_gpus = get_torch_device().device_count()
     if os.environ.get("DEVICE_NAME") == "npu" or get_device_name() == "npu":
         try:
@@ -174,6 +177,7 @@ def _resolve_lora_test_device_count(strategy: str) -> int:
 
 
 def _run_lora_adapter_switch_test(strategy: str) -> None:
+    """Check adapter selection, parameter isolation and training under FSDP."""
     base_model_path = _require_model_path()
     device_count = _resolve_lora_test_device_count(strategy)
 
@@ -262,6 +266,7 @@ def _run_lora_adapter_switch_test(strategy: str) -> None:
 
 
 def _run_copy_ema_adapter_test(strategy: str) -> None:
+    """Check adapter copy and EMA values after a real distributed training update."""
     base_model_path = _require_model_path()
     device_count = _resolve_lora_test_device_count(strategy)
 
@@ -334,6 +339,7 @@ def _run_copy_ema_adapter_test(strategy: str) -> None:
 
 @pytest.mark.parametrize("strategy", ["fsdp", "fsdp2"])
 def test_diffusers_fsdp_lora_adapter_switch(strategy):
+    """Run the adapter-switch contract on the selected accelerator and FSDP strategy."""
     if not (is_cuda_available or is_npu_available):
         _skip_or_fail("A CUDA or Ascend NPU accelerator is required for FSDP LoRA adapter tests.")
     _run_lora_adapter_switch_test(strategy)
@@ -341,6 +347,7 @@ def test_diffusers_fsdp_lora_adapter_switch(strategy):
 
 @pytest.mark.parametrize("strategy", ["fsdp", "fsdp2"])
 def test_diffusers_fsdp_lora_adapter_copy_ema(strategy):
+    """Run the adapter copy/EMA contract on the selected accelerator and FSDP strategy."""
     if not (is_cuda_available or is_npu_available):
         _skip_or_fail("A CUDA or Ascend NPU accelerator is required for FSDP LoRA adapter tests.")
     _run_copy_ema_adapter_test(strategy)

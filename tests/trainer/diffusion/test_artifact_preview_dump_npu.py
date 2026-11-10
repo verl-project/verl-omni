@@ -29,6 +29,7 @@ from verl_omni.pipelines.rollout_media import MediaArtifact, MediaSpec
 @pytest.mark.parametrize("version", [0, 1])
 @pytest.mark.parametrize("latent_shape", [(2, 16), (2, 16, 2, 2)])
 def test_npu_latent_primary_exports_image_previews(tmp_path, version, latent_shape):
+    """Dump decoded previews without replacing or mutating the primary NPU latents."""
     import torch_npu  # noqa: F401
 
     assert torch.npu.is_available()

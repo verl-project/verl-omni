@@ -285,6 +285,7 @@ def ensure_tiny_qwen3_omni_checkpoint(
 
 
 def _checkpoint_is_compatible(output: Path, *, head_dim: int) -> bool:
+    """Require the requested tiny geometry and nonempty local model/processor files."""
     try:
         config = json.loads((output / "config.json").read_text())
         text = config["thinker_config"]["text_config"]
@@ -309,6 +310,7 @@ def _checkpoint_is_compatible(output: Path, *, head_dim: int) -> bool:
 
 
 def main() -> None:
+    """Build or reuse the requested tiny checkpoint from CLI options."""
     parser = argparse.ArgumentParser(
         description="Build a tiny Qwen3-Omni Thinker checkpoint offline (random weights).",
     )
@@ -325,7 +327,10 @@ def main() -> None:
     parser.add_argument(
         "--force",
         action="store_true",
-        help="Rebuild even when output-dir already contains config.json",
+        help=(
+            "Overwrite generated checkpoint files in place without clearing other files; "
+            "use a new output directory for a clean build."
+        ),
     )
     args = parser.parse_args()
 

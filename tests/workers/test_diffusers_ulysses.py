@@ -39,6 +39,7 @@ _ENABLED_GPU_DEVICES = ("cuda", "xpu")
 
 
 def get_device_name() -> str:
+    """Enable Ascend only for an explicitly selected NPU smoke invocation."""
     name = _platform_device_name()
     return name if name in _ENABLED_GPU_DEVICES or (name == "npu" and os.getenv("DEVICE_NAME") == "npu") else "cpu"
 
@@ -68,6 +69,7 @@ _DEFAULT_MODEL_PATH = os.path.expanduser("~/models/tiny-random/Qwen-Image")
 
 
 def _skip_or_fail(reason: str) -> None:
+    """Keep optional GPU skips from hiding failures in an explicitly selected NPU run."""
     if os.environ.get("DEVICE_NAME") == "npu" or get_device_name() == "npu":
         pytest.fail(reason)
     pytest.skip(reason)
@@ -79,6 +81,7 @@ def sync_model_parameters_global(module):
 
 
 def _load_config_for_sp(sp_size: int) -> dict:
+    """Load the local tiny checkpoint and align its attention heads to the SP degree."""
     from diffusers import AutoModel
 
     model_path = _DEFAULT_MODEL_PATH
