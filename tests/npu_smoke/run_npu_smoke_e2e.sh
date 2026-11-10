@@ -41,4 +41,5 @@ run_test 22 "FlowGRPO V1 separate-async trainer e2e" \
     env -u MODEL_PATH -u TOKENIZER_PATH -u TRAIN_FILES -u VAL_FILES \
         DATA_DIR="${LOG_DIR}/test22_data" \
     bash tests/special_e2e/run_flowgrpo_qwen_image_v1_separate_async_npu.sh
+cleanup_runtime
 print_summary
