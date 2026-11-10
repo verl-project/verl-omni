@@ -515,8 +515,8 @@ model-specific — verify each against your own model's architecture.
 - **mrope**: Qwen-style multimodal models use 3-component position IDs
   (temporal, height, width) for mrope. HuggingFace's `get_rope_index` returns
   float32 position IDs that FSDP would bf16-round. Cast to `int64` in
-  `configure_processor` (see `_get_rope_index_long` in
-  `thinker_training_adapter.py:136-140`).
+  `configure_processor` (search for `_get_rope_index_long` in
+  `thinker_training_adapter.py`).
 
 - **`dedup_pad_tokens`**: Bind on the processor for multimodal (image/video/
   audio) training to avoid double-expansion in AR mode. Both the HF processor
