@@ -27,6 +27,7 @@ _LAUNCHER = Path(__file__).resolve().parents[2] / "tests/special_e2e/run_flowgrp
 
 
 def _checkpoint(directory, *, marker=False):
+    """Create a caller-owned checkpoint, optionally marked as a builder fixture."""
     directory.mkdir(parents=True)
     (directory / "model_index.json").write_text('{"_class_name": "QwenImageEditPlusPipeline"}')
     (directory / "weights.bin").write_bytes(b"user checkpoint weights")
@@ -38,6 +39,7 @@ def _checkpoint(directory, *, marker=False):
 
 
 def _files(path):
+    """Snapshot file contents so launcher tests can detect unintended writes."""
     if path.is_file():
         return {"": path.read_bytes()}
     return {str(file.relative_to(path)): file.read_bytes() for file in path.rglob("*") if file.is_file()}
@@ -45,6 +47,7 @@ def _files(path):
 
 @pytest.fixture
 def edit_launcher(tmp_path):
+    """Isolate the real wrapper with recording builder and trainer subprocesses."""
     script_dir = tmp_path / "fixture repo" / "tests" / "special_e2e"
     script_dir.mkdir(parents=True)
     launcher = script_dir / _LAUNCHER.name
@@ -83,6 +86,7 @@ PY
     events = tmp_path / "events.jsonl"
 
     def run(overrides=None, *args):
+        """Return the wrapper's raw exit and ordered builder/trainer events."""
         env = dict(os.environ)
         env.pop("MODEL_PATH", None)
         env.update(
@@ -108,6 +112,7 @@ PY
 
 @pytest.mark.parametrize("symlink", [False, True])
 def test_explicit_checkpoint_is_reused_without_a_tiny_marker(edit_launcher, tmp_path, symlink):
+    """Reuse caller checkpoints, including symlinks, without rebuilding their files."""
     target = _checkpoint(tmp_path / "user checkpoint")
     model = target
     if symlink:
@@ -127,6 +132,7 @@ def test_explicit_checkpoint_is_reused_without_a_tiny_marker(edit_launcher, tmp_
 
 @pytest.mark.parametrize("kind", ["missing", "file", "missing-manifest"])
 def test_invalid_explicit_checkpoint_fails_without_writing(edit_launcher, tmp_path, kind):
+    """Reject invalid explicit paths before either builder or trainer can write."""
     model = tmp_path / "explicit checkpoint"
     if kind == "file":
         model.write_bytes(b"user data")
@@ -147,6 +153,7 @@ def test_invalid_explicit_checkpoint_fails_without_writing(edit_launcher, tmp_pa
 
 @pytest.mark.parametrize("empty_override", [False, True])
 def test_only_the_default_fixture_is_built(edit_launcher, empty_override):
+    """Build the managed default only when no nonempty checkpoint override is set."""
     result, events = edit_launcher.run({"MODEL_PATH": ""} if empty_override else {})
 
     assert result.returncode == 0, result.stderr
@@ -156,6 +163,7 @@ def test_only_the_default_fixture_is_built(edit_launcher, empty_override):
 
 
 def test_explicit_default_path_is_still_reused(edit_launcher):
+    """Treat an explicit default-directory override as caller owned."""
     _checkpoint(edit_launcher.default)
     before = _files(edit_launcher.default)
 
@@ -168,6 +176,7 @@ def test_explicit_default_path_is_still_reused(edit_launcher):
 
 @pytest.mark.parametrize("populated", [False, True])
 def test_default_empty_or_builder_owned_directory_is_allowed(edit_launcher, populated):
+    """Permit rebuilding an empty cache or a fixture with the expected ownership marker."""
     if populated:
         _checkpoint(edit_launcher.default, marker=True)
     else:
@@ -181,6 +190,7 @@ def test_default_empty_or_builder_owned_directory_is_allowed(edit_launcher, popu
 
 @pytest.mark.parametrize("metadata", [None, "invalid-json", '{"format_version": 2}', "[]"])
 def test_unowned_default_directory_is_not_modified(edit_launcher, metadata):
+    """Reject populated caches whose ownership metadata is absent or invalid."""
     _checkpoint(edit_launcher.default)
     if metadata is not None:
         (edit_launcher.default / "tiny_checkpoint_metadata.json").write_text(metadata)
@@ -195,6 +205,7 @@ def test_unowned_default_directory_is_not_modified(edit_launcher, metadata):
 
 
 def test_default_leaf_symlink_is_not_modified(edit_launcher, tmp_path):
+    """Do not rebuild the managed cache through a symlink to someone else's model."""
     target = _checkpoint(tmp_path / "user model", marker=True)
     edit_launcher.default.parent.mkdir(parents=True)
     edit_launcher.default.symlink_to(target, target_is_directory=True)
@@ -210,6 +221,7 @@ def test_default_leaf_symlink_is_not_modified(edit_launcher, tmp_path):
 
 
 def test_default_file_is_not_modified(edit_launcher):
+    """Leave non-directory data at the default cache path untouched."""
     edit_launcher.default.parent.mkdir(parents=True)
     edit_launcher.default.write_bytes(b"user data")
 
@@ -222,6 +234,7 @@ def test_default_file_is_not_modified(edit_launcher):
 
 
 def test_default_cache_parent_may_be_a_mount_symlink(edit_launcher, tmp_path):
+    """Allow a mounted cache parent while preserving ownership of the leaf directory."""
     cache = tmp_path / "mounted cache"
     cache.mkdir()
     (edit_launcher.home / ".cache").symlink_to(cache, target_is_directory=True)
@@ -234,6 +247,7 @@ def test_default_cache_parent_may_be_a_mount_symlink(edit_launcher, tmp_path):
 
 @pytest.mark.parametrize("code", [1, 23, 134])
 def test_builder_nonzero_exit_stops_before_training(edit_launcher, code):
+    """Propagate builder failures, including native aborts, without starting training."""
     result, events = edit_launcher.run({"STUB_BUILDER_EXIT": str(code)})
 
     assert result.returncode == code
@@ -242,6 +256,7 @@ def test_builder_nonzero_exit_stops_before_training(edit_launcher, code):
 
 @pytest.mark.parametrize("code", [1, 23, 134])
 def test_training_nonzero_exit_is_preserved(edit_launcher, tmp_path, code):
+    """Propagate trainer failures without rewriting the caller checkpoint."""
     model = _checkpoint(tmp_path / "user checkpoint")
     before = _files(model)
 
