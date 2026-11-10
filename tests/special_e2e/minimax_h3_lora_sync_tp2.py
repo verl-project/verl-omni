@@ -29,9 +29,9 @@ from vllm.distributed import (
     initialize_model_parallel,
 )
 from vllm_omni.diffusion.data import DiffusionParallelConfig, OmniDiffusionConfig, TransformerConfig
-from vllm_omni.diffusion.lora.manager import DiffusionLoRAManager
 from vllm_omni.diffusion.models.minimax_h3.minimax_h3_transformer import MiniMaxH3DiTModel
 from vllm_omni.diffusion.models.minimax_h3.pipeline_minimax_h3 import MiniMaxH3Pipeline
+from vllm_omni.lora.manager import DiffusionLoRAManager
 
 from verl_omni.pipelines.minimax_h3_diffusion_nft.common import MiniMaxH3RolloutWeightSyncMixin
 from verl_omni.utils.vllm_omni import OmniTensorLoRARequest, VLLMOmniHijack
