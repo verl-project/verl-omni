@@ -182,5 +182,5 @@ The script launches `python3 -m verl_omni.trainer.main_diffusion_v1` with FlowGR
 written to:
 
 ```bash
-checkpoints/flow_grpo/qwen_image_ocr_lora
+checkpoints/flow_grpo/qwen_image_ocr_lora_v1
 ```

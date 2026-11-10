@@ -51,7 +51,8 @@ If possible, please add CI test(s) for your new feature:
    the CPU CI job) or a check under `tests/special_sanity/` — no workflow edit
    needed.
 2. GPU/NPU smoke: register the script in `tests/gpu_smoke/run_gpu_smoke_*.sh`
-   and extend the group patterns in
+   (GPU) or `tests/npu_smoke/run_npu_smoke_{core,e2e}.sh` (NPU), and extend the
+   GPU group patterns in
    `tests/gpu_smoke/select_gpu_smoke_groups.py` if needed
    (see [GPU smoke tests](docs/contributing/gpu_smoke_tests.md) and
    [NPU smoke tests](docs/contributing/npu_smoke_tests.md)). Do not edit

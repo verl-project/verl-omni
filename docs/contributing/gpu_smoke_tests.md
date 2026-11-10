@@ -84,6 +84,12 @@ Shared helpers live in [`lib_gpu_smoke.sh`](../../tests/gpu_smoke/lib_gpu_smoke.
    `pyproject.toml`); editing workflow files is CI infrastructure and needs
    maintainer approval — the selector script is the contributor-owned knob.
 
+   A selector pattern does not make the workflow *trigger*: a change touching
+   only paths outside the workflow's own `paths:` filters (e.g. an `examples/`
+   launcher) will not start GPU smoke at all, even when a selector pattern
+   matches it. In that case ask a maintainer to extend the filters — that file
+   is CI infrastructure.
+
 ## Run Locally
 
 ### Prerequisites

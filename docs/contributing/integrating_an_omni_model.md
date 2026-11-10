@@ -452,7 +452,7 @@ The omni config defaults to verl's `single_turn_agent`; pick per run:
 | ---- | -------- |
 | `single_turn_agent` (verl, default) | text-token stages such as the Thinker |
 | `omni_single_turn_agent` | an autoregressive Talker stage whose rollout adapter must map model-native output to the Talker policy sequence (see §5) |
-| `image_gen_tool_agent` | multi-turn tool/image-gen agents — [`docs/advanced/multi_turn_image_agents.md`](../advanced/multi_turn_image_agents.md) |
+| `image_gen_tool_agent` | multi-turn tool/image-gen agents — [`docs/advanced/multi_turn_image_agents.md`](../advanced/multi_turn_image_agents.md). It must be the configured **default**, not a per-sample override: the tool and Hermes-format binding happens at worker init only when `default_agent_loop == image_gen_tool_agent` (`verl_omni/agent_loop/omni_agent_loop.py`) |
 
 **Extend before you register.** Model-specific rollout behavior belongs in the
 rollout adapter hooks (`postprocess_agent_loop_output`, §3), not in a copied
@@ -471,8 +471,10 @@ generation (the default `agent_reward_loop` path, no reward model required).
 The three supported sources:
 
 - `reward.custom_reward_function.path` / `.name` — a Python reward function
-  routed per the parquet `data_source` column (verl's standard contract).
-  Example: built-in GSM8K scoring via `data_source="openai/gsm8k"` — see the
+  that **replaces the default scorer**: it receives the parquet `data_source`
+  among its arguments and does its own routing. With no custom function
+  configured, scoring dispatches on `data_source` (verl's built-in contract,
+  e.g. `openai/gsm8k`) — see the
   [GSPO README](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/README.md).
 - Named reward-model ensembles —
   [`docs/algo/named_reward_models.md`](../algo/named_reward_models.md).
