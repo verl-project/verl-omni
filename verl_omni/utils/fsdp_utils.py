@@ -77,7 +77,7 @@ def _filter_ignored_wrap_targets(wrap_targets, root, ignored_names):
     return kept
 
 
-def apply_fsdp2(model, fsdp_kwargs, config, ignored_names: Sequence[str] = ()):
+def apply_fsdp2(model, fsdp_kwargs, config, ignored_names: Sequence[str] = (), replicate_frozen: bool = False):
     """FSDP2 wrap; ``ignored_names`` subtrees stay unsharded.
 
     Adapted from verl's ``apply_fsdp2``; deltas are DIFF-marked.
@@ -100,6 +100,12 @@ def apply_fsdp2(model, fsdp_kwargs, config, ignored_names: Sequence[str] = ()):
             ignored_params.add(param)
             if param.requires_grad:
                 trainable_ignored.append(name)
+    if replicate_frozen:
+        for name, param in model.named_parameters():
+            if "lora_" not in name:
+                if param.requires_grad:
+                    trainable_ignored.append(name)
+                ignored_params.add(param)
     mesh = fsdp_kwargs.get("mesh")
     if trainable_ignored and (mesh is None or mesh.size() > 1):
         raise ValueError(
@@ -128,7 +134,10 @@ def apply_fsdp2(model, fsdp_kwargs, config, ignored_names: Sequence[str] = ()):
 
     for idx, module in enumerate(modules):
         with maybe_patch_fsdp_module(module):
-            fully_shard(module, **fsdp_kwargs)
+            if replicate_frozen:
+                fully_shard(module, ignored_params=ignored_params, **fsdp_kwargs)
+            else:
+                fully_shard(module, **fsdp_kwargs)
 
     with maybe_patch_fsdp_module(model):
         # DIFF vs upstream: only the root call carries ignored_params
