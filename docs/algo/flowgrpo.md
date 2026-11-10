@@ -1,6 +1,6 @@
 # Flow-GRPO
 
-Last updated: 07/22/2026.
+Last updated: 11/10/2026.
 
 Flow-GRPO ([paper](https://arxiv.org/abs/2505.05470), [code](https://github.com/yifan123/flow_grpo)) is the first method to integrate online policy gradient reinforcement learning into **flow matching** generative models (e.g., Stable Diffusion 3, FLUX). It enables direct reward optimization for tasks such as compositional text-to-image generation, visual text rendering, and human preference alignment, without modifying the standard inference pipeline.
 
@@ -217,10 +217,10 @@ the full runnable command, see `docs/start/flowgrpo_quickstart.md`.
 ## Reference Example
 
 Standard LoRA training with OCR reward (Qwen-Image, 4 GPUs) using the current
-`vllm_omni` rollout example:
+`vllm_omni` rollout example (V1 sync — the default trainer path since v0.3.0):
 
 ```bash
-bash examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora.sh
+bash examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora_v1.sh
 ```
 
 ## Variants
@@ -300,9 +300,10 @@ A ready-to-use 4-GPU SP=2 example is provided:
 bash examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora_sp2.sh
 ```
 
-The FlowGRPO Qwen-Image example scripts enable **step-wise continuous batching**
-by default (`step_execution=true`). SD3.5 examples use **request-level**
-batching instead. See
+The FlowGRPO Qwen-Image full-parameter example (`run_qwen_image_ocr.sh`) enables
+**step-wise continuous batching** (`step_execution=true`); the LoRA launchers
+(including the v1 default) use **request-level** batching instead, as do the
+SD3.5 examples. See
 [`rollout_batching.md`](../start/rollout_batching.md) for how to choose and
 enable either mode.
 
