@@ -57,7 +57,12 @@ class Qwen3OmniThinkerAdapter(OmniModelBase):
         from .veomni import freeze_modality_towers, validate_thinker_only
 
         validate_thinker_only(module, cls.get_strip_modules(model_config))
-        frozen = freeze_modality_towers(module)
+        overrides = getattr(model_config, "override_config", {})
+        frozen = freeze_modality_towers(
+            module,
+            freeze_vision=overrides.get("freeze_vision_tower", True),
+            freeze_audio=overrides.get("freeze_audio_tower", True),
+        )
         logger.info("Frozen Qwen3-Omni modality towers before optimizer creation: %s", frozen)
 
     @classmethod
@@ -91,6 +96,15 @@ class Qwen3OmniThinkerAdapter(OmniModelBase):
             forward/embedding accessors redirected to thinker.
         """
         module = super().configure_model(module, model_config)
+        overrides = getattr(model_config, "override_config", {})
+        if "freeze_vision_tower" in overrides or "freeze_audio_tower" in overrides:
+            from .veomni import freeze_modality_towers
+
+            freeze_modality_towers(
+                module,
+                freeze_vision=overrides.get("freeze_vision_tower", False),
+                freeze_audio=overrides.get("freeze_audio_tower", False),
+            )
         module.forward = module.thinker.forward
         module.get_input_embeddings = module.thinker.get_input_embeddings
         module.set_input_embeddings = module.thinker.set_input_embeddings

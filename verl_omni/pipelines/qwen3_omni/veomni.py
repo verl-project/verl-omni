@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Qwen3-Omni Thinker text/image training on verl's VeOmni FSDP2/EP engine.
+"""Qwen3-Omni Thinker multimodal training on verl's VeOmni FSDP2/EP engine.
 
 VeOmni owns model construction, sharding, optimization and checkpoint loading.
 This adapter supplies prompt-only modality masks and converts fused expert
@@ -63,6 +63,12 @@ def patch_veomni_causal_mask_kwargs() -> bool:
 
     Returns True when the shim was installed, False when it is unnecessary.
     """
+
+    from veomni.utils.device import IS_NPU_AVAILABLE
+
+    # VeOmni 0.1.12's NPU modeling already omits cache_position.
+    if IS_NPU_AVAILABLE:
+        return False
 
     from transformers.masking_utils import create_causal_mask
     from veomni.models.transformers.qwen3_omni_moe.generated import (
@@ -161,8 +167,10 @@ def validate_thinker_only(module: torch.nn.Module, excluded_modules: Iterable[st
         )
 
 
-def freeze_modality_towers(module: torch.nn.Module) -> tuple[str, ...]:
-    """Freeze the encoder towers, while training the full text backbone.
+def freeze_modality_towers(
+    module: torch.nn.Module, *, freeze_vision: bool = True, freeze_audio: bool = True
+) -> tuple[str, ...]:
+    """Freeze selected encoder towers, leaving other trainability unchanged.
 
     The vision tower still runs in the forward pass for image inputs; freezing
     only keeps its parameters out of the optimizer. The adapter validates the
@@ -171,7 +179,11 @@ def freeze_modality_towers(module: torch.nn.Module) -> tuple[str, ...]:
 
     thinker = getattr(module, "thinker", module)
     frozen: list[str] = []
-    for tower_name in ("visual", "audio_tower"):
+    for tower_name, freeze in (("visual", freeze_vision), ("audio_tower", freeze_audio)):
+        if not isinstance(freeze, bool):
+            raise TypeError(f"Freeze setting for {tower_name} must be a bool, got {freeze!r}.")
+        if not freeze:
+            continue
         tower = getattr(thinker, tower_name, None)
         if tower is None:
             raise AttributeError(f"Qwen3-Omni Thinker is missing expected {tower_name!r} module")
@@ -257,10 +269,26 @@ def setup_backend(model_config, engine_config) -> None:
 
 def prepare_inputs(model_inputs: dict, micro_batch: TensorDict, model_config) -> dict:
     """Add masks for prompt placeholders, retaining response token embeddings."""
+    features = model_inputs.get("input_features")
+    if features is not None:
+        feature_mask = model_inputs.get("feature_attention_mask")
+        if features.ndim != 3 or feature_mask is None or feature_mask.shape != (features.shape[0], features.shape[2]):
+            raise ValueError(
+                "Qwen3-Omni VeOmni expects HF input_features (num_audios, mel_bins, frames) "
+                "and feature_attention_mask (num_audios, frames)."
+            )
+        # Same packing as veomni.data.data_transform: discard padded mel frames,
+        # keep clip order, and provide lengths to the generated audio encoder.
+        feature_mask = feature_mask.to(device=features.device, dtype=torch.bool)
+        lengths = feature_mask.sum(-1)
+        valid = lengths > 0
+        model_inputs["input_features"] = features[valid].transpose(1, 2)[feature_mask[valid]].contiguous()
+        model_inputs["audio_feature_lengths"] = lengths[valid]
+        model_inputs.pop("feature_attention_mask")
+        if model_inputs["input_features"].shape[0] == 0:
+            model_inputs.pop("input_features")
+            model_inputs.pop("audio_feature_lengths")
     available = {modality for modality, key in _MODALITY_TENSOR_KEYS.items() if model_inputs.get(key) is not None}
-    unsupported = available - {"image"}
-    if unsupported:
-        raise NotImplementedError(f"Qwen3-Omni Thinker with VeOmni does not support {sorted(unsupported)} inputs yet.")
     prompt_mask = _build_prompt_region_mask(micro_batch, model_inputs["input_ids"].size(-1))
     if prompt_mask is None:
         raise ValueError("Qwen3-Omni VeOmni requires jagged input_ids and response_mask to locate prompt placeholders.")

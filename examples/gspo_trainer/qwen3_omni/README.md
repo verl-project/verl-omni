@@ -1,6 +1,6 @@
 # Qwen3-Omni Thinker GSPO recipes
 
-Last updated: 10/24/2026
+Last updated: 10/27/2026
 
 This directory contains both FSDP2 and Megatron recipes. For non-Megatron
 setup, data preparation and training instructions, see the
@@ -17,6 +17,7 @@ defaults and accept CLI overrides.
 | AVQA LoRA | FSDP2 / GPU | [AVQA LoRA](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_avqa_v1.sh) |
 | AVQA full-parameter | FSDP2 / NPU | [AVQA NPU](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_avqa_v1.sh) |
 | NExT-QA full-parameter | FSDP2 / NPU | [NExT-QA NPU](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_npu_nextqa_v1.sh) |
+| NExT-QA full-parameter | VeOmni / NPU | [NExT-QA VeOmni NPU](run_qwen3_omni_thinker_gspo_veomni_npu_nextqa_v1.sh) |
 | AudioMCQ full-parameter, separate-async | Megatron / GPU | [AudioMCQ](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/qwen3_omni/run_qwen3_omni_megatron_audiomcq_separate_async.sh) |
 | AVQA image+audio full-parameter, separate-async | Megatron / GPU | [AVQA](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/qwen3_omni/run_qwen3_omni_megatron_avqa_separate_async.sh) |
 | Geo3K full-parameter, separate-async | Megatron / GPU | [Geo3K](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/qwen3_omni/run_qwen3_omni_megatron_geo3k_separate_async.sh) |
@@ -24,6 +25,47 @@ defaults and accept CLI overrides.
 The following sections describe the **Megatron AudioMCQ**, **AVQA**, and **Geo3K** recipes,
 their dependency prerequisites and validation limits. For model-adapter development, see the
 [Megatron integration notes](../../../docs/contributing/integrating_an_omni_model.md#21-megatron-training-adapters).
+
+## NExT-QA with VeOmni on Ascend NPU
+
+The [standalone launcher](run_qwen3_omni_thinker_gspo_veomni_npu_nextqa_v1.sh)
+trains all Thinker parameters with the existing NExT-QA dataset and reward code.
+It does not source or modify the FSDP2 launchers.
+
+Install the [NPU training stack](../../../docs/start/install_npu.md), then
+VeOmni 0.1.12 following its
+[Ascend guide](https://github.com/ByteDance-Seed/VeOmni/blob/v0.1.12/docs/hardware_support/get_started_npu.md).
+Source CANN/ATB on every Ray node before launching:
+
+```bash
+MODEL_PATH=/models/Qwen3-Omni-30B-A3B-Instruct \
+TRAIN_FILE=/datasets/NextQA/train.parquet \
+VAL_FILE=/datasets/NextQA/validation.parquet \
+bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_veomni_npu_nextqa_v1.sh
+```
+
+Defaults are 16 NPUs, rollout TP=4, actor EP=1, prompt batch 32, eight samples
+per prompt, micro-batch 1, LR 1e-6, and 500 training steps. Prompt/response
+limits remain 8192/1024. Override topology with `N_GPUS_PER_NODE`, `NNODES`,
+`ROLLOUT_TP` and `ACTOR_EP`; trailing Hydra arguments take precedence.
+
+The launcher selects packed FlashAttention, fused NPU MoE and NPU CE/RMSNorm/RoPE.
+Reference operators inherit actor settings through Hydra interpolation.
+`MULTI_STREAM_MEMORY_REUSE=2` and the external-module setting are forwarded to
+Ray workers as strings. Rollout uses `PIECEWISE` graphs and `weight_nz_mode=0`.
+Combined stdout/stderr is saved to a timestamped log; `LOG_FILE` and `RUN_TIME`
+are overridable.
+
+For backend comparisons, use FSDP2 FP32 parameter storage with matching BF16
+compute precision, hardware, data and training settings. VeOmni's default
+mixed precision uses FP32 stored parameters and BF16 computation. Record the
+packed-versus-padded input and kernel differences. Use separate output paths
+and do not resume one backend from the other's checkpoint.
+
+The user has validated NExT-QA training on the preceding launcher revision.
+This standalone refactor requires a new NPU smoke run. Audio/video adapter
+support remains in the backend; this recipe keeps `use_audio_in_video=false`
+and does not establish joint audio/video alignment correctness.
 
 ## AudioMCQ with Megatron and V1 separate-async rollout
 
