@@ -777,6 +777,7 @@ def ensure_tiny_minimax_h3_checkpoint(
 
 
 def _build_checkpoint_from_source(output: Path, hf_root: Path, *, source: str) -> str:
+    """Assemble the native rollout partitions and actor weights from one tiny source."""
     source_qwen_config = Qwen3VLConfig.from_pretrained(
         hf_root / "text_encoder",
         local_files_only=True,
@@ -836,6 +837,7 @@ def _build_checkpoint_from_source(output: Path, hf_root: Path, *, source: str) -
 
 
 def main() -> None:
+    """Build the requested tiny checkpoint from a downloaded or offline source."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--hf-cache-dir", default=None)

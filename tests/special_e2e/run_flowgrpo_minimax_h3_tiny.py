@@ -87,6 +87,7 @@ def _require_minimax_h3_diffusers() -> None:
 
 
 def _validate_actor_sp(num_gpus: int, actor_sp: int) -> None:
+    """Require a positive actor world size divisible by its sequence-parallel degree."""
     if num_gpus <= 0 or actor_sp <= 0 or num_gpus % actor_sp:
         raise ValueError(f"num_gpus={num_gpus} must be divisible by actor_sp={actor_sp}.")
 
@@ -443,6 +444,7 @@ def run_smoke(
 
 
 def _parse_args() -> argparse.Namespace:
+    """Parse the task, accelerator topology and tiny-workload dimensions."""
     parser = argparse.ArgumentParser(description="Run tiny MiniMax-H3 T2VA, FL2VA, and Ref2VA FlowGRPO smoke coverage.")
     parser.add_argument("--tiny-model-dir", default=os.environ.get("MODEL_PATH", _DEFAULT_TINY_MODEL_DIR))
     parser.add_argument("--data-dir", default=os.environ.get("DATA_DIR", _DEFAULT_DATA_DIR))
@@ -478,6 +480,7 @@ def _parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    """Run the selected H3 tasks sequentially and stop on the first nonzero exit."""
     args = _parse_args()
     _require_minimax_h3_diffusers()
     tasks = ("t2va", "fl2va", "ref2va") if args.task == "all" else (args.task,)
