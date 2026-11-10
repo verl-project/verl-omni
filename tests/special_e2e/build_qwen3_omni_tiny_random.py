@@ -285,7 +285,7 @@ def ensure_tiny_qwen3_omni_checkpoint(
 
 
 def _checkpoint_is_compatible(output: Path, *, head_dim: int) -> bool:
-    """Require the requested tiny geometry and nonempty local model/processor files."""
+    """Check tiny attention geometry and the required local checkpoint components."""
     try:
         config = json.loads((output / "config.json").read_text())
         text = config["thinker_config"]["text_config"]
