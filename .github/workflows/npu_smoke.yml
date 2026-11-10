@@ -15,6 +15,7 @@ on:
       - "pyproject.toml"
       - ".github/workflows/npu_smoke.yml"
       - .github/vllm_omni_pin.txt
+      - .github/qwen_tts_pin.txt
   pull_request:
     branches:
       - main
@@ -30,6 +31,7 @@ on:
       - "pyproject.toml"
       - ".github/workflows/npu_smoke.yml"
       - .github/vllm_omni_pin.txt
+      - .github/qwen_tts_pin.txt
 
 # Declare permissions just read content and PR file metadata.
 permissions:
@@ -123,6 +125,10 @@ jobs:
           MODEL_PATH="${HOME}/.cache/modelscope/hub/models/tiny-random/Qwen-Image"
           python tests/special_e2e/build_qwen_image_tiny_random.py \
             --output-dir "${MODEL_PATH}"
+      - name: Prepare Qwen3-TTS smoke dependencies and source assets
+        if: matrix.group == 'e2e'
+        shell: bash
+        run: bash tests/npu_smoke/prepare_tts_smoke.sh
       - name: Run NPU smoke ${{ matrix.group }} tests
         shell: bash
         env:

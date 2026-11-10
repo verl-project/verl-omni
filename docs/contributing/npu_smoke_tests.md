@@ -1,6 +1,6 @@
 # NPU Smoke Tests
 
-Last updated: 11/09/2026.
+Last updated: 11/10/2026.
 
 This guide explains how to add CI test cases for Huawei Ascend devices in verl-omni.
 
@@ -24,6 +24,17 @@ into these runners:
 | 5 | core | Unseeded multi-worker rollout diversity | tests/agent_loop/test_diffusion_agent_loop_npu.py::test_rollout_without_seed_npu | 8 |
 | 6 | core | Seeded multi-worker rollout reproducibility | tests/agent_loop/test_diffusion_agent_loop_npu.py::test_rollout_seed_reproducibility_npu | 8 |
 | 7 | core | Standalone vLLM reward engine and OCR scoring | tests/reward_loop/test_reward_engine_npu.py | 8 |
+| 29 | e2e | Qwen3-TTS full-parameter GRPO | tests/special_e2e/run_qwen3_tts_grpo_npu.sh | 8 |
+| 35 | e2e | SD3 CRD, independent EMA and checkpoint restore | tests/special_e2e/run_crd_sd35_npu.sh | 8 |
+
+The combined runner has ten entries: six core and four e2e. Entry 29 reuses
+GPU omni entry 3 with two full-parameter updates and a test-local duration
+reward. CI prepares the pinned Qwen3-TTS package, audio helpers and tiny source
+before offline execution. For local setup, run
+`bash tests/npu_smoke/prepare_tts_smoke.sh`; `--check-only` checks dependencies.
+Entry 35 reuses GPU diffusion entry 12, retaining two CRD updates, independent
+EMA, distributed update parity and exact checkpoint restoration. Both are
+execution smokes, not quality or convergence checks.
 
 The combined runner has eight entries: six core (0, 3, 4, 5, 6, 7) and two e2e
 (1, 2). The core group collects seven pytest cases because entry 4 is
@@ -150,7 +161,7 @@ If the new test lives outside current path filters, add its path. Current
 filters include verl_omni/**, tests/npu_smoke/**, tests/agent_loop/**,
 tests/reward_loop/**, tests/workers/**, tests/special_e2e/**, pyproject.toml,
 .github/workflows/npu_smoke.yml,
-and .github/vllm_omni_pin.txt.
+.github/vllm_omni_pin.txt and .github/qwen_tts_pin.txt.
 
 ### 5. Handle models and datasets
 
