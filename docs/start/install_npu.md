@@ -1,6 +1,6 @@
 # Installation (NPU)
 
-Last updated: 10/29/2026
+Last updated: 11/10/2026
 
 For NVIDIA GPU, see the {doc}`GPU installation guide <install>`. For AMD GPU, see the {doc}`ROCm installation guide <install_rocm>`. For Intel GPU, see the {doc}`Intel GPU installation guide <install_xpu>`. For Cambricon MLU, see the {doc}`MLU installation guide <install_mlu>`.
 
@@ -259,7 +259,11 @@ If you run the training command manually, make sure to include the NPU-specific 
 actor_rollout_ref.model.attn_backend=_native_npu
 ```
 
-The script launches `python3 -m verl_omni.trainer.main_diffusion` with FlowGRPO + `vllm_omni` rollout and OCR reward (`compute_score_ocr`). Checkpoints are written to:
+The script launches `python3 -m verl_omni.trainer.main_diffusion` (the
+deprecated v0 trainer — this NPU launcher keeps v0 until an NPU V1 recipe for
+Qwen-Image FlowGRPO lands, tracked in
+[verl-project/verl-omni#389](https://github.com/verl-project/verl-omni/issues/389);
+expect a `DeprecationWarning` at launch) with FlowGRPO + `vllm_omni` rollout and OCR reward (`compute_score_ocr`). Checkpoints are written to:
 
 ```bash
 checkpoints/flow_grpo/qwen_image_ocr_lora

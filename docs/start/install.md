@@ -1,6 +1,6 @@
 # Installation
 
-Last updated: 10/29/2026
+Last updated: 11/10/2026
 
 For Ascend NPU, see the {doc}`NPU installation guide <install_npu>`. For AMD GPU, see the {doc}`ROCm installation guide <install_rocm>`. For Intel GPU, see the {doc}`Intel GPU installation guide <install_xpu>`. For Cambricon MLU, see the {doc}`MLU installation guide <install_mlu>`.
 
@@ -106,7 +106,7 @@ uv pip install -e ".[fa2]"
 
 ### Optional engine backends
 
-VeRL-Omni defaults to FSDP2; the diffusion trainer and Qwen3-Omni Thinker can alternatively use VeOmni — see {doc}`Optional engine backends <engine_backends>`.
+VeRL-Omni trains with FSDP by default (`fsdp2` is a selectable strategy); the diffusion trainer and Qwen3-Omni Thinker can alternatively use VeOmni — see {doc}`Optional engine backends <engine_backends>`.
 
 ## Post-Installation Verification
 
@@ -184,7 +184,7 @@ Notes:
 
 ## Example: Qwen-Image FlowGRPO training in Docker
 
-This walkthrough follows the [FlowGRPO quickstart](flowgrpo_quickstart.md) using the OCR dataset and `examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora.sh`.
+This walkthrough follows the [FlowGRPO quickstart](flowgrpo_quickstart.md) using the OCR dataset and `examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora_v1.sh`.
 
 Use the **`ocr` image target** (`verl-omni:gpu-ocr`) so the `Levenshtein` dependency is present.
 
@@ -215,13 +215,14 @@ export WANDB_API_KEY=<your_wandb_api_key>
 
 ### 4. Run FlowGRPO training
 
-The default OCR LoRA script uses 4 GPUs by default:
+The default OCR LoRA script (V1 sync — the default trainer path since v0.3.0)
+uses 4 GPUs by default:
 
 ```bash
-bash examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora.sh
+bash examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora_v1.sh
 ```
 
-The script launches `python3 -m verl_omni.trainer.main_diffusion` with FlowGRPO + `vllm_omni` rollout and OCR reward (`compute_score_ocr`). Checkpoints are written to:
+The script launches `python3 -m verl_omni.trainer.main_diffusion_v1` with FlowGRPO + `vllm_omni` rollout and OCR reward (`compute_score_ocr`). Checkpoints are written to:
 
 ```bash
 checkpoints/flow_grpo/qwen_image_ocr_lora

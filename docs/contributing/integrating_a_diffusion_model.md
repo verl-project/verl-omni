@@ -1,6 +1,6 @@
 # How to Integrate a New Diffusion Model for FlowGRPO Training
 
-Last updated: 10/27/2026.
+Last updated: 11/10/2026.
 
 This guide walks you through everything required to integrate a new diffusion
 model into VeRL-Omni so it can be trained end-to-end with the **FlowGRPO**
@@ -442,6 +442,35 @@ The worked example is
   setup on `diffusers_training_adapter.py`.
 - Under FSDP2, `get_fsdp_ignored_module_names` feeds
   `CompositeARFSDPEngineWithLMHead._build_fsdp_module`.
+
+### Composite rollout loop
+
+Training an AR adapter pairs with the `composite_single_turn_agent` loop,
+which runs AR and diffusion generation in one rollout. Select it with
+`actor_rollout_ref.rollout.agent.default_agent_loop=composite_single_turn_agent`
+(per-sample `agent_name` overrides) and set
+`+actor_rollout_ref.rollout.agent.agent_loop_manager_class` to the manager FQN
+(the `+` prefix is needed — the key is absent from the shipped config)
+`verl_omni.agent_loop.composite_agent_loop.CompositeAgentLoopManager`. The
+contract, in brief:
+
+- AR sampling lives under `actor_rollout_ref.rollout.ar.*`; `rollout.m` is the
+  diffusion group size per AR sample.
+- The reward config must define a function named `ar` with `weight: 0` — AR
+  reward is derived from the per-image `reward/ar` extras and the loop asserts
+  the zero weight (`verl_omni/agent_loop/composite_agent_loop.py`).
+- AR `position_ids` dispatch to the registered pipeline's
+  `build_ar_position_ids` hook (`verl_omni/pipelines/model_base.py`).
+
+The worked wiring is
+[`qwen_image_dual_grpo`](../../verl_omni/pipelines/qwen_image_dual_grpo/);
+a runnable miniature lives in
+[`tests/agent_loop/test_composite_agent_loop.py`](../../tests/agent_loop/test_composite_agent_loop.py).
+
+Models that are not composite stay on the default `diffusion_single_turn_agent`
+loop. Put model-specific rollout behavior in adapter hooks first — registering
+a new loop is a last resort (see "Select the rollout loop" in
+[`integrating_an_omni_model.md`](integrating_an_omni_model.md)).
 
 ---
 
