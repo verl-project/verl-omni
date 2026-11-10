@@ -6,7 +6,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib_npu_e2e.sh"
 
 export NUM_GPUS="${NUM_NPUS}"
-export REWARD_TP="${REWARD_TP:-2}"
 export MODEL_PATH="${MODEL_PATH:-${HOME}/.cache/modelscope/hub/models/tiny-random/Qwen-Image}"
 export TOKENIZER_PATH="${MODEL_PATH}/tokenizer"
 export REWARD_MODEL_PATH="${QWEN_IMAGE_REWARD_MODEL_PATH:-${HOME}/.cache/verl-omni-npu-smoke/e2e/Qwen2.5-VL-Reward-NPU}"
@@ -31,6 +30,5 @@ fi
 
 exec bash "${SCRIPT_DIR}/run_online_dpo_qwen_image.sh" \
     "${NPU_RUNTIME_ARGS[@]}" \
-    "actor_rollout_ref.rollout.tensor_model_parallel_size=${ROLLOUT_TP:-2}" \
     trainer.experiment_name=online-dpo-qwen-image-v1-sync-npu-e2e \
     "$@"

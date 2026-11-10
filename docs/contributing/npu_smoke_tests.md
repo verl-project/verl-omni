@@ -18,10 +18,10 @@ into these runners:
 |---|---|---|---|---:|
 | 0 | core | vLLM-Omni rollout + sleep/wake-up | tests/workers/rollout/rollout_vllm/test_vllm_omni_generate_npu.py | 8 |
 | 3 | core | Diffusers FSDP engine inference and training | tests/workers/test_diffusers_fsdp_engine_npu.py | 8 |
-| 4 | core | Diffusion agent loop, request and step execution | tests/agent_loop/test_diffusion_agent_loop_npu.py::test_diffusion_single_turn_npu | 2 |
-| 5 | core | Unseeded multi-worker rollout diversity | tests/agent_loop/test_diffusion_agent_loop_npu.py::test_rollout_without_seed_npu | 2 |
-| 6 | core | Seeded multi-worker rollout reproducibility | tests/agent_loop/test_diffusion_agent_loop_npu.py::test_rollout_seed_reproducibility_npu | 2 |
-| 7 | core | Standalone vLLM reward engine and OCR scoring | tests/reward_loop/test_reward_engine_npu.py | 2 |
+| 4 | core | Diffusion agent loop, request and step execution | tests/agent_loop/test_diffusion_agent_loop_npu.py::test_diffusion_single_turn_npu | 8 |
+| 5 | core | Unseeded multi-worker rollout diversity | tests/agent_loop/test_diffusion_agent_loop_npu.py::test_rollout_without_seed_npu | 8 |
+| 6 | core | Seeded multi-worker rollout reproducibility | tests/agent_loop/test_diffusion_agent_loop_npu.py::test_rollout_seed_reproducibility_npu | 8 |
+| 7 | core | Standalone vLLM reward engine and OCR scoring | tests/reward_loop/test_reward_engine_npu.py | 8 |
 | 1 | e2e | Qwen-Image FlowGRPO trainer | tests/special_e2e/run_flowgrpo_qwen_image_npu.sh | 8 |
 | 2 | e2e | Wan2.2 DanceGRPO trainer with Qwen2.5-VL reward | tests/special_e2e/run_dancegrpo_wan22_npu.sh | 8 |
 | 18 | e2e | Qwen-Image FlowGRPO V1 sync | tests/special_e2e/run_flowgrpo_qwen_image_v1_npu.sh | 8 |
@@ -61,10 +61,8 @@ explicitly rather than producing an all-skipped smoke success.
 
 Tests 4-6 reuse the GPU cases to check request/step execution, unseeded rollout
 diversity, and seeded reproducibility. They use tiny Qwen-Image, rollout TP=2,
-and two agent-loop workers. The default uses one TP=2 replica; `NUM_NPUS`
-remains the available budget and must be even and at least 2. Set
-`NPU_SMOKE_FULL_TOPOLOGY=1` to exercise every allocated device in tests 4-7.
-FSDP and trainer tests continue to use their full configured allocations.
+and two agent-loop workers. `NUM_NPUS` selects the allocation and must be even
+and at least 2. Each test uses its full configured allocation.
 
 The workflow prepares the local checkpoint. For a local run, prepare it first:
 
@@ -91,8 +89,8 @@ For a two-device local check, set both visibility variables to `0,1` and
 ### Standalone reward engine
 
 Test 7 checks standalone vLLM reward-server startup and OCR scoring with a tiny
-random Qwen2.5-VL model generated offline. It starts one TP=2 reward replica
-by default, without an actor rollout server. The first server uses a cold
+random Qwen2.5-VL model generated offline. It starts `NUM_NPUS / 2` TP=2 reward
+replicas without an actor rollout server. The first server uses a cold
 inspection cache; later restarts in the same pytest module reuse that cache.
 
 After configuring the [runtime environment](#runtime-environment), run:
@@ -105,9 +103,9 @@ All nonzero exits, including native abort 134, fail the smoke group.
 
 ### Wan2.2 trainer with a reward model
 
-Test 2 runs one DanceGRPO training step with six actor NPUs and a dedicated
-TP=2 Qwen2.5-VL reward engine on two NPUs. Prepare the Qwen2.5-VL-3B-Instruct
-checkpoint before an offline run; set `REWARD_MODEL_PATH` to its local directory
+With eight NPUs, test 2 runs one DanceGRPO training step with six actor NPUs
+and a dedicated TP=2 Qwen2.5-VL reward engine on two NPUs. Prepare the
+Qwen2.5-VL-3B-Instruct checkpoint before an offline run; set `REWARD_MODEL_PATH` to its local directory
 when needed. The test must complete training and exit 0.
 
 ### Qwen-Image V1 trainer variants
@@ -121,10 +119,9 @@ MODEL_PATH=/path/to/Qwen-Image-Edit NUM_NPUS=8 \
   bash tests/special_e2e/run_flowgrpo_qwen_image_edit_npu.sh
 ```
 
-Entries 18-21 default to rollout TP=2; entries 18/20 also use reward TP=2.
-`ROLLOUT_TP` and `REWARD_TP` override these defaults. Single-group runs retain
-the eight-NPU training allocation. Full-CI shards use four NPUs per group;
-launchers derive their batches from that allocation and retain the training steps.
+Single-group runs retain the eight-NPU allocation. Full-CI shards use four
+NPUs per group; launchers derive their batches from that allocation and retain
+the training steps.
 
 ## Add a New NPU Smoke Test
 

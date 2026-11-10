@@ -18,8 +18,6 @@ from pathlib import Path
 
 import pytest
 
-from tests.utils.npu_test_topology import inference_npu_count
-
 
 @pytest.fixture(scope="module")
 def npu_reward_inspection_cache(tmp_path_factory):
@@ -63,8 +61,6 @@ def npu_reward_checkpoint(monkeypatch, npu_reward_inspection_cache):
 
     if not torch.npu.is_available() or requested > torch.npu.device_count():
         pytest.fail("The standalone reward smoke requires at least NUM_NPUS visible Ascend NPUs.")
-    requested = inference_npu_count(torch.npu.device_count())
-    print(f"Standalone reward smoke: {requested // 2} TP=2 replica(s).")
 
     from tests.reward_loop.build_qwen25_vl_reward_tiny_random import ensure_tiny_qwen25_vl_reward_checkpoint
 
