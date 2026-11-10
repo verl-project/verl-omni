@@ -123,22 +123,27 @@ def _fsdp_param_dtype(
     return configured_dtype
 
 
-def _replicate_frozen_requested() -> bool:
-    """Keep the frozen base unsharded on every rank (LoRA + FSDP2 only)."""
-    return os.environ.get("VERL_OMNI_FSDP_REPLICATE_FROZEN", "0") == "1"
-
-
 def _replicate_frozen_enabled(engine) -> bool:
-    """Whether this engine keeps its frozen base replicated (env flag, FSDP2, LoRA, no CPU offload)."""
-    if not _replicate_frozen_requested() or engine.model_config.lora_rank <= 0:
+    """Whether the adapter keeps the frozen base replicated (FSDP2, unmerged LoRA, no CPU offload)."""
+    model_cls = DiffusionModelBase.get_class(engine.model_config)
+    if engine.model_config.lora_rank <= 0 or not model_cls.replicate_frozen_base(engine.model_config):
         return False
     if engine.engine_config.strategy != "fsdp2":
-        raise ValueError("VERL_OMNI_FSDP_REPLICATE_FROZEN=1 requires strategy=fsdp2.")
+        raise ValueError("replicate_frozen_base requires strategy=fsdp2.")
     if resolve_lora_config(engine.model_config).merge:
-        raise ValueError("VERL_OMNI_FSDP_REPLICATE_FROZEN=1 does not support model.lora.merge=True.")
+        raise ValueError("replicate_frozen_base does not support model.lora.merge=True.")
     if engine.engine_config.param_offload:
-        raise ValueError("VERL_OMNI_FSDP_REPLICATE_FROZEN=1 requires param_offload=False.")
+        raise ValueError("replicate_frozen_base requires param_offload=False.")
     return not (engine.engine_config.offload_policy or engine.engine_config.forward_only)
+
+
+def _cast_replicated_params(module, param_dtype: Optional[torch.dtype]) -> None:
+    """Store the frozen base in the FSDP compute dtype; FSDP2 casts only the parameters it shards."""
+    if param_dtype is None:
+        return
+    for name, param in module.named_parameters():
+        if "lora_" not in name and param.is_floating_point():
+            param.data = param.data.to(param_dtype)
 
 
 def _check_replicated_params(module) -> None:
@@ -150,9 +155,7 @@ def _check_replicated_params(module) -> None:
     ok = torch.tensor(float(bool(torch.isfinite(sums).all()) and torch.equal(reference, sums)), device=sums.device)
     torch.distributed.all_reduce(ok, op=torch.distributed.ReduceOp.MIN)
     if ok.item() == 0:
-        raise RuntimeError(
-            "VERL_OMNI_FSDP_REPLICATE_FROZEN=1: replicated parameters differ across ranks or are non-finite."
-        )
+        raise RuntimeError("replicate_frozen_base: replicated parameters differ across ranks or are non-finite.")
 
 
 class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
@@ -486,6 +489,7 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
                     ((n, p) for n, p in module.named_parameters() if "lora_" in n), key=lambda item: item[0]
                 ):
                     torch.distributed.broadcast(param.data, src=0)
+                _cast_replicated_params(module, param_dtype)
                 _check_replicated_params(module)
                 apply_fsdp2(module, fsdp_kwargs, self.engine_config, ignored_names=ignored_names, replicate_frozen=True)
             else:

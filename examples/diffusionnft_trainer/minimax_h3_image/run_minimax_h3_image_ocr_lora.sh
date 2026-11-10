@@ -16,14 +16,16 @@
 #   REWARD_MODEL_NAME  Qwen3-VL-8B-Instruct repo id or local path (served by the reward worker)
 set -euo pipefail
 
-export VERL_OMNI_FSDP_REPLICATE_FROZEN=1
+export VERL_OMNI_H3_IMAGE_REPLICATE_FROZEN=1
 export VERL_OMNI_H3_IMAGE_PACK_MICRO_BATCH=1
 export GENRM_OCR_TEMPERATURE=0
 export VLLM_ENGINE_READY_TIMEOUT_S=${VLLM_ENGINE_READY_TIMEOUT_S:-3600}
 : "${PPOCR_MODEL_DIR:?Set PPOCR_MODEL_DIR to the PP-OCRv6 medium ONNX directory}"
 : "${PICKSCORE_PATH:?Set PICKSCORE_PATH to yuvalkirstain/PickScore_v1}"
 : "${CLIP_H14_PATH:?Set CLIP_H14_PATH to laion/CLIP-ViT-H-14-laion2B-s32B-b79K}"
-: "${HPSV2_CHECKPOINT:?Set HPSV2_CHECKPOINT to HPS_v2.1_compressed.pt}"
+: "${CUSTOM_REWARD_MODEL_PATH:?Set CUSTOM_REWARD_MODEL_PATH to HPS_v2.1_compressed.pt}"
+export HPSV2_PRETRAINED_PATH=${HPSV2_PRETRAINED_PATH:-$CLIP_H14_PATH/open_clip_pytorch_model.bin}
+export CUSTOM_REWARD_MODEL_PATH
 
 export WANDB_MODE=${WANDB_MODE:-offline}
 export RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO=0

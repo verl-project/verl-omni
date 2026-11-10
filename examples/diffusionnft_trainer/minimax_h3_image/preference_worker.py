@@ -14,12 +14,12 @@
 """PickScore and HPSv2.1 scorer process for the preference reward terms.
 
 One JSON request per stdin line (``{"path": image file, "prompt": full generation prompt}``), one JSON reply per
-stdout line (``{"pickscore": logit / 26, "hpsv2": cosine}``). Runs on the GPU given by ``CUDA_VISIBLE_DEVICES`` of
-this process.
+stdout line (``{"pickscore": logit / 26, "hpsv2": score}``). Runs on the GPU given by ``CUDA_VISIBLE_DEVICES`` of
+this process. HPSv2.1 is ``compute_score_hpsv2`` and PickScore is ``_PickScoreInferencer.score``.
 
 Requires ``PICKSCORE_PATH`` (``yuvalkirstain/PickScore_v1``), ``CLIP_H14_PATH``
-(``laion/CLIP-ViT-H-14-laion2B-s32B-b79K``, holding ``open_clip_pytorch_model.bin``) and ``HPSV2_CHECKPOINT``
-(``HPS_v2.1_compressed.pt``).
+(``laion/CLIP-ViT-H-14-laion2B-s32B-b79K``) and the ``compute_score_hpsv2`` inputs ``HPSV2_PRETRAINED_PATH``
+(``open_clip_pytorch_model.bin`` of that CLIP) and ``CUSTOM_REWARD_MODEL_PATH`` (``HPS_v2.1_compressed.pt``).
 """
 
 import json
@@ -34,34 +34,34 @@ def main():
     import torch
     from PIL import Image
 
-    from verl_omni.utils.reward_score.hpsv2_reward import _HPSv2Scorer
-    from verl_omni.utils.reward_score.pickscore_reward import _pairwise_pickscore, _PickScoreInferencer
+    from verl_omni.utils.reward_score.hpsv2_reward import compute_score_hpsv2
+    from verl_omni.utils.reward_score.pickscore_reward import _PickScoreInferencer
 
     if not torch.cuda.is_available():
         raise RuntimeError("preference_worker.py needs a CUDA device")
-    device = torch.device("cuda")
-    clip_h = os.environ["CLIP_H14_PATH"]
-    hpsv2 = _HPSv2Scorer(os.path.join(clip_h, "open_clip_pytorch_model.bin"), os.environ["HPSV2_CHECKPOINT"], device)
+    os.environ["REWARD_DEVICE"] = "cuda"
     pickscore = _PickScoreInferencer(
-        device=device, dtype=torch.bfloat16, model_path=os.environ["PICKSCORE_PATH"], processor_path=clip_h
+        device=torch.device("cuda"),
+        dtype=torch.bfloat16,
+        model_path=os.environ["PICKSCORE_PATH"],
+        processor_path=os.environ["CLIP_H14_PATH"],
     )
+    blank = Image.new("RGB", (64, 64))
+    compute_score_hpsv2(blank, ground_truth="")
     real_stdout.write(json.dumps({"ready": True}) + "\n")
     real_stdout.flush()
     for line in sys.stdin:
-        request = json.loads(line)
+        if not line.strip():
+            continue
         try:
+            request = json.loads(line)
             image = Image.open(request["path"]).convert("RGB")
             prompt = request["prompt"]
             with torch.no_grad():
-                hps = hpsv2.infer([image], [prompt])
-                pick = pickscore.infer([prompt], [image])
+                pick = pickscore.score([prompt], [image])
             reply = {
-                "hpsv2": torch.nn.functional.cosine_similarity(
-                    hps["text_embeddings"][0:1].float(), hps["image_embeddings"][0:1].float(), dim=-1
-                ).item(),
-                "pickscore": _pairwise_pickscore(
-                    pick["text_embeddings"][0:1], pick["image_embeddings"][0:1], pick["logit_scale"], score_divisor=26.0
-                ).item(),
+                "hpsv2": compute_score_hpsv2(image, ground_truth=prompt)["score"],
+                "pickscore": float(pick[0].item()),
             }
         except Exception as error:
             reply = {"error": repr(error)}

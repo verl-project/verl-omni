@@ -448,6 +448,61 @@ class TestForward:
         assert torch.equal(installed[0], stock[0]) and torch.equal(installed[1], stock[1])
         assert stock[1].abs().sum() > 0
 
+    def _lora_actor(self):
+        from peft import LoraConfig, inject_adapter_in_model
+
+        actor = _tiny_actor()
+        inject_adapter_in_model(LoraConfig(r=2, lora_alpha=4, target_modules=["to_q", "ff.net.2"]), actor)
+        for name, parameter in actor.named_parameters():
+            if "lora_B" in name:
+                torch.nn.init.normal_(parameter, std=0.05)
+        return actor
+
+    def test_packed_micro_batch_matches_the_per_sample_forward(self, tmp_path, monkeypatch):
+        model_config = _model_config(tmp_path)
+        actor = self._lora_actor()
+        micro_batch = _micro_batch(3, forward_noise=torch.randn(3, _NUM_ROWS * 96))
+        micro_batch["train_timesteps"][:, 0] = torch.tensor([532, 967, 750])
+        inputs = self._inputs(micro_batch, 0, actor, model_config)
+        inputs["encoder_mask"][1, 3:] = 0
+        inputs["encoder_mask"][2, 4:] = 0
+
+        def run(packed):
+            monkeypatch.setattr(MiniMaxH3ImageDiffusionNFT, "pack_micro_batch", packed)
+            actor.zero_grad()
+            prediction = MiniMaxH3ImageDiffusionNFT.forward(actor, model_config, inputs)
+            prediction.square().mean().backward()
+            grads = {name: parameter.grad.clone() for name, parameter in actor.named_parameters() if "lora_" in name}
+            return prediction.detach(), grads
+
+        per_sample, per_sample_grads = run(False)
+        packed, packed_grads = run(True)
+        assert torch.allclose(packed, per_sample, atol=1e-5, rtol=1e-4)
+        for name, grad in per_sample_grads.items():
+            assert grad.abs().sum() > 0, name
+            assert torch.allclose(packed_grads[name], grad, atol=1e-5, rtol=1e-4), name
+
+        monkeypatch.setattr(MiniMaxH3ImageDiffusionNFT, "pack_micro_batch", True)
+        other_text = inputs["encoder_hidden_states"].clone()
+        other_text[2] += 1.0
+        with torch.no_grad():
+            changed = MiniMaxH3ImageDiffusionNFT.forward(
+                actor, model_config, {**inputs, "encoder_hidden_states": other_text}
+            )
+        assert torch.allclose(changed[:2], packed[:2], atol=1e-6) and not torch.allclose(changed[2], packed[2])
+
+    def test_packed_micro_batch_rejects_gradient_checkpointing(self, tmp_path, monkeypatch):
+        model_config = _model_config(tmp_path)
+        actor = self._lora_actor()
+        actor.enable_gradient_checkpointing()
+        actor.train()
+        monkeypatch.setattr(MiniMaxH3ImageDiffusionNFT, "pack_micro_batch", True)
+        inputs = self._inputs(_micro_batch(2, forward_noise=torch.randn(2, _NUM_ROWS * 96)), 2, actor, model_config)
+        with pytest.raises(NotImplementedError, match="gradient checkpointing off"):
+            MiniMaxH3ImageDiffusionNFT.forward(actor, model_config, inputs)
+        with torch.no_grad():
+            assert MiniMaxH3ImageDiffusionNFT.forward(actor, model_config, inputs).shape == (2, _NUM_ROWS * 96)
+
     def test_straight_through_returns_the_kernel_value_with_the_reference_gradient(self):
         source = torch.tensor([1.0, 2.0], requires_grad=True)
         value = torch.tensor([10.0, 20.0])

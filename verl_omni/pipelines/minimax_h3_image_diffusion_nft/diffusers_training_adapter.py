@@ -73,6 +73,12 @@ class MiniMaxH3ImageDiffusionNFT(DiffusionModelBase):
 
     pack_micro_batch = os.environ.get("VERL_OMNI_H3_IMAGE_PACK_MICRO_BATCH", "0") == "1"
     use_rollout_kernels = os.environ.get("VERL_OMNI_H3_IMAGE_ROLLOUT_KERNELS", "1") != "0"
+    replicate_frozen = os.environ.get("VERL_OMNI_H3_IMAGE_REPLICATE_FROZEN", "0") == "1"
+
+    @classmethod
+    def replicate_frozen_base(cls, model_config) -> bool:
+        """Opt-in (``VERL_OMNI_H3_IMAGE_REPLICATE_FROZEN=1``): the 31B frozen base fits on each GB300 rank."""
+        return cls.replicate_frozen
 
     @classmethod
     def validate_lora_config(cls, model_config: DiffusionModelConfig) -> None:

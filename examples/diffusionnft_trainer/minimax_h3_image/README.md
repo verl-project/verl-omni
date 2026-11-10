@@ -15,7 +15,7 @@ DiffusionNFT LoRA training for the MiniMax H3 image model (6-step PDD sampler) o
 Layout guard: 0 if a PP-OCR text box touches the frame (within 2 px), else `min(1, 0.08 / text_area)`.
 It is required: with a plain OCR term the policy enlarges the text until it fills the canvas
 (text area 0.054 -> 0.175, 20% of validation images touching the frame at step 50), and PickScore / HPSv2.1 do not
-react to that. A PP-OCR failure on an image counts as no text (guard 1).
+react to that. A failed PP-OCR request leaves the guard at 1 and is counted in `reward/ocr/guard_error`.
 
 ## Setup
 
@@ -29,7 +29,8 @@ python verl_omni/pipelines/minimax_h3_image_diffusion_nft/checkpoint.py convert 
 - `rapidocr` must support `OCRVersion.PPOCRV6`; `PPOCR_MODEL_DIR` holds `PP-OCRv6_det_medium.onnx` and
   `PP-OCRv6_rec_medium.onnx`.
 - `PICKSCORE_PATH`: `yuvalkirstain/PickScore_v1`. `CLIP_H14_PATH`: `laion/CLIP-ViT-H-14-laion2B-s32B-b79K`
-  (with `open_clip_pytorch_model.bin`). `HPSV2_CHECKPOINT`: `HPS_v2.1_compressed.pt` from `xswu/HPSv2`.
+  (with `open_clip_pytorch_model.bin`, the default `HPSV2_PRETRAINED_PATH`). `CUSTOM_REWARD_MODEL_PATH`:
+  `HPS_v2.1_compressed.pt` from `xswu/HPSv2`. HPSv2.1 is scored by `compute_score_hpsv2`.
 - Rollout needs vLLM-Omni with MiniMax H3 image support (vLLM-Omni 0.33, #878).
 
 The data rows carry the target text in `reward_model.ground_truth` and `extra_info.split` / `extra_info.index`; the
@@ -38,14 +39,15 @@ reward looks the full prompt up in `TRAIN_FILES` / `VAL_FILES` by that key.
 ## Run
 
 ```bash
-export MODEL_PATH ACTOR_PATH DATA_DIR PPOCR_MODEL_DIR PICKSCORE_PATH CLIP_H14_PATH HPSV2_CHECKPOINT
+export MODEL_PATH ACTOR_PATH DATA_DIR PPOCR_MODEL_DIR PICKSCORE_PATH CLIP_H14_PATH CUSTOM_REWARD_MODEL_PATH
 bash examples/diffusionnft_trainer/minimax_h3_image/run_minimax_h3_image_ocr_lora.sh
 ```
 
 One node with 4 GPUs: GPUs 0-2 run the trainer, rollout and OCR reward model; GPU 3 runs the PickScore / HPSv2.1
-scorer (`PREFERENCE_SCORER_GPU`). 512x512 is generated directly, without the upscaled canvas. LoRA rank 66, lr 1e-4,
-96 images per step, 2 updates per step. The frozen base is replicated on every rank
-(`VERL_OMNI_FSDP_REPLICATE_FROZEN=1`) and each micro-batch runs as one packed DiT call
+scorer (`PREFERENCE_SCORER_GPU`). Each of the 3 reward-loop workers starts its own scorer process there (about
+7 GB each) and its own pool of 8 PP-OCR processes. 512x512 is generated directly, without the upscaled canvas.
+LoRA rank 66, lr 1e-4, 96 images per step, 2 updates per step. The frozen base is replicated on every rank
+(`VERL_OMNI_H3_IMAGE_REPLICATE_FROZEN=1`) and each micro-batch runs as one packed DiT call
 (`VERL_OMNI_H3_IMAGE_PACK_MICRO_BATCH=1`, requires gradient checkpointing off). Steps took 60-85 s on GB300.
 
 ## Result

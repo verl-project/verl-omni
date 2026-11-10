@@ -103,9 +103,7 @@ def apply_fsdp2(model, fsdp_kwargs, config, ignored_names: Sequence[str] = (), r
     if replicate_frozen:
         trainable = [name for name, param in model.named_parameters() if "lora_" not in name and param.requires_grad]
         if trainable:
-            raise ValueError(
-                f"VERL_OMNI_FSDP_REPLICATE_FROZEN=1 requires every non-LoRA parameter to be frozen: {trainable[:8]}"
-            )
+            raise ValueError(f"replicate_frozen requires every non-LoRA parameter to be frozen: {trainable[:8]}")
         ignored_params.update(param for name, param in model.named_parameters() if "lora_" not in name)
     mesh = fsdp_kwargs.get("mesh")
     if trainable_ignored and (mesh is None or mesh.size() > 1):

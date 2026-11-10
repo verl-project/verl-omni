@@ -17,9 +17,14 @@ The recipe weights them ``0.5 * term_pickscore + 0.2 * term_ocr_guarded + 0.3 * 
 
 - ``term_ocr_guarded``: VLM OCR score (``genrm_ocr``) times a layout guard that is 0 when any PP-OCR text box touches
   the frame and ``min(1, OCR_GUARD_AREA_REF / text_area)`` otherwise. Without the guard the policy enlarges the text
-  until it fills or leaves the canvas; the preference terms do not see that.
+  until it fills or leaves the canvas; the preference terms do not see that. A failed PP-OCR request leaves the
+  guard at 1 (its identity) and reports ``guard_error=1``.
 - ``term_pickscore`` / ``term_hpsv2``: PickScore (logit / 26) and HPSv2.1 of the image against the full generation
   prompt. Both terms share one scorer call per image.
+
+Each reward-loop worker process owns its own PP-OCR pool (``OCR_GUARD_PROCS`` processes) and one scorer process on
+``PREFERENCE_SCORER_GPU``. A child process that exits or gives no reply within ``REWARD_WORKER_TIMEOUT_S`` is killed,
+its request raises, and a new process takes its place.
 
 The full generation prompt is looked up by ``extra_info["split"]`` / ``extra_info["index"]`` in ``TRAIN_FILES`` and
 ``VAL_FILES`` (or taken from ``extra_info["prompt"]`` when the rows carry it).
@@ -27,17 +32,22 @@ The full generation prompt is looked up by ``extra_info["split"]`` / ``extra_inf
 
 import asyncio
 import json
+import logging
 import os
 import sys
 import tempfile
 import uuid
 
-from verl_omni.utils.reward_score.genrm_ocr import _to_pil, compute_score_ocr
+from verl_omni.utils.reward_score.genrm_ocr import compute_score_ocr
+from verl_omni.utils.reward_score.image_preference_utils import decoded_reward_image
+
+logger = logging.getLogger(__name__)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 AREA_REF = float(os.environ.get("OCR_GUARD_AREA_REF", "0.08"))
 POOL_SIZE = int(os.environ.get("OCR_GUARD_PROCS", "8"))
 SCORER_GPU = os.environ.get("PREFERENCE_SCORER_GPU", "3")
+TIMEOUT_S = float(os.environ.get("REWARD_WORKER_TIMEOUT_S", "300"))
 TMP = os.path.join(os.environ.get("OCR_REWARD_TMPDIR") or tempfile.gettempdir(), "ocr_preference_reward")
 
 _guard_pool = None
@@ -48,6 +58,12 @@ _prompts = None
 _last = (None, None)
 
 
+async def _kill(proc) -> None:
+    if proc.returncode is None:
+        proc.kill()
+    await proc.wait()
+
+
 async def _spawn(script: str, env: dict):
     proc = await asyncio.create_subprocess_exec(
         sys.executable,
@@ -56,25 +72,38 @@ async def _spawn(script: str, env: dict):
         stdout=asyncio.subprocess.PIPE,
         env=env,
     )
-    line = await proc.stdout.readline()
+    try:
+        line = await asyncio.wait_for(proc.stdout.readline(), TIMEOUT_S)
+    except TimeoutError:
+        await _kill(proc)
+        raise RuntimeError(f"{script} did not start within {TIMEOUT_S:g} s") from None
     if not line or not json.loads(line).get("ready"):
-        raise RuntimeError(f"{script} failed to start (exit code {await proc.wait()})")
+        await _kill(proc)
+        raise RuntimeError(f"{script} failed to start (exit code {proc.returncode})")
     return proc
 
 
 async def _request(proc, script: str, payload: dict) -> dict:
-    proc.stdin.write((json.dumps(payload) + "\n").encode())
-    await proc.stdin.drain()
-    line = await proc.stdout.readline()
+    """Send one request; a worker that exits or hangs is killed and the request raises."""
+    try:
+        proc.stdin.write((json.dumps(payload) + "\n").encode())
+        await proc.stdin.drain()
+        line = await asyncio.wait_for(proc.stdout.readline(), TIMEOUT_S)
+    except TimeoutError:
+        await _kill(proc)
+        raise RuntimeError(f"{script} gave no reply within {TIMEOUT_S:g} s") from None
+    except (BrokenPipeError, ConnectionResetError):
+        line = b""
     if not line:
-        raise RuntimeError(f"{script} exited (exit code {await proc.wait()})")
+        await _kill(proc)
+        raise RuntimeError(f"{script} exited (exit code {proc.returncode})")
     return json.loads(line)
 
 
-def _save(image) -> str:
+def _save(solution_image, extra_info: dict, scorer: str) -> str:
     os.makedirs(TMP, exist_ok=True)
     path = os.path.join(TMP, f"{uuid.uuid4().hex}.png")
-    _to_pil(image).save(path)
+    decoded_reward_image(solution_image, extra_info, scorer=scorer).save(path)
     return path
 
 
@@ -105,35 +134,50 @@ def full_prompt(extra_info: dict) -> str:
     return _prompts[key]
 
 
-async def _layout(image) -> dict:
+async def _layout(solution_image, extra_info: dict) -> dict:
     global _guard_pool, _guard_lock
     if _guard_lock is None:
         _guard_lock = asyncio.Lock()
     async with _guard_lock:
         if _guard_pool is None:
-            procs = await asyncio.gather(*[_spawn("ocr_layout_worker.py", dict(os.environ)) for _ in range(POOL_SIZE)])
+            procs = await asyncio.gather(
+                *[_spawn("ocr_layout_worker.py", dict(os.environ)) for _ in range(POOL_SIZE)], return_exceptions=True
+            )
+            failed = [proc for proc in procs if isinstance(proc, BaseException)]
+            if failed:
+                for proc in procs:
+                    if not isinstance(proc, BaseException):
+                        await _kill(proc)
+                raise failed[0]
             _guard_pool = asyncio.Queue()
             for proc in procs:
                 _guard_pool.put_nowait(proc)
-    path = _save(image)
+    path = _save(solution_image, extra_info, "Layout guard")
     proc = await _guard_pool.get()
     try:
         return await _request(proc, "ocr_layout_worker.py", {"path": path})
     finally:
-        _guard_pool.put_nowait(proc)
         _remove(path)
+        if proc.returncode is not None:
+            try:
+                proc = await _spawn("ocr_layout_worker.py", dict(os.environ))
+            except Exception:
+                logger.exception("Could not replace a dead PP-OCR layout worker")
+                proc = None
+        if proc is not None:
+            _guard_pool.put_nowait(proc)
 
 
-async def _preference(image, extra_info) -> dict:
+async def _preference(solution_image, extra_info: dict) -> dict:
     global _scorer, _scorer_lock, _last
-    if _last[0] is image:
+    if _last[0] is solution_image:
         return _last[1]
     if _scorer_lock is None:
         _scorer_lock = asyncio.Lock()
-    path = _save(image)
+    path = _save(solution_image, extra_info, "Preference scorer")
     try:
         async with _scorer_lock:
-            if _scorer is None:
+            if _scorer is None or _scorer.returncode is not None:
                 env = dict(os.environ)
                 env["CUDA_VISIBLE_DEVICES"] = SCORER_GPU
                 _scorer = await _spawn("preference_worker.py", env)
@@ -142,11 +186,13 @@ async def _preference(image, extra_info) -> dict:
         _remove(path)
     if "error" in reply:
         raise RuntimeError(f"Preference scorer failed: {reply['error']}")
-    _last = (image, reply)
+    _last = (solution_image, reply)
     return reply
 
 
 def guard_value(geometry: dict) -> float:
+    if geometry.get("error"):
+        return 1.0
     if geometry["border"]:
         return 0.0
     return min(1.0, AREA_REF / geometry["area"]) if geometry["area"] > 0 else 1.0
@@ -155,8 +201,10 @@ def guard_value(geometry: dict) -> float:
 async def term_ocr_guarded(data_source, solution_image, ground_truth, extra_info, **kwargs):
     result, geometry = await asyncio.gather(
         compute_score_ocr(data_source, solution_image, ground_truth, extra_info, **kwargs),
-        _layout(solution_image),
+        _layout(solution_image, extra_info),
     )
+    if geometry.get("error"):
+        logger.warning("PP-OCR layout request failed, guard left at 1: %s", geometry["error"])
     ocr = float(result["score"])
     guard = guard_value(geometry)
     return {
@@ -164,6 +212,7 @@ async def term_ocr_guarded(data_source, solution_image, ground_truth, extra_info
         "score": ocr * guard,
         "ocr_vlm": ocr,
         "guard": guard,
+        "guard_error": float(bool(geometry.get("error"))),
         "text_area": float(geometry["area"]),
         "border_touch": float(geometry["border"]),
         "line_height": float(geometry["line_h"]),
