@@ -29,17 +29,19 @@ export RAY_DEDUP_LOGS=0
 
 python3 - <<'PY'
 import torch
+from verl.utils.device import get_device_name, get_torch_device
 
-print(f"PyTorch {torch.__version__}, CUDA build {torch.version.cuda}", flush=True)
-if torch.version.cuda is None:
+device = get_device_name()
+print(f"PyTorch {torch.__version__}, CUDA build {torch.version.cuda}, device {device}", flush=True)
+if device == "cuda" and torch.version.cuda is None:
     raise RuntimeError(
         "The BOOGU smoke test requires CUDA PyTorch. When building the image "
         "without a GPU, select an explicit uv --torch-backend matching your "
         "CUDA stack instead of auto."
     )
-if not torch.cuda.is_available():
-    raise RuntimeError("CUDA PyTorch is installed, but no usable CUDA device is visible.")
-torch.ones(1, device="cuda").sum().item()
+if not get_torch_device().is_available():
+    raise RuntimeError(f"PyTorch is installed, but no usable {device} device is visible.")
+torch.ones(1, device=device).sum().item()
 
 # An OpenCV import failure can leave cv2/ on sys.path, causing spawned
 # rollout workers to import cv2.typing instead of the standard-library typing
