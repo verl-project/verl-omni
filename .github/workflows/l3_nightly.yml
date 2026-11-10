@@ -28,14 +28,8 @@ on:
           - qwen_image_flowgrpo
           - qwen_image_diffusion_nft
           - qwen_image_online_dpo
-      model_path:
-        description: "Optional local Qwen-Image model path"
-        required: false
-        default: ""
-      reward_model_path:
-        description: "Optional local Qwen-VL reward model path"
-        required: false
-        default: ""
+          - qwen3_omni_thinker_gspo
+          - minicpmo_4_5_thinker_gspo
       output_root:
         description: "Output directory for dumps, logs, and reports"
         required: false
@@ -75,7 +69,7 @@ env:
   REPORT_ARTIFACT_PREFIX: l3-nightly-reports
   RUN_MODE: ${{ github.event_name == 'schedule' && 'nightly' || github.event_name == 'pull_request' && 'nightly' || github.event.inputs.mode || 'nightly' }}
   L3_CASE: ${{ github.event.inputs.case || 'all' }}
-  ALL_L3_CASES: qwen_image_flowgrpo qwen_image_diffusion_nft qwen_image_online_dpo
+  ALL_L3_CASES: qwen_image_flowgrpo qwen_image_diffusion_nft qwen_image_online_dpo qwen3_omni_thinker_gspo minicpmo_4_5_thinker_gspo
   NUM_GPUS: ${{ github.event.inputs.num_gpus || '1' }}
   MODEL_PATH: ${{ github.event.inputs.model_path || '' }}
   REWARD_MODEL_PATH: ${{ github.event.inputs.reward_model_path || '' }}

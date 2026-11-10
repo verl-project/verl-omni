@@ -1,6 +1,6 @@
 # CI/CD Layers
 
-Last updated: 10/30/2026.
+Last updated: 11/06/2026.
 
 VeRL-Omni uses layered CI/CD checks so fast CPU feedback and expensive GPU or convergence validation can evolve independently.
 
@@ -17,7 +17,7 @@ L3 has one runnable scheduled workflow. It runs different algorithm cases on the
 
 L1 is the default merge gate for code that can be validated without GPU hardware. Tests must run on CPU, avoid Ray clusters, avoid real checkpoint downloads, and use mocks or tiny in-memory fixtures when model boundaries need to be exercised.
 
-The L1 workflow is `[.github/workflows/cpu_unit_tests.yml](../../.github/workflows/cpu_unit_tests.yml)`. It selects files ending in `_on_cpu.py`, runs `pytest` with coverage enabled for `verl_omni`, uploads coverage artifacts, and writes a short summary to the GitHub job summary. Tests run in parallel via `pytest-xdist` (one worker per runner core, test files distributed whole with `--dist loadfile`). L1 tests must not use Ray: worker processes are shared across files and Ray state is process-global. The single exception is `tests/reward_loop/test_cpu_native_reward_ray_on_cpu.py`, which runs as its own sequential pytest invocation in a fresh process.
+The L1 workflow is [`.github/workflows/cpu_unit_tests.yml`](../../.github/workflows/cpu_unit_tests.yml). It selects files ending in `_on_cpu.py`, runs `pytest` with coverage enabled for `verl_omni`, uploads coverage artifacts, and writes a short summary to the GitHub job summary.
 
 Add or update L1 tests when changing:
 
@@ -40,8 +40,7 @@ L3 is intended for scheduled numerical and performance regression tracking. Thes
 The runnable L3 cases live under `tests/nightly/`. Shared debug hooks, metric
 collection, dump comparison, and `run_l3_case.sh` live in that directory next
 to the case folders. They run a
-deterministic 20-step LoRA training window on local tiny-random policy and
-reward models, then compare:
+deterministic 20-step LoRA training window on local tiny-random weights, then compare:
 
 - debug dumps from selected steps for precision regressions; and
 - post-warmup timing, throughput, and memory metrics for performance regressions.
@@ -52,9 +51,9 @@ Supported cases:
 | `qwen_image_flowgrpo` | `tests/nightly/qwen_image_flowgrpo/run_qwen_image_flowgrpo.sh` | 1 | FlowGRPO, OCR reward |
 | `qwen_image_diffusion_nft` | `tests/nightly/qwen_image_diffusion_nft/run_qwen_image_diffusion_nft.sh` | 1 | DiffusionNFT, OCR reward, old-adapter rollout |
 | `qwen_image_online_dpo` | `tests/nightly/qwen_image_online_dpo/run_qwen_image_online_dpo.sh` | 1 | Online DPO, OCR reward |
+| `qwen3_omni_thinker_gspo` | `tests/nightly/qwen3_omni_thinker_gspo/run_qwen3_omni_thinker_gspo.sh` | 1 | GSPO, GSM8K rule reward, v1 omni trainer |
+| `minicpmo_4_5_thinker_gspo` | `tests/nightly/minicpmo_4_5_thinker_gspo/run_minicpmo_4_5_thinker_gspo.sh` | 1 | GSPO, AVQA choice reward, v1 omni trainer |
 
-The workflow runs the ids in `ALL_L3_CASES`. Add a case there and to the `case`
-input options.
 
 Run one case manually with:
 
@@ -63,8 +62,9 @@ bash tests/nightly/model_name_my_algo/run_model_name_my_algo.sh
 ```
 
 The GitHub workflow is `.github/workflows/l3_nightly.yml`. The job runs the
-three cases sequentially in strict nightly mode every day at 22:00
+all cases in `ALL_L3_CASES` sequentially in strict nightly mode every day at 22:00
 Asia/Shanghai and can also be triggered manually with `workflow_dispatch`.
+For a new case, add the case name to `ALL_L3_CASES` and to the `case` input options.
 
 Nightly jobs run with `BOOTSTRAP_MISSING_BASELINE=0` so missing or stale
 baselines fail closed. Baseline creation is manual only: run the workflow with
