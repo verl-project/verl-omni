@@ -62,6 +62,9 @@ batch sizes in the script are kept equal to the DGPO recipe for a side-by-side.
 
 ## Tested configuration
 
+Historical validation environment (Diffusers 0.40.0; recorded before the project raised its
+minimum to 0.41.0).
+
 - 1x NVIDIA A100-SXM4-40GB (Colab Pro), driver 580.82, Linux, BF16
 - Python 3.12, torch 2.13.0+cu132, vllm 0.30.0, vllm-omni 0.30.1.dev29+g12e928001,
   diffusers 0.40.0, transformers 5.14.1

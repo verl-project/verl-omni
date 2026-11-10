@@ -23,7 +23,7 @@ dependencies = [
     "cachetools",
     "codetiming",
     "datasets>=2.20.0",
-    "diffusers>=0.40.0",
+    "diffusers>=0.41.0",
     "dill",
     "hydra-core",
     "imageio[ffmpeg]>=2.37.2",
@@ -40,6 +40,8 @@ dependencies = [
     # FSDP `_no_split_modules` metadata change introduced in Transformers 5.15.0.
     "transformers>=5.13.0,<=5.14.1",
     "wandb",
+    "swanlab>=0.10.3",
+    "soundfile>=0.12.1",
     "packaging>=20.0",
     "uvicorn",
     "fastapi",
@@ -78,7 +80,7 @@ gpu = [
 ]
 xpu = [
     # verl has no built-in Intel platform; the plugin registers it via the verl.plugins entry point.
-    "verl-hardware-plugin @ git+https://github.com/verl-project/verl-hardware-plugin.git@53c4de2626745543e45761711d4f6c265c508dc6",
+    "verl-hardware-plugin @ git+https://github.com/verl-project/verl-hardware-plugin.git@1c740e0d399a5a0ad931d64890cb8961daa08d98",
     # Ray counts Intel GPUs through dpctl; 0.22.x matches the oneAPI 2026 runtime of torch 2.13+xpu.
     "dpctl>=0.22,<0.23",
 ]
@@ -89,6 +91,7 @@ dev = [
     "py-spy",
     "pytest-asyncio",
     "pytest-rerunfailures",
+    "pytest-xdist",
 ]
 ocr = [
     "Levenshtein",
@@ -205,6 +208,7 @@ verl_omni = [
 [tool.uv]
 override-dependencies = [
     "accelerate>=1.14.0",
+    "diffusers>=0.41.0",
     "kernels==0.16.0",
     "transformers>=5.13.0,<=5.14.1",
 ]

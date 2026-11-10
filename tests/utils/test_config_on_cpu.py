@@ -166,3 +166,79 @@ def test_dynamic_resource_scheduling_raises_on_v1_entrypoints():
     config.async_training = {"use_dynamic_resource_scheduling": True}
     with pytest.raises(ValueError, match="hybrid_rollout.enable_switch"):
         validate_config(config)
+
+
+def _rollout_config(**overrides):
+    """A minimal config that passes the gates; rollout keys are overridable."""
+    rollout = {
+        "name": "vllm_omni",
+        "expert_parallel_size": 1,
+        "tensor_model_parallel_size": 1,
+        "data_parallel_size": 1,
+    }
+    rollout.update(overrides)
+    return OmegaConf.create({"trainer": {"resume_mode": "disable"}, "actor_rollout_ref": {"rollout": rollout}})
+
+
+def test_rollout_ep_requires_tp_times_dp():
+    """vLLM derives the EP degree from TP x DP; a mismatched size cannot be honored."""
+    config = _rollout_config(expert_parallel_size=2, tensor_model_parallel_size=1)
+    with pytest.raises(ValueError, match=r"tensor_model_parallel_size \* data_parallel_size"):
+        validate_config(config)
+
+
+def test_rollout_ep_matching_tp_times_dp_is_admitted():
+    validate_config(_rollout_config(expert_parallel_size=2, tensor_model_parallel_size=2))
+    validate_config(_rollout_config(expert_parallel_size=4, tensor_model_parallel_size=4))
+
+
+def test_rollout_ep_one_is_admitted_for_any_sizes():
+    validate_config(_rollout_config(expert_parallel_size=1, tensor_model_parallel_size=8, data_parallel_size=4))
+
+
+def test_rollout_ep_gate_accepts_a_plain_dict_config():
+    config = OmegaConf.to_container(_rollout_config(expert_parallel_size=2, tensor_model_parallel_size=2))
+    validate_config(config)
+
+
+def test_diffusion_rollout_ep_is_rejected():
+    """No diffusion stage reads the knob, so EP>1 there cannot be honored."""
+    config = _rollout_config(expert_parallel_size=2, tensor_model_parallel_size=2)
+    config.actor_rollout_ref.rollout.rollout_attn_backend = "FLASH_ATTN_3_HUB"
+    with pytest.raises(ValueError, match="diffusion rollout"):
+        validate_config(config)
+
+
+def test_rollout_parallel_config_escape_hatch_is_rejected():
+    """engine_kwargs.vllm_omni.parallel_config bypasses the size accounting."""
+    config = _rollout_config(engine_kwargs={"vllm_omni": {"parallel_config": {"enable_expert_parallel": True}}})
+    with pytest.raises(ValueError, match="bypasses"):
+        validate_config(config)
+
+
+def test_rollout_flat_enable_expert_parallel_is_rejected():
+    """The flat spelling is never honored on AR and unvalidated on diffusion."""
+    config = _rollout_config(engine_kwargs={"vllm_omni": {"enable_expert_parallel": True}})
+    with pytest.raises(ValueError, match="not a supported spelling"):
+        validate_config(config)
+
+
+def test_rollout_stage_override_ep_is_rejected():
+    """The vLLM-Omni resolver applies stage_overrides over the deploy config."""
+    config = _rollout_config(engine_kwargs={"vllm_omni": {"stage_overrides": {"0": {"enable_expert_parallel": True}}}})
+    with pytest.raises(ValueError, match="stage_overrides"):
+        validate_config(config)
+
+
+def test_rollout_ep_with_dp_greater_than_one_is_rejected():
+    """DP>1 cannot express EP in the deploy config, so accepting it would lie."""
+    config = _rollout_config(expert_parallel_size=4, tensor_model_parallel_size=2, data_parallel_size=2)
+    with pytest.raises(ValueError, match=r"data_parallel_size=2 is not wired"):
+        validate_config(config)
+
+
+def test_rollout_non_positive_ep_size_is_rejected():
+    """0 and negative sizes are not meaningful degrees; refuse them loudly."""
+    for bad in (0, -2):
+        with pytest.raises(ValueError, match="positive integer"):
+            validate_config(_rollout_config(expert_parallel_size=bad))

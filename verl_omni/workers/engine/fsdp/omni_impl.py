@@ -17,6 +17,7 @@ import logging
 import warnings
 
 import torch
+from accelerate import init_empty_weights
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp.api import FullStateDictConfig, ShardedStateDictConfig, StateDictType
 from transformers import AutoModelForMultimodalLM
@@ -40,12 +41,13 @@ from verl.workers.engine.fsdp.utils import get_sharding_strategy
 
 from verl_omni.utils.fsdp_utils import apply_fsdp2
 from verl_omni.workers.config import OmniModelConfig
+from verl_omni.workers.engine.lora_adapter_mixin import apply_lora_dtype, cast_adapter_params_to_base
 from verl_omni.workers.engine.lora_export import export_lora_for_sync
 
 logger = logging.getLogger(__name__)
 
 
-@EngineRegistry.register(model_type="omni_model", backend=["fsdp", "fsdp2"], device=["cuda", "npu", "xpu"])
+@EngineRegistry.register(model_type="omni_model", backend=["fsdp", "fsdp2"], device=["cuda", "npu", "xpu", "mlu"])
 class OmniFSDPEngine(FSDPEngineWithLMHead):
     """FSDP engine for omni models"""
 
@@ -62,6 +64,10 @@ class OmniFSDPEngine(FSDPEngineWithLMHead):
         return model_inputs, output_args
 
     def get_per_tensor_param(self, layered_summon=False, base_sync_done=False, **kwargs):
+        from verl.utils.torch_dtypes import PrecisionType
+
+        mixed_precision = self.engine_config.mixed_precision or {}
+        full_weight_dtype = PrecisionType.to_dtype(mixed_precision.get("param_dtype", "bf16"))
         log_gpu_memory_usage("Before load_fsdp_model_to_gpu", logger=logger)
 
         # FSDP2 CPUOffloadPolicy owns CPU<->GPU placement; calling model.to(device) here
@@ -87,6 +93,7 @@ class OmniFSDPEngine(FSDPEngineWithLMHead):
             is_diffusers=False,
             offload_fn=_offload_to_cpu,
             stream_transform=self._qat_stream_transform(),
+            full_weight_dtype=full_weight_dtype,
         )
 
     def get_per_tensor_param_shard(self, **kwargs):
@@ -94,16 +101,19 @@ class OmniFSDPEngine(FSDPEngineWithLMHead):
 
         The inherited export (``state_dict`` + ``convert_weight_keys``, identity
         coordinates) matches this engine's full export only for full-weight,
-        non-QAT runs:
+        non-QAT, bf16 runs:
 
         - LoRA (either merge mode): the full export ships adapter weights
           (``collect_lora_params``) or merged, name-normalized tensors, never a
           plain ``state_dict``;
         - QAT: the full export applies ``quantize_with_fusion`` after conversion,
-          which renames and repacks tensors the shard export emits unquantized.
+          which renames and repacks tensors the shard export emits unquantized;
+        - non-bf16 ``param_dtype``: the full export honors ``mixed_precision.param_dtype``
+          while the inherited shard export casts every floating shard to bfloat16,
+          so the seed and steady syncs would diverge in dtype.
 
-        Both would silently break the delta contract (seed and steady exports must
-        share names and coordinates), so fail closed.
+        All three would silently break the delta contract (seed and steady exports
+        must share names, coordinates, and dtype), so fail closed.
         """
         if getattr(self, "_qat_enabled", False):
             raise NotImplementedError("omni_delta_sharded shard export does not support QAT exports.")
@@ -111,6 +121,16 @@ class OmniFSDPEngine(FSDPEngineWithLMHead):
         if hasattr(peft_model, "peft_config"):
             raise NotImplementedError(
                 "omni_delta_sharded shard export supports full-weight training only (no LoRA adapters)."
+            )
+        from verl.utils.torch_dtypes import PrecisionType
+
+        mixed_precision = self.engine_config.mixed_precision or {}
+        full_weight_dtype = PrecisionType.to_dtype(mixed_precision.get("param_dtype", "bf16"))
+        if full_weight_dtype != torch.bfloat16:
+            raise NotImplementedError(
+                "omni_delta_sharded shard export casts floating shards to bfloat16 while the full "
+                f"export uses param_dtype={mixed_precision.get('param_dtype', 'bf16')}: seed and steady "
+                "dtypes would diverge. Use param_dtype=bf16 or a non-delta checkpoint backend."
             )
         return super().get_per_tensor_param_shard(**kwargs)
 
@@ -177,17 +197,31 @@ class OmniFSDPEngine(FSDPEngineWithLMHead):
             self.model_config.hf_config.tie_word_embeddings = tie_word_embeddings
 
         init_context = get_init_weight_context_manager(use_meta_tensor=not tie_word_embeddings, mesh=self.device_mesh)
+        auto_model_cls = getattr(adapter_cls, "auto_model_class", None) or AutoModelForMultimodalLM
+        # Ranks on meta get their weights from rank 0 when FSDP wraps the module, but transformers 5's
+        # from_pretrained reads and converts every checkpoint tensor even under init_empty_weights.
+        meta_init = init_context is init_empty_weights and hasattr(auto_model_cls, "from_config")
 
         with init_context(), warnings.catch_warnings():
             warnings.simplefilter("ignore")
 
-            auto_model_cls = getattr(adapter_cls, "auto_model_class", None) or AutoModelForMultimodalLM
-            module = auto_model_cls.from_pretrained(
-                pretrained_model_name_or_path=self.model_config.local_path,
-                torch_dtype=torch_dtype,
-                config=self.model_config.hf_config,
-                trust_remote_code=self.model_config.trust_remote_code,
-            )
+            if meta_init:
+                # from_config resolves auto_map remote code from config.name_or_path,
+                # which AutoConfig.from_pretrained sets to hf_config_path. Rank 0's
+                # from_pretrained resolves from local_path; those directories may differ.
+                self.model_config.hf_config.name_or_path = self.model_config.local_path
+                module = auto_model_cls.from_config(
+                    self.model_config.hf_config,
+                    torch_dtype=torch_dtype,
+                    trust_remote_code=self.model_config.trust_remote_code,
+                )
+            else:
+                module = auto_model_cls.from_pretrained(
+                    pretrained_model_name_or_path=self.model_config.local_path,
+                    torch_dtype=torch_dtype,
+                    config=self.model_config.hf_config,
+                    trust_remote_code=self.model_config.trust_remote_code,
+                )
             module = adapter_cls.configure_model(module, self.model_config)
 
             if self.engine_config.strategy == "fsdp" and not self.engine_config.use_orig_params:
@@ -205,22 +239,14 @@ class OmniFSDPEngine(FSDPEngineWithLMHead):
 
     def _build_lora_module(self, module):
         module = super()._build_lora_module(module)
+        # Adapters beyond the first skip peft's base-dtype cast; align them before sharding.
+        cast_adapter_params_to_base(module)
 
         lora_dtype = getattr(self.model_config, "lora_dtype", None)
         if lora_dtype is not None:
-            from peft.tuners.tuners_utils import BaseTunerLayer
             from verl.utils.torch_dtypes import PrecisionType
 
-            target_dtype = PrecisionType.to_dtype(lora_dtype)
-            for name, param in module.named_parameters():
-                if param.requires_grad:
-                    orig_dtype = param.dtype
-                    param.data = param.data.to(target_dtype)
-                    logger.debug("LoRA param %s: %s -> %s", name, orig_dtype, param.dtype)
-
-            for submodule in module.modules():
-                if isinstance(submodule, BaseTunerLayer):
-                    submodule.cast_input_dtype_enabled = False
+            apply_lora_dtype(module, PrecisionType.to_dtype(lora_dtype))
 
         return module
 
