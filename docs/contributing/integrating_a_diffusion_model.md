@@ -1,6 +1,6 @@
 # How to Integrate a New Diffusion Model for FlowGRPO Training
 
-Last updated: 10/27/2026.
+Last updated: 11/10/2026.
 
 This guide walks you through everything required to integrate a new diffusion
 model into VeRL-Omni so it can be trained end-to-end with the **FlowGRPO**
@@ -442,6 +442,48 @@ The worked example is
   setup on `diffusers_training_adapter.py`.
 - Under FSDP2, `get_fsdp_ignored_module_names` feeds
   `CompositeARFSDPEngineWithLMHead._build_fsdp_module`.
+
+### Composite rollout loop
+
+Training an AR adapter pairs with the `composite_single_turn_agent` loop,
+which runs AR and diffusion generation in one rollout: one AR sample per
+input row, each expanded into its diffusion group. Its contract, in brief:
+
+- Loop selection: `actor_rollout_ref.rollout.agent.default_agent_loop=composite_single_turn_agent`
+  (a per-sample `agent_name` override must select a loop that returns the
+  composite output contract — one AR result plus its diffusion samples per
+  row — or the worker's unpack fails).
+- `rollout.m` is the AR repeat count: callers repeat each prompt row themselves
+  (`batch.repeat(rollout.m)`, as the composite test does) to draw `m` AR
+  rollouts per prompt — the loop emits one AR output per row; `rollout.n` is
+  the diffusion group size per AR sample (`rollout.val_kwargs.n` replaces it
+  for validation batches).
+- AR sampling lives under `actor_rollout_ref.rollout.ar.*`.
+- The reward config must define a function named `ar` with `weight: 0` — AR
+  reward is derived from the per-image `reward/ar` extras and the loop asserts
+  the zero weight (`verl_omni/agent_loop/composite_agent_loop.py`).
+- AR `position_ids` dispatch to the registered pipeline's
+  `build_ar_position_ids` hook (`verl_omni/pipelines/model_base.py`).
+- The manager is `CompositeAgentLoopManager`
+  (`verl_omni.agent_loop.composite_agent_loop.CompositeAgentLoopManager`),
+  selected via `+actor_rollout_ref.rollout.agent.agent_loop_manager_class`
+  (the `+` prefix is needed — the key is absent from the shipped config).
+
+**Trainer status — read before wiring a run.** The manager's
+`generate_sequences` returns an `(ar_batch, diffusion_batch)` tuple, while the
+shipped trainers (both `main_diffusion` and the V1 path) consume a single
+`DataProto`. No in-tree trainer or example recipe consumes the composite
+manager today; the machinery is exercised by
+[`tests/agent_loop/test_composite_agent_loop.py`](../../tests/agent_loop/test_composite_agent_loop.py)
+at the worker/manager level. Integrating a composite model end-to-end needs
+trainer-side support for the tuple — raise it with the maintainers first.
+The AR training adapter half (above) and the `qwen_image_dual_grpo` package
+remain valid references.
+
+Models that are not composite stay on the default `diffusion_single_turn_agent`
+loop. Put model-specific rollout behavior in adapter hooks first — registering
+a new loop is a last resort (see "Select the rollout loop" in
+[`integrating_an_omni_model.md`](integrating_an_omni_model.md)).
 
 ---
 
