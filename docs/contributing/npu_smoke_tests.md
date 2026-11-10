@@ -176,6 +176,22 @@ Run all groups:
 bash tests/npu_smoke/run_npu_smoke_tests.sh --num-npus 8
 ```
 
+To run both groups concurrently in one dedicated eight-NPU CI container:
+
+```bash
+NPU_SMOKE_PARALLEL=1 bash tests/npu_smoke/run_npu_smoke_tests.sh --num-npus 8
+```
+
+Core uses NPUs `0,1`; e2e uses `2,3,4,5,6,7`. This does not replace per-case
+eight-rank coverage from the sequential command. The e2e trainers remain
+sequential; this layout does not support concurrent colocated training jobs.
+
+Unset shared `MODEL_PATH`, `TOKENIZER_PATH`, `DATA_DIR`, `TRAIN_FILES`,
+`VAL_FILES` and `NPU_SMOKE_TEST_IDS` overrides before parallel execution. Use a
+dedicated test environment because final cleanup stops its Ray/model processes.
+Native aborts and log-writing failures remain failures. The GitHub Actions
+workflow retains its existing separate eight-NPU core/e2e jobs.
+
 Run one group:
 
 ```bash

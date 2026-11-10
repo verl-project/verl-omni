@@ -323,6 +323,9 @@ pipeline:
   # Distilled guidance scale for models with guidance_embeds; null to disable
   guidance_scale: null
 
+  # CFG for the frozen pretrained anchor in forward-process training.
+  reference_guidance_scale: 4.5
+
   # Reference-image short edge for compatible pipelines
   reference_image_short_edge: null
 
