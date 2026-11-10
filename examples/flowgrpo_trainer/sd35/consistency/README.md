@@ -72,10 +72,12 @@ export REPLAY_OUTPUT=/absolute/fresh-replay-output
 bash "$SOURCE_ROOT/examples/flowgrpo_trainer/sd35/consistency/run.sh" replay
 ```
 
-The public reader selects only row 0, step 0, validates the pinned eight
-producer files and raw MSProbe dumps, then writes `report.json` and `audit.json`.
-A numerical mismatch or malformed capture is a failure; partial artifacts stay
-in place for diagnosis. The transformer checkpoint byte SHA256 is checked
+The reader verifies the eight producer pins and compares the full 2 × 2
+log-probability tensors. `audit.json` reports the overall replay status.
+`report.json` covers the public checker's validation of the MSProbe dumps and
+log probabilities for row 0, step 0. A numerical mismatch anywhere in the
+saved tensors or a malformed capture causes a nonzero exit. Partial artifacts
+stay in place for diagnosis. The transformer checkpoint byte SHA256 is checked
 against this recipe's fixed digest before either GPU role. The remaining model
 component files are inventoried by path and size, and their configs are hashed;
 that does not independently attest those weights. Real execution still needs

@@ -166,6 +166,14 @@ def test_cli_replays_captured_first_pair(tmp_path, nested):
     assert result.returncode == 0, result.stderr
     report = json.loads((tmp_path / "report/report.json").read_text())
     assert report["status"] == "admitted" and report["row_keys"] == [["sd35-prompt-0", 0, "cond"]]
+    audit = json.loads((tmp_path / "report/audit.json").read_text())
+    assert audit["status"] == "admitted"
+    assert audit["full_comparison"] == {
+        "allclose": True,
+        "max_abs_logprob_difference": 0.0,
+        "atol": 1e-5,
+        "rtol": 1e-3,
+    }
     assert all((root / path).read_bytes() == data for path, data in original.items())
 
 
@@ -248,11 +256,12 @@ def test_cli_rejects_bad_source_or_destination(tmp_path, change, expected_error)
     assert not (output / "report.json").exists()
 
 
-def test_cli_reports_numerical_mismatch(tmp_path):
+@pytest.mark.parametrize(("row", "step"), [(0, 0), (0, 1), (1, 0), (1, 1)])
+def test_cli_reports_numerical_mismatch(tmp_path, row, step):
     root = fixture(tmp_path)
     path = root / "actor/comparison.pt"
     tensors = torch.load(path, map_location="cpu", weights_only=True)
-    tensors["actor_log_probs"][0, 0] += 0.1
+    tensors["actor_log_probs"][row, step] += 0.1
     torch.save(tensors, path)
     metadata_path = root / "actor/comparison.json"
     metadata = json.loads(metadata_path.read_text())
@@ -262,8 +271,13 @@ def test_cli_reports_numerical_mismatch(tmp_path):
     output = tmp_path / "report"
     result = run(root, sha, output)
     assert result.returncode != 0
-    assert json.loads((output / "report.json").read_text())["status"] == "numerical_mismatch"
-    assert json.loads((output / "audit.json").read_text())["checker_report"]["status"] == "numerical_mismatch"
+    report = json.loads((output / "report.json").read_text())
+    assert report["status"] == ("numerical_mismatch" if (row, step) == (0, 0) else "admitted")
+    audit = json.loads((output / "audit.json").read_text())
+    assert audit["checker_report"] == report
+    assert audit["status"] == "numerical_mismatch"
+    assert audit["full_comparison"]["allclose"] is False
+    assert audit["full_comparison"]["max_abs_logprob_difference"] == pytest.approx(0.1)
 
 
 def test_help_has_no_capture_or_model_default(tmp_path):

@@ -14,8 +14,8 @@
 
 """Replay a pinned, existing two-prompt SD3.5 producer pair on CPU.
 
-The producer saved only the first forward for each role. This bridge therefore
-checks only that captured sample and its first scheduler step.
+Replay compares all saved log probabilities and checks MSProbe dumps for the
+first sample and scheduler step captured by each role.
 """
 
 from __future__ import annotations
@@ -192,8 +192,9 @@ def replay(root: Path, pin_name: str, pin_sha: str, output: Path) -> dict:
     ]
     require(mapping == expected_map, "producer request map differs from fixed two-prompt recipe")
     require(sample == mapping[0]["sample_id"], "raw capture is not the first request sample")
+    atol, rtol = 1e-5, 1e-3
     require(
-        actor.get("allclose_atol") == 1e-5 and actor.get("allclose_rtol") == 1e-3,
+        actor.get("allclose_atol") == atol and actor.get("allclose_rtol") == rtol,
         "producer tolerance differs from fixed recipe",
     )
 
@@ -218,6 +219,9 @@ def replay(root: Path, pin_name: str, pin_sha: str, output: Path) -> dict:
             "producer tensor must be finite CPU float32 2x2",
         )
     require(torch.equal(batch["old_log_probs"], tensors["rollout_log_probs"]), "saved rollout probabilities differ")
+    actor_probs, rollout_probs = tensors["actor_log_probs"], tensors["rollout_log_probs"]
+    full_close = torch.allclose(actor_probs, rollout_probs, atol=atol, rtol=rtol)
+    max_diff = float((actor_probs.double() - rollout_probs.double()).abs().max())
     row = mapping[0]["api_output_index"]
     selected = {name: value[row : row + 1, :1].clone() for name, value in tensors.items()}
     manifest = {
@@ -232,8 +236,8 @@ def replay(root: Path, pin_name: str, pin_sha: str, output: Path) -> dict:
         },
         "records": records,
         "comparison": {"path": "comparison.pt", "keys": [[sample, 0, "cond"]]},
-        "atol": 1e-5,
-        "rtol": 1e-3,
+        "atol": atol,
+        "rtol": rtol,
     }
     output.mkdir(exist_ok=False)
     case = output / "case"
@@ -262,6 +266,7 @@ def replay(root: Path, pin_name: str, pin_sha: str, output: Path) -> dict:
         )
         mismatch = exc
     audit = {
+        "status": "admitted" if full_close and mismatch is None else "numerical_mismatch",
         "source_pins_sha256": pin_sha,
         "producer_identity": identity,
         "producer_provenance": provenance,
@@ -269,15 +274,23 @@ def replay(root: Path, pin_name: str, pin_sha: str, output: Path) -> dict:
         "api_output_index": row,
         "tensor_step": 0,
         "scope": (
-            "captured first sample and first step only; producer provenance is pinned metadata, "
-            "not fresh source or model validation"
+            "all saved log probabilities; MSProbe dumps for the first sample and step only; "
+            "producer provenance is pinned metadata, not fresh source or model validation"
         ),
+        "full_comparison": {
+            "allclose": full_close,
+            "max_abs_logprob_difference": max_diff,
+            "atol": atol,
+            "rtol": rtol,
+        },
         "checker_report": report,
     }
     (output / "audit.json").write_bytes(encoded(audit))
     require(not torch.cuda.is_initialized(), "CPU replay initialized CUDA")
     if mismatch is not None:
         raise mismatch
+    if not full_close:
+        raise RuntimeError("full actor/rollout log-probability mismatch; see audit.json")
     return audit
 
 

@@ -161,13 +161,15 @@ python scripts/replay_sd35_consistency.py \
 
 The output directory must be fresh and outside the input root. It contains
 `case/` with derived checker inputs, `report.json` from the public checker,
-and `audit.json` describing the source pin digest and selected tensor row.
+and `audit.json` with the overall replay status, full log-probability
+comparison, source pin digest, and selected tensor row.
 Original producer files are read only. Legacy nested input records and newer
 flat records are normalized to the same checker record. The bridge binds the
 captured sample to the producer's ordered `request_map`, verifies both saved
-rollout tensor copies, then selects row 0 and step 0. Because the producer
-saved only the first forward for each role, the report applies only to that
-captured sample and step, even though the original tensors are 2 by 2.
+rollout tensor copies, and compares all four saved log probabilities. The
+public checker validates the captured forward for row 0, step 0, so
+`report.json` covers only that pair. A mismatch anywhere in the full comparison
+makes replay exit nonzero, even if the captured pair passes.
 The pin list uses paths relative to the supplied capture root, so the eight
 original bytes can be copied to a differently named root. The pinned producer
 metadata still names the original run path and request IDs; the bridge uses
