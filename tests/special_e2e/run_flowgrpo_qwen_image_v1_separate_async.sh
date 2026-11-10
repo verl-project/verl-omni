@@ -77,7 +77,11 @@ module_map = {
     "hccl": "verl.checkpoint_engine.hccl_checkpoint_engine",
 }
 mod = module_map.get(backend)
-if mod is None:
+# A hardware plugin can register its own engine under these names (on Intel GPU,
+# verl-hardware-plugin registers its XCCL engine as "nccl"), so accept any registered engine.
+from verl.checkpoint_engine import CheckpointEngineRegistry
+
+if mod is None or backend in CheckpointEngineRegistry._registry:
     sys.exit(0)
 try:
     importlib.import_module(mod)
