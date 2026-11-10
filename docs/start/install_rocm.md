@@ -1,6 +1,6 @@
 # Installation (ROCm)
 
-Last updated: 11/09/2026
+Last updated: 11/10/2026
 
 For NVIDIA GPU, see the {doc}`GPU installation guide <install>`. For Ascend NPU, see the {doc}`NPU installation guide <install_npu>`. For Intel GPU, see the {doc}`Intel GPU installation guide <install_xpu>`. For Cambricon MLU, see the {doc}`MLU installation guide <install_mlu>`.
 
@@ -126,7 +126,7 @@ NVIDIA GPU images are documented in the {doc}`GPU installation guide <install>`,
 
 ## Example: Qwen-Image FlowGRPO training in Docker
 
-This walkthrough uses the OCR dataset and `examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora.sh`. 
+This walkthrough uses the OCR dataset and `examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora_v1.sh`.
 
 ### 1. Launch the interactive container
 
@@ -168,7 +168,7 @@ ROCm requires the native/SDPA attention pair described in
 overrides, so append them to the command:
 
 ```bash
-bash examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora.sh \
+bash examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora_v1.sh \
   actor_rollout_ref.model.attn_backend=native \
   actor_rollout_ref.rollout.rollout_attn_backend=TORCH_SDPA
 ```
@@ -177,10 +177,10 @@ Without those two overrides the run fails during model init with
 `FileNotFoundError: Cannot find a build variant for this system in
 kernels-community/flash-attn3`.
 
-The script launches `python3 -m verl_omni.trainer.main_diffusion` with FlowGRPO
+The script launches `python3 -m verl_omni.trainer.main_diffusion_v1` with FlowGRPO
 + `vllm_omni` rollout and OCR reward (`compute_score_ocr`). Checkpoints are
 written to:
 
 ```bash
-checkpoints/flow_grpo/qwen_image_ocr_lora
+checkpoints/flow_grpo/qwen_image_ocr_lora_v1
 ```

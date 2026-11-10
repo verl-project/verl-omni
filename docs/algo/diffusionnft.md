@@ -1,6 +1,6 @@
 # DiffusionNFT
 
-Last updated: 10/15/2026.
+Last updated: 11/10/2026.
 
 DiffusionNFT ([paper](https://arxiv.org/abs/2509.16117),
 [code](https://github.com/NVlabs/DiffusionNFT),
@@ -193,7 +193,7 @@ The command writes:
 Launch training from the repository root:
 
 ```bash
-bash examples/diffusionnft_trainer/qwen_image/run_qwen_image_ocr_lora.sh
+bash examples/diffusionnft_trainer/qwen_image/run_qwen_image_ocr_lora_v1.sh
 ```
 
 
