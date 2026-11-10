@@ -36,10 +36,9 @@ Entry 35 reuses GPU diffusion entry 12, retaining two CRD updates, independent
 EMA, distributed update parity and exact checkpoint restoration. Both are
 execution smokes, not quality or convergence checks.
 
-The combined runner has eight entries: six core (0, 3, 4, 5, 6, 7) and two e2e
-(1, 2). The core group collects seven pytest cases because entry 4 is
-parametrized into request and step execution. The two e2e entries each run a
-trainer workload; they are not pytest cases.
+The core group collects seven pytest cases because entry 4 is parametrized
+into request and step execution. E2e entries run trainer workloads rather
+than pytest cases.
 
 Test 3 ports the `fsdp` case of `tests/workers/test_diffusers_fsdp_engine.py`
 (GPU core ID 2). It reuses the GPU test's synthetic trajectories and engine

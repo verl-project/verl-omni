@@ -41,7 +41,9 @@ def launcher_runtime(tmp_path):
         (scripts / name).write_text(
             f"#!/bin/bash\nexec {sys.executable} - \"$@\" <<'PY'\n"
             "import json,os,pathlib,sys\n"
-            "pathlib.Path(os.environ['CAPTURE']).write_text(json.dumps(dict(argv=sys.argv[1:],env=dict(os.environ))))\n"
+            "keys=('NUM_GPUS','MODEL_PATH','WORK_DIR','RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES')\n"
+            f"data=dict(base={name!r},argv=sys.argv[1:],env={{k:os.environ.get(k) for k in keys}})\n"
+            "pathlib.Path(os.environ['CAPTURE']).write_text(json.dumps(data))\n"
             "raise SystemExit(int(os.environ['RAW_EXIT']))\nPY\n"
         )
     bins = tmp_path / "bin"
@@ -94,6 +96,7 @@ def test_wrapper_preserves_delegation_paths_and_raw_exit(launcher_runtime, scrip
     )
     assert result.returncode == raw_exit, result.stdout + result.stderr
     captured = json.loads(Path(env["CAPTURE"]).read_text())
+    assert captured["base"] == base
     assert captured["argv"][-1] == "trainer.logger=console"
     assert "trainer.device=npu" in captured["argv"]
     assert captured["env"]["RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES"] == ""
