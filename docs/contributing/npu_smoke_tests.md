@@ -1,6 +1,6 @@
 # NPU Smoke Tests
 
-Last updated: 11/09/2026.
+Last updated: 11/10/2026.
 
 This guide explains how to add CI test cases for Huawei Ascend devices in verl-omni.
 
@@ -19,15 +19,20 @@ into these runners:
 | 0 | core | vLLM-Omni rollout + sleep/wake-up | tests/workers/rollout/rollout_vllm/test_vllm_omni_generate_npu.py | 8 |
 | 1 | e2e | Qwen-Image FlowGRPO trainer | tests/special_e2e/run_flowgrpo_qwen_image_npu.sh | 8 |
 | 2 | e2e | Wan2.2 DanceGRPO trainer with Qwen2.5-VL reward | tests/special_e2e/run_dancegrpo_wan22_npu.sh | 8 |
+| 18 | e2e | Qwen-Image FlowGRPO V1 sync | tests/special_e2e/run_flowgrpo_qwen_image_v1_npu.sh | 8 |
+| 19 | e2e | Qwen-Image-Edit FlowGRPO V1 sync | tests/special_e2e/run_flowgrpo_qwen_image_edit_npu.sh | 8 |
+| 20 | e2e | Qwen-Image online DPO V1 sync | tests/special_e2e/run_online_dpo_qwen_image_npu.sh | 8 |
+| 21 | e2e | Qwen-Image DiffusionNFT V1 sync | tests/special_e2e/run_diffusionnft_qwen_image_npu.sh | 8 |
+| 22 | e2e | Qwen-Image FlowGRPO V1 separate-async | tests/special_e2e/run_flowgrpo_qwen_image_v1_separate_async_npu.sh | 8 |
 | 3 | core | Diffusers FSDP engine inference and training | tests/workers/test_diffusers_fsdp_engine_npu.py | 8 |
 | 4 | core | Diffusion agent loop, request and step execution | tests/agent_loop/test_diffusion_agent_loop_npu.py::test_diffusion_single_turn_npu | 8 |
 | 5 | core | Unseeded multi-worker rollout diversity | tests/agent_loop/test_diffusion_agent_loop_npu.py::test_rollout_without_seed_npu | 8 |
 | 6 | core | Seeded multi-worker rollout reproducibility | tests/agent_loop/test_diffusion_agent_loop_npu.py::test_rollout_seed_reproducibility_npu | 8 |
 | 7 | core | Standalone vLLM reward engine and OCR scoring | tests/reward_loop/test_reward_engine_npu.py | 8 |
 
-The combined runner has eight entries: six core (0, 3, 4, 5, 6, 7) and two e2e
-(1, 2). The core group collects seven pytest cases because entry 4 is
-parametrized into request and step execution. The two e2e entries each run a
+The combined runner has 13 entries: six core (0, 3, 4, 5, 6, 7) and seven e2e
+(1, 2, 18, 19, 20, 21, 22). The core group collects seven pytest cases because entry 4 is
+parametrized into request and step execution. The e2e entries each run a
 trainer workload; they are not pytest cases.
 
 Test 3 ports the `fsdp` case of `tests/workers/test_diffusers_fsdp_engine.py`
@@ -99,6 +104,18 @@ Test 2 runs one DanceGRPO training step with six actor NPUs and a dedicated
 TP=2 Qwen2.5-VL reward engine on two NPUs. Prepare the Qwen2.5-VL-3B-Instruct
 checkpoint before an offline run; set `REWARD_MODEL_PATH` to its local directory
 when needed. The test must complete training and exit 0.
+
+### Qwen-Image V1 trainer variants
+
+Entries 18-22 reuse the GPU trainer workloads with native NPU attention,
+local tiny checkpoints and isolated per-entry datasets. Entries 18 and 20 use
+the tiny Qwen2.5-VL OCR reward model. Entry 19 prepares an image-edit checkpoint
+and requires `qwen-vl-utils==0.0.14`, installed by the e2e workflow without
+changing the inference-stack dependencies. Explicit model paths are reused.
+Entry 22 splits an even NPU budget between actor and standalone rollout.
+
+Run these entries through the e2e group after configuring the runtime below.
+All trainer and builder failures remain failures, including exit 134.
 
 ## Add a New NPU Smoke Test
 

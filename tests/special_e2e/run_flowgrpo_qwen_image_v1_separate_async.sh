@@ -56,11 +56,14 @@ fi
 ENGINE=vllm_omni
 max_prompt_length=256
 
-ATTN_BACKEND=_flash_3_varlen_hub
-ROLLOUT_ATTN_BACKEND=FLASH_ATTN
-if ! python3 -c 'from verl_omni.utils.diffusion_attention import fa_available; raise SystemExit(0 if fa_available() else 1)' >/dev/null 2>&1; then
-    ATTN_BACKEND=native
-    ROLLOUT_ATTN_BACKEND=TORCH_SDPA
+if [[ -z "${ATTN_BACKEND:-}" || -z "${ROLLOUT_ATTN_BACKEND:-}" ]]; then
+    if python3 -c 'from verl_omni.utils.diffusion_attention import fa_available; raise SystemExit(0 if fa_available() else 1)' >/dev/null 2>&1; then
+        ATTN_BACKEND=${ATTN_BACKEND:-_flash_3_varlen_hub}
+        ROLLOUT_ATTN_BACKEND=${ROLLOUT_ATTN_BACKEND:-FLASH_ATTN}
+    else
+        ATTN_BACKEND=${ATTN_BACKEND:-native}
+        ROLLOUT_ATTN_BACKEND=${ROLLOUT_ATTN_BACKEND:-TORCH_SDPA}
+    fi
 fi
 
 # Pre-flight: surface missing cupy/pyzmq before Ray spins up.
@@ -82,6 +85,18 @@ if mod is None:
 try:
     importlib.import_module(mod)
 except Exception as e:
+    # On Ascend the "nccl"-named engine is served by the HCCL module: verl
+    # registers HCCLCheckpointEngine under "nccl" and the CUDA/NPU engines
+    # are mutually exclusive, so probe the HCCL module before failing.
+    if backend == "nccl":
+        try:
+            from verl.utils.device import is_torch_npu_available
+
+            if is_torch_npu_available(check_device=True):
+                importlib.import_module("verl.checkpoint_engine.hccl_checkpoint_engine")
+                sys.exit(0)
+        except Exception:
+            pass
     print(f"Checkpoint backend '{backend}' could not be imported: {e}", file=sys.stderr)
     if backend == "nccl":
         print("Install the required dependency. For 'nccl' that is typically:", file=sys.stderr)
@@ -107,13 +122,13 @@ python3 tests/special_e2e/create_dummy_diffusion_data.py \
     --val_size 4
 
 python3 -m verl_omni.trainer.main_diffusion_v1 \
-    data.train_files=${dummy_train_path} \
-    data.val_files=${dummy_test_path} \
+    data.train_files="${dummy_train_path}" \
+    data.val_files="${dummy_test_path}" \
     data.train_batch_size=${train_batch_size} \
     data.max_prompt_length=${max_prompt_length} \
     actor_rollout_ref.model.algorithm=flow_grpo \
-    actor_rollout_ref.model.path=${MODEL_PATH} \
-    actor_rollout_ref.model.tokenizer_path=${TOKENIZER_PATH} \
+    actor_rollout_ref.model.path="${MODEL_PATH}" \
+    actor_rollout_ref.model.tokenizer_path="${TOKENIZER_PATH}" \
     actor_rollout_ref.model.attn_backend=${ATTN_BACKEND} \
     actor_rollout_ref.rollout.rollout_attn_backend=${ROLLOUT_ATTN_BACKEND} \
     actor_rollout_ref.model.lora_rank=8 \

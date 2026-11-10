@@ -28,11 +28,14 @@ max_prompt_length=256
 
 # Smoke: pin local FLASH_ATTN (product default remains FLASH_ATTN_3_HUB).
 # Use exit-code checks only — importing verl/vllm may print INFO lines on stdout.
-ATTN_BACKEND=_flash_3_varlen_hub
-ROLLOUT_ATTN_BACKEND=FLASH_ATTN
-if ! python3 -c 'from verl_omni.utils.diffusion_attention import fa_available; raise SystemExit(0 if fa_available() else 1)' >/dev/null 2>&1; then
-    ATTN_BACKEND=native
-    ROLLOUT_ATTN_BACKEND=TORCH_SDPA
+if [[ -z "${ATTN_BACKEND:-}" || -z "${ROLLOUT_ATTN_BACKEND:-}" ]]; then
+    if python3 -c 'from verl_omni.utils.diffusion_attention import fa_available; raise SystemExit(0 if fa_available() else 1)' >/dev/null 2>&1; then
+        ATTN_BACKEND=${ATTN_BACKEND:-_flash_3_varlen_hub}
+        ROLLOUT_ATTN_BACKEND=${ROLLOUT_ATTN_BACKEND:-FLASH_ATTN}
+    else
+        ATTN_BACKEND=${ATTN_BACKEND:-native}
+        ROLLOUT_ATTN_BACKEND=${ROLLOUT_ATTN_BACKEND:-TORCH_SDPA}
+    fi
 fi
 
 # This helper runs nvidia-smi in a background loop during training and
@@ -80,13 +83,13 @@ python3 tests/special_e2e/create_dummy_diffusion_data.py \
 
 start_leak_monitor
 python3 -m verl_omni.trainer.main_diffusion_v1 \
-    data.train_files=${dummy_train_path} \
-    data.val_files=${dummy_test_path} \
+    data.train_files="${dummy_train_path}" \
+    data.val_files="${dummy_test_path}" \
     data.train_batch_size=${train_batch_size} \
     data.max_prompt_length=${max_prompt_length} \
     actor_rollout_ref.model.algorithm=flow_grpo \
-    actor_rollout_ref.model.path=${MODEL_PATH} \
-    actor_rollout_ref.model.tokenizer_path=${TOKENIZER_PATH} \
+    actor_rollout_ref.model.path="${MODEL_PATH}" \
+    actor_rollout_ref.model.tokenizer_path="${TOKENIZER_PATH}" \
     actor_rollout_ref.model.attn_backend=${ATTN_BACKEND} \
     actor_rollout_ref.rollout.rollout_attn_backend=${ROLLOUT_ATTN_BACKEND} \
     actor_rollout_ref.model.lora_rank=8 \
@@ -123,7 +126,7 @@ python3 -m verl_omni.trainer.main_diffusion_v1 \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=${micro_bsz_per_gpu} \
     reward.num_workers=1 \
     reward.reward_model.enable=True \
-    reward.reward_model.model_path=${REWARD_MODEL_PATH} \
+    reward.reward_model.model_path="${REWARD_MODEL_PATH}" \
     reward.reward_model.rollout.name=vllm \
     reward.reward_model.rollout.tensor_model_parallel_size=${REWARD_TP} \
     reward.reward_model.rollout.gpu_memory_utilization=0.4 \
