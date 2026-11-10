@@ -472,9 +472,10 @@ The three supported sources:
 
 - `reward.custom_reward_function.path` / `.name` — a Python reward function
   that **replaces the default scorer**: it receives the parquet `data_source`
-  among its arguments and does its own routing. With no custom function
-  configured, scoring dispatches on `data_source` (verl's built-in contract,
-  e.g. `openai/gsm8k`) — see the
+  among its arguments and does its own routing. With neither a custom function
+  nor a reward model configured, scoring dispatches on `data_source` (verl's
+  built-in contract, e.g. `openai/gsm8k`); with `reward.reward_model.enable=true`
+  and no custom function, the reward model scores instead — see the
   [GSPO README](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/README.md).
 - Named reward-model ensembles —
   [`docs/algo/named_reward_models.md`](../algo/named_reward_models.md).

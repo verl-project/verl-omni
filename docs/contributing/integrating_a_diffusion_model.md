@@ -453,8 +453,10 @@ input row, each expanded into its diffusion group. Its contract, in brief:
   (a per-sample `agent_name` override must select a loop that returns the
   composite output contract — one AR result plus its diffusion samples per
   row — or the worker's unpack fails).
-- `rollout.m` repeats each prompt row for AR sampling (`m` AR rollouts per
-  prompt); `rollout.n` is the diffusion group size per AR sample.
+- `rollout.m` is the AR repeat count: callers repeat each prompt row themselves
+  (`batch.repeat(rollout.m)`, as the composite test does) to draw `m` AR
+  rollouts per prompt — the loop emits one AR output per row; `rollout.n` is
+  the diffusion group size per AR sample.
 - AR sampling lives under `actor_rollout_ref.rollout.ar.*`.
 - The reward config must define a function named `ar` with `weight: 0` — AR
   reward is derived from the per-image `reward/ar` extras and the loop asserts
