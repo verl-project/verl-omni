@@ -496,6 +496,7 @@ actor_rollout_ref:
       freeze_vision_projection: true
       freeze_language_model: true
     model_type: omni_model
+    composite_mode: null
     architecture: null
     model_stage: thinker
     hf_config_name: null
@@ -551,6 +552,9 @@ data:
     path: null
     name: null
   apply_chat_template_kwargs: {}
+  continuous_token:
+    enable: false
+    model_family: auto
 critic:
   optim:
     _target_: verl.workers.config.FSDPOptimizerConfig
@@ -938,6 +942,8 @@ algorithm:
   sample_source: online
   paired_preference: false
   global_std: true
+  gen_norm_adv_by_std_in_grpo: null
+  adv_std_floor: 0.05
 distillation:
   _target_: verl.workers.config.DistillationConfig
   enabled: false
@@ -1063,6 +1069,7 @@ trainer:
         path: null
         name: null
       sampler_kwargs: {}
+    bagel_corl_sync: {}
   ray_master_port_range: null
 global_profiler:
   _target_: verl.utils.profiler.ProfilerConfig
@@ -1138,11 +1145,19 @@ agentic_image_gen:
   diffusion_tool_timeout: 900
   vllm_url: ''
   vllm_model: ''
+  rubric_model: ca_judge
+  rubric_vllm_url: ''
+  rubric_vllm_model: ''
   reflect_max_new_tokens: 1024
   judge_parse_retries: 1
   reflect_vlm_timeout: 120
   judge_enable_thinking: false
   good_enough_threshold: 0.8
+  score_backend: unified_reward
+  unified_good_enough_threshold: 0.62
+  gen_rubric_weight: 0.5
+  stop_requires_rubric: true
+  pickscore_good_enough_threshold: 1.0
   block_generate_after_yes: true
   block_generate_after_max_passes: true
   max_generate_image_passes: 3
@@ -1153,3 +1168,4 @@ agentic_image_gen:
   rewrite_judge_before_generate: true
   e2e_root: null
   run_dir: null
+  corl_reward_version: v1

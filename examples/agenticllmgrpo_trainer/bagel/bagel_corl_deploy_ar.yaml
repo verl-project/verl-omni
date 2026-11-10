@@ -1,0 +1,113 @@
+# Co-RL (Joint-Training) UND AR deploy (Thinker). Sibling of bagel_corl_deploy.yaml (GEN / bagel_single_stage).
+#
+# Uses registered ``bagel_think`` so stage-0 LLM_AR decodes planning / tool tokens
+# (Hermes ``<tool_call>``) before any KV transfer. Do NOT use bagel_single_stage here —
+# that is DiffusionStrategy / GEN-only.
+#
+# Passed from run_agentic_bagel_rpco_lora.sh as BAGEL_UND_DEPLOY_CONFIG and from
+# run_bagel_und_ar_serve.sh for standalone Hermes verification.
+#
+# Layout: Thinker on logical 0, DiT on logical 1 -- the same split the serve helper
+# applies when two GPUs are visible (``run_bagel_und_ar_serve.sh``: "Two visible cards
+# -> split Thinker / DiT. One card -> both on logical 0."). The stages must NOT share
+# one card in the training path: each ``bagel_think`` stage loads its own copy of the
+# full 27.5GiB Bagel checkpoint, and the recipe always boots at least one GEN engine on
+# the first actor GPU. Both stages on device 0 is therefore three checkpoint copies on
+# one 80GiB card (measured: GPU 0 at 71.9GiB while GPUs 1-3 sat at 2.8GiB), and the
+# first ``update_weights`` then dies with "Wake-up failed on Rank 0 ... CUDA Error: out
+# of memory at cumem_allocator.cpp:163" because the GEN engine's level-1 sleep has to
+# re-map 28.56GiB that is no longer there.
+#
+# Requires ``agent.und_n_gpus >= 2`` (recipe ``UND_N_GPUS``): stage devices are logical
+# indices into the replica's own ``CUDA_VISIBLE_DEVICES``, so a 1-GPU pool cannot resolve
+# logical device 1. For a 1-GPU smoke test put both stages back on "0" and drop to 1.
+#
+# ``UND_N_GPUS`` must also **divide** the actor pool: the slice is taken by
+# ``split_resource_pool``, which asserts ``split_size`` divides ``world_size``. On the
+# usual 4-card pool the valid widths are therefore {1, 2, 4} -- a 3-wide replica does not
+# exist, so an offset layout (Thinker 1 / DiT 2) is only expressible on a pool that is a
+# multiple of 3 (otherwise ``split_size must be a divisor of world_size``).
+#
+# The one-card offset is what a *contended* pool needs (it keeps 28.6GiB of Thinker off
+# the card a co-tenant takes, since the actor shard and one GEN rank are pinned there by
+# the pool geometry). Use it only when the pool width allows it; on an idle 4-card pool
+# the plain split below is both valid and enough.
+#
+# Two halves have to line up for the split to survive into the colocated training path
+# (the serve helper below is a standalone ``vllm-omni serve`` and gets ``--stage-overrides``
+# from its own script):
+#   * ``_build_und_ar_entrypoint_config`` declares the replica's width as
+#     ``tensor_model_parallel_size = und_n_gpus``. ``RolloutReplica`` derives
+#     ``gpus_per_replica_node = min(n_gpus_per_node, world_size)`` and
+#     ``vLLMReplica.launch_servers`` builds the server's ``CUDA_VISIBLE_DEVICES`` from that
+#     count, so without the declaration the server sees only device "0" and logical "1"
+#     below is unreachable.
+#   * the same builder emits ``--stage-overrides`` pinning ``tensor_parallel_size: 1`` for
+#     *every* stage in this file, because a plain top-level engine arg is copied into each
+#     stage by the deploy-config path (the DiT stage even folds it into its diffusion
+#     ``parallel_config``). Without the pin, a stage that has one ``devices`` entry here
+#     would be asked for two ranks.
+
+pipeline: bagel_think
+async_chunk: false
+
+stages:
+  - stage_id: 0
+    # Bagel registers as encoder-decoder in vLLM-Omni, which forces
+    # disable_chunked_mm_input=True and pins the MM encoder budget to
+    # max_num_batched_tokens. The Bagel image processor emits ~8625 tokens per
+    # image, so 2048 aborts engine init with:
+    #   ValueError: Chunked MM input disabled but max_tokens_per_mm_item (8625)
+    #   is larger than max_num_batched_tokens (2048).
+    # 16384 keeps max_num_batched_tokens == max_num_seqs * max_model_len, so the
+    # scheduler's seq*len warning stays silent, and leaves prompt headroom.
+    max_model_len: 16384
+    max_num_batched_tokens: 16384
+    max_num_seqs: 1
+    # Must track ``agent.und_gpu_memory_utilization`` (recipe ``UND_GPU_MEM_UTIL``).
+    #
+    # This budget sizes the Thinker stage's KV cache, not its weights. Measured on GPU 0
+    # with the stage alone in flight: vLLM reports "Actual usage is 28.16 GiB for consumed
+    # memory (weights + non-torch), 2.96 GiB for peak activation" over a 27.54GiB
+    # checkpoint load, then fills the rest of ``util * total`` with KV (6.93GiB at 0.45,
+    # i.e. 129,776 tokens where one 16k-token episode needs a fraction of that). Weights +
+    # peak are util-independent, so a budget under ~31.1GiB aborts init with "No available
+    # memory for the cache blocks" -- 0.30 and 0.35 both killed the run inside ``_init_und``
+    # on an otherwise-idle card. Floor ~0.393.
+    #
+    # 0.40 is the cheapest init-viable pool (~4.3GiB of KV). Since the DiT stage now lives
+    # on its own card, this card's other residents are only GEN rank 0 (28.21GiB awake /
+    # 2.15GiB asleep) plus the actor shard, which leaves the ~28.56GiB the GEN wake_up
+    # re-maps. Do not raise this to chase GEN headroom, and do not lower it below the floor.
+    gpu_memory_utilization: 0.40
+    enforce_eager: true
+    trust_remote_code: true
+    enable_prefix_caching: false
+    devices: "0"
+    default_sampling_params:
+      temperature: 0.7
+      top_p: 0.9
+      top_k: 50
+      max_tokens: 512
+      seed: 42
+      detokenize: true
+      repetition_penalty: 1.05
+
+  - stage_id: 1
+    max_num_batched_tokens: 2048
+    max_num_seqs: 1
+    enforce_eager: true
+    trust_remote_code: true
+    enable_prefix_caching: false
+    # DiT decode stage. Here, and only here, it gets the replica's second card: keeping
+    # it on "0" alongside the Thinker is what put 71.9GiB on GPU 0 and OOM'd the GEN
+    # wake_up (see the layout note at the top). Logical index -- needs UND_N_GPUS >= 2.
+    devices: "1"
+    input_connectors:
+      from_stage_0: shared_memory_connector
+    default_sampling_params:
+      seed: 42
+
+connectors:
+  shared_memory_connector:
+    name: SharedMemoryConnector

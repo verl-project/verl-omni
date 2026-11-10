@@ -29,7 +29,12 @@ from verl_omni.pipelines.rollout_media import ArtifactContractError
 from verl_omni.workers.config.reward import get_reward_model_entries, resolve_reward_model_name
 
 from .media import _reward_extra_info
-from .visual import _sampling_params_from_rollout, _validate_visual_response
+from .visual import (
+    _is_token_response,
+    _optional_row_field,
+    _sampling_params_from_rollout,
+    _validate_visual_response,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -389,3 +394,62 @@ class MultiVisualRewardManager(MultiRewardManager):
                 sampling_params=sampling_params,
             )
         return reward_kwargs
+
+
+class BagelCorlMultiRewardManager(MultiRewardManager):
+    """``VisualRewardManager``'s Bagel Co-RL input contract on top of named reward models.
+
+    The Co-RL loop sends this manager two row shapes: a Hermes *token* trajectory for the
+    episode reward (decoded into ``solution_str``) and a one-row placeholder carrying the
+    mid-loop image payload under ``extra_info["bagel_corl"]`` (``bagel_corl_rm``). Both
+    are scored by one reward function (``bagel_rm_image_scorer.compute_score``), which
+    dispatches on the payload; here that function is a named-model term so it can reach
+    *two* colocated engines -- the image scorer it is bound to and the C/A rubric judge
+    via ``reward_router_addresses``.
+
+    The multi-reward aggregator namespaces each term's extras as ``reward/<term>/<key>``.
+    Every Co-RL consumer reads them flat -- ``parse_rm_result`` wants ``sample_scores`` /
+    ``sample_good_enough`` on the mid-loop row, and the trainer's breakdown wants
+    ``reward_image`` / ``reward_ca`` / ... on the episode row -- so this manager also
+    flattens the *primary* term's extras back to their bare names. With one configured
+    term that is the whole table; with several, the primary is the first term, and the
+    rest keep their namespaced keys.
+    """
+
+    @classmethod
+    def assemble_rm_scores(cls, data: DataProto, scores: list[float]) -> torch.Tensor:
+        """Match ``VisualRewardManager``: one scalar per sample, shape ``(batch_size, 1)``."""
+        return torch.tensor(scores, dtype=torch.float32).unsqueeze(-1)
+
+    async def _build_reward_kwargs(self, data_item: DataProto) -> dict:
+        response = data_item.batch["responses"]
+        if _is_token_response(response):
+            solution_str = self.tokenizer.decode(response.reshape(-1).tolist(), skip_special_tokens=True)
+            score_input = {"solution_str": solution_str}
+        else:
+            _validate_visual_response(response, self.config, is_validate=data_item.meta_info.get("validate", False))
+            score_input = {"solution_image": response}
+        extra_info = _reward_extra_info(data_item)
+        extra_info["num_turns"] = data_item.non_tensor_batch.get("__num_turns__", None)
+        extra_info["rollout_reward_scores"] = data_item.non_tensor_batch.get("reward_scores", {})
+        return {
+            "data_source": _optional_row_field(data_item, "data_source", ""),
+            "ground_truth": _optional_row_field(data_item, "reward_model", {}).get("ground_truth", ""),
+            "extra_info": extra_info,
+            **score_input,
+        }
+
+    async def run_single(self, data: DataProto) -> dict:
+        output = await super().run_single(data)
+        if not self._sub_rewards:
+            return output
+        primary = f"reward/{self._sub_rewards[0]['key']}/"
+        extras = output["reward_extra_info"]
+        flat = {}
+        for key, value in extras.items():
+            if key.startswith(primary):
+                flat[key[len(primary) :]] = value
+        # Namespaced keys stay alongside the flat ones; a flat name that collides with a
+        # namespaced key is impossible (the namespace carries a slash).
+        extras.update(flat)
+        return output

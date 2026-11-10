@@ -47,6 +47,20 @@ vllm_url: ""
 # Optional model id for the judge OpenAI chat payload.
 vllm_model: ""
 
+# Which reward-pool model answers the C/A rubric when the pool serves several
+# (``reward.models.<name>``). The image score stays on the model the reward function is
+# bound to; the rubric goes to this sibling (a general VLM, e.g. Qwen3.5-9B). Ignored
+# when the pool has no model by this name, in which case the rubric uses the scoring
+# endpoint, as before.
+rubric_model: ca_judge
+
+# Optional external OpenAI chat base URL for the C/A rubric only. Wins over
+# ``rubric_model``; empty means "use the pool".
+rubric_vllm_url: ""
+
+# Model id sent to ``rubric_vllm_url``; ignored when the rubric rides the pool.
+rubric_vllm_model: ""
+
 # Max new tokens for judge / reflect VLM calls.
 reflect_max_new_tokens: 1024
 
@@ -61,6 +75,45 @@ judge_enable_thinking: false
 
 # Min C and A for client-side good_enough=YES (0.80 = 0.8 discrete grid band).
 good_enough_threshold: 0.80
+
+# Numeric reward backend for the Bagel GEN lane: "unified_reward" scores the image
+# against its prompt on UnifiedReward 2.0's 1-5 Alignment/Coherence/Style axes and
+# normalizes to [0, 1] (continuous, so a GRPO group keeps variance); "pickscore"
+# scores it with PickScore_v1 in-process on the reward worker, matching the reward the
+# canonical Bagel FlowGRPO recipes train against; "vlm_judge" uses the discrete
+# correctness/aesthetics facet grid.
+score_backend: unified_reward
+
+# Min normalized UnifiedReward score for client-side good_enough=YES. Not the same
+# scale as good_enough_threshold (that one is the facet judge's 6-level grid).
+# Calibrated to the judge this lane actually runs, not chosen a priori. Two measured
+# points bracket the failure modes: 0.41 was the p90 of the older rollouts (ceiling
+# 0.490) and fired ~8-10% YES; on the 2026-10-11 ``bagel_corl_reflect_k3`` run
+# UnifiedReward 2.0 emitted 0.367..0.674 (p50 0.561, p90 0.623), so 0.41 read YES on
+# 99.3% of first images -- the stop cue was a constant the other way, every episode
+# broke at J=1/K=1 and the reflection loop never iterated. 0.62 is this run's p90 ->
+# ~11% YES: high enough that YES is an achievement, low enough that a rewrite can
+# reach it. Re-derive from any run dir with tools/_verify_bagel_episode_reward.py and
+# raise toward good_enough_threshold as the GEN lane improves.
+unified_good_enough_threshold: 0.62
+
+# ``unified_reward_rubric`` only: share of the rubric verdict (C + A) / 2 in each image's
+# score, the rest being UnifiedReward. UnifiedReward does not check exact strings or
+# counts, so with 0 the GEN lane never learns what the rubric judge flags.
+gen_rubric_weight: 0.5
+
+# ``unified_reward_rubric`` + v2: good_enough=YES needs the rubric judge's own YES
+# (C and A >= good_enough_threshold) as well as the UnifiedReward cut. With false the
+# stop follows UnifiedReward alone and can contradict the C/A shown beside it.
+stop_requires_rubric: true
+
+# Min PickScore for client-side good_enough=YES when ``score_backend: pickscore``. On
+# PickScore's ``raw / 26`` scale. Unlike ``unified_good_enough_threshold`` this is not
+# calibrated against a measured distribution yet -- PickScore is a *relative* ranker,
+# so read ``reward_extra_info["per_image"][*]["score"]`` from the first run and set
+# this near the observed p90. Conservative by default so the stop cue cannot fire on
+# every first image (the failure mode documented above).
+pickscore_good_enough_threshold: 1.0
 
 # Block further generate_image after good_enough=YES.
 block_generate_after_yes: true
@@ -91,3 +144,6 @@ e2e_root: null
 
 # Explicit run directory (null → e2e_root / trainer.experiment_name).
 run_dir: null
+
+# Co-RL objective contract: v1 baseline or opt-in v2 final quality/call cost.
+corl_reward_version: v1

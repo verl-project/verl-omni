@@ -90,11 +90,18 @@ class OmniAlgoConfig(AlgoConfig):
     adv_estimator: str = "dpo"
     norm_adv_by_std_in_grpo: bool = True
     global_std: bool = True
+    # Bagel Co-RL GEN-lane override of ``norm_adv_by_std_in_grpo``; ``None`` inherits it.
+    gen_norm_adv_by_std_in_grpo: Optional[bool] = None
+    # Per-group std floor for ``adv_estimator=grpo_std_floor``: A = (r - mean) / max(std, floor).
+    # Ignored by every other estimator.
+    adv_std_floor: float = 0.05
 
     def __post_init__(self):
         valid_trainer_types = {"policy_gradient", "direct_preference"}
         if self.trainer_type not in valid_trainer_types:
             raise ValueError(f"Invalid trainer_type: {self.trainer_type}. Must be one of {sorted(valid_trainer_types)}")
+        if self.adv_std_floor < 0:
+            raise ValueError(f"adv_std_floor must be >= 0, got {self.adv_std_floor}")
         valid_sample_sources = {"online", "offline"}
         if self.sample_source not in valid_sample_sources:
             raise ValueError(

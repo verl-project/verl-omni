@@ -60,30 +60,56 @@ async def _await_owned(awaitable):
 
 
 class EngineRouterClient:
-    """Expose one engine router to a configured reward function."""
+    """Expose one engine router to a configured reward function.
 
-    def __init__(self, router_address: str, model_path: str):
+    ``peers`` maps every engine-backed model in the same reward pool to its router
+    address. A scorer that needs a *second* model (the Bagel Co-RL rubric judge, which
+    is asked the C/A question while UnifiedReward scores the same image) can only reach
+    it through this map: its own term is bound to one model, and the reward loop hands
+    out exactly one ``reward_router_address`` per term.
+    """
+
+    def __init__(
+        self,
+        router_address: str,
+        model_path: str,
+        peers: dict[str, str] | None = None,
+        peer_models: dict[str, str] | None = None,
+    ):
         self.router_address = router_address
         self.model_path = model_path
+        self.peers = dict(peers or {})
+        self.peer_models = dict(peer_models or {})
 
-    def reward_kwargs(self) -> dict[str, str]:
+    def reward_kwargs(self) -> dict[str, Any]:
         return {
             "reward_router_address": self.router_address,
             "model_name": self.model_path,
+            # Every engine model's router, keyed by configured model name (``reward.models.<name>``).
+            "reward_router_addresses": dict(self.peers),
+            # The matching checkpoint paths, which vLLM serves as the OpenAI model id.
+            "reward_model_paths": dict(self.peer_models),
         }
 
 
 class EngineRewardExecutor:
     """Worker-side request contract for one engine-backed reward model."""
 
-    def __init__(self, spec: RewardModelSpec):
+    def __init__(
+        self,
+        spec: RewardModelSpec,
+        peers: dict[str, str] | None = None,
+        peer_models: dict[str, str] | None = None,
+    ):
         self.spec = spec
         self._client = EngineRouterClient(
             router_address=spec.router_address,
             model_path=spec.model_path,
+            peers=peers,
+            peer_models=peer_models,
         )
 
-    def reward_kwargs(self) -> dict[str, str]:
+    def reward_kwargs(self) -> dict[str, Any]:
         return self._client.reward_kwargs()
 
 
@@ -246,8 +272,17 @@ class NativeRewardExecutor:
 
 
 def build_engine_reward_executors(specs: dict[str, RewardModelSpec]) -> dict[str, EngineRewardExecutor]:
-    """Build worker-side router clients for engine-backed model specs."""
-    return {name: EngineRewardExecutor(spec) for name, spec in specs.items() if is_engine_backend(spec.backend)}
+    """Build worker-side router clients for engine-backed model specs.
+
+    Every client receives the *whole* pool's router map, so a scorer bound to one model
+    can address a sibling model (the C/A rubric judge) in the same reward pool.
+    """
+    engine_specs = {name: spec for name, spec in specs.items() if is_engine_backend(spec.backend)}
+    peers = {name: spec.router_address for name, spec in engine_specs.items()}
+    peer_models = {name: spec.model_path for name, spec in engine_specs.items()}
+    return {
+        name: EngineRewardExecutor(spec, peers=peers, peer_models=peer_models) for name, spec in engine_specs.items()
+    }
 
 
 def build_native_reward_executors(specs: dict[str, RewardModelSpec]) -> dict[str, NativeRewardExecutor]:
