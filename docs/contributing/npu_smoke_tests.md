@@ -111,10 +111,19 @@ Entries 18-22 reuse the GPU trainer workloads with native NPU attention,
 local tiny checkpoints and isolated per-entry datasets. Entries 18 and 20 use
 the tiny Qwen2.5-VL OCR reward model. Entry 19 prepares an image-edit checkpoint
 and requires `qwen-vl-utils==0.0.14`, installed by the e2e workflow without
-changing the inference-stack dependencies. Explicit model paths are reused.
+changing the inference-stack dependencies. Entries 18 and 20 build their default
+reward checkpoint in an e2e-only cache, separate from the core reward tests.
 Entry 22 splits an even NPU budget between actor and standalone rollout.
 
-Run these entries through the e2e group after configuring the runtime below.
+The e2e group clears `MODEL_PATH` for entries 18-22 to select independent model
+fixtures. To reuse an existing image-edit checkpoint, invoke its launcher
+directly after configuring the runtime below:
+
+```bash
+MODEL_PATH=/path/to/Qwen-Image-Edit NUM_NPUS=8 \
+  bash tests/special_e2e/run_flowgrpo_qwen_image_edit_npu.sh
+```
+
 All trainer and builder failures remain failures, including exit 134.
 
 ## Add a New NPU Smoke Test

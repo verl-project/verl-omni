@@ -8,7 +8,7 @@ source "${SCRIPT_DIR}/lib_npu_e2e.sh"
 export NUM_GPUS="${NUM_NPUS}"
 export MODEL_PATH="${MODEL_PATH:-${HOME}/.cache/modelscope/hub/models/tiny-random/Qwen-Image}"
 export TOKENIZER_PATH="${MODEL_PATH}/tokenizer"
-export REWARD_MODEL_PATH="${QWEN_IMAGE_REWARD_MODEL_PATH:-${HOME}/.cache/verl-omni-npu-smoke/Qwen2.5-VL-Reward-NPU}"
+export REWARD_MODEL_PATH="${QWEN_IMAGE_REWARD_MODEL_PATH:-${HOME}/.cache/verl-omni-npu-smoke/e2e/Qwen2.5-VL-Reward-NPU}"
 DATA_DIR="${DATA_DIR:-$(mktemp -d "${TMPDIR:-/tmp}/verl-omni-online-dpo-npu.XXXXXX")}"
 export DATA_DIR
 unset TRAIN_FILES VAL_FILES
