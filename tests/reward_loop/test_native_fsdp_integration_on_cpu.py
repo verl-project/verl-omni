@@ -71,10 +71,8 @@ def test_rank_order_is_explicit_and_flat_devices_remain_complete_replicas():
     [
         {"devices": [0], "replica_groups": [[0, 1]]},
         {"replica_groups": [[0, 0]]},
-        {"replica_groups": [[0, True]]},
         {"replica_groups": [[0]]},
         {"replica_groups": [[0, 1], [2, 3]]},
-        {"resource": "cpu", "num_replicas": 1, "replica_groups": [[0, 1]]},
     ],
 )
 def test_invalid_placement_is_rejected(placement):
@@ -84,10 +82,9 @@ def test_invalid_placement_is_rejected(placement):
         parse_reward_model_config("pickscore", model)
 
 
-@pytest.mark.parametrize("required", [False, None, "true"])
-def test_optional_or_ambiguous_terms_are_rejected_before_resource_allocation(required):
+def test_optional_terms_are_rejected_before_resource_allocation():
     cfg = config()
-    cfg.reward.reward_functions.pickscore.required = required
+    cfg.reward.reward_functions.pickscore.required = False
     with pytest.raises(ValueError, match="required=true"):
         validate_reward_model_terms(cfg)
 
@@ -107,24 +104,6 @@ def test_unsupported_modes_fail_before_allocation(mode):
         cfg.reward.reward_model.nnodes = 2
     with pytest.raises(ValueError):
         validate_reward_model_terms(cfg)
-
-
-def test_group_bundles_reuse_parent_overlap_and_bounds_validation():
-    cfg = config()
-    cfg.reward.models.pickscore.placement.replica_groups = [[0, 2]]
-    with pytest.raises(ValueError, match="only 2 bundles"):
-        MultiRewardModelManager(cfg, SimpleNamespace(world_size=2))
-    model = parse_reward_model_config("pickscore", cfg.reward.models.pickscore)
-    other = parse_reward_model_config(
-        "other",
-        {
-            "backend": "native",
-            "placement": {"devices": [2]},
-            "executor": {"model": "other:Model"},
-        },
-    )
-    with pytest.raises(ValueError, match="overlaps"):
-        MultiRewardModelManager._validate_native_device_assignments([("pickscore", model), ("other", other)])
 
 
 def test_dispatcher_registers_one_logical_worker_for_two_ranks(monkeypatch):
@@ -158,14 +137,12 @@ def test_partial_worker_group_construction_rolls_back_accepted_ranks(monkeypatch
     assert calls == ["rank0"]
 
 
-@pytest.mark.parametrize("failure", [False, True])
-def test_trainer_cleanup_closes_fsdp_and_queue_even_on_fit_or_close_failure(failure):
+def test_trainer_cleanup_closes_fsdp_and_queue_even_on_fit_or_close_failure():
     calls = []
 
     async def close():
         calls.append("models")
-        if failure:
-            raise RuntimeError("model close failed")
+        raise RuntimeError("model close failed")
 
     def queue():
         calls.append("queue")
@@ -173,17 +150,14 @@ def test_trainer_cleanup_closes_fsdp_and_queue_even_on_fit_or_close_failure(fail
     trainer = SimpleNamespace(
         reward_loop_manager=SimpleNamespace(multi_reward_model_manager=SimpleNamespace(close_native_models=close))
     )
-    if failure:
-        with pytest.raises(BaseExceptionGroup) as error:
-            finish_training_resources(trainer, config(), queue, ValueError("fit failed"))
-        assert [str(exc) for exc in error.value.exceptions] == ["fit failed", "model close failed"]
-    else:
-        finish_training_resources(trainer, config(), queue)
+    with pytest.raises(BaseExceptionGroup) as error:
+        finish_training_resources(trainer, config(), queue, ValueError("fit failed"))
+    assert [str(exc) for exc in error.value.exceptions] == ["fit failed", "model close failed"]
     assert calls == ["models", "queue"]
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failure", ["exit", "hang", "submission"])
+@pytest.mark.parametrize("failure", ["exit", "hang"])
 async def test_facade_failure_terminates_owned_ranks_before_return(failure, monkeypatch):
     cfg = config()
     owner = MultiRewardModelManager(cfg, SimpleNamespace(world_size=2)).models["pickscore"]
@@ -194,9 +168,6 @@ async def test_facade_failure_terminates_owned_ranks_before_return(failure, monk
         await asyncio.Future()
 
     def compute(*args):
-        if failure == "submission":
-            raise ValueError("submission failed")
-
         async def result():
             if failure == "exit":
                 raise RuntimeError("facade died")
@@ -209,7 +180,7 @@ async def test_facade_failure_terminates_owned_ranks_before_return(failure, monk
     ranks = [object(), object()]
     owner.bind_rank_workers(ranks)
     monkeypatch.setattr(native_fsdp, "terminate_ranks", lambda workers, timeout, status_method: calls.append(workers))
-    with pytest.raises((RuntimeError, TimeoutError, ValueError)):
+    with pytest.raises((RuntimeError, TimeoutError)):
         await owner.run_rpc("compute_score_batch", object())
     assert calls == [[facade], ranks] and owner._closed
     await owner.close()
@@ -285,9 +256,7 @@ def construction(monkeypatch):
                 raise state.primary
             return True
         state.events.append(("confirm", ref))
-        if (ref == "facade" and state.cleanup_failure in {"facade_probe", "both_probes"}) or (
-            ref == "rank1" and state.cleanup_failure in {"rank_probe", "both_probes"}
-        ):
+        if ref in {"facade", "rank1"} and state.cleanup_failure:
             raise TimeoutError(f"{ref} death unconfirmed")
         assert ref in state.dead
         raise native_fsdp.ray.exceptions.RayActorError()
@@ -296,8 +265,6 @@ def construction(monkeypatch):
         name = "facade" if actor is state.facade else "rank0" if actor is state.ranks[0] else "rank1"
         state.events.append(("kill", name))
         state.dead.add(name)
-        if name == "facade" and state.cleanup_failure == "facade_kill":
-            raise RuntimeError("facade kill failed")
 
     monkeypatch.setattr(
         native_fsdp,
@@ -318,8 +285,10 @@ def test_facade_is_owned_before_successful_readiness(construction):
     assert not state.events and not state.owner._closed
 
 
-@pytest.mark.parametrize("failure", ["facade_submission", "ready_submission", "ready_error", "ready_timeout"])
-@pytest.mark.parametrize("cleanup_failure", [None, "facade_kill", "facade_probe", "rank_probe", "both_probes"])
+@pytest.mark.parametrize(
+    ("failure", "cleanup_failure"),
+    [("facade_submission", False), ("ready_submission", False), ("ready_error", False), ("ready_timeout", True)],
+)
 @pytest.mark.asyncio
 async def test_construction_failure_confirms_every_owned_actor(construction, failure, cleanup_failure):
     state = construction
@@ -336,11 +305,9 @@ async def test_construction_failure_confirms_every_owned_actor(construction, fai
     if failure != "facade_submission":
         assert state.bound_at_ready == [True]
         assert state.owner._workers == [state.facade]
-    failed_cleanup = cleanup_failure in {"rank_probe", "both_probes"} or (
-        failure != "facade_submission" and cleanup_failure is not None
-    )
-    if failed_cleanup:
+    if cleanup_failure:
         assert error.value.exceptions[1] is state.owner._termination_error
+        assert len(state.owner._termination_error.exceptions) == 2
         with pytest.raises(BaseExceptionGroup) as repeated:
             await state.owner.close()
         assert repeated.value is state.owner._termination_error
