@@ -102,6 +102,33 @@ async def _timed_await(name: str, timings: dict, coro):
         timings[name] = time.perf_counter() - start
 
 
+def _iter_actor_lora_peft_models(engine):
+    from verl.workers.engine.base import BaseEngine
+
+    from verl_omni.workers.engine.fsdp.diffusers_impl import CompositeFSDPEngine
+
+    def get_peft_model_from_engine(engine: BaseEngine) -> torch.nn.Module | None:
+        module = getattr(engine, "module", None)
+        peft_model = getattr(module, "_fsdp_wrapped_module", module) if module is not None else None
+        if peft_model is not None and getattr(peft_model, "peft_config", None):
+            if peft_model.peft_config.get("default") is not None:
+                return peft_model
+        return None
+
+    if engine is None:
+        return
+    if isinstance(engine, CompositeFSDPEngine):
+        for sub_engine in (engine.dit_engine, engine.ar_engine):
+            peft_model = get_peft_model_from_engine(sub_engine)
+            if peft_model is not None:
+                yield peft_model
+        return
+
+    peft_model = get_peft_model_from_engine(engine)
+    if peft_model is not None:
+        yield peft_model
+
+
 def _with_routing_replay_flag(enabled: bool):
     """Decorator to set 'enable_routing_replay' flag on the data TensorDict."""
 
@@ -193,6 +220,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
             self.flops_counter = FlopsCounter(self.model_config.hf_config)
         elif self.config.model_type in (
             "diffusion_model",
+            "diffusion_composite_model",
             "diffusion_dpo_model",
             "diffusion_nft_model",
         ):
@@ -390,7 +418,9 @@ class TrainingWorker(Worker, DistProfilerExtension):
                     update_lr_scheduler=batch_idx == total_num_iterations - 1,
                     disable_auto_offload=True,
                 )
-                actor_output = self.train_batch(mini_batch_td)
+                with torch.profiler.record_function(f"mini_batch{batch_idx}"):
+                    actor_output = self.train_batch(mini_batch_td)
+                self.profiler.step()
                 output_lst.append(actor_output)
 
             if self.engine.is_mp_src_rank_with_outputs():
@@ -651,6 +681,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         )
         is_diffusion = model_config.get("model_type", "language_model") in (
             "diffusion_model",
+            "diffusion_composite_model",
             "diffusion_dpo_model",
             "diffusion_nft_model",
         )
@@ -684,6 +715,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 engine_config=ref_config.engine,
                 optimizer_config=ref_config.optim,
                 checkpoint_config=ref_config.checkpoint,
+                profiler_config=ref_config.profiler,
             )
 
             # assign engine configs
@@ -724,6 +756,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 engine_config=actor_config.engine,
                 optimizer_config=actor_config.optim,
                 checkpoint_config=actor_config.checkpoint,
+                profiler_config=actor_config.profiler,
             )
 
             if is_diffusion:
@@ -953,7 +986,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         self._teacher_key_vocab: list[str] = sorted(teacher_unembeds.keys())
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
-    @DistProfiler.annotate(color="red", role="actor_update")
+    @DistProfiler.annotate(color="red", role="actor_update", scheduled=True)
     @_with_routing_replay_flag(enabled=True)
     def update_actor(self, data: TensorDict) -> TensorDict:
         tu.assign_non_tensor(data, enable_timestep_staging=self.config.actor.get("enable_timestep_staging", False))
@@ -1003,8 +1036,6 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         if self.peft_merge:
             return None
         engine = getattr(self.actor, "engine", None)
-        module = getattr(engine, "module", None) if engine is not None else None
-        peft_model = getattr(module, "_fsdp_wrapped_module", module) if module is not None else None
         if _get_engine_lora_config(engine) is None:
             return None
 
@@ -1013,20 +1044,21 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         first_lora_a = None
         first_lora_b = None
         last_name = None
-        for name, param in peft_model.named_parameters():
-            if "lora_A" in name or "lora_B" in name:
-                try:
-                    total_sum += param.detach().float().sum().item()
-                except Exception:
-                    # Sharded/flat params may not be directly summable; skip
-                    # them but still count so the caller sees the path ran.
-                    pass
-                num_tensors += 1
-                last_name = name
-                if first_lora_a is None and "lora_A" in name:
-                    first_lora_a = name
-                if first_lora_b is None and "lora_B" in name:
-                    first_lora_b = name
+        for peft_model in _iter_actor_lora_peft_models(engine):
+            for name, param in peft_model.named_parameters():
+                if "lora_A" in name or "lora_B" in name:
+                    try:
+                        total_sum += param.detach().float().sum().item()
+                    except Exception:
+                        # Sharded/flat params may not be directly summable; skip
+                        # them but still count so the caller sees the path ran.
+                        pass
+                    num_tensors += 1
+                    last_name = name
+                    if first_lora_a is None and "lora_A" in name:
+                        first_lora_a = name
+                    if first_lora_b is None and "lora_B" in name:
+                        first_lora_b = name
         if num_tensors == 0:
             return None
         return {
