@@ -1,4 +1,9 @@
-# Install without dependency resolution to preserve the compiled NPU stack.
+# Tested audio subset for the Python 3.12 / torch 2.10 Ascend CI image.
+# Install with --no-deps: resolving the full omni extra would select
+# torchaudio>=2.11 and could replace the image's compiled torch/NPU stack.
+# prepare_tts_smoke.sh checks shared pins against pyproject.toml bounds.
+# pooch, scikit-learn and threadpoolctl supply librosa's transitive imports
+# when dependency resolution is disabled. These are CI pins, not new minima.
 audioread==3.1.0
 librosa==0.11.0
 onnxruntime==1.31.0

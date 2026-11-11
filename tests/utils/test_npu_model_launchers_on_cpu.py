@@ -35,7 +35,7 @@ def launcher_runtime(tmp_path):
     root = tmp_path / "repo with spaces"
     scripts = root / "tests/special_e2e"
     scripts.mkdir(parents=True)
-    for name in {case[0] for case in CASES} | {"lib_npu_e2e.sh"}:
+    for name in {case[0] for case in CASES}:
         shutil.copy2(REPO / "tests/special_e2e" / name, scripts / name)
     for name in {case[1] for case in CASES}:
         (scripts / name).write_text(
@@ -50,12 +50,16 @@ def launcher_runtime(tmp_path):
     bins.mkdir()
     python = bins / "python3"
     python.write_text(
-        f"#!{sys.executable}\nimport sys\n"
+        f"#!{sys.executable}\nimport os,sys,types\n"
         "if sys.argv[1:]==['-'] or (len(sys.argv)>1 and sys.argv[1]=='-'):\n"
         "    source=sys.stdin.read()\n"
-        "    if 'import torch' not in source:\n"
-        "        sys.argv=sys.argv[1:]\n"
-        "        exec(compile(source,'<wrapper>','exec'))\n"
+        "    torch=types.ModuleType('torch')\n"
+        "    torch.npu=types.SimpleNamespace(is_available=lambda:True,"
+        "device_count=lambda:int(os.environ['NUM_NPUS']))\n"
+        "    sys.modules['torch']=torch\n"
+        "    sys.modules['torch_npu']=types.ModuleType('torch_npu')\n"
+        "    sys.argv=sys.argv[1:]\n"
+        "    exec(compile(source,'<wrapper>','exec'))\n"
     )
     python.chmod(0o755)
     env = {
@@ -66,7 +70,7 @@ def launcher_runtime(tmp_path):
         )
     }
     env.update(PATH=f"{bins}:{env['PATH']}", NUM_NPUS="8", CAPTURE=str(tmp_path / "capture.json"))
-    # Skip only the host-specific CANN setup, not lib_npu_e2e.sh itself.
+    # Skip only host-specific CANN setup; keep each wrapper real.
     command = 'source() { case "$1" in */set_env.sh) return 0;; *) builtin source "$@";; esac; }; '
     command += 'export -f source; exec bash "$@"'
     return root, scripts, env, command
@@ -130,3 +134,51 @@ def test_invalid_topology_fails_before_delegation(launcher_runtime, script, base
     )
     assert result.returncode == 2
     assert not Path(env["CAPTURE"]).exists()
+
+
+@pytest.mark.parametrize("script,base", CASES)
+@pytest.mark.parametrize(
+    "name,devices",
+    [
+        ("ASCEND_RT_VISIBLE_DEVICES", "0,1"),
+        ("ASCEND_RT_VISIBLE_DEVICES", "0,1,2,3,4,5,6,6"),
+        ("ASCEND_VISIBLE_DEVICES", "0,1,2,3,4,5,6,x"),
+    ],
+)
+def test_invalid_device_masks_fail_before_delegation(launcher_runtime, script, base, name, devices):
+    """Each standalone wrapper validates the real masks before allocating workers."""
+    _, scripts, env, command = launcher_runtime
+    env.update({name: devices, "RAW_EXIT": "0"})
+    result = subprocess.run(
+        ["bash", "-c", command, "fixture", str(scripts / script)],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode != 0
+    assert f"Invalid {name}" in result.stderr
+    assert not Path(env["CAPTURE"]).exists()
+
+
+@pytest.mark.parametrize("script,base", CASES)
+def test_wrapper_preserves_physical_device_pool(launcher_runtime, script, base):
+    """A four-device lane may retain the larger physical pool used by Ray workers."""
+    _, scripts, env, command = launcher_runtime
+    env.update(
+        NUM_NPUS="4",
+        ASCEND_RT_VISIBLE_DEVICES="4,5,6,7",
+        ASCEND_VISIBLE_DEVICES="0,1,2,3,4,5,6,7",
+        RAW_EXIT="0",
+    )
+    result = subprocess.run(
+        ["bash", "-c", command, "fixture", str(scripts / script)],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    captured = json.loads(Path(env["CAPTURE"]).read_text())
+    assert captured["env"]["NUM_GPUS"] == "4"
+    assert '++ray_kwargs.ray_init.runtime_env.env_vars.ASCEND_VISIBLE_DEVICES="0,1,2,3,4,5,6,7"' in captured["argv"]

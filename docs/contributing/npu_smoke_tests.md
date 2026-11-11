@@ -1,6 +1,6 @@
 # NPU Smoke Tests
 
-Last updated: 11/10/2026.
+Last updated: 11/11/2026.
 
 This guide explains how to add CI test cases for Huawei Ascend devices in verl-omni.
 
@@ -17,28 +17,19 @@ into these runners:
 | ID | Group | Name | Test entry point | Default NPUs |
 |---|---|---|---|---:|
 | 0 | core | vLLM-Omni rollout + sleep/wake-up | tests/workers/rollout/rollout_vllm/test_vllm_omni_generate_npu.py | 8 |
-| 1 | e2e | Qwen-Image FlowGRPO trainer | tests/special_e2e/run_flowgrpo_qwen_image_npu.sh | 8 |
-| 2 | e2e | Wan2.2 DanceGRPO trainer with Qwen2.5-VL reward | tests/special_e2e/run_dancegrpo_wan22_npu.sh | 8 |
 | 3 | core | Diffusers FSDP engine inference and training | tests/workers/test_diffusers_fsdp_engine_npu.py | 8 |
 | 4 | core | Diffusion agent loop, request and step execution | tests/agent_loop/test_diffusion_agent_loop_npu.py::test_diffusion_single_turn_npu | 8 |
 | 5 | core | Unseeded multi-worker rollout diversity | tests/agent_loop/test_diffusion_agent_loop_npu.py::test_rollout_without_seed_npu | 8 |
 | 6 | core | Seeded multi-worker rollout reproducibility | tests/agent_loop/test_diffusion_agent_loop_npu.py::test_rollout_seed_reproducibility_npu | 8 |
 | 7 | core | Standalone vLLM reward engine and OCR scoring | tests/reward_loop/test_reward_engine_npu.py | 8 |
+| 1 | e2e | Qwen-Image FlowGRPO trainer | tests/special_e2e/run_flowgrpo_qwen_image_npu.sh | 8 |
+| 2 | e2e | Wan2.2 DanceGRPO trainer with Qwen2.5-VL reward | tests/special_e2e/run_dancegrpo_wan22_npu.sh | 8 |
 | 29 | e2e | Qwen3-TTS full-parameter GRPO | tests/special_e2e/run_qwen3_tts_grpo_npu.sh | 8 |
 | 35 | e2e | SD3 CRD, independent EMA and checkpoint restore | tests/special_e2e/run_crd_sd35_npu.sh | 8 |
 
-The combined runner has ten entries: six core and four e2e. Entry 29 reuses
-GPU omni entry 3 with two full-parameter updates and a test-local duration
-reward. CI prepares the pinned Qwen3-TTS package, audio helpers and tiny source
-before offline execution. For local setup, run
-`bash tests/npu_smoke/prepare_tts_smoke.sh`; `--check-only` checks dependencies.
-Entry 35 reuses GPU diffusion entry 12, retaining two CRD updates, independent
-EMA, distributed update parity and exact checkpoint restoration. Both are
-execution smokes, not quality or convergence checks.
-
-The core group collects seven pytest cases because entry 4 is parametrized
-into request and step execution. E2e entries run trainer workloads rather
-than pytest cases.
+Test IDs stay stable across companion PRs, so gaps are intentional. Core
+entries collect pytest cases; e2e entries run trainer workloads. These are
+execution checks, not quality or convergence benchmarks.
 
 Test 3 ports the `fsdp` case of `tests/workers/test_diffusers_fsdp_engine.py`
 (GPU core ID 2). It reuses the GPU test's synthetic trajectories and engine
@@ -110,6 +101,28 @@ TP=2 Qwen2.5-VL reward engine on two NPUs. Prepare the Qwen2.5-VL-3B-Instruct
 checkpoint before an offline run; set `REWARD_MODEL_PATH` to its local directory
 when needed. The test must complete training and exit 0.
 
+### Qwen3-TTS
+
+Requires SoX, Qwen3-TTS at `.github/qwen_tts_pin.txt`, and the optional audio
+packages in `tests/npu_smoke/requirements_tts_smoke.txt`. The workflow installs
+these without resolving or upgrading the compiled NPU stack. The lock subset
+is checked against the project dependency bounds before model preparation.
+After installing those prerequisites, cache the pinned tiny source before an
+offline run:
+
+```bash
+bash tests/npu_smoke/prepare_tts_smoke.sh
+```
+
+Use `--check-only` to validate prerequisites without downloading the source.
+The launcher runs two full-parameter updates with the existing duration reward.
+
+### SD3 CRD
+
+The launcher builds its tiny SD3 checkpoint offline. Set `CRD_MODEL_PATH` to
+reuse an existing SD3 pipeline. It runs two updates and the distributed EMA
+and checkpoint-restore checks.
+
 ## Add a New NPU Smoke Test
 
 ### 1. Add the smallest useful entry point
@@ -160,7 +173,7 @@ If the new test lives outside current path filters, add its path. Current
 filters include verl_omni/**, tests/npu_smoke/**, tests/agent_loop/**,
 tests/reward_loop/**, tests/workers/**, tests/special_e2e/**, pyproject.toml,
 .github/workflows/npu_smoke.yml,
-.github/vllm_omni_pin.txt and .github/qwen_tts_pin.txt.
+.github/vllm_omni_pin.txt, and .github/vllm_ascend_pin.txt.
 
 ### 5. Handle models and datasets
 
@@ -250,8 +263,24 @@ Each group job uses eight NPUs on linux-aarch64-a2b4-8, a 120 minute timeout,
 swr.cn-north-4.myhuaweicloud.com/mindspeed/pr-verl-omni-a2:v010-vllm030-omni030
 ```
 
+The image carries the previous generation of the pinned stack (CANN, torch,
+torch-npu, triton-ascend, editable vllm / vllm-ascend / vllm-omni / verl).
+After checkout, `tests/npu_smoke/sync_npu_stack.sh` reinstalls the pinned
+generation — `.github/*_pin.txt`, the `pyproject.toml` vllm pin, and
+torch-npu/triton-ascend/fla-npu mirroring `docker/Dockerfile.npu` — on top of
+it, so the jobs run the pinned stack even when the registry image for that
+generation has not been rebuilt yet. The sync installs vllm-ascend pure-python
+(`COMPILE_CUSTOM_KERNELS=0`) because the smoke suite runs tiny models through
+the native op path and the full aclnn ops build would cost most of the job
+timeout; the `vllm_ascend_C` module (rollout sleep/wake_up) and the
+`add_rms_norm_bias` aclnn op (the reward-model engine) are still built
+in-job.
+
+When the registry image at the current generation exists, the workflow pins
+its tag directly and the sync step is dropped.
+
 The workflow prints CANN details, npu-smi output, relevant Ascend variables,
-and installed vLLM component versions.
+and the synced vLLM component versions.
 
 The FlowGRPO and DanceGRPO end-to-end launchers source CANN and ATB before
 starting the workload:

@@ -1,25 +1,41 @@
 #!/usr/bin/env bash
-# Prepare optional audio packages and the pinned tiny source before offline runs.
+# Check optional audio prerequisites and cache the pinned tiny source.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${REPO_ROOT}"
 case "${1:-}" in
-    '')
-        python3 -m pip install --no-deps -r tests/npu_smoke/requirements_tts_smoke.txt
-        python3 -m pip install --no-deps --force-reinstall \
-            "qwen-tts @ https://github.com/QwenLM/Qwen3-TTS/archive/$(cat .github/qwen_tts_pin.txt).tar.gz"
-        if ! command -v sox >/dev/null; then
-            apt-get update
-            apt-get install -y --no-install-recommends sox
-        fi
-        ;;
-    --check-only) ;;
+    ''|--check-only) ;;
     *) echo "Usage: $0 [--check-only]" >&2; exit 2 ;;
 esac
 
 command -v sox >/dev/null
 python3 - <<'PY'
+import tomllib
+from pathlib import Path
+
+from packaging.requirements import Requirement
+from packaging.utils import canonicalize_name
+
+project = tomllib.loads(Path("pyproject.toml").read_text())["project"]
+declared = project["dependencies"] + [
+    requirement for extra in project["optional-dependencies"].values() for requirement in extra
+]
+for line in Path("tests/npu_smoke/requirements_tts_smoke.txt").read_text().splitlines():
+    if not line.strip() or line.lstrip().startswith("#"):
+        continue
+    pinned = Requirement(line)
+    specs = list(pinned.specifier)
+    if len(specs) != 1 or specs[0].operator != "==" or "*" in specs[0].version:
+        raise SystemExit(f"Expected an exact audio smoke pin: {line}")
+    for requirement in map(Requirement, declared):
+        if canonicalize_name(requirement.name) != canonicalize_name(pinned.name):
+            continue
+        if requirement.marker is not None and not requirement.marker.evaluate():
+            continue
+        if specs[0].version not in requirement.specifier:
+            raise SystemExit(f"Audio smoke pin {pinned} conflicts with pyproject.toml: {requirement}")
+
 import librosa
 import onnxruntime
 import soundfile

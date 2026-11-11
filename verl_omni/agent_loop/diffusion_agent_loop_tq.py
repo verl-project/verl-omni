@@ -15,6 +15,7 @@
 import asyncio
 import logging
 import os
+import secrets
 from typing import Any
 
 import ray
@@ -146,6 +147,13 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
                     # a chunk-local position would reuse the same seed offsets
                     # in every worker and roll out duplicated noise.
                     run_sampling_params["seed"] = derive_rollout_seed(rollout_base_seed, prompt_index * n + session_id)
+                elif not trajectory["validate"]:
+                    # Unseeded training sessions still need explicit, diverse
+                    # seeds: vLLM-Omni fills absent request seeds with
+                    # random.randint in the engine-server process, where
+                    # Ray-forked replicas share RNG state and unseeded requests
+                    # routed to different replicas would collide bit-exactly.
+                    run_sampling_params["seed"] = secrets.randbits(63)
                 task = asyncio.create_task(
                     self._run_agent_loop(
                         run_sampling_params,

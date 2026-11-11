@@ -15,19 +15,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Temporary CUDA Graph and LoRA compatibility for the pinned vLLM-Omni stack."""
+"""Temporary LoRA compatibility for the pinned vLLM-Omni stack."""
 
-from collections.abc import Sequence
-
-import torch
 from vllm.config.utils import config
 from vllm.model_executor.models.utils import WeightsMapper
-from vllm.sequence import IntermediateTensors
 from vllm_omni.config import omni_config
 from vllm_omni.config.stage_config import StageExecutionType
-from vllm_omni.model_executor.models.qwen3_omni.qwen3_omni_moe_thinker import Qwen3MoeLLMModel
-
-_ORIGINAL_THINKER_FORWARD = Qwen3MoeLLMModel.forward
 
 
 # TODO: Remove when the pin includes the LLM LoRA owner from
@@ -59,40 +52,8 @@ def patch_vllm_omni_lora_config() -> None:
 
 
 def patch_vllm_lora_weights_mapper() -> None:
-    """Keep verl's tensor LoRA loader using vLLM 0.30's rename-only mapper."""
+    """Keep verl's tensor LoRA loader on the pinned vLLM's rename-only mapper."""
     # TODO: Remove when the verl pin calls get_rename_mapper instead of the
     # get_unstacked_mapper name removed in vLLM 0.30. Never skip HF name mapping.
     if not hasattr(WeightsMapper, "get_unstacked_mapper"):
         WeightsMapper.get_unstacked_mapper = WeightsMapper.get_rename_mapper
-
-
-def patch_qwen3_omni_thinker_forward() -> None:
-    """Wrap the pinned Thinker forward before model construction in each worker."""
-    if "update" in Qwen3MoeLLMModel.forward.__code__.co_names:
-        Qwen3MoeLLMModel.forward = _qwen3_omni_thinker_forward
-
-
-# Dynamo inlines the upstream call, consuming its local dict.update during tracing.
-# Real buffer mutations still emit update in transformed bytecode and retain vLLM's guard.
-# TODO: Remove when the pin fixes the local dict.update introduced by
-# https://github.com/vllm-project/vllm-omni/pull/7345 and the unwrapped forward compiles.
-def _qwen3_omni_thinker_forward(
-    self,
-    input_ids: torch.Tensor,
-    positions: torch.Tensor,
-    intermediate_tensors: IntermediateTensors | None = None,
-    inputs_embeds: torch.Tensor | None = None,
-    capture_layer_indices: Sequence[int] | None = None,
-    return_hidden_states: bool = False,
-    deepstack_input_embeds: IntermediateTensors | None = None,
-) -> torch.Tensor | IntermediateTensors:
-    return _ORIGINAL_THINKER_FORWARD(
-        self,
-        input_ids=input_ids,
-        positions=positions,
-        intermediate_tensors=intermediate_tensors,
-        inputs_embeds=inputs_embeds,
-        capture_layer_indices=capture_layer_indices,
-        return_hidden_states=return_hidden_states,
-        deepstack_input_embeds=deepstack_input_embeds,
-    )
