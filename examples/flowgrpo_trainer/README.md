@@ -50,6 +50,13 @@ Launch the example from the repository root. The default is the V1 trainer
 bash examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora_v1.sh
 ```
 
+The recipe ships engine-side LoRA merge (`model.lora.merge=Engine`): the actor
+streams only adapter tensors and the rollout engine folds them into its dense
+weights at the sync barrier. See
+[LoRA rollout merge modes](../../docs/examples/config.md#lora-rollout-merge-modes)
+for the mode overview and pipeline support matrix; `lora.merge=False` (runtime
+adapters) remains a config-only flip.
+
 The legacy v0 script below is **deprecated** (a `DeprecationWarning` is emitted
 at launch) and remains only until the v0 trainer is removed:
 

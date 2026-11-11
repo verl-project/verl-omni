@@ -48,7 +48,9 @@ def lora_config_patch(monkeypatch):
 def test_lora_flags_reach_real_engine_args(lora_config_patch, source):
     flags = {"enable_lora": True, "max_lora_rank": 8, "max_loras": 1, "fully_sharded_loras": True}
     engine_args = dict(flags)
-    ARStrategy(SimpleNamespace(config=SimpleNamespace())).prepare_engine_args(engine_args, Namespace())
+    ARStrategy(SimpleNamespace(config=SimpleNamespace(), model_config=SimpleNamespace(lora={}))).prepare_engine_args(
+        engine_args, Namespace()
+    )
     assert all(engine_args[key] == value for key, value in flags.items())
     cli = flags if source == "global" else {f"stage_0_{key}": value for key, value in flags.items()}
     deploy = None
@@ -81,7 +83,9 @@ def test_lora_patch_does_not_give_diffusion_stages_llm_lora_fields(lora_config_p
 
 def test_lora_patch_is_not_installed_for_merged_lora(monkeypatch):
     monkeypatch.setattr(patch, "patch_vllm_omni_lora_config", lambda: pytest.fail("unexpected LoRA patch"))
-    ARStrategy(SimpleNamespace(config=SimpleNamespace())).prepare_engine_args({}, Namespace())
+    ARStrategy(SimpleNamespace(config=SimpleNamespace(), model_config=SimpleNamespace(lora={}))).prepare_engine_args(
+        {}, Namespace()
+    )
 
 
 def test_mapper_compatibility_preserves_unfused_module_names(monkeypatch):

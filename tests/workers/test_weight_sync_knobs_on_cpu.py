@@ -26,6 +26,7 @@ omni-config defaults (no ``rollout_adapter`` field, no lora merge).
 
 from types import SimpleNamespace
 
+import pytest
 from omegaconf import DictConfig
 
 import verl_omni.workers.engine_workers as ew
@@ -66,3 +67,67 @@ def test_weight_sync_knobs_read_diffusion_dual_adapter_and_lora_merge():
     assert worker.peft_merge is True
     assert worker.layered_summon is True
     assert worker.base_sync_done is False  # dummy load_format skips base sync
+
+
+def _engine_merge_worker(rollout_cfg: dict):
+    """A worker with the colocated backend engine merge requires."""
+    worker = _bare_worker({"checkpoint_engine": {"backend": "naive"}, **rollout_cfg})
+    worker.actor = None
+    return worker
+
+
+def test_weight_sync_knobs_resolve_engine_merge(monkeypatch):
+    """Valid engine-merge config resolves to peft_merge off, engine_merge on."""
+    monkeypatch.setattr(ew, "is_cuda_available", True)
+    worker = _engine_merge_worker({"load_format": "safetensors"})
+
+    ew.ActorRolloutRefWorker._init_weight_sync_knobs(worker, SimpleNamespace(lora_rank=32, lora={"merge": "engine"}))
+
+    assert worker.peft_merge is False
+    assert worker.engine_merge is True
+
+
+def test_engine_merge_refuses_dummy_load_format(monkeypatch):
+    """Dummy load format has no dense bootstrap and fails closed."""
+    monkeypatch.setattr(ew, "is_cuda_available", True)
+    worker = _engine_merge_worker({"load_format": "dummy_model_dt"})
+
+    with pytest.raises(ValueError, match="no dense bootstrap"):
+        ew.ActorRolloutRefWorker._init_weight_sync_knobs(
+            worker, SimpleNamespace(lora_rank=32, lora={"merge": "engine"})
+        )
+
+
+def test_engine_merge_refuses_separate_async_backend(monkeypatch):
+    """Separate-async (nccl) checkpoint backends fail closed: colocated only."""
+    monkeypatch.setattr(ew, "is_cuda_available", True)
+    worker = _bare_worker({"load_format": "safetensors", "checkpoint_engine": {"backend": "nccl"}})
+    worker.actor = None
+
+    with pytest.raises(ValueError, match="colocated sync only"):
+        ew.ActorRolloutRefWorker._init_weight_sync_knobs(
+            worker, SimpleNamespace(lora_rank=32, lora={"merge": "engine"})
+        )
+
+
+def test_engine_merge_refuses_non_cuda_devices(monkeypatch):
+    """CUDA-IPC handles need CUDA; other devices fail closed."""
+    monkeypatch.setattr(ew, "is_cuda_available", False)
+    worker = _engine_merge_worker({"load_format": "safetensors"})
+
+    with pytest.raises(ValueError, match="requires CUDA"):
+        ew.ActorRolloutRefWorker._init_weight_sync_knobs(
+            worker, SimpleNamespace(lora_rank=32, lora={"merge": "engine"})
+        )
+
+
+def test_engine_merge_refuses_engines_that_read_raw_merge_keys(monkeypatch):
+    """Actor engines that read raw merge keys fail closed (silent full-weight export)."""
+    monkeypatch.setattr(ew, "is_cuda_available", True)
+    worker = _engine_merge_worker({"load_format": "safetensors"})
+    worker.actor = SimpleNamespace(engine=object())
+
+    with pytest.raises(ValueError, match="reads raw merge keys"):
+        ew.ActorRolloutRefWorker._init_weight_sync_knobs(
+            worker, SimpleNamespace(lora_rank=32, lora={"merge": "engine"})
+        )

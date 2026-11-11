@@ -205,7 +205,16 @@ gating unifies (#693). Resolution rules:
   `lora_rank`"): the engine rank gates read the flat spelling, so a nested-only
   value would silently run full-parameter training where LoRA was intended.
   Setting both spellings to different positive values also raises.
-- `merge` is read only from the nested `actor_rollout_ref.model.lora.merge`.
+- `merge` is read only from the nested `actor_rollout_ref.model.lora.merge`. It
+  accepts `True` (actor-side merge), `False` (runtime adapters, the default),
+  and the string `"engine"` (engine-side merge) — see
+  [LoRA rollout merge modes](#lora-rollout-merge-modes). Among string spellings
+  only `"true"` and `"engine"` coerce (case-insensitively); the string
+  `"false"` is rejected — it
+  stays truthy in the raw config tree, where the rollout-side merge gates
+  would read merge-on while the actor runs adapters — so adapter mode is
+  selected with the boolean `False` only. Any other string raises a
+  `ValueError`.
 - The adapter path is the flat `actor_rollout_ref.model.lora_adapter_path`,
   same rule as rank: a nested-only `lora.adapter_path` raises; setting both
   spellings to different paths raises a `ValueError`. The FSDP wrap gate keys
@@ -225,6 +234,48 @@ gating unifies (#693). Resolution rules:
   composed configs carry is tolerated; a set value raises.
 - `actor_rollout_ref.model.policy_state_adapters` accepts only `default`, `old`,
   and `reference`; `default` is always forced first because it is the trained policy.
+
+### LoRA rollout merge modes
+
+`actor_rollout_ref.model.lora.merge` selects where adapter math happens at the
+rollout:
+
+| mode | sync wire per step | rollout forward |
+| --- | --- | --- |
+| `merge=False` (default) | LoRA tensors (~MB) | dense + per-layer LoRA ops + per-request adapter plumbing |
+| `merge=True` | full merged weights (~GB) | dense |
+| `merge="engine"` | LoRA tensors (~MB) | dense — the engine folds the adapter into its weights at the sync barrier |
+
+Engine-side merge keeps the adapter-sized wire of `merge=False` while every
+rollout forward runs the same dense graph a full-parameter run executes: the
+actor exports CUDA-IPC adapter tensors, and the rollout engine's merged
+weight-update session stages them, merges `W_base + (B@A)·s` in fp32 from a
+pristine base bank, and copies the result in place (fail-closed — a failed
+session leaves the previous policy live). The mode is selected automatically
+on the engine side; no `enable_lora` or other rollout flags are needed.
+
+Requirements and refusals (all fail fast at config resolution or worker init):
+
+- CUDA and colocated sync training (`checkpoint_engine.backend=naive`);
+  separate-async wiring is not supported yet.
+- A base-loading `rollout.load_format` (e.g. `safetensors`) — there is no
+  dense bootstrap, so dummy loads are refused.
+- An unquantized rollout; the engine additionally rejects quantized bases,
+  HSDP, and inference weight offload at construction.
+- No named `policy_state_adapters` — engine-side merge keeps one dense policy.
+
+Pipeline support at the current vLLM-Omni pin — the engine owns this gate and
+raises at construction for the rest:
+
+| pipeline | engine-side merge |
+| --- | --- |
+| Qwen-Image (diffusion) | supported |
+| Qwen3-Omni Thinker (AR) | supported |
+| SD3.5, Boogu-Image (diffusion) | pending upstream: the vLLM-Omni pipelines must opt into weight reloading (`supports_weight_reload`) first |
+| MiniCPM-o 4.5 (AR) | pending upstream: the vLLM-Omni model wrapper needs `packed_modules_mapping` / `hf_to_vllm_mapper` |
+
+When upstream enables those pipelines, the verl-omni side needs no further
+changes — the wiring is model-agnostic.
 
 ### `actor_rollout_ref.actor` — diffusion actor / loss
 

@@ -4,6 +4,8 @@
 # This is the v1 counterpart of run_qwen_image_ocr_lora.sh. It uses the new
 # `verl_omni.trainer.main_diffusion_v1` entrypoint, which selects
 # `PolicyGradientDiffusionTrainerV1Sync` via `trainer.v1.trainer_mode=sync`.
+# LoRA sync uses engine-side merge (`model.lora.merge=Engine`): the rollout
+# engine folds the adapter into its dense weights at the sync barrier.
 # TransferQueue is force-enabled inside the runner, so it does not need to be
 # set on the CLI. Model, LoRA, reward, pipeline, and SDE knobs match the v0
 # 4-GPU recipe.
@@ -61,6 +63,7 @@ python3 -m verl_omni.trainer.main_diffusion_v1 \
     actor_rollout_ref.model.lora_rank=64 \
     actor_rollout_ref.model.lora_alpha=128 \
     actor_rollout_ref.model.target_modules="['to_q','to_k','to_v','to_out.0','add_q_proj','add_k_proj','add_v_proj','to_add_out','img_mlp.net.0.proj','img_mlp.net.2','txt_mlp.net.0.proj','txt_mlp.net.2']" \
+    actor_rollout_ref.model.lora.merge=Engine \
     actor_rollout_ref.actor.optim.lr=3e-4 \
     actor_rollout_ref.actor.optim.weight_decay=0.0001 \
     actor_rollout_ref.actor.ppo_mini_batch_size=16 \

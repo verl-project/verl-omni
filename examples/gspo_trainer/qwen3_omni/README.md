@@ -1,6 +1,6 @@
 # Qwen3-Omni Thinker GSPO recipes
 
-Last updated: 10/24/2026
+Last updated: 11/10/2026
 
 This directory contains both FSDP2 and Megatron recipes. For non-Megatron
 setup, data preparation and training instructions, see the
@@ -9,7 +9,7 @@ defaults and accept CLI overrides.
 
 | Recipe | Backend / platform | Launcher |
 | --- | --- | --- |
-| GSM8K LoRA | FSDP2 / GPU | [Thinker LoRA](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_v1.sh) |
+| GSM8K LoRA (engine-side merge) | FSDP2 / GPU | [Thinker LoRA](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_v1.sh) |
 | MMK12 LoRA | FSDP2 / GPU | [MMK12](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_mmk12_v1.sh) |
 | MMK12 LoRA, separate-async | FSDP2 / GPU | [MMK12 separate-async](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_mmk12_separate_async_v1.sh) |
 | MMK12 LoRA | FSDP2 / NPU | [MMK12 NPU](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_mmk12_v1_npu.sh) |

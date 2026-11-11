@@ -36,4 +36,12 @@ run_test 4 "MiniCPM-o 4.5 Thinker GSPO LoRA e2e (collocated sync, V1)" \
     env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS=2 \
     bash tests/special_e2e/run_gspo_minicpmo_thinker_lora_v1_smoke.sh "${omni_trainer_args[@]}"
 
+# Engine-side LoRA merge on the AR thinker: adapter tensors only on the wire,
+# dense decode forwards (issue #850). The trailing override replaces the
+# smoke's internal actor-side merge=True (Hydra last-wins).
+run_test 5 "Qwen3-Omni Thinker GSPO LoRA engine-side merge e2e (V1)" \
+    env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS=2 \
+    bash tests/special_e2e/run_gspo_qwen3_omni_thinker_lora_v1_smoke.sh "${omni_trainer_args[@]}" \
+    actor_rollout_ref.model.lora.merge=Engine
+
 gpu_smoke_summary

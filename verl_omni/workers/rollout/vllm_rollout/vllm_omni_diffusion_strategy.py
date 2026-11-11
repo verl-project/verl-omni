@@ -263,6 +263,7 @@ class DiffusionStrategy(OmniStrategyBase):
 
     def prepare_engine_args(self, engine_args: dict[str, Any], args: Namespace) -> None:
         config = self.server.config
+        self._apply_engine_merge_engine_args(engine_args, diffusion=True)
         parallel_config = engine_args.get("parallel_config")
         if parallel_config is not None:
             parallel_config = dict(parallel_config) if isinstance(parallel_config, Mapping) else asdict(parallel_config)

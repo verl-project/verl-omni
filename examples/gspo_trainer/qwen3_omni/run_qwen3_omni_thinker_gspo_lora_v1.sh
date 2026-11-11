@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Qwen3-Omni Thinker GSPO + LoRA training with omni V1 trainer.
+# Qwen3-Omni Thinker GSPO + LoRA training with omni V1 trainer,
+# engine-side merge: the rollout engine folds the adapter into its dense
+# weights at the sync barrier (adapter tensors only on the wire).
 
 set -x
 
@@ -22,7 +24,7 @@ python3 -m verl_omni.trainer.main_omni \
     actor_rollout_ref.model.lora_rank=32 \
     actor_rollout_ref.model.lora_alpha=64 \
     actor_rollout_ref.model.lora_dtype=float32 \
-    actor_rollout_ref.model.lora.merge=True \
+    actor_rollout_ref.model.lora.merge=Engine \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.model.exclude_modules=".*talker.*|.*code2wav.*|.*code_predictor.*|.*visual.*|.*audio_tower.*" \

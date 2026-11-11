@@ -23,6 +23,7 @@ from verl.utils.tracking import RLInsightLogger
 from vllm_omni.lora.request import LoRARequest
 
 from verl_omni.pipelines.rollout_request import OmniRolloutRequest
+from verl_omni.utils.config import resolve_lora_config
 
 if TYPE_CHECKING:
     from argparse import Namespace
@@ -165,6 +166,20 @@ class OmniStrategyBase(ABC):
         AR adapters can narrow actor weight synchronization to trainable stages.
         """
         return None
+
+    def _apply_engine_merge_engine_args(self, engine_args: dict[str, Any], *, diffusion: bool) -> None:
+        """Select engine-side LoRA merge on the rollout engine args.
+
+        Arms the weight-transfer session with the ``omni_lora_ipc`` backend
+        (diffusion additionally switches ``lora_application``); the engine
+        validates the rest fail-closed at construction.
+        """
+        model_config = getattr(self.server, "model_config", None)
+        if model_config is None or not resolve_lora_config(model_config).engine_merge:
+            return
+        engine_args["weight_transfer_config"] = {"backend": "omni_lora_ipc"}
+        if diffusion:
+            engine_args["lora_application"] = "merged"
 
     @abstractmethod
     def prepare_engine_args(self, engine_args: dict[str, Any], args: Namespace) -> None:
