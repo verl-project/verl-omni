@@ -38,6 +38,8 @@ import sys
 import tempfile
 import uuid
 
+import torch
+
 from verl_omni.utils.reward_score.genrm_ocr import compute_score_ocr
 from verl_omni.utils.reward_score.image_preference_utils import decoded_reward_image
 
@@ -179,7 +181,13 @@ async def _preference(solution_image, extra_info: dict) -> dict:
         async with _scorer_lock:
             if _scorer is None or _scorer.returncode is not None:
                 env = dict(os.environ)
-                env["CUDA_VISIBLE_DEVICES"] = SCORER_GPU
+                if torch.version.hip:
+                    # ROCm aborts on conflicting visibility; the inherited values name the trainer GPUs.
+                    env.pop("CUDA_VISIBLE_DEVICES", None)
+                    env.pop("ROCR_VISIBLE_DEVICES", None)
+                    env["HIP_VISIBLE_DEVICES"] = SCORER_GPU
+                else:
+                    env["CUDA_VISIBLE_DEVICES"] = SCORER_GPU
                 _scorer = await _spawn("preference_worker.py", env)
             reply = await _request(_scorer, "preference_worker.py", {"path": path, "prompt": full_prompt(extra_info)})
     finally:

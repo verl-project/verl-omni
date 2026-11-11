@@ -45,7 +45,16 @@ REWARD_GPU_MEM_UTIL=${REWARD_GPU_MEM_UTIL:-0.15}
 
 N_GPUS=${N_GPUS:-3}
 export PREFERENCE_SCORER_GPU=${PREFERENCE_SCORER_GPU:-$N_GPUS}
-export CUDA_VISIBLE_DEVICES=$(seq -s, 0 $((N_GPUS - 1)))
+RAY_GPU_ARGS=()
+if python3 -c "import sys, torch; sys.exit(torch.version.hip is None)"; then
+    # vLLM's ROCm platform copies a driver-level HIP_VISIBLE_DEVICES into CUDA_VISIBLE_DEVICES; Ray workers
+    # inherit that while Ray sets a per-worker HIP_VISIBLE_DEVICES, and ROCm aborts on the mismatch.
+    # Leave visibility unset and cap Ray at the first N_GPUS devices instead.
+    unset CUDA_VISIBLE_DEVICES HIP_VISIBLE_DEVICES
+    RAY_GPU_ARGS=(+ray_kwargs.ray_init.num_gpus="$N_GPUS")
+else
+    export CUDA_VISIBLE_DEVICES=$(seq -s, 0 $((N_GPUS - 1)))
+fi
 if (( PREFERENCE_SCORER_GPU < N_GPUS )); then
     echo "PREFERENCE_SCORER_GPU=$PREFERENCE_SCORER_GPU must not be one of the $N_GPUS trainer GPUs" >&2
     exit 1
@@ -184,4 +193,5 @@ ${VERL_OMNI_ENTRY:-python3 -m verl_omni.trainer.main_diffusion} \
     trainer.test_freq=10 \
     trainer.total_epochs=15 \
     trainer.total_training_steps="$TOTAL_TRAINING_STEPS" \
+    "${RAY_GPU_ARGS[@]}" \
     "$@"
