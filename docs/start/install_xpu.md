@@ -118,22 +118,6 @@ verl should report `xpu xccl`, and both vLLM and vLLM-Omni should report `xpu`.
 Intel GPU runs currently need the overrides below on top of a recipe. Each
 script forwards extra Hydra overrides, so append them to the command.
 
-### Sleep mode
-
-Sleep mode is not supported on Intel GPU yet. vLLM-Omni's diffusion worker uses
-vLLM's CUDA memory allocator for it, so with the default config the rollout
-server fails at model load with `AssertionError: cumem allocator is not available`.
-The fix, [vllm-project/vllm-omni#5485](https://github.com/vllm-project/vllm-omni/pull/5485),
-is waiting to be merged. Until then, turn sleep mode off:
-
-```bash
-actor_rollout_ref.rollout.free_cache_engine=False \
-+actor_rollout_ref.rollout.enable_sleep_mode=False
-```
-
-The rollout weights then stay on the GPU while the actor trains, which limits
-the model size a colocated run can fit.
-
 ### Attention backend
 
 Only the native/SDPA pair has been validated on Intel GPU. Recipes that select
@@ -144,22 +128,47 @@ actor_rollout_ref.model.attn_backend=native \
 actor_rollout_ref.rollout.rollout_attn_backend=TORCH_SDPA
 ```
 
+SDPA on Intel GPU can use FlashAttention-2 kernels (for bf16 and fp16 inputs).
+FlashAttention-2 from the Kernel Hub (`kernels-community/flash-attn2`) also has an
+Intel GPU build.
+
 ## Current status
 
 Validated with the tiny-random GPU smoke tests on Arc Pro B60 and B70: FlowGRPO
 (FSDP and FSDP2, rollout TP 1 and 2, rule-based and vLLM-served reward models),
-DiffusionNFT, online DPO, and BAGEL FlowGRPO. Full-size recipes have not been
-validated yet.
+DiffusionNFT, online DPO, and BAGEL FlowGRPO.
+
+Sleep mode works on Intel GPU, so recipes run with their default sleep-mode settings.
+
+Full-size recipes: SD3.5-Medium FlowGRPO OCR (`run_sd35_medium_ocr_lora_v1.sh`)
+on 3x Arc Pro B60, with two overrides that keep it within the 24 GB cards
+(smaller rollout decode batch, capped reward-model image size). Prepare the OCR
+dataset and the models as in Steps 1 and 2 of the
+{doc}`FlowGRPO quickstart <flowgrpo_quickstart>`, then run:
+
+```bash
+bash examples/flowgrpo_trainer/sd35/run_sd35_medium_ocr_lora_v1.sh \
+    actor_rollout_ref.rollout.engine_kwargs.vllm_omni.max_num_seqs=8 \
+    +reward.models.ocr.rollout.engine_kwargs.vllm.mm_processor_kwargs.max_pixels=401408
+```
+
+Reward models on Arc Pro B60: a separate reward GPU pool with async scoring, the
+vLLM-served Qwen2.5-VL-3B OCR reward model, the whisper_cer HTTP scorer service
+(start it with `--device xpu`), and the HPSv3, CLAP, PickScore, CLIPScore and HPSv2.1
+scorers, which match their CPU scores.
+
+FSDP2 with CPU offload on Arc Pro B60: verl's parameter and optimizer offload and FSDP2's
+own `CPUOffloadPolicy` (`fsdp_config.offload_policy=True`), for FlowGRPO with LoRA and
+full fine-tuning, DiffusionNFT and online DPO.
 
 FlowGRPO with the trainer and rollout on separate GPUs, synchronous and fully
 async (`run_flowgrpo_qwen_image_separate.sh` and
 `run_flowgrpo_qwen_image_v1_separate_async.sh`), also runs on Arc Pro B60 and
-B70 with the sleep mode overrides above. Weights sync through the XCCL
-checkpoint engine from verl-hardware-plugin, which registers under both `nccl`
-and `xccl`, so recipes keep the default `checkpoint_engine.backend=nccl`. The
-two smoke scripts pre-check `nccl` by importing the CUDA engine, so on Intel GPU
-run them with `CKPT_BACKEND=xccl`, which selects the XCCL engine and pre-checks
-it instead.
+B70. Weights sync through the XCCL checkpoint engine from verl-hardware-plugin,
+which registers under both `nccl` and `xccl`, so recipes keep the default
+`checkpoint_engine.backend=nccl`. The two smoke scripts pre-check `nccl` by
+importing the CUDA engine, so on Intel GPU run them with `CKPT_BACKEND=xccl`,
+which selects the XCCL engine and pre-checks it instead.
 
 Not yet supported on Intel GPU:
 
@@ -183,9 +192,7 @@ uv pip install -e ".[ocr]"
 python3 tests/special_e2e/build_qwen_image_tiny_random.py --output-dir ~/models/tiny-random/Qwen-Image
 hf download tiny-random/qwen3-vl --local-dir ~/models/tiny-random/qwen3-vl
 
-NUM_GPUS=2 bash tests/special_e2e/run_flowgrpo_qwen_image.sh \
-  actor_rollout_ref.rollout.free_cache_engine=False \
-  +actor_rollout_ref.rollout.enable_sleep_mode=False
+NUM_GPUS=2 bash tests/special_e2e/run_flowgrpo_qwen_image.sh
 ```
 
 The script prints per-step metrics and ends with
