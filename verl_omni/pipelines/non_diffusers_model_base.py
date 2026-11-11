@@ -26,8 +26,6 @@ from __future__ import annotations
 import logging
 import os
 from abc import ABCMeta, abstractmethod
-from collections.abc import Iterator
-from contextlib import contextmanager
 from typing import Callable
 
 import torch
@@ -135,11 +133,12 @@ class NonDiffusersModelBase(nn.Module, metaclass=ABCMeta):
 
         Reads ``adapter_config.json`` and ``adapter_model.safetensors``,
         injects the adapter, then copies weights in.  Checkpoint keys the model
-        does not have raise ``ValueError``.  Checkpoint validation and tensor-copy
-        failures restore the module to its state before the call; model keys missing
-        from the checkpoint keep their initial values with a warning.
+        does not have raise ``ValueError``.  Injection, checkpoint validation and
+        tensor-copy failures restore the module to its state before the call; model
+        keys missing from the checkpoint keep their initial values with a warning.
         """
         from peft import LoraConfig
+        from peft.tuners.tuners_utils import BaseTunerLayer
         from safetensors.torch import load_file as safetensors_load_file
 
         adapter_config_path = os.path.join(adapter_path, "adapter_config.json")
@@ -153,9 +152,19 @@ class NonDiffusersModelBase(nn.Module, metaclass=ABCMeta):
         lora_config = LoraConfig.from_pretrained(adapter_path)
         adapter_state_dict = safetensors_load_file(adapter_weights_path)
 
-        with self._rollback_adapter_on_error(adapter_name):
+        requires_grad_before = [(param, param.requires_grad) for param in self.parameters()]
+        modules_before = dict(self.named_modules())
+        active_before = {
+            name: list(module.active_adapters)
+            for name, module in modules_before.items()
+            if isinstance(module, BaseTunerLayer)
+        }
+        try:
             self.add_adapter(lora_config, adapter_name=adapter_name)
             self._copy_adapter_weights(adapter_state_dict, adapter_name, adapter_path)
+        except Exception:
+            self._restore_loaded_adapter(adapter_name, requires_grad_before, modules_before, active_before)
+            raise
 
     def _copy_adapter_weights(
         self, adapter_state_dict: dict[str, torch.Tensor], adapter_name: str, adapter_path: str
@@ -185,35 +194,30 @@ class NonDiffusersModelBase(nn.Module, metaclass=ABCMeta):
         for key in loadable_keys:
             current_state[key].copy_(adapter_state_dict[key])
 
-    @contextmanager
-    def _rollback_adapter_on_error(self, adapter_name: str) -> Iterator[None]:
-        """Undo ``add_adapter(..., adapter_name)`` if the body raises."""
+    def _restore_loaded_adapter(
+        self,
+        adapter_name: str,
+        requires_grad_before: list[tuple[nn.Parameter, bool]],
+        modules_before: dict[str, nn.Module],
+        active_before: dict[str, list[str]],
+    ) -> None:
+        """Remove *adapter_name* and restore the state recorded before ``add_adapter``."""
         from peft.tuners.tuners_utils import BaseTunerLayer
 
-        requires_grad_before = [(param, param.requires_grad) for param in self.parameters()]
-        modules_before = dict(self.named_modules())
-        active_before = {
-            name: list(module.active_adapters)
-            for name, module in modules_before.items()
-            if isinstance(module, BaseTunerLayer)
-        }
-        try:
-            yield
-        except Exception:
-            # Injection activates the new adapter, wraps new layers and freezes existing weights.
-            for name, module in list(self.named_modules()):
-                if not isinstance(module, BaseTunerLayer):
-                    continue
-                if name in active_before:
-                    module.set_adapter(active_before[name])
-                    module.delete_adapter(adapter_name)
-                else:
-                    parent_name, _, child_name = name.rpartition(".")
-                    setattr(self.get_submodule(parent_name), child_name, modules_before[name])
-            del self.peft_config[adapter_name]
-            for param, requires_grad in requires_grad_before:
-                param.requires_grad_(requires_grad)
-            raise
+        # BaseTunerLayer.delete_adapter picks a new active adapter if the deleted one is active, so set_adapter first.
+        # peft's module-level delete_adapter would leave new wrappers in place and skip paths containing "lora_".
+        for name, module in list(self.named_modules()):
+            if not isinstance(module, BaseTunerLayer):
+                continue
+            if name in active_before:
+                module.set_adapter(active_before[name])
+                module.delete_adapter(adapter_name)
+            else:
+                parent_name, _, child_name = name.rpartition(".")
+                setattr(self.get_submodule(parent_name), child_name, modules_before[name])
+        del self.peft_config[adapter_name]
+        for param, requires_grad in requires_grad_before:
+            param.requires_grad_(requires_grad)
 
     def set_adapter(self, adapter_name: str) -> None:
         """Activate a named PEFT adapter across all submodules."""

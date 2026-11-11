@@ -44,6 +44,12 @@ class _ThreeLayerModel(_TinyModel):
         self.lora_head = nn.Linear(4, 4)
 
 
+class _ModelWithNorm(_ThreeLayerModel):
+    def __init__(self):
+        super().__init__()
+        self.norm = nn.LayerNorm(4)
+
+
 def _lora_config(target_modules=("proj",)) -> LoraConfig:
     return LoraConfig(r=2, lora_alpha=2, target_modules=list(target_modules))
 
@@ -125,6 +131,29 @@ def test_tensor_copy_failure_restores_existing_adapters_and_layers(tmp_path):
     state[next(iter(state))] = torch.zeros(3, 3)
 
     with pytest.raises(RuntimeError):
+        model.load_lora_adapter(_write_adapter(tmp_path / "bad", state, config), adapter_name="c")
+
+    assert model.proj.active_adapters == ["b"]
+    assert type(model.other) is nn.Linear and type(model.lora_head) is nn.Linear
+    assert set(model.peft_config) == {"a", "b"}
+    assert {name: param.requires_grad for name, param in model.named_parameters()} == requires_grad_before
+    assert model.state_dict().keys() == state_before.keys()
+    for key, value in state_before.items():
+        torch.testing.assert_close(model.state_dict()[key], value)
+
+
+def test_injection_failure_restores_existing_adapters_and_layers(tmp_path):
+    model = _ModelWithNorm()
+    model.add_adapter(_lora_config(), adapter_name="a")
+    model.add_adapter(_lora_config(), adapter_name="b")
+    model.set_adapter("b")
+    state_before = {key: value.clone() for key, value in model.state_dict().items()}
+    requires_grad_before = {name: param.requires_grad for name, param in model.named_parameters()}
+    # LoRA does not support LayerNorm, so injection raises at "norm" after adding "c" to the three Linear targets.
+    config = _lora_config(["proj", "other", "lora_head", "norm"])
+    state = _trained_adapter_state(_ThreeLayerModel, _lora_config(["proj", "other", "lora_head"]))
+
+    with pytest.raises(ValueError, match="not supported"):
         model.load_lora_adapter(_write_adapter(tmp_path / "bad", state, config), adapter_name="c")
 
     assert model.proj.active_adapters == ["b"]
