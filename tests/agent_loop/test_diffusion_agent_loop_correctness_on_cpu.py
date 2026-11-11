@@ -33,7 +33,7 @@ from verl_omni.agent_loop.diffusion_agent_loop import (
 )
 from verl_omni.agent_loop.diffusion_agent_loop_tq import DiffusionAgentLoopWorkerTQ
 from verl_omni.agent_loop.single_turn_agent_loop import DiffusionSingleTurnAgentLoop
-from verl_omni.agent_loop.utils import derive_rollout_seed
+from verl_omni.agent_loop.utils import derive_rollout_seed, per_rollout_seeds_or_entropy
 from verl_omni.trainer.diffusion.v1 import tq_utils
 
 
@@ -498,6 +498,22 @@ def _seed_test_chunk(fields: dict[str, list[int]], uids: list[str], **non_tensor
     )
 
 
+def test_per_rollout_seeds_or_entropy_falls_back_to_entropy():
+    """Without ``rollout_seed`` every row gets a distinct in-range entropy seed."""
+    seeds = per_rollout_seeds_or_entropy({"global_steps": 1}, 4)
+
+    assert len(seeds) == 4
+    assert all(isinstance(seed, int) and 0 <= seed < 2**63 for seed in seeds)
+    assert len(set(seeds)) == 4
+
+
+def test_per_rollout_seeds_or_entropy_derives_when_seeded():
+    """A set ``rollout_seed`` keeps the derived-seed path (global indices honored)."""
+    seeds = per_rollout_seeds_or_entropy({"rollout_seed": 42}, 3, global_indices=[7, 8, 9])
+
+    assert seeds == [derive_rollout_seed(42, idx) for idx in (7, 8, 9)]
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "chunks",
@@ -544,11 +560,14 @@ async def test_generate_sequences_seeds_from_global_prompt_index(monkeypatch, ch
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("validate", [False, True])
-async def test_rollout_seed_index_leaves_unseeded_and_validation_requests_alone(monkeypatch, validate):
-    """``rollout_seed_index`` only feeds the seeded training path.
+async def test_unseeded_training_gets_entropy_seeds_validation_keeps_val_seed(monkeypatch, validate):
+    """Unseeded training requests carry explicit per-session entropy seeds.
 
-    Without ``rollout.seed`` the batch has no ``rollout_seed`` and requests stay
-    unseeded; validation keeps ``val_kwargs.seed`` even when a base seed is set.
+    Without ``rollout.seed`` the requests must not stay unseeded: vLLM-Omni
+    assigns absent seeds via ``random.randint`` in the engine-server process,
+    where Ray-forked replicas share RNG state and draw colliding seeds for
+    unseeded requests routed to different replicas. Validation keeps
+    ``val_kwargs.seed`` even when a base seed is set.
     """
     worker, captured_seeds = _seed_capturing_tq_worker(monkeypatch, val_seed=123)
     non_tensor = {"validate": True, "rollout_seed": 42} if validate else {}
@@ -557,8 +576,13 @@ async def test_rollout_seed_index_leaves_unseeded_and_validation_requests_alone(
     await worker.generate_sequences(chunk)
     await asyncio.gather(*worker.background_tasks)
 
-    expected_seed = 123 if validate else None
-    assert captured_seeds == {(uid, session): expected_seed for uid in "ab" for session in range(2)}
+    seeds = list(captured_seeds.values())
+    assert set(captured_seeds) == {(uid, session) for uid in "ab" for session in range(2)}
+    if validate:
+        assert seeds == [123] * 4
+    else:
+        assert all(isinstance(seed, int) and 0 <= seed < 2**63 for seed in seeds)
+        assert len(set(seeds)) == 4  # per-session entropy: no duplicated noise across replicas
 
 
 @pytest.mark.asyncio

@@ -41,7 +41,9 @@ def test_rollout_output_uses_native_trajectory_and_metadata_fields() -> None:
     torch.testing.assert_close(output.trajectory_timesteps, timesteps)
     torch.testing.assert_close(output.trajectory_log_probs, log_probs)
     assert "trajectory" not in output.output["payload"]
-    assert "custom_output" not in output.__dataclass_fields__
+    # ``custom_output`` exists as an upstream-native field at this pin; this flow
+    # must leave it empty — the native trajectory/metadata fields carry everything.
+    assert output.custom_output == {}
     torch.testing.assert_close(output.output["metadata"]["prompt_embeddings"]["prompt_embeds"], prompt_embeds)
     assert output.output["metadata"]["prompt_embeddings"]["negative_prompt_embeds"] is None
     torch.testing.assert_close(output.output["metadata"]["rl"]["latents_clean"], latents_clean)

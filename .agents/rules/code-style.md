@@ -188,12 +188,11 @@ block:
 2. **Subclass the closest existing class.** `QwenImageEditPlusFlowGRPO` and the NFT
    adapter both subclass `QwenImage` from `qwen_image_flow_grpo`; every loss class
    subclasses `DiffusionLossFn`; `MultiVisualRewardManager` subclasses
-   `VisualRewardManager`; `PolicyGradient`/`DirectPreference` trainers share
+   `MultiRewardManager`; `PolicyGradient`/`DirectPreference` trainers share
    `BaseRayDiffusionTrainer`.
 3. **A mixin, when the shared part cuts across the hierarchy.**
    `QwenImageTokenIdPromptMixin` (defined in `qwen_image_flow_grpo/common.py`) is
-   mixed into two unrelated rollout pipelines; `NPUColocateWorkerMixin` was
-   extracted the same way (#82).
+   mixed into several unrelated rollout pipelines the same way.
 4. **A scoped refactor.** Consolidate shared behavior needed by the change; do not
    bundle neighboring cleanups. Follow `AGENTS.md`'s contribution policy.
 

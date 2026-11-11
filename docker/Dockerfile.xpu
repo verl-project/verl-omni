@@ -13,8 +13,8 @@
 #
 # oneCCL reads /dev/dri/by-path, which --device /dev/dri alone does not create.
 
-# Base provides torch-xpu, oneCCL, the Intel GPU user-mode driver and vLLM 0.30.0 in /opt/venv.
-ARG BASE_IMAGE=vllm/vllm-openai-xpu:v0.30.0
+# Base provides torch-xpu, oneCCL, the Intel GPU user-mode driver and vLLM 0.33.0 in /opt/venv.
+ARG BASE_IMAGE=vllm/vllm-openai-xpu:v0.33.0
 # Default: read from .github/verl_pin.txt at build time (override with VERL_GIT_REF).
 ARG VERL_GIT_REF=
 
@@ -28,7 +28,7 @@ SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 ENTRYPOINT []
 
 # Step 1: pin the accelerator packages from the base. Neither PyPI nor the core
-# vllm==0.30.0 pin knows about the +xpu builds, so a resolver would otherwise
+# vllm==0.33.0 pin knows about the +xpu builds, so a resolver would otherwise
 # swap in CUDA or CPU wheels.
 RUN python3 - > /opt/xpu-constraints.txt <<'PY'
 from importlib.metadata import version, PackageNotFoundError

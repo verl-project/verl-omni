@@ -1,6 +1,6 @@
 # Welcome to VeRL-Omni's documentation!
 
-Last updated: 10/29/2026
+Last updated: 11/10/2026
 
 [VeRL-Omni](https://github.com/verl-project/verl-omni) is a general RL training framework focused on multimodal generative models, built on top of [verl](https://github.com/verl-project/verl). It originated from the multi-modal generation RL effort in `verl`, and now has a dedicated home so it can evolve in a more focused way.
 
@@ -185,7 +185,7 @@ VeRL-Omni is free software; you can redistribute it and/or modify it under the t
 of the Apache License 2.0. We welcome contributions.
 Join us on [GitHub](https://github.com/verl-project/verl-omni) for discussions.
 
-See the [2026 Q2 roadmap](https://github.com/verl-project/verl/issues/5755) for planned work.
+See the [project roadmap](https://github.com/verl-project/verl-omni/issues/700) for planned work.
 
 ### Code Linting and Formatting
 
