@@ -238,9 +238,8 @@ def export_lora_for_sync(
         offload_fn: Engine memory management. Called after the params are
             materialized on the non-merged paths, and when the merged stream
             finishes.
-        stream_transform: Engine post-processing (QAT quantization) applied to
-            the non-merged export stream; merged exports bypass it, matching
-            upstream verl.
+        stream_transform: Engine post-processing applied to the non-merged
+            export stream; merged exports bypass it, matching upstream verl.
         full_weight_dtype: Floating dtype for gathered full-weight DTensors;
             adapter-only exports and plain tensors retain their dtypes.
 
