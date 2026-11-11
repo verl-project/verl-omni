@@ -12,7 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from verl_omni.models.transformers.qwen3_tts import patch_qwen3_tts_default_rope_read
+
 from .omni_rollout_adapter import Qwen3TTSRolloutAdapter
 from .talker_training_adapter import Qwen3TTSTalkerAdapter
+
+# qwen-tts's default-rope hook reads a bare rope_theta that Transformers
+# 5.16+ configs no longer declare; wrap its registrations from here on.
+patch_qwen3_tts_default_rope_read()
 
 __all__ = ["Qwen3TTSTalkerAdapter", "Qwen3TTSRolloutAdapter"]

@@ -9,7 +9,7 @@
 #
 # Override pinned versions (defaults match pyproject.toml extras):
 #   docker build -f docker/Dockerfile.rocm -t verl-omni:rocm \
-#     --build-arg VLLM_VERSION=v0.30.0 \
+#     --build-arg VLLM_VERSION=v0.33.0 \
 #     --build-arg VERL_GIT_REF=2ab35292039a51175a4b3d3b3b2d76e951a0d3e4 .
 #
 # Run:
@@ -18,7 +18,7 @@
 
 # Base provides torch 2.12 + ROCm 7.14, a vLLM checkout at /workspace/vllm, and hipcc.
 ARG BASE_IMAGE=verlai/verl:rocm7.14_torch2.12_release_0724
-ARG VLLM_VERSION=v0.30.0
+ARG VLLM_VERSION=v0.33.0
 # Default: read from .github/verl_pin.txt at build time (override with VERL_GIT_REF).
 ARG VERL_GIT_REF=
 
@@ -70,7 +70,7 @@ COPY pyproject.toml setup.py README.md ./
 COPY .github/verl_pin.txt .github/vllm_omni_pin.txt ./.github/
 COPY verl_omni ./verl_omni
 
-# Step 3 — vllm-omni at the git pin, --no-deps so its vllm==0.30.0 requirement does
+# Step 3 — vllm-omni at the git pin, --no-deps so its vllm==0.33.0 requirement does
 # not pull the CUDA wheel over the ROCm build. The rest are the runtime imports
 # --no-deps therefore skips; see install_rocm.md for what is deliberately omitted.
 RUN VLLM_OMNI_REF="$(tr -d '[:space:]' < .github/vllm_omni_pin.txt)" \
@@ -86,7 +86,7 @@ RUN VLLM_OMNI_REF="$(tr -d '[:space:]' < .github/vllm_omni_pin.txt)" \
       onnxruntime \
       prettytable \
       gguf \
-      kernels==0.16.0 \
+      kernels==0.16.1 \
       kernels-data==0.16.1  # not optional: kernels loads it via an entry point
 
 # Step 4 — corrections the ROCm base needs.
