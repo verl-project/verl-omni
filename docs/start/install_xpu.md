@@ -139,8 +139,15 @@ DiffusionNFT, online DPO, and BAGEL FlowGRPO.
 
 Sleep mode works on Intel GPU, so recipes run with their default sleep-mode settings.
 
-Full-size recipes: SD3.5-Medium FlowGRPO OCR on 3x Arc Pro B60, see
-{doc}`FlowGRPO quickstart <flowgrpo_quickstart>`.
+Full-size recipes: SD3.5-Medium FlowGRPO OCR (`run_sd35_medium_ocr_lora_v1.sh`)
+on 3x Arc Pro B60, with two overrides that keep it within the 24 GB cards
+(smaller rollout decode batch, capped reward-model image size):
+
+```bash
+bash examples/flowgrpo_trainer/sd35/run_sd35_medium_ocr_lora_v1.sh \
+    actor_rollout_ref.rollout.engine_kwargs.vllm_omni.max_num_seqs=8 \
+    +reward.models.ocr.rollout.engine_kwargs.vllm.mm_processor_kwargs.max_pixels=401408
+```
 
 Reward models on Arc Pro B60: a separate reward GPU pool with async scoring, the
 vLLM-served Qwen2.5-VL-3B OCR reward model, the whisper_cer HTTP scorer service
