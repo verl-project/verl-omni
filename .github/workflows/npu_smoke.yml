@@ -128,7 +128,7 @@ jobs:
           python tests/special_e2e/build_qwen_image_tiny_random.py \
             --output-dir "${MODEL_PATH}"
       - name: Install NPU TTS dependencies
-        if: matrix.group == 'e2e'
+        if: matrix.group != 'core'
         shell: bash
         run: |
           python3 -m pip install --no-deps -r tests/npu_smoke/requirements_tts_smoke.txt
@@ -139,7 +139,7 @@ jobs:
             apt-get install -y --no-install-recommends sox
           fi
       - name: Prepare tiny Qwen3-TTS source
-        if: matrix.group == 'e2e'
+        if: matrix.group != 'core'
         shell: bash
         run: bash tests/npu_smoke/prepare_tts_smoke.sh
       - name: Run NPU smoke ${{ matrix.group }} tests
