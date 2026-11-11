@@ -111,6 +111,10 @@ class OmniRewardLoopWorker(RewardLoopWorker):
         await executor.sleep()
 
     async def close_reward_model(self, name: str | None = None) -> None:
+        """Drain and close one native executor, or all when ``name`` is None.
+
+        Caller cancellation is reported after all submitted closes settle.
+        """
         await await_owned(self._close_reward_model(name))
 
     async def _close_reward_model(self, name: str | None = None) -> None:
@@ -182,6 +186,12 @@ class OmniRewardLoopManager(RewardLoopManager):
 
     @property
     def reward_loop_worker_handles(self):
+        """Expose manager-owned workers for per-sample scoring.
+
+        Returns:
+            None when disabled, a legacy actor list, or a mapping from named
+            reward groups to replica tuples. The caller does not own teardown.
+        """
         if not streaming_reward_enabled(self.config):
             return None
         if self.multi_reward_model_manager.models:

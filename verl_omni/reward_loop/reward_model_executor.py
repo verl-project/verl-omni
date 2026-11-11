@@ -84,6 +84,7 @@ class NativeRewardExecutor:
         self._close_failed = False
 
     async def wake_up(self) -> None:
+        """Load or restore the model, settling the transition before reporting cancellation."""
         await await_owned(self._wake_up())
 
     async def _wake_up(self) -> None:
@@ -154,6 +155,7 @@ class NativeRewardExecutor:
                     self._idle.set()
 
     async def sleep(self) -> None:
+        """Fence inference and drain accepted calls, then offload or dispose of the model."""
         await await_owned(self._sleep())
 
     async def _sleep(self) -> None:
@@ -179,6 +181,7 @@ class NativeRewardExecutor:
                 raise
 
     async def close(self) -> None:
+        """Permanently fence inference and drain accepted calls before releasing the model."""
         await await_owned(self._close())
 
     async def _close(self) -> None:

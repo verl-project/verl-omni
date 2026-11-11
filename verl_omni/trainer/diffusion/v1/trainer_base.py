@@ -1213,6 +1213,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         return self.llm_server_manager.get_client()
 
     def get_reward_handles(self):
+        """Borrow the reward manager's per-sample worker handles, or None when disabled."""
         return self.reward_loop_manager.reward_loop_worker_handles
 
     def _fetch_one_gen_batch(self):

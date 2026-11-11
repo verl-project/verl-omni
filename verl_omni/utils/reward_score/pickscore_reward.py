@@ -219,6 +219,7 @@ class PickScoreNativeModel:
         return await asyncio.gather(*futures)
 
     async def sleep(self):
+        """Drain queued scores and move retained weights to CPU; requires CPU retention."""
         await await_owned(self._sleep())
 
     async def _sleep(self):
@@ -248,6 +249,7 @@ class PickScoreNativeModel:
                 raise
 
     async def wake_up(self):
+        """Restore retained weights to the target device before accepting new scores."""
         await await_owned(self._wake_up())
 
     async def _wake_up(self):
@@ -271,6 +273,7 @@ class PickScoreNativeModel:
                 raise
 
     async def close(self):
+        """Drain queued scores and release the model before reporting caller cancellation."""
         await await_owned(self._close())
 
     async def _close(self):

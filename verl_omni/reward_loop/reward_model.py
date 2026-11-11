@@ -298,6 +298,7 @@ class NativeManagedRewardModel(ManagedRewardModel):
                 raise result
 
     async def wake_up(self) -> None:
+        """Wake bound worker models, settling submitted RPCs before reporting cancellation."""
         await await_owned(self._wake_up())
 
     async def _wake_up(self) -> None:
@@ -310,6 +311,7 @@ class NativeManagedRewardModel(ManagedRewardModel):
             self._resident = True
 
     async def sleep(self) -> None:
+        """Sleep bound worker models when offload is enabled; otherwise retain them."""
         await await_owned(self._sleep())
 
     async def _sleep(self) -> None:
@@ -322,6 +324,7 @@ class NativeManagedRewardModel(ManagedRewardModel):
             self._resident = False
 
     async def close(self) -> None:
+        """Close bound worker models, settling submitted RPCs before reporting cancellation."""
         await await_owned(self._close())
 
     async def _close(self) -> None:
