@@ -26,6 +26,8 @@ from __future__ import annotations
 import logging
 import os
 from abc import ABCMeta, abstractmethod
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Callable
 
 import torch
@@ -137,8 +139,7 @@ class NonDiffusersModelBase(nn.Module, metaclass=ABCMeta):
         failures restore the module to its state before the call; model keys missing
         from the checkpoint keep their initial values with a warning.
         """
-        from peft import LoraConfig, get_peft_model_state_dict
-        from peft.tuners.tuners_utils import BaseTunerLayer
+        from peft import LoraConfig
         from safetensors.torch import load_file as safetensors_load_file
 
         adapter_config_path = os.path.join(adapter_path, "adapter_config.json")
@@ -150,6 +151,44 @@ class NonDiffusersModelBase(nn.Module, metaclass=ABCMeta):
             raise FileNotFoundError(f"LoRA adapter weights not found at {adapter_weights_path}")
 
         lora_config = LoraConfig.from_pretrained(adapter_path)
+        adapter_state_dict = safetensors_load_file(adapter_weights_path)
+
+        with self._rollback_adapter_on_error(adapter_name):
+            self.add_adapter(lora_config, adapter_name=adapter_name)
+            self._copy_adapter_weights(adapter_state_dict, adapter_name, adapter_path)
+
+    def _copy_adapter_weights(
+        self, adapter_state_dict: dict[str, torch.Tensor], adapter_name: str, adapter_path: str
+    ) -> None:
+        """Copy checkpoint tensors into the injected adapter; checkpoint keys the model lacks raise ``ValueError``."""
+        from peft import get_peft_model_state_dict
+
+        current_state = get_peft_model_state_dict(self, adapter_name=adapter_name)
+
+        loadable_keys = set(adapter_state_dict.keys()) & set(current_state.keys())
+        missing_load = set(current_state.keys()) - set(adapter_state_dict.keys())
+        unexpected_load = set(adapter_state_dict.keys()) - set(current_state.keys())
+
+        if unexpected_load:
+            raise ValueError(
+                f"Failed to load LoRA adapter {adapter_name!r} from {adapter_path}: {len(unexpected_load)} "
+                f"checkpoint keys are not in the model, e.g. {sorted(unexpected_load)[:5]}. Ensure the adapter "
+                "was trained for this model with the same target modules."
+            )
+        if missing_load:
+            logger.warning(
+                "LoRA adapter %r: %d keys in model but not in checkpoint. They will keep their initial values.",
+                adapter_name,
+                len(missing_load),
+            )
+
+        for key in loadable_keys:
+            current_state[key].copy_(adapter_state_dict[key])
+
+    @contextmanager
+    def _rollback_adapter_on_error(self, adapter_name: str) -> Iterator[None]:
+        """Undo ``add_adapter(..., adapter_name)`` if the body raises."""
+        from peft.tuners.tuners_utils import BaseTunerLayer
 
         requires_grad_before = [(param, param.requires_grad) for param in self.parameters()]
         modules_before = dict(self.named_modules())
@@ -158,32 +197,8 @@ class NonDiffusersModelBase(nn.Module, metaclass=ABCMeta):
             for name, module in modules_before.items()
             if isinstance(module, BaseTunerLayer)
         }
-        self.add_adapter(lora_config, adapter_name=adapter_name)
-
         try:
-            # Load adapter weights into the newly created parameters.
-            adapter_state_dict = safetensors_load_file(adapter_weights_path)
-            current_state = get_peft_model_state_dict(self, adapter_name=adapter_name)
-
-            loadable_keys = set(adapter_state_dict.keys()) & set(current_state.keys())
-            missing_load = set(current_state.keys()) - set(adapter_state_dict.keys())
-            unexpected_load = set(adapter_state_dict.keys()) - set(current_state.keys())
-
-            if unexpected_load:
-                raise ValueError(
-                    f"Failed to load LoRA adapter {adapter_name!r} from {adapter_path}: {len(unexpected_load)} "
-                    f"checkpoint keys are not in the model, e.g. {sorted(unexpected_load)[:5]}. Ensure the adapter "
-                    "was trained for this model with the same target modules."
-                )
-            if missing_load:
-                logger.warning(
-                    "LoRA adapter %r: %d keys in model but not in checkpoint. They will keep their initial values.",
-                    adapter_name,
-                    len(missing_load),
-                )
-
-            for key in loadable_keys:
-                current_state[key].copy_(adapter_state_dict[key])
+            yield
         except Exception:
             # Injection activates the new adapter, wraps new layers and freezes existing weights.
             for name, module in list(self.named_modules()):
