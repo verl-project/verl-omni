@@ -17,13 +17,16 @@
 #     launching (this script does not do it, so the same script works on GPU
 #     clusters that expose NPUs through Ray).
 #   - ASCEND_RT_VISIBLE_DEVICES must cover TRAINER_DIES + ROLLOUT_DIES devices.
-#   - pip install -e ".[train]" plus the vllm-omni build matching the installed
-#     CANN/torch_npu versions (see docs/start/install.md).
+#   - Python environment installed per docs/start/install_npu.md, including the
+#     vllm-omni build matching the installed CANN/torch_npu versions.
 #
 # Policy loss is GSPO (sequence-level importance ratio, clip 3e-4 / 4e-4,
 # seq-mean-token-mean) with GRPO advantages and no KL penalty. Dynamic sampling
-# is disabled. `reward.reward_manager.name=dapo` selects the math_dapo reward
-# (rule-based \boxed{} exact match, +1 correct / -1 wrong), not the optimizer.
+# is disabled. `reward.reward_manager.name=dapo` selects verl's math_dapo reward
+# (+1 correct / -1 wrong), not the optimizer. It scores the last 300 characters of
+# the response, takes the last `Answer:` line when present (normalized
+# comparison), and only then falls back to the last \boxed{} within the last 100
+# characters (exact match). A response with neither form scores -1.
 #
 # Data: one parquet row per problem, with data_source="math_dapo",
 # reward_model.ground_truth, and a chat-style prompt column. No learned reward

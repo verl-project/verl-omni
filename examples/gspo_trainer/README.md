@@ -145,10 +145,24 @@ Healthy signals (gsm8k, 4×H800, LoRA r=32):
 
 ## Training with `math_dapo`
 
-Pure-text math data with the built-in `math_dapo` reward: rule-based `\boxed{}`
-exact match, `+1` correct / `-1` wrong. No reward model and no critic. Select it
-with `reward.reward_manager.name=dapo` — the name refers to the dataset reward,
-not to the policy loss; the launcher below trains with **GSPO**.
+Pure-text math data with the built-in `math_dapo` reward, `+1` correct / `-1`
+wrong. No reward model and no critic. Select it with
+`reward.reward_manager.name=dapo` — the name refers to the dataset reward, not to
+the policy loss; the launcher below trains with **GSPO**.
+
+The scorer is not `\boxed{}`-only. It reads the last 300 characters of the
+response and tries, in order:
+
+1. the last `Answer: <value>` line (case-insensitive); the value is normalized
+   (LaTeX wrappers, spacing, thousand separators) and compared with the
+   normalized ground truth;
+2. only if no `Answer:` line is present, the last `\boxed{...}` within the last
+   100 characters, compared with the ground truth as an exact string.
+
+A response with neither form scores `-1`, so the prompt must elicit one of them.
+The DAPO math prompts do: the training rows end with "The last line of your
+response should be of the form Answer: $Answer", and the AIME validation rows
+end with "output the final answer within \boxed{}".
 
 ### Prepare the dataset
 
@@ -168,9 +182,14 @@ TP=2 (6 replicas) and generates one batch ahead of training;
 `parameter_sync_step=4` syncs weights every four trainer steps.
 
 ```bash
-bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_math_dapo_separate_async_npu_v1.sh \
-    TOTAL_TRAINING_STEPS=100
+TOTAL_TRAINING_STEPS=100 \
+bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_math_dapo_separate_async_npu_v1.sh
 ```
+
+`TOTAL_TRAINING_STEPS` is read from the environment before Python starts, so the
+assignment has to precede `bash`; anything after the script path is forwarded to
+the trainer as a Hydra override. The launcher already defaults to 100, so the
+assignment is optional.
 
 The launcher enforces the V1 constraint
 `train_batch_size == parameter_sync_step * ppo_mini_batch_size` (`64 == 4 * 16`)
@@ -184,10 +203,14 @@ Same model, data, batch shape (64 prompts × 16 responses), LoRA r=32,
 `max_response_length=16384`, 100 steps on 16 Ascend 910C NPUs (CANN 9.1,
 vllm-omni 0.28.0rc1). Step 1 is excluded from the averages (warm-up).
 
-| topology | step (s) | rollout residual (s) | old_log_prob (s) | update_actor (s) | update_weights (s) |
+| topology | step (s) | gen (s) | old_log_prob (s) | update_actor (s) | update_weights (s) |
 | --- | --- | --- | --- | --- | --- |
-| async 12 rollout / 4 train | 2160 | 432 | 451 | 1243 | 30 |
-| sync 16 shared | 2508 | — | 126 | 360 | 18 |
+| async 12 rollout / 4 train | 2160 | 432 (residual wait) | 451 | 1243 | 30 |
+| sync 16 shared | 2508 | 2002 (full generation) | 126 | 360 | 18 |
+
+`timing_s/gen` is the training-side wait for the next batch in async mode (the
+rollout pool keeps generating during the step), and the full generation time in
+sync mode, where generation runs inline on the same 16 dies.
 
 In the async layout the trainer pool is the bottleneck: `old_log_prob +
 update_actor` is ~78% of the step, and the rollout pool stays busy enough that
