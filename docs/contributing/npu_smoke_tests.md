@@ -96,7 +96,7 @@ All nonzero exits, including native abort 134, fail the smoke group.
 
 ### Wan2.2 trainer with a reward model
 
-Test 2 runs one DanceGRPO training step with six actor NPUs and a dedicated
+With eight NPUs, test 2 runs one DanceGRPO training step with six actor NPUs and a dedicated
 TP=2 Qwen2.5-VL reward engine on two NPUs. Prepare the Qwen2.5-VL-3B-Instruct
 checkpoint before an offline run; set `REWARD_MODEL_PATH` to its local directory
 when needed. The test must complete training and exit 0.
@@ -205,9 +205,12 @@ To run both groups concurrently in one dedicated eight-NPU CI container:
 NPU_SMOKE_PARALLEL=1 bash tests/npu_smoke/run_npu_smoke_tests.sh --num-npus 8
 ```
 
-Core uses NPUs `0,1`; e2e uses `2,3,4,5,6,7`. This does not replace per-case
-eight-rank coverage from the sequential command. The e2e trainers remain
-sequential; this layout does not support concurrent colocated training jobs.
+Only this optional parallel command allocates NPUs `0,1` to core and
+`2,3,4,5,6,7` to e2e. Sequential and single-group commands allocate eight NPUs per
+group. Each launcher assigns actor, rollout and reward workers within its
+allocation; parallel-mode replica counts and derived batch sizes may differ.
+Use the eight-NPU commands for the original allocation coverage. E2e trainers
+remain sequential within their group.
 
 Unset shared `MODEL_PATH`, `TOKENIZER_PATH`, `DATA_DIR`, `TRAIN_FILES`,
 `VAL_FILES` and `NPU_SMOKE_TEST_IDS` overrides before parallel execution. Use a
