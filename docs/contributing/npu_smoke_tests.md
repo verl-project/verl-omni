@@ -1,6 +1,6 @@
 # NPU Smoke Tests
 
-Last updated: 11/10/2026.
+Last updated: 11/11/2026.
 
 This guide explains how to add CI test cases for Huawei Ascend devices in verl-omni.
 
@@ -17,8 +17,6 @@ into these runners:
 | ID | Group | Name | Test entry point | Default NPUs |
 |---|---|---|---|---:|
 | 0 | core | vLLM-Omni rollout + sleep/wake-up | tests/workers/rollout/rollout_vllm/test_vllm_omni_generate_npu.py | 8 |
-| 1 | e2e | Qwen-Image FlowGRPO trainer | tests/special_e2e/run_flowgrpo_qwen_image_npu.sh | 8 |
-| 2 | e2e | Wan2.2 DanceGRPO trainer with Qwen2.5-VL reward | tests/special_e2e/run_dancegrpo_wan22_npu.sh | 8 |
 | 3 | core | Diffusers FSDP engine inference and training | tests/workers/test_diffusers_fsdp_engine_npu.py | 8 |
 | 4 | core | Diffusion agent loop, request and step execution | tests/agent_loop/test_diffusion_agent_loop_npu.py::test_diffusion_single_turn_npu | 8 |
 | 5 | core | Unseeded multi-worker rollout diversity | tests/agent_loop/test_diffusion_agent_loop_npu.py::test_rollout_without_seed_npu | 8 |
@@ -32,15 +30,12 @@ into these runners:
 | 17 | core | Omni tool-agent image generation | tests/agent_loop/test_omni_agent_loop_worker_npu.py | 8 |
 | 28 | core | FSDP2 LoRA adapter switch and EMA | tests/workers/test_diffusers_fsdp_lora_adapter.py | 8 |
 | 30 | core | Image previews and H3 offload placeholders | tests/trainer/diffusion/test_artifact_preview_dump_npu.py; tests/pipelines/test_minimax_h3_meta_output_npu.py | 8 |
+| 1 | e2e | Qwen-Image FlowGRPO trainer | tests/special_e2e/run_flowgrpo_qwen_image_npu.sh | 8 |
+| 2 | e2e | Wan2.2 DanceGRPO trainer with Qwen2.5-VL reward | tests/special_e2e/run_dancegrpo_wan22_npu.sh | 8 |
 
-The combined runner has 16 entries: 14 core and two e2e (1, 2). Several core
-entries contain multiple parameterized cases. The two e2e entries each run a
-trainer workload; they are not pytest cases.
-
-The additional core entries reuse the GPU assertion paths with Ascend device
-placement and local tiny checkpoints. Entry 14 requires at least four NPUs for
-SP=4. Entry 28 covers FSDP2; its two FSDP1 adapter parameters remain excluded.
-These checks establish execution and tensor contracts, not model convergence.
+Test IDs stay stable across companion PRs, so gaps are intentional. Core
+entries collect pytest cases; e2e entries run trainer workloads. Check each
+launcher for its hardware requirements and coverage limits.
 
 Test 3 ports the `fsdp` case of `tests/workers/test_diffusers_fsdp_engine.py`
 (GPU core ID 2). It reuses the GPU test's synthetic trajectories and engine
@@ -195,9 +190,10 @@ To run both groups concurrently in one dedicated eight-NPU CI container:
 NPU_SMOKE_PARALLEL=1 bash tests/npu_smoke/run_npu_smoke_tests.sh --num-npus 8
 ```
 
-Core uses NPUs `0,1,2,3`; e2e uses `4,5,6,7` so core can exercise SP=4. This does not replace per-case
-eight-rank coverage from the sequential command. The e2e trainers remain
-sequential; this layout does not support concurrent colocated training jobs.
+Only in this optional parallel mode, core uses NPUs `0,1,2,3` and e2e uses
+`4,5,6,7`. Each group runs with four ranks and its derived batch sizes, instead
+of eight ranks in the sequential or single-group commands. Use those eight-NPU
+commands for full-rank coverage. E2e trainers remain sequential within the group.
 
 Unset shared `MODEL_PATH`, `TOKENIZER_PATH`, `DATA_DIR`, `TRAIN_FILES`,
 `VAL_FILES` and `NPU_SMOKE_TEST_IDS` overrides before parallel execution. Use a

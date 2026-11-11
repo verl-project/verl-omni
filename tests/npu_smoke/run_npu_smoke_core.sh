@@ -33,6 +33,7 @@ run_test 12 "rollout request batching + step-execution contracts" \
     python3 -m pytest -s tests/workers/rollout/rollout_vllm/test_vllm_omni_generate_contracts_npu.py
 run_test 13 "diffusers FSDP/FSDP2 engine with sequence parallel 2" \
     python3 -m pytest -s tests/workers/test_diffusers_fsdp_engine_sp_npu.py
+# SP=2/SP=4 forward and backward checks require at least four visible NPUs.
 run_test 14 "diffusers Ulysses sequence-parallel equivalence" \
     env MODEL_PATH="${QWEN_IMAGE_MODEL_PATH:-${HOME}/.cache/modelscope/hub/models/tiny-random/Qwen-Image}" \
     python3 -m torch.distributed.run --nproc_per_node="${NUM_NPUS}" --local-ranks-filter=0 tests/workers/test_diffusers_ulysses.py
