@@ -34,8 +34,8 @@ into these runners:
 | 2 | e2e | Wan2.2 DanceGRPO trainer with Qwen2.5-VL reward | tests/special_e2e/run_dancegrpo_wan22_npu.sh | 8 |
 
 Test IDs stay stable across companion PRs, so gaps are intentional. Core
-entries collect pytest cases; e2e entries run trainer workloads. Check each
-launcher for its hardware requirements and coverage limits.
+entries collect pytest cases; e2e entries run trainer workloads. These are
+execution checks, not quality or convergence benchmarks.
 
 Test 3 ports the `fsdp` case of `tests/workers/test_diffusers_fsdp_engine.py`
 (GPU core ID 2). It reuses the GPU test's synthetic trajectories and engine
@@ -102,7 +102,7 @@ All nonzero exits, including native abort 134, fail the smoke group.
 
 ### Wan2.2 trainer with a reward model
 
-Test 2 runs one DanceGRPO training step with six actor NPUs and a dedicated
+With eight NPUs, test 2 runs one DanceGRPO training step with six actor NPUs and a dedicated
 TP=2 Qwen2.5-VL reward engine on two NPUs. Prepare the Qwen2.5-VL-3B-Instruct
 checkpoint before an offline run; set `REWARD_MODEL_PATH` to its local directory
 when needed. The test must complete training and exit 0.
@@ -190,10 +190,12 @@ To run both groups concurrently in one dedicated eight-NPU CI container:
 NPU_SMOKE_PARALLEL=1 bash tests/npu_smoke/run_npu_smoke_tests.sh --num-npus 8
 ```
 
-Only in this optional parallel mode, core uses NPUs `0,1,2,3` and e2e uses
-`4,5,6,7`. Each group runs with four ranks and its derived batch sizes, instead
-of eight ranks in the sequential or single-group commands. Use those eight-NPU
-commands for full-rank coverage. E2e trainers remain sequential within the group.
+Only this optional parallel command allocates NPUs `0,1,2,3` to core and
+`4,5,6,7` to e2e. Sequential and single-group commands allocate eight NPUs per
+group. Each launcher assigns actor, rollout and reward workers within its
+allocation; parallel-mode replica counts and derived batch sizes may differ.
+Use the eight-NPU commands for the original allocation coverage. E2e trainers
+remain sequential within their group.
 
 Unset shared `MODEL_PATH`, `TOKENIZER_PATH`, `DATA_DIR`, `TRAIN_FILES`,
 `VAL_FILES` and `NPU_SMOKE_TEST_IDS` overrides before parallel execution. Use a
