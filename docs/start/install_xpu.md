@@ -128,8 +128,9 @@ actor_rollout_ref.model.attn_backend=native \
 actor_rollout_ref.rollout.rollout_attn_backend=TORCH_SDPA
 ```
 
-SDPA on Intel GPU already runs FlashAttention-2 kernels. FlashAttention-2 from the
-Kernel Hub (`kernels-community/flash-attn2`) also has an Intel GPU build.
+SDPA on Intel GPU can use FlashAttention-2 kernels (for bf16 and fp16 inputs).
+FlashAttention-2 from the Kernel Hub (`kernels-community/flash-attn2`) also has an
+Intel GPU build.
 
 ## Current status
 
@@ -141,7 +142,9 @@ Sleep mode works on Intel GPU, so recipes run with their default sleep-mode sett
 
 Full-size recipes: SD3.5-Medium FlowGRPO OCR (`run_sd35_medium_ocr_lora_v1.sh`)
 on 3x Arc Pro B60, with two overrides that keep it within the 24 GB cards
-(smaller rollout decode batch, capped reward-model image size):
+(smaller rollout decode batch, capped reward-model image size). Prepare the OCR
+dataset and the models as in Steps 1 and 2 of the
+{doc}`FlowGRPO quickstart <flowgrpo_quickstart>`, then run:
 
 ```bash
 bash examples/flowgrpo_trainer/sd35/run_sd35_medium_ocr_lora_v1.sh \
