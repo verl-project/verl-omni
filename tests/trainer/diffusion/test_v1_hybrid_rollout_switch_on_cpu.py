@@ -43,6 +43,7 @@ class _RecordingCheckpointManager:
         self.update_calls: list[int] = []
         self.resume_calls = 0
         self.abort_calls = 0
+        self.wait_calls = 0
         self.reject_requests: list[bool] = []
         self.sleep_calls = 0
         self.wake_calls = 0
@@ -51,6 +52,10 @@ class _RecordingCheckpointManager:
         self.events.append(f"{self.name}_update")
         self.update_calls.append(global_steps)
         return {}
+
+    def wait_for_weight_update(self):
+        self.events.append(f"{self.name}_wait")
+        self.wait_calls += 1
 
     def resume_generation_replicas(self):
         self.events.append(f"{self.name}_resume")
@@ -679,16 +684,16 @@ def test_validation_lends_the_engine_and_leaves_it_for_the_next_step():
 
     trainer.on_validate_begin()
     assert trainer.current_mode == HybridEngineMode.ROLLOUT
-    assert trainer.events == ["hybrid_update", "hybrid_resume", "add"]
+    assert trainer.events == ["hybrid_update", "hybrid_resume", "add", "standalone_wait"]
     assert trainer.checkpoint_manager.wake_calls == 0
 
     trainer.on_validate_end()
     assert trainer.current_mode == HybridEngineMode.ROLLOUT
-    assert trainer.events == ["hybrid_update", "hybrid_resume", "add"]
+    assert trainer.events == ["hybrid_update", "hybrid_resume", "add", "standalone_wait"]
 
     trainer.on_step_begin()
     assert trainer.current_mode == HybridEngineMode.TRAINER
-    assert trainer.events[3:] == ["remove", "hybrid_abort", "hybrid_sleep"]
+    assert trainer.events[4:] == ["remove", "hybrid_abort", "hybrid_sleep"]
 
 
 def test_validation_does_not_switch_when_already_in_rollout_mode():
@@ -696,7 +701,7 @@ def test_validation_does_not_switch_when_already_in_rollout_mode():
 
     trainer.on_validate_begin()
 
-    assert trainer.events == []
+    assert trainer.events == ["standalone_wait"]
     assert trainer.current_mode == HybridEngineMode.ROLLOUT
 
 

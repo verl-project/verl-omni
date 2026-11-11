@@ -51,7 +51,7 @@ dependencies = [
     "TransferQueue==0.1.11",
     "vllm==0.33.0",
     "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@6e8c1097cd8c73ce799fd1d7f7cd32e656b29b28",
-    "verl @ git+https://github.com/verl-project/verl.git@2ab35292039a51175a4b3d3b3b2d76e951a0d3e4",
+    "verl @ git+https://github.com/verl-project/verl.git@2b4ed6826a39205838d0ca004bdd942334dbe4b6",
 ]
 
 [project.optional-dependencies]

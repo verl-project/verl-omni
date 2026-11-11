@@ -343,10 +343,14 @@ class PolicyGradientDiffusionTrainerV1SeparateAsync(PolicyGradientDiffusionTrain
             restored_prompts,
         )
 
+    def on_train_end(self):
+        self.standalone_checkpoint_manager.wait_for_weight_update()
+
     def on_validate_begin(self):
         if self.current_mode == HybridEngineMode.TRAINER:
             logger.info("Switching hybrid engine to rollout mode for validation")
             self.switch_to_rollout()
+        self.standalone_checkpoint_manager.wait_for_weight_update()
         if self.sync_compatible and self._standalone_paused:
             # Validation uses the standalone rollout via get_llm_client(), so
             # make sure it is resumed if it was paused for actor training.
