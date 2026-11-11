@@ -20,11 +20,13 @@ not here, so diffusion loops do not import Hydra ``agentic_image_gen`` readers.
 
 from __future__ import annotations
 
+import secrets
 from typing import Any, Optional
 
 __all__ = [
     "derive_rollout_seed",
     "maybe_per_rollout_seeds",
+    "per_rollout_seeds_or_entropy",
     "messages_to_text",
 ]
 
@@ -80,3 +82,19 @@ def maybe_per_rollout_seeds(meta_info: dict, batch_size: int, global_indices=Non
         raise ValueError(f"Expected {batch_size} global rollout indices, got {len(indices)}")
 
     return [derive_rollout_seed(base, idx) for idx in indices]
+
+
+def per_rollout_seeds_or_entropy(meta_info: dict, batch_size: int, global_indices=None) -> list[int]:
+    """Per-row rollout seeds: derived from ``rollout_seed`` when set, else fresh entropy.
+
+    Unseeded training requests must still carry explicit per-row seeds: vLLM-Omni's
+    ``OmniDiffusionRequest`` fills an absent seed with ``random.randint`` inside the
+    engine-server process, where Ray-forked replicas share RNG state, so unseeded
+    requests routed to different replicas draw colliding seeds (bit-identical initial
+    latents). Entropy seeds ride the same request plumbing as trainer-assigned seeds
+    and keep unseeded rollouts diverse on every topology.
+    """
+    seeds = maybe_per_rollout_seeds(meta_info, batch_size, global_indices)
+    if seeds is None:
+        seeds = [secrets.randbits(63) for _ in range(batch_size)]
+    return seeds

@@ -247,7 +247,7 @@ def _launch_server(*, step_execution: bool = False, algorithm: str = "flow_grpo"
             "env_vars": {
                 "TOKENIZERS_PARALLELISM": "true",
                 "NCCL_DEBUG": "WARN",
-                "VLLM_LOGGING_LEVEL": "WARN",
+                "VLLM_LOGGING_LEVEL": "WARNING",
             }
         },
         ignore_reinit_error=True,

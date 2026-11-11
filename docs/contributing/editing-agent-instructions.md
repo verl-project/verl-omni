@@ -7,7 +7,7 @@
 | Generic     | Variants                   | Audience        | Scope                          |
 | ----------- | -------------------------- | --------------- | ------------------------------ |
 | `AGENTS.md` | `CLAUDE.md`, ...           | Agents          | Project-wide instructions.     |
-| `.agent/`   | `.claude/`, `.codex/`, ... | Agents          | Agent specification directory. |
+| `.agents/`   | `.claude/`, `.codex/`, ... | Agents          | Agent specification directory. |
 | `docs/`     | N/A                        | Humans & Agents | Project documentation.         |
 
 Generic files are framework-agnostic. Variants directly symlink generic files or refer to them and add framework-specific content.
@@ -91,4 +91,4 @@ Before submitting changes to any agent instruction file:
 
 Adapted from the [verl project](https://github.com/verl-project/verl)'s [`editing-agent-instructions.md`](https://github.com/verl-project/verl/blob/main/docs/contributing/editing-agent-instructions.md), which was itself adapted from the [vLLM project](https://github.com/vllm-project/vllm).
 
-Last updated: 04/23/2026
+Last updated: 11/10/2026

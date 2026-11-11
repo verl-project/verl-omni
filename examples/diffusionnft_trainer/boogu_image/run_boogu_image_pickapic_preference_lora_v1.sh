@@ -15,8 +15,9 @@
 #   python examples/flowgrpo_trainer/data_process/boogu_image_pickapic.py
 set -euo pipefail
 
-# vLLM 0.30's allocator extension uses the pip-provided CUDA 13 runtime even
-# when PyTorch itself is a cu129 build. Make those shared libraries discoverable.
+# vLLM's allocator extension uses the pip-provided CUDA 13 runtime even
+# when PyTorch is built against a different CUDA minor version. Make those
+# shared libraries discoverable.
 cuda13_lib=$(python3 - <<'PY'
 from importlib.metadata import PackageNotFoundError, distribution
 

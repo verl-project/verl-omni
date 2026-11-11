@@ -33,9 +33,9 @@ from vllm.distributed import (
     initialize_model_parallel,
 )
 from vllm_omni.diffusion.data import DiffusionParallelConfig, OmniDiffusionConfig
-from vllm_omni.diffusion.lora.manager import DiffusionLoRAManager
 from vllm_omni.diffusion.models.minimax_h3.minimax_h3_transformer import MiniMaxH3DiTModel
 from vllm_omni.diffusion.models.minimax_h3.pipeline_minimax_h3 import MiniMaxH3Pipeline
+from vllm_omni.lora.manager import DiffusionLoRAManager
 
 from tests.special_e2e.minimax_h3_lora_sync_tp2 import _TINY_H3, _old_adapter_payload, _vllm_transformer_config
 from verl_omni.pipelines.minimax_h3_diffusion_nft.common import MiniMaxH3RolloutWeightSyncMixin
