@@ -661,7 +661,7 @@ keeps `compute_rm_score()` as the synchronous compatibility entrypoint used by
 current trainers. Cleanup is attempted even when inference or scoring fails.
 
 Native PickScore can retain its existing weights on CPU while sleeping by setting
-`executor.kwargs.retain_weights_on_cpu: true`. This opt-in requires a CUDA worker;
+`executor.kwargs.retain_weights_on_cpu: true`. This opt-in requires a CUDA or Intel GPU worker;
 the default native lifecycle still closes and reconstructs the model. CPU
 retention keeps the same model and processor, and inference is rejected while
 asleep. Call `await multi_reward_model_manager.close_native_models()` for final

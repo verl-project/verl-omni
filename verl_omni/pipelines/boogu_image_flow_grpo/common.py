@@ -231,7 +231,7 @@ def lora_module_name(tensor_name: str) -> str:
 
 
 #: Denoiser components ``DiffusionLoRAManager._replace_layers_with_lora`` scans.
-#: Mirrors ``vllm_omni.diffusion.lora.manager``; a LoRA layer is keyed
+#: Mirrors ``vllm_omni.lora.manager``; a LoRA layer is keyed
 #: ``f"{component}.{module_name}"``, so the engine key space is
 #: component-qualified even though ``component.named_modules()`` is not.
 _LORA_COMPONENT_NAMES: tuple[str, ...] = ("transformer", "transformer_2", "dit", "bagel", "unet")

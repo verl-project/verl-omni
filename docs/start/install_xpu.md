@@ -1,6 +1,6 @@
 # Installation (Intel GPU)
 
-Last updated: 10/29/2026
+Last updated: 11/09/2026
 
 For NVIDIA GPU, see the {doc}`GPU installation guide <install>`. For Ascend NPU, see the {doc}`NPU installation guide <install_npu>`. For AMD GPU, see the {doc}`ROCm installation guide <install_rocm>`. For Cambricon MLU, see the {doc}`MLU installation guide <install_mlu>`.
 
@@ -14,7 +14,7 @@ For NVIDIA GPU, see the {doc}`GPU installation guide <install>`. For Ascend NPU,
 
 On Intel GPU the Docker image is the supported path. It builds on vLLM's official
 XPU image, which already ships torch for XPU, oneCCL, the Intel GPU user-mode
-driver and vLLM 0.30.0.
+driver and vLLM 0.33.0.
 
 ```bash
 git clone https://github.com/verl-project/verl-omni.git
@@ -29,12 +29,12 @@ Build context is controlled by the repo-root [`.dockerignore`](https://github.co
 
 | Argument       | Default                                              | Purpose                                         |
 | -------------- | ---------------------------------------------------- | ----------------------------------------------- |
-| `BASE_IMAGE`   | `vllm/vllm-openai-xpu:v0.30.0`                       | torch for XPU, oneCCL, Intel GPU driver, vLLM   |
+| `BASE_IMAGE`   | `vllm/vllm-openai-xpu:v0.33.0`                       | torch for XPU, oneCCL, Intel GPU driver, vLLM   |
 | `VERL_GIT_REF` | [`.github/verl_pin.txt`](../../.github/verl_pin.txt) | verl commit to install                          |
 
 ### Install into an existing vLLM XPU environment
 
-The same steps work in any environment that already has `vllm==0.30.0+xpu`.
+The same steps work in any environment that already has `vllm==0.33.0+xpu`.
 Pin the XPU builds first, so the resolver cannot replace them with CUDA or CPU wheels:
 
 ```bash
@@ -150,6 +150,16 @@ Validated with the tiny-random GPU smoke tests on Arc Pro B60 and B70: FlowGRPO
 (FSDP and FSDP2, rollout TP 1 and 2, rule-based and vLLM-served reward models),
 DiffusionNFT, online DPO, and BAGEL FlowGRPO. Full-size recipes have not been
 validated yet.
+
+FlowGRPO with the trainer and rollout on separate GPUs, synchronous and fully
+async (`run_flowgrpo_qwen_image_separate.sh` and
+`run_flowgrpo_qwen_image_v1_separate_async.sh`), also runs on Arc Pro B60 and
+B70 with the sleep mode overrides above. Weights sync through the XCCL
+checkpoint engine from verl-hardware-plugin, which registers under both `nccl`
+and `xccl`, so recipes keep the default `checkpoint_engine.backend=nccl`. The
+two smoke scripts pre-check `nccl` by importing the CUDA engine, so on Intel GPU
+run them with `CKPT_BACKEND=xccl`, which selects the XCCL engine and pre-checks
+it instead.
 
 Not yet supported on Intel GPU:
 

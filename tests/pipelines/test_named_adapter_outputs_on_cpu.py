@@ -653,13 +653,18 @@ def test_ltx_latent_forward_preserves_independent_audio_decode(monkeypatch, requ
     assert ("video_preview" in header["specs"]) == decode
 
 
-@pytest.mark.parametrize("adapter", ["qwen", "sd3"])
+@pytest.mark.parametrize("adapter", ["qwen", "sd3", "crd"])
 @pytest.mark.parametrize("request_preview", [False, True])
 def test_image_forward_keeps_preview_request_union_from_later_request(adapter, request_preview):
     from verl_omni.pipelines.qwen_image_flow_grpo.vllm_omni_rollout_adapter import QwenImagePipelineWithLogProb
+    from verl_omni.pipelines.sd3_crd.vllm_omni_rollout_adapter import StableDiffusion3CRDPipeline
     from verl_omni.pipelines.sd3_flow_grpo.vllm_omni_rollout_adapter import StableDiffusion3PipelineWithLogProb
 
-    cls = QwenImagePipelineWithLogProb if adapter == "qwen" else StableDiffusion3PipelineWithLogProb
+    cls = {
+        "qwen": QwenImagePipelineWithLogProb,
+        "sd3": StableDiffusion3PipelineWithLogProb,
+        "crd": StableDiffusion3CRDPipeline,
+    }[adapter]
     pipeline = object.__new__(cls)
     pipeline.device = torch.device("cpu")
     pipeline.vae_scale_factor = 8
@@ -701,6 +706,20 @@ def test_image_forward_keeps_preview_request_union_from_later_request(adapter, r
         for index in range(2)
     ]
     outputs = pipeline.forward(DiffusionRequestBatch(requests=requests))
+    if adapter == "crd":
+        assert pipeline.encode_prompt.call_count == 2
+        assert pipeline.diffuse.call_args.args[6] is False  # Sampling remains unguided.
+        for output in outputs:
+            embeddings = output.output["metadata"]["prompt_embeddings"]
+            assert embeddings["negative_prompt_embeds"] is not None
+            assert embeddings["negative_pooled_prompt_embeds"] is not None
+    elif adapter == "sd3":
+        assert pipeline.encode_prompt.call_count == 1
+        assert pipeline.diffuse.call_args.args[6] is False
+        for output in outputs:
+            embeddings = output.output["metadata"]["prompt_embeddings"]
+            assert embeddings["negative_prompt_embeds"] is None
+            assert embeddings["negative_pooled_prompt_embeds"] is None
     assert pipeline.vae.decode.call_count == int(request_preview)
     for index, output in enumerate(outputs):
         header = output.output["metadata"]["media_artifacts"]

@@ -32,7 +32,7 @@ from verl.utils.dataset.rl_dataset import get_dataset_class
 from verl.utils.profiler import simple_timer
 from verl.workers.rollout.llm_server import LLMServerClient
 
-from verl_omni.agent_loop.utils import maybe_per_rollout_seeds
+from verl_omni.agent_loop.utils import per_rollout_seeds_or_entropy
 from verl_omni.reward_loop.streaming import create_async_reward_client
 from verl_omni.utils.asyncio_utils import await_owned
 from verl_omni.workers.config import DiffusionModelConfig, DiffusionRolloutConfig
@@ -237,10 +237,12 @@ class DiffusionAgentLoopWorker:
             sampling_params["global_steps"] = batch.meta_info["global_steps"]
             # Prefer trainer-assigned global indices so chunked workers derive the
             # same per-row seed regardless of local batch position / pack order.
+            # Unseeded training rows fall back to per-row entropy seeds so that
+            # engine-side default seeding cannot collide across replicas.
             global_indices = batch.non_tensor_batch.get("_rollout_seed_global_idx")
             if global_indices is not None:
                 global_indices = np.asarray(global_indices, dtype=np.int64).reshape(-1)
-            per_rollout_seeds = maybe_per_rollout_seeds(batch.meta_info, len(batch), global_indices)
+            per_rollout_seeds = per_rollout_seeds_or_entropy(batch.meta_info, len(batch), global_indices)
 
         if "agent_name" not in batch.non_tensor_batch:
             default_agent_loop = config.agent.default_agent_loop

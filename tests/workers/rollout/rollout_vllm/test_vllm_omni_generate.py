@@ -36,6 +36,7 @@ from transformers import AutoTokenizer
 from verl.utils.tokenizer import normalize_token_ids
 from verl.workers.rollout.replica import RolloutMode
 
+from tests.utils.gpu_test_topology import empty_gpu_cache
 from verl_omni.utils.reward_score.reward_utils import image_tensor_to_pil, visual_reward_frames
 from verl_omni.workers.rollout.replica import DiffusionOutput
 from verl_omni.workers.rollout.vllm_rollout.vllm_omni_async_server import vLLMOmniHttpServer
@@ -246,7 +247,7 @@ def _launch_server(*, step_execution: bool = False, algorithm: str = "flow_grpo"
             "env_vars": {
                 "TOKENIZERS_PARALLELISM": "true",
                 "NCCL_DEBUG": "WARN",
-                "VLLM_LOGGING_LEVEL": "WARN",
+                "VLLM_LOGGING_LEVEL": "WARNING",
             }
         },
         ignore_reinit_error=True,
@@ -279,8 +280,7 @@ def _launch_server(*, step_execution: bool = False, algorithm: str = "flow_grpo"
 def _shutdown_server() -> None:
     ray.shutdown()
     gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
+    empty_gpu_cache()
 
 
 @pytest.fixture(scope="module")
