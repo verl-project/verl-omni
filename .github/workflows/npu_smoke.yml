@@ -94,7 +94,7 @@ jobs:
       fail-fast: false
       max-parallel: 2
       matrix:
-        job: ${{ fromJSON(needs.resolve_groups.outputs.jobs) }}
+        group: ${{ fromJSON(needs.resolve_groups.outputs.jobs) }}
     runs-on: linux-aarch64-a2b4-8
     timeout-minutes: 120
     container:
@@ -125,7 +125,7 @@ jobs:
         run: |
           bash tests/npu_smoke/sync_npu_stack.sh
       - name: Prepare NPU image-edit dependency
-        if: matrix.job != 'core'
+        if: matrix.group != 'core'
         shell: bash
         run: |
           python -m pip install --no-deps qwen-vl-utils==0.0.14
@@ -136,10 +136,10 @@ jobs:
           MODEL_PATH="${HOME}/.cache/modelscope/hub/models/tiny-random/Qwen-Image"
           python tests/special_e2e/build_qwen_image_tiny_random.py \
             --output-dir "${MODEL_PATH}"
-      - name: Run NPU smoke ${{ matrix.job }} tests
+      - name: Run NPU smoke ${{ matrix.group }} tests
         shell: bash
         env:
-          NPU_SMOKE_JOB: ${{ matrix.job }}
+          NPU_SMOKE_JOB: ${{ matrix.group }}
         run: |
           mkdir -p logs/npu_smoke/parallel
           case "${NPU_SMOKE_JOB}" in
@@ -158,7 +158,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: npu-smoke-logs-${{ matrix.job }}
+          name: npu-smoke-logs-${{ matrix.group }}
           path: logs/npu_smoke/**
           if-no-files-found: ignore
 

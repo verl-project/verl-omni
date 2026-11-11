@@ -347,6 +347,10 @@ def test_workflow_label_resolution_retains_single_group_runs(tmp_path, event, la
     import yaml
 
     workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/npu_smoke.yml").read_text())
+    # Companion model-preparation steps use the stable matrix.group interface.
+    assert workflow["jobs"]["npu_smoke"]["strategy"]["matrix"] == {
+        "group": "${{ fromJSON(needs.resolve_groups.outputs.jobs) }}"
+    }
     step = workflow["jobs"]["resolve_groups"]["steps"][0]
     output = tmp_path / "github-output"
     env = dict(os.environ, EVENT_NAME=event, PR_LABELS=json.dumps(labels), GITHUB_OUTPUT=str(output))
