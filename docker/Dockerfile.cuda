@@ -5,7 +5,7 @@
 #
 # Override the verl pin (vllm/kernels versions come from the pyproject extras):
 #   docker build -f docker/Dockerfile.cuda -t verl-omni:gpu \
-#     --build-arg VERL_GIT_REF=fefb080262e1c015a0ea05f958822a6a512dc795 .
+#     --build-arg VERL_GIT_REF=2b4ed6826a39205838d0ca004bdd942334dbe4b6 .
 #
 # Build with dev extras (pytest, pre-commit, …):
 #   docker build -f docker/Dockerfile.cuda --target dev -t verl-omni:gpu-dev .

@@ -543,8 +543,6 @@ class TestConfigureArModuleDispatch:
     def test_build_module_dispatches_registered_adapter(self):
         from verl.workers.engine.fsdp.transformer_impl import FSDPEngineWithLMHead
 
-        from verl_omni.pipelines.qwen_image_dual_grpo.ar_training_adapter import qwen2_vl_base_forward
-
         base = _ar_module_with_visual(nested=True)
 
         def build_lora_module(module):
@@ -561,7 +559,7 @@ class TestConfigureArModuleDispatch:
         with patch.object(FSDPEngineWithLMHead, "_build_module", return_value=base):
             module = engine._build_module()
         assert module is base
-        assert module.model.forward.__func__ is qwen2_vl_base_forward
+        assert module.model.forward.__func__ is torch.nn.Module.forward
         assert callable(module.model.visual)
         assert not isinstance(module.model.visual, torch.nn.Module)
 
@@ -574,8 +572,6 @@ class TestConfigureArModuleDispatch:
     def test_build_module_leaves_other_adapters_unchanged(self):
         from verl.workers.engine.fsdp.transformer_impl import FSDPEngineWithLMHead
 
-        from verl_omni.pipelines.qwen_image_dual_grpo.ar_training_adapter import qwen2_vl_base_forward
-
         base = _ar_module_with_visual(nested=True)
         visual = base.model.visual
         engine = CompositeARFSDPEngineWithLMHead.__new__(CompositeARFSDPEngineWithLMHead)
@@ -585,7 +581,7 @@ class TestConfigureArModuleDispatch:
         with patch.object(FSDPEngineWithLMHead, "_build_module", return_value=base):
             module = engine._build_module()
         assert module.model.visual is visual
-        assert getattr(module.model.forward, "__func__", None) is not qwen2_vl_base_forward
+        assert module.model.forward.__func__ is torch.nn.Module.forward
 
     def test_fsdp2_build_fsdp_module_injects_ar_ignored_names(self):
         from verl.workers.engine.fsdp.transformer_impl import FSDPEngineWithLMHead

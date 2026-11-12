@@ -140,7 +140,7 @@ class ARStrategy(OmniStrategyBase):
             f"pipeline ({supported_pipelines}), or leave expert_parallel_size=1."
         )
 
-    def apply_quantization(self) -> tuple[str | None, dict[str, Any]]:
+    def apply_quantization(self) -> dict[str, Any]:
         return vLLMHttpServer._apply_quantization(self.server)
 
     def override_generation_config(self) -> dict[str, Any]:
