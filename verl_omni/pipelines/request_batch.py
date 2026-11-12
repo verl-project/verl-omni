@@ -27,6 +27,7 @@ __all__ = [
     "collate_prompt_mask",
     "collate_prompt_rows",
     "sample_per_sample_sde_windows",
+    "shared_sde_window_generator",
     "split_diffusion_output_by_request",
 ]
 
@@ -41,6 +42,28 @@ def requested_outputs_for_batch(request_batch: Any) -> list[str]:
         for name in requested_artifact_names(requested, context=f"request_id={request.request_id}"):
             names[name] = None
     return list(names)
+
+
+def shared_sde_window_generator(
+    extra_args: dict | None,
+    fallback: torch.Generator | list[torch.Generator] | None,
+    *,
+    device: torch.device | str,
+) -> torch.Generator | list[torch.Generator] | None:
+    """Draw one SDE window for every rollout in a training step.
+
+    Per-request seeds put the GRPO samples of one prompt on different timesteps.
+    ``sde_window_seed`` wins; otherwise ``global_steps`` is the shared seed.
+    Calls with neither keep ``fallback``.
+    """
+    if not isinstance(extra_args, dict):
+        return fallback
+    seed = extra_args.get("sde_window_seed")
+    if seed is None:
+        seed = extra_args.get("global_steps")
+    if seed is None:
+        return fallback
+    return torch.Generator(device=device).manual_seed(int(seed))
 
 
 def sample_per_sample_sde_windows(

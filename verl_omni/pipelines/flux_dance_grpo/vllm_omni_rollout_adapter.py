@@ -35,7 +35,11 @@ from verl_omni.pipelines.diffusion_rollout_output import (
     with_visual_artifacts,
 )
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
-from verl_omni.pipelines.request_batch import requested_outputs_for_batch, split_diffusion_output_by_request
+from verl_omni.pipelines.request_batch import (
+    requested_outputs_for_batch,
+    shared_sde_window_generator,
+    split_diffusion_output_by_request,
+)
 from verl_omni.pipelines.rollout_media import DiffusionIOSpec, MediaSpec
 from verl_omni.pipelines.rollout_request import prompt_ids_from_payload
 from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
@@ -464,7 +468,7 @@ class FluxDanceGRPOPipelineWithLogProb(FluxPipeline):
             window_range=window_range,
             num_steps=len(timesteps),
             batch_size=latents.shape[0],
-            generators=generators,
+            generators=shared_sde_window_generator(extra_args, generators, device=self.device),
             device=self.device,
         )
         current, next_latents, log_probs, selected_timesteps, pred_original = self.diffuse(

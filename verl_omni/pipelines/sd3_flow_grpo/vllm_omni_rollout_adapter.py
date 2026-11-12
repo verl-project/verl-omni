@@ -39,6 +39,9 @@ from verl_omni.pipelines.request_batch import (
     sample_per_sample_sde_windows as _sample_per_sample_sde_windows,
 )
 from verl_omni.pipelines.request_batch import (
+    shared_sde_window_generator as _shared_sde_window_generator,
+)
+from verl_omni.pipelines.request_batch import (
     split_diffusion_output_by_request as _split_diffusion_output_by_request,
 )
 from verl_omni.pipelines.rollout_media import DiffusionIOSpec, MediaSpec
@@ -484,7 +487,7 @@ class StableDiffusion3PipelineWithLogProb(SD3TokenIdPromptMixin, StableDiffusion
             sde_window_range=sde_window_range,
             num_timesteps=len(timesteps),
             batch_size=latents.shape[0],
-            generator=generator,
+            generator=_shared_sde_window_generator(sampling_params.extra_args, generator, device=self.device),
             device=self.device,
         )
 

@@ -41,6 +41,7 @@ from verl_omni.pipelines.qwen_image_flow_grpo.common import (
     apply_true_cfg,
     coalesce_not_none,
 )
+from verl_omni.pipelines.request_batch import shared_sde_window_generator
 from verl_omni.pipelines.rollout_media import DiffusionIOSpec, MediaSpec
 from verl_omni.pipelines.rollout_request import condition_images_from_payload, prompt_ids_from_payload
 from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
@@ -505,6 +506,9 @@ class QwenImageEditPlusPipelineWithLogProb(QwenImageLoRAMixin, QwenImageTokenIdP
 
         if sde_window_size is not None:
             window_generator = generator[0] if isinstance(generator, list) else generator
+            window_generator = shared_sde_window_generator(
+                sampling_params.extra_args, window_generator, device=self.device
+            )
             start = torch.randint(
                 sde_window_range[0],
                 sde_window_range[1] - sde_window_size + 1,

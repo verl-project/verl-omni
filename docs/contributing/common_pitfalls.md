@@ -228,6 +228,13 @@ placement, which is opaque and not reproducible across GPU counts.  A better
 approach would pass an explicit seed from the launcher.
 ```
 
+Qwen-Image, Qwen-Image-Edit, SD3, FLUX, and Wan2.2 draw the window from
+``sde_window_seed`` when that extra arg is set, and otherwise from
+``global_steps``. Training sends ``global_steps`` on every request, so the
+samples of one prompt share a window even when they run on different workers.
+The per-request generator is left for latent noise. BAGEL still uses
+``LOCAL_RANK``. Calls that carry neither seed keep the per-sample window.
+
 (verification-sde-window)=
 ### Verification
 

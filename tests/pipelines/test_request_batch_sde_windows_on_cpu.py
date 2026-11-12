@@ -16,7 +16,8 @@
 
 import torch
 
-from verl_omni.pipelines.request_batch import sample_per_sample_sde_windows
+from verl_omni.agent_loop.utils import derive_rollout_seed
+from verl_omni.pipelines.request_batch import sample_per_sample_sde_windows, shared_sde_window_generator
 
 
 def _advanced_generator(seed: int, latent_numel: int = 8) -> torch.Generator:
@@ -49,3 +50,39 @@ def test_per_sample_sde_windows_match_serial_and_ignore_pack_order():
         device="cpu",
     )
     assert packed == [serial[i] for i in packed_order]
+
+
+def _window_for(generator: torch.Generator) -> tuple[int, int]:
+    return sample_per_sample_sde_windows(
+        sde_window_size=2,
+        sde_window_range=(0, 5),
+        num_timesteps=10,
+        batch_size=1,
+        generator=generator,
+        device="cpu",
+    )[0]
+
+
+def test_shared_step_seed_collapses_grpo_windows_without_touching_sample_rng():
+    # Wan2.2 recipe, step 1: rollout.seed=42, n=8, window size 2 inside [0, 5).
+    base_seed = 42
+    per_sample = [
+        _window_for(torch.Generator().manual_seed(derive_rollout_seed(base_seed, session))) for session in range(8)
+    ]
+    assert len(set(per_sample)) > 1
+
+    shared = []
+    for session in range(8):
+        fallback = torch.Generator().manual_seed(derive_rollout_seed(base_seed, session))
+        state = fallback.get_state().clone()
+        generator = shared_sde_window_generator({"global_steps": 1}, fallback, device="cpu")
+        shared.append(_window_for(generator))
+        assert torch.equal(fallback.get_state(), state)
+    assert len(set(shared)) == 1
+
+    explicit = _window_for(
+        shared_sde_window_generator({"sde_window_seed": 99, "global_steps": 1}, torch.Generator(), device="cpu")
+    )
+    from_steps = _window_for(shared_sde_window_generator({"global_steps": 99}, torch.Generator(), device="cpu"))
+    assert explicit == from_steps
+    assert shared_sde_window_generator(None, "fallback", device="cpu") == "fallback"
