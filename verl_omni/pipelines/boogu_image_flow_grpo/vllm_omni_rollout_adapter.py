@@ -20,6 +20,7 @@ import logging
 import os
 from typing import Any, Literal
 
+import PIL.Image
 import torch
 import torch.nn.functional as F
 from vllm_omni.diffusion.data import DiffusionOutput, OmniDiffusionConfig
@@ -28,7 +29,11 @@ from vllm_omni.diffusion.models.boogu_image.pipeline_boogu_image import BooguIma
 from vllm_omni.diffusion.request import OmniDiffusionRequest
 from vllm_omni.diffusion.worker.request_batch import DiffusionRequestBatch
 
-from verl_omni.pipelines.diffusion_rollout_output import rollout_output, wrap_rollout_postprocessor
+from verl_omni.pipelines.diffusion_rollout_output import (
+    install_rollout_postprocessor,
+    rollout_output,
+    with_visual_artifacts,
+)
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
 from verl_omni.pipelines.qwen_image_flow_grpo.common import QwenImageTokenIdPromptMixin, coalesce_not_none
 from verl_omni.pipelines.request_batch import (
@@ -37,6 +42,7 @@ from verl_omni.pipelines.request_batch import (
 from verl_omni.pipelines.request_batch import (
     collate_prompt_rows as _collate_prompt_rows,
 )
+from verl_omni.pipelines.request_batch import requested_outputs_for_batch
 from verl_omni.pipelines.request_batch import (
     sample_per_sample_sde_windows as _sample_per_sample_sde_windows,
 )
@@ -51,7 +57,7 @@ from .common import (
     apply_boogu_text_cfg,
     boogu_timestep_from_scheduler,
     configure_boogu_sde_timesteps,
-    get_boogu_freqs_cis,
+    get_boogu_freqs_real,
     lora_engine_module_names,
     lora_module_name,
     rename_boogu_lora_name,
@@ -71,16 +77,7 @@ logger = logging.getLogger(__name__)
 #: silently dropped by a name mismatch.
 _BIND_REPORT_EMITTED = False
 
-_BOOGU_POST_PROCESS_FACTORY = pipeline_boogu_image.get_boogu_image_post_process_func
-
-
-def get_rollout_post_process_func(od_config):
-    """Postprocess Boogu-Image media while preserving rollout metadata."""
-    return wrap_rollout_postprocessor(_BOOGU_POST_PROCESS_FACTORY(od_config))
-
-
-# vllm-omni resolves the built-in architecture's factory in the engine process.
-pipeline_boogu_image.get_boogu_image_post_process_func = get_rollout_post_process_func
+install_rollout_postprocessor(pipeline_boogu_image, "get_boogu_image_post_process_func")
 
 
 def _report_first_bind(module_count: int, target_count: int) -> None:
@@ -121,9 +118,14 @@ class BooguImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, BooguImagePipel
 
     supports_request_batch = True
 
-    #: Declares the primary rollout media stream so downstream consumers read
-    #: the modality from the adapter instead of inferring it from tensor rank.
-    diffusion_io_spec = DiffusionIOSpec(primary=MediaSpec("image"))
+    #: Declares the named artifacts available to a request, so consumers select
+    #: one by name instead of inferring modality from tensor rank or channel size.
+    diffusion_io_spec = DiffusionIOSpec(
+        artifacts={
+            "image_preview": MediaSpec("image", "decoded", "CHW"),
+            "image_latent": MediaSpec("image", "latent", "CHW"),
+        }
+    )
 
     def __init__(self, *, od_config: OmniDiffusionConfig, prefix: str = "") -> None:
         super().__init__(od_config=od_config, prefix=prefix)
@@ -276,25 +278,35 @@ class BooguImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, BooguImagePipel
         prompt_embeds_mask: torch.Tensor | None = None,
         max_sequence_length: int = 1280,
         condition_images: list | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Encode pre-tokenised prompt IDs into padded ``(B, L, D)`` embeddings.
-
-        Replaces the upstream text-based ``encode_prompt``; the agent loop ships
-        token IDs produced by the data preprocessor, whose chat template must
-        match the upstream Boogu system prompts exactly.
-        """
-        if prompt_embeds is None:
+        do_classifier_free_guidance: bool = True,
+        negative_prompt: str | list[str] | None = None,
+        device: torch.device | None = None,
+        negative_prompt_embeds: torch.Tensor | None = None,
+        prompt_attention_mask: torch.Tensor | None = None,
+        negative_prompt_attention_mask: torch.Tensor | None = None,
+        truncate_instruction_sequence: bool = False,
+        input_images: list[list[PIL.Image.Image] | None] | None = None,
+    ):
+        """Encode pre-tokenised prompt IDs (RL) or dispatch text prompts (warmup/dummy run)."""
+        if isinstance(prompt_ids, str | list) and (not prompt_ids or isinstance(prompt_ids[0], str)):
+            input_pil_images = (
+                [[img] if img is not None else None for img in condition_images] if condition_images else input_images
+            )
+            prompt_embeds, prompt_embeds_mask = self._get_instruction_feature_embeds(
+                instruction=prompt_ids,
+                input_pil_images=input_pil_images,
+                device=device or self.device,
+                max_sequence_length=max_sequence_length,
+                truncate_instruction_sequence=truncate_instruction_sequence,
+            )
+        elif prompt_embeds is None:
             prompt_embeds, prompt_embeds_mask = self._get_boogu_prompt_embeds(
                 prompt_ids, attention_mask, condition_images=condition_images
             )
-        return super().encode_prompt(
-            prompt_ids,
-            attention_mask,
-            num_images_per_prompt,
-            prompt_embeds,
-            prompt_embeds_mask,
-            max_sequence_length,
+        _, _, prompt_embeds, prompt_embeds_mask = self._reshape_embeds_and_mask(
+            prompt_embeds, prompt_embeds_mask, num_images_per_prompt
         )
+        return prompt_embeds, prompt_embeds_mask
 
     def _tokenize_text_prompt(self, text: str | list[str]) -> tuple[torch.Tensor, torch.Tensor]:
         """Tokenize raw text with the upstream chat template (dummy-run fallback)."""
@@ -554,6 +566,7 @@ class BooguImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, BooguImagePipel
             return outputs if return_batch else outputs[0]
 
         sampling_params = request_batch.sampling_params_list[0]
+        requested_outputs = requested_outputs_for_batch(request_batch)
         height = sampling_params.height or self.default_sample_size * self.vae_scale_factor
         width = sampling_params.width or self.default_sample_size * self.vae_scale_factor
         num_inference_steps = sampling_params.num_inference_steps or 50
@@ -618,11 +631,12 @@ class BooguImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, BooguImagePipel
         ref_image_hidden_states = None
         condition_image_latents = None
         if has_reference:
+            ref_generators = [generator] if isinstance(generator, torch.Generator) else generator
             ref_image_hidden_states = self._build_ref_latents(
                 preprocessed_images,
                 num_images_per_prompt,
                 self.device,
-                generator,
+                ref_generators,
             )
             # Transport shape (B, C, H, W): one reference latent per output.
             condition_image_latents = torch.stack([sample_latents[0] for sample_latents in ref_image_hidden_states])
@@ -659,7 +673,7 @@ class BooguImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, BooguImagePipel
             device=self.device,
         )
 
-        freqs_cis = get_boogu_freqs_cis(self.transformer.axes_dim_rope, self.transformer.axes_lens)
+        freqs_cis = get_boogu_freqs_real(self.transformer.axes_dim_rope, self.transformer.axes_lens)
 
         latents, all_latents, all_log_probs, all_timesteps = self.diffuse(
             prompt_embeds,
@@ -680,8 +694,8 @@ class BooguImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, BooguImagePipel
 
         # Decode the way upstream does: undo the VAE scaling/shift, resize back.
         output_type = sampling_params.output_type or "pil"
-        if output_type == "latent":
-            image = latents
+        if output_type == "latent" and "image_preview" not in requested_outputs:
+            image = None
         else:
             decode_latents = latents.to(dtype=self.vae.dtype)
             if self.vae.config.scaling_factor is not None:
@@ -707,6 +721,15 @@ class BooguImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, BooguImagePipel
             # training side's ``condition_image_latents`` stays absent there.
             rl=None if condition_image_latents is None else {"condition_image_latents": condition_image_latents},
             to_cpu=True,
+        )
+        result = with_visual_artifacts(
+            result,
+            decoded=image,
+            latents=latents,
+            latent_layout="CHW",
+            output_type=output_type,
+            context=f"pipeline={type(self).__name__}, request_id={[r.request_id for r in request_batch.requests]}",
+            requested=requested_outputs,
         )
         outputs = _split_diffusion_output_by_request(
             result,

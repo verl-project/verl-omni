@@ -1,291 +1,308 @@
 # NPU Smoke Tests
 
-Last updated: 09/24/2026.
+Last updated: 11/09/2026.
 
-我们在 verl-omni 上增加基于华为昇腾设备的CI用例添加指导。
+This guide explains how to add CI test cases for Huawei Ascend devices in verl-omni.
 
-verl-omni 仓库使用 GitHub Actions 作为 CI 平台，通过分层测试架构保障代码质量与系统稳定性。
-NPU 相关的工作流主要包括：
+The workflow entry point is .github/workflows/npu_smoke.yml. The suite is split
+into these runners:
 
-GitHub Actions 入口为
-[`.github/workflows/npu_smoke.yml`](../../.github/workflows/npu_smoke.yml)，
-本地统一入口为
-[`tests/npu_smoke/run_npu_smoke_tests.sh`](../../tests/npu_smoke/run_npu_smoke_tests.sh)。
+- tests/npu_smoke/run_npu_smoke_core.sh runs rollout, worker, and engine checks.
+- tests/npu_smoke/run_npu_smoke_e2e.sh runs end-to-end trainer checks.
+- tests/npu_smoke/run_npu_smoke_tests.sh runs both groups sequentially for local use.
+- tests/npu_smoke/lib_npu_smoke.sh contains shared cleanup, logging, and summaries.
 
-## 测试用例
+## Test Cases
 
-| ID | 名称 | 测试入口 | 默认 NPU 数量 | 状态 |
-|---|---|---|---:|---|
-| 0 | vLLM-Omni rollout + sleep/wake-up | `tests/workers/rollout/rollout_vllm/test_vllm_omni_generate_npu.py` | 8 | 启用 |
-| 1 | Qwen-Image FlowGRPO trainer e2e | `tests/special_e2e/run_flowgrpo_qwen_image_npu.sh` | 8 | 暂时跳过 |
+| ID | Group | Name | Test entry point | Default NPUs |
+|---|---|---|---|---:|
+| 0 | core | vLLM-Omni rollout + sleep/wake-up | tests/workers/rollout/rollout_vllm/test_vllm_omni_generate_npu.py | 8 |
+| 1 | e2e | Qwen-Image FlowGRPO trainer | tests/special_e2e/run_flowgrpo_qwen_image_npu.sh | 8 |
+| 2 | e2e | Wan2.2 DanceGRPO trainer with Qwen2.5-VL reward | tests/special_e2e/run_dancegrpo_wan22_npu.sh | 8 |
+| 3 | core | Diffusers FSDP engine inference and training | tests/workers/test_diffusers_fsdp_engine_npu.py | 8 |
+| 4 | core | Diffusion agent loop, request and step execution | tests/agent_loop/test_diffusion_agent_loop_npu.py::test_diffusion_single_turn_npu | 8 |
+| 5 | core | Unseeded multi-worker rollout diversity | tests/agent_loop/test_diffusion_agent_loop_npu.py::test_rollout_without_seed_npu | 8 |
+| 6 | core | Seeded multi-worker rollout reproducibility | tests/agent_loop/test_diffusion_agent_loop_npu.py::test_rollout_seed_reproducibility_npu | 8 |
+| 7 | core | Standalone vLLM reward engine and OCR scoring | tests/reward_loop/test_reward_engine_npu.py | 8 |
 
-Test 1 仍保留在 runner 和 workflow 中，但
-`run_npu_smoke_tests.sh` 当前通过 `RUN_TEST[1]=0` 强制将其标记为
-`SKIP`。待 FlowGRPO 运行时问题解决后，删除该临时设置即可恢复。
+The combined runner has eight entries: six core (0, 3, 4, 5, 6, 7) and two e2e
+(1, 2). The core group collects seven pytest cases because entry 4 is
+parametrized into request and step execution. The two e2e entries each run a
+trainer workload; they are not pytest cases.
 
-## 增加一个新的 NPU Smoke 测试
+Test 3 ports the `fsdp` case of `tests/workers/test_diffusers_fsdp_engine.py`
+(GPU core ID 2). It reuses the GPU test's synthetic trajectories and engine
+inference/training exercise, with `_native_npu` attention and sequence parallel
+size 1. It requires at least two visible NPUs and a local tiny Qwen-Image model.
+FSDP2 and sequence-parallel execution are not covered by this NPU case.
+The test checks finite inference log probabilities, training loss, and gradient
+norm; it does not establish GPU/NPU numerical parity or model convergence.
 
-### 1. 添加最小测试入口
-
-根据测试范围选择文件位置：
-
-| 测试类型 | 推荐位置 |
-|---|---|
-| rollout、worker、engine 或 sleep/wake-up | `tests/workers/` 下的 pytest |
-| trainer 端到端流程 | `tests/special_e2e/` 下的 Shell 脚本 |
-| NPU smoke 公共逻辑 | `tests/npu_smoke/` |
-
-测试应尽量小且可重复：
-
-- 使用 tiny-random 或 CI 已缓存的模型权重。
-- 使用最少的数据、batch size 和训练步数。
-- 不依赖运行期间从公网下载模型或数据集。
-- 命令成功时返回 0，失败时保留原始非零退出码。
-- 不复用其他任务遗留的 Ray 集群或 worker 进程。
-
-例如，新增 pytest：
-
-```python
-def test_my_npu_feature():
-    # Arrange the smallest NPU workload.
-    ...
-```
-
-或者新增端到端脚本：
+Run only the migrated case from the repository root after configuring the
+[runtime environment](#runtime-environment):
 
 ```bash
-#!/usr/bin/env bash
-set -euo pipefail
-
-export DEVICE_NAME=npu
-python -m verl_omni.trainer.main_ppo \
-    trainer.total_epochs=1 \
-    trainer.total_training_steps=1
+DEVICE_NAME=npu NUM_NPUS=2 \
+MODEL_PATH="${HOME}/.cache/modelscope/hub/models/tiny-random/Qwen-Image" \
+python3 -m pytest -v -s tests/workers/test_diffusers_fsdp_engine_npu.py
 ```
 
-### 2. 在统一 runner 中注册测试
+The same case runs through `run_npu_smoke_core.sh` and the combined
+`run_npu_smoke_tests.sh` entry point. Missing hardware or model files fail
+explicitly rather than producing an all-skipped smoke success.
 
-打开
-[`run_npu_smoke_tests.sh`](../../tests/npu_smoke/run_npu_smoke_tests.sh)，
-为新测试分配下一个未使用的数字 ID。
+### Agent-loop execution and rollout seeds
 
-首先在 `RUN_TEST` 中注册 ID。假设新用例 ID 为 2：
+Tests 4-6 reuse the GPU cases to check request/step execution, unseeded rollout
+diversity, and seeded reproducibility. They use tiny Qwen-Image, rollout TP=2,
+and two agent-loop workers. `NUM_NPUS` must be even and at least 2.
+
+The workflow prepares the local checkpoint. For a local run, prepare it first:
 
 ```bash
-declare -A RUN_TEST=([0]=1 [1]=1 [2]=1)
+python3 tests/special_e2e/build_qwen_image_tiny_random.py \
+    --output-dir "${HOME}/.cache/modelscope/hub/models/tiny-random/Qwen-Image"
 ```
 
-然后在测试执行区域添加 `run_selected_test`：
+After configuring the [runtime environment](#runtime-environment), run these
+cases from the repository root:
 
 ```bash
-cleanup_runtime
-run_selected_test 2 "my NPU smoke test" \
+export DEVICE_NAME=npu NUM_NPUS=8
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+export ASCEND_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1
+export HCCL_NPU_SOCKET_PORT_RANGE=auto
+python3 -m pytest -v -s tests/agent_loop/test_diffusion_agent_loop_npu.py
+```
+
+For a two-device local check, set both visibility variables to `0,1` and
+`NUM_NPUS=2`. Missing hardware or model files fail the tests.
+
+### Standalone reward engine
+
+Test 7 checks standalone vLLM reward-server startup and OCR scoring with a tiny
+random Qwen2.5-VL model generated offline. Eight NPUs run four TP=2 reward
+replicas, without an actor rollout server. This is an execution smoke test.
+
+After configuring the [runtime environment](#runtime-environment), run:
+
+```bash
+NUM_NPUS=8 python3 -m pytest -v -s tests/reward_loop/test_reward_engine_npu.py
+```
+
+All nonzero exits, including native abort 134, fail the smoke group.
+
+### Wan2.2 trainer with a reward model
+
+Test 2 runs one DanceGRPO training step with six actor NPUs and a dedicated
+TP=2 Qwen2.5-VL reward engine on two NPUs. Prepare the Qwen2.5-VL-3B-Instruct
+checkpoint before an offline run; set `REWARD_MODEL_PATH` to its local directory
+when needed. The test must complete training and exit 0.
+
+## Add a New NPU Smoke Test
+
+### 1. Add the smallest useful entry point
+
+Use a pytest file under the relevant tests module for core integration coverage,
+such as tests/workers, tests/agent_loop, or tests/reward_loop.
+Use a shell script under tests/special_e2e for a trainer end-to-end path.
+
+Keep tests small and reproducible:
+
+- Use tiny-random checkpoints or weights cached on the CI runner.
+- Use the smallest practical dataset, batch size, and training-step count.
+- Do not require public model or dataset downloads at runtime.
+- Preserve nonzero exit codes on failure.
+- Do not reuse Ray processes left by another test.
+
+### 2. Register the test in its group runner
+
+Add core tests to run_npu_smoke_core.sh and trainer tests to
+run_npu_smoke_e2e.sh. Assign an unused numeric ID and call run_test:
+
+```bash
+run_test 8 "my NPU smoke test" \
     env ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES}" \
         NUM_NPUS="${NUM_NPUS}" \
-    pytest -s tests/workers/test_my_npu_feature.py
+    python3 -m pytest -s tests/workers/test_my_npu_feature.py
 ```
 
-端到端脚本则写为：
+Do not reuse an existing ID. Adding a test to an existing group needs no
+workflow mapping change.
+
+### 3. Configure devices
+
+Group runners use eight NPUs by default and derive
+ASCEND_RT_VISIBLE_DEVICES from --num-npus. Each command should receive both
+ASCEND_RT_VISIBLE_DEVICES and NUM_NPUS. If a test requires a fixed number of
+devices, validate it in the test entry point and fail with a clear message.
+
+### 4. Update workflow groups and paths
+
+The Resolve NPU CI groups step maps labels to groups as listed in
+[CI Triggers](#ci-triggers). Multiple labels produce the union of their groups.
+Selected groups run in separate containers on independent eight-NPU runners,
+in parallel when runner capacity is available. The setup_runner check succeeds
+only when all selected groups pass.
+
+If the new test lives outside current path filters, add its path. Current
+filters include verl_omni/**, tests/npu_smoke/**, tests/agent_loop/**,
+tests/reward_loop/**, tests/workers/**, tests/special_e2e/**, pyproject.toml,
+.github/workflows/npu_smoke.yml,
+.github/vllm_omni_pin.txt, and .github/vllm_ascend_pin.txt.
+
+### 5. Handle models and datasets
+
+Prefer tiny checkpoints that can be generated and validated offline. Prepare
+shared checkpoints in the workflow, model-specific core checkpoints in pytest
+fixtures, and trainer checkpoints in their end-to-end launchers.
+The Wan2.2 launcher prepares and validates its checkpoint
+before training, so selecting only the core group does not prepare Wan2.2
+weights.
+Builders should reuse a valid cached checkpoint, rebuild missing or stale
+components, and reload saved assets when file-presence checks are not
+sufficient. Keep checkpoint paths overridable and do not overwrite shared
+caches.
+
+### 6. Validate locally
+
+Run from the repository root in an environment with CANN, vLLM, vLLM-Ascend,
+and vLLM-Omni installed.
+
+Run all groups:
 
 ```bash
-cleanup_runtime
-run_selected_test 2 "my trainer e2e" \
-    env ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES}" \
-        NUM_NPUS="${NUM_NPUS}" \
-    bash tests/special_e2e/run_my_npu_smoke.sh
+bash tests/npu_smoke/run_npu_smoke_tests.sh --num-npus 8
 ```
 
-同时更新脚本的 `--help` 输出：
-
-```text
-Tests:
-  0  vllm-omni rollout + sleep/wake_up
-  1  FlowGRPO trainer e2e
-  2  my NPU smoke test
-```
-
-不要复用已有 ID。测试名称应能说明覆盖的组件和行为。
-
-### 3. 配置 NPU 数量与可见设备
-
-统一 runner 默认使用 8 张 NPU，并根据 `--num-npus` 生成
-`ASCEND_RT_VISIBLE_DEVICES`。测试命令必须传递：
+To run both groups concurrently in one dedicated eight-NPU CI container:
 
 ```bash
-env ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES}" \
-    NUM_NPUS="${NUM_NPUS}" \
-    <test-command>
+NPU_SMOKE_PARALLEL=1 bash tests/npu_smoke/run_npu_smoke_tests.sh --num-npus 8
 ```
 
-如果测试只能使用固定卡数，应在测试脚本中检查并给出清晰错误，而不是静默使用
-错误的并行配置。
+Core uses NPUs `0,1`; e2e uses `2,3,4,5,6,7`. This does not replace per-case
+eight-rank coverage from the sequential command. The e2e trainers remain
+sequential; this layout does not support concurrent colocated training jobs.
 
-### 4. 更新 workflow 测试分组
+Unset shared `MODEL_PATH`, `TOKENIZER_PATH`, `DATA_DIR`, `TRAIN_FILES`,
+`VAL_FILES` and `NPU_SMOKE_TEST_IDS` overrides before parallel execution. Use a
+dedicated test environment because final cleanup stops its Ray/model processes.
+Native aborts and log-writing failures remain failures. The GitHub Actions
+workflow retains its existing separate eight-NPU core/e2e jobs.
 
-如果新用例需要由现有标签触发，在
-[`npu_smoke.yml`](../../.github/workflows/npu_smoke.yml) 的
-`resolve-groups` 步骤中加入测试 ID。例如让完整模式执行 Test 2：
-
-```yaml
-if [[ "${mode}" == "all" ]]; then
-  plan_json='{
-    "test_ids": ["0", "1", "2"],
-    "group_count": 3,
-    "num_npus": 8,
-    "runner_size": 8
-  }'
-fi
-```
-
-如需单独运行新测试，可以新增 mode 和 PR label，并在
-`Resolve NPU CI mode` 与 `resolve-groups` 两处同时配置。
-
-如果测试文件不在现有 workflow 的 path filters 中，也要添加对应路径。当前
-主要过滤路径包括：
-
-- `verl_omni/**`
-- `tests/npu_smoke/**`
-- `tests/workers/**`
-- `tests/special_e2e/**`
-- `pyproject.toml`
-- `.github/workflows/npu_smoke.yml`
-- `.github/vllm_omni_pin.txt`
-
-### 5. 处理模型和数据
-
-Qwen-Image tiny-random 权重默认放在：
-
-```text
-${HOME}/.cache/modelscope/hub/models/tiny-random/Qwen-Image
-```
-
-workflow 仅在目录不存在时构建：
+Run one group:
 
 ```bash
-MODEL_PATH="${HOME}/.cache/modelscope/hub/models/tiny-random/Qwen-Image"
-if [[ ! -d "${MODEL_PATH}" ]]; then
-  python tests/special_e2e/build_qwen_image_tiny_random.py \
-    --output-dir "${MODEL_PATH}"
-fi
+bash tests/npu_smoke/run_npu_smoke_core.sh --num-npus 8
+bash tests/npu_smoke/run_npu_smoke_e2e.sh --num-npus 8
 ```
 
-新增模型时，优先使用 runner 已缓存的权重。若必须生成 tiny checkpoint，应：
-
-- 仅在目标目录不存在时生成。
-- 通过环境变量允许覆盖默认路径。
-- 避免覆盖 CI 机器上的共享缓存。
-- 在测试完成后只清理本次测试产生的临时文件。
-
-### 6. 本地验证
-
-在安装好 CANN、vLLM、vLLM-Ascend 和 vLLM-Omni 的 Ascend 环境中，
-从仓库根目录运行测试。开始前可以先确认设备和停止残留的 Ray runtime：
-
-```bash
-npu-smi info
-ray stop --force
-```
-
-运行默认测试集合：
-
-```bash
-bash tests/npu_smoke/run_npu_smoke_tests.sh
-```
-
-只运行 Test 0：
-
-```bash
-bash tests/npu_smoke/run_npu_smoke_tests.sh --num-npus 8 0
-```
-
-指定 NPU 数量运行 Test 0：
-
-```bash
-bash tests/npu_smoke/run_npu_smoke_tests.sh --num-npus 4 0
-```
-
-显式选择设备：
+Select devices explicitly:
 
 ```bash
 ASCEND_RT_VISIBLE_DEVICES=0,2,4,6 NUM_NPUS=4 \
-  bash tests/npu_smoke/run_npu_smoke_tests.sh 0
+    bash tests/npu_smoke/run_npu_smoke_core.sh
 ```
 
-当前请求 Test 1 时，runner 会将其报告为 `SKIP`，不会启动 FlowGRPO：
+Before committing:
 
 ```bash
-bash tests/npu_smoke/run_npu_smoke_tests.sh --num-npus 8 1
-```
-
-新增 Test 2 后，可以单独运行：
-
-```bash
-bash tests/npu_smoke/run_npu_smoke_tests.sh --num-npus 8 2
-```
-
-测试日志默认保存在 `logs/npu_smoke/<timestamp>/`。先查看
-`summary.log`，再根据失败 ID 查看对应的 `test_<id>.log`。
-
-提交前至少检查：
-
-```bash
-bash -n tests/npu_smoke/run_npu_smoke_tests.sh
+bash -n tests/npu_smoke/*.sh
 pre-commit run --all-files
 ```
 
-## CI 触发方式
+bash -n checks syntax only; it does not start Ray or allocate NPUs. Pre-commit
+may reformat files, so review changes and rerun it until all hooks pass.
 
-workflow 在相关文件发生变化时响应以下事件：
+## CI Triggers
 
-- push 到 `main` 或 `v0.*`，运行完整测试集合。
-- 针对 `main` 或 `v0.*` 的 pull request 被打上 CI 标签。创建、同步或重新打开 PR 不会启动 NPU runner。新提交会自动去掉名称里含 `ci` 的标签，需要重新打标。
+Pushes to main or v0.* run both groups. Pull requests targeting those branches
+run only after a supported label is applied:
 
-没有下表中的标签时，PR 不会占用 NPU runner。PR 还必须改动 workflow 的 path filter（例如 `verl_omni/**`、`tests/npu_smoke/**`、`tests/workers/**`、`tests/special_e2e/**`）。
+| Label | Requested groups |
+|---|---|
+| ready-for-ci | core e2e |
+| ci-npu | core e2e |
+| ci-npu-core | core |
+| ci-npu-e2e | e2e |
 
-PR 标签与请求范围：
+Labels are not mutually exclusive. Applying both ci-npu-core and ci-npu-e2e
+runs both groups.
 
-| 标签 | 模式 | 请求的测试 |
-|---|---|---|
-| `ready-for-ci` | all | Test 0、Test 1 |
-| `ci-npu` | all | Test 0、Test 1 |
-| `ci-npu-rollout` | rollout | Test 0 |
-| `ci-npu-flowgrpo` | flowgrpo | Test 1 |
+## Runtime Environment
 
-Test 1 暂时禁用期间，即使 workflow 请求 Test 1，runner 也会将其报告为
-`SKIP`。
-
-## 运行环境
-
-当前 CI 使用：
-
-- Runner：`linux-aarch64-a2b4-8`
-- NPU 数量：8
-- 超时时间：120 分钟
-- 共享内存：16 GiB
-- 容器镜像：
-  `swr.cn-north-4.myhuaweicloud.com/mindspeed/pr-verl-omni-a2:latest`
-
-测试开始前，workflow 会打印 CANN 安装信息、`npu-smi info`、Ascend
-相关环境变量以及 vLLM、vLLM-Ascend、vLLM-Omni 版本。
-
-## 进程清理与日志
-
-每个测试开始前，统一 runner 会：
-
-1. 执行 `ray stop --force`。
-2. 终止残留的 `DiffusionWorker`、`VLLMWorker` 和
-   `vLLMOmniHttpServer`。
-3. 等待 5 秒后强制终止仍然存在的相关进程。
-4. 打印 `npu-smi info`。
-
-不要在同一台机器上同时运行名称匹配上述规则的其他任务。
-
-日志默认写入：
+Each group job uses eight NPUs on linux-aarch64-a2b4-8, a 120 minute timeout,
+16 GiB shared memory, and this image:
 
 ```text
-logs/npu_smoke/<timestamp>/
+swr.cn-north-4.myhuaweicloud.com/mindspeed/pr-verl-omni-a2:v010-vllm030-omni030
 ```
 
-每个实际执行的用例会生成 `test_<id>.log`，`summary.log` 记录
-`PASS`、`FAIL` 或 `SKIP` 以及用时。排查失败时应先检查测试日志、
-NPU 显存占用、CANN 环境和 vLLM 组件版本。
+The image carries the previous generation of the pinned stack (CANN, torch,
+torch-npu, triton-ascend, editable vllm / vllm-ascend / vllm-omni / verl).
+After checkout, `tests/npu_smoke/sync_npu_stack.sh` reinstalls the pinned
+generation — `.github/*_pin.txt`, the `pyproject.toml` vllm pin, and
+torch-npu/triton-ascend/fla-npu mirroring `docker/Dockerfile.npu` — on top of
+it, so the jobs run the pinned stack even when the registry image for that
+generation has not been rebuilt yet. The sync installs vllm-ascend pure-python
+(`COMPILE_CUSTOM_KERNELS=0`) because the smoke suite runs tiny models through
+the native op path and the full aclnn ops build would cost most of the job
+timeout; the `vllm_ascend_C` module (rollout sleep/wake_up) and the
+`add_rms_norm_bias` aclnn op (the reward-model engine) are still built
+in-job.
+
+When the registry image at the current generation exists, the workflow pins
+its tag directly and the sync step is dropped.
+
+The workflow prints CANN details, npu-smi output, relevant Ascend variables,
+and the synced vLLM component versions.
+
+The FlowGRPO and DanceGRPO end-to-end launchers source CANN and ATB before
+starting the workload:
+
+```bash
+source "${ASCEND_HOME_PATH:-/usr/local/Ascend/ascend-toolkit/latest}/set_env.sh"
+source /usr/local/Ascend/nnal/atb/set_env.sh
+```
+
+Set `ASCEND_HOME_PATH` to the toolkit directory for a custom installation.
+If it is unset or empty, the launchers use the `latest` symlink. The selected
+CANN version must remain compatible with the image's PyTorch and torch-npu.
+
+Both group runners source `lib_npu_smoke.sh`, which defaults `VLLM_PLUGINS`
+to `ascend` and preloads jemalloc before starting the tests. If jemalloc is
+not already in `LD_PRELOAD`, the library uses `JEMALLOC_PATH` or discovers a
+readable library through `ldconfig`; a missing library fails the run. Set
+`JEMALLOC_PATH` for a custom installation.
+
+For direct pytest execution outside a group runner, export `VLLM_PLUGINS=ascend`
+and preload the installed jemalloc library before launching Python.
+
+The diagnostics and artifact-upload steps are defined directly in the workflow.
+The NPU runner executes the job in a container, so repository-local composite
+actions may otherwise be resolved against a different host workspace.
+
+## Runtime Cleanup, Results, and Artifacts
+
+Before each test, the shared library stops Ray, terminates stale
+DiffusionWorker, VLLMWorker, and vLLMOmniHttpServer processes, waits five
+seconds, force-kills remaining matches, and prints npu-smi information.
+
+Per-test logs are stored under:
+
+```text
+logs/npu_smoke/<group>/<timestamp>/
+```
+
+Each test writes test_<id>.log and each group writes summary.log. The workflow
+also writes group console logs under logs/npu_smoke/parallel/.
+
+Each group's actions/upload-artifact step runs even after failure and uploads
+logs/npu_smoke/** as npu-smoke-logs-core or npu-smoke-logs-e2e. A failed group
+does not cancel the other selected group.
+
+Every nonzero test exit, including native abort 134 after a pytest or training
+completion message, remains a failure. Keep the raw exit code and full log
+when reporting a failed run.

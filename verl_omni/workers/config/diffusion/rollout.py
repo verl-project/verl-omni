@@ -27,6 +27,7 @@ from verl.workers.config.rollout import (
 )
 
 __all__ = [
+    "DiffusionARConfig",
     "DiffusionRolloutAlgoConfig",
     "DiffusionPipelineConfig",
     "DiffusionSamplingConfig",
@@ -63,9 +64,13 @@ class DiffusionPipelineConfig(BaseConfig):
     width: int = 512
     num_inference_steps: int = 10
     output_type: str = "image"
+    # Additional named artifacts required by rewards/logging, including previews with a latent primary.
+    requested_outputs: Optional[list[str]] = None
     true_cfg_scale: float = 1.0
     max_sequence_length: int = 512
     guidance_scale: Optional[float] = None
+    # CFG for the frozen pretrained anchor in forward-process training.
+    reference_guidance_scale: float = 4.5
     reference_image_short_edge: Optional[int] = None
 
     # Wan2.2 video generation: number of frames (81 = ~3s at 24fps)
@@ -89,17 +94,25 @@ class DiffusionPipelineConfig(BaseConfig):
 
 
 @dataclass
-class DiffusionSamplingConfig(BaseConfig):
-    # for validation only
-    n: int = 1
-    seed: int = 42
-    pipeline: DiffusionPipelineConfig = field(default_factory=DiffusionPipelineConfig)
-    algo: DiffusionRolloutAlgoConfig = field(default_factory=DiffusionRolloutAlgoConfig)
-
-    # for llm part when needed
+class DiffusionARConfig(BaseConfig):
+    # AR part sampling config
+    # text generation when needed
     temperature: float = 1.0
     top_k: int = 0
     top_p: float = 1.0
+    repetition_penalty: float = 1.0
+    response_length: int = 1024
+
+
+@dataclass
+class DiffusionSamplingConfig(BaseConfig):
+    # for validation only
+    n: int = 1
+    m: int = 1  # Optional. AR stage 1, number of samples per prompt
+    seed: int = 42
+    pipeline: DiffusionPipelineConfig = field(default_factory=DiffusionPipelineConfig)
+    algo: DiffusionRolloutAlgoConfig = field(default_factory=DiffusionRolloutAlgoConfig)
+    ar: DiffusionARConfig = field(default_factory=DiffusionARConfig)
 
 
 @dataclass
@@ -120,13 +133,7 @@ class DiffusionRolloutConfig(BaseConfig):
     nnodes: int = 0
     n_gpus_per_node: int = 8
     n: int = 1
-
-    # for llm part when needed
-    temperature: float = 1.0
-    top_k: int = 0
-    top_p: float = 1.0
-    repetition_penalty: float = 1.0
-    max_new_tokens: int = 256
+    m: int = 1  # Optional. AR stage 1, number of samples per prompt
 
     # Base seed for deterministic training rollout RNG. Per-step base is
     # ``seed + global_step - 1``. null disables rollout seeding.
@@ -141,6 +148,9 @@ class DiffusionRolloutConfig(BaseConfig):
 
     dtype: str = "bfloat16"
     gpu_memory_utilization: float = 0.5
+    # Budget for standalone rollout replicas on dedicated GPUs; None keeps
+    # gpu_memory_utilization.
+    standalone_gpu_memory_utilization: Optional[float] = None
     enforce_eager: bool = False
     cudagraph_capture_sizes: Optional[list] = None
 
@@ -170,6 +180,9 @@ class DiffusionRolloutConfig(BaseConfig):
     max_model_len: Optional[int] = None
     max_num_seqs: int = 1024
 
+    # Ray max_concurrency of the rollout server actor.
+    ray_actor_max_concurrency: int = 1024
+
     # When True, the vLLM-Omni engine runs the registered pipeline in
     # step-execution mode.
     step_execution: bool = False
@@ -190,7 +203,7 @@ class DiffusionRolloutConfig(BaseConfig):
     pipeline: DiffusionPipelineConfig = field(default_factory=DiffusionPipelineConfig)
 
     calculate_log_probs: bool = False
-    llm_calculate_log_probs: bool = False
+    ar_calculate_log_probs: bool = False
 
     rollout_adapter: str = "default"
 
@@ -206,7 +219,8 @@ class DiffusionRolloutConfig(BaseConfig):
 
     enable_chunked_prefill: bool = True
 
-    enable_prefix_caching: bool = True
+    # Diffusion models generate latents without autoregressive token prefix caching; keep False.
+    enable_prefix_caching: bool = False
 
     load_format: str = "dummy"
 
@@ -229,6 +243,9 @@ class DiffusionRolloutConfig(BaseConfig):
     disaggregation: DisaggregationConfig = field(default_factory=DisaggregationConfig)
 
     external_lib: Optional[str] = None
+
+    # For multi-stage generation (e.g, text rewriting -> image generation)
+    ar: Optional[DiffusionARConfig] = field(default_factory=DiffusionARConfig)
 
     def to_vllm_omni_attention_config(self) -> dict:
         """Convert the rollout backend to vLLM-Omni's canonical config form."""

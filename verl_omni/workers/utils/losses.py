@@ -76,9 +76,18 @@ def diffusion_loss(config: DiffusionActorConfig, model_output, data: TensorDict,
 
     loss_mode = config.diffusion_loss.get("loss_mode", "flow_grpo")
     loss_func = get_diffusion_loss_fn(loss_mode)
+    loss_func.validate_inputs(loss_name=loss_mode, model_output=model_output, data=data)
 
     # Rollout Correction bypass mode only applies to log-prob policy-gradient losses.
     if "log_probs" in loss_func.required_model_output_keys:
+        if model_output["log_probs"].is_nested or data["old_log_probs"].is_nested:  # for trainable AR
+            from verl.workers.utils.padding import no_padding_2_padding
+
+            if model_output["log_probs"].is_nested:
+                model_output["log_probs"] = no_padding_2_padding(model_output["log_probs"], data)
+            if data["old_log_probs"].is_nested:
+                data["old_log_probs"] = no_padding_2_padding(data["old_log_probs"], data)
+
         log_prob = model_output["log_probs"]
         old_log_prob = data["old_log_probs"]
         rc_cfg = config.rollout_correction
@@ -87,7 +96,6 @@ def diffusion_loss(config: DiffusionActorConfig, model_output, data: TensorDict,
         if rc_cfg.bypass_mode:
             _apply_bypass_rc(log_prob, old_log_prob, rc_cfg, data, metrics)
 
-    loss_func.validate_inputs(loss_name=loss_mode, model_output=model_output, data=data)
     loss_result = loss_func(config=config, model_output=model_output, data=data)
     loss_value = loss_result.loss
     metrics_values = loss_result.metrics
@@ -120,7 +128,8 @@ def diffusion_loss(config: DiffusionActorConfig, model_output, data: TensorDict,
         metrics["distill_coef"] = config.distill_loss_coef
 
     gradient_accumulation_steps = tu.get_non_tensor_data(data, "gradient_accumulation_steps", default=None)
-    loss_value = loss_value / gradient_accumulation_steps
+    if gradient_accumulation_steps:  # diffusion only
+        loss_value = loss_value / gradient_accumulation_steps
 
     sp_size = tu.get_non_tensor_data(data, "sp_size", default=None)
     if sp_size > 1:

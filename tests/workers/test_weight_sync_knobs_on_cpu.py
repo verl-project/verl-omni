@@ -16,8 +16,8 @@
 With ``actor_rollout_ref.separate=true`` the actor worker's role has no
 "rollout", so nothing in the rollout-engine build branch runs for it — yet
 ``update_weights()`` (nccl / separate-async path) reads ``self.rollout_adapter``
-and, with LoRA, ``self.peft_merge``. The v0 diffusion separate e2e crashed with
-``AttributeError: 'ActorRolloutRefWorker' object has no attribute
+and, with LoRA, ``self.lora_settings``. The v0 diffusion separate e2e crashed
+with ``AttributeError: 'ActorRolloutRefWorker' object has no attribute
 'rollout_adapter'`` when those knobs were initialized only under
 ``if "rollout" in self.role``. init_model now derives them for every role via
 ``_init_weight_sync_knobs``; this test pins that derivation, including the
@@ -49,7 +49,8 @@ def test_weight_sync_knobs_default_for_config_without_optional_fields():
     ew.ActorRolloutRefWorker._init_weight_sync_knobs(worker, model_config)
 
     assert worker.rollout_adapter == "default"
-    assert worker.peft_merge is False
+    assert worker.lora_settings.merge is False
+    assert worker.lora_settings.enabled is False
     assert worker.layered_summon is False
     assert worker.base_sync_done is True
     assert worker._zmq_update_seq == 0
@@ -63,6 +64,6 @@ def test_weight_sync_knobs_read_diffusion_dual_adapter_and_lora_merge():
     ew.ActorRolloutRefWorker._init_weight_sync_knobs(worker, model_config)
 
     assert worker.rollout_adapter == "adapter_b"
-    assert worker.peft_merge is True
+    assert worker.lora_settings.merge is True
     assert worker.layered_summon is True
     assert worker.base_sync_done is False  # dummy load_format skips base sync

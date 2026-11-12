@@ -1,6 +1,6 @@
 # GPU Smoke Tests
 
-Last updated: 09/28/2026.
+Last updated: 11/10/2026.
 
 GPU smoke tests validate GPU-only trainer, rollout, worker, reward, and
 agent-loop paths with small workloads. They are intentionally lightweight: use
@@ -16,7 +16,7 @@ The smoke suite is split by code-change coverage under `tests/gpu_smoke/`:
 | Group script | CI label | Default GPUs | What it covers |
 |---|---|---|---|
 | [`run_gpu_smoke_core.sh`](../../tests/gpu_smoke/run_gpu_smoke_core.sh) | `ci-core` | 2 | Rollout, engines, agent loop, reward loop, Ulysses SP |
-| [`run_gpu_smoke_omni_e2e.sh`](../../tests/gpu_smoke/run_gpu_smoke_omni_e2e.sh) | `ci-e2e-omni` | 2 | Qwen3-Omni end-to-end training (GSPO + LoRA) |
+| [`run_gpu_smoke_omni_e2e.sh`](../../tests/gpu_smoke/run_gpu_smoke_omni_e2e.sh) | `ci-e2e-omni` | 2 | Omni trainer end-to-end paths (Qwen3-Omni GSPO/DPO, Qwen3-TTS GRPO, MiniCPM-o 4.5 thinker GSPO) |
 | [`run_gpu_smoke_diffusion_e2e.sh`](../../tests/gpu_smoke/run_gpu_smoke_diffusion_e2e.sh) | `ci-e2e-diffusion` | 4 | Diffusion end-to-end training (Qwen-Image-Edit, FlowGRPO, online DPO, DiffusionNFT, MiniMax-H3 on the v1 sync trainer; v1 separate_async; v0 remains for Bagel and the v0 separate layout) |
 
 [`run_gpu_smoke_tests.sh`](../../tests/gpu_smoke/run_gpu_smoke_tests.sh) runs all
@@ -70,13 +70,25 @@ Shared helpers live in [`lib_gpu_smoke.sh`](../../tests/gpu_smoke/lib_gpu_smoke.
    `PYTHONUNBUFFERED=1`, `RAY_DEDUP_LOGS=0`, creates a log directory, and stops
    Ray between tests unless `GPU_SMOKE_SKIP_RAY_STOP=1` is set.
 
-5. Update workflow paths if needed.
+5. Extend the group-selection patterns if needed.
 
-   If the new test lives outside the existing path filters in
-   `.github/workflows/gpu_smoke.yml`, add the path so PR updates trigger the GPU
-   smoke workflow. Current filters include `verl_omni/**`, `tests/gpu_smoke/**`,
-   `tests/agent_loop/**`, `tests/reward_loop/**`, `tests/workers/**`,
-   `tests/special_e2e/**`, and `pyproject.toml`.
+   `ready-for-ci` selects which smoke groups run from `GROUP_PATTERNS` /
+   `FULL_SUITE_PATTERNS` in
+   [`tests/gpu_smoke/select_gpu_smoke_groups.py`](../../tests/gpu_smoke/select_gpu_smoke_groups.py).
+   If the new test — or its fixtures, checkpoint builders, or patch modules —
+   lives outside the patterns of the group it belongs to, extend that group's
+   tuple there. The `paths:` filters in `.github/workflows/gpu_smoke.yml` only
+   decide whether the workflow triggers at all (current filters already cover
+   `verl_omni/**`, `tests/gpu_smoke/**`, `tests/agent_loop/**`,
+   `tests/reward_loop/**`, `tests/workers/**`, `tests/special_e2e/**`, and
+   `pyproject.toml`); editing workflow files is CI infrastructure and needs
+   maintainer approval — the selector script is the contributor-owned knob.
+
+   A selector pattern does not make the workflow *trigger*: a change touching
+   only paths outside the workflow's own `paths:` filters (e.g. an `examples/`
+   launcher) will not start GPU smoke at all, even when a selector pattern
+   matches it. In that case ask a maintainer to extend the filters — that file
+   is CI infrastructure.
 
 ## Run Locally
 
@@ -87,7 +99,7 @@ Smoke tests need a working CUDA environment, Ray, and the pinned `verl` /
 `vllm-omni` dependencies. From the repo root:
 
 ```bash
-uv pip install vllm==0.28.0 --torch-backend=auto
+uv pip install vllm==0.33.0 --torch-backend=auto
 uv pip install -e ".[gpu,audio,omni,dev]" --torch-backend=auto
 ```
 
@@ -213,8 +225,8 @@ The mapping is intentionally conservative:
 | Changed paths | Selected group |
 |---|---|
 | `verl_omni/workers/**`, `verl_omni/agent_loop/**`, `verl_omni/reward_loop/**`, matching GPU tests | `ci-core` |
-| `verl_omni/trainer/omni/**`, `verl_omni/trainer/config/omni/**`, `qwen3_omni_thinker.py`, omni e2e scripts | `ci-e2e-omni` |
-| `verl_omni/trainer/diffusion/**`, `verl_omni/trainer/config/diffusion/**`, `verl_omni/pipelines/**`, diffusion e2e scripts | `ci-e2e-diffusion` |
+| `verl_omni/trainer/omni/**`, `verl_omni/trainer/config/omni/**`, `tests/special_e2e/*omni*`, `verl_omni/pipelines/qwen3_omni/**`, `verl_omni/pipelines/minicpm/**`, omni e2e scripts | `ci-e2e-omni` |
+| `verl_omni/trainer/diffusion/**`, `verl_omni/trainer/config/diffusion/**`, `verl_omni/pipelines/**` (qwen3_omni/minicpm changes also select `ci-e2e-omni`), diffusion e2e scripts | `ci-e2e-diffusion` |
 | shared CI/test helpers, package metadata, shared trainer config, or unknown GPU-smoke paths | all groups |
 
 Pushes to `main` and `v0.*` still run all groups. If future group definitions

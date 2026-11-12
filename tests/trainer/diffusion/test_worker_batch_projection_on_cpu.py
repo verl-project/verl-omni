@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""CPU contracts for excluding driver-only pixels from diffusion worker RPCs."""
+"""CPU contracts for excluding driver-only pixels and named media artifacts from diffusion worker RPCs."""
 
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -23,6 +23,8 @@ from omegaconf import OmegaConf
 from verl import DataProto
 from verl.utils import tensordict_utils as tu
 
+from verl_omni.pipelines.rollout_media import ARTIFACT_CONTEXT, ARTIFACT_SPECS, PREVIEW_ARTIFACT, PRIMARY_ARTIFACT
+from verl_omni.trainer.diffusion.diffusion_trainer_utils import MEDIA_ARTIFACT_METADATA_FIELDS
 from verl_omni.trainer.diffusion.ray_diffusion_trainer import (
     DirectPreferenceRayTrainer,
     PolicyGradientRayTrainer,
@@ -30,6 +32,8 @@ from verl_omni.trainer.diffusion.ray_diffusion_trainer import (
 )
 from verl_omni.trainer.diffusion.teacher_manager import DiffusionTeacherManager
 from verl_omni.trainer.diffusion.v1.trainer_base import PolicyGradientDiffusionTrainerV1
+
+ARTIFACT_METADATA_KEYS = frozenset({ARTIFACT_SPECS, PRIMARY_ARTIFACT, PREVIEW_ARTIFACT, ARTIFACT_CONTEXT})
 
 
 def _make_config():
@@ -55,12 +59,24 @@ def _make_config():
 
 def _make_batch(*, include_responses: bool = True):
     latents = torch.arange(16, dtype=torch.float32).reshape(2, 2, 2, 2)
-    tensors = {"latents": latents}
+    tensors = {
+        "latents": latents,
+        # Reward/dump-only payload that must never reach compute workers.
+        "media_artifact__image_preview": torch.randint(256, (2, 3, 4, 4), dtype=torch.uint8),
+        "media_artifact__image_latent": latents * 2,
+    }
     if include_responses:
         tensors["responses"] = torch.randint(256, (2, 3, 4, 4), dtype=torch.uint8)
+    specs = {"image_preview": {"modality": "image", "representation": "decoded", "layout": "CHW"}}
     return DataProto.from_dict(
         tensors=tensors,
-        non_tensors={"sample_id": np.array(["sample-0", "sample-1"], dtype=object)},
+        non_tensors={
+            "sample_id": np.array(["sample-0", "sample-1"], dtype=object),
+            ARTIFACT_SPECS: np.array([specs, specs], dtype=object),
+            PRIMARY_ARTIFACT: np.array(["image_preview"] * 2, dtype=object),
+            PREVIEW_ARTIFACT: np.array(["image_preview"] * 2, dtype=object),
+            ARTIFACT_CONTEXT: np.array(["pipeline=Test, request_id=['r0', 'r1']"] * 2, dtype=object),
+        },
         meta_info={"driver_tag": "keep-me"},
     )
 
@@ -92,7 +108,22 @@ def _make_worker_groups():
 def _assert_worker_projection(sent_batch, driver_batch):
     assert "responses" not in sent_batch
     assert "responses" in driver_batch.batch
+    assert "media_artifact__image_preview" not in sent_batch
+    assert "media_artifact__image_latent" not in sent_batch
+    assert "media_artifact__image_preview" in driver_batch.batch
     assert sent_batch["latents"].data_ptr() == driver_batch.batch["latents"].data_ptr()
+    _assert_artifact_metadata_projection(sent_batch, driver_batch)
+
+
+def _assert_artifact_metadata_projection(sent_batch, driver_batch):
+    for key in ARTIFACT_METADATA_KEYS:
+        assert key not in sent_batch
+        assert key in driver_batch.non_tensor_batch
+    assert tu.get(sent_batch, "sample_id") == ["sample-0", "sample-1"]
+
+
+def test_worker_artifact_metadata_names_match_rollout_media():
+    assert MEDIA_ARTIFACT_METADATA_FIELDS == ARTIFACT_METADATA_KEYS
 
 
 @pytest.mark.parametrize("include_responses", [True, False])
@@ -105,8 +136,10 @@ def test_worker_projection_preserves_driver_batch_and_shared_tensor_storage(incl
     assert "responses" not in worker_batch
     assert ("responses" in driver_batch.batch) is include_responses
     assert driver_batch.batch.get("responses") is responses
+    assert "media_artifact__image_preview" not in worker_batch
+    assert "media_artifact__image_preview" in driver_batch.batch
     assert worker_batch["latents"].data_ptr() == driver_batch.batch["latents"].data_ptr()
-    assert tu.get(worker_batch, "sample_id") == ["sample-0", "sample-1"]
+    _assert_artifact_metadata_projection(worker_batch, driver_batch)
     assert tu.get(worker_batch, "driver_tag") == "keep-me"
 
 

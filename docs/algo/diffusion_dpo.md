@@ -1,6 +1,6 @@
 # Diffusion-DPO
 
-Last updated: 06/05/2026.
+Last updated: 11/10/2026.
 
 Diffusion-DPO
 ([paper](https://arxiv.org/abs/2311.12908),
@@ -179,14 +179,14 @@ The command writes:
 Launch online DPO training from the repository root:
 
 ```bash
-bash examples/dpo_trainer/qwen_image/run_qwen_image_online_dpo_lora.sh
+bash examples/dpo_trainer/qwen_image/run_qwen_image_online_dpo_lora_v1.sh
 ```
 
 You can override any Hydra option at launch time. For example, to reduce the
 rollout group size for a quick smoke run:
 
 ```bash
-bash examples/dpo_trainer/qwen_image/run_qwen_image_online_dpo_lora.sh \
+bash examples/dpo_trainer/qwen_image/run_qwen_image_online_dpo_lora_v1.sh \
   data.train_batch_size=4 \
   actor_rollout_ref.rollout.n=2 \
   actor_rollout_ref.actor.ppo_mini_batch_size=2 \

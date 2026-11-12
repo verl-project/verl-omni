@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import math
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -30,6 +31,7 @@ __all__ = [
     "VeOmniDiffusionEngineConfig",
     "VeOmniDiffusionOptimizerConfig",
     "DiffusionActorConfig",
+    "DiffusionActorARConfig",
     "FSDPDiffusionActorConfig",
     "VeOmniDiffusionActorConfig",
 ]
@@ -46,6 +48,19 @@ class DiffusionLossConfig(BaseConfig):
     dpo_beta: float = 2000.0
     kl_mask_threshold: float = 1e-5
     add_kl_coefficient: bool = True
+    # Scale of the CRD implicit reward (beta_old in the paper).
+    crd_beta: float = 1.0
+    # Minimum reward-adaptive coefficient for the pretrained-reference penalty.
+    crd_kl_min: float = 0.0
+    dgpo_beta: float = 100.0
+    dgpo_clip_range: float = 0.01
+    awm_clip_range: float = 1e-4
+    awm_kl_coef: float = 0.1
+    # OmniNFT-only modality weights and reference regularization coefficients.
+    video_weight: float = 1.0
+    audio_weight: float = 1.0
+    video_ref_kl_coef: float = 0.0
+    audio_ref_kl_coef: float = 0.0
 
     def __post_init__(self):
         """Validate diffusion loss configuration."""
@@ -54,9 +69,14 @@ class DiffusionLossConfig(BaseConfig):
             "flow_dppo",
             "grpo_guard",
             "diffusion_nft",
+            "omni_nft",
+            "dgpo",
+            "crd",
+            "awm",
             "dpo",
             "dmd2",
             "dance_grpo",
+            "dual_grpo",
             "distill_kl",
             "distill_fm_mse",
         ]
@@ -70,6 +90,28 @@ class DiffusionLossConfig(BaseConfig):
             raise ValueError(f"adaptive_weight_min must be positive, got {self.adaptive_weight_min}.")
         if self.kl_mask_threshold <= 0:
             raise ValueError(f"kl_mask_threshold must be positive, got {self.kl_mask_threshold}.")
+        if self.loss_mode == "crd":
+            if not math.isfinite(self.crd_beta) or self.crd_beta <= 0:
+                raise ValueError("crd_beta must be finite and positive.")
+            if not 0 <= self.crd_kl_min <= self.ref_kl_coef or not math.isfinite(self.ref_kl_coef):
+                raise ValueError("CRD requires finite 0 <= crd_kl_min <= ref_kl_coef.")
+        if self.dgpo_beta <= 0:
+            raise ValueError(f"dgpo_beta must be positive, got {self.dgpo_beta}.")
+        if self.dgpo_clip_range < 0:
+            raise ValueError(f"dgpo_clip_range must be non-negative, got {self.dgpo_clip_range}.")
+        if self.awm_clip_range < 0:
+            raise ValueError(f"awm_clip_range must be non-negative, got {self.awm_clip_range}.")
+        if self.awm_kl_coef < 0:
+            raise ValueError(f"awm_kl_coef must be non-negative, got {self.awm_kl_coef}.")
+
+
+@dataclass
+class DiffusionActorARConfig(BaseConfig):
+    # AR part actor config
+    # use when training AR part
+
+    calculate_entropy: bool = False
+    entropy_coeff: float = 0
 
 
 @dataclass
@@ -143,6 +185,14 @@ class DiffusionActorConfig(BaseConfig):
     strategy: str = MISSING
     ppo_mini_batch_size: int = 256
     ppo_micro_batch_size_per_gpu: int = MISSING
+
+    # Token-PPO clip for the AR branch of dual_grpo. DiT keeps diffusion_loss.clip_ratio.
+    clip_ratio: float = 0.2
+    clip_ratio_low: float = 0.2
+    clip_ratio_high: float = 0.2
+    clip_ratio_c: float = 3.0
+    loss_agg_mode: str = "token-mean"
+
     diffusion_loss: DiffusionLossConfig = field(default_factory=DiffusionLossConfig)
     loss_scale_factor: Optional[float] = None
     use_kl_loss: bool = False
@@ -170,10 +220,24 @@ class DiffusionActorConfig(BaseConfig):
     # When bypass_mode=True, ``diffusion_loss`` computes per-step RS from here.
     rollout_correction: RolloutCorrectionConfig = field(default_factory=RolloutCorrectionConfig)
 
+    # Trainale AR config
+    ar: DiffusionActorARConfig = field(default_factory=DiffusionActorARConfig)
+
     def __post_init__(self):
         """Validate diffusion actor configuration parameters."""
         assert self.strategy != MISSING
         assert self.rollout_n != MISSING
+        valid_loss_agg_modes = [
+            "token-mean",
+            "token-sum",
+            "seq-mean-token-sum",
+            "seq-mean-token-mean",
+            "seq-mean-token-sum-norm",
+        ]
+        if self.loss_agg_mode not in valid_loss_agg_modes:
+            raise ValueError(f"Invalid loss_agg_mode: {self.loss_agg_mode}. Must be one of {valid_loss_agg_modes}")
+        if self.clip_ratio_c <= 1.0:
+            raise ValueError(f"clip_ratio_c must be greater than 1.0 for dual-clip token PPO, got {self.clip_ratio_c}.")
         valid_distill_modes = ["distill_kl", "distill_fm_mse"]
         if self.use_distill_loss and self.distill_loss_mode not in valid_distill_modes:
             raise ValueError(

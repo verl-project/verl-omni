@@ -102,7 +102,8 @@ def test_missing_nested_etp_is_filled_without_mutating_input(monkeypatch):
     config = DiffusionRolloutConfig(tensor_model_parallel_size=4, text_encoder_tp_size=4, vae_patch_parallel_size=4)
     engine_args = _prepare(monkeypatch, config=config, parallel=parallel)
     stages = AsyncOmniEngine._create_default_diffusion_stage_cfg(engine_args)
-    assert stages[0]["engine_args"]["parallel_config"].text_encoder_tp_size == 4
+    od_config = OmniDiffusionConfig(parallel_config=stages[0]["engine_args"]["parallel_config"])
+    assert od_config.parallel_config.text_encoder_tp_size == 4
     assert "text_encoder_tp_size" not in parallel
 
 

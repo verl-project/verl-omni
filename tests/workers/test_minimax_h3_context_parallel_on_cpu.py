@@ -176,6 +176,8 @@ def test_minimax_h3_smoke_config_enables_sp_for_each_task(task, train_batch_size
     assert "actor_rollout_ref.actor.fsdp_config.ulysses_sequence_parallel_size=2" in overrides
     assert f"data.train_batch_size={train_batch_size}" in overrides
     assert f"actor_rollout_ref.rollout.pipeline.task={task}" in overrides
+    assert "+actor_rollout_ref.rollout.engine_kwargs.vllm_omni.trust_remote_code=True" in overrides
+    assert "actor_rollout_ref.model.trust_remote_code=True" not in overrides
 
 
 def test_minimax_h3_smoke_config_rejects_invalid_sp_partition() -> None:

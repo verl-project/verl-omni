@@ -14,6 +14,7 @@ on:
       - "**/*.py"
       - .github/vllm_ascend_pin.txt
       - .github/vllm_omni_pin.txt
+      - .github/triton_cpu_pin.txt
       - .github/verl_pin.txt
       - .github/workflows/*.yml
       - .readthedocs.yaml
@@ -46,6 +47,7 @@ jobs:
           cache: pip
           cache-dependency-path: |
             pyproject.toml
+            .github/triton_cpu_pin.txt
             .github/vllm_omni_pin.txt
             .github/verl_pin.txt
       - name: Verify vLLM-Ascend pin
@@ -59,9 +61,9 @@ jobs:
           test "$(git -C "${tmp_dir}" rev-parse FETCH_HEAD)" = "${pin}"
       - name: Install the current repository
         run: |
-          pip install --extra-index-url https://download.pytorch.org/whl/cpu "https://github.com/vllm-project/vllm/releases/download/v0.28.0/vllm-0.28.0+cpu-cp38-abi3-manylinux_2_34_x86_64.whl"
+          pip install --extra-index-url https://download.pytorch.org/whl/cpu "https://github.com/vllm-project/vllm/releases/download/v0.33.0rc3/vllm-0.33.0+cpu-cp38-abi3-manylinux_2_39_x86_64.whl"
           pip install uv
-          uv pip install --python "$(command -v python)" -e ".[dev]"
+          uv pip install --python "$(command -v python)" --constraint .github/triton_cpu_pin.txt -e ".[dev]"
       - name: Run sanity test
         run: |
           pytest -s -x tests/special_sanity

@@ -62,30 +62,28 @@ _REF_BLOCKS = [
 
 
 def test_reference_image_short_edge_environment_override_is_restored(monkeypatch):
-    from vllm_omni.diffusion.models.minimax_h3.pipeline_minimax_h3 import _reference_image_shape
+    import vllm_omni.model_executor.models.minimax_h3.preprocessing as h3_preprocessing
 
-    constant = "MINIMAX_H3_REFERENCE_IMAGE_SHORT_EDGE"
-    monkeypatch.setitem(_reference_image_shape.__globals__, constant, 2048)
     monkeypatch.setenv("REF_IMAGE_SHORT_EDGE", "1024")
     image = Image.new("RGB", (640, 400))
+    original_shape = h3_preprocessing.resolve_minimax_h3_reference_image_shape(image)
 
     with ref2va_reference_image_short_edge() as short_edge:
         assert short_edge == 1024
-        assert _reference_image_shape(image) == (1632, 1024)
-    assert min(_reference_image_shape(image)) == 2048
+        assert min(h3_preprocessing.resolve_minimax_h3_reference_image_shape(image)) == 1024
+    assert h3_preprocessing.resolve_minimax_h3_reference_image_shape(image) == original_shape
 
 
 def test_request_short_edge_overrides_environment_temporarily(monkeypatch):
-    from vllm_omni.diffusion.models.minimax_h3.pipeline_minimax_h3 import _reference_image_shape
+    import vllm_omni.model_executor.models.minimax_h3.preprocessing as h3_preprocessing
 
-    constant = "MINIMAX_H3_REFERENCE_IMAGE_SHORT_EDGE"
-    monkeypatch.setitem(_reference_image_shape.__globals__, constant, 2048)
     monkeypatch.setenv("REF_IMAGE_SHORT_EDGE", "512")
     image = Image.new("RGB", (640, 400))
+    original_shape = h3_preprocessing.resolve_minimax_h3_reference_image_shape(image)
     seen = []
 
     def fake_forward(_self, _request):
-        seen.append(min(_reference_image_shape(image)))
+        seen.append(min(h3_preprocessing.resolve_minimax_h3_reference_image_shape(image)))
         raise RuntimeError("stop after observing the request-local override")
 
     monkeypatch.setattr(MiniMaxH3Pipeline, "forward", fake_forward)
@@ -108,7 +106,7 @@ def test_request_short_edge_overrides_environment_temporarily(monkeypatch):
         pipeline.forward(request)
 
     assert seen == [1024]
-    assert min(_reference_image_shape(image)) == 2048
+    assert h3_preprocessing.resolve_minimax_h3_reference_image_shape(image) == original_shape
 
 
 @pytest.mark.parametrize("value", ["invalid", "255", "1000", "2049"])
@@ -358,14 +356,6 @@ def test_ref2va_prompt_keeps_original_ids_with_all_reference_modalities(monkeypa
 
     monkeypatch.setattr(pipeline_module, "_dit_rank_world", lambda: (None, 0, 1))
     monkeypatch.setattr(pipeline_module, "_broadcast_tensor", lambda value, **kwargs: value)
-    monkeypatch.setattr(
-        pipeline_module,
-        "sample_reference_video_frames",
-        lambda path: {
-            "frames": [np.zeros((4, 4, 3), dtype=np.uint8)] * 4,
-            "block_timestamps": [0.2, 1.0],
-        },
-    )
 
     class Tokenizer:
         special = {"<|vision_start|>": 11, "<|image_pad|>": 12, "<|vision_end|>": 13, "<|video_pad|>": 14}
@@ -406,13 +396,16 @@ def test_ref2va_prompt_keeps_original_ids_with_all_reference_modalities(monkeypa
     stub._distribute_encode_inputs = lambda ids, vision_kwargs: received.update(vision_kwargs) or ids
     stub._encode_text_hidden = lambda ids, vision_kwargs: ids[:, None].float()
 
-    hidden, tags = stub.encode_prompt(
-        task="ref2va",
+    frames = np.zeros((4, 4, 3), dtype=np.uint8)
+    prepared = SimpleNamespace(
         prompt="[pretokenized]",
+        media=SimpleNamespace(task="ref2va"),
         images=[object(), object()],
-        prepared_videos=[{"prepared_path": "/tmp/reference.mp4", "input_has_audio": True}],
+        qwen_videos=[(frames, {"has_audio": True})],
+        video_timestamps=[[0.2, 1.0]],
         condition_labels=[("image", 1), ("image", 2), ("audio", 1), ("video", 1), ("audio", 2)],
     )
+    hidden, tags = stub.encode_prompt(prepared)
 
     assert hidden[-3:, 0].tolist() == [501.0, 502.0, 503.0]
     assert tags[-3:].tolist() == [1, 1, 1]

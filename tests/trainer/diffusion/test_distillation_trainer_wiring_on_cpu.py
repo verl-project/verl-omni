@@ -66,6 +66,56 @@ class TestValidateDistillationConfig:
                 )
             )
 
+    def test_teacher_cfg_without_student_cfg_raises(self):
+        with pytest.raises(ValueError, match="guidance_scale"):
+            validate_distillation_config(
+                compose_cfg(
+                    ENABLE
+                    + [
+                        "actor_rollout_ref.actor.diffusion_loss.loss_mode=distill_kl",
+                        "distillation.teacher_models.teacher_model.guidance_scale=4.5",
+                        "actor_rollout_ref.rollout.pipeline.guidance_scale=1.0",
+                    ]
+                )
+            )
+
+    def test_inherited_teacher_cfg_without_student_cfg_raises(self):
+        with pytest.raises(ValueError, match="model.pipeline.guidance_scale"):
+            validate_distillation_config(
+                compose_cfg(
+                    ENABLE
+                    + [
+                        "actor_rollout_ref.actor.diffusion_loss.loss_mode=distill_kl",
+                        "actor_rollout_ref.model.pipeline.guidance_scale=4.5",
+                        "actor_rollout_ref.rollout.pipeline.guidance_scale=1.0",
+                    ]
+                )
+            )
+
+    def test_teacher_cfg_with_student_cfg_passes(self):
+        validate_distillation_config(
+            compose_cfg(
+                ENABLE
+                + [
+                    "actor_rollout_ref.actor.diffusion_loss.loss_mode=distill_kl",
+                    "distillation.teacher_models.teacher_model.guidance_scale=4.5",
+                    "actor_rollout_ref.rollout.pipeline.guidance_scale=4.5",
+                ]
+            )
+        )
+
+    def test_teacher_without_cfg_under_cfg_free_student_passes(self):
+        validate_distillation_config(
+            compose_cfg(
+                ENABLE
+                + [
+                    "actor_rollout_ref.actor.diffusion_loss.loss_mode=distill_kl",
+                    "distillation.teacher_models.teacher_model.guidance_scale=1.0",
+                    "actor_rollout_ref.rollout.pipeline.guidance_scale=1.0",
+                ]
+            )
+        )
+
     def test_direct_preference_trainer_rejected(self):
         with pytest.raises(NotImplementedError, match="policy_gradient"):
             validate_distillation_config(
@@ -118,14 +168,14 @@ class TestWorkerGroupPortRanges:
         assert compose_cfg([]).trainer.ray_master_port_range is None
 
     def test_null_range_gives_no_range_per_group(self):
-        from verl_omni.trainer.diffusion.diffusion_trainer_utils import worker_group_port_ranges
+        from verl_omni.utils.net_utils import worker_group_port_ranges
 
         assert worker_group_port_ranges(None, 3) == [None, None, None]
 
     def test_range_is_sliced_disjointly_per_group(self):
         from omegaconf import OmegaConf
 
-        from verl_omni.trainer.diffusion.diffusion_trainer_utils import worker_group_port_ranges
+        from verl_omni.utils.net_utils import worker_group_port_ranges
 
         ranges = worker_group_port_ranges(OmegaConf.create({"r": [20000, 20010]}).r, 3)
         assert len(ranges) == 3
@@ -136,7 +186,7 @@ class TestWorkerGroupPortRanges:
             assert lo >= prev_hi
 
     def test_range_too_small_raises(self):
-        from verl_omni.trainer.diffusion.diffusion_trainer_utils import worker_group_port_ranges
+        from verl_omni.utils.net_utils import worker_group_port_ranges
 
         with pytest.raises(ValueError, match="ray_master_port_range"):
             worker_group_port_ranges([20000, 20002], 3)

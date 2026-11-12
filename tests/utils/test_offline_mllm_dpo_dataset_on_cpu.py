@@ -49,6 +49,16 @@ def _load_dataset_module():
     sys.modules[transform_spec.name] = transform_module
     transform_spec.loader.exec_module(transform_module)
 
+    minicpm_transform_spec = importlib.util.spec_from_file_location(
+        "verl_omni.utils.dataset.minicpm_transform",
+        dataset_dir / "minicpm_transform.py",
+    )
+    if minicpm_transform_spec is None or minicpm_transform_spec.loader is None:
+        raise ImportError("Cannot load minicpm_transform module.")
+    minicpm_transform_module = importlib.util.module_from_spec(minicpm_transform_spec)
+    sys.modules[minicpm_transform_spec.name] = minicpm_transform_module
+    minicpm_transform_spec.loader.exec_module(minicpm_transform_module)
+
     dataset_spec = importlib.util.spec_from_file_location(
         "verl_omni.utils.dataset.offline_mllm_dpo_dataset",
         dataset_dir / "offline_mllm_dpo_dataset.py",
@@ -190,6 +200,26 @@ def test_build_preference_branch_supports_compact_top_level_media_schema():
     assert branch["conversations"][-1] == ["assistant", ("text", "preferred answer")]
 
 
+def test_build_preference_branch_supports_numbered_minicpm_image_placeholders():
+    sample = {
+        "prompt": [{"role": "user", "content": "<image_00>Compare it with <image_01>."}],
+        "chosen": {"role": "assistant", "content": "preferred answer"},
+        "images": ["/tmp/left.png", "/tmp/right.png"],
+        "data_source": "minicpm/image",
+    }
+    branch = dataset_mod._build_preference_branch(sample, sample["chosen"])
+
+    assert branch["images"] == ["/tmp/left.png", "/tmp/right.png"]
+    assert branch["conversations"][0] == [
+        "user",
+        ("image", None),
+        ("text", "Compare it with "),
+        ("image", None),
+        ("text", "."),
+    ]
+    assert branch["conversations"][-1] == ["assistant", ("text", "preferred answer")]
+
+
 def test_build_preference_branch_rejects_missing_top_level_media():
     sample = {
         "prompt": [{"role": "user", "content": "<video>What happens at the end?"}],
@@ -199,6 +229,166 @@ def test_build_preference_branch_rejects_missing_top_level_media():
 
     with pytest.raises(ValueError, match=r"Prompt contains 1 <video> token\(s\) but videos has 0 item\(s\)"):
         dataset_mod._build_preference_branch(sample, sample["chosen"])
+
+
+@pytest.mark.parametrize(
+    ("modality", "path"),
+    [("image", "/tmp/a.png"), ("video", "/tmp/a.mp4"), ("audio", "/tmp/a.wav")],
+)
+def test_build_preference_branch_keeps_repeated_inline_media_paths(modality, path):
+    item = _content_item(modality, **{modality: path})
+    sample = {
+        "prompt": [{"role": "user", "content": [item, item, _content_item("text", text="Compare these.")]}],
+        "chosen": "answer A",
+    }
+    branch = dataset_mod._build_preference_branch(sample, sample["chosen"])
+
+    assert branch[f"{modality}s"] == [path, path]
+
+
+def test_build_preference_branch_keeps_same_media_path_across_messages():
+    item = _content_item("image", image="/tmp/a.png")
+    sample = {
+        "prompt": [
+            {"role": "user", "content": [item]},
+            {"role": "assistant", "content": "Noted."},
+            {"role": "user", "content": [item, _content_item("text", text="Is this the same image?")]},
+        ],
+        "chosen": "answer A",
+    }
+    branch = dataset_mod._build_preference_branch(sample, sample["chosen"])
+
+    assert branch["images"] == ["/tmp/a.png", "/tmp/a.png"]
+
+
+def test_build_preference_branch_does_not_double_count_declared_top_level_media():
+    sample = {
+        "prompt": [{"role": "user", "content": [_content_item("image", image="/tmp/a.png")]}],
+        "chosen": "answer A",
+        "images": ["/tmp/a.png"],
+    }
+    branch = dataset_mod._build_preference_branch(sample, sample["chosen"])
+
+    assert branch["images"] == ["/tmp/a.png"]
+
+
+def test_build_preference_branch_appends_inline_media_missing_from_top_level():
+    sample = {
+        "prompt": [
+            {"role": "user", "content": "<image>What is this?"},
+            {"role": "user", "content": [_content_item("image", image="/tmp/b.png")]},
+        ],
+        "chosen": "answer A",
+        "images": ["/tmp/a.png"],
+    }
+    branch = dataset_mod._build_preference_branch(sample, sample["chosen"])
+
+    assert branch["images"] == ["/tmp/a.png", "/tmp/b.png"]
+
+
+def test_build_preference_branch_orders_media_by_prompt_tokens():
+    sample = {
+        "prompt": [
+            {
+                "role": "user",
+                "content": [
+                    _content_item("image", image="/tmp/b.png"),
+                    _content_item("image", image="/tmp/a.png"),
+                    _content_item("text", text="Which is brighter?"),
+                ],
+            }
+        ],
+        "chosen": "answer A",
+        "images": ["/tmp/a.png"],
+    }
+    branch = dataset_mod._build_preference_branch(sample, sample["chosen"])
+
+    assert branch["images"] == ["/tmp/b.png", "/tmp/a.png"]
+
+
+def test_build_preference_branch_orders_placeholder_after_inline_media():
+    sample = {
+        "prompt": [
+            {"role": "user", "content": [_content_item("image", image="/tmp/b.png")]},
+            {"role": "user", "content": "<image>What is this?"},
+        ],
+        "chosen": "answer A",
+        "images": ["/tmp/a.png"],
+    }
+    branch = dataset_mod._build_preference_branch(sample, sample["chosen"])
+
+    assert branch["images"] == ["/tmp/b.png", "/tmp/a.png"]
+
+
+def test_minicpm_base_transform_does_not_require_qwen_rope(monkeypatch, tmp_path):
+    rows = [
+        {
+            "data_source": "minicpm/image",
+            "prompt": [{"role": "user", "content": "<image>Question?"}],
+            "chosen": {"role": "assistant", "content": "chosen"},
+            "rejected": {"role": "assistant", "content": "rejected"},
+            "images": ["/tmp/image.png"],
+            "extra_info": {"modality": "image"},
+        }
+    ]
+    parquet_path = tmp_path / "minicpm.parquet"
+    pd.DataFrame(rows).to_parquet(parquet_path, index=False)
+
+    def fake_minicpm_transform(sample, processor, **kwargs):
+        del sample, processor, kwargs
+        return [
+            {
+                "input_ids": torch.tensor([1, 2, 3]),
+                "attention_mask": torch.tensor([1, 1, 1]),
+                "position_ids": torch.tensor([0, 1, 2]),
+                "labels": torch.tensor([-100, -100, 3]),
+            }
+        ]
+
+    monkeypatch.setattr(dataset_mod, "process_minicpm_sample", fake_minicpm_transform)
+    config = OmegaConf.create({"base_transform": "minicpm", "pad_mode": "right"})
+
+    dataset = dataset_mod.OfflineMLLMDPODataset(
+        str(parquet_path),
+        tokenizer=None,
+        processor=MagicMock(),
+        config=config,
+    )
+    item = dataset[0]
+
+    assert item["input_ids"][0].tolist() == [1, 2, 3]
+    assert item["input_ids"][1].tolist() == [1, 2, 3]
+    assert item["is_chosen"] == [True, False]
+
+
+def test_minicpm_base_transform_rejects_use_audio_in_video(tmp_path):
+    rows = [
+        {
+            "data_source": "minicpm/image",
+            "prompt": [{"role": "user", "content": "<image>Question?"}],
+            "chosen": {"role": "assistant", "content": "chosen"},
+            "rejected": {"role": "assistant", "content": "rejected"},
+            "images": ["/tmp/image.png"],
+            "extra_info": {"modality": "image"},
+        }
+    ]
+    parquet_path = tmp_path / "minicpm.parquet"
+    pd.DataFrame(rows).to_parquet(parquet_path, index=False)
+    config = OmegaConf.create(
+        {
+            "base_transform": "minicpm",
+            "pad_mode": "right",
+            "mm_configs": {"use_audio_in_video": True},
+        }
+    )
+
+    with pytest.raises(ValueError, match="use_audio_in_video=True is not supported"):
+        dataset_mod.OfflineMLLMDPODataset(
+            str(parquet_path),
+            tokenizer=None,
+            processor=MagicMock(),
+            config=config,
+        )
 
 
 def test_pair_branch_values_keeps_chosen_rejected_branches_separate():
@@ -247,6 +437,28 @@ def test_collate_tensor_values_pads_variable_length_sequences():
     assert collated.shape == (2, 3)
     torch.testing.assert_close(collated[0], torch.tensor([1, 2, 0]))
     torch.testing.assert_close(collated[1], torch.tensor([3, 4, 5]))
+
+
+@pytest.mark.parametrize(("key", "pad_value"), [("labels", -100), ("attention_mask", 0), ("input_ids", 0)])
+def test_collate_tensor_values_fills_missing_rows_with_pad_value(key, pad_value):
+    values = [torch.tensor([5, 6, 7]), None, torch.tensor([8])]
+    collated = dataset_mod._collate_tensor_values(key, values)
+
+    assert collated.shape == (3, 3)
+    torch.testing.assert_close(collated[1], torch.full((3,), pad_value))
+    torch.testing.assert_close(collated[2], torch.tensor([8, pad_value, pad_value]))
+
+
+def test_offline_mllm_dpo_collate_fn_pads_branch_missing_a_tensor_key():
+    features = [
+        {"modality": "image", "input_ids": torch.tensor([1, 2, 3]), "labels": torch.tensor([-100, 2, 3])},
+        {"modality": "image", "input_ids": torch.tensor([1, 2, 3]), "labels": None},
+    ]
+    batch = dataset_mod.offline_mllm_dpo_collate_fn(features, pad_mode="right")
+
+    assert isinstance(batch["labels"], torch.Tensor)
+    torch.testing.assert_close(batch["labels"], torch.tensor([[-100, 2, 3], [-100, -100, -100]]))
+    torch.testing.assert_close(batch["loss_mask"], torch.tensor([[False, True, True], [False, False, False]]))
 
 
 def test_offline_mllm_dpo_collate_fn_rejects_mixed_modalities():
@@ -402,6 +614,32 @@ def test_modality_grouped_batch_sampler_yields_same_modality_chunks():
         assert len(set(batch_modalities)) == 1
 
 
+def test_modality_grouped_batch_sampler_resamples_each_epoch():
+    modalities = ["image"] * 8 + ["video"] * 8
+    sampler = dataset_mod.ModalityGroupedBatchSampler(
+        data_source=FakeModalityDataset(modalities),
+        batch_size=4,
+        seed=0,
+    )
+
+    # A DataLoader calls iter(sampler) once per epoch and never calls set_epoch.
+    first_epoch = list(sampler)
+    second_epoch = list(sampler)
+    assert first_epoch != second_epoch
+
+    # Explicit set_epoch still reproduces an epoch exactly.
+    sampler.set_epoch(0)
+    assert list(sampler) == first_epoch
+
+    # The per-epoch sequence is deterministic for a given seed.
+    twin = dataset_mod.ModalityGroupedBatchSampler(
+        data_source=FakeModalityDataset(modalities),
+        batch_size=4,
+        seed=0,
+    )
+    assert [list(twin), list(twin)] == [first_epoch, second_epoch]
+
+
 def test_modality_grouped_batch_sampler_respects_weights(monkeypatch):
     dataset = FakeModalityDataset(["image", "video", "audio"])
     sampler = dataset_mod.ModalityGroupedBatchSampler(
@@ -512,6 +750,7 @@ def test_offline_mllm_dpo_dataset_getitem(monkeypatch, mock_processor, mixed_par
     assert item["modality"] == ["image", "image"]
     assert item["data_source"] == ["omni_preference/image", "omni_preference/image"]
     assert item["extra_info"][0]["modality"] == "image"
+    assert "dataset_index" not in item["extra_info"][0]
 
 
 def test_offline_mllm_dpo_dataset_getitem_compact_top_level_media_schema(monkeypatch, mock_processor, tmp_path):
@@ -700,3 +939,100 @@ def test_offline_mllm_dpo_collate_fn_squeezes_position_ids():
     batch = dataset_mod.offline_mllm_dpo_collate_fn(features, pad_mode="right")
 
     assert batch["position_ids"].shape == (2, 3, 4)
+
+
+def _truncation_branch(placeholders: int, total_length: int, start: int = 4) -> dict:
+    ids = torch.arange(total_length)
+    image_mask = torch.zeros(total_length, dtype=torch.bool)
+    image_mask[start : start + placeholders] = True
+    return {
+        "input_ids": ids,
+        "attention_mask": torch.ones(total_length, dtype=torch.long),
+        "labels": torch.full((total_length,), -100, dtype=torch.long),
+        "position_ids": torch.zeros(3, total_length, dtype=torch.long),
+        "image_mask": image_mask,
+        "video_mask": torch.zeros(total_length, dtype=torch.bool),
+        "audio_mask": torch.zeros(total_length, dtype=torch.bool),
+        "multi_modal_inputs": {"image_grid_thw": torch.tensor([[1, 8, 8]])},
+    }
+
+
+@pytest.mark.parametrize(
+    "truncation,max_length",
+    [
+        ("right", 12),  # cuts the placeholder run in half
+        ("right", 2),  # drops the image entirely
+        ("left", 50),  # keeps 6/16 placeholders: partial left cut, not a full drop
+        ("left", 2),  # drops the image entirely
+    ],
+)
+def test_prepare_branch_inputs_rejects_truncation_that_cuts_media_placeholders(truncation, max_length):
+    dataset = object.__new__(dataset_mod.OfflineMLLMDPODataset)
+    dataset.pad_mode = dataset_mod.DatasetPadMode.NO_PADDING
+    dataset.max_length = max_length
+    dataset.truncation = truncation
+    dataset.tokenizer = MagicMock()
+
+    with pytest.raises(ValueError, match="cut placeholder runs"):
+        dataset._prepare_branch_inputs(_truncation_branch(placeholders=16, total_length=64))
+
+
+def test_prepare_branch_inputs_fails_closed_when_transform_emits_no_modality_masks():
+    """A branch with media but no bool modality masks must not skip the check.
+
+    ``process_minicpm_sample`` emits no ``image_mask``/``video_mask``/``audio_mask``, so
+    ``_media_placeholder_counts`` is empty and the desync guard used to no-op.
+    """
+    dataset = object.__new__(dataset_mod.OfflineMLLMDPODataset)
+    dataset.pad_mode = dataset_mod.DatasetPadMode.NO_PADDING
+    dataset.max_length = 10
+    dataset.truncation = "right"
+    dataset.tokenizer = MagicMock()
+
+    branch = _truncation_branch(placeholders=16, total_length=64)
+    for key in dataset_mod._MEDIA_MASK_KEYS:
+        branch.pop(key)
+    # Same shape as the MiniCPM image branch: empty ``image_bound`` plus real pixels.
+    branch["multi_modal_inputs"] = {
+        "image_bound": torch.zeros(0, 2, dtype=torch.long),
+        "pixel_values": torch.ones(1, 3, 4, 4),
+    }
+
+    with pytest.raises(ValueError, match="cut placeholder runs"):
+        dataset._prepare_branch_inputs(branch)
+
+
+def test_prepare_branch_inputs_truncates_when_media_placeholders_survive():
+    dataset = object.__new__(dataset_mod.OfflineMLLMDPODataset)
+    dataset.pad_mode = dataset_mod.DatasetPadMode.NO_PADDING
+    dataset.max_length = 40
+    dataset.truncation = "right"
+    dataset.tokenizer = MagicMock()
+
+    prepared = dataset._prepare_branch_inputs(_truncation_branch(placeholders=16, total_length=64))
+
+    assert prepared["input_ids"].shape == (40,)
+    assert int(prepared["image_mask"].sum()) == 16
+    assert prepared["multi_modal_inputs"] is not None
+
+
+def test_prepare_branch_inputs_still_truncates_text_only_branches():
+    dataset = object.__new__(dataset_mod.OfflineMLLMDPODataset)
+    dataset.pad_mode = dataset_mod.DatasetPadMode.RIGHT
+    dataset.max_length = 4
+    dataset.truncation = "left"
+    dataset.tokenizer = MagicMock()
+
+    # MiniCPM emits an empty ``image_bound`` tensor even for text-only rows, and
+    # processors may report media keys as ``None``; neither counts as media.
+    branch = {
+        "input_ids": torch.arange(10),
+        "labels": torch.arange(10),
+        "multi_modal_inputs": {
+            "image_bound": torch.zeros(0, 2, dtype=torch.long),
+            "pixel_values": None,
+        },
+    }
+    prepared = dataset._prepare_branch_inputs(branch)
+
+    torch.testing.assert_close(prepared["input_ids"], torch.arange(10)[-4:])

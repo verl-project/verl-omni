@@ -52,7 +52,9 @@ def _stub_engine(num_train_timesteps: int | None) -> NFTDiffusersFSDPEngine:
     engine.ulysses_sequence_parallel_size = 1
     engine.use_ulysses_sp = False
     engine.module = SimpleNamespace()
-    engine.model_config = SimpleNamespace()
+    engine.model_config = SimpleNamespace(
+        architecture="BooguImagePipeline", algorithm="diffusion_nft", external_lib=None
+    )
     return engine
 
 
@@ -81,17 +83,19 @@ def test_engine_divides_train_timesteps_by_the_scheduler_scale(num_train_timeste
 
     micro_batch = _micro_batch(timesteps)
     with patch(_PREPARE_MODEL_INPUTS, return_value=({}, {})):
-        *_, t_expanded = engine.prepare_model_inputs(micro_batch=micro_batch, step=0)
+        *_, loss_context = engine.prepare_model_inputs(micro_batch=micro_batch, step=0)
 
     expected = (timesteps[:, 0] / num_train_timesteps).view(-1, 1, 1, 1)
-    torch.testing.assert_close(t_expanded, expected)
+    torch.testing.assert_close(loss_context["t_expanded"], expected)
     # The adapter conditions the DiT with this integer, so the engine hands it over.
     assert tu.get_non_tensor_data(micro_batch, "num_train_timesteps", default=None) == num_train_timesteps
 
     # Span the whole schedule to confirm the divisor is uniform across steps.
     with patch(_PREPARE_MODEL_INPUTS, return_value=({}, {})):
-        *_, t_expanded_step1 = engine.prepare_model_inputs(micro_batch=_micro_batch(timesteps), step=1)
-    torch.testing.assert_close(t_expanded_step1, (timesteps[:, 1] / num_train_timesteps).view(-1, 1, 1, 1))
+        *_, loss_context_step1 = engine.prepare_model_inputs(micro_batch=_micro_batch(timesteps), step=1)
+    torch.testing.assert_close(
+        loss_context_step1["t_expanded"], (timesteps[:, 1] / num_train_timesteps).view(-1, 1, 1, 1)
+    )
 
 
 def test_engine_flow_time_is_complementary_to_the_boogu_timestep():
@@ -106,12 +110,12 @@ def test_engine_flow_time_is_complementary_to_the_boogu_timestep():
         engine = _stub_engine(num_train_timesteps)
         micro_batch = _micro_batch(timesteps)
         with patch(_PREPARE_MODEL_INPUTS, return_value=({}, {})):
-            *_, t_expanded = engine.prepare_model_inputs(micro_batch=micro_batch, step=0)
+            *_, loss_context = engine.prepare_model_inputs(micro_batch=micro_batch, step=0)
 
         published = tu.get_non_tensor_data(micro_batch, "num_train_timesteps", default=None)
         assert published == num_train_timesteps
         boogu_time = 1.0 - timesteps[:, 0] / published
-        torch.testing.assert_close(t_expanded.flatten() + boogu_time, torch.ones(2))
+        torch.testing.assert_close(loss_context["t_expanded"].flatten() + boogu_time, torch.ones(2))
 
 
 def test_engine_rejects_a_scheduler_without_a_timestep_scale():

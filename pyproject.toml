@@ -23,7 +23,7 @@ dependencies = [
     "cachetools",
     "codetiming",
     "datasets>=2.20.0",
-    "diffusers>=0.40.0",
+    "diffusers>=0.41.0",
     "dill",
     "hydra-core",
     "imageio[ffmpeg]>=2.37.2",
@@ -36,20 +36,22 @@ dependencies = [
     "safetensors>=0.4.5",
     "tensordict>=0.8.0,<=0.10.0,!=0.9.0",
     "torchdata",
-    # TODO: Remove this cap after the Qwen3-Omni adapter and tests support the
-    # FSDP `_no_split_modules` metadata change introduced in Transformers 5.15.0.
-    "transformers>=5.13.0,<=5.14.1",
+    # Mirrors vllm-omni's requirements/common.txt bound at the pinned commit.
+    "transformers>=5.16.1,<5.20.0",
     "wandb",
+    "swanlab>=0.10.3",
+    "soundfile>=0.12.1",
     "packaging>=20.0",
     "uvicorn",
     "fastapi",
     "latex2sympy2_extended",
     "math_verify",
+    "mathruler",
     "tensorboard",
-    "TransferQueue==0.1.9",
-    "vllm==0.28.0",
-    "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@ded8934626aaad1a3e816c3a1d9d742efc012d93",
-    "verl @ git+https://github.com/verl-project/verl.git@fefb080262e1c015a0ea05f958822a6a512dc795",
+    "TransferQueue==0.1.11",
+    "vllm==0.33.0",
+    "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@6e8c1097cd8c73ce799fd1d7f7cd32e656b29b28",
+    "verl @ git+https://github.com/verl-project/verl.git@2b4ed6826a39205838d0ca004bdd942334dbe4b6",
 ]
 
 [project.optional-dependencies]
@@ -71,9 +73,15 @@ fa2 = [
     "flash-attn>=2.8.3",
 ]
 gpu = [
-    "kernels==0.16.0",
+    "kernels==0.16.1",
     "liger-kernel",
     "cupy-cuda13x",
+]
+xpu = [
+    # verl has no built-in Intel platform; the plugin registers it via the verl.plugins entry point.
+    "verl-hardware-plugin @ git+https://github.com/verl-project/verl-hardware-plugin.git@1c740e0d399a5a0ad931d64890cb8961daa08d98",
+    # Ray counts Intel GPUs through dpctl; 0.22.x matches the oneAPI 2026 runtime of torch 2.14+xpu.
+    "dpctl>=0.22,<0.23",
 ]
 dev = [
     "pytest",
@@ -82,16 +90,11 @@ dev = [
     "py-spy",
     "pytest-asyncio",
     "pytest-rerunfailures",
+    "pytest-xdist",
 ]
 ocr = [
     "Levenshtein",
 ]
-
-# vLLM loads every `vllm.general_plugins` entry point at startup in each
-# engine process; see verl_omni/pipelines/minicpm/vllm_plugin.py.
-# TODO (mike): drop this entry point at the next vllm-omni pin bump, together with vllm_plugin.py.
-[project.entry-points."vllm.general_plugins"]
-verl_omni_minicpmo_embed_multimodal = "verl_omni.pipelines.minicpm.vllm_plugin:register"
 
 # -------------------------------
 # tool.ruff - Linting configuration
@@ -195,6 +198,7 @@ verl_omni = [
   "trainer/config/*.yaml",
   "trainer/config/*/*.yaml",
   "trainer/config/*/*/*.yaml",
+  "utils/agentic/*.json",
 ]
 
 # -------------------------------
@@ -203,6 +207,7 @@ verl_omni = [
 [tool.uv]
 override-dependencies = [
     "accelerate>=1.14.0",
-    "kernels==0.16.0",
-    "transformers>=5.13.0,<=5.14.1",
+    "diffusers>=0.41.0",
+    "kernels==0.16.1",
+    "transformers>=5.16.1,<5.20.0",
 ]

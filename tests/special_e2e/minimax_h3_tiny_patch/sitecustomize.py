@@ -17,7 +17,7 @@ Python imports ``sitecustomize`` during interpreter startup. The smoke runner
 adds this directory to ``PYTHONPATH`` for its trainer and inherited Ray worker
 processes only, so the installed vLLM-Omni package is never modified. The H3
 encoder already constructs its attention projections from Qwen3-VL config;
-only its final production-width assertion needs this test-local override.
+its final width assertion and the conditioning contract must use that tiny width.
 """
 
 from __future__ import annotations
@@ -32,8 +32,10 @@ from types import ModuleType
 from typing import Any
 
 _CONFIG_ENV = "VERL_OMNI_MINIMAX_H3_TINY_TEXT_CONFIG"
-_TARGET_MODULE = "vllm_omni.diffusion.models.minimax_h3.encoder"
-_HIDDEN_DIM_NAME = "MINIMAX_H3_QWEN3VL_HIDDEN_DIM"
+_TARGET_MODULES = {
+    "vllm_omni.diffusion.models.minimax_h3.encoder": "MINIMAX_H3_QWEN3VL_HIDDEN_DIM",
+    "vllm_omni.model_executor.models.minimax_h3.conditioning": "MINIMAX_H3_TEXT_HIDDEN_SIZE",
+}
 
 
 def _configured_hidden_size() -> int | None:
@@ -61,9 +63,7 @@ class _PatchLoader(importlib.abc.Loader):
 
     def exec_module(self, module: ModuleType) -> None:
         self._wrapped.exec_module(module)
-        if not hasattr(module, _HIDDEN_DIM_NAME):
-            raise RuntimeError(f"{_TARGET_MODULE} no longer exposes {_HIDDEN_DIM_NAME}; update the tiny E2E patch")
-        setattr(module, _HIDDEN_DIM_NAME, self._hidden_size)
+        _patch_module(module, self._hidden_size)
 
 
 class _PatchFinder(importlib.abc.MetaPathFinder):
@@ -72,23 +72,30 @@ class _PatchFinder(importlib.abc.MetaPathFinder):
 
     def find_spec(self, fullname: str, path=None, target=None):
         del target
-        if fullname != _TARGET_MODULE:
+        if fullname not in _TARGET_MODULES:
             return None
         spec = importlib.machinery.PathFinder.find_spec(fullname, path)
         if spec is None or spec.loader is None:
-            raise ImportError(f"cannot locate {_TARGET_MODULE} for the tiny E2E patch")
+            raise ImportError(f"cannot locate {fullname} for the tiny E2E patch")
         spec.loader = _PatchLoader(spec.loader, self._hidden_size)
         return spec
+
+
+def _patch_module(module: ModuleType, hidden_size: int) -> None:
+    constant = _TARGET_MODULES[module.__name__]
+    if not hasattr(module, constant):
+        raise RuntimeError(f"{module.__name__} no longer exposes {constant}; update the tiny E2E patch")
+    setattr(module, constant, hidden_size)
 
 
 def _install() -> None:
     hidden_size = _configured_hidden_size()
     if hidden_size is None:
         return
-    loaded = sys.modules.get(_TARGET_MODULE)
-    if loaded is not None:
-        setattr(loaded, _HIDDEN_DIM_NAME, hidden_size)
-        return
+    for name in _TARGET_MODULES:
+        loaded = sys.modules.get(name)
+        if loaded is not None:
+            _patch_module(loaded, hidden_size)
     sys.meta_path.insert(0, _PatchFinder(hidden_size))
 
 

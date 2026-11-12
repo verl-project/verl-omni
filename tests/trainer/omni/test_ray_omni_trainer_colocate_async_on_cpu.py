@@ -83,8 +83,10 @@ class TestOmniColocateAsyncOnTrainBegin:
     def _config(num_warmup_batches, skip_warmup=False):
         # on_train_begin is inherited from PPOTrainerColocateAsync and must read
         # the generic trainer.v1.colocate_async key, not an omni_* stub (#320 §3.6).
+        # Warmup counting follows verl's _add_async_warmup_batches: prompts, not batches.
         return OmegaConf.create(
             {
+                "data": {"train_batch_size": 8, "gen_batch_size": 8},
                 "skip": {"rollout_tq": {"enable": skip_warmup}},
                 "trainer": {
                     "v1": {
@@ -94,30 +96,36 @@ class TestOmniColocateAsyncOnTrainBegin:
             }
         )
 
-    def test_warmup_reads_generic_colocate_async_key(self):
+    @staticmethod
+    def _make_trainer(config):
         trainer = OmniPPOTrainerColocateAsync.__new__(OmniPPOTrainerColocateAsync)
-        trainer.config = self._config(num_warmup_batches=3)
+        trainer.config = config
+        # Set by PPOTrainer.__init__ in the real path; the __new__ shortcut skips it.
+        trainer._restored_tq_prompt_count = 0
+        return trainer
 
-        with patch.object(trainer, "_add_batch_to_generate") as mock_add:
+    def test_warmup_reads_generic_colocate_async_key(self):
+        trainer = self._make_trainer(self._config(num_warmup_batches=3))
+
+        with patch.object(trainer, "_add_prompts_to_generate") as mock_add:
             trainer.on_train_begin()
 
-        assert mock_add.call_count == 3
+        # 3 warmup batches of train_batch_size=8 → one 24-prompt submission.
+        mock_add.assert_called_once_with(24)
 
     def test_omni_key_if_present_is_ignored(self):
-        trainer = OmniPPOTrainerColocateAsync.__new__(OmniPPOTrainerColocateAsync)
-        trainer.config = self._config(num_warmup_batches=2)
+        trainer = self._make_trainer(self._config(num_warmup_batches=2))
         OmegaConf.update(trainer.config, "trainer.v1.omni_colocate_async.num_warmup_batches", 7)
 
-        with patch.object(trainer, "_add_batch_to_generate") as mock_add:
+        with patch.object(trainer, "_add_prompts_to_generate") as mock_add:
             trainer.on_train_begin()
 
-        assert mock_add.call_count == 2
+        mock_add.assert_called_once_with(16)
 
     def test_skip_guard_disables_warmup(self):
-        trainer = OmniPPOTrainerColocateAsync.__new__(OmniPPOTrainerColocateAsync)
-        trainer.config = self._config(num_warmup_batches=3, skip_warmup=True)
+        trainer = self._make_trainer(self._config(num_warmup_batches=3, skip_warmup=True))
 
-        with patch.object(trainer, "_add_batch_to_generate") as mock_add:
+        with patch.object(trainer, "_add_prompts_to_generate") as mock_add:
             trainer.on_train_begin()
 
         mock_add.assert_not_called()

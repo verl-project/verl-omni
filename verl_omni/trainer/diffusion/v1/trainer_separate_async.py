@@ -46,11 +46,12 @@ import logging
 import os
 import time
 from collections import deque
+from copy import deepcopy
 from enum import Enum
 
 import ray
 import transfer_queue as tq
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 from transfer_queue import KVBatchMeta
 from verl import DataProto
 from verl.checkpoint_engine import CheckpointEngineManager
@@ -183,7 +184,13 @@ class PolicyGradientDiffusionTrainerV1SeparateAsync(PolicyGradientDiffusionTrain
         self._scaling_factor = (hybrid_gpus + standalone_gpus) / standalone_gpus
 
     def _compute_old_log_prob(self, data: DataProto) -> DataProto:
-        """Compute every local update's proximal log-probs with cycle-start weights."""
+        """Compute every local update's proximal log-probs with cycle-start weights.
+
+        Not annotated directly: the base method already carries the
+        ``old_log_prob`` annotation and this override reaches it through
+        ``super()``, so skipping and dumping happen exactly once per call while
+        the snapshot lifecycle here always runs.
+        """
         if self.parameter_sync_step == 1:
             return super()._compute_old_log_prob(data)
 
@@ -262,11 +269,17 @@ class PolicyGradientDiffusionTrainerV1SeparateAsync(PolicyGradientDiffusionTrain
     def _setup(self):
         super()._setup()
 
-        # Standalone rollout replicas on dedicated GPUs. start_rank skips the
-        # colocated replica ranks to avoid Ray named-actor collisions.
+        # start_rank skips the colocated replica ranks to avoid Ray named-actor collisions.
         hybrid_num_replicas = len(self.llm_server_manager.rollout_replicas)
+        # Standalone replicas have dedicated GPUs; keep their memory budget
+        # separate from the hybrid replicas that share GPUs with training.
+        standalone_config = deepcopy(self.config)
+        standalone_rollout_config = standalone_config.actor_rollout_ref.rollout
+        standalone_memory = standalone_rollout_config.get("standalone_gpu_memory_utilization")
+        if standalone_memory is not None:
+            standalone_rollout_config.gpu_memory_utilization = standalone_memory
         self.standalone_server_manager: LLMServerManager = LLMServerManager.create(
-            config=self.config, start_rank=hybrid_num_replicas
+            config=standalone_config, start_rank=hybrid_num_replicas
         )
 
         standalone_ckpt_config = omega_conf_to_dataclass(self.config.actor_rollout_ref.rollout.checkpoint_engine)
@@ -297,35 +310,47 @@ class PolicyGradientDiffusionTrainerV1SeparateAsync(PolicyGradientDiffusionTrain
         self.standalone_checkpoint_manager.update_weights(self.global_steps)
         self.checkpoint_manager.update_weights(self.global_steps)
 
+    def _rollout_server_managers(self) -> list:
+        # Unlike the PPO trainer, diffusion must exclude hybrid replicas when
+        # switching is disabled; only standalone replicas generate in that mode.
+        managers = super()._rollout_server_managers() if self.hybrid_rollout_config.enable_switch else []
+        standalone = getattr(self, "standalone_server_manager", None)
+        if standalone is not None:
+            managers.append(standalone)
+        return managers
+
     def on_train_begin(self):
         if not self.hybrid_rollout_config.enable_switch and self.current_mode == HybridEngineMode.ROLLOUT:
             # Reclaim before the warmup feed so no warmup request is routed to a replica about to sleep.
             logger.info("Switching hybrid engine to trainer mode before the warmup feed")
             self.switch_to_trainer()
+        if OmegaConf.select(self.config, "skip.rollout_tq.enable", default=False):
+            return
         num_warmup_batches = self.config.trainer.v1.separate_async.num_warmup_batches
         train_batch_size = self.config.data.train_batch_size
         target_warmup_prompts = num_warmup_batches * train_batch_size
         queue_state = tq.kv_list("train") or {}
-        restored_inflight_prompts = sum(
-            tag.get("is_prompt", False) and tag.get("status") in ("pending", "running")
-            for tag in queue_state.get("train", {}).values()
-        )
-        prompts_to_add = max(0, target_warmup_prompts - restored_inflight_prompts)
+        restored_prompts = sum(tag.get("is_prompt", False) for tag in queue_state.get("train", {}).values())
+        prompts_to_add = max(0, target_warmup_prompts - restored_prompts)
         full_batches, remaining_prompts = divmod(prompts_to_add, train_batch_size)
         for _ in range(full_batches):
             self._add_batch_to_generate()
         if remaining_prompts:
             self._add_prompts_to_generate(remaining_prompts)
         logger.info(
-            "Added %d warmup prompts to the agent loop manager; restored %d in-flight prompts",
+            "Added %d warmup prompts to the agent loop manager; restored %d prompt groups",
             prompts_to_add,
-            restored_inflight_prompts,
+            restored_prompts,
         )
+
+    def on_train_end(self):
+        self.standalone_checkpoint_manager.wait_for_weight_update()
 
     def on_validate_begin(self):
         if self.current_mode == HybridEngineMode.TRAINER:
             logger.info("Switching hybrid engine to rollout mode for validation")
             self.switch_to_rollout()
+        self.standalone_checkpoint_manager.wait_for_weight_update()
         if self.sync_compatible and self._standalone_paused:
             # Validation uses the standalone rollout via get_llm_client(), so
             # make sure it is resumed if it was paused for actor training.
@@ -422,6 +447,10 @@ class PolicyGradientDiffusionTrainerV1SeparateAsync(PolicyGradientDiffusionTrain
         )
 
     def on_step_end(self):
+        # _stop_profiling() already moved this step's flag to prev_step_profile.
+        if self.prev_step_profile:
+            self._stop_rollout_profiling()
+
         config = self.hybrid_rollout_config
         with marked_timer("update_weights", self.timing_raw, color="red"):
             self._pending_sync_metrics = dict(
@@ -540,7 +569,7 @@ class PolicyGradientDiffusionTrainerV1SeparateAsync(PolicyGradientDiffusionTrain
     def switch_to_trainer(self):
         """Stop routing to Hybrid, abort partial requests, and return its GPU memory to training."""
         self.remove_replicas_from_balancer()
-        self.checkpoint_manager.abort_replicas()
+        self.checkpoint_manager.abort_replicas(reject_request=True)
         self.checkpoint_manager.sleep_replicas()
         self.current_mode = HybridEngineMode.TRAINER
 

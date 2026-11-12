@@ -61,6 +61,10 @@ actor_rollout_ref:
       all_ranks: false
       ranks: []
       save_path: ${oc.select:global_profiler.save_path,outputs/profile}
+      relocate_results: ${oc.select:global_profiler.relocate_results,false}
+      finish_hook_cmd: ${oc.select:global_profiler.finish_hook_cmd,null}
+      finish_hook_all_ranks: ${oc.select:global_profiler.finish_hook_all_ranks,false}
+      finish_hook_ranks: ${oc.select:global_profiler.finish_hook_ranks,[]}
       tool_config:
         npu:
           _target_: verl.utils.profiler.config.NPUToolConfig
@@ -90,6 +94,11 @@ actor_rollout_ref:
     strategy: veomni
     ppo_mini_batch_size: 256
     ppo_micro_batch_size_per_gpu: null
+    clip_ratio: 0.2
+    clip_ratio_low: 0.2
+    clip_ratio_high: 0.2
+    clip_ratio_c: 3.0
+    loss_agg_mode: token-mean
     diffusion_loss:
       _target_: verl_omni.workers.config.diffusion.DiffusionLossConfig
       loss_mode: ${oc.select:actor_rollout_ref.model.algorithm,flow_grpo}
@@ -101,6 +110,16 @@ actor_rollout_ref:
       dpo_beta: 2000.0
       kl_mask_threshold: 1.0e-05
       add_kl_coefficient: true
+      dgpo_beta: 100.0
+      crd_beta: 1.0
+      crd_kl_min: 0.0
+      dgpo_clip_range: 0.01
+      awm_clip_range: 0.0001
+      awm_kl_coef: 0.1
+      video_weight: 1.0
+      audio_weight: 1.0
+      video_ref_kl_coef: 0.0
+      audio_ref_kl_coef: 0.0
     rollout_correction:
       _target_: verl.trainer.config.algorithm.RolloutCorrectionConfig
       bypass_mode: ${oc.select:algorithm.rollout_correction.bypass_mode,false}
@@ -128,6 +147,10 @@ actor_rollout_ref:
       save_lora_only: false
       load_contents: ${.save_contents}
       async_save: false
+    ar:
+      _target_: verl_omni.workers.config.diffusion.actor.DiffusionActorARConfig
+      calculate_entropy: false
+      entropy_coeff: 0.0
   ref:
     rollout_n: ${oc.select:actor_rollout_ref.rollout.n,1}
     strategy: veomni
@@ -187,6 +210,10 @@ actor_rollout_ref:
       all_ranks: false
       ranks: []
       save_path: ${oc.select:global_profiler.save_path,outputs/profile}
+      relocate_results: ${oc.select:global_profiler.relocate_results,false}
+      finish_hook_cmd: ${oc.select:global_profiler.finish_hook_cmd,null}
+      finish_hook_all_ranks: ${oc.select:global_profiler.finish_hook_all_ranks,false}
+      finish_hook_ranks: ${oc.select:global_profiler.finish_hook_ranks,[]}
       tool_config:
         npu:
           _target_: verl.utils.profiler.config.NPUToolConfig
@@ -220,6 +247,10 @@ actor_rollout_ref:
       all_ranks: false
       ranks: []
       save_path: ${oc.select:global_profiler.save_path,outputs/profile}
+      relocate_results: ${oc.select:global_profiler.relocate_results,false}
+      finish_hook_cmd: ${oc.select:global_profiler.finish_hook_cmd,null}
+      finish_hook_all_ranks: ${oc.select:global_profiler.finish_hook_all_ranks,false}
+      finish_hook_ranks: ${oc.select:global_profiler.finish_hook_ranks,[]}
       tool_config:
         npu:
           _target_: verl.utils.profiler.config.NPUToolConfig
@@ -254,6 +285,7 @@ actor_rollout_ref:
     dtype: bfloat16
     rollout_attn_backend: FLASH_ATTN_3_HUB
     gpu_memory_utilization: 0.5
+    standalone_gpu_memory_utilization: ${oc.select:actor_rollout_ref.rollout.gpu_memory_utilization}
     enforce_eager: false
     cudagraph_capture_sizes: null
     free_cache_engine: true
@@ -270,9 +302,10 @@ actor_rollout_ref:
     max_num_batched_tokens: 8192
     max_model_len: null
     max_num_seqs: 1024
+    ray_actor_max_concurrency: 1024
     step_execution: false
     enable_chunked_prefill: true
-    enable_prefix_caching: true
+    enable_prefix_caching: false
     logprobs_mode: processed_logprobs
     scheduling_policy: fcfs
     load_format: dummy
@@ -280,6 +313,7 @@ actor_rollout_ref:
     log_prob_micro_batch_size_per_gpu: null
     disable_log_stats: true
     'n': 1
+    m: 1
     seed: 42
     full_determinism: false
     multi_turn:
@@ -293,11 +327,13 @@ actor_rollout_ref:
     val_kwargs:
       _target_: verl_omni.workers.config.diffusion.DiffusionSamplingConfig
       'n': 1
+      m: 1
       pipeline:
         _target_: verl_omni.workers.config.diffusion.DiffusionPipelineConfig
         height: ${oc.select:actor_rollout_ref.rollout.pipeline.height,512}
         width: ${oc.select:actor_rollout_ref.rollout.pipeline.width,512}
         num_inference_steps: 50
+        requested_outputs: ${oc.select:actor_rollout_ref.rollout.pipeline.requested_outputs,null}
         true_cfg_scale: ${oc.select:actor_rollout_ref.rollout.pipeline.true_cfg_scale,1.0}
         max_sequence_length: ${oc.select:actor_rollout_ref.rollout.pipeline.max_sequence_length,512}
         guidance_scale: ${oc.select:actor_rollout_ref.rollout.pipeline.guidance_scale,null}
@@ -315,6 +351,13 @@ actor_rollout_ref:
         sde_window_size: ${oc.select:actor_rollout_ref.rollout.algo.sde_window_size,null}
         sde_window_range: ${oc.select:actor_rollout_ref.rollout.algo.sde_window_range,null}
         sde_contiguous: ${oc.select:actor_rollout_ref.rollout.algo.sde_contiguous,true}
+      ar:
+        _target_: verl_omni.workers.config.diffusion.DiffusionARConfig
+        temperature: ${oc.select:actor_rollout_ref.rollout.ar.temperature,1.0}
+        top_k: ${oc.select:actor_rollout_ref.rollout.ar.top_k,0}
+        top_p: ${oc.select:actor_rollout_ref.rollout.ar.top_p,1.0}
+        repetition_penalty: ${oc.select:actor_rollout_ref.rollout.ar.repetition_penalty,1.0}
+        response_length: ${oc.select:actor_rollout_ref.rollout.ar.response_length,1024}
     algo:
       _target_: verl_omni.workers.config.diffusion.DiffusionRolloutAlgoConfig
       noise_level: 1.0
@@ -330,9 +373,11 @@ actor_rollout_ref:
       height: 512
       width: 512
       num_inference_steps: 10
+      requested_outputs: null
       true_cfg_scale: 1.0
       max_sequence_length: 512
       guidance_scale: null
+      reference_guidance_scale: 4.5
       reference_image_short_edge: null
       num_frames: 1
       frame_rate: 24.0
@@ -340,13 +385,15 @@ actor_rollout_ref:
       task: null
       frame_indices: null
       aspect_ratio: null
+    ar:
+      _target_: verl_omni.workers.config.diffusion.DiffusionARConfig
+      temperature: 1.0
+      top_k: 0
+      top_p: 1.0
+      repetition_penalty: 1.0
+      response_length: 1024
     calculate_log_probs: false
-    llm_calculate_log_probs: false
-    temperature: 1.0
-    top_k: 0
-    top_p: 1.0
-    repetition_penalty: 1.0
-    max_new_tokens: 256
+    ar_calculate_log_probs: false
     rollout_adapter: default
     agent:
       _target_: verl.workers.config.AgentLoopConfig
@@ -381,6 +428,7 @@ actor_rollout_ref:
     external_lib: null
     enable_gradient_checkpointing: true
     config_path: null
+    text_encoder_subfolder: text_encoder
     transformer_subfolder: transformer
     attn_backend: _flash_3_varlen_hub
     use_regional_compile: false
@@ -403,6 +451,7 @@ actor_rollout_ref:
     lora_dtype: null
     fsdp_layer_prefixes:
     - transformer_blocks.
+    use_remove_padding: false
     mtp:
       _target_: verl.workers.config.MtpConfig
       enable: false
@@ -411,9 +460,11 @@ actor_rollout_ref:
       height: ${oc.select:actor_rollout_ref.rollout.pipeline.height,512}
       width: ${oc.select:actor_rollout_ref.rollout.pipeline.width,512}
       num_inference_steps: ${oc.select:actor_rollout_ref.rollout.pipeline.num_inference_steps,10}
+      requested_outputs: ${oc.select:actor_rollout_ref.rollout.pipeline.requested_outputs,null}
       true_cfg_scale: ${oc.select:actor_rollout_ref.rollout.pipeline.true_cfg_scale,1.0}
       max_sequence_length: ${oc.select:actor_rollout_ref.rollout.pipeline.max_sequence_length,512}
       guidance_scale: ${oc.select:actor_rollout_ref.rollout.pipeline.guidance_scale,null}
+      reference_guidance_scale: ${oc.select:actor_rollout_ref.rollout.pipeline.reference_guidance_scale,4.5}
       reference_image_short_edge: ${oc.select:actor_rollout_ref.rollout.pipeline.reference_image_short_edge,null}
       num_frames: ${oc.select:actor_rollout_ref.rollout.pipeline.num_frames,1}
       frame_rate: ${oc.select:actor_rollout_ref.rollout.pipeline.frame_rate,24.0}
@@ -427,6 +478,21 @@ actor_rollout_ref:
       sde_window_size: ${oc.select:actor_rollout_ref.rollout.algo.sde_window_size,null}
       sde_window_range: ${oc.select:actor_rollout_ref.rollout.algo.sde_window_range,null}
       sde_contiguous: ${oc.select:actor_rollout_ref.rollout.algo.sde_contiguous,true}
+    ar:
+      _target_: verl_omni.workers.config.diffusion.DiffusionModelARConfig
+      override_config: {}
+      optim:
+        _target_: verl_omni.workers.config.diffusion.DiffusionModelAROptimizerConfig
+        lr: null
+        weight_decay: null
+        betas: null
+        clip_grad: null
+        lr_warmup_steps_ratio: null
+        lr_warmup_steps: null
+        lr_scheduler_type: null
+        min_lr_ratio: null
+        num_cycles: null
+        override_optimizer_config: null
     model_type: diffusion_model
   separate: false
   hybrid_engine: true
@@ -482,6 +548,10 @@ reward:
         all_ranks: false
         ranks: []
         save_path: ${oc.select:global_profiler.save_path,outputs/profile}/reward_model
+        relocate_results: ${oc.select:global_profiler.relocate_results,false}
+        finish_hook_cmd: ${oc.select:global_profiler.finish_hook_cmd,null}
+        finish_hook_all_ranks: ${oc.select:global_profiler.finish_hook_all_ranks,false}
+        finish_hook_ranks: ${oc.select:global_profiler.finish_hook_ranks,[]}
         tool_config:
           npu:
             _target_: verl.utils.profiler.config.NPUToolConfig
@@ -540,8 +610,12 @@ reward:
       full_determinism: false
       prompt_length: 2048
       response_length: 2048
-      quantization: null
-      quantization_config_file: null
+      quantization:
+        _target_: verl.workers.config.RolloutQuantizationConfig
+        linear: null
+        moe: null
+        ignore: []
+        config_file: null
       mtp: null
       disaggregation:
         enabled: false
@@ -564,6 +638,7 @@ reward:
   accelerator_workers:
     enabled: false
   reward_functions: {}
+  multi_reward_concurrency: 1
   models: {}
   aggregation: weighted_sum
   reward_manager:
@@ -588,6 +663,7 @@ distillation:
       key: null
       model_path: null
       world_size: 0
+      guidance_scale: null
   teacher_key: data_source
   scheduler: inline
 dmd:
@@ -629,7 +705,12 @@ algorithm:
   old_policy_decay_schedule: copy
   old_policy_decay: null
   old_policy_update_interval: 1
+  reference_policy_decay_schedule: linear_from_0_25_to_0_5
+  reference_policy_decay: null
+  reference_policy_update_interval: 1
   timestep_fraction: 1.0
+  train_timestep_range: null
+  train_timestep_count: null
   adv_mode: continuous
   paired_preference: false
   rollout_correction:
@@ -674,6 +755,16 @@ trainer:
   device: cuda
   use_v1: true
   v1:
+    watchdog:
+      enabled: false
+      window_size: 3
+      warmup_steps: 5
+      cooldown_steps: 20
+      reward_std_max: 1.0e-08
+      grad_norm_max: 1.0e-12
+      ratio_lower: 0.5
+      ratio_upper: 2.0
+      max_staleness: null
     trainer_mode: sync
     sync: {}
     colocate_async:
@@ -707,6 +798,10 @@ global_profiler:
   steps: null
   profile_continuous_steps: false
   save_path: outputs/profile
+  relocate_results: false
+  finish_hook_cmd: null
+  finish_hook_all_ranks: false
+  finish_hook_ranks: []
   global_tool_config:
     nsys:
       _target_: verl.utils.profiler.config.NsightToolConfig
@@ -734,26 +829,30 @@ ray_kwargs:
   timeline_json_file: null
 transfer_queue:
   enable: false
-  metrics:
-    enabled: false
-    port: 0
   backend:
     storage_backend: SimpleStorage
     SimpleStorage:
-      total_storage_size: 100000
+      total_storage_size: null
       num_data_storage_units: 8
+      ssd_offload:
+        enabled: false
+        path: null
+        threshold_bytes: 1048576
     MooncakeStore:
       auto_init: false
-      metadata_server: localhost:50123
+      metadata_server: P2PHANDSHAKE
       master_server_address: localhost:50124
-      local_hostname: localhost
-      protocol: tcp
       global_segment_size: 4294967296
       local_buffer_size: 1073741824
-      device_name: ''
+      hard_pin: true
 skip:
   _target_: verl.utils.skip.SkipManagerConfig
   rollout:
+    enable: false
+    dump_dir: ~/.verl/rollout_dump
+    steps: []
+    action: cache
+  rollout_tq:
     enable: false
     dump_dir: ~/.verl/rollout_dump
     steps: []
@@ -763,3 +862,36 @@ skip:
     dump_dir: ~/.verl/rollout_dump
     steps: []
     action: cache
+omni_skip:
+  _target_: verl_omni.utils.skip.OmniSkipConfig
+  reward:
+    enable: false
+    dump_dir: ~/.verl/stage_dump
+    steps: []
+    action: cache
+  old_log_prob:
+    enable: false
+    dump_dir: ~/.verl/stage_dump
+    steps: []
+    action: cache
+  ref_log_prob:
+    enable: false
+    dump_dir: ~/.verl/stage_dump
+    steps: []
+    action: cache
+  advantage:
+    enable: false
+    dump_dir: ~/.verl/stage_dump
+    steps: []
+    action: cache
+  actor_update:
+    enable: false
+    dump_dir: ~/.verl/stage_dump
+    steps: []
+    action: empty
+  weight_sync:
+    enable: false
+    dump_dir: ~/.verl/stage_dump
+    steps: []
+    action: empty
+    ack_stale_weights: false

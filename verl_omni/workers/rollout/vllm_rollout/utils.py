@@ -70,6 +70,17 @@ def _bucket_is_delta_flush(weights: list) -> bool:
     return bool(weights) and weights[0][0].partition("#")[0] == SPEC_NAME
 
 
+def _peft_misroute(weights: list) -> RuntimeError | None:
+    """The fail-loud error when PEFT-wrapped names arrive at a replica with no LoRA peft_config."""
+    if any(name.startswith("base_model.") for name, _ in weights):
+        return RuntimeError(
+            "PEFT-wrapped names reached a non-LoRA load path: this replica has "
+            "no LoRA peft_config for the sync, so the adapters cannot be "
+            "routed to the LoRA manager"
+        )
+    return None
+
+
 class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
     """
     The class for vLLM-Omni's worker to inherit from, in the colocate setting.
@@ -91,6 +102,17 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
 
         # 1. patch for Lora
         VLLMOmniHijack.hijack()
+        # 2. Teach the AR runners to return the thinker's last-layer hidden states
+        # (full-vocab OPD teacher signal). The patch targets the runner inside
+        # the StageEngineCoreProc sub-process, where server-actor installs do
+        # not propagate; the worker extension materializes there.
+        from verl_omni.workers.rollout.vllm_rollout.process_hidden_states import (
+            apply_hidden_states_patches,
+        )
+
+        # TODO(upstream): move the generic per-request opt-in hidden-state return
+        # (vLLM core's `return_hidden_states`) into vllm-omni as a wire field.
+        apply_hidden_states_patches()
 
         return super().__new__(cls)
 
@@ -105,16 +127,6 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
         later full-weight sync is not misrouted.
         """
         self._pending_lora_peft_config = peft_config
-
-    def _move_diffusion_lora_stacks_to_device(self) -> None:
-        """Move unregistered LoRA stacks to the worker device before execution."""
-        # TODO(@NancyFyong): Move this into vLLM-Omni's DiffusionLoRAManager.
-        manager = getattr(self, "lora_manager", None)
-        for module in getattr(manager, "_lora_modules", {}).values():
-            for name in ("lora_a_stacked", "lora_b_stacked"):
-                tensors = getattr(module, name, None)
-                if tensors is not None:
-                    setattr(module, name, tuple(tensor.to(self.device, non_blocking=True) for tensor in tensors))
 
     def _get_standard_weight_model_and_config(self):
         """Return ``(model, model_config)`` for the standard (non-LoRA) AR weight path.
@@ -191,13 +203,13 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
             t1 = time.perf_counter()
             logger.debug("remove_lora took %.3f ms", (t1 - t0) * 1000)
 
-            # Accumulate all LoRA tensors across buckets (LoRA weights are small;
-            # a single atomic ``add_lora`` is both correct for multi-bucket edge
-            # cases and more efficient than per-bucket loading).
+            # Clone: add_lora runs after receive_weights returns, past the reused IPC buffer's lifetime.
             t_recv_start = time.perf_counter()
             accumulated_weights: dict[str, torch.Tensor] = {}
             receiver.receive_weights(
-                on_bucket_received=lambda weights, *args, **kwargs: accumulated_weights.update(weights)
+                on_bucket_received=lambda weights, *args, **kwargs: accumulated_weights.update(
+                    (name, tensor.clone()) for name, tensor in weights
+                )
             )
             t_recv_end = time.perf_counter()
             lora_total_bytes = sum(t.element_size() * t.numel() for t in accumulated_weights.values())
@@ -232,8 +244,6 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
                 )
             t2 = time.perf_counter()
             self.add_lora(lora_request)
-            if self._get_standard_weight_model_and_config() is None:
-                self._move_diffusion_lora_stacks_to_device()
             t3 = time.perf_counter()
             logger.debug("add_lora took %.3f ms", (t3 - t2) * 1000)
             logger.debug(
@@ -252,30 +262,53 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
             logger.info("Loading standard weights (async)")
             if delta_flush is True:
                 delta_state: dict = {}
-                receiver.receive_weights(
-                    on_bucket_received=lambda weights, is_last=False, *args, **kwargs: self._apply_delta_bucket(
-                        weights, delta_state, is_last=is_last
-                    )
-                )
+                misroute: RuntimeError | None = None
+
+                def _delta_bucket(weights, is_last=False, *args, **kwargs):
+                    nonlocal misroute
+                    if misroute is not None:
+                        # Keep draining so the sender completes its stream and the
+                        # adapter surfaces the error below instead of blocking.
+                        return
+                    if (err := _peft_misroute(weights)) is not None:
+                        misroute = err
+                        return
+                    self._apply_delta_bucket(weights, delta_state, is_last=is_last)
+
+                receiver.receive_weights(on_bucket_received=_delta_bucket)
+                if misroute is not None:
+                    raise misroute
                 self._finish_delta_stream(delta_state)
                 return
 
             delta_ctx = {"delta": None}
+            misroute: RuntimeError | None = None
 
             def _route_bucket(weights, is_last=False, *args, **kwargs):
+                nonlocal misroute
                 # delta_ctx carries the sniffed routing flag and, once delta is
                 # detected, the lazy applier state (see _apply_delta_bucket).
                 # A zero-flush sync still delivers one empty terminal bucket; that
                 # must stay a no-op, not a dense load_weights([]) / post-load pass.
                 # Once a delta stream has started, an empty trailing bucket still
                 # has to reach the applier so is_last can close the flush.
+                if misroute is not None:
+                    # Keep draining so the sender completes its stream and the
+                    # adapter surfaces the error below instead of blocking.
+                    return
                 if delta_ctx["delta"] is None:
                     if not weights:
                         return
                     delta_ctx["delta"] = _bucket_is_delta_flush(weights)
                 if delta_ctx["delta"]:
+                    if (err := _peft_misroute(weights)) is not None:
+                        misroute = err
+                        return
                     self._apply_delta_bucket(weights, delta_ctx, is_last=is_last)
                 elif weights:
+                    if (err := _peft_misroute(weights)) is not None:
+                        misroute = err
+                        return
                     dense_on_bucket(weights)
 
             standard = self._get_standard_weight_model_and_config()
@@ -307,6 +340,8 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
                         model.load_weights(weights)
 
                     receiver.receive_weights(on_bucket_received=_route_bucket)
+                    if misroute is not None:
+                        raise misroute
                     if delta_ctx["delta"]:
                         self._finish_delta_stream(delta_ctx)
                     elif delta_ctx["delta"] is False:
@@ -338,6 +373,8 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
                         model.load_weights([(name, tensor.clone()) for name, tensor in weights])
 
                     receiver.receive_weights(on_bucket_received=_route_bucket)
+                    if misroute is not None:
+                        raise misroute
                     if delta_ctx["delta"]:
                         self._finish_delta_stream(delta_ctx)
                     elif delta_ctx["delta"] is False:
@@ -358,6 +395,8 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
                     load_fn(weights)
 
                 receiver.receive_weights(on_bucket_received=_route_bucket)
+                if misroute is not None:
+                    raise misroute
                 if delta_ctx["delta"]:
                     self._finish_delta_stream(delta_ctx)
 

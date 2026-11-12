@@ -19,8 +19,7 @@ delivers tokens; diffusion sleep/wake ACKs are not engine-checked.
 """
 
 import asyncio
-import time
-from concurrent.futures import ThreadPoolExecutor
+import logging
 from types import SimpleNamespace
 
 import pytest
@@ -33,6 +32,8 @@ from verl_omni.workers.rollout.vllm_rollout.vllm_omni_async_server import vLLMOm
 from verl_omni.workers.rollout.vllm_rollout.vllm_omni_strategy_base import OmniStrategyBase  # noqa: E402
 
 _SUCCESS_ACK = SimpleNamespace(status="SUCCESS")
+
+pytestmark = pytest.mark.asyncio
 
 
 class _FakeRequestState:
@@ -66,14 +67,6 @@ class _FakeAsyncOmni:
         self.late_states: dict[str, _FakeRequestState] | None = None
         # Fail only the straggler (second) abort call.
         self.fail_straggler_abort = False
-        # Real-shaped handle: the frontend multimodal cache lives on the
-        # renderer, so the fake must expose clear_mm_cache_async there.
-        self.mm_clears = 0
-
-        async def _clear_mm_cache_async():
-            self.mm_clears += 1
-
-        self.renderer = SimpleNamespace(clear_mm_cache_async=_clear_mm_cache_async)
 
     async def abort(self, request_ids):
         self.calls.append("abort")
@@ -131,6 +124,7 @@ async def test_abort_runs_before_pause_with_one_batched_call():
         "ext-1-abc": _FakeRequestState("ext-1-abc", "ext-1"),
         "ext-1-def": _FakeRequestState("ext-1-def", "ext-1"),  # same external id
         "ext-2-xyz": _FakeRequestState("ext-2-xyz", "ext-2"),
+        "ext-none": _FakeRequestState("ext-none", None),  # None external id must be skipped
     }
     engine = _FakeAsyncOmni(states=states)
     server = _make_server(engine)
@@ -154,6 +148,69 @@ async def test_abort_with_no_in_flight_requests_still_pauses():
     assert engine.abort_calls == [[]]
     assert engine.calls == ["abort", "pause"]
     assert result == {"aborted_count": 0, "request_ids": []}
+
+
+async def test_abort_only_aborts_without_pausing():
+    states = {"ext-1-abc": _FakeRequestState("ext-1-abc", "ext-1")}
+    engine = _FakeAsyncOmni(states=states)
+    server = _make_server(engine)
+
+    result = await server.abort_all_requests(abort_only=True)
+
+    # abort_only cancels current engine requests and keeps admission open: no pause.
+    assert engine.calls == ["abort"]
+    assert engine.pause_calls == []
+    assert result == {"aborted_count": 1, "request_ids": ["ext-1"]}
+
+
+async def test_abort_only_failure_unblocks_generators_without_pausing():
+    states = {
+        "ext-1-abc": _FakeRequestState("ext-1-abc", "ext-1"),
+        "ext-2-xyz": _FakeRequestState("ext-2-xyz", "ext-2"),
+    }
+    engine = _FakeAsyncOmni(states=states, fail_abort=True)
+    server = _make_server(engine)
+
+    with pytest.raises(RuntimeError, match="abort rpc failed"):
+        await server.abort_all_requests(abort_only=True)
+
+    assert engine.pause_calls == []
+    for state in states.values():
+        terminal = state.queue.get_nowait()
+        assert terminal.finished is True
+        assert terminal.engine_outputs.outputs[0].finish_reason == "abort"
+
+
+async def test_reject_request_is_accepted_and_still_pauses(caplog):
+    states = {"ext-1-abc": _FakeRequestState("ext-1-abc", "ext-1")}
+    engine = _FakeAsyncOmni(states=states)
+    server = _make_server(engine)
+
+    with caplog.at_level(logging.WARNING, logger=server_module.logger.name):
+        await server.abort_all_requests(reject_request=True)
+
+    # The AsyncOmni engine has no reject knob; arrivals behind the pause park.
+    assert engine.calls == ["abort", "pause"]
+    assert "park until resume" in caplog.text
+
+
+async def test_generate_accepts_session_id_without_forwarding():
+    engine = _FakeAsyncOmni()
+    server = _make_server(engine)
+    forwarded: dict = {}
+
+    async def _record_generate(**kwargs):
+        forwarded.update(kwargs)
+        return SimpleNamespace()
+
+    server._generate_strategy = SimpleNamespace(generate=_record_generate)
+
+    await server.generate(prompt_ids=[1], sampling_params={"top_p": 1.0}, request_id="req-1", session_id="sess-1")
+
+    # Cross-request server affinity has no AsyncOmni counterpart; routing
+    # stickiness stays owned by the load balancer.
+    assert forwarded["request_id"] == "req-1"
+    assert "session_id" not in forwarded
 
 
 # ---------------------------------------------------------------------------
@@ -233,82 +290,8 @@ async def test_lifecycle_guards_skip_standalone_and_non_driver_ranks():
 
 
 # ---------------------------------------------------------------------------
-# mm cache drift: EngineCore.sleep wipes only the engine-side multimodal
-# cache, so every successful sleep must also clear the frontend copy through
-# the renderer (the engine's reset_mm_cache no-ops on a missing attribute)
+# fail-closed ack validation
 # ---------------------------------------------------------------------------
-
-
-async def test_sleep_and_release_kv_cache_clear_frontend_mm_sender_cache():
-    engine = _FakeAsyncOmni()
-    server = _make_server(engine)
-
-    await server.sleep()
-    assert engine.sleep_calls[0]["level"] == 1
-    assert engine.mm_clears == 1
-
-    await server.release_kv_cache()
-    assert engine.mm_clears == 2
-
-
-async def test_frontend_mm_clear_skipped_when_sleep_acks_fail():
-    engine = _FakeAsyncOmni(sleep_acks=[SimpleNamespace(status="FAILED", error_msg="boom")])
-    server = _make_server(engine)
-
-    with pytest.raises(RuntimeError, match="sleep failed"):
-        await server.sleep()
-
-    assert engine.mm_clears == 0
-
-
-async def test_sleep_skips_frontend_mm_clear_when_renderer_is_none():
-    # Diffusion-only engines build no InputProcessor, so renderer is None.
-    engine = _FakeAsyncOmni()
-    engine.renderer = None
-    server = _make_server(engine)
-
-    await server.sleep()
-    await server.release_kv_cache()
-    assert engine.mm_clears == 0
-    assert engine.sleep_calls[0]["level"] == 1
-
-
-async def test_abort_pause_clears_frontend_mm_sender_cache():
-    engine = _FakeAsyncOmni(states={"ext-1-abc": _FakeRequestState("ext-1-abc", "ext-1")})
-    server = _make_server(engine)
-
-    await server.abort_all_requests()
-
-    # pause_generation(clear_cache=True) wipes the engine-side mm cache; the
-    # frontend copy must go with it or hash-only follow-ups finish empty.
-    assert engine.pause_calls[0]["clear_cache"] is True
-    assert engine.mm_clears == 1
-
-
-async def test_abort_skips_frontend_mm_clear_without_cache_reset():
-    engine = _FakeAsyncOmni(states={"ext-1-abc": _FakeRequestState("ext-1-abc", "ext-1")})
-    server = _make_server(engine)
-
-    await server.abort_all_requests(reset_prefix_cache=False)
-
-    assert engine.pause_calls[0]["clear_cache"] is False
-    assert engine.mm_clears == 0
-
-
-async def test_frontend_mm_clear_skipped_when_pause_fails():
-    class _PauseFailsEngine(_FakeAsyncOmni):
-        async def pause_generation(self, **kwargs):
-            self.calls.append("pause")
-            self.pause_calls.append(kwargs)
-            raise RuntimeError("pause rpc failed")
-
-    engine = _PauseFailsEngine()
-    server = _make_server(engine)
-
-    with pytest.raises(RuntimeError, match="pause rpc failed"):
-        await server.abort_all_requests()
-
-    assert engine.mm_clears == 0
 
 
 async def test_ack_validation_fails_closed():
@@ -351,11 +334,11 @@ async def test_engine_side_rpc_failure_propagates_from_all_four_methods():
 
 
 # ---------------------------------------------------------------------------
-# fail-closed abort: enqueue terminals first, then raise; timeout raises
+# fail-closed abort: abort failure propagates; timeout raises
 # ---------------------------------------------------------------------------
 
 
-async def test_abort_failure_enqueues_terminals_then_raises():
+async def test_abort_failure_propagates_without_pausing():
     states = {
         "ext-1-abc": _FakeRequestState("ext-1-abc", "ext-1"),
         "ext-2-xyz": _FakeRequestState("ext-2-xyz", "ext-2"),
@@ -366,6 +349,7 @@ async def test_abort_failure_enqueues_terminals_then_raises():
     with pytest.raises(RuntimeError, match="abort rpc failed"):
         await server.abort_all_requests()
 
+    assert engine.pause_calls == []
     for state in states.values():
         terminal = state.queue.get_nowait()
         assert terminal.finished is True
@@ -404,7 +388,9 @@ async def test_abort_ack_timeout_raises(monkeypatch):
         await server.abort_all_requests()
 
     for state in states.values():
-        assert state.queue.get_nowait().finished is True  # terminal still enqueued
+        terminal = state.queue.get_nowait()
+        assert terminal.finished is True
+        assert terminal.engine_outputs.outputs[0].finish_reason == "abort"
 
 
 # ---------------------------------------------------------------------------
@@ -425,6 +411,19 @@ async def test_abort_request_aborts_single_id_without_pausing():
     assert engine.calls == ["abort"], "single-request abort must not pause the engine"
     assert states["ext-1-abc"].queue.qsize() == 1  # engine terminal only
     assert result == {"aborted": True, "request_id": "ext-1"}
+
+
+async def test_abort_request_failure_enqueues_terminal():
+    states = {"ext-1-abc": _FakeRequestState("ext-1-abc", "ext-1")}
+    engine = _FakeAsyncOmni(states=states, fail_abort=True)
+    server = _make_server(engine)
+
+    with pytest.raises(RuntimeError, match="abort rpc failed"):
+        await server.abort_request("ext-1")
+
+    terminal = states["ext-1-abc"].queue.get_nowait()
+    assert terminal.finished is True
+    assert terminal.engine_outputs.outputs[0].finish_reason == "abort"
 
 
 async def test_abort_request_unknown_id_is_a_noop():
@@ -485,7 +484,12 @@ def _build_async_omni(stage_type: str):
         return [ack]
 
     omni = object.__new__(AsyncOmni)
-    omni.engine = SimpleNamespace(stage_clients=[SimpleNamespace(stage_type=stage_type)])
+    omni.engine = SimpleNamespace(
+        stage_clients=[SimpleNamespace(stage_type=stage_type)],
+        stage_configs=[SimpleNamespace(stage_type=stage_type)],
+    )
+    omni.input_processor = None
+    omni._paused_stage_ids = set()
     omni._pause_cond = asyncio.Condition()
     omni._admitting = 0
     omni._paused = False
@@ -672,43 +676,6 @@ async def test_no_second_abort_without_stragglers():
 
     assert engine.abort_calls == [["a"]]
     assert result["aborted_count"] == 1
-
-
-class _BackloggedMmRenderer:
-    """Renderer whose mm clear queues behind real jobs on a single-worker executor."""
-
-    def __init__(self, backlog: int, job_s: float):
-        self._executor = ThreadPoolExecutor(max_workers=1)
-        self._backlog = backlog
-        self._job_s = job_s
-        self.clears = 0
-
-    def _clear(self) -> None:
-        self.clears += 1
-
-    async def clear_mm_cache_async(self) -> None:
-        loop = asyncio.get_running_loop()
-        for _ in range(self._backlog):
-            await loop.run_in_executor(self._executor, time.sleep, self._job_s)
-        await loop.run_in_executor(self._executor, self._clear)
-
-
-async def test_mm_clear_queued_behind_backlog_abandons_wait_but_still_runs(monkeypatch):
-    """A frontend mm clear stuck behind preprocessing must not hang the abort,
-    and must still execute afterwards (not be cancelled by the abandoned wait)."""
-    monkeypatch.setenv("VERL_OMNI_MM_CLEAR_TIMEOUT_S", "0.1")
-    engine = _FakeAsyncOmni(states={"i0": _FakeRequestState("i0", "a")})
-    engine.renderer = _BackloggedMmRenderer(backlog=3, job_s=0.2)  # ~0.6s of backlog
-    server = _make_server(engine)
-
-    loop = asyncio.get_running_loop()
-    start = loop.time()
-    result = await asyncio.wait_for(server.abort_all_requests(), timeout=5)
-
-    assert loop.time() - start < 0.5  # abandoned the wait well before the backlog drained
-    assert result["aborted_count"] == 1
-    await _wait_until(lambda: engine.renderer.clears == 1, timeout=5)  # clear still ran
-    engine.renderer._executor.shutdown(wait=True)
 
 
 async def test_straggler_abort_failure_enqueues_terminals_then_raises():

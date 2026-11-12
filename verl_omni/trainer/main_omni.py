@@ -32,7 +32,7 @@ from typing import Any
 import hydra
 import ray
 from omegaconf import OmegaConf, open_dict
-from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
+from verl.trainer.constants_ppo import batch_invariant_requested, export_batch_invariant_env, get_ppo_ray_runtime_env
 from verl.trainer.ppo.utils import need_reference_policy
 from verl.utils.device import auto_set_device, is_cuda_available
 
@@ -41,7 +41,12 @@ from verl_omni.trainer.diffusion.ray_diffusion_trainer import (
     DirectPreferenceRayTrainer,
     PolicyGradientRayTrainer,
 )
-from verl_omni.utils.config import validate_config as validate_omni_config
+from verl_omni.utils.config import (
+    resolve_lora_config,
+)
+from verl_omni.utils.config import (
+    validate_config as validate_omni_config,
+)
 from verl_omni.utils.fs import resolve_model_local_dir
 from verl_omni.utils.rl_insight import enable_rl_insight
 from verl_omni.workers.config.reward import reward_pool_is_separate, reward_role_required
@@ -90,10 +95,7 @@ class RayTrainerTaskRunner:
         actor_rollout_cls = ActorRolloutRefWorker
         ray_worker_group_cls = RayWorkerGroup
 
-        lora_rank = config.actor_rollout_ref.model.get("lora", {}).get("rank", 0)
-        if lora_rank <= 0:
-            lora_rank = config.actor_rollout_ref.model.get("lora_rank", 0)
-        ref_in_actor = lora_rank > 0 or config.actor_rollout_ref.model.get("lora_adapter_path") is not None
+        ref_in_actor = resolve_lora_config(config.actor_rollout_ref.model).enabled
 
         if config.algorithm.sample_source == "offline":
             if not hasattr(Role, "Actor"):
@@ -287,6 +289,11 @@ def launch_ray_task_runner(
     """Initialize Ray (if needed) and run ``task_runner_class.run(config)`` remotely."""
     if propagate_determinism:
         maybe_set_determinism_env(config)
+
+    # Mirror verl's main_ppo: export before ray.init() so get_ppo_ray_runtime_env()
+    # forwards the batch-invariant env pair to every actor worker.
+    if batch_invariant_requested(config):
+        export_batch_invariant_env()
 
     if not ray.is_initialized():
         default_runtime_env = _resolve_ppo_runtime_env(config)

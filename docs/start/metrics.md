@@ -1,7 +1,7 @@
 (metrics)=
 # Training Metrics
 
-Last updated: 09/28/2026
+Last updated: 10/24/2026
 
 Metrics are logged each step to your configured backend (console / W&B). The diffusion RL
 trainers share the group-statistic metrics, and each objective adds its own block below. Names
@@ -77,3 +77,58 @@ largest residuals.
 - $A$ — `adv_clip_max`
 - $\lambda$ — `ref_kl_coef`
 - $t$ — flow time
+
+## DGPO
+
+DGPO consumes the same rollouts and group statistics as DiffusionNFT, but weights each sample's
+flow-matching error by a sigmoid of its whole group's preference score. With
+$d_i = \mathrm{mean}\left((v - v_\theta)^2\right)$ the per-sample error against the target velocity
+$v$, and $d_i^{\mathrm{ref}}$, $d_i^{\mathrm{old}}$ the same error under the reference and rollout
+policies, the group score is $s_G = \tfrac{\beta}{|G|}\sum_{i \in G} A_i (d_i - d_i^{\mathrm{ref}})$
+and the group weight is $w_G = \sigma(s_G)$.
+
+| Metric | Definition | Interpretation |
+|--------|------------|----------------|
+| total_loss | $\text{policy loss} + \lambda \cdot \text{ref KL loss}$ | The objective actually backpropagated. |
+| policy_loss | $\overline{w_G A_i d_i}$ | The group-weighted fit that drives learning. Its sign follows which samples dominate the batch and is not itself a progress measure; read the reward curves. |
+| dsm_loss | $\overline{d_i}$ | Mean flow-matching error of the trained policy on the rollout samples. |
+| ref_dsm_loss | $\overline{d_i^{\mathrm{ref}}}$ | The same error under the reference policy; `dsm_loss - ref_dsm_loss` is what the group score is built from. |
+| old_dsm_loss | $\overline{d_i^{\mathrm{old}}}$ | The same error under the rollout policy, used by the clip. |
+| group_weight_mean | $\overline{w_G}$ | Mean group weight. Exactly $0.5$ while the policy equals the reference (before the first optimizer update of a fresh LoRA). |
+| group_weight_dev | $\overline{\lvert w_G - 0.5 \rvert}$ | How far groups have moved from the neutral weight. Near $0$ means the policy barely differs from the reference on these samples; near $0.5$ means the weights saturate and `dgpo_beta` may be too large. |
+| clip_frac | fraction of samples with $\exp(d_i^{\mathrm{old}} - d_i)$ outside $[1 - \epsilon_c, 1 + \epsilon_c]$ in the direction of $A_i$ | Share of samples whose error was detached by the clip. A value climbing toward $1$ means the update outruns the rollout policy. |
+| ref_kl_loss | $\overline{(v_\theta - v_\mathrm{ref})^2}$ | Deviation from the reference policy, implemented as a mean squared difference. |
+
+**Variables.** $A_i$ — clipped group-normalized advantage; $\beta$ — `dgpo_beta`; $\epsilon_c$ —
+`dgpo_clip_range`; $\lambda$ — `ref_kl_coef`; $v_\theta$, $v_\mathrm{ref}$ — velocities of the
+trained and reference policies.
+
+## CRD
+
+`old_policy/*` reports sampling-adapter refreshes; `reference_policy/*` reports moving-reference
+refreshes. Each includes `update_applied`, `copy_update`, `ema_update`, and `decay` for that iteration.
+
+CRD matches within-prompt centered rewards to implicit rewards estimated from denoising
+errors. With $d_i^\theta$ and $d_i^{\mathrm{moving}}$ the adaptive-normalized denoising errors
+of the trained policy and moving reference, the implicit reward is
+$u_i = d_i^{\mathrm{moving}} - d_i^\theta$. The bounded target reward is
+$q_i = \tfrac12 + \mathrm{clip}(A_i, -C, C)/(2C)$.
+The centered values are $\widetilde u_i = u_i - \operatorname{sg}(\overline u_G)$ and
+$\widetilde q_i = q_i - \overline q_G$, where $G$ is the sample's prompt group.
+
+| Metric | Definition | Interpretation |
+|--------|------------|----------------|
+| crd_loss | $\text{crd policy loss} + \text{crd KL loss}$ | The objective actually backpropagated. |
+| crd_policy_loss | $\dfrac{C}{\beta}\operatorname{mean}_i[(\beta\widetilde u_i - \widetilde q_i)^2]$ | Error in matching the centered implicit rewards to the centered target rewards. |
+| crd_kl_loss | $\operatorname{mean}_i[\lambda_i\operatorname{mean}((v_\theta - v_{\mathrm{init}}^\gamma)^2)]$ | Weighted pretrained-anchor penalty. Compare with `crd_policy_loss` to see the anchor's contribution to the update. |
+| crd_kl_coefficient | $\operatorname{mean}_i[\lambda_i]$ | Mean anchor strength, with $\lambda_i = \lambda_{\min} + r_i(\lambda_{\max} - \lambda_{\min})$. Higher raw rewards increase this coefficient. |
+| crd_implicit_reward | $\operatorname{mean}_i[u_i]$ | Mean reduction in adaptive-normalized denoising error relative to the moving reference, before centering. |
+
+**Variables.**
+
+- $A_i$ — group-normalized advantage; $C$ — `adv_clip_max`
+- $\beta$ — `crd_beta`; $r_i$ — raw reward in $[0,1]$
+- $\lambda_{\min}$ — `crd_kl_min`; $\lambda_{\max}$ — `ref_kl_coef`
+- $v_\theta$ — trained-policy velocity; $v_{\mathrm{init}}^\gamma$ — frozen pretrained velocity with CFG scale $\gamma$
+- $d_i^\phi$ — mean squared velocity error divided by an adaptive denominator: the detached mean absolute error floored at `adaptive_weight_min`
+- $\overline u_G$, $\overline q_G$ — within-prompt group means; $\operatorname{sg}$ — stop-gradient

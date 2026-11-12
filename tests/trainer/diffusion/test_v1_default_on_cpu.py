@@ -37,6 +37,18 @@ def test_diffusion_config_defaults_to_v1():
     assert config.trainer.v1.trainer_mode == "sync"
 
 
+def test_diffusion_rollout_standalone_budget_overrides_without_struct_error():
+    # The standalone replicas' memory budget must be a listed key of the diffusion
+    # tree (it lives in DiffusionRolloutConfig), not verl's rollout yaml: a plain
+    # override reaches the separate-async trainer's budget lookup instead of
+    # failing Hydra struct mode.
+    config = compose_diffusion_config(["actor_rollout_ref.rollout.standalone_gpu_memory_utilization=0.85"])
+    assert config.actor_rollout_ref.rollout.standalone_gpu_memory_utilization == 0.85
+
+    default = compose_diffusion_config()
+    assert default.actor_rollout_ref.rollout.standalone_gpu_memory_utilization == 0.5
+
+
 @pytest.mark.parametrize(
     ("sample_source", "trainer_type", "expected"),
     [
@@ -75,10 +87,15 @@ def test_offline_dpo_v0_launch_stays_silent():
     assert config.trainer.use_v1 is False
 
 
-def test_run_diffusion_v1_force_enables_transfer_queue_before_ray_init(monkeypatch):
+@pytest.mark.parametrize(
+    "overrides",
+    [[], ["+ray_kwargs.ray_init.runtime_env.env_vars.OMP_NUM_THREADS='8'"]],
+    ids=["default", "user_env_vars"],
+)
+def test_run_diffusion_v1_force_enables_transfer_queue_before_ray_init(monkeypatch, overrides):
     import verl_omni.trainer.main_diffusion_v1 as main_v1
 
-    config = compose_diffusion_config()
+    config = compose_diffusion_config(overrides)
     assert config.transfer_queue.enable is False
 
     captured = {}
@@ -110,3 +127,5 @@ def test_run_diffusion_v1_force_enables_transfer_queue_before_ray_init(monkeypat
     assert config.transfer_queue.enable is True
     env_vars = captured["runtime_env"]["env_vars"]
     assert env_vars.get("TRANSFER_QUEUE_ENABLE") == "1"
+    if overrides:
+        assert env_vars.get("OMP_NUM_THREADS") == "8"

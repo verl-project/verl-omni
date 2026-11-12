@@ -113,8 +113,8 @@ def runtime_manager(monkeypatch, request):
     import vllm.distributed.parallel_state as parallel_state
     from vllm.config import VllmConfig, set_current_vllm_config
     from vllm_omni.diffusion.data import OmniDiffusionConfig
-    from vllm_omni.diffusion.lora.manager import DiffusionLoRAManager
     from vllm_omni.diffusion.models.qwen_image import qwen_image_transformer as qwen
+    from vllm_omni.lora.manager import DiffusionLoRAManager
 
     from verl_omni.pipelines.qwen_image_flow_grpo.vllm_omni_rollout_adapter import QwenImagePipelineWithLogProb
     from verl_omni.utils.vllm_omni.utils import VLLMOmniHijack
@@ -162,19 +162,16 @@ def test_export_load_bind_activate_contract(runtime_manager, monkeypatch, case):
     mapped, _ = manager.pipeline.map_lora_update_to_engine(
         {name: tensor.clone() for name, tensor in params.items()}, config
     )
-    manager.set_active_adapter(
-        OmniTensorLoRARequest(
-            lora_name="actor", lora_int_id=1, lora_path="in-memory", lora_tensors=params, peft_config=config
-        )
+    request = OmniTensorLoRARequest(
+        lora_name="actor", lora_int_id=1, lora_path="in-memory", lora_tensors=params, peft_config=config
     )
-    assert manager._active_adapter_id == 1
     if case == "unmapped":
-        assert any(name.endswith(".to_out.0") for name in manager._registered_adapters[1].loras)
-        # Set-valued PEFT targets can wrap the output layer, but its adapter stays unbound.
-        output = manager._lora_modules.get("transformer.transformer_blocks.0.attn.to_out")
-        if output is not None:
-            assert all(torch.count_nonzero(t) == 0 for t in (*output.lora_a_stacked, *output.lora_b_stacked))
+        with pytest.raises(ValueError, match=r"binding is incomplete.*to_out\.0"):
+            manager.set_active_adapter(request)
         return
+
+    manager.set_active_adapter(request)
+    assert manager._active_adapter_id == 1
 
     assert any(name.endswith(".to_out") for name in manager._lora_modules)
     bound = 0

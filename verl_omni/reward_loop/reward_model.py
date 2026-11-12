@@ -35,6 +35,7 @@ from verl_omni.workers.config.reward import (
 )
 
 from .accelerator_reward_workers import _IndexedResourcePool
+from .reward_model_executor import _await_owned
 
 __all__ = [
     "EngineManagedRewardModel",
@@ -102,7 +103,10 @@ class MultiRewardModelManager:
 
     async def wake_up(self) -> None:
         """Wake independent reward models concurrently."""
-        await asyncio.gather(*(model.wake_up() for model in self.models.values()))
+        results = await asyncio.gather(*(model.wake_up() for model in self.models.values()), return_exceptions=True)
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
 
     async def sleep(self) -> None:
         """Attempt to sleep every model and report the first lifecycle error."""
@@ -116,6 +120,17 @@ class MultiRewardModelManager:
         if errors:
             raise errors[0]
 
+    async def close_native_models(self) -> None:
+        """Release native models permanently without changing engine lifecycle."""
+        await _await_owned(self._close_native_models())
+
+    async def _close_native_models(self) -> None:
+        models = [model for model in self.models.values() if isinstance(model, NativeManagedRewardModel)]
+        results = await asyncio.gather(*(model.close() for model in models), return_exceptions=True)
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
+
     @staticmethod
     def _validate_native_device_assignments(
         native_entries: list[tuple[str, NativeRewardModelConfig]],
@@ -124,6 +139,8 @@ class MultiRewardModelManager:
         assignments: dict[str, tuple[int, ...]] = {}
         claimed_devices: dict[int, str] = {}
         for name, model in native_entries:
+            if model.placement.is_cpu:
+                continue
             for device in model.placement.devices:
                 if device in claimed_devices:
                     raise ValueError(
@@ -140,6 +157,7 @@ class MultiRewardModelManager:
         return engine_pools
 
     def _split_model_resource_pools(self, engine_entries, native_entries, base_config):
+        native_entries = [(name, model) for name, model in native_entries if not model.placement.is_cpu]
         if not engine_entries and not native_entries:
             return {}, {}
         if self.resource_pool is None:
@@ -241,6 +259,7 @@ class NativeManagedRewardModel(ManagedRewardModel):
         if not isinstance(model, NativeRewardModelConfig):
             model = parse_reward_model_config(name, model)
         offload = model.resolved_offload
+        self.placement = model.placement
         executor_config = {"model": model.executor.model, "kwargs": model.executor.kwargs}
 
         super().__init__(
@@ -249,14 +268,14 @@ class NativeManagedRewardModel(ManagedRewardModel):
                 backend="native",
                 model_path=model.model_path,
                 executor_config=executor_config,
+                device_type=model.placement.resource,
             ),
             offload=offload,
         )
         self._workers = None
-        # Controller-side cache only. Ray actor restart recovery is not part of
-        # the current native lifecycle contract; a restarted worker must be
-        # rebound and woken by a future recovery implementation.
         self._resident = False
+        self._closed = False
+        self._lifecycle_lock = asyncio.Lock()
 
     def bind_workers(self, workers) -> None:
         self._workers = list(workers)
@@ -264,20 +283,54 @@ class NativeManagedRewardModel(ManagedRewardModel):
     async def _run_worker_lifecycle(self, method: str) -> None:
         if self._workers is None:
             raise RuntimeError(f"Native reward model {self.name!r} has no bound workers")
-        refs = [getattr(worker, method).remote(self.name) for worker in self._workers]
-        await asyncio.gather(*refs)
+        refs = []
+        submission_error = None
+        try:
+            for worker in self._workers:
+                refs.append(getattr(worker, method).remote(self.name))
+        except BaseException as exc:
+            submission_error = exc
+        results = await asyncio.gather(*refs, return_exceptions=True)
+        if submission_error is not None:
+            raise submission_error
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
 
     async def wake_up(self) -> None:
-        if not self.offload and self._resident:
-            return
-        await self._run_worker_lifecycle("wake_up_reward_model")
-        self._resident = True
+        await _await_owned(self._wake_up())
+
+    async def _wake_up(self) -> None:
+        async with self._lifecycle_lock:
+            if self._closed:
+                raise RuntimeError(f"Native reward model {self.name!r} is closed")
+            if not self.offload and self._resident and not self.placement.is_cpu:
+                return
+            await self._run_worker_lifecycle("wake_up_reward_model")
+            self._resident = True
 
     async def sleep(self) -> None:
-        if not self.offload:
-            return
-        await self._run_worker_lifecycle("sleep_reward_model")
-        self._resident = False
+        await _await_owned(self._sleep())
+
+    async def _sleep(self) -> None:
+        async with self._lifecycle_lock:
+            if self._closed:
+                return
+            if not self.offload:
+                return
+            await self._run_worker_lifecycle("sleep_reward_model")
+            self._resident = False
+
+    async def close(self) -> None:
+        await _await_owned(self._close())
+
+    async def _close(self) -> None:
+        async with self._lifecycle_lock:
+            if self._closed:
+                return
+            await self._run_worker_lifecycle("close_reward_model")
+            self._resident = False
+            self._closed = True
 
 
 def _prepare_engine_config(model, base_config, fallback_model=None):
