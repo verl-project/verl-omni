@@ -346,11 +346,14 @@ class QwenImagePipelineWithLogProb(QwenImageLoRAMixin, QwenImageTokenIdPromptMix
         sde_type = coalesce_not_none(extra.get("sde_type", None), "sde")
         logprobs = coalesce_not_none(extra.get("logprobs", None), True)
         if sde_window_size is not None:
+            # Step execution is the path the shipped Qwen-Image scripts use.
+            # The request generator stays on state.sampling.generator for scheduler noise.
+            window_generator = _shared_sde_window_generator(extra, generator, device=self.device)
             start = torch.randint(
                 sde_window_range[0],
                 sde_window_range[1] - sde_window_size + 1,
                 (1,),
-                generator=generator,
+                generator=window_generator,
                 device=self.device,
             ).item()
             sde_window = (start, start + sde_window_size)
