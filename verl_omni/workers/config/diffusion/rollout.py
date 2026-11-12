@@ -69,6 +69,8 @@ class DiffusionPipelineConfig(BaseConfig):
     true_cfg_scale: float = 1.0
     max_sequence_length: int = 512
     guidance_scale: Optional[float] = None
+    # CFG for the frozen pretrained anchor in forward-process training.
+    reference_guidance_scale: float = 4.5
     reference_image_short_edge: Optional[int] = None
 
     # Wan2.2 video generation: number of frames (81 = ~3s at 24fps)
@@ -146,6 +148,9 @@ class DiffusionRolloutConfig(BaseConfig):
 
     dtype: str = "bfloat16"
     gpu_memory_utilization: float = 0.5
+    # Budget for standalone rollout replicas on dedicated GPUs; None keeps
+    # gpu_memory_utilization.
+    standalone_gpu_memory_utilization: Optional[float] = None
     enforce_eager: bool = False
     cudagraph_capture_sizes: Optional[list] = None
 
@@ -174,6 +179,9 @@ class DiffusionRolloutConfig(BaseConfig):
 
     max_model_len: Optional[int] = None
     max_num_seqs: int = 1024
+
+    # Ray max_concurrency of the rollout server actor.
+    ray_actor_max_concurrency: int = 1024
 
     # When True, the vLLM-Omni engine runs the registered pipeline in
     # step-execution mode.

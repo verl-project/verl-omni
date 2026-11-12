@@ -13,6 +13,9 @@
 # limitations under the License.
 """Omni separate-async trainer: a thin ``PPOTrainerSeparateAsync`` subclass (RFC #320)."""
 
+import logging
+from copy import deepcopy
+
 import ray
 from verl.trainer.ppo.utils import Role
 from verl.trainer.ppo.v1.trainer_base import register_trainer
@@ -25,6 +28,8 @@ from verl_omni.trainer.omni.trainer_base import OmniPPOTrainer
 from verl_omni.workers.checkpoint_engine import OmniCheckpointEngineManager
 from verl_omni.workers.config import OmniModelConfig
 from verl_omni.workers.omni_engine_workers import OmniDetachActorWorker
+
+logger = logging.getLogger(__name__)
 
 
 @register_trainer("omni_separate_async")
@@ -48,8 +53,17 @@ class OmniPPOTrainerSeparateAsync(OmniPPOTrainer, PPOTrainerSeparateAsync):
         # The omni worker's LoRA-aware weight sync must win over upstream's (which
         # resends base weights under lora.merge=False); Detach adds CPU save/restore.
         super()._init_resource_pool_mgr()
-        actor_role = Role.ActorRolloutRef if Role.ActorRolloutRef in self.role_worker_mapping else Role.ActorRollout
-        self.role_worker_mapping[actor_role] = ray.remote(OmniDetachActorWorker)
+        # Re-map whichever actor role the parent laid out: with hybrid replicas
+        # disabled (the separate-async default) the mapping carries Role.Actor
+        # (+ Role.RefPolicy), not Role.ActorRolloutRef.
+        if Role.Actor in self.role_worker_mapping:
+            self.role_worker_mapping[Role.Actor] = ray.remote(OmniDetachActorWorker)
+            if Role.RefPolicy in self.role_worker_mapping:
+                self.role_worker_mapping[Role.RefPolicy] = ray.remote(OmniDetachActorWorker)
+        elif Role.ActorRolloutRef in self.role_worker_mapping:
+            self.role_worker_mapping[Role.ActorRolloutRef] = ray.remote(OmniDetachActorWorker)
+        elif Role.ActorRollout in self.role_worker_mapping:
+            self.role_worker_mapping[Role.ActorRollout] = ray.remote(OmniDetachActorWorker)
 
     def _setup(self):
         # Faithful copy of verl's PPOTrainerSeparateAsync._setup; super() lands on
@@ -59,8 +73,15 @@ class OmniPPOTrainerSeparateAsync(OmniPPOTrainer, PPOTrainerSeparateAsync):
         # initialize standalone rollout
         # TODO: make initialization parallel with super().init()
         hybrid_num_replicas = len(self.llm_server_manager.rollout_replicas)
+        # Standalone replicas have dedicated GPUs; keep their memory budget
+        # separate from the hybrid replicas that share GPUs with training.
+        standalone_config = deepcopy(self.config)
+        standalone_rollout_config = standalone_config.actor_rollout_ref.rollout
+        standalone_memory = standalone_rollout_config.get("standalone_gpu_memory_utilization")
+        if standalone_memory is not None:
+            standalone_rollout_config.gpu_memory_utilization = standalone_memory
         self.standalone_server_manager: LLMServerManager = LLMServerManager.create(
-            config=self.config, start_rank=hybrid_num_replicas
+            config=standalone_config, start_rank=hybrid_num_replicas
         )
         rollout_config = self.config.actor_rollout_ref.rollout
         if rollout_config.prometheus.enable:
@@ -79,5 +100,17 @@ class OmniPPOTrainerSeparateAsync(OmniPPOTrainer, PPOTrainerSeparateAsync):
         )
 
         # hybrid engine is in rollout mode after initialization
-        self.current_mode = HybridEngineMode.ROLLOUT
-        self.add_replicas_to_balancer()
+        if self._enable_hybrid_replicas:
+            self.current_mode = HybridEngineMode.ROLLOUT
+            self.add_replicas_to_balancer()
+        else:
+            # No colocated replicas exist on the training GPUs (the default;
+            # they are only created when hybrid_rollout.enable_switch=True):
+            # rollout is served exclusively by the standalone pool, so never enter
+            # ROLLOUT mode; the mode-switch hooks and balancer updates become no-ops.
+            self.current_mode = HybridEngineMode.TRAINER
+            logger.info(
+                "[V1SepAsync] no hybrid replicas on the training GPUs "
+                "(trainer.v1.separate_async.hybrid_rollout.enable_switch=False): "
+                f"rollout served by {len(self.standalone_server_manager.get_replicas())} standalone replicas only"
+            )

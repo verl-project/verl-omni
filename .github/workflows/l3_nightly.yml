@@ -18,6 +18,16 @@ on:
         description: "Number of GPUs to use"
         required: false
         default: "1"
+      case:
+        description: "Case to run."
+        required: true
+        default: all
+        type: choice
+        options:
+          - all
+          - qwen_image_flowgrpo
+          - qwen_image_diffusion_nft
+          - qwen_image_online_dpo
       model_path:
         description: "Optional local Qwen-Image model path"
         required: false
@@ -64,6 +74,8 @@ env:
   CURRENT_ARTIFACT_PREFIX: l3-nightly-current
   REPORT_ARTIFACT_PREFIX: l3-nightly-reports
   RUN_MODE: ${{ github.event_name == 'schedule' && 'nightly' || github.event_name == 'pull_request' && 'nightly' || github.event.inputs.mode || 'nightly' }}
+  L3_CASE: ${{ github.event.inputs.case || 'all' }}
+  ALL_L3_CASES: qwen_image_flowgrpo qwen_image_diffusion_nft qwen_image_online_dpo
   NUM_GPUS: ${{ github.event.inputs.num_gpus || '1' }}
   MODEL_PATH: ${{ github.event.inputs.model_path || '' }}
   REWARD_MODEL_PATH: ${{ github.event.inputs.reward_model_path || '' }}
@@ -81,11 +93,29 @@ jobs:
     outputs:
       runner-label: ${{ steps.create-runner.outputs.runner-label }}
       mlp-task-id: ${{ steps.create-runner.outputs.mlp-task-id }}
+      baseline-found: ${{ steps.baseline.outputs.found }}
     steps:
+      - name: Check L3_CASE
+        run: |
+          set -euo pipefail
+
+          read -r -a all_cases <<< "${ALL_L3_CASES}"
+          if [ "${L3_CASE}" = "all" ]; then
+            exit 0
+          fi
+          for case_name in "${all_cases[@]}"; do
+            if [ "${case_name}" = "${L3_CASE}" ]; then
+              exit 0
+            fi
+          done
+          echo "L3_CASE=${L3_CASE} is not in ALL_L3_CASES (${ALL_L3_CASES})."
+          exit 1
+
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
-      - name: Download latest L3 baseline artifact
-        if: env.RUN_MODE == 'nightly'
+      - id: baseline
+        name: Download latest L3 baseline artifact
+        if: env.RUN_MODE == 'nightly' || env.RUN_MODE == 'baseline'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -99,11 +129,18 @@ jobs:
           )"
 
           if [ -z "${artifact_row}" ]; then
-            echo "No non-expired ${BASELINE_ARTIFACT_NAME} artifact found for branch ${BASELINE_BRANCH}."
-            echo "Create one with workflow_dispatch mode=baseline before running nightly mode."
-            exit 1
+            echo "found=false" >> "${GITHUB_OUTPUT}"
+            if [ "${RUN_MODE}" = "nightly" ]; then
+              echo "No non-expired ${BASELINE_ARTIFACT_NAME} artifact found for branch ${BASELINE_BRANCH}."
+              echo "Create one with workflow_dispatch mode=baseline before running nightly mode."
+              exit 1
+            fi
+            echo "No existing ${BASELINE_ARTIFACT_NAME} artifact for branch ${BASELINE_BRANCH}."
+            echo "Baseline mode will bootstrap each case."
+            exit 0
           fi
 
+          echo "found=true" >> "${GITHUB_OUTPUT}"
           artifact_id="$(printf '%s' "${artifact_row}" | awk '{ print $2 }')"
           echo "Downloading ${BASELINE_ARTIFACT_NAME} artifact ${artifact_id} from branch ${BASELINE_BRANCH}."
 
@@ -115,8 +152,39 @@ jobs:
           shopt -s dotglob nullglob
           cp -a /tmp/l3-nightly-baseline/* "${OUTPUT_ROOT}/baseline/"
 
+      - name: Check selected nightly baselines
+        if: env.RUN_MODE == 'nightly' && steps.baseline.outputs.found == 'true'
+        run: |
+          set -euo pipefail
+
+          read -r -a all_cases <<< "${ALL_L3_CASES}"
+          if [ "${L3_CASE}" = "all" ]; then
+            cases=("${all_cases[@]}")
+          else
+            cases=("${L3_CASE}")
+          fi
+
+          missing=()
+          for case_name in "${cases[@]}"; do
+            dir="${OUTPUT_ROOT}/baseline/${case_name}"
+            payload="$(find "${dir}" -name payload.pt -print -quit 2>/dev/null || true)"
+            if [ ! -f "${dir}/metrics.json" ] || [ -z "${payload}" ]; then
+              missing+=("${case_name}")
+            fi
+          done
+
+          if [ "${#missing[@]}" -eq 0 ]; then
+            echo "[NIGHTLY] baseline ready for: ${cases[*]}"
+            exit 0
+          fi
+
+          echo "Nightly baseline is missing for: ${missing[*]}"
+          echo "Artifact ${BASELINE_ARTIFACT_NAME} on branch ${BASELINE_BRANCH} does not contain payload.pt and metrics.json for those cases."
+          echo "Create them with workflow_dispatch mode=baseline and the same case before running nightly mode."
+          exit 1
+
       - name: Upload L3 baseline staging artifact
-        if: env.RUN_MODE == 'nightly'
+        if: steps.baseline.outputs.found == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.BASELINE_STAGING_ARTIFACT_PREFIX }}-${{ github.run_id }}
@@ -146,7 +214,7 @@ jobs:
       UV_SYSTEM_PYTHON: "1"
       UV_BREAK_SYSTEM_PACKAGES: "1"
       PIP_BREAK_SYSTEM_PACKAGES: "1"
-      NIGHTLY_PIN_TRANSFORMERS: "5.14.1"
+      NIGHTLY_PIN_TRANSFORMERS: "5.19.0"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -170,27 +238,26 @@ jobs:
           uv pip install --system --break-system-packages -e ".[gpu,dev,audio,ocr]"
           # veomni's [gpu] extra pins torch 2.11 and would conflict with the vLLM stack.
           # See docs/start/engine_backends.md.
-          # TODO: rm --no-deps when VeOmni supports the vLLM torch pin (torch 2.13 as of vLLM 0.30).
+          # TODO: rm --no-deps when VeOmni supports the vLLM torch pin (torch 2.14 as of vLLM 0.33).
           uv pip install --system --break-system-packages veomni==0.1.12 --no-deps
           uv pip install --system --break-system-packages torchcodec librosa soundfile av audioread
           uv pip install --system --break-system-packages "transformers[mistral-common]==${NIGHTLY_PIN_TRANSFORMERS}"
-          python3 -c "import importlib.metadata as m; print('[NIGHTLY] pinned deps:', 'transformers='+m.version('transformers'), 'kernels='+m.version('kernels'), 'fa3-fwd='+m.version('fa3-fwd'))"
+          python3 -c "import importlib.metadata as m; print('[NIGHTLY] pinned deps:', 'transformers='+m.version('transformers'), 'kernels='+m.version('kernels'))"
           if ! command -v python >/dev/null 2>&1; then
             ln -sfn "$(command -v python3)" /usr/local/bin/python
           fi
 
       - name: Download L3 baseline from setup job
-        if: env.RUN_MODE == 'nightly'
+        if: needs.setup.outputs.baseline-found == 'true'
         uses: actions/download-artifact@v4
         with:
           name: ${{ env.BASELINE_STAGING_ARTIFACT_PREFIX }}-${{ github.run_id }}
           path: ${{ env.OUTPUT_ROOT }}/baseline
 
-      - name: Run Qwen-Image FlowGRPO L3 regression
+      - name: Run Qwen-Image L3 regressions
         run: |
           set -euo pipefail
 
-          export NUM_GPUS="${NUM_GPUS}"
           export OUTPUT_ROOT="${OUTPUT_ROOT}"
           if [ -n "${MODEL_PATH}" ]; then
             export MODEL_PATH="${MODEL_PATH}"
@@ -201,12 +268,43 @@ jobs:
 
           if [ "${RUN_MODE}" = "baseline" ]; then
             export BOOTSTRAP_MISSING_BASELINE=1
+            export L3_REFRESH_BASELINE=1
           else
             export BOOTSTRAP_MISSING_BASELINE=0
+            export L3_REFRESH_BASELINE=0
           fi
 
-          ray stop --force
-          bash tests/nightly/qwen_image_flowgrpo/run_qwen_image_flowgrpo.sh
+          # NUM_GPUS is the workflow input (default 1) and applies to every case.
+          # L3_CASE=all runs every case. A named case skips the others, so a
+          # baseline run replaces only that case inside the downloaded artifact.
+          # Keep running remaining cases after a failure; fail the step at the end.
+          read -r -a all_cases <<< "${ALL_L3_CASES}"
+          failed=0
+          failed_names=()
+          for case_name in "${all_cases[@]}"; do
+            if [ "${L3_CASE}" != "all" ] && [ "${L3_CASE}" != "${case_name}" ]; then
+              echo "[NIGHTLY] skip ${case_name}; L3_CASE=${L3_CASE}"
+              continue
+            fi
+            script="tests/nightly/${case_name}/run_${case_name}.sh"
+            if [ ! -f "${script}" ]; then
+              echo "Missing nightly script for ${case_name}: ${script}"
+              exit 1
+            fi
+            ray stop --force || true
+            if bash "${script}"; then
+              echo "[NIGHTLY][PASS] ${case_name}"
+            else
+              echo "[NIGHTLY][FAIL] ${case_name}"
+              failed=1
+              failed_names+=("${case_name}")
+            fi
+          done
+
+          if [ "${failed}" -ne 0 ]; then
+            echo "[NIGHTLY] failed cases: ${failed_names[*]}"
+            exit 1
+          fi
 
       - name: Upload current nightly artifacts
         if: always() && env.RUN_MODE == 'nightly'
@@ -219,7 +317,7 @@ jobs:
           retention-days: 30
 
       - name: Upload baseline artifact
-        if: always() && env.RUN_MODE == 'baseline'
+        if: success() && env.RUN_MODE == 'baseline'
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.BASELINE_ARTIFACT_NAME }}

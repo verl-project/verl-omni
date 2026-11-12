@@ -107,12 +107,12 @@ def test_strategies_preserve_mode_specific_quantization(monkeypatch):
     monkeypatch.setattr(
         ar_strategy_module.vLLMHttpServer,
         "_apply_quantization",
-        lambda server: ("fp8", {"source": server}),
+        lambda server: {"source": server},
     )
     server = SimpleNamespace()
 
-    assert ARStrategy(server).apply_quantization() == ("fp8", {"source": server})
-    assert DiffusionStrategy(server).apply_quantization() == (None, {})
+    assert ARStrategy(server).apply_quantization() == {"source": server}
+    assert DiffusionStrategy(server).apply_quantization() == {}
 
 
 def test_strategies_preserve_platform_worker_extensions():
@@ -1377,7 +1377,7 @@ def test_diffusion_rejects_non_tensor_named_payload_with_context():
 
 
 def test_drop_defaulted_engine_args_keeps_only_explicit_overrides():
-    """Only explicitly-set engine args may reach AsyncOmni (12e9280+)."""
+    """Only explicitly-set engine args may reach AsyncOmni (6e8c1097+)."""
     from dataclasses import asdict
 
     from vllm_omni.engine.arg_utils import OmniEngineArgs
@@ -1393,6 +1393,10 @@ def test_drop_defaulted_engine_args_keeps_only_explicit_overrides():
     assert "_api_process_count" not in filtered
     assert "_api_process_rank" not in filtered
     assert "convert" not in filtered
+    # The serialized default fault-tolerance dict must not survive either: vLLM
+    # auto-enables fault tolerance whenever a config dict arrives, so forwarding
+    # the default would enable it without a load balancer.
+    assert "fault_tolerance_config" not in filtered
     # ... including OrchestratorArgs parser defaults (the ownership check
     # flags every non-None value, even False).
     engine_args["ulysses_mode"] = "strict"
@@ -1496,6 +1500,33 @@ def test_ar_deploy_config_omits_text_encoder_tp_size_on_ar_stages(tmp_path, monk
     assert stages[1]["text_encoder_tp_size"] == 1
 
 
+def test_stage_config_boundary_rejects_expanded_compilation_config(monkeypatch):
+    """The pin's stage config rejects asdict-expanded compilation configs.
+
+    The rollout always re-expands vLLM's compilation_config (EngineArgs dict→object
+    coercion followed by ``asdict`` in default filtering); because this boundary
+    rejects the expanded shape, ``_restore_raw_compilation_config`` must keep
+    restoring the raw user mapping before stage-config construction.
+    """
+    from dataclasses import asdict
+
+    import pydantic
+    from vllm.config import CompilationConfig
+    from vllm_omni import platforms
+    from vllm_omni.config.omni_config import VllmOmniDiffusionStageConfig
+    from vllm_omni.config.stage_config import StagePipelineConfig
+
+    platform = platforms.current_omni_platform
+    monkeypatch.setattr(platform, "device_name", "cpu", raising=False)
+    monkeypatch.setattr(platform, "device_type", "cpu", raising=False)
+
+    with pytest.raises(pydantic.ValidationError, match="compilation_config"):
+        VllmOmniDiffusionStageConfig(
+            stage_pipeline_config=StagePipelineConfig(stage_id=0, model_stage="model", final_output=True),
+            compilation_config=asdict(CompilationConfig()),
+        )
+
+
 def test_restore_raw_compilation_config_keeps_user_mapping():
     """Only the raw user mapping may travel; expanded objects are rejected."""
     from dataclasses import asdict
@@ -1523,22 +1554,41 @@ def test_diffusion_ingress_allowed_fields_includes_pinned_frontend_fields():
     assert "height" in allowed or "num_inference_steps" in allowed or "dtype" in allowed
 
 
-def test_diffusion_ingress_allowed_fields_supports_npu_frontend_path(monkeypatch):
-    import sys
-    from dataclasses import dataclass
-    from types import ModuleType
+def test_verl_plain_cli_parser_builds_tracking_serve_subparser():
+    """verl builds the rollout CLI from a plain FlexibleArgumentParser; the
+    serve subcommand this repo returns must still construct and parse (the
+    pin's serve rejects non-tracking subparsers)."""
+    import vllm_omni.entrypoints.cli.serve
+    from vllm.utils.argparse_utils import FlexibleArgumentParser
 
-    @dataclass
-    class NpuFrontendArgs:
-        host: str | None = None
+    from verl_omni.workers.rollout.vllm_rollout.vllm_omni_async_server import _TrackingCliModule
 
-    monkeypatch.setitem(sys.modules, "vllm.entrypoints.launchers", None)
-    monkeypatch.setitem(sys.modules, "vllm.entrypoints.launchers.cli_args", None)
-    npu_cli_args = ModuleType("vllm.entrypoints.openai.cli_args")
-    npu_cli_args.FrontendArgs = NpuFrontendArgs
-    monkeypatch.setitem(sys.modules, "vllm.entrypoints.openai.cli_args", npu_cli_args)
+    parser = FlexibleArgumentParser(description="verl launch_server equivalent")
+    subparsers = parser.add_subparsers(required=False, dest="subparser")
+    cmds = {}
+    for command in _TrackingCliModule(vllm_omni.entrypoints.cli.serve).cmd_init():
+        command.subparser_init(subparsers).set_defaults(dispatch_function=command.cmd)
+        cmds[command.name] = command
 
-    allowed = diffusion_strategy_module._diffusion_ingress_allowed_fields()
+    parsed = parser.parse_args(["serve", "dummy-model"])
 
-    assert isinstance(allowed, frozenset)
-    assert "host" in allowed
+    assert parsed.subparser == "serve"
+    assert parsed.model_tag == "dummy-model"
+
+
+def test_rollout_logging_level_canonicalized_for_diffusion_workers(monkeypatch):
+    """verl pins VLLM_LOGGING_LEVEL=WARN; vLLM's LoggingConfig accepts only
+    canonical level names, and diffusion workers validate the env on boot."""
+    import os
+
+    from vllm.config.logging import LoggingConfig
+
+    from verl_omni.workers.rollout.vllm_rollout.vllm_omni_async_server import (
+        _normalize_rollout_logging_level,
+    )
+
+    monkeypatch.setenv("VLLM_LOGGING_LEVEL", "WARN")
+    _normalize_rollout_logging_level()
+
+    assert os.environ["VLLM_LOGGING_LEVEL"] == "WARNING"
+    LoggingConfig(log_level=os.environ["VLLM_LOGGING_LEVEL"])

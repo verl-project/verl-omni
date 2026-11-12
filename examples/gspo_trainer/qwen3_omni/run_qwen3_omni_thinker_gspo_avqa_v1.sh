@@ -20,9 +20,6 @@ if [[ "${DEVICE}" == "npu" ]]; then
     source "${ASCEND_HOME_PATH}/../nnal/atb/set_env.sh"
 fi
 
-# Setting actor_rollout_ref.actor.fsdp_config.use_no_sync_for_gradient_accumulation=false
-# requires verl commit a0feb78fe8229fde644aec3bbec20b5dc4583509 or later.
-
 MODEL_PATH=${MODEL_PATH:-"Qwen/Qwen3-Omni-30B-A3B-Instruct"}
 TRAIN_FILE=${TRAIN_FILE:-"$HOME/data/avqa_r1_6k/train.parquet"}
 VAL_FILE=${VAL_FILE:-"$HOME/data/avqa_r1_6k/validation.parquet"}
