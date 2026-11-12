@@ -1,26 +1,32 @@
 # L3 Nightly Regression
 
 These regressions run 20 training steps on local tiny-random weights with one
-deterministic OCR prompt repeated across the batch. Each job checks two things:
+deterministic prompt repeated across the batch. Qwen-Image cases reuse an OCR
+prompt. Qwen3-Omni and MiniCPM-o build a tiny checkpoint and text-only or image-audio prompts before training. Each job checks two things:
 
-- Steps in `DEBUG_DUMP_STEPS` default to `1,2` and write driver, actor-forward,
-  and LoRA-gradient debug dumps for precision comparison.
+- Steps in `DEBUG_DUMP_STEPS` default to `1,2` and write debug dumps for
+  precision comparison.
 - Steps after `PERF_SKIP_STEPS` default to `2` and are used for timing,
   throughput, and memory metric comparison.
 
 Shared hooks, metric collection, dump comparison, dataset generation, and the
 v1 trainer entrypoint live in this directory. Each case directory only owns
-that algorithm's Hydra overrides. The runner is `tests/nightly/run.py`, which
-starts `verl_omni.trainer.main_diffusion_v1` with `trainer.v1.trainer_mode=sync`.
+that algorithm's Hydra overrides. The runner is `tests/nightly/run.py`.
+Qwen-Image cases start the default `verl_omni.trainer.main_diffusion_v1`.
+Qwen3-Omni and MiniCPM-o export
+`NIGHTLY_TRAINER_MODULE=verl_omni.trainer.main_omni` so the same runner starts
+the omni v1 entrypoint. 
 The v0 trainer is not used.
 
 ## Supported models and algorithms
 
-| Model | Case | Algorithm | GPUs | Script |
-| --- | --- | --- | --- | --- |
-| Qwen-Image | `qwen_image_flowgrpo` | FlowGRPO, OCR reward | 1 | `tests/nightly/qwen_image_flowgrpo/run_qwen_image_flowgrpo.sh` |
-| Qwen-Image | `qwen_image_diffusion_nft` | DiffusionNFT, OCR reward, old-adapter rollout | 1 | `tests/nightly/qwen_image_diffusion_nft/run_qwen_image_diffusion_nft.sh` |
-| Qwen-Image | `qwen_image_online_dpo` | Online DPO, OCR reward | 1 | `tests/nightly/qwen_image_online_dpo/run_qwen_image_online_dpo.sh` |
+| Model | Case | Algorithm | Trainer | GPUs | Script |
+| --- | --- | --- | --- | --- | --- |
+| Qwen-Image | `qwen_image_flowgrpo` | FlowGRPO, OCR reward | `main_diffusion_v1` | 1 | `tests/nightly/qwen_image_flowgrpo/run_qwen_image_flowgrpo.sh` |
+| Qwen-Image | `qwen_image_diffusion_nft` | DiffusionNFT, OCR reward, old-adapter rollout | `main_diffusion_v1` | 1 | `tests/nightly/qwen_image_diffusion_nft/run_qwen_image_diffusion_nft.sh` |
+| Qwen-Image | `qwen_image_online_dpo` | Online DPO, OCR reward | `main_diffusion_v1` | 1 | `tests/nightly/qwen_image_online_dpo/run_qwen_image_online_dpo.sh` |
+| Qwen3-Omni | `qwen3_omni_thinker_gspo` | GSPO LoRA, GSM8K rule reward | `main_omni` | 1 | `tests/nightly/qwen3_omni_thinker_gspo/run_qwen3_omni_thinker_gspo.sh` |
+| MiniCPM-o 4.5 | `minicpmo_4_5_thinker_gspo` | GSPO LoRA, AVQA choice reward | `main_omni` | 1 | `tests/nightly/minicpmo_4_5_thinker_gspo/run_minicpmo_4_5_thinker_gspo.sh` |
 
 Case-specific precision tensors and ordering notes are in each case README.
 The workflow baseline check and run loop both read `ALL_L3_CASES` in
@@ -40,9 +46,10 @@ Workflow trigger modes:
 
 - Scheduled runs use `nightly` mode and require an existing baseline artifact.
 - `workflow_dispatch` supports `mode=nightly` or `mode=baseline`, and a `case`
-  choice of `all`, `qwen_image_flowgrpo`, `qwen_image_diffusion_nft`, or
-  `qwen_image_online_dpo`. Scheduled runs and pull requests ignore `case` and
-  run every case.
+  choice of `all`, `qwen_image_flowgrpo`, `qwen_image_diffusion_nft`,
+  `qwen_image_online_dpo`, `qwen3_omni_thinker_gspo`, or
+  `minicpmo_4_5_thinker_gspo`. Scheduled runs and pull requests ignore `case`
+  and run every case.
 - To trigger a baseline run, open the workflow in GitHub Actions, choose
   **Run workflow**, and set `mode=baseline`. Set `case` to one case to refresh
   only that subdirectory.
@@ -55,15 +62,19 @@ The runner must have:
 
 - 1 GPU by default, or set `NUM_GPUS` to match the runner.
 - An installed `verl_omni` GPU environment with the rollout and training
-  dependencies needed by the case.
-- Local tiny-random policy and reward model directories.
+  dependencies needed by the case. Omni cases also need the audio stack used
+  by the nightly workflow (`librosa`, `soundfile`, `av`, `audioread`).
+- Local tiny-random policy weights. Qwen-Image cases also need the OCR reward
+  model. Omni cases build their own tiny policy under `POLICY_MODEL_PATH`.
 - Enough local disk space for debug dumps, metrics, and logs under
   `OUTPUT_ROOT`.
 
 Expected local model defaults:
 
-- Policy: `~/models/tiny-random/Qwen-Image`
-- Reward: `~/models/tiny-random/qwen3-vl`
+- Qwen-Image policy: `~/models/tiny-random/Qwen-Image`
+- Qwen-Image OCR reward: `~/models/tiny-random/qwen3-vl`
+- Qwen3-Omni policy: `~/models/tiny-random/Qwen3-Omni`
+- MiniCPM-o policy: `~/models/tiny-random/MiniCPM-o-4_5`
 
 ## Run
 
@@ -72,6 +83,8 @@ copies the current artifacts into that case's `baseline/` directory and passes.
 An existing baseline is compared and is not replaced. Set
 `BOOTSTRAP_MISSING_BASELINE=0` for a strict comparison.
 
+Diffusion case example:
+
 ```bash
 NUM_GPUS=1 \
 MODEL_PATH=/path/to/tiny-random/Qwen-Image \
@@ -80,19 +93,17 @@ OUTPUT_ROOT=/path/to/debug_dumps \
 bash tests/nightly/qwen_image_flowgrpo/run_qwen_image_flowgrpo.sh
 ```
 
-Strict comparison adds `BOOTSTRAP_MISSING_BASELINE=0`:
+Omni case example:
 
 ```bash
 NUM_GPUS=1 \
-MODEL_PATH=/path/to/tiny-random/Qwen-Image \
-REWARD_MODEL_PATH=/path/to/tiny-random/qwen3-vl \
+POLICY_MODEL_PATH=/path/to/tiny-random/Qwen3-Omni \
 OUTPUT_ROOT=/path/to/debug_dumps \
-BOOTSTRAP_MISSING_BASELINE=0 \
-bash tests/nightly/qwen_image_flowgrpo/run_qwen_image_flowgrpo.sh
+bash tests/nightly/qwen3_omni_thinker_gspo/run_qwen3_omni_thinker_gspo.sh
 ```
 
-Replace the script path with other case scripts. The same
-variables apply. 
+Strict comparison adds `BOOTSTRAP_MISSING_BASELINE=0` to any of those case
+commands. Replace the script path with other case scripts when needed.
 
 ## Baselines
 
@@ -103,15 +114,21 @@ outputs/debug_dumps/
 |-- baseline/
 |   |-- qwen_image_flowgrpo/
 |   |-- qwen_image_diffusion_nft/
-|   `-- qwen_image_online_dpo/
+|   |-- qwen_image_online_dpo/
+|   |-- qwen3_omni_thinker_gspo/
+|   `-- minicpmo_4_5_thinker_gspo/
 |-- current/
 |   |-- qwen_image_flowgrpo/
 |   |-- qwen_image_diffusion_nft/
-|   `-- qwen_image_online_dpo/
+|   |-- qwen_image_online_dpo/
+|   |-- qwen3_omni_thinker_gspo/
+|   `-- minicpmo_4_5_thinker_gspo/
 `-- logs/
     |-- qwen_image_flowgrpo/
     |-- qwen_image_diffusion_nft/
-    `-- qwen_image_online_dpo/
+    |-- qwen_image_online_dpo/
+    |-- qwen3_omni_thinker_gspo/
+    `-- minicpmo_4_5_thinker_gspo/
 ```
 
 GitHub Actions stores every case inside one shared `l3-nightly-baseline`
@@ -122,10 +139,11 @@ baseline subdirectory after training succeeds, then copy `current/` in as the
 new baseline. The run prints `BASELINE BOOTSTRAPPED` and does not compare
 against the deleted baseline. Sibling case directories stay in place. The
 workflow sets this in `mode=baseline` after downloading the current unified
-baseline artifact. The `case` input limits which scripts run, so a single-case baseline run leaves
-the other downloaded directories unchanged and uploads the full tree. If no
-artifact exists yet, a single-case run uploads only that case; a later nightly
-fails before the GPU runner when a selected case has no baseline artifacts. A scheduled nightly keeps `L3_REFRESH_BASELINE` at `0` with
+baseline artifact. The `case` input limits which scripts run, so a single-case
+baseline run leaves the other downloaded directories unchanged and uploads the
+full tree. If no artifact exists yet, a single-case run uploads only that case;
+a later nightly fails before the GPU runner when a selected case has no
+baseline artifacts. A scheduled nightly keeps `L3_REFRESH_BASELINE` at `0` with
 `BOOTSTRAP_MISSING_BASELINE=0`, so a missing baseline, a missing dump, or a
 metric regression fails the job.
 
@@ -186,7 +204,9 @@ Performance metrics:
 
 FlowGRPO reports `timing_s/old_log_prob` and `perf/mfu/actor_infer`. DiffusionNFT
 and online DPO do not recompute old log-probs, so those two keys are absent.
-`perf/mfu/actor` is compared for all three.
+`perf/mfu/actor` is compared for the Qwen-Image cases. The GSPO omni cases also
+collect language-model MFU, but `collect_metrics.py` warns that those
+model/algorithm pairs are outside the diffusion MFU allowlist.
 
 A lower-is-better metric fails when current is more than the metric threshold
 above baseline. A higher-is-better metric fails when current is more than the
@@ -196,29 +216,36 @@ values, are kept in the report but are not compared against the baseline.
 
 Precision comparison recursively compares all tensors in matching `payload.pt`
 debug dumps under `current/<case>/` and `baseline/<case>/`. Missing files,
-missing tensors, and shape mismatches fail the comparison. The default dumps
-cover driver-forward, actor-forward, and LoRA-gradient payloads for
-`DEBUG_DUMP_STEPS`, which defaults to `1,2`.
+missing tensors, and shape mismatches fail the comparison.
 
-The nightly dataset writes `extra_info.repeat_index` on each repeated prompt.
-Online DPO and DiffusionNFT draw noise or timesteps in actor-batch order. That
-batch arrives in per-run `uuid4` uid order, so the nightly hook sorts it onto
-`repeat_index` before `prepare_actor_batch`. Dump comparison realigns rows by
-the same key. Online DPO keeps the top and bottom reward of each prompt. The
-nightly random reward model returns stable scores, so chosen and rejected stay in the
-same order across runs. FlowGRPO binds `log_probs`, latents, and timesteps at
+Qwen-Image dumps cover driver-forward, actor-forward, and LoRA-gradient
+payloads for `DEBUG_DUMP_STEPS`, which defaults to `1,2`. The nightly dataset
+writes `extra_info.repeat_index` on each repeated prompt. Online DPO and
+DiffusionNFT draw noise or timesteps in actor-batch order. That batch arrives
+in per-run `uuid4` uid order, so the nightly hook sorts it onto `repeat_index`
+before `prepare_actor_batch`. Dump comparison realigns rows by the same key.
+Online DPO keeps the top and bottom reward of each prompt. The nightly random
+reward model returns stable scores, so chosen and rejected stay in the same
+order across runs. FlowGRPO binds `log_probs`, latents, and timesteps at
 rollout; comparison-time `repeat_index` alignment is enough for that case.
 Missing or mismatched keys fall back to raw file order with a
 `row order not realigned` warning. Normal training does not load the hook and
 stays in uid order.
 
-Actor-forward tensors are every tensor returned by the diffusion FSDP engine
-forward/backward batch output. LoRA-gradient tensors are every available LoRA
-parameter gradient under `gradients.<parameter_name>`. Optional
-actor-forward-step tensors are included only when `DEBUG_DUMP_FORWARD_STEPS=1`.
-Named batch tensors differ by algorithm; see the case README.
+For Qwen-Image, actor-forward tensors are every tensor returned by the
+diffusion FSDP engine forward/backward batch output. LoRA-gradient tensors are
+every available LoRA parameter gradient under `gradients.<parameter_name>`.
+Optional actor-forward-step tensors are included only when
+`DEBUG_DUMP_FORWARD_STEPS=1`. Named batch tensors differ by algorithm; see the
+case README.
 
-Dumped but never failing:
+Qwen3-Omni and MiniCPM-o dump `actor_update_batch` and `lora_gradients`. The
+actor mini-batch includes `old_log_probs`, `ref_log_prob`, and
+`rollout_log_probs` when present. Rollout is greedy so the repeated prompt
+keeps stable token ids; a token-id change still fails when it moves those log
+probs or the LoRA gradients. Case READMEs list the exact payload fields.
+
+Dumped but never failing for Qwen-Image:
 
 - `responses` is rollout pixel output: uint8 images, and rollout sampling is
   not bit-exact, so pixel-level differences are expected.
@@ -227,8 +254,12 @@ Dumped but never failing:
   vLLM-Omni request packing (`max_num_seqs` > 1) changes the pre-window ODE
   batch shape, which flips individual OCR scores by ~1/255 pixel drift.
 
-These tensors are measured and reported but cannot fail the run. They carry
-`informational: true` in `dump_compare.json` and are listed under
+For the GSPO omni cases, `batch.responses` and `batch.advantages` stay
+informational for the same shared comparator reason. Rule or choice reward
+scores are compared.
+
+These informational tensors are measured and reported but cannot fail the run.
+They carry `informational: true` in `dump_compare.json` and are listed under
 `informational_tensors`; the log prints
 `Informational tensors (measured, never fail)`. A shape mismatch on these
 tensors still fails.
