@@ -1,6 +1,6 @@
 # NPU Smoke Tests
 
-Last updated: 11/09/2026.
+Last updated: 11/11/2026.
 
 This guide explains how to add CI test cases for Huawei Ascend devices in verl-omni.
 
@@ -17,18 +17,19 @@ into these runners:
 | ID | Group | Name | Test entry point | Default NPUs |
 |---|---|---|---|---:|
 | 0 | core | vLLM-Omni rollout + sleep/wake-up | tests/workers/rollout/rollout_vllm/test_vllm_omni_generate_npu.py | 8 |
-| 1 | e2e | Qwen-Image FlowGRPO trainer | tests/special_e2e/run_flowgrpo_qwen_image_npu.sh | 8 |
-| 2 | e2e | Wan2.2 DanceGRPO trainer with Qwen2.5-VL reward | tests/special_e2e/run_dancegrpo_wan22_npu.sh | 8 |
 | 3 | core | Diffusers FSDP engine inference and training | tests/workers/test_diffusers_fsdp_engine_npu.py | 8 |
 | 4 | core | Diffusion agent loop, request and step execution | tests/agent_loop/test_diffusion_agent_loop_npu.py::test_diffusion_single_turn_npu | 8 |
 | 5 | core | Unseeded multi-worker rollout diversity | tests/agent_loop/test_diffusion_agent_loop_npu.py::test_rollout_without_seed_npu | 8 |
 | 6 | core | Seeded multi-worker rollout reproducibility | tests/agent_loop/test_diffusion_agent_loop_npu.py::test_rollout_seed_reproducibility_npu | 8 |
 | 7 | core | Standalone vLLM reward engine and OCR scoring | tests/reward_loop/test_reward_engine_npu.py | 8 |
+| 1 | e2e | Qwen-Image FlowGRPO trainer | tests/special_e2e/run_flowgrpo_qwen_image_npu.sh | 8 |
+| 2 | e2e | Wan2.2 DanceGRPO trainer with Qwen2.5-VL reward | tests/special_e2e/run_dancegrpo_wan22_npu.sh | 8 |
+| 29 | e2e | Qwen3-TTS full-parameter GRPO | tests/special_e2e/run_qwen3_tts_grpo_npu.sh | 8 |
+| 35 | e2e | SD3 CRD, independent EMA and checkpoint restore | tests/special_e2e/run_crd_sd35_npu.sh | 8 |
 
-The combined runner has eight entries: six core (0, 3, 4, 5, 6, 7) and two e2e
-(1, 2). The core group collects seven pytest cases because entry 4 is
-parametrized into request and step execution. The two e2e entries each run a
-trainer workload; they are not pytest cases.
+Test IDs stay stable across companion PRs, so gaps are intentional. Core
+entries collect pytest cases; e2e entries run trainer workloads. These are
+execution checks, not quality or convergence benchmarks.
 
 Test 3 ports the `fsdp` case of `tests/workers/test_diffusers_fsdp_engine.py`
 (GPU core ID 2). It reuses the GPU test's synthetic trajectories and engine
@@ -95,10 +96,32 @@ All nonzero exits, including native abort 134, fail the smoke group.
 
 ### Wan2.2 trainer with a reward model
 
-Test 2 runs one DanceGRPO training step with six actor NPUs and a dedicated
+With eight NPUs, test 2 runs one DanceGRPO training step with six actor NPUs and a dedicated
 TP=2 Qwen2.5-VL reward engine on two NPUs. Prepare the Qwen2.5-VL-3B-Instruct
 checkpoint before an offline run; set `REWARD_MODEL_PATH` to its local directory
 when needed. The test must complete training and exit 0.
+
+### Qwen3-TTS
+
+Requires SoX, Qwen3-TTS at `.github/qwen_tts_pin.txt`, and the optional audio
+packages in `tests/npu_smoke/requirements_tts_smoke.txt`. The workflow installs
+these without resolving or upgrading the compiled NPU stack. The lock subset
+is checked against the project dependency bounds before model preparation.
+After installing those prerequisites, cache the pinned tiny source before an
+offline run:
+
+```bash
+bash tests/npu_smoke/prepare_tts_smoke.sh
+```
+
+Use `--check-only` to validate prerequisites without downloading the source.
+The launcher runs two full-parameter updates with the existing duration reward.
+
+### SD3 CRD
+
+The launcher builds its tiny SD3 checkpoint offline. Set `CRD_MODEL_PATH` to
+reuse an existing SD3 pipeline. It runs two updates and the distributed EMA
+and checkpoint-restore checks.
 
 ## Add a New NPU Smoke Test
 
@@ -182,9 +205,12 @@ To run both groups concurrently in one dedicated eight-NPU CI container:
 NPU_SMOKE_PARALLEL=1 bash tests/npu_smoke/run_npu_smoke_tests.sh --num-npus 8
 ```
 
-Core uses NPUs `0,1`; e2e uses `2,3,4,5,6,7`. This does not replace per-case
-eight-rank coverage from the sequential command. The e2e trainers remain
-sequential; this layout does not support concurrent colocated training jobs.
+Only this optional parallel command allocates NPUs `0,1` to core and
+`2,3,4,5,6,7` to e2e. Sequential and single-group commands allocate eight NPUs per
+group. Each launcher assigns actor, rollout and reward workers within its
+allocation; parallel-mode replica counts and derived batch sizes may differ.
+Use the eight-NPU commands for the original allocation coverage. E2e trainers
+remain sequential within their group.
 
 Unset shared `MODEL_PATH`, `TOKENIZER_PATH`, `DATA_DIR`, `TRAIN_FILES`,
 `VAL_FILES` and `NPU_SMOKE_TEST_IDS` overrides before parallel execution. Use a
