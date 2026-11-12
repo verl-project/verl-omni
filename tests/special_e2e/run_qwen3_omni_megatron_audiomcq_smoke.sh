@@ -20,7 +20,6 @@ bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_megatron_audiomcq_separate_
   actor_rollout_ref.actor.megatron.sequence_parallel=false \
   actor_rollout_ref.actor.megatron.param_offload=false \
   actor_rollout_ref.actor.megatron.optimizer_offload=false \
-  actor_rollout_ref.actor.megatron.grad_offload=false \
   data.train_batch_size=4 actor_rollout_ref.actor.ppo_mini_batch_size=2 \
   trainer.v1.separate_async.parameter_sync_step=2 \
   actor_rollout_ref.rollout.top_k=1 \

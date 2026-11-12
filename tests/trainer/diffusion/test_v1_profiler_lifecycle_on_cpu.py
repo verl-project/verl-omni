@@ -91,6 +91,7 @@ def make_trainer(monkeypatch, *, mode="sync", continuous=False, fail_at=None, re
 
     trainer.step = step
     monkeypatch.setattr(trainer_base, "SkipManager", Mock())
+    monkeypatch.setattr(trainer_base, "init_skip_manager", Mock())
     monkeypatch.setattr(trainer_base, "Tracking", Mock())
     monkeypatch.setattr(trainer_base, "ValidationGenerationsLogger", Mock())
     monkeypatch.setattr(trainer_base, "tq", Mock())

@@ -22,6 +22,9 @@ from pathlib import Path
 import torch
 from safetensors.torch import save_file
 
+# The qwen3-tts pipeline wraps the rope registry before qwen_tts loads.
+import verl_omni.pipelines.qwen3_tts  # noqa: F401
+
 
 def _copy_files(source: Path, destination: Path, names: tuple[str, ...]) -> None:
     for name in names:

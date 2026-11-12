@@ -1,102 +1,38 @@
 #!/usr/bin/env bash
 # Nightly Qwen-Image FlowGRPO regression on local tiny random weights.
+# V1 sync trainer only (verl_omni.trainer.main_diffusion_v1).
 set -xeuo pipefail
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd -- "${SCRIPT_DIR}/../../.." && pwd)
 
-NUM_GPUS=${NUM_GPUS:-1}
-MODEL_PATH=${MODEL_PATH:-${HOME}/models/tiny-random/Qwen-Image}
-TOKENIZER_PATH=${TOKENIZER_PATH:-${MODEL_PATH}/tokenizer}
-REWARD_MODEL_PATH=${REWARD_MODEL_PATH:-${HOME}/models/tiny-random/qwen3-vl}
-REWARD_TP=${REWARD_TP:-1}
-TOTAL_TRAIN_STEPS=${TOTAL_TRAIN_STEPS:-20}
-DEBUG_DUMP_STEPS=${DEBUG_DUMP_STEPS:-1,2}
-PERF_SKIP_STEPS=${PERF_SKIP_STEPS:-2}
-PERF_THRESHOLD=${PERF_THRESHOLD:-0.15}
-PRECISION_ATOL=${PRECISION_ATOL:-1e-3}
-PRECISION_MEAN_ATOL=${PRECISION_MEAN_ATOL:-1e-4}
-PRECISION_RMSE_ATOL=${PRECISION_RMSE_ATOL:-1e-3}
-PRECISION_P99_ATOL=${PRECISION_P99_ATOL:-2e-3}
-PRECISION_MAX_FRAC_ABS_OVER_ATOL=${PRECISION_MAX_FRAC_ABS_OVER_ATOL:-2e-2}
-PRECISION_MIN_COS_SIM=${PRECISION_MIN_COS_SIM:-0.99}
-BOOTSTRAP_MISSING_BASELINE=${BOOTSTRAP_MISSING_BASELINE:-1}
-NIGHTLY_DETERMINISTIC_SEED=${NIGHTLY_DETERMINISTIC_SEED:-42}
-L3_TEST_CASE=${L3_TEST_CASE:-qwen_image_flowgrpo}
+export L3_TEST_CASE=${L3_TEST_CASE:-qwen_image_flowgrpo}
+export L3_ALGORITHM=${L3_ALGORITHM:-flowgrpo}
+export L3_CASE_LABEL=${L3_CASE_LABEL:-"Qwen-Image FlowGRPO single-sample"}
+export L3_DATA_SOURCE=${L3_DATA_SOURCE:-qwen_image_flowgrpo}
+export NUM_GPUS=${NUM_GPUS:-1}
+export REWARD_TP=${REWARD_TP:-1}
 
-DATA_DIR=${DATA_DIR:-${HOME}/data/qwen_image_flowgrpo}
-TRAIN_FILES=${TRAIN_FILES:-${DATA_DIR}/train.parquet}
-VAL_FILES=${VAL_FILES:-${DATA_DIR}/test.parquet}
-OUTPUT_ROOT=${OUTPUT_ROOT:-${REPO_ROOT}/outputs/debug_dumps}
-CURRENT_DUMP_DIR=${CURRENT_DUMP_DIR:-${OUTPUT_ROOT}/current/${L3_TEST_CASE}}
-BASELINE_DUMP_DIR=${BASELINE_DUMP_DIR:-${OUTPUT_ROOT}/baseline/${L3_TEST_CASE}}
-LOG_DIR=${LOG_DIR:-${OUTPUT_ROOT}/logs/${L3_TEST_CASE}}
-CONSOLE_LOG=${CONSOLE_LOG:-${LOG_DIR}/qwen_image_flowgrpo.log}
-DEBUG_METRICS_JSONL=${DEBUG_METRICS_JSONL:-${CURRENT_DUMP_DIR}/metrics.jsonl}
-CURRENT_METRICS_JSON=${CURRENT_METRICS_JSON:-${CURRENT_DUMP_DIR}/metrics.json}
-BASELINE_METRICS_JSON=${BASELINE_METRICS_JSON:-${BASELINE_DUMP_DIR}/metrics.json}
-DUMP_COMPARE_JSON=${DUMP_COMPARE_JSON:-${CURRENT_DUMP_DIR}/dump_compare.json}
-ENV_METADATA_JSON=${ENV_METADATA_JSON:-${LOG_DIR}/env_metadata.json}
-
-ENGINE=vllm_omni
-REWARD_ENGINE=vllm
 MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-256}
 N_RESP_PER_PROMPT=${N_RESP_PER_PROMPT:-4}
 MICRO_BSZ_PER_GPU=${MICRO_BSZ_PER_GPU:-4}
 MICRO_BSZ=$((MICRO_BSZ_PER_GPU * NUM_GPUS))
 MINI_BSZ=${MICRO_BSZ}
-TRAIN_BATCH_SIZE=$((MINI_BSZ * N_RESP_PER_PROMPT))
+export TRAIN_BATCH_SIZE=$((MINI_BSZ * N_RESP_PER_PROMPT))
 
-# The GPU smoke image may contain the ``kernels`` Python package while its
-# installed Torch/CUDA combination has no compatible Hub FA3 build variant.
-# Select the portable native/SDPA pair explicitly for these E2E tests so the
-# production engine can keep its fail-fast attention-backend behavior..
-ATTN_BACKEND=native
-ROLLOUT_ATTN_BACKEND=TORCH_SDPA
-echo "[NIGHTLY] diffusion attention: ATTN_BACKEND=${ATTN_BACKEND} ROLLOUT_ATTN_BACKEND=${ROLLOUT_ATTN_BACKEND}"
+ENGINE=vllm_omni
+REWARD_ENGINE=vllm
+ATTN_BACKEND=${ATTN_BACKEND:-native}
+ROLLOUT_ATTN_BACKEND=${ROLLOUT_ATTN_BACKEND:-TORCH_SDPA}
 
-export NIGHTLY_DETERMINISTIC_SEED
-export PYTHONHASHSEED=${PYTHONHASHSEED:-${NIGHTLY_DETERMINISTIC_SEED}}
-export CUBLAS_WORKSPACE_CONFIG=${CUBLAS_WORKSPACE_CONFIG:-:4096:8}
-export TOKENIZERS_PARALLELISM=${TOKENIZERS_PARALLELISM:-false}
-export GENRM_OCR_TEMPERATURE=${GENRM_OCR_TEMPERATURE:-0.0}
-export GENRM_OCR_TOP_P=${GENRM_OCR_TOP_P:-1.0}
-export GENRM_OCR_MAX_TOKENS=${GENRM_OCR_MAX_TOKENS:-32}
-export GENRM_OCR_SEED=${GENRM_OCR_SEED:-${NIGHTLY_DETERMINISTIC_SEED}}
-
-rm -rf "${CURRENT_DUMP_DIR}"
-mkdir -p "${CURRENT_DUMP_DIR}" "${BASELINE_DUMP_DIR}" "${LOG_DIR}"
-
-python3 "${SCRIPT_DIR}/env_metadata.py" \
-    --output "${ENV_METADATA_JSON}" \
-    --attn-backend "${ATTN_BACKEND}" \
-    --rollout-attn-backend "${ROLLOUT_ATTN_BACKEND}"
-
-python3 "${SCRIPT_DIR}/create_single_sample_data.py" \
-    --local_save_dir "${DATA_DIR}" \
-    --train_size "${TRAIN_BATCH_SIZE}" \
-    --val_size 4
-
-export DEBUG_DUMP_ENABLED=1
-export DEBUG_DUMP_DIR="${CURRENT_DUMP_DIR}"
-export DEBUG_DUMP_STEPS
-export DEBUG_METRICS_JSONL
-
-BOOTSTRAP_ARGS=()
-if [ "${BOOTSTRAP_MISSING_BASELINE}" = "1" ]; then
-    BOOTSTRAP_ARGS+=(--bootstrap-missing)
-fi
-
-python3 "${SCRIPT_DIR}/run.py" \
+bash "${REPO_ROOT}/tests/nightly/run_l3_case.sh" \
     algorithm.adv_estimator=flow_grpo \
-    data.train_files="${TRAIN_FILES}" \
-    data.val_files="${VAL_FILES}" \
     data.train_batch_size=${TRAIN_BATCH_SIZE} \
     data.max_prompt_length=${MAX_PROMPT_LENGTH} \
     data.shuffle=false \
     data.seed=42 \
-    actor_rollout_ref.model.path="${MODEL_PATH}" \
-    actor_rollout_ref.model.tokenizer_path="${TOKENIZER_PATH}" \
+    actor_rollout_ref.model.path="${MODEL_PATH:-${HOME}/models/tiny-random/Qwen-Image}" \
+    actor_rollout_ref.model.tokenizer_path="${TOKENIZER_PATH:-${MODEL_PATH:-${HOME}/models/tiny-random/Qwen-Image}/tokenizer}" \
     actor_rollout_ref.model.attn_backend=${ATTN_BACKEND} \
     actor_rollout_ref.model.algorithm=flow_grpo \
     actor_rollout_ref.model.lora_rank=8 \
@@ -142,7 +78,7 @@ python3 "${SCRIPT_DIR}/run.py" \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=${MICRO_BSZ_PER_GPU} \
     reward.num_workers=$((NUM_GPUS / REWARD_TP)) \
     reward.reward_model.enable=True \
-    reward.reward_model.model_path="${REWARD_MODEL_PATH}" \
+    reward.reward_model.model_path="${REWARD_MODEL_PATH:-${HOME}/models/tiny-random/qwen3-vl}" \
     reward.reward_model.rollout.name=${REWARD_ENGINE} \
     reward.reward_model.rollout.tensor_model_parallel_size=${REWARD_TP} \
     reward.reward_model.rollout.gpu_memory_utilization=0.4 \
@@ -163,39 +99,7 @@ python3 "${SCRIPT_DIR}/run.py" \
     trainer.test_freq=-1 \
     trainer.save_freq=-1 \
     trainer.resume_mode=disable \
-    trainer.total_training_steps=${TOTAL_TRAIN_STEPS} \
+    trainer.total_training_steps=${TOTAL_TRAIN_STEPS:-20} \
     trainer.use_v1=true \
     trainer.v1.trainer_mode=sync \
-    "$@" 2>&1 | tee "${CONSOLE_LOG}"
-
-METRICS_STATUS=0
-python3 "${SCRIPT_DIR}/collect_metrics.py" \
-    --metrics-jsonl "${DEBUG_METRICS_JSONL}" \
-    --log-file "${CONSOLE_LOG}" \
-    --baseline "${BASELINE_METRICS_JSON}" \
-    --output "${CURRENT_METRICS_JSON}" \
-    --model qwen-image \
-    --algorithm flowgrpo \
-    --perf-skip-steps "${PERF_SKIP_STEPS}" \
-    --threshold "${PERF_THRESHOLD}" \
-    "${BOOTSTRAP_ARGS[@]}" || METRICS_STATUS=$?
-
-DUMP_STATUS=0
-python3 "${SCRIPT_DIR}/compare_dumps.py" \
-    --baseline "${BASELINE_DUMP_DIR}" \
-    --current "${CURRENT_DUMP_DIR}" \
-    --output "${DUMP_COMPARE_JSON}" \
-    --atol "${PRECISION_ATOL}" \
-    --mean-atol "${PRECISION_MEAN_ATOL}" \
-    --rmse-atol "${PRECISION_RMSE_ATOL}" \
-    --p99-atol "${PRECISION_P99_ATOL}" \
-    --max-frac-abs-over-atol "${PRECISION_MAX_FRAC_ABS_OVER_ATOL}" \
-    --min-cos-sim "${PRECISION_MIN_COS_SIM}" \
-    "${BOOTSTRAP_ARGS[@]}" || DUMP_STATUS=$?
-
-if [ "${METRICS_STATUS}" -ne 0 ] || [ "${DUMP_STATUS}" -ne 0 ]; then
-    echo "Qwen-Image FlowGRPO single-sample nightly regression failed: metrics_status=${METRICS_STATUS}, dump_status=${DUMP_STATUS}."
-    exit 1
-fi
-
-echo "Qwen-Image FlowGRPO single-sample nightly regression passed."
+    "$@"

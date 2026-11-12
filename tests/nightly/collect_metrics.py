@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Collect and compare performance metrics for the nightly FlowGRPO run."""
+"""Collect and compare performance metrics for a nightly run."""
 
 from __future__ import annotations
 
@@ -34,6 +34,8 @@ _LOWER_IS_BETTER_KEYS = {
     "perf/time_per_step",
     "timing_s/gen",
     "timing_s/old_log_prob",
+    "timing_s/prepare_actor_batch",
+    "timing_s/ref",
     "timing_s/reward",
     "timing_s/update_actor",
     "timing_s/update_weights",
@@ -48,6 +50,8 @@ _PER_KEY_THRESHOLDS = {
 }
 _SUPPORTED_MFU_CONFIGS = {
     ("qwen-image", "flowgrpo"),
+    ("qwen-image", "diffusion-nft"),
+    ("qwen-image", "online-dpo"),
 }
 
 
@@ -235,8 +239,9 @@ def _collect_warnings(summary: dict[str, dict[str, float]], model: str | None, a
     has_mfu = any(key.startswith("perf/mfu/") for key in summary)
     mfu_config = (_normalize_name(model), _normalize_name(algorithm))
     if has_mfu and mfu_config not in _SUPPORTED_MFU_CONFIGS:
+        supported = ", ".join(f"{model} + {algorithm}" for model, algorithm in sorted(_SUPPORTED_MFU_CONFIGS))
         warnings.append(
-            "MFU metrics are only supported and validated for Qwen-Image + FlowGRPO; "
+            f"MFU metrics are only supported and validated for {supported}; "
             f"current model/algorithm is {mfu_config[0]} + {mfu_config[1]},"
             " so interpret perf/mfu/* values with caution."
         )
@@ -347,7 +352,7 @@ def collect(args: argparse.Namespace) -> tuple[bool, dict]:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Collect Qwen-Image FlowGRPO nightly metrics")
+    parser = argparse.ArgumentParser(description="Collect Qwen-Image L3 nightly metrics")
     parser.add_argument("--metrics-jsonl", type=Path)
     parser.add_argument("--log-file", type=Path)
     parser.add_argument("--baseline", type=Path)

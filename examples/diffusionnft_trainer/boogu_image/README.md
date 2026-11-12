@@ -147,7 +147,15 @@ bash examples/diffusionnft_trainer/boogu_image/run_boogu_image_pickapic_preferen
 
 The recipe samples from a dataset capped at 5,760 Pick-a-Pic v1 prompts; the default 60-step
 run consumes 1,440 prompt groups (24 per step). Validation uses 256 fixed prompts with a fixed
-seed. The recipe differs from the OCR recipe in two ways that both matter for convergence:
+seed.
+
+The prompts come from the prompt-only SFW export of the Pick-a-Pic v1 training split,
+`CarperAI/pickapic_v1_no_images_training_sfw` (`train` split, `caption` column). Pairwise labels
+and images are discarded; RL uses only the prompt text. `boogu_image_pickapic.py` normalizes,
+deduplicates, and shuffles the captions with seed 42, holds out 256 for validation, and takes
+the next 5,760 for training.
+
+The recipe differs from the OCR recipe in two ways that both matter for convergence:
 
 - `pipeline.guidance_scale=1.0` (CFG-free, as in DiffusionNFT). With text CFG active the
   training forward regresses the guided velocity `v_u + s * (v_c - v_u)` onto the policy's own

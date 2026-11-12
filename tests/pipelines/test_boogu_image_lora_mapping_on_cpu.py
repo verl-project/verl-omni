@@ -386,7 +386,7 @@ class TestVllmManagerInterplay:
     @pytest.fixture()
     def match(self):
         pytest.importorskip("vllm_omni")
-        from vllm_omni.diffusion.lora.utils import _match_target_modules
+        from vllm_omni.lora.binding import _match_target_modules
 
         return _match_target_modules
 
@@ -616,8 +616,8 @@ def boogu_manager(monkeypatch):
     import vllm.distributed.parallel_state as parallel_state
     from vllm.config import VllmConfig, set_current_vllm_config
     from vllm_omni.diffusion.data import OmniDiffusionConfig, TransformerConfig
-    from vllm_omni.diffusion.lora.manager import DiffusionLoRAManager
     from vllm_omni.diffusion.models.boogu_image import boogu_image_transformer as boogu
+    from vllm_omni.lora.manager import DiffusionLoRAManager
 
     from verl_omni.pipelines.boogu_image_flow_grpo.vllm_omni_rollout_adapter import BooguImagePipelineWithLogProb
     from verl_omni.utils.vllm_omni.utils import VLLMOmniHijack

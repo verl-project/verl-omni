@@ -1,6 +1,6 @@
 # How to Integrate a New Diffusion Model for FlowGRPO Training
 
-Last updated: 10/05/2026.
+Last updated: 11/10/2026.
 
 This guide walks you through everything required to integrate a new diffusion
 model into VeRL-Omni so it can be trained end-to-end with the **FlowGRPO**
@@ -28,14 +28,17 @@ code is the canonical reference.
 ## TL;DR
 
 A new model needs **three files in one new package** plus **two registry
-hooks**. The same adapters work with both the default diffusers + FSDP2
+hooks**. A run that also trains the text encoder adds
+`ar_training_adapter.py`; see
+[Composite AR training adapter](#composite-ar-training-adapter).  The same adapters work with both the default diffusers + FSDP2
 backend and the optional [VeOmni backend](#53-use-the-veomni-backend-optional) — backend selection is purely a configuration concern.
 
 ```
 verl_omni/pipelines/<model>_flow_grpo/
 ├── __init__.py                       # re-exports both adapters
 ├── diffusers_training_adapter.py     # subclass of DiffusionModelBase
-└── vllm_omni_rollout_adapter.py      # subclass of VllmOmniPipelineBase
+├── vllm_omni_rollout_adapter.py      # subclass of VllmOmniPipelineBase
+└── ar_training_adapter.py            # only when the text encoder is trained
 ```
 
 Both adapters are picked up by string-based registries that dispatch on
@@ -259,7 +262,8 @@ as a template:
 verl_omni/pipelines/<model>_flow_grpo/
 ├── __init__.py
 ├── diffusers_training_adapter.py
-└── vllm_omni_rollout_adapter.py
+├── vllm_omni_rollout_adapter.py
+└── ar_training_adapter.py            # only when AR is trained
 ```
 
 The `__init__.py` re-exports both adapters so the `@register(...)`
@@ -396,6 +400,90 @@ skipped for some micro-batches — an unsharded forward emits no collectives,
 so the skip cannot desync the ranks. Ignored parameters must stay frozen
 (FSDP2 does not synchronize their gradients), and a non-empty list requires
 `strategy=fsdp2`; the engine raises otherwise.
+
+---
+
+## Composite AR training adapter
+
+Skip this file when only the DiT is trained. 
+Add `ar_training_adapter.py` when the same package trains the AR (e.g., text encoder) with the DiT (`model_type=diffusion_composite_model`). 
+Packages that do not train the AR must not register a subclass — `DiffusionModelARBase.peek_class` returns `None` and the engine skips AR setup.
+
+The AR backend is `CompositeARFSDPEngineWithLMHead`. After verl builds the
+language-model module it dispatches through `DiffusionModelARBase`, which is not `DiffusionModelBase`. AR setup stays in `ar_training_adapter.py`; the DiT adapter stays in `diffusers_training_adapter.py`. Both use the same
+`(architecture, algorithm)` key.
+
+```python
+from verl_omni.pipelines.model_base import DiffusionModelARBase
+
+@DiffusionModelARBase.register("MyModelPipeline", algorithm="flow_grpo")
+class MyModelAR(DiffusionModelARBase):
+    @classmethod
+    def configure_module(cls, module, model_config) -> None:
+        ...
+
+    @classmethod
+    def get_fsdp_ignored_module_names(cls, model_config) -> list[str]:
+        return []  # optional; frozen subtrees left unsharded under FSDP2
+```
+
+Import the class from the package `__init__.py` so the decorator runs:
+
+```python
+from .ar_training_adapter import MyModelAR  # noqa: F401
+```
+
+The worked example is
+[`qwen_image_dual_grpo/ar_training_adapter.py`](../../verl_omni/pipelines/qwen_image_dual_grpo/ar_training_adapter.py).
+
+- `configure_module` receives the Hugging Face module before FSDP wrap.
+  Strip an unused tower or patch `forward` here.
+- Do not call DiT adapter methods from this file, and do not put this
+  setup on `diffusers_training_adapter.py`.
+- Under FSDP2, `get_fsdp_ignored_module_names` feeds
+  `CompositeARFSDPEngineWithLMHead._build_fsdp_module`.
+
+### Composite rollout loop
+
+Training an AR adapter pairs with the `composite_single_turn_agent` loop,
+which runs AR and diffusion generation in one rollout: one AR sample per
+input row, each expanded into its diffusion group. Its contract, in brief:
+
+- Loop selection: `actor_rollout_ref.rollout.agent.default_agent_loop=composite_single_turn_agent`
+  (a per-sample `agent_name` override must select a loop that returns the
+  composite output contract — one AR result plus its diffusion samples per
+  row — or the worker's unpack fails).
+- `rollout.m` is the AR repeat count: callers repeat each prompt row themselves
+  (`batch.repeat(rollout.m)`, as the composite test does) to draw `m` AR
+  rollouts per prompt — the loop emits one AR output per row; `rollout.n` is
+  the diffusion group size per AR sample (`rollout.val_kwargs.n` replaces it
+  for validation batches).
+- AR sampling lives under `actor_rollout_ref.rollout.ar.*`.
+- The reward config must define a function named `ar` with `weight: 0` — AR
+  reward is derived from the per-image `reward/ar` extras and the loop asserts
+  the zero weight (`verl_omni/agent_loop/composite_agent_loop.py`).
+- AR `position_ids` dispatch to the registered pipeline's
+  `build_ar_position_ids` hook (`verl_omni/pipelines/model_base.py`).
+- The manager is `CompositeAgentLoopManager`
+  (`verl_omni.agent_loop.composite_agent_loop.CompositeAgentLoopManager`),
+  selected via `+actor_rollout_ref.rollout.agent.agent_loop_manager_class`
+  (the `+` prefix is needed — the key is absent from the shipped config).
+
+**Trainer status — read before wiring a run.** The manager's
+`generate_sequences` returns an `(ar_batch, diffusion_batch)` tuple, while the
+shipped trainers (both `main_diffusion` and the V1 path) consume a single
+`DataProto`. No in-tree trainer or example recipe consumes the composite
+manager today; the machinery is exercised by
+[`tests/agent_loop/test_composite_agent_loop.py`](../../tests/agent_loop/test_composite_agent_loop.py)
+at the worker/manager level. Integrating a composite model end-to-end needs
+trainer-side support for the tuple — raise it with the maintainers first.
+The AR training adapter half (above) and the `qwen_image_dual_grpo` package
+remain valid references.
+
+Models that are not composite stay on the default `diffusion_single_turn_agent`
+loop. Put model-specific rollout behavior in adapter hooks first — registering
+a new loop is a last resort (see "Select the rollout loop" in
+[`integrating_an_omni_model.md`](integrating_an_omni_model.md)).
 
 ---
 
@@ -624,7 +712,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     ...  # everything else identical to your diffusers/FSDP2 recipe
 ```
 
-See [`examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_veomni.sh`](../../examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_veomni.sh) for a complete VeOmni recipe that mirrors [`run_qwen_image_ocr.sh`](../../examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr.sh) line-for-line — the diff is only the engine-selection fields. Install instructions for VeOmni alongside vLLM 0.30.0 are in [`docs/start/engine_backends.md`](../start/engine_backends.md).
+See [`examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_veomni.sh`](../../examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_veomni.sh) for a complete VeOmni recipe that mirrors [`run_qwen_image_ocr.sh`](../../examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr.sh) line-for-line — the diff is only the engine-selection fields. Install instructions for VeOmni alongside vLLM are in [`docs/start/engine_backends.md`](../start/engine_backends.md#installing-veomni-alongside-vllm).
 
 
 #### Mixing override schemas — don't
@@ -681,6 +769,9 @@ Before opening the PR, confirm every box:
       (no decode-and-re-encode in the pipeline).
 - [ ] `verl_omni/pipelines/<model>_flow_grpo/` contains `__init__.py`,
       `diffusers_training_adapter.py`, and `vllm_omni_rollout_adapter.py`.
+      A package that also trains the AR module adds
+      `ar_training_adapter.py` and imports it from `__init__.py`
+      ([Composite AR training adapter](#composite-ar-training-adapter)).
 - [ ] [`verl_omni/pipelines/__init__.py`](../../verl_omni/pipelines/__init__.py)
       imports the new package.
 - [ ] Architecture string on both `@register(...)` decorators matches

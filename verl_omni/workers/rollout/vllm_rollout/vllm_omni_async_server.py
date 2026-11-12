@@ -22,6 +22,7 @@ from typing import Any, Optional
 import ray
 import torch
 import vllm_omni.entrypoints.cli.serve
+from omegaconf import DictConfig, OmegaConf
 from verl.utils.profiler import build_rollout_dist_profiler
 from verl.utils.tracking import RLInsightLogger
 from verl.workers.config import RolloutConfig
@@ -39,6 +40,7 @@ from vllm_omni.engine.arg_utils import OmniEngineArgs, OrchestratorArgs, orchest
 from vllm_omni.entrypoints import AsyncOmni
 from vllm_omni.entrypoints.openai.api_server import omni_init_app_state
 from vllm_omni.lora.request import LoRARequest
+from vllm_omni.utils.tracking_parser import TrackingArgumentParser
 
 from verl_omni.utils.net_utils import get_non_ephemeral_free_port
 from verl_omni.workers.config import DiffusionModelConfig, DiffusionRolloutConfig, OmniModelConfig
@@ -50,12 +52,18 @@ from verl_omni.workers.rollout.vllm_rollout.vllm_omni_diffusion_strategy import 
 logger = logging.getLogger(__file__)
 logger.setLevel(logging.INFO)
 
+
+def _abort_ack_timeout_s() -> float:
+    """RPC timeout for engine abort acknowledgements; env-overridable for tests."""
+    return float(os.getenv("VERL_OMNI_ABORT_ACK_TIMEOUT_S", "120"))
+
+
 # Sentinel: ``None`` is a valid cached value (LoRA not loaded).
 # TODO: Move LoRA request cache resolution/invalidation upstream to AsyncOmni.
 _LORA_REQUEST_CACHE_MISS = object()
 
 # Lazily-computed upstream argument defaults, used to forward only explicitly
-# set engine arguments (see ``_drop_defaulted_engine_args``; tracked in vllm-omni#8503).
+# set engine arguments (see ``_drop_defaulted_engine_args``).
 _ENGINE_ARGS_DEFAULTS: dict | None = None
 
 
@@ -119,6 +127,71 @@ def _drop_defaulted_engine_args(engine_args: dict) -> dict:
     }
 
 
+def _normalize_rollout_logging_level() -> None:
+    """Canonicalize VLLM_LOGGING_LEVEL before diffusion workers spawn.
+
+    verl's rollout env pins ``WARN`` (verl/trainer/constants_ppo.py); vLLM's
+    LoggingConfig at this pin accepts only canonical level names, and
+    vllm-omni's diffusion workers feed the environment value straight into
+    it. Only the alias is rewritten — an explicit user level passes through.
+
+    TODO (mike): drop once verl sets ``WARNING`` directly in its rollout env
+    (its constants_ppo.py pins the ``WARN`` alias).
+    """
+    if os.environ.get("VLLM_LOGGING_LEVEL", "").upper() == "WARN":
+        os.environ["VLLM_LOGGING_LEVEL"] = "WARNING"
+
+
+# TODO (mike): drop these wrappers once vllm-omni's serve CLI accepts plain
+# argparse subparsers (it only recognizes TrackingArgumentParser, while
+# verl's launcher builds the rollout CLI with FlexibleArgumentParser).
+class _TrackingSubparsers:
+    """Create tracking parsers from a plain argparse subparsers action."""
+
+    def __init__(self, subparsers: argparse._SubParsersAction):
+        self._subparsers = subparsers
+
+    def add_parser(self, name: str, *args: Any, **kwargs: Any) -> TrackingArgumentParser:
+        # ``add_parser`` builds kwargs for its fixed parser class, so construct
+        # and register the tracking parser here instead.
+        kwargs.pop("parser_class", None)
+        kwargs.setdefault("prog", f"{self._subparsers._prog_prefix} {name}")
+        parser = TrackingArgumentParser(**kwargs)
+        self._subparsers._name_parser_map[name] = parser
+        return parser
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._subparsers, name)
+
+
+class _TrackingCliCommand:
+    """Build one vllm-omni CLI command's subparser as a tracking parser.
+
+    verl's launcher constructs the rollout CLI from a plain
+    FlexibleArgumentParser, while the pinned vllm-omni's serve subparser
+    only accepts TrackingArgumentParser (its explicit-args machinery).
+    """
+
+    def __init__(self, command):
+        self._command = command
+
+    def subparser_init(self, subparsers: argparse._SubParsersAction) -> TrackingArgumentParser:
+        return self._command.subparser_init(_TrackingSubparsers(subparsers))
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._command, name)
+
+
+class _TrackingCliModule:
+    """Present vllm-omni's CLI modules with tracking-parser subcommands."""
+
+    def __init__(self, module):
+        self._module = module
+
+    def cmd_init(self) -> list:
+        return [_TrackingCliCommand(command) for command in self._module.cmd_init()]
+
+
 class vLLMOmniHttpServer(vLLMHttpServer):
     """vLLM-Omni http server in single node, this is equivalent to launch server with command line:
     ```
@@ -152,6 +225,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
 
     def _post_init(self, cuda_visible_devices: str) -> None:
         """Run strategy post-init and preserve the replica device list."""
+        _normalize_rollout_logging_level()
         if get_rollout_sequence_parallel_size(self.config) > 1:
             self.replica_world_size = get_rollout_world_size(self.config)
             profiler = self.profiler_controller
@@ -180,7 +254,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
     # launch_server hooks
     # -----------------------------------------------------------------------
 
-    def _apply_quantization(self) -> tuple[str | None, dict]:
+    def _apply_quantization(self) -> dict:
         return self._generate_strategy.apply_quantization()
 
     def _get_override_generation_config(self) -> dict:
@@ -201,7 +275,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         return self._generate_strategy.worker_extension_cls(device_type)
 
     def _get_cli_modules(self) -> list:
-        return [vllm_omni.entrypoints.cli.serve]
+        return [_TrackingCliModule(vllm_omni.entrypoints.cli.serve)]
 
     def _get_cli_description(self) -> str:
         return "vLLM-Omni CLI"
@@ -217,13 +291,6 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         engine_args = OmniEngineArgs.from_cli_args(args)
         engine_args = asdict(engine_args)
 
-        # TODO (mike): drop this patch once vllm-omni strips the serialized default
-        # fault_tolerance_config at its kwargs boundary, or vLLM defaults it to None —
-        # any dict is read as an explicit --fault-tolerance-config and auto-enabled,
-        # failing without an external load balancer.
-        if not engine_args.get("enable_fault_tolerance"):
-            engine_args.pop("fault_tolerance_config", None)
-
         # ``from_cli_args`` only retains OmniEngineArgs fields. Restore the
         # OrchestratorArgs fields forwarded by verl before creating AsyncOmni.
         for key in orchestrator_field_names() - engine_args.keys():
@@ -231,10 +298,9 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             if value is not None:
                 engine_args[key] = value
 
-        # Restore raw user mapping so compilation runtime fields do not fail stage config validation.
+        # The stage-config boundary rejects asdict-expanded compilation configs,
+        # so restore the raw user mapping before dropping unowned defaults.
         _restore_raw_compilation_config(engine_args, args)
-
-        # Forward only explicitly-set engine args; stage config rejects unowned defaults.
         engine_args = _drop_defaulted_engine_args(engine_args)
         # This rollout setting is explicit even when its value matches the
         # OmniEngineArgs default, so restore it after default filtering.
@@ -494,7 +560,10 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         extra_prompt_ids: Optional[dict[str, list[int]]] = None,
         negative_extra_prompt_ids: Optional[dict[str, list[int]]] = None,
         priority: int = 0,
+        session_id: Optional[str] = None,
     ) -> DiffusionOutput | TokenOutput:
+        # session_id (cross-request server affinity in the vLLM path) has no
+        # AsyncOmni counterpart; routing stickiness is owned by the load balancer.
         return await self._generate_strategy.generate(
             prompt_ids=prompt_ids,
             sampling_params=sampling_params,
@@ -558,11 +627,23 @@ class vLLMOmniHttpServer(vLLMHttpServer):
     # so the parent's AsyncLLM-specific implementation must be overridden.
     # -----------------------------------------------------------------------
 
-    async def abort_all_requests(self, reset_prefix_cache: bool = True) -> dict[str, Any]:
-        """Abort all in-flight requests on the AsyncOmni engine."""
+    async def abort_all_requests(
+        self, reset_prefix_cache: bool = True, reject_request: bool = False, abort_only: bool = False
+    ) -> dict[str, Any]:
+        """Abort all in-flight requests on the AsyncOmni engine.
+
+        ``abort_only`` cancels current engine requests and keeps admission open;
+        the other flags shape the pause that otherwise follows. The AsyncOmni
+        engine parks requests that arrive behind its pause (it has no reject
+        knob), so ``reject_request`` only reaches engines that support it.
+        """
         engine = self.engine
         if getattr(engine, "output_processor", None) is not None:
-            return await super().abort_all_requests(reset_prefix_cache)
+            return await super().abort_all_requests(
+                reset_prefix_cache, reject_request=reject_request, abort_only=abort_only
+            )
+        if reject_request and not abort_only:
+            logger.warning("AsyncOmni has no admission gate: requests arriving behind the pause park until resume")
 
         # ``engine.abort`` takes EXTERNAL ids; ``request_states`` is keyed by internal.
         in_flight: list[tuple[str, str, Any]] = []
@@ -575,11 +656,20 @@ class vLLMOmniHttpServer(vLLMHttpServer):
 
         request_ids = [external_id for _, external_id, _ in in_flight]
 
+        if abort_only:
+            try:
+                await asyncio.wait_for(engine.abort(request_ids), timeout=_abort_ack_timeout_s())
+            except Exception:
+                # Same cleanup as the pause path: synthetic terminals unblock waiting generators.
+                for internal_id, _, state in in_flight:
+                    self._enqueue_abort_output(internal_id, state)
+                raise
+            logger.info("Aborted %d request(s) (admission left open): %s", len(request_ids), request_ids)
+            return {"aborted_count": len(request_ids), "request_ids": request_ids}
+
         aborted = False
         try:
-            await asyncio.wait_for(
-                engine.abort(request_ids), timeout=float(os.getenv("VERL_OMNI_ABORT_ACK_TIMEOUT_S", "120"))
-            )
+            await asyncio.wait_for(engine.abort(request_ids), timeout=_abort_ack_timeout_s())
             aborted = True
             # Pause even with nothing to abort: holds admission until resume_generation.
             await engine.pause_generation(
@@ -647,9 +737,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
                 break
 
         try:
-            await asyncio.wait_for(
-                engine.abort(request_id), timeout=float(os.getenv("VERL_OMNI_ABORT_ACK_TIMEOUT_S", "120"))
-            )
+            await asyncio.wait_for(engine.abort(request_id), timeout=_abort_ack_timeout_s())
         except Exception:
             if in_flight_state is not None:
                 self._enqueue_abort_output(in_flight_state.request_id, in_flight_state)
@@ -708,6 +796,15 @@ class vLLMOmniReplica(vLLMReplica):
         is_teacher_model: bool = False,
         name_suffix: str = "",
     ):
+        if is_teacher_model and isinstance(model_config, dict | DictConfig):
+            engine_kwargs = (config.engine_kwargs or {}).get("vllm_omni") or {}
+            if engine_kwargs.get("output_mode") == "ar":
+                # Checkpoint workers construct the model config before the HTTP server does.
+                model_config = OmegaConf.merge(
+                    {"trust_remote_code": engine_kwargs.get("trust_remote_code", False)},
+                    model_config,
+                    {"_target_": "verl_omni.workers.config.OmniModelConfig"},
+                )
         super().__init__(
             replica_rank, config, model_config, gpus_per_node, is_reward_model, is_teacher_model, name_suffix
         )
