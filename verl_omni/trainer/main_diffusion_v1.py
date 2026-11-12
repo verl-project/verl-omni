@@ -61,10 +61,8 @@ def run_diffusion_v1(config, task_runner_class=None) -> None:
         print(f"ray init kwargs: {ray_init_kwargs}")
         ray.init(**OmegaConf.to_container(ray_init_kwargs))
 
-    task_runner_options = {}
     if task_runner_class is None:
         task_runner_class = DiffusionTaskRunnerV1
-        task_runner_options["num_cpus"] = 1
 
     if (
         is_cuda_available
@@ -76,10 +74,7 @@ def run_diffusion_v1(config, task_runner_class=None) -> None:
 
         assert is_nvtx_available(), "nvtx is not available in CUDA platform. Please 'pip3 install nvtx'"
         nsight_options = build_controller_nsight_launch_options(config)
-        task_runner_options["runtime_env"] = {"nsight": nsight_options}
-
-    if task_runner_options:
-        runner = task_runner_class.options(**task_runner_options).remote()
+        runner = task_runner_class.options(runtime_env={"nsight": nsight_options}).remote()
     else:
         runner = task_runner_class.remote()
     ray.get(runner.run.remote(config))
@@ -89,7 +84,7 @@ def run_diffusion_v1(config, task_runner_class=None) -> None:
         ray.timeline(filename=timeline_json_file)
 
 
-@ray.remote
+@ray.remote(num_cpus=1)
 class DiffusionTaskRunnerV1:
     def __init__(self):
         self.config = None

@@ -15,14 +15,12 @@
 
 import warnings
 from pathlib import Path
-from unittest.mock import Mock
 
 import pytest
 from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
 
 import verl_omni
-from verl_omni.trainer import main_diffusion_v1
 from verl_omni.trainer.main_diffusion import _deprecate_v0_trainer, uses_v1_trainer
 
 
@@ -131,34 +129,3 @@ def test_run_diffusion_v1_force_enables_transfer_queue_before_ray_init(monkeypat
     assert env_vars.get("TRANSFER_QUEUE_ENABLE") == "1"
     if overrides:
         assert env_vars.get("OMP_NUM_THREADS") == "8"
-
-
-
-
-def test_default_task_runner_combines_resource_and_nsys_options(monkeypatch):
-    config = OmegaConf.create(
-        {
-            "global_profiler": {"tool": "nsys", "steps": [1]},
-            "transfer_queue": {"enable": False},
-            "ray_kwargs": {},
-        }
-    )
-    options = {"trace": "nvtx", "o": "controller-test"}
-    build_options = Mock(return_value=options)
-    runner_class = Mock()
-    monkeypatch.setattr(main_diffusion_v1, "build_controller_nsight_launch_options", build_options)
-    monkeypatch.setattr(main_diffusion_v1, "enable_rl_insight", Mock())
-    monkeypatch.setattr(main_diffusion_v1, "DiffusionTaskRunnerV1", runner_class)
-    monkeypatch.setattr(main_diffusion_v1, "is_cuda_available", True)
-    monkeypatch.setattr(main_diffusion_v1.ray, "is_initialized", lambda: True)
-    get = Mock()
-    monkeypatch.setattr(main_diffusion_v1.ray, "get", get)
-    monkeypatch.setattr("verl.utils.import_utils.is_nvtx_available", lambda: True)
-
-    main_diffusion_v1.run_diffusion_v1(config)
-
-    build_options.assert_called_once_with(config)
-    runner_class.options.assert_called_once_with(num_cpus=1, runtime_env={"nsight": options})
-    runner = runner_class.options.return_value.remote.return_value
-    runner.run.remote.assert_called_once_with(config)
-    get.assert_called_once_with(runner.run.remote.return_value)

@@ -211,7 +211,14 @@ class TestRayMasterPortRangeSchema:
 def test_omni_entrypoint_forwards_controller_launch_options(monkeypatch):
     from verl_omni.trainer import main_omni
 
-    config = OmegaConf.create({"ray_kwargs": {}, "global_profiler": {"tool": "nsys", "steps": [1]}})
+    config = OmegaConf.create(
+        {
+            "actor_rollout_ref": {"actor": {}, "ref": {}},
+            "critic": {},
+            "ray_kwargs": {},
+            "global_profiler": {"tool": "nsys", "steps": [1]},
+        }
+    )
     options = {"trace": "nvtx", "o": "controller-test"}
     build_options = MagicMock(return_value=options)
     runner = MagicMock()
