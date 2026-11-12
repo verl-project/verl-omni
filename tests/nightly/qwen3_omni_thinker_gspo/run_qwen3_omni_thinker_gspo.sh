@@ -2,8 +2,12 @@
 # Nightly Qwen3-Omni Thinker GSPO on the v1 omni trainer.
 #
 # Same wiring as tests/special_e2e/run_gspo_qwen3_omni_thinker_lora_v1_smoke.sh,
-# on 1 GPU for 20 steps. Rollout is greedy so the repeated GSM8K prompt stays
-# aligned across runs. The tiny checkpoint is built locally.
+# on 1 GPU for 20 steps. Prompts are length-varied on purpose: equal-length 4-channel
+# mRoPE position_ids hit a pinned-verl jagged layout bug (split_with_sizes) during
+# compute_log_prob. ppo_micro_batch_size_per_gpu matches ppo_mini_batch_size so the
+# actor update is one micro-batch: a smaller one enables FSDP2 no_sync, and torch 2.13
+# then crashes on unused vision/audio params (FSDPParam has no _unsharded_param).
+# The tiny checkpoint is built locally.
 set -xeuo pipefail
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -14,7 +18,7 @@ export L3_TEST_CASE=${L3_TEST_CASE:-qwen3_omni_thinker_gspo}
 export L3_ALGORITHM=${L3_ALGORITHM:-gspo}
 export L3_CASE_LABEL=${L3_CASE_LABEL:-"Qwen3-Omni Thinker GSPO"}
 export L3_MODEL=${L3_MODEL:-qwen3-omni}
-export L3_DATA_SOURCE=${L3_DATA_SOURCE:-openai/gsm8k}
+export L3_DATA_SOURCE=${L3_DATA_SOURCE:-${L3_TEST_CASE}}
 export NUM_GPUS=${NUM_GPUS:-1}
 export TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-4}
 export L3_SKIP_DATASET=1
@@ -30,20 +34,24 @@ DATA_DIR=${DATA_DIR:-${HOME}/data/${L3_TEST_CASE}}
 export DATA_DIR
 export TRAIN_FILES=${DATA_DIR}/train.parquet
 export VAL_FILES=${DATA_DIR}/test.parquet
-# The workflow MODEL_PATH input is the Qwen-Image policy. This case builds its own.
+# Tiny model: always built locally (no external Hub dependency).
 POLICY_MODEL_PATH=${POLICY_MODEL_PATH:-${HOME}/models/tiny-random/Qwen3-Omni}
 
 EXCLUDE_MODULES=".*talker.*|.*code2wav.*|.*code_predictor.*|.*visual.*|.*audio_tower.*"
 
+# ── Build tiny model ──────────────────────────────────────────────────────────
 python3 "${REPO_ROOT}/tests/special_e2e/build_qwen3_omni_tiny_random.py" \
     --output-dir "${POLICY_MODEL_PATH}" --force
 
-python3 "${REPO_ROOT}/tests/nightly/create_repeated_gspo_data.py" \
-    --kind math \
-    --local_save_dir "${DATA_DIR}" \
-    --train_size "${TRAIN_BATCH_SIZE}" \
-    --val_size 4
+# ── Build dummy math dataset if not present ───────────────────────────────────
+if [ ! -f "${DATA_DIR}/train.parquet" ]; then
+    python3 "${REPO_ROOT}/tests/special_e2e/create_dummy_math_data.py" \
+        --local_save_dir "${DATA_DIR}" \
+        --train_size "${TRAIN_BATCH_SIZE}" \
+        --val_size 4
+fi
 
+# ── Run V1 training (20 steps, LoRA, GSPO, vLLM-Omni AR rollout) ───────────────
 bash "${REPO_ROOT}/tests/nightly/run_l3_case.sh" \
     data.train_files="${TRAIN_FILES}" \
     data.val_files="${VAL_FILES}" \
@@ -72,7 +80,7 @@ bash "${REPO_ROOT}/tests/nightly/run_l3_case.sh" \
     actor_rollout_ref.actor.optim.weight_decay=0.01 \
     actor_rollout_ref.actor.optim.clip_grad=1.0 \
     actor_rollout_ref.actor.ppo_mini_batch_size=4 \
-    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
+    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=4 \
     actor_rollout_ref.actor.use_dynamic_bsz=True \
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=20480 \
     actor_rollout_ref.actor.use_kl_loss=false \
@@ -119,7 +127,7 @@ bash "${REPO_ROOT}/tests/nightly/run_l3_case.sh" \
     reward.reward_manager.source=register \
     reward.reward_manager.name=naive \
     trainer.val_before_train=false \
-    trainer.balance_batch=True \
+    trainer.balance_batch=False \
     trainer.critic_warmup=0 \
     trainer.logger=console \
     trainer.project_name=verl-nightly \

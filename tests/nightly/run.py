@@ -11,7 +11,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Nightly entrypoint for Qwen-Image L3 regressions on the v1 trainer."""
+"""Nightly entrypoint for L3 regressions on the v1 trainer.
+
+Qwen-Image cases use ``verl_omni.trainer.main_diffusion_v1``.
+MiniCPM-o and Qwen3-Omni cases use ``verl_omni.trainer.main_omni``.
+"""
 
 from __future__ import annotations
 
@@ -28,6 +32,14 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 _SCRIPT_DIR = Path(__file__).resolve().parent
 
+
+_DEFAULT_TRAINER_MODULE = "verl_omni.trainer.main_diffusion_v1"
+_ALLOWED_TRAINER_MODULES = frozenset(
+    {
+        "verl_omni.trainer.main_diffusion_v1",
+        "verl_omni.trainer.main_omni",
+    }
+)
 
 _FORWARDED_ENV_PREFIXES = ("DEBUG_DUMP_", "GENRM_OCR_")
 _FORWARDED_ENV_NAMES = {
@@ -70,10 +82,21 @@ def _patch_ray_init() -> None:
     ray.init = ray_init_with_debug_hooks
 
 
+def _trainer_module() -> str:
+    """Return the v1 trainer module selected by ``NIGHTLY_TRAINER_MODULE``."""
+    module = os.environ.get("NIGHTLY_TRAINER_MODULE", _DEFAULT_TRAINER_MODULE)
+    if module not in _ALLOWED_TRAINER_MODULES:
+        allowed = ", ".join(sorted(_ALLOWED_TRAINER_MODULES))
+        raise ValueError(f"NIGHTLY_TRAINER_MODULE={module!r} is not one of: {allowed}")
+    return module
+
+
 def main() -> None:
     install_debug_hooks.install_debug_hooks()
     _patch_ray_init()
-    runpy.run_module("verl_omni.trainer.main_diffusion_v1", run_name="__main__", alter_sys=True)
+    module = _trainer_module()
+    print(f"[NIGHTLY] trainer module: {module}", flush=True)
+    runpy.run_module(module, run_name="__main__", alter_sys=True)
 
 
 if __name__ == "__main__":

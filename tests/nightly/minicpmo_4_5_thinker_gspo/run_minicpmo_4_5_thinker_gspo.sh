@@ -14,7 +14,7 @@ export L3_TEST_CASE=${L3_TEST_CASE:-minicpmo_4_5_thinker_gspo}
 export L3_ALGORITHM=${L3_ALGORITHM:-gspo}
 export L3_CASE_LABEL=${L3_CASE_LABEL:-"MiniCPM-o 4.5 Thinker GSPO"}
 export L3_MODEL=${L3_MODEL:-minicpmo-4.5}
-export L3_DATA_SOURCE=${L3_DATA_SOURCE:-avqa_r1_6k}
+export L3_DATA_SOURCE=${L3_DATA_SOURCE:-${L3_TEST_CASE}}
 export NUM_GPUS=${NUM_GPUS:-1}
 export TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-4}
 export L3_SKIP_DATASET=1
@@ -29,8 +29,8 @@ export RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO=0
 DATA_DIR=${DATA_DIR:-${HOME}/data/${L3_TEST_CASE}}
 export DATA_DIR
 export TRAIN_FILES=${DATA_DIR}/train.parquet
-export VAL_FILES=${DATA_DIR}/validation.parquet
-# The workflow MODEL_PATH input is the Qwen-Image policy. This case builds its own.
+export VAL_FILES=${DATA_DIR}/test.parquet
+# This case builds its own policy model.
 POLICY_MODEL_PATH=${POLICY_MODEL_PATH:-${HOME}/models/tiny-random/MiniCPM-o-4_5}
 
 EXCLUDE_MODULES=".*vpm.*|.*apm.*|.*talker.*|.*code2wav.*|.*code_predictor.*|.*codec.*|.*audio_decoder.*|.*audio_generator.*|.*audio_head.*|.*tts.*|.*vocoder.*"
@@ -38,11 +38,12 @@ EXCLUDE_MODULES=".*vpm.*|.*apm.*|.*talker.*|.*code2wav.*|.*code_predictor.*|.*co
 python3 "${REPO_ROOT}/tests/special_e2e/build_minicpmo_tiny_random.py" \
     --output-dir "${POLICY_MODEL_PATH}" --force
 
-python3 "${REPO_ROOT}/tests/nightly/create_repeated_gspo_data.py" \
+python3 "${REPO_ROOT}/tests/nightly/create_single_sample_data.py" \
     --kind avqa \
     --local_save_dir "${DATA_DIR}" \
     --train_size "${TRAIN_BATCH_SIZE}" \
-    --val_size 4
+    --val_size 4 \
+    --data_source "${L3_DATA_SOURCE}"
 
 bash "${REPO_ROOT}/tests/nightly/run_l3_case.sh" \
     data.train_files="${TRAIN_FILES}" \
