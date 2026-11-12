@@ -88,6 +88,7 @@ def _worker(*, offload=True, free_cache=True, lora=True, base_synced=True, merge
     )
     worker._rank = 0
     worker.peft_merge = merged
+    worker.engine_merge = False
     worker.base_sync_done = base_synced
     worker.layered_summon = False
     worker.rollout_adapter = "default"

@@ -108,11 +108,25 @@ def _build_merged_lora_ipc_payload(lora_weights: dict, peft_config: dict | None)
     ``MergedLoRAIPCUpdateInfo`` payload as a dict plus the staging refs,
     which must outlive the send ack and release barrier (the rebuild args do
     not pin the storage).
+
+    The payload crosses vLLM's msgspec worker RPC on AR stages, so the handle
+    args ship in the wire encoding of
+    :mod:`verl_omni.workers.rollout.vllm_rollout.lora_ipc_wire` (the worker
+    extension decodes before the engine sees them), and the PEFT config ships
+    with sets normalized to sorted lists — PEFT's ``set`` target modules
+    degrade the engine's matcher to match-everything.
     """
     from dataclasses import asdict
 
     from torch.multiprocessing.reductions import reduce_tensor
     from vllm_omni.lora.weight_transfer import MergedLoRAIPCUpdateInfo
+
+    from verl_omni.workers.rollout.vllm_rollout.lora_ipc_wire import (
+        IPC_WIRE_KEY,
+        IPC_WIRE_VERSION,
+        encode_ipc_handle_args,
+        normalize_peft_config_for_wire,
+    )
 
     torch_device = get_torch_device()
     device_index = torch_device.current_device()
@@ -155,11 +169,14 @@ def _build_merged_lora_ipc_payload(lora_weights: dict, peft_config: dict | None)
             names=names,
             dtype_names=dtype_names,
             shapes=shapes,
-            ipc_handles=ipc_handles,
-            peft_config=peft_config,
+            ipc_handles=[
+                {uuid: encode_ipc_handle_args(args) for uuid, args in handle.items()} for handle in ipc_handles
+            ],
+            peft_config=normalize_peft_config_for_wire(peft_config),
             lora_int_id=1,
         )
     )
+    payload[IPC_WIRE_KEY] = IPC_WIRE_VERSION
     return payload, staged
 
 

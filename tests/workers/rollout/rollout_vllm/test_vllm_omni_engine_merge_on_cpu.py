@@ -24,21 +24,74 @@ from argparse import Namespace
 from types import MethodType, SimpleNamespace
 
 import pytest
+import torch
 from omegaconf import OmegaConf
 
 import verl_omni.workers.rollout.vllm_rollout.utils as rollout_utils
+from verl_omni.workers.rollout.vllm_rollout.lora_ipc_wire import (
+    IPC_WIRE_KEY,
+    IPC_WIRE_VERSION,
+    decode_ipc_handle_args,
+    encode_ipc_handle_args,
+)
 from verl_omni.workers.rollout.vllm_rollout.utils import vLLMOmniColocateWorkerExtension
 from verl_omni.workers.rollout.vllm_rollout.vllm_omni_ar_strategy import ARStrategy
 from verl_omni.workers.rollout.vllm_rollout.vllm_omni_strategy_base import OmniStrategyBase
+
+# The reduce_tensor args layout the engine rebuilds from: class objects,
+# torch.dtype, torch.Size tuples and raw IPC handle bytes (index 6 is the
+# device index the engine overwrites with its own).
+_REDUCE_ARGS = (
+    torch.Tensor,
+    torch.Size([8, 16]),
+    torch.Size([16, 1]),
+    0,
+    torch.storage.TypedStorage,
+    torch.float32,
+    0,
+    b"\x01" * 64,
+    512,
+    0,
+    False,
+    b"\x02" * 64,
+    8,
+    b"\x03" * 64,
+    False,
+)
 
 _PAYLOAD = {
     "names": ["base_model.model.foo.lora_A.weight"],
     "dtype_names": ["float32"],
     "shapes": [[8, 16]],
-    "ipc_handles": [{"gpu-uuid": (0, 1, 2)}],
+    "ipc_handles": [{"gpu-uuid": encode_ipc_handle_args(_REDUCE_ARGS)}],
     "peft_config": {"r": 8, "lora_alpha": 16, "target_modules": ["foo"]},
     "lora_int_id": 1,
+    IPC_WIRE_KEY: IPC_WIRE_VERSION,
 }
+
+
+def _decoded_payload(payload: dict) -> dict:
+    """The payload as the engine session must see it: marker popped, raw handles."""
+    return {
+        **{key: value for key, value in payload.items() if key != IPC_WIRE_KEY},
+        "ipc_handles": [
+            {uuid: decode_ipc_handle_args(args) for uuid, args in handle.items()} for handle in payload["ipc_handles"]
+        ],
+    }
+
+
+def _assert_msgspec_primitives(value) -> None:
+    """Fail unless every nested value is a msgspec primitive (str/int/float/bool/bytes/list/dict/None)."""
+    if value is None or isinstance(value, str | int | float | bool | bytes):
+        return
+    assert isinstance(value, list | dict), f"non-primitive {value!r} of type {type(value).__name__}"
+    if isinstance(value, dict):
+        for key, item in value.items():
+            assert isinstance(key, str)
+            _assert_msgspec_primitives(item)
+    else:
+        for item in value:
+            _assert_msgspec_primitives(item)
 
 
 class _FakeWorker:
@@ -85,14 +138,16 @@ def _no_hijack(monkeypatch):
 
 
 def test_payload_drives_the_merged_session_in_order(monkeypatch):
-    """A merged payload runs start/update/finish with the payload verbatim."""
+    """A merged payload runs start/update/finish; handles decode, marker drops."""
     _no_hijack(monkeypatch)
     worker = _FakeWorker().bind_extension()
 
     vLLMOmniColocateWorkerExtension.update_weights_from_ipc(worker, lora_ipc_payload=dict(_PAYLOAD))
 
     assert [name for name, *_ in worker.calls] == ["start", "update", "finish"]
-    assert worker.calls[1][1] == _PAYLOAD
+    assert worker.calls[1][1] == _decoded_payload(_PAYLOAD)
+    assert IPC_WIRE_KEY not in worker.calls[1][1]
+    assert worker.calls[1][1]["ipc_handles"] == [{"gpu-uuid": _REDUCE_ARGS}]
 
 
 def test_payload_fails_closed_without_a_transfer_engine(monkeypatch):
@@ -146,6 +201,68 @@ def test_failed_session_unwedges_worker_state_and_reraises(monkeypatch):
     # finish runs twice: once in the try (skipped by the failure) and once as
     # the cleanup that unwedges the worker's active-session state.
     assert [name for name, *_ in worker.calls] == ["start", "update", "finish"]
+
+
+def test_payload_fails_closed_on_unknown_wire(monkeypatch):
+    """A payload without the expected wire marker never reaches the session."""
+    _no_hijack(monkeypatch)
+    for bad in ({k: v for k, v in _PAYLOAD.items() if k != IPC_WIRE_KEY}, {**_PAYLOAD, IPC_WIRE_KEY: "mystery-v0"}):
+        worker = _FakeWorker().bind_extension()
+        with pytest.raises(ValueError, match="wire encoding"):
+            vLLMOmniColocateWorkerExtension.update_weights_from_ipc(worker, lora_ipc_payload=bad)
+        assert worker.calls == []
+
+
+def test_wire_encoding_round_trips_reduce_args():
+    """Every reduce-args kind survives encode/decode, and the wire form is
+    msgspec-primitive only — class objects, dtypes and storages are what kill
+    vLLM's AR worker RPC."""
+    parameter_args = (torch.nn.parameter.Parameter,) + _REDUCE_ARGS[1:]
+    for args in (_REDUCE_ARGS, parameter_args):
+        encoded = encode_ipc_handle_args(args)
+        _assert_msgspec_primitives(encoded)
+        assert decode_ipc_handle_args(encoded) == args
+        assert isinstance(decode_ipc_handle_args(encoded), tuple)
+
+
+def test_wire_encoding_fails_closed_on_unencodable_values():
+    """Objects without a wire form are rejected at build time, not mid-RPC."""
+    with pytest.raises(TypeError, match="no msgspec-safe wire encoding"):
+        encode_ipc_handle_args((SimpleNamespace(),))
+
+
+def test_wire_decoding_fails_closed_on_unknown_names():
+    """Unresolvable dtype or class names raise instead of passing junk on."""
+    from verl_omni.workers.rollout.vllm_rollout.lora_ipc_wire import _DTYPE_TAG, _TYPE_TAG
+
+    with pytest.raises(ValueError, match="unknown dtype"):
+        decode_ipc_handle_args(([_DTYPE_TAG, "torch.notadtype"],))
+    with pytest.raises(ValueError, match="not one of"):
+        decode_ipc_handle_args(([_TYPE_TAG, "torch.module.NotAClass"],))
+    with pytest.raises(ValueError, match="wire decoder does not produce"):
+        decode_ipc_handle_args((["notatag", 1],))
+
+
+def test_peft_config_wire_normalization_sorts_sets():
+    """PEFT ships set target_modules; the engine matcher needs sorted lists."""
+    from verl_omni.workers.rollout.vllm_rollout.lora_ipc_wire import normalize_peft_config_for_wire
+
+    peft_config = {
+        "r": 8,
+        "target_modules": {"transformer_blocks.1.attn", "transformer_blocks.0.attn"},
+        "modules_to_save": frozenset({"norm"}),
+        "nested": {"exclude_modules": {"lm_head"}},
+    }
+
+    assert normalize_peft_config_for_wire(peft_config) == {
+        "r": 8,
+        "target_modules": ["transformer_blocks.0.attn", "transformer_blocks.1.attn"],
+        "modules_to_save": ["norm"],
+        "nested": {"exclude_modules": ["lm_head"]},
+    }
+    assert normalize_peft_config_for_wire(None) is None
+    # The input is not mutated.
+    assert peft_config["target_modules"] == {"transformer_blocks.1.attn", "transformer_blocks.0.attn"}
 
 
 def _strategy_server(merge):
@@ -210,7 +327,8 @@ def test_engine_merge_refuses_the_spelling_without_lora_configured():
 
 def test_merged_payload_builder_shapes_the_upstream_contract(monkeypatch):
     """CPU-visible half of the producer contract: sorted names, per-tensor
-    UUID-keyed handle dicts from the patched reducer, staging refs returned."""
+    UUID-keyed handle dicts from the patched reducer, staging refs returned,
+    handles on the msgspec-safe wire, PEFT sets normalized to sorted lists."""
     import torch
 
     import verl_omni.workers.engine_workers as ew
@@ -218,8 +336,24 @@ def test_merged_payload_builder_shapes_the_upstream_contract(monkeypatch):
     recorded = []
 
     def fake_reduce(tensor):
-        """Record the handle tuple the patched reducer would produce."""
-        args = ("handle", tensor.shape, tensor.stride(), tensor.dtype)
+        """Record a reduce-args tuple with the kinds that break msgspec RPC."""
+        args = (
+            type(tensor),
+            tensor.size(),
+            tensor.stride(),
+            0,
+            torch.storage.TypedStorage,
+            tensor.dtype,
+            0,
+            b"\x01" * 64,
+            512,
+            0,
+            False,
+            b"\x02" * 64,
+            8,
+            None,
+            False,
+        )
         recorded.append(args)
         return None, args
 
@@ -240,13 +374,18 @@ def test_merged_payload_builder_shapes_the_upstream_contract(monkeypatch):
         "base_model.model.b.lora_B.weight": torch.zeros(4, 8),
         "base_model.model.a.lora_A.weight": torch.zeros(8, 2),
     }
-    payload, staged = ew._build_merged_lora_ipc_payload(weights, peft_config={"r": 8})
+    peft_config = {"r": 8, "target_modules": {"attn", "proj"}}
+    payload, staged = ew._build_merged_lora_ipc_payload(weights, peft_config=peft_config)
 
     assert payload["names"] == sorted(weights)
     assert payload["dtype_names"] == ["float32", "float32"]
     assert payload["shapes"] == [[8, 2], [4, 8]]
-    assert payload["ipc_handles"] == [{"gpu-uuid": recorded[0]}, {"gpu-uuid": recorded[1]}]
-    assert payload["peft_config"] == {"r": 8}
+    assert payload[IPC_WIRE_KEY] == IPC_WIRE_VERSION
+    # The whole payload crosses vLLM's msgspec worker RPC on AR stages.
+    _assert_msgspec_primitives(payload)
+    # The engine rebuilds from the decoded args, so they must round-trip.
+    assert [decode_ipc_handle_args(list(handle["gpu-uuid"])) for handle in payload["ipc_handles"]] == recorded
+    assert payload["peft_config"] == {"r": 8, "target_modules": ["attn", "proj"]}
     assert payload["lora_int_id"] == 1
     # The staging refs share storage with the gathered tensors (detach views).
     assert staged[0].data_ptr() == weights["base_model.model.a.lora_A.weight"].data_ptr()

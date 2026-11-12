@@ -81,6 +81,31 @@ def _peft_misroute(weights: list) -> RuntimeError | None:
     return None
 
 
+def _decode_merged_lora_payload_wire(payload: dict) -> None:
+    """Decode the engine-merge payload's IPC handles in place.
+
+    The actor ships the handle args in the msgspec-safe wire encoding because
+    the payload crosses vLLM's worker RPC on AR stages (class objects,
+    ``torch.dtype`` and storages are not serializable there). The wire marker
+    is consumed here so the engine's update-info dataclass never sees it.
+    """
+    from verl_omni.workers.rollout.vllm_rollout.lora_ipc_wire import (
+        IPC_WIRE_KEY,
+        IPC_WIRE_VERSION,
+        decode_ipc_handle_args,
+    )
+
+    wire = payload.pop(IPC_WIRE_KEY, None)
+    if wire != IPC_WIRE_VERSION:
+        raise ValueError(
+            "update_weights_from_ipc received a merged LoRA payload whose IPC handles "
+            f"use wire encoding {wire!r}; this worker understands only {IPC_WIRE_VERSION!r}."
+        )
+    payload["ipc_handles"] = [
+        {uuid: decode_ipc_handle_args(args) for uuid, args in handle.items()} for handle in payload["ipc_handles"]
+    ]
+
+
 class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
     """
     The class for vLLM-Omni's worker to inherit from, in the colocate setting.
@@ -213,6 +238,7 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
                     "update_weights_from_ipc received both a merged LoRA payload and the "
                     "adapter-tensor sync path; engine-side merge ships one payload per sync."
                 )
+            _decode_merged_lora_payload_wire(lora_ipc_payload)
             self._apply_merged_lora_payload(lora_ipc_payload)
             return
 
