@@ -27,8 +27,10 @@ from verl.trainer.ppo.utils import need_reference_policy
 from verl.utils.device import auto_set_device, is_cuda_available
 
 from verl_omni.trainer.diffusion.ray_diffusion_trainer import (
+    CompositePolicyGradientRayTrainer,
     DirectPreferenceRayTrainer,
     PolicyGradientRayTrainer,
+    use_composite_policy_gradient,
     validate_separate_config,
 )
 from verl_omni.utils.config import resolve_lora_config, validate_config
@@ -187,9 +189,14 @@ def run_diffusion(config, task_runner_class=None) -> None:
 
 
 def _get_trainer_cls(config):
-    """Return the trainer class selected by ``algorithm.trainer_type``."""
+    """Return the trainer class selected by ``algorithm.trainer_type``.
+
+    ``trainer.train_ar`` selects ``CompositePolicyGradientRayTrainer`` for DualGRPO.
+    """
     trainer_type = config.algorithm.trainer_type
     if trainer_type == "policy_gradient":
+        if use_composite_policy_gradient(config):
+            return CompositePolicyGradientRayTrainer
         return PolicyGradientRayTrainer
     if trainer_type == "direct_preference":
         return DirectPreferenceRayTrainer
