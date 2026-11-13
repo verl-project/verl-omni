@@ -28,15 +28,20 @@ import torch.distributed
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp import MixedPrecision, ShardingStrategy
+from verl.utils.device import get_device_name as _platform_device_name
 
 # Hub FA kernels don't fetch on the torch-2.13 CI stack (no flash-attn2 build; hf-mirror breaks flash-attn3).
 _ulysses_backends = ["native"]
 
+# Same list as ENABLED_GPU_DEVICES in tests/utils/gpu_test_topology.py (this file also runs as a torchrun
+# script, where that package is not importable). Other devices run on CPU as before.
+_ENABLED_GPU_DEVICES = ("cuda", "xpu")
+
 
 def get_device_name() -> str:
-    if torch.cuda.is_available():
-        return "cuda"
-    return "cpu"
+    """Enable Ascend only for an explicitly selected NPU smoke invocation."""
+    name = _platform_device_name()
+    return name if name in _ENABLED_GPU_DEVICES or (name == "npu" and os.getenv("DEVICE_NAME") == "npu") else "cpu"
 
 
 def get_torch_device():
@@ -44,7 +49,12 @@ def get_torch_device():
 
 
 def initialize_global_process_group(timeout_second: int = 36000):
-    backend = "hccl" if get_device_name() == "npu" else "nccl"
+    if get_device_name() == "npu":
+        backend = "hccl"
+    elif get_device_name() == "xpu":
+        backend = "xccl"
+    else:
+        backend = "nccl"
     torch.distributed.init_process_group(
         backend,
         timeout=timedelta(seconds=timeout_second),
@@ -58,21 +68,31 @@ def initialize_global_process_group(timeout_second: int = 36000):
 _DEFAULT_MODEL_PATH = os.path.expanduser("~/models/tiny-random/Qwen-Image")
 
 
+def _skip_or_fail(reason: str) -> None:
+    """Keep optional GPU skips from hiding failures in an explicitly selected NPU run."""
+    if os.environ.get("DEVICE_NAME") == "npu" or get_device_name() == "npu":
+        pytest.fail(reason)
+    pytest.skip(reason)
+
+
 def sync_model_parameters_global(module):
     for p in module.parameters():
         torch.distributed.broadcast(tensor=p.data, src=0)
 
 
 def _load_config_for_sp(sp_size: int) -> dict:
+    """Load the local tiny checkpoint and align its attention heads to the SP degree."""
     from diffusers import AutoModel
 
-    if not os.path.isdir(_DEFAULT_MODEL_PATH):
-        pytest.skip(
-            f"Tiny Qwen-Image model not found at {_DEFAULT_MODEL_PATH!r}. "
-            "Provide the model or adjust _DEFAULT_MODEL_PATH."
+    model_path = _DEFAULT_MODEL_PATH
+    if os.environ.get("DEVICE_NAME") == "npu" or get_device_name() == "npu":
+        model_path = os.path.expanduser(os.environ.get("MODEL_PATH", model_path))
+    if not os.path.isdir(model_path):
+        _skip_or_fail(
+            f"Tiny Qwen-Image model not found at {model_path!r}. Provide the model or adjust _DEFAULT_MODEL_PATH."
         )
 
-    cfg = AutoModel.load_config(_DEFAULT_MODEL_PATH, subfolder="transformer")
+    cfg = AutoModel.load_config(model_path, subfolder="transformer")
 
     orig_heads = cfg.get("num_attention_heads", 1)
     if orig_heads % sp_size != 0:
@@ -102,7 +122,7 @@ def test_diffusers_ulysses_fwd(sp_size, backend):
 
     world_size = torch.distributed.get_world_size()
     if world_size < sp_size:
-        pytest.skip(f"Requires ≥ {sp_size} GPUs, found {world_size}")
+        _skip_or_fail(f"Requires ≥ {sp_size} devices, found {world_size}")
 
     dp_size = world_size // sp_size
     _diffusers_ulysses_fwd(sp_size=sp_size, dp_size=dp_size, backend=backend)
@@ -113,7 +133,7 @@ def _diffusers_ulysses_fwd(sp_size: int, dp_size: int, backend: str):
     try:
         from diffusers import AutoModel, ContextParallelConfig
     except ImportError:
-        pytest.skip("diffusers package is not installed")
+        _skip_or_fail("diffusers package is not installed")
 
     assert get_torch_device().device_count() >= sp_size, f"Need at least {sp_size} GPUs for sp_size={sp_size}"
 
@@ -128,7 +148,11 @@ def _diffusers_ulysses_fwd(sp_size: int, dp_size: int, backend: str):
 
     cfg = _load_config_for_sp(sp_size)
     latent_dim = cfg.get("in_channels", 64)
-    encoder_hidden_dim = cfg.get("cross_attention_dim", cfg.get("encoder_hidden_size", 32))
+    # The text-branch RMSNorm normalizes joint_attention_dim; tiny checkpoints
+    # differ in which alias keys they carry, so fall back to the actual width.
+    encoder_hidden_dim = cfg.get(
+        "cross_attention_dim", cfg.get("encoder_hidden_size", cfg.get("joint_attention_dim", 32))
+    )
 
     module_sp = AutoModel.from_config(cfg, torch_dtype=torch.bfloat16)
     module_sp.enable_parallelism(config=ContextParallelConfig(ulysses_degree=sp_size, mesh=ulysses_device_mesh))
@@ -216,7 +240,7 @@ def test_diffusers_ulysses_fwd_bwd(sp_size, backend):
 
     world_size = torch.distributed.get_world_size()
     if world_size < sp_size:
-        pytest.skip(f"Requires ≥ {sp_size} GPUs, found {world_size}")
+        _skip_or_fail(f"Requires ≥ {sp_size} devices, found {world_size}")
 
     dp_size = world_size // sp_size
     _diffusers_ulysses_fwd_bwd(sp_size=sp_size, dp_size=dp_size, backend=backend)
@@ -227,7 +251,7 @@ def _diffusers_ulysses_fwd_bwd(sp_size: int, dp_size: int, backend: str):
     try:
         from diffusers import AutoModel, ContextParallelConfig
     except ImportError:
-        pytest.skip("diffusers package is not installed")
+        _skip_or_fail("diffusers package is not installed")
 
     assert get_torch_device().device_count() >= sp_size, f"Need at least {sp_size} GPUs for sp_size={sp_size}"
 
@@ -243,7 +267,11 @@ def _diffusers_ulysses_fwd_bwd(sp_size: int, dp_size: int, backend: str):
 
     cfg = _load_config_for_sp(sp_size)
     latent_dim = cfg.get("in_channels", 64)
-    encoder_hidden_dim = cfg.get("cross_attention_dim", cfg.get("encoder_hidden_size", 32))
+    # The text-branch RMSNorm normalizes joint_attention_dim; tiny checkpoints
+    # differ in which alias keys they carry, so fall back to the actual width.
+    encoder_hidden_dim = cfg.get(
+        "cross_attention_dim", cfg.get("encoder_hidden_size", cfg.get("joint_attention_dim", 32))
+    )
 
     module_sp = AutoModel.from_config(cfg, torch_dtype=torch.bfloat16)
     module_sp.enable_parallelism(config=ContextParallelConfig(ulysses_degree=sp_size, mesh=ulysses_device_mesh))
@@ -388,7 +416,7 @@ def test_minimax_h3_standard_ulysses_all_tasks_fwd_bwd(sp_size, backend, aligned
 
     world_size = torch.distributed.get_world_size()
     if world_size < sp_size:
-        pytest.skip(f"Requires ≥ {sp_size} GPUs, found {world_size}")
+        _skip_or_fail(f"Requires ≥ {sp_size} devices, found {world_size}")
     dp_size = world_size // sp_size
     device = get_device_name()
 
@@ -481,7 +509,7 @@ def test_diffusers_ulysses_fwd_bwd_fsdp(sp_size, backend):
 
     world_size = torch.distributed.get_world_size()
     if world_size < sp_size:
-        pytest.skip(f"Requires ≥ {sp_size} GPUs, found {world_size}")
+        _skip_or_fail(f"Requires ≥ {sp_size} devices, found {world_size}")
 
     dp_size = world_size // sp_size
     _diffusers_ulysses_fwd_bwd_fsdp(sp_size=sp_size, dp_size=dp_size, backend=backend)
@@ -501,7 +529,7 @@ def _diffusers_ulysses_fwd_bwd_fsdp(sp_size: int, dp_size: int, backend: str):
         from diffusers.models.transformers.transformer_qwenimage import QwenImageTransformerBlock
         from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
     except ImportError:
-        pytest.skip("diffusers package is not installed")
+        _skip_or_fail("diffusers package is not installed")
 
     import functools
 
@@ -519,7 +547,11 @@ def _diffusers_ulysses_fwd_bwd_fsdp(sp_size: int, dp_size: int, backend: str):
 
     cfg = _load_config_for_sp(sp_size)
     latent_dim = cfg.get("in_channels", 64)
-    encoder_hidden_dim = cfg.get("cross_attention_dim", cfg.get("encoder_hidden_size", 32))
+    # The text-branch RMSNorm normalizes joint_attention_dim; tiny checkpoints
+    # differ in which alias keys they carry, so fall back to the actual width.
+    encoder_hidden_dim = cfg.get(
+        "cross_attention_dim", cfg.get("encoder_hidden_size", cfg.get("joint_attention_dim", 32))
+    )
 
     module_sp = AutoModel.from_config(cfg, torch_dtype=torch.bfloat16)
     module_sp.enable_parallelism(config=ContextParallelConfig(ulysses_degree=sp_size, mesh=ulysses_device_mesh))
@@ -634,4 +666,6 @@ def _diffusers_ulysses_fwd_bwd_fsdp(sp_size: int, dp_size: int, backend: str):
 
 
 if __name__ == "__main__":
-    pytest.main([__file__, "-svv"])
+    # Propagate the pytest exit code so torchrun (and the smoke runners behind
+    # it) fail on test failures instead of exiting 0.
+    raise SystemExit(pytest.main([__file__, "-svv"]))

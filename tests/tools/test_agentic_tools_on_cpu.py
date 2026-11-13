@@ -25,7 +25,6 @@ from verl.tools.function_tool import FUNCTION_TOOL_REGISTRY
 
 import verl_omni.tools.image_gen as image_gen
 from verl_omni.tools import trajectory
-from verl_omni.tools.trajectory import artifacts
 
 
 def _bind_tool_cfg(*, e2e_root=None, run_name="cpu_test", **overrides):
@@ -51,23 +50,12 @@ def _bind_tool_cfg(*, e2e_root=None, run_name="cpu_test", **overrides):
     trajectory.bind_run_artifacts(cfg)
 
 
-def _clear_all_tool_artifacts() -> None:
-    """Test-only: wipe the process-global generate_image registry between cases."""
-    with artifacts._artifact_registry_lock:
-        artifacts._artifact_registry.clear()
-        artifacts._artifact_by_id.clear()
-        artifacts._latest_image_by_rollout.clear()
-    artifacts.set_latest_tool_image_path(None)
-
-
 @pytest.fixture(autouse=True)
-def _isolate_tool_artifact_registry():
-    """Prior tests share ``step_*/sample_*`` keys; wipe leftover registry rows."""
-    _clear_all_tool_artifacts()
+def _isolate_episode():
     trajectory.clear_agentic_image_gen()
     trajectory.clear_run_artifacts()
-    yield
-    _clear_all_tool_artifacts()
+    with trajectory.episode_scope(trajectory.EpisodeState()):
+        yield
     trajectory.clear_agentic_image_gen()
     trajectory.clear_run_artifacts()
 
@@ -97,11 +85,11 @@ def test_generate_image_stub_without_service(tmp_path):
 
 def test_generate_image_blocked_after_yes(tmp_path):
     _bind_tool_cfg(e2e_root=tmp_path, run_name="cpu_test")
-    yes_token = image_gen.set_good_enough_yes_reached(True)
+    yes_token = trajectory.set_good_enough_yes_reached(True)
     try:
         response, reward, metrics = image_gen.generate_image("a cafe poster")
     finally:
-        image_gen.set_good_enough_yes_reached(False)
+        trajectory.set_good_enough_yes_reached(False)
         del yes_token
     assert "generate_image blocked" in response.text
     assert "good_enough=YES" in response.text
@@ -111,29 +99,20 @@ def test_generate_image_blocked_after_yes(tmp_path):
 
 
 def test_good_enough_yes_latch_does_not_key_on_recycled_thread_ident():
-    """No rollout/task scope → the shared latch dict must stay untouched.
-
-    Thread-pool idents are recycled; keying the cross-context latch on
-    ``threading.get_ident()`` let a YES set from an executor thread survive the
-    loop's ``clear`` (different ident) and bleed into the next sample.
-    """
+    """A raw thread without an inherited owner cannot change the parent's latch."""
     import threading
 
-    from verl_omni.tools.trajectory import judge_latch
+    from verl_omni.tools.trajectory import episode_judge
 
     tokens = trajectory.set_active_trajectory_relpath(None)
     try:
-        before = dict(judge_latch._good_enough_yes_by_scope)
-        worker = threading.Thread(target=judge_latch.set_good_enough_yes_reached, args=(True,))
+        worker = threading.Thread(target=episode_judge.set_good_enough_yes_reached, args=(True,))
         worker.start()
         worker.join()
-        # Executor-thread set must not mint a recycled-ident scope entry.
-        assert not any(isinstance(k, tuple) and k and k[0] == "thread" for k in judge_latch._good_enough_yes_by_scope)
-        assert judge_latch._good_enough_yes_by_scope == before
-        # And the parent context does not inherit the executor thread's YES.
-        assert judge_latch.get_good_enough_yes_reached() is False
+        # A raw thread has no inherited episode and cannot change its parent.
+        assert episode_judge.get_good_enough_yes_reached() is False
     finally:
-        judge_latch.clear_good_enough_yes_reached()
+        episode_judge.clear_good_enough_yes_reached()
         trajectory.reset_active_trajectory_relpath(tokens)
 
 
@@ -164,13 +143,13 @@ def test_judge_image_stub_without_vllm():
 
 def test_expand_judge_user_request_placeholders():
     bound = "A vertical artistic cafe poster."
-    token = trajectory.active_user_prompt.set(bound)
+    token = trajectory.set_active_user_prompt(bound)
     try:
         assert image_gen._expand_judge_user_request("same as user message") == bound
         assert image_gen._expand_judge_user_request("last") == bound
         assert image_gen._expand_judge_user_request("some other task text") == "some other task text"
     finally:
-        trajectory.active_user_prompt.reset(token)
+        trajectory.reset_active_user_prompt(token)
     assert image_gen._expand_judge_user_request("raw without binding") == "raw without binding"
 
 
@@ -192,30 +171,16 @@ def test_clear_latest_image_prunes_only_active_rollout_registry(tmp_path):
     Image.new("RGB", (1, 1), (1, 2, 3)).save(png_a)
     Image.new("RGB", (1, 1), (4, 5, 6)).save(png_b)
 
-    tokens_a = trajectory.set_active_trajectory_relpath("step_000001/sample_0.00")
-    trajectory.register_tool_artifact(prompt="prompt a", paths=[str(png_a)], backend="qwen_image")
-    assert trajectory.count_live_generate_artifacts_for_active_rollout() == 1
-    trajectory.reset_active_trajectory_relpath(tokens_a)
-
-    tokens_b = trajectory.set_active_trajectory_relpath("step_000001/sample_1.00")
-    trajectory.register_tool_artifact(prompt="prompt b", paths=[str(png_b)], backend="qwen_image")
-    assert trajectory.count_live_generate_artifacts_for_active_rollout() == 1
-    trajectory.reset_active_trajectory_relpath(tokens_b)
-
-    tokens_a = trajectory.set_active_trajectory_relpath("step_000001/sample_0.00")
-    try:
-        trajectory.clear_latest_tool_image_for_active_rollout()
-        assert trajectory.count_live_generate_artifacts_for_active_rollout() == 0
-    finally:
-        trajectory.reset_active_trajectory_relpath(tokens_a)
-
-    tokens_b = trajectory.set_active_trajectory_relpath("step_000001/sample_1.00")
-    try:
+    with trajectory.episode_scope(trajectory.EpisodeState(episode_id="a")):
+        trajectory.register_tool_artifact(prompt="prompt a", paths=[str(png_a)], backend="qwen_image")
+        with trajectory.episode_scope(trajectory.EpisodeState(episode_id="b")):
+            trajectory.register_tool_artifact(prompt="prompt b", paths=[str(png_b)], backend="qwen_image")
+            assert trajectory.count_live_generate_artifacts_for_active_rollout() == 1
+            trajectory.clear_tool_artifacts_for_active_rollout()
+            assert trajectory.count_live_generate_artifacts_for_active_rollout() == 0
         assert trajectory.count_live_generate_artifacts_for_active_rollout() == 1
-        trajectory.clear_latest_tool_image_for_active_rollout()
+        trajectory.clear_tool_artifacts_for_active_rollout()
         assert trajectory.count_live_generate_artifacts_for_active_rollout() == 0
-    finally:
-        trajectory.reset_active_trajectory_relpath(tokens_b)
 
 
 def test_decode_images_base64():
@@ -250,16 +215,13 @@ def test_count_live_generate_artifacts_unbound_rid_is_zero(tmp_path):
     """Missing active rollout id must not count every registry row."""
     from verl_omni.tools import trajectory
 
-    _clear_all_tool_artifacts()
     png = tmp_path / "orphan.png"
     png.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 16)
-    # Register with an explicit rid while nothing is active on this task.
+    # An unbound standalone call has no rollout identity to count.
     trajectory.register_tool_artifact(
         prompt="orphan",
         paths=[str(png)],
         backend="qwen_image",
-        rollout_id="some_other_rollout",
     )
     assert trajectory.get_active_rollout_id() is None
     assert trajectory.count_live_generate_artifacts_for_active_rollout() == 0
-    _clear_all_tool_artifacts()

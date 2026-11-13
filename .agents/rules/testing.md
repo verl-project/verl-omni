@@ -15,7 +15,9 @@ things here are enforcement facts rather than guidance.
 
 `validate-structure` fails the commit unless every `test*.py` sits in
 `tests/<module>/`, where `<module>` is a first-level directory of `verl_omni/`
-(`agent_loop`, `models`, `pipelines`, `reward_loop`, `trainer`, `utils`, `workers`) or
+(the hook discovers them automatically — `agent_loop`, `models`, `pipelines`,
+`reward_loop`, `trainer`, `utils`, `workers`, `experimental`, `tools`,
+`model_merger`, `version`, and later additions) or
 one of `special_{e2e,sanity,standalone,distributed}`. A test at the `tests/` root
 fails — three legacy root files are explicitly allowlisted.
 
@@ -29,6 +31,7 @@ never runs.
 `tests/gpu_smoke/` and `tests/npu_smoke/` hold **no pytest files** — only shell
 scripts that invoke GPU tests living in the ordinary module directories
 (`tests/workers/test_diffusers_fsdp_engine.py`, …), because `validate-structure`
-forbids `test_*.py` under those directories. Exactly one file in the tree uses
-`skipif(not torch.cuda.is_available())`. Keep GPU tests beside the CPU tests and let
+forbids `test_*.py` under those directories. No file gates on bare
+`skipif(not torch.cuda.is_available())` — GPU-dependent tests skip via helpers
+(e.g. `enabled_gpu_count()` from `tests/utils/gpu_test_topology.py`). Keep GPU tests beside the CPU tests and let
 the filename keep them out of the CPU job.

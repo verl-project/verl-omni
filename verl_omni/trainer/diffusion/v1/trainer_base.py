@@ -15,11 +15,13 @@
 import logging
 import math
 import os
+import time
 import uuid
 from abc import ABC, abstractmethod
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from functools import cached_property
 from numbers import Integral
 from pprint import pprint
 
@@ -95,6 +97,7 @@ from verl_omni.trainer.diffusion.rollout_correction import (
     rollout_correction_enabled,
 )
 from verl_omni.trainer.diffusion.teacher_manager import DiffusionTeacherManager
+from verl_omni.trainer.diffusion.training_watchdog import TrainingWatchdog
 from verl_omni.trainer.diffusion.v1.tq_utils import (
     canonicalize_diffusion_tq_meta,
     diffusion_dump_tq_fields,
@@ -106,6 +109,7 @@ from verl_omni.trainer.diffusion.v1.tq_utils import (
 )
 from verl_omni.utils.config import resolve_lora_config
 from verl_omni.utils.net_utils import worker_group_port_ranges
+from verl_omni.utils.skip import init_skip_manager, log_skip_summary
 from verl_omni.utils.tracking import batch_items, validate_audio_batch
 from verl_omni.workers.config.reward import (
     reward_is_enabled,
@@ -220,6 +224,11 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         # Local update index within the parameter-sync cycle.
         self.local_trigger_step = 0
         self._nonfinite_grad_streak = 0
+        watchdog_config = dict(config.trainer.v1.get("watchdog", {}))
+        watchdog_enabled = watchdog_config.pop("enabled", False)
+        if not isinstance(watchdog_enabled, bool):
+            raise ValueError("trainer.v1.watchdog.enabled must be a boolean")
+        self._training_watchdog = TrainingWatchdog(loss_mode=loss_mode, **watchdog_config) if watchdog_enabled else None
 
     def _build_replay_buffer(self) -> ReplayBuffer:
         sampler_config = self.config.trainer.v1.sampler
@@ -253,9 +262,19 @@ class PolicyGradientDiffusionTrainerV1(ABC):
     def init(self):
         """Initialize workers, rollout server, reward loop, checkpoint engine."""
         self._setup()
-        if self._has_old_adapter:
-            self.actor_rollout_wg.copy_adapter(source="default", target="old")
         self.on_init_end()
+
+    def _policy_adapter_specs(self) -> tuple[tuple[str, str], ...]:
+        """Return adapter names and their algorithm config prefixes."""
+        specs = self._loss_fn.extra_ema_adapters if self._loss_fn is not None else ()
+        if self._has_old_adapter:
+            specs += (("old", "old_policy"),)
+        return specs
+
+    def _initialize_policy_adapters(self):
+        """Initialize snapshots before checkpoint restoration can replace them."""
+        for target, _ in self._policy_adapter_specs():
+            self.actor_rollout_wg.copy_adapter(source="default", target=target)
 
     def _rollout_server_managers(self) -> list:
         """LLM server managers whose inference engines take part in rollout profiling.
@@ -346,8 +365,8 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         """Run the v1 training loop, mirroring upstream ``PPOTrainer.fit``."""
         self.agent_loop_manager = agent_loop_manager
 
-        # initialize SkipManager for V1 rollout skip support (no-op until configured).
-        SkipManager.init(self.config)
+        # initialize SkipManager (verl rollout skip + verl-omni stage skip; no-op until configured).
+        init_skip_manager(self.config)
 
         self.logger = Tracking(
             project_name=self.config.trainer.project_name,
@@ -372,6 +391,8 @@ class PolicyGradientDiffusionTrainerV1(ABC):
                 self._shutdown_dataloaders()
                 return
 
+        if self._training_watchdog is not None:
+            self._training_watchdog.reset()
         current_epoch = self.global_steps // self.steps_per_epoch
         progress_bar = tqdm(total=self.total_training_steps, initial=self.global_steps, desc="Diffusion Training")
 
@@ -417,6 +438,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
                 metrics.update(val_metrics)
 
             self._compute_metrics(batch, metrics, self.timing_raw, self.global_steps, current_epoch)
+            self._report_training_watchdog(metrics)
 
             rollout_data_dir = self.config.trainer.get("rollout_data_dir", None)
             rollout_data_save_freq = self.config.trainer.get("rollout_data_save_freq", 1)
@@ -431,6 +453,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             SkipManager.set_step(self.global_steps)
             current_epoch = (self.global_steps - 1) // self.steps_per_epoch
             if is_last_step:
+                log_skip_summary(self.logger, self.global_steps)
                 self._shutdown_dump_executor()
                 pprint(f"Final validation metrics: {last_val_metrics}")
                 progress_bar.close()
@@ -438,8 +461,27 @@ class PolicyGradientDiffusionTrainerV1(ABC):
                 return
 
         self.on_train_end()
+        log_skip_summary(self.logger, self.global_steps)
         self._shutdown_dump_executor()
         self._shutdown_dataloaders()
+
+    def _report_training_watchdog(self, metrics: dict) -> None:
+        if self._training_watchdog is None:
+            return
+        started = time.perf_counter()
+        alerts, diagnostics = self._training_watchdog.observe(self.global_steps, metrics)
+        for alert in alerts:
+            logger.warning(
+                "Training watchdog rule=%s step=%d window=[%d,%d] observations=%d evidence=%s",
+                alert.rule,
+                alert.step,
+                alert.first_step,
+                alert.last_step,
+                alert.observations,
+                alert.evidence,
+            )
+        metrics.update(diagnostics)
+        metrics["watchdog/processing_time_s"] = time.perf_counter() - started
 
     def step(self, metrics: dict, timing_raw: dict) -> KVBatchMeta:
         """Feed one train batch and run ``parameter_sync_step`` local updates."""
@@ -560,7 +602,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
                     # syncs the standalone rollout, and switch_to_rollout is
                     # not guaranteed to fire), so keep the mid-cycle wake+sync
                     # or colocated generation stalls on stale weights.
-                    self.checkpoint_manager.update_weights(self.global_steps)
+                    self._update_rollout_weights_mid_cycle()
                 # In sync mode the replicas must stay asleep through the
                 # training phases below: update_weights resumes their weights
                 # (~55GB for Qwen-Image at rollout TP=1) and the actor update
@@ -656,6 +698,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         reward_tensor = reward_tensor.squeeze(-1).float() if reward_tensor.ndim > 1 else reward_tensor.float()
         return self._loss_fn.prepare_actor_batch(batch, reward_tensor, self.config)
 
+    @SkipManager.annotate(role="ref_log_prob")
     def _compute_ref_noise_pred(self, data: DataProto) -> DataProto | None:
         """Reference transformer output and shared flow tensors for DPO."""
         batch_td = _to_diffusion_worker_tensordict(data)
@@ -698,21 +741,25 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         }
         return DataProto.from_tensordict(tu.get_tensordict(ref_output))
 
-    def _update_old_policy(self) -> tuple[bool, float, str]:
-        """Refresh the NFT old-policy adapter (copy or EMA)."""
+    def _update_policy_adapters(self) -> dict[str, float]:
+        """Refresh each policy snapshot on its own schedule and report its metrics."""
         algo_cfg = self.config.algorithm
-        if self.global_steps % algo_cfg.old_policy_update_interval != 0:
-            return False, 0.0, "none"
-
-        decay = algo_cfg.old_policy_decay
-        if decay is None:
-            decay = old_policy_decay(self.global_steps, algo_cfg.old_policy_decay_schedule)
-
-        if decay == 0:
-            self.actor_rollout_wg.copy_adapter(source="default", target="old")
-            return True, float(decay), "copy"
-        self.actor_rollout_wg.ema_update_adapter(source="default", target="old", decay=decay)
-        return True, float(decay), "ema"
+        metrics = {}
+        for target, prefix in self._policy_adapter_specs():
+            if self.global_steps % getattr(algo_cfg, f"{prefix}_update_interval") != 0:
+                metrics.update(compute_old_policy_metrics((False, 0.0, "none"), prefix=prefix))
+                continue
+            decay = getattr(algo_cfg, f"{prefix}_decay")
+            if decay is None:
+                decay = old_policy_decay(self.global_steps, getattr(algo_cfg, f"{prefix}_decay_schedule"))
+            if decay == 0:
+                self.actor_rollout_wg.copy_adapter(source="default", target=target)
+                update_type = "copy"
+            else:
+                self.actor_rollout_wg.ema_update_adapter(source="default", target=target, decay=decay)
+                update_type = "ema"
+            metrics.update(compute_old_policy_metrics((True, float(decay), update_type), prefix=prefix))
+        return metrics
 
     def _train_direct_preference_batch(
         self, metrics: dict, timing_raw: dict, batch_meta: KVBatchMeta, data: DataProto
@@ -750,8 +797,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             actor_output = self._update_actor(data)
             actor_metrics = reduce_metrics(actor_output.meta_info["metrics"])
             metrics.update(actor_metrics)
-            if self._has_old_adapter:
-                metrics.update(compute_old_policy_metrics(self._update_old_policy()))
+            metrics.update(self._update_policy_adapters())
 
         return batch_meta
 
@@ -827,6 +873,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         actor_rollout_resource_pool = self._init_colocated_workers()
         self._init_online_rollout_stack(actor_rollout_resource_pool)
         self.checkpoint_manager.sleep_replicas()
+        self._initialize_policy_adapters()
         self._load_checkpoint()
 
         logger.info("diffusion v1 trainer initialized, ready to fit")
@@ -932,6 +979,9 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         # Per-run monotonic generation-batch number; pairs with the batch-local
         # ``index`` so TQ row ordering survives multi-batch sampling paths.
         self._gen_batch_seq = 0
+        # Prompts already given a rollout seed position in ``_rollout_seed_step``.
+        self._rollout_seed_step = None
+        self._rollout_seed_next_index = 0
         val_batch_size = self.config.data.val_batch_size or len(self.val_dataset)
         self.val_dataloader = StatefulDataLoader(
             dataset=self.val_dataset,
@@ -1214,10 +1264,22 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         chunks = [self._fetch_one_gen_batch() for _ in range(num_prompts // gen_batch_size)]
         batch = chunks[0] if len(chunks) == 1 else tu.concat_tensordict(chunks)
         tu.assign_non_tensor_data(batch, "global_steps", self.global_steps)
-        rollout_seed_cfg = self.config.actor_rollout_ref.rollout.get("seed")
-        if rollout_seed_cfg is not None:
-            tu.assign_non_tensor_data(batch, "rollout_seed", int(rollout_seed_cfg) + self.global_steps - 1)
+        self._assign_rollout_seed(batch, num_prompts)
         return batch
+
+    def _assign_rollout_seed(self, batch: tu.TensorDict, num_prompts: int) -> None:
+        rollout_seed_cfg = self.config.actor_rollout_ref.rollout.get("seed")
+        if rollout_seed_cfg is None:
+            return
+        tu.assign_non_tensor_data(batch, "rollout_seed", int(rollout_seed_cfg) + self.global_steps - 1)
+        # ``index`` restarts in every generation batch, and refills reuse this
+        # step's seed base, so seed from the position among the step's prompts.
+        if self._rollout_seed_step != self.global_steps:
+            self._rollout_seed_step = self.global_steps
+            self._rollout_seed_next_index = 0
+        start = self._rollout_seed_next_index
+        self._rollout_seed_next_index += num_prompts
+        batch["rollout_seed_index"] = torch.arange(start, start + num_prompts, dtype=torch.int64)
 
     @staticmethod
     def _trajectory_uid(key: str) -> str:
@@ -1333,26 +1395,41 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         batch = self._next_train_batch(num_prompts)
         return self._submit_batch_to_rollout(batch)
 
+    @SkipManager.annotate_tq(role="rollout_tq", phase="submit")
     def _add_batch_to_generate(self):
         batch = self._next_train_batch()
         self._submit_batch_to_rollout(batch)
 
+    @SkipManager.annotate(role="weight_sync")
+    def _update_rollout_weights_mid_cycle(self) -> None:
+        """Wake colocated replicas after the reward phase and refresh their weights (async modes).
+
+        Lifecycle syncs (init, step end, validation) always run; skipping this
+        refresh still wakes the replicas, on pre-update weights.
+        """
+        self.checkpoint_manager.update_weights(self.global_steps)
+
+    @SkipManager.annotate(role="reward")
     def _compute_reward_colocate(self, data: DataProto) -> DataProto:
         """Compute reward score with a colocated reward model on a DataProto batch."""
         assert self.reward_loop_manager is not None, "RewardLoopManager is None"
         return self.reward_loop_manager.compute_rm_score(data)
 
+    @cached_property
+    def _actor_dp_size(self) -> int:
+        """Actor DP size, queried once: the dispatch mapping is fixed for the worker group's lifetime."""
+        if not hasattr(self.actor_rollout_wg, "_query_dispatch_info"):
+            return 1
+        info = self.actor_rollout_wg._query_dispatch_info("actor")
+        if isinstance(info, dict):
+            return max(info.values()) + 1 if info else 1
+        if isinstance(info, list | tuple | set):
+            return max(info) + 1 if info else 1
+        # ONE_TO_ALL dispatch may return a scalar dp rank per worker.
+        return int(info) + 1 if info is not None else 1
+
     def _balance_batch(self, data: DataProto, metrics: dict) -> DataProto:
-        dp_size = 1
-        if hasattr(self.actor_rollout_wg, "_query_dispatch_info"):
-            info = self.actor_rollout_wg._query_dispatch_info("actor")
-            if isinstance(info, dict):
-                dp_size = max(info.values()) + 1 if info else 1
-            elif isinstance(info, list | tuple | set):
-                dp_size = max(info) + 1 if info else 1
-            else:
-                # ONE_TO_ALL dispatch may return a scalar dp rank per worker.
-                dp_size = int(info) + 1 if info is not None else 1
+        dp_size = self._actor_dp_size
         actor_global_mini_batch_size = self.config.actor_rollout_ref.actor.ppo_mini_batch_size
         actor_global_mini_batch_size *= self.config.actor_rollout_ref.rollout.n
         if self.trainer_mode == "separate_async":
@@ -1395,6 +1472,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         advantages[is_pad] = 0.0
         return data
 
+    @SkipManager.annotate(role="old_log_prob")
     def _compute_old_log_prob(self, data: DataProto) -> DataProto:
         """Recompute old log-probs over diffusion latents with the actor engine."""
         batch_td = _to_diffusion_worker_tensordict(data)
@@ -1423,6 +1501,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             old_log_prob.meta_info["metrics"] = {"perf/mfu/actor_infer": mfu}
         return old_log_prob
 
+    @SkipManager.annotate(role="ref_log_prob")
     def _compute_ref_log_prob(self, data: DataProto) -> DataProto:
         """Compute reference log-probs over diffusion latents."""
         batch_td = _to_diffusion_worker_tensordict(data)
@@ -1447,6 +1526,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             ref_dict["ref_prev_sample_mean"] = prev_sample_mean.float()
         return DataProto.from_tensordict(tu.get_tensordict(ref_dict))
 
+    @SkipManager.annotate(role="advantage")
     def _compute_advantage(self, data: DataProto) -> DataProto:
         """Compute diffusion (Flow-GRPO) advantages on the driver."""
         reward_tensor, reward_extra_infos_dict = extract_reward(data)
@@ -1467,6 +1547,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         )
         return data
 
+    @SkipManager.annotate(role="actor_update")
     def _update_actor(self, data: DataProto) -> DataProto:
         """Update the diffusion actor network."""
         rollout_config = self.config.actor_rollout_ref.rollout
@@ -1561,6 +1642,9 @@ class PolicyGradientDiffusionTrainerV1(ABC):
                 )
                 tq.kv_clear(keys=batch_meta.keys, partition_id=batch_meta.partition_id)
                 continue
+
+            # Stage-skip decorators bypass marked calls: validation must never poison training caches.
+            data.meta_info["validate"] = True
 
             if self.use_rm and self.reward_loop_manager.reward_loop_worker_handles is None:
                 self.checkpoint_manager.sleep_replicas()
@@ -1657,7 +1741,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         media_kinds=None,
         previews=None,
     ):
-        """Use the shared image/video W&B path with declared media metadata."""
+        """Use the shared image/video tracker path with declared media metadata."""
         return BaseRayDiffusionTrainer._maybe_log_val_generations(
             self,
             inputs,
@@ -2020,6 +2104,10 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             tq.kv_clear(keys=partial_trajectory_keys, partition_id=partition_id)
 
         tu.assign_non_tensor_data(batch, "global_steps", self.global_steps)
+        # The TQ round trip drops ``rollout_seed`` (NonTensorData). Re-stamp the seed
+        # positions too: prompts submitted later in this step count from the same
+        # step-wide counter and would otherwise reuse the restored ones.
+        self._assign_rollout_seed(batch, len(inflight_uids))
         tags = [{"is_prompt": True, "status": "pending", "global_steps": self.global_steps} for _ in inflight_uids]
         from tensordict.tensorclass import NonTensorData
 
