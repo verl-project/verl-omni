@@ -42,7 +42,7 @@ def _ar_strategy(*, ep=1, tp=2, dp=1, pipeline_name=QWEN3_OMNI_PIPELINE, pipelin
         data_parallel_size=dp,
         engine_kwargs={"vllm_omni": {"pipeline_name": pipeline_name, "pipeline_mode": pipeline_mode}},
     )
-    return ARStrategy(types.SimpleNamespace(config=config))
+    return ARStrategy(types.SimpleNamespace(config=config, model_config=types.SimpleNamespace(lora={}, lora_rank=0)))
 
 
 def _diffusion_strategy(*, ep=1, parallel_config=None, flat_flag=False, stage_overrides=None):

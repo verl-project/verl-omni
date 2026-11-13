@@ -329,6 +329,7 @@ def test_ar_strategy_resolves_nonzero_policy_and_weight_sync_stages(monkeypatch)
             max_model_len=64,
             max_num_batched_tokens=64,
         ),
+        model_config=SimpleNamespace(lora={}, lora_rank=0),
         _rollout_flags={},
     )
     strategy = ARStrategy(server)
@@ -371,6 +372,7 @@ def test_ar_strategy_moves_capacity_overrides_to_each_stage(monkeypatch):
             max_model_len=4096,
             max_num_batched_tokens=8192,
         ),
+        model_config=SimpleNamespace(lora={}, lora_rank=0),
         _rollout_flags={},
     )
     strategy = ARStrategy(server)
@@ -987,6 +989,34 @@ def test_ar_strategy_preserves_qwen3_omni_thinker_only_contract():
     assert output.extra_fields == {"global_steps": 12}
 
 
+def test_ar_deploy_config_scopes_lora_to_the_policy_stage(monkeypatch):
+    monkeypatch.setattr(ar_strategy_module, "get_visible_devices_keyword", lambda: "CUDA_VISIBLE_DEVICES")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
+    server = SimpleNamespace(
+        config=SimpleNamespace(
+            tensor_model_parallel_size=1,
+            text_encoder_tp_size=1,
+            max_model_len=8,
+            max_num_batched_tokens=8,
+        ),
+        model_config=SimpleNamespace(lora={"rank": 66}, lora_rank=0),
+        _rollout_flags={},
+    )
+    strategy = ARStrategy(server)
+    engine_kwargs = {
+        "pipeline_name": "qwen3_omni_moe",
+        "pipeline_mode": "full",
+    }
+
+    strategy.preprocess_engine_kwargs(engine_kwargs)
+
+    deploy = yaml.safe_load(Path(engine_kwargs["deploy-config"]).read_text(encoding="utf-8"))
+    policy_stage, other_stages = deploy["stages"][0], deploy["stages"][1:]
+    assert policy_stage["engine_extras"] == {"enable_lora": True, "max_loras": 1, "max_lora_rank": 128}
+    assert all("enable_lora" not in stage["engine_extras"] for stage in other_stages)
+    server._temp_deploy_ctx.cleanup()
+
+
 def test_ar_strategy_writes_qwen3_omni_thinker_only_deploy_config(monkeypatch):
     monkeypatch.setattr(ar_strategy_module, "get_visible_devices_keyword", lambda: "CUDA_VISIBLE_DEVICES")
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
@@ -997,6 +1027,7 @@ def test_ar_strategy_writes_qwen3_omni_thinker_only_deploy_config(monkeypatch):
             max_model_len=8,
             max_num_batched_tokens=8,
         ),
+        model_config=SimpleNamespace(lora={}, lora_rank=0),
         _rollout_flags={},
     )
     strategy = ARStrategy(server)
@@ -1025,6 +1056,7 @@ def test_ar_strategy_preserves_qwen3_omni_full_without_combiner(monkeypatch):
             max_model_len=8,
             max_num_batched_tokens=8,
         ),
+        model_config=SimpleNamespace(lora={}, lora_rank=0),
         _rollout_flags={},
     )
     strategy = ARStrategy(server)
@@ -1485,6 +1517,7 @@ def test_ar_deploy_config_omits_text_encoder_tp_size_on_ar_stages(tmp_path, monk
 
     server = SimpleNamespace(
         config=SimpleNamespace(tensor_model_parallel_size=2, text_encoder_tp_size=1),
+        model_config=SimpleNamespace(lora={}, lora_rank=0),
     )
     strategy = ARStrategy(server)
     engine_kwargs: dict = {}
