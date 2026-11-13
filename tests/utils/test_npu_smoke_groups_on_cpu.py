@@ -100,9 +100,9 @@ def test_parallel_groups_overlap_and_preserve_failures(shell_runtime, core_exit,
     )
     assert result.returncode == int(bool(core_exit or e2e_exit)), result.stdout + result.stderr
     values = {name: json.loads((evidence / f"{name}.json").read_text()) for name in ("core", "e2e")}
-    assert values["core"]["ASCEND_RT_VISIBLE_DEVICES"] == "0,1"
-    assert values["e2e"]["ASCEND_RT_VISIBLE_DEVICES"] == "2,3,4,5,6,7"
-    assert values["core"]["NUM_NPUS"] == "2" and values["e2e"]["NUM_NPUS"] == "6"
+    assert values["core"]["ASCEND_RT_VISIBLE_DEVICES"] == "0,1,2,3"
+    assert values["e2e"]["ASCEND_RT_VISIBLE_DEVICES"] == "4,5,6,7"
+    assert values["core"]["NUM_NPUS"] == "4" and values["e2e"]["NUM_NPUS"] == "4"
     assert values["core"]["RAY_TMPDIR"] != values["e2e"]["RAY_TMPDIR"]
     assert values["core"]["RAY_MASTER_PORT_RANGE"] != values["e2e"]["RAY_MASTER_PORT_RANGE"]
     for value in values.values():
