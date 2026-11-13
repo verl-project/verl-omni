@@ -430,8 +430,42 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         ``AsyncOmni.wake_up`` deliberately raises NotImplementedError after a
         level-2 sleep, and the trainer would have to re-upload the full
         pipeline each cycle. Keep 1 until both change.
+
+        AR-only engines whose every stage is rewritten by the weight sync use
+        vLLM's level (2 for full-weight syncs) when the job sets
+        ``VLLM_OMNI_AR_SLEEP_DISCARD_WEIGHTS=1`` and the installed vllm-omni
+        can wake AR stages after level 2 (``ar_level2_wake_enabled``,
+        vllm-project/vllm-omni#9712). Older vllm-omni raises on that wake, and
+        ``omni_delta_sharded`` stays at level 1: after the initial dense seed
+        it sends sparse byte-diffs that need the unchanged parameters kept.
+        Otherwise level 1 copies every weight to pinned host memory on sleep
+        and back on wake, just before the sync overwrites them.
         """
+        if self._sync_rewrites_all_ar_weights():
+            return super()._resolve_sleep_level()
         return 1
+
+    def _sync_rewrites_all_ar_weights(self) -> bool:
+        strategy = getattr(self, "_generate_strategy", None)
+        if not isinstance(strategy, ARStrategy) or os.environ.get("VLLM_OMNI_AR_SLEEP_DISCARD_WEIGHTS", "0") != "1":
+            return False
+        # Sparse delta sync rewrites only changed bytes. Level 2 would discard
+        # the unchanged parameters those diffs are applied on top of.
+        if getattr(getattr(self.config, "checkpoint_engine", None), "backend", None) == "omni_delta_sharded":
+            return False
+        # Pinned vllm-omni (before #9712) has no AR level-2 wake. sleep(level=2)
+        # then makes AsyncOmni.wake_up raise NotImplementedError.
+        import vllm_omni.entrypoints.async_omni as async_omni_module
+
+        ar_level2_wake_enabled = getattr(async_omni_module, "ar_level2_wake_enabled", None)
+        if not callable(ar_level2_wake_enabled) or not ar_level2_wake_enabled():
+            return False
+        ar_stage_ids, diffusion_stage_ids = self.engine._split_stage_ids_by_type()
+        if diffusion_stage_ids or not ar_stage_ids:
+            return False
+        synced = strategy.collective_rpc_stage_ids("update_weights_from_ipc")
+        # A sync to every stage (None) need not cover every weight of a multi-stage pipeline.
+        return len(ar_stage_ids) == 1 if synced is None else set(ar_stage_ids) <= set(synced)
 
     async def wake_up(self, tags: list[str] | None = None):
         if self.node_rank != 0:

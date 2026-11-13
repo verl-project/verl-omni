@@ -588,3 +588,110 @@ async def test_failed_wake_skips_admission_resume():
         await server.wake_up()
 
     assert engine.resumed == 0
+
+
+# ---------------------------------------------------------------------------
+# sleep level: AR-only engines discard weights at level 2 with the opt-in
+# ---------------------------------------------------------------------------
+
+
+class _StageEngine(_FakeAsyncOmni):
+    def __init__(self, stage_types):
+        super().__init__()
+        self.stage_types = list(stage_types)
+
+    def _split_stage_ids_by_type(self, stage_ids=None):
+        ids = range(len(self.stage_types))
+        return [i for i in ids if self.stage_types[i] != "diffusion"], [
+            i for i in ids if self.stage_types[i] == "diffusion"
+        ]
+
+
+def _sleep_level_server(engine, *, strategy_cls=None, weight_sync_stage_ids=None, lora=None, mtp=False):
+    from verl_omni.workers.rollout.vllm_rollout.vllm_omni_ar_strategy import ARStrategy
+
+    server = _make_server(engine)
+    strategy = object.__new__(strategy_cls or ARStrategy)
+    strategy._weight_sync_stage_ids = weight_sync_stage_ids
+    server._generate_strategy = strategy
+    server.model_config = SimpleNamespace(lora_rank=0, lora=lora or {})
+    server.config = SimpleNamespace(
+        free_cache_engine=True, mtp=SimpleNamespace(enable=mtp, enable_rollout=mtp) if mtp else None
+    )
+    return server
+
+
+@pytest.fixture
+def discard_weights(monkeypatch):
+    import vllm_omni.entrypoints.async_omni as async_omni_module
+
+    monkeypatch.setenv("VLLM_OMNI_AR_SLEEP_DISCARD_WEIGHTS", "1")
+    monkeypatch.setattr(
+        "verl.workers.rollout.vllm_rollout.vllm_async_server.is_torch_npu_available", lambda check_device=False: False
+    )
+    # The pinned vllm-omni has no ar_level2_wake_enabled. Opt-in tests stand in
+    # for a build that can wake AR stages after level 2.
+    monkeypatch.setattr(async_omni_module, "ar_level2_wake_enabled", lambda: True, raising=False)
+
+
+async def test_ar_only_engine_uses_vllm_sleep_level_with_discard_opt_in(discard_weights):
+    server = _sleep_level_server(_StageEngine(["llm"]))
+    assert server._resolve_sleep_level() == 2
+
+    await server.sleep()
+    assert server.engine.sleep_calls == [{"stage_ids": None, "level": 2, "mode": "abort"}]
+
+    # A merged LoRA sync rewrites every weight; vLLM's own level-1 cases are adapter-only LoRA sync and MTP drafters.
+    assert _sleep_level_server(_StageEngine(["llm"]), lora={"rank": 32, "merge": True})._resolve_sleep_level() == 2
+    assert _sleep_level_server(_StageEngine(["llm"]), lora={"rank": 32, "merge": False})._resolve_sleep_level() == 1
+    assert _sleep_level_server(_StageEngine(["llm"]), mtp=True)._resolve_sleep_level() == 1
+
+
+async def test_multi_stage_ar_engine_needs_every_stage_in_the_weight_sync(discard_weights):
+    engine = _StageEngine(["llm", "llm"])
+    assert _sleep_level_server(engine, weight_sync_stage_ids=[0, 1])._resolve_sleep_level() == 2
+    assert _sleep_level_server(engine, weight_sync_stage_ids=[0])._resolve_sleep_level() == 1
+    assert _sleep_level_server(engine, weight_sync_stage_ids=None)._resolve_sleep_level() == 1
+
+
+async def test_diffusion_and_mixed_engines_keep_level_one_with_discard_opt_in(discard_weights):
+    from verl_omni.workers.rollout.vllm_rollout.vllm_omni_diffusion_strategy import DiffusionStrategy
+
+    mixed = _sleep_level_server(_StageEngine(["llm", "diffusion"]), weight_sync_stage_ids=[0, 1])
+    assert mixed._resolve_sleep_level() == 1
+    diffusion = _sleep_level_server(_StageEngine(["diffusion"]), strategy_cls=DiffusionStrategy)
+    assert diffusion._resolve_sleep_level() == 1
+
+
+@pytest.mark.parametrize("value", [None, "0"])
+async def test_ar_only_engine_keeps_level_one_without_opt_in(monkeypatch, value):
+    if value is None:
+        monkeypatch.delenv("VLLM_OMNI_AR_SLEEP_DISCARD_WEIGHTS", raising=False)
+    else:
+        monkeypatch.setenv("VLLM_OMNI_AR_SLEEP_DISCARD_WEIGHTS", value)
+    assert _sleep_level_server(_StageEngine(["llm"]))._resolve_sleep_level() == 1
+
+
+async def test_omni_delta_sharded_keeps_level_one_with_discard_opt_in(discard_weights):
+    """Sparse delta sync must not discard the parameters its byte-diffs patch."""
+    server = _sleep_level_server(_StageEngine(["llm"]))
+    server.config.checkpoint_engine = SimpleNamespace(backend="omni_delta_sharded")
+    assert server._resolve_sleep_level() == 1
+
+    await server.release_kv_cache()
+    assert server.engine.sleep_calls == [{"stage_ids": None, "level": 1, "mode": "abort"}]
+
+
+async def test_sleep_level_follows_ar_level2_wake_enabled(discard_weights, monkeypatch):
+    """Older vllm-omni has no AR level-2 wake, so an opted-in AR sync stays at 1."""
+    import vllm_omni.entrypoints.async_omni as async_omni_module
+
+    server = _sleep_level_server(_StageEngine(["llm"]))
+    monkeypatch.delattr(async_omni_module, "ar_level2_wake_enabled", raising=False)
+    assert server._resolve_sleep_level() == 1
+
+    monkeypatch.setattr(async_omni_module, "ar_level2_wake_enabled", lambda: False, raising=False)
+    assert server._resolve_sleep_level() == 1
+
+    monkeypatch.setattr(async_omni_module, "ar_level2_wake_enabled", lambda: True, raising=False)
+    assert server._resolve_sleep_level() == 2
