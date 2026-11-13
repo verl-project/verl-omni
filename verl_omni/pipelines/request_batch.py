@@ -16,6 +16,8 @@
 
 from __future__ import annotations
 
+import os
+import random
 from typing import Any
 
 import numpy as np
@@ -44,26 +46,58 @@ def requested_outputs_for_batch(request_batch: Any) -> list[str]:
     return list(names)
 
 
+# SD3 and FLUX advance this across sampling calls. It is not reseeded per call.
+_call_window_rng = random.Random()
+
+
+def reset_call_window_rng(seed: int) -> None:
+    _call_window_rng.seed(seed)
+
+
+def _process_rank() -> int:
+    for key in ("RANK", "LOCAL_RANK"):
+        raw = os.environ.get(key)
+        if raw:
+            return int(raw)
+    return 0
+
+
 def shared_sde_window_generator(
     extra_args: dict | None,
     fallback: torch.Generator | list[torch.Generator] | None,
     *,
     device: torch.device | str,
+    policy: str = "step",
 ) -> torch.Generator | list[torch.Generator] | None:
-    """Draw one SDE window for every rollout in a training step.
+    """One SDE-window generator for the samples of a rollout call.
 
-    Per-request seeds put the GRPO samples of one prompt on different timesteps.
-    ``sde_window_seed`` wins; otherwise ``global_steps`` is the shared seed.
-    Calls with neither keep ``fallback``.
+    Forwarded ``sde_window_seed=0`` is the config default, not a pin.
+    ``constant`` reseeds 0. ``rank`` reseeds the process rank. ``call`` takes
+    the next value from a process RNG. ``step`` adds the seed to ``global_steps``.
+    A non-zero seed pins, except ``step``, which still adds ``global_steps``.
+    No seed and no step keeps ``fallback``.
     """
     if not isinstance(extra_args, dict):
         return fallback
-    seed = extra_args.get("sde_window_seed")
-    if seed is None:
-        seed = extra_args.get("global_steps")
-    if seed is None:
+    if policy not in ("constant", "rank", "call", "step"):
+        raise ValueError(f"Unknown SDE window policy: {policy!r}")
+    raw_seed = extra_args.get("sde_window_seed")
+    steps = extra_args.get("global_steps")
+    has_seed = raw_seed is not None
+    has_steps = steps is not None
+    if not has_seed and not has_steps:
         return fallback
-    return torch.Generator(device=device).manual_seed(int(seed))
+    if policy != "step" and has_seed and int(raw_seed) != 0:
+        seed = int(raw_seed)
+    elif policy == "constant":
+        seed = 0
+    elif policy == "rank":
+        seed = _process_rank()
+    elif policy == "call":
+        seed = _call_window_rng.randrange(2**31)
+    else:
+        seed = int(raw_seed or 0) + int(steps or 0)
+    return torch.Generator(device=device).manual_seed(seed)
 
 
 def sample_per_sample_sde_windows(

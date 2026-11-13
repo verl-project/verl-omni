@@ -66,19 +66,19 @@ def _state(seed: int, extra: dict) -> tuple[StepRequestState, torch.Generator]:
     return StepRequestState(request_id=f"r{seed}", sampling=sampling, prompt="x"), generator
 
 
-def test_prepare_encode_shares_one_window_and_leaves_the_request_generator() -> None:
-    extra = {"global_steps": 7, "sde_window_size": 2, "sde_window_range": [0, 5]}
+def test_prepare_encode_keeps_a_constant_window_when_the_default_seed_is_forwarded() -> None:
     pipeline = _pipeline()
     windows = []
-    for seed in (1, 2):
-        state, generator = _state(seed, extra)
+    for step in (1, 7):
+        extra = {"sde_window_seed": 0, "global_steps": step, "sde_window_size": 2, "sde_window_range": [0, 5]}
+        state, generator = _state(step, extra)
         before = generator.get_state().clone()
         pipeline.prepare_encode(state)
         windows.append(state.sde_window)
         assert state.sampling.generator is generator
         assert torch.equal(generator.get_state(), before)
 
-    expected = int(torch.randint(0, 4, (1,), generator=torch.Generator().manual_seed(7)).item())
+    expected = int(torch.randint(0, 4, (1,), generator=torch.Generator().manual_seed(0)).item())
     assert windows == [(expected, expected + 2), (expected, expected + 2)]
 
 

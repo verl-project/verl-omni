@@ -534,7 +534,9 @@ class QwenImagePipelineWithDualLogProb(QwenImagePipelineWithLogProb):
             sde_window_range=sde_window_range if sde_window_range is not None else (0, 5),
             num_timesteps=len(timesteps),
             batch_size=latents.shape[0],
-            generator=_shared_sde_window_generator(sampling_params.extra_args, generator, device=self.device),
+            generator=_shared_sde_window_generator(
+                sampling_params.extra_args, generator, device=self.device, policy="constant"
+            ),
             device=self.device,
         )
 

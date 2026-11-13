@@ -634,7 +634,9 @@ class Wan22DanceGRPOPipelineWithLogProb(Wan22Pipeline):
             attention_kwargs = {}
 
         # One window per training step. The per-request generator stays on the latents.
-        window_generator = shared_sde_window_generator(sampling_params.extra_args, generator, device=device)
+        window_generator = shared_sde_window_generator(
+            sampling_params.extra_args, generator, device=device, policy="step"
+        )
         if sde_window_size is not None:
             window_start = torch.randint(
                 sde_window_range[0],

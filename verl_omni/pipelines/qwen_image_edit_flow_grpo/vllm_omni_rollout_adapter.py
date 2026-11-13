@@ -507,7 +507,7 @@ class QwenImageEditPlusPipelineWithLogProb(QwenImageLoRAMixin, QwenImageTokenIdP
         if sde_window_size is not None:
             window_generator = generator[0] if isinstance(generator, list) else generator
             window_generator = shared_sde_window_generator(
-                sampling_params.extra_args, window_generator, device=self.device
+                sampling_params.extra_args, window_generator, device=self.device, policy="rank"
             )
             start = torch.randint(
                 sde_window_range[0],

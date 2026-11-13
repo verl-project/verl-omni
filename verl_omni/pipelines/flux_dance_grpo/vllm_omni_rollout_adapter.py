@@ -468,7 +468,7 @@ class FluxDanceGRPOPipelineWithLogProb(FluxPipeline):
             window_range=window_range,
             num_steps=len(timesteps),
             batch_size=latents.shape[0],
-            generators=shared_sde_window_generator(extra_args, generators, device=self.device),
+            generators=shared_sde_window_generator(extra_args, generators, device=self.device, policy="call"),
             device=self.device,
         )
         current, next_latents, log_probs, selected_timesteps, pred_original = self.diffuse(

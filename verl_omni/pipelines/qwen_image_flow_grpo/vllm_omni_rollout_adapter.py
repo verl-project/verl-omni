@@ -348,7 +348,7 @@ class QwenImagePipelineWithLogProb(QwenImageLoRAMixin, QwenImageTokenIdPromptMix
         if sde_window_size is not None:
             # Step execution is the path the shipped Qwen-Image scripts use.
             # The request generator stays on state.sampling.generator for scheduler noise.
-            window_generator = _shared_sde_window_generator(extra, generator, device=self.device)
+            window_generator = _shared_sde_window_generator(extra, generator, device=self.device, policy="constant")
             start = torch.randint(
                 sde_window_range[0],
                 sde_window_range[1] - sde_window_size + 1,
@@ -930,7 +930,9 @@ class QwenImagePipelineWithLogProb(QwenImageLoRAMixin, QwenImageTokenIdPromptMix
             sde_window_range=sde_window_range if sde_window_range is not None else (0, 5),
             num_timesteps=len(timesteps),
             batch_size=latents.shape[0],
-            generator=_shared_sde_window_generator(sampling_params.extra_args, generator, device=self.device),
+            generator=_shared_sde_window_generator(
+                sampling_params.extra_args, generator, device=self.device, policy="constant"
+            ),
             device=self.device,
         )
 

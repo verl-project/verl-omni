@@ -14,10 +14,16 @@
 
 """CPU tests for per-sample SDE window sampling under request packing."""
 
+import random
+
 import torch
 
 from verl_omni.agent_loop.utils import derive_rollout_seed
-from verl_omni.pipelines.request_batch import sample_per_sample_sde_windows, shared_sde_window_generator
+from verl_omni.pipelines.request_batch import (
+    reset_call_window_rng,
+    sample_per_sample_sde_windows,
+    shared_sde_window_generator,
+)
 
 
 def _advanced_generator(seed: int, latent_numel: int = 8) -> torch.Generator:
@@ -81,8 +87,64 @@ def test_shared_step_seed_collapses_grpo_windows_without_touching_sample_rng():
     assert len(set(shared)) == 1
 
     explicit = _window_for(
-        shared_sde_window_generator({"sde_window_seed": 99, "global_steps": 1}, torch.Generator(), device="cpu")
+        shared_sde_window_generator(
+            {"sde_window_seed": 99, "global_steps": 1}, torch.Generator(), device="cpu", policy="step"
+        )
     )
-    from_steps = _window_for(shared_sde_window_generator({"global_steps": 99}, torch.Generator(), device="cpu"))
-    assert explicit == from_steps
+    from_sum = _window_for(shared_sde_window_generator({"global_steps": 100}, torch.Generator(), device="cpu"))
+    assert explicit == from_sum
     assert shared_sde_window_generator(None, "fallback", device="cpu") == "fallback"
+
+
+def test_forwarded_zero_seed_follows_the_model_policy(monkeypatch) -> None:
+    def _seeded(seed: int) -> int:
+        generator = shared_sde_window_generator(
+            {"sde_window_seed": 0, "global_steps": seed}, torch.Generator(), device="cpu", policy="constant"
+        )
+        return int(generator.initial_seed())
+
+    assert _seeded(0) == _seeded(7) == 0
+
+    monkeypatch.setenv("RANK", "2")
+    for step in (0, 7):
+        generator = shared_sde_window_generator(
+            {"sde_window_seed": 0, "global_steps": step}, torch.Generator(), device="cpu", policy="rank"
+        )
+        assert generator.initial_seed() == 2
+
+    reset_call_window_rng(123)
+    twin = random.Random(123)
+    first = shared_sde_window_generator(
+        {"sde_window_seed": 0, "global_steps": 1}, torch.Generator(), device="cpu", policy="call"
+    )
+    second = shared_sde_window_generator(
+        {"sde_window_seed": 0, "global_steps": 1}, torch.Generator(), device="cpu", policy="call"
+    )
+    assert first.initial_seed() == twin.randrange(2**31)
+    assert second.initial_seed() == twin.randrange(2**31)
+    assert first.initial_seed() != second.initial_seed()
+    shared = sample_per_sample_sde_windows(
+        sde_window_size=2,
+        sde_window_range=(0, 5),
+        num_timesteps=10,
+        batch_size=4,
+        generator=first,
+        device="cpu",
+    )
+    assert len(set(shared)) == 1
+
+    pinned = shared_sde_window_generator(
+        {"sde_window_seed": 99, "global_steps": 1}, torch.Generator(), device="cpu", policy="call"
+    )
+    assert pinned.initial_seed() == 99
+
+    for step in (0, 1, 7):
+        generator = shared_sde_window_generator(
+            {"sde_window_seed": 0, "global_steps": step}, torch.Generator(), device="cpu", policy="step"
+        )
+        assert generator.initial_seed() == step
+    added = shared_sde_window_generator(
+        {"sde_window_seed": 99, "global_steps": 1}, torch.Generator(), device="cpu", policy="step"
+    )
+    assert added.initial_seed() == 100
+    assert shared_sde_window_generator({}, "fallback", device="cpu", policy="call") == "fallback"

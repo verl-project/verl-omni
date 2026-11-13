@@ -171,7 +171,7 @@ def test_wan22_sde_window_uses_the_training_step_not_the_sample_seed(monkeypatch
         wan22_adapter, "rollout_output", MagicMock(side_effect=lambda **_: DiffusionOutput(output=None))
     )
 
-    def _run(sample_seed: int) -> None:
+    def _run(sample_seed: int, step: int) -> None:
         sampling_params = OmniDiffusionSamplingParams(
             height=64,
             width=96,
@@ -181,7 +181,12 @@ def test_wan22_sde_window_uses_the_training_step_not_the_sample_seed(monkeypatch
             output_type="latent",
             seed=sample_seed,
             max_sequence_length=4,
-            extra_args={"global_steps": 7, "sde_window_size": 2, "sde_window_range": [0, 5]},
+            extra_args={
+                "sde_window_seed": 0,
+                "global_steps": step,
+                "sde_window_size": 2,
+                "sde_window_range": [0, 5],
+            },
         )
         request = OmniDiffusionRequest(
             request_id="wan22-window",
@@ -211,6 +216,8 @@ def test_wan22_sde_window_uses_the_training_step_not_the_sample_seed(monkeypatch
         )
         pipeline.forward(DiffusionRequestBatch(requests=[request]))
 
-    _run(123)
-    _run(999)
-    assert recorded == [7, 7]
+    _run(123, 7)
+    _run(999, 7)
+    _run(5, 1)
+    _run(6, 4)
+    assert recorded == [7, 7, 1, 4]
