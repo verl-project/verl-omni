@@ -123,8 +123,8 @@ def _image() -> torch.Tensor:
     return torch.zeros(3, 8, 8, dtype=torch.uint8)
 
 
-def _video() -> torch.Tensor:
-    return torch.zeros(2, 3, 8, 8, dtype=torch.uint8)
+def _video(num_frames: int = 2) -> torch.Tensor:
+    return torch.zeros(num_frames, 3, 8, 8, dtype=torch.uint8)
 
 
 def _capture(monkeypatch, *, sessions: list | None = None) -> list[dict]:
@@ -149,6 +149,7 @@ async def _score_ocr(
     sampling_params=None,
     extra_info=None,
     solution_image=None,
+    ground_truth="hello",
 ):
     kwargs = {}
     if user_prompt is not None:
@@ -158,7 +159,7 @@ async def _score_ocr(
     return await scorer(
         data_source="test",
         solution_image=_image() if solution_image is None else solution_image,
-        ground_truth="hello",
+        ground_truth=ground_truth,
         extra_info=extra_info or {"media_kind": "image"},
         reward_router_address="judge:8000",
         model_name=model_name,
@@ -330,6 +331,7 @@ def test_public_signatures_are_unchanged():
 
 
 def test_sampling_params_merge_defaults_without_mutating_them():
+    assert list(inspect.signature(vlm_as_a_judge._sampling_params).parameters) == ["sampling_params"]
     assert vlm_as_a_judge._sampling_params() == vlm_as_a_judge.DEFAULT_SAMPLING_PARAMS
     assert vlm_as_a_judge._sampling_params({"temperature": 0.2, "seed": 9}) == {
         **vlm_as_a_judge.DEFAULT_SAMPLING_PARAMS,
@@ -341,6 +343,33 @@ def test_sampling_params_merge_defaults_without_mutating_them():
         "top_p": 0.8,
         "max_tokens": 4096,
     }
+
+
+def test_unified_sampling_defaults_are_shared_and_public():
+    expected = {"temperature": 0.0, "top_p": 1.0, "max_tokens": 512}
+
+    assert vlm_as_a_judge.DEFAULT_UNIFIED_REWARD_SAMPLING_PARAMS == expected
+    assert (
+        unified_reward.DEFAULT_UNIFIED_REWARD_SAMPLING_PARAMS is vlm_as_a_judge.DEFAULT_UNIFIED_REWARD_SAMPLING_PARAMS
+    )
+    assert "DEFAULT_UNIFIED_REWARD_SAMPLING_PARAMS" in vlm_as_a_judge.__all__
+    assert "DEFAULT_UNIFIED_REWARD_SAMPLING_PARAMS" in unified_reward.__all__
+
+
+@pytest.mark.asyncio
+async def test_unified_public_helper_forwards_shared_default_extra_keys(monkeypatch):
+    requests = _capture(monkeypatch)
+    monkeypatch.setattr(
+        vlm_as_a_judge,
+        "DEFAULT_UNIFIED_REWARD_SAMPLING_PARAMS",
+        {**vlm_as_a_judge.DEFAULT_UNIFIED_REWARD_SAMPLING_PARAMS, "top_k": 7},
+    )
+
+    await _score_unified(vlm_as_a_judge.compute_score_unified_reward)
+
+    assert requests[0]["max_tokens"] == 512
+    assert requests[0]["top_k"] == 7
+    assert vlm_as_a_judge.DEFAULT_SAMPLING_PARAMS["max_tokens"] == 4096
 
 
 @pytest.mark.asyncio
@@ -360,15 +389,76 @@ async def test_ocr_sampling_params_override_defaults(monkeypatch, scorer):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("scorer", OCR_SCORERS)
-async def test_ocr_none_judge_response_scores_as_empty(monkeypatch, scorer):
+async def test_ocr_none_judge_response_with_nonempty_ground_truth_scores_zero(monkeypatch, scorer):
     async def transport(router_address, chat_complete_request, session=None):
         return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=None))])
 
     monkeypatch.setattr(vlm_as_a_judge, "_post_chat_completion", transport)
 
-    result = await _score_ocr(scorer)
+    result = await _score_ocr(scorer, ground_truth="hello")
 
     assert result == {"score": 0.0, "genrm_response": ""}
+    assert isinstance(result["genrm_response"], str)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scorer", OCR_SCORERS)
+async def test_ocr_none_judge_response_with_empty_ground_truth_scores_zero(monkeypatch, scorer):
+    async def transport(router_address, chat_complete_request, session=None):
+        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=None))])
+
+    monkeypatch.setattr(vlm_as_a_judge, "_post_chat_completion", transport)
+
+    result = await _score_ocr(scorer, ground_truth="")
+
+    assert result == {"score": 0.0, "genrm_response": ""}
+    assert isinstance(result["genrm_response"], str)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scorer", OCR_SCORERS)
+async def test_ocr_empty_judge_response_with_empty_ground_truth_scores_one(monkeypatch, scorer):
+    async def transport(router_address, chat_complete_request, session=None):
+        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=""))])
+
+    monkeypatch.setattr(vlm_as_a_judge, "_post_chat_completion", transport)
+
+    result = await _score_ocr(scorer, ground_truth="")
+
+    assert result == {"score": 1.0, "genrm_response": ""}
+    assert isinstance(result["genrm_response"], str)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scorer", OCR_SCORERS)
+@pytest.mark.parametrize(
+    ("contents", "ground_truth", "expected_score"),
+    [
+        ([None, "hello", None], "hello", 1.0 / 3.0),
+        ([None, ""], "", 0.5),
+        (["", None], "", 0.5),
+    ],
+)
+async def test_ocr_mixed_none_frames_average_over_all_frames(
+    monkeypatch, scorer, contents, ground_truth, expected_score
+):
+    replies = iter(contents)
+
+    async def transport(router_address, chat_complete_request, session=None):
+        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=next(replies)))])
+
+    monkeypatch.setattr(vlm_as_a_judge, "_post_chat_completion", transport)
+
+    result = await _score_ocr(
+        scorer,
+        ground_truth=ground_truth,
+        solution_image=_video(len(contents)),
+        extra_info={"media_kind": "video", "fps": 8, "frame_interval": 1},
+    )
+
+    assert result["score"] == pytest.approx(expected_score)
+    assert result["genrm_response"] == ""
+    assert isinstance(result["genrm_response"], str)
 
 
 @pytest.mark.asyncio
@@ -395,6 +485,21 @@ async def test_unified_sampling_params_override_defaults(monkeypatch, scorer):
     assert requests[0]["top_p"] == 1.0
     assert requests[0]["max_tokens"] == 17
     assert "seed" not in requests[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scorer", UNIFIED_SCORERS)
+async def test_unified_sampling_override_does_not_mutate_public_defaults(monkeypatch, scorer):
+    requests = _capture(monkeypatch)
+    expected = {"temperature": 0.0, "top_p": 1.0, "max_tokens": 512}
+
+    await _score_unified(scorer, sampling_params={"temperature": 0.9, "max_tokens": 17})
+
+    assert requests[0]["temperature"] == 0.9
+    assert requests[0]["top_p"] == 1.0
+    assert requests[0]["max_tokens"] == 17
+    assert vlm_as_a_judge.DEFAULT_UNIFIED_REWARD_SAMPLING_PARAMS == expected
+    assert unified_reward.DEFAULT_UNIFIED_REWARD_SAMPLING_PARAMS == expected
 
 
 @pytest.mark.asyncio

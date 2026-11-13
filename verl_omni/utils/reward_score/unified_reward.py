@@ -21,6 +21,7 @@ This module stays importable for existing ``pkg://`` configs and file-path loads
 
 from verl_omni.utils.reward_score.vlm_as_a_judge import (
     DEFAULT_UNIFIED_REWARD_MODEL_PATH,
+    DEFAULT_UNIFIED_REWARD_SAMPLING_PARAMS,
     UNIFIED_REWARD_SCORE_PATTERN,
     _aggregate_unified_reward_scores,
     _build_unified_reward_prompt,
@@ -31,6 +32,7 @@ from verl_omni.utils.reward_score.vlm_as_a_judge import (
 
 __all__ = [
     "DEFAULT_UNIFIED_REWARD_MODEL_PATH",
+    "DEFAULT_UNIFIED_REWARD_SAMPLING_PARAMS",
     "UNIFIED_REWARD_SCORE_PATTERN",
     "compute_score_unified_reward",
     # Re-exported for callers that imported these helpers from this module.

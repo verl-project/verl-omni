@@ -42,6 +42,7 @@ DEFAULT_GRM_PROMPT = (
 DEFAULT_GRM_MODEL_PATH = "~/models/tiny-random/qwen3-vl"
 DEFAULT_SAMPLING_PARAMS = {"temperature": 0.7, "top_p": 0.8, "max_tokens": 4096}
 DEFAULT_UNIFIED_REWARD_MODEL_PATH = "CodeGoat24/UnifiedReward-2.0-qwen3vl-2b"
+DEFAULT_UNIFIED_REWARD_SAMPLING_PARAMS = {"temperature": 0.0, "top_p": 1.0, "max_tokens": 512}
 UNIFIED_REWARD_SCORE_PATTERN = re.compile(
     r"(Alignment|Coherence|Style)\s+Score\s*(?:\(1-5\))?\s*:\s*"
     r"([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)",
@@ -241,7 +242,7 @@ async def compute_score_ocr(
     grm_response = ""
     scores = []
     for image in solution_image:
-        grm_response = await _score_vlm_frame(
+        frame_response = await _score_vlm_frame(
             image,
             prompt,
             router_address=reward_router_address,
@@ -249,9 +250,14 @@ async def compute_score_ocr(
             sampling_params=params,
             system_prompt="You are a helpful assistant.",
         )
-        # An empty judge reply is a valid (empty) transcription, not a failure.
-        grm_response = grm_response or ""
-        scores.append(_levenshtein_score(grm_response, ground_truth))
+        if frame_response is None:
+            # A missing judge reply is a failed frame; a real empty string is
+            # still scored by the Levenshtein rule below.
+            scores.append(0.0)
+            grm_response = ""
+            continue
+        scores.append(_levenshtein_score(frame_response, ground_truth))
+        grm_response = frame_response
 
     score = sum(scores) / len(scores)
     return {"score": score, "genrm_response": grm_response}
@@ -380,7 +386,7 @@ async def compute_score_unified_reward(
         prompt = user_prompt.replace("{caption}", caption)
 
     model_name = model_name or DEFAULT_UNIFIED_REWARD_MODEL_PATH
-    unified_sampling_params = {"temperature": 0.0, "top_p": 1.0, "max_tokens": 512}
+    unified_sampling_params = DEFAULT_UNIFIED_REWARD_SAMPLING_PARAMS.copy()
     if sampling_params is not None:
         unified_sampling_params.update(sampling_params)
     params = _sampling_params(unified_sampling_params)
@@ -432,6 +438,7 @@ __all__ = [
     "DEFAULT_GRM_PROMPT",
     "DEFAULT_SAMPLING_PARAMS",
     "DEFAULT_UNIFIED_REWARD_MODEL_PATH",
+    "DEFAULT_UNIFIED_REWARD_SAMPLING_PARAMS",
     "UNIFIED_REWARD_SCORE_PATTERN",
     "compute_score_ocr",
     "compute_score_unified_reward",

@@ -71,6 +71,19 @@ VLM-as-a-Judge Scorers
 The generative-judge scorers live in one module. ``genrm_ocr`` and
 ``unified_reward`` remain importable aliases for the shared entrypoints.
 
+When ``VisualRewardManager`` calls this repository's
+``compute_score_unified_reward`` (the shared module or the ``unified_reward``
+compatibility path), a reward rollout ``response_length`` is not forwarded as
+``max_tokens``: UnifiedReward keeps its 512-token default, while tuned
+``temperature``, ``top_p``, ``top_k`` and ``seed`` are still forwarded. Set an
+explicit judge length through the existing reward kwargs, which take precedence:
+
+.. code-block:: bash
+
+   +reward.custom_reward_function.reward_kwargs.sampling_params.max_tokens=1024
+
+Other scorers, including OCR, keep the rollout-length behavior.
+
 .. automodule:: verl_omni.utils.reward_score.vlm_as_a_judge
    :members: compute_score_ocr, compute_score_unified_reward
 
