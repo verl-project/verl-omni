@@ -49,8 +49,7 @@ from verl_omni.workers.rollout.replica import DiffusionOutput
 from verl_omni.workers.rollout.vllm_rollout.vllm_omni_ar_strategy import ARStrategy
 from verl_omni.workers.rollout.vllm_rollout.vllm_omni_diffusion_strategy import DiffusionStrategy
 
-logger = logging.getLogger(__file__)
-logger.setLevel(logging.INFO)
+logger = logging.getLogger(__name__)
 
 
 def _abort_ack_timeout_s() -> float:
@@ -453,6 +452,17 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             self._invalidate_lora_request_cache()
         await super().set_global_steps(global_steps)
 
+    def _log_admission_state(self, where: str) -> None:
+        engine = self.engine
+        admitting = getattr(engine, "_admitting", None)
+        states = getattr(engine, "request_states", None)
+        logger.info(
+            "%s: admission_slots_held=%s in_flight_requests=%s",
+            where,
+            admitting if admitting is not None else "?",
+            len(states) if states is not None else "?",
+        )
+
     async def sleep(self):
         if self.node_rank != 0 or not self.config.free_cache_engine:
             return
@@ -460,6 +470,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             logger.info("skip sleep in standalone mode")
             return
         with RLInsightLogger.trace_state("vllm_sleep", state_lane_id=f"replica_{self.replica_rank}"):
+            self._log_admission_state("sleep requested")
             acks = await self.engine.sleep(level=self._resolve_sleep_level())
             self._validate_acks("sleep", acks)
             self._invalidate_lora_request_cache()
@@ -528,6 +539,9 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         priority: int = 0,
         session_id: Optional[str] = None,
     ) -> DiffusionOutput | TokenOutput:
+        # Hold generates while abort_all_requests runs: engine admission only
+        # holds at pause_generation, and resubmissions admitted before it wedge sleep().
+        await self._generation_gate().wait()
         # session_id (cross-request server affinity in the vLLM path) has no
         # AsyncOmni counterpart; routing stickiness is owned by the load balancer.
         return await self._generate_strategy.generate(
@@ -593,6 +607,15 @@ class vLLMOmniHttpServer(vLLMHttpServer):
     # so the parent's AsyncLLM-specific implementation must be overridden.
     # -----------------------------------------------------------------------
 
+    def _generation_gate(self) -> asyncio.Event:
+        """Lazily created open-by-default admission gate (see ``generate``)."""
+        gate = getattr(self, "_generation_gate_event", None)
+        if gate is None:
+            gate = asyncio.Event()
+            gate.set()
+            self._generation_gate_event = gate
+        return gate
+
     async def abort_all_requests(
         self, reset_prefix_cache: bool = True, reject_request: bool = False, abort_only: bool = False
     ) -> dict[str, Any]:
@@ -611,6 +634,25 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         if reject_request and not abort_only:
             logger.warning("AsyncOmni has no admission gate: requests arriving behind the pause park until resume")
 
+        if abort_only:
+            # abort_only must leave admission open by contract, so it runs
+            # outside the client-side generation gate.
+            return await self._abort_all_requests_ungated(engine, reset_prefix_cache, abort_only=True)
+
+        # Close the admission window for the whole abort+pause sequence:
+        # resubmissions triggered by early abort ACKs must not be admitted.
+        gate = self._generation_gate()
+        gate.clear()
+        try:
+            self._log_admission_state("abort window opening")
+            result = await self._abort_all_requests_ungated(engine, reset_prefix_cache)
+        finally:
+            gate.set()
+        return result
+
+    async def _abort_all_requests_ungated(
+        self, engine, reset_prefix_cache: bool, abort_only: bool = False
+    ) -> dict[str, Any]:
         # ``engine.abort`` takes EXTERNAL ids; ``request_states`` is keyed by internal.
         in_flight: list[tuple[str, str, Any]] = []
         seen: set[str] = set()
@@ -650,8 +692,26 @@ class vLLMOmniHttpServer(vLLMHttpServer):
                     self._enqueue_abort_output(internal_id, state)
             raise
 
-        logger.info("Aborted %d request(s): %s", len(request_ids), request_ids)
-        return {"aborted_count": len(request_ids), "request_ids": request_ids}
+        # Requests that entered just before the gate closed missed the first
+        # scan; abort them so none survives into sleep()'s drain barrier.
+        straggler_states: list[tuple[str, str, Any]] = []
+        for state in engine.request_states.values():
+            if not state.external_request_id or state.external_request_id in seen:
+                continue
+            seen.add(state.external_request_id)
+            straggler_states.append((state.request_id, state.external_request_id, state))
+        stragglers = [external_id for _, external_id, _ in straggler_states]
+        if stragglers:
+            try:
+                await asyncio.wait_for(engine.abort(stragglers), timeout=_abort_ack_timeout_s())
+            except Exception:
+                for internal_id, _, state in straggler_states:
+                    self._enqueue_abort_output(internal_id, state)
+                raise
+
+        aborted_ids = request_ids + stragglers
+        logger.info("Aborted %d request(s): %s", len(aborted_ids), aborted_ids)
+        return {"aborted_count": len(aborted_ids), "request_ids": aborted_ids}
 
     def _enqueue_abort_output(self, internal_id: str, req_state: Any) -> None:
         """Synthesize a terminal abort OutputMessage and put it into a per-request queue.
