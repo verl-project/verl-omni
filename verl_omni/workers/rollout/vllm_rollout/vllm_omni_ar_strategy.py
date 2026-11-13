@@ -271,7 +271,11 @@ class ARStrategy(OmniStrategyBase):
         }
         # vLLM LoRA is per LLM stage: the policy stage owns the rollout's LoRA
         # engine args, and global ones are dropped in ``prepare_engine_args``.
-        stage_extras[policy_stage_id].update(lora_engine_extras(self.server.model_config))
+        # Adapter-delta weight syncs follow the same stages (only they carry a
+        # vLLM LoRA manager); see ``vLLMOmniHttpServer.collective_rpc``.
+        lora_extras = lora_engine_extras(self.server.model_config)
+        stage_extras[policy_stage_id].update(lora_extras)
+        self.lora_stage_ids = [policy_stage_id] if lora_extras else None
         capacity_fields = ("max_model_len", "max_num_batched_tokens")
         if any(field in extras for extras in stage_extras.values() for field in capacity_fields):
             for extras in stage_extras.values():

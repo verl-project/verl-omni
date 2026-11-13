@@ -248,6 +248,9 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         self._generate_strategy.post_init(cuda_visible_devices)
         self._lora_request_cache: LoRARequest | None | object = _LORA_REQUEST_CACHE_MISS
         self._lora_resolve_lock = asyncio.Lock()
+        # Mirrors the workers' ``set_pending_lora_peft_config`` stash so the bare
+        # follow-up ``update_weights_from_ipc`` routes as an adapter-delta sync.
+        self._pending_lora_delta = False
         super()._post_init(cuda_visible_devices)
 
     # -----------------------------------------------------------------------
@@ -369,7 +372,12 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         require_ack: bool = False,
     ):
         """Dispatch a shared RPC to the stages selected by the active strategy."""
+        rpc_kwargs = kwargs or {}
+        if method == "set_pending_lora_peft_config":
+            self._pending_lora_delta = bool(rpc_kwargs.get("peft_config"))
         stage_ids = self._generate_strategy.collective_rpc_stage_ids(method)
+        if method == "update_weights_from_ipc":
+            stage_ids = self._resolve_adapter_delta_stages(stage_ids, rpc_kwargs)
         if require_ack:
             return await self._collective_rpc_with_ack(method, timeout, args, kwargs, stage_ids)
         return await self.engine.collective_rpc(
@@ -379,6 +387,29 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             kwargs=kwargs,
             stage_ids=stage_ids,
         )
+
+    def _resolve_adapter_delta_stages(
+        self, stage_ids: list[int] | None, rpc_kwargs: dict[str, Any]
+    ) -> list[int] | None:
+        """Route adapter-delta weight syncs to the stages carrying a vLLM LoRA manager.
+
+        Only the deploy config's LoRA stages (the AR policy stage) enable vLLM
+        LoRA; every other stage rejects ``remove_lora``/``add_lora`` outright,
+        so a broadcast delta sync would fail there. Full-weight syncs keep the
+        strategy's stage selection. A delta is explicit in the RPC kwargs or
+        stashed on the workers by ``set_pending_lora_peft_config``; the stash is
+        mirrored in ``_pending_lora_delta``.
+        """
+        lora_stage_ids = self._generate_strategy.lora_stage_ids
+        if lora_stage_ids is None:
+            return stage_ids
+        explicit_delta = bool(rpc_kwargs.get("peft_config"))
+        if explicit_delta:
+            return list(lora_stage_ids)
+        if self._pending_lora_delta:
+            self._pending_lora_delta = False
+            return list(lora_stage_ids)
+        return stage_ids
 
     async def _collective_rpc_with_ack(
         self, method: Any, timeout: float | None, args: tuple, kwargs: dict[str, Any] | None, stage_ids: Any
