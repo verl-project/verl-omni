@@ -1,6 +1,6 @@
 # Check pinned diffusion consistency artifacts
 
-Last updated: 10/31/2026
+Last updated: 11/09/2026
 
 `scripts/check_diffusion_consistency.py` checks a saved rollout and actor
 log-probability comparison on CPU. It accepts a caller-defined manifest and an
@@ -99,6 +99,86 @@ metadata, pairing, or tensor shape fail without an admitted report. The reader
 checks all pinned bytes before `torch.load(..., weights_only=True)` and uses
 those same verified bytes for JSON and tensor parsing. It accepts relocated
 root folders because every input path is relative to the root.
+
+## Collect a new public SD3.5 producer pair
+
+The [public SD3.5 capture recipe](../../examples/flowgrpo_trainer/sd35/consistency/README.md)
+provides source-byte inventory, CPU admission, separate real rollout and actor
+processes, and external producer pins before this replay bridge. The raw
+MSProbe captures cover the first sample's first transformer forward per role.
+The saved batch and comparison tensors cover both prompts and two SDE steps.
+The default public producer uses no rollout offload and targets an 80 GB GPU.
+For the opt-in DiT-only layerwise rollout mode, set
+`SD35_ROLLOUT_OFFLOAD=dit-layerwise` before both `admit` and `capture`; the
+admission token binds the mode. See the recipe for the measured RTX 3090
+memory usage and validation scope.
+
+## Replay an existing SD3.5 producer pair
+
+`scripts/replay_sd35_consistency.py` bridges the existing two-prompt,
+two-step SD3.5 producer artifacts to the checker above. It does not collect a
+new capture or run a model. Prepare `producer-pins.sha256` outside the capture
+root, with root-relative entries
+containing exactly these eight original files: `rollout/manifest.json`,
+`rollout/actor_batch.pt`, `actor/comparison.json`, `actor/comparison.pt`, one
+`record.json` under each role's `captures/<role>/<capture-id>/`, and the
+corresponding `dump/step0/rank0/dump.json` for each record. Record the SHA256
+of the pin list independently before replay; a digest freshly calculated from
+the same untrusted capture provides no independent evidence.
+
+For an already trusted capture, prepare the list once with Python's standard
+library. Set `CAPTURE_ROOT` and `PIN_FILE` to absolute paths; put `PIN_FILE`
+outside `CAPTURE_ROOT`. Keep the resulting digest in an independent record.
+
+```python
+import hashlib
+import os
+from pathlib import Path
+
+root = Path(os.environ["CAPTURE_ROOT"])
+pin_file = Path(os.environ["PIN_FILE"])
+names = ["rollout/manifest.json", "rollout/actor_batch.pt",
+         "actor/comparison.json", "actor/comparison.pt"]
+for role in ("rollout", "actor"):
+    records = list((root / role / "captures" / role).glob("*/record.json"))
+    assert len(records) == 1
+    names += [str(records[0].relative_to(root)),
+              str((records[0].parent / "dump/step0/rank0/dump.json").relative_to(root))]
+data = "".join(f"{hashlib.sha256((root / name).read_bytes()).hexdigest()}  {name}\n"
+               for name in names).encode()
+with pin_file.open("xb") as stream:
+    stream.write(data)
+print(hashlib.sha256(data).hexdigest())
+```
+
+```bash
+python scripts/replay_sd35_consistency.py \
+  --root /absolute/existing-capture \
+  --pins /absolute/producer-pins.sha256 \
+  --pins-sha256 "$TRUSTED_PRODUCER_PINS_SHA256" \
+  --output /absolute/new-replay-output
+```
+
+The output directory must be fresh and outside the input root. It contains
+`case/` with derived checker inputs, `report.json` from the public checker,
+and `audit.json` with the overall replay status, full log-probability
+comparison, source pin digest, and selected tensor row.
+Original producer files are read only. Legacy nested input records and newer
+flat records are normalized to the same checker record. The bridge binds the
+captured sample to the producer's ordered `request_map`, verifies both saved
+rollout tensor copies, and compares all four saved log probabilities. The
+public checker validates the captured forward for row 0, step 0, so
+`report.json` covers only that pair. A mismatch anywhere in the full comparison
+makes replay exit nonzero, even if the captured pair passes.
+The pin list uses paths relative to the supplied capture root, so the eight
+original bytes can be copied to a differently named root. The pinned producer
+metadata still names the original run path and request IDs; the bridge uses
+those declarations to interpret legacy absolute dump paths. The recipe
+requires the fixed two prompts, seeds 1234 and 1235, and tolerances `1e-5`
+and `1e-3`. `audit.json` includes pinned producer identity and provenance;
+these declarations are not fresh source, probe, or model-weight validation.
+The replay bridge does not attest model weights independently of the pinned
+producer declarations; use the public capture recipe to produce fresh bytes.
 
 ## Scope of evidence
 
