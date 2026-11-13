@@ -196,6 +196,15 @@ class DiffusionModelBase(ABC):
         return []
 
     @classmethod
+    def replicate_frozen_base(cls, model_config) -> bool:
+        """Keep every frozen non-LoRA parameter unsharded on each rank under FSDP2 LoRA training (default: off).
+
+        Only the LoRA parameters are sharded, so a forward all-gathers only them. Costs one full copy of the
+        base per rank.
+        """
+        return False
+
+    @classmethod
     def validate_lora_config(cls, model_config: DiffusionModelConfig) -> None:
         """Validate LoRA settings; default no-op. Override for rollout-sync-constrained models."""
         return

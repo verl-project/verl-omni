@@ -1,0 +1,82 @@
+# verl-omni AMD GPU (ROCm) image on the prebuilt vLLM ROCm image — no vLLM source build.
+#
+# Build (from repo root):
+#   docker build -f docker/Dockerfile.rocm-h3-image -t verl-omni:rocm .
+#
+# MiniMax H3 image recipe (OCR reward, PP-OCR layout guard, PickScore / HPSv2.1):
+#   docker build -f docker/Dockerfile.rocm-h3-image --target h3-image -t verl-omni:rocm-h3-image .
+#
+# VLLM_OMNI_REF defaults to the vLLM-Omni commit the ROCm results were measured on; MiniMax H3 image
+# needs eb8b991 or later. Override it (e.g. main) or the verl pin:
+#   docker build -f docker/Dockerfile.rocm-h3-image --target h3-image -t verl-omni:rocm-h3-image \
+#     --build-arg VLLM_OMNI_REF=main .
+#
+# Run:
+#   docker run --device=/dev/kfd --device=/dev/dri --group-add video \
+#     --security-opt seccomp=unconfined --ipc=host --shm-size=64g -it verl-omni:rocm-h3-image
+
+# Base provides torch 2.13 + ROCm 10.0, vLLM 0.33.0 (gfx90a / gfx942 / gfx950) and flash_attn.
+ARG BASE_IMAGE=vllm/vllm-openai-rocm:v0.33.0
+ARG VLLM_OMNI_REF=4e26cdcb457b6a863d444d905f5957e3d2b9fca3
+# Default: read from .github/verl_pin.txt at build time (override with VERL_GIT_REF).
+ARG VERL_GIT_REF=
+
+FROM ${BASE_IMAGE} AS base
+
+# The base is vLLM's serving stage, whose ENTRYPOINT is `vllm serve`.
+ENTRYPOINT []
+
+ARG VLLM_OMNI_REF
+ARG VERL_GIT_REF
+
+# Keep the base image's ROCm builds: PyPI only carries CUDA wheels.
+RUN pip list --format=freeze | grep -E "^(torch|torchvision|torchaudio|triton|vllm|flash_attn|numpy)==" \
+    > /opt/rocm-constraints.txt
+ENV PIP_CONSTRAINT=/opt/rocm-constraints.txt
+
+# Repositories bind-mounted for development are owned by the host user.
+RUN git config --system --add safe.directory '*'
+
+WORKDIR /workspace/verl-omni
+
+COPY pyproject.toml setup.py README.md ./
+COPY .github/verl_pin.txt ./.github/
+COPY verl_omni ./verl_omni
+
+# Step 1 — vLLM-Omni (editable at /workspace/vllm-omni); --no-deps keeps the base image's vLLM build.
+# As in vLLM-Omni's AMD recipe, skip requirements unused here; cosmos-guardrail pulls the GUI
+# opencv-python, whose cv2 needs libGL that the base image lacks.
+RUN git clone https://github.com/vllm-project/vllm-omni.git /workspace/vllm-omni \
+    && git -C /workspace/vllm-omni checkout "${VLLM_OMNI_REF}" \
+    && grep -vE "^(cosmos-guardrail|openai-whisper|s3tokenizer|kernels)" \
+        /workspace/vllm-omni/requirements/common.txt > /tmp/vllm-omni-requirements.txt \
+    && pip install -r /tmp/vllm-omni-requirements.txt \
+    && pip install --no-deps -e /workspace/vllm-omni
+
+# Step 2 — verl core dependency (from .github/verl_pin.txt, overridable via VERL_GIT_REF)
+RUN VERL_REF="${VERL_GIT_REF:-$(tr -d '[:space:]' < .github/verl_pin.txt)}" \
+    && echo "Installing verl@${VERL_REF}" \
+    && pip install --no-deps \
+        "verl @ git+https://github.com/verl-project/verl.git@${VERL_REF}"
+
+# Step 3 — verl-omni (editable); --no-deps keeps the vLLM-Omni above instead of the pyproject pin,
+# so the remaining core dependencies are listed. diffusers / accelerate override vLLM-Omni's pins.
+RUN pip install --no-deps -e . \
+    && pip install \
+        diffusers==0.41.0 accelerate==1.15.0 \
+        cachetools codetiming "datasets>=2.20.0" dill hydra-core "imageio[ffmpeg]>=2.37.2" pandas peft \
+        "pyarrow>=19.0.0,<25.0.0" pybind11 pylatexenc "ray[default]" "safetensors>=0.4.5" \
+        "tensordict>=0.8.0,<=0.10.0,!=0.9.0" torchdata wandb "swanlab>=0.10.3" "soundfile>=0.12.1" \
+        "packaging>=20.0" uvicorn fastapi latex2sympy2_extended math_verify mathruler tensorboard \
+        TransferQueue==0.1.9
+
+
+FROM base AS runtime
+WORKDIR /workspace/verl-omni
+CMD ["/bin/bash"]
+
+# MiniMax H3 image recipe: OCR reward, PP-OCR layout guard, PickScore / HPSv2.1 scorer
+# (torchao: peft >=0.19 rejects torchao <0.16).
+FROM base AS h3-image
+RUN pip install Levenshtein==0.27.5 torchao==0.18.0 rapidocr==3.10.0 onnxruntime==1.31.1 open_clip_torch==4.2.2
+CMD ["/bin/bash"]
