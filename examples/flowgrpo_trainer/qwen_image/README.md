@@ -1,9 +1,18 @@
 # Qwen-Image FlowGRPO
 
-Last updated: 11/09/2026
+Last updated: 11/10/2026
 
 See the [FlowGRPO trainer guide](../../../docs/examples/flowgrpo_trainer.md) for installation, OCR data and
 reward-model setup.
+
+## Engine-side LoRA merge
+
+The recipe ships `actor_rollout_ref.model.lora.merge=Engine`: the actor streams
+only adapter tensors (~MB) per sync and the rollout engine folds them into its
+dense weights at the sync barrier — dense rollout forwards, no runtime-adapter
+LoRA ops. Requirements and the pipeline support matrix are in
+[LoRA rollout merge modes](../../../docs/examples/config.md#lora-rollout-merge-modes);
+`lora.merge=False` (runtime adapters) remains a config-only flip.
 
 ## VeOmni LoRA
 

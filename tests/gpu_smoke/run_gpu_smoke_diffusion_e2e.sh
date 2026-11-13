@@ -38,9 +38,10 @@ run_qwen_image_edit_flowgrpo_e2e() {
 run_test 0 "Qwen-Image-Edit FlowGRPO v1 sync trainer e2e" \
     run_qwen_image_edit_flowgrpo_e2e
 
-run_test 1 "FlowGRPO v1 sync trainer e2e" \
+run_test 1 "FlowGRPO v1 sync trainer e2e (LoRA engine-side merge)" \
     env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" \
-    bash tests/special_e2e/run_flowgrpo_qwen_image.sh "${diffusion_trainer_args[@]}"
+    bash tests/special_e2e/run_flowgrpo_qwen_image.sh "${diffusion_trainer_args[@]}" \
+    actor_rollout_ref.model.lora.merge=Engine
 
 run_test 2 "Qwen-Image online DPO v1 sync trainer e2e" \
     env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" \

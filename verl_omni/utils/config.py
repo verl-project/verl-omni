@@ -70,8 +70,8 @@ def _validate_delta_sharded(config: Any) -> None:
     # hint is a dead end where the flat key is refused too.
     delta_lora_error = (
         "checkpoint_engine.backend='omni_delta_sharded' requires full-weight training; LoRA is "
-        "refused in either merge mode because the shard export's names and values differ "
-        "from the adapter (merge=false) and merged (merge=true) full exports."
+        "refused in every merge mode because the shard export's names and values differ "
+        "from the adapter (merge=false), merged (merge=true) and engine-merged exports."
     )
     try:
         settings = resolve_lora_config(_select(config, model_key))
@@ -359,6 +359,22 @@ class LoRASettings:
     merge: bool  # nested lora.merge: fuse adapters into base weights before sync
     adapters: tuple[str, ...]  # normalized policy_state_adapters, "default" forced first
     enabled: bool  # rank > 0 or adapter_path is not None
+    engine_merge: bool = False  # nested lora.merge="engine": the rollout engine merges at the sync barrier
+
+    def __post_init__(self):
+        """Fail closed on engine-merge combinations the engines cannot honor."""
+        if self.engine_merge and self.adapters != ("default",):
+            raise ValueError(
+                "actor_rollout_ref.model.lora.merge='engine' does not support named policy-state "
+                f"adapters (policy_state_adapters={list(self.adapters)}); engine-side merge keeps one "
+                "dense policy with no per-request adapters."
+            )
+        if self.engine_merge and not self.enabled:
+            raise ValueError(
+                "actor_rollout_ref.model.lora.merge='engine' selects a LoRA sync mode but no LoRA is "
+                "configured; set actor_rollout_ref.model.lora_rank (or lora_adapter_path), or drop the "
+                "merge override."
+            )
 
 
 def resolve_lora_config(model_config: Any) -> LoRASettings:
@@ -379,6 +395,15 @@ def resolve_lora_config(model_config: Any) -> LoRASettings:
       ``lora.alpha: 32`` next to ``lora_alpha: 16`` (both injected from verl's
       default tree), so a disagreeing nested alpha is ignored until one of
       those two defaults changes.
+    - merge: nested ``lora.merge`` — ``True`` fuses adapters into base weights
+      before sync, ``False`` (default) ships runtime adapters, and the string
+      ``"engine"`` ships the same adapter tensors for the rollout engine to
+      merge in place at the sync barrier (normalized to ``merge=False,
+      engine_merge=True``; the raw tree keeps the truthy string for the
+      rollout-side gates that read it). String ``"true"`` is accepted as
+      ``True``; string ``"false"`` is rejected — the raw truthy string would
+      read as merge-on rollout-side while the resolved actor path runs
+      adapters, so only the boolean spelling selects adapter mode.
     """
     nested = _select(model_config, "lora", None) or {}
     if not hasattr(nested, "keys"):
@@ -421,13 +446,39 @@ def resolve_lora_config(model_config: Any) -> LoRASettings:
             "instead (nested-only adoption returns with engine gating unification, #685)."
         )
 
+    raw_merge = nested.get("merge", False)
+    if isinstance(raw_merge, str):
+        spelled = raw_merge.strip().lower()
+        if spelled == "engine":
+            merge, engine_merge = False, True
+        elif spelled == "true":
+            merge, engine_merge = True, False
+        elif spelled == "false":
+            # A truthy "false" stays in the raw tree, where verl's rollout-side
+            # lora_as_adapter / enable_lora gates read it as merge-on (dense
+            # rollout) while the resolved actor path runs adapters. Only the
+            # boolean spelling selects adapter mode.
+            raise ValueError(
+                f"actor_rollout_ref.model.lora.merge={raw_merge!r} is not a valid spelling; "
+                "use the boolean False for runtime-adapter rollout (a string stays truthy in "
+                "the raw tree and desyncs the rollout's merge gates from the actor's)."
+            )
+        else:
+            raise ValueError(
+                f"actor_rollout_ref.model.lora.merge={raw_merge!r} is not a valid spelling; "
+                "use True, False, or the string 'engine' (engine-side merge)."
+            )
+    else:
+        merge, engine_merge = bool(raw_merge), False
+
     return LoRASettings(
         rank=int(rank),
         alpha=int(_select(model_config, "lora_alpha", 0) or 0),
         adapter_path=adapter_path,
-        merge=bool(nested.get("merge", False)),
+        merge=merge,
         adapters=_normalize_policy_state_adapters(_select(model_config, "policy_state_adapters", ("default",))),
         enabled=rank > 0 or adapter_path is not None,
+        engine_merge=engine_merge,
     )
 
 

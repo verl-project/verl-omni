@@ -81,6 +81,31 @@ def _peft_misroute(weights: list) -> RuntimeError | None:
     return None
 
 
+def _decode_merged_lora_payload_wire(payload: dict) -> None:
+    """Decode the engine-merge payload's IPC handles in place.
+
+    The actor ships the handle args in the msgspec-safe wire encoding because
+    the payload crosses vLLM's worker RPC on AR stages (class objects,
+    ``torch.dtype`` and storages are not serializable there). The wire marker
+    is consumed here so the engine's update-info dataclass never sees it.
+    """
+    from verl_omni.workers.rollout.vllm_rollout.lora_ipc_wire import (
+        IPC_WIRE_KEY,
+        IPC_WIRE_VERSION,
+        decode_ipc_handle_args,
+    )
+
+    wire = payload.pop(IPC_WIRE_KEY, None)
+    if wire != IPC_WIRE_VERSION:
+        raise ValueError(
+            "update_weights_from_ipc received a merged LoRA payload whose IPC handles "
+            f"use wire encoding {wire!r}; this worker understands only {IPC_WIRE_VERSION!r}."
+        )
+    payload["ipc_handles"] = [
+        {uuid: decode_ipc_handle_args(args) for uuid, args in handle.items()} for handle in payload["ipc_handles"]
+    ]
+
+
 class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
     """
     The class for vLLM-Omni's worker to inherit from, in the colocate setting.
@@ -100,9 +125,7 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
     def __new__(cls, **kwargs):
         set_death_signal()
 
-        # 1. patch for Lora
-        VLLMOmniHijack.hijack()
-        # 2. Teach the AR runners to return the thinker's last-layer hidden states
+        # 1. Teach the AR runners to return the thinker's last-layer hidden states
         # (full-vocab OPD teacher signal). The patch targets the runner inside
         # the StageEngineCoreProc sub-process, where server-actor installs do
         # not propagate; the worker extension materializes there.
@@ -127,6 +150,39 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
         later full-weight sync is not misrouted.
         """
         self._pending_lora_peft_config = peft_config
+
+    def _apply_merged_lora_payload(self, payload: dict) -> None:
+        """Drive the engine's merged weight-update session with a pre-built payload.
+
+        The handles were exported by the actor process; ``finish`` applies the
+        merged policy in place, leaving the previous policy live on failure.
+        """
+        transfer = getattr(self.vllm_config, "weight_transfer_config", None)
+        backend = getattr(transfer, "backend", None)
+        if backend != "omni_lora_ipc":
+            raise ValueError(
+                "update_weights_from_ipc received a merged LoRA payload but this engine's "
+                f"weight-transfer backend is {backend!r}; engine-side merge is selected at "
+                "rollout construction (actor_rollout_ref.model.lora.merge='engine')."
+            )
+        # The engine builds its transfer engine at construction; absence means divergence.
+        if getattr(self, "weight_transfer_engine", None) is None:
+            raise RuntimeError(
+                "update_weights_from_ipc received a merged LoRA payload but this engine has "
+                "no weight-transfer engine; weight_transfer_config must be set at engine "
+                "construction (it is, when lora.merge='engine' selected the rollout args)."
+            )
+        self.start_weight_update()
+        try:
+            self.update_weights(payload)
+            self.finish_weight_update()
+        except Exception:
+            # Attempt to unwedge the worker's session state; the engine keeps the previous policy live.
+            try:
+                self.finish_weight_update()
+            except Exception:
+                logger.warning("finish_weight_update cleanup failed after a merged LoRA sync error", exc_info=True)
+            raise
 
     def _get_standard_weight_model_and_config(self):
         """Return ``(model, model_config)`` for the standard (non-LoRA) AR weight path.
@@ -157,6 +213,7 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
         use_shm: bool = False,
         zmq_update_id: str | None = None,
         delta_flush: bool | None = None,
+        lora_ipc_payload: dict | None = None,
     ):
         """Update the weights of the rollout model.
 
@@ -169,9 +226,21 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
         path, which passes no flag) sniffs the first bucket, and a ``__delta_spec__``
         sentinel routes the stream to the in-place delta apply
         (:mod:`verl_omni.workers.rollout.vllm_rollout.delta_apply`).
+        Engine-side merge passes ``lora_ipc_payload`` instead: a CUDA-IPC adapter
+        payload the engine's merged weight-update session applies in place.
         """
 
         from verl.workers.rollout.vllm_rollout.bucketed_weight_transfer import BucketedWeightReceiver
+
+        if lora_ipc_payload is not None:
+            if peft_config is not None or self._pending_lora_peft_config is not None:
+                raise ValueError(
+                    "update_weights_from_ipc received both a merged LoRA payload and the "
+                    "adapter-tensor sync path; engine-side merge ships one payload per sync."
+                )
+            _decode_merged_lora_payload_wire(lora_ipc_payload)
+            self._apply_merged_lora_payload(lora_ipc_payload)
+            return
 
         if peft_config is None and self._pending_lora_peft_config is not None:
             peft_config = self._pending_lora_peft_config
@@ -197,6 +266,8 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
         )
 
         if peft_config and base_sync_done:
+            # Lazy: engine-merge mode never routes through add_lora and must not carry the patch.
+            VLLMOmniHijack.hijack()
             # In async mode, make sure the old lora is removed before adding the new one
             t0 = time.perf_counter()
             self.remove_lora(VLLM_LORA_INT_ID)
