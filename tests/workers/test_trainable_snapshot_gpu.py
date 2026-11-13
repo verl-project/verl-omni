@@ -394,7 +394,8 @@ def test_trainable_snapshot_two_rank(tmp_path):
     """Exercise real shard helpers through the same pytest entry used by core smoke."""
     from tests.utils.gpu_test_topology import enabled_gpu_count
 
-    if enabled_gpu_count() < 2:
+    available = get_torch_device().device_count() if get_device_name() == "npu" else enabled_gpu_count()
+    if available < 2:
         if os.environ.get("REQUIRE_TRAINABLE_SNAPSHOT_GPU") == "1":
             pytest.fail("Required FSDP2 snapshot smoke needs two visible GPUs")
         pytest.skip("Real FSDP2 shards require two GPUs")
