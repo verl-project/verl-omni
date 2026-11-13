@@ -25,6 +25,7 @@ from verl.experimental.reward_loop.reward_loop import RewardLoopWorker
 from verl.protocol import DataProto
 from verl.trainer.ppo.reward import resolve_reward_manager_cls
 
+from verl_omni.utils.asyncio_utils import await_owned
 from verl_omni.workers.config.reward import (
     accelerator_workers_enabled,
     get_reward_model_entries,
@@ -40,10 +41,10 @@ from .reward_model import MultiRewardModelManager
 from .reward_model_executor import (
     EngineRewardExecutor,
     NativeRewardExecutor,
-    _await_owned,
     build_engine_reward_executors,
     build_native_reward_executors,
 )
+from .streaming import merge_reward_outputs
 
 logger = logging.getLogger(__name__)
 
@@ -110,7 +111,11 @@ class OmniRewardLoopWorker(RewardLoopWorker):
         await executor.sleep()
 
     async def close_reward_model(self, name: str | None = None) -> None:
-        await _await_owned(self._close_reward_model(name))
+        """Drain and close one native executor, or all when ``name`` is None.
+
+        Caller cancellation is reported after all submitted closes settle.
+        """
+        await await_owned(self._close_reward_model(name))
 
     async def _close_reward_model(self, name: str | None = None) -> None:
         if name is None:
@@ -150,6 +155,7 @@ class OmniRewardLoopManager(RewardLoopManager):
                     "use reward.aggregation=weighted_sum for this trainer."
                 )
         self.accelerator_resource_pool = accelerator_resource_pool
+        enable_streaming = streaming_reward_enabled(config)
         named_reward_manager_cls = None
         if has_reward_models(config):
             validate_reward_model_terms(config)
@@ -175,11 +181,21 @@ class OmniRewardLoopManager(RewardLoopManager):
             self._init_reward_loop_workers()
         else:
             super().__init__(config=config, rm_resource_pool=rm_resource_pool)
+        if self.multi_reward_model_manager.models and enable_streaming:
+            asyncio.run(self.multi_reward_model_manager.wake_up())
 
     @property
     def reward_loop_worker_handles(self):
+        """Expose manager-owned workers for per-sample scoring.
+
+        Returns:
+            None when disabled, a legacy actor list, or a mapping from named
+            reward groups to replica tuples. The caller does not own teardown.
+        """
         if not streaming_reward_enabled(self.config):
             return None
+        if self.multi_reward_model_manager.models:
+            return {name: tuple(workers) for name, workers in self._reward_worker_groups.items()}
         return super().reward_loop_worker_handles
 
     def _init_reward_loop_workers(self):
@@ -374,20 +390,9 @@ class OmniRewardLoopManager(RewardLoopManager):
         merged_scores = []
         merged_infos = []
         for index in range(len(data)):
-            total = 0.0
-            info = {}
-            for outputs in group_outputs.values():
-                item = outputs[index]
-                total += float(item["reward_score"])
-                for key, value in item.get("reward_extra_info", {}).items():
-                    if key == "reward/combined":
-                        continue
-                    if key in info:
-                        raise ValueError(f"Duplicate reward extra-info key {key!r} across worker groups")
-                    info[key] = value
-            info["reward/combined"] = total
-            merged_scores.append(total)
-            merged_infos.append(info)
+            result = merge_reward_outputs([outputs[index] for outputs in group_outputs.values()])
+            merged_scores.append(result["reward_score"])
+            merged_infos.append(result["reward_extra_info"])
 
         meta_info = {}
         if self._preserve_reward_components:

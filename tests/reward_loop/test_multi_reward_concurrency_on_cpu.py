@@ -313,6 +313,26 @@ def test_artifact_contract_error_during_score_conversion_is_not_optional(indepen
         manager.loop.run_until_complete(manager.run_single(_sample("one")))
 
 
+def test_concurrent_contract_error_outranks_required_operational_failure():
+    """A completed concurrent window must not hide a peer's fatal media error."""
+    manager = _manager(
+        {"operational": _term(independent=True, required=True), "media": _term(independent=True, required=False)},
+        concurrency=2,
+    )
+
+    async def operational(**kwargs):
+        raise RuntimeError("required service failed")
+
+    async def media(**kwargs):
+        await asyncio.sleep(0)
+        raise ArtifactContractError("invalid peer artifact")
+
+    _replace(manager, "operational", operational)
+    _replace(manager, "media", media)
+    with pytest.raises(ArtifactContractError, match="invalid peer artifact"):
+        manager.loop.run_until_complete(manager.run_single(_sample("one")))
+
+
 def test_native_barrier_keeps_batch_binding_and_valid_fps_after_independent_window():
     manager = _manager(
         {"first": _term(independent=True), "native": _term(model="native", required=False, fps=24.0)},
