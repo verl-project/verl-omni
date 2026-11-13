@@ -14,6 +14,7 @@
 """Opt-in configuration, construction rollback, and trainer cleanup contracts."""
 
 import asyncio
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -24,7 +25,12 @@ from verl_omni.reward_loop import reward_loop as reward_loop_module
 from verl_omni.reward_loop.reward_loop import OmniRewardLoopManager
 from verl_omni.reward_loop.reward_model import MultiRewardModelManager
 from verl_omni.trainer.main_diffusion_v1 import finish_training_resources
-from verl_omni.workers.config.reward import parse_reward_model_config, validate_reward_model_terms
+from verl_omni.workers.config.reward import (
+    NativeRewardFSDPConfig,
+    NativeRewardModelConfig,
+    parse_reward_model_config,
+    validate_reward_model_terms,
+)
 
 
 def config():
@@ -64,6 +70,47 @@ def test_rank_order_is_explicit_and_flat_devices_remain_complete_replicas():
     flat["placement"] = {"devices": [3, 1]}
     ordinary = parse_reward_model_config("pickscore", flat)
     assert ordinary.placement.devices == [3, 1] and ordinary.fsdp is None
+
+
+@pytest.mark.parametrize(
+    ("group", "fields", "valid"),
+    [
+        (False, {}, True),
+        (False, {"fsdp": None}, True),
+        (False, {"fsdp": {}}, False),
+        (True, {}, True),
+        (True, {"fsdp": None}, True),
+        (True, {"fsdp": {"timeout": 9}}, True),
+        (True, {"fsdp": {"timeout": 0}}, False),
+    ],
+)
+def test_mapping_and_direct_fsdp_defaults_agree(group, fields, valid):
+    model = OmegaConf.to_container(config().reward.models.pickscore)
+    if not group:
+        model["placement"] = {"devices": [0, 1]}
+    model.update(fields)
+
+    def construct(direct):
+        if not direct:
+            return parse_reward_model_config("pickscore", model)
+        parsed = parse_reward_model_config("pickscore", {key: value for key, value in model.items() if key != "fsdp"})
+        values = dict(parsed)
+        values.pop("fsdp")
+        if "fsdp" in fields:
+            values["fsdp"] = None if fields["fsdp"] is None else NativeRewardFSDPConfig(**fields["fsdp"])
+        return NativeRewardModelConfig(**values)
+
+    for direct in (False, True):
+        if not valid:
+            with pytest.raises(ValueError):
+                construct(direct)
+        else:
+            parsed = construct(direct)
+            if group:
+                assert parsed.fsdp.timeout == (fields.get("fsdp") or {}).get("timeout", 120)
+                assert parsed.fsdp.collective_timeout == 30
+            else:
+                assert parsed.fsdp is None
 
 
 @pytest.mark.parametrize(
@@ -259,7 +306,7 @@ def construction(monkeypatch):
         if ref in {"facade", "rank1"} and state.cleanup_failure:
             raise TimeoutError(f"{ref} death unconfirmed")
         assert ref in state.dead
-        raise native_fsdp.ray.exceptions.RayActorError()
+        raise native_fsdp.ray.exceptions.ActorDiedError()
 
     def kill(actor, **kwargs):
         name = "facade" if actor is state.facade else "rank0" if actor is state.ranks[0] else "rank1"
@@ -314,3 +361,54 @@ async def test_construction_failure_confirms_every_owned_actor(construction, fai
     else:
         assert len(error.value.exceptions) == 1 and state.owner._termination_error is None
         await state.owner.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("failure", "cancel"), [(False, False), (True, False), (False, True), (True, True)])
+async def test_concurrent_close_waits_for_scoring_cleanup(monkeypatch, failure, cancel):
+    owner = MultiRewardModelManager(config(), SimpleNamespace(world_size=2)).models["pickscore"]
+    entered, release = threading.Event(), threading.Event()
+    calls = []
+
+    async def compute(*args):
+        raise RuntimeError("scoring failed")
+
+    owner.bind_workers([SimpleNamespace(compute_score_batch=SimpleNamespace(remote=compute))])
+    owner.bind_rank_workers([object(), object()])
+
+    def terminate(workers, timeout, status_method):
+        calls.append(status_method)
+        if status_method == "ready":
+            entered.set()
+            assert release.wait(5)
+            if failure:
+                raise TimeoutError("facade death unconfirmed")
+
+    monkeypatch.setattr(native_fsdp, "terminate_ranks", terminate)
+    scoring = asyncio.create_task(owner.run_rpc("compute_score_batch", object()))
+    closing = []
+    try:
+        assert await asyncio.to_thread(entered.wait, 5)
+        closing = [asyncio.create_task(owner.close()) for _ in range(2)]
+        await asyncio.sleep(0.02)
+        assert all(not task.done() for task in closing)
+        if cancel:
+            closing[0].cancel()
+            closing[0].cancel()
+            await asyncio.sleep(0.02)
+            assert not closing[0].done()
+    finally:
+        release.set()
+        results = await asyncio.gather(scoring, *closing, return_exceptions=True)
+    assert calls == ["ready", "status"]
+    assert isinstance(results[0], BaseExceptionGroup if failure else RuntimeError)
+    if cancel:
+        assert isinstance(results[1], asyncio.CancelledError)
+    for result in results[2:] if cancel else results[1:]:
+        assert result is owner._termination_error
+    if failure:
+        with pytest.raises(BaseExceptionGroup) as repeated:
+            await owner.close()
+        assert repeated.value is owner._termination_error
+    else:
+        await owner.close()

@@ -313,6 +313,10 @@ class NativeRewardModelConfig(RewardModelConfig):
             validate_executor_config(self.executor)
             if not self.model_path:
                 raise ValueError("Native FSDP requires an explicit immutable model_path")
+            if self.fsdp is None:
+                object.__setattr__(self, "fsdp", NativeRewardFSDPConfig())
+            elif not isinstance(self.fsdp, NativeRewardFSDPConfig):
+                raise ValueError("fsdp must be a NativeRewardFSDPConfig")
         elif self.fsdp is not None:
             raise ValueError("fsdp requires placement.replica_groups")
 
@@ -349,7 +353,7 @@ class NativeRewardModelConfig(RewardModelConfig):
             placement=placement,
             executor=NativeRewardModelExecutorConfig.from_mapping(name, model.get("executor")),
             dispatch_batch_size=model.get("dispatch_batch_size"),
-            fsdp=NativeRewardFSDPConfig(**fsdp_values) if placement.replica_groups or "fsdp" in model else None,
+            fsdp=NativeRewardFSDPConfig(**fsdp_values) if model.get("fsdp") is not None else None,
         )
 
 

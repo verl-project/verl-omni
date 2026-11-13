@@ -18,6 +18,7 @@ import threading
 from types import SimpleNamespace
 
 import pytest
+import ray
 import torch
 
 from verl_omni.reward_loop.native_fsdp import (
@@ -50,18 +51,32 @@ def test_partial_submission_and_rank_failure_terminate_whole_group(monkeypatch):
     model.close()
 
 
-def test_unconfirmed_rank_death_is_an_error_and_other_ranks_are_attempted(monkeypatch):
+@pytest.mark.parametrize(
+    "probe_error",
+    [
+        ray.exceptions.ActorDiedError(),
+        ray.exceptions.ActorUnavailableError("unavailable", None),
+        TimeoutError("rank did not exit"),
+    ],
+)
+def test_only_confirmed_death_succeeds_and_every_rank_is_attempted(monkeypatch, probe_error):
     calls = []
-    actors = [SimpleNamespace(status=SimpleNamespace(remote=lambda: "pending")) for _ in range(2)]
+    probes = []
+    actors = [SimpleNamespace(status=SimpleNamespace(remote=lambda index=index: index)) for index in range(2)]
     monkeypatch.setattr("verl_omni.reward_loop.native_fsdp.ray.kill", lambda actor, **kwargs: calls.append(actor))
 
-    def timeout(*args, **kwargs):
-        raise TimeoutError("rank did not exit")
+    def probe(index, **kwargs):
+        probes.append(index)
+        raise probe_error if index == 0 else ray.exceptions.ActorDiedError()
 
-    monkeypatch.setattr("verl_omni.reward_loop.native_fsdp.ray.get", timeout)
-    with pytest.raises(BaseExceptionGroup, match="job termination") as error:
+    monkeypatch.setattr("verl_omni.reward_loop.native_fsdp.ray.get", probe)
+    if isinstance(probe_error, ray.exceptions.ActorDiedError):
         terminate_ranks(actors, 0.1)
-    assert calls == actors and len(error.value.exceptions) == 2
+    else:
+        with pytest.raises(BaseExceptionGroup, match="job termination") as error:
+            terminate_ranks(actors, 0.1)
+        assert error.value.exceptions == (probe_error,)
+    assert calls == actors and probes == [0, 1]
 
 
 @pytest.mark.asyncio

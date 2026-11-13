@@ -1,6 +1,6 @@
 # RFC: Native FSDP2 reward replicas
 
-Last updated: 11/05/2026.
+Last updated: 11/13/2026.
 
 ## Summary
 
@@ -155,6 +155,10 @@ to use `resource: cpu` with `num_replicas` and no `replica_groups`.
 
 ## Architecture and execution
 
+Flat placement treats an omitted or null `fsdp` as disabled. Replica-group placement supplies the same default
+deadlines for omitted or null `fsdp` through mapping and typed dataclass construction. Explicit deadlines remain
+subject to finite, positive-value validation.
+
 ```text
 named reward terms -> existing dispatcher -> facade A -> rank A0 + rank A1
                                          -> facade B -> rank B0 + rank B1
@@ -255,6 +259,11 @@ death-confirmation deadline of at most `min(timeout, 10)` seconds and attempts e
 Actor death must be confirmed before successful shutdown; garbage collection and `ray.shutdown()` do not establish
 successful deployment cleanup. Primary and cleanup errors are preserved together. Failed death confirmation
 requires job termination; there is no collective retry, recovery barrier or automatic replacement replica.
+
+Only a definite actor-death response confirms successful RPC termination. Temporary actor unavailability and
+probe timeouts remain cleanup failures. Closing admission does not establish completed termination: concurrent
+close callers wait for that operation and receive its retained error. Cancelling a close caller does not release
+ownership before cleanup settles; waiting on the termination lock runs outside the event loop.
 
 ### Synchronous trainer and resume
 

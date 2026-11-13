@@ -86,7 +86,7 @@ def terminate_ranks(workers, timeout, status_method="status"):
                     raise TimeoutError("Unconfirmed FSDP rank termination")
                 try:
                     ray.get(getattr(worker, status_method).remote(), timeout=remaining)
-                except ray.exceptions.RayActorError:
+                except ray.exceptions.ActorDiedError:
                     break
         except BaseException as exc:
             errors.append(exc)
@@ -401,11 +401,10 @@ class NativeFSDPManagedRewardModel(NativeManagedRewardModel):
         if method == "close_reward_model":
             await _await_owned(asyncio.to_thread(self._terminate_owned))
 
-    async def close(self):
-        """Report sticky termination errors even after the deployment was invalidated."""
-        if self._termination_error is not None:
-            raise self._termination_error
-        await super().close()
+    async def _close(self):
+        """Wait for active termination before reporting its retained error."""
+        await super()._close()
+        await asyncio.to_thread(self._terminate_owned)
 
 
 def attach_replica(workers, processor_path, timeout):
