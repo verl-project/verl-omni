@@ -49,8 +49,9 @@ RAY_GPU_ARGS=()
 if python3 -c "import sys, torch; sys.exit(torch.version.hip is None)"; then
     # vLLM's ROCm platform copies a driver-level HIP_VISIBLE_DEVICES into CUDA_VISIBLE_DEVICES; Ray workers
     # inherit that while Ray sets a per-worker HIP_VISIBLE_DEVICES, and ROCm aborts on the mismatch.
-    # Leave visibility unset and cap Ray at the first N_GPUS devices instead.
-    unset CUDA_VISIBLE_DEVICES HIP_VISIBLE_DEVICES
+    # Leave visibility unset and cap Ray at the first N_GPUS devices instead. ROCR_VISIBLE_DEVICES goes too:
+    # Ray's AMD manager raises when it is set without HIP_VISIBLE_DEVICES.
+    unset CUDA_VISIBLE_DEVICES HIP_VISIBLE_DEVICES ROCR_VISIBLE_DEVICES
     RAY_GPU_ARGS=(+ray_kwargs.ray_init.num_gpus="$N_GPUS")
 else
     export CUDA_VISIBLE_DEVICES=$(seq -s, 0 $((N_GPUS - 1)))

@@ -6,9 +6,10 @@
 # MiniMax H3 image recipe (OCR reward, PP-OCR layout guard, PickScore / HPSv2.1):
 #   docker build -f docker/Dockerfile.rocm-h3-image --target h3-image -t verl-omni:rocm-h3-image .
 #
-# Override the vLLM-Omni ref (MiniMax H3 image needs eb8b991 or later) or the verl pin:
+# VLLM_OMNI_REF defaults to the vLLM-Omni commit the ROCm results were measured on; MiniMax H3 image
+# needs eb8b991 or later. Override it (e.g. main) or the verl pin:
 #   docker build -f docker/Dockerfile.rocm-h3-image --target h3-image -t verl-omni:rocm-h3-image \
-#     --build-arg VLLM_OMNI_REF=eb8b991ff692c3c304472044ef18772c65bc7eee .
+#     --build-arg VLLM_OMNI_REF=main .
 #
 # Run:
 #   docker run --device=/dev/kfd --device=/dev/dri --group-add video \
@@ -16,11 +17,14 @@
 
 # Base provides torch 2.13 + ROCm 10.0, vLLM 0.33.0 (gfx90a / gfx942 / gfx950) and flash_attn.
 ARG BASE_IMAGE=vllm/vllm-openai-rocm:v0.33.0
-ARG VLLM_OMNI_REF=main
+ARG VLLM_OMNI_REF=4e26cdcb457b6a863d444d905f5957e3d2b9fca3
 # Default: read from .github/verl_pin.txt at build time (override with VERL_GIT_REF).
 ARG VERL_GIT_REF=
 
 FROM ${BASE_IMAGE} AS base
+
+# The base is vLLM's serving stage, whose ENTRYPOINT is `vllm serve`.
+ENTRYPOINT []
 
 ARG VLLM_OMNI_REF
 ARG VERL_GIT_REF
