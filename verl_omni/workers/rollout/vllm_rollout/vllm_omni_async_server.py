@@ -376,8 +376,8 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         if method == "set_pending_lora_peft_config":
             self._pending_lora_delta = bool(rpc_kwargs.get("peft_config"))
         stage_ids = self._generate_strategy.collective_rpc_stage_ids(method)
-        if method == "update_weights_from_ipc":
-            stage_ids = self._resolve_adapter_delta_stages(stage_ids, rpc_kwargs)
+        if method in {"set_pending_lora_peft_config", "update_weights_from_ipc"}:
+            stage_ids = self._resolve_lora_scoped_stages(method, stage_ids, rpc_kwargs)
         if require_ack:
             return await self._collective_rpc_with_ack(method, timeout, args, kwargs, stage_ids)
         return await self.engine.collective_rpc(
@@ -388,25 +388,32 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             stage_ids=stage_ids,
         )
 
-    def _resolve_adapter_delta_stages(
-        self, stage_ids: list[int] | None, rpc_kwargs: dict[str, Any]
+    def _resolve_lora_scoped_stages(
+        self, method: str, stage_ids: list[int] | None, rpc_kwargs: dict[str, Any]
     ) -> list[int] | None:
-        """Route adapter-delta weight syncs to the stages carrying a vLLM LoRA manager.
+        """Scope LoRA stash installation and adapter-delta syncs to the LoRA stages.
 
         Only the deploy config's LoRA stages (the AR policy stage) enable vLLM
-        LoRA; every other stage rejects ``remove_lora``/``add_lora`` outright,
-        so a broadcast delta sync would fail there. Full-weight syncs keep the
-        strategy's stage selection. A delta is explicit in the RPC kwargs or
-        stashed on the workers by ``set_pending_lora_peft_config``; the stash is
-        mirrored in ``_pending_lora_delta``.
+        LoRA; every other stage rejects ``remove_lora``/``add_lora`` outright
+        ("LoRA is not enabled"), so broadcasts of either RPC would fail there.
+        A delta is explicit in the RPC kwargs — ``peft_config`` with
+        ``base_sync_done`` true, the same condition the worker uses to pick its
+        adapter path, so the first base-weight sync still broadcasts — or
+        stashed on the workers by ``set_pending_lora_peft_config``, mirrored in
+        ``_pending_lora_delta``. The stash is installed on the same LoRA stages
+        only: one left on another stage would misroute its next full-weight
+        sync into the adapter path. Full-weight syncs keep the strategy's
+        stage selection.
         """
         lora_stage_ids = self._generate_strategy.lora_stage_ids
         if lora_stage_ids is None:
             return stage_ids
-        explicit_delta = bool(rpc_kwargs.get("peft_config"))
+        if method == "set_pending_lora_peft_config":
+            return list(lora_stage_ids)
+        explicit_delta = bool(rpc_kwargs.get("peft_config")) and bool(rpc_kwargs.get("base_sync_done"))
         if explicit_delta:
             return list(lora_stage_ids)
-        if self._pending_lora_delta:
+        if self._pending_lora_delta and rpc_kwargs.get("peft_config") is None:
             self._pending_lora_delta = False
             return list(lora_stage_ids)
         return stage_ids

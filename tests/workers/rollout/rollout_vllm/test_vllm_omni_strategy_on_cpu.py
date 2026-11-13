@@ -1030,21 +1030,29 @@ async def test_collective_rpc_routes_adapter_deltas_to_the_lora_stages():
     await server.collective_rpc("update_weights_from_ipc", kwargs={"base_sync_done": False})
     assert server.engine.collective_rpc.call_args.kwargs["stage_ids"] is None
 
+    # The first adapter sync (base weights + peft metadata, base_sync_done=False)
+    # still broadcasts so every stage receives its initial base weights.
+    await server.collective_rpc("update_weights_from_ipc", kwargs={"peft_config": {"r": 8}, "base_sync_done": False})
+    assert server.engine.collective_rpc.call_args.kwargs["stage_ids"] is None
+
     # An explicit adapter delta reaches only the LoRA-carrying stage.
     await server.collective_rpc("update_weights_from_ipc", kwargs={"peft_config": {"r": 8}, "base_sync_done": True})
     assert server.engine.collective_rpc.call_args.kwargs["stage_ids"] == [0]
 
     # A stashed delta routes the same way, once; the next bare sync is full-weight.
+    # The stash itself is installed on the LoRA stage only.
     await server.collective_rpc("set_pending_lora_peft_config", kwargs={"peft_config": {"r": 8}})
     assert server._pending_lora_delta is True
+    assert server.engine.collective_rpc.call_args.kwargs["stage_ids"] == [0]
     await server.collective_rpc("update_weights_from_ipc", kwargs={})
     assert server.engine.collective_rpc.call_args.kwargs["stage_ids"] == [0]
     assert server._pending_lora_delta is False
     await server.collective_rpc("update_weights_from_ipc", kwargs={})
     assert server.engine.collective_rpc.call_args.kwargs["stage_ids"] is None
 
-    # Clearing the stash keeps full-weight broadcast.
+    # Clearing the stash also lands on the LoRA stage only.
     await server.collective_rpc("set_pending_lora_peft_config", kwargs={"peft_config": None})
+    assert server.engine.collective_rpc.call_args.kwargs["stage_ids"] == [0]
     await server.collective_rpc("update_weights_from_ipc", kwargs={})
     assert server.engine.collective_rpc.call_args.kwargs["stage_ids"] is None
 
@@ -1058,6 +1066,11 @@ async def test_collective_rpc_keeps_sync_routing_without_rollout_lora():
     server.engine = SimpleNamespace(collective_rpc=AsyncMock(return_value=[]))
 
     await server.collective_rpc("update_weights_from_ipc", kwargs={"peft_config": {"r": 8}})
+    assert server.engine.collective_rpc.call_args.kwargs["stage_ids"] is None
+
+    # Stash installation also broadcasts without rollout LoRA: the clear
+    # broadcast must be able to reach any worker holding a stash.
+    await server.collective_rpc("set_pending_lora_peft_config", kwargs={"peft_config": None})
     assert server.engine.collective_rpc.call_args.kwargs["stage_ids"] is None
 
 
