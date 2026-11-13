@@ -11,7 +11,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Debug hooks used by the Qwen-Image L3 nightly regressions."""
+"""Debug hooks used by the L3 nightly regressions.
+
+Diffusion  dumps come from the diffusion trainer and ``DiffusersFSDPEngine``.
+Omni models dump ``actor_update_batch`` when the actor update
+starts and ``lora_gradients`` before the omni FSDP optimizer step.
+"""
 
 from __future__ import annotations
 
@@ -156,7 +161,16 @@ def _to_cpu_payload(value: Any, *, max_sequence_items: int = 128) -> Any:
         import torch
 
         if isinstance(value, torch.Tensor):
-            return value.detach().cpu()
+            value = value.detach()
+            # Nested log-prob tensors cannot be flattened by the dump comparator.
+            if getattr(value, "is_nested", False):
+                try:
+                    value = torch.nested.to_padded_tensor(value, 0)
+                except Exception:
+                    values = getattr(value, "values", None)
+                    if callable(values):
+                        value = values()
+            return value.cpu()
     except Exception:
         pass
     if isinstance(value, np.ndarray):
@@ -181,6 +195,16 @@ def _tensor_dict_subset(data: Any, keys: tuple[str, ...]) -> dict[str, Any]:
         except Exception:
             pass
     return subset
+
+
+def _non_tensor_subset(data: Any) -> dict[str, Any]:
+    """Read the shared non-tensor dump keys from a DataProto or a TensorDict."""
+    source = getattr(data, "non_tensor_batch", None)
+    if source is None:
+        source = data
+    # extra_info.repeat_index is stable across runs. uid is a per-run uuid4.
+    _non_tensor_dump_keys = ("uid", "data_source", "extra_info", _DEBUG_STEP_KEY)
+    return _tensor_dict_subset(data, _non_tensor_dump_keys)
 
 
 def _extract_debug_step(data: Any = None, fallback: int | None = None) -> int | None:
@@ -374,14 +398,7 @@ def _install_driver_hook() -> None:
         )
         payload = {
             "batch": _tensor_dict_subset(batch.batch, payload_keys),
-            "non_tensor": {
-                key: batch.non_tensor_batch[key]
-                # "extra_info" carries the run-stable dataset position
-                # (repeat_index) that compare_dumps.py uses to realign rows,
-                # because "uid" is a per-run uuid4.
-                for key in ("uid", "data_source", "extra_info", _DEBUG_STEP_KEY)
-                if key in batch.non_tensor_batch
-            },
+            "non_tensor": _non_tensor_subset(batch),
         }
         _dump_event("driver_forward", {"global_step": global_step}, payload)
         return original_update_actor(self, batch, *args, **kwargs)
@@ -406,6 +423,27 @@ def _install_training_worker_hook() -> None:
             self._nightly_debug_global_step = global_step
             if hasattr(self, "engine"):
                 self.engine._nightly_debug_global_step = global_step
+        # Dump before train_mini_batch pops loader keys. Diffusion uses this
+        # method too and is excluded by the engine check.
+        if _omni_nightly() and _is_omni_fsdp_engine(getattr(self, "engine", None)):
+            payload_keys = (
+                "responses",
+                "advantages",
+                "old_log_probs",
+                "ref_log_prob",
+                "rollout_log_probs",
+                "token_level_rewards",
+                "token_level_scores",
+                "rm_scores",
+            )
+            _dump_event(
+                "actor_update_batch",
+                {"global_step": global_step},
+                {
+                    "batch": _tensor_dict_subset(data, payload_keys),
+                    "non_tensor": _non_tensor_subset(data),
+                },
+            )
         return original_train_mini_batch(self, data, *args, **kwargs)
 
     setattr(train_mini_batch_with_context, _WRAPPED_ATTR, True)
@@ -429,6 +467,14 @@ def _lora_gradients(module: Any) -> dict[str, Any]:
             pass
         grads[name] = grad
     return grads
+
+
+def _dump_lora_gradients(module: Any, global_step: int | None) -> None:
+    if global_step is None:
+        return
+    grads = _lora_gradients(module)
+    if grads:
+        _dump_event("lora_gradients", {"global_step": int(global_step)}, {"gradients": grads})
 
 
 def _install_engine_hooks() -> None:
@@ -481,11 +527,7 @@ def _install_engine_hooks() -> None:
         return
 
     def optimizer_step_with_dump(self, *args, **kwargs):
-        global_step = getattr(self, "_nightly_debug_global_step", None)
-        if global_step is not None:
-            grads = _lora_gradients(getattr(self, "module", None))
-            if grads:
-                _dump_event("lora_gradients", {"global_step": int(global_step)}, {"gradients": grads})
+        _dump_lora_gradients(getattr(self, "module", None), getattr(self, "_nightly_debug_global_step", None))
         grad_norm = original_optimizer_step(self, *args, **kwargs)
         if isinstance(grad_norm, float) and not math.isfinite(grad_norm):
             print(f"WARN nightly debug observed non-finite grad_norm: {grad_norm}")
@@ -493,6 +535,69 @@ def _install_engine_hooks() -> None:
 
     setattr(optimizer_step_with_dump, _WRAPPED_ATTR, True)
     DiffusersFSDPEngine.optimizer_step = optimizer_step_with_dump
+
+
+def _omni_nightly() -> bool:
+    """True on the omni nightly driver and workers."""
+    return os.environ.get("NIGHTLY_TRAINER_MODULE") == "verl_omni.trainer.main_omni"
+
+
+def _is_omni_fsdp_engine(engine: Any) -> bool:
+    try:
+        from verl_omni.workers.engine.fsdp.omni_impl import OmniFSDPEngine
+    except Exception:
+        return False
+    return isinstance(engine, OmniFSDPEngine)
+
+
+def _install_omni_driver_hook() -> None:
+    try:
+        from verl_omni.trainer.omni.ray_omni_trainer import OmniPPOTrainerSync
+    except Exception:
+        return
+
+    original_update_actor = OmniPPOTrainerSync._update_actor
+    if getattr(original_update_actor, _WRAPPED_ATTR, False):
+        return
+
+    # Why not dumping actor update batch in _update_actor?
+    # Because the batch is not available in the _update_actor method.
+    # The driver-side _update_actor only sees a KVBatchMeta.
+    # The tensors live in TransferQueue, so old_log_probs, responses, etc. are not on that object
+    # and there is nothing there to write into payload.pt.
+    # Dump before TrainingWorker.train_mini_batch instead.
+    def update_actor_with_debug_step(self, batch, *args, **kwargs):
+        # KVBatchMeta carries this dict onto the worker TensorDict. The payload
+        # itself is written there, where the batch tensors exist.
+        extra = getattr(batch, "extra_info", None)
+        if isinstance(extra, dict):
+            extra[_DEBUG_STEP_KEY] = int(getattr(self, "global_steps", 0))
+        return original_update_actor(self, batch, *args, **kwargs)
+
+    setattr(update_actor_with_debug_step, _WRAPPED_ATTR, True)
+    OmniPPOTrainerSync._update_actor = update_actor_with_debug_step
+
+
+def _install_omni_optimizer_hook() -> None:
+    try:
+        from verl.workers.engine.fsdp.transformer_impl import FSDPEngine
+    except Exception:
+        return
+
+    original_optimizer_step = FSDPEngine.optimizer_step
+    if getattr(original_optimizer_step, _WRAPPED_ATTR, False):
+        return
+
+    def optimizer_step_with_omni_dump(self, *args, **kwargs):
+        if _is_omni_fsdp_engine(self):
+            _dump_lora_gradients(getattr(self, "module", None), getattr(self, "_nightly_debug_global_step", None))
+        grad_norm = original_optimizer_step(self, *args, **kwargs)
+        if isinstance(grad_norm, float) and not math.isfinite(grad_norm):
+            print(f"WARN nightly debug observed non-finite grad_norm: {grad_norm}")
+        return grad_norm
+
+    setattr(optimizer_step_with_omni_dump, _WRAPPED_ATTR, True)
+    FSDPEngine.optimizer_step = optimizer_step_with_omni_dump
 
 
 def install_debug_hooks() -> None:
@@ -505,3 +610,6 @@ def install_debug_hooks() -> None:
     _install_driver_hook()
     _install_training_worker_hook()
     _install_engine_hooks()
+    if _omni_nightly():
+        _install_omni_driver_hook()
+        _install_omni_optimizer_hook()

@@ -38,7 +38,7 @@ EXCLUDE_MODULES=".*vpm.*|.*apm.*|.*talker.*|.*code2wav.*|.*code_predictor.*|.*co
 python3 "${REPO_ROOT}/tests/special_e2e/build_minicpmo_tiny_random.py" \
     --output-dir "${POLICY_MODEL_PATH}" --force
 
-python3 "${REPO_ROOT}/tests/nightly/create_single_sample_data.py" \
+python3 "${REPO_ROOT}/tests/nightly/create_sample_data.py" \
     --kind avqa \
     --local_save_dir "${DATA_DIR}" \
     --train_size "${TRAIN_BATCH_SIZE}" \

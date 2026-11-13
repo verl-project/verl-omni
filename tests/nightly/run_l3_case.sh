@@ -75,7 +75,7 @@ python3 "${NIGHTLY_DIR}/env_metadata.py" \
     --attn-backend "${ATTN_BACKEND}" \
     --rollout-attn-backend "${ROLLOUT_ATTN_BACKEND}"
 
-python3 "${NIGHTLY_DIR}/create_single_sample_data.py" \
+python3 "${NIGHTLY_DIR}/create_sample_data.py" \
     --local_save_dir "${DATA_DIR}" \
     --train_size "${TRAIN_BATCH_SIZE}" \
     --val_size 4 \
