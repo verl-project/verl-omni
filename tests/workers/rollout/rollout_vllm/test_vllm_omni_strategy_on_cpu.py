@@ -329,6 +329,7 @@ def test_ar_strategy_resolves_nonzero_policy_and_weight_sync_stages(monkeypatch)
             max_model_len=64,
             max_num_batched_tokens=64,
         ),
+        model_config=SimpleNamespace(lora={}, lora_rank=0),
         _rollout_flags={},
     )
     strategy = ARStrategy(server)
@@ -371,6 +372,7 @@ def test_ar_strategy_moves_capacity_overrides_to_each_stage(monkeypatch):
             max_model_len=4096,
             max_num_batched_tokens=8192,
         ),
+        model_config=SimpleNamespace(lora={}, lora_rank=0),
         _rollout_flags={},
     )
     strategy = ARStrategy(server)
@@ -631,7 +633,7 @@ async def test_ar_strategy_retains_requested_stage_outputs_and_targets_weight_sy
 async def test_weight_sync_rejects_best_effort_rpc_failures(reply):
     server = object.__new__(server_module.vLLMOmniHttpServer)
     server.engine = SimpleNamespace(num_stages=1, collective_rpc=AsyncMock(return_value=reply))
-    server._generate_strategy = SimpleNamespace(collective_rpc_stage_ids=lambda method: [0])
+    server._generate_strategy = SimpleNamespace(lora_stage_ids=None, collective_rpc_stage_ids=lambda method: [0])
     with pytest.raises(RuntimeError, match="update_weights_from_ipc failed"):
         await server.collective_rpc("update_weights_from_ipc", kwargs={"base_sync_done": True}, require_ack=True)
     server.engine.collective_rpc.assert_awaited_once_with(
@@ -644,7 +646,7 @@ async def test_weight_sync_rejects_best_effort_rpc_failures(reply):
 async def test_weight_sync_accepts_successful_rpc_results(reply):
     server = object.__new__(server_module.vLLMOmniHttpServer)
     server.engine = SimpleNamespace(num_stages=1, collective_rpc=AsyncMock(return_value=reply))
-    server._generate_strategy = SimpleNamespace(collective_rpc_stage_ids=lambda method: None)
+    server._generate_strategy = SimpleNamespace(lora_stage_ids=None, collective_rpc_stage_ids=lambda method: None)
     assert await server.collective_rpc("update_weights_from_ipc", require_ack=True) == list(reply)
     assert server.engine.collective_rpc.await_args.kwargs["stage_ids"] == [0]
 
@@ -655,7 +657,7 @@ async def test_checked_collective_rpc_is_method_independent_and_preserves_reply_
     first = [None, {"supported": True}]
     second = [("second",), None]
     server.engine = SimpleNamespace(num_stages=2, collective_rpc=AsyncMock(side_effect=[first, second]))
-    server._generate_strategy = SimpleNamespace(collective_rpc_stage_ids=lambda method: [1, 1, 0])
+    server._generate_strategy = SimpleNamespace(lora_stage_ids=None, collective_rpc_stage_ids=lambda method: [1, 1, 0])
 
     assert await server.collective_rpc("refresh_metadata", require_ack=True) == first + second
     assert [call.kwargs["stage_ids"] for call in server.engine.collective_rpc.await_args_list] == [[1], [0]]
@@ -665,7 +667,7 @@ async def test_checked_collective_rpc_is_method_independent_and_preserves_reply_
 async def test_checked_collective_rpc_rejects_other_method_error_envelope():
     server = object.__new__(server_module.vLLMOmniHttpServer)
     server.engine = SimpleNamespace(num_stages=1, collective_rpc=AsyncMock(return_value=[{"todo": True}]))
-    server._generate_strategy = SimpleNamespace(collective_rpc_stage_ids=lambda method: [0])
+    server._generate_strategy = SimpleNamespace(lora_stage_ids=None, collective_rpc_stage_ids=lambda method: [0])
 
     with pytest.raises(RuntimeError, match="refresh_metadata failed"):
         await server.collective_rpc("refresh_metadata", require_ack=True)
@@ -676,7 +678,7 @@ async def test_unchecked_collective_rpc_returns_raw_reply_with_unknown_topology(
     server = object.__new__(server_module.vLLMOmniHttpServer)
     reply = [{"supported": False, "error": "best effort"}]
     server.engine = SimpleNamespace(collective_rpc=AsyncMock(return_value=reply))
-    server._generate_strategy = SimpleNamespace(collective_rpc_stage_ids=lambda method: None)
+    server._generate_strategy = SimpleNamespace(lora_stage_ids=None, collective_rpc_stage_ids=lambda method: None)
 
     assert await server.collective_rpc("update_weights_from_ipc") is reply
     server.engine.collective_rpc.assert_awaited_once_with(
@@ -737,7 +739,7 @@ async def test_omni_adapter_propagates_ipc_failure_and_cancellation(error):
 async def test_inherited_full_weight_update_requires_ack_before_publishing(reply):
     server = object.__new__(server_module.vLLMOmniHttpServer)
     server.engine = SimpleNamespace(num_stages=1, collective_rpc=AsyncMock(return_value=reply))
-    server._generate_strategy = SimpleNamespace(collective_rpc_stage_ids=lambda method: [0])
+    server._generate_strategy = SimpleNamespace(lora_stage_ids=None, collective_rpc_stage_ids=lambda method: [0])
 
     adapter = object.__new__(server_module.vLLMOmniServerAdapter)
     adapter._ensure_server_handle = MagicMock(return_value=True)
@@ -786,7 +788,7 @@ async def test_inherited_full_weight_update_requires_ack_before_publishing(reply
 async def test_weight_sync_preserves_raised_error_and_other_controls(error):
     server = object.__new__(server_module.vLLMOmniHttpServer)
     server.engine = SimpleNamespace(num_stages=1, collective_rpc=AsyncMock(side_effect=error))
-    server._generate_strategy = SimpleNamespace(collective_rpc_stage_ids=lambda method: None)
+    server._generate_strategy = SimpleNamespace(lora_stage_ids=None, collective_rpc_stage_ids=lambda method: None)
     with pytest.raises(type(error)) as raised:
         await server.collective_rpc("update_weights_from_ipc", require_ack=True)
     assert raised.value is error
@@ -802,7 +804,7 @@ async def test_weight_sync_preserves_raised_error_and_other_controls(error):
 async def test_weight_sync_rejects_missing_second_stage_despite_two_first_stage_replies(selected):
     server = object.__new__(server_module.vLLMOmniHttpServer)
     server.engine = SimpleNamespace(num_stages=2, collective_rpc=AsyncMock(side_effect=[[None, None], []]))
-    server._generate_strategy = SimpleNamespace(collective_rpc_stage_ids=lambda method: selected)
+    server._generate_strategy = SimpleNamespace(lora_stage_ids=None, collective_rpc_stage_ids=lambda method: selected)
     with pytest.raises(RuntimeError, match="missing replica results for stage 1"):
         await server.collective_rpc("update_weights_from_ipc", require_ack=True)
     assert [call.kwargs["stage_ids"] for call in server.engine.collective_rpc.await_args_list] == [[0], [1]]
@@ -847,7 +849,7 @@ async def test_weight_sync_rejects_missing_stage_from_pinned_orchestrator(select
 
     server = object.__new__(server_module.vLLMOmniHttpServer)
     server.engine = SimpleNamespace(num_stages=2, collective_rpc=collective_rpc)
-    server._generate_strategy = SimpleNamespace(collective_rpc_stage_ids=lambda method: selected)
+    server._generate_strategy = SimpleNamespace(lora_stage_ids=None, collective_rpc_stage_ids=lambda method: selected)
 
     with pytest.raises(RuntimeError, match="missing replica results for stage 1"):
         await server.collective_rpc("update_weights_from_ipc", require_ack=True)
@@ -862,7 +864,7 @@ async def test_weight_sync_rejects_missing_stage_from_pinned_orchestrator(select
 async def test_weight_sync_dispatches_each_selected_stage_once():
     server = object.__new__(server_module.vLLMOmniHttpServer)
     server.engine = SimpleNamespace(num_stages=2, collective_rpc=AsyncMock(side_effect=[[None, None], [None]]))
-    server._generate_strategy = SimpleNamespace(collective_rpc_stage_ids=lambda method: [0, 0, 1])
+    server._generate_strategy = SimpleNamespace(lora_stage_ids=None, collective_rpc_stage_ids=lambda method: [0, 0, 1])
 
     assert await server.collective_rpc("update_weights_from_ipc", require_ack=True) == [None, None, None]
     assert [call.kwargs["stage_ids"] for call in server.engine.collective_rpc.await_args_list] == [[0], [1]]
@@ -875,7 +877,7 @@ async def test_weight_sync_stops_before_next_stage_on_nested_worker_error():
         num_stages=2,
         collective_rpc=AsyncMock(side_effect=[[[None], [{"error": "receiver failed"}]], [None]]),
     )
-    server._generate_strategy = SimpleNamespace(collective_rpc_stage_ids=lambda method: [0, 1])
+    server._generate_strategy = SimpleNamespace(lora_stage_ids=None, collective_rpc_stage_ids=lambda method: [0, 1])
 
     with pytest.raises(RuntimeError, match="receiver failed"):
         await server.collective_rpc("update_weights_from_ipc", require_ack=True)
@@ -888,7 +890,7 @@ async def test_weight_sync_stops_before_next_stage_on_nested_worker_error():
 async def test_weight_sync_checks_each_stage_with_unequal_replica_counts(selected):
     server = object.__new__(server_module.vLLMOmniHttpServer)
     server.engine = SimpleNamespace(num_stages=2, collective_rpc=AsyncMock(side_effect=[[None, None], [None]]))
-    server._generate_strategy = SimpleNamespace(collective_rpc_stage_ids=lambda method: selected)
+    server._generate_strategy = SimpleNamespace(lora_stage_ids=None, collective_rpc_stage_ids=lambda method: selected)
 
     assert await server.collective_rpc(
         "update_weights_from_ipc", timeout=3, args=("weights",), kwargs={"ready": True}, require_ack=True
@@ -910,7 +912,7 @@ async def test_weight_sync_checks_each_stage_with_unequal_replica_counts(selecte
 async def test_weight_sync_rejects_empty_or_unknown_stages_before_dispatch(num_stages, selected):
     server = object.__new__(server_module.vLLMOmniHttpServer)
     server.engine = SimpleNamespace(num_stages=num_stages, collective_rpc=AsyncMock())
-    server._generate_strategy = SimpleNamespace(collective_rpc_stage_ids=lambda method: selected)
+    server._generate_strategy = SimpleNamespace(lora_stage_ids=None, collective_rpc_stage_ids=lambda method: selected)
 
     with pytest.raises(RuntimeError, match="update_weights_from_ipc failed"):
         await server.collective_rpc("update_weights_from_ipc", require_ack=True)
@@ -940,7 +942,7 @@ async def test_weight_sync_rejects_pinned_stage_pool_error_envelope(error):
 
     server = object.__new__(server_module.vLLMOmniHttpServer)
     server.engine = SimpleNamespace(num_stages=1, collective_rpc=collective_rpc)
-    server._generate_strategy = SimpleNamespace(collective_rpc_stage_ids=lambda method: [0])
+    server._generate_strategy = SimpleNamespace(lora_stage_ids=None, collective_rpc_stage_ids=lambda method: [0])
     with pytest.raises(RuntimeError, match="timed out" if isinstance(error, TimeoutError) else str(error)):
         await server.collective_rpc("update_weights_from_ipc", require_ack=True)
 
@@ -987,6 +989,91 @@ def test_ar_strategy_preserves_qwen3_omni_thinker_only_contract():
     assert output.extra_fields == {"global_steps": 12}
 
 
+def test_ar_deploy_config_scopes_lora_to_the_policy_stage(monkeypatch):
+    monkeypatch.setattr(ar_strategy_module, "get_visible_devices_keyword", lambda: "CUDA_VISIBLE_DEVICES")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
+    server = SimpleNamespace(
+        config=SimpleNamespace(
+            tensor_model_parallel_size=1,
+            text_encoder_tp_size=1,
+            max_model_len=8,
+            max_num_batched_tokens=8,
+        ),
+        model_config=SimpleNamespace(lora={"rank": 66}, lora_rank=0),
+        _rollout_flags={},
+    )
+    strategy = ARStrategy(server)
+    engine_kwargs = {
+        "pipeline_name": "qwen3_omni_moe",
+        "pipeline_mode": "full",
+    }
+
+    strategy.preprocess_engine_kwargs(engine_kwargs)
+
+    deploy = yaml.safe_load(Path(engine_kwargs["deploy-config"]).read_text(encoding="utf-8"))
+    policy_stage, other_stages = deploy["stages"][0], deploy["stages"][1:]
+    assert policy_stage["engine_extras"] == {"enable_lora": True, "max_loras": 1, "max_lora_rank": 128}
+    assert all("enable_lora" not in stage["engine_extras"] for stage in other_stages)
+    assert strategy.lora_stage_ids == [0]
+    server._temp_deploy_ctx.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_collective_rpc_routes_adapter_deltas_to_the_lora_stages():
+    strategy = SimpleNamespace(collective_rpc_stage_ids=lambda method: None, lora_stage_ids=[0])
+    server = object.__new__(server_module.vLLMOmniHttpServer)
+    server._generate_strategy = strategy
+    server._pending_lora_delta = False
+    server.engine = SimpleNamespace(collective_rpc=AsyncMock(return_value=[]))
+
+    # Full-weight syncs keep the strategy's broadcast selection.
+    await server.collective_rpc("update_weights_from_ipc", kwargs={"base_sync_done": False})
+    assert server.engine.collective_rpc.call_args.kwargs["stage_ids"] is None
+
+    # The first adapter sync (base weights + peft metadata, base_sync_done=False)
+    # still broadcasts so every stage receives its initial base weights.
+    await server.collective_rpc("update_weights_from_ipc", kwargs={"peft_config": {"r": 8}, "base_sync_done": False})
+    assert server.engine.collective_rpc.call_args.kwargs["stage_ids"] is None
+
+    # An explicit adapter delta reaches only the LoRA-carrying stage.
+    await server.collective_rpc("update_weights_from_ipc", kwargs={"peft_config": {"r": 8}, "base_sync_done": True})
+    assert server.engine.collective_rpc.call_args.kwargs["stage_ids"] == [0]
+
+    # A stashed delta routes the same way, once; the next bare sync is full-weight.
+    # The stash itself is installed on the LoRA stage only.
+    await server.collective_rpc("set_pending_lora_peft_config", kwargs={"peft_config": {"r": 8}})
+    assert server._pending_lora_delta is True
+    assert server.engine.collective_rpc.call_args.kwargs["stage_ids"] == [0]
+    await server.collective_rpc("update_weights_from_ipc", kwargs={})
+    assert server.engine.collective_rpc.call_args.kwargs["stage_ids"] == [0]
+    assert server._pending_lora_delta is False
+    await server.collective_rpc("update_weights_from_ipc", kwargs={})
+    assert server.engine.collective_rpc.call_args.kwargs["stage_ids"] is None
+
+    # Clearing the stash also lands on the LoRA stage only.
+    await server.collective_rpc("set_pending_lora_peft_config", kwargs={"peft_config": None})
+    assert server.engine.collective_rpc.call_args.kwargs["stage_ids"] == [0]
+    await server.collective_rpc("update_weights_from_ipc", kwargs={})
+    assert server.engine.collective_rpc.call_args.kwargs["stage_ids"] is None
+
+
+@pytest.mark.asyncio
+async def test_collective_rpc_keeps_sync_routing_without_rollout_lora():
+    strategy = SimpleNamespace(collective_rpc_stage_ids=lambda method: None, lora_stage_ids=None)
+    server = object.__new__(server_module.vLLMOmniHttpServer)
+    server._generate_strategy = strategy
+    server._pending_lora_delta = True
+    server.engine = SimpleNamespace(collective_rpc=AsyncMock(return_value=[]))
+
+    await server.collective_rpc("update_weights_from_ipc", kwargs={"peft_config": {"r": 8}})
+    assert server.engine.collective_rpc.call_args.kwargs["stage_ids"] is None
+
+    # Stash installation also broadcasts without rollout LoRA: the clear
+    # broadcast must be able to reach any worker holding a stash.
+    await server.collective_rpc("set_pending_lora_peft_config", kwargs={"peft_config": None})
+    assert server.engine.collective_rpc.call_args.kwargs["stage_ids"] is None
+
+
 def test_ar_strategy_writes_qwen3_omni_thinker_only_deploy_config(monkeypatch):
     monkeypatch.setattr(ar_strategy_module, "get_visible_devices_keyword", lambda: "CUDA_VISIBLE_DEVICES")
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
@@ -997,6 +1084,7 @@ def test_ar_strategy_writes_qwen3_omni_thinker_only_deploy_config(monkeypatch):
             max_model_len=8,
             max_num_batched_tokens=8,
         ),
+        model_config=SimpleNamespace(lora={}, lora_rank=0),
         _rollout_flags={},
     )
     strategy = ARStrategy(server)
@@ -1025,6 +1113,7 @@ def test_ar_strategy_preserves_qwen3_omni_full_without_combiner(monkeypatch):
             max_model_len=8,
             max_num_batched_tokens=8,
         ),
+        model_config=SimpleNamespace(lora={}, lora_rank=0),
         _rollout_flags={},
     )
     strategy = ARStrategy(server)
@@ -1485,6 +1574,7 @@ def test_ar_deploy_config_omits_text_encoder_tp_size_on_ar_stages(tmp_path, monk
 
     server = SimpleNamespace(
         config=SimpleNamespace(tensor_model_parallel_size=2, text_encoder_tp_size=1),
+        model_config=SimpleNamespace(lora={}, lora_rank=0),
     )
     strategy = ARStrategy(server)
     engine_kwargs: dict = {}
