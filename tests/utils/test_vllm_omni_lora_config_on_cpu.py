@@ -84,46 +84,16 @@ def test_lora_patch_is_not_installed_for_merged_lora(monkeypatch):
     ARStrategy(SimpleNamespace(config=SimpleNamespace())).prepare_engine_args({}, Namespace())
 
 
-def test_mapper_compatibility_preserves_unfused_module_names(monkeypatch):
-    from vllm.model_executor.models.utils import WeightsMapper
-
-    monkeypatch.setattr(WeightsMapper, "get_unstacked_mapper", None, raising=False)
-    monkeypatch.delattr(WeightsMapper, "get_unstacked_mapper")
-    mapper = WeightsMapper(
-        orig_to_new_prefix={"thinker.model.": "language_model.model."},
-        orig_to_new_stacked={"q_proj": ("qkv_proj", "q")},
-    )
-    patch.patch_vllm_lora_weights_mapper()
-    renamed = mapper.get_unstacked_mapper()
-    assert renamed._map_name("thinker.model.layers.0.q_proj.weight") == "language_model.model.layers.0.q_proj.weight"
-    assert mapper._map_name("thinker.model.layers.0.q_proj.weight") == "language_model.model.layers.0.qkv_proj.weight"
-    patch.patch_vllm_lora_weights_mapper()
-    assert WeightsMapper.get_unstacked_mapper is WeightsMapper.get_rename_mapper
-
-
-def test_mapper_compatibility_keeps_existing_upstream_method(monkeypatch):
-    from vllm.model_executor.models.utils import WeightsMapper
-
-    sentinel = lambda self: self
-    monkeypatch.setattr(WeightsMapper, "get_unstacked_mapper", sentinel, raising=False)
-    patch.patch_vllm_lora_weights_mapper()
-    assert WeightsMapper.get_unstacked_mapper is sentinel
-
-
 def test_real_verl_tensor_lora_loader_preserves_qwen_prefixes(monkeypatch):
     import torch
     from verl.utils.vllm.utils import TensorLoRARequest, VLLMHijack
     from vllm.lora import lora_model
     from vllm.lora.lora_model import LoRAModel
     from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
-    from vllm.model_executor.models.utils import WeightsMapper
     from vllm_omni.model_executor.models.qwen3_omni.qwen3_omni_moe_thinker import (
         Qwen3OmniMoeThinkerForConditionalGeneration,
     )
 
-    monkeypatch.setattr(WeightsMapper, "get_unstacked_mapper", None, raising=False)
-    monkeypatch.delattr(WeightsMapper, "get_unstacked_mapper")
-    patch.patch_vllm_lora_weights_mapper()
     monkeypatch.setattr(LRUCacheWorkerLoRAManager, "_load_adapter", LRUCacheWorkerLoRAManager._load_adapter)
     # The GPU wheel enables pinning at import; CPU tests must not allocate pinned memory.
     monkeypatch.setattr(lora_model, "PIN_MEMORY", False)

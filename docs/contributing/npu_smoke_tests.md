@@ -22,6 +22,14 @@ into these runners:
 | 5 | core | Unseeded multi-worker rollout diversity | tests/agent_loop/test_diffusion_agent_loop_npu.py::test_rollout_without_seed_npu | 8 |
 | 6 | core | Seeded multi-worker rollout reproducibility | tests/agent_loop/test_diffusion_agent_loop_npu.py::test_rollout_seed_reproducibility_npu | 8 |
 | 7 | core | Standalone vLLM reward engine and OCR scoring | tests/reward_loop/test_reward_engine_npu.py | 8 |
+| 11 | core | Reward restart determinism and JPEG rule scoring | tests/reward_loop/test_reward_engine_npu.py | 8 |
+| 12 | core | Request batching and step-execution output contracts | tests/workers/rollout/rollout_vllm/test_vllm_omni_generate_contracts_npu.py | 8 |
+| 13 | core | FSDP/FSDP2 engine inference and training with SP=2 | tests/workers/test_diffusers_fsdp_engine_sp_npu.py | 8 |
+| 14 | core | Ulysses SP=2/SP=4 forward and backward equivalence | tests/workers/test_diffusers_ulysses.py | 8 |
+| 15 | core | FSDP2 trainable snapshot restore | tests/workers/test_trainable_snapshot_gpu.py | 8 |
+| 17 | core | Omni tool-agent image generation | tests/agent_loop/test_omni_agent_loop_worker_npu.py | 8 |
+| 28 | core | FSDP2 LoRA adapter switch and EMA | tests/workers/test_diffusers_fsdp_lora_adapter.py | 8 |
+| 30 | core | Image previews and H3 offload placeholders | tests/trainer/diffusion/test_artifact_preview_dump_npu.py; tests/pipelines/test_minimax_h3_meta_output_npu.py | 8 |
 | 1 | e2e | Qwen-Image FlowGRPO trainer | tests/special_e2e/run_flowgrpo_qwen_image_npu.sh | 8 |
 | 2 | e2e | Wan2.2 DanceGRPO trainer with Qwen2.5-VL reward | tests/special_e2e/run_dancegrpo_wan22_npu.sh | 8 |
 | 18 | e2e | Qwen-Image FlowGRPO V1 sync | tests/special_e2e/run_flowgrpo_qwen_image_v1_npu.sh | 8 |
@@ -103,7 +111,8 @@ All nonzero exits, including native abort 134, fail the smoke group.
 
 With eight NPUs, test 2 runs one DanceGRPO training step with six actor NPUs
 and a dedicated TP=2 Qwen2.5-VL reward engine on two NPUs. Prepare the
-Qwen2.5-VL-3B-Instruct checkpoint before an offline run; set `REWARD_MODEL_PATH` to its local directory
+Qwen2.5-VL-3B-Instruct checkpoint before an offline run; set
+`REWARD_MODEL_PATH` to its local directory
 when needed. The test must complete training and exit 0.
 
 ### Qwen-Image V1 trainer variants
@@ -171,7 +180,8 @@ only when every selected job passes.
 
 If the new test lives outside current path filters, add its path. Current
 filters include verl_omni/**, tests/npu_smoke/**, tests/agent_loop/**,
-tests/reward_loop/**, tests/workers/**, tests/special_e2e/**, pyproject.toml,
+tests/reward_loop/**, tests/workers/**, tests/trainer/**, tests/pipelines/**,
+tests/special_e2e/**, pyproject.toml,
 .github/workflows/npu_smoke.yml,
 .github/vllm_omni_pin.txt, and .github/vllm_ascend_pin.txt.
 
@@ -324,9 +334,11 @@ actions may otherwise be resolved against a different host workspace.
 
 ## Runtime Cleanup, Results, and Artifacts
 
-Before each test, the shared library stops Ray, terminates stale
-DiffusionWorker, VLLMWorker, and vLLMOmniHttpServer processes, waits five
-seconds, force-kills remaining matches, and prints npu-smi information.
+Serial groups clean up Ray and stale model workers before each test and on
+exit. Parallel shards clean up globally only before starting both groups and
+after they finish; child groups skip global cleanup to avoid interrupting each
+other. A crashed workload can therefore leave processes that affect later
+tests in the same shard. Run the suite in its own container.
 
 Per-test logs are stored under:
 

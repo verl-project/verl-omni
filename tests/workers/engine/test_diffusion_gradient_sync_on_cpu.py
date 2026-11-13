@@ -107,6 +107,7 @@ def test_forward_only_never_enters_sync_context(monkeypatch):
 def test_gradient_sync_context_delegates_fsdp2(monkeypatch):
     engine = object.__new__(diffusers_impl.PPODiffusersFSDPEngine)
     engine.module = _FSDP2Module()
+    engine.engine_config = SimpleNamespace(use_no_sync_for_gradient_accumulation=True)
     monkeypatch.setattr("verl.workers.engine.fsdp.transformer_impl.fsdp_version", lambda _: 2)
 
     with engine._gradient_sync_context(is_last_micro_batch=False):
@@ -118,6 +119,7 @@ def test_gradient_sync_context_delegates_fsdp2(monkeypatch):
 def test_gradient_sync_context_restores_fsdp2_after_error(monkeypatch):
     engine = object.__new__(diffusers_impl.PPODiffusersFSDPEngine)
     engine.module = _FSDP2Module()
+    engine.engine_config = SimpleNamespace(use_no_sync_for_gradient_accumulation=True)
     monkeypatch.setattr("verl.workers.engine.fsdp.transformer_impl.fsdp_version", lambda _: 2)
 
     with pytest.raises(RuntimeError, match="backward failed"):
@@ -130,6 +132,7 @@ def test_gradient_sync_context_restores_fsdp2_after_error(monkeypatch):
 def test_gradient_sync_context_keeps_sync_on_last_step(monkeypatch):
     engine = object.__new__(diffusers_impl.PPODiffusersFSDPEngine)
     engine.module = _FSDP2Module()
+    engine.engine_config = SimpleNamespace(use_no_sync_for_gradient_accumulation=True)
     monkeypatch.setattr("verl.workers.engine.fsdp.transformer_impl.fsdp_version", lambda _: 2)
 
     with engine._gradient_sync_context(is_last_micro_batch=True):

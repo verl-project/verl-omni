@@ -196,7 +196,7 @@ pip_install --no-deps -e "${REPO_ROOT}"
 pip_install diffusers==0.41.0 Levenshtein
 
 # 7. Transformers range + TransferQueue, mirroring the Dockerfile tail.
-pip_install 'transformers>=5.16.1,<5.20.0' 'TransferQueue==0.1.9'
+pip_install 'transformers>=5.16.1,<5.20.0' 'TransferQueue==0.1.11'
 pip_install --upgrade onnxruntime
 
 log "synced stack:"
