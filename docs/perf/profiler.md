@@ -1,6 +1,6 @@
 # Profiling FlowGRPO / diffusion training in VeRL-Omni
 
-Last updated: 11/03/2026.
+Last updated: 11/04/2026.
 
 VeRL-Omni reuses the profiler subsystem from upstream
 [verl](https://github.com/verl-project/verl) (`verl.utils.profiler`) and exposes
@@ -278,6 +278,48 @@ analysis but not millisecond-scale cross-process latency comparisons.
 
 This recipe intentionally requires one node. A multi-node variant needs a
 collector on every node and synchronized clocks.
+
+### 4b. NVIDIA Nsight Compute (`ncu`)
+
+Use Nsight Systems first to find a kernel that materially contributes to the
+step. Nsight Compute replays selected kernels to collect hardware counters, so
+its timings do not represent normal training throughput. `ncu` runs as a
+standalone CLI; it has no `global_profiler.tool` backend.
+
+The SD3.5 Medium example profiles the legacy `main_diffusion` actor on rank 0
+of a one-node run. It offers an Nsight Systems mode and an Nsight Compute mode;
+the latter limits collection to the `actor_update` NVTX range and one matching
+kernel launch:
+
+```bash
+# Nsight Systems timeline; reports are written under Ray's nsight log directory.
+PROFILE_TOOL=nsys bash examples/flowgrpo_trainer/sd35/profile_sd35_medium_ocr_lora_nsight.sh
+
+# Nsight Compute counters; replace the placeholder with a compute-kernel regex from Systems.
+PROFILE_TOOL=ncu NCU_KERNEL_REGEX='.*<kernel-name-from-nsys>.*' bash examples/flowgrpo_trainer/sd35/profile_sd35_medium_ocr_lora_nsight.sh
+```
+
+The example needs the SD3.5 OCR train and validation datasets used by the base
+recipe, a single node with three CUDA GPUs, and `nvtx` in the Python environment.
+Install `nsys` on every Ray node for the Systems run and `ncu` on the single
+training host for the Compute run. For `ncu`, the report is written to
+`outputs/profile_sd35_nsight/sd35_medium_actor.ncu-rep` and opens with
+`ncu-ui`.
+
+In `ncu` mode, `global_profiler.tool=torch` schedules the selected training
+step without starting an Nsight Systems session. The actor's per-role profiler
+uses its `nsys` annotations to mark the CUDA profiler window and NVTX range;
+the `ncu` CLI wraps the local Ray process tree and collects the selected
+kernel. The `actor_update` marker is an NVTX start/end range.
+`NCU_KERNEL_REGEX` is required; set it to one compute kernel identified in the
+Systems report. Keep the launch count small. Nsight Compute's replay can slow
+down or stall distributed work. The example is single-node and actor-only.
+Rollout servers are separate processes; see
+[recipe 5](#5-rollout-servers-vllm-omni) to profile their generation path.
+
+For CLI details, see NVIDIA's
+[Nsight Systems user guide](https://docs.nvidia.com/nsight-systems/UserGuide/index.html)
+and [Nsight Compute CLI guide](https://docs.nvidia.com/nsight-compute/NsightComputeCli/index.html).
 
 ### 5. Rollout servers (vLLM-Omni)
 
