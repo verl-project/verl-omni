@@ -1,0 +1,9 @@
+--- a/diffusers/models/transformers/transformer_minimax_h3.py
++++ b/diffusers/models/transformers/transformer_minimax_h3.py
+@@ -635,4 +635,5 @@
+         hidden_states = text_embeds.new_zeros((text_embeds.shape[0], sequence_length, text_embeds.shape[-1]))
+         hidden_states = hidden_states.index_copy(1, text_indices, text_embeds)
+         hidden_states = hidden_states.index_copy(1, video_indices, video_embeds.to(text_embeds.dtype))
+-        hidden_states = hidden_states.index_copy(1, audio_indices, audio_embeds.to(text_embeds.dtype))
++        if hidden_states.device.type != "npu" or audio_indices.numel() > 0:
++            hidden_states = hidden_states.index_copy(1, audio_indices, audio_embeds.to(text_embeds.dtype))
