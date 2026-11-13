@@ -92,7 +92,6 @@ class OmniFSDPEngine(FSDPEngineWithLMHead):
             layered_summon=layered_summon,
             is_diffusers=False,
             offload_fn=_offload_to_cpu,
-            stream_transform=self._qat_stream_transform(),
             full_weight_dtype=full_weight_dtype,
         )
 
@@ -101,22 +100,18 @@ class OmniFSDPEngine(FSDPEngineWithLMHead):
 
         The inherited export (``state_dict`` + ``convert_weight_keys``, identity
         coordinates) matches this engine's full export only for full-weight,
-        non-QAT, bf16 runs:
+        bf16 runs:
 
         - LoRA (either merge mode): the full export ships adapter weights
           (``collect_lora_params``) or merged, name-normalized tensors, never a
           plain ``state_dict``;
-        - QAT: the full export applies ``quantize_with_fusion`` after conversion,
-          which renames and repacks tensors the shard export emits unquantized;
         - non-bf16 ``param_dtype``: the full export honors ``mixed_precision.param_dtype``
           while the inherited shard export casts every floating shard to bfloat16,
           so the seed and steady syncs would diverge in dtype.
 
-        All three would silently break the delta contract (seed and steady exports
+        Both would silently break the delta contract (seed and steady exports
         must share names, coordinates, and dtype), so fail closed.
         """
-        if getattr(self, "_qat_enabled", False):
-            raise NotImplementedError("omni_delta_sharded shard export does not support QAT exports.")
         peft_model = getattr(self.module, "_fsdp_wrapped_module", self.module)
         if hasattr(peft_model, "peft_config"):
             raise NotImplementedError(
@@ -133,29 +128,6 @@ class OmniFSDPEngine(FSDPEngineWithLMHead):
                 "dtypes would diverge. Use param_dtype=bf16 or a non-delta checkpoint backend."
             )
         return super().get_per_tensor_param_shard(**kwargs)
-
-    def _qat_stream_transform(self):
-        """Engine post-processing (QAT quantization) applied to the non-merged export stream."""
-        if not self._qat_enabled:
-            return None
-
-        from verl.utils.qat.quantizer import QATQuantizer
-        from verl.utils.torch_dtypes import PrecisionType
-
-        mixed_precision_config = self.engine_config.mixed_precision
-        if mixed_precision_config is not None:
-            param_dtype = PrecisionType.to_dtype(mixed_precision_config.get("param_dtype", "bf16"))
-        else:
-            param_dtype = torch.bfloat16
-
-        quantizer = QATQuantizer(
-            mode=self._qat_config.mode,
-            group_size=self._qat_config.group_size,
-            ignore_patterns=list(self._qat_config.ignore_patterns),
-            device=torch.device(get_device_id()),
-            param_dtype=param_dtype,
-        )
-        return lambda stream: quantizer.quantize_with_fusion(stream, target_device=torch.device("cpu"))
 
     def _build_module(self):
         unsupported_options = [

@@ -53,25 +53,19 @@ _NPU_WORKER_EXTENSION = "verl_omni.workers.rollout.vllm_rollout.npu_utils.vLLMOm
 def _diffusion_ingress_allowed_fields() -> frozenset[str]:
     """Mirror vllm-omni's diffusion ingress allowlist.
 
-    TODO (vllm-omni): Clean up OmniEngineArgs boundary; tracked in
-    https://github.com/vllm-project/vllm-omni/issues/8503.
+    The ingress validator rejects every field without an owner, and LLM-only
+    OmniEngineArgs fields have none on diffusion stages — this mirror is what
+    strips them. TODO (mike): drop the hand-copy once upstream exposes the
+    diffusion ingress allowlist as a public getter.
     """
     from dataclasses import fields
     from typing import Any, cast
 
     import vllm_omni.config.omni_config as omni_config_mod
+    from vllm.entrypoints.common.cli_args import FrontendArgs
     from vllm_omni.config import VllmOmniOrchestratorConfig
     from vllm_omni.diffusion.data import OmniDiffusionConfig
     from vllm_omni.engine.arg_utils import orchestrator_field_names
-
-    try:
-        from vllm.entrypoints.launchers.cli_args import FrontendArgs
-    except ModuleNotFoundError as error:
-        if error.name not in {"vllm.entrypoints.launchers", "vllm.entrypoints.launchers.cli_args"}:
-            raise
-        # The Ascend NPU smoke image can expose frontend args at the
-        # pre-launchers path even though the GPU v0.30 wheel uses launchers.
-        from vllm.entrypoints.openai.cli_args import FrontendArgs
 
     frontend_fields = {f.name for f in fields(FrontendArgs)}
 
@@ -379,8 +373,8 @@ class DiffusionStrategy(OmniStrategyBase):
         engine_args["enable_prompt_embed_cache"] = self.server.config.enable_prompt_embed_cache
         engine_args["prompt_embed_cache_size"] = self.server.config.prompt_embed_cache_size
 
-        # Strip LLM-only fields from OmniEngineArgs before passing to diffusion ingress.
-        # Tracked upstream in https://github.com/vllm-project/vllm-omni/issues/8503.
+        # Strip LLM-only fields before diffusion ingress: the validator rejects
+        # every field without an owner, and LLM-only fields have none there.
         allowed = _diffusion_ingress_allowed_fields()
         dropped = sorted(key for key in engine_args if key not in allowed)
         for key in dropped:

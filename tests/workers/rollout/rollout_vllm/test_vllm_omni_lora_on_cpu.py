@@ -15,25 +15,7 @@
 
 from types import SimpleNamespace
 
-import torch
-
 from verl_omni.workers.rollout.vllm_rollout.utils import vLLMOmniColocateWorkerExtension
-
-
-def test_diffusion_lora_stacks_follow_the_worker_device():
-    layer = SimpleNamespace(
-        lora_a_stacked=(torch.ones(1),),
-        lora_b_stacked=(torch.ones(1),),
-    )
-    worker = SimpleNamespace(
-        device=torch.device("meta"),
-        lora_manager=SimpleNamespace(_lora_modules={"transformer.block": layer}),
-    )
-
-    vLLMOmniColocateWorkerExtension._move_diffusion_lora_stacks_to_device(worker)
-
-    assert layer.lora_a_stacked[0].device.type == "meta"
-    assert layer.lora_b_stacked[0].device.type == "meta"
 
 
 class _FakeMoeEngine:

@@ -18,8 +18,9 @@ from pprint import pprint
 
 import hydra
 import ray
+import torch
 from omegaconf import DictConfig, OmegaConf
-from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
+from verl.trainer.constants_ppo import available_physical_cores, get_ppo_ray_runtime_env
 from verl.utils.device import auto_set_device, is_cuda_available
 from verl.utils.import_utils import load_class_from_fqn
 
@@ -112,6 +113,13 @@ class DiffusionTaskRunnerV1:
         self.config = None
         self.trainer = None
         self.agent_loop_manager = None
+
+        # Mirror verl's TaskRunnerV1: the job-wide OMP default is gone from the
+        # runtime env (#8592 scopes it to the offload-carrying training workers),
+        # so the runner sets its own thread count for the dataloader-driving process.
+        value = str(available_physical_cores())
+        os.environ["OMP_NUM_THREADS"] = value
+        torch.set_num_threads(int(value))
 
     def init_agent_loop_manager(self):
         from verl_omni.agent_loop import create_diffusion_agent_loop_manager

@@ -2,7 +2,7 @@
 (request_level_batching)=
 # Diffusion Rollout Batching
 
-Last updated: 07/29/2026.
+Last updated: 11/10/2026.
 
 vLLM-Omni can batch diffusion rollouts in two different ways. They look similar
 in config (`max_num_seqs`) but they are **different engines** and are
@@ -39,7 +39,8 @@ Do not enable both modes at once.
 
 | Recipe | Default mode |
 |---|---|
-| Qwen-Image FlowGRPO baselines (`run_qwen_image_ocr.sh`, `run_qwen_image_ocr_lora.sh`) | Step-wise (`step_execution=true`, `max_num_seqs=256`) |
+| Qwen-Image FlowGRPO full-parameter (`run_qwen_image_ocr.sh`) | Step-wise (`step_execution=true`, `max_num_seqs=32`) |
+| Qwen-Image FlowGRPO LoRA (`run_qwen_image_ocr_lora.sh` and the v1 default `run_qwen_image_ocr_lora_v1.sh`) | Request-level packing (`max_num_seqs=8`, `wait_ms=10`; mutually exclusive with step-wise) |
 | SD3.5 FlowGRPO (`run_sd35_medium_ocr_lora.sh`) | Request-level (`step_execution=false`, `max_num_seqs=256`, `wait_ms=10`) |
 
 Other `run_qwen_image_ocr*.sh` launchers do not all set these overrides.

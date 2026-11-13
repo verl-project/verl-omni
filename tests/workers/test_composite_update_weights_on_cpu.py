@@ -76,6 +76,7 @@ def _make_composite_engine(
 def _make_actor_rollout_worker(
     composite_engine: CompositeFSDPEngine,
     *,
+    enable_lora: bool = False,
     peft_merge: bool = False,
     base_sync_done: bool = False,
     free_cache_engine: bool = False,
@@ -83,7 +84,6 @@ def _make_actor_rollout_worker(
 ) -> ActorRolloutRefWorker:
     worker = ActorRolloutRefWorker.__new__(ActorRolloutRefWorker)
     worker.role = "actor_rollout"
-    worker.peft_merge = peft_merge
     worker.layered_summon = False
     worker._zmq_update_seq = 0
     # base_sync_done is derived from load_format in _init_weight_sync_knobs (dummy => False).
@@ -91,6 +91,10 @@ def _make_actor_rollout_worker(
         load_format = "dummy"
     worker.config = OmegaConf.create(
         {
+            # The sync plan resolver reads these the same way the real model
+            # config node does: flat lora_rank gates LoRA, nested lora.merge
+            # selects merged-full exports.
+            "lora_rank": 8 if enable_lora else 0,
             "rollout": {
                 "free_cache_engine": free_cache_engine,
                 "load_format": load_format,
@@ -242,7 +246,7 @@ class TestCompositeUpdateWeightsNaive:
             )
 
         engine.get_per_tensor_param = MagicMock(side_effect=fake_get_per_tensor)
-        worker = _make_actor_rollout_worker(engine, base_sync_done=False)
+        worker = _make_actor_rollout_worker(engine, enable_lora=True, base_sync_done=False)
 
         with (
             patch.object(engine_workers_module, "set_expandable_segments"),
@@ -275,7 +279,7 @@ class TestCompositeUpdateWeightsNaive:
                 peft_meta,
             )
         )
-        worker = _make_actor_rollout_worker(engine, base_sync_done=True, load_format="safetensors")
+        worker = _make_actor_rollout_worker(engine, enable_lora=True, base_sync_done=True, load_format="safetensors")
 
         sent: dict[str, torch.Tensor] = {}
 

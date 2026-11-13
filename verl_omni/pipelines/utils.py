@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 from functools import lru_cache
 from typing import Optional
 
@@ -39,8 +40,20 @@ __all__ = [
     "prepare_noisy_latents",
     "sample_noise_and_timesteps",
     "scheduler_num_train_timesteps",
+    "seeded_or_entropy_generator",
     "set_timesteps",
 ]
+
+
+def seeded_or_entropy_generator(seed: int | None, device: torch.device | str) -> torch.Generator:
+    """Build a rollout noise generator: from ``seed`` when given, else OS entropy.
+
+    Device-default RNG state is identical across worker processes (torch_npu
+    seeds it deterministically), so unseeded requests on different workers
+    would otherwise draw the same initial noise.
+    """
+    entropy = secrets.randbits(63) if seed is None else int(seed)
+    return torch.Generator(device=device).manual_seed(entropy)
 
 
 def prepare_model_inputs(

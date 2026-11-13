@@ -1,6 +1,6 @@
 # Common Pitfalls
 
-Last updated: 08/22/2026.
+Last updated: 11/10/2026.
 
 ---
 
@@ -99,7 +99,11 @@ txt_seq_lens = [int(mask.sum()) for mask in prompt_embeds_mask]
 txt_seq_lens = [int(prompt_embeds.shape[1])] * int(prompt_embeds.shape[0])
 ```
 
-The stepwise adapters in `verl_omni/experimental/` already do this.
+The Qwen-Image FlowGRPO stepwise adapter already does this via
+`txt_seq_lens_from_embeds` (padded width — see
+[integrating_a_stepwise_continuous_batching_model.md](integrating_a_stepwise_continuous_batching_model.md));
+the Qwen-Image DPO and DiffusionNFT stepwise adapters still derive
+`txt_seq_lens` from `prompt_embeds_mask.sum()`.
 The stock vllm-omni path is still affected and tracked as an upstream
 issue.
 
