@@ -337,15 +337,20 @@ class ARStrategy(OmniStrategyBase):
     def prepare_engine_args(self, engine_args: dict[str, Any], args: Namespace) -> None:
         """Apply mode-specific engine arguments before the engine is created.
 
-        Expert parallelism and vLLM LoRA are owned by the generated per-stage
-        deploy config, so their global engine args are dropped here: applied
-        globally, expert parallelism would reach non-MoE stages that cannot
-        shard experts, and LoRA flags would be rejected outright on multi-stage
-        pipelines. The deploy config emits LoRA on the policy stage instead.
+        Expert parallelism is owned by the generated per-stage deploy config,
+        so the global ``enable_expert_parallel`` engine arg is dropped here:
+        applied globally it would reach every stage that owns the field,
+        including non-MoE stages that cannot shard experts.
+
+        vLLM LoRA flags are dropped only when the generated deploy config
+        re-routed them to the policy stage (``lora_stage_ids`` set): without a
+        generated config — an externally configured pipeline — the globals are
+        the only carrier, and upstream accepts them on single-stage pipelines.
         """
         engine_args.pop("enable_expert_parallel", None)
-        for lora_key in _GLOBAL_LORA_ENGINE_KEYS:
-            engine_args.pop(lora_key, None)
+        if self.lora_stage_ids is not None:
+            for lora_key in _GLOBAL_LORA_ENGINE_KEYS:
+                engine_args.pop(lora_key, None)
         if self._rollout_output_modalities is not None:
             # The generated per-stage deploy config owns model_stage for
             # multi-output pipelines.

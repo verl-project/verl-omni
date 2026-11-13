@@ -62,12 +62,26 @@ def test_lora_flags_reach_real_engine_args(source):
 
 
 def test_prepare_engine_args_drops_global_lora_flags():
+    strategy = ARStrategy(SimpleNamespace(config=SimpleNamespace()))
+    strategy.lora_stage_ids = [0]
     engine_args = {"enable_lora": True, "max_loras": 1, "max_lora_rank": 128, "fully_sharded_loras": True}
-    ARStrategy(SimpleNamespace(config=SimpleNamespace())).prepare_engine_args(engine_args, Namespace())
+    strategy.prepare_engine_args(engine_args, Namespace())
     assert engine_args.get("enable_lora") is None
     assert engine_args.get("max_loras") is None
     assert engine_args.get("max_lora_rank") is None
     assert engine_args.get("fully_sharded_loras") is None
+
+
+def test_prepare_engine_args_keeps_global_lora_flags_without_a_generated_config():
+    # An externally configured pipeline has no generated deploy config to
+    # re-route the flags; upstream accepts the globals there.
+    strategy = ARStrategy(SimpleNamespace(config=SimpleNamespace()))
+    engine_args = {"enable_lora": True, "max_loras": 1, "max_lora_rank": 128, "fully_sharded_loras": True}
+    strategy.prepare_engine_args(engine_args, Namespace())
+    assert engine_args["enable_lora"] is True
+    assert engine_args["max_loras"] == 1
+    assert engine_args["max_lora_rank"] == 128
+    assert engine_args["fully_sharded_loras"] is True
 
 
 def test_global_lora_flags_rejected_on_multi_stage_pipelines():
