@@ -62,6 +62,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       groups: ${{ steps.resolve-groups.outputs.groups }}
+      jobs: ${{ steps.resolve-groups.outputs.jobs }}
     steps:
       - name: Resolve NPU CI groups
         id: resolve-groups
@@ -88,6 +89,8 @@ jobs:
 
           with open(os.environ["GITHUB_OUTPUT"], "a") as output:
               output.write(f"groups={json.dumps(groups)}\n")
+              jobs = ["shard-0", "shard-1"] if len(groups) == 2 else groups
+              output.write(f"jobs={json.dumps(jobs)}\n")
           PY
 
   npu_smoke:
@@ -97,7 +100,7 @@ jobs:
       fail-fast: false
       max-parallel: 2
       matrix:
-        group: ${{ fromJSON(needs.resolve_groups.outputs.groups) }}
+        group: ${{ fromJSON(needs.resolve_groups.outputs.jobs) }}
     runs-on: linux-aarch64-a2b4-8
     timeout-minutes: 120
     container:
@@ -134,6 +137,12 @@ jobs:
         shell: bash
         run: |
           bash tests/npu_smoke/sync_npu_stack.sh
+      - name: Prepare NPU image-edit dependency
+        if: matrix.group != 'core'
+        shell: bash
+        run: |
+          python -m pip install --no-deps qwen-vl-utils==0.0.14
+          python -c "import qwen_vl_utils"
       - name: Prepare tiny Qwen-Image checkpoint
         shell: bash
         run: |
@@ -143,11 +152,21 @@ jobs:
       - name: Run NPU smoke ${{ matrix.group }} tests
         shell: bash
         env:
-          NPU_SMOKE_GROUP: ${{ matrix.group }}
+          NPU_SMOKE_JOB: ${{ matrix.group }}
         run: |
           mkdir -p logs/npu_smoke/parallel
-          bash "tests/npu_smoke/run_npu_smoke_${NPU_SMOKE_GROUP}.sh" --num-npus 8 \
-            2>&1 | tee "logs/npu_smoke/parallel/${NPU_SMOKE_GROUP}.log"
+          case "${NPU_SMOKE_JOB}" in
+            core|e2e)
+              bash "tests/npu_smoke/run_npu_smoke_${NPU_SMOKE_JOB}.sh" --num-npus 8 \
+                2>&1 | tee "logs/npu_smoke/parallel/${NPU_SMOKE_JOB}.log"
+              ;;
+            shard-0|shard-1)
+              NPU_SMOKE_PARALLEL=1 NPU_SMOKE_SHARD_INDEX="${NPU_SMOKE_JOB#shard-}" \
+                bash tests/npu_smoke/run_npu_smoke_tests.sh --num-npus 8 \
+                2>&1 | tee "logs/npu_smoke/parallel/${NPU_SMOKE_JOB}.log"
+              ;;
+            *) echo "Unknown NPU smoke job: ${NPU_SMOKE_JOB}" >&2; exit 2 ;;
+          esac
       - name: Upload NPU smoke logs
         if: always()
         uses: actions/upload-artifact@v4

@@ -45,6 +45,22 @@ PYTORCH_CPU_INDEX_URL="${PYTORCH_CPU_INDEX_URL:-https://download.pytorch.org/whl
 
 log() { echo "[sync_npu_stack] $*"; }
 
+configure_native_build_parallelism() {
+    local jobs="${CMAKE_BUILD_PARALLEL_LEVEL:-}"
+    if [[ -z "${jobs}" ]]; then
+        # The image's OMP_NUM_THREADS=1 is for model execution, not compilation.
+        jobs=$(env -u OMP_NUM_THREADS -u OMP_THREAD_LIMIT nproc)
+        [[ "${jobs}" =~ ^[1-9][0-9]*$ ]] || return 1
+        if (( jobs > 8 )); then jobs=8; fi
+    fi
+    [[ "${jobs}" =~ ^[1-9][0-9]*$ ]] || {
+        echo "CMAKE_BUILD_PARALLEL_LEVEL must be a positive integer." >&2
+        return 1
+    }
+    # Nested CMake builds (including Protobuf) also inherit this limit.
+    export CMAKE_BUILD_PARALLEL_LEVEL="${jobs}"
+}
+
 VLLM_OMNI_PIN="$(tr -d '[:space:]' < "${REPO_ROOT}/.github/vllm_omni_pin.txt")"
 VLLM_ASCEND_PIN="$(tr -d '[:space:]' < "${REPO_ROOT}/.github/vllm_ascend_pin.txt")"
 VERL_PIN="$(tr -d '[:space:]' < "${REPO_ROOT}/.github/verl_pin.txt")"
@@ -114,6 +130,8 @@ log "installing vllm-ascend ${VLLM_ASCEND_PIN} (pure-python)"
     # Upper-bound both: cmake 4 drops pre-3.5 compatibility and pybind11 3 is
     # untested against CANN's ascendc cmake files.
     pip_install 'cmake<4' 'pybind11<3'
+    configure_native_build_parallelism
+    log "native build parallelism: ${CMAKE_BUILD_PARALLEL_LEVEL}"
     VA_BUILD_DIR="build/vllm_ascend_C"
     TORCH_NPU_PATH="$(python3 -m pip show torch-npu | awk '/^Location:/ {print $2}')/torch_npu"
     # Mirrors vllm-ascend setup.py cmake_build_ext.configure(); SOC_VERSION
@@ -128,7 +146,7 @@ log "installing vllm-ascend ${VLLM_ASCEND_PIN} (pure-python)"
         -DSOC_VERSION=ascend910b1 \
         -DTORCH_NPU_PATH="${TORCH_NPU_PATH}" \
         -DFETCHCONTENT_BASE_DIR="${PWD}/.deps"
-    cmake --build "${VA_BUILD_DIR}" --target vllm_ascend_C -j "$(nproc)"
+    cmake --build "${VA_BUILD_DIR}" --target vllm_ascend_C -j "${CMAKE_BUILD_PARALLEL_LEVEL}"
     cmake --install "${VA_BUILD_DIR}"
     python3 -c "import vllm_ascend.vllm_ascend_C as c; assert c.python_create_and_map"
 
@@ -139,7 +157,7 @@ log "installing vllm-ascend ${VLLM_ASCEND_PIN} (pure-python)"
     export CPATH="${CATLASS_INCLUDE}${CPATH:+:${CPATH}}"
     (
         cd csrc
-        bash build.sh --pkg --ops=add_rms_norm_bias --soc=ascend910b -j"$(nproc)"
+        bash build.sh --pkg --ops=add_rms_norm_bias --soc=ascend910b -j"${CMAKE_BUILD_PARALLEL_LEVEL}"
         find ../vllm_ascend/_cann_ops_custom -mindepth 1 -maxdepth 1 ! -name '.gitkeep' -exec rm -rf -- {} +
         bash build/cann-ops-transformer*.run --install-path="${OLDPWD}/vllm_ascend/_cann_ops_custom"
     )

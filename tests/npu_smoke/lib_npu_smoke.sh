@@ -82,6 +82,11 @@ build_npu_device_list() {
 }
 export ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES:-$(build_npu_device_list "${NUM_NPUS}")}"
 
+case "${NPU_SMOKE_SHARD_INDEX:-}" in
+    ''|0|1) ;;
+    *) fail "NPU_SMOKE_SHARD_INDEX must be unset, 0 or 1."; exit 2 ;;
+esac
+
 declare -a TEST_IDS=()
 declare -a TEST_NAMES=()
 declare -a TEST_RESULTS=()
@@ -108,6 +113,11 @@ run_test() {
     local name="$2"
     shift 2
     local logfile="${LOG_DIR}/test_${id}.log"
+
+    if [[ -n "${NPU_SMOKE_SHARD_INDEX:-}" ]] && (( id % 2 != NPU_SMOKE_SHARD_INDEX )); then
+        log "[${id}] Assigned to the other NPU smoke shard."
+        return 0
+    fi
 
     cleanup_runtime
     sep
@@ -165,6 +175,7 @@ print_summary() {
     echo "Passed: ${passed}" | tee -a "${SUMMARY_LOG}"
     echo "Failed: ${failed}" | tee -a "${SUMMARY_LOG}"
     echo "Logs  : ${LOG_DIR}" | tee -a "${SUMMARY_LOG}"
+    [[ "${passed}" -gt 0 ]] || { fail "No tests executed."; return 1; }
     [[ "${failed}" -eq 0 ]]
 }
 
@@ -177,6 +188,7 @@ print_header() {
     echo "  Repo root : ${REPO_ROOT}"
     echo "  Log dir   : ${LOG_DIR}"
     echo "  NUM_NPUS  : ${NUM_NPUS}"
+    echo "  Shard     : ${NPU_SMOKE_SHARD_INDEX:-all} (even IDs: 0; odd IDs: 1)"
     echo "  ASCEND_RT_VISIBLE_DEVICES : ${ASCEND_RT_VISIBLE_DEVICES}"
     sep
 }

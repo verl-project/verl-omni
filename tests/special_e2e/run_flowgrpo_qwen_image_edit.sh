@@ -64,12 +64,12 @@ python3 tests/special_e2e/create_dummy_image_edit_data.py \
 
 # FlowGRPO with jpeg_compressibility rule reward and no reward model.
 python3 -m verl_omni.trainer.main_diffusion_v1 \
-    data.train_files=${dummy_train_path} \
-    data.val_files=${dummy_test_path} \
+    data.train_files="${dummy_train_path}" \
+    data.val_files="${dummy_test_path}" \
     data.train_batch_size=${train_batch_size} \
     data.max_prompt_length=${max_prompt_length} \
     actor_rollout_ref.model.algorithm=flow_grpo \
-    actor_rollout_ref.model.path=${MODEL_PATH} \
+    actor_rollout_ref.model.path="${MODEL_PATH}" \
     actor_rollout_ref.model.lora_rank=8 \
     actor_rollout_ref.model.lora_alpha=16 \
     actor_rollout_ref.model.target_modules="['to_q','to_k','to_v','to_out.0','add_q_proj','add_k_proj','add_v_proj','to_add_out']" \
