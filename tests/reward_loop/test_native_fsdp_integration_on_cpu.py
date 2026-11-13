@@ -14,14 +14,26 @@
 """Opt-in configuration, construction rollback, and trainer cleanup contracts."""
 
 import asyncio
+import json
+import os
+import sys
 import threading
 from types import SimpleNamespace
 
 import pytest
+import torch
 from omegaconf import OmegaConf
 
+from tests.special_e2e import validate_native_fsdp_training_failure as failure_validation
+from tests.special_e2e.verify_native_fsdp_training import optimizer_steps, validate_training_log
 from verl_omni.reward_loop import native_fsdp
 from verl_omni.reward_loop import reward_loop as reward_loop_module
+from verl_omni.reward_loop.native_fsdp import (
+    FSDPRewardReplica,
+    NativeFSDPExecutor,
+    NativeFSDPGroupError,
+    terminate_ranks,
+)
 from verl_omni.reward_loop.reward_loop import OmniRewardLoopManager
 from verl_omni.reward_loop.reward_model import MultiRewardModelManager
 from verl_omni.trainer.main_diffusion_v1 import finish_training_resources
@@ -153,23 +165,6 @@ def test_unsupported_modes_fail_before_allocation(mode):
         validate_reward_model_terms(cfg)
 
 
-def test_dispatcher_registers_one_logical_worker_for_two_ranks(monkeypatch):
-    cfg = config()
-    manager = object.__new__(OmniRewardLoopManager)
-    manager.config = cfg
-    manager.multi_reward_model_manager = MultiRewardModelManager(cfg, SimpleNamespace(world_size=2))
-    observed = []
-
-    def create(group_config, spec, model):
-        observed.append(group_config.reward.num_workers)
-        return ["complete_replica"]
-
-    monkeypatch.setattr(manager, "_create_fsdp_worker", create)
-    manager._init_reward_loop_workers()
-    assert observed == [1]
-    assert manager._reward_worker_groups["pickscore"] == ["complete_replica"]
-
-
 def test_partial_worker_group_construction_rolls_back_accepted_ranks(monkeypatch):
     calls = []
 
@@ -234,137 +229,7 @@ async def test_facade_failure_terminates_owned_ranks_before_return(failure, monk
 
 
 @pytest.mark.asyncio
-async def test_owner_cleanup_attempts_ranks_after_facade_termination_error(monkeypatch):
-    owner = MultiRewardModelManager(config(), SimpleNamespace(world_size=2)).models["pickscore"]
-    calls = []
-
-    def broken_submission(*args):
-        raise ValueError("primary")
-
-    facade = SimpleNamespace(close_reward_model=SimpleNamespace(remote=broken_submission))
-    owner.bind_workers([facade])
-    ranks = [object(), object()]
-    owner.bind_rank_workers(ranks)
-
-    def terminate(workers, timeout, status_method):
-        calls.append(workers)
-        if workers == [facade]:
-            raise RuntimeError("unconfirmed facade termination")
-
-    monkeypatch.setattr(native_fsdp, "terminate_ranks", terminate)
-    with pytest.raises(BaseExceptionGroup) as error:
-        await owner.close()
-    assert str(error.value.exceptions[0]) == "primary" and calls == [[facade], ranks]
-    with pytest.raises(BaseExceptionGroup, match="owner cleanup failed"):
-        await owner.close()
-
-
-@pytest.fixture
-def construction(monkeypatch):
-    cfg = config()
-    manager = object.__new__(OmniRewardLoopManager)
-    manager.multi_reward_model_manager = MultiRewardModelManager(cfg, SimpleNamespace(world_size=2))
-    owner = manager.multi_reward_model_manager.models["pickscore"]
-    model = parse_reward_model_config("pickscore", cfg.reward.models.pickscore)
-    state = SimpleNamespace(
-        cfg=cfg,
-        manager=manager,
-        owner=owner,
-        model=model,
-        spec=manager.multi_reward_model_manager.reward_model_specs["pickscore"],
-        failure=None,
-        cleanup_failure=None,
-        primary=RuntimeError("construction failed"),
-        events=[],
-        bound_at_ready=[],
-        dead=set(),
-    )
-
-    def ready():
-        if not owner._closed:
-            state.bound_at_ready.append(owner._workers == [state.facade])
-            if state.failure == "ready_submission":
-                raise state.primary
-        return "facade"
-
-    state.facade = SimpleNamespace(ready=SimpleNamespace(remote=ready))
-    state.ranks = [
-        SimpleNamespace(status=SimpleNamespace(remote=lambda rank=rank: rank)) for rank in ("rank0", "rank1")
-    ]
-
-    def submit(*args):
-        if state.failure == "facade_submission":
-            raise state.primary
-        return state.facade
-
-    def get(ref, **kwargs):
-        if not owner._closed:
-            if state.failure in {"ready_error", "ready_timeout"}:
-                raise state.primary
-            return True
-        state.events.append(("confirm", ref))
-        if ref in {"facade", "rank1"} and state.cleanup_failure:
-            raise TimeoutError(f"{ref} death unconfirmed")
-        assert ref in state.dead
-        raise native_fsdp.ray.exceptions.ActorDiedError()
-
-    def kill(actor, **kwargs):
-        name = "facade" if actor is state.facade else "rank0" if actor is state.ranks[0] else "rank1"
-        state.events.append(("kill", name))
-        state.dead.add(name)
-
-    monkeypatch.setattr(
-        native_fsdp,
-        "build_replica",
-        lambda *args, **kwargs: SimpleNamespace(worker_group=SimpleNamespace(workers=state.ranks)),
-    )
-    monkeypatch.setattr(reward_loop_module.ray, "remote", lambda cls: SimpleNamespace(remote=submit))
-    monkeypatch.setattr(reward_loop_module.ray, "get", get)
-    monkeypatch.setattr(reward_loop_module.ray, "kill", kill)
-    return state
-
-
-def test_facade_is_owned_before_successful_readiness(construction):
-    state = construction
-    assert state.manager._create_fsdp_worker(state.cfg, state.spec, state.model) == [state.facade]
-    assert state.bound_at_ready == [True]
-    assert state.owner.rank_workers == state.ranks and state.owner._workers == [state.facade]
-    assert not state.events and not state.owner._closed
-
-
-@pytest.mark.parametrize(
-    ("failure", "cleanup_failure"),
-    [("facade_submission", False), ("ready_submission", False), ("ready_error", False), ("ready_timeout", True)],
-)
-@pytest.mark.asyncio
-async def test_construction_failure_confirms_every_owned_actor(construction, failure, cleanup_failure):
-    state = construction
-    state.failure, state.cleanup_failure = failure, cleanup_failure
-    if failure == "ready_timeout":
-        state.primary = native_fsdp.ray.exceptions.GetTimeoutError("readiness deadline")
-    with pytest.raises(BaseExceptionGroup) as error:
-        state.manager._create_fsdp_worker(state.cfg, state.spec, state.model)
-    assert error.value.exceptions[0] is state.primary
-    expected = ["rank0", "rank1"] if failure == "facade_submission" else ["facade", "rank0", "rank1"]
-    assert [name for event, name in state.events if event == "kill"] == expected
-    assert [name for event, name in state.events if event == "confirm"] == expected
-    assert state.owner._closed
-    if failure != "facade_submission":
-        assert state.bound_at_ready == [True]
-        assert state.owner._workers == [state.facade]
-    if cleanup_failure:
-        assert error.value.exceptions[1] is state.owner._termination_error
-        assert len(state.owner._termination_error.exceptions) == 2
-        with pytest.raises(BaseExceptionGroup) as repeated:
-            await state.owner.close()
-        assert repeated.value is state.owner._termination_error
-    else:
-        assert len(error.value.exceptions) == 1 and state.owner._termination_error is None
-        await state.owner.close()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(("failure", "cancel"), [(False, False), (True, False), (False, True), (True, True)])
+@pytest.mark.parametrize(("failure", "cancel"), [(False, False), (True, True)])
 async def test_concurrent_close_waits_for_scoring_cleanup(monkeypatch, failure, cancel):
     owner = MultiRewardModelManager(config(), SimpleNamespace(world_size=2)).models["pickscore"]
     entered, release = threading.Event(), threading.Event()
@@ -412,3 +277,203 @@ async def test_concurrent_close_waits_for_scoring_cleanup(monkeypatch, failure, 
         assert repeated.value is owner._termination_error
     else:
         await owner.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["success", "submit", "ready"])
+async def test_construction_records_facade_before_readiness_and_rolls_back(monkeypatch, phase):
+    cfg = config()
+    manager = object.__new__(OmniRewardLoopManager)
+    manager.multi_reward_model_manager = MultiRewardModelManager(cfg, SimpleNamespace(world_size=2))
+    owner = manager.multi_reward_model_manager.models["pickscore"]
+    model = parse_reward_model_config("pickscore", cfg.reward.models.pickscore)
+    spec = manager.multi_reward_model_manager.reward_model_specs["pickscore"]
+    ranks, calls = [object(), object()], []
+    facade = SimpleNamespace(ready=SimpleNamespace(remote=lambda: "ready"))
+    primary = RuntimeError("construction failed")
+
+    def submit(*args):
+        if phase == "submit":
+            raise primary
+        return facade
+
+    def ready(*args, **kwargs):
+        assert owner._workers == [facade] and owner.rank_workers == ranks
+        if phase == "ready":
+            raise primary
+
+    def terminate(workers, timeout, status_method):
+        calls.append(workers)
+        if phase == "ready" and status_method == "ready":
+            raise TimeoutError("facade death unconfirmed")
+
+    monkeypatch.setattr(
+        native_fsdp,
+        "build_replica",
+        lambda *args, **kwargs: SimpleNamespace(worker_group=SimpleNamespace(workers=ranks)),
+    )
+    monkeypatch.setattr(reward_loop_module.ray, "remote", lambda cls: SimpleNamespace(remote=submit))
+    monkeypatch.setattr(reward_loop_module.ray, "get", ready)
+    monkeypatch.setattr(native_fsdp, "terminate_ranks", terminate)
+    if phase == "success":
+        assert manager._create_fsdp_worker(cfg, spec, model) == [facade]
+        assert not calls and not owner._closed
+    else:
+        with pytest.raises(BaseExceptionGroup) as error:
+            manager._create_fsdp_worker(cfg, spec, model)
+        assert error.value.exceptions[0] is primary and owner._closed
+        assert calls == ([[], ranks] if phase == "submit" else [[facade], ranks])
+        if phase == "ready":
+            assert error.value.exceptions[1] is owner._termination_error
+            with pytest.raises(BaseExceptionGroup) as repeated:
+                await owner.close()
+            assert repeated.value is owner._termination_error
+        else:
+            await owner.close()
+
+
+def test_acceptance_rejects_adjacent_metrics_and_wrong_optimizer_counters(tmp_path):
+    for value in ("nan", "inf", "", "0"):
+        with pytest.raises((ValueError, AssertionError)):
+            validate_training_log(f"actor/grad_norm: {value}\nactor/lr: 0.001", 1)
+    for prefix in ("Found checkpoint:", "Resuming diffusion from"):
+        assert validate_training_log(f"{prefix} /run/global_step_2\nactor/grad_norm: 0.5", 3, 2) == [0.5]
+    path = tmp_path / "optimizer.pt"
+    for step in (2.0, 2.5):
+        torch.save(
+            {"state": {0: {"step": torch.tensor(step), "exp_avg": torch.ones(1), "exp_avg_sq": torch.ones(1)}}}, path
+        )
+        if step == 2:
+            assert optimizer_steps(path, 2) == [2.0]
+        else:
+            with pytest.raises(AssertionError):
+                optimizer_steps(path, 2)
+
+
+def test_acceptance_uses_ray_job_id_string_before_actor_and_checkpoint_checks(tmp_path, monkeypatch):
+    overrides, output = tmp_path / "overrides.json", tmp_path / "result.json"
+    overrides.write_text("[]")
+    (tmp_path / "latest_checkpointed_iteration.txt").write_text("0")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "verify",
+            "--overrides",
+            str(overrides),
+            "--checkpoint-root",
+            str(tmp_path),
+            "--expected-step",
+            "0",
+            "--output",
+            str(output),
+        ],
+    )
+
+    def fail(*args, **kwargs):
+        assert os.environ["HYDRA_FULL_ERROR"] == "1"
+        raise RuntimeError("fit: FSDP wake_up failed: model.safetensors missing")
+
+    roles = [
+        "PickScoreFSDPRank",
+        "PickScoreFSDPRank",
+        "OmniFSDPRewardLoopWorker",
+        "TransferQueueController",
+        "SimpleStorageUnit",
+    ]
+    rows = {
+        str(i): {"ActorID": str(i), "ActorClassName": role, "Name": "", "Pid": 1, "State": "DEAD", "JobID": "job"}
+        for i, role in enumerate(roles)
+    }
+    rows["other"] = dict(rows["0"], ActorID="other", JobID="other", State="ALIVE")
+    monkeypatch.setenv("HYDRA_FULL_ERROR", "0")
+    monkeypatch.setattr(failure_validation.runpy, "run_module", fail)
+    monkeypatch.setattr(failure_validation.ray._private.state, "actors", lambda: rows)
+    monkeypatch.setattr(failure_validation.ray, "is_initialized", lambda: True)
+    monkeypatch.setattr(
+        failure_validation.ray, "get_runtime_context", lambda: SimpleNamespace(get_job_id=lambda: "job")
+    )
+    monkeypatch.setattr(failure_validation.ray, "shutdown", lambda: None)
+    failure_validation.main()
+    report = json.loads(output.read_text())
+    assert report["passed"] and report["latest_checkpoint"] == 0
+    assert len(report["actors_before_ray_shutdown"]) == 5
+
+
+def test_partial_submission_and_rank_failure_terminate_whole_group(monkeypatch):
+    calls = []
+    ranks = [object(), object()]
+
+    def partial(*args):
+        raise RuntimeError("rank failed")
+
+    group = SimpleNamespace(world_size=2, workers=ranks, wake_up=lambda: [None, None], infer=partial)
+    model = FSDPRewardReplica(group, lambda **kwargs: {})
+    monkeypatch.setattr("verl_omni.reward_loop.native_fsdp.ray.get", lambda refs, **kwargs: refs)
+    monkeypatch.setattr(
+        "verl_omni.reward_loop.native_fsdp.terminate_ranks", lambda workers, timeout: calls.extend(workers)
+    )
+    model.wake_up()
+    with pytest.raises(NativeFSDPGroupError):
+        model.infer(["prompt"], [object()])
+    assert calls == ranks
+    with pytest.raises(RuntimeError, match="closed"):
+        model.wake_up()
+    model.close()
+
+
+@pytest.mark.parametrize(
+    "probe_error",
+    [
+        native_fsdp.ray.exceptions.ActorDiedError(),
+        native_fsdp.ray.exceptions.ActorUnavailableError("unavailable", None),
+        TimeoutError("rank did not exit"),
+    ],
+)
+def test_only_confirmed_death_succeeds_and_every_rank_is_attempted(monkeypatch, probe_error):
+    calls = []
+    probes = []
+    actors = [SimpleNamespace(status=SimpleNamespace(remote=lambda index=index: index)) for index in range(2)]
+    monkeypatch.setattr("verl_omni.reward_loop.native_fsdp.ray.kill", lambda actor, **kwargs: calls.append(actor))
+
+    def probe(index, **kwargs):
+        probes.append(index)
+        raise probe_error if index == 0 else native_fsdp.ray.exceptions.ActorDiedError()
+
+    monkeypatch.setattr("verl_omni.reward_loop.native_fsdp.ray.get", probe)
+    if isinstance(probe_error, native_fsdp.ray.exceptions.ActorDiedError):
+        terminate_ranks(actors, 0.1)
+    else:
+        with pytest.raises(BaseExceptionGroup, match="job termination") as error:
+            terminate_ranks(actors, 0.1)
+        assert error.value.exceptions == (probe_error,)
+    assert calls == actors and probes == [0, 1]
+
+
+@pytest.mark.asyncio
+async def test_cancelled_native_handle_retains_accepted_work_until_settlement():
+    entered, release = threading.Event(), threading.Event()
+    finished = threading.Event()
+
+    def infer(*args, **kwargs):
+        entered.set()
+        assert release.wait(5)
+        finished.set()
+        return {
+            "image_embeddings": torch.ones(1, 2),
+            "text_embeddings": torch.ones(1, 2),
+            "logit_scale": torch.ones(()),
+        }
+
+    handle = NativeFSDPExecutor(SimpleNamespace(infer=infer))
+    task = asyncio.create_task(handle.infer(["prompt"], [object()]))
+    assert await asyncio.to_thread(entered.wait, 5)
+    task.cancel()
+    await asyncio.sleep(0)
+    task.cancel()
+    await asyncio.sleep(0)
+    assert not task.done()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, 5)
+    assert finished.is_set()

@@ -52,7 +52,7 @@ def main():
         else:
             assert args.expect_success, "missing reward weights returned training success"
         assert ray.is_initialized(), "cleanup must be inspected before driver/cluster shutdown"
-        job_id = ray.get_runtime_context().get_job_id().hex()
+        job_id = ray.get_runtime_context().get_job_id()
         expected_counts = {
             "PickScoreFSDPRank": 2,
             "OmniFSDPRewardLoopWorker": 1,
