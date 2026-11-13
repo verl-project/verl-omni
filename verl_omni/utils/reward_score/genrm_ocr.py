@@ -35,7 +35,9 @@ DEFAULT_GRM_PROMPT = (
     "Please output only the text content from the image without any additional descriptions or formatting."
 )
 DEFAULT_GRM_MODEL_PATH = "~/models/tiny-random/qwen3-vl"
-DEFAULT_SAMPLING_PARAMS = {"temperature": 0.7, "top_p": 0.8, "max_tokens": 4096}
+# OCR transcriptions are a few dozen tokens; the budget only bounds degenerate
+# repetition loops, which otherwise run to the limit at single-sequence decode speed.
+DEFAULT_SAMPLING_PARAMS = {"temperature": 0.7, "top_p": 0.8, "max_tokens": 256}
 
 
 async def _chat_complete(router_address: str, chat_complete_request: dict) -> ChatCompletion:

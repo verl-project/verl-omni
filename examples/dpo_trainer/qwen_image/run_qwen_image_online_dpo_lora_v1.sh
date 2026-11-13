@@ -69,6 +69,7 @@ python3 -m verl_omni.trainer.main_diffusion_v1 \
     reward.reward_model.enable=True \
     reward.reward_model.model_path=$reward_model_name \
     reward.reward_model.rollout.name=$REWARD_ENGINE \
+    reward.reward_model.rollout.response_length=256 \
     reward.reward_model.rollout.tensor_model_parallel_size=$REWARD_TP \
     reward.reward_model.rollout.enforce_eager=False \
     reward.custom_reward_function.path=$reward_function_path \
