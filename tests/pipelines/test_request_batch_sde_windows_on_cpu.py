@@ -148,3 +148,26 @@ def test_forwarded_zero_seed_follows_the_model_policy(monkeypatch) -> None:
     )
     assert added.initial_seed() == 100
     assert shared_sde_window_generator({}, "fallback", device="cpu", policy="call") == "fallback"
+
+
+def test_call_policy_matches_across_ranks_of_one_replica(monkeypatch):
+    import verl_omni.pipelines.request_batch as request_batch
+
+    monkeypatch.setattr(request_batch, "_data_parallel_rank", lambda: 4)
+    monkeypatch.setattr(request_batch, "_call_window_rng", None)
+    kwargs = {"sde_window_seed": 0, "global_steps": 1}
+    expected = random.Random(4)
+    first = shared_sde_window_generator(kwargs, torch.Generator(), device="cpu", policy="call")
+    second = shared_sde_window_generator(kwargs, torch.Generator(), device="cpu", policy="call")
+    assert first.initial_seed() == expected.randrange(2**31)
+    assert second.initial_seed() == expected.randrange(2**31)
+
+    monkeypatch.setattr(request_batch, "_call_window_rng", None)
+    other_rank = shared_sde_window_generator(kwargs, torch.Generator(), device="cpu", policy="call")
+    assert other_rank.initial_seed() == random.Random(4).randrange(2**31)
+
+    monkeypatch.setattr(request_batch, "_data_parallel_rank", lambda: 5)
+    monkeypatch.setattr(request_batch, "_call_window_rng", None)
+    other_replica = shared_sde_window_generator(kwargs, torch.Generator(), device="cpu", policy="call")
+    assert other_replica.initial_seed() == random.Random(5).randrange(2**31)
+    assert other_replica.initial_seed() != first.initial_seed()

@@ -232,8 +232,9 @@ Training also forwards ``sde_window_seed: 0`` on every request. That default
 is not a pin. Qwen-Image and Qwen-Image dual GRPO reseed 0 on every call, which
 is upstream ``random.seed(process_index)`` when the script leaves
 ``process_index`` at 0. Qwen-Image-Edit reseeds the process rank. SD3 and FLUX
-share one window inside a sampling call and advance a process RNG between
-calls, without reseeding. Wan2.2 and Boogu share one window per step at
+share one window inside a sampling call. Each call advances a RNG seeded
+once from the data-parallel rank, so the ranks of one replica match. Wan2.2
+and Boogu share one window per step at
 ``sde_window_seed + global_steps``. MixGRPO still collapses its range from
 that sum before the draw. BAGEL still uses ``LOCAL_RANK``. A non-zero
 ``sde_window_seed`` pins the models other than Wan2.2, Boogu, and MixGRPO.

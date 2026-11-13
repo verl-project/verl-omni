@@ -46,12 +46,30 @@ def requested_outputs_for_batch(request_batch: Any) -> list[str]:
     return list(names)
 
 
-# SD3 and FLUX advance this across sampling calls. It is not reseeded per call.
-_call_window_rng = random.Random()
+# SD3 and FLUX advance this across sampling calls. The first draw seeds it
+# with the data-parallel rank so every rank of one replica stays aligned.
+_call_window_rng: random.Random | None = None
 
 
 def reset_call_window_rng(seed: int) -> None:
-    _call_window_rng.seed(seed)
+    global _call_window_rng
+    _call_window_rng = random.Random(int(seed))
+
+
+def _data_parallel_rank() -> int:
+    try:
+        from vllm_omni.diffusion.distributed.parallel_state import get_data_parallel_rank
+
+        return int(get_data_parallel_rank())
+    except Exception:
+        return 0
+
+
+def _next_call_window_seed() -> int:
+    global _call_window_rng
+    if _call_window_rng is None:
+        _call_window_rng = random.Random(_data_parallel_rank())
+    return _call_window_rng.randrange(2**31)
 
 
 def _process_rank() -> int:
@@ -72,8 +90,8 @@ def shared_sde_window_generator(
     """One SDE-window generator for the samples of a rollout call.
 
     Forwarded ``sde_window_seed=0`` is the config default, not a pin.
-    ``constant`` reseeds 0. ``rank`` reseeds the process rank. ``call`` takes
-    the next value from a process RNG. ``step`` adds the seed to ``global_steps``.
+    ``constant`` reseeds 0. ``rank`` reseeds the process rank. ``call`` draws
+    from a RNG seeded once with the data-parallel rank. ``step`` adds ``global_steps``.
     A non-zero seed pins, except ``step``, which still adds ``global_steps``.
     No seed and no step keeps ``fallback``.
     """
@@ -94,7 +112,7 @@ def shared_sde_window_generator(
     elif policy == "rank":
         seed = _process_rank()
     elif policy == "call":
-        seed = _call_window_rng.randrange(2**31)
+        seed = _next_call_window_seed()
     else:
         seed = int(raw_seed or 0) + int(steps or 0)
     return torch.Generator(device=device).manual_seed(seed)
