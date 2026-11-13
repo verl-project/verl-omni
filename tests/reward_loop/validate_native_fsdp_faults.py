@@ -32,7 +32,7 @@ from PIL import Image
 from verl.single_controller.base.decorator import Dispatch, register
 from verl.single_controller.ray import RayResourcePool
 
-from tests.reward_loop.validate_native_fsdp import finish_validation
+from tests.reward_loop.validate_native_fsdp import finish_validation, owned_actor_states
 from verl_omni.reward_loop import native_fsdp
 
 
@@ -229,7 +229,7 @@ def main():
                 for actor in replica.worker_group.workers:
                     try:
                         ray.get(actor.status.remote(), timeout=5)
-                    except ray.exceptions.RayActorError:
+                    except ray.exceptions.ActorDiedError:
                         continue
                     raise AssertionError("rank survived a group failure") from exc
                 report["cases"].append(
@@ -322,10 +322,15 @@ def main():
         for actor in owned:
             try:
                 ray.get(actor.status.remote(), timeout=5)
-            except ray.exceptions.RayActorError:
+            except ray.exceptions.ActorDiedError:
                 continue
             raise AssertionError("Owned rank survived before Ray shutdown")
         report["owned_rank_actors"] = len(owned)
+        assert len(owned) == 2 * (len(cases) + 3)
+        report["actors_before_ray_shutdown"] = owned_actor_states(
+            [actor._actor_id.hex() for actor in owned], {"FaultRank": len(owned)}
+        )
+        assert all(row["State"] == "DEAD" for row in report["actors_before_ray_shutdown"])
         report["all_owned_actors_dead_before_ray_shutdown"] = True
         report["passed"] = True
     except BaseException as exc:

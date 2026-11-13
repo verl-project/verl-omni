@@ -1,6 +1,6 @@
 # Native FSDP reward validation
 
-Last updated: 11/05/2026.
+Last updated: 11/13/2026.
 
 ## Acceptance boundary
 
@@ -90,8 +90,9 @@ historical tests retain their original execution identities.
 
 All 12 repository pre-commit hooks passed on the foundation update, the three feature snapshots and the combined candidate, including generated-config verification.
 
-All accelerator checks require actual idle devices and confirm their physical UUIDs. Manual validators write
-results outside the repository. A skipped or mocked accelerator path is not counted as an accelerator pass.
+Accelerator checks use actual devices and confirm their physical UUIDs. Shared-device runs record their resource
+conditions and establish functional correctness. Manual validators write results outside the repository.
+A skipped or mocked accelerator path is not counted as an accelerator pass.
 
 ## Construction rollback verification
 
@@ -134,7 +135,7 @@ job loaded checkpoint 2 on a different three-GPU selection. Selected GPUs were i
 appeared on two training GPUs. These runs establish functional updates and continuation, not isolated performance or
 memory savings. Execution records include candidate/helper hashes, runtime, overrides, model/data and checkpoint identities.
 
-Run from the repository root with two idle visible GPUs and local checkpoints:
+Run from the repository root with local checkpoints and two visible GPUs with sufficient free memory:
 
 ```bash
 CUDA_VISIBLE_DEVICES="$GPU_PAIR" PYTHONPATH="$PWD" HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 \
@@ -153,6 +154,36 @@ CUDA_VISIBLE_DEVICES='' PYTHONPATH="$PWD" PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
 
 On the replica-group extension, `--replicas 2` requires four distinct idle GPUs and injects failure into the second
 facade after confirming the first group's ranks and facade are alive. All six owned actors must then be DEAD.
+
+## Lifecycle safety and acceptance checks (2026-11-12–13)
+
+These checks cover the single-replica PickScore foundation after correcting actor-death confirmation, concurrent
+close, configuration defaults and the acceptance tools.
+The reruns used the runtime revisions listed above, with vLLM 0.30.0 and vLLM-Omni 0.30.1.dev29+g12e928001.
+
+| Check | Result |
+| --- | --- |
+| Focused CPU contracts | 43 cases covering configuration entry points, confirmed death versus unavailability/timeout, concurrent and cancelled close, and acceptance-tool regressions. |
+| Related CPU regression | 268 passed, including the focused contracts. |
+| Real Ray CPU construction | Constructor error/hang and ready error/hang passed; each case confirmed the three retained actor IDs DEAD before shutdown. |
+| Two-GPU construction | The same four construction failures passed with real CUDA/NCCL ranks. Each case recorded two physical GPU UUIDs and confirmed two rank IDs and one facade ID DEAD. |
+| Two-GPU facade failure | Idle/scoring exit and idle/scoring hang passed. Each case checked exactly one facade, two ranks, one queue controller and one storage actor by ID; all five were DEAD before shutdown. |
+| Two-GPU rank faults and drain | Ten real faults passed, including a rank-confirmed five-second NCCL ALLGATHER watchdog timeout. Twenty load/score/unload cycles reached a stable allocated-memory plateau; infer/sleep and infer/close drained accepted work. All 26 unique retained rank IDs were DEAD before shutdown. |
+| Two-GPU pretrained PickScore parity | Real 256×256 training images passed raw-output and score comparisons at `rtol=1e-4, atol=2e-5` for batches 1/3/16/17, reordered samples and long text. Maximum score absolute error was `1.7881393432617188e-7`. Three reload cycles, existing training/validation reward-manager scoring, actual rank exit and clean close passed. |
+| Preserved training artifacts | All 54 files matched their recorded hashes. Rechecking both 1→2 and 2→3 transitions found 484 changed nonempty LoRA tensors and 909 unchanged frozen tensors. Every active Adam state had the exact counter 1, 2 or 3 for its checkpoint. |
+| Corrected log and media checks | The saved training gradients were `0.0145263671875` and `0.023681640625`; resume gradient was `0.00982666015625`. The corrected verifier accepted checkpoint 2→3 continuation and all rollout/validation media. |
+
+Gradient parsing rejects NaN, infinity, missing values and zero without reading another metric. Recovery checks
+accept the trainer's actual auto-resume and explicit-path messages. A CPU regression checks Hydra failure
+propagation through actor/checkpoint inspection. Actor inventories reject empty sets, duplicate IDs and missing
+facade roles.
+
+The training rows above reread preserved artifacts from the earlier execution; they are not a new training run
+of these lifecycle corrections. Construction and facade checks started on idle cards; an independent job later
+appeared during the facade run. Rank-fault and numerical-parity reruns used shared GPUs with at least 24 GiB
+free per card at launch and an 8 GiB free-memory reserve sampled during execution; the lowest sampled free
+memory was above 36 GiB. Parity reused four generated training images to form 17 samples. These checks establish
+functional behavior, not isolated performance or memory savings.
 
 ## Independent training integrations
 

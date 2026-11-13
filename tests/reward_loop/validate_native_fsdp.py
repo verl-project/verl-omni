@@ -28,6 +28,7 @@ import os
 import subprocess
 import tempfile
 import time
+from collections import Counter
 from pathlib import Path
 
 import numpy as np
@@ -61,6 +62,15 @@ def _images():
 
 def _scores(outputs):
     return torch.stack([_pairwise_pickscore(**output) for output in outputs]).cpu()
+
+
+def owned_actor_states(actor_ids, expected_counts):
+    """Inspect exact owned IDs and reject missing actors or incomplete role counts."""
+    assert actor_ids and len(actor_ids) == len(set(actor_ids))
+    actors = ray._private.state.actors()
+    rows = [actors[actor_id] for actor_id in actor_ids]
+    assert Counter(row["ActorClassName"] for row in rows) == expected_counts
+    return [{key: row[key] for key in ("ActorID", "ActorClassName", "Name", "Pid", "State")} for row in rows]
 
 
 def finish_validation(replica, pool, output, report, primary_error=None):
@@ -316,7 +326,7 @@ def main():
         for worker in replica.worker_group.workers:
             try:
                 ray.get(worker.status.remote(), timeout=10)
-            except ray.exceptions.RayActorError:
+            except ray.exceptions.ActorDiedError:
                 continue
             raise AssertionError("rank actor survived group failure")
         report["all_rank_actors_dead"] = True

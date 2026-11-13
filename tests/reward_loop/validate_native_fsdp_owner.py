@@ -35,20 +35,11 @@ from omegaconf import OmegaConf
 from verl.protocol import DataProto
 from verl.single_controller.ray import RayResourcePool
 
-from tests.reward_loop.validate_native_fsdp import finish_validation
+from tests.reward_loop.validate_native_fsdp import finish_validation, owned_actor_states
 from tests.reward_loop.validate_native_fsdp_faults import FaultRank, case_checkpoint, wait_markers
 from verl_omni.reward_loop import native_fsdp
 from verl_omni.reward_loop.reward_loop import OmniRewardLoopManager
 from verl_omni.trainer.main_diffusion_v1 import finish_training_resources
-
-
-def owned_actors():
-    """Inspect GCS before Ray shutdown or Python garbage collection."""
-    return [
-        {key: row[key] for key in ("ActorClassName", "ActorID", "Pid", "State")}
-        for row in ray._private.state.actors().values()
-        if row["ActorClassName"] in {"PickScoreFSDPRank", "FaultRank", "TransferQueueController", "SimpleStorageUnit"}
-    ]
 
 
 async def exercise(manager, data, mode, markers):
@@ -79,7 +70,7 @@ async def exercise(manager, data, mode, markers):
         for actor in owner.rank_workers:
             try:
                 await actor.status.remote()
-            except ray.exceptions.RayActorError:
+            except ray.exceptions.ActorDiedError:
                 continue
             raise AssertionError("rank survived independent owner cleanup") from exc
         return exc, time.monotonic() - started
@@ -136,6 +127,7 @@ def main():
     manager = None
     try:
         for mode in ("idle_exit", "scoring_exit", "idle_hang", "scoring_hang"):
+            before_actors = set(ray._private.state.actors())
             cfg = OmegaConf.create(OmegaConf.to_container(base, resolve=True))
             checkpoint = args.output / mode
             markers = case_checkpoint(args.model_path, checkpoint, "hold" if mode.startswith("scoring") else "none", 0)
@@ -145,13 +137,28 @@ def main():
 
             with patch.object(native_fsdp, "build_replica", partial(build, _rank_class=FaultRank)):
                 manager = OmniRewardLoopManager(cfg, rm_resource_pool=pool)
+            owner = manager.multi_reward_model_manager.models["pickscore"]
+            actor_ids = [actor._actor_id.hex() for actor in [*owner._workers, *owner.rank_workers]]
+            actor_ids.extend(
+                actor_id
+                for actor_id, row in ray._private.state.actors().items()
+                if actor_id not in before_actors
+                and row["ActorClassName"] in {"TransferQueueController", "SimpleStorageUnit"}
+            )
+            expected_counts = {
+                "FaultRank": 2,
+                "OmniFSDPRewardLoopWorker": 1,
+                "TransferQueueController": 1,
+                "SimpleStorageUnit": 1,
+            }
+            owned_actor_states(actor_ids, expected_counts)
             error, elapsed = asyncio.run(exercise(manager, data, mode, markers))
             try:
                 finish_training_resources(SimpleNamespace(reward_loop_manager=manager), cfg, tq.close, error)
             except Exception as exc:
                 assert exc is error
             deadline = time.monotonic() + 10
-            while not all(row["State"] == "DEAD" for row in owned_actors()):
+            while not all(row["State"] == "DEAD" for row in owned_actor_states(actor_ids, expected_counts)):
                 assert time.monotonic() < deadline
                 time.sleep(0.1)
             report["cases"].append(
@@ -160,7 +167,7 @@ def main():
                     "error": type(error).__name__,
                     "seconds": elapsed,
                     "all_owned_actors_dead_before_shutdown": True,
-                    "actors": owned_actors(),
+                    "actors": owned_actor_states(actor_ids, expected_counts),
                 }
             )
             manager = None

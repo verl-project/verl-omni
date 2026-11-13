@@ -68,10 +68,11 @@ def wait_for_marker(path):
 
 def assert_dead(actors):
     """Require actor RPC death and GCS DEAD while the test cluster remains live."""
+    assert actors and len({actor._actor_id.hex() for actor in actors}) == len(actors)
     for actor in actors:
         try:
             ray.get(actor.__ray_ready__.remote(), timeout=10)
-        except ray.exceptions.RayActorError:
+        except ray.exceptions.ActorDiedError:
             continue
         raise AssertionError("Owned actor survived construction rollback")
     deadline = time.monotonic() + 10
@@ -161,6 +162,7 @@ def run_case(cfg, pool, mode, directory, replicas):
             "replicas": replicas,
             "owned_ranks": len(ranks),
             "owned_facades": len(facades),
+            "owned_actor_ids": [actor._actor_id.hex() for actor in [*facades, *ranks]],
             "constructed_ranks": rank_states,
             "states_before_ray_shutdown": states,
             "readiness_and_cleanup_seconds": elapsed,

@@ -29,6 +29,28 @@ def local(tensor):
     return tensor.to_local() if hasattr(tensor, "to_local") else tensor
 
 
+def optimizer_steps(path, expected_step):
+    """Require finite Adam moments and the exact update counter in every active state."""
+    state = torch.load(path, map_location="cpu", weights_only=False)
+    active = [value for value in state["state"].values() if "step" in value]
+    assert active and all(
+        torch.isfinite(local(value[key])).all() for value in active for key in ("exp_avg", "exp_avg_sq")
+    )
+    observed = sorted({float(local(value["step"])) for value in active})
+    assert observed == [float(expected_step)], (expected_step, observed)
+    return observed
+
+
+def validate_training_log(log, steps, resume_from=0):
+    """Read each gradient value without crossing into another field or log line."""
+    norms = [float(value) for value in re.findall(r"\bactor/grad_norm:[ \t]*([^\s]*)", log)]
+    assert len(norms) >= steps - resume_from
+    assert all(math.isfinite(value) and value > 0 for value in norms)
+    if resume_from:
+        assert re.search(rf"(?:Resuming diffusion from|Found checkpoint:)[^\r\n]*global_step_{resume_from}\b", log)
+    return norms
+
+
 def main():
     """Reject successful process exits without completed, finite training updates."""
     parser = argparse.ArgumentParser()
@@ -57,22 +79,9 @@ def main():
     assert changed > 0
     del previous
 
-    def optimizer(step):
-        state = torch.load(actor(step) / "optim_world_size_1_rank_0.pt", map_location="cpu", weights_only=False)
-        active = [value for value in state["state"].values() if "step" in value]
-        assert active and all(
-            torch.isfinite(local(value[key])).all() for value in active for key in ("exp_avg", "exp_avg_sq")
-        )
-        return sorted({int(local(value["step"])) for value in active})
-
-    current_steps, previous_steps = optimizer(args.steps), optimizer(args.steps - 1)
-    assert min(current_steps) > max(previous_steps) > 0
-    log = args.log.read_text()
-    norms = [float(value) for value in re.findall(r"actor/grad_norm[^0-9+\-]*([0-9.eE+\-]+)", log)]
-    assert len(norms) >= args.steps - args.resume_from
-    assert all(math.isfinite(value) and value > 0 for value in norms)
-    if args.resume_from:
-        assert re.search(rf"Found checkpoint:.*global_step_{args.resume_from}\b", log)
+    current_steps = optimizer_steps(actor(args.steps) / "optim_world_size_1_rank_0.pt", args.steps)
+    previous_steps = optimizer_steps(actor(args.steps - 1) / "optim_world_size_1_rank_0.pt", args.steps - 1)
+    norms = validate_training_log(args.log.read_text(), args.steps, args.resume_from)
     media = {}
     for step in range(1, args.steps + 1):
         for kind, expected in (("rollouts", 4), ("validation", 2)):
