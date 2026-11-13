@@ -40,6 +40,8 @@ INFORMATIONAL_TENSORS = frozenset(
         # move it even when the rollout latent is unchanged.
         "batch.reward_prob",
         "batch.returns",
+        # Nested old_log_probs pads inconsistently on the tiny model; rollout_log_probs covers token-id drift.
+        "batch.old_log_probs",
     }
 )
 

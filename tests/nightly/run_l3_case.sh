@@ -2,8 +2,9 @@
 # Shared L3 nightly runner. Case scripts export L3_* / TRAIN_BATCH_SIZE and
 # pass the v1 trainer Hydra overrides as arguments.
 #
-# Training always goes through tests/nightly/run.py, which starts
-# verl_omni.trainer.main_diffusion_v1. Do not point a case at the v0 trainer.
+# Training always goes through tests/nightly/run.py. NIGHTLY_TRAINER_MODULE
+# selects the v1 entrypoint:: ``main_diffusion_v1``(default) or ``main_omni``.
+# Do not point a case at the v0 trainer.
 set -xeuo pipefail
 
 NIGHTLY_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -74,7 +75,7 @@ python3 "${NIGHTLY_DIR}/env_metadata.py" \
     --attn-backend "${ATTN_BACKEND}" \
     --rollout-attn-backend "${ROLLOUT_ATTN_BACKEND}"
 
-python3 "${NIGHTLY_DIR}/create_single_sample_data.py" \
+python3 "${NIGHTLY_DIR}/create_sample_data.py" \
     --local_save_dir "${DATA_DIR}" \
     --train_size "${TRAIN_BATCH_SIZE}" \
     --val_size 4 \
