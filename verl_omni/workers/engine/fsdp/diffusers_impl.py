@@ -123,6 +123,41 @@ def _fsdp_param_dtype(
     return configured_dtype
 
 
+def _replicate_frozen_enabled(engine) -> bool:
+    """Whether the adapter keeps the frozen base replicated (FSDP2, unmerged LoRA, no CPU offload)."""
+    model_cls = DiffusionModelBase.get_class(engine.model_config)
+    if engine.model_config.lora_rank <= 0 or not model_cls.replicate_frozen_base(engine.model_config):
+        return False
+    if engine.engine_config.strategy != "fsdp2":
+        raise ValueError("replicate_frozen_base requires strategy=fsdp2.")
+    if resolve_lora_config(engine.model_config).merge:
+        raise ValueError("replicate_frozen_base does not support model.lora.merge=True.")
+    if engine.engine_config.param_offload:
+        raise ValueError("replicate_frozen_base requires param_offload=False.")
+    return not (engine.engine_config.offload_policy or engine.engine_config.forward_only)
+
+
+def _cast_replicated_params(module, param_dtype: Optional[torch.dtype]) -> None:
+    """Store the frozen base in the FSDP compute dtype; FSDP2 casts only the parameters it shards."""
+    if param_dtype is None:
+        return
+    for name, param in module.named_parameters():
+        if "lora_" not in name and param.is_floating_point():
+            param.data = param.data.to(param_dtype)
+
+
+def _check_replicated_params(module) -> None:
+    """Fail on every rank at init unless all ranks hold finite, identical parameters."""
+    with torch.no_grad():
+        sums = torch.stack([param.detach().float().sum() for param in module.parameters()])
+    reference = sums.clone()
+    torch.distributed.broadcast(reference, src=0)
+    ok = torch.tensor(float(bool(torch.isfinite(sums).all()) and torch.equal(reference, sums)), device=sums.device)
+    torch.distributed.all_reduce(ok, op=torch.distributed.ReduceOp.MIN)
+    if ok.item() == 0:
+        raise RuntimeError("replicate_frozen_base: replicated parameters differ across ranks or are non-finite.")
+
+
 class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
     """Base Diffusers engine using PyTorch FullyShardedDataParallel (FSDP).
 
@@ -305,7 +340,8 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
             return module
 
         # Default path: load via diffusers AutoModel
-        init_context = get_init_weight_context_manager(use_meta_tensor=True, mesh=self.device_mesh)
+        replicate_frozen = _replicate_frozen_enabled(self)
+        init_context = get_init_weight_context_manager(use_meta_tensor=not replicate_frozen, mesh=self.device_mesh)
 
         with init_context(), warnings.catch_warnings():
             warnings.simplefilter("ignore")
@@ -447,9 +483,19 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
                 "offload_policy": offload_policy,
                 "reshard_after_forward": self.engine_config.reshard_after_forward,
             }
-            full_state = module.state_dict()
-            apply_fsdp2(module, fsdp_kwargs, self.engine_config, ignored_names=ignored_names)
-            fsdp2_load_full_state_dict(module, full_state, fsdp_mesh, offload_policy)
+            if _replicate_frozen_enabled(self):
+                module = module.to(device=get_device_id())
+                for _, param in sorted(
+                    ((n, p) for n, p in module.named_parameters() if "lora_" in n), key=lambda item: item[0]
+                ):
+                    torch.distributed.broadcast(param.data, src=0)
+                _cast_replicated_params(module, param_dtype)
+                _check_replicated_params(module)
+                apply_fsdp2(module, fsdp_kwargs, self.engine_config, ignored_names=ignored_names, replicate_frozen=True)
+            else:
+                full_state = module.state_dict()
+                apply_fsdp2(module, fsdp_kwargs, self.engine_config, ignored_names=ignored_names)
+                fsdp2_load_full_state_dict(module, full_state, fsdp_mesh, offload_policy)
         else:
             raise NotImplementedError(f"Unknown strategy {self.engine_config.strategy}")
 
