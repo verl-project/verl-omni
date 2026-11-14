@@ -128,7 +128,7 @@ args=(
   "actor_rollout_ref.rollout.max_model_len=$((MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH))"
   ++data.mm_processor_kwargs.sampling_rate=16000
   ++actor_rollout_ref.rollout.engine_kwargs.vllm_omni.limit_mm_per_prompt.audio=1
-  reward.custom_reward_function.path=verl_omni/utils/reward_score/choice_reward.py
+  "reward.custom_reward_function.path=$REPO_ROOT/verl_omni/utils/reward_score/choice_reward.py"
   "$@"
 )
 printf '%q ' "${PYTHON:-python3}" -m verl_omni.trainer.main_omni "${args[@]}" > "${RUN_DIR}/command.txt"
