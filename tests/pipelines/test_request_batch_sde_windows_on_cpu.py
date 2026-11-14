@@ -171,3 +171,16 @@ def test_call_policy_matches_across_ranks_of_one_replica(monkeypatch):
     other_replica = shared_sde_window_generator(kwargs, torch.Generator(), device="cpu", policy="call")
     assert other_replica.initial_seed() == random.Random(5).randrange(2**31)
     assert other_replica.initial_seed() != first.initial_seed()
+
+
+def test_replica_policy_uses_data_parallel_rank(monkeypatch):
+    import verl_omni.pipelines.request_batch as request_batch
+
+    monkeypatch.setenv("RANK", "1")
+    monkeypatch.setattr(request_batch, "_data_parallel_rank", lambda: 4)
+    generator = shared_sde_window_generator(
+        {"sde_window_seed": 0, "global_steps": 7}, torch.Generator(), device="cpu", policy="replica"
+    )
+    assert generator.initial_seed() == 4
+    pinned = shared_sde_window_generator({"sde_window_seed": 99}, torch.Generator(), device="cpu", policy="replica")
+    assert pinned.initial_seed() == 99

@@ -90,14 +90,15 @@ def shared_sde_window_generator(
     """One SDE-window generator for the samples of a rollout call.
 
     Forwarded ``sde_window_seed=0`` is the config default, not a pin.
-    ``constant`` reseeds 0. ``rank`` reseeds the process rank. ``call`` draws
-    from a RNG seeded once with the data-parallel rank. ``step`` adds ``global_steps``.
-    A non-zero seed pins, except ``step``, which still adds ``global_steps``.
-    No seed and no step keeps ``fallback``.
+    ``constant`` reseeds 0. ``rank`` reseeds the process rank. ``replica``
+    reseeds the data-parallel rank, or 0 when that state is not initialized.
+    ``call`` draws from a RNG seeded once with the data-parallel rank.
+    ``step`` adds ``global_steps``. A non-zero seed pins, except ``step``,
+    which still adds ``global_steps``. No seed and no step keeps ``fallback``.
     """
     if not isinstance(extra_args, dict):
         return fallback
-    if policy not in ("constant", "rank", "call", "step"):
+    if policy not in ("constant", "rank", "replica", "call", "step"):
         raise ValueError(f"Unknown SDE window policy: {policy!r}")
     raw_seed = extra_args.get("sde_window_seed")
     steps = extra_args.get("global_steps")
@@ -111,6 +112,8 @@ def shared_sde_window_generator(
         seed = 0
     elif policy == "rank":
         seed = _process_rank()
+    elif policy == "replica":
+        seed = _data_parallel_rank()
     elif policy == "call":
         seed = _next_call_window_seed()
     else:
