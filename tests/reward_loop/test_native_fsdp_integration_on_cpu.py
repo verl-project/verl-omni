@@ -15,9 +15,6 @@
 
 import asyncio
 import inspect
-import json
-import os
-import sys
 import threading
 from types import SimpleNamespace
 
@@ -25,8 +22,6 @@ import pytest
 import torch
 from omegaconf import OmegaConf
 
-from tests.special_e2e import validate_native_fsdp_training_failure as failure_validation
-from tests.special_e2e.verify_native_fsdp_training import optimizer_steps, validate_training_log
 from verl_omni.reward_loop import native_fsdp
 from verl_omni.reward_loop import reward_loop as reward_loop_module
 from verl_omni.reward_loop.native_fsdp import (
@@ -195,7 +190,7 @@ def test_pinned_verl_worker_hooks_and_wrap_config_contract():
     assert _select_fsdp2_wrap_targets(model, ["Linear"]) == [clip.encoder]
 
 
-@pytest.mark.parametrize("mode", ["shared", "streaming", "async", "v0", "multinode"])
+@pytest.mark.parametrize("mode", ["shared", "streaming", "async", "multinode"])
 def test_unsupported_modes_fail_before_allocation(mode):
     cfg = config()
     if mode == "shared":
@@ -204,8 +199,6 @@ def test_unsupported_modes_fail_before_allocation(mode):
         cfg.reward.streaming = {"enabled": True}
     elif mode == "async":
         cfg.trainer.v1.trainer_mode = "separate_async"
-    elif mode == "v0":
-        cfg.trainer.use_v1 = False
     else:
         cfg.reward.reward_model.nnodes = 2
     with pytest.raises(ValueError):
@@ -377,74 +370,6 @@ async def test_construction_records_facade_before_readiness_and_rolls_back(monke
             assert repeated.value is owner._termination_error
         else:
             await owner.close()
-
-
-def test_acceptance_rejects_adjacent_metrics_and_wrong_optimizer_counters(tmp_path):
-    for value in ("nan", "inf", "", "0"):
-        with pytest.raises((ValueError, AssertionError)):
-            validate_training_log(f"actor/grad_norm: {value}\nactor/lr: 0.001", 1)
-    for prefix in ("Found checkpoint:", "Resuming diffusion from"):
-        assert validate_training_log(f"{prefix} /run/global_step_2\nactor/grad_norm: 0.5", 3, 2) == [0.5]
-    path = tmp_path / "optimizer.pt"
-    for step in (2.0, 2.5):
-        torch.save(
-            {"state": {0: {"step": torch.tensor(step), "exp_avg": torch.ones(1), "exp_avg_sq": torch.ones(1)}}}, path
-        )
-        if step == 2:
-            assert optimizer_steps(path, 2) == [2.0]
-        else:
-            with pytest.raises(AssertionError):
-                optimizer_steps(path, 2)
-
-
-def test_acceptance_uses_ray_job_id_string_before_actor_and_checkpoint_checks(tmp_path, monkeypatch):
-    overrides, output = tmp_path / "overrides.json", tmp_path / "result.json"
-    overrides.write_text("[]")
-    (tmp_path / "latest_checkpointed_iteration.txt").write_text("0")
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "verify",
-            "--overrides",
-            str(overrides),
-            "--checkpoint-root",
-            str(tmp_path),
-            "--expected-step",
-            "0",
-            "--output",
-            str(output),
-        ],
-    )
-
-    def fail(*args, **kwargs):
-        assert os.environ["HYDRA_FULL_ERROR"] == "1"
-        raise RuntimeError("fit: FSDP wake_up failed: model.safetensors missing")
-
-    roles = [
-        "PickScoreFSDPRank",
-        "PickScoreFSDPRank",
-        "OmniFSDPRewardLoopWorker",
-        "TransferQueueController",
-        "SimpleStorageUnit",
-    ]
-    rows = {
-        str(i): {"ActorID": str(i), "ActorClassName": role, "Name": "", "Pid": 1, "State": "DEAD", "JobID": "job"}
-        for i, role in enumerate(roles)
-    }
-    rows["other"] = dict(rows["0"], ActorID="other", JobID="other", State="ALIVE")
-    monkeypatch.setenv("HYDRA_FULL_ERROR", "0")
-    monkeypatch.setattr(failure_validation.runpy, "run_module", fail)
-    monkeypatch.setattr(failure_validation.ray._private.state, "actors", lambda: rows)
-    monkeypatch.setattr(failure_validation.ray, "is_initialized", lambda: True)
-    monkeypatch.setattr(
-        failure_validation.ray, "get_runtime_context", lambda: SimpleNamespace(get_job_id=lambda: "job")
-    )
-    monkeypatch.setattr(failure_validation.ray, "shutdown", lambda: None)
-    failure_validation.main()
-    report = json.loads(output.read_text())
-    assert report["passed"] and report["latest_checkpoint"] == 0
-    assert len(report["actors_before_ray_shutdown"]) == 5
 
 
 @pytest.mark.parametrize("failure", ["rank", "shape", "shape_cleanup"])

@@ -91,11 +91,10 @@ Trainer finalization closes reward resources and the transfer queue on both succ
 
 ## Validation
 
-The lightweight CPU contracts are in `tests/reward_loop/test_native_fsdp_integration_on_cpu.py`; they do not start
-Ray or load model weights. Manual accelerator validators cover pretrained parity, constructor/readiness failures,
-rank/facade faults and repeated load/unload. Cleanup checks retain actor IDs and require terminal states before
-Ray shutdown. End-to-end SD3.5 training additionally checks finite gradients, changed LoRA tensors, exact Adam
-counters and checkpoint continuation. These checks establish correctness for the exercised configuration.
+The CPU regressions in `tests/reward_loop/test_native_fsdp_integration_on_cpu.py` cover configuration,
+construction rollback, cancellation and shutdown without starting Ray or loading model weights.
+The manual two-GPU validator checks pretrained parity, named-reward integration, load/unload and rank-failure
+cleanup. It retains actor IDs and requires terminal states before Ray shutdown.
 
 Run from the repository root with local immutable checkpoints and two GPUs with sufficient free memory:
 
