@@ -12,10 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
+import inspect
 from argparse import Namespace
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import torch
@@ -105,12 +107,12 @@ def test_strategies_preserve_mode_specific_quantization(monkeypatch):
     monkeypatch.setattr(
         ar_strategy_module.vLLMHttpServer,
         "_apply_quantization",
-        lambda server: ("fp8", {"source": server}),
+        lambda server: {"source": server},
     )
     server = SimpleNamespace()
 
-    assert ARStrategy(server).apply_quantization() == ("fp8", {"source": server})
-    assert DiffusionStrategy(server).apply_quantization() == (None, {})
+    assert ARStrategy(server).apply_quantization() == {"source": server}
+    assert DiffusionStrategy(server).apply_quantization() == {}
 
 
 def test_strategies_preserve_platform_worker_extensions():
@@ -544,6 +546,7 @@ async def test_ar_strategy_retains_requested_stage_outputs_and_targets_weight_sy
         def __init__(self):
             self.generate_kwargs = None
             self.rpc_kwargs = None
+            self.num_stages = 1
 
         async def generate(self, **kwargs):
             self.generate_kwargs = kwargs
@@ -551,7 +554,7 @@ async def test_ar_strategy_retains_requested_stage_outputs_and_targets_weight_sy
 
         async def collective_rpc(self, **kwargs):
             self.rpc_kwargs = kwargs
-            return "rpc-result"
+            return [None]
 
     class Adapter(OmniRolloutPipelineBase):
         @staticmethod
@@ -579,7 +582,7 @@ async def test_ar_strategy_retains_requested_stage_outputs_and_targets_weight_sy
     assert strategy._rollout_fields_by_request_id == {"request-0": {"audio_sample_rate": 24_000}}
     assert server.engine.generate_kwargs["output_modalities"] == ["latent", "audio"]
     assert server.engine.rpc_kwargs["stage_ids"] == [0]
-    assert rpc_result is None
+    assert rpc_result == [None]
 
     output = strategy.process_output(result, ar_strategy_module.SamplingParams(), {})
     assert output.extra_fields == {"global_steps": 3, "audio_sample_rate": 24_000}
@@ -610,6 +613,336 @@ async def test_ar_strategy_retains_requested_stage_outputs_and_targets_weight_sy
     assert output.token_ids == [7]
     assert output.extra_fields == {"global_steps": 3, "audio_sample_rate": 24_000}
     assert strategy._rollout_fields_by_request_id == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "reply",
+    [
+        [{"supported": False, "error": "unsupported LoRA weight"}],
+        [[None], [{"error": "second replica failed"}]],
+        [{"todo": True}],
+        [{"supported": False, "error": ""}],
+        None,
+        [],
+        [[]],
+    ],
+)
+async def test_weight_sync_rejects_best_effort_rpc_failures(reply):
+    server = object.__new__(server_module.vLLMOmniHttpServer)
+    server.engine = SimpleNamespace(num_stages=1, collective_rpc=AsyncMock(return_value=reply))
+    server._generate_strategy = SimpleNamespace(collective_rpc_stage_ids=lambda method: [0])
+    with pytest.raises(RuntimeError, match="update_weights_from_ipc failed"):
+        await server.collective_rpc("update_weights_from_ipc", kwargs={"base_sync_done": True}, require_ack=True)
+    server.engine.collective_rpc.assert_awaited_once_with(
+        method="update_weights_from_ipc", timeout=None, args=(), kwargs={"base_sync_done": True}, stage_ids=[0]
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reply", [[None], [[True], [None]], [{"supported": True}], [(None,)]])
+async def test_weight_sync_accepts_successful_rpc_results(reply):
+    server = object.__new__(server_module.vLLMOmniHttpServer)
+    server.engine = SimpleNamespace(num_stages=1, collective_rpc=AsyncMock(return_value=reply))
+    server._generate_strategy = SimpleNamespace(collective_rpc_stage_ids=lambda method: None)
+    assert await server.collective_rpc("update_weights_from_ipc", require_ack=True) == list(reply)
+    assert server.engine.collective_rpc.await_args.kwargs["stage_ids"] == [0]
+
+
+@pytest.mark.asyncio
+async def test_checked_collective_rpc_is_method_independent_and_preserves_reply_order():
+    server = object.__new__(server_module.vLLMOmniHttpServer)
+    first = [None, {"supported": True}]
+    second = [("second",), None]
+    server.engine = SimpleNamespace(num_stages=2, collective_rpc=AsyncMock(side_effect=[first, second]))
+    server._generate_strategy = SimpleNamespace(collective_rpc_stage_ids=lambda method: [1, 1, 0])
+
+    assert await server.collective_rpc("refresh_metadata", require_ack=True) == first + second
+    assert [call.kwargs["stage_ids"] for call in server.engine.collective_rpc.await_args_list] == [[1], [0]]
+
+
+@pytest.mark.asyncio
+async def test_checked_collective_rpc_rejects_other_method_error_envelope():
+    server = object.__new__(server_module.vLLMOmniHttpServer)
+    server.engine = SimpleNamespace(num_stages=1, collective_rpc=AsyncMock(return_value=[{"todo": True}]))
+    server._generate_strategy = SimpleNamespace(collective_rpc_stage_ids=lambda method: [0])
+
+    with pytest.raises(RuntimeError, match="refresh_metadata failed"):
+        await server.collective_rpc("refresh_metadata", require_ack=True)
+
+
+@pytest.mark.asyncio
+async def test_unchecked_collective_rpc_returns_raw_reply_with_unknown_topology():
+    server = object.__new__(server_module.vLLMOmniHttpServer)
+    reply = [{"supported": False, "error": "best effort"}]
+    server.engine = SimpleNamespace(collective_rpc=AsyncMock(return_value=reply))
+    server._generate_strategy = SimpleNamespace(collective_rpc_stage_ids=lambda method: None)
+
+    assert await server.collective_rpc("update_weights_from_ipc") is reply
+    server.engine.collective_rpc.assert_awaited_once_with(
+        method="update_weights_from_ipc", timeout=None, args=(), kwargs=None, stage_ids=None
+    )
+
+
+@pytest.mark.asyncio
+async def test_omni_adapter_opts_ipc_into_ack_and_preserves_transport_flags():
+    adapter = object.__new__(server_module.vLLMOmniServerAdapter)
+    adapter._ensure_server_handle = MagicMock(return_value=True)
+    pending = asyncio.get_running_loop().create_future()
+    remote = MagicMock(return_value=pending)
+    adapter.server_handle = SimpleNamespace(collective_rpc=SimpleNamespace(remote=remote))
+
+    result = await adapter._execute_method(
+        "update_weights_from_ipc", non_block=True, timeout=3, args=("weights",), kwargs={"ready": True}
+    )
+    assert result is pending
+    remote.assert_called_once_with(
+        "update_weights_from_ipc", timeout=3, args=("weights",), kwargs={"ready": True}, require_ack=True
+    )
+    pending.set_result([None])
+    assert await result == [None]
+
+    completed = asyncio.get_running_loop().create_future()
+    completed.set_result(["ack"])
+    remote.return_value = completed
+    assert await adapter._execute_method("update_weights_from_ipc") == ["ack"]
+
+    adapter._ensure_server_handle.return_value = False
+    remote.reset_mock()
+    assert await adapter._execute_method("update_weights_from_ipc", non_block=True) is None
+    remote.assert_not_called()
+
+    with patch.object(server_module.ServerAdapter, "_execute_method", new_callable=AsyncMock) as inherited:
+        inherited.return_value = "base"
+        assert await adapter._execute_method("optional_control", non_block=True, timeout=2) == "base"
+        inherited.assert_awaited_once_with("optional_control", non_block=True, timeout=2, args=(), kwargs=None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", [RuntimeError("receiver failed"), asyncio.CancelledError()])
+async def test_omni_adapter_propagates_ipc_failure_and_cancellation(error):
+    adapter = object.__new__(server_module.vLLMOmniServerAdapter)
+    adapter._ensure_server_handle = MagicMock(return_value=True)
+    pending = asyncio.get_running_loop().create_future()
+    pending.set_exception(error)
+    adapter.server_handle = SimpleNamespace(collective_rpc=SimpleNamespace(remote=MagicMock(return_value=pending)))
+
+    with pytest.raises(type(error)) as raised:
+        await adapter._execute_method("update_weights_from_ipc")
+    assert raised.value is error
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reply", [[None], [{"error": "receiver failed"}]])
+async def test_inherited_full_weight_update_requires_ack_before_publishing(reply):
+    server = object.__new__(server_module.vLLMOmniHttpServer)
+    server.engine = SimpleNamespace(num_stages=1, collective_rpc=AsyncMock(return_value=reply))
+    server._generate_strategy = SimpleNamespace(collective_rpc_stage_ids=lambda method: [0])
+
+    adapter = object.__new__(server_module.vLLMOmniServerAdapter)
+    adapter._ensure_server_handle = MagicMock(return_value=True)
+    adapter.zmq_handle = "ipc:///tmp/test-full-weight-sync.sock"
+    adapter.use_shm = False
+    adapter._has_server = True
+    adapter.replica_rank = 0
+    adapter.rollout_rank = 0
+    adapter.config = SimpleNamespace(checkpoint_engine=SimpleNamespace(update_weights_bucket_megabytes=16))
+    rpc_calls = []
+
+    def remote(method, **kwargs):
+        rpc_calls.append((method, kwargs))
+        return asyncio.create_task(server.collective_rpc(method, **kwargs))
+
+    clear_cache = AsyncMock()
+    set_steps = AsyncMock()
+    adapter.server_handle = SimpleNamespace(
+        collective_rpc=SimpleNamespace(remote=remote),
+        clear_kv_cache=SimpleNamespace(remote=clear_cache),
+        set_global_steps=SimpleNamespace(remote=set_steps),
+    )
+    sender = SimpleNamespace(async_send_weights=AsyncMock())
+    upstream_module = inspect.getmodule(server_module.ServerAdapter)
+    with patch.object(upstream_module, "BucketedWeightSender", return_value=sender):
+        if reply == [None]:
+            await adapter.update_weights([("w", torch.zeros(1))], global_steps=7)
+        else:
+            with pytest.raises(RuntimeError, match="update_weights_from_ipc failed"):
+                await adapter.update_weights([("w", torch.zeros(1))], global_steps=7)
+
+    sender.async_send_weights.assert_awaited_once()
+    assert len(rpc_calls) == 1
+    assert rpc_calls[0][0] == "update_weights_from_ipc"
+    assert rpc_calls[0][1]["require_ack"] is True
+    if reply == [None]:
+        clear_cache.assert_awaited_once()
+        set_steps.assert_awaited_once_with(7)
+    else:
+        clear_cache.assert_not_awaited()
+        set_steps.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", [ValueError("worker failed"), TimeoutError("control timed out")])
+async def test_weight_sync_preserves_raised_error_and_other_controls(error):
+    server = object.__new__(server_module.vLLMOmniHttpServer)
+    server.engine = SimpleNamespace(num_stages=1, collective_rpc=AsyncMock(side_effect=error))
+    server._generate_strategy = SimpleNamespace(collective_rpc_stage_ids=lambda method: None)
+    with pytest.raises(type(error)) as raised:
+        await server.collective_rpc("update_weights_from_ipc", require_ack=True)
+    assert raised.value is error
+    server.engine.collective_rpc = AsyncMock(return_value=[{"supported": False, "error": "optional control"}])
+    assert await server.collective_rpc("optional_control") == [{"supported": False, "error": "optional control"}]
+    server.engine.collective_rpc.assert_awaited_once_with(
+        method="optional_control", timeout=None, args=(), kwargs=None, stage_ids=None
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("selected", [[0, 1], None])
+async def test_weight_sync_rejects_missing_second_stage_despite_two_first_stage_replies(selected):
+    server = object.__new__(server_module.vLLMOmniHttpServer)
+    server.engine = SimpleNamespace(num_stages=2, collective_rpc=AsyncMock(side_effect=[[None, None], []]))
+    server._generate_strategy = SimpleNamespace(collective_rpc_stage_ids=lambda method: selected)
+    with pytest.raises(RuntimeError, match="missing replica results for stage 1"):
+        await server.collective_rpc("update_weights_from_ipc", require_ack=True)
+    assert [call.kwargs["stage_ids"] for call in server.engine.collective_rpc.await_args_list] == [[0], [1]]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("selected", [[0, 1], None])
+async def test_weight_sync_rejects_missing_stage_from_pinned_orchestrator(selected):
+    from vllm_omni.engine.messages import CollectiveRPCRequestMessage
+    from vllm_omni.engine.orchestrator import Orchestrator
+    from vllm_omni.entrypoints import AsyncOmni
+
+    pools = [
+        SimpleNamespace(
+            stage_id=stage_id,
+            stage_type="diffusion",
+            live_replica_ids=lambda replica_ids=replica_ids: replica_ids,
+            collective_rpc=AsyncMock(return_value=None),
+        )
+        for stage_id, replica_ids in enumerate(([0, 1], []))
+    ]
+    orchestrator = object.__new__(Orchestrator)
+    orchestrator.num_stages = len(pools)
+    orchestrator.stage_pools = pools
+    orchestrator.rpc_async_queue = asyncio.Queue()
+    producer_messages = []
+    requested_stages = []
+
+    async def dispatch(**kwargs):
+        requested_stages.append(kwargs["stage_ids"])
+        request = CollectiveRPCRequestMessage(rpc_id="weight-sync", **kwargs)
+        await orchestrator._handle_collective_rpc(request)
+        result = await orchestrator.rpc_async_queue.get()
+        producer_messages.append(result)
+        # The pinned engine client discards result.stage_ids at this boundary.
+        return result.results
+
+    omni = SimpleNamespace(engine=SimpleNamespace(collective_rpc_async=dispatch))
+
+    async def collective_rpc(**kwargs):
+        return await AsyncOmni.collective_rpc(omni, **kwargs)
+
+    server = object.__new__(server_module.vLLMOmniHttpServer)
+    server.engine = SimpleNamespace(num_stages=2, collective_rpc=collective_rpc)
+    server._generate_strategy = SimpleNamespace(collective_rpc_stage_ids=lambda method: selected)
+
+    with pytest.raises(RuntimeError, match="missing replica results for stage 1"):
+        await server.collective_rpc("update_weights_from_ipc", require_ack=True)
+    assert requested_stages == [[0], [1]]
+    assert [message.stage_ids for message in producer_messages] == [[0, 0], []]
+    assert [message.results for message in producer_messages] == [[None, None], []]
+    assert pools[0].collective_rpc.await_count == 2
+    pools[1].collective_rpc.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_weight_sync_dispatches_each_selected_stage_once():
+    server = object.__new__(server_module.vLLMOmniHttpServer)
+    server.engine = SimpleNamespace(num_stages=2, collective_rpc=AsyncMock(side_effect=[[None, None], [None]]))
+    server._generate_strategy = SimpleNamespace(collective_rpc_stage_ids=lambda method: [0, 0, 1])
+
+    assert await server.collective_rpc("update_weights_from_ipc", require_ack=True) == [None, None, None]
+    assert [call.kwargs["stage_ids"] for call in server.engine.collective_rpc.await_args_list] == [[0], [1]]
+
+
+@pytest.mark.asyncio
+async def test_weight_sync_stops_before_next_stage_on_nested_worker_error():
+    server = object.__new__(server_module.vLLMOmniHttpServer)
+    server.engine = SimpleNamespace(
+        num_stages=2,
+        collective_rpc=AsyncMock(side_effect=[[[None], [{"error": "receiver failed"}]], [None]]),
+    )
+    server._generate_strategy = SimpleNamespace(collective_rpc_stage_ids=lambda method: [0, 1])
+
+    with pytest.raises(RuntimeError, match="receiver failed"):
+        await server.collective_rpc("update_weights_from_ipc", require_ack=True)
+    server.engine.collective_rpc.assert_awaited_once()
+    assert server.engine.collective_rpc.await_args.kwargs["stage_ids"] == [0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("selected", [[0, 1], None])
+async def test_weight_sync_checks_each_stage_with_unequal_replica_counts(selected):
+    server = object.__new__(server_module.vLLMOmniHttpServer)
+    server.engine = SimpleNamespace(num_stages=2, collective_rpc=AsyncMock(side_effect=[[None, None], [None]]))
+    server._generate_strategy = SimpleNamespace(collective_rpc_stage_ids=lambda method: selected)
+
+    assert await server.collective_rpc(
+        "update_weights_from_ipc", timeout=3, args=("weights",), kwargs={"ready": True}, require_ack=True
+    ) == [None, None, None]
+    assert [call.kwargs for call in server.engine.collective_rpc.await_args_list] == [
+        {
+            "method": "update_weights_from_ipc",
+            "timeout": 3,
+            "args": ("weights",),
+            "kwargs": {"ready": True},
+            "stage_ids": [stage_id],
+        }
+        for stage_id in (0, 1)
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("num_stages", "selected"), [(2, []), (0, None), (None, [0]), (2, [2])])
+async def test_weight_sync_rejects_empty_or_unknown_stages_before_dispatch(num_stages, selected):
+    server = object.__new__(server_module.vLLMOmniHttpServer)
+    server.engine = SimpleNamespace(num_stages=num_stages, collective_rpc=AsyncMock())
+    server._generate_strategy = SimpleNamespace(collective_rpc_stage_ids=lambda method: selected)
+
+    with pytest.raises(RuntimeError, match="update_weights_from_ipc failed"):
+        await server.collective_rpc("update_weights_from_ipc", require_ack=True)
+    server.engine.collective_rpc.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", [RuntimeError("receiver failed"), TimeoutError("receiver timed out")])
+async def test_weight_sync_rejects_pinned_stage_pool_error_envelope(error):
+    from vllm_omni.engine.stage_pool import StagePool
+    from vllm_omni.entrypoints import AsyncOmni
+
+    # Exercise the pinned producer's exception-to-data conversion, not a
+    # fabricated error dictionary. No model or transport process is needed.
+    pool = object.__new__(StagePool)
+    pool.stage_id = 0
+    pool.clients = [SimpleNamespace(stage_type="diffusion", collective_rpc_async=AsyncMock(side_effect=error))]
+
+    async def dispatch(**kwargs):
+        kwargs.pop("stage_ids")
+        return [await pool.collective_rpc(replica_id=0, **kwargs)]
+
+    omni = SimpleNamespace(engine=SimpleNamespace(collective_rpc_async=dispatch))
+
+    async def collective_rpc(**kwargs):
+        return await AsyncOmni.collective_rpc(omni, **kwargs)
+
+    server = object.__new__(server_module.vLLMOmniHttpServer)
+    server.engine = SimpleNamespace(num_stages=1, collective_rpc=collective_rpc)
+    server._generate_strategy = SimpleNamespace(collective_rpc_stage_ids=lambda method: [0])
+    with pytest.raises(RuntimeError, match="timed out" if isinstance(error, TimeoutError) else str(error)):
+        await server.collective_rpc("update_weights_from_ipc", require_ack=True)
 
 
 def test_ar_strategy_preserves_qwen3_omni_thinker_only_contract():
@@ -823,27 +1156,44 @@ async def test_diffusion_strategy_rejects_nonzero_priority():
         await strategy.run_generation(None, None, "request-id", None, priority=1)
 
 
-def _joint_video_audio_final_res():
-    video = torch.zeros(1, 3, 2, 8, 8, dtype=torch.uint8)
+def _joint_spec(sample_rate=48000):
+    return DiffusionIOSpec(
+        artifacts={
+            "video_preview": MediaSpec("video", "decoded", "TCHW", fps=24),
+            "audio": MediaSpec("audio", "decoded", "CT", sample_rate=sample_rate),
+        }
+    )
+
+
+def _joint_video_audio_final_res(sample_rate=48000):
+    from dataclasses import asdict
+
+    from vllm_omni.outputs import OmniRequestOutput
+
+    video = torch.zeros(2, 3, 8, 8, dtype=torch.uint8)
     audio = torch.zeros(1, 16)
-    final_res = SimpleNamespace(
-        images=[(video, audio)],
+    final_res = OmniRequestOutput.from_diffusion(
+        request_id="joint-output",
+        images=[{"video_preview": video, "audio": audio}],
         trajectory_latents=None,
         trajectory_timesteps=None,
         trajectory_log_probs=None,
-        multimodal_output=None,
-        request_output=None,
+        multimodal_output={
+            "metadata": {
+                "media_artifacts": {
+                    "primary": "video_preview",
+                    "preview": "video_preview",
+                    "audio": "audio",
+                    "specs": {name: asdict(spec) for name, spec in _joint_spec(sample_rate).artifacts.items()},
+                }
+            }
+        },
     )
     return final_res, audio
 
 
 def test_diffusion_strategy_uses_declared_audio_sample_rate(monkeypatch):
-    pipeline_cls = SimpleNamespace(
-        diffusion_io_spec=DiffusionIOSpec(
-            primary=MediaSpec("video"),
-            auxiliary=(MediaSpec("audio", sample_rate=48000),),
-        )
-    )
+    pipeline_cls = SimpleNamespace(diffusion_io_spec=_joint_spec())
     monkeypatch.setattr(
         diffusion_strategy_module.VllmOmniPipelineBase,
         "get_class",
@@ -860,8 +1210,8 @@ def test_diffusion_strategy_uses_declared_audio_sample_rate(monkeypatch):
     # The audio sample rate comes from the adapter-declared DiffusionIOSpec,
     # not the strategy's legacy 32 kHz fallback.
     assert processed.extra_fields["audio_sample_rate"] == 48000
-    # process_output unbatches the leading dimension of auxiliary media.
-    torch.testing.assert_close(processed.extra_fields["audio"], audio[0])
+    # Audio is already a declared per-sample CT artifact, not a positional batch.
+    torch.testing.assert_close(processed.extra_fields["audio"], audio)
     # The declared primary modality rides to downstream consumers so they read
     # the media kind instead of inferring it from the tensor rank.
     assert processed.extra_fields["media_kind"] == "video"
@@ -869,29 +1219,29 @@ def test_diffusion_strategy_uses_declared_audio_sample_rate(monkeypatch):
 
 @pytest.mark.parametrize("runtime_kind", ["image", "depth"])
 def test_diffusion_strategy_rejects_conflicting_media_kind(monkeypatch, runtime_kind):
-    strategy = DiffusionStrategy(SimpleNamespace(global_steps=1))
+    strategy = DiffusionStrategy(SimpleNamespace(global_steps=1, model_config=None))
     monkeypatch.setattr(
         strategy,
         "_diffusion_io_spec",
-        lambda: DiffusionIOSpec(MediaSpec("video"), (MediaSpec("audio", sample_rate=48000),)),
+        _joint_spec,
     )
     final_res, _ = _joint_video_audio_final_res()
     final_res.request_id = "request-conflict"
-    final_res.multimodal_output = {"metadata": {"rl": {"media_kind": runtime_kind}}}
+    final_res.multimodal_output["metadata"]["rl"] = {"media_kind": runtime_kind}
 
-    with pytest.raises(ValueError, match="media_kind.*request-conflict.*video"):
+    with pytest.raises(ValueError, match="request-conflict.*media_kind"):
         strategy.process_output(final_res, None, {"output_type": "pt"})
 
 
 def test_diffusion_strategy_accepts_matching_kind_and_runtime_audio_rate(monkeypatch):
-    strategy = DiffusionStrategy(SimpleNamespace(global_steps=1))
+    strategy = DiffusionStrategy(SimpleNamespace(global_steps=1, model_config=None))
     monkeypatch.setattr(
         strategy,
         "_diffusion_io_spec",
-        lambda: DiffusionIOSpec(MediaSpec("video"), (MediaSpec("audio", sample_rate=48000),)),
+        lambda: _joint_spec(sample_rate=None),
     )
-    final_res, _ = _joint_video_audio_final_res()
-    final_res.multimodal_output = {"metadata": {"rl": {"media_kind": "video", "audio_sample_rate": 24000}}}
+    final_res, _ = _joint_video_audio_final_res(sample_rate=24000)
+    final_res.multimodal_output["metadata"]["rl"] = {"media_kind": "video", "audio_sample_rate": 24000}
 
     result = strategy.process_output(final_res, None, {"output_type": "pt"})
     assert result.extra_fields["media_kind"] == "video"
@@ -900,26 +1250,34 @@ def test_diffusion_strategy_accepts_matching_kind_and_runtime_audio_rate(monkeyp
 
 @pytest.mark.parametrize("declared", [False, True])
 def test_diffusion_strategy_rejects_extra_tuple_streams(monkeypatch, declared):
-    strategy = DiffusionStrategy(SimpleNamespace(global_steps=1))
-    spec = DiffusionIOSpec(MediaSpec("video"), (MediaSpec("audio", sample_rate=48000),)) if declared else None
+    strategy = DiffusionStrategy(SimpleNamespace(global_steps=1, model_config=None))
+    spec = _joint_spec() if declared else None
     monkeypatch.setattr(strategy, "_diffusion_io_spec", lambda: spec)
     final_res, audio = _joint_video_audio_final_res()
-    final_res.images[0] += (audio.clone(),)
-    with pytest.raises(ValueError, match="Unsupported diffusion media tuple"):
+    final_res.images = [(final_res.images[0]["video_preview"], audio, audio.clone())]
+    final_res.multimodal_output.clear()
+    with pytest.raises(ValueError, match="named media_artifacts declaration required"):
         strategy.process_output(final_res, None, {"output_type": "pt"})
 
 
-def test_diffusion_strategy_rejects_undeclared_tuple_audio(monkeypatch):
-    strategy = DiffusionStrategy(SimpleNamespace(global_steps=1))
-    monkeypatch.setattr(strategy, "_diffusion_io_spec", lambda: DiffusionIOSpec(MediaSpec("video")))
+def test_diffusion_strategy_rejects_undeclared_named_audio(monkeypatch):
+    strategy = DiffusionStrategy(SimpleNamespace(global_steps=1, model_config=None))
+    monkeypatch.setattr(
+        strategy,
+        "_diffusion_io_spec",
+        lambda: DiffusionIOSpec(
+            artifacts={
+                "video_preview": MediaSpec("video", "decoded", "TCHW"),
+            }
+        ),
+    )
     final_res, _ = _joint_video_audio_final_res()
-    with pytest.raises(ValueError, match="Unsupported diffusion media tuple"):
+    with pytest.raises(ValueError, match="undeclared artifact='audio'"):
         strategy.process_output(final_res, None, {"output_type": "pt"})
 
 
-def test_diffusion_strategy_omits_audio_sample_rate_without_declared_spec(monkeypatch):
-    # Without an adapter-declared DiffusionIOSpec the strategy still surfaces the
-    # auxiliary audio stream but attaches no model-specific sample-rate default.
+def test_diffusion_strategy_uses_runtime_header_without_static_spec(monkeypatch):
+    # The actual artifact carries its rate; the strategy supplies no default.
     monkeypatch.setattr(
         diffusion_strategy_module.VllmOmniPipelineBase,
         "get_class",
@@ -933,10 +1291,9 @@ def test_diffusion_strategy_omits_audio_sample_rate_without_declared_spec(monkey
 
     processed = DiffusionStrategy(server).process_output(final_res, None, {"output_type": "pt", "logprobs": False})
 
-    torch.testing.assert_close(processed.extra_fields["audio"], audio[0])
-    assert "audio_sample_rate" not in processed.extra_fields
-    # No declared spec => no declared media kind is surfaced either.
-    assert "media_kind" not in processed.extra_fields
+    torch.testing.assert_close(processed.extra_fields["audio"], audio)
+    assert processed.extra_fields["audio_sample_rate"] == 48000
+    assert processed.extra_fields["media_kind"] == "video"
 
 
 @pytest.mark.parametrize(
@@ -975,8 +1332,52 @@ async def test_strategy_preserves_mode_specific_engine_call(strategy_cls, priori
     assert set(engine.kwargs) - {"prompt", "request_id", "sampling_params_list"} == expected_extra_keys
 
 
+@pytest.mark.parametrize("finish_reason,expected", [("stop", "completed"), ("abort", "aborted"), (None, "aborted")])
+def test_diffusion_empty_output_preserves_completion_state(finish_reason, expected):
+    from vllm_omni.outputs import OmniRequestOutput
+
+    final = OmniRequestOutput.from_diffusion(request_id="empty", images=[])
+    final.outputs = [SimpleNamespace(finish_reason=finish_reason)]
+    result = DiffusionStrategy(SimpleNamespace(global_steps=1, model_config=None)).process_output(final, None, {})
+    assert result.diffusion_output.numel() == 0
+    assert result.stop_reason == expected
+
+
+@pytest.mark.parametrize("wrapped", [False, True])
+def test_diffusion_named_output_preserves_completion_and_preemption_state(wrapped):
+    from vllm_omni.outputs import OmniRequestOutput
+
+    final, _ = _joint_video_audio_final_res()
+    completion = SimpleNamespace(finish_reason="length", num_preempted=3)
+    if wrapped:
+        final.request_output = OmniRequestOutput.from_diffusion(request_id="wrapped-output", images=[])
+        final.request_output.outputs = [completion]
+    else:
+        final.outputs = [completion]
+    result = DiffusionStrategy(SimpleNamespace(global_steps=1, model_config=None)).process_output(final, None, {})
+    assert result.stop_reason == "completed"
+    assert result.num_preempted == 3
+    assert result.artifacts["video_preview"].data.dtype == torch.uint8
+
+
+@pytest.mark.parametrize("field", ["primary", "specs", "preview", "audio"])
+def test_diffusion_rejects_incomplete_header_with_request_context(field):
+    final, _ = _joint_video_audio_final_res()
+    final.multimodal_output["metadata"]["media_artifacts"].pop(field)
+    with pytest.raises(ValueError, match="joint-output.*invalid media_artifacts header"):
+        DiffusionStrategy(SimpleNamespace(global_steps=1, model_config=None)).process_output(final, None, {})
+
+
+def test_diffusion_rejects_non_tensor_named_payload_with_context():
+    final, _ = _joint_video_audio_final_res()
+    final.request_id = "bad-tensor"
+    final.images[0]["audio"] = [0.0, 1.0]
+    with pytest.raises(TypeError, match="bad-tensor.*artifact='audio'.*expected tensor"):
+        DiffusionStrategy(SimpleNamespace(global_steps=1, model_config=None)).process_output(final, None, {})
+
+
 def test_drop_defaulted_engine_args_keeps_only_explicit_overrides():
-    """Only explicitly-set engine args may reach AsyncOmni (12e9280+)."""
+    """Only explicitly-set engine args may reach AsyncOmni (6e8c1097+)."""
     from dataclasses import asdict
 
     from vllm_omni.engine.arg_utils import OmniEngineArgs
@@ -992,6 +1393,10 @@ def test_drop_defaulted_engine_args_keeps_only_explicit_overrides():
     assert "_api_process_count" not in filtered
     assert "_api_process_rank" not in filtered
     assert "convert" not in filtered
+    # The serialized default fault-tolerance dict must not survive either: vLLM
+    # auto-enables fault tolerance whenever a config dict arrives, so forwarding
+    # the default would enable it without a load balancer.
+    assert "fault_tolerance_config" not in filtered
     # ... including OrchestratorArgs parser defaults (the ownership check
     # flags every non-None value, even False).
     engine_args["ulysses_mode"] = "strict"
@@ -1095,6 +1500,33 @@ def test_ar_deploy_config_omits_text_encoder_tp_size_on_ar_stages(tmp_path, monk
     assert stages[1]["text_encoder_tp_size"] == 1
 
 
+def test_stage_config_boundary_rejects_expanded_compilation_config(monkeypatch):
+    """The pin's stage config rejects asdict-expanded compilation configs.
+
+    The rollout always re-expands vLLM's compilation_config (EngineArgs dict→object
+    coercion followed by ``asdict`` in default filtering); because this boundary
+    rejects the expanded shape, ``_restore_raw_compilation_config`` must keep
+    restoring the raw user mapping before stage-config construction.
+    """
+    from dataclasses import asdict
+
+    import pydantic
+    from vllm.config import CompilationConfig
+    from vllm_omni import platforms
+    from vllm_omni.config.omni_config import VllmOmniDiffusionStageConfig
+    from vllm_omni.config.stage_config import StagePipelineConfig
+
+    platform = platforms.current_omni_platform
+    monkeypatch.setattr(platform, "device_name", "cpu", raising=False)
+    monkeypatch.setattr(platform, "device_type", "cpu", raising=False)
+
+    with pytest.raises(pydantic.ValidationError, match="compilation_config"):
+        VllmOmniDiffusionStageConfig(
+            stage_pipeline_config=StagePipelineConfig(stage_id=0, model_stage="model", final_output=True),
+            compilation_config=asdict(CompilationConfig()),
+        )
+
+
 def test_restore_raw_compilation_config_keeps_user_mapping():
     """Only the raw user mapping may travel; expanded objects are rejected."""
     from dataclasses import asdict
@@ -1122,22 +1554,41 @@ def test_diffusion_ingress_allowed_fields_includes_pinned_frontend_fields():
     assert "height" in allowed or "num_inference_steps" in allowed or "dtype" in allowed
 
 
-def test_diffusion_ingress_allowed_fields_supports_npu_frontend_path(monkeypatch):
-    import sys
-    from dataclasses import dataclass
-    from types import ModuleType
+def test_verl_plain_cli_parser_builds_tracking_serve_subparser():
+    """verl builds the rollout CLI from a plain FlexibleArgumentParser; the
+    serve subcommand this repo returns must still construct and parse (the
+    pin's serve rejects non-tracking subparsers)."""
+    import vllm_omni.entrypoints.cli.serve
+    from vllm.utils.argparse_utils import FlexibleArgumentParser
 
-    @dataclass
-    class NpuFrontendArgs:
-        host: str | None = None
+    from verl_omni.workers.rollout.vllm_rollout.vllm_omni_async_server import _TrackingCliModule
 
-    monkeypatch.setitem(sys.modules, "vllm.entrypoints.launchers", None)
-    monkeypatch.setitem(sys.modules, "vllm.entrypoints.launchers.cli_args", None)
-    npu_cli_args = ModuleType("vllm.entrypoints.openai.cli_args")
-    npu_cli_args.FrontendArgs = NpuFrontendArgs
-    monkeypatch.setitem(sys.modules, "vllm.entrypoints.openai.cli_args", npu_cli_args)
+    parser = FlexibleArgumentParser(description="verl launch_server equivalent")
+    subparsers = parser.add_subparsers(required=False, dest="subparser")
+    cmds = {}
+    for command in _TrackingCliModule(vllm_omni.entrypoints.cli.serve).cmd_init():
+        command.subparser_init(subparsers).set_defaults(dispatch_function=command.cmd)
+        cmds[command.name] = command
 
-    allowed = diffusion_strategy_module._diffusion_ingress_allowed_fields()
+    parsed = parser.parse_args(["serve", "dummy-model"])
 
-    assert isinstance(allowed, frozenset)
-    assert "host" in allowed
+    assert parsed.subparser == "serve"
+    assert parsed.model_tag == "dummy-model"
+
+
+def test_rollout_logging_level_canonicalized_for_diffusion_workers(monkeypatch):
+    """verl pins VLLM_LOGGING_LEVEL=WARN; vLLM's LoggingConfig accepts only
+    canonical level names, and diffusion workers validate the env on boot."""
+    import os
+
+    from vllm.config.logging import LoggingConfig
+
+    from verl_omni.workers.rollout.vllm_rollout.vllm_omni_async_server import (
+        _normalize_rollout_logging_level,
+    )
+
+    monkeypatch.setenv("VLLM_LOGGING_LEVEL", "WARN")
+    _normalize_rollout_logging_level()
+
+    assert os.environ["VLLM_LOGGING_LEVEL"] == "WARNING"
+    LoggingConfig(log_level=os.environ["VLLM_LOGGING_LEVEL"])

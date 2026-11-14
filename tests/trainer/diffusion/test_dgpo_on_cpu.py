@@ -442,7 +442,13 @@ def test_actor_update_keeps_dgpo_groups_unshuffled(
 
 @pytest.mark.parametrize(
     "loss_mode,uses_old_adapter,accepted",
-    [("dgpo", None, True), ("diffusion_nft", None, True), ("dpo", None, False), ("dpo", True, True)],
+    [
+        ("dgpo", None, True),
+        ("diffusion_nft", None, True),
+        ("omni_nft", None, True),
+        ("dpo", None, False),
+        ("dpo", True, True),
+    ],
 )
 @pytest.mark.parametrize("trainer_version", ["v0", "v1"])
 def test_old_adapter_requires_a_loss_that_uses_it(loss_mode, uses_old_adapter, accepted, trainer_version, monkeypatch):
@@ -521,7 +527,7 @@ def make_trainer_config(**overrides):
                 "v1": {"trainer_mode": "sync", "sampler": {"drop_incomplete_groups": True}},
             },
             "actor_rollout_ref": {
-                "model": {"lora_rank": 32, "policy_state_adapters": ["default", "old"]},
+                "model": {"algorithm": "dgpo", "lora_rank": 32, "policy_state_adapters": ["default", "old"]},
                 "rollout": {"n": 8, "rollout_adapter": "old"},
                 "actor": {
                     "ppo_mini_batch_size": 4,
@@ -549,6 +555,10 @@ def make_trainer_config(**overrides):
         ({"trainer.n_gpus_per_node": 4, "data.train_batch_size": 6}, "6 prompts per actor update"),
         ({"actor_rollout_ref.actor.use_dynamic_bsz": True}, "use_dynamic_bsz"),
         ({"actor_rollout_ref.model.lora_rank": 0}, "lora_rank must be > 0"),
+        (
+            {"actor_rollout_ref.model.algorithm": "awm"},
+            "model.algorithm must be dgpo when diffusion_loss.loss_mode is dgpo",
+        ),
         ({"actor_rollout_ref.model.policy_state_adapters": ["default"]}, 'must include "old"'),
         ({"actor_rollout_ref.rollout.rollout_adapter": "default"}, "rollout_adapter must be old"),
         ({"actor_rollout_ref.actor.use_kl_loss": True}, "use_kl_loss must be False"),
@@ -597,8 +607,9 @@ def test_dgpo_trainer_config_requires_whole_groups(overrides, message):
 
 
 def test_other_losses_reject_the_dgpo_timestep_knobs():
+    """Losses that do not consume the shared-timestep knobs reject them at trainer start."""
     config = make_trainer_config(**{"algorithm.train_timestep_count": 4})
-    with pytest.raises(ValueError, match="only used by the dgpo loss"):
+    with pytest.raises(ValueError, match="only used by the dgpo, awm and crd losses"):
         get_diffusion_loss_fn("diffusion_nft").validate_trainer_config(config)
     get_diffusion_loss_fn("diffusion_nft").validate_trainer_config(make_trainer_config())
 
@@ -606,6 +617,7 @@ def test_other_losses_reject_the_dgpo_timestep_knobs():
 DGPO_TRAINER_OVERRIDES = [
     "algorithm.trainer_type=direct_preference",
     "algorithm.sample_source=online",
+    "actor_rollout_ref.model.algorithm=dgpo",
     "actor_rollout_ref.actor.diffusion_loss.loss_mode=dgpo",
     "actor_rollout_ref.model.lora_rank=8",
     "actor_rollout_ref.model.policy_state_adapters=[default,old]",
@@ -645,6 +657,7 @@ def test_v1_trainer_init_accepts_a_dgpo_config():
     "extra,message",
     [
         (["actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1"], "multiple of rollout.n"),
+        (["actor_rollout_ref.model.algorithm=awm"], "model.algorithm must be dgpo"),
         (["actor_rollout_ref.model.policy_state_adapters=[default]"], 'must include "old"'),
         (["trainer.v1.sampler.drop_incomplete_groups=false"], "drop_incomplete_groups must be True"),
     ],

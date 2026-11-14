@@ -14,33 +14,20 @@
 """CPU regression tests for diffusion V1 async checkpoint recovery."""
 
 import logging
-import uuid
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import torch
-import transfer_queue as tq
 from omegaconf import OmegaConf
 from verl.utils import tensordict_utils as tu
 
 from verl_omni.trainer.diffusion.v1 import trainer_base as trainer_base_module
 from verl_omni.trainer.diffusion.v1 import trainer_separate_async as separate_async_module
+from verl_omni.trainer.diffusion.v1.trainer_colocate_async import PolicyGradientDiffusionTrainerV1ColocateAsync
 from verl_omni.trainer.diffusion.v1.trainer_separate_async import PolicyGradientDiffusionTrainerV1SeparateAsync
-
-_REAL_TQ_SUPPORTS_CHECKPOINT = trainer_base_module._tq_supports_checkpoint
-requires_tq_checkpoint = pytest.mark.skipif(
-    not _REAL_TQ_SUPPORTS_CHECKPOINT(),
-    reason="TransferQueue >= 0.1.9 with checkpoint APIs is required",
-)
-
-
-@pytest.fixture(scope="module")
-def initialized_tq():
-    tq.init()
-    yield
-    tq.close()
 
 
 def test_transfer_queue_checkpoint_guard(monkeypatch):
@@ -168,6 +155,7 @@ def test_reissue_restarts_only_inflight_prompt_groups(monkeypatch, trainer_mode)
     trainer = object.__new__(PolicyGradientDiffusionTrainerV1SeparateAsync)
     trainer.trainer_mode = trainer_mode
     trainer.global_steps = 8
+    trainer.config = OmegaConf.create({"actor_rollout_ref": {"rollout": {"seed": None}}})
     trainer.agent_loop_manager = SimpleNamespace(generate_sequences=submitted.append)
 
     assert trainer._reissue_inflight_prompts() == 2
@@ -183,102 +171,74 @@ def test_reissue_restarts_only_inflight_prompt_groups(monkeypatch, trainer_mode)
     assert submitted == [prompt_batch]
 
 
-@requires_tq_checkpoint
 @pytest.mark.parametrize("trainer_mode", ["separate_async", "colocate_async"])
-def test_transfer_queue_checkpoint_roundtrip_and_reissue(initialized_tq, tmp_path, monkeypatch, trainer_mode):
-    partition_id = f"test-{uuid.uuid4().hex}"
-    pending, finished = uuid.uuid4().hex, uuid.uuid4().hex
+def test_reissue_restamps_legacy_rollout_seed_for_the_current_step(monkeypatch, trainer_mode):
+    # The TQ round trip keeps tensor fields only: ``rollout_seed`` is gone and
+    # ``rollout_seed_index`` still holds the positions from the original step.
+    """Legacy prompts gain current seeds without colliding with subsequent warmup prompts."""
+    inflight = ["pending", "running"]
+    items = {uid: {"is_prompt": True, "status": "pending", "global_steps": 2} for uid in inflight}
     prompt_batch = tu.get_tensordict(
         {
-            "uid": [pending, finished],
-            "raw_prompt": ["pending prompt", "finished prompt"],
-            "index": torch.tensor([0, 1]),
+            "uid": inflight,
+            "raw_prompt": ["prompt-pending", "prompt-running"],
+            "index": torch.tensor([0, 0]),
+            "rollout_seed_index": torch.tensor([4, 5]),
         }
     )
+    updated = []
+    submitted = []
+
+    monkeypatch.setattr(trainer_base_module, "_tq_supports_checkpoint", lambda: True)
+    monkeypatch.setattr(trainer_base_module.tq, "kv_list", lambda partition_id: {partition_id: deepcopy(items)})
+    monkeypatch.setattr(trainer_base_module.tq, "kv_batch_get", lambda *, keys, partition_id: prompt_batch)
+    monkeypatch.setattr(trainer_base_module.tq, "kv_batch_put", lambda **kwargs: updated.append(kwargs))
+
     trainer = object.__new__(PolicyGradientDiffusionTrainerV1SeparateAsync)
     trainer.trainer_mode = trainer_mode
-    trainer.global_steps = 3
-    trainer.config = OmegaConf.create(
-        {
-            "data": {"train_batch_size": 2, "gen_batch_size": 1},
-            "trainer": {"v1": {"sampler": {"drop_incomplete_groups": False}}},
-            "actor_rollout_ref": {"rollout": {"seed": 42}},
-        }
-    )
-    chunks = iter(prompt_batch.split(1))
+    trainer.global_steps = 8
+    trainer.config = OmegaConf.create({"data": {"train_batch_size": 2}, "actor_rollout_ref": {"rollout": {"seed": 7}}})
     trainer._rollout_seed_step = None
     trainer._rollout_seed_next_index = 0
-    trainer._fetch_one_gen_batch = lambda: next(chunks)
-    prompt_batch = trainer._next_train_batch()
-    trainer.agent_loop_manager = SimpleNamespace(generate_sequences=lambda batch: None)
-    real_put = tq.kv_batch_put
-    with monkeypatch.context() as patch:
-        patch.setattr(tq, "kv_batch_put", lambda **kwargs: real_put(**{**kwargs, "partition_id": partition_id}))
-        assert trainer._submit_batch_to_rollout(prompt_batch) == 2
-    tq.kv_batch_put(
-        keys=[pending, finished],
-        partition_id=partition_id,
-        tags=[
-            {"is_prompt": True, "status": "running", "global_steps": 3},
-            {"is_prompt": True, "status": "finished", "global_steps": 3},
-        ],
-    )
-    pending_trajectory = f"{pending}_0_0"
-    finished_trajectory = f"{finished}_0_0"
-    consumed_trajectory = f"{uuid.uuid4().hex}_0_0"
-    for key in (pending_trajectory, finished_trajectory, consumed_trajectory):
-        tq.kv_put(
-            key=key,
-            partition_id=partition_id,
-            fields={"input_ids": torch.tensor([1, 2, 3])},
-            tag={"is_prompt": False, "global_steps": 3},
-        )
-
-    checkpoint_dir = tmp_path / "transfer_queue"
-    tq.save_checkpoint(checkpoint_dir, metadata={"global_steps": 3})
-    tq.kv_clear(keys=list(tq.kv_list(partition_id)[partition_id]), partition_id=partition_id)
-    tq.load_checkpoint(checkpoint_dir)
-
-    submitted = []
-    trainer.global_steps = 4
     trainer.agent_loop_manager = SimpleNamespace(generate_sequences=submitted.append)
-    try:
-        assert trainer._reissue_inflight_prompts(partition_id) == 1
-        items = tq.kv_list(partition_id)[partition_id]
-        assert items[pending]["status"] == "pending"
-        assert items[finished]["status"] == "finished"
-        assert pending_trajectory not in items
-        assert consumed_trajectory not in items
-        assert finished_trajectory in items
-        assert list(submitted[0]["uid"]) == [pending]
-        assert list(submitted[0]["raw_prompt"]) == ["pending prompt"]
-        assert int(submitted[0]["global_steps"]) == 4
-        assert int(submitted[0]["rollout_seed"][0]) == 44
-        assert int(submitted[0]["rollout_seed_index"][0]) == 0
-        persisted_prompt = tq.kv_batch_get(keys=[pending], partition_id=partition_id)
-        assert list(persisted_prompt["uid"]) == [pending]
-        assert list(persisted_prompt["raw_prompt"]) == ["pending prompt"]
-        assert int(persisted_prompt["index"][0]) == 0
-        assert int(persisted_prompt["rollout_seed"][0]) == 44
-        assert int(persisted_prompt["rollout_seed_index"][0]) == 0
-    finally:
-        tq.kv_clear(keys=list(tq.kv_list(partition_id)[partition_id]), partition_id=partition_id)
+
+    assert trainer._reissue_inflight_prompts() == 2
+    assert submitted[0]["rollout_seed"].tolist() == [7 + 8 - 1] * 2
+    assert [int(v) for v in submitted[0]["rollout_seed_index"]] == [0, 1]
+    assert [int(v) for v in updated[0]["fields"]["rollout_seed_index"]] == [0, 1]
+
+    # Warmup prompts submitted after the reissue in the same step take the next positions.
+    trainer.train_dataloader_it = iter([{"raw_prompt": np.array(["p0", "p1"], dtype=object)}])
+    trainer._gen_batch_seq = 0
+    trainer._effective_generation_batch_size = 2
+    warmup = trainer._next_train_batch()
+    assert warmup["rollout_seed"].tolist() == [7 + 8 - 1] * 2
+    assert [int(v) for v in warmup["rollout_seed_index"]] == [2, 3]
 
 
 @pytest.mark.parametrize(
     ("statuses", "expected_submissions"),
     [
-        (["pending"] * 4, []),
-        (["finished"], [("batch", 2), ("batch", 2)]),
-        (["running"] * 3, [("prompts", 1)]),
+        ([], {"separate_async": [("batch", 2), ("batch", 2)], "colocate_async": [("prompts", 4)]}),
+        (["pending"] * 4, {"separate_async": [], "colocate_async": []}),
+        (["finished"], {"separate_async": [("batch", 2), ("prompts", 1)], "colocate_async": [("prompts", 3)]}),
+        (["running"] * 3, {"separate_async": [("prompts", 1)], "colocate_async": [("prompts", 1)]}),
+        (["running"] * 5, {"separate_async": [], "colocate_async": []}),
     ],
 )
-def test_warmup_tops_up_inflight_prompts(monkeypatch, statuses, expected_submissions):
-    trainer = object.__new__(PolicyGradientDiffusionTrainerV1SeparateAsync)
+@pytest.mark.parametrize("trainer_mode", ["separate_async", "colocate_async"])
+def test_warmup_tops_up_restored_prompt_groups(monkeypatch, statuses, expected_submissions, trainer_mode):
+    """Finished groups count toward warmup in both async modes."""
+    cls = (
+        PolicyGradientDiffusionTrainerV1SeparateAsync
+        if trainer_mode == "separate_async"
+        else PolicyGradientDiffusionTrainerV1ColocateAsync
+    )
+    trainer = object.__new__(cls)
     trainer.config = OmegaConf.create(
         {
             "data": {"train_batch_size": 2},
-            "trainer": {"v1": {"separate_async": {"num_warmup_batches": 2}}},
+            "trainer": {"v1": {trainer_mode: {"num_warmup_batches": 2}}},
         }
     )
     # Skip the hybrid reclaim branch; this test only covers warmup top-up math.
@@ -292,4 +252,4 @@ def test_warmup_tops_up_inflight_prompts(monkeypatch, statuses, expected_submiss
     }
     monkeypatch.setattr(separate_async_module.tq, "kv_list", lambda partition_id: {partition_id: queue_items})
     trainer.on_train_begin()
-    assert submitted == expected_submissions
+    assert submitted == expected_submissions[trainer_mode]

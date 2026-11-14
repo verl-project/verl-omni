@@ -8,11 +8,17 @@ on:
     paths:
       - "verl_omni/**"
       - "tests/npu_smoke/**"
+      - "tests/agent_loop/**"
+      - "tests/reward_loop/**"
       - "tests/workers/**"
+      - "tests/trainer/**"
+      - "tests/pipelines/**"
       - "tests/special_e2e/**"
       - "pyproject.toml"
-      - .github/workflows/npu_smoke.yml
+      - ".github/workflows/npu_smoke.yml"
       - .github/vllm_omni_pin.txt
+      - .github/vllm_ascend_pin.txt
+      - .github/verl_pin.txt
   pull_request:
     branches:
       - main
@@ -21,11 +27,17 @@ on:
     paths:
       - "verl_omni/**"
       - "tests/npu_smoke/**"
+      - "tests/agent_loop/**"
+      - "tests/reward_loop/**"
       - "tests/workers/**"
+      - "tests/trainer/**"
+      - "tests/pipelines/**"
       - "tests/special_e2e/**"
       - "pyproject.toml"
-      - .github/workflows/npu_smoke.yml
+      - ".github/workflows/npu_smoke.yml"
       - .github/vllm_omni_pin.txt
+      - .github/vllm_ascend_pin.txt
+      - .github/verl_pin.txt
 
 # Declare permissions just read content and PR file metadata.
 permissions:
@@ -33,23 +45,67 @@ permissions:
   pull-requests: read
 
 jobs:
-  setup_runner:
+  resolve_groups:
     # Pull requests run only after a CI label is applied:
-    #   ready-for-ci / ci-npu           -> tests 0 and 1
-    #   ci-npu-rollout                  -> test 0
-    #   ci-npu-flowgrpo                 -> test 1
+    #   ready-for-ci                    -> all NPU tests as part of full PR validation
+    #   ci-npu                         -> all NPU tests for targeted NPU validation
+    #   ci-npu-core                   -> core group
+    #   ci-npu-e2e                    -> e2e group
     # Pushes to main and release branches run the full suite.
     if: >-
       github.repository_owner == 'verl-project' &&
       (github.event_name != 'pull_request' ||
        contains(github.event.pull_request.labels.*.name, 'ready-for-ci') ||
        contains(github.event.pull_request.labels.*.name, 'ci-npu') ||
-       contains(github.event.pull_request.labels.*.name, 'ci-npu-rollout') ||
-       contains(github.event.pull_request.labels.*.name, 'ci-npu-flowgrpo'))
+       contains(github.event.pull_request.labels.*.name, 'ci-npu-core') ||
+       contains(github.event.pull_request.labels.*.name, 'ci-npu-e2e'))
+    runs-on: ubuntu-latest
+    outputs:
+      groups: ${{ steps.resolve-groups.outputs.groups }}
+    steps:
+      - name: Resolve NPU CI groups
+        id: resolve-groups
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_LABELS: ${{ github.event_name == 'pull_request' && toJSON(github.event.pull_request.labels.*.name) || '[]' }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+
+          label_groups = {
+              "ready-for-ci": ("core", "e2e"),
+              "ci-npu": ("core", "e2e"),
+              "ci-npu-core": ("core",),
+              "ci-npu-e2e": ("e2e",),
+          }
+          labels = json.loads(os.environ["PR_LABELS"]) if os.environ["EVENT_NAME"] == "pull_request" else ["ci-npu"]
+          selected = {group for label in labels for group in label_groups.get(label, ())}
+          groups = [group for group in ("core", "e2e") if group in selected]
+          if not groups:
+              raise SystemExit("No NPU smoke groups selected.")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write(f"groups={json.dumps(groups)}\n")
+          PY
+
+  npu_smoke:
+    needs: resolve_groups
+    if: needs.resolve_groups.result == 'success'
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        group: ${{ fromJSON(needs.resolve_groups.outputs.groups) }}
     runs-on: linux-aarch64-a2b4-8
     timeout-minutes: 120
     container:
-      image: swr.cn-north-4.myhuaweicloud.com/mindspeed/pr-verl-omni-a2:latest
+      # Previous-generation image that exists in the registry; the pinned
+      # stack is synced onto it by tests/npu_smoke/sync_npu_stack.sh.
+      # TODO (mike): flip to the v011-vllm033-omni033 tag once the registry
+      # image is rebuilt from docker/Dockerfile.npu, and drop the sync step.
+      image: swr.cn-north-4.myhuaweicloud.com/mindspeed/pr-verl-omni-a2:v010-vllm030-omni030
       options: >-
         --shm-size 16g
     env:
@@ -59,102 +115,55 @@ jobs:
       PIP_TRUSTED_HOST: "cache-service.nginx-pypi-cache.svc.cluster.local"
       TRANSFORMERS_VERBOSITY: 'error'
     steps:
-      - name: Check npu and CANN info
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install the pinned verl over the image's stack
+        shell: bash
+        run: |
+          pip install --no-deps --force-reinstall "verl @ git+https://github.com/verl-project/verl.git@$(cat .github/verl_pin.txt)"
+          # The image predates the pin bump and still ships TransferQueue 0.1.9;
+          # verl requires >=0.1.11, and --no-deps above skips it.
+          pip install "TransferQueue==0.1.11"
+      - name: Check NPU and CANN info
+        shell: bash
         run: |
           cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
           npu-smi info
           echo "===== Ascend/NPU environment ====="
           env | LC_ALL=C sort | grep -E "(/usr/local/Ascend/|^(ASCEND|ATB|HCCL|NPU|DEVICE_|RANK_TABLE|RAY_EXPERIMENTAL_NOSET_ASCEND))" || true
-      - name: Resolve NPU CI mode
-        id: resolve-mode
+      - name: Sync pinned NPU stack onto the base image
         shell: bash
         run: |
-          mode="none"
-          pr_labels="${{ github.event_name == 'pull_request' && join(github.event.pull_request.labels.*.name, ',') || '' }}"
-          if [[ "${{ github.event_name }}" != "pull_request" ]]; then
-            mode="all"
-          elif [[ ",${pr_labels}," == *",ready-for-ci,"* ]]; then
-            mode="all"
-          elif [[ ",${pr_labels}," == *",ci-npu,"* ]]; then
-            mode="all"
-          elif [[ ",${pr_labels}," == *",ci-npu-rollout,"* ]]; then
-            mode="rollout"
-          elif [[ ",${pr_labels}," == *",ci-npu-flowgrpo,"* ]]; then
-            mode="flowgrpo"
-          else
-            mode="none"
-          fi
-
-          echo "mode=${mode}" >> "$GITHUB_OUTPUT"
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        if: steps.resolve-mode.outputs.mode != 'none'
+          bash tests/npu_smoke/sync_npu_stack.sh
       - name: Prepare tiny Qwen-Image checkpoint
-        if: steps.resolve-mode.outputs.mode != 'none'
+        shell: bash
         run: |
           MODEL_PATH="${HOME}/.cache/modelscope/hub/models/tiny-random/Qwen-Image"
-          if [[ -d "${MODEL_PATH}" ]]; then
-            echo "Reusing existing tiny Qwen-Image checkpoint at ${MODEL_PATH}"
-          else
-            python tests/special_e2e/build_qwen_image_tiny_random.py --output-dir "${MODEL_PATH}"
-          fi
-      - name: Upgrade vLLM stack
-        if: steps.resolve-mode.outputs.mode != 'none'
+          python tests/special_e2e/build_qwen_image_tiny_random.py \
+            --output-dir "${MODEL_PATH}"
+      - name: Run NPU smoke ${{ matrix.group }} tests
         shell: bash
+        env:
+          NPU_SMOKE_GROUP: ${{ matrix.group }}
         run: |
-          set -euxo pipefail
-          
-          echo "===== Installed versions ====="
-          pip show vllm || true
-          pip show vllm-ascend || true
-          pip show vllm-omni || true
-      - id: resolve-groups
-        if: steps.resolve-mode.outputs.mode != 'none'
-        shell: bash
+          mkdir -p logs/npu_smoke/parallel
+          bash "tests/npu_smoke/run_npu_smoke_${NPU_SMOKE_GROUP}.sh" --num-npus 8 \
+            2>&1 | tee "logs/npu_smoke/parallel/${NPU_SMOKE_GROUP}.log"
+      - name: Upload NPU smoke logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: npu-smoke-logs-${{ matrix.group }}
+          path: logs/npu_smoke/**
+          if-no-files-found: ignore
+
+  setup_runner:
+    needs: [resolve_groups, npu_smoke]
+    if: always() && needs.resolve_groups.result != 'skipped'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check selected NPU smoke groups
+        env:
+          GROUP_SELECTION_RESULT: ${{ needs.resolve_groups.result }}
+          NPU_SMOKE_RESULT: ${{ needs.npu_smoke.result }}
         run: |
-          mode="${{ steps.resolve-mode.outputs.mode }}"
-
-          if [[ "${mode}" == "all" ]]; then
-            plan_json='{
-              "test_ids": ["0", "1"],
-              "group_count": 2,
-              "num_npus": 8,
-              "runner_size": 8
-            }'
-          elif [[ "${mode}" == "rollout" ]]; then
-            plan_json='{
-              "test_ids": ["0"],
-              "group_count": 1,
-              "num_npus": 8,
-              "runner_size": 8
-            }'
-          elif [[ "${mode}" == "flowgrpo" ]]; then
-            plan_json='{
-              "test_ids": ["1"],
-              "group_count": 1,
-              "num_npus": 8,
-              "runner_size": 8
-            }'
-          else
-            echo "Unknown NPU smoke mode: ${mode}"
-            exit 1
-          fi
-
-          echo "Resolved NPU smoke plan: ${plan_json}"
-
-          PLAN_JSON="${plan_json}" python - <<'PY' >> "$GITHUB_OUTPUT"
-          import json
-          import os
-
-          plan = json.loads(os.environ["PLAN_JSON"])
-          print(f"group-count={plan['group_count']}")
-          print(f"num-npus={plan['num_npus']}")
-          print(f"runner-size={plan['runner_size']}")
-          print(f"test-ids={' '.join(plan['test_ids'])}")
-          PY
-      - name: Run NPU smoke tests
-        if: steps.resolve-mode.outputs.mode != 'none'
-        shell: bash
-        run: |
-          bash tests/npu_smoke/run_npu_smoke_tests.sh \
-            --num-npus "${{ steps.resolve-groups.outputs.num-npus }}" \
-            ${{ steps.resolve-groups.outputs.test-ids }}
+          [[ "${GROUP_SELECTION_RESULT}" == 'success' && "${NPU_SMOKE_RESULT}" == 'success' ]]

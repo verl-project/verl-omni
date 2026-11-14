@@ -17,7 +17,7 @@ from pathlib import Path
 
 def test_avqa_npu_launcher_wires_v1_multimodal_training():
     launcher_dir = Path(__file__).parents[2] / "examples/gspo_trainer/qwen3_omni"
-    avqa_launcher = (launcher_dir / "run_qwen3_omni_thinker_gspo_npu_avqa_v1.sh").read_text(encoding="utf-8")
+    avqa_launcher = (launcher_dir / "run_qwen3_omni_thinker_gspo_avqa_v1.sh").read_text(encoding="utf-8")
 
     required_settings = (
         "python3 -m verl_omni.trainer.main_omni",

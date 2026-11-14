@@ -79,6 +79,9 @@ run_test 10 "Boogu-Image DiffusionNFT trainer e2e" \
     bash tests/special_e2e/run_diffusionnft_boogu_image.sh "${diffusion_trainer_args[@]}"
 
 run_sd3_colocate_async_e2e() {
+    if ! env CUDA_VISIBLE_DEVICES="" python -m pytest -q tests/trainer/diffusion/test_v1_checkpoint_recovery.py; then
+        return 1
+    fi
     local model_path="${SD3_MODEL_PATH:-${HOME}/models/tiny-random/sd3-colocate-async}"
     if ! python tests/special_e2e/build_sd3_tiny_random.py \
         --output-dir "${model_path}" --hidden-size 64 --dtype bfloat16; then
@@ -89,7 +92,15 @@ run_sd3_colocate_async_e2e() {
         bash tests/special_e2e/run_flowgrpo_sd35_v1_colocate_async.sh "${diffusion_trainer_args[@]}"
 }
 
-run_test 11 "SD3 FlowGRPO v1 colocate_async trainer e2e" \
+run_test 11 "Named image previews and MiniMax-H3 offload placeholders" \
+    env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" \
+    pytest -q tests/trainer/diffusion/test_artifact_preview_dump.py tests/pipelines/test_minimax_h3_meta_output.py
+
+run_test 12 "CRD SD3 v1 sync trainer and checkpoint e2e" \
+    env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" \
+    bash tests/special_e2e/run_crd_sd35.sh "${diffusion_trainer_args[@]}"
+
+run_test 13 "SD3 FlowGRPO v1 colocate_async trainer e2e" \
     run_sd3_colocate_async_e2e
 
 gpu_smoke_summary

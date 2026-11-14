@@ -21,6 +21,8 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 import torch
 
+from verl_omni.utils.config import LoRASettings
+
 # The engine imports veomni, which the CPU CI does not install.
 pytest.importorskip("veomni")
 import verl_omni.workers.engine.veomni.diffusion_impl as veomni_impl
@@ -29,6 +31,17 @@ from tests.workers.veomni_lora_helpers import export_veomni_params, make_veomni_
 from verl_omni.workers.config.diffusion import DiffusionModelConfig
 
 veomni_lora = pytest.importorskip("veomni.lora")
+
+
+def _lora_settings(*, enabled=True, merge=False) -> LoRASettings:
+    return LoRASettings(
+        rank=8 if enabled else 0,
+        alpha=16,
+        adapter_path=None,
+        merge=merge,
+        adapters=("default",),
+        enabled=enabled,
+    )
 
 
 class _Block(torch.nn.Module):
@@ -138,7 +151,7 @@ def test_adapter_sync_exports_peft_formatted_lora_tensors(monkeypatch):
 def test_adapter_sync_keys_resolve_in_actual_diffusion_lora_manager(monkeypatch):
     from vllm.lora.lora_model import LoRAModel
     from vllm.lora.peft_helper import PEFTHelper
-    from vllm_omni.diffusion.lora.manager import DiffusionLoRAManager
+    from vllm_omni.lora.manager import DiffusionLoRAManager
 
     engine = make_veomni_engine(_lora_module(), lora_rank=4, target_modules=["to_q", "to_k"])
     params, config = export_veomni_params(engine, monkeypatch, base_sync_done=True)
@@ -164,7 +177,9 @@ def test_worker_reads_veomni_lora_metadata_and_checksum_without_export():
     engine.get_per_tensor_param = MagicMock(side_effect=AssertionError("metadata must not gather weights"))
     worker = object.__new__(ActorRolloutRefWorker)
     worker.role = "actor"
-    worker.peft_merge = False
+    worker.lora_settings = _lora_settings(enabled=True, merge=False)
+    worker.rollout_adapter = "default"
+    worker.base_sync_done = True
     worker.actor = SimpleNamespace(engine=engine)
 
     config = worker.get_lora_peft_config()
@@ -174,7 +189,7 @@ def test_worker_reads_veomni_lora_metadata_and_checksum_without_export():
     checksum = worker.get_lora_weight_checksum()
     assert checksum["num_lora_tensors"] == 4
     engine.get_per_tensor_param.assert_not_called()
-    worker.peft_merge = True
+    worker.lora_settings = _lora_settings(enabled=True, merge=True)
     assert worker.get_lora_peft_config() is None
     assert worker.get_lora_weight_checksum() is None
 
@@ -188,8 +203,9 @@ def test_non_naive_worker_sends_veomni_adapters_on_every_update(monkeypatch):
     worker = object.__new__(ActorRolloutRefWorker)
     worker.actor = SimpleNamespace(engine=engine)
     worker.config = SimpleNamespace(rollout=SimpleNamespace(checkpoint_engine=SimpleNamespace(backend="nccl")))
-    worker.peft_merge = False
+    worker.lora_settings = _lora_settings(enabled=True, merge=False)
     worker.rollout_adapter = "default"
+    worker.base_sync_done = True
     worker._rank = 0
     sent = []
 

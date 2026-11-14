@@ -21,6 +21,7 @@ import torch
 from omegaconf import OmegaConf
 from verl.workers.rollout.llm_server import LLMServerClient
 
+from verl_omni.pipelines.rollout_media import MediaArtifact, MediaSpec, artifact_fields, artifacts_from_fields
 from verl_omni.workers.rollout.diffusion_llm_server import DiffusionWholeSampleRetryLLMServerClient
 
 pytestmark = pytest.mark.asyncio
@@ -30,12 +31,31 @@ def _client(**kwargs):
     return DiffusionWholeSampleRetryLLMServerClient(OmegaConf.create({}), retry_wait_s=0, **kwargs)
 
 
-async def test_retry_discards_partial_sample_and_preserves_original_inputs(monkeypatch):
-    aborted = SimpleNamespace(stop_reason="abort", extra_fields={"global_steps": 1}, diffusion_output=torch.ones(2))
+@pytest.mark.parametrize("preview_name", ["image_preview", None])
+async def test_retry_discards_partial_sample_and_preserves_original_inputs(monkeypatch, preview_name):
+    """Only the successful attempt contributes named media and model-version metadata."""
+    aborted = SimpleNamespace(
+        stop_reason="abort",
+        extra_fields={"global_steps": 1, "preview_artifact": "stale_preview"},
+        diffusion_output=torch.ones(2),
+    )
+    artifacts = {
+        "image_latent": MediaArtifact(
+            MediaSpec("image", "latent", "CHW"), torch.full((16, 2, 2), 3.0), context="successful attempt"
+        ),
+        "image_preview": MediaArtifact(
+            MediaSpec("image", "decoded", "CHW"), torch.full((3, 4, 4), 159, dtype=torch.uint8)
+        ),
+    }
     completed = SimpleNamespace(
         stop_reason="completed",
-        extra_fields={"global_steps": 3, "min_global_steps": 3, "max_global_steps": 3},
-        diffusion_output=torch.zeros(3),
+        extra_fields={
+            **artifact_fields(artifacts, "image_latent", preview_name),
+            "global_steps": 3,
+            "min_global_steps": 3,
+            "max_global_steps": 3,
+        },
+        diffusion_output=artifacts["image_latent"].data,
     )
     calls = []
 
@@ -54,6 +74,13 @@ async def test_retry_discards_partial_sample_and_preserves_original_inputs(monke
     assert prompt_ids == [7, 8] and params["seed"] == 42
     assert output is completed
     assert output.extra_fields["min_global_steps"] == output.extra_fields["max_global_steps"] == 3
+    assert output.extra_fields["primary_artifact"] == "image_latent"
+    assert output.extra_fields["preview_artifact"] == preview_name
+    assert output.extra_fields["media_artifact_context"] == "successful attempt"
+    restored = artifacts_from_fields(output.extra_fields, context="whole-sample retry")
+    for name, artifact in artifacts.items():
+        assert restored[name].spec == artifact.spec
+        torch.testing.assert_close(restored[name].data, artifact.data)
 
 
 async def test_retry_exhaustion_fails_instead_of_returning_empty_success(monkeypatch):
@@ -66,6 +93,7 @@ async def test_retry_exhaustion_fails_instead_of_returning_empty_success(monkeyp
 
 @pytest.mark.parametrize("params", [{}, {"seed": None}])
 async def test_unseeded_sample_chooses_one_seed_for_all_attempts(monkeypatch, params):
+    """One random seed belongs to the whole sample, including interrupted attempts."""
     choose_seed = Mock(return_value=123456)
     monkeypatch.setattr("verl_omni.workers.rollout.diffusion_llm_server.secrets.randbits", choose_seed)
     generate = AsyncMock(side_effect=[SimpleNamespace(stop_reason="aborted"), SimpleNamespace(stop_reason="completed")])
@@ -80,20 +108,27 @@ async def test_unseeded_sample_chooses_one_seed_for_all_attempts(monkeypatch, pa
 
 
 async def test_routing_pause_waits_without_consuming_retry_budget(monkeypatch):
+    """Exercise the real parent generate interface while the hybrid pool is unavailable."""
     reopened = asyncio.Event()
+    output = SimpleNamespace(stop_reason="completed", extra_fields={"global_steps": 3})
+    server = SimpleNamespace(generate=SimpleNamespace(remote=AsyncMock(return_value=output)))
 
-    async def acquire(self, request_id):
+    async def acquire(self, request_id, **extra):
+        assert extra["prompt_ids"] == [1] and extra["sampling_params"]["seed"] == 42
         if not reopened.is_set():
             raise RuntimeError("No available servers in load balancer")
-        return "server", "handle"
+        return "server", server
 
     monkeypatch.setattr(LLMServerClient, "_acquire_server", acquire)
-    task = asyncio.create_task(_client(max_retries=1, only_hybrid=True)._acquire_server("request"))
+    client = _client(max_retries=1, only_hybrid=True)
+    client.config = OmegaConf.create({"actor_rollout_ref": {"rollout": {"name": "vllm_omni"}}})
+    monkeypatch.setattr(client, "_release_server", Mock())
+    task = asyncio.create_task(client.generate("request", prompt_ids=[1], sampling_params={"seed": 42}))
     for _ in range(60):
         await asyncio.sleep(0)
     assert not task.done()
     reopened.set()
-    assert await task == ("server", "handle")
+    assert await task is output
 
 
 @pytest.mark.parametrize("only_hybrid", [False, True])

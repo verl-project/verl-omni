@@ -139,6 +139,8 @@ class MultiRewardModelManager:
         assignments: dict[str, tuple[int, ...]] = {}
         claimed_devices: dict[int, str] = {}
         for name, model in native_entries:
+            if model.placement.is_cpu:
+                continue
             for device in model.placement.devices:
                 if device in claimed_devices:
                     raise ValueError(
@@ -155,6 +157,7 @@ class MultiRewardModelManager:
         return engine_pools
 
     def _split_model_resource_pools(self, engine_entries, native_entries, base_config):
+        native_entries = [(name, model) for name, model in native_entries if not model.placement.is_cpu]
         if not engine_entries and not native_entries:
             return {}, {}
         if self.resource_pool is None:
@@ -256,6 +259,7 @@ class NativeManagedRewardModel(ManagedRewardModel):
         if not isinstance(model, NativeRewardModelConfig):
             model = parse_reward_model_config(name, model)
         offload = model.resolved_offload
+        self.placement = model.placement
         executor_config = {"model": model.executor.model, "kwargs": model.executor.kwargs}
 
         super().__init__(
@@ -264,13 +268,11 @@ class NativeManagedRewardModel(ManagedRewardModel):
                 backend="native",
                 model_path=model.model_path,
                 executor_config=executor_config,
+                device_type=model.placement.resource,
             ),
             offload=offload,
         )
         self._workers = None
-        # Controller-side cache only. Ray actor restart recovery is not part of
-        # the current native lifecycle contract; a restarted worker must be
-        # rebound and woken by a future recovery implementation.
         self._resident = False
         self._closed = False
         self._lifecycle_lock = asyncio.Lock()
@@ -302,7 +304,7 @@ class NativeManagedRewardModel(ManagedRewardModel):
         async with self._lifecycle_lock:
             if self._closed:
                 raise RuntimeError(f"Native reward model {self.name!r} is closed")
-            if not self.offload and self._resident:
+            if not self.offload and self._resident and not self.placement.is_cpu:
                 return
             await self._run_worker_lifecycle("wake_up_reward_model")
             self._resident = True

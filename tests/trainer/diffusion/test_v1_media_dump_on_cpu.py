@@ -250,7 +250,7 @@ def test_validation_logger_failures_are_best_effort(monkeypatch, tmp_path, caplo
 
     import verl_omni.utils.tracking as tracking
 
-    caplog.set_level(logging.WARNING, logger=ray_diffusion_trainer.sys_logger.name)
+    caplog.set_level(logging.WARNING, logger=tracking.logger.name)
     trainer = SimpleNamespace(global_steps=7)
     trainer.config = OmegaConf.create({"trainer": {"logger": ["wandb"], "log_val_generations": 1}})
     video_dir = tmp_path / "temporary-video"
@@ -261,13 +261,12 @@ def test_validation_logger_failures_are_best_effort(monkeypatch, tmp_path, caplo
         raise OSError("simulated logger failure")
 
     monkeypatch.setattr(
-        ray_diffusion_trainer,
+        tracking,
         "wrap_val_samples_for_wandb",
         lambda *args, **kwargs: ([("prompt", "video", 1.0)], str(video_dir), {"val/videos/1": "video"}),
     )
     monkeypatch.setattr(wandb, "run", object())
     monkeypatch.setattr(wandb, "log", fail if failure == "media" else lambda *args, **kwargs: None)
-    monkeypatch.setattr(ray_diffusion_trainer, "log_wandb_media", tracking.log_wandb_media)
     trainer.validation_generations_logger = SimpleNamespace(
         log=fail if failure == "table" else lambda *args: table_calls.append(args)
     )
@@ -379,14 +378,8 @@ def test_v1_rollout_dump_sorts_and_forwards_media_metadata(monkeypatch, media_ki
             "audio_sample_rate": np.array([48_000, 48_000], dtype=object),
         },
     )
-
-    def read_media(*args, select_fields, **kwargs):
-        assert set(data.batch) <= set(select_fields)
-        assert set(data.non_tensor_batch) <= set(select_fields)
-        assert {"all_latents", "prompt_embeds", "old_log_probs", "advantages"}.isdisjoint(select_fields)
-        return data
-
-    monkeypatch.setattr(trainer_base_module, "diffusion_tq_batch_to_dataproto", read_media)
+    monkeypatch.setattr(trainer_base_module, "diffusion_tq_batch_to_dataproto", lambda *args, **kwargs: data)
+    monkeypatch.setattr(trainer_base_module, "diffusion_dump_tq_fields", lambda batch_meta: [])
 
     batch_meta = SimpleNamespace(keys=["second_0_0", "first_0_0"], partition_id="train")
     if media_kinds != ["video", "video"]:
@@ -424,6 +417,7 @@ def test_v1_rollout_dump_uses_tool_media_when_batch_has_no_generated_media(monke
         },
     )
     monkeypatch.setattr(trainer_base_module, "diffusion_tq_batch_to_dataproto", lambda *args, **kwargs: data)
+    monkeypatch.setattr(trainer_base_module, "diffusion_dump_tq_fields", lambda batch_meta: [])
 
     trainer._log_rollout_data(SimpleNamespace(keys=["sample_0_0"], partition_id="train"), {}, "/tmp/unused")
 

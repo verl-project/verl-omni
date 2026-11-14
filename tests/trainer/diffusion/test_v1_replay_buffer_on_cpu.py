@@ -301,6 +301,7 @@ def test_disabled_sync_policy_preserves_upstream_training_failure_sampling(monke
 
 @pytest.mark.parametrize("trainer_mode", ["separate_async", "colocate_async"])
 def test_async_uses_upstream_exact_eviction_and_refill(monkeypatch, trainer_mode):
+    """Both async modes replace only evicted groups through the upstream refill path."""
     fake_tq = _FakeTransferQueue({})
     fake_tq.add_group("stale", status="finished", trajectories=1, global_steps=0)
     fake_tq.add_group("failed", status="failure", trajectories=1, global_steps=5)

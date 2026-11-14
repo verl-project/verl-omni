@@ -1,6 +1,6 @@
 # BAGEL-7B-MoT FlowGRPO training
 
-Last updated: 09/07/2026
+Last updated: 11/10/2026
 
 [BAGEL-7B-MoT](https://github.com/ByteDance-Seed/BAGEL) is a
 Mixture-of-Transformers model supporting both image understanding and
@@ -52,10 +52,16 @@ For GPU:
 bash examples/flowgrpo_trainer/bagel/run_bagel_ocr_lora.sh
 ```
 
-For NPU:  
+For NPU (not supported yet — see below):  
 ```bash
 bash examples/flowgrpo_trainer/bagel/run_bagel_ocr_lora_npu.sh
 ```
+
+> **NPU is not supported yet.** On vLLM-Omni ≥ 0.24, BAGEL LoRA requires
+> merged weight sync (`actor_rollout_ref.model.lora.merge=true`) — adapter
+> sync silently binds zero modules on the fused MoT layout and reward stays
+> flat — and merged sync is not validated on NPU. The launcher above is not a
+> supported recipe until that validation lands.
 
 The launch script uses a [Qwen3-VL-8B-Instruct](https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct)
 reward model with vLLM rollout (TP=4) and the ``genrm_ocr.py`` custom reward
@@ -144,3 +150,10 @@ wrapper replacement but simply has ``requires_grad=False`` set by the
 
 - [How to Integrate a Non-Diffusers Model for FlowGRPO Training](../../../docs/contributing/integrating_a_non_diffusers_model.md) — full integration guide using BAGEL as the worked example
 - [vLLM-Omni BAGEL docs](https://docs.vllm.ai/projects/vllm-omni/en/latest/user_guide/examples/online_serving/bagel/)
+
+## Gotchas
+
+- Pre-tokenized BAGEL prompts must retain `<|im_start|>` and `<|im_end|>` framing.
+  The agent loop marks them as native tokens; rollout decodes only their content,
+  preserving captions that begin with `user` rather than interpreting a chat role.
+  Chat-template prompts keep the existing decoding path.

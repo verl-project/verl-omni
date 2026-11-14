@@ -44,7 +44,11 @@ from vllm_omni.diffusion.models.minimax_h3.packed_tokens import (
 from vllm_omni.diffusion.request import OmniDiffusionRequest
 from vllm_omni.diffusion.worker.request_batch import DiffusionRequestBatch
 
-from verl_omni.pipelines.diffusion_rollout_output import with_rollout_data
+from verl_omni.pipelines.diffusion_rollout_output import (
+    contains_meta_tensor,
+    with_batched_media_artifacts,
+    with_rollout_data,
+)
 from verl_omni.pipelines.minimax_h3_diffusion_nft.common import (
     ref2va_reference_image_short_edge,
     serialize_ref_blocks,
@@ -70,17 +74,6 @@ from .weight_sync import MiniMaxH3WeightSyncMixin
 __all__ = ["MiniMaxH3PipelineWithLogProb"]
 
 
-def _iter_tensors(value: Any):
-    if isinstance(value, torch.Tensor):
-        yield value
-    elif isinstance(value, dict):
-        for item in value.values():
-            yield from _iter_tensors(item)
-    elif isinstance(value, (list | tuple)):
-        for item in value:
-            yield from _iter_tensors(item)
-
-
 def _pad_first_dim(value: torch.Tensor, target: int) -> torch.Tensor:
     if value.shape[0] > target:
         raise ValueError(f"MiniMax H3 metadata length {value.shape[0]} exceeds configured cap {target}.")
@@ -104,8 +97,12 @@ class MiniMaxH3PipelineWithLogProb(MiniMaxH3WeightSyncMixin, MiniMaxH3Pipeline):
     supports_request_batch = False
 
     diffusion_io_spec = DiffusionIOSpec(
-        primary=MediaSpec("video"),
-        auxiliary=(MediaSpec("audio", sample_rate=32000),),
+        artifacts={
+            "video_preview": MediaSpec("video", "decoded", "TCHW"),
+            "audio": MediaSpec("audio", "decoded", "CT", sample_rate=32000),
+            "video_latent": MediaSpec("video", "latent", "CTHW"),
+            "audio_latent": MediaSpec("audio", "latent", "CLT"),
+        }
     )
 
     def __init__(self, *, od_config: OmniDiffusionConfig, prefix: str = ""):
@@ -254,11 +251,21 @@ class MiniMaxH3PipelineWithLogProb(MiniMaxH3WeightSyncMixin, MiniMaxH3Pipeline):
         base_schedule: Sequence[float] | None = None,
         pad_seq_len: int | None = None,
         locked_audio_rows: torch.Tensor | None = None,
+        control_context_scale: float | None = None,
+        request_context: dict[str, Any] | None = None,
+        sampler: str | None = None,
         **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # vLLM-Omni forwards every denoise input key and sets the unused ones to None. FlowGRPO rollouts have
         # no edit path, so a real value here must fail instead of silently producing plain generation.
         unsupported = sorted(name for name, value in kwargs.items() if value is not None)
+        # The pin adds ControlNet/sampler plumbing with non-None defaults; only their neutral values pass.
+        # request_context is the pipeline's own prepared-request channel, forwarded by its forward() —
+        # not an edit path; edit inputs arrive as the explicit kwargs guarded above.
+        if control_context_scale not in (None, 1.0):
+            unsupported.append("control_context_scale")
+        if sampler not in (None, "euler"):
+            unsupported.append("sampler")
         if unsupported:
             raise NotImplementedError(f"MiniMax H3 FlowGRPO rollout does not support {', '.join(unsupported)}.")
         target_video_rows, target_audio_rows = self._initial_noise(
@@ -539,6 +546,7 @@ class MiniMaxH3PipelineWithLogProb(MiniMaxH3WeightSyncMixin, MiniMaxH3Pipeline):
             audio_t=audio_t * 2,
             audio_channel=2,
         )
+        self._flow_grpo_final_latents = (video_latent, audio_latent)
         return video_latent, audio_latent
 
     @torch.no_grad()
@@ -547,6 +555,7 @@ class MiniMaxH3PipelineWithLogProb(MiniMaxH3WeightSyncMixin, MiniMaxH3Pipeline):
             raise ValueError(f"MiniMax H3 FlowGRPO expects one request, got {len(request.requests)}.")
         req = request.requests[0]
         self._configure_flow_grpo(req)
+        self._flow_grpo_final_latents = None
         extra_args = req.sampling_params.extra_args or {}
         short_edge = extra_args.get(
             "reference_image_short_edge",
@@ -591,8 +600,8 @@ class MiniMaxH3PipelineWithLogProb(MiniMaxH3WeightSyncMixin, MiniMaxH3Pipeline):
         replay_fields = tuple(key for key in replay_fields if key in trajectory)
         # With model-level CPU offload, vLLM-Omni leaves a meta placeholder on ranks that do not reply;
         # DiffusionOutput(to_cpu=True) cannot copy it. The trajectory tensors above are already on CPU.
-        has_meta_output = any(isinstance(item, torch.Tensor) and item.is_meta for item in _iter_tensors(output.output))
-        return with_rollout_data(
+        has_meta_output = contains_meta_tensor(output.output)
+        result = with_rollout_data(
             output,
             trajectory_latents=trajectory["all_latents"],
             trajectory_log_probs=trajectory["all_log_probs"],
@@ -603,4 +612,40 @@ class MiniMaxH3PipelineWithLogProb(MiniMaxH3WeightSyncMixin, MiniMaxH3Pipeline):
             },
             rl={key: trajectory[key] for key in replay_fields},
             to_cpu=not has_meta_output,
+        )
+        if self._flow_grpo_final_latents is None:
+            raise RuntimeError("MiniMax H3 rollout did not capture final native latents")
+        video_latent, audio_latent = self._flow_grpo_final_latents
+        self._flow_grpo_final_latents = None
+        if has_meta_output:
+            # A non-replying offload rank carries a placeholder, not servable media.
+            return result
+        video, audio = output.output
+        sampling = req.sampling_params
+        extra_args = sampling.extra_args or {}
+        output_type = extra_args.get("output_type", sampling.output_type)
+        return with_batched_media_artifacts(
+            result,
+            data={
+                "video_preview": video,
+                "audio": audio,
+                "video_latent": video_latent,
+                "audio_latent": audio_latent.unsqueeze(0),
+            },
+            specs={
+                "video_preview": MediaSpec(
+                    "video",
+                    "decoded",
+                    "THWC",
+                    fps=24 if sampling.resolved_frame_rate is None else sampling.resolved_frame_rate,
+                ),
+                "audio": MediaSpec("audio", "decoded", "CT", sample_rate=32000),
+                "video_latent": MediaSpec("video", "latent", "CTHW"),
+                "audio_latent": MediaSpec("audio", "latent", "CLT"),
+            },
+            primary="video_latent" if output_type == "latent" else "video_preview",
+            preview="video_preview",
+            audio="audio",
+            context=f"pipeline={type(self).__name__}, request_id={req.request_id}",
+            requested=extra_args.get("requested_outputs"),
         )

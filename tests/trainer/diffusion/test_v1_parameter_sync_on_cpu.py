@@ -213,6 +213,25 @@ def test_sync_balance_batch_zeros_duplicated_pad_row_advantages():
     assert "_balance_is_pad" not in zeroed.non_tensor_batch
 
 
+def test_sync_balance_batch_queries_actor_dispatch_info_once():
+    queries = []
+
+    def query_dispatch_info(mesh_name):
+        queries.append(mesh_name)
+        return [0, 1]
+
+    trainer = object.__new__(_SyncTrainerStub)
+    trainer.trainer_mode = "sync"
+    trainer.actor_rollout_wg = SimpleNamespace(_query_dispatch_info=query_dispatch_info)
+    trainer.config = OmegaConf.create({"actor_rollout_ref": {"actor": {"ppo_mini_batch_size": 2}, "rollout": {"n": 2}}})
+    data = DataProto.from_dict(tensors={"advantages": torch.arange(1, 5, dtype=torch.float32)})
+
+    for _ in range(3):
+        assert len(trainer._balance_batch(data, {})) == 4
+
+    assert queries == ["actor"]
+
+
 def test_separate_async_uses_single_prompt_generation_batches_for_exact_refill():
     trainer = object.__new__(PolicyGradientDiffusionTrainerV1SeparateAsync)
     trainer.trainer_mode = "separate_async"

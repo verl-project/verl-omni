@@ -90,7 +90,7 @@ def _request(future, value=1):
     return hpsv3_reward._ScoreRequest(
         prompt="prompt",
         solution_image=_image(value),
-        extra_info={},
+        extra_info={"media_kind": "image"},
         checkpoint_path="fake-checkpoint",
         device="cpu",
         max_batch_size=4,
@@ -113,7 +113,7 @@ def _score(
         data_source="test",
         solution_image=solution_image,
         ground_truth=prompt,
-        extra_info=extra_info or {},
+        extra_info={"media_kind": "image"} if extra_info is None else extra_info,
         model_name=model_name,
         device=device,
         max_batch_size=max_batch_size,
@@ -128,7 +128,7 @@ async def test_score_queue_is_bounded(monkeypatch):
 
 
 def test_to_pil_preserves_uint8_pixel_values():
-    image = hpsv3_reward._to_pil_hwc(_image(173))
+    image = hpsv3_reward._frame_to_pil(_image(173))
 
     assert image.mode == "RGB"
     assert image.getpixel((0, 0)) == (173, 173, 173)
@@ -157,16 +157,24 @@ async def test_single_video_is_split_by_total_frame_cap_and_averaged(monkeypatch
     if channels_last:
         video = video.permute(0, 2, 3, 1)
 
-    result = await _score(
-        video,
-        max_batch_size=2,
-        reward_scale=0.5,
-        extra_info={"frame_interval": 1},
-    )
+    if channels_last:
+        with pytest.raises(ValueError, match="expected 1/3/4 image channels"):
+            await _score(
+                video,
+                max_batch_size=2,
+                reward_scale=0.5,
+                extra_info={"frame_interval": 1, "media_kind": "video", "fps": 24},
+            )
+    else:
+        result = await _score(
+            video,
+            max_batch_size=2,
+            reward_scale=0.5,
+            extra_info={"frame_interval": 1, "media_kind": "video", "fps": 24},
+        )
+        assert [len(images) for images, _ in inferencer.batches] == [2, 2, 1]
+        assert result == {"score": pytest.approx(1.5), "hpsv3_raw": pytest.approx(3.0)}
     await _stop_consumer(state)
-
-    assert [len(images) for images, _ in inferencer.batches] == [2, 2, 1]
-    assert result == {"score": pytest.approx(1.5), "hpsv3_raw": pytest.approx(3.0)}
 
 
 @pytest.mark.parametrize("channels_last", [False, True])
@@ -175,26 +183,92 @@ def test_extract_frames_samples_the_time_axis(channels_last):
     if channels_last:
         video = video.permute(0, 2, 3, 1)
 
-    frames = hpsv3_reward._extract_frames(video, frame_interval=2)
-
-    assert [frame.getpixel((0, 0))[0] for frame in frames] == [1, 3, 5]
+    if channels_last:
+        with pytest.raises(ValueError, match="expected 1/3/4 image channels"):
+            hpsv3_reward._extract_frames(video, frame_interval=2, extra_info={"media_kind": "video", "fps": 24})
+    else:
+        frames = hpsv3_reward._extract_frames(video, frame_interval=2, extra_info={"media_kind": "video", "fps": 24})
+        assert [frame.getpixel((0, 0))[0] for frame in frames] == [1, 3, 5]
 
 
 def test_extract_frames_prefers_tchw_when_width_is_channel_sized():
     video = torch.stack([torch.full((3, 2, 3), value, dtype=torch.uint8) for value in [1, 2, 3]])
 
-    frames = hpsv3_reward._extract_frames(video)
+    frames = hpsv3_reward._extract_frames(video, extra_info={"media_kind": "video", "fps": 24})
 
     assert [frame.size for frame in frames] == [(3, 2)] * 3
     assert [frame.getpixel((0, 0))[0] for frame in frames] == [1, 2, 3]
 
 
-def test_extract_frames_preserves_legacy_cthw_direct_calls():
+def test_extract_frames_rejects_legacy_cthw_direct_calls():
     video = _video([1, 2, 3, 4, 5]).permute(1, 0, 2, 3)
 
-    frames = hpsv3_reward._extract_frames(video, frame_interval=2)
+    with pytest.raises(ValueError, match="expected 1/3/4 image channels"):
+        hpsv3_reward._extract_frames(video, frame_interval=2, extra_info={"media_kind": "video", "fps": 24})
 
-    assert [frame.getpixel((0, 0))[0] for frame in frames] == [1, 3, 5]
+
+@pytest.mark.parametrize("num_frames, expected_indices", [(None, [0, 4, 8]), (4, [0, 3, 5, 8])])
+def test_sampling_paths_preserve_canonical_frame_order(num_frames, expected_indices):
+    video = torch.arange(9 * 3 * 4 * 5).reshape(9, 3, 4, 5).to(torch.uint8)
+    frames = hpsv3_reward._select_reward_frames(video, {"media_kind": "video", "fps": 24}, num_frames)
+    assert len(frames) == len(expected_indices)
+    for frame, index in zip(frames, expected_indices, strict=True):
+        assert frame.size == (5, 4)
+        assert frame.tobytes() == video[index].permute(1, 2, 0).contiguous().numpy().tobytes()
+
+
+@pytest.mark.parametrize("layout", ["THWC", "CTHW", "BCTHW", "BTHWC"])
+@pytest.mark.parametrize("num_frames", [None, 4])
+def test_sampling_paths_reject_noncanonical_layouts(layout, num_frames):
+    video = torch.zeros(9, 3, 4, 5, dtype=torch.uint8)
+    inputs = {
+        "THWC": video.permute(0, 2, 3, 1),
+        "CTHW": video.permute(1, 0, 2, 3),
+        "BCTHW": video.permute(1, 0, 2, 3).unsqueeze(0),
+        "BTHWC": video.permute(0, 2, 3, 1).unsqueeze(0),
+    }
+    with pytest.raises(ValueError):
+        hpsv3_reward._select_reward_frames(inputs[layout], {"media_kind": "video", "fps": 24}, num_frames)
+
+
+@pytest.mark.parametrize("num_frames, expected", [(None, [0, 2, 4, 5, 7, 9]), (4, [0, 1, 3, 4, 5, 6, 8, 9])])
+def test_sampling_paths_preserve_per_sample_frame_order(num_frames, expected):
+    frames = [
+        frame
+        for video in (_video(range(5)), _video(range(5, 10)))
+        for frame in hpsv3_reward._select_reward_frames(
+            video, {"media_kind": "video", "fps": 24, "frame_interval": 2}, num_frames
+        )
+    ]
+    assert [frame.getpixel((0, 0))[0] for frame in frames] == expected
+
+
+@pytest.mark.parametrize("channels_last", [False, True])
+@pytest.mark.parametrize("num_frames", [None, 3])
+def test_sampling_paths_preserve_single_image(channels_last, num_frames):
+    image = _image(7)
+    if channels_last:
+        image = image.permute(1, 2, 0)
+        with pytest.raises(ValueError):
+            hpsv3_reward._select_reward_frames(image, {"media_kind": "image"}, num_frames)
+        return
+    frames = hpsv3_reward._select_reward_frames(image, {"media_kind": "image"}, num_frames)
+    assert [frame.getpixel((0, 0))[0] for frame in frames] == [7] * (num_frames or 1)
+
+
+def test_uniform_sampling_preserves_repeated_frames_and_tchw_priority():
+    video = torch.stack([torch.full((3, 2, 3), value, dtype=torch.uint8) for value in range(3)])
+    frames = hpsv3_reward._select_reward_frames(video, {"media_kind": "video", "fps": 24}, 5)
+    assert [frame.size for frame in frames] == [(3, 2)] * 5
+    assert [frame.getpixel((0, 0))[0] for frame in frames] == [0, 0, 1, 2, 2]
+
+
+@pytest.mark.parametrize("num_frames", [None, 2])
+@pytest.mark.parametrize("value", [0.0, 1.0, -0.1, 1.1, float("nan"), float("inf")])
+def test_sampling_paths_require_uint8_decoded_pixels(num_frames, value):
+    video = torch.full((2, 3, 4, 4), value)
+    with pytest.raises(ValueError, match="uint8"):
+        hpsv3_reward._select_reward_frames(video, {"media_kind": "video", "fps": 24}, num_frames)
 
 
 @pytest.mark.asyncio
@@ -206,7 +280,7 @@ async def test_invalid_request_is_isolated_from_valid_batch(monkeypatch):
     await _stop_consumer(state)
 
     assert results[0] == {"score": pytest.approx(0.7), "hpsv3_raw": pytest.approx(7.0)}
-    assert isinstance(results[1], AttributeError)
+    assert isinstance(results[1], ValueError)
     assert results[2] == {"score": pytest.approx(0.9), "hpsv3_raw": pytest.approx(9.0)}
     assert [len(images) for images, _ in inferencer.batches] == [2]
 

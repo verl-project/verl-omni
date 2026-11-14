@@ -238,7 +238,11 @@ def _decode_video_path(video_path: str) -> tuple[torch.Tensor, float]:
         container.close()
         raise ValueError(f"Video {video_path} contains no video streams.")
     stream = container.streams.video[0]
-    video_fps = float(stream.average_rate) if stream.average_rate else 2.0
+    frame_rate = stream.average_rate or stream.guessed_rate
+    if not frame_rate:
+        container.close()
+        raise ValueError(f"Video {video_path} reports no frame rate, so its frames cannot be resampled.")
+    video_fps = float(frame_rate)
     frames = [frame.to_image().convert("RGB") for frame in container.decode(video=0)]
     container.close()
     if not frames:

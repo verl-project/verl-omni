@@ -15,6 +15,7 @@
 import asyncio
 import logging
 import os
+import secrets
 from typing import Any
 
 import ray
@@ -30,7 +31,8 @@ from verl_omni.agent_loop.diffusion_agent_loop import (
     _config_to_sampling_dict,
     _InternalDiffusionAgentLoopOutput,
 )
-from verl_omni.agent_loop.utils import _derive_rollout_seed
+from verl_omni.agent_loop.utils import derive_rollout_seed
+from verl_omni.pipelines.rollout_media import ARTIFACT_CONTEXT, ARTIFACT_SPECS, PREVIEW_ARTIFACT, PRIMARY_ARTIFACT
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
@@ -139,7 +141,14 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
                     # semantics): each worker only sees a chunk of the batch, so
                     # a chunk-local position would reuse the same seed offsets
                     # in every worker and roll out duplicated noise.
-                    run_sampling_params["seed"] = _derive_rollout_seed(rollout_base_seed, prompt_index * n + session_id)
+                    run_sampling_params["seed"] = derive_rollout_seed(rollout_base_seed, prompt_index * n + session_id)
+                elif not trajectory["validate"]:
+                    # Unseeded training sessions still need explicit, diverse
+                    # seeds: vLLM-Omni fills absent request seeds with
+                    # random.randint in the engine-server process, where
+                    # Ray-forked replicas share RNG state and unseeded requests
+                    # routed to different replicas would collide bit-exactly.
+                    run_sampling_params["seed"] = secrets.randbits(63)
                 task = asyncio.create_task(
                     self._run_agent_loop(
                         run_sampling_params,
@@ -261,9 +270,16 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
             # Tensor media (for example generated audio) is already carried as a
             # top-level TQ field above. Preserve its non-tensor declaration/metadata
             # in the envelope that ``diffusion_tq_batch_to_dataproto`` restores.
-            for media_key in ("media_kind", "audio_sample_rate"):
+            for media_key in (
+                "media_kind",
+                "audio_sample_rate",
+                ARTIFACT_SPECS,
+                PRIMARY_ARTIFACT,
+                PREVIEW_ARTIFACT,
+                ARTIFACT_CONTEXT,
+            ):
                 media_value = extra.get(media_key)
-                if media_value is not None and not isinstance(media_value, torch.Tensor):
+                if media_key in extra and not isinstance(media_value, torch.Tensor):
                     extra_fields_out[media_key] = media_value
             extra_fields_out["min_global_steps"] = min_step
             extra_fields_out["max_global_steps"] = max_step

@@ -19,11 +19,12 @@ import os
 from contextlib import nullcontext
 
 import aiohttp
-import numpy as np
 import torch
 from PIL import Image
 from transformers import CLIPModel, CLIPProcessor
 from verl.utils.device import get_device_id, get_device_name
+
+from verl_omni.utils.reward_score.image_preference_utils import clip_feature_tensor, decoded_reward_image, to_rgb_image
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
@@ -61,18 +62,6 @@ async def _await_owned(awaitable):
     return task.result()
 
 
-def _feature_tensor(features):
-    if isinstance(features, torch.Tensor):
-        return features
-    if hasattr(features, "image_embeds") and features.image_embeds is not None:
-        return features.image_embeds
-    if hasattr(features, "text_embeds") and features.text_embeds is not None:
-        return features.text_embeds
-    if hasattr(features, "pooler_output") and features.pooler_output is not None:
-        return features.pooler_output
-    raise TypeError(f"Unsupported CLIP feature return type: {type(features)!r}")
-
-
 def _pairwise_pickscore(
     text_embeddings: torch.Tensor,
     image_embeddings: torch.Tensor,
@@ -82,7 +71,8 @@ def _pairwise_pickscore(
     """Compute paired PickScore values from text and image embeddings."""
     if score_divisor == 0:
         raise ValueError("PickScore score_divisor must be non-zero")
-    cosine = torch.nn.functional.cosine_similarity(text_embeddings, image_embeddings, dim=-1)
+    # In bf16 the cosine rounds to ~4e-3 after scaling, a third of the within-group reward spread.
+    cosine = torch.nn.functional.cosine_similarity(text_embeddings.float(), image_embeddings.float(), dim=-1)
     return torch.as_tensor(logit_scale, device=cosine.device, dtype=cosine.dtype) * cosine / score_divisor
 
 
@@ -128,8 +118,8 @@ class _PickScoreInferencer:
         )
         text_inputs = {k: v.to(device=self.device) for k, v in text_inputs.items()}
 
-        image_embs = _feature_tensor(self.model.get_image_features(**image_inputs))
-        text_embs = _feature_tensor(self.model.get_text_features(**text_inputs))
+        image_embs = clip_feature_tensor(self.model.get_image_features(**image_inputs))
+        text_embs = clip_feature_tensor(self.model.get_text_features(**text_inputs))
         text_embs = text_embs[prompt_indices]
 
         return {
@@ -162,8 +152,8 @@ class PickScoreNativeModel:
         if type(retain_weights_on_cpu) is not bool:
             raise TypeError("retain_weights_on_cpu must be a bool")
         target_device = torch.device(device) if device is not None else torch.device(get_device_name(), get_device_id())
-        if retain_weights_on_cpu and target_device.type != "cuda":
-            raise ValueError("retain_weights_on_cpu requires a CUDA device")
+        if retain_weights_on_cpu and target_device.type not in ("cuda", "xpu"):
+            raise ValueError("retain_weights_on_cpu requires a CUDA or Intel GPU device")
         self.supports_cpu_offload = retain_weights_on_cpu
         self._inferencer = _PickScoreInferencer(
             device=target_device,
@@ -322,23 +312,17 @@ class PickScoreNativeModel:
         finally:
             self._consumer_task = None
             if hasattr(self, "_inferencer"):
+                backend_tokenizer = getattr(self._inferencer.processor.tokenizer, "backend_tokenizer", None)
+                # CLIP's decode wrapper captures a native tokenizer that Python GC cannot traverse.
+                if backend_tokenizer is not None and "decode" in vars(backend_tokenizer):
+                    del backend_tokenizer.decode
                 del self._inferencer
+                del backend_tokenizer
             gc.collect()
             accelerator = getattr(torch, get_device_name(), None)
             empty_cache = getattr(accelerator, "empty_cache", None)
             if callable(empty_cache) and getattr(accelerator, "is_available", lambda: False)():
                 empty_cache()
-
-
-def _to_pil_hwc(image) -> Image.Image:
-    if isinstance(image, torch.Tensor):
-        image = image.cpu().numpy()
-    if isinstance(image, np.ndarray):
-        if image.ndim == 3 and image.shape[0] in (1, 3):
-            image = image.transpose(1, 2, 0)
-        image = Image.fromarray(image)
-    assert isinstance(image, Image.Image)
-    return image
 
 
 def _score_batch(requests) -> list[float | Exception]:
@@ -350,7 +334,7 @@ def _score_batch(requests) -> list[float | Exception]:
 
     for index, (prompt, solution_image, _) in enumerate(requests):
         try:
-            images.append(_to_pil_hwc(solution_image))
+            images.append(to_rgb_image(solution_image))
             prompts.append(prompt)
             valid_indices.append(index)
         except Exception as e:
@@ -423,6 +407,7 @@ async def compute_score_pickscore(
     device: str | None = None,
     **kwargs,
 ) -> dict:
+    solution_image = decoded_reward_image(solution_image, extra_info, scorer="PickScore")
     await _ensure_consumer(device)
 
     prompt = ground_truth if ground_truth else ""
@@ -443,9 +428,9 @@ async def compute_score_pickscore_native(
     score_divisor: float = 26.0,
 ) -> dict:
     """Compute PickScore from outputs produced by a native named reward model."""
-    del data_source, extra_info
+    del data_source
     prompt = ground_truth or ""
-    image = _to_pil_hwc(solution_image)
+    image = decoded_reward_image(solution_image, extra_info, scorer="PickScore")
     outputs = await reward_model.infer(prompts=[prompt], images=[image])
     output = outputs[0]
     raw_score = _pairwise_pickscore(
@@ -474,7 +459,8 @@ async def compute_score_pickscore_engine(
     ``logit_scale`` is explicit because vLLM CLIP pooling does not restore the
     PickScore checkpoint's parameter.
     """
-    del data_source, extra_info
+    del data_source
+    image = decoded_reward_image(solution_image, extra_info, scorer="PickScore")
     if not reward_router_address:
         raise ValueError("PickScore engine reward requires reward_router_address")
     if not model_name:
@@ -483,7 +469,6 @@ async def compute_score_pickscore_engine(
     from verl_omni.utils.reward_score.reward_utils import pil_image_to_base64
 
     prompt = ground_truth or ""
-    image = _to_pil_hwc(solution_image)
     loop = asyncio.get_running_loop()
     image_url = await loop.run_in_executor(None, pil_image_to_base64, image)
     text_payload = {"model": model_name, "input": prompt, "encoding_format": "float"}

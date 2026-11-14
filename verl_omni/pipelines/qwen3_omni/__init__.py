@@ -13,6 +13,7 @@
 # limitations under the License.
 """Qwen3-Omni pipeline adapters (Thinker training + rollout pipeline topology)."""
 
+from . import continuous_token  # noqa: F401  -- Continuous Token builder-family registration
 from .omni_rollout_adapter import Qwen3OmniRolloutAdapter
 from .thinker_training_adapter import Qwen3OmniThinkerAdapter
 

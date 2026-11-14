@@ -18,8 +18,9 @@ from pprint import pprint
 
 import hydra
 import ray
+import torch
 from omegaconf import DictConfig, OmegaConf
-from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
+from verl.trainer.constants_ppo import available_physical_cores, get_ppo_ray_runtime_env
 from verl.utils.device import auto_set_device, is_cuda_available
 from verl.utils.import_utils import load_class_from_fqn
 
@@ -74,12 +75,11 @@ def run_diffusion_v1(config, task_runner_class=None) -> None:
         ray_init_kwargs = config.ray_kwargs.get("ray_init", {})
         runtime_env_kwargs = ray_init_kwargs.get("runtime_env", {})
 
-        if config.transfer_queue.enable:
-            runtime_env_vars = runtime_env_kwargs.get("env_vars", {})
-            runtime_env_vars["TRANSFER_QUEUE_ENABLE"] = "1"
-            runtime_env_kwargs["env_vars"] = runtime_env_vars
-
+        # Merge into a fresh config: user-provided `env_vars` arrive in struct mode and
+        # reject new keys, so writing into them would crash any override such as OMP_NUM_THREADS.
         runtime_env = OmegaConf.merge(default_runtime_env, runtime_env_kwargs)
+        if config.transfer_queue.enable:
+            runtime_env = OmegaConf.merge(runtime_env, {"env_vars": {"TRANSFER_QUEUE_ENABLE": "1"}})
         ray_init_kwargs = OmegaConf.create({**ray_init_kwargs, "runtime_env": runtime_env})
         print(f"ray init kwargs: {ray_init_kwargs}")
         ray.init(**OmegaConf.to_container(ray_init_kwargs))
@@ -115,6 +115,13 @@ class DiffusionTaskRunnerV1:
         self.config = None
         self.trainer = None
         self.agent_loop_manager = None
+
+        # Mirror verl's TaskRunnerV1: the job-wide OMP default is gone from the
+        # runtime env (#8592 scopes it to the offload-carrying training workers),
+        # so the runner sets its own thread count for the dataloader-driving process.
+        value = str(available_physical_cores())
+        os.environ["OMP_NUM_THREADS"] = value
+        torch.set_num_threads(int(value))
 
     def init_agent_loop_manager(self):
         from verl_omni.agent_loop import create_diffusion_agent_loop_manager

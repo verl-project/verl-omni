@@ -57,9 +57,11 @@ class PolicyGradientDiffusionTrainerV1ColocateAsync(PolicyGradientDiffusionTrain
         super().__init__(config)
 
     def get_llm_client(self):
+        """Retry whole samples while the hybrid pool is temporarily unavailable."""
         return self.llm_server_manager.get_client(client_cls=DiffusionWholeSampleRetryLLMServerClient, only_hybrid=True)
 
     def on_train_begin(self):
+        """Top up warmup without duplicating restored prompt groups."""
         # Restored terminal groups count toward warmup as well as in-flight groups.
         items = (tq.kv_list("train") or {}).get("train", {})
         queued = sum(tag.get("is_prompt", False) for tag in items.values())
@@ -68,6 +70,7 @@ class PolicyGradientDiffusionTrainerV1ColocateAsync(PolicyGradientDiffusionTrain
             self._add_prompts_to_generate(target - queued)
 
     def on_sample_end(self):
+        """Close routing and reclaim rollout resources before actor computation."""
         # Remove routing before aborting: retries wait until committed weights are ready.
         manager = self.llm_server_manager
         ray.get(manager.global_load_balancer.remove_servers.remote(manager.server_addresses))
@@ -75,6 +78,7 @@ class PolicyGradientDiffusionTrainerV1ColocateAsync(PolicyGradientDiffusionTrain
         super().on_sample_end()
 
     def on_step_end(self):
+        """Reopen routing only after committing weights and resuming generation."""
         with marked_timer("update_weights", self.timing_raw, color="red"):
             self.checkpoint_manager.update_weights(self.global_steps)
             self.checkpoint_manager.resume_generation_replicas()

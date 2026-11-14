@@ -34,6 +34,7 @@ from verl_omni.agent_loop.diffusion_agent_loop import (
 )
 from verl_omni.agent_loop.diffusion_agent_loop_tq import DiffusionAgentLoopWorkerTQ
 from verl_omni.agent_loop.single_turn_agent_loop import DiffusionSingleTurnAgentLoop
+from verl_omni.agent_loop.utils import derive_rollout_seed, per_rollout_seeds_or_entropy
 from verl_omni.trainer.diffusion.v1 import tq_utils
 from verl_omni.trainer.diffusion.v1.trainer_sync import PolicyGradientDiffusionTrainerV1Sync
 
@@ -61,6 +62,7 @@ class _DummyDiffusionAgentLoopWorker:
 
 @pytest.mark.asyncio
 async def test_single_prompt_fetches_preserve_v0_noise_offsets(monkeypatch):
+    """Single-prompt refills retain distinct noise after concatenation and worker sharding."""
     trainer = object.__new__(PolicyGradientDiffusionTrainerV1Sync)
     trainer.config = SimpleNamespace(
         data=SimpleNamespace(train_batch_size=4),
@@ -98,7 +100,7 @@ async def test_single_prompt_fetches_preserve_v0_noise_offsets(monkeypatch):
     for chunk in batch.split(2):
         await worker.generate_sequences(chunk)
     await asyncio.gather(*worker.background_tasks)
-    assert sorted(seen) == [diffusion_agent_loop_tq._derive_rollout_seed(42, i) for i in range(16)]
+    assert sorted(seen) == [derive_rollout_seed(42, i) for i in range(16)]
 
 
 @pytest.mark.parametrize(
@@ -155,6 +157,7 @@ async def test_single_turn_agent_forwards_all_multimodal_inputs():
     agent_loop.server_manager = SimpleNamespace(
         generate=AsyncMock(
             return_value=SimpleNamespace(
+                artifacts={},
                 diffusion_output=torch.zeros(1),
                 log_probs=None,
                 num_preempted=None,
@@ -334,6 +337,56 @@ async def test_tq_writer_preserves_allowlisted_non_tensor_trajectory_metadata(mo
 
 
 @pytest.mark.asyncio
+async def test_run_prompt_batches_prompt_group_into_one_put(monkeypatch):
+    """All of a prompt's session rows must land in a single batched TQ put."""
+    worker_cls = DiffusionAgentLoopWorkerTQ.__ray_metadata__.modified_class
+    worker = object.__new__(worker_cls)
+    worker.rollout_config = SimpleNamespace(n=2, val_kwargs=SimpleNamespace(n=2))
+
+    def make_output(*, with_log_probs: bool):
+        return SimpleNamespace(
+            prompt_ids=torch.tensor([[1, 2]]),
+            response_diffusion_output=torch.zeros(1, 3, 2, 2),
+            response_logprobs=torch.zeros(1, 4) if with_log_probs else None,
+            reward_score=0.5,
+            num_turns=1,
+            extra_fields={"media_kind": "image"},
+        )
+
+    captured = {}
+
+    async def fake_run_agent_loop(self, sampling_params, *, session_id, **kwargs):
+        del self, sampling_params, kwargs
+        return make_output(with_log_probs=True)
+
+    async def fake_kv_batch_put(*, keys, fields, tags, partition_id):
+        captured.update(keys=keys, fields=fields, tags=tags, partition_id=partition_id)
+
+    async def fake_kv_put(*, key, partition_id, tag):
+        del key, partition_id, tag
+
+    worker._run_agent_loop = MethodType(fake_run_agent_loop, worker)
+    monkeypatch.setattr(diffusion_agent_loop_tq.tq, "async_kv_batch_put", fake_kv_batch_put)
+    monkeypatch.setattr(diffusion_agent_loop_tq.tq, "async_kv_put", fake_kv_put)
+
+    await worker._run_prompt(
+        prompt={"uid": "sample", "agent_name": "diffusion_single_turn_agent"},
+        sampling_params={"global_steps": 3},
+        trajectory={"validate": False, "step": 3},
+        prompt_index=0,
+    )
+
+    assert captured["keys"] == ["sample_0_0", "sample_1_0"]
+    assert captured["partition_id"] == "train"
+    assert len(captured["tags"]) == 2
+    assert all(tag["status"] == "success" for tag in captured["tags"])
+    # One batched put call: the real list_of_dict_to_tensordict stacks the rows.
+    assert captured["fields"].batch_size == (2,)
+    assert "rollout_log_probs" in captured["fields"].keys()
+    assert "rm_scores" in captured["fields"].keys()
+
+
+@pytest.mark.asyncio
 async def test_tq_writer_batches_group_sessions_and_partitions_field_sets(monkeypatch):
     worker_cls = DiffusionAgentLoopWorkerTQ.__ray_metadata__.modified_class
     worker = object.__new__(worker_cls)
@@ -381,6 +434,7 @@ async def test_tq_writer_batches_group_sessions_and_partitions_field_sets(monkey
 
 @pytest.mark.asyncio
 async def test_tq_writer_uses_each_completed_samples_actual_version(monkeypatch):
+    """Persist each successful attempt rather than its older submission version."""
     worker_cls = DiffusionAgentLoopWorkerTQ.__ray_metadata__.modified_class
     worker = object.__new__(worker_cls)
     rows, tags = [], []
@@ -417,6 +471,7 @@ async def test_tq_writer_uses_each_completed_samples_actual_version(monkeypatch)
     "versions, threshold, expected_count", [([4, 4], 1, 1), ([3, 4], 1, 0), ([3, 4], 2, 1), ([2, 4], 2, 0)]
 )
 async def test_retried_group_freshness_uses_oldest_completed_sample(monkeypatch, versions, threshold, expected_count):
+    """Replay eligibility follows the oldest successful session in a complete group."""
     worker_cls = DiffusionAgentLoopWorkerTQ.__ray_metadata__.modified_class
     worker = object.__new__(worker_cls)
     worker.rollout_config = SimpleNamespace(n=2, val_kwargs=SimpleNamespace(n=2))
@@ -534,16 +589,8 @@ async def test_run_prompt_publishes_failure_after_siblings_settle(monkeypatch):
     assert [session_id for session_id, _output in written[0]] == [1]
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("per_prompt_seed", [False, True])
-async def test_generate_sequences_seeds_from_global_prompt_index(monkeypatch, per_prompt_seed):
-    """Per-request rollout seeds must derive from the global batch index (#561).
-
-    Each agent worker only sees a chunk of the batch, so seeding from the
-    chunk-local position makes every worker reuse the same seed offsets and
-    roll out duplicated noise. Two chunks carrying global indices [0, 1] and
-    [2, 3] must yield distinct seeds for all prompt x session combinations.
-    """
+def _seed_capturing_tq_worker(monkeypatch, *, val_seed: int = 0):
+    """TQ agent loop worker (rollout.n=2) that records the request seed per (uid, session)."""
     worker_cls = DiffusionAgentLoopWorkerTQ.__ray_metadata__.modified_class
     worker = object.__new__(worker_cls)
     worker.background_tasks = set()
@@ -553,48 +600,135 @@ async def test_generate_sequences_seeds_from_global_prompt_index(monkeypatch, pe
         algo={},
         calculate_log_probs=False,
         agent=SimpleNamespace(default_agent_loop="diffusion_single_turn_agent"),
-        val_kwargs=SimpleNamespace(n=2, seed=0, pipeline={}, algo={}),
+        val_kwargs=SimpleNamespace(n=2, seed=val_seed, pipeline={}, algo={}),
     )
 
     async def fake_kv_put(*, key, partition_id, tag):
         del key, partition_id, tag
 
-    captured_seeds: list[int] = []
+    captured_seeds: dict[tuple[str, int], int | None] = {}
 
-    async def fake_run_agent_loop(self, sampling_params, *, session_id, **kwargs):
-        del self, session_id, kwargs
-        captured_seeds.append(sampling_params["seed"])
+    async def fake_run_agent_loop(self, sampling_params, *, session_id, uid, **kwargs):
+        del self, kwargs
+        captured_seeds[(uid, session_id)] = sampling_params.get("seed")
 
     monkeypatch.setattr(diffusion_agent_loop_tq, "_config_to_sampling_dict", lambda cfg: {})
     monkeypatch.setattr(diffusion_agent_loop_tq.tq, "async_kv_put", fake_kv_put)
     worker._run_agent_loop = MethodType(fake_run_agent_loop, worker)
+    return worker, captured_seeds
 
-    def make_chunk(global_indices: list[int], uids: list[str]) -> TensorDict:
-        return TensorDict(
-            {
-                "index": torch.tensor(global_indices),
-                "uid": NonTensorStack(*uids),
-                "rollout_seed": torch.tensor([42 + i // 2 for i in global_indices])
-                if per_prompt_seed
-                else NonTensorData(42),
-                "global_steps": NonTensorData(1),
-            },
-            batch_size=[len(global_indices)],
-        )
 
-    # Two chunks as AgentLoopManagerTQ would split a 4-prompt batch across two
-    # workers: chunk-local positions restart at 0, global indices do not.
-    await worker.generate_sequences(make_chunk([0, 1], ["a", "b"]))
-    await worker.generate_sequences(make_chunk([2, 3], ["c", "d"]))
+def _seed_test_chunk(fields: dict[str, list[int]], uids: list[str], **non_tensor) -> TensorDict:
+    return TensorDict(
+        {
+            **{name: torch.tensor(values) for name, values in fields.items()},
+            "uid": NonTensorStack(*uids),
+            "global_steps": NonTensorData(1),
+            **{name: NonTensorData(value) for name, value in non_tensor.items()},
+        },
+        batch_size=[len(uids)],
+    )
+
+
+def test_per_rollout_seeds_or_entropy_falls_back_to_entropy():
+    """Without ``rollout_seed`` every row gets a distinct in-range entropy seed."""
+    seeds = per_rollout_seeds_or_entropy({"global_steps": 1}, 4)
+
+    assert len(seeds) == 4
+    assert all(isinstance(seed, int) and 0 <= seed < 2**63 for seed in seeds)
+    assert len(set(seeds)) == 4
+
+
+def test_per_rollout_seeds_or_entropy_derives_when_seeded():
+    """A set ``rollout_seed`` keeps the derived-seed path (global indices honored)."""
+    seeds = per_rollout_seeds_or_entropy({"rollout_seed": 42}, 3, global_indices=[7, 8, 9])
+
+    assert seeds == [derive_rollout_seed(42, idx) for idx in (7, 8, 9)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "chunks",
+    [
+        # One generation batch split across two workers (#561): chunk-local
+        # positions restart at 0, global indices do not.
+        [{"index": [0, 1]}, {"index": [2, 3]}],
+        # The same batch as the trainer now stamps it: with one generation batch
+        # per step the seed index equals ``index``, so seeds match the case above.
+        [
+            {"index": [0, 1], "rollout_seed_index": [0, 1]},
+            {"index": [2, 3], "rollout_seed_index": [2, 3]},
+        ],
+        # One step spanning two generation batches (gen_batch_size < num_prompts,
+        # refills): ``index`` restarts per batch, the step-wide seed index does not.
+        [
+            {"index": [0, 1], "rollout_seed_index": [0, 1]},
+            {"index": [0, 1], "rollout_seed_index": [2, 3]},
+        ],
+    ],
+)
+async def test_generate_sequences_seeds_from_global_prompt_index(monkeypatch, chunks):
+    """Per-request rollout seeds must follow the prompt's position among the step's prompts.
+
+    Each agent worker only sees a chunk of the batch, and one step can span
+    several generation batches; seeding from a position that repeats makes
+    prompts reuse the same seed offsets and roll out duplicated noise. Every
+    layout must seed prompt ``p``, session ``s`` with
+    ``derive_rollout_seed(base, p * n + s)``.
+    """
+    worker, captured_seeds = _seed_capturing_tq_worker(monkeypatch)
+
+    await worker.generate_sequences(_seed_test_chunk(chunks[0], ["a", "b"], rollout_seed=42))
+    await worker.generate_sequences(_seed_test_chunk(chunks[1], ["c", "d"], rollout_seed=42))
     await asyncio.gather(*worker.background_tasks)
 
-    assert len(captured_seeds) == 4 * 2  # 4 prompts x rollout.n=2
-    assert len(set(captured_seeds)) == 4 * 2  # no duplicated noise across workers
-    assert sorted(captured_seeds) == sorted(
-        diffusion_agent_loop_tq._derive_rollout_seed(42 + (i // 2 if per_prompt_seed else 0), i * 2 + session_id)
-        for i in range(4)
-        for session_id in range(2)
-    )
+    assert captured_seeds == {
+        (uid, session): derive_rollout_seed(42, position * 2 + session)
+        for position, uid in enumerate("abcd")
+        for session in range(2)
+    }
+    assert len(set(captured_seeds.values())) == 4 * 2  # no duplicated noise across workers
+
+
+@pytest.mark.asyncio
+async def test_generate_sequences_preserves_per_prompt_retry_seeds(monkeypatch):
+    """Reissued prompts may carry different saved seed bases in the same worker batch."""
+    worker, captured = _seed_capturing_tq_worker(monkeypatch)
+    chunk = _seed_test_chunk({"index": [0, 0], "rollout_seed_index": [2, 5], "rollout_seed": [42, 43]}, ["a", "b"])
+    await worker.generate_sequences(chunk)
+    await asyncio.gather(*worker.background_tasks)
+    assert captured == {
+        (uid, session): derive_rollout_seed(base, position * 2 + session)
+        for uid, base, position in [("a", 42, 2), ("b", 43, 5)]
+        for session in range(2)
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("validate", [False, True])
+async def test_unseeded_training_gets_entropy_seeds_validation_keeps_val_seed(monkeypatch, validate):
+    """Unseeded training requests carry explicit per-session entropy seeds.
+
+    Without ``rollout.seed`` the requests must not stay unseeded: vLLM-Omni
+    assigns absent seeds via ``random.randint`` in the engine-server process,
+    where Ray-forked replicas share RNG state and draw colliding seeds for
+    unseeded requests routed to different replicas. Validation keeps
+    ``val_kwargs.seed`` even when a base seed is set.
+    """
+    worker, captured_seeds = _seed_capturing_tq_worker(monkeypatch, val_seed=123)
+    non_tensor = {"validate": True, "rollout_seed": 42} if validate else {}
+    chunk = _seed_test_chunk({"index": [0, 1], "rollout_seed_index": [2, 3]}, ["a", "b"], **non_tensor)
+
+    await worker.generate_sequences(chunk)
+    await asyncio.gather(*worker.background_tasks)
+
+    seeds = list(captured_seeds.values())
+    assert set(captured_seeds) == {(uid, session) for uid in "ab" for session in range(2)}
+    if validate:
+        assert seeds == [123] * 4
+    else:
+        assert all(isinstance(seed, int) and 0 <= seed < 2**63 for seed in seeds)
+        assert len(set(seeds)) == 4  # per-session entropy: no duplicated noise across replicas
 
 
 @pytest.mark.asyncio

@@ -1,6 +1,6 @@
 # DiffusionNFT Trainer
 
-Last updated: 09/12/2026
+Last updated: 10/15/2026
 
 This example shows how to post-train `Qwen-Image` with DiffusionNFT on an OCR-style image generation task using `vllm-omni` rollout and a visual generative reward model (`Qwen3-VL-8B-Instruct` in this example).
 
@@ -18,7 +18,9 @@ They use the dedicated token-ID-native H3 AgentLoop; see the
 preparation, and launch instructions.
 
 Boogu-Image-0.1-Base has a DiffusionNFT recipe as well:
-[`boogu_image/run_boogu_image_ocr_lora.sh`](https://github.com/verl-project/verl-omni/blob/main/examples/diffusionnft_trainer/boogu_image/run_boogu_image_ocr_lora.sh). See the
+[`boogu_image/run_boogu_image_ocr_lora.sh`](https://github.com/verl-project/verl-omni/blob/main/examples/diffusionnft_trainer/boogu_image/run_boogu_image_ocr_lora.sh),
+and a CFG-free HPSv2.1 + PickScore + CLIPScore recipe on Pick-a-Pic prompts:
+[`boogu_image/run_boogu_image_pickapic_preference_lora_v1.sh`](https://github.com/verl-project/verl-omni/blob/main/examples/diffusionnft_trainer/boogu_image/run_boogu_image_pickapic_preference_lora_v1.sh). See the
 [Boogu-Image recipe README](https://github.com/verl-project/verl-omni/blob/main/examples/diffusionnft_trainer/boogu_image/README.md) for its guided-CFG and LoRA-target
 constraints.
 
@@ -190,6 +192,7 @@ See the [Metrics Documentation](../../docs/start/metrics.md) for a full descript
 | `examples/diffusionnft_trainer/qwen_image/run_qwen_image_ocr_lora.sh` | Qwen-Image | DiffusionNFT | True | 4 (NVIDIA) | qwenvl-ocr-vllm | 4 | 4 | 0 (sync)                | 24 | 16 | 3e-4 | 1k (full set) | 24×16=384 | 12 | 0.166                        | 570 |
 | `examples/diffusionnft_trainer/qwen_image/run_qwen_image_ocr_lora_npu.sh` | Qwen-Image | DiffusionNFT | True | 16 (NPU) | qwenvl-ocr-vllm | 16 | 16 | 0 (sync)               | 24 | 16 | 3e-4 | 1k (full set) | 24×16=384 | 12 | 0.049                      | 490 |
 | `examples/diffusionnft_trainer/boogu_image/run_boogu_image_ocr_lora.sh` | Boogu-Image | DiffusionNFT | True | 4 (H800) | qwenvl-ocr-vllm | 4 | 4 | 0 (sync)                | 24 | 16 | 1e-4 | 256 (subset) | 24×16=384 | 12 | 0.114                      | 839 |
+| `examples/diffusionnft_trainer/boogu_image/run_boogu_image_pickapic_preference_lora_v1.sh` | Boogu-Image | DiffusionNFT | True | 4 (L20X) | HPSv2.1 + PickScore + CLIPScore | 4 | 4 | 0 (sync)                | 24 | 16 | 3e-4 | 256 (subset) | 24×16=384 | 12 | 0.239                      | 402 |
 
 <table align="center" style="border: none;">
   <tr style="border: none;">

@@ -57,10 +57,11 @@ class DiffusionWholeSampleRetryLLMServerClient(LLMServerClient):
         self.retry_wait_s = float(retry_wait_s)
         self.only_hybrid = only_hybrid
 
-    async def _acquire_server(self, request_id: str):
+    async def _acquire_server(self, request_id: str, **extra):
+        """Wait through hybrid training pauses without consuming sample retries."""
         while True:
             try:
-                return await super()._acquire_server(request_id)
+                return await super()._acquire_server(request_id, **extra)
             except RuntimeError as error:
                 if not self.only_hybrid or "No available servers in load balancer" not in str(error):
                     raise
