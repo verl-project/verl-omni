@@ -93,15 +93,12 @@ Trainer finalization closes reward resources and the transfer queue on both succ
 
 The CPU regressions in `tests/reward_loop/test_native_fsdp_integration_on_cpu.py` cover configuration,
 construction rollback, cancellation and shutdown without starting Ray or loading model weights.
-The manual two-GPU validator checks pretrained parity, named-reward integration, load/unload and rank-failure
-cleanup. It retains actor IDs and requires terminal states before Ray shutdown.
+GPU parity, fault-injection and end-to-end training evidence are recorded in
+[PR #855](https://github.com/verl-project/verl-omni/pull/855).
 
-Run from the repository root with local immutable checkpoints and two GPUs with sufficient free memory:
+Run the CPU regressions from the repository root:
 
 ```bash
 CUDA_VISIBLE_DEVICES='' "$PYTHON" -m pytest \
   tests/reward_loop/test_native_fsdp_integration_on_cpu.py -q --asyncio-mode=auto
-CUDA_VISIBLE_DEVICES="$GPU_PAIR" "$PYTHON" -m tests.reward_loop.validate_native_fsdp \
-  --model-path "$PICKSCORE_MODEL" --processor-path "$PICKSCORE_PROCESSOR" \
-  --media-jsonl "$MEDIA_JSONL" --output "$PARITY_OUTPUT"
 ```

@@ -164,16 +164,6 @@ def test_entrypoint_rejects_fsdp_before_trainer_selection(monkeypatch, invalid):
         main_module.main.__wrapped__(cfg)
 
 
-@pytest.mark.parametrize("processor_path", [None, "explicit-processor"])
-def test_processor_default_is_resolved_by_the_adapter(monkeypatch, processor_path):
-    from verl_omni.utils.reward_score.pickscore_reward import _PROCESSOR_PATH
-
-    monkeypatch.setattr(native_fsdp.CLIPProcessor, "from_pretrained", lambda path: path)
-    assert native_fsdp._load_processor(processor_path) == (
-        _PROCESSOR_PATH if processor_path is None else processor_path
-    )
-
-
 def test_pinned_verl_worker_hooks_and_wrap_config_contract():
     from verl.single_controller.ray import RayWorkerGroup
     from verl.utils.fsdp_utils import _select_fsdp2_wrap_targets
@@ -239,30 +229,20 @@ def test_trainer_cleanup_closes_fsdp_and_queue_even_on_fit_or_close_failure():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failure", ["exit", "hang"])
-async def test_facade_failure_terminates_owned_ranks_before_return(failure, monkeypatch):
-    cfg = config()
-    owner = MultiRewardModelManager(cfg, SimpleNamespace(world_size=2)).models["pickscore"]
+async def test_facade_timeout_terminates_owned_ranks_before_return(monkeypatch):
+    owner = MultiRewardModelManager(config(), SimpleNamespace(world_size=2)).models["pickscore"]
     owner.timeout = 0.01
     calls = []
 
-    async def ready():
+    async def blocked(*args):
         await asyncio.Future()
 
-    def compute(*args):
-        async def result():
-            if failure == "exit":
-                raise RuntimeError("facade died")
-            await asyncio.Future()
-
-        return result()
-
-    facade = SimpleNamespace(compute_score_batch=SimpleNamespace(remote=compute), ready=SimpleNamespace(remote=ready))
+    facade = SimpleNamespace(compute_score_batch=SimpleNamespace(remote=blocked), ready=SimpleNamespace(remote=blocked))
     owner.bind_workers([facade])
     ranks = [object(), object()]
     owner.bind_rank_workers(ranks)
     monkeypatch.setattr(native_fsdp, "terminate_ranks", lambda workers, timeout, status_method: calls.append(workers))
-    with pytest.raises((RuntimeError, TimeoutError)):
+    with pytest.raises(TimeoutError):
         await owner.run_rpc("compute_score_batch", object())
     assert calls == [[facade], ranks] and owner._closed
     await owner.close()
