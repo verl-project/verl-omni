@@ -453,12 +453,9 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             SkipManager.set_step(self.global_steps)
             current_epoch = (self.global_steps - 1) // self.steps_per_epoch
             if is_last_step:
-                log_skip_summary(self.logger, self.global_steps)
-                self._shutdown_dump_executor()
                 pprint(f"Final validation metrics: {last_val_metrics}")
                 progress_bar.close()
-                self._shutdown_dataloaders()
-                return
+                break
 
         self.on_train_end()
         log_skip_summary(self.logger, self.global_steps)
