@@ -308,9 +308,6 @@ class NativeRewardModelConfig(RewardModelConfig):
         if self.dispatch_batch_size is not None:
             _validate_positive_int(self.dispatch_batch_size, f"Native reward model {self.name!r} dispatch_batch_size")
         if self.placement.replica_groups:
-            from verl_omni.reward_loop.native_fsdp import validate_executor_config
-
-            validate_executor_config(self.executor)
             if not self.model_path:
                 raise ValueError("Native FSDP requires an explicit immutable model_path")
             if self.fsdp is None:

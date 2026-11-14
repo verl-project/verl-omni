@@ -1,6 +1,6 @@
 # Named Reward Models
 
-Last updated: 10/27/2026
+Last updated: 11/13/2026
 
 This guide describes how to configure and extend named model-backed rewards
 under `reward.models` in `verl-omni`. For the general Reward Loop interface and
@@ -402,9 +402,11 @@ Each native model entry is one deployment. Different checkpoints or lifecycle
 policies require different named deployments; multiple reward functions may
 share one deployment through their `model` field. For accelerator placement, every
 `placement.devices` entry creates one complete replica of that deployment.
-Future FSDP support will need an explicit replica-group schema because a flat
-device list cannot distinguish full replicas from ranks within one sharded
-replica.
+Experimental FSDP2 PickScore support uses `placement.replica_groups: [[0, 1]]`
+for one sharded replica across two GPUs. It requires a dedicated single-node
+reward pool and synchronous V1 diffusion training. See the
+[FSDP2 reward model design](../advanced/fsdp2_reward_models.md) for configuration,
+lifecycle guarantees and the supported scope.
 
 For native CLAP, AudioBox, and DeSync scorers, a single-sample `batch` supplies
 `audio`, `audio_sample_rate`, and optional `audio_layout` in preference to
@@ -718,12 +720,15 @@ workload benefits.
 
 - Named-model aggregation currently uses the visual input contract implemented
   by `MultiVisualRewardManager`; the aggregation core itself is modality-neutral.
-- Native models are replicated; FSDP and tensor parallelism are not supported.
+- Flat native placement creates full replicas. Experimental FSDP2 support is
+  limited to one frozen PickScore deployment with two GPU ranks; see the
+  [design document](../advanced/fsdp2_reward_models.md). Tensor parallelism is
+  not supported.
 - Native routing defaults to a static even split; optional microbatch dispatch
   balances available work, without preempting or stealing an active batch.
 - Named models do not participate in streaming reward computation.
 - vLLM-Omni reward serving is not implemented.
 
 Automatic migration of every existing reward implementation and a unified
-streaming/FSDP design remain follow-up work. The configuration migration and
+streaming integration remain follow-up work. The configuration migration and
 extension contracts supported by this change are documented above.

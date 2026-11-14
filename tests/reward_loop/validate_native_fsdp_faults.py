@@ -58,6 +58,8 @@ class FaultRank(native_fsdp.PickScoreFSDPRank):
 
         def hook(module, args):
             marker = Path(self.fault["markers"])
+            if self.fault["mode"] == "nccl_timeout" and not (marker / "armed").exists():
+                return
             (marker / f"rank{self.fault_rank}").write_text("after root FSDP pre-forward/all-gather")
             if self.fault["mode"] == "hold" or self.fault_rank == self.fault["rank"]:
                 if self.fault["mode"] == "forward_error":
@@ -181,6 +183,10 @@ def main():
             phase = "wake_up"
             try:
                 replica.wake_up()
+                if mode == "nccl_timeout":
+                    # Initialize the lazy CUDA/NCCL path before testing a steady-state collective deadline.
+                    replica.infer(["a blue image"], [image])
+                    (markers / "armed").write_text("healthy FSDP forward completed on both ranks")
                 phase = "infer"
                 if mode == "hang":
                     replica.timeout = 5

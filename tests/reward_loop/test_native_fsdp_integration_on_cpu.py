@@ -14,6 +14,7 @@
 """Opt-in configuration, construction rollback, and trainer cleanup contracts."""
 
 import asyncio
+import inspect
 import json
 import os
 import sys
@@ -31,11 +32,11 @@ from verl_omni.reward_loop import reward_loop as reward_loop_module
 from verl_omni.reward_loop.native_fsdp import (
     FSDPRewardReplica,
     NativeFSDPExecutor,
-    NativeFSDPGroupError,
     terminate_ranks,
 )
 from verl_omni.reward_loop.reward_loop import OmniRewardLoopManager
 from verl_omni.reward_loop.reward_model import MultiRewardModelManager
+from verl_omni.trainer import main_diffusion_v1 as main_module
 from verl_omni.trainer.main_diffusion_v1 import finish_training_resources
 from verl_omni.workers.config.reward import (
     NativeRewardFSDPConfig,
@@ -146,6 +147,52 @@ def test_optional_terms_are_rejected_before_resource_allocation():
     cfg.reward.reward_functions.pickscore.required = False
     with pytest.raises(ValueError, match="required=true"):
         validate_reward_model_terms(cfg)
+
+
+@pytest.mark.parametrize("invalid", ["legacy", "executor", "kwargs"])
+def test_entrypoint_rejects_fsdp_before_trainer_selection(monkeypatch, invalid):
+    cfg = config()
+    cfg.reward.reward_model.n_gpus_per_node = 2
+    if invalid == "legacy":
+        cfg.trainer.use_v1 = False
+    elif invalid == "executor":
+        cfg.reward.models.pickscore.executor.model = "unsupported.Adapter"
+    else:
+        cfg.reward.models.pickscore.executor.kwargs = {"dtype": "float16"}
+    monkeypatch.setattr(main_module, "auto_set_device", lambda config: None)
+    monkeypatch.setattr(main_module, "validate_config", lambda config: None)
+    monkeypatch.setattr(main_module, "validate_attention_consistency", lambda config: None)
+    monkeypatch.setattr(main_module, "is_cuda_available", True)
+    monkeypatch.setattr(main_module, "run_diffusion_v1", lambda config: pytest.fail("trainer selected"))
+    monkeypatch.setattr(main_module.ray, "init", lambda **kwargs: pytest.fail("Ray allocated"))
+    with pytest.raises(ValueError):
+        main_module.main.__wrapped__(cfg)
+
+
+@pytest.mark.parametrize("processor_path", [None, "explicit-processor"])
+def test_processor_default_is_resolved_by_the_adapter(monkeypatch, processor_path):
+    from verl_omni.utils.reward_score.pickscore_reward import _PROCESSOR_PATH
+
+    monkeypatch.setattr(native_fsdp.CLIPProcessor, "from_pretrained", lambda path: path)
+    assert native_fsdp._load_processor(processor_path) == (
+        _PROCESSOR_PATH if processor_path is None else processor_path
+    )
+
+
+def test_pinned_verl_worker_hooks_and_wrap_config_contract():
+    from verl.single_controller.ray import RayWorkerGroup
+    from verl.utils.fsdp_utils import _select_fsdp2_wrap_targets
+
+    for name in ("_get_master_addr_port", "_create_worker"):
+        assert inspect.signature(getattr(native_fsdp._RankWorkerGroup, name)) == inspect.signature(
+            getattr(RayWorkerGroup, name)
+        )
+    clip = torch.nn.Module()
+    clip.config = SimpleNamespace(tie_word_embeddings=False)
+    clip.logit_scale = torch.nn.Parameter(torch.zeros(()))
+    clip.encoder = torch.nn.Linear(1, 1)
+    model = native_fsdp.PickScoreForward(clip)
+    assert _select_fsdp2_wrap_targets(model, ["Linear"]) == [clip.encoder]
 
 
 @pytest.mark.parametrize("mode", ["shared", "streaming", "async", "v0", "multinode"])
@@ -400,26 +447,42 @@ def test_acceptance_uses_ray_job_id_string_before_actor_and_checkpoint_checks(tm
     assert len(report["actors_before_ray_shutdown"]) == 5
 
 
-def test_partial_submission_and_rank_failure_terminate_whole_group(monkeypatch):
+@pytest.mark.parametrize("failure", ["rank", "shape", "shape_cleanup"])
+def test_partial_submission_and_rank_failure_terminate_whole_group(monkeypatch, failure):
     calls = []
     ranks = [object(), object()]
 
     def partial(*args):
-        raise RuntimeError("rank failed")
+        if failure == "rank":
+            raise RuntimeError("rank failed")
+        return [None, None]
 
     group = SimpleNamespace(world_size=2, workers=ranks, wake_up=lambda: [None, None], infer=partial)
     model = FSDPRewardReplica(group, lambda **kwargs: {})
     monkeypatch.setattr("verl_omni.reward_loop.native_fsdp.ray.get", lambda refs, **kwargs: refs)
-    monkeypatch.setattr(
-        "verl_omni.reward_loop.native_fsdp.terminate_ranks", lambda workers, timeout: calls.extend(workers)
-    )
+    cleanup = TimeoutError("rank death unconfirmed")
+
+    def terminate(workers, timeout):
+        calls.extend(workers)
+        if failure == "shape_cleanup":
+            raise cleanup
+
+    monkeypatch.setattr(native_fsdp, "terminate_ranks", terminate)
     model.wake_up()
-    with pytest.raises(NativeFSDPGroupError):
+    with pytest.raises(BaseExceptionGroup if failure == "shape_cleanup" else RuntimeError) as error:
         model.infer(["prompt"], [object()])
+    if failure == "shape_cleanup":
+        assert "rank zero" in str(error.value.exceptions[0])
+        assert error.value.exceptions[1] is cleanup
     assert calls == ranks
     with pytest.raises(RuntimeError, match="closed"):
         model.wake_up()
-    model.close()
+    if failure == "shape_cleanup":
+        with pytest.raises(TimeoutError) as repeated:
+            model.close()
+        assert repeated.value is cleanup
+    else:
+        model.close()
 
 
 @pytest.mark.parametrize(
@@ -433,8 +496,19 @@ def test_partial_submission_and_rank_failure_terminate_whole_group(monkeypatch):
 def test_only_confirmed_death_succeeds_and_every_rank_is_attempted(monkeypatch, probe_error):
     calls = []
     probes = []
-    actors = [SimpleNamespace(status=SimpleNamespace(remote=lambda index=index: index)) for index in range(2)]
+
+    def closed_status():
+        raise ValueError("Default process group has not been initialized")
+
+    actors = [
+        SimpleNamespace(
+            status=SimpleNamespace(remote=closed_status),
+            __ray_ready__=SimpleNamespace(remote=lambda index=index: index),
+        )
+        for index in range(2)
+    ]
     monkeypatch.setattr("verl_omni.reward_loop.native_fsdp.ray.kill", lambda actor, **kwargs: calls.append(actor))
+    monkeypatch.setattr(native_fsdp.time, "monotonic", lambda: 0)
 
     def probe(index, **kwargs):
         probes.append(index)

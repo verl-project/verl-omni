@@ -47,15 +47,6 @@ def run_diffusion_v1(config, task_runner_class=None) -> None:
                 settings, model paths, and training hyperparameters.
         task_runner_class: For recipe to change TaskRunner.
     """
-    if has_fsdp_reward_models(config):
-        validate_reward_model_terms(config)
-        if not is_cuda_available:
-            raise ValueError("Native FSDP requires a supported GPU runtime")
-        for name, entry in get_reward_model_entries(config).items():
-            model = parse_reward_model_config(name, entry)
-            if max(model.placement.bundle_indices) >= config.reward.reward_model.n_gpus_per_node:
-                raise ValueError("Native FSDP bundle index exceeds the dedicated reward pool")
-
     # Reject unsupported profiling combinations before starting Ray or workers.
     if OmegaConf.select(config, "global_profiler.steps"):
         if (
@@ -206,6 +197,18 @@ def main(config):
     OmegaConf.resolve(config)
     validate_config(config)
     validate_attention_consistency(config)
+
+    if has_fsdp_reward_models(config):
+        from verl_omni.reward_loop.native_fsdp import validate_executor_config
+
+        validate_reward_model_terms(config)
+        if not is_cuda_available:
+            raise ValueError("Native FSDP requires a supported GPU runtime")
+        for name, entry in get_reward_model_entries(config).items():
+            model = parse_reward_model_config(name, entry)
+            validate_executor_config(model.executor)
+            if max(model.placement.bundle_indices) >= config.reward.reward_model.n_gpus_per_node:
+                raise ValueError("Native FSDP bundle index exceeds the dedicated reward pool")
 
     if config.trainer.get("use_v1", False):
         run_diffusion_v1(config)

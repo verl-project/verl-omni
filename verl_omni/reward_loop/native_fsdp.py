@@ -63,14 +63,23 @@ def validate_executor_config(executor):
         raise ValueError("Native FSDP executor.kwargs supports processor_path only (float32 inference)")
 
 
+def _load_processor(processor_path):
+    """Resolve the PickScore processor default inside its native adapter."""
+    if processor_path is None:
+        from verl_omni.utils.reward_score.pickscore_reward import _PROCESSOR_PATH
+
+        processor_path = _PROCESSOR_PATH
+    return CLIPProcessor.from_pretrained(processor_path)
+
+
 def validate_timeout(value, name="timeout"):
     """Reject non-finite or non-positive deadlines before allocating workers."""
     if isinstance(value, bool) or not isinstance(value, int | float) or not math.isfinite(value) or value <= 0:
         raise ValueError(f"{name} must be a finite positive number")
 
 
-def terminate_ranks(workers, timeout, status_method="status"):
-    """Attempt every termination and confirm every owned actor has exited."""
+def terminate_ranks(workers, timeout, status_method="__ray_ready__"):
+    """Kill every owned actor and confirm death independently of model state."""
     errors = []
     for worker in workers:
         try:
@@ -103,6 +112,7 @@ class PickScoreForward(torch.nn.Module):
         self.clip = clip.eval().requires_grad_(False)
         # FSDP2 rejects scalar parameters. Preserve the value in a length-one tensor.
         self.clip.logit_scale = torch.nn.Parameter(clip.logit_scale.detach().reshape(1), requires_grad=False)
+        # verl's FSDP2 wrap-target selection reads model.config.
         self.config = clip.config
 
     def forward(self, image_inputs, text_inputs):
@@ -269,8 +279,12 @@ class FSDPRewardReplica:
             results = self._run("infer", self._sequence, inputs)
             self._sequence += 1
             if len(results) != 2 or results[0] is None or results[1] is not None:
-                self._terminate()
-                raise RuntimeError("Expected one result from logical replica rank zero")
+                error = RuntimeError("Expected one result from logical replica rank zero")
+                try:
+                    self._terminate()
+                except BaseException as cleanup:
+                    raise BaseExceptionGroup("FSDP result and cleanup failed", [error, cleanup]) from None
+                raise error
             return results[0]
 
     def sleep(self):
@@ -414,7 +428,7 @@ def attach_replica(workers, processor_path, timeout):
         ray_cls_with_init=RayClassWithInitArgs(ray.remote(PickScoreFSDPRank)),
         use_gpu=False,
     )
-    return FSDPRewardReplica(group, CLIPProcessor.from_pretrained(processor_path), timeout)
+    return FSDPRewardReplica(group, _load_processor(processor_path), timeout)
 
 
 class _RankPool(_IndexedResourcePool):
@@ -452,7 +466,7 @@ class _RankWorkerGroup(RayWorkerGroup):
 def build_replica(
     resource_pool,
     model_path: str,
-    processor_path: str,
+    processor_path: str | None,
     timeout: float = 120,
     collective_timeout: float = 30,
     bundle_indices=None,
@@ -473,7 +487,7 @@ def build_replica(
         )
     ):
         raise ValueError("FSDP requires exactly two distinct valid parent-pool bundle indices")
-    processor = CLIPProcessor.from_pretrained(processor_path)
+    processor = _load_processor(processor_path)
     group = _RankWorkerGroup(
         resource_pool=_RankPool(resource_pool, indices),
         ray_cls_with_init=RayClassWithInitArgs(

@@ -1,8 +1,9 @@
-# FSDP2 reward model design
+# Experimental FSDP2 reward model design
 
 Last updated: 11/13/2026.
 
 This design document is for developers maintaining reward execution, placement and lifecycle management.
+FSDP2 reward-model support is experimental; its current scope and lifecycle guarantees are described below.
 It explains how a frozen reward model spans two GPUs within the existing named native reward interface.
 For scorer configuration and the inference/scoring contract, see [Named Reward Models](../algo/named_reward_models.md).
 
@@ -52,7 +53,8 @@ reward:
 ```
 
 The checkpoint must remain immutable across load/unload cycles. Both deadlines must be finite and positive.
-Unsupported placement, executor and trainer settings are rejected before actor allocation.
+The diffusion entrypoint rejects unsupported placement, executor and trainer settings before selecting the V1 or
+legacy trainer and before allocating actors.
 
 ## Execution and ownership
 
@@ -80,6 +82,7 @@ rollback terminate actors even when the facade constructor or readiness check fa
 A rank error, timeout, partial submission or facade failure invalidates the whole replica. Cleanup attempts the
 facade and both ranks even if one termination fails. A definite actor-death response is required for success;
 temporary unavailability and timeout remain cleanup failures. Primary and cleanup errors are preserved together.
+Rank termination probes use Ray's built-in readiness RPC, which remains valid after process-group teardown.
 The failed replica is not retried or reused.
 
 Concurrent close callers wait for the same owned termination to settle and observe its retained error. Cancelling
@@ -103,3 +106,41 @@ CUDA_VISIBLE_DEVICES="$GPU_PAIR" "$PYTHON" -m tests.reward_loop.validate_native_
   --model-path "$PICKSCORE_MODEL" --processor-path "$PICKSCORE_PROCESSOR" \
   --media-jsonl "$MEDIA_JSONL" --output "$PARITY_OUTPUT"
 ```
+
+The manual SD3.5 functional study uses 128 training and 32 held-out prompts from a pinned upstream PickScore
+split. Preparation selects the first unique captions with 5–20 whitespace-separated words and at most 140
+characters, preserves source order and excludes every training caption from validation. It records source
+indices, selected captions and file checksums. No reward-based selection is used.
+
+The reference runs 64 updates; a separate process restores checkpoint 32 and continues to 64 with the same
+configuration. Verification compares saved images, scores, logged gradient norms, model tensors and optimizer state,
+checks frozen weights and LoRA updates, and requires exact Adam counters. Plotting needs matplotlib.
+The override template enables the existing actor and rollout full-determinism options and uses serial rollout
+requests (`max_num_seqs=1`) to control the continuation comparison; it is not a throughput benchmark.
+Exact continuation also requires the row-order correction tracked in [#742](https://github.com/verl-project/verl-omni/pull/742)
+and the separately scoped [strict actor determinism fix](https://github.com/WEIXILIN0307/verl-omni/tree/fix/diffusers-fsdp-strict-determinism).
+The recorded study includes both prerequisites; the reward patch alone does not establish exact continuation.
+From the repository root, with three available GPUs and immutable local model directories:
+
+```bash
+export PYTHONPATH="$PWD"
+export STUDY_OUTPUT=/path/to/sd35-study
+"$PYTHON" -m tests.special_e2e.reproduce_native_fsdp_sd35 --phase prepare \
+  --output "$STUDY_OUTPUT" --sd35-model "$SD35_MODEL" \
+  --pickscore-model "$PICKSCORE_MODEL" --processor "$PICKSCORE_PROCESSOR"
+CUDA_VISIBLE_DEVICES="$GPU_TRIPLE" "$PYTHON" -m tests.special_e2e.reproduce_native_fsdp_sd35 \
+  --phase reference --output "$STUDY_OUTPUT"
+CUDA_VISIBLE_DEVICES="$GPU_TRIPLE" "$PYTHON" -m tests.special_e2e.reproduce_native_fsdp_sd35 \
+  --phase resume --output "$STUDY_OUTPUT"
+CUDA_VISIBLE_DEVICES='' "$PYTHON" -m tests.special_e2e.reproduce_native_fsdp_sd35 \
+  --phase verify --output "$STUDY_OUTPUT"
+"$PYTHON" -m tests.special_e2e.reproduce_native_fsdp_sd35 --phase plot --output "$STUDY_OUTPUT"
+```
+
+The override template is `tests/special_e2e/native_fsdp_sd35_overrides.json`. The complete unsmoothed training
+and validation means are written to `curves.csv`; `comparison.json` records continuation checks. Validation
+shading is one standard error across the fixed prompts, not an interval over independent training runs.
+The trainer saves training media on a best-effort basis. Verification accepts a missing training dump only
+when the log records that the previous dump was still running; all logged training means and every validation
+image set are still required. The report lists inspected samples and skipped training dumps separately.
+This single-seed study establishes the exercised integration behavior, not convergence or quality gains.

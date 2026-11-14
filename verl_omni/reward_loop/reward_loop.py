@@ -345,11 +345,10 @@ class OmniRewardLoopManager(RewardLoopManager):
         )
 
     def _create_fsdp_worker(self, config, spec, model):
-        from verl_omni.utils.reward_score.pickscore_reward import _PROCESSOR_PATH
+        from .native_fsdp import build_replica, validate_executor_config
 
-        from .native_fsdp import build_replica
-
-        processor_path = model.executor.kwargs.get("processor_path", _PROCESSOR_PATH)
+        validate_executor_config(model.executor)
+        processor_path = model.executor.kwargs.get("processor_path")
         replica = build_replica(
             self.multi_reward_model_manager.resource_pool,
             model.model_path,
@@ -428,7 +427,11 @@ class OmniRewardLoopManager(RewardLoopManager):
                 data,
                 self._reward_worker_groups,
                 self._reward_dispatch_batch_sizes,
-                rpc_owners=self.multi_reward_model_manager.models,
+                rpc_owners={
+                    name: self.multi_reward_model_manager.models[name]
+                    for name, entry in get_reward_model_entries(self.config).items()
+                    if entry.get("placement", {}).get("replica_groups")
+                },
             )
         else:
             group_outputs = await dispatch_reward_groups(
