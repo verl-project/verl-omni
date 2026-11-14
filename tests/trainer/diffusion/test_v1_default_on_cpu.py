@@ -13,14 +13,18 @@
 # limitations under the License.
 """V1-by-default trainer selection and v0 deprecation warnings."""
 
+import os
 import warnings
 from pathlib import Path
 
 import pytest
 from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
+from verl.trainer.ppo.v1.replay_buffer import ReplayBufferAsync
 
 import verl_omni
+from verl_omni.trainer.diffusion.v1 import get_diffusion_trainer_cls
+from verl_omni.trainer.diffusion.v1.trainer_colocate_async import PolicyGradientDiffusionTrainerV1ColocateAsync
 from verl_omni.trainer.main_diffusion import _deprecate_v0_trainer, uses_v1_trainer
 
 
@@ -87,16 +91,32 @@ def test_offline_dpo_v0_launch_stays_silent():
     assert config.trainer.use_v1 is False
 
 
-@pytest.mark.parametrize(
-    "overrides",
-    [[], ["+ray_kwargs.ray_init.runtime_env.env_vars.OMP_NUM_THREADS='8'"]],
-    ids=["default", "user_env_vars"],
-)
-def test_run_diffusion_v1_force_enables_transfer_queue_before_ray_init(monkeypatch, overrides):
+@pytest.mark.parametrize("overrides", [[], ["+ray_kwargs.ray_init.runtime_env.env_vars.OMP_NUM_THREADS='8'"]])
+@pytest.mark.parametrize("entrypoint", ["v0", "v1"])
+@pytest.mark.parametrize("reward_path", ["legacy", "named"])
+@pytest.mark.parametrize("reward_enabled, full_determinism", [(False, True), (True, False), (True, True)])
+def test_diffusion_ray_runtime_env_matches_reward_config(
+    monkeypatch, entrypoint, reward_path, reward_enabled, full_determinism, overrides
+):
+    """User runtime overrides coexist with deterministic reward and TransferQueue flags."""
+    import verl_omni.trainer.main_diffusion as main_v0
     import verl_omni.trainer.main_diffusion_v1 as main_v1
 
     config = compose_diffusion_config(overrides)
     assert config.transfer_queue.enable is False
+    config.reward.reward_model.enable = reward_enabled if reward_path == "legacy" else False
+    config.reward.custom_reward_function.path = "verl_omni/utils/reward_score/genrm_ocr.py"
+    OmegaConf.update(config, "reward.reward_model.rollout.full_determinism", full_determinism, force_add=True)
+    OmegaConf.update(config, "reward.reward_model.rollout.seed", 17, force_add=True)
+    if reward_path == "named" and reward_enabled:
+        OmegaConf.update(
+            config,
+            "reward.models.ocr",
+            {"backend": "engine", "model_path": "ocr", "rollout": {"full_determinism": full_determinism, "seed": 17}},
+            force_add=True,
+        )
+    for key in ("VERL_FULL_DETERMINISM", "VLLM_BATCH_INVARIANT", "PYTHONHASHSEED"):
+        monkeypatch.delenv(key, raising=False)
 
     captured = {}
 
@@ -122,10 +142,103 @@ def test_run_diffusion_v1_force_enables_transfer_queue_before_ray_init(monkeypat
     monkeypatch.setattr(main_v1.ray, "init", fake_ray_init)
     monkeypatch.setattr(main_v1.ray, "get", lambda handle: None)
 
-    main_v1.run_diffusion_v1(config, task_runner_class=FakeRunner)
+    if entrypoint == "v0":
+        with pytest.warns(DeprecationWarning, match="legacy \\(v0\\) diffusion trainer"):
+            main_v0.run_diffusion(config, task_runner_class=FakeRunner)
+    else:
+        main_v1.run_diffusion_v1(config, task_runner_class=FakeRunner)
 
-    assert config.transfer_queue.enable is True
     env_vars = captured["runtime_env"]["env_vars"]
-    assert env_vars.get("TRANSFER_QUEUE_ENABLE") == "1"
+    if entrypoint == "v1":
+        assert config.transfer_queue.enable is True
+        assert env_vars.get("TRANSFER_QUEUE_ENABLE") == "1"
+    expected = "1" if reward_enabled and full_determinism else "0"
+    assert env_vars["VERL_FULL_DETERMINISM"] == expected
+    assert env_vars["VLLM_BATCH_INVARIANT"] == expected
+    if expected == "1":
+        assert env_vars["PYTHONHASHSEED"] == "17"
+    else:
+        assert "PYTHONHASHSEED" not in env_vars
     if overrides:
         assert env_vars.get("OMP_NUM_THREADS") == "8"
+
+
+@pytest.mark.parametrize("seed", [17, 2**32, 2**63 - 1])
+@pytest.mark.parametrize("reward_path", ["legacy", "named"])
+def test_reward_hash_seed_starts_python_without_changing_sampling_seed(seed, reward_path):
+    """Large sampling seeds produce valid child-process hash seeds without mutation."""
+    import subprocess
+    import sys
+
+    from verl_omni.workers.config.reward import reward_determinism_env
+
+    config = compose_diffusion_config([])
+    config.reward.reward_model.enable = reward_path == "legacy"
+    model = config.reward.reward_model if reward_path == "legacy" else OmegaConf.create({"backend": "engine"})
+    OmegaConf.update(model, "rollout", {"full_determinism": True, "seed": seed}, force_add=True)
+    if reward_path == "named":
+        OmegaConf.update(config, "reward.models.ocr", model, force_add=True)
+    env = reward_determinism_env(config)
+    assert env["PYTHONHASHSEED"] == str(seed % (2**32))
+    assert model.rollout.seed == seed
+    result = subprocess.run([sys.executable, "-c", "pass"], env={**os.environ, **env}, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("seed", [None, "42", True])
+def test_deterministic_reward_rejects_noninteger_seed(seed):
+    from verl_omni.workers.config.reward import reward_determinism_env
+
+    config = compose_diffusion_config([])
+    config.reward.reward_model.enable = True
+    OmegaConf.update(config, "reward.reward_model.rollout.full_determinism", True, force_add=True)
+    OmegaConf.update(config, "reward.reward_model.rollout.seed", seed, force_add=True)
+    with pytest.raises(ValueError, match="rollout.seed must be an integer"):
+        reward_determinism_env(config)
+
+
+def test_registered_trainer_uses_async_groups_and_exact_refill():
+    trainer = get_diffusion_trainer_cls("colocate_async")(
+        compose_diffusion_config(
+            [
+                "trainer.v1.trainer_mode=colocate_async",
+                "data.train_batch_size=4",
+                "actor_rollout_ref.actor.ppo_mini_batch_size=2",
+                "+data.gen_batch_size=4",
+            ]
+        )
+    )
+    assert isinstance(trainer, PolicyGradientDiffusionTrainerV1ColocateAsync)
+    assert isinstance(trainer.replay_buffer, ReplayBufferAsync)
+    assert trainer.parameter_sync_step == 1
+    assert trainer._generation_batch_size() == 1
+
+
+@pytest.mark.parametrize(
+    ("override", "message"),
+    [
+        ("actor_rollout_ref.rollout.nnodes=1", "colocated rollout"),
+        ("actor_rollout_ref.rollout.checkpoint_engine.backend=nccl", "backend=naive"),
+        ("trainer.v1.colocate_async.num_warmup_batches=-1", "nonnegative integer"),
+        ("trainer.v1.colocate_async.num_warmup_batches=1.5", "nonnegative integer"),
+        ("+trainer.v1.colocate_async.parameter_sync_step=2", "one parameter sync"),
+        ("actor_rollout_ref.model.algorithm=diffusion_nft", "FlowGRPO"),
+        ("data.train_batch_size=0", "positive integer"),
+        ("data.train_batch_size=-2", "positive integer"),
+        ("actor_rollout_ref.actor.ppo_mini_batch_size=0", "positive integer"),
+        ("actor_rollout_ref.actor.ppo_mini_batch_size=1.5", "positive integer"),
+        ("data.train_batch_size=3", "divisible by ppo_mini_batch_size"),
+    ],
+)
+def test_invalid_config_fails_before_workers_start(override, message):
+    with pytest.raises(ValueError, match=message):
+        PolicyGradientDiffusionTrainerV1ColocateAsync(
+            compose_diffusion_config(
+                [
+                    "trainer.v1.trainer_mode=colocate_async",
+                    "data.train_batch_size=4",
+                    "actor_rollout_ref.actor.ppo_mini_batch_size=2",
+                    override,
+                ]
+            )
+        )

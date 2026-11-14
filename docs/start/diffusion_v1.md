@@ -1,8 +1,8 @@
 # Diffusion V1 training
 
-Last updated: 11/03/2026
+Last updated: 11/14/2026
 
-This guide runs the diffusion V1 trainer in synchronous or separate-asynchronous
+This guide runs the diffusion V1 trainer in synchronous, colocated-asynchronous or separate-asynchronous
 mode using the provided Stable Diffusion 3.5 Medium FlowGRPO OCR recipes.
 Qwen-Image FlowGRPO now has a matching V1 sync LoRA recipe as well. The V1
 trainer uses TransferQueue and ReplayBuffer to move rollout trajectories into
@@ -167,6 +167,78 @@ bash examples/dancegrpo_trainer/wan22/run_wan22_5b_t2v_hpsv3_v1.sh
 See {doc}`../examples/dancegrpo_trainer` for dataset and HPSv3 setup. The
 legacy v0 auto-detect script (`run_wan22_5b_t2v_hpsv3_auto.sh`) is
 **deprecated** for CUDA and remains for NPU.
+
+## Run V1 colocate-async mode
+
+SD3.5 Medium + FlowGRPO can use an asynchronous queue while the actor and
+rollout share the same GPUs:
+
+```bash
+bash examples/flowgrpo_trainer/sd35/run_sd35_medium_ocr_lora_v1_colocate_async.sh
+```
+
+The recipe reuses the sync model, loss and OCR reward settings and enables actor
+parameter/optimizer offload. It requires `rollout.nnodes=0` and the `naive`
+checkpoint backend. There is one weight
+sync per trainer step; existing actor PPO mini-batches remain unchanged, and
+`train_batch_size` must be divisible by `ppo_mini_batch_size`.
+
+By default, `actor_rollout_ref.rollout.free_cache_engine=true` releases rollout
+weights during actor computation. If rollout weights and actor training fit in
+GPU memory together, set it to `false` to keep rollout weights resident and avoid
+their CPU offload and reload each step. Generation still pauses during actor
+computation and resumes after the new weights are installed. Measure peak GPU
+memory with the chosen image resolution and actor micro-batch size.
+
+For SD3.5 LoRA runs with available actor memory, pass
+`actor_rollout_ref.model.enable_gradient_checkpointing=false` to avoid
+recomputing transformer activations during backward. This trades higher
+activation memory for less computation; measure peak memory at the chosen
+image resolution and actor micro-batch size. The default remains enabled.
+
+`trainer.v1.colocate_async.num_warmup_batches` controls the queued backlog
+(default 1, use 0 for no warmup). Training samples only complete prompt groups.
+Before actor computation, the trainer closes routing and aborts unfinished
+requests. It sleeps rollout weights when `free_cache_engine=true`. After training, it installs the new
+weights and resumes generation before reopening routing. Aborted diffusion
+samples restart from their original inputs and seed. Configured rollout seeds
+are saved per prompt in TransferQueue and retained when pending groups resume
+from a checkpoint. When no seed is supplied,
+the client chooses one once for that sample. Their partial images,
+latents and log-probs are discarded. Waiting for the actor's GPUs does not
+consume the retry budget. Exhausted retries fail the whole prompt group, which
+the async replay buffer evicts and replaces with one fresh prompt. Completed
+rows retain their actual generation version, even if sessions of a group finish
+across different steps. A finished group's replay freshness follows its oldest
+successful sample, so retries on newer weights do not expire because of the
+original prompt submission version. Groups with stale samples still
+follow the configured off-policy threshold.
+
+The mode uses the same TransferQueue checkpoint recovery as separate-async and
+tops warmup up from restored groups. It currently supports FlowGRPO only. It
+does not use token continuation or dynamically change GPU allocation.
+
+Run a small pretrained-model smoke with a real JPEG image reward (no OCR reward
+GPU required), validation and LoRA checkpoints:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 MODEL_PATH=/path/to/stable-diffusion-3.5-medium \
+OUTPUT_DIR=/path/to/smoke \
+bash tests/special_e2e/run_flowgrpo_sd35_v1_colocate_async.sh
+
+# Continue from the saved queue, dataloader, LoRA and optimizer state.
+CUDA_VISIBLE_DEVICES=0 MODEL_PATH=/path/to/stable-diffusion-3.5-medium \
+OUTPUT_DIR=/path/to/smoke TOTAL_TRAIN_STEPS=5 \
+bash tests/special_e2e/run_flowgrpo_sd35_v1_colocate_async.sh trainer.resume_mode=auto
+```
+
+This smoke checks execution and state updates; it does not measure OCR
+convergence or establish a throughput advantage over sync.
+The diffusion GPU CI group also runs this script with the existing offline
+SD3 checkpoint builder (`run_gpu_smoke_diffusion_e2e.sh`, test 13), so its
+generation, actor updates and checkpoint checks need no model download.
+Named latent and preview outputs follow the {doc}`../advanced/diffusion_media_artifacts`
+contract through whole-sample retries and checkpoint recovery.
 
 ## Optional training watchdog
 
@@ -474,7 +546,7 @@ setup and requires TransferQueue >= 0.1.11 for async checkpoint resume.
 
 - `trainer.use_v1` (default `true` since v0.3.0) selects the V1 trainer; setting
   it to `false` explicitly selects the deprecated legacy v0 trainer.
-- `trainer.v1.trainer_mode` selects `sync` or `separate_async`.
+- `trainer.v1.trainer_mode` selects `sync`, `colocate_async` or `separate_async`.
 - `trainer.v1.separate_async.parameter_sync_step` controls the number of local
   actor updates per rollout-weight synchronization cycle.
 - `trainer.v1.separate_async.hybrid_rollout.enable_switch` lends the colocated
@@ -495,8 +567,8 @@ setup and requires TransferQueue >= 0.1.11 for async checkpoint resume.
   number of in-memory storage units.
 
 The configurable incomplete-group refill policy above applies to `sync` mode.
-In `separate_async`, the upstream async replay buffer automatically evicts and
-replaces stale or failed prompt groups. `colocate_async` is not yet supported.
+In both async modes, the upstream async replay buffer automatically evicts and
+replaces stale or failed prompt groups.
 
 ## Legacy v0 trainer (deprecated)
 

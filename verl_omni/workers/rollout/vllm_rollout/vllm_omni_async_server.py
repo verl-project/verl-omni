@@ -445,7 +445,10 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         ):
             acks = await self.engine.wake_up(tags=resolved_tags)
             self._validate_acks("wake_up", acks)
-            await self.engine.resume_generation()
+            # Actor weight sync wakes weights before writing them, then wakes
+            # kv_cache after the commit. Admission must wait for the full wake.
+            if not await self.engine.is_sleeping():
+                await self.engine.resume_generation()
             self._invalidate_lora_request_cache()
 
     async def set_global_steps(self, global_steps: int):
@@ -610,6 +613,9 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             )
         if reject_request and not abort_only:
             logger.warning("AsyncOmni has no admission gate: requests arriving behind the pause park until resume")
+
+        if not self.config.free_cache_engine and not abort_only:
+            await engine.pause_generation(mode="keep", clear_cache=reset_prefix_cache)
 
         # ``engine.abort`` takes EXTERNAL ids; ``request_states`` is keyed by internal.
         in_flight: list[tuple[str, str, Any]] = []

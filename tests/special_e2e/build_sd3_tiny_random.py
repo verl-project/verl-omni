@@ -167,6 +167,8 @@ def get_dummy_sd3_components(*, hidden_size: int = 8, seed: int = 42) -> dict[st
         sample_size=256,
         in_channels=3,
         out_channels=3,
+        down_block_types=("DownEncoderBlock2D",) * 4,
+        up_block_types=("UpDecoderBlock2D",) * 4,
         # Keep every down/up block at the same width to avoid GroupNorm channel mismatches.
         block_out_channels=(vae_channels, vae_channels, vae_channels, vae_channels),
         layers_per_block=1,

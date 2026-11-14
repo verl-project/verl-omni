@@ -20,7 +20,12 @@ import torch
 
 from verl_omni.agent_loop.diffusion_agent_loop import DiffusionAgentLoopWorker
 from verl_omni.agent_loop.diffusion_agent_loop_tq import DiffusionAgentLoopWorkerTQ
-from verl_omni.pipelines.rollout_media import MediaArtifact, MediaSpec, artifact_fields, previews_from_batch
+from verl_omni.pipelines.rollout_media import (
+    MediaArtifact,
+    MediaSpec,
+    artifact_fields,
+    previews_from_batch,
+)
 from verl_omni.reward_loop.reward_manager.visual import _reward_extra_info
 from verl_omni.trainer.diffusion.v1 import tq_utils
 from verl_omni.utils.reward_score.clap import _get_audio
@@ -92,3 +97,26 @@ def test_named_scorers_reject_missing_stream_instead_of_legacy_fallback():
         _get_audio({"media_artifacts": {}, "audio": torch.ones(16), "audio_sample_rate": 32000})
     with pytest.raises(ValueError, match="decoded video"):
         _to_tchw(MediaArtifact(MediaSpec("video", "latent", "CTHW"), torch.zeros(16, 3, 2, 2)))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("missing", ["video_latent", "video_preview", "audio"])
+@pytest.mark.parametrize("consumer", ["reward", "dump"])
+async def test_declared_missing_tensor_fails_after_tq_projection(monkeypatch, missing, consumer):
+    """Missing declared artifacts remain fatal at reward and export boundaries."""
+    worker = object.__new__(DiffusionAgentLoopWorkerTQ.__ray_metadata__.modified_class)
+    stored = {}
+
+    async def put(*, fields, **kwargs):
+        stored.update(fields)
+
+    monkeypatch.setattr(tq_utils.tq, "async_kv_batch_put", put)
+    await worker._write_trajectories_to_tq([(0, _internal())], uid="sample", trajectory={"step": 1}, validate=False)
+    del stored[f"media_artifact__{missing}"]
+    monkeypatch.setattr(tq_utils.tq, "kv_batch_get", lambda **kwargs: stored)
+    data = tq_utils.diffusion_tq_batch_to_dataproto(SimpleNamespace(keys=["sample_0_0"], partition_id="train"))
+    with pytest.raises(ValueError, match=f"declared artifacts missing.*{missing}"):
+        if consumer == "reward":
+            _reward_extra_info(data[0])
+        else:
+            previews_from_batch(data)

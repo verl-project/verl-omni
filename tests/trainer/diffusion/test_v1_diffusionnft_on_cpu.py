@@ -81,6 +81,7 @@ def test_nft_initializes_old_adapter_before_first_weight_sync(monkeypatch):
 
 @pytest.mark.parametrize("step,refresh", [(1, None), (2, "copy"), (76, "ema")])
 def test_nft_tq_rows_and_old_policy_schedule(monkeypatch, step, refresh):
+    """The shared TQ consumer preserves supplied rows and the NFT old-policy schedule."""
     trainer = make_nft_trainer()
     trainer.global_steps = step
     trainer.timing_raw = {}
@@ -142,25 +143,20 @@ def test_nft_tq_rows_and_old_policy_schedule(monkeypatch, step, refresh):
     assert trainer._train_sampled_batch(metrics, {}, meta) is meta
     trainer.on_step_end()
 
-    sorted_keys = ["p0_0_0", "p0_1_0", "p1_0_0", "p1_1_0"]
-    sorted_uids = ["p0", "p0", "p1", "p1"]
-    sorted_latents = torch.stack([rollout_by_key[k]["latents_clean"] for k in sorted_keys])
-    sorted_rewards = torch.stack([rollout_by_key[k]["rm_scores"] for k in sorted_keys])
-
-    read.assert_called_once_with(keys=sorted_keys, partition_id="train", select_fields=None)
+    read.assert_called_once_with(keys=keys, partition_id="train", select_fields=None)
     sent = captured["data"]
-    assert list(sent.non_tensor_batch["uid"]) == sorted_uids
-    assert list(sent.non_tensor_batch["sample_id"]) == sorted_keys
-    torch.testing.assert_close(sent.batch["latents_clean"], sorted_latents)
+    assert list(sent.non_tensor_batch["uid"]) == uids
+    assert list(sent.non_tensor_batch["sample_id"]) == keys
+    torch.testing.assert_close(sent.batch["latents_clean"], latents)
     torch.testing.assert_close(sent.batch["train_timesteps"].sort(dim=1).values, timesteps.sort(dim=1).values)
-    torch.testing.assert_close(sent.batch["sample_level_scores"], sorted_rewards)
+    torch.testing.assert_close(sent.batch["sample_level_scores"], rewards)
     assert sent.batch["reward_prob"].shape == (4, 3)
     assert (sent.batch["reward_prob"][[0, 3]] > 0.5).all()
     assert (sent.batch["reward_prob"][[1, 2]] < 0.5).all()
     assert "old_log_probs" not in sent.batch
     assert "ref_noise_pred" not in sent.batch
-    assert write.call_args.kwargs["keys"] == sorted_keys
-    torch.testing.assert_close(write.call_args.kwargs["fields"]["sample_level_scores"], sorted_rewards)
+    assert write.call_args.kwargs["keys"] == keys
+    torch.testing.assert_close(write.call_args.kwargs["fields"]["sample_level_scores"], rewards)
     assert metrics["old_policy/update_applied"] == float(refresh is not None)
     assert events == ["actor", *([refresh] if refresh else []), "sync"]
     if refresh == "copy":

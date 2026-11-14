@@ -22,6 +22,7 @@ import torch
 from tensordict import NonTensorData, NonTensorStack, TensorDict
 from verl.experimental.agent_loop.agent_loop import AgentLoopMetrics
 from verl.protocol import DataProto
+from verl.trainer.ppo.v1.replay_buffer import ReplayBufferAsync
 from verl.utils import tensordict_utils as tu
 
 from verl_omni.agent_loop import diffusion_agent_loop_tq
@@ -35,6 +36,7 @@ from verl_omni.agent_loop.diffusion_agent_loop_tq import DiffusionAgentLoopWorke
 from verl_omni.agent_loop.single_turn_agent_loop import DiffusionSingleTurnAgentLoop
 from verl_omni.agent_loop.utils import derive_rollout_seed, per_rollout_seeds_or_entropy
 from verl_omni.trainer.diffusion.v1 import tq_utils
+from verl_omni.trainer.diffusion.v1.trainer_sync import PolicyGradientDiffusionTrainerV1Sync
 
 
 class _FakeRemoteComputeScore:
@@ -56,6 +58,49 @@ class _DummyDiffusionAgentLoopWorker:
 
     def __init__(self, reward_loop_worker_handle: _FakeRewardLoopWorkerHandle):
         self.reward_loop_worker_handles = [reward_loop_worker_handle]
+
+
+@pytest.mark.asyncio
+async def test_single_prompt_fetches_preserve_v0_noise_offsets(monkeypatch):
+    """Single-prompt refills retain distinct noise after concatenation and worker sharding."""
+    trainer = object.__new__(PolicyGradientDiffusionTrainerV1Sync)
+    trainer.config = SimpleNamespace(
+        data=SimpleNamespace(train_batch_size=4),
+        actor_rollout_ref=SimpleNamespace(rollout={"seed": 42}),
+    )
+    trainer.global_steps = 1
+    trainer._gen_batch_seq = 0
+    trainer._rollout_seed_step = None
+    trainer._rollout_seed_next_index = 0
+    trainer.train_dataloader_it = None
+    trainer._effective_generation_batch_size = 1
+    trainer.train_dataloader = [{"raw_prompt": np.array([str(i)], dtype=object)} for i in range(4)]
+    batch = trainer._next_train_batch()
+
+    worker_cls = DiffusionAgentLoopWorkerTQ.__ray_metadata__.modified_class
+    worker = object.__new__(worker_cls)
+    worker.background_tasks = set()
+    worker.rollout_config = SimpleNamespace(
+        n=4,
+        pipeline={},
+        algo={},
+        calculate_log_probs=False,
+        agent=SimpleNamespace(default_agent_loop="diffusion_single_turn_agent"),
+    )
+    seen = []
+
+    async def run_agent_loop(sampling_params, **kwargs):
+        seen.append(sampling_params["seed"])
+
+    worker._run_agent_loop = run_agent_loop
+    worker._write_trajectories_to_tq = AsyncMock(return_value=0)
+    monkeypatch.setattr(diffusion_agent_loop_tq.tq, "async_kv_put", AsyncMock())
+    monkeypatch.setattr(diffusion_agent_loop_tq, "_config_to_sampling_dict", lambda value: {})
+    # Exercise the same two-worker split used by the real manager after fetch/concat.
+    for chunk in batch.split(2):
+        await worker.generate_sequences(chunk)
+    await asyncio.gather(*worker.background_tasks)
+    assert sorted(seen) == [derive_rollout_seed(42, i) for i in range(16)]
 
 
 @pytest.mark.parametrize(
@@ -387,6 +432,93 @@ async def test_tq_writer_batches_group_sessions_and_partitions_field_sets(monkey
     assert all(tag["gen_batch_seq"] == 5 for put in puts for tag in put["tags"])
 
 
+@pytest.mark.asyncio
+async def test_tq_writer_uses_each_completed_samples_actual_version(monkeypatch):
+    """Persist each successful attempt rather than its older submission version."""
+    worker_cls = DiffusionAgentLoopWorkerTQ.__ray_metadata__.modified_class
+    worker = object.__new__(worker_cls)
+    rows, tags = [], []
+
+    async def put(**kwargs):
+        rows.extend(kwargs["fields"])
+        tags.extend(kwargs["tags"])
+
+    monkeypatch.setattr(diffusion_agent_loop_tq, "list_of_dict_to_tensordict", lambda value: value)
+    monkeypatch.setattr(diffusion_agent_loop_tq.tq, "async_kv_batch_put", put)
+    outputs = [
+        (
+            i,
+            SimpleNamespace(
+                prompt_ids=torch.tensor([[1, 2]]),
+                response_diffusion_output=torch.zeros(1, 3, 2, 2),
+                response_logprobs=None,
+                reward_score=None,
+                num_turns=1,
+                extra_fields={"global_steps": step, "min_global_steps": step, "max_global_steps": step},
+            ),
+        )
+        for i, step in enumerate([2, 4])
+    ]
+    await worker._write_trajectories_to_tq(outputs, uid="sample", trajectory={"step": 1}, validate=False)
+    assert [tag["global_steps"] for tag in tags] == [2, 4]
+    for row, tag, step in zip(rows, tags, [2, 4], strict=True):
+        assert row["extra_fields"]["min_global_steps"] == tag["min_global_steps"] == step
+        assert row["extra_fields"]["max_global_steps"] == tag["max_global_steps"] == step
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "versions, threshold, expected_count", [([4, 4], 1, 1), ([3, 4], 1, 0), ([3, 4], 2, 1), ([2, 4], 2, 0)]
+)
+async def test_retried_group_freshness_uses_oldest_completed_sample(monkeypatch, versions, threshold, expected_count):
+    """Replay eligibility follows the oldest successful session in a complete group."""
+    worker_cls = DiffusionAgentLoopWorkerTQ.__ray_metadata__.modified_class
+    worker = object.__new__(worker_cls)
+    worker.rollout_config = SimpleNamespace(n=2, val_kwargs=SimpleNamespace(n=2))
+    tags = {"sample": {"is_prompt": True, "status": "pending", "global_steps": 1}}
+
+    async def put(*, key, partition_id, tag):
+        assert partition_id == "train"
+        tags.setdefault(key, {}).update(tag)
+
+    async def batch_put(*, keys, tags: list[dict], **kwargs):
+        for key, tag in zip(keys, tags, strict=True):
+            await put(key=key, partition_id=kwargs["partition_id"], tag=tag)
+
+    async def run_agent_loop(sampling_params, *, session_id, **kwargs):
+        version = versions[session_id]
+        return SimpleNamespace(
+            prompt_ids=torch.tensor([[1, 2]]),
+            response_diffusion_output=torch.zeros(1, 3, 2, 2),
+            response_logprobs=None,
+            reward_score=None,
+            num_turns=1,
+            extra_fields={"global_steps": version, "min_global_steps": version, "max_global_steps": version},
+        )
+
+    monkeypatch.setattr(diffusion_agent_loop_tq.tq, "async_kv_put", put)
+    monkeypatch.setattr(diffusion_agent_loop_tq.tq, "async_kv_batch_put", batch_put)
+    monkeypatch.setattr(diffusion_agent_loop_tq.tq, "kv_list", lambda: {"train": tags})
+    monkeypatch.setattr(diffusion_agent_loop_tq, "list_of_dict_to_tensordict", lambda value: value)
+    worker._run_agent_loop = run_agent_loop
+    await worker._run_prompt(
+        prompt={"uid": "sample"},
+        sampling_params={"global_steps": 1},
+        trajectory={"step": 1, "validate": False},
+        prompt_index=0,
+    )
+
+    replay = ReplayBufferAsync(
+        trainer_mode="colocate_async",
+        trainer_config={},
+        max_off_policy_threshold=threshold,
+        max_off_policy_strategy="drop",
+        sampler_kwargs={},
+    )
+    assert replay.get_sampleable_count(global_steps=5, partition_id="train") == expected_count
+    assert tags["sample"] == {"is_prompt": True, "status": "finished", "global_steps": min(versions) + 1}
+
+
 def test_tq_batch_restores_non_tensor_trajectory_metadata(monkeypatch):
     img_shapes = [
         [(1, 32, 32), (1, 64, 64)],
@@ -556,6 +688,20 @@ async def test_generate_sequences_seeds_from_global_prompt_index(monkeypatch, ch
         for session in range(2)
     }
     assert len(set(captured_seeds.values())) == 4 * 2  # no duplicated noise across workers
+
+
+@pytest.mark.asyncio
+async def test_generate_sequences_preserves_per_prompt_retry_seeds(monkeypatch):
+    """Reissued prompts may carry different saved seed bases in the same worker batch."""
+    worker, captured = _seed_capturing_tq_worker(monkeypatch)
+    chunk = _seed_test_chunk({"index": [0, 0], "rollout_seed_index": [2, 5], "rollout_seed": [42, 43]}, ["a", "b"])
+    await worker.generate_sequences(chunk)
+    await asyncio.gather(*worker.background_tasks)
+    assert captured == {
+        (uid, session): derive_rollout_seed(base, position * 2 + session)
+        for uid, base, position in [("a", 42, 2), ("b", 43, 5)]
+        for session in range(2)
+    }
 
 
 @pytest.mark.asyncio

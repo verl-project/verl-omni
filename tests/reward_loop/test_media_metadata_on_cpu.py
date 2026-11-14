@@ -85,7 +85,9 @@ async def test_generated_media_reaches_scorer(monkeypatch, manager_cls, transpor
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("manager_cls", [VisualRewardManager, multi.MultiVisualRewardManager])
-async def test_latent_primary_and_decoded_artifacts_reach_real_reward_managers(monkeypatch, manager_cls):
+@pytest.mark.parametrize("preview_name", ["video_preview", None])
+async def test_latent_primary_and_decoded_artifacts_reach_real_reward_managers(monkeypatch, manager_cls, preview_name):
+    """Reward reconstruction preserves latent responses and explicit preview selection."""
     from verl_omni.pipelines.rollout_media import MediaArtifact, MediaSpec, artifact_fields
     from verl_omni.utils.reward_score.clap import _get_audio
 
@@ -97,7 +99,7 @@ async def test_latent_primary_and_decoded_artifacts_reach_real_reward_managers(m
         ),
         "audio": MediaArtifact(MediaSpec("audio", "decoded", "CT", sample_rate=32000), torch.ones(2, 16)),
     }
-    fields = artifact_fields(artifacts, "video_latent", "video_preview")
+    fields = artifact_fields(artifacts, "video_latent", preview_name)
     data = DataProto.from_dict(
         tensors={
             "responses": latent.unsqueeze(0),
@@ -113,6 +115,7 @@ async def test_latent_primary_and_decoded_artifacts_reach_real_reward_managers(m
     async def scorer(solution_image, extra_info, **kwargs):
         assert solution_image.dtype == torch.float16
         assert extra_info["media_artifacts"]["video_preview"].data.dtype == torch.uint8
+        assert "preview_artifact" in extra_info and extra_info["preview_artifact"] == preview_name
         audio, rate = _get_audio(extra_info)
         assert rate == 32000 and audio.shape == (16,)
         return {"score": 1.0}
@@ -166,10 +169,20 @@ async def test_decoded_audio_primary_is_self_describing_not_inferred_from_pixel_
 @pytest.mark.asyncio
 @pytest.mark.parametrize("manager_cls", [VisualRewardManager, multi.MultiVisualRewardManager])
 @pytest.mark.parametrize(
-    "field, value", [("media_kind", "image"), ("audio_sample_rate", 24000), ("audio", torch.zeros(1, 16))]
+    "field, value",
+    [
+        ("media_kind", "image"),
+        ("audio_sample_rate", 24000),
+        ("preview_artifact", "video_preview"),
+        ("preview_artifact", None),
+        ("audio", torch.zeros(1, 16)),
+    ],
 )
 async def test_conflicting_generated_media_sources_fail_before_scoring(monkeypatch, manager_cls, field, value):
+    """Contradictory preview selectors fail before invoking a scorer."""
     data, _ = _data(monkeypatch, "top")
+    if field == "preview_artifact":
+        data.non_tensor_batch[field] = np.array([None if value is not None else "video_preview"], dtype=object)
     data.non_tensor_batch["tool_extra_fields"] = np.array([{field: value}], dtype=object)
 
     async def scorer(**kwargs):
