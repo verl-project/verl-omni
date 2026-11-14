@@ -47,6 +47,9 @@ from verl_omni.pipelines.request_batch import (
     sample_per_sample_sde_windows as _sample_per_sample_sde_windows,
 )
 from verl_omni.pipelines.request_batch import (
+    shared_sde_window_generator as _shared_sde_window_generator,
+)
+from verl_omni.pipelines.request_batch import (
     split_diffusion_output_by_request as _split_diffusion_output_by_request,
 )
 from verl_omni.pipelines.rollout_media import DiffusionIOSpec, MediaSpec
@@ -344,11 +347,14 @@ class QwenImagePipelineWithLogProb(QwenImageLoRAMixin, QwenImageTokenIdPromptMix
         sde_type = coalesce_not_none(extra.get("sde_type", None), "sde")
         logprobs = coalesce_not_none(extra.get("logprobs", None), True)
         if sde_window_size is not None:
+            # Step execution is the path the shipped Qwen-Image scripts use.
+            # The request generator stays on state.sampling.generator for scheduler noise.
+            window_generator = _shared_sde_window_generator(extra, generator, device=self.device, policy="constant")
             start = torch.randint(
                 sde_window_range[0],
                 sde_window_range[1] - sde_window_size + 1,
                 (1,),
-                generator=generator,
+                generator=window_generator,
                 device=self.device,
             ).item()
             sde_window = (start, start + sde_window_size)
@@ -925,7 +931,9 @@ class QwenImagePipelineWithLogProb(QwenImageLoRAMixin, QwenImageTokenIdPromptMix
             sde_window_range=sde_window_range if sde_window_range is not None else (0, 5),
             num_timesteps=len(timesteps),
             batch_size=latents.shape[0],
-            generator=generator,
+            generator=_shared_sde_window_generator(
+                sampling_params.extra_args, generator, device=self.device, policy="constant"
+            ),
             device=self.device,
         )
 

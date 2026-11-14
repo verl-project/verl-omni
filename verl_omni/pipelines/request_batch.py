@@ -16,6 +16,8 @@
 
 from __future__ import annotations
 
+import os
+import random
 from typing import Any
 
 import numpy as np
@@ -27,6 +29,7 @@ __all__ = [
     "collate_prompt_mask",
     "collate_prompt_rows",
     "sample_per_sample_sde_windows",
+    "shared_sde_window_generator",
     "split_diffusion_output_by_request",
 ]
 
@@ -41,6 +44,81 @@ def requested_outputs_for_batch(request_batch: Any) -> list[str]:
         for name in requested_artifact_names(requested, context=f"request_id={request.request_id}"):
             names[name] = None
     return list(names)
+
+
+# SD3 and FLUX advance this across sampling calls. The first draw seeds it
+# with the data-parallel rank so every rank of one replica stays aligned.
+_call_window_rng: random.Random | None = None
+
+
+def reset_call_window_rng(seed: int) -> None:
+    global _call_window_rng
+    _call_window_rng = random.Random(int(seed))
+
+
+def _data_parallel_rank() -> int:
+    try:
+        from vllm_omni.diffusion.distributed.parallel_state import get_data_parallel_rank
+
+        return int(get_data_parallel_rank())
+    except Exception:
+        return 0
+
+
+def _next_call_window_seed() -> int:
+    global _call_window_rng
+    if _call_window_rng is None:
+        _call_window_rng = random.Random(_data_parallel_rank())
+    return _call_window_rng.randrange(2**31)
+
+
+def _process_rank() -> int:
+    for key in ("RANK", "LOCAL_RANK"):
+        raw = os.environ.get(key)
+        if raw:
+            return int(raw)
+    return 0
+
+
+def shared_sde_window_generator(
+    extra_args: dict | None,
+    fallback: torch.Generator | list[torch.Generator] | None,
+    *,
+    device: torch.device | str,
+    policy: str = "step",
+) -> torch.Generator | list[torch.Generator] | None:
+    """One SDE-window generator for the samples of a rollout call.
+
+    Forwarded ``sde_window_seed=0`` is the config default, not a pin.
+    ``constant`` reseeds 0. ``rank`` reseeds the process rank. ``replica``
+    reseeds the data-parallel rank, or 0 when that state is not initialized.
+    ``call`` draws from a RNG seeded once with the data-parallel rank.
+    ``step`` adds ``global_steps``. A non-zero seed pins, except ``step``,
+    which still adds ``global_steps``. No seed and no step keeps ``fallback``.
+    """
+    if not isinstance(extra_args, dict):
+        return fallback
+    if policy not in ("constant", "rank", "replica", "call", "step"):
+        raise ValueError(f"Unknown SDE window policy: {policy!r}")
+    raw_seed = extra_args.get("sde_window_seed")
+    steps = extra_args.get("global_steps")
+    has_seed = raw_seed is not None
+    has_steps = steps is not None
+    if not has_seed and not has_steps:
+        return fallback
+    if policy != "step" and has_seed and int(raw_seed) != 0:
+        seed = int(raw_seed)
+    elif policy == "constant":
+        seed = 0
+    elif policy == "rank":
+        seed = _process_rank()
+    elif policy == "replica":
+        seed = _data_parallel_rank()
+    elif policy == "call":
+        seed = _next_call_window_seed()
+    else:
+        seed = int(raw_seed or 0) + int(steps or 0)
+    return torch.Generator(device=device).manual_seed(seed)
 
 
 def sample_per_sample_sde_windows(

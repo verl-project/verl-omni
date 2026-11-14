@@ -409,7 +409,7 @@ actor_rollout_ref:
       sde_window_range: null
       sample_strategy: random      # MixGRPO
       iters_per_group: 1          # MixGRPO progressive
-      sde_window_seed: 0          # MixGRPO random
+      sde_window_seed: 0          # added to global_steps; 0 is not a pin
 ```
 
 - `actor_rollout_ref.rollout.algo.noise_level`: Magnitude of SDE noise inside the active window (larger → more diversity, often lower quality).
@@ -418,7 +418,7 @@ actor_rollout_ref:
 - `actor_rollout_ref.rollout.algo.sde_window_range`: `[start, end)` envelope for random window-start sampling; `null` = entire trajectory.
 - `actor_rollout_ref.rollout.algo.sample_strategy`: MixGRPO sliding-window scheduler: `random` (fresh window each step) or `progressive` (advance by `sde_window_size` every `iters_per_group` iterations).
 - `actor_rollout_ref.rollout.algo.iters_per_group`: Training iterations spent at each progressive window position (must be `> 0` when `sample_strategy=progressive`).
-- `actor_rollout_ref.rollout.algo.sde_window_seed`: Base seed for random window draws (`sample_strategy=random`).
+- `actor_rollout_ref.rollout.algo.sde_window_seed`: Base added to `global_steps` for MixGRPO's random window and for Wan2.2 and Boogu. The default `0` is copied onto every request and is not a pin. Qwen-Image and Qwen-Image dual GRPO keep a constant window. Qwen-Image-Edit uses the data-parallel rank, so tensor-parallel ranks of one replica share the window. SD3 and FLUX advance once per sampling call, from a RNG seeded with the data-parallel rank so ranks of one replica match. A non-zero value pins those models.
 
 #### Validation sampling — `val_kwargs`
 

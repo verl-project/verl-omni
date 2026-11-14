@@ -44,6 +44,7 @@ from verl_omni.pipelines.diffusion_rollout_output import (
     with_visual_artifacts,
 )
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
+from verl_omni.pipelines.request_batch import shared_sde_window_generator
 from verl_omni.pipelines.rollout_media import DiffusionIOSpec, MediaSpec
 from verl_omni.pipelines.rollout_request import prompt_ids_from_payload
 from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
@@ -632,13 +633,16 @@ class Wan22DanceGRPOPipelineWithLogProb(Wan22Pipeline):
         if attention_kwargs is None:
             attention_kwargs = {}
 
-        # --- SDE window ---
+        # One window per training step. The per-request generator stays on the latents.
+        window_generator = shared_sde_window_generator(
+            sampling_params.extra_args, generator, device=device, policy="step"
+        )
         if sde_window_size is not None:
             window_start = torch.randint(
                 sde_window_range[0],
                 sde_window_range[1] - sde_window_size + 1,
                 (1,),
-                generator=generator,
+                generator=window_generator,
                 device=device,
             ).item()
             sde_window = (window_start, window_start + sde_window_size)

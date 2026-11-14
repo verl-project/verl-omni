@@ -153,3 +153,71 @@ def test_wan22_dance_grpo_forward_accepts_vllm_omni_request_batch(monkeypatch) -
         },
         to_cpu=True,
     )
+
+
+def test_wan22_sde_window_uses_the_training_step_not_the_sample_seed(monkeypatch) -> None:
+    recorded: list[int | None] = []
+    real_randint = torch.randint
+
+    def _spy(*args, **kwargs):
+        generator = kwargs.get("generator")
+        recorded.append(None if generator is None else int(generator.initial_seed()))
+        return real_randint(*args, **kwargs)
+
+    monkeypatch.setattr(wan22_adapter.torch, "randint", _spy)
+    monkeypatch.setattr(wan22_adapter, "seed_from_prompt_ids", lambda **_: 321)
+    monkeypatch.setattr(wan22_adapter, "current_omni_platform", SimpleNamespace(is_available=lambda: False))
+    monkeypatch.setattr(
+        wan22_adapter, "rollout_output", MagicMock(side_effect=lambda **_: DiffusionOutput(output=None))
+    )
+
+    def _run(sample_seed: int, step: int) -> None:
+        sampling_params = OmniDiffusionSamplingParams(
+            height=64,
+            width=96,
+            num_frames=5,
+            num_inference_steps=2,
+            guidance_scale=1.0,
+            output_type="latent",
+            seed=sample_seed,
+            max_sequence_length=4,
+            extra_args={
+                "sde_window_seed": 0,
+                "global_steps": step,
+                "sde_window_size": 2,
+                "sde_window_range": [0, 5],
+            },
+        )
+        request = OmniDiffusionRequest(
+            request_id="wan22-window",
+            prompt={"prompt_token_ids": [11, 12, 13]},
+            sampling_params=sampling_params,
+        )
+        pipeline = object.__new__(Wan22DanceGRPOPipelineWithLogProb)
+        pipeline.device = torch.device("cpu")
+        pipeline.transformer_config = SimpleNamespace(patch_size=(1, 2), in_channels=4)
+        pipeline.vae_scale_factor_spatial = 8
+        pipeline.vae_scale_factor_temporal = 4
+        pipeline.transformer = SimpleNamespace(dtype=torch.float32)
+        pipeline.transformer_2 = None
+        pipeline.text_encoder = SimpleNamespace(dtype=torch.float32)
+        pipeline.boundary_ratio = None
+        pipeline.expand_timesteps = False
+        pipeline.scheduler = SimpleNamespace(
+            set_timesteps=MagicMock(),
+            timesteps=torch.tensor([900.0, 500.0]),
+            config=SimpleNamespace(num_train_timesteps=1000),
+        )
+        latents = torch.zeros(1, 4, 2, 4, 6)
+        pipeline.encode_prompt = MagicMock(return_value=(torch.zeros(1, 4, 8), torch.ones(1, 4, dtype=torch.long)))
+        pipeline.prepare_latents = MagicMock(return_value=latents)
+        pipeline.diffuse = MagicMock(
+            return_value=(latents, latents.unsqueeze(1), torch.zeros(1, 1), torch.tensor([[900.0]]))
+        )
+        pipeline.forward(DiffusionRequestBatch(requests=[request]))
+
+    _run(123, 7)
+    _run(999, 7)
+    _run(5, 1)
+    _run(6, 4)
+    assert recorded == [7, 7, 1, 4]

@@ -30,9 +30,11 @@ from verl_omni.pipelines.qwen_image_edit_flow_grpo.diffusers_training_adapter im
 from verl_omni.pipelines.qwen_image_edit_flow_grpo.vllm_omni_rollout_adapter import (
     QwenImageEditPlusPipelineWithLogProb,
     _condition_images_for_prompt_encoding,
+    _select_qwen_image_edit_sde_window,
     _use_true_cfg,
     _validate_condition_image_sizes,
 )
+from verl_omni.pipelines.request_batch import shared_sde_window_generator
 from verl_omni.workers.config.diffusion.model import DiffusionModelConfig
 
 
@@ -277,5 +279,60 @@ def test_condition_images_allow_fixed_nonsquare_target():
 
     # A square target still requires square conditions (backward compatible).
     _validate_condition_image_sizes(["image"], [(1024, 1024)], target_size=(512, 512))
+
+
+def _data_parallel_rank(global_rank: int, groups: list[list[int]]) -> int:
+    for group in groups:
+        if global_rank in group:
+            return group.index(global_rank)
+    raise AssertionError(global_rank)
+
+
+def test_qwen_image_edit_window_matches_across_tp_ranks(monkeypatch):
+    from vllm_omni.diffusion.distributed.parallel_state import RankGenerator
+
+    import verl_omni.pipelines.request_batch as request_batch
+
+    # TP=2, DP=1 is one replica: both process ranks share data-parallel rank 0.
+    single = RankGenerator(2, 1, 1, 1, 1)
+    assert single.get_ranks("tp") == [[0, 1]]
+    assert [_data_parallel_rank(rank, single.get_ranks("dp")) for rank in (0, 1)] == [0, 0]
+    # TP=2, DP=2: each tensor-parallel pair shares one data-parallel rank.
+    paired = RankGenerator(2, 1, 1, 1, 2)
+    assert paired.get_ranks("tp") == [[0, 1], [2, 3]]
+    paired_dp = paired.get_ranks("dp")
+    assert [_data_parallel_rank(rank, paired_dp) for rank in (0, 1, 2, 3)] == [0, 0, 1, 1]
+
+    extra = {"sde_window_seed": 0}
+    kwargs = {"device": "cpu", "sde_window_size": 3, "sde_window_range": (0, 6), "num_timesteps": 6}
+
+    def process_rank_window(process_rank: str) -> tuple[int, int]:
+        monkeypatch.setenv("RANK", process_rank)
+        monkeypatch.delenv("LOCAL_RANK", raising=False)
+        generator = shared_sde_window_generator(extra, torch.Generator(), device="cpu", policy="rank")
+        start = int(torch.randint(0, 4, (1,), generator=generator).item())
+        return (start, start + 3)
+
+    assert process_rank_window("0") == (0, 3)
+    assert process_rank_window("1") == (1, 4)
+
+    def replica_window(process_rank: str, data_parallel_rank: int) -> tuple[int, int]:
+        monkeypatch.setenv("RANK", process_rank)
+        monkeypatch.setattr(request_batch, "_data_parallel_rank", lambda: data_parallel_rank)
+        return _select_qwen_image_edit_sde_window(extra, torch.Generator(), **kwargs)
+
+    assert replica_window("0", 0) == replica_window("1", 0) == (0, 3)
+    assert replica_window("2", 1) == replica_window("3", 1) == (1, 4)
+
+    monkeypatch.undo()
+    monkeypatch.setenv("RANK", "1")
+    monkeypatch.delenv("LOCAL_RANK", raising=False)
+    assert _select_qwen_image_edit_sde_window(extra, torch.Generator(), **kwargs) == (0, 3)
+    pinned_start = int(torch.randint(0, 4, (1,), generator=torch.Generator().manual_seed(99)).item())
+    pinned = _select_qwen_image_edit_sde_window({"sde_window_seed": 99}, torch.Generator(), **kwargs)
+    assert pinned == (pinned_start, pinned_start + 3)
+    assert _select_qwen_image_edit_sde_window(
+        extra, torch.Generator(), device="cpu", sde_window_size=None, sde_window_range=(0, 6), num_timesteps=10
+    ) == (0, 9)
     with pytest.raises(ValueError, match="target aspect ratio"):
         _validate_condition_image_sizes(["image"], [(1344, 768)], target_size=(512, 512))

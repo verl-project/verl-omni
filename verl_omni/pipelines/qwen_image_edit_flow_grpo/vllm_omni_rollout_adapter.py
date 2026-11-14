@@ -41,6 +41,7 @@ from verl_omni.pipelines.qwen_image_flow_grpo.common import (
     apply_true_cfg,
     coalesce_not_none,
 )
+from verl_omni.pipelines.request_batch import shared_sde_window_generator
 from verl_omni.pipelines.rollout_media import DiffusionIOSpec, MediaSpec
 from verl_omni.pipelines.rollout_request import condition_images_from_payload, prompt_ids_from_payload
 from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
@@ -104,6 +105,30 @@ def _validate_condition_image_sizes(condition_images, vae_image_sizes, target_si
             "pipeline target height/width to your aspect ratio to train on non-square (e.g. 16:9, "
             "4:3) images, or pad source images to a square."
         )
+
+
+def _select_qwen_image_edit_sde_window(
+    extra_args: dict | None,
+    generator: torch.Generator | list[torch.Generator] | None,
+    *,
+    device: torch.device | str,
+    sde_window_size: int | None,
+    sde_window_range: tuple[int, int] | list[int],
+    num_timesteps: int,
+) -> tuple[int, int]:
+    """One window for the replica. Tensor-parallel ranks share the data-parallel rank."""
+    if sde_window_size is None:
+        return (0, num_timesteps - 1)
+    window_generator = generator[0] if isinstance(generator, list) else generator
+    window_generator = shared_sde_window_generator(extra_args, window_generator, device=device, policy="replica")
+    start = torch.randint(
+        sde_window_range[0],
+        sde_window_range[1] - sde_window_size + 1,
+        (1,),
+        generator=window_generator,
+        device=device,
+    ).item()
+    return (int(start), int(start) + int(sde_window_size))
 
 
 def _condition_images_for_prompt_encoding(custom_prompt: dict) -> list[Any]:
@@ -503,19 +528,14 @@ class QwenImageEditPlusPipelineWithLogProb(QwenImageLoRAMixin, QwenImageTokenIdP
             negative_prompt_embeds_mask.sum(dim=1).tolist() if negative_prompt_embeds_mask is not None else None
         )
 
-        if sde_window_size is not None:
-            window_generator = generator[0] if isinstance(generator, list) else generator
-            start = torch.randint(
-                sde_window_range[0],
-                sde_window_range[1] - sde_window_size + 1,
-                (1,),
-                generator=window_generator,
-                device=self.device,
-            ).item()
-            end = start + sde_window_size
-            sde_window = (start, end)
-        else:
-            sde_window = (0, len(timesteps) - 1)
+        sde_window = _select_qwen_image_edit_sde_window(
+            sampling_params.extra_args,
+            generator,
+            device=self.device,
+            sde_window_size=sde_window_size,
+            sde_window_range=sde_window_range,
+            num_timesteps=len(timesteps),
+        )
 
         latents, all_latents, all_log_probs, all_timesteps = self.diffuse(
             prompt_embeds,
