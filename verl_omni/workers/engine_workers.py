@@ -35,7 +35,13 @@ from verl.single_controller.base.decorator import Dispatch, make_nd_compute_data
 from verl.trainer.distillation import distillation_ppo_loss, is_distillation_enabled
 from verl.utils import tensordict_utils as tu
 from verl.utils.config import omega_conf_to_dataclass
-from verl.utils.device import get_device_name, get_torch_device, is_npu_available, set_expandable_segments
+from verl.utils.device import (
+    get_device_name,
+    get_torch_device,
+    is_cuda_available,
+    is_npu_available,
+    set_expandable_segments,
+)
 from verl.utils.distributed import initialize_global_process_group_ray, set_numa_affinity
 from verl.utils.flops_counter import FlopsCounter
 from verl.utils.import_utils import import_external_libs
@@ -92,6 +98,87 @@ def _get_engine_lora_config(engine, adapter_name: str = "default") -> dict | Non
     module = getattr(module, "_fsdp_wrapped_module", module)
     config = getattr(module, "peft_config", {}).get(adapter_name)
     return config.to_dict() if config is not None else None
+
+
+def _build_merged_lora_ipc_payload(lora_weights: dict, peft_config: dict | None) -> tuple[dict, list]:
+    """Stage the adapter on this rank's GPU and export CUDA-IPC handles.
+
+    Per-tensor ``{gpu_uuid: rebuild_cuda_tensor args}`` dicts are all-gather
+    merged so every colocated rollout worker finds its device; names are
+    sorted so the per-index merge aligns across ranks. Returns the upstream
+    ``MergedLoRAIPCUpdateInfo`` payload as a dict plus the staging refs,
+    which must outlive the send ack and release barrier (the rebuild args do
+    not pin the storage).
+
+    The payload crosses vLLM's msgspec worker RPC on AR stages, so the handle
+    args ship in the wire encoding of
+    :mod:`verl_omni.workers.rollout.vllm_rollout.lora_ipc_wire` (the worker
+    extension decodes before the engine sees them), and the PEFT config ships
+    with sets normalized to sorted lists — PEFT's ``set`` target modules
+    degrade the engine's matcher to match-everything.
+    """
+    from dataclasses import asdict
+
+    from torch.multiprocessing.reductions import reduce_tensor
+    from vllm_omni.lora.weight_transfer import MergedLoRAIPCUpdateInfo
+
+    from verl_omni.workers.rollout.vllm_rollout.lora_ipc_wire import (
+        IPC_WIRE_KEY,
+        IPC_WIRE_VERSION,
+        encode_ipc_handle_args,
+        normalize_peft_config_for_wire,
+    )
+
+    torch_device = get_torch_device()
+    device_index = torch_device.current_device()
+    gpu_uuid = str(torch_device.get_device_properties(device_index).uuid)
+    names: list[str] = []
+    dtype_names: list[str] = []
+    shapes: list[list[int]] = []
+    ipc_handles: list[dict[str, tuple]] = []
+    staged: list = []
+    for name in sorted(lora_weights):
+        weight = lora_weights[name].detach().to(device=device_index).contiguous()
+        staged.append(weight)
+        names.append(name)
+        dtype_names.append(str(weight.dtype).split(".")[-1])
+        shapes.append(list(weight.shape))
+        _, ipc_args = reduce_tensor(weight)
+        ipc_handles.append({gpu_uuid: ipc_args})
+
+    if torch.distributed.is_initialized() and torch.distributed.get_world_size() > 1:
+        gathered: list[list[dict[str, tuple]] | None] = [None] * torch.distributed.get_world_size()
+        torch.distributed.all_gather_object(gathered, ipc_handles)
+        torch.distributed.barrier()
+        torch.accelerator.synchronize()
+        if any(rank_handles is not None and len(rank_handles) != len(ipc_handles) for rank_handles in gathered):
+            raise ValueError(
+                "engine-side merge adapter tensors diverged across ranks; every rank must "
+                "gather the identical (sorted) adapter name set before the handle merge."
+            )
+        merged = []
+        for idx in range(len(ipc_handles)):
+            entry: dict[str, tuple] = {}
+            for rank_handles in gathered:
+                if rank_handles is not None:
+                    entry.update(rank_handles[idx])
+            merged.append(entry)
+        ipc_handles = merged
+
+    payload = asdict(
+        MergedLoRAIPCUpdateInfo(
+            names=names,
+            dtype_names=dtype_names,
+            shapes=shapes,
+            ipc_handles=[
+                {uuid: encode_ipc_handle_args(args) for uuid, args in handle.items()} for handle in ipc_handles
+            ],
+            peft_config=normalize_peft_config_for_wire(peft_config),
+            lora_int_id=1,
+        )
+    )
+    payload[IPC_WIRE_KEY] = IPC_WIRE_VERSION
+    return payload, staged
 
 
 async def _timed_await(name: str, timings: dict, coro):
@@ -928,6 +1015,40 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         # diffusion-only dual-adapter knob; the omni rollout config has no such field
         self.rollout_adapter: str = self.config.rollout.get("rollout_adapter", "default")
         self.lora_settings: LoRASettings = resolve_lora_config(model_config)
+        if self.lora_settings.engine_merge:
+            # The remaining engine-merge gates need worker context the settings object lacks.
+            from verl_omni.workers.engine.fsdp.diffusers_impl import CompositeFSDPEngine, DiffusersFSDPEngine
+            from verl_omni.workers.engine.fsdp.omni_impl import OmniFSDPEngine
+
+            actor = getattr(self, "actor", None)
+            if actor is not None and not isinstance(
+                actor.engine, OmniFSDPEngine | DiffusersFSDPEngine | CompositeFSDPEngine
+            ):
+                raise ValueError(
+                    "actor_rollout_ref.model.lora.merge='engine' requires an omni or diffusers actor "
+                    f"engine; {type(actor.engine).__name__} reads raw merge keys and would "
+                    "silently export merged full weights. Use lora.merge=True for that engine, or "
+                    "an omni/diffusers model."
+                )
+            if not is_cuda_available:
+                raise ValueError(
+                    "actor_rollout_ref.model.lora.merge='engine' requires CUDA this release: the "
+                    "engine's merged weight-transfer session ships CUDA-IPC adapter handles and "
+                    "has no validation on other accelerators."
+                )
+            if "dummy" in self.config.rollout.load_format:
+                raise ValueError(
+                    "actor_rollout_ref.model.lora.merge='engine' requires the rollout to load real "
+                    f"base weights (rollout.load_format={self.config.rollout.load_format!r}); engine-side "
+                    "merge has no dense bootstrap, so the adapter would ride a random base."
+                )
+            backend = self.config.rollout.checkpoint_engine.backend
+            if backend != "naive":
+                raise ValueError(
+                    "actor_rollout_ref.model.lora.merge='engine' supports colocated sync only in this "
+                    f"release; checkpoint_engine.backend={backend!r} (separate-async) is not wired to "
+                    "the engine's merged weight-update session."
+                )
         self._zmq_update_seq = 0
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="ref"))
@@ -1298,39 +1419,53 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             log_gpu_memory_usage("After resume weights", logger=logger)
 
             try:
-                # Use ZMQ IPC to transfer LoRA weights, bypassing Ray serialization.
-                # Broadcast only the update id. Each vLLM worker combines it with its
-                # rank-local base handle, preserving the one-sender/one-receiver route.
                 sync_start = time.perf_counter()
-                # update_weights is dispatched ONE_TO_ALL, so every actor rank advances
-                # this sequence exactly once for the same LoRA update.
-                zmq_update_id = make_update_zmq_id(global_steps, self._zmq_update_seq)
-                self._zmq_update_seq += 1
-                zmq_handle = make_update_zmq_handle(self.rollout.zmq_handle, zmq_update_id)
-                future = await self.rollout._execute_method(
-                    "update_weights_from_ipc",
-                    non_block=True,
-                    kwargs={
-                        "peft_config": peft_config,
-                        "base_sync_done": True,
-                        "use_shm": self.rollout.use_shm,
-                        "zmq_update_id": zmq_update_id,
-                    },
-                )
-                # The sender allocates and IPC-maps a device buffer of the bucket size on every sync;
-                # size it to the adapter payload rather than the full-weight bucket the config carries.
-                lora_mb = math.ceil(sum(t.numel() * t.element_size() for t in lora_weights.values()) / (1 << 20))
-                configured_mb = self.config.rollout.checkpoint_engine.update_weights_bucket_megabytes
-                bucket_size_mb = max(1, min(configured_mb, lora_mb))
-                sender = BucketedWeightSender(
-                    zmq_handle=zmq_handle,
-                    bucket_size_mb=bucket_size_mb,
-                    use_shm=self.rollout.use_shm,
-                )
-                with RLInsightLogger.trace_state("update_weights", state_lane_id=f"rank_{self.rank}"):
-                    await sender.async_send_weights(lora_weights.items())
-                    if future is not None:
-                        await future
+                if self.lora_settings.engine_merge:
+                    # One CUDA-IPC adapter payload drives the engine's merged session — no
+                    # add_lora; "staged" pins the exported storages past the ack and barrier.
+                    payload, staged = _build_merged_lora_ipc_payload(lora_weights, peft_config)
+                    with RLInsightLogger.trace_state("update_weights", state_lane_id=f"rank_{self.rank}"):
+                        await self.rollout._execute_method(
+                            "update_weights_from_ipc",
+                            kwargs={"lora_ipc_payload": payload},
+                        )
+                    # The barrier holds every rank's staging until all consumers opened their IPC views.
+                    if torch.distributed.is_initialized() and torch.distributed.get_world_size() > 1:
+                        torch.distributed.barrier()
+                    torch_device.ipc_collect()
+                else:
+                    # Use ZMQ IPC to transfer LoRA weights, bypassing Ray serialization.
+                    # Broadcast only the update id. Each vLLM worker combines it with its
+                    # rank-local base handle, preserving the one-sender/one-receiver route.
+                    # update_weights is dispatched ONE_TO_ALL, so every actor rank advances
+                    # this sequence exactly once for the same LoRA update.
+                    zmq_update_id = make_update_zmq_id(global_steps, self._zmq_update_seq)
+                    self._zmq_update_seq += 1
+                    zmq_handle = make_update_zmq_handle(self.rollout.zmq_handle, zmq_update_id)
+                    future = await self.rollout._execute_method(
+                        "update_weights_from_ipc",
+                        non_block=True,
+                        kwargs={
+                            "peft_config": peft_config,
+                            "base_sync_done": True,
+                            "use_shm": self.rollout.use_shm,
+                            "zmq_update_id": zmq_update_id,
+                        },
+                    )
+                    # The sender allocates and IPC-maps a device buffer of the bucket size on every sync;
+                    # size it to the adapter payload rather than the full-weight bucket the config carries.
+                    lora_mb = math.ceil(sum(t.numel() * t.element_size() for t in lora_weights.values()) / (1 << 20))
+                    configured_mb = self.config.rollout.checkpoint_engine.update_weights_bucket_megabytes
+                    bucket_size_mb = max(1, min(configured_mb, lora_mb))
+                    sender = BucketedWeightSender(
+                        zmq_handle=zmq_handle,
+                        bucket_size_mb=bucket_size_mb,
+                        use_shm=self.rollout.use_shm,
+                    )
+                    with RLInsightLogger.trace_state("update_weights", state_lane_id=f"rank_{self.rank}"):
+                        await sender.async_send_weights(lora_weights.items())
+                        if future is not None:
+                            await future
                 # Mirror ServerAdapter.update_weights: reset caches and stamp the weight version.
                 if self.rollout.rollout_rank == 0 and self.rollout._ensure_server_handle():
                     await self.rollout.server_handle.clear_kv_cache.remote()

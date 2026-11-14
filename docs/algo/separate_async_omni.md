@@ -149,7 +149,9 @@ bash examples/gspo_trainer/minicpm/run_minicpmo_4_5_thinker_gspo_lora_avqa_separ
 
 LoRA recipes should set `actor_rollout_ref.model.lora.merge=False` so weight
 sync ships only adapter tensors (applied on the replicas via the LoRA-aware
-checkpoint engine manager).
+checkpoint engine manager). Engine-side merge (`lora.merge="engine"`)
+also ships only adapter tensors but is not wired for separate-async yet — it
+is refused at config resolution until a recipe needs it.
 
 The actor-side peft keys resolve onto both rollout classes without a remap —
 Qwen3-Omni through transformers' `_checkpoint_conversion_mapping` strip,

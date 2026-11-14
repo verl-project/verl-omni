@@ -308,6 +308,7 @@ class ARStrategy(OmniStrategyBase):
         non-MoE stages that cannot shard experts.
         """
         engine_args.pop("enable_expert_parallel", None)
+        self._apply_engine_merge_engine_args(engine_args, diffusion=False)
         if engine_args.get("enable_lora"):
             from verl_omni.utils.vllm_omni.patch import patch_vllm_omni_lora_config
 

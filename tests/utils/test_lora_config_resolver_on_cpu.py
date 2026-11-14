@@ -80,6 +80,56 @@ def test_merge_is_read_from_nested_block_only():
     assert not resolve_lora_config(_model_config()).merge
 
 
+def test_engine_merge_spelling_normalizes_to_adapter_mode():
+    """ "engine" selects engine-side merge: the actor streams adapter tensors
+    (merge=False) and the rollout engine folds them into dense weights."""
+    settings = resolve_lora_config(_model_config(lora_rank=32, lora={"merge": "engine"}))
+    assert settings.merge is False
+    assert settings.engine_merge is True
+    assert settings == LoRASettings(
+        rank=32, alpha=16, adapter_path=None, merge=False, adapters=("default",), enabled=True, engine_merge=True
+    )
+
+
+@pytest.mark.parametrize("spelling", ["Engine", "ENGINE", " engine "])
+def test_engine_merge_spelling_is_case_insensitive(spelling):
+    """The engine spelling resolves whatever its case or surrounding space."""
+    assert resolve_lora_config(_model_config(lora_rank=32, lora={"merge": spelling})).engine_merge
+
+
+@pytest.mark.parametrize("spelling", [("true", True), ("True", True), (" TRUE ", True)])
+def test_string_boolean_merge_spellings_coerce(spelling):
+    """String "true" spellings resolve to actor-side merge, engine merge off."""
+    value, expected = spelling
+    settings = resolve_lora_config(_model_config(lora={"merge": value}))
+    assert settings.merge is expected
+    assert settings.engine_merge is False
+
+
+@pytest.mark.parametrize("spelling", ["false", "False", " FALSE "])
+def test_string_false_merge_spelling_raises(spelling):
+    """String "false" is rejected: truthy in the raw tree's rollout-side gates."""
+    # A truthy "false" would read merge-on in the raw tree's rollout-side gates
+    # while the actor resolves to adapter mode — rejected fail-closed.
+    with pytest.raises(ValueError, match="use the boolean False"):
+        resolve_lora_config(_model_config(lora={"merge": spelling}))
+
+
+def test_unknown_merge_string_raises():
+    """Any other string spelling fails closed with the valid spellings named."""
+    with pytest.raises(ValueError, match="not a valid spelling"):
+        resolve_lora_config(_model_config(lora_rank=32, lora={"merge": "turbo"}))
+
+
+def test_engine_merge_refuses_named_policy_state_adapters():
+    """Engine-side merge keeps one dense policy; per-request adapters cannot
+    attach to it."""
+    with pytest.raises(ValueError, match="named policy-state adapters"):
+        resolve_lora_config(
+            _model_config(lora_rank=32, lora={"merge": "engine"}, policy_state_adapters=["default", "old"])
+        )
+
+
 def test_adapter_path_conflict_raises():
     with pytest.raises(ValueError, match="adapter_path"):
         resolve_lora_config(_model_config(lora_adapter_path="/a", lora={"merge": False, "adapter_path": "/b"}))
