@@ -13,6 +13,8 @@
 # limitations under the License.
 
 import inspect
+from functools import partial
+from pathlib import Path
 
 import torch
 from verl import DataProto
@@ -24,10 +26,83 @@ from verl_omni.utils.reward_score import default_compute_score_image
 
 from .media import _reward_extra_info
 
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+_UNIFIED_REWARD_PKG_PATHS = frozenset(
+    {
+        "pkg://verl_omni.utils.reward_score.vlm_as_a_judge",
+        "pkg://verl_omni.utils.reward_score.unified_reward",
+    }
+)
+_UNIFIED_REWARD_SOURCE_FILES = frozenset(
+    {
+        (_REPO_ROOT / "verl_omni" / "utils" / "reward_score" / "vlm_as_a_judge.py").resolve(),
+        (_REPO_ROOT / "verl_omni" / "utils" / "reward_score" / "unified_reward.py").resolve(),
+    }
+)
+
+
+def _is_repo_unified_reward_path(path) -> bool:
+    """Whether a configured reward path names this repository's UnifiedReward module."""
+    if not isinstance(path, str) or not path:
+        return False
+    if path in _UNIFIED_REWARD_PKG_PATHS:
+        return True
+    if path.startswith("file://"):
+        path = path[len("file://") :]
+    candidate = Path(path).expanduser()
+    candidates = [candidate] if candidate.is_absolute() else [candidate, _REPO_ROOT / candidate]
+    return any(item.resolve() in _UNIFIED_REWARD_SOURCE_FILES for item in candidates)
+
+
+def _partial_sampling_params(compute_score) -> dict | None:
+    """Return sampling params supplied by a standard ``functools.partial``, if any."""
+    scorer = compute_score
+    while isinstance(scorer, partial):
+        if "sampling_params" in scorer.keywords:
+            return scorer.keywords["sampling_params"]
+        scorer = scorer.func
+    return None
+
+
+def _is_legacy_unified_reward_entry(compute_score, config) -> bool:
+    """Whether a callable is the repository UnifiedReward scorer for this compat entry.
+
+    Direct injection is identified by the scorer's defining module and name.
+    Config-loaded callables are identified by path plus function name so a
+    third-party file exporting the same name keeps the general rollout sampling
+    behavior.
+    """
+    scorer = compute_score
+    while isinstance(scorer, partial):
+        scorer = scorer.func
+    if (
+        getattr(scorer, "__module__", None) == "verl_omni.utils.reward_score.vlm_as_a_judge"
+        and getattr(scorer, "__name__", None) == "compute_score_unified_reward"
+    ):
+        return True
+    reward_fn_config = config.reward.get("custom_reward_function") or {}
+    return reward_fn_config.get("name") == "compute_score_unified_reward" and _is_repo_unified_reward_path(
+        reward_fn_config.get("path")
+    )
+
 
 def _sampling_params_from_rollout(rollout_config) -> dict:
-    """Build the OCR-compatible generation overrides from a rollout config."""
+    """Build judge generation overrides from a reward rollout config.
+
+    The response length is always forwarded. Temperature and top-p are
+    forwarded together once either is tuned away from the upstream rollout
+    defaults, and top-k is forwarded when it is set. Configs that keep the
+    upstream defaults retain the scorer's own sampling setup.
+    """
     params = {"max_tokens": rollout_config.get("response_length") or 4096}
+    top_k = rollout_config.get("top_k", -1)
+    if top_k != -1:
+        params["top_k"] = top_k
+    temperature = rollout_config.get("temperature", 1.0)
+    top_p = rollout_config.get("top_p", 1.0)
+    if temperature != 1.0 or top_p != 1.0:
+        params["temperature"] = temperature
+        params["top_p"] = top_p
     if rollout_config.get("full_determinism", False):
         params["seed"] = rollout_config.get("seed", 42)
     return params
@@ -114,19 +189,24 @@ class VisualRewardManager(RewardManagerBase):
         extra_info["rollout_reward_scores"] = rollout_reward_scores
 
         rm_rollout = self.config.reward.reward_model.rollout
-        # Keep the scorer's own sampling defaults and only override the length/seed.
+        # Unset rollout sampling fields keep the scorer's own tuned defaults.
         sampling_params = _sampling_params_from_rollout(rm_rollout)
+        if _is_legacy_unified_reward_entry(self.compute_score, self.config):
+            # The compat entry keeps UnifiedReward's own 512-token default. Its
+            # explicit reward_kwargs still win through get_custom_reward_fn.
+            sampling_params.pop("max_tokens", None)
+            if _partial_sampling_params(self.compute_score) is not None:
+                sampling_params = None
 
-        extra_reward_kwargs = (
-            {
+        extra_reward_kwargs = {}
+        if self.reward_router_address is not None:
+            extra_reward_kwargs = {
                 "reward_router_address": self.reward_router_address,
                 "reward_model_tokenizer": self.reward_model_tokenizer,
                 "model_name": self.config.reward.reward_model.model_path,
-                "sampling_params": sampling_params,
             }
-            if self.reward_router_address is not None
-            else {}
-        )
+            if sampling_params is not None:
+                extra_reward_kwargs["sampling_params"] = sampling_params
         if self.is_async_reward_score:
             result = await self.compute_score(
                 data_source=data_source,

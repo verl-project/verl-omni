@@ -190,12 +190,14 @@ OCR_WORKSPACE=/path/to/workspace bash examples/flowgrpo_trainer/sd35/run_sd35_me
 
 Caller overrides remain last. This recipe opts into
 `reward.reward_functions.ocr.use_rollout_sampling_params=true` to forward the
-response length and optional deterministic seed from the model's rollout
-settings, falling back to `reward.reward_model.rollout`. Explicit scorer
-`sampling_params` take precedence. Existing named rewards without this opt-in
-keep their scorer defaults; OCR still defaults to 4096 output tokens and honors
-`GENRM_OCR_SEED`. The opt-in preserves the legacy visual manager's seed behavior:
-an environment seed is excluded unless rollout determinism supplies a seed.
+response length, tuned temperature/top-p/top-k and optional deterministic seed
+from the model's rollout settings, falling back to
+`reward.reward_model.rollout`. Temperature and top-p are forwarded together once
+either is tuned away from the upstream rollout defaults, top-k is forwarded when
+set, and otherwise the scorer's own sampling defaults apply.
+Explicit scorer `sampling_params` take precedence, and a deterministic seed is
+supplied only when `rollout.full_determinism=true`. Existing named rewards
+without this opt-in keep the scorer defaults.
 
 ## Model-to-reward binding
 
@@ -235,17 +237,19 @@ One judge model can serve several reward terms, each with its own `user_prompt`
 (literal text, or a `pkg://` builder). For UnifiedReward, literal text may contain
 `{caption}`, and a custom builder receives the caption. Leaving `user_prompt`
 unset keeps the scorer's default request.
+Both scorers live in `verl_omni.utils.reward_score.vlm_as_a_judge`; the older
+`genrm_ocr` and `unified_reward` paths still work.
 
 ```yaml
 reward_functions:
   ocr:
     model: judge
-    path: pkg://verl_omni.utils.reward_score.genrm_ocr
+    path: pkg://verl_omni.utils.reward_score.vlm_as_a_judge
     name: compute_score_ocr
     user_prompt: "Transcribe all text in the image exactly."
   semantics:
     model: judge
-    path: pkg://verl_omni.utils.reward_score.unified_reward
+    path: pkg://verl_omni.utils.reward_score.vlm_as_a_judge
     name: compute_score_unified_reward
     user_prompt: pkg://my_package.prompts.build_semantic_prompt
 ```

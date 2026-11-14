@@ -123,6 +123,19 @@ async def reward_uses_legacy_router(reward_router_address, model_name, sampling_
     return 0.65
 
 
+async def reward_uses_tuned_legacy_router(reward_router_address, model_name, sampling_params):
+    assert reward_router_address == "legacy-router"
+    assert model_name == "legacy-model"
+    assert sampling_params == {
+        "max_tokens": 321,
+        "top_k": 5,
+        "temperature": 0.0,
+        "top_p": 1.0,
+        "seed": 17,
+    }
+    return 0.65
+
+
 async def reward_uses_native_model(reward_model, ground_truth, solution_image):
     output = await reward_model.infer(prompt=ground_truth, image=solution_image)
     return {"score": output["value"], "backend": "native-function"}
@@ -273,18 +286,16 @@ class TestMultiRewardManagerRunSingle:
     def test_fallback_ocr_preserves_upstream_sampling_and_explicit_overrides(
         self, monkeypatch, deterministic, explicit_sampling
     ):
-        from verl_omni.utils.reward_score import genrm_ocr
+        from verl_omni.utils.reward_score import genrm_ocr, vlm_as_a_judge
 
         requests = []
 
-        async def chat_complete(router_address, chat_complete_request):
+        async def chat_complete(router_address, chat_complete_request, session=None):
             assert router_address == "engine-router"
             requests.append(chat_complete_request)
             return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="hello"))])
 
-        monkeypatch.setenv("GENRM_OCR_SEED", "777")
-        monkeypatch.delenv("GENRM_OCR_MAX_TOKENS", raising=False)
-        monkeypatch.setattr(genrm_ocr, "_chat_complete", chat_complete)
+        monkeypatch.setattr(vlm_as_a_judge, "_post_chat_completion", chat_complete)
         entry = {"path": "pkg://verl_omni.utils.reward_score.genrm_ocr", "name": "compute_score_ocr"}
         if explicit_sampling is not None:
             entry["sampling_params"] = explicit_sampling
@@ -335,17 +346,15 @@ class TestMultiRewardManagerRunSingle:
     def test_existing_named_ocr_preserves_scorer_defaults_unless_recipe_opts_in(
         self, monkeypatch, deterministic, inherit
     ):
-        from verl_omni.utils.reward_score import genrm_ocr
+        from verl_omni.utils.reward_score import genrm_ocr, vlm_as_a_judge
 
         requests = []
 
-        async def chat_complete(router_address, chat_complete_request):
+        async def chat_complete(router_address, chat_complete_request, session=None):
             requests.append(chat_complete_request)
             return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="test"))])
 
-        monkeypatch.setenv("GENRM_OCR_SEED", "777")
-        monkeypatch.delenv("GENRM_OCR_MAX_TOKENS", raising=False)
-        monkeypatch.setattr(genrm_ocr, "_chat_complete", chat_complete)
+        monkeypatch.setattr(vlm_as_a_judge, "_post_chat_completion", chat_complete)
         entry = {"path": "pkg://verl_omni.utils.reward_score.genrm_ocr", "name": "compute_score_ocr"}
         if inherit:
             entry["use_rollout_sampling_params"] = True
@@ -373,7 +382,6 @@ class TestMultiRewardManagerRunSingle:
         manager.loop.run_until_complete(manager.run_single(data))
         previous, current = requests
         assert previous["max_tokens"] == 4096
-        assert previous["seed"] == 777
         if not inherit:
             assert current == previous
         else:
@@ -384,15 +392,15 @@ class TestMultiRewardManagerRunSingle:
                 assert "seed" not in current
 
     def test_genrm_ocr_user_prompt_is_per_reward_term(self, monkeypatch):
-        from verl_omni.utils.reward_score import genrm_ocr
+        from verl_omni.utils.reward_score import genrm_ocr, vlm_as_a_judge
 
         requests = []
 
-        async def chat_complete(router_address, chat_complete_request):
+        async def chat_complete(router_address, chat_complete_request, session=None):
             requests.append(chat_complete_request)
             return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="hello"))])
 
-        monkeypatch.setattr(genrm_ocr, "_chat_complete", chat_complete)
+        monkeypatch.setattr(vlm_as_a_judge, "_post_chat_completion", chat_complete)
         scorer_path = "pkg://verl_omni.utils.reward_score.genrm_ocr"
         config = _make_config(
             {
@@ -788,6 +796,61 @@ class TestMultiRewardManagerRunSingle:
         result = manager.loop.run_until_complete(manager.run_single(_make_single_data()))
 
         assert result["reward_score"] == pytest.approx(0.65)
+
+    def test_legacy_visual_router_forwards_tuned_rollout_sampling(self):
+        config = _make_config(
+            {"legacy": {"path": DUMMY_REWARDS_PATH, "name": "reward_uses_tuned_legacy_router", "weight": 1.0}}
+        )
+        config.reward.reward_model.model_path = "legacy-model"
+        config.reward.reward_model.rollout.response_length = 321
+        config.reward.reward_model.rollout.temperature = 0.0
+        config.reward.reward_model.rollout.top_p = 1.0
+        config.reward.reward_model.rollout.top_k = 5
+        config.reward.reward_model.rollout.full_determinism = True
+        config.reward.reward_model.rollout.seed = 17
+        manager = MultiVisualRewardManager(
+            config,
+            MagicMock(),
+            compute_score=None,
+            reward_router_address="legacy-router",
+            reward_model_tokenizer=MagicMock(),
+        )
+
+        result = manager.loop.run_until_complete(manager.run_single(_make_single_data()))
+
+        assert result["reward_score"] == pytest.approx(0.65)
+
+    def test_rollout_sampling_keeps_scorer_defaults_unless_tuned(self):
+        from verl_omni.reward_loop.reward_manager.visual import _sampling_params_from_rollout
+
+        defaults = OmegaConf.create(
+            {
+                "response_length": 32,
+                "temperature": 1.0,
+                "top_p": 1.0,
+                "top_k": -1,
+                "full_determinism": False,
+            }
+        )
+        assert _sampling_params_from_rollout(defaults) == {"max_tokens": 32}
+
+        tuned = OmegaConf.create(
+            {
+                "response_length": 32,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "top_k": 5,
+                "full_determinism": True,
+                "seed": 7,
+            }
+        )
+        assert _sampling_params_from_rollout(tuned) == {
+            "max_tokens": 32,
+            "top_k": 5,
+            "temperature": 0.0,
+            "top_p": 1.0,
+            "seed": 7,
+        }
 
 
 class TestMultiRewardManagerInit:
