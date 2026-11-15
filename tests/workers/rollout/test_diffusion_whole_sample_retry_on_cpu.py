@@ -76,6 +76,7 @@ async def test_retry_discards_partial_sample_and_preserves_original_inputs(monke
     assert calls == [(prompt_ids, params, {"clip": [9]})] * 2
     assert prompt_ids == [7, 8] and params["seed"] == 42
     assert output is completed
+    assert output.extra_fields["rollout_retries"] == 1
     assert output.extra_fields["min_global_steps"] == output.extra_fields["max_global_steps"] == 3
     assert output.extra_fields["primary_artifact"] == "image_latent"
     assert output.extra_fields["preview_artifact"] == preview_name

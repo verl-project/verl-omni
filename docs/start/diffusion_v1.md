@@ -218,6 +218,31 @@ The mode uses the same TransferQueue checkpoint recovery as separate-async and
 tops warmup up from restored groups. It currently supports FlowGRPO only. It
 does not use token continuation or dynamically change GPU allocation.
 
+Explicit admission pauses stay closed through LoRA memory wakeups. Generation
+resumes only after adapter installation and model-version commit; a failed
+commit leaves admission and routing closed. The default router reports an empty
+pool with a typed error, while custom routers retain their own error handling.
+
+`+trainer.v1.colocate_async.request_timeout_s=1800` bounds a whole-sample call
+and repeated replay refills during one sampling operation. Expiry propagates as
+`TimeoutError`; the trainer settles its background prompt tasks before closing
+TransferQueue. Server-side parked calls have the same default timeout, adjustable
+with `VERL_OMNI_ADMISSION_TIMEOUT_S`.
+
+`timing_s/colocate_*` separates routing, abort, sleep, weight synchronization and
+resume. `perf/colocate_gpu_handoff_s` sums both handoff directions;
+`timing_s/gen` already includes the handoff to the actor. Queue gauges count
+prompt groups, and `rollout/trained_trajectories/*` counts retries and backoff
+for consumed, non-padding trajectories. Routing-wait and per-attempt logs also
+cover work outside the consumed batch. Executed denoising steps discarded by
+abort are unavailable from the current request-level engine API.
+Handoff timers include validation switches when rewards share the rollout pool;
+trained-trajectory throughput excludes validation.
+
+Intermediate denoising recovery is unsupported: the current engine does not
+export a resumable request containing scheduler/RNG state and the full training
+trajectory. An old latent must never be continued with a newly committed policy.
+
 Run a small pretrained-model smoke with a real JPEG image reward (no OCR reward
 GPU required), validation and LoRA checkpoints:
 

@@ -303,6 +303,9 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
                 "min_global_steps": min_step,
                 "max_global_steps": max_step,
             }
+            for name in ("rollout_retries", "rollout_retry_wait_s"):
+                if name in extra:
+                    tag[name] = extra[name]
             # Identity of the prompt group for the trainer's v0 prompt-major
             # row reordering: position inside its generation batch plus the
             # per-run generation-batch number. ``index`` alone repeats across

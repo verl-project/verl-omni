@@ -117,7 +117,9 @@ class DiffusionWholeSampleRetryLLMServerClient(LLMServerClient):
             sampling_params = dict(sampling_params)
             if sampling_params.get("seed") is None:
                 sampling_params["seed"] = secrets.randbits(32)
+            retry_wait_s = 0.0
             for attempt in range(self.max_retries):
+                logger.debug("diffusion_rollout_attempt request_id=%s attempt=%d", request_id, attempt + 1)
                 output = await super().generate(
                     request_id=request_id,
                     prompt_ids=list(prompt_ids),
@@ -129,6 +131,11 @@ class DiffusionWholeSampleRetryLLMServerClient(LLMServerClient):
                     **kwargs,
                 )
                 if output.stop_reason not in ("aborted", "abort"):
+                    output.extra_fields = {
+                        **output.extra_fields,
+                        "rollout_retries": attempt,
+                        "rollout_retry_wait_s": retry_wait_s,
+                    }
                     return output
 
                 logger.debug(
@@ -138,5 +145,7 @@ class DiffusionWholeSampleRetryLLMServerClient(LLMServerClient):
                     request_id,
                 )
                 if attempt + 1 < self.max_retries:
+                    wait_started = time.perf_counter()
                     await asyncio.sleep(self.retry_wait_s)
+                    retry_wait_s += time.perf_counter() - wait_started
             raise RuntimeError(f"Diffusion sample {request_id} aborted after {self.max_retries} attempts")

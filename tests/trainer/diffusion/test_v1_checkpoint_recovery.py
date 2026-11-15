@@ -192,7 +192,12 @@ def test_transfer_queue_checkpoint_roundtrip_and_reissue(
             ),
         }
         fields = artifact_fields(artifacts, "image_latent", preview_name)
-        fields.update(global_steps=3 + session, reward_extra_info={"ocr": value / 255})
+        fields.update(
+            global_steps=3 + session,
+            reward_extra_info={"ocr": value / 255},
+            rollout_retries=session,
+            rollout_retry_wait_s=session * 0.25,
+        )
         outputs.append(
             (
                 session,
@@ -228,6 +233,10 @@ def test_transfer_queue_checkpoint_roundtrip_and_reissue(
     tq.save_checkpoint(checkpoint_dir, metadata={"global_steps": 3})
     tq.kv_clear(keys=list(tq.kv_list(partition_id)[partition_id]), partition_id=partition_id)
     tq.load_checkpoint(checkpoint_dir)
+    restored = tq.kv_list(partition_id)[partition_id]
+    for session in range(2):
+        assert restored[f"{finished}_{session}_0"]["rollout_retries"] == session
+        assert restored[f"{finished}_{session}_0"]["rollout_retry_wait_s"] == session * 0.25
 
     submitted = []
     trainer.global_steps = 4

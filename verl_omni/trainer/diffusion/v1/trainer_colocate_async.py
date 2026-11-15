@@ -82,18 +82,34 @@ class PolicyGradientDiffusionTrainerV1ColocateAsync(PolicyGradientDiffusionTrain
         """Close routing and reclaim rollout resources before actor computation."""
         # Remove routing before aborting: retries wait until committed weights are ready.
         manager = self.llm_server_manager
-        ray.get(manager.global_load_balancer.remove_servers.remote(manager.server_addresses))
-        self.checkpoint_manager.abort_replicas()
-        super().on_sample_end()
+        with marked_timer("colocate_handoff_to_actor", self.timing_raw):
+            with marked_timer("colocate_route_close", self.timing_raw):
+                ray.get(manager.global_load_balancer.remove_servers.remote(manager.server_addresses))
+            with marked_timer("colocate_abort", self.timing_raw):
+                self.checkpoint_manager.abort_replicas()
+            with marked_timer("colocate_sleep", self.timing_raw):
+                super().on_sample_end()
 
     def on_step_end(self):
         """Reopen routing only after committing weights and resuming generation."""
         with marked_timer("update_weights", self.timing_raw, color="red"):
-            self.checkpoint_manager.update_weights(self.global_steps)
-            self.checkpoint_manager.resume_generation_replicas()
+            with marked_timer("colocate_weight_sync", self.timing_raw):
+                self.checkpoint_manager.update_weights(self.global_steps)
+            with marked_timer("colocate_resume", self.timing_raw):
+                self.checkpoint_manager.resume_generation_replicas()
             manager = self.llm_server_manager
             servers = dict(zip(manager.server_addresses, manager.server_handles, strict=True))
-            ray.get(manager.global_load_balancer.add_servers.remote(servers))
+            with marked_timer("colocate_route_open", self.timing_raw):
+                ray.get(manager.global_load_balancer.add_servers.remote(servers))
+
+    def prepare_step(self) -> dict:
+        """Feed normally and observe group counts from the existing replay snapshot."""
+        metrics = super().prepare_step()
+        replay = self.replay_buffer
+        metrics["rollout/queue/sampleable_groups"] = replay.get_sampleable_count(self.global_steps, "train")
+        for name in ("pending", "running", "finished", "failure"):
+            metrics[f"rollout/queue/{name}_groups"] = len(getattr(replay, f"{name}_keys")["train"])
+        return metrics
 
     def _sample_training_batch(self, batch_size):
         refill = self.replay_buffer.refill_fn
@@ -110,4 +126,14 @@ class PolicyGradientDiffusionTrainerV1ColocateAsync(PolicyGradientDiffusionTrain
             batch, metrics = super()._sample_training_batch(batch_size)
         finally:
             self.replay_buffer.refill_fn = refill
+        tags = [tag for tag in batch.tags if not tag.get("is_padding", False)]
+        metrics["rollout/trained_trajectories/retries"] = sum(tag.get("rollout_retries", 0) for tag in tags)
+        metrics["rollout/trained_trajectories/retry_wait_s"] = sum(tag.get("rollout_retry_wait_s", 0) for tag in tags)
         return batch, metrics
+
+    def _compute_metrics(self, batch_meta, metrics, timing_raw, global_steps, epoch):
+        super()._compute_metrics(batch_meta, metrics, timing_raw, global_steps, epoch)
+        metrics["perf/colocate_gpu_handoff_s"] = timing_raw["colocate_handoff_to_actor"] + timing_raw["update_weights"]
+        metrics["perf/trained_trajectories_per_s"] = (
+            sum(not tag.get("is_padding", False) for tag in batch_meta.tags) / timing_raw["step"]
+        )
