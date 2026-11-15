@@ -251,6 +251,33 @@ def _validate_expert_parallel(config: Any) -> None:
         )
 
 
+# Settings under which rollout and actor log-probs are bitwise equal.
+_TRUE_ON_POLICY_CONTRACT = {
+    "actor_rollout_ref.rollout.temperature": 1.0,
+    "actor_rollout_ref.rollout.top_p": 1.0,
+    "actor_rollout_ref.rollout.top_k": -1,
+    "actor_rollout_ref.rollout.tensor_model_parallel_size": 1,
+    "actor_rollout_ref.rollout.calculate_log_probs": True,
+    "actor_rollout_ref.model.lora_rank": 0,
+    "actor_rollout_ref.model.use_remove_padding": True,
+    "actor_rollout_ref.actor.fsdp_config.batch_invariant": True,
+    "actor_rollout_ref.actor.fsdp_config.ulysses_sequence_parallel_size": 1,
+}
+
+
+def _validate_true_on_policy(config: Any) -> None:
+    violations = [
+        f"{path}={_select(config, path)!r} (requires {expected!r})"
+        for path, expected in _TRUE_ON_POLICY_CONTRACT.items()
+        if _select(config, path) != expected
+    ]
+    strategy = _select(config, "actor_rollout_ref.actor.strategy")
+    if strategy not in ("fsdp", "fsdp2"):
+        violations.append(f"actor_rollout_ref.actor.strategy={strategy!r} (requires 'fsdp' or 'fsdp2')")
+    if violations:
+        raise ValueError("actor_rollout_ref.model.true_on_policy=true is not supported with: " + "; ".join(violations))
+
+
 def validate_config(config: Any) -> None:
     """Validate configuration values that otherwise trigger silent fallbacks."""
     if _select(config, "actor_rollout_ref.actor.enable_timestep_staging", False):
@@ -269,6 +296,9 @@ def validate_config(config: Any) -> None:
                 "actor.use_no_sync_for_gradient_accumulation=true requires actor.strategy "
                 f"fsdp or fsdp2, got {strategy!r}."
             )
+
+    if _select(config, "actor_rollout_ref.model.true_on_policy", False):
+        _validate_true_on_policy(config)
 
     resume_mode = _select(config, "trainer.resume_mode")
     valid_resume_modes = ("disable", "auto", "resume_path")

@@ -61,6 +61,8 @@ GROUP_PATTERNS = {
         "tests/reward_loop/**",
         "tests/workers/**",
         "tests/gpu_smoke/run_gpu_smoke_core.sh",
+        "tests/pipelines/test_qwen3_omni_vllm_fused_moe_experts_gpu.py",
+        "verl_omni/pipelines/qwen3_omni/vllm_fused_moe_experts.py",
         "verl_omni/agent_loop/**",
         "verl_omni/reward_loop/**",
         "verl_omni/workers/**",
