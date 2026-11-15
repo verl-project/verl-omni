@@ -19,7 +19,10 @@ from verl.utils.debug import marked_timer
 
 from verl_omni.trainer.diffusion.v1.trainer_base import register_diffusion_trainer
 from verl_omni.trainer.diffusion.v1.trainer_sync import PolicyGradientDiffusionTrainerV1Sync
-from verl_omni.workers.rollout.diffusion_llm_server import DiffusionWholeSampleRetryLLMServerClient
+from verl_omni.workers.rollout.diffusion_llm_server import (
+    DEFAULT_REQUEST_TIMEOUT_S,
+    DiffusionWholeSampleRetryLLMServerClient,
+)
 
 
 @register_diffusion_trainer("colocate_async")
@@ -58,7 +61,11 @@ class PolicyGradientDiffusionTrainerV1ColocateAsync(PolicyGradientDiffusionTrain
 
     def get_llm_client(self):
         """Retry whole samples while the hybrid pool is temporarily unavailable."""
-        return self.llm_server_manager.get_client(client_cls=DiffusionWholeSampleRetryLLMServerClient, only_hybrid=True)
+        return self.llm_server_manager.get_client(
+            client_cls=DiffusionWholeSampleRetryLLMServerClient,
+            only_hybrid=True,
+            request_timeout_s=self.config.trainer.v1.colocate_async.get("request_timeout_s", DEFAULT_REQUEST_TIMEOUT_S),
+        )
 
     def on_train_begin(self):
         """Top up warmup without duplicating restored prompt groups."""

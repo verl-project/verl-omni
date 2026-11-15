@@ -193,6 +193,7 @@ async def test_sp_one_manager_delegates(monkeypatch):
     original = AsyncMock()
     monkeypatch.setattr(LLMServerManager, "_initialize_llm_servers", original)
     manager = object.__new__(DiffusionLLMServerManager)
+    manager._load_balancer_cls = None
     manager.rollout_config = DiffusionRolloutConfig()
     await manager._initialize_llm_servers(start_rank=3)
     original.assert_awaited_once_with(start_rank=3)

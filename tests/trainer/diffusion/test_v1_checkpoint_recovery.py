@@ -57,6 +57,33 @@ def initialized_tq():
             ray.shutdown()
 
 
+def test_typed_empty_pool_survives_ray_and_recovers(initialized_tq):
+    from verl_omni.workers.rollout.diffusion_llm_server import (
+        DiffusionWholeSampleRetryLLMServerClient,
+        PausableRequestLoadBalancer,
+        RolloutPoolUnavailable,
+    )
+
+    router = ray.remote(num_cpus=0)(PausableRequestLoadBalancer).remote({}, full_determinism=True)
+
+    async def run():
+        with pytest.raises(RolloutPoolUnavailable):
+            await router.acquire_server.remote("request")
+        client = DiffusionWholeSampleRetryLLMServerClient(
+            OmegaConf.create({}), router, only_hybrid=True, retry_wait_s=0.01, request_timeout_s=0.1
+        )
+        await router.add_servers.remote({"server": "handle"})
+        assert await client._acquire_server("request") == ("server", "handle")
+        await router.remove_servers.remote(["server"])
+        with pytest.raises(TimeoutError):
+            await client.generate("request", prompt_ids=[1], sampling_params={})
+
+    try:
+        asyncio.run(run())
+    finally:
+        ray.kill(router)
+
+
 def test_preinitialized_ray_forwards_reward_environment(initialized_tq, tmp_path, monkeypatch):
     """An existing Ray job passes startup settings to the runner and its child tasks."""
     from verl_omni.trainer.main_diffusion_v1 import run_diffusion_v1

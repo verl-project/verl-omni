@@ -22,7 +22,10 @@ from omegaconf import OmegaConf
 from verl.workers.rollout.llm_server import LLMServerClient
 
 from verl_omni.pipelines.rollout_media import MediaArtifact, MediaSpec, artifact_fields, artifacts_from_fields
-from verl_omni.workers.rollout.diffusion_llm_server import DiffusionWholeSampleRetryLLMServerClient
+from verl_omni.workers.rollout.diffusion_llm_server import (
+    DiffusionWholeSampleRetryLLMServerClient,
+    RolloutPoolUnavailable,
+)
 
 pytestmark = pytest.mark.asyncio
 
@@ -96,7 +99,9 @@ async def test_unseeded_sample_chooses_one_seed_for_all_attempts(monkeypatch, pa
     """One random seed belongs to the whole sample, including interrupted attempts."""
     choose_seed = Mock(return_value=123456)
     monkeypatch.setattr("verl_omni.workers.rollout.diffusion_llm_server.secrets.randbits", choose_seed)
-    generate = AsyncMock(side_effect=[SimpleNamespace(stop_reason="aborted"), SimpleNamespace(stop_reason="completed")])
+    generate = AsyncMock(
+        side_effect=[SimpleNamespace(stop_reason="aborted"), SimpleNamespace(stop_reason="completed", extra_fields={})]
+    )
     monkeypatch.setattr(LLMServerClient, "generate", generate)
     original_params = dict(params)
 
@@ -116,7 +121,7 @@ async def test_routing_pause_waits_without_consuming_retry_budget(monkeypatch):
     async def acquire(self, request_id, **extra):
         assert extra["prompt_ids"] == [1] and extra["sampling_params"]["seed"] == 42
         if not reopened.is_set():
-            raise RuntimeError("No available servers in load balancer")
+            raise RolloutPoolUnavailable("pool closed")
         return "server", server
 
     monkeypatch.setattr(LLMServerClient, "_acquire_server", acquire)
@@ -136,3 +141,36 @@ async def test_unrelated_routing_failure_propagates(monkeypatch, only_hybrid):
     monkeypatch.setattr(LLMServerClient, "_acquire_server", AsyncMock(side_effect=RuntimeError("worker disconnected")))
     with pytest.raises(RuntimeError, match="worker disconnected"):
         await _client(only_hybrid=only_hybrid)._acquire_server("request")
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+async def test_closed_pool_wait_is_bounded_and_cancellable(monkeypatch, cancel):
+    monkeypatch.setattr(LLMServerClient, "_acquire_server", AsyncMock(side_effect=RolloutPoolUnavailable()))
+    client = _client(only_hybrid=True, request_timeout_s=0.02)
+    task = asyncio.create_task(client.generate("request", prompt_ids=[1], sampling_params={}))
+    if cancel:
+        await asyncio.sleep(0)
+        task.cancel()
+    with pytest.raises(asyncio.CancelledError if cancel else TimeoutError):
+        await task
+
+
+@pytest.mark.parametrize("only_hybrid", [False, True])
+async def test_public_deadline_covers_a_stalled_generate_without_changing_separate_async(monkeypatch, only_hybrid):
+    async def stalled(self, **kwargs):
+        await asyncio.Future()
+
+    monkeypatch.setattr(LLMServerClient, "generate", stalled)
+    task = asyncio.create_task(
+        _client(only_hybrid=only_hybrid, request_timeout_s=0.02).generate("request", prompt_ids=[1], sampling_params={})
+    )
+    try:
+        if only_hybrid:
+            with pytest.raises(TimeoutError):
+                await task
+        else:
+            await asyncio.sleep(0.04)
+            assert not task.done()
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)

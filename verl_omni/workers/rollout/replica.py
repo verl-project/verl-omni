@@ -51,6 +51,10 @@ class DiffusionLLMServerManager(LLMServerManager):
     """Include diffusion SP ranks without changing verl's rollout lifecycle."""
 
     async def _initialize_llm_servers(self, start_rank: int | None = None):
+        from verl_omni.workers.rollout.diffusion_llm_server import PausableRequestLoadBalancer
+
+        if self._load_balancer_cls is None and not getattr(self.rollout_config, "router_config_path", None):
+            self._load_balancer_cls = PausableRequestLoadBalancer
         if get_rollout_sequence_parallel_size(self.rollout_config) == 1:
             return await super()._initialize_llm_servers(start_rank=start_rank)
 
