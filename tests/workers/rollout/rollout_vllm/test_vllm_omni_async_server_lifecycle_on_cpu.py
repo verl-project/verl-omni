@@ -114,6 +114,9 @@ def _make_server(engine, rollout_mode=RolloutMode.HYBRID, node_rank=0, free_cach
     server.rollout_mode = rollout_mode
     server.config = SimpleNamespace(free_cache_engine=free_cache_engine)
     server._lora_request_cache = None  # a valid cached value
+    server._submission_paused = server._rejecting = False
+    server._resume_event = asyncio.Event()
+    server._resume_event.set()
     return server
 
 

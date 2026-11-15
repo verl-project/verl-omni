@@ -445,9 +445,9 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         ):
             acks = await self.engine.wake_up(tags=resolved_tags)
             self._validate_acks("wake_up", acks)
-            # Actor weight sync wakes weights before writing them, then wakes
-            # kv_cache after the commit. Admission must wait for the full wake.
-            if not await self.engine.is_sleeping():
+            # A sync may wake both pools before installing the adapter.
+            # Explicit pauses remain held until the checkpoint owner resumes.
+            if not await self.engine.is_sleeping() and not self._submission_paused:
                 await self.engine.resume_generation()
             self._invalidate_lora_request_cache()
 
@@ -496,12 +496,8 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         with RLInsightLogger.trace_state("vllm_resume_kv_cache", state_lane_id=f"replica_{self.replica_rank}"):
             acks = await self.engine.wake_up(tags=["kv_cache"])
             self._validate_acks("wake_up", acks)
-            await self.engine.resume_generation()
+            await self.resume_generation()
             self._invalidate_lora_request_cache()
-
-    async def resume_generation(self):
-        if self.node_rank == 0:
-            await self.engine.resume_generation()
 
     def _validate_acks(self, method: str, acks: Any) -> None:
         """Fail closed on any non-success sleep/wake handshake."""
@@ -533,6 +529,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
     ) -> DiffusionOutput | TokenOutput:
         # session_id (cross-request server affinity in the vLLM path) has no
         # AsyncOmni counterpart; routing stickiness is owned by the load balancer.
+        await self._resume_event.wait()
         return await self._generate_strategy.generate(
             prompt_ids=prompt_ids,
             sampling_params=sampling_params,
@@ -613,6 +610,10 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             )
         if reject_request and not abort_only:
             logger.warning("AsyncOmni has no admission gate: requests arriving behind the pause park until resume")
+
+        if not abort_only:
+            self._submission_paused = True
+            self._resume_event.clear()
 
         if not self.config.free_cache_engine and not abort_only:
             await engine.pause_generation(mode="keep", clear_cache=reset_prefix_cache)

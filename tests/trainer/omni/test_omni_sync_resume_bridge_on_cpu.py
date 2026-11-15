@@ -139,13 +139,7 @@ def test_unbridged_parent_hooks_leave_hold_set():
 
 
 async def test_server_wake_up_resumes_admission_after_ack():
-    """The server's wake_up re-opens admission once the wake ACKs.
-
-    wake_up_replicas() only runs after the weight sync completes, so resuming
-    there is never mid-sync; it is what lets every trainer generate after
-    sleep/wake without its own resume bridge (the engine keeps the sleep hold
-    through its own wake_up).
-    """
+    """A full wake resumes generation when admission is not explicitly paused."""
     server_module = pytest.importorskip("verl_omni.workers.rollout.vllm_rollout.vllm_omni_async_server")
     server = object.__new__(server_module.vLLMOmniHttpServer)
     server.node_rank = 0
@@ -156,6 +150,7 @@ async def test_server_wake_up_resumes_admission_after_ack():
     server.rollout_mode = RolloutMode.COLOCATED
     server.config = SimpleNamespace(free_cache_engine=True)
     server._lora_request_cache = None
+    server._submission_paused = False
 
     calls: list[str] = []
 
@@ -165,8 +160,12 @@ async def test_server_wake_up_resumes_admission_after_ack():
     async def resume_generation(stage_ids=None):
         calls.append("resume_generation")
 
+    async def is_sleeping():
+        return False
+
     server.engine = SimpleNamespace(wake_up=wake_up)
     server.engine.resume_generation = resume_generation
+    server.engine.is_sleeping = is_sleeping
 
     await server.wake_up()
 
