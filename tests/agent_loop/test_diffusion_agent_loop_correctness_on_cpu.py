@@ -392,14 +392,14 @@ async def test_tq_writer_batches_group_sessions_and_partitions_field_sets(monkey
     worker = object.__new__(worker_cls)
     puts = []
 
-    def make_internal(with_reward: bool):
+    def make_internal(with_reward: bool, step: int):
         internal = SimpleNamespace(
             prompt_ids=torch.tensor([[1, 2]]),
             response_diffusion_output=torch.zeros(1, 3, 2, 2),
             response_logprobs=None,
             reward_score=0.5 if with_reward else None,
             num_turns=1,
-            extra_fields={},
+            extra_fields={"global_steps": step, "min_global_steps": step, "max_global_steps": step},
         )
         return internal
 
@@ -413,7 +413,7 @@ async def test_tq_writer_batches_group_sessions_and_partitions_field_sets(monkey
     # Session 1 carries rm_scores, sessions 0/2 do not: rows split by field
     # signature instead of crashing on missing keys.
     await worker._write_trajectories_to_tq(
-        [(0, make_internal(False)), (1, make_internal(True)), (2, make_internal(False))],
+        [(0, make_internal(False, 8)), (1, make_internal(True, 9)), (2, make_internal(False, 10))],
         uid="sample",
         trajectory={"step": 7},
         validate=False,
@@ -424,46 +424,17 @@ async def test_tq_writer_batches_group_sessions_and_partitions_field_sets(monkey
     assert [put["keys"] for put in puts] == [["sample_0_0", "sample_2_0"], ["sample_1_0"]]
     assert "rm_scores" in puts[1]["fields"][0]
     assert all("rm_scores" not in put["fields"][0] for put in puts[:1])
-    assert all(tag["global_steps"] == 7 for put in puts for tag in put["tags"])
+    for put in puts:
+        for key, row, tag in zip(put["keys"], put["fields"], put["tags"], strict=True):
+            step = 8 + int(key.split("_")[1])
+            assert tag["global_steps"] == step
+            assert row["extra_fields"]["min_global_steps"] == tag["min_global_steps"] == step
+            assert row["extra_fields"]["max_global_steps"] == tag["max_global_steps"] == step
     # The prompt identity rides in the tags so the trainer can restore the
     # v0 prompt-major row order: batch-local position plus the per-run
     # generation-batch number.
     assert all(tag["prompt_index"] == 3 for put in puts for tag in put["tags"])
     assert all(tag["gen_batch_seq"] == 5 for put in puts for tag in put["tags"])
-
-
-@pytest.mark.asyncio
-async def test_tq_writer_uses_each_completed_samples_actual_version(monkeypatch):
-    """Persist each successful attempt rather than its older submission version."""
-    worker_cls = DiffusionAgentLoopWorkerTQ.__ray_metadata__.modified_class
-    worker = object.__new__(worker_cls)
-    rows, tags = [], []
-
-    async def put(**kwargs):
-        rows.extend(kwargs["fields"])
-        tags.extend(kwargs["tags"])
-
-    monkeypatch.setattr(diffusion_agent_loop_tq, "list_of_dict_to_tensordict", lambda value: value)
-    monkeypatch.setattr(diffusion_agent_loop_tq.tq, "async_kv_batch_put", put)
-    outputs = [
-        (
-            i,
-            SimpleNamespace(
-                prompt_ids=torch.tensor([[1, 2]]),
-                response_diffusion_output=torch.zeros(1, 3, 2, 2),
-                response_logprobs=None,
-                reward_score=None,
-                num_turns=1,
-                extra_fields={"global_steps": step, "min_global_steps": step, "max_global_steps": step},
-            ),
-        )
-        for i, step in enumerate([2, 4])
-    ]
-    await worker._write_trajectories_to_tq(outputs, uid="sample", trajectory={"step": 1}, validate=False)
-    assert [tag["global_steps"] for tag in tags] == [2, 4]
-    for row, tag, step in zip(rows, tags, [2, 4], strict=True):
-        assert row["extra_fields"]["min_global_steps"] == tag["min_global_steps"] == step
-        assert row["extra_fields"]["max_global_steps"] == tag["max_global_steps"] == step
 
 
 @pytest.mark.asyncio

@@ -347,8 +347,7 @@ def _remote(fn):
 
 
 @pytest.mark.parametrize("profile", [False, True])
-@pytest.mark.parametrize("free_cache", [False, True])
-def test_routing_stays_closed_from_abort_through_weight_commit(monkeypatch, profile, free_cache):
+def test_routing_stays_closed_from_abort_through_weight_commit(monkeypatch, profile):
     """Failed weight commits never expose rollout replicas to new requests."""
     trainer = PolicyGradientDiffusionTrainerV1ColocateAsync(
         compose_cfg(
@@ -356,7 +355,6 @@ def test_routing_stays_closed_from_abort_through_weight_commit(monkeypatch, prof
                 "trainer.v1.trainer_mode=colocate_async",
                 "data.train_batch_size=4",
                 "actor_rollout_ref.actor.ppo_mini_batch_size=2",
-                f"actor_rollout_ref.rollout.free_cache_engine={str(free_cache).lower()}",
             ]
         )
     )

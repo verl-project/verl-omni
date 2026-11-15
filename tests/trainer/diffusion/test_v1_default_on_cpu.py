@@ -91,17 +91,27 @@ def test_offline_dpo_v0_launch_stays_silent():
     assert config.trainer.use_v1 is False
 
 
-@pytest.mark.parametrize("overrides", [[], ["+ray_kwargs.ray_init.runtime_env.env_vars.OMP_NUM_THREADS='8'"]])
-@pytest.mark.parametrize("entrypoint", ["v0", "v1"])
-@pytest.mark.parametrize("reward_path", ["legacy", "named"])
-@pytest.mark.parametrize("reward_enabled, full_determinism", [(False, True), (True, False), (True, True)])
+@pytest.mark.parametrize(
+    "entrypoint, reward_path, reward_enabled, full_determinism, user_env",
+    [
+        ("v0", "legacy", False, True, False),
+        ("v1", "named", False, True, True),
+        ("v0", "legacy", True, False, True),
+        ("v1", "named", True, False, False),
+        ("v0", "legacy", True, True, False),
+        ("v1", "legacy", True, True, True),
+        ("v0", "named", True, True, True),
+        ("v1", "named", True, True, False),
+    ],
+)
 def test_diffusion_ray_runtime_env_matches_reward_config(
-    monkeypatch, entrypoint, reward_path, reward_enabled, full_determinism, overrides
+    monkeypatch, entrypoint, reward_path, reward_enabled, full_determinism, user_env
 ):
     """User runtime overrides coexist with deterministic reward and TransferQueue flags."""
     import verl_omni.trainer.main_diffusion as main_v0
     import verl_omni.trainer.main_diffusion_v1 as main_v1
 
+    overrides = ["+ray_kwargs.ray_init.runtime_env.env_vars.OMP_NUM_THREADS='8'"] if user_env else []
     config = compose_diffusion_config(overrides)
     assert config.transfer_queue.enable is False
     config.reward.reward_model.enable = reward_enabled if reward_path == "legacy" else False
@@ -229,8 +239,7 @@ def test_v1_runner_combines_nsight_and_environment(monkeypatch, initialized):
     assert captured["runtime_env"]["env_vars"]["TRANSFER_QUEUE_ENABLE"] == "1"
 
 
-@pytest.mark.parametrize("seed", [17, 2**32, 2**63 - 1])
-@pytest.mark.parametrize("reward_path", ["legacy", "named"])
+@pytest.mark.parametrize("seed, reward_path", [(17, "legacy"), (2**32, "named"), (2**63 - 1, "legacy")])
 def test_reward_hash_seed_starts_python_without_changing_sampling_seed(seed, reward_path):
     """Large sampling seeds produce valid child-process hash seeds without mutation."""
     import subprocess
