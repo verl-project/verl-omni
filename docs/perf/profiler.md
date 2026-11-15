@@ -1,6 +1,6 @@
 # Profiling FlowGRPO / diffusion training in VeRL-Omni
 
-Last updated: 11/12/2026.
+Last updated: 11/14/2026.
 
 VeRL-Omni reuses the profiler subsystem from upstream
 [verl](https://github.com/verl-project/verl) (`verl.utils.profiler`) and exposes
@@ -311,11 +311,19 @@ metrics are device-level and do not attribute activity to an individual role.
 > Without this option, reports may contain environment variables such as
 > `HF_TOKEN`, so take care when sharing report files.
 
-After training, the wrappers wait for report generation to finish and copy
-reports into `$RUN_DIR/nsight`. Set `PROFILE_FINALIZE_TIMEOUT_S` to change the
-120-second timeout. Available reports and raw streams are preserved on training
-or collection failure. Keep the generated session names and output filename IDs
-when overriding Nsight launch options.
+The wrappers record existing Nsight sessions before training, then wait for
+new sessions to finish report generation and copy reports into
+`$RUN_DIR/nsight`. Nsight assigns session names automatically so actors that
+inherit profiling options can start without name conflicts. Do not run another
+Nsight experiment as the same user on this node during collection. Keep the
+output filename IDs when overriding Nsight launch options.
+
+Set `PROFILE_FINALIZE_TIMEOUT_S` to change the 120-second report-wait budget.
+It is checked between session queries and does not interrupt a running query;
+a query can take more than ten seconds. Query exit codes and durations are
+logged with the original stderr. Available reports and raw streams are preserved
+on training or collection failure. Session completion does not verify report
+contents: check that the intended steady-state interval is present.
 
 Collection reads from `session_latest`. Avoid starting another Ray cluster
 during collection, since it can redirect that link. Reusing a Ray cluster and

@@ -34,7 +34,6 @@ extra_overrides=(
     ++global_profiler.global_tool_config.nsys.gpu_metrics_nsight_options.gpu-metrics-devices='"all"'
     ++global_profiler.global_tool_config.nsys.gpu_metrics_nsight_options.gpu-metrics-frequency=20
     ++global_profiler.global_tool_config.nsys.gpu_metrics_nsight_options.wait=primary
-    '++global_profiler.global_tool_config.nsys.gpu_metrics_nsight_options.session-new=profile_@RUN_ID@_gpu_metrics'
     '++global_profiler.global_tool_config.nsys.gpu_metrics_nsight_options.o="gpu_metrics_@RUN_ID@_%h_pid%p"'
 )
 exec bash "$script_dir/run_diffusion_benchmark_nsys_v0.sh" \

@@ -114,6 +114,29 @@ chmod 700 "$profile_dst"
 # Entrypoints and callers can reference this experiment's run ID in overrides.
 set -- "${@//@RUN_ID@/$profile_run_id}"
 
+query_nsight_sessions() {
+    local started_ns status=0
+    started_ns=$(date +%s%N)
+    nsys sessions list --output-format=json || status=$?
+    printf 'NSIGHT_QUERY phase=%s exit_code=%s elapsed_ms=%s\n' \
+        "$1" "$status" "$((($(date +%s%N) - started_ns) / 1000000))" >&2
+    return "$status"
+}
+
+# Let Nsight assign unique names, including for actors inheriting runtime_env.
+# This single-node recipe assumes no concurrent Nsight run by the same user.
+if ! sessions_before=$(query_nsight_sessions before_training); then
+    echo "ERROR: unable to query Nsight sessions before training." >&2
+    exit 1
+fi
+if ! session_names_before=$(python -c '
+import json, sys
+print(json.dumps([s["name"] for s in json.load(sys.stdin)]))
+' <<< "$sessions_before"); then
+    echo "ERROR: invalid Nsight session status output before training." >&2
+    exit 1
+fi
+
 training_status=0
 bash "$base_recipe" \
     trainer.total_training_steps="$TRAINING_STEPS" \
@@ -141,7 +164,6 @@ bash "$base_recipe" \
     +global_profiler.global_tool_config.nsys.controller_nsight_options.python-sampling='"true"' \
     +global_profiler.global_tool_config.nsys.controller_nsight_options.python-sampling-frequency=20 \
     +global_profiler.global_tool_config.nsys.controller_nsight_options.wait=primary \
-    +global_profiler.global_tool_config.nsys.controller_nsight_options.session-new="profile_${profile_run_id}_controller" \
     +global_profiler.global_tool_config.nsys.controller_nsight_options.o="\"controller_${profile_run_id}_%h_pid%p\"" \
     global_profiler.global_tool_config.nsys.worker_nsight_options.trace='"nvtx,cuda-sw,osrt"' \
     global_profiler.global_tool_config.nsys.worker_nsight_options.cuda-memory-usage='"false"' \
@@ -158,7 +180,6 @@ bash "$base_recipe" \
     +global_profiler.global_tool_config.nsys.worker_nsight_options.python-sampling='"true"' \
     +global_profiler.global_tool_config.nsys.worker_nsight_options.python-sampling-frequency=20 \
     +global_profiler.global_tool_config.nsys.worker_nsight_options.wait=primary \
-    +global_profiler.global_tool_config.nsys.worker_nsight_options.session-new="\"profile_${profile_run_id}_{role}_{rank}\"" \
     +global_profiler.global_tool_config.nsys.worker_nsight_options.o="\"worker_${profile_run_id}_rank_%q{RANK}_%h_pid%p\"" \
     "$@" || training_status=$?
 
@@ -175,11 +196,10 @@ artifact_pattern="*${profile_run_id}*"
 # asynchronous report generation visible in its session state, even before a
 # report appears in the output directory. Idle sessions may outlive training.
 # Do not infer completeness from report counts, file sizes, or importer PIDs.
-finalize_deadline=$((SECONDS + PROFILE_FINALIZE_TIMEOUT_S))
-reports_ready=0
+finalize_started_s=$SECONDS
 report_error=0
-while (( SECONDS < finalize_deadline )); do
-    if ! sessions=$(timeout 10s nsys sessions list --output-format=json); then
+while true; do
+    if ! sessions=$(query_nsight_sessions after_training); then
         echo "ERROR: unable to query Nsight sessions." >&2
         report_error=1
         break
@@ -188,24 +208,27 @@ while (( SECONDS < finalize_deadline )); do
     if ! pending_sessions=$(python -c '
 import json, sys
 idle = {"Launched", "ConfiguredLaunched", "StartRange"}
+existing = set(json.loads(sys.argv[1]))
 print("\n".join(s["name"] + " " + s["state"] for s in json.load(sys.stdin)
-                if s["name"].startswith(sys.argv[1]) and s["state"] not in idle))
-' "profile_${profile_run_id}_" <<< "$sessions"); then
+                if s["name"] not in existing and s["state"] not in idle))
+' "$session_names_before" <<< "$sessions"); then
         echo "ERROR: invalid Nsight session status output." >&2
         report_error=1
         break
     fi
     if [[ -z "$pending_sessions" ]]; then
-        reports_ready=1
+        break
+    fi
+    # Check the budget between queries; an in-flight query is not interrupted.
+    if (( SECONDS - finalize_started_s >= PROFILE_FINALIZE_TIMEOUT_S )); then
+        echo "ERROR: Nsight sessions still pending after ${PROFILE_FINALIZE_TIMEOUT_S}s waiting budget:" >&2
+        echo "$pending_sessions" >&2
+        report_error=1
         break
     fi
     sleep 1
 done
-if (( reports_ready == 0 )); then
-    echo "ERROR: Nsight sessions did not finish within ${PROFILE_FINALIZE_TIMEOUT_S}s." >&2
-    echo "${pending_sessions:-Session status unavailable.}" >&2
-    report_error=1
-fi
+echo "NSIGHT_FINALIZE elapsed_s=$((SECONDS - finalize_started_s)) exit_code=$report_error"
 
 # On failure, still preserve available reports and recoverable raw streams.
 report_count=0
