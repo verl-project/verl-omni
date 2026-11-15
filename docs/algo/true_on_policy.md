@@ -46,6 +46,7 @@ The trainer refuses to start unless all of these hold, and lists every violation
 | `actor_rollout_ref.actor.strategy` | `fsdp` or `fsdp2` |
 | `actor_rollout_ref.actor.fsdp_config.batch_invariant` | `true` |
 | `actor_rollout_ref.actor.fsdp_config.ulysses_sequence_parallel_size` | `1` |
+| `trainer.v1.trainer_mode` | `omni_sync` |
 
 `actor_rollout_ref.model.override_config.attn_implementation` may be left unset or set to `hub_fa3`, and `override_config.experts_implementation` unset or set to `vllm_fused_moe`; anything else is an error. CUDA graphs on the rollout (`enforce_eager=false`) are supported.
 
@@ -70,13 +71,14 @@ Dense GEMMs, the embedding, `lm_head` and synced weights are already bitwise equ
 
 ## Scope
 
-Supported: Qwen3-Omni thinker, text-only prompts, full-parameter training, rollout TP=1, FSDP/FSDP2 actor, Hopper GPUs.
+Supported: Qwen3-Omni thinker, text-only prompts, full-parameter training, rollout TP=1, FSDP/FSDP2 actor, the synchronous trainer, Hopper GPUs.
 
 Not supported:
 
 - LoRA: merged and unmerged weights differ by construction.
 - Multimodal inputs and the vision/audio towers. An image input fails in the actor with a `ValueError` from `hub_fa3`, which serves the text decoder only.
 - TP or EP > 1 on the rollout; the vLLM-Omni option refuses them.
+- The separate-async trainer (`omni_separate_async`): its rollout replicas can generate with weights the actor has already updated.
 - Run-to-run reproducibility of training: only the rollout-vs-actor log-probs within a run are covered.
 
 ## Cost

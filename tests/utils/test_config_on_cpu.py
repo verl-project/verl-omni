@@ -245,7 +245,7 @@ def test_rollout_non_positive_ep_size_is_rejected():
 
 
 def _true_on_policy_config(**overrides):
-    config = _config()
+    config = _config(v1={"trainer_mode": "omni_sync"})
     config.algorithm = {"rollout_correction": {"bypass_mode": False}}
     config.actor_rollout_ref = {
         "model": {"true_on_policy": True, "lora_rank": 0, "use_remove_padding": True},
@@ -287,6 +287,7 @@ def test_validate_config_does_not_require_rollout_full_determinism():
         ("actor_rollout_ref.actor.fsdp_config.batch_invariant", False),
         ("actor_rollout_ref.actor.fsdp_config.ulysses_sequence_parallel_size", 2),
         ("actor_rollout_ref.actor.strategy", "megatron"),
+        ("trainer.v1.trainer_mode", "omni_separate_async"),
     ],
 )
 def test_validate_config_rejects_true_on_policy_violations(path, value):
