@@ -152,3 +152,8 @@ class Qwen3OmniRolloutAdapter(OmniRolloutPipelineBase):
                 f"Unknown pipeline_mode={pipeline_mode!r}. Expected one of: 'thinker_only', 'thinker_talker', 'full'."
             )
         return frozenset({cls.policy_stage_id(pipeline_mode=pipeline_mode)})
+
+    @classmethod
+    def get_true_on_policy_engine_extras(cls, stage_id: int) -> dict:
+        """Run the thinker stage with HF numerics so its log-probs match the HF actor bitwise."""
+        return {"additional_config": {"hf_numerics": True}} if stage_id == 0 else {}

@@ -770,6 +770,16 @@ class OmniModelBase(ABC):
         return
 
     @classmethod
+    def register_true_on_policy_implementations(cls) -> dict[str, str]:
+        """Register the Transformers kernels used under ``true_on_policy``.
+
+        Returns:
+            The ``*_implementation`` names to build the HF config with, e.g.
+            ``{"attn_implementation": ..., "experts_implementation": ...}``.
+        """
+        raise NotImplementedError(f"{cls.__name__} does not support true_on_policy.")
+
+    @classmethod
     @abstractmethod
     def get_strip_modules(cls, model_config) -> list[str]:
         """Return submodule prefixes to strip before FSDP init.
@@ -1094,6 +1104,18 @@ class OmniRolloutPipelineBase:
 
         Returns:
             dict: Extra key-value pairs merged into the stage's engine args.
+        """
+        return {}
+
+    @classmethod
+    def get_true_on_policy_engine_extras(cls, stage_id: int) -> dict:
+        """Return ``engine_extras`` merged into a stage when ``model.true_on_policy`` is on.
+
+        Args:
+            stage_id: The pipeline stage ID.
+
+        Returns:
+            dict: Extra key-value pairs merged over :meth:`get_stage_engine_extras`.
         """
         return {}
 
