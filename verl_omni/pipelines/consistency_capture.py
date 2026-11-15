@@ -91,6 +91,7 @@ def _driver_pair(data, result, context: dict) -> None:
 
 
 def _schedule_inputs(engine, micro_batch, step: int) -> tuple[dict, bool]:
+    from verl_omni.pipelines.model_base import DiffusionModelBase
     from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
 
     scheduler = engine.scheduler
@@ -99,7 +100,10 @@ def _schedule_inputs(engine, micro_batch, step: int) -> tuple[dict, bool]:
         "rollout_log_probs": _cpu(micro_batch["rollout_log_probs"][:, step].float()).reshape(-1, 1),
         "timesteps": _cpu(timesteps.float()).reshape(-1, 1),
     }
-    contract = isinstance(scheduler, FlowMatchSDEDiscreteScheduler)
+    adapter = DiffusionModelBase.get_class(engine.model_config)
+    contract = (
+        isinstance(scheduler, FlowMatchSDEDiscreteScheduler) and adapter.consistency_timestep_unit == "training_step"
+    )
     if contract:
         import torch
 

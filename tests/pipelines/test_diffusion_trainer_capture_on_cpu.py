@@ -73,6 +73,7 @@ def hooks(monkeypatch, tmp_path):
     class PPODiffusersFSDPEngine:
         def __init__(self, source=True):
             self.scheduler = FlowMatchSDEDiscreteScheduler()
+            self.model_config = SimpleNamespace(adapter=SimpleNamespace(consistency_timestep_unit="training_step"))
             self.source = source
             self.parameter = torch.nn.Parameter(torch.tensor(2.0))
             self.fail = False
@@ -130,6 +131,7 @@ def hooks(monkeypatch, tmp_path):
         "verl_omni.workers.engine.fsdp": ModuleType("verl_omni.workers.engine.fsdp"),
         "verl_omni.workers.engine.fsdp.diffusers_impl": ModuleType("verl_omni.workers.engine.fsdp.diffusers_impl"),
         "verl_omni.pipelines": ModuleType("verl_omni.pipelines"),
+        "verl_omni.pipelines.model_base": ModuleType("verl_omni.pipelines.model_base"),
         "verl_omni.pipelines.schedulers": ModuleType("verl_omni.pipelines.schedulers"),
     }
     package_names = {
@@ -156,6 +158,9 @@ def hooks(monkeypatch, tmp_path):
     engine_module.DiffusersFSDPEngine = DiffusersFSDPEngine
     engine_module.PPODiffusersFSDPEngine = PPODiffusersFSDPEngine
     modules["verl_omni.pipelines.schedulers"].FlowMatchSDEDiscreteScheduler = FlowMatchSDEDiscreteScheduler
+    modules["verl_omni.pipelines.model_base"].DiffusionModelBase = SimpleNamespace(
+        get_class=lambda config: config.adapter
+    )
     capture.install_trainer_capture()
     return capture, root, PolicyGradientDiffusionTrainerV1, DiffusersFSDPEngine, PPODiffusersFSDPEngine
 
@@ -230,6 +235,63 @@ def test_metadata_restored_and_context_reset_after_engine_failure(hooks):
     assert data.meta_info[capture._CONTEXT_KEY] is sentinel
     assert capture._ENGINE_CONTEXT.get() is None
     assert not root.exists()
+
+
+@pytest.mark.parametrize("unit", [None, "sigma"])
+def test_sigma_units_are_not_inferred_from_scheduler_class(hooks, monkeypatch, unit):
+    capture, root, Trainer, EngineBase, PPO = hooks
+    engine = type("CPUCombinedEngine", (PPO, EngineBase), {})()
+    engine.model_config.adapter.consistency_timestep_unit = unit
+    engine.scheduler.timesteps = torch.tensor([0.75, 0.5, 0.25])
+    engine.scheduler.sigmas = torch.tensor([0.75, 0.5, 0.25, 0.0])
+    data = _data()
+    data.batch["all_timesteps"] = torch.tensor([[0.75, 0.5]]).repeat(2, 1)
+    torch.manual_seed(123)
+    data.batch["rollout_log_probs"] = torch.cat([(torch.randn(2, 1) + 2).square() for _ in range(2)], 1)
+    torch.manual_seed(123)
+    Trainer(engine)._compute_old_log_prob(data)
+    for record, payload in _events(root):
+        if record["kind"] == "engine_forward":
+            assert record["sigma_timestep_contract"] is False
+            assert "sigma" not in payload and "sigma_next" not in payload
+    monkeypatch.syspath_prepend(str(SOURCE.parents[2] / "scripts"))
+    import replay_diffusion_trainer_capture as reader
+
+    report = reader.replay(root, root.parent / "report.json")
+    assert report["status"] == "admitted"
+    assert report["sigma_diagnosis_available"] is False
+
+
+def test_registered_sd3_and_bagel_timestep_contracts():
+    if importlib.util.find_spec("verl") is None:
+        pytest.skip("optional verl package is unavailable")
+    from verl_omni.pipelines.bagel_flow_grpo.common import setup_bagel_sigmas
+    from verl_omni.pipelines.model_base import DiffusionModelBase
+    from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
+
+    capture = _capture_module()
+    assert DiffusionModelBase.consistency_timestep_unit is None
+    scheduler = FlowMatchSDEDiscreteScheduler(num_train_timesteps=1000)
+    setup_bagel_sigmas(scheduler, num_steps=4, device="cpu")
+    config = SimpleNamespace(architecture="OmniBagelForConditionalGeneration", algorithm="flow_grpo", external_lib=None)
+    assert DiffusionModelBase.get_class(config).consistency_timestep_unit is None
+    batch = {"all_timesteps": scheduler.timesteps[1:2].reshape(1, 1), "rollout_log_probs": torch.zeros(1, 1)}
+    engine = SimpleNamespace(scheduler=scheduler, model_config=config)
+    payload, contract = capture._schedule_inputs(engine, batch, 0)
+    assert contract is False and "sigma" not in payload
+    index = scheduler.index_for_timestep(batch["all_timesteps"][0, 0])
+    assert scheduler.sigmas[index] == batch["all_timesteps"][0, 0]
+    assert not torch.isclose(scheduler.sigmas[index], batch["all_timesteps"][0, 0] / 1000)
+
+    config.architecture = "StableDiffusion3Pipeline"
+    assert DiffusionModelBase.get_class(config).consistency_timestep_unit == "training_step"
+    scheduler = FlowMatchSDEDiscreteScheduler(num_train_timesteps=1000)
+    scheduler.set_timesteps(4, device="cpu")
+    engine.scheduler = scheduler
+    batch["all_timesteps"] = scheduler.timesteps[1:2].reshape(1, 1)
+    payload, contract = capture._schedule_inputs(engine, batch, 0)
+    assert contract is True
+    torch.testing.assert_close(payload["sigma"], payload["timesteps"] / 1000)
 
 
 def test_default_step_selection_and_unset_directory_are_no_ops(hooks, monkeypatch):

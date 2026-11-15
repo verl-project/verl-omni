@@ -24,6 +24,12 @@ export DIFFUSION_CAPTURE_DIR=/absolute/fresh/run/captures
 export DIFFUSION_CAPTURE_STEPS=1
 ```
 
+For multi-node runs, use the same capture path on storage accessible to every
+worker and the driver, or copy every worker's event directories into one replay
+input root after collection. Node-local roots contain only that host's events;
+the reader cannot detect probes left on another host. Keep the same capture-root
+basename on every host, because it identifies the run in each event record.
+
 The existing Ray worker setup forwards these variables and installs the
 observer in each worker. It does not select a model, change seeds, force
 FP32, disable LoRA, or change the microbatch. With no capture directory,
@@ -33,7 +39,12 @@ engine; bypass and direct-preference algorithms do not provide that pair.
 
 The driver saves every row and timestep of the rollout/recomputed pair.
 Engine records save the consumed microbatch's log probabilities, raw
-timesteps, and current/next sigma values for FlowMatch SDE schedulers.
+timesteps, and current/next sigma values when a FlowMatch SDE adapter explicitly
+declares `consistency_timestep_unit = "training_step"`. This describes the
+`all_timesteps` consumed by the scheduler, before any transformer-input scaling.
+SD3 FlowGRPO declares this contract. Adapters using sigma units (such as BAGEL)
+or leaving the declaration unset retain numerical comparison without sigma
+diagnosis. The observer does not infer units from observed timestep/sigma values.
 Record completion is written after the detached CPU payload and its hash.
 Temporary batch metadata and engine context are restored on exceptions.
 Capturing selected steps adds observation and I/O cost; it is not a
