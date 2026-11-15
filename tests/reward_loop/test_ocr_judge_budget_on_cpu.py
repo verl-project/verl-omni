@@ -18,6 +18,8 @@ from pathlib import Path
 
 import pytest
 
+from verl_omni.reward_loop.reward_manager.visual import _sampling_params_from_rollout
+
 EXAMPLES = Path(__file__).parents[2] / "examples"
 OCR_RECIPES = sorted(
     p
@@ -34,3 +36,12 @@ def test_ocr_recipes_exist():
 @pytest.mark.parametrize("recipe", OCR_RECIPES, ids=lambda p: str(p.relative_to(EXAMPLES)))
 def test_ocr_recipe_bounds_the_judge_output(recipe):
     assert BUDGET.search(recipe.read_text()), f"{recipe} does not set the OCR judge response_length to 256"
+
+
+def test_rollout_response_length_is_forwarded_as_the_budget():
+    assert _sampling_params_from_rollout({"response_length": 64}) == {"max_tokens": 64}
+
+
+@pytest.mark.parametrize("rollout", [{}, {"response_length": None}, {"response_length": 0}])
+def test_rollout_without_a_response_length_leaves_the_budget_to_the_scorer(rollout):
+    assert _sampling_params_from_rollout(rollout) == {}

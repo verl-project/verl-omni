@@ -1,6 +1,6 @@
 # Named Reward Models
 
-Last updated: 11/01/2026
+Last updated: 11/14/2026
 
 This guide describes how to configure and extend named model-backed rewards
 under `reward.models` in `verl-omni`. For the general Reward Loop interface and
@@ -84,7 +84,7 @@ this option does not introduce a timeout or health-check policy.
 
 | Backend | Use it when | Reward-function arguments |
 | --- | --- | --- |
-| `engine` | The model is supported by the existing `verl.RewardModelManager` and should be served by vLLM | `reward_router_address` and `model_name` |
+| `engine` | The model is supported by the existing `verl.RewardModelManager` and should be served by vLLM | `reward_router_address` and `model_name`; `reward_model_tokenizer` when the function declares it |
 | `native` | The model can be loaded and called directly in a reward worker, including ordinary Transformers models | `reward_model`, an inference handle |
 
 The engine path documented here uses vLLM. vLLM-Omni reward serving is not
@@ -208,10 +208,21 @@ generative judge: with the opt-in above it is forwarded as the request's
 transcriptions are a few dozen tokens, and a small VLM judge occasionally falls
 into a repetition loop on an illegible image; without a budget that one request
 runs to the limit at single-sequence decode speed while the whole step waits.
-The OCR recipes therefore set `response_length=256`. Precedence, highest first:
-`reward.reward_functions.<term>.sampling_params`, the model's
-`rollout.response_length` (when `use_rollout_sampling_params=true`), the
-scorer's environment override, the scorer default.
+The OCR recipes therefore set `response_length=256`. The budget is resolved in
+this order:
+
+1. An explicit `reward.reward_functions.<term>.sampling_params` replaces the
+   rollout-derived parameters as a whole. Its `max_tokens` is the budget; a
+   mapping without `max_tokens` falls through to step 3, not to
+   `rollout.response_length`.
+2. Otherwise, with `use_rollout_sampling_params=true`, the model's
+   `rollout.response_length` when it is set.
+3. The scorer's environment override (`GENRM_OCR_MAX_TOKENS`), then the scorer
+   default (256).
+
+The OCR scorer counts the ground truth with the judge's tokenizer and raises
+before sending a request when it needs more tokens than the budget, so a text
+the judge cannot transcribe in full fails the run instead of lowering the score.
 
 ## Model-to-reward binding
 

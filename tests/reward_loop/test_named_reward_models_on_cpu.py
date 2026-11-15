@@ -896,6 +896,23 @@ def test_engine_executor_exposes_only_router_arguments():
     }
 
 
+def test_engine_executor_loads_the_model_tokenizer_on_first_use(monkeypatch):
+    loaded = []
+
+    def load_tokenizer(name_or_path, **kwargs):
+        loaded.append(name_or_path)
+        return object()
+
+    monkeypatch.setattr(executor_module, "hf_tokenizer", load_tokenizer)
+    spec = RewardModelSpec(name="ocr", backend="engine", model_path="/models/judge", router_address="router:8000")
+    executor = build_engine_reward_executors({"ocr": spec})["ocr"]
+
+    executor.reward_kwargs()
+    assert loaded == []
+    assert executor.tokenizer is executor.tokenizer
+    assert loaded == ["/models/judge"]
+
+
 @pytest.mark.parametrize(
     ("models", "term", "message"),
     [
