@@ -120,6 +120,7 @@ def init_server():
                 "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
                 "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES": "1",
                 "HCCL_CUMEM_ENABLE": "0",
+                "ASCEND_RT_VISIBLE_DEVICES": ",".join(str(i) for i in range(requested_npus)),
             }
         },
         max_concurrency=10,
@@ -132,7 +133,6 @@ def init_server():
         node_rank=0,
         gpus_per_node=requested_npus,
         nnodes=1,
-        cuda_visible_devices=",".join(str(i) for i in range(requested_npus)),
     )
 
     ray.get(server.launch_server.remote())

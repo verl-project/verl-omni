@@ -15,6 +15,7 @@
 
 """CPU checks for vLLM-Omni deploy configs, replica allocation and SP rank mapping."""
 
+import os
 import types
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -253,13 +254,14 @@ def test_http_profiler_uses_sp_footprint(monkeypatch):
         config=ProfilerConfig(tool="torch", ranks=[4]),
         tool_config=TorchProfilerToolConfig(),
     )
-    server._generate_strategy = SimpleNamespace(post_init=Mock())
     monkeypatch.setenv("VERL_ZMQ_BASE_VISIBLE_DEVICES", "")
-    monkeypatch.setattr(module.vLLMHttpServer, "_post_init", lambda *_: None)
-    server._post_init("0,1,2,3")
+    monkeypatch.setenv(module.get_visible_devices_keyword(), "0,1,2,3")
+    monkeypatch.setattr(module.vLLMHttpServer, "_post_init", lambda self: None)
+    server._post_init()
     assert server.replica_world_size == 4
     assert server.profiler_controller.config.ranks == [1]
     assert server.config.profiler.ranks == [4]
+    assert os.environ["VERL_ZMQ_BASE_VISIBLE_DEVICES"] == "0,1,2,3"
 
 
 @pytest.mark.parametrize("standalone", [False, True])
