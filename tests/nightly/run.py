@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Nightly entrypoint for Qwen-Image L3 regressions on the v1 trainer."""
+"""Real V1 trainer entrypoint with optional nightly and consistency capture hooks."""
 
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ if str(_REPO_ROOT) not in sys.path:
 _SCRIPT_DIR = Path(__file__).resolve().parent
 
 
-_FORWARDED_ENV_PREFIXES = ("DEBUG_DUMP_", "GENRM_OCR_")
+_FORWARDED_ENV_PREFIXES = ("DEBUG_DUMP_", "GENRM_OCR_", "DIFFUSION_CAPTURE_")
 _FORWARDED_ENV_NAMES = {
     "CUBLAS_WORKSPACE_CONFIG",
     "DEBUG_METRICS_JSONL",

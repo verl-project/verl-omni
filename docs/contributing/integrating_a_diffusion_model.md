@@ -1,6 +1,6 @@
 # How to Integrate a New Diffusion Model for FlowGRPO Training
 
-Last updated: 11/10/2026.
+Last updated: 11/15/2026.
 
 This guide walks you through everything required to integrate a new diffusion
 model into VeRL-Omni so it can be trained end-to-end with the **FlowGRPO**
@@ -722,6 +722,21 @@ See [`examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_veomni.sh`](../../
 ---
 
 ## Step 6 — Add a Smoke Test
+
+For rollout/actor consistency debugging, first inspect the trainer's existing
+`rollout_corr/logprob_abs_diff_*` and per-timestep metrics. A small numeric
+delta is not evidence of a pipeline logic bug. Keep the new pipeline's actual
+precision, LoRA and microbatch settings when collecting a witness.
+
+The [shared trainer capture workflow](../perf/diffusion_consistency.md#capture-on-the-real-trainer-path)
+uses the real V1 trainer through the existing nightly worker setup. It records
+the complete rollout/recomputed log-probability pair and the shared engine's
+consumed timestep/sigma inputs, without a new model-specific producer. For a
+PPO/SDE integration, enable `actor_rollout_ref.rollout.calculate_log_probs=true`
+and keep bypass disabled. Include a controlled scheduler mismatch and restoration:
+the report should localize the affected raw timestep and sigma field, and the
+restored run should reproduce the baseline. Other algorithms need their own
+comparison contract; they must not be presented as PPO log-probability pairs.
 
 Add an end-to-end smoke test under `tests/special_e2e/` modelled on
 [`tests/special_e2e/run_flowgrpo_qwen_image.sh`](../../tests/special_e2e/run_flowgrpo_qwen_image.sh).

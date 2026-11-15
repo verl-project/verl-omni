@@ -208,6 +208,45 @@ def _pairs(records: Any, expected: dict[str, Any], root: Path, pinned: dict[str,
     return result
 
 
+def compare_log_probs(actor: Any, rollout: Any, atol: float, rtol: float) -> dict[str, Any]:
+    """Compare complete finite CPU float32 ``(N, T)`` log-probability tensors.
+
+    Args:
+        actor: Actor log probabilities with shape ``(N, T)``.
+        rollout: Rollout log probabilities with the same shape.
+        atol: Nonnegative absolute tolerance.
+        rtol: Nonnegative relative tolerance.
+
+    Returns:
+        Comparison status, allclose result, and maximum absolute difference.
+    """
+    import torch
+
+    _number(atol, "atol", nonnegative=True)
+    _number(rtol, "rtol", nonnegative=True)
+    for name, value in (("actor_log_probs", actor), ("rollout_log_probs", rollout)):
+        _require(
+            type(value) is torch.Tensor
+            and not value.requires_grad
+            and value.device.type == "cpu"
+            and value.layout == torch.strided
+            and value.dtype == torch.float32
+            and value.ndim == 2
+            and value.shape[0] > 0
+            and value.shape[1] > 0
+            and bool(torch.isfinite(value).all()),
+            f"{name} must be a plain dense finite CPU float32 (N,T) tensor without gradients",
+        )
+    _require(actor.shape == rollout.shape, "log-probability tensor shapes differ")
+    maxdiff = max(abs(float(a) - float(b)) for a, b in zip(actor.flatten(), rollout.flatten(), strict=True))
+    close = bool(torch.allclose(actor.double(), rollout.double(), atol=atol, rtol=rtol))
+    return {
+        "status": "admitted" if close else "numerical_mismatch",
+        "allclose": close,
+        "max_abs_logprob_difference": maxdiff,
+    }
+
+
 def check(root: Path, manifest_name: str, pin_name: str, external_sha: str, output: Path) -> dict[str, Any]:
     """Check a pinned artifact and write an exclusive JSON verdict.
 
@@ -290,22 +329,16 @@ def check(root: Path, manifest_name: str, pin_name: str, external_sha: str, outp
         "comparison tensor map invalid",
     )
     actor, rollout = tensors["actor_log_probs"], tensors["rollout_log_probs"]
-    for name, value in (("actor_log_probs", actor), ("rollout_log_probs", rollout)):
-        _require(
-            type(value) is torch.Tensor
-            and not value.requires_grad
-            and value.device.type == "cpu"
-            and value.layout == torch.strided
-            and value.dtype == torch.float32
-            and value.ndim == 2
-            and value.shape[0] == len(keys)
-            and value.shape[1] > 0
-            and bool(torch.isfinite(value).all()),
-            f"{name} must be a plain dense finite CPU float32 (N,T) tensor without gradients",
-        )
-    _require(actor.shape == rollout.shape, "log-probability tensor shapes differ")
-    maxdiff = max(abs(float(a) - float(b)) for a, b in zip(actor.flatten(), rollout.flatten(), strict=True))
-    close = bool(torch.allclose(actor.double(), rollout.double(), atol=atol, rtol=rtol))
+    _require(
+        type(actor) is torch.Tensor and actor.ndim == 2 and actor.shape[0] == len(keys),
+        "actor_log_probs must be a plain dense finite CPU float32 (N,T) tensor without gradients",
+    )
+    _require(
+        type(rollout) is torch.Tensor and rollout.ndim == 2 and rollout.shape[0] == len(keys),
+        "rollout_log_probs must be a plain dense finite CPU float32 (N,T) tensor without gradients",
+    )
+    comparison_result = compare_log_probs(actor, rollout, atol, rtol)
+    close = comparison_result["allclose"]
     report = {
         "status": "admitted" if close else "numerical_mismatch",
         "declared_policy_id": expected["policy_id"],
@@ -313,7 +346,7 @@ def check(root: Path, manifest_name: str, pin_name: str, external_sha: str, outp
         "comparison_path": comparison_path,
         "row_keys": row_keys,
         "pair_count": len(paired),
-        "max_abs_logprob_difference": maxdiff,
+        "max_abs_logprob_difference": comparison_result["max_abs_logprob_difference"],
         "atol": atol,
         "rtol": rtol,
         "allclose": close,

@@ -1,6 +1,70 @@
 # Check pinned diffusion consistency artifacts
 
-Last updated: 11/09/2026
+Last updated: 11/15/2026
+
+## Capture on the real trainer path
+
+For a pipeline integration, first screen the existing
+`rollout_corr/logprob_abs_diff_mean`, `rollout_corr/logprob_abs_diff_max` and
+`rollout_corr/logprob_abs_diff/ts_*` metrics. Numerical differences alone do
+not identify a pipeline bug. In the default recomputation path, rollout
+log probabilities are not the old-policy values consumed by the loss;
+bypass/on-policy modes have a different consistency requirement.
+
+To collect evidence under the recipe's actual precision, LoRA and microbatch
+settings, keep its Hydra overrides and replace only
+`python3 -m verl_omni.trainer.main_diffusion_v1` with
+`DEBUG_DUMP_ENABLED=0 python3 tests/nightly/run.py`. Add
+`actor_rollout_ref.rollout.calculate_log_probs=true` so the rollout returns
+the reference log probabilities. Use the normal PPO/SDE recomputation path,
+with bypass disabled. Set:
+
+```bash
+export DIFFUSION_CAPTURE_DIR=/absolute/fresh/run/captures
+export DIFFUSION_CAPTURE_STEPS=1
+```
+
+The existing Ray worker setup forwards these variables and installs the
+observer in each worker. It does not select a model, change seeds, force
+FP32, disable LoRA, or change the microbatch. With no capture directory,
+the observer is not installed. The current integration covers diffusion
+PPO/SDE old-log-probability recomputation through the shared Diffusers
+engine; bypass and direct-preference algorithms do not provide that pair.
+
+The driver saves every row and timestep of the rollout/recomputed pair.
+Engine records save the consumed microbatch's log probabilities, raw
+timesteps, and current/next sigma values for FlowMatch SDE schedulers.
+Record completion is written after the detached CPU payload and its hash.
+Temporary batch metadata and engine context are restored on exceptions.
+Capturing selected steps adds observation and I/O cost; it is not a
+throughput benchmark.
+
+Replay the resulting events on CPU, with the report outside the input root:
+
+```bash
+python3 scripts/replay_diffusion_trainer_capture.py \
+  --root /absolute/fresh/run/captures \
+  --output /absolute/fresh/run/report.json
+```
+
+The reader reuses the standalone checker's full `(N, T)` numeric comparison.
+It reports existing-style difference metrics by raw timestep and distinguishes
+`numerical_mismatch` (exit 3) from a consumed
+`scheduler_sigma_timestep_mismatch` (`logic_mismatch`, exit 2).
+Only the declared FlowMatch raw-timestep/sigma relationship supports that
+logic classification. Incomplete event directories fail instead of passing. The reader requires at
+least one driver pair and one engine probe, but cannot attest that every
+expected probe was emitted.
+
+For an integrator's negative control, temporarily perturb one consumed
+scheduler sigma before recomputation, restore it in `finally`, and recompute
+the same batch again before any optimizer update. Require the report to name
+the affected raw timestep, sigma index and current/next field, then verify the
+restored result matches the baseline. This tests a known logic fault, rather
+than labelling ordinary kernel/dtype differences as a scheduling bug. Captures
+do not independently attest model weights or prove a naturally occurring bug.
+
+## Standalone pinned artifact checker
 
 `scripts/check_diffusion_consistency.py` checks a saved rollout and actor
 log-probability comparison on CPU. It accepts a caller-defined manifest and an
@@ -102,7 +166,7 @@ root folders because every input path is relative to the root.
 
 ## Collect a new public SD3.5 producer pair
 
-The [public SD3.5 capture recipe](../../examples/flowgrpo_trainer/sd35/consistency/README.md)
+The [public SD3.5 capture recipe](../../examples/flowgrpo_trainer/sd35/consistency/GUIDE.md)
 provides source-byte inventory, CPU admission, separate real rollout and actor
 processes, and external producer pins before this replay bridge. The raw
 MSProbe captures cover the first sample's first transformer forward per role.

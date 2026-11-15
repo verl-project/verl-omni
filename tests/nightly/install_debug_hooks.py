@@ -497,6 +497,10 @@ def _install_engine_hooks() -> None:
 
 def install_debug_hooks() -> None:
     """Install all test-side monkey patches. Safe to call multiple times."""
+    if os.environ.get("DIFFUSION_CAPTURE_DIR"):
+        from verl_omni.pipelines.consistency_capture import install_trainer_capture
+
+        install_trainer_capture()
     if not _enabled():
         return
     _set_local_rank_device()
