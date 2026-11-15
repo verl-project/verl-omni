@@ -241,6 +241,9 @@ class ARStrategy(OmniStrategyBase):
             stage.stage_id: dict(adapter_cls.get_stage_engine_extras(stage.stage_id, pipeline_mode=pipeline_mode))
             for stage in stages
         }
+        if self.server.model_config.true_on_policy:
+            for stage_id, extras in stage_extras.items():
+                extras.update(adapter_cls.get_true_on_policy_engine_extras(stage_id))
         capacity_fields = ("max_model_len", "max_num_batched_tokens")
         if any(field in extras for extras in stage_extras.values() for field in capacity_fields):
             for extras in stage_extras.values():

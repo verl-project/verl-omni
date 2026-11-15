@@ -84,6 +84,21 @@ def test_shared_omni_veomni_engine_and_adapters_select_omni_smoke():
         assert "ci-e2e-omni" in selector.select_group_names([path]), path
 
 
+def test_true_on_policy_files_select_the_groups_that_run_their_gpu_tests():
+    selector = _load_selector()
+
+    for path in (
+        "verl_omni/pipelines/qwen3_omni/vllm_fused_moe_experts.py",
+        "tests/pipelines/test_qwen3_omni_vllm_fused_moe_experts_gpu.py",
+    ):
+        assert "ci-core" in selector.select_group_names([path]), path
+    for path in (
+        "verl_omni/pipelines/qwen3_omni/hub_fa3_attention.py",
+        "tests/special_e2e/run_qwen3_omni_true_on_policy_gate.sh",
+    ):
+        assert "ci-e2e-omni" in selector.select_group_names([path]), path
+
+
 def test_omni_e2e_runner_forwards_trainer_args_to_every_run_test():
     # A run_test that drops the trainer args silently loses the configured
     # rendezvous port range, so every launched command must forward them.

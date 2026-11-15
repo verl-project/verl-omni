@@ -204,3 +204,70 @@ class TestOmniModelConfigLoraFields:
         assert actor_cfg.omni_loss.__class__.__name__ == OmniLossConfig.__name__
         assert actor_cfg.omni_loss.loss_mode == "dpo"
         assert actor_cfg.omni_loss.beta == pytest.approx(0.2)
+
+
+TRUE_ON_POLICY_IMPLEMENTATIONS = {"attn_implementation": "hub_fa3", "experts_implementation": "vllm_fused_moe"}
+
+
+class TestOmniModelConfigTrueOnPolicy:
+    @pytest.fixture
+    def adapter(self, monkeypatch, tmp_path):
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+
+        from verl_omni.pipelines.model_base import OmniModelBase
+        from verl_omni.workers.config.omni import model as model_config_module
+
+        adapter = MagicMock()
+        adapter.register_true_on_policy_implementations.return_value = dict(TRUE_ON_POLICY_IMPLEMENTATIONS)
+        adapter.requested = []
+        monkeypatch.setattr(OmniModelBase, "peek_class", lambda *_args: adapter)
+        monkeypatch.setattr(model_config_module, "copy_to_local", lambda path, use_shm=False: str(tmp_path))
+
+        def load_config(*_args, trust_remote_code, **implementations):
+            adapter.requested.append(implementations)
+            return SimpleNamespace(tie_word_embeddings=False, architectures=["arch"])
+
+        monkeypatch.setattr(model_config_module.AutoConfig, "from_pretrained", load_config)
+        return adapter
+
+    def _config(self, tmp_path, **kwargs):
+        return OmniModelConfig(path=str(tmp_path), architecture="arch", load_tokenizer=False, **kwargs)
+
+    def test_default_off_keeps_flash_attention_2(self, adapter, tmp_path):
+        cfg = self._config(tmp_path)
+
+        assert cfg.true_on_policy is False
+        assert adapter.requested == [{"attn_implementation": "flash_attention_2"}]
+        adapter.register_true_on_policy_implementations.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "override_config", [{}, {"attn_implementation": "hub_fa3"}, TRUE_ON_POLICY_IMPLEMENTATIONS]
+    )
+    def test_on_registers_and_selects_adapter_implementations(self, adapter, tmp_path, override_config):
+        self._config(tmp_path, true_on_policy=True, override_config=override_config)
+
+        adapter.register_true_on_policy_implementations.assert_called_once_with()
+        assert adapter.requested == [TRUE_ON_POLICY_IMPLEMENTATIONS]
+
+    @pytest.mark.parametrize(
+        "override_config, message",
+        [
+            ({"attn_implementation": "sdpa"}, "attn_implementation='hub_fa3', got 'sdpa'"),
+            ({"experts_implementation": "grouped_mm"}, "experts_implementation='vllm_fused_moe', got 'grouped_mm'"),
+        ],
+    )
+    def test_on_rejects_other_implementation_override(self, adapter, tmp_path, override_config, message):
+        with pytest.raises(ValueError, match=message):
+            self._config(tmp_path, true_on_policy=True, override_config=override_config)
+
+    def test_yaml_default_is_off(self):
+        from hydra import compose, initialize_config_dir
+
+        import verl_omni
+
+        config_dir = os.path.join(os.path.dirname(verl_omni.__file__), "trainer/config/omni/model")
+        with initialize_config_dir(config_dir=config_dir, version_base=None):
+            cfg = compose(config_name="omni_model", overrides=["path=unused"])
+
+        assert cfg.true_on_policy is False
