@@ -19,7 +19,6 @@ delivers tokens; diffusion sleep/wake ACKs are not engine-checked.
 """
 
 import asyncio
-import logging
 from types import SimpleNamespace
 
 import pytest
@@ -111,6 +110,7 @@ def _make_server(engine, rollout_mode=RolloutMode.HYBRID, node_rank=0, free_cach
     server.engine = engine
     server.node_rank = node_rank
     server.replica_rank = 0
+    server.global_steps = 0
     server.rollout_mode = rollout_mode
     server.config = SimpleNamespace(free_cache_engine=free_cache_engine)
     server._lora_request_cache = None  # a valid cached value
@@ -154,6 +154,35 @@ async def test_abort_with_no_in_flight_requests_still_pauses():
     assert engine.abort_calls == [[]]
     assert engine.calls == ["abort", "pause"]
     assert result == {"aborted_count": 0, "request_ids": []}
+
+
+@pytest.mark.parametrize("failure", [None, "abort", "cancel"])
+async def test_stragglers_are_aborted_after_pause_and_failures_hold_admission(failure):
+    late = _FakeRequestState("late-internal", "late-external")
+
+    class Engine(_FakeAsyncOmni):
+        async def pause_generation(self, **kwargs):
+            await super().pause_generation(**kwargs)
+            self.request_states[late.request_id] = late
+
+        async def abort(self, request_ids):
+            if request_ids:
+                if failure == "abort":
+                    raise RuntimeError("straggler failed")
+                if failure == "cancel":
+                    raise asyncio.CancelledError
+            return await super().abort(request_ids)
+
+    engine = Engine()
+    server = _make_server(engine)
+    if failure:
+        with pytest.raises(RuntimeError if failure == "abort" else asyncio.CancelledError):
+            await server.abort_all_requests()
+    else:
+        result = await server.abort_all_requests()
+        assert result["request_ids"] == ["late-external"]
+    assert not server._resume_event.is_set()
+    assert late.queue.get_nowait().finished
 
 
 async def test_resident_rollout_pauses_until_explicit_resume_without_sleeping():
@@ -213,17 +242,30 @@ async def test_abort_only_failure_unblocks_generators_without_pausing():
         assert terminal.engine_outputs.outputs[0].finish_reason == "abort"
 
 
-async def test_reject_request_is_accepted_and_still_pauses(caplog):
+async def test_reject_request_aborts_late_calls_without_entering_the_engine():
     states = {"ext-1-abc": _FakeRequestState("ext-1-abc", "ext-1")}
     engine = _FakeAsyncOmni(states=states)
     server = _make_server(engine)
 
-    with caplog.at_level(logging.WARNING, logger=server_module.logger.name):
-        await server.abort_all_requests(reject_request=True)
-
-    # The AsyncOmni engine has no reject knob; arrivals behind the pause park.
+    await server.abort_all_requests(reject_request=True)
     assert engine.calls == ["abort", "pause"]
-    assert "park until resume" in caplog.text
+    output = await server.generate(prompt_ids=[1], sampling_params={}, request_id="late")
+    assert output.stop_reason == "aborted"
+    assert not server._resume_event.is_set()
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+async def test_parked_admission_is_bounded_and_cancellable(monkeypatch, cancel):
+    monkeypatch.setenv("VERL_OMNI_ADMISSION_TIMEOUT_S", "0.02")
+    server = _make_server(_FakeAsyncOmni())
+    await server.abort_all_requests()
+    request = asyncio.create_task(server.generate(prompt_ids=[1], sampling_params={}, request_id="late"))
+    if cancel:
+        await asyncio.sleep(0)
+        request.cancel()
+    with pytest.raises(asyncio.CancelledError if cancel else TimeoutError):
+        await request
+    assert not server._resume_event.is_set()
 
 
 async def test_generate_accepts_session_id_without_forwarding():
@@ -318,6 +360,7 @@ async def test_lifecycle_guards_skip_standalone_and_non_driver_ranks():
     await server.wake_up()
     await server.release_kv_cache()
     await server.resume_kv_cache()
+    assert await server.abort_all_requests() == {"aborted_count": 0, "request_ids": []}
     assert engine.calls == []
 
 

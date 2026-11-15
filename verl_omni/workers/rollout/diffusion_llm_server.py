@@ -25,6 +25,7 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 # Conservative default so shutdown / persistent failures cannot loop forever.
 DEFAULT_MAX_RETRIES = 50
 DEFAULT_RETRY_WAIT_S = 1.0
+DEFAULT_REQUEST_TIMEOUT_S = 1800.0
 
 
 class DiffusionWholeSampleRetryLLMServerClient(LLMServerClient):
