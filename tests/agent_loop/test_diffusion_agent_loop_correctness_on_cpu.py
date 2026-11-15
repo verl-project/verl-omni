@@ -61,6 +61,28 @@ class _DummyDiffusionAgentLoopWorker:
 
 
 @pytest.mark.asyncio
+async def test_close_cancels_and_settles_owned_prompt_tasks():
+    worker_cls = DiffusionAgentLoopWorkerTQ.__ray_metadata__.modified_class
+    worker = object.__new__(worker_cls)
+    started = asyncio.Event()
+    cleaned = asyncio.Event()
+
+    async def prompt():
+        started.set()
+        try:
+            await asyncio.Future()
+        finally:
+            cleaned.set()
+
+    task = asyncio.create_task(prompt())
+    worker.background_tasks = {task}
+    task.add_done_callback(worker.background_tasks.discard)
+    await started.wait()
+    await worker.close()
+    assert cleaned.is_set() and task.cancelled() and not worker.background_tasks
+
+
+@pytest.mark.asyncio
 async def test_single_prompt_fetches_preserve_v0_noise_offsets(monkeypatch):
     """Single-prompt refills retain distinct noise after concatenation and worker sharding."""
     trainer = object.__new__(PolicyGradientDiffusionTrainerV1Sync)

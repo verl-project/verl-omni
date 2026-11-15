@@ -47,6 +47,13 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
         tq.init()
         self.background_tasks = set()
 
+    async def close(self):
+        """Cancel and settle owned prompt tasks before TransferQueue closes."""
+        tasks = tuple(self.background_tasks)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
     async def generate_sequences(self, batch: TensorDict) -> None:
         """Spawn diffusion agent loops for each prompt in the batch without waiting."""
         validate = batch["validate"] if "validate" in batch else False
