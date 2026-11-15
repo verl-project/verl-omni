@@ -20,6 +20,7 @@ import pytest
 import torch
 from tensordict import TensorDict
 
+from verl_omni.pipelines.minimax_h3_diffusion_nft import diffusers_training_adapter
 from verl_omni.pipelines.minimax_h3_diffusion_nft.common import (
     AUDIO_ROW_WIDTH,
     AUDIO_TAG,
@@ -110,6 +111,29 @@ class TestMiniMaxH3DiffusionNFTRegistry:
 
         assert hasattr(pipelines, "minimax_h3_diffusion_nft")
         assert DiffusionModelBase.get_class_by_name("MiniMaxH3Pipeline", "diffusion_nft") is not None
+
+
+def test_npu_norm_hook_preserves_parameters_and_cpu_behavior(monkeypatch):
+    module = torch.nn.Sequential(torch.nn.RMSNorm(8, eps=1e-5), torch.nn.Identity())
+    norm = module[0]
+    x = torch.randn(2, 8)
+    expected = module(x)
+    weight = norm.weight
+
+    monkeypatch.setattr(diffusers_training_adapter, "get_device_name", lambda: "cpu")
+    MiniMaxH3DiffusionNFT.configure_train_mode(module)
+    assert norm.forward.__func__ is torch.nn.RMSNorm.forward
+
+    monkeypatch.setattr(diffusers_training_adapter, "get_device_name", lambda: "npu")
+    MiniMaxH3DiffusionNFT.configure_train_mode(module)
+    patched_forward = norm.forward
+    MiniMaxH3DiffusionNFT.configure_train_mode(module)
+
+    assert norm.forward is patched_forward
+    assert norm.forward.__func__ is not torch.nn.RMSNorm.forward
+    assert norm.weight is weight
+    assert list(module.state_dict()) == ["0.weight"]
+    torch.testing.assert_close(module(x), expected, rtol=0, atol=0)
 
 
 class TestMiniMaxH3PackUnpack:

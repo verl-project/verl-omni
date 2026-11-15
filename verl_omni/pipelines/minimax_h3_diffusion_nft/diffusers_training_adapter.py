@@ -13,11 +13,13 @@
 # limitations under the License.
 """MiniMax H3 training adapter for DiffusionNFT."""
 
+from types import MethodType
 from typing import Optional
 
 import torch
 from tensordict import TensorDict
 from verl.utils import tensordict_utils as tu
+from verl.utils.device import get_device_name
 
 from verl_omni.pipelines.minimax_h3_diffusion_nft.common import (
     build_layout_from_meta,
@@ -39,9 +41,41 @@ from verl_omni.workers.config import DiffusionModelConfig
 __all__ = ["MiniMaxH3DiffusionNFT"]
 
 
+def _npu_rms_norm_forward(norm: torch.nn.RMSNorm, hidden_states: torch.Tensor) -> torch.Tensor:
+    weight = norm.weight
+    if (
+        hidden_states.device.type == "npu"
+        and hidden_states.dtype == torch.bfloat16
+        and hidden_states.ndim > 1
+        and hidden_states.is_contiguous()
+        and hidden_states.numel() > 0
+        and weight is not None
+        and weight.dtype == hidden_states.dtype
+        and weight.is_contiguous()
+        and norm.eps is not None
+        and len(norm.normalized_shape) == 1
+        and hidden_states.shape[-1:] == norm.normalized_shape
+    ):
+        from torch_npu import npu_rms_norm
+
+        return npu_rms_norm(hidden_states, weight, epsilon=norm.eps)[0]
+    return torch.nn.RMSNorm.forward(norm, hidden_states)
+
+
 @DiffusionModelBase.register("MiniMaxH3Pipeline", algorithm="diffusion_nft")
 class MiniMaxH3DiffusionNFT(DiffusionModelBase):
     """Forward-process MiniMax H3 adapter used by DiffusionNFT."""
+
+    @classmethod
+    def configure_train_mode(cls, module: torch.nn.Module) -> None:
+        """Use the Ascend RMSNorm kernel for eligible BF16 H3 actor inputs."""
+        if get_device_name() != "npu" or getattr(module, "_h3_npu_rms_norm_installed", False):
+            return
+        for child in module.modules():
+            if type(child) is torch.nn.RMSNorm and getattr(child.forward, "__func__", None) is torch.nn.RMSNorm.forward:
+                # Keep the original submodule and Parameter for FSDP and checkpoint state.
+                child.forward = MethodType(_npu_rms_norm_forward, child)
+        module._h3_npu_rms_norm_installed = True
 
     @classmethod
     def validate_lora_config(cls, model_config: DiffusionModelConfig) -> None:
