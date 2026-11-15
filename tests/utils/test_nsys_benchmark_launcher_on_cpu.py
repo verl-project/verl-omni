@@ -58,7 +58,7 @@ def launch(tmp_path):
         'exit "${TRAINING_STATUS:-0}"\n'
     )
 
-    def run(responses, version="v1", training_status=0, **overrides):
+    def run(responses, version="v1", training_status=0, hydra_overrides=(), **overrides):
         (tmp_path / "responses").write_text(json.dumps(responses))
         wrapper = Path(__file__).resolve().parents[2] / "examples" / f"run_diffusion_benchmark_nsys_{version}.sh"
         env = dict(
@@ -74,7 +74,7 @@ def launch(tmp_path):
         )
         env.update(overrides)
         return subprocess.run(
-            ["bash", str(wrapper), str(recipe)],
+            ["bash", str(wrapper), str(recipe), *hydra_overrides],
             env=env,
             capture_output=True,
             text=True,
@@ -104,10 +104,24 @@ def test_collector_waits_for_new_sessions_and_ignores_existing_sessions(launch, 
     assert (tmp_path / "calls").read_text() == "3"
     argv = (tmp_path / "argv").read_text().splitlines()
     assert not any("session-new" in arg for arg in argv)
+    if version == "v1":
+        assert '++global_profiler.global_tool_config.nsys.gpu_metrics_nsight_options.gpu-metrics-devices="0"' in argv
+        assert "++global_profiler.global_tool_config.nsys.gpu_metrics_nsight_options.gpu-metrics-frequency=10" in argv
     assert {p.name: p.read_text() for p in (tmp_path / "run/nsight").iterdir()} == {
         "worker_trial_pid123.nsys-rep": "report",
         "metrics_trial_pid456.qdstrm": "raw",
     }
+
+
+def test_v1_metrics_defaults_preserve_caller_overrides(launch, tmp_path):
+    overrides = [
+        '++global_profiler.global_tool_config.nsys.gpu_metrics_nsight_options.gpu-metrics-devices="0,4"',
+        "++global_profiler.global_tool_config.nsys.gpu_metrics_nsight_options.gpu-metrics-frequency=20",
+    ]
+    result = launch([[], []], hydra_overrides=overrides)
+
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "argv").read_text().splitlines()[-2:] == overrides
 
 
 @pytest.mark.parametrize(

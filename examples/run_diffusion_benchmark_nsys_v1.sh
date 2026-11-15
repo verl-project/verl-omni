@@ -31,8 +31,9 @@ extra_overrides=(
     ++global_profiler.global_tool_config.nsys.gpu_metrics_nsight_options.sample=none
     ++global_profiler.global_tool_config.nsys.gpu_metrics_nsight_options.cpuctxsw=none
     ++global_profiler.global_tool_config.nsys.gpu_metrics_nsight_options.cudabacktrace=none
-    ++global_profiler.global_tool_config.nsys.gpu_metrics_nsight_options.gpu-metrics-devices='"all"'
-    ++global_profiler.global_tool_config.nsys.gpu_metrics_nsight_options.gpu-metrics-frequency=20
+    # Limit default data volume; callers can override the device and frequency.
+    ++global_profiler.global_tool_config.nsys.gpu_metrics_nsight_options.gpu-metrics-devices='"0"'
+    ++global_profiler.global_tool_config.nsys.gpu_metrics_nsight_options.gpu-metrics-frequency=10
     ++global_profiler.global_tool_config.nsys.gpu_metrics_nsight_options.wait=primary
     '++global_profiler.global_tool_config.nsys.gpu_metrics_nsight_options.o="gpu_metrics_@RUN_ID@_%h_pid%p"'
 )

@@ -278,10 +278,26 @@ append force overrides such as these to the command:
 ```
 
 Role-local CUDA traces use the `cuda-sw` backend so independent sessions can
-share a GPU. The V1 recipe also collects device-level GPU metrics for all local
-GPUs at 20 Hz in a dedicated process, over the same profiling window. Do not
+share a GPU. The V1 recipe also collects device-level GPU metrics for device 0
+at 10 Hz in a dedicated process, over the same profiling window. This default
+limits data volume and describes only the selected device. It does not guarantee
+successful collection or represent all GPUs on the node. Check the selected
+physical device against the placement of the roles you want to inspect. Do not
 enable GPU metrics in other profiling processes: multiple collectors on the
 same device compete for its counters.
+
+The default reduces data volume while retaining the full step window: the
+approximate number of GPU sampling instants is `N = G * f * T`, for `G` devices,
+frequency `f` in Hz, and the full metrics window `T` in seconds. A 666-second
+window gives about 6,660 instants at one device and 10 Hz, versus 106,560 at
+eight devices and 20 Hz. Larger captures have shown GPU metrics import errors;
+reducing volume is an experimental precaution, not a proven fix or a safe
+threshold. To change devices and frequency, append overrides, for example:
+
+```bash
+'++global_profiler.global_tool_config.nsys.gpu_metrics_nsight_options.gpu-metrics-devices="0,4"' \
+'++global_profiler.global_tool_config.nsys.gpu_metrics_nsight_options.gpu-metrics-frequency=20'
+```
 
 In each role-local report:
 
@@ -294,8 +310,8 @@ In each role-local report:
   originating processes.
 
 The controller normally has no GPU kernels of its own; actor, rollout, and
-reward kernels appear in their corresponding role-local reports. Overall GPU
-busy and idle intervals appear in the dedicated `gpu_metrics_*.nsys-rep`; GPU
+reward kernels appear in their corresponding role-local reports. GPU busy and
+idle intervals for the selected devices appear in `gpu_metrics_*.nsys-rep`; GPU
 metrics are device-level and do not attribute activity to an individual role.
 
 > [!WARNING]
