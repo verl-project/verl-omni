@@ -119,13 +119,13 @@ class OmniStrategyBase(ABC):
         """
         return None
 
-    def apply_quantization(self) -> tuple[str | None, dict[str, Any]]:
-        """Return the ``(quantization, extra_kwargs)`` pair for the engine.
+    def apply_quantization(self) -> dict[str, Any]:
+        """Return the ``hf_overrides`` mapping for the engine.
 
-        Default returns ``(None, {})`` (no quantization). Override for modes
+        Default returns ``{}`` (no quantization). Override for modes
         that reuse the base vLLM quantization path.
         """
-        return None, {}
+        return {}
 
     def override_generation_config(self) -> dict[str, Any]:
         """Return generation-config overrides merged into the engine defaults.

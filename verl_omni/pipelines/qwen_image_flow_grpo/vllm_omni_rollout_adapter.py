@@ -52,6 +52,7 @@ from verl_omni.pipelines.request_batch import (
 from verl_omni.pipelines.rollout_media import DiffusionIOSpec, MediaSpec
 from verl_omni.pipelines.rollout_request import prompt_ids_from_payload
 from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
+from verl_omni.pipelines.utils import seeded_or_entropy_generator
 
 from .common import QwenImageLoRAMixin, QwenImageTokenIdPromptMixin, apply_true_cfg, build_img_shapes, coalesce_not_none
 
@@ -271,8 +272,8 @@ class QwenImagePipelineWithLogProb(QwenImageLoRAMixin, QwenImageTokenIdPromptMix
         max_sequence_length = sampling.max_sequence_length or self.tokenizer_max_length
 
         generator = sampling.generator
-        if generator is None and sampling.seed is not None:
-            generator = torch.Generator(device=self.device).manual_seed(sampling.seed)
+        if generator is None:
+            generator = seeded_or_entropy_generator(sampling.seed, self.device)
 
         self._guidance_scale = guidance_scale
         self._attention_kwargs = kwargs.get("attention_kwargs") or {}
@@ -835,9 +836,9 @@ class QwenImagePipelineWithLogProb(QwenImageLoRAMixin, QwenImageTokenIdPromptMix
 
         for request in request_batch.requests:
             request_sampling_params = request.sampling_params
-            if request_sampling_params.generator is None and request_sampling_params.seed is not None:
-                request_sampling_params.generator = torch.Generator(device=self.device).manual_seed(
-                    request_sampling_params.seed
+            if request_sampling_params.generator is None:
+                request_sampling_params.generator = seeded_or_entropy_generator(
+                    request_sampling_params.seed, self.device
                 )
         true_cfg_scale = coalesce_not_none(sampling_params.true_cfg_scale, true_cfg_scale)
         if getattr(sampling_params, "guidance_scale_provided", False):
