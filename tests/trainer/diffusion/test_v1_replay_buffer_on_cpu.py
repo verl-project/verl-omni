@@ -21,7 +21,9 @@ from omegaconf import OmegaConf
 from verl.trainer.ppo.v1.replay_buffer import ReplayBuffer, ReplayBufferAsync
 
 from verl_omni.trainer.diffusion.v1 import trainer_base as trainer_base_module
+from verl_omni.trainer.diffusion.v1 import trainer_colocate_async as colocate_module
 from verl_omni.trainer.diffusion.v1.trainer_base import PolicyGradientDiffusionTrainerV1
+from verl_omni.trainer.diffusion.v1.trainer_colocate_async import PolicyGradientDiffusionTrainerV1ColocateAsync
 
 
 class _FakeTransferQueue:
@@ -336,6 +338,43 @@ def test_async_uses_upstream_exact_eviction_and_refill(monkeypatch, trainer_mode
     assert metrics["training/off_policy/evicted_samples"] == 1
     assert metrics["training/off_policy/evicted_samples_staleness/mean"] == pytest.approx(6.0)
     assert metrics["training/rollout_failure/evicted_samples"] == 1
+
+
+@pytest.mark.parametrize("persistent", [False, True])
+def test_colocate_failed_group_refills_are_bounded_without_replacing_the_buffer(monkeypatch, persistent):
+    fake_tq = _FakeTransferQueue({})
+    fake_tq.add_group("initial", status="failure", trajectories=0, global_steps=5)
+    _patch_transfer_queue(monkeypatch, fake_tq)
+    clock = iter((0.0, 0.1, 0.5, 1.1))
+    monkeypatch.setattr(colocate_module, "time", SimpleNamespace(monotonic=lambda: next(clock)), raising=False)
+    calls = []
+
+    def refill(count):
+        calls.append(count)
+        assert len(calls) <= 2, "persistent rollout failure was refilled without a bound"
+        finished = not persistent and len(calls) == 2
+        fake_tq.add_group(
+            f"replacement-{len(calls)}",
+            status="finished" if finished else "failure",
+            trajectories=1 if finished else 0,
+            global_steps=5,
+        )
+        return count
+
+    trainer = object.__new__(PolicyGradientDiffusionTrainerV1ColocateAsync)
+    trainer.config = _make_config(drop_incomplete_groups=False, trainer_mode="colocate_async", train_batch_size=1)
+    trainer.config.trainer.v1.colocate_async.request_timeout_s = 1
+    trainer.trainer_mode = "colocate_async"
+    trainer.global_steps = 5
+    trainer._add_prompts_to_generate = refill
+    trainer.replay_buffer = PolicyGradientDiffusionTrainerV1._build_replay_buffer(trainer)
+    if persistent:
+        with pytest.raises(TimeoutError, match="refill deadline"):
+            trainer._sample_training_batch(1)
+    else:
+        batch, _ = trainer._sample_training_batch(1)
+        assert len(batch.keys) == 1
+    assert trainer.replay_buffer.refill_fn is refill
 
 
 def test_colocate_async_waits_for_all_sessions_of_running_group(monkeypatch):

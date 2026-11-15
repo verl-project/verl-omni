@@ -13,6 +13,8 @@
 # limitations under the License.
 """Colocated asynchronous FlowGRPO with whole-sample diffusion retries."""
 
+import time
+
 import ray
 import transfer_queue as tq
 from verl.utils.debug import marked_timer
@@ -92,3 +94,20 @@ class PolicyGradientDiffusionTrainerV1ColocateAsync(PolicyGradientDiffusionTrain
             manager = self.llm_server_manager
             servers = dict(zip(manager.server_addresses, manager.server_handles, strict=True))
             ray.get(manager.global_load_balancer.add_servers.remote(servers))
+
+    def _sample_training_batch(self, batch_size):
+        refill = self.replay_buffer.refill_fn
+        timeout_s = self.config.trainer.v1.colocate_async.get("request_timeout_s", DEFAULT_REQUEST_TIMEOUT_S)
+        deadline = time.monotonic() + timeout_s
+
+        def refill_before_deadline(num_prompts):
+            if time.monotonic() >= deadline:
+                raise TimeoutError("colocate_async sampling exhausted its rollout refill deadline")
+            return refill(num_prompts)
+
+        self.replay_buffer.refill_fn = refill_before_deadline
+        try:
+            batch, metrics = super()._sample_training_batch(batch_size)
+        finally:
+            self.replay_buffer.refill_fn = refill
+        return batch, metrics
