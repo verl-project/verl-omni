@@ -63,8 +63,14 @@ def test_typed_empty_pool_survives_ray_and_recovers(initialized_tq):
         PausableRequestLoadBalancer,
         RolloutPoolUnavailable,
     )
+    from verl_omni.workers.rollout.replica import DiffusionLLMServerManager
 
-    router = ray.remote(num_cpus=0)(PausableRequestLoadBalancer).remote({}, full_determinism=True)
+    manager = object.__new__(DiffusionLLMServerManager)
+    manager._load_balancer_cls = PausableRequestLoadBalancer
+    manager.rollout_config = OmegaConf.create({"full_determinism": True})
+    manager.server_addresses = manager.server_handles = []
+    asyncio.run(manager._init_global_load_balancer())
+    router = manager.global_load_balancer
 
     async def run():
         with pytest.raises(RolloutPoolUnavailable):
