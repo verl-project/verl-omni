@@ -36,10 +36,11 @@ dependencies = [
     "safetensors>=0.4.5",
     "tensordict>=0.8.0,<=0.10.0,!=0.9.0",
     "torchdata",
-    # TODO: Remove this cap after the Qwen3-Omni adapter and tests support the
-    # FSDP `_no_split_modules` metadata change introduced in Transformers 5.15.0.
-    "transformers>=5.13.0,<=5.14.1",
+    # Mirrors vllm-omni's requirements/common.txt bound at the pinned commit.
+    "transformers>=5.16.1,<5.20.0",
     "wandb",
+    "swanlab>=0.10.3",
+    "soundfile>=0.12.1",
     "packaging>=20.0",
     "uvicorn",
     "fastapi",
@@ -47,10 +48,10 @@ dependencies = [
     "math_verify",
     "mathruler",
     "tensorboard",
-    "TransferQueue==0.1.9",
-    "vllm==0.30.0",
-    "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@12e9280010afc41ce5c6a1f46900fc329cf08377",
-    "verl @ git+https://github.com/verl-project/verl.git@fefb080262e1c015a0ea05f958822a6a512dc795",
+    "TransferQueue==0.1.11",
+    "vllm==0.33.0",
+    "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@6e8c1097cd8c73ce799fd1d7f7cd32e656b29b28",
+    "verl @ git+https://github.com/verl-project/verl.git@2b4ed6826a39205838d0ca004bdd942334dbe4b6",
 ]
 
 [project.optional-dependencies]
@@ -72,14 +73,14 @@ fa2 = [
     "flash-attn>=2.8.3",
 ]
 gpu = [
-    "kernels==0.16.0",
+    "kernels==0.16.1",
     "liger-kernel",
     "cupy-cuda13x",
 ]
 xpu = [
     # verl has no built-in Intel platform; the plugin registers it via the verl.plugins entry point.
-    "verl-hardware-plugin @ git+https://github.com/verl-project/verl-hardware-plugin.git@53c4de2626745543e45761711d4f6c265c508dc6",
-    # Ray counts Intel GPUs through dpctl; 0.22.x matches the oneAPI 2026 runtime of torch 2.13+xpu.
+    "verl-hardware-plugin @ git+https://github.com/verl-project/verl-hardware-plugin.git@1c740e0d399a5a0ad931d64890cb8961daa08d98",
+    # Ray counts Intel GPUs through dpctl; 0.22.x matches the oneAPI 2026 runtime of torch 2.14+xpu.
     "dpctl>=0.22,<0.23",
 ]
 dev = [
@@ -89,6 +90,7 @@ dev = [
     "py-spy",
     "pytest-asyncio",
     "pytest-rerunfailures",
+    "pytest-xdist",
 ]
 ocr = [
     "Levenshtein",
@@ -206,6 +208,6 @@ verl_omni = [
 override-dependencies = [
     "accelerate>=1.14.0",
     "diffusers>=0.41.0",
-    "kernels==0.16.0",
-    "transformers>=5.13.0,<=5.14.1",
+    "kernels==0.16.1",
+    "transformers>=5.16.1,<5.20.0",
 ]

@@ -22,15 +22,19 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 try:
     from .vllm_omni_rollout_adapter import Wan22DanceGRPOPipelineWithLogProb
-except (ImportError, RuntimeError, AttributeError) as e:
-    logger.info(f"Wan22 Dance GRPO not available: {e}. GPU/NPU required.")
+except ImportError as e:
+    _import_error = e
+    logger.warning(f"Wan22 Dance GRPO rollout is unavailable: {e!r}")
+
+    def _unavailable_error() -> RuntimeError:
+        return RuntimeError(f"Wan22 Dance GRPO rollout is unavailable: {_import_error!r}")
 
     class _UnavailableModule:
         def __getattr__(self, _):
-            raise RuntimeError("Wan22 Dance GRPO requires GPU (CUDA/NPU)")
+            raise _unavailable_error() from _import_error
 
         def __call__(self, *args, **kwargs):
-            raise RuntimeError("Wan22 Dance GRPO requires GPU (CUDA/NPU)")
+            raise _unavailable_error() from _import_error
 
     Wan22DanceGRPOPipelineWithLogProb = _UnavailableModule()
 

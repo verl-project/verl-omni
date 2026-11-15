@@ -14,6 +14,7 @@
 
 import math
 import os
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -94,7 +95,7 @@ def test_omni_nft_trainer_rejects_timestep_staging(actor_config):
 def test_omni_nft_retains_base_trainer_validation(key, value):
     """OmniNFT keeps the base rejection of the DGPO/AWM timestep knobs."""
     config = OmegaConf.create({"algorithm": {key: value}, "actor_rollout_ref": {"actor": {}}})
-    with pytest.raises(ValueError, match=f"algorithm.{key} is only used by the dgpo and awm losses"):
+    with pytest.raises(ValueError, match=f"algorithm.{key} is only used by the dgpo, awm and crd losses"):
         diffusion_algos.get_diffusion_loss_fn("omni_nft").validate_trainer_config(config)
 
 
@@ -233,6 +234,158 @@ def test_compute_policy_loss_flow_grpo() -> None:
         assert "actor/pg_clipfrac" in pg_metrics
         assert "actor/pg_clipfrac_higher" in pg_metrics
         assert "actor/pg_clipfrac_lower" in pg_metrics
+
+
+def _dual_grpo_actor_config():
+    from verl_omni.workers.config.diffusion.actor import FSDPDiffusionActorConfig
+
+    return FSDPDiffusionActorConfig(
+        rollout_n=1,
+        ppo_micro_batch_size_per_gpu=1,
+        clip_ratio=0.2,
+        clip_ratio_low=0.2,
+        clip_ratio_high=0.28,
+        clip_ratio_c=10.0,
+    )
+
+
+def test_dual_grpo_dit_matches_flow_grpo() -> None:
+    from tensordict import TensorDict
+
+    config = _dual_grpo_actor_config()
+    old_log_prob = torch.tensor([0.1, -0.2, 0.3, 0.0])
+    log_prob = torch.tensor([0.12, -0.1, 0.3, 0.05])
+    advantages = torch.tensor([1.0, -1.5, 0.2, -0.4])
+    data = TensorDict(
+        {"old_log_probs": old_log_prob, "advantages": advantages},
+        batch_size=[old_log_prob.shape[0]],
+    )
+    model_output = {
+        "log_probs": log_prob,
+        "prev_sample_mean": torch.zeros(4, 2),
+    }
+    dual = diffusion_algos.get_diffusion_loss_fn("dual_grpo")
+    flow = diffusion_algos.get_diffusion_loss_fn("flow_grpo")
+    dual_result = dual(config=config, model_output=model_output, data=data)
+    flow_result = flow(config=config, model_output=model_output, data=data)
+
+    torch.testing.assert_close(dual_result.loss, flow_result.loss)
+    assert dual_result.metrics["actor/ppo_kl"] == pytest.approx(flow_result.metrics["actor/ppo_kl"])
+
+
+def test_dual_grpo_ar_matches_vanilla_and_caps_negative_ratio() -> None:
+    """A huge token ratio on a negative advantage is capped by clip_ratio_c."""
+    from tensordict import TensorDict
+    from verl.trainer.ppo.core_algos import get_policy_loss_fn
+    from verl.utils import tensordict_utils as tu
+
+    config = _dual_grpo_actor_config()
+    old_log_prob = torch.zeros(1, 4)
+    log_prob = torch.tensor([[5.0, 0.0, 0.0, 8.0]], requires_grad=True)
+    advantages = torch.tensor([[-2.0, -2.0, 1.0, -2.0]])
+    response_mask = torch.tensor([[1, 1, 1, 0]])
+    data = TensorDict(
+        {
+            "old_log_probs": old_log_prob,
+            "advantages": advantages,
+            "response_mask": response_mask,
+            "responses": torch.tensor([[11, 12, 13, 0]]),
+        },
+        batch_size=[1],
+    )
+    # Without global batch info, agg_loss uses the local mask sum (3 tokens).
+    tu.assign_non_tensor(data, dp_size=1, batch_num_tokens=3, global_batch_size=1)
+    model_output = {"log_probs": log_prob}
+    result = diffusion_algos.get_diffusion_loss_fn("dual_grpo")(config=config, model_output=model_output, data=data)
+    # Keep vanilla's config.global_batch_info in sync; DualGRPO fills it before calling.
+    config.global_batch_info.update(
+        {"dp_size": 1, "batch_num_tokens": 3, "global_batch_size": 1, "loss_scale_factor": config.loss_scale_factor}
+    )
+    vanilla_loss, _ = get_policy_loss_fn("vanilla")(
+        old_log_prob=old_log_prob,
+        log_prob=log_prob,
+        advantages=advantages,
+        response_mask=response_mask.bool(),
+        loss_agg_mode=config.loss_agg_mode,
+        config=config,
+    )
+
+    torch.testing.assert_close(result.loss, vanilla_loss)
+    # Token 0 would contribute 2 * exp(5) without the dual-clip cap. clip_ratio_c=10
+    # limits it to 20. Token 3 is padding and must not enter the mean.
+    assert result.loss.item() == pytest.approx((20.0 + 2.0 - 1.0) / 3.0)
+    assert "actor/pg_clipfrac" in result.metrics
+    result.loss.backward()
+    assert log_prob.grad is not None
+    assert log_prob.grad[0, 3].item() == pytest.approx(0.0)
+
+
+def test_dual_grpo_ar_loss_invariant_to_micro_batch_split() -> None:
+    """Global token normalization must not scale with the number of micro-batches.
+
+    Without filling ``config.global_batch_info``, each micro-batch uses a local
+    masked mean, so summing two halves yields ~2x the full-batch loss.
+    """
+    from tensordict import TensorDict
+    from verl.utils import tensordict_utils as tu
+
+    config = _dual_grpo_actor_config()
+    old_log_prob = torch.zeros(2, 4)
+    log_prob = torch.tensor([[0.1, -0.2, 0.0, 0.3], [0.05, 0.1, -0.15, 0.0]])
+    advantages = torch.tensor([[1.0, -1.0, 0.5, -0.5], [0.25, -0.25, 1.5, -1.5]])
+    response_mask = torch.tensor([[1, 1, 1, 0], [1, 1, 0, 0]])
+    batch_num_tokens = int(response_mask.sum().item())  # 5
+    dual = diffusion_algos.get_diffusion_loss_fn("dual_grpo")
+
+    full = TensorDict(
+        {
+            "old_log_probs": old_log_prob,
+            "advantages": advantages,
+            "response_mask": response_mask,
+            "responses": torch.tensor([[11, 12, 13, 0], [21, 22, 0, 0]]),
+        },
+        batch_size=[2],
+    )
+    tu.assign_non_tensor(full, dp_size=1, batch_num_tokens=batch_num_tokens, global_batch_size=2)
+    full_loss = dual(config=config, model_output={"log_probs": log_prob}, data=full).loss
+
+    partial_losses = []
+    for start in (0, 1):
+        micro = TensorDict(
+            {
+                "old_log_probs": old_log_prob[start : start + 1],
+                "advantages": advantages[start : start + 1],
+                "response_mask": response_mask[start : start + 1],
+                "responses": torch.tensor([[11, 12, 13, 0], [21, 22, 0, 0]])[start : start + 1],
+            },
+            batch_size=[1],
+        )
+        tu.assign_non_tensor(micro, dp_size=1, batch_num_tokens=batch_num_tokens, global_batch_size=2)
+        partial_losses.append(
+            dual(
+                config=config,
+                model_output={"log_probs": log_prob[start : start + 1]},
+                data=micro,
+            ).loss
+        )
+
+    torch.testing.assert_close(sum(partial_losses), full_loss)
+
+
+def test_dual_grpo_rejects_ambiguous_log_prob() -> None:
+    from tensordict import TensorDict
+
+    config = _dual_grpo_actor_config()
+    data = TensorDict(
+        {"old_log_probs": torch.zeros(2), "advantages": torch.ones(2)},
+        batch_size=[2],
+    )
+    with pytest.raises(ValueError, match="could not tell an AR token forward"):
+        diffusion_algos.get_diffusion_loss_fn("dual_grpo")(
+            config=config,
+            model_output={"log_probs": torch.zeros(2)},
+            data=data,
+        )
 
 
 def test_flow_grpo_loss_with_zeroed_pad_rows() -> None:
@@ -760,6 +913,42 @@ def test_diffusion_nft_reward_signal_scaling() -> None:
     # reward decomposition untouched, otherwise `ref_kl_coef` would be re-scaling the reward signal.
     assert anchored["actor/policy_loss"] == pytest.approx(rebalanced["actor/policy_loss"], rel=1e-6)
     assert anchored["actor/log10_signal_ratio"] == pytest.approx(rebalanced["actor/log10_signal_ratio"], rel=1e-6)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("batch_size", [1, 2, 8])
+@pytest.mark.parametrize("use_is_weights", [False, True])
+def test_grpo_guard_ratio_statistics(dtype: torch.dtype, batch_size: int, use_is_weights: bool) -> None:
+    config = SimpleNamespace(diffusion_loss=SimpleNamespace(adv_clip_max=5.0, clip_ratio=2e-6))
+    old_log_prob = torch.zeros(batch_size, dtype=dtype)
+    log_prob = torch.linspace(-0.02, 0.04, batch_size, dtype=dtype).requires_grad_()
+    old_mean = torch.zeros(batch_size, 2, 2, 2, dtype=dtype)
+    current_mean = old_mean.clone().requires_grad_()
+    weights = torch.linspace(0.5, 1.2, batch_size, dtype=dtype) if use_is_weights else None
+
+    loss, metrics = diffusion_algos.GRPOGuardLoss.compute_loss(
+        old_log_prob=old_log_prob,
+        log_prob=log_prob,
+        advantages=torch.tensor([(-1) ** i for i in range(batch_size)], dtype=dtype),
+        config=config,
+        old_prev_sample_mean=old_mean,
+        prev_sample_mean=current_mean,
+        std_dev_t=torch.full((batch_size, 1, 1, 1), 0.5, dtype=dtype),
+        sqrt_dt=torch.full((batch_size,), 0.5, dtype=dtype),
+        rollout_is_weights=weights,
+    )
+
+    assert torch.isfinite(loss)
+    assert all(math.isfinite(value) for value in metrics.values())
+    gradients = torch.autograd.grad(loss, (log_prob, current_mean))
+    assert all(torch.isfinite(gradient).all() for gradient in gradients)
+    if batch_size == 1:
+        assert metrics["actor/ratio_std"] == 0.0
+    else:
+        ratios = torch.exp(log_prob.detach() * 0.25).double().tolist()
+        mean = math.fsum(ratios) / batch_size
+        expected_std = math.sqrt(math.fsum((ratio - mean) ** 2 for ratio in ratios) / batch_size)
+        assert metrics["actor/ratio_std"] == pytest.approx(expected_std, rel=0.02, abs=2e-4)
 
 
 def test_compute_policy_loss_grpo_guard() -> None:

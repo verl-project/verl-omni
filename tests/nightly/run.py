@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Nightly entrypoint for the Qwen-Image FlowGRPO V1 regression."""
+"""Nightly entrypoint for Qwen-Image L3 regressions on the v1 trainer."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ from pathlib import Path
 
 import install_debug_hooks
 
-_REPO_ROOT = Path(__file__).resolve().parents[3]
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 _SCRIPT_DIR = Path(__file__).resolve().parent

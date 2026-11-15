@@ -41,7 +41,8 @@ def test_rejects_invalid_opt_in_before_loading(monkeypatch, value, error):
 
 
 @pytest.mark.asyncio
-async def test_opt_in_moves_same_model_between_cpu_and_explicit_cuda(monkeypatch):
+@pytest.mark.parametrize("device", ["cuda:2", "xpu:1"])
+async def test_opt_in_moves_same_model_between_cpu_and_explicit_accelerator(monkeypatch, device):
     module = _load_module()
 
     class Weights:
@@ -57,10 +58,10 @@ async def test_opt_in_moves_same_model_between_cpu_and_explicit_cuda(monkeypatch
     inferencer = type(
         "Inferencer",
         (),
-        {"model": weights, "processor": SimpleNamespace(tokenizer=SimpleNamespace()), "device": torch.device("cuda:2")},
+        {"model": weights, "processor": SimpleNamespace(tokenizer=SimpleNamespace()), "device": torch.device(device)},
     )()
     monkeypatch.setattr(module, "_PickScoreInferencer", lambda **kwargs: inferencer)
-    model = module.PickScoreNativeModel(device="cuda:2", retain_weights_on_cpu=True)
+    model = module.PickScoreNativeModel(device=device, retain_weights_on_cpu=True)
     assert model.supports_cpu_offload
     original_processor = inferencer.processor
     await model.sleep()
@@ -69,7 +70,7 @@ async def test_opt_in_moves_same_model_between_cpu_and_explicit_cuda(monkeypatch
     with pytest.raises(RuntimeError, match="asleep"):
         await model.infer([], [])
     await model.wake_up()
-    assert weights.targets[-1] == torch.device("cuda:2")
+    assert weights.targets[-1] == torch.device(device)
     assert model._inferencer is inferencer and inferencer.processor is original_processor
     assert weights.dtype == torch.float16
     await model.close()

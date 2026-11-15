@@ -1,6 +1,6 @@
 # Diffusion V1 training
 
-Last updated: 10/15/2026
+Last updated: 11/03/2026
 
 This guide runs the diffusion V1 trainer in synchronous or separate-asynchronous
 mode using the provided Stable Diffusion 3.5 Medium FlowGRPO OCR recipes.
@@ -19,6 +19,46 @@ launches it without extra flags. The legacy v0 trainer
 The examples support a single-node NVIDIA GPU setup. Sync mode uses two GPUs for
 the colocated actor and rollout plus one reward GPU. Separate-async mode also
 requires dedicated standalone rollout GPUs.
+
+## Architecture
+
+![VeRL-Omni Diffusion V1 training architecture](../assets/diffusion_v1_arch.svg)
+
+`main_diffusion_v1` starts the Ray task runner, enables TransferQueue, and selects
+the `sync` or `separate_async` trainer. The diffusion agent loop samples media
+trajectories through the configured rollout backend (commonly vLLM-Omni).
+TransferQueue is the center of the online experience data path. A row can hold
+prompt/group/session identity, generated media or latents, rollout
+log-probabilities, reward scores, extra fields, and policy-step metadata. In
+`separate_async`, prompt records and statuses can also be queued while generation
+is pending.
+
+Reward workers called by the agent loop receive the prompt and generated output;
+their score returns to the agent loop and is stored with the trajectory row. An
+optional colocated reward scorer runs trainer-side after the row is read. The
+trainer then writes selected score, advantage, and return fields back to that
+same queue row. ReplayBuffer samples and groups queue rows for actor training;
+the trainer computes configured advantages and diffusion loss, then updates the
+actor policy.
+
+The main implementation points are `main_diffusion_v1.py`,
+`agent_loop/diffusion_agent_loop_tq.py::_write_trajectories_to_tq`,
+`trainer/diffusion/v1/trainer_base.py::_train_sampled_batch`, and
+`trainer/diffusion/v1/tq_utils.py::put_dataproto_fields_to_tq`. The trainer's
+checkpoint manager handles actor/dataloader checkpoints and rollout weight
+sync; separate-async checkpoints can also snapshot TransferQueue state. Training
+rows are cleared after metric and rollout-dump handling.
+
+In `sync`, rollout and actor workers are colocated, and each training step waits
+for a complete rollout batch before updating the actor and refreshing rollout
+weights. In `separate_async`, standalone rollout workers can generate while the
+actor trains; `parameter_sync_step` controls how many local actor updates happen
+before rollout weights are refreshed. Set `sync_compatible=true` to pause
+standalone generation during actor updates. The replay buffer handles
+asynchronous batch availability and rollout staleness.
+
+The diagram shows the shared online diffusion RL path. Optional old/reference
+policy scoring, rollout correction, and reward components depend on the recipe.
 
 ## Prerequisites
 
@@ -374,7 +414,7 @@ dataloader (`global_step_N/transfer_queue/`). Resume with
 `trainer.resume_mode=auto` (or `resume_path`) restores queued prompt groups,
 re-issues pending and running groups, and tops warmup up to
 `num_warmup_batches * train_batch_size` instead of enqueueing that many new
-batches. Requires TransferQueue 0.1.9. Sync mode does not write a queue
+batches. Requires TransferQueue 0.1.11. Sync mode does not write a queue
 snapshot. Old checkpoints without `transfer_queue/` warn and start the queue
 empty.
 
@@ -423,11 +463,12 @@ Every V1 diffusion run depends on it:
 4. **Tuning.** `transfer_queue.backend.SimpleStorage.total_storage_size` caps
    how many experience samples the default backend holds;
    `num_data_storage_units` sets the in-memory storage units; metrics can be
-   exposed via `transfer_queue.metrics.*`. See [Important settings](#important-settings).
+   exposed via `++transfer_queue.metrics.*` (the block is not listed in the
+   config tree; see [RL-Insight](rl_insight.md)). See [Important settings](#important-settings).
 
 Omni models get the same support through verl's `TaskRunnerV1`
 (`python -m verl_omni.trainer.main_omni`); omni inherits verl's TransferQueue
-setup and requires TransferQueue >= 0.1.9 for async checkpoint resume.
+setup and requires TransferQueue >= 0.1.11 for async checkpoint resume.
 
 ## Important settings
 

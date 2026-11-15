@@ -1,6 +1,6 @@
 # NPU Smoke Tests
 
-Last updated: 10/29/2026.
+Last updated: 11/11/2026.
 
 This guide explains how to add CI test cases for Huawei Ascend devices in verl-omni.
 
@@ -17,18 +17,25 @@ into these runners:
 | ID | Group | Name | Test entry point | Default NPUs |
 |---|---|---|---|---:|
 | 0 | core | vLLM-Omni rollout + sleep/wake-up | tests/workers/rollout/rollout_vllm/test_vllm_omni_generate_npu.py | 8 |
-| 1 | e2e | Qwen-Image FlowGRPO trainer | tests/special_e2e/run_flowgrpo_qwen_image_npu.sh | 8 |
-| 2 | e2e | Wan2.2 DanceGRPO trainer with Qwen2.5-VL reward | tests/special_e2e/run_dancegrpo_wan22_npu.sh | 8 |
 | 3 | core | Diffusers FSDP engine inference and training | tests/workers/test_diffusers_fsdp_engine_npu.py | 8 |
 | 4 | core | Diffusion agent loop, request and step execution | tests/agent_loop/test_diffusion_agent_loop_npu.py::test_diffusion_single_turn_npu | 8 |
 | 5 | core | Unseeded multi-worker rollout diversity | tests/agent_loop/test_diffusion_agent_loop_npu.py::test_rollout_without_seed_npu | 8 |
 | 6 | core | Seeded multi-worker rollout reproducibility | tests/agent_loop/test_diffusion_agent_loop_npu.py::test_rollout_seed_reproducibility_npu | 8 |
 | 7 | core | Standalone vLLM reward engine and OCR scoring | tests/reward_loop/test_reward_engine_npu.py | 8 |
+| 11 | core | Reward restart determinism and JPEG rule scoring | tests/reward_loop/test_reward_engine_npu.py | 8 |
+| 12 | core | Request batching and step-execution output contracts | tests/workers/rollout/rollout_vllm/test_vllm_omni_generate_contracts_npu.py | 8 |
+| 13 | core | FSDP/FSDP2 engine inference and training with SP=2 | tests/workers/test_diffusers_fsdp_engine_sp_npu.py | 8 |
+| 14 | core | Ulysses SP=2/SP=4 forward and backward equivalence | tests/workers/test_diffusers_ulysses.py | 8 |
+| 15 | core | FSDP2 trainable snapshot restore | tests/workers/test_trainable_snapshot_gpu.py | 8 |
+| 17 | core | Omni tool-agent image generation | tests/agent_loop/test_omni_agent_loop_worker_npu.py | 8 |
+| 28 | core | FSDP2 LoRA adapter switch and EMA | tests/workers/test_diffusers_fsdp_lora_adapter.py | 8 |
+| 30 | core | Image previews and H3 offload placeholders | tests/trainer/diffusion/test_artifact_preview_dump_npu.py; tests/pipelines/test_minimax_h3_meta_output_npu.py | 8 |
+| 1 | e2e | Qwen-Image FlowGRPO trainer | tests/special_e2e/run_flowgrpo_qwen_image_npu.sh | 8 |
+| 2 | e2e | Wan2.2 DanceGRPO trainer with Qwen2.5-VL reward | tests/special_e2e/run_dancegrpo_wan22_npu.sh | 8 |
 
-The combined runner has eight entries: six core (0, 3, 4, 5, 6, 7) and two e2e
-(1, 2). The core group collects seven pytest cases because entry 4 is
-parametrized into request and step execution. The two e2e entries each run a
-trainer workload; they are not pytest cases.
+Test IDs stay stable across companion PRs, so gaps are intentional. Core
+entries collect pytest cases; e2e entries run trainer workloads. These are
+execution checks, not quality or convergence benchmarks.
 
 Test 3 ports the `fsdp` case of `tests/workers/test_diffusers_fsdp_engine.py`
 (GPU core ID 2). It reuses the GPU test's synthetic trajectories and engine
@@ -95,7 +102,7 @@ All nonzero exits, including native abort 134, fail the smoke group.
 
 ### Wan2.2 trainer with a reward model
 
-Test 2 runs one DanceGRPO training step with six actor NPUs and a dedicated
+With eight NPUs, test 2 runs one DanceGRPO training step with six actor NPUs and a dedicated
 TP=2 Qwen2.5-VL reward engine on two NPUs. Prepare the Qwen2.5-VL-3B-Instruct
 checkpoint before an offline run; set `REWARD_MODEL_PATH` to its local directory
 when needed. The test must complete training and exit 0.
@@ -148,9 +155,10 @@ only when all selected groups pass.
 
 If the new test lives outside current path filters, add its path. Current
 filters include verl_omni/**, tests/npu_smoke/**, tests/agent_loop/**,
-tests/reward_loop/**, tests/workers/**, tests/special_e2e/**, pyproject.toml,
+tests/reward_loop/**, tests/workers/**, tests/trainer/**, tests/pipelines/**,
+tests/special_e2e/**, pyproject.toml,
 .github/workflows/npu_smoke.yml,
-and .github/vllm_omni_pin.txt.
+.github/vllm_omni_pin.txt, and .github/vllm_ascend_pin.txt.
 
 ### 5. Handle models and datasets
 
@@ -175,6 +183,25 @@ Run all groups:
 ```bash
 bash tests/npu_smoke/run_npu_smoke_tests.sh --num-npus 8
 ```
+
+To run both groups concurrently in one dedicated eight-NPU CI container:
+
+```bash
+NPU_SMOKE_PARALLEL=1 bash tests/npu_smoke/run_npu_smoke_tests.sh --num-npus 8
+```
+
+Only this optional parallel command allocates NPUs `0,1,2,3` to core and
+`4,5,6,7` to e2e. Sequential and single-group commands allocate eight NPUs per
+group. Each launcher assigns actor, rollout and reward workers within its
+allocation; parallel-mode replica counts and derived batch sizes may differ.
+Use the eight-NPU commands for the original allocation coverage. E2e trainers
+remain sequential within their group.
+
+Unset shared `MODEL_PATH`, `TOKENIZER_PATH`, `DATA_DIR`, `TRAIN_FILES`,
+`VAL_FILES` and `NPU_SMOKE_TEST_IDS` overrides before parallel execution. Use a
+dedicated test environment because final cleanup stops its Ray/model processes.
+Native aborts and log-writing failures remain failures. The GitHub Actions
+workflow retains its existing separate eight-NPU core/e2e jobs.
 
 Run one group:
 
@@ -224,8 +251,24 @@ Each group job uses eight NPUs on linux-aarch64-a2b4-8, a 120 minute timeout,
 swr.cn-north-4.myhuaweicloud.com/mindspeed/pr-verl-omni-a2:v010-vllm030-omni030
 ```
 
+The image carries the previous generation of the pinned stack (CANN, torch,
+torch-npu, triton-ascend, editable vllm / vllm-ascend / vllm-omni / verl).
+After checkout, `tests/npu_smoke/sync_npu_stack.sh` reinstalls the pinned
+generation — `.github/*_pin.txt`, the `pyproject.toml` vllm pin, and
+torch-npu/triton-ascend/fla-npu mirroring `docker/Dockerfile.npu` — on top of
+it, so the jobs run the pinned stack even when the registry image for that
+generation has not been rebuilt yet. The sync installs vllm-ascend pure-python
+(`COMPILE_CUSTOM_KERNELS=0`) because the smoke suite runs tiny models through
+the native op path and the full aclnn ops build would cost most of the job
+timeout; the `vllm_ascend_C` module (rollout sleep/wake_up) and the
+`add_rms_norm_bias` aclnn op (the reward-model engine) are still built
+in-job.
+
+When the registry image at the current generation exists, the workflow pins
+its tag directly and the sync step is dropped.
+
 The workflow prints CANN details, npu-smi output, relevant Ascend variables,
-and installed vLLM component versions.
+and the synced vLLM component versions.
 
 The FlowGRPO and DanceGRPO end-to-end launchers source CANN and ATB before
 starting the workload:

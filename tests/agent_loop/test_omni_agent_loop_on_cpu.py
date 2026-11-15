@@ -125,7 +125,7 @@ def test_inbound_stamp_reaches_compute_score_kwargs(monkeypatch):
 
     def _parent_generate(self, prompts):
         del self
-        # Same construction as pinned AgentLoopWorker.generate_sequences (fefb0802).
+        # Same construction as pinned AgentLoopWorker.generate_sequences.
         kwargs = {k: v[0] for k, v in prompts.non_tensor_batch.items() if k != "__do_sample__"}
         captured["kwargs"] = kwargs
         captured["remote_extra"] = np.array([kwargs["extra_info"]])[0]
@@ -191,6 +191,29 @@ def test_stamp_reward_context_does_not_override_row_values(monkeypatch):
         OmegaConf.create({"agentic_image_gen": {"vllm_url": "http://cli", "good_enough_threshold": 0.55}}),
     )
     assert fresh.non_tensor_batch["extra_info"][0]["rollout_images_root"] == str(Path("/run/root/rollout_images"))
+
+
+def test_qwen3_omni_continuous_token_builder_matches_chat_template():
+    """The registered Qwen3-Omni builder must reproduce the ChatML template at turn boundaries.
+
+    verl's agent-loop workers run this same verification in strict mode at init; an
+    unregistered ``qwen3_omni_moe`` falls back to the generic VL builder, which drops
+    the newline ChatML writes after every ``<|im_end|>`` and fails the check.
+    """
+    from verl.utils.tokenizer.continuous_token import QwenVLContinuousTokenBuilder
+    from verl.utils.tokenizer.continuous_token_check import verify_continuous_token_builder
+    from verl.utils.tokenizer.continuous_token_wiring import create_continuous_token_builder
+
+    from tests.special_e2e.build_qwen3_omni_tiny_random import _build_tiny_chatml_tokenizer, _build_tiny_processor
+
+    tokenizer = _build_tiny_chatml_tokenizer()
+    builder = create_continuous_token_builder(
+        tokenizer,
+        hf_model_type="qwen3_omni_moe",
+        processor=_build_tiny_processor(tokenizer),
+    )
+    assert isinstance(builder, QwenVLContinuousTokenBuilder)
+    verify_continuous_token_builder(builder, mode="strict", hf_model_type="qwen3_omni_moe", generation_config=None)
 
 
 def test_materialize_rollout_images_ignores_stub_no_image_txt(tmp_path):

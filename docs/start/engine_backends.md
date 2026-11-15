@@ -1,12 +1,14 @@
 # Optional Engine Backends
 
-Last updated: 10/07/2026
+Last updated: 11/10/2026
 
-VeRL-Omni defaults to **FSDP2** as the training engine for the policy and reference models. The diffusion trainer and Qwen3-Omni Thinker can alternatively use [**VeOmni**](https://github.com/ByteDance-Seed/VeOmni). The engine is selected at the Hydra command line — see [`examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_veomni.sh`](https://github.com/verl-project/verl-omni/blob/main/examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_veomni.sh) for a complete recipe.
+VeRL-Omni trains the policy and reference models with FSDP — the shipped config
+default is `actor.strategy: fsdp`, with `fsdp2` a selectable strategy that many
+reference recipes opt into. The diffusion trainer and Qwen3-Omni Thinker can alternatively use [**VeOmni**](https://github.com/ByteDance-Seed/VeOmni). The engine is selected at the Hydra command line — see [`examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_veomni.sh`](https://github.com/verl-project/verl-omni/blob/main/examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_veomni.sh) for a complete recipe.
 
-## Installing VeOmni alongside vLLM 0.30.0
+## Installing VeOmni alongside vLLM
 
-VeOmni 0.1.12's `gpu` extra pins `torch==2.11.0+cu130`, which conflicts with the `torch==2.13.0` pulled in by `vllm==0.30.0`. A plain `uv pip install veomni[gpu]==0.1.12` therefore fails dependency resolution.
+VeOmni 0.1.12's `gpu` extra pins `torch==2.11.0+cu130`, which conflicts with the `torch==2.14.0` pulled in by `vllm==0.33.0`. A plain `uv pip install veomni[gpu]==0.1.12` therefore fails dependency resolution.
 
 Install the base VeOmni package without dependency resolution so the existing
 torch/vLLM stack is preserved, then add its media runtime dependencies
@@ -27,8 +29,9 @@ python -c "import veomni; print('veomni', veomni.__version__)"
 python -c "from veomni.distributed.offloading import load_model_to_gpu, load_optimizer, offload_model_to_cpu, offload_optimizer; print('VeOmni offloading helpers OK')"
 ```
 
-The two-GPU Thinker backend check and two-step V1 smoke pass with torch 2.13
-and vLLM 0.30, including forward, backward, optimizer updates, EP weight export
+The two-GPU Thinker backend check and two-step V1 smoke passed with torch
+2.13 and vLLM 0.30 (recorded at the vLLM 0.30 pin), including forward,
+backward, optimizer updates, EP weight export
 and full-weight rollout synchronization. These checks use tiny random weights;
 they do not validate the full 30B checkpoint or convergence. The base
 import/offloading checks above do not exercise these training paths.
@@ -75,9 +78,10 @@ These constraints prevent the added packages from replacing the installed
 stack; an incompatibility should fail resolution rather than change torch.
 The backend check passed on two GB200 GPUs with torch 2.13.0+cu130, locally
 built flash-attn 2.8.3.post1, liger-kernel 0.8.3, Triton 3.7.1 and Transformers
-5.14.1 through normal package initialization. This uses a tiny random
+5.14.1 (recorded at the vLLM 0.30 pin) through normal package
+initialization. This uses a tiny random
 checkpoint, not the full 30B model. Do not install a torch 2.11 FA2 wheel into
-a torch 2.13 environment.
+a torch 2.14 environment.
 
 Run these checks on each training node. They load the FA2 extension and resolve
 VeOmni's native operator implementations, beyond merely importing `veomni`:
