@@ -13,7 +13,9 @@
 # limitations under the License.
 import asyncio
 import logging
+import math
 import os
+import secrets
 from typing import Any, Optional
 
 from verl.workers.rollout.llm_server import LLMServerClient
@@ -30,15 +32,15 @@ class DiffusionWholeSampleRetryLLMServerClient(LLMServerClient):
     """LLM server client that retries whole diffusion samples on abort.
 
     Behavior:
-    - Call the base ``LLMServerClient.generate`` with the original (unmodified)
-      ``prompt_ids`` and ``sampling_params`` every attempt.
+    - Copy ``prompt_ids`` and ``sampling_params`` for every base
+      ``LLMServerClient.generate`` call so it cannot modify retry inputs.
+    - Choose one seed when none is supplied and reuse it on every attempt.
     - If the returned ``DiffusionOutput.stop_reason`` is ``"aborted"`` /
       ``"abort"``, sleep briefly and retry the whole sample.
-    - Track ``min_global_steps`` (earliest version seen) and ``max_global_steps``
-      (latest version seen) across attempts and write them onto the final
-      output's ``extra_fields`` so off-policy staleness metrics stay correct.
-    - Give up after ``max_retries`` attempts and return the last (aborted) output
-      so the agent loop can mark the prompt as a failure.
+    - Keep the successful attempt's version metadata: aborted samples are
+      discarded, so their versions do not belong to the returned trajectory.
+    - Raise after ``max_retries`` aborted attempts so the agent loop marks the
+      prompt group as failed instead of writing an empty successful sample.
     """
 
     def __init__(
@@ -49,7 +51,11 @@ class DiffusionWholeSampleRetryLLMServerClient(LLMServerClient):
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
-        self.max_retries = max(1, int(max_retries))
+        if isinstance(max_retries, bool) or not isinstance(max_retries, int) or max_retries <= 0:
+            raise ValueError("max_retries must be a positive integer")
+        if not math.isfinite(retry_wait_s) or retry_wait_s < 0:
+            raise ValueError("retry_wait_s must be finite and nonnegative")
+        self.max_retries = max_retries
         self.retry_wait_s = float(retry_wait_s)
 
     async def generate(
@@ -65,28 +71,22 @@ class DiffusionWholeSampleRetryLLMServerClient(LLMServerClient):
         **kwargs: Any,
     ):
         """Generate a diffusion sample, retrying the whole sample on abort."""
-        min_global_steps: Optional[int] = None
-        max_global_steps: Optional[int] = None
-        output = None
+        sampling_params = dict(sampling_params)
+        if sampling_params.get("seed") is None:
+            sampling_params["seed"] = secrets.randbits(32)
         for attempt in range(self.max_retries):
             output = await super().generate(
                 request_id=request_id,
-                prompt_ids=prompt_ids,
-                sampling_params=sampling_params,
+                prompt_ids=list(prompt_ids),
+                sampling_params=dict(sampling_params),
                 image_data=image_data,
                 video_data=video_data,
                 audio_data=audio_data,
                 mm_processor_kwargs=mm_processor_kwargs,
                 **kwargs,
             )
-            global_steps = output.extra_fields.get("global_steps")
-            if global_steps is not None:
-                if min_global_steps is None:
-                    min_global_steps = global_steps
-                max_global_steps = global_steps
-
             if output.stop_reason not in ("aborted", "abort"):
-                break
+                return output
 
             logger.debug(
                 "diffusion rollout aborted (attempt %d/%d) for request_id=%s; retrying whole sample",
@@ -94,9 +94,6 @@ class DiffusionWholeSampleRetryLLMServerClient(LLMServerClient):
                 self.max_retries,
                 request_id,
             )
-            await asyncio.sleep(self.retry_wait_s)
-
-        if output is not None:
-            output.extra_fields["min_global_steps"] = min_global_steps
-            output.extra_fields["max_global_steps"] = max_global_steps
-        return output
+            if attempt + 1 < self.max_retries:
+                await asyncio.sleep(self.retry_wait_s)
+        raise RuntimeError(f"Diffusion sample {request_id} aborted after {self.max_retries} attempts")
