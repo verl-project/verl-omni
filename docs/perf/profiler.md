@@ -1,6 +1,6 @@
 # Profiling FlowGRPO / diffusion training in VeRL-Omni
 
-Last updated: 11/14/2026.
+Last updated: 11/16/2026.
 
 VeRL-Omni reuses the profiler subsystem from upstream
 [verl](https://github.com/verl-project/verl) (`verl.utils.profiler`) and exposes
@@ -290,14 +290,43 @@ The default reduces data volume while retaining the full step window: the
 approximate number of GPU sampling instants is `N = G * f * T`, for `G` devices,
 frequency `f` in Hz, and the full metrics window `T` in seconds. A 666-second
 window gives about 6,660 instants at one device and 10 Hz, versus 106,560 at
-eight devices and 20 Hz. Larger captures have shown GPU metrics import errors;
-reducing volume is an experimental precaution, not a proven fix or a safe
-threshold. To change devices and frequency, append overrides, for example:
+eight devices and 20 Hz. Larger captures have shown the import error
+`GPU Metrics event chronological order was broken`.
+One hypothesis based on limited observations is that each sampling instant,
+or each fixed-size block of instants, has a small independent probability
+of triggering the error.
+Under this model, failure probability increases with total sample count rather
+than at a fixed threshold. Reducing devices, frequency, or capture duration may
+therefore lower the risk, but is not a proven fix or a guarantee of success.
+To change devices and frequency, append overrides, for example:
 
 ```bash
 '++global_profiler.global_tool_config.nsys.gpu_metrics_nsight_options.gpu-metrics-devices="0,4"' \
 '++global_profiler.global_tool_config.nsys.gpu_metrics_nsight_options.gpu-metrics-frequency=20'
 ```
+
+Separately, restarting GPU metrics collection in the same session can
+intermittently disconnect the Nsight Agent and leave a later window missing,
+even when training and CUDA profiler API calls succeed. This has occurred
+with two-second windows, while repeated collection has also succeeded.
+The CLI reports:
+
+```text
+Connection to Agent lost. This is most likely a bug. Internal reason: 'End of file'.
+```
+
+Internal diagnostic logs (NVLOG) can also contain:
+
+```text
+Failed to start range: End of file
+Failed to start range: The proxy is not started.
+```
+
+Based on limited samples, we conjecture that this restart failure has a
+probability independent of capture duration. This conjecture concerns Agent
+disconnection, rather than the chronological-order import error above.
+Check that every requested window produced a readable report; if collection
+fails, retry the run. A successful retry does not establish long-term reliability.
 
 In each role-local report:
 
