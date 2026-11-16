@@ -292,6 +292,7 @@ def _rebind(module: nn.Module, forward) -> None:
 
 
 def rollout_kernels_enabled(module: nn.Module) -> bool:
+    """Return whether rollout normalization/LoRA kernels are installed on ``module``."""
     return bool(getattr(module, _FLAG, False))
 
 
