@@ -381,8 +381,19 @@ Nsight Systems' multi-report view. For reports collected on one host, prefer
 is suitable for coarse phase analysis but not millisecond-scale cross-process
 latency comparisons.
 
-<!-- TODO: Add an updated Nsight Systems multi-report timeline screenshot from
-     a new V1 run, showing controller, actor, rollout, reward-loop, and GPU metrics. -->
+The following multi-report views show V1 training with device-level GPU metrics
+aligned to the process timelines.
+
+**Qwen-Image with OCR reward on H100:** generation, independent OCR reward
+inference across four tensor-parallel workers, and actor computation appear
+alongside the controller's phase annotations.
+
+![Qwen-Image V1 multi-report timeline with OCR reward and GPU metrics](../assets/nsys_qwen_image_v1_timeline.png)
+
+**Wan 2.2 with HPSv3 reward on B200:** the controller's step and phase annotations
+align with actor, rollout, and reward-process activity.
+
+![Wan 2.2 V1 multi-report timeline with HPSv3 reward and GPU metrics](../assets/nsys_wan22_v1_timeline.png)
 
 This recipe intentionally requires one node. A multi-node variant needs a
 collector on every node and synchronized clocks.
