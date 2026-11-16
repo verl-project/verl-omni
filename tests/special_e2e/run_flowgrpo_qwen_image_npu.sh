@@ -20,7 +20,7 @@ train_batch_size=$((mini_bsz * n_resp_per_prompt))
 
 export ASCEND_RT_VISIBLE_DEVICES=${ASCEND_RT_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}
 export DEVICE_NAME=npu
-export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1
+export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES="${RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES-1}"
 
 echo "===== Source Ascend environment (Test 1) ====="
 set +u
@@ -52,12 +52,12 @@ fi
 python3 -m verl_omni.trainer.main_diffusion \
     trainer.device=npu \
     algorithm.adv_estimator=flow_grpo \
-    data.train_files=${dummy_train_path} \
-    data.val_files=${dummy_test_path} \
+    data.train_files="${dummy_train_path}" \
+    data.val_files="${dummy_test_path}" \
     data.train_batch_size=${train_batch_size} \
     data.max_prompt_length=${max_prompt_length} \
-    actor_rollout_ref.model.path=${MODEL_PATH} \
-    actor_rollout_ref.model.tokenizer_path=${TOKENIZER_PATH} \
+    actor_rollout_ref.model.path="${MODEL_PATH}" \
+    actor_rollout_ref.model.tokenizer_path="${TOKENIZER_PATH}" \
     actor_rollout_ref.model.attn_backend=_native_npu \
     actor_rollout_ref.model.lora_rank=8 \
     actor_rollout_ref.model.lora_alpha=16 \

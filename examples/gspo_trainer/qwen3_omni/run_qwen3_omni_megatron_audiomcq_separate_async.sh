@@ -50,7 +50,6 @@ args=(
   actor_rollout_ref.actor.megatron.expert_tensor_parallel_size=1
   actor_rollout_ref.actor.megatron.param_offload=true
   actor_rollout_ref.actor.megatron.optimizer_offload=true
-  actor_rollout_ref.actor.megatron.grad_offload=true
   +actor_rollout_ref.actor.megatron.override_transformer_config.gradient_accumulation_fusion=false
   +actor_rollout_ref.actor.megatron.override_transformer_config.freeze_language_model=false
   +actor_rollout_ref.actor.megatron.override_transformer_config.freeze_vision_model=true

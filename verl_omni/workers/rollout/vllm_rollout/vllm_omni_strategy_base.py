@@ -72,6 +72,10 @@ class OmniStrategyBase(ABC):
     rollout_config_cls: type
     #: Model-config dataclass the mode expects. Subclasses must set this.
     model_config_cls: type
+    #: Stages carrying a vLLM LoRA manager; the server routes adapter-delta
+    #: weight syncs there. ``None`` (default) when the rollout has no LoRA —
+    #: diffusion LoRA rides the diffusion LoRA manager and never sets this.
+    lora_stage_ids: list[int] | None = None
 
     def __init__(self, server: vLLMOmniHttpServer) -> None:
         self.server = server
@@ -119,13 +123,13 @@ class OmniStrategyBase(ABC):
         """
         return None
 
-    def apply_quantization(self) -> tuple[str | None, dict[str, Any]]:
-        """Return the ``(quantization, extra_kwargs)`` pair for the engine.
+    def apply_quantization(self) -> dict[str, Any]:
+        """Return the ``hf_overrides`` mapping for the engine.
 
-        Default returns ``(None, {})`` (no quantization). Override for modes
+        Default returns ``{}`` (no quantization). Override for modes
         that reuse the base vLLM quantization path.
         """
-        return None, {}
+        return {}
 
     def override_generation_config(self) -> dict[str, Any]:
         """Return generation-config overrides merged into the engine defaults.
