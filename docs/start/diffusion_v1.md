@@ -233,6 +233,10 @@ and repeated replay refills during one sampling operation. Expiry propagates as
 `TimeoutError`; the trainer settles its background prompt tasks before closing
 TransferQueue. Server-side parked calls have the same default timeout, adjustable
 with `VERL_OMNI_ADMISSION_TIMEOUT_S`.
+Scheduler pause/resume RPCs use `VERL_OMNI_ABORT_ACK_TIMEOUT_S` (default 120
+seconds), forwarded to the existing backend transport and device barrier.
+Cancellation settles the bounded RPC before propagating. Explicit admission
+holds remain closed on timeout or cancellation.
 
 `timing_s/colocate_*` separates routing, abort, sleep, weight synchronization and
 resume. `perf/colocate_gpu_handoff_s` sums both handoff directions;

@@ -19,6 +19,7 @@ delivers tokens; diffusion sleep/wake ACKs are not engine-checked.
 """
 
 import asyncio
+import queue
 from types import SimpleNamespace
 
 import pytest
@@ -239,6 +240,69 @@ async def test_resident_standalone_pause_uses_supported_engine_mode(step_executi
     await server.abort_all_requests()
     assert [call["mode"] for call in engine.pause_calls] == (["abort"] if step_execution else ["keep", "abort"])
     assert frontend._paused and server._submission_paused
+
+
+@pytest.mark.parametrize(
+    "phase, outcome",
+    [("pause", "success"), ("pause", "timeout"), ("pause", "cancel"), ("pause", "full"), ("resume", "timeout")],
+)
+async def test_scheduler_deadline_settles_real_rpc_waiter(monkeypatch, phase, outcome):
+    from vllm_omni.engine.messages import CollectiveRPCResultMessage
+    from vllm_omni.engine.omni_engine_base import OmniEngineBase
+    from vllm_omni.engine.rpc_result_router import CorrelatedRpcClient
+
+    monkeypatch.setenv("VERL_OMNI_ABORT_ACK_TIMEOUT_S", "0.05")
+    requests, results = queue.Queue(maxsize=1), queue.Queue()
+    if outcome == "full":
+        requests.put(object())
+    transport = CorrelatedRpcClient(requests, results)
+    engine = object.__new__(OmniEngineBase)
+    engine._correlated_rpc_client = transport
+    frontend = object.__new__(server_module._RolloutAsyncOmni)
+    frontend.engine = engine
+    frontend._pause_cond = asyncio.Condition()
+    frontend._paused_stage_ids = {0} if phase == "resume" else set()
+    frontend._split_stage_ids_by_type = lambda stage_ids: ([], [0])
+    frontend._cancel_pending_submits = lambda: None
+    state = _FakeRequestState("internal", "external")
+    frontend.request_states = {state.request_id: state}
+
+    async def abort(request_ids):
+        pass
+
+    frontend.abort = abort
+    server = _make_server(frontend, free_cache_engine=False)
+    server._submission_paused = True
+    server._resume_event.clear()
+    task = asyncio.create_task(server.abort_all_requests() if phase == "pause" else server.resume_generation())
+    try:
+        if outcome != "full":
+            message = await asyncio.to_thread(requests.get, True, 2)
+            assert message.timeout == 0.05
+            if outcome == "success":
+                results.put(
+                    CollectiveRPCResultMessage(
+                        rpc_id=message.rpc_id, method=message.method, stage_ids=message.stage_ids, results=[None]
+                    )
+                )
+            elif outcome == "cancel":
+                task.cancel()
+        if outcome == "success":
+            await asyncio.wait_for(asyncio.shield(task), 2)
+            assert frontend._paused
+        else:
+            error = {"full": queue.Full, "cancel": asyncio.CancelledError, "timeout": TimeoutError}[outcome]
+            with pytest.raises(error):
+                await asyncio.wait_for(asyncio.shield(task), 2)
+            if phase == "pause":
+                assert state.queue.get_nowait().finished
+        assert not transport._router._pending
+        assert server._submission_paused and not server._resume_event.is_set()
+    finally:
+        if outcome == "full":
+            requests.get_nowait()
+        transport.close()
+        await asyncio.gather(task, return_exceptions=True)
 
 
 @pytest.mark.parametrize("free_cache", [False, True])
