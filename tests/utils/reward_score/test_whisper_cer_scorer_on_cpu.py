@@ -23,6 +23,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import torch
 
 
 @pytest.fixture(scope="module")
@@ -81,6 +82,36 @@ def test_audio_protocol_fails_closed_on_length_mismatch(scorer):
         scorer.decode_request(payload)
 
 
+def test_audio_protocol_rejects_a_sample_rate_below_the_supported_floor(scorer):
+    """The floor is what bounds the resampling ratio: a rate of 1 Hz would ask
+    for thousands of output samples per input sample."""
+    waveform = np.ones(160, dtype=np.float32)
+
+    for rate in (1, 1_000, 7_999):
+        with pytest.raises(ValueError, match="between 8000 and 384000"):
+            scorer.decode_request(_request(waveform, sample_rate=rate))
+
+
+def test_audio_protocol_rejects_a_sample_rate_above_the_supported_ceiling(scorer):
+    """The ceiling keeps the accepted contract to real capture rates."""
+    waveform = np.ones(160, dtype=np.float32)
+
+    with pytest.raises(ValueError, match="between 8000 and 384000"):
+        scorer.decode_request(_request(waveform, sample_rate=384_001))
+    with pytest.raises(ValueError, match="between 8000 and 384000"):
+        scorer.decode_request(_request(waveform, sample_rate=1_000_000))
+
+
+def test_audio_protocol_accepts_the_supported_sample_rate_range(scorer):
+    waveform = np.ones(160, dtype=np.float32)
+
+    for rate in (8_000, 16_000, 24_000, 384_000):
+        decoded, accepted, _, _ = scorer.decode_request(_request(waveform, sample_rate=rate))
+
+        assert accepted == rate
+        assert decoded.size == 160
+
+
 def test_audio_protocol_requires_metadata(scorer):
     payload = _request(np.ones(160, dtype=np.float32))
     del payload["metadata"]
@@ -135,3 +166,180 @@ def test_http_server_implements_audio_json_contract(scorer):
         thread.join(timeout=2)
 
     assert result == {"score": 0.25, "sample_rate": 16_000, "prompt": "सही"}
+
+
+class _FakeDeviceType:
+    def __init__(self, device_type, index=None):
+        self.type = device_type
+        self.index = index
+
+
+class _FakeAccelerator:
+    """Models ``torch.accelerator``: ``current_accelerator()`` yields a device whose
+    index is unknown, and ``current_device_index()`` is where the index comes from."""
+
+    _UNSET = object()
+
+    def __init__(self, current, *, runtime_available=True, current_index=_UNSET):
+        self._current = current
+        self._runtime_available = runtime_available
+        self._current_index = current_index
+        self.check_available_calls = []
+
+    def current_accelerator(self, check_available=False):
+        self.check_available_calls.append(check_available)
+        if not check_available:
+            # The compile-time answer, which ignores whether a device exists.
+            return self._current
+        return self._current if self._runtime_available else None
+
+    def current_device_index(self):
+        # Real torch reports the index here; by default mirror the device shown.
+        if self._current_index is self._UNSET:
+            return self._current.index if self._current is not None and self._current.index is not None else 0
+        if isinstance(self._current_index, BaseException):
+            raise self._current_index
+        return self._current_index
+
+
+class _FakeBackend:
+    def __init__(self, available):
+        self._available = available
+
+    def is_available(self):
+        return self._available
+
+
+class _ExplodingBackend:
+    def is_available(self):
+        raise RuntimeError("driver missing")
+
+
+def _fake_torch(accelerator=None, **backends):
+    attributes = {name: _FakeBackend(available) for name, available in backends.items()}
+    if accelerator is not None:
+        attributes["accelerator"] = accelerator
+    return type("FakeTorch", (), attributes)()
+
+
+@pytest.fixture(autouse=True)
+def _reset_torchaudio_probe(scorer):
+    """The import probe is memoized module-wide; reset it so tests stay independent."""
+    scorer._TORCHAUDIO_PROBED = False
+    scorer._TORCHAUDIO_FUNCTIONAL = None
+    yield
+    scorer._TORCHAUDIO_PROBED = False
+    scorer._TORCHAUDIO_FUNCTIONAL = None
+
+
+@pytest.mark.parametrize(
+    ("torch_module", "expected"),
+    [
+        (_fake_torch(accelerator=_FakeAccelerator(_FakeDeviceType("npu"))), "npu:0"),
+        (_fake_torch(accelerator=_FakeAccelerator(_FakeDeviceType("npu", 3))), "npu:3"),
+        (_fake_torch(accelerator=_FakeAccelerator(_FakeDeviceType("cuda", 1))), "cuda:1"),
+        # ``current_accelerator()`` never carries an index in real torch; the index
+        # of the device in use has to come from ``current_device_index()``.
+        (_fake_torch(accelerator=_FakeAccelerator(_FakeDeviceType("npu"), current_index=3)), "npu:3"),
+        (_fake_torch(accelerator=_FakeAccelerator(_FakeDeviceType("cuda"), current_index=2)), "cuda:2"),
+        # A build that raises from the accessor must not break device selection.
+        (
+            _fake_torch(accelerator=_FakeAccelerator(_FakeDeviceType("npu"), current_index=RuntimeError("no index"))),
+            "npu:0",
+        ),
+        (_fake_torch(accelerator=_FakeAccelerator(_FakeDeviceType("cpu")), cuda=False, npu=True), "npu:0"),
+        (_fake_torch(cuda=True, npu=True), "cuda:0"),
+        (_fake_torch(cuda=False, npu=False, xpu=True), "xpu:0"),
+        # MPS is not probed: auto must never pick it on an Apple-silicon host,
+        # whether the accelerator reports it or only the backend probe does.
+        (_fake_torch(cuda=False, npu=False, xpu=False, mps=True), "cpu"),
+        (_fake_torch(accelerator=_FakeAccelerator(_FakeDeviceType("mps")), mps=True), "cpu"),
+        (_fake_torch(cuda=False, npu=False), "cpu"),
+    ],
+)
+def test_auto_device_uses_a_non_cuda_accelerator(scorer, torch_module, expected):
+    """Probing CUDA alone resolves to CPU on Ascend NPU, which then rejects float16."""
+    assert scorer._resolve_auto_device(torch_module) == expected
+
+
+def test_auto_device_falls_back_to_cpu_when_a_probe_raises(scorer):
+    torch_module = _fake_torch(accelerator=_FakeAccelerator(_FakeDeviceType("cpu")), npu=False)
+    torch_module.cuda = _ExplodingBackend()
+
+    assert scorer._resolve_auto_device(torch_module) == "cpu"
+
+
+def test_auto_device_uses_runtime_availability_not_the_compile_time_answer(scorer):
+    """A build compiled with CUDA on a host with no usable CUDA device must not
+    select ``cuda:0``; the compile-time answer alone is not enough."""
+    torch_module = _fake_torch(
+        accelerator=_FakeAccelerator(_FakeDeviceType("cuda"), runtime_available=False),
+        cuda=False,
+        npu=False,
+    )
+
+    assert scorer._resolve_auto_device(torch_module) == "cpu"
+
+
+def test_auto_device_supports_builds_without_the_check_available_kwarg(scorer):
+    """Older builds only accept a bare ``current_accelerator()``."""
+
+    class _NoKwargAccelerator:
+        def current_accelerator(self):
+            return _FakeDeviceType("npu")
+
+    torch_module = _fake_torch(accelerator=_NoKwargAccelerator(), npu=True)
+
+    assert scorer._resolve_auto_device(torch_module) == "npu:0"
+
+
+def _make_torchaudio_unimportable(monkeypatch, calls=None):
+    """Make every ``import torchaudio`` raise ``OSError``, restored by ``monkeypatch``.
+
+    ``torchaudio`` can be installed while a native library fails to load, in which
+    case the import raises ``OSError`` rather than ``ImportError``.
+    """
+
+    class _BrokenTorchaudio:
+        def find_spec(self, name, path=None, target=None):
+            if name == "torchaudio" or name.startswith("torchaudio."):
+                if calls is not None:
+                    calls.append(name)
+                raise OSError("libtorchaudio.so: cannot open shared object file")
+            return None
+
+    for name in [key for key in list(sys.modules) if key.startswith("torchaudio")]:
+        monkeypatch.delitem(sys.modules, name)
+    monkeypatch.setattr(sys, "meta_path", [_BrokenTorchaudio(), *sys.meta_path])
+
+
+def test_torchaudio_native_load_failure_still_falls_back(scorer, monkeypatch):
+    _make_torchaudio_unimportable(monkeypatch)
+
+    assert scorer._import_torchaudio_functional() is None
+
+
+def test_torchaudio_probe_is_memoized_across_calls(scorer, monkeypatch):
+    """A failed import is not cached by ``sys.modules``, so the probe result has to
+    be memoized; otherwise every request re-imports and re-logs the warning."""
+    calls = []
+    _make_torchaudio_unimportable(monkeypatch, calls)
+
+    assert scorer._import_torchaudio_functional() is None
+    assert scorer._import_torchaudio_functional() is None
+
+    assert len(calls) == 1
+
+
+def test_linear_resample_keeps_the_duration_and_interpolates_linearly(scorer):
+    samples = torch.arange(9, dtype=torch.float32)
+
+    upsampled = scorer._linear_resample(samples, 8_000, 16_000)
+    assert upsampled.shape == (18,)
+    torch.testing.assert_close(upsampled, torch.linspace(0.0, 8.0, 18))
+
+    downsampled = scorer._linear_resample(samples, 16_000, 8_000)
+    assert downsampled.shape == (5,)
+    torch.testing.assert_close(downsampled, torch.linspace(0.0, 8.0, 5))
+
+    assert scorer._linear_resample(samples, 16_000, 16_000) is samples

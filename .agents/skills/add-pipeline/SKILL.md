@@ -41,24 +41,37 @@ repo infers for you.
 Both at once? Architecture first — an algorithm can only be paired with an adapter
 that already exists.
 
+**Also training the text encoder in diffusion model?** That is composite training. Keep the DiT in
+`diffusers_training_adapter.py` and put a `DiffusionModelARBase` subclass in
+`ar_training_adapter.py`. Follow "Composite AR training adapter" in
+`docs/contributing/integrating_a_diffusion_model.md`. Do not fold that setup into
+the DiT adapter, and do not register an AR adapter when the text encoder is frozen.
+
+**Rollout behavior runs through an agent loop** (`verl_omni/agent_loop/`), selected
+per sample by `agent_name` with `actor_rollout_ref.rollout.agent.default_agent_loop`
+as the fallback. Reach for a stock loop plus adapter hooks — "Select the rollout
+loop" in `integrating_an_omni_model.md` §6 and the composite note in
+`integrating_a_diffusion_model.md` cover selection; registering a new loop is a
+last resort.
+
 ## Step 1 — Find the closest pair to copy
 
 List the live registry rather than guessing at a template:
 
 ```bash
-grep -rhoE '@[A-Za-z]+\.register\([^)]*\)' verl_omni/pipelines/*/[dv]*.py | sort -u
+grep -rhoE '@[A-Za-z]+\.register\([^)]*\)' verl_omni/pipelines/*/*adapter*.py | sort -u
 ```
 
-`DiffusionModelBase` rows are training adapters, `VllmOmniPipelineBase` rows are
-rollout adapters; a pair with no rollout row reuses another package's pipeline.
+`DiffusionModelBase` / `DiffusionModelARBase` / `OmniModelBase` rows are training
+adapters, `VllmOmniPipelineBase` / `OmniRolloutPipelineBase` rows are rollout
+adapters; a pair with no rollout row reuses another package's pipeline.
 Copy the closest package, then share rather than fork
 ([code-style](../../rules/code-style.md#reuse-over-duplication)).
 
 ## Step 2 — Work the guide's checklist literally
 
-Every guide but the omni one ends in a `- [ ]` checklist (the omni guide ends in its
-own `## Common pitfalls` instead). Work it item by item; between them the checklists
-cover what is most often missed: the star-import in `verl_omni/pipelines/__init__.py`
+Every guide ends in a `- [ ]` checklist — work it item by item; between them the
+checklists cover what is most often missed: the star-import in `verl_omni/pipelines/__init__.py`
 (without it the adapter is invisible and nothing errors at import time), mirroring a
 new pipeline config field in **both** `diffusion_rollout.yaml` and
 `diffusion_model.yaml`, and wiring a smoke test into `tests/gpu_smoke/`.

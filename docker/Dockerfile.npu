@@ -14,10 +14,14 @@ ARG MOONCAKE_INDEX_URL="https://mirrors.aliyun.com/pypi/web/simple"
 ARG MOONCAKE_TAG="0.3.11.post1"
 
 ARG VLLM_REPO="https://github.com/vllm-project/vllm.git"
-ARG VLLM_REF="v0.30.0"
+ARG VLLM_REF="v0.33.0"
 
 ARG VLLM_ASCEND_REPO="https://github.com/vllm-project/vllm-ascend.git"
 ARG VLLM_ASCEND_REF=""
+
+# Kernel-acceleration package vllm-ascend's worker init imports on
+# A2/A3/950; match the variant to the SOC lane (a2 for 910b, a5 for 950DT).
+ARG FLA_NPU_PACKAGE="flash-linear-attention-npu-a3==26.9.1"
 
 ARG VLLM_OMNI_REPO="https://github.com/vllm-project/vllm-omni.git"
 ARG VLLM_OMNI_REF=""
@@ -108,7 +112,7 @@ RUN python3 -m pip install --force-reinstall \
         torchaudio==2.10.0+cpu \
         --index-url ${PYTORCH_CPU_INDEX_URL} && \
     python3 -m pip install --force-reinstall \
-        torch-npu==2.10.0.post4 \
+        torch-npu==2.10.0.post7 \
         --extra-index-url ${ASCEND_PIP_INDEX_URL} \
         --extra-index-url ${PYTORCH_CPU_INDEX_URL}
 
@@ -140,7 +144,10 @@ RUN VLLM_ASCEND_REF="${VLLM_ASCEND_REF:-$(tr -d '[:space:]' < /workspace/pins/vl
         --extra-index-url ${PYTORCH_CPU_INDEX_URL} && \
     python3 -m pip uninstall -y triton triton-ascend || true && \
     python3 -m pip install \
-        triton-ascend==3.2.2 \
+        triton-ascend==3.6.0.post2 \
+        --extra-index-url ${ASCEND_PIP_INDEX_URL} && \
+    python3 -m pip install --no-deps \
+        ${FLA_NPU_PACKAGE} \
         --extra-index-url ${ASCEND_PIP_INDEX_URL} && \
     python3 -m pip install concurrent-log-handler
 
@@ -176,13 +183,13 @@ RUN git clone \
     python3 -m pip install --no-deps -e . \
         --extra-index-url ${ASCEND_PIP_INDEX_URL} \
         --extra-index-url ${PYTORCH_CPU_INDEX_URL} \
-    && python3 -m pip install Levenshtein
+    && python3 -m pip install diffusers==0.41.0 Levenshtein
 
-# --no-deps skips verl-omni's own pins. verl leaves transformers<5.11,
-# which breaks kernels 0.16.1, and does not install TransferQueue.
+# --no-deps skips verl-omni's own pins; install the repo's transformers
+# window and TransferQueue explicitly (verl's extras are not installed).
 RUN python3 -m pip install \
-        'transformers>=5.13.0,<=5.14.1' \
-        'TransferQueue==0.1.9'
+        'transformers>=5.16.1,<5.20.0' \
+        'TransferQueue==0.1.11'
 
 RUN python3 -m pip install --force-reinstall \
         torch==2.10.0+cpu \
@@ -190,7 +197,7 @@ RUN python3 -m pip install --force-reinstall \
         torchaudio==2.10.0+cpu \
         --index-url ${PYTORCH_CPU_INDEX_URL} && \
     python3 -m pip install --force-reinstall \
-        torch-npu==2.10.0.post4 \
+        torch-npu==2.10.0.post7 \
         --extra-index-url ${ASCEND_PIP_INDEX_URL} \
         --extra-index-url ${PYTORCH_CPU_INDEX_URL} && \
     python3 -m pip install --upgrade onnxruntime

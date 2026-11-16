@@ -13,14 +13,33 @@ sep() { printf '%0.s-' {1..78}; echo; }
 
 NPU_SMOKE_GROUP="${NPU_SMOKE_GROUP:?NPU_SMOKE_GROUP must be set}"
 TIMESTAMP="$(date '+%Y%m%d_%H%M%S')"
-LOG_DIR="${LOG_DIR:-${REPO_ROOT}/logs/npu_smoke/${NPU_SMOKE_GROUP}/${TIMESTAMP}}"
+if [[ -z "${LOG_DIR:-}" ]]; then
+    NPU_SMOKE_LOG_ROOT="${REPO_ROOT}/logs/npu_smoke/${NPU_SMOKE_GROUP}"
+    mkdir -p "${NPU_SMOKE_LOG_ROOT}"
+    LOG_DIR="$(mktemp -d "${NPU_SMOKE_LOG_ROOT}/${TIMESTAMP}.XXXXXX")"
+fi
 mkdir -p "${LOG_DIR}"
 SUMMARY_LOG="${LOG_DIR}/summary.log"
 
 export PYTHONUNBUFFERED=1
 export RAY_DEDUP_LOGS=0
 export DEVICE_NAME=npu
-export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1
+export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES="${RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES-1}"
+export VLLM_PLUGINS="${VLLM_PLUGINS:-ascend}"
+
+if [[ "${LD_PRELOAD:-}" != *libjemalloc* ]]; then
+    if [[ -z "${JEMALLOC_PATH:-}" ]] && ! JEMALLOC_PATH=$(ldconfig -p 2>/dev/null \
+        | awk '/libjemalloc\.so/ && !path {path = $NF} END {print path}'); then
+        JEMALLOC_PATH=
+    fi
+    if [[ -z "${JEMALLOC_PATH:-}" || ! -r "${JEMALLOC_PATH}" ]]; then
+        fail "Unable to locate a readable jemalloc library for NPU smoke tests."
+        exit 1
+    fi
+    export LD_PRELOAD="${JEMALLOC_PATH}${LD_PRELOAD:+:${LD_PRELOAD}}"
+fi
+
+log "NPU smoke tests will use jemalloc via LD_PRELOAD=${LD_PRELOAD}"
 
 REQUESTED_NUM_NPUS="${NUM_NPUS:-8}"
 while [[ $# -gt 0 ]]; do
@@ -70,6 +89,9 @@ declare -a TEST_DURATIONS=()
 declare -a TEST_LOG_FILES=()
 
 cleanup_runtime() {
+    if [[ "${NPU_SMOKE_SKIP_GLOBAL_CLEANUP:-0}" == 1 ]]; then
+        return
+    fi
     ray stop --force || true
     pkill -TERM -f DiffusionWorker || true
     pkill -TERM -f VLLMWorker || true
@@ -95,28 +117,16 @@ run_test() {
     sep
 
     local start_ts end_ts elapsed rc
+    local -a statuses
     start_ts="$(date +%s)"
     set +e
     "$@" 2>&1 | tee "${logfile}"
-    rc="${PIPESTATUS[0]}"
+    statuses=("${PIPESTATUS[@]}")
     set -e
-
-    if [[ "${rc}" -eq 134 ]]; then
-        if [[ "${id}" == "0" || "${id}" == "3" ]] && awk '
-            /^=+ .* =+$/ {
-                passed = ($0 ~ /^=+ 1 passed(, [0-9]+ warnings?)? in .+ =+$/)
-                known_abort = 0
-                next
-            }
-            passed && $0 == "corrupted size vs. prev_size" { known_abort = 1 }
-            END { exit !known_abort }
-        ' "${logfile}"; then
-            warn "[${id}] Ignoring known native teardown abort after pytest success"
-            rc=0
-        elif [[ "${id}" == "1" || "${id}" == "2" ]]             && grep -q 'training/global_step:1' "${logfile}"             && grep -q 'Training Progress: 100%' "${logfile}"; then
-            warn "[${id}] Ignoring native teardown abort after training step success"
-            rc=0
-        fi
+    rc="${statuses[0]}"
+    if [[ "${statuses[1]}" -ne 0 ]]; then
+        fail "[${id}] Unable to write test log: tee exit=${statuses[1]}"
+        [[ "${rc}" -ne 0 ]] || rc="${statuses[1]}"
     fi
 
     end_ts="$(date +%s)"

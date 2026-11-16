@@ -181,7 +181,6 @@ def test_load_adapter_file_fallback():
         mock_from_dir.assert_called_once_with(
             "/resolved/fallback/dir",
             max_position_embeddings=None,
-            tensorizer_config_dict=req.tensorizer_config_dict,
         )
         mock_from_ckpt.assert_called_once_with(
             "/resolved/fallback/dir",
@@ -191,7 +190,6 @@ def test_load_adapter_file_fallback():
             device="cpu",
             dtype=torch.float32,
             model_vocab_size=None,
-            tensorizer_config_dict=req.tensorizer_config_dict,
             weights_mapper=None,
         )
         assert model is mock_lora_model
