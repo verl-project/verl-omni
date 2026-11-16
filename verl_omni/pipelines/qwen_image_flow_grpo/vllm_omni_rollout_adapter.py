@@ -617,8 +617,9 @@ class QwenImagePipelineWithLogProb(QwenImageLoRAMixin, QwenImageTokenIdPromptMix
             negative_txt_seq_lens=input_batch.negative_txt_seq_lens,
             extra_transformer_kwargs={"attention_kwargs": self.attention_kwargs, "return_dict": False},
         )
-        # _build_denoise_kwargs casts the timestep to the latents' dtype (bf16 here). diffuse() and the trainer
-        # feed it in fp32, and t/1000 in bf16 is off by up to ~3e-3, which shows up as rollout/trainer log-prob drift.
+        # The transformer rounds t/1000 to its own dtype. _build_denoise_kwargs also rounds t to the latents' dtype
+        # (bf16) before dividing, so step mode rounds twice and, at some timesteps, lands on a different bf16 value
+        # than diffuse() and the trainer, which round once. Pass fp32 so all three round the same way.
         model_timestep = t.expand(x.shape[0]).to(device=x.device, dtype=torch.float32) / 1000
         positive_kwargs["timestep"] = model_timestep
         if negative_kwargs is not None:
