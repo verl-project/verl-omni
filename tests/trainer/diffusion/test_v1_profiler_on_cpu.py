@@ -48,6 +48,44 @@ def test_async_rollout_manager_selection(switch, standalone_present):
     assert trainer._rollout_server_managers() == expected
 
 
+@pytest.mark.parametrize(
+    ("ref_worker_key", "teacher_worker_keys", "expected_key_roles"),
+    [
+        pytest.param(None, None, [("actor", "train")], id="actor-only"),
+        pytest.param("actor", ["actor", "actor"], [("actor", "train")], id="all-share-actor-group"),
+        pytest.param(
+            None,
+            ["teacher1", "teacher2"],
+            [("actor", "train"), ("teacher1", "teacher"), ("teacher2", "teacher")],
+            id="standalone-teachers",
+        ),
+        pytest.param(
+            "ref",
+            ["ref", "teacher1", "teacher1", "teacher2"],
+            [("actor", "train"), ("ref", "ref"), ("teacher1", "teacher"), ("teacher2", "teacher")],
+            id="shared-and-distinct-groups",
+        ),
+    ],
+)
+def test_profile_worker_groups(ref_worker_key, teacher_worker_keys, expected_key_roles):
+    trainer = object.__new__(PolicyGradientDiffusionTrainerV1Sync)
+    # Keys identify worker group objects; repeated keys represent aliases to the same object.
+    workers = {key: object() for key in ("actor", "ref", "teacher1", "teacher2")}
+    trainer.actor_rollout_wg = workers["actor"]
+    trainer.use_reference_policy = ref_worker_key is not None
+    trainer.ref_policy_wg = workers[ref_worker_key] if ref_worker_key is not None else None
+    trainer.use_teacher_policy = teacher_worker_keys is not None
+    if teacher_worker_keys is not None:
+        trainer.teacher_model_manager = SimpleNamespace(
+            teacher_wg={str(index): workers[key] for index, key in enumerate(teacher_worker_keys)}
+        )
+    trainer.global_steps = 7
+
+    assert trainer._profile_worker_groups() == [
+        (workers[key], {"role": role, "profile_step": 7}) for key, role in expected_key_roles
+    ]
+
+
 @pytest.mark.parametrize("continuous,expected", [(False, [1, 2, 4]), (True, [1, 4])])
 def test_training_windows_and_shared_reference_group(continuous, expected):
     trainer = object.__new__(PolicyGradientDiffusionTrainerV1Sync)
@@ -62,14 +100,17 @@ def test_training_windows_and_shared_reference_group(continuous, expected):
     trainer.actor_rollout_wg = Mock()
     trainer.ref_policy_wg = trainer.actor_rollout_wg
     trainer.use_reference_policy = True
-    trainer.use_critic = False
+    trainer.use_teacher_policy = False
+    trainer.reward_loop_manager = None
+    trainer.gpu_metrics_profiler = None
+    trainer._init_profile_state()
     trainer.total_training_steps = 4
     trainer.prev_step_profile = False
     trainer.curr_step_profile = True
     for step in range(1, 5):
         trainer.global_steps = step
-        trainer._start_profiling()
-        trainer._stop_profiling()
+        trainer._on_profiling_step_start()
+        trainer._on_profiling_step_end()
     assert [call.kwargs["profile_step"] for call in trainer.actor_rollout_wg.start_profile.call_args_list] == expected
     assert trainer.actor_rollout_wg.stop_profile.call_count == len(expected)
     assert [call.kwargs["run_command"] for call in trainer.actor_rollout_wg.stop_profile.call_args_list] == (
