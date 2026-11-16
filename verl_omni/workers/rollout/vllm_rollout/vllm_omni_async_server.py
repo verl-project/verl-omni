@@ -248,8 +248,8 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         self._generate_strategy.post_init(cuda_visible_devices)
         self._lora_request_cache: LoRARequest | None | object = _LORA_REQUEST_CACHE_MISS
         self._lora_resolve_lock = asyncio.Lock()
-        # Mirrors the workers' ``set_pending_lora_peft_config`` stash so the bare
-        # follow-up ``update_weights_from_ipc`` routes as an adapter-delta sync.
+        # Mirrors the workers' set_pending stash: the bare follow-up
+        # update_weights_from_ipc routes as an adapter-delta sync.
         self._pending_lora_delta = False
         super()._post_init(cuda_visible_devices)
 
@@ -391,19 +391,15 @@ class vLLMOmniHttpServer(vLLMHttpServer):
     def _resolve_lora_scoped_stages(
         self, method: str, stage_ids: list[int] | None, rpc_kwargs: dict[str, Any]
     ) -> list[int] | None:
-        """Scope LoRA stash installation and adapter-delta syncs to the LoRA stages.
+        """Route LoRA-scoped weight-sync RPCs to ``lora_stage_ids``.
 
-        Only the deploy config's LoRA stages (the AR policy stage) enable vLLM
-        LoRA; every other stage rejects ``remove_lora``/``add_lora`` outright
-        ("LoRA is not enabled"), so broadcasts of either RPC would fail there.
-        A delta is explicit in the RPC kwargs — ``peft_config`` with
-        ``base_sync_done`` true, the same condition the worker uses to pick its
-        adapter path, so the first base-weight sync still broadcasts — or
-        stashed on the workers by ``set_pending_lora_peft_config``, mirrored in
-        ``_pending_lora_delta``. The stash is installed on the same LoRA stages
-        only: one left on another stage would misroute its next full-weight
-        sync into the adapter path. Full-weight syncs keep the strategy's
-        stage selection.
+        Stash installation and adapter deltas reach only the LoRA-carrying
+        stages; every other stage rejects ``remove_lora``/``add_lora`` ("LoRA
+        is not enabled"), and a stash left there would misroute its next
+        full-weight sync into the adapter path. A delta is explicit
+        (``peft_config`` and ``base_sync_done`` — the worker's own adapter-path
+        condition) or stashed (mirrored in ``_pending_lora_delta``). Everything
+        else, including no-LoRA rollouts, passes ``stage_ids`` through.
         """
         lora_stage_ids = self._generate_strategy.lora_stage_ids
         if lora_stage_ids is None:

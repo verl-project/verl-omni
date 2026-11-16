@@ -22,6 +22,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 import torch
 import yaml
+from vllm_omni.config import omni_config
+from vllm_omni.config.stage_config import load_deploy_config
+from vllm_omni.engine.stage_init_utils import _project_omni_stage_engine_args
+from vllm_omni.model_executor.models.qwen3_omni.pipeline import QWEN3_OMNI_PIPELINE
 
 from verl_omni.pipelines.model_base import OmniRolloutPipelineBase
 from verl_omni.pipelines.qwen3_omni.omni_rollout_adapter import Qwen3OmniRolloutAdapter
@@ -1015,6 +1019,25 @@ def test_ar_deploy_config_scopes_lora_to_the_policy_stage(monkeypatch):
     assert policy_stage["engine_extras"] == {"enable_lora": True, "max_loras": 1, "max_lora_rank": 128}
     assert all("enable_lora" not in stage["engine_extras"] for stage in other_stages)
     assert strategy.lora_stage_ids == [0]
+
+    # Round-trip the generated file: after prepare_engine_args drops the four
+    # globals, upstream config resolution accepts the 3-stage pipeline and
+    # projects LoRA engine args on the policy stage only.
+    engine_args = {"enable_lora": True, "max_loras": 1, "max_lora_rank": 128}
+    strategy.prepare_engine_args(engine_args, Namespace())
+    assert not {"enable_lora", "max_loras", "max_lora_rank"} & engine_args.keys()
+    user_deploy = load_deploy_config(engine_kwargs["deploy-config"])
+    config = omni_config.VllmOmniConfig.from_pipeline_config(
+        QWEN3_OMNI_PIPELINE, user_deploy_config=user_deploy, cli_overrides=engine_args
+    )
+    projected = _project_omni_stage_engine_args(config.stage_by_id(0))
+    assert {key: projected[key] for key in ("enable_lora", "max_loras", "max_lora_rank")} == {
+        "enable_lora": True,
+        "max_loras": 1,
+        "max_lora_rank": 128,
+    }
+    for stage_id in (stage["stage_id"] for stage in other_stages):
+        assert "enable_lora" not in _project_omni_stage_engine_args(config.stage_by_id(stage_id))
     server._temp_deploy_ctx.cleanup()
 
 
