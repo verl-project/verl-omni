@@ -248,6 +248,9 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         self._generate_strategy.post_init(cuda_visible_devices)
         self._lora_request_cache: LoRARequest | None | object = _LORA_REQUEST_CACHE_MISS
         self._lora_resolve_lock = asyncio.Lock()
+        # Mirrors the workers' set_pending stash: the bare follow-up
+        # update_weights_from_ipc routes as an adapter-delta sync.
+        self._pending_lora_delta = False
         super()._post_init(cuda_visible_devices)
 
     # -----------------------------------------------------------------------
@@ -369,7 +372,12 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         require_ack: bool = False,
     ):
         """Dispatch a shared RPC to the stages selected by the active strategy."""
+        rpc_kwargs = kwargs or {}
+        if method == "set_pending_lora_peft_config":
+            self._pending_lora_delta = bool(rpc_kwargs.get("peft_config"))
         stage_ids = self._generate_strategy.collective_rpc_stage_ids(method)
+        if method in {"set_pending_lora_peft_config", "update_weights_from_ipc"}:
+            stage_ids = self._resolve_lora_scoped_stages(method, stage_ids, rpc_kwargs)
         if require_ack:
             return await self._collective_rpc_with_ack(method, timeout, args, kwargs, stage_ids)
         return await self.engine.collective_rpc(
@@ -379,6 +387,32 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             kwargs=kwargs,
             stage_ids=stage_ids,
         )
+
+    def _resolve_lora_scoped_stages(
+        self, method: str, stage_ids: list[int] | None, rpc_kwargs: dict[str, Any]
+    ) -> list[int] | None:
+        """Route LoRA-scoped weight-sync RPCs to ``lora_stage_ids``.
+
+        Stash installation and adapter deltas reach only the LoRA-carrying
+        stages; every other stage rejects ``remove_lora``/``add_lora`` ("LoRA
+        is not enabled"), and a stash left there would misroute its next
+        full-weight sync into the adapter path. A delta is explicit
+        (``peft_config`` and ``base_sync_done`` — the worker's own adapter-path
+        condition) or stashed (mirrored in ``_pending_lora_delta``). Everything
+        else, including no-LoRA rollouts, passes ``stage_ids`` through.
+        """
+        lora_stage_ids = self._generate_strategy.lora_stage_ids
+        if lora_stage_ids is None:
+            return stage_ids
+        if method == "set_pending_lora_peft_config":
+            return list(lora_stage_ids)
+        explicit_delta = bool(rpc_kwargs.get("peft_config")) and bool(rpc_kwargs.get("base_sync_done"))
+        if explicit_delta:
+            return list(lora_stage_ids)
+        if self._pending_lora_delta and rpc_kwargs.get("peft_config") is None:
+            self._pending_lora_delta = False
+            return list(lora_stage_ids)
+        return stage_ids
 
     async def _collective_rpc_with_ack(
         self, method: Any, timeout: float | None, args: tuple, kwargs: dict[str, Any] | None, stage_ids: Any
