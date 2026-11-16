@@ -176,7 +176,7 @@ def main() -> None:
     if train_path.is_file() and val_path.is_file():
         print(f"Dataset already exists in {output_dir}. Skipping creation.")
         return
-    
+
     output_dir.mkdir(parents=True, exist_ok=True)
     if args.kind == "ocr":
         write_ocr(args.data_source, args.train_size, args.val_size, train_path, val_path)

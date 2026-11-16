@@ -7,19 +7,23 @@ This is the v1-trainer form of
 `tests/special_e2e/run_gspo_qwen3_omni_thinker_lora_v1_smoke.sh`:
 `verl_omni.trainer.main_omni`, `pipeline_name=qwen3_omni_moe`, and the same
 Thinker module filter, stretched to 20 steps on 1 GPU. The script builds the
-tiny checkpoint and a repeated GSM8K prompt before training.
+tiny checkpoint and distinct GSM8K prompts via
+`tests/nightly/create_sample_data.py --kind math` before training. Each row
+gets `extra_info.repeat_index` so dump comparison can realign prompts across
+runs. `data_source` stays `openai/gsm8k` for the naive GSM8K rule reward.
 
-Rollout is greedy (`temperature=0`, `do_sample=false`, `seed=42`) so the same
-prompt keeps the same token ids. Dump comparison reads two payload kinds:
+Rollout is greedy (`temperature=0`, `do_sample=false`, `seed=42`). Dump
+comparison reads two payload kinds:
 
 - `actor_update_batch`: the actor mini-batch, including `old_log_probs`,
   `ref_log_prob`, and `rollout_log_probs` when those fields are present.
 - `lora_gradients`: LoRA parameter gradients before the optimizer step.
 
-`batch.responses` and `batch.advantages` stay informational because the shared
-comparator treats those names that way. A token-id change still fails the run
-when it moves `old_log_probs` or the LoRA gradients. Rule reward scores are
-compared. There is no OCR reward model.
+`batch.responses`, `batch.advantages`, and `batch.old_log_probs` stay
+informational. Nested `old_log_probs` pads inconsistently on the tiny model;
+`rollout_log_probs` covers token-id drift. A token-id change still fails the
+run when it moves `rollout_log_probs`, `ref_log_prob`, or the LoRA gradients.
+Rule reward scores are compared. There is no reward model.
 
 The language-model MFU counter is collected. `collect_metrics.py` warns that
 this model and algorithm pair is not in the diffusion MFU allowlist.
