@@ -46,7 +46,6 @@ python3 -m verl_omni.trainer.main_omni \
     actor_rollout_ref.model.enable_gradient_checkpointing=true \
     actor_rollout_ref.model.use_remove_padding=true \
     actor_rollout_ref.model.exclude_modules=".*talker.*|.*code2wav.*|.*code_predictor.*|.*visual.*|.*audio_tower.*" \
-    actor_rollout_ref.actor.freeze_vision_tower=true \
     actor_rollout_ref.actor.strategy=fsdp2 \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.actor.optim.weight_decay=0.1 \
@@ -64,7 +63,6 @@ python3 -m verl_omni.trainer.main_omni \
     actor_rollout_ref.actor.loss_agg_mode=seq-mean-token-mean \
     actor_rollout_ref.actor.fsdp_config.param_offload=true \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=true \
-    actor_rollout_ref.actor.fsdp_config.model_dtype=bfloat16 \
     actor_rollout_ref.actor.fsdp_config.use_orig_params=true \
     ++actor_rollout_ref.actor.fsdp_config.use_no_sync_for_gradient_accumulation=false \
     actor_rollout_ref.actor.fsdp_config.use_torch_compile=False \
@@ -96,7 +94,6 @@ python3 -m verl_omni.trainer.main_omni \
     actor_rollout_ref.ref.log_prob_use_dynamic_bsz=true \
     actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=20480 \
     actor_rollout_ref.ref.fsdp_config.param_offload=true \
-    actor_rollout_ref.ref.fsdp_config.model_dtype=bfloat16 \
     algorithm.adv_estimator=grpo \
     algorithm.use_kl_in_reward=false \
     reward.reward_manager.source=register \
@@ -111,8 +108,8 @@ python3 -m verl_omni.trainer.main_omni \
     trainer.experiment_name=gspo_avqa_npu \
     trainer.n_gpus_per_node=${NUM_GPUS_ACTOR_ROLLOUT_REWARD} \
     trainer.nnodes=1 \
-    trainer.save_freq=500 \
-    trainer.test_freq=1000 \
+    trainer.save_freq=50 \
+    trainer.test_freq=10 \
     trainer.total_epochs=10 \
     "$@" \
     2>&1 | tee "run_qwen3omni_npu_avqa_v1_$(date +%Y%m%d_%H%M%S).log"
