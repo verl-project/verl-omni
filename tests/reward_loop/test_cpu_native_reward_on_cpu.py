@@ -256,6 +256,7 @@ async def test_cpu_phase_submission_failure_drains_accepted_rpc_before_sleep():
         calls.append("sleep")
 
     manager = object.__new__(OmniRewardLoopManager)
+    manager.config = OmegaConf.create({"reward": {}})
     manager._score_lock = asyncio.Lock()
     manager._reward_dispatch_batch_sizes = {}
     manager._reward_worker_groups = {

@@ -1,6 +1,6 @@
 # How to Add a New Omni Model
 
-Last updated: 09/22/2026.
+Last updated: 11/10/2026.
 
 This guide walks through adding a new omni (multimodal autoregressive) model to
 the verl-omni training framework. It uses the Qwen3-Omni Thinker adapter as a
@@ -26,7 +26,7 @@ Decide which **training stage** you want to train and how the model decomposes:
   `get_strip_modules` excludes them from the trainable set if they are separate
   submodules. If they stay in the module graph and are *conditionally skipped*
   rather than removed, keep them sharded-safe with
-  `get_fsdp_ignored_module_names` instead — see §2 and §6.
+  `get_fsdp_ignored_module_names` instead — see §2 and §9.
 - **Discrete-token**: Unlike diffusion models, omni models produce discrete
   text tokens. RL algorithms (GSPO, GRPO, RLOO) are selected through standard
   verl config fields (`actor.policy_loss.loss_mode`,
@@ -367,9 +367,10 @@ as a model-specific reference:
   behavior. These are the same excluded-module names used by the FSDP adapter.
 - The version-sensitive `create_causal_mask` shim drops the obsolete
   `cache_position` keyword from VeOmni 0.1.12's generated GPU model when the
-  Transformers signature no longer accepts it, validated with Transformers
-  5.14.1. Compatible signatures are unchanged and other unknown arguments
-  still raise. Recheck this shim when either dependency is upgraded.
+  Transformers signature no longer accepts it. The masked signature was
+  re-verified at Transformers 5.19.0; end-to-end behavior was last validated
+  at Transformers 5.14.1. Compatible signatures are unchanged and other
+  unknown arguments still raise.
 
 #### Select native operators
 
@@ -440,7 +441,69 @@ nonzero gradients. These checks validate training and weight-transfer mechanics,
 not 30B-model convergence. Both scripts remain manual validation tools outside
 the required `ci-e2e-omni` group.
 
-## 6. Common pitfalls
+## 6. Select the rollout loop
+
+Every online rollout executes a registered agent loop. The trainer resolves
+the loop **per sample** from the optional `agent_name` batch column, falling
+back to `actor_rollout_ref.rollout.agent.default_agent_loop` when it is absent
+(see `verl_omni/agent_loop/diffusion_agent_loop.py` for the fallback in-tree).
+The omni config defaults to verl's `single_turn_agent`; pick per run:
+
+| Loop | Use when |
+| ---- | -------- |
+| `single_turn_agent` (verl, default) | text-token stages such as the Thinker |
+| `omni_single_turn_agent` | an autoregressive Talker stage whose rollout adapter must map model-native output to the Talker policy sequence (see §5) |
+| `image_gen_tool_agent` | multi-turn tool/image-gen agents — [`docs/advanced/multi_turn_image_agents.md`](../advanced/multi_turn_image_agents.md). It must be the configured **default**, not a per-sample override: the tool and Hermes-format binding happens at worker init only when `default_agent_loop == image_gen_tool_agent` (`verl_omni/agent_loop/omni_agent_loop.py`) |
+
+**Extend before you register.** Model-specific rollout behavior belongs in the
+rollout adapter hooks (`postprocess_agent_loop_output`, §3), not in a copied
+loop — the loops in `verl_omni/agent_loop/` are shared, model-agnostic core.
+Registering a new loop is a last resort: the `@register("name")` subclass
+lives in the model's pipeline package and must be imported by
+`verl_omni/agent_loop/__init__.py` so the decorator fires (do not re-export it
+from the package `__init__` — import cycle). Precedents: `ltx2_flow_grpo`,
+`minimax_h3_diffusion_nft`.
+
+## 7. Wire rewards
+
+Scores come from the reward loop configured under `reward.*` on the same
+config — `RewardLoopManager` workers stream `_compute_score` during
+generation (the default `agent_reward_loop` path, no reward model required).
+The three supported sources:
+
+- `reward.custom_reward_function.path` / `.name` — a Python reward function
+  that **replaces the default scorer**: it receives the parquet `data_source`
+  among its arguments and does its own routing. With neither a custom function
+  nor a reward model configured, scoring dispatches on `data_source` (verl's
+  built-in contract, e.g. `openai/gsm8k`); with `reward.reward_model.enable=true`
+  and no custom function, the reward model scores instead — see the
+  [GSPO README](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/README.md).
+- Named reward-model ensembles —
+  [`docs/algo/named_reward_models.md`](../algo/named_reward_models.md).
+- Remote HTTP scorers — [`docs/start/http_scorer.md`](../start/http_scorer.md).
+
+Reward-loop mechanics, weighting, and async scoring are owned by
+[`docs/algo/async_reward.md`](../algo/async_reward.md).
+
+## 8. Meet the dataset contract
+
+Training parquet flows through verl's `RLHFDataset`; media handling is
+selected per model with `data.custom_cls.name`:
+
+- `QwenOmniRLHFDataset` — resolves image/audio/video paths from structured
+  messages via `qwen_omni_utils.process_mm_info`; audio is padded to a hop
+  multiple so the HF and vLLM-Omni sides expand identically
+  (`verl_omni/utils/dataset/omni_rl_datasets.py`).
+- `MiniCPMORLHFDataset` — walks the content blocks verl builds from
+  `<image>` / `<audio>` parquet markers; loads RGB images and 16 kHz mono
+  waveforms.
+
+**Text-only rows must leave media absent, not empty lists.** The agent loop
+forwards `[]` as a present-but-empty media stream, which mis-routes the
+sample; the MiniCPM loader normalizes with `images or None` for exactly this
+reason (#858). Placeholder-token expansion and chat-template pitfalls: see §9.
+
+## 9. Common pitfalls
 
 These pitfalls are drawn from the Qwen3-Omni and MiniCPM-o adapters. Some are
 model-specific — verify each against your own model's architecture.
@@ -453,8 +516,8 @@ model-specific — verify each against your own model's architecture.
 - **mrope**: Qwen-style multimodal models use 3-component position IDs
   (temporal, height, width) for mrope. HuggingFace's `get_rope_index` returns
   float32 position IDs that FSDP would bf16-round. Cast to `int64` in
-  `configure_processor` (see `_get_rope_index_long` in
-  `thinker_training_adapter.py:98-100`).
+  `configure_processor` (search for `_get_rope_index_long` in
+  `thinker_training_adapter.py`).
 
 - **`dedup_pad_tokens`**: Bind on the processor for multimodal (image/video/
   audio) training to avoid double-expansion in AR mode. Both the HF processor
@@ -483,3 +546,20 @@ model-specific — verify each against your own model's architecture.
   token log-probabilities before training. Treat numerical comparisons as
   execution-consistency diagnostics, not evidence of output quality or bitwise
   agreement between different precision paths.
+
+## 10. Integration checklist
+
+- [ ] Training adapter registered on `(architecture, stage)` and imported
+  (§4); rollout adapter registered on `model_type` with `pipeline_name`
+  resolving to it (§3, §5).
+- [ ] Rollout loop selected per §6 — a stock loop plus adapter hooks, no new
+  registered loop.
+- [ ] Dataset class and parquet media contract verified (§8); text-only rows
+  carry no empty-list media.
+- [ ] Reward source wired (§7) and a smoke run yields nonzero scores.
+- [ ] Adapter-boundary CPU tests under `tests/<module>/test_*_on_cpu.py`
+  ([testing guide](testing_guide.md)).
+- [ ] End-to-end smoke wired into the omni smoke group and its path patterns
+  ([GPU smoke tests](gpu_smoke_tests.md)).
+- [ ] `docs/start/models.md` entry added and the example README symlinked
+  under `docs/examples/` with an index toctree entry.

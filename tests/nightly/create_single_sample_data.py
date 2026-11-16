@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Create the deterministic single-sample OCR dataset used by the nightly test."""
+"""Create the deterministic repeated-prompt dataset used by a nightly run."""
 
 from __future__ import annotations
 
@@ -28,9 +28,9 @@ USER_PROMPT = "A clean white square image with the black text CI centered in lar
 GROUND_TRUTH = "CI"
 
 
-def build_rows(split: str, size: int) -> list[dict]:
+def build_rows(split: str, size: int, data_source: str) -> list[dict]:
     row = {
-        "data_source": "qwen_image_flowgrpo",
+        "data_source": data_source,
         "prompt": [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": USER_PROMPT},
@@ -51,7 +51,7 @@ def build_rows(split: str, size: int) -> list[dict]:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Generate repeated single-sample Qwen-Image FlowGRPO data")
+    parser = argparse.ArgumentParser(description="Generate repeated single-sample Qwen-Image L3 data")
     parser.add_argument(
         "--local_save_dir",
         default=os.path.expanduser("~/data/qwen_image_flowgrpo"),
@@ -59,14 +59,19 @@ def main() -> None:
     )
     parser.add_argument("--train_size", type=int, default=16, help="Repeated train rows")
     parser.add_argument("--val_size", type=int, default=4, help="Repeated validation rows")
+    parser.add_argument(
+        "--data_source",
+        default="qwen_image_flowgrpo",
+        help="Value stored in the data_source column",
+    )
     args = parser.parse_args()
 
     os.makedirs(args.local_save_dir, exist_ok=True)
     train_path = os.path.join(args.local_save_dir, "train.parquet")
     val_path = os.path.join(args.local_save_dir, "test.parquet")
 
-    pd.DataFrame(build_rows("train", args.train_size)).to_parquet(train_path)
-    pd.DataFrame(build_rows("test", args.val_size)).to_parquet(val_path)
+    pd.DataFrame(build_rows("train", args.train_size, args.data_source)).to_parquet(train_path)
+    pd.DataFrame(build_rows("test", args.val_size, args.data_source)).to_parquet(val_path)
 
     print(f"Wrote repeated single-sample train data to {train_path}")
     print(f"Wrote repeated single-sample validation data to {val_path}")
