@@ -14,6 +14,7 @@
 import asyncio
 from typing import Any, Optional
 
+import ray
 from pydantic import BaseModel, ConfigDict, Field
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.tracking import RLInsightLogger
@@ -24,6 +25,7 @@ from verl.workers.rollout.utils import update_prometheus_config
 from verl_omni.pipelines.rollout_media import MediaArtifact
 from verl_omni.workers.config import DiffusionRolloutConfig
 from verl_omni.workers.rollout.base import get_rollout_sequence_parallel_size, get_rollout_world_size
+from verl_omni.workers.rollout.diffusion_llm_server import PausableRequestLoadBalancer
 
 
 class DiffusionOutput(BaseModel):
@@ -51,6 +53,8 @@ class DiffusionLLMServerManager(LLMServerManager):
     """Include diffusion SP ranks without changing verl's rollout lifecycle."""
 
     async def _initialize_llm_servers(self, start_rank: int | None = None):
+        if self._load_balancer_cls is None and not getattr(self.rollout_config, "router_config_path", None):
+            self._load_balancer_cls = PausableRequestLoadBalancer
         if get_rollout_sequence_parallel_size(self.rollout_config) == 1:
             return await super()._initialize_llm_servers(start_rank=start_rank)
 
@@ -91,6 +95,16 @@ class DiffusionLLMServerManager(LLMServerManager):
                     config.name,
                     labels=[{"replica": replica.replica_rank} for replica in self.rollout_replicas],
                 )
+
+    async def _init_global_load_balancer(self) -> None:
+        """Preserve configured determinism for the default pausable router."""
+        if self._load_balancer_cls is not PausableRequestLoadBalancer:
+            return await super()._init_global_load_balancer()
+        # The pinned factory does not forward full_determinism to subclasses.
+        self.global_load_balancer = ray.remote(PausableRequestLoadBalancer).remote(
+            servers=dict(zip(self.server_addresses, self.server_handles, strict=True)),
+            full_determinism=self.rollout_config.get("full_determinism", False),
+        )
 
 
 def _load_vllm_omni():

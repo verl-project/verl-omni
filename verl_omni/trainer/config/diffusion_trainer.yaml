@@ -276,13 +276,14 @@ trainer:
       # Optional maximum trajectory staleness in model versions; null disables this rule.
       max_staleness: null
 
-    # Trainer mode: "sync", "separate_async".
+    # Trainer mode: "sync", "colocate_async", "separate_async".
     trainer_mode: sync
 
     # Synchronous diffusion trainer (colocated rollout, no partial rollout).
     sync: {}
 
-    # Asynchronous diffusion trainer with colocated trainer and rollout (not implemented yet).
+    # Asynchronous FlowGRPO with colocated actor/rollout and whole-sample retries.
+    # One weight sync per trainer step; actor PPO mini-batches are unchanged.
     colocate_async:
 
       # Number of warmup batches to add before the training loop starts.

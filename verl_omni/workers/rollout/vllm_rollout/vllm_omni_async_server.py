@@ -16,6 +16,7 @@ import asyncio
 import json
 import logging
 import os
+import uuid
 from dataclasses import asdict
 from typing import Any, Optional
 
@@ -37,6 +38,7 @@ from verl.workers.rollout.vllm_rollout.utils import (
 from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMHttpServer, vLLMReplica
 from vllm.entrypoints.openai.api_server import build_app
 from vllm_omni.engine.arg_utils import OmniEngineArgs, OrchestratorArgs, orchestrator_field_names
+from vllm_omni.engine.messages import CollectiveRPCRequestMessage, CollectiveRPCResultMessage
 from vllm_omni.entrypoints import AsyncOmni
 from vllm_omni.entrypoints.openai.api_server import omni_init_app_state
 from vllm_omni.lora.request import LoRARequest
@@ -45,6 +47,7 @@ from vllm_omni.utils.tracking_parser import TrackingArgumentParser
 from verl_omni.utils.net_utils import get_non_ephemeral_free_port
 from verl_omni.workers.config import DiffusionModelConfig, DiffusionRolloutConfig, OmniModelConfig
 from verl_omni.workers.rollout.base import get_rollout_sequence_parallel_size, get_rollout_world_size
+from verl_omni.workers.rollout.diffusion_llm_server import DEFAULT_REQUEST_TIMEOUT_S
 from verl_omni.workers.rollout.replica import DiffusionOutput
 from verl_omni.workers.rollout.vllm_rollout.vllm_omni_ar_strategy import ARStrategy
 from verl_omni.workers.rollout.vllm_rollout.vllm_omni_diffusion_strategy import DiffusionStrategy
@@ -54,8 +57,43 @@ logger.setLevel(logging.INFO)
 
 
 def _abort_ack_timeout_s() -> float:
-    """RPC timeout for engine abort acknowledgements; env-overridable for tests."""
+    """Timeout for rollout abort and scheduler RPC acknowledgements."""
     return float(os.getenv("VERL_OMNI_ABORT_ACK_TIMEOUT_S", "120"))
+
+
+class _RolloutAsyncOmni(AsyncOmni):
+    """Bound scheduler RPCs without duplicating upstream pause/resume logic."""
+
+    async def collective_rpc(self, method, timeout=None, args=(), kwargs=None, stage_ids=None):
+        """Use bounded, nonblocking transport for scheduler control."""
+        if method not in {"pause_scheduler", "resume_scheduler"}:
+            return await super().collective_rpc(method, timeout, args, kwargs, stage_ids)
+        if timeout is None:
+            timeout = _abort_ack_timeout_s()
+        rpc_id = uuid.uuid4().hex
+        message = CollectiveRPCRequestMessage(
+            rpc_id=rpc_id, method=method, timeout=timeout, args=tuple(args), kwargs=kwargs or {}, stage_ids=stage_ids
+        )
+        # Nonblocking submission also bounds failure when the request queue is full.
+        rpc = asyncio.create_task(
+            asyncio.to_thread(
+                self.engine.rpc_client.execute,
+                ("collective", rpc_id),
+                message,
+                timeout=timeout,
+                timeout_message=f"{method} timed out after {timeout} seconds",
+                block_on_submit=False,
+            )
+        )
+        try:
+            result = await asyncio.shield(rpc)
+        except asyncio.CancelledError:
+            # Settle the bounded transport waiter before propagating cancellation.
+            await asyncio.gather(rpc, return_exceptions=True)
+            raise
+        if not isinstance(result, CollectiveRPCResultMessage):
+            raise RuntimeError(f"unexpected collective RPC result type: {type(result).__name__}")
+        return list(result.results)
 
 
 # Sentinel: ``None`` is a valid cached value (LoRA not loaded).
@@ -339,7 +377,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
                 attn_backend,
             )
 
-        engine_client = AsyncOmni(**engine_args)
+        engine_client = _RolloutAsyncOmni(**engine_args)
         app = build_app(args)
         await omni_init_app_state(engine_client, app.state, args)
 
@@ -445,7 +483,10 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         ):
             acks = await self.engine.wake_up(tags=resolved_tags)
             self._validate_acks("wake_up", acks)
-            await self.engine.resume_generation()
+            # A sync may wake both pools before installing the adapter.
+            # Explicit pauses remain held until the checkpoint owner resumes.
+            if not await self.engine.is_sleeping() and not self._submission_paused:
+                await self.engine.resume_generation()
             self._invalidate_lora_request_cache()
 
     async def set_global_steps(self, global_steps: int):
@@ -493,12 +534,8 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         with RLInsightLogger.trace_state("vllm_resume_kv_cache", state_lane_id=f"replica_{self.replica_rank}"):
             acks = await self.engine.wake_up(tags=["kv_cache"])
             self._validate_acks("wake_up", acks)
-            await self.engine.resume_generation()
+            await self.resume_generation()
             self._invalidate_lora_request_cache()
-
-    async def resume_generation(self):
-        if self.node_rank == 0:
-            await self.engine.resume_generation()
 
     def _validate_acks(self, method: str, acks: Any) -> None:
         """Fail closed on any non-success sleep/wake handshake."""
@@ -530,6 +567,11 @@ class vLLMOmniHttpServer(vLLMHttpServer):
     ) -> DiffusionOutput | TokenOutput:
         # session_id (cross-request server affinity in the vLLM path) has no
         # AsyncOmni counterpart; routing stickiness is owned by the load balancer.
+        if self._submission_paused and self._rejecting:
+            return TokenOutput(token_ids=[], stop_reason="aborted", extra_fields={"global_steps": self.global_steps})
+        timeout_s = float(os.getenv("VERL_OMNI_ADMISSION_TIMEOUT_S", str(DEFAULT_REQUEST_TIMEOUT_S)))
+        async with asyncio.timeout(timeout_s):
+            await self._resume_event.wait()
         return await self._generate_strategy.generate(
             prompt_ids=prompt_ids,
             sampling_params=sampling_params,
@@ -599,17 +641,28 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         """Abort all in-flight requests on the AsyncOmni engine.
 
         ``abort_only`` cancels current engine requests and keeps admission open;
-        the other flags shape the pause that otherwise follows. The AsyncOmni
-        engine parks requests that arrive behind its pause (it has no reject
-        knob), so ``reject_request`` only reaches engines that support it.
+        the other flags shape the pause that otherwise follows. The inherited
+        submission gate parks or rejects new calls until explicit resume.
         """
+        if self.node_rank != 0:
+            return {"aborted_count": 0, "request_ids": []}
         engine = self.engine
         if getattr(engine, "output_processor", None) is not None:
             return await super().abort_all_requests(
                 reset_prefix_cache, reject_request=reject_request, abort_only=abort_only
             )
-        if reject_request and not abort_only:
-            logger.warning("AsyncOmni has no admission gate: requests arriving behind the pause park until resume")
+        if not abort_only:
+            self._submission_paused = True
+            self._rejecting = reject_request
+            self._resume_event.clear()
+
+        if not self.config.free_cache_engine and not getattr(self.config, "step_execution", False) and not abort_only:
+            try:
+                await engine.pause_generation(mode="keep", clear_cache=reset_prefix_cache)
+            except BaseException:
+                for internal_id, state in engine.request_states.items():
+                    self._enqueue_abort_output(internal_id, state)
+                raise
 
         # ``engine.abort`` takes EXTERNAL ids; ``request_states`` is keyed by internal.
         in_flight: list[tuple[str, str, Any]] = []
@@ -625,7 +678,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         if abort_only:
             try:
                 await asyncio.wait_for(engine.abort(request_ids), timeout=_abort_ack_timeout_s())
-            except Exception:
+            except BaseException:
                 # Same cleanup as the pause path: synthetic terminals unblock waiting generators.
                 for internal_id, _, state in in_flight:
                     self._enqueue_abort_output(internal_id, state)
@@ -641,7 +694,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             await engine.pause_generation(
                 mode="abort", wait_for_inflight_requests=False, clear_cache=reset_prefix_cache
             )
-        except Exception:
+        except BaseException:
             # If the engine abort RPC fails or times out, upstream has not
             # delivered terminals to waiting generator coroutines. Enqueue
             # synthetic abort outputs so active generators unblock and exit.
@@ -649,6 +702,20 @@ class vLLMOmniHttpServer(vLLMHttpServer):
                 for internal_id, _, state in in_flight:
                     self._enqueue_abort_output(internal_id, state)
             raise
+
+        stragglers = {
+            state.external_request_id: state
+            for state in engine.request_states.values()
+            if state.external_request_id and state.external_request_id not in seen
+        }
+        if stragglers:
+            try:
+                await asyncio.wait_for(engine.abort(list(stragglers)), timeout=_abort_ack_timeout_s())
+            except BaseException:
+                for state in stragglers.values():
+                    self._enqueue_abort_output(state.request_id, state)
+                raise
+            request_ids.extend(stragglers)
 
         logger.info("Aborted %d request(s): %s", len(request_ids), request_ids)
         return {"aborted_count": len(request_ids), "request_ids": request_ids}

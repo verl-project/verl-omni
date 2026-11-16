@@ -19,7 +19,7 @@ delivers tokens; diffusion sleep/wake ACKs are not engine-checked.
 """
 
 import asyncio
-import logging
+import queue
 from types import SimpleNamespace
 
 import pytest
@@ -61,6 +61,7 @@ class _FakeAsyncOmni:
         self.sleep_calls: list[dict] = []
         self.wake_calls: list[dict] = []
         self.resumed = 0
+        self.sleeping_tags = set()
         # Real-shaped handle: the frontend multimodal cache lives on the
         # renderer, so the fake must expose clear_mm_cache_async there.
         self.mm_clears = 0
@@ -85,17 +86,22 @@ class _FakeAsyncOmni:
         self.pause_calls.append(kwargs)
 
     async def sleep(self, stage_ids=None, level=2, mode="abort"):
+        self.sleeping_tags = {"weights", "kv_cache"}
         self.calls.append("sleep")
         self.sleep_calls.append({"stage_ids": stage_ids, "level": level, "mode": mode})
         return self.sleep_acks
 
     async def wake_up(self, stage_ids=None, tags=None):
+        self.sleeping_tags.difference_update(tags or {"weights", "kv_cache"})
         self.calls.append("wake_up")
         self.wake_calls.append({"stage_ids": stage_ids, "tags": tags})
         return self.wake_acks
 
     async def resume_generation(self, stage_ids=None):
         self.resumed += 1
+
+    async def is_sleeping(self):
+        return bool(self.sleeping_tags)
 
 
 def _make_server(engine, rollout_mode=RolloutMode.HYBRID, node_rank=0, free_cache_engine=True):
@@ -105,9 +111,13 @@ def _make_server(engine, rollout_mode=RolloutMode.HYBRID, node_rank=0, free_cach
     server.engine = engine
     server.node_rank = node_rank
     server.replica_rank = 0
+    server.global_steps = 0
     server.rollout_mode = rollout_mode
-    server.config = SimpleNamespace(free_cache_engine=free_cache_engine)
+    server.config = SimpleNamespace(free_cache_engine=free_cache_engine, step_execution=False)
     server._lora_request_cache = None  # a valid cached value
+    server._submission_paused = server._rejecting = False
+    server._resume_event = asyncio.Event()
+    server._resume_event.set()
     return server
 
 
@@ -147,11 +157,161 @@ async def test_abort_with_no_in_flight_requests_still_pauses():
     assert result == {"aborted_count": 0, "request_ids": []}
 
 
-async def test_abort_only_aborts_without_pausing():
+@pytest.mark.parametrize("failure", [None, "abort", "cancel"])
+async def test_stragglers_are_aborted_after_pause_and_failures_hold_admission(failure):
+    late = _FakeRequestState("late-internal", "late-external")
+
+    class Engine(_FakeAsyncOmni):
+        async def pause_generation(self, **kwargs):
+            await super().pause_generation(**kwargs)
+            self.request_states[late.request_id] = late
+
+        async def abort(self, request_ids):
+            if request_ids:
+                if failure == "abort":
+                    raise RuntimeError("straggler failed")
+                if failure == "cancel":
+                    raise asyncio.CancelledError
+            return await super().abort(request_ids)
+
+    engine = Engine()
+    server = _make_server(engine)
+    if failure:
+        with pytest.raises(RuntimeError if failure == "abort" else asyncio.CancelledError):
+            await server.abort_all_requests()
+    else:
+        result = await server.abort_all_requests()
+        assert result["request_ids"] == ["late-external"]
+    assert not server._resume_event.is_set()
+    assert late.queue.get_nowait().finished
+
+
+async def test_resident_rollout_pauses_until_explicit_resume_without_sleeping():
+    """Quiescence includes late admissions before enumerating resident rollout aborts."""
+
+    class LateAdmissionEngine(_FakeAsyncOmni):
+        async def pause_generation(self, **kwargs):
+            await super().pause_generation(**kwargs)
+            if kwargs["mode"] == "keep":
+                self.request_states["late"] = _FakeRequestState("late", "late-external")
+
+    engine = LateAdmissionEngine()
+    server = _make_server(engine, free_cache_engine=False)
+
+    await server.abort_all_requests()
+    await server.sleep()
+    assert engine.calls == ["pause", "abort", "pause"]
+    assert engine.pause_calls[0]["mode"] == "keep"
+    assert engine.abort_calls == [["late-external"]]
+    assert engine.sleep_calls == []
+    assert engine.resumed == 0
+
+    await server.resume_generation()
+    assert engine.resumed == 1
+
+
+@pytest.mark.parametrize("step_execution", [False, True])
+async def test_resident_standalone_pause_uses_supported_engine_mode(step_execution):
+    from vllm_omni.diffusion.diffusion_engine import DiffusionEngine, DiffusionExecutionMode
+    from vllm_omni.entrypoints import AsyncOmni
+
+    execution_mode = DiffusionExecutionMode.STEP_BATCH if step_execution else DiffusionExecutionMode.REQUEST_BATCH
+
+    async def engine_rpc(method, *, stage_ids, kwargs):
+        DiffusionEngine._check_pause_request(SimpleNamespace(execution_mode=execution_mode), kwargs)
+
+    frontend = SimpleNamespace(
+        _pause_cond=asyncio.Condition(),
+        _paused_stage_ids=set(),
+        _name="lifecycle-test",
+        _split_stage_ids_by_type=lambda stage_ids: ([], [0]),
+        _cancel_pending_submits=lambda: None,
+        _engine_core_rpc=engine_rpc,
+    )
+    engine = _FakeAsyncOmni()
+
+    async def pause(**kwargs):
+        await AsyncOmni.pause_generation(frontend, **kwargs)
+        engine.pause_calls.append(kwargs)
+
+    engine.pause_generation = pause
+    server = _make_server(engine, rollout_mode=RolloutMode.STANDALONE, free_cache_engine=False)
+    server.config.step_execution = step_execution
+    await server.abort_all_requests()
+    assert [call["mode"] for call in engine.pause_calls] == (["abort"] if step_execution else ["keep", "abort"])
+    assert frontend._paused and server._submission_paused
+
+
+@pytest.mark.parametrize(
+    "phase, outcome",
+    [("pause", "success"), ("pause", "timeout"), ("pause", "cancel"), ("pause", "full"), ("resume", "timeout")],
+)
+async def test_scheduler_deadline_settles_real_rpc_waiter(monkeypatch, phase, outcome):
+    from vllm_omni.engine.messages import CollectiveRPCResultMessage
+    from vllm_omni.engine.omni_engine_base import OmniEngineBase
+    from vllm_omni.engine.rpc_result_router import CorrelatedRpcClient
+
+    monkeypatch.setenv("VERL_OMNI_ABORT_ACK_TIMEOUT_S", "0.05")
+    requests, results = queue.Queue(maxsize=1), queue.Queue()
+    if outcome == "full":
+        requests.put(object())
+    transport = CorrelatedRpcClient(requests, results)
+    engine = object.__new__(OmniEngineBase)
+    engine._correlated_rpc_client = transport
+    frontend = object.__new__(server_module._RolloutAsyncOmni)
+    frontend.engine = engine
+    frontend._pause_cond = asyncio.Condition()
+    frontend._paused_stage_ids = {0} if phase == "resume" else set()
+    frontend._split_stage_ids_by_type = lambda stage_ids: ([], [0])
+    frontend._cancel_pending_submits = lambda: None
+    state = _FakeRequestState("internal", "external")
+    frontend.request_states = {state.request_id: state}
+
+    async def abort(request_ids):
+        pass
+
+    frontend.abort = abort
+    server = _make_server(frontend, free_cache_engine=False)
+    server._submission_paused = True
+    server._resume_event.clear()
+    task = asyncio.create_task(server.abort_all_requests() if phase == "pause" else server.resume_generation())
+    try:
+        if outcome != "full":
+            message = await asyncio.to_thread(requests.get, True, 2)
+            assert message.timeout == 0.05
+            if outcome == "success":
+                results.put(
+                    CollectiveRPCResultMessage(
+                        rpc_id=message.rpc_id, method=message.method, stage_ids=message.stage_ids, results=[None]
+                    )
+                )
+            elif outcome == "cancel":
+                task.cancel()
+        if outcome == "success":
+            await asyncio.wait_for(asyncio.shield(task), 2)
+            assert frontend._paused
+        else:
+            error = {"full": queue.Full, "cancel": asyncio.CancelledError, "timeout": TimeoutError}[outcome]
+            with pytest.raises(error):
+                await asyncio.wait_for(asyncio.shield(task), 2)
+            if phase == "pause":
+                assert state.queue.get_nowait().finished
+        assert not transport._router._pending
+        assert server._submission_paused and not server._resume_event.is_set()
+    finally:
+        if outcome == "full":
+            requests.get_nowait()
+        transport.close()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.parametrize("free_cache", [False, True])
+async def test_abort_only_aborts_without_pausing(free_cache):
     states = {"ext-1-abc": _FakeRequestState("ext-1-abc", "ext-1")}
     engine = _FakeAsyncOmni(states=states)
     server = _make_server(engine)
 
+    server.config.free_cache_engine = free_cache
     result = await server.abort_all_requests(abort_only=True)
 
     # abort_only cancels current engine requests and keeps admission open: no pause.
@@ -178,17 +338,30 @@ async def test_abort_only_failure_unblocks_generators_without_pausing():
         assert terminal.engine_outputs.outputs[0].finish_reason == "abort"
 
 
-async def test_reject_request_is_accepted_and_still_pauses(caplog):
+async def test_reject_request_aborts_late_calls_without_entering_the_engine():
     states = {"ext-1-abc": _FakeRequestState("ext-1-abc", "ext-1")}
     engine = _FakeAsyncOmni(states=states)
     server = _make_server(engine)
 
-    with caplog.at_level(logging.WARNING, logger=server_module.logger.name):
-        await server.abort_all_requests(reject_request=True)
-
-    # The AsyncOmni engine has no reject knob; arrivals behind the pause park.
+    await server.abort_all_requests(reject_request=True)
     assert engine.calls == ["abort", "pause"]
-    assert "park until resume" in caplog.text
+    output = await server.generate(prompt_ids=[1], sampling_params={}, request_id="late")
+    assert output.stop_reason == "aborted"
+    assert not server._resume_event.is_set()
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+async def test_parked_admission_is_bounded_and_cancellable(monkeypatch, cancel):
+    monkeypatch.setenv("VERL_OMNI_ADMISSION_TIMEOUT_S", "0.02")
+    server = _make_server(_FakeAsyncOmni())
+    await server.abort_all_requests()
+    request = asyncio.create_task(server.generate(prompt_ids=[1], sampling_params={}, request_id="late"))
+    if cancel:
+        await asyncio.sleep(0)
+        request.cancel()
+    with pytest.raises(asyncio.CancelledError if cancel else TimeoutError):
+        await request
+    assert not server._resume_event.is_set()
 
 
 async def test_generate_accepts_session_id_without_forwarding():
@@ -283,6 +456,7 @@ async def test_lifecycle_guards_skip_standalone_and_non_driver_ranks():
     await server.wake_up()
     await server.release_kv_cache()
     await server.resume_kv_cache()
+    assert await server.abort_all_requests() == {"aborted_count": 0, "request_ids": []}
     assert engine.calls == []
 
 
@@ -557,6 +731,17 @@ async def test_wake_up_resumes_engine_admission():
     await server.wake_up()
 
     assert engine.wake_calls == [{"stage_ids": None, "tags": ["kv_cache", "weights"]}]
+    assert engine.resumed == 1
+
+
+async def test_actor_weight_sync_keeps_admission_closed_until_full_wake():
+    engine = _FakeAsyncOmni()
+    server = _make_server(engine)
+    await server.sleep()
+    await server.wake_up(tags=["weights"])
+    assert engine.resumed == 0
+    assert engine.sleeping_tags == {"kv_cache"}
+    await server.wake_up(tags=["kv_cache"])
     assert engine.resumed == 1
 
 

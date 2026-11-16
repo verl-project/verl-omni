@@ -32,6 +32,7 @@ from verl_omni.workers.config.reward import (
     get_reward_model_entries,
     has_fsdp_reward_models,
     parse_reward_model_config,
+    reward_determinism_env,
     validate_reward_model_terms,
 )
 
@@ -74,23 +75,24 @@ def run_diffusion_v1(config, task_runner_class=None) -> None:
     # TRANSFER_QUEUE_ENABLE is exported to every worker through the runtime env.
     config.transfer_queue.enable = True
     enable_rl_insight(config)
+    os.environ.update(reward_determinism_env(config))
 
+    ray_init_kwargs = config.ray_kwargs.get("ray_init", {})
+    # Merge into a fresh config: user-provided env_vars may be in struct mode.
+    runtime_env = OmegaConf.merge(
+        get_ppo_ray_runtime_env(),
+        ray_init_kwargs.get("runtime_env", {}),
+        {"env_vars": {"TRANSFER_QUEUE_ENABLE": "1"}},
+    )
     if not ray.is_initialized():
-        default_runtime_env = get_ppo_ray_runtime_env()
-        ray_init_kwargs = config.ray_kwargs.get("ray_init", {})
-        runtime_env_kwargs = ray_init_kwargs.get("runtime_env", {})
-
-        # Merge into a fresh config: user-provided `env_vars` arrive in struct mode and
-        # reject new keys, so writing into them would crash any override such as OMP_NUM_THREADS.
-        runtime_env = OmegaConf.merge(default_runtime_env, runtime_env_kwargs)
-        if config.transfer_queue.enable:
-            runtime_env = OmegaConf.merge(runtime_env, {"env_vars": {"TRANSFER_QUEUE_ENABLE": "1"}})
         ray_init_kwargs = OmegaConf.create({**ray_init_kwargs, "runtime_env": runtime_env})
         print(f"ray init kwargs: {ray_init_kwargs}")
         ray.init(**OmegaConf.to_container(ray_init_kwargs))
 
-    if task_runner_class is None:
-        task_runner_class = DiffusionTaskRunnerV1.options(num_cpus=1)
+    runner_options = {"num_cpus": 1} if task_runner_class is None else {}
+    task_runner_class = task_runner_class or DiffusionTaskRunnerV1
+    # An existing Ray job cannot inherit later changes to the driver's environment.
+    runner_runtime_env = {"env_vars": OmegaConf.to_container(runtime_env.env_vars)}
 
     if (
         is_cuda_available
@@ -104,9 +106,8 @@ def run_diffusion_v1(config, task_runner_class=None) -> None:
         from verl_omni.trainer.main_diffusion import _resolve_controller_nsight_options
 
         nsight_options = _resolve_controller_nsight_options(config)
-        runner = task_runner_class.options(runtime_env={"nsight": nsight_options}).remote()
-    else:
-        runner = task_runner_class.remote()
+        runner_runtime_env["nsight"] = nsight_options
+    runner = task_runner_class.options(runtime_env=runner_runtime_env, **runner_options).remote()
     ray.get(runner.run.remote(config))
 
     timeline_json_file = config.ray_kwargs.get("timeline_json_file", None)
@@ -114,9 +115,14 @@ def run_diffusion_v1(config, task_runner_class=None) -> None:
         ray.timeline(filename=timeline_json_file)
 
 
-def finish_training_resources(trainer, config, close_queue, primary_error=None):
+def finish_training_resources(trainer, config, close_queue, primary_error=None, close_agent_loops=None):
     """Close the opted-in FSDP deployment and queue on every fit/init exit."""
     errors = [] if primary_error is None else [primary_error]
+    if close_agent_loops is not None:
+        try:
+            close_agent_loops()
+        except BaseException as exc:
+            errors.append(exc)
     if has_fsdp_reward_models(config) and trainer is not None:
         manager = getattr(trainer, "reward_loop_manager", None)
         if manager is not None:
@@ -166,6 +172,13 @@ class DiffusionTaskRunnerV1:
                 reward_loop_worker_handles=self.trainer.get_reward_handles(),
             )
 
+    def _close_agent_loops(self):
+        if self.agent_loop_manager is None or self.config.actor_rollout_ref.rollout.agent.get(
+            "agent_loop_manager_class"
+        ):
+            return
+        ray.get([worker.close.remote() for worker in self.agent_loop_manager.agent_loop_workers], timeout=30)
+
     def run(self, config: DictConfig):
         """Run the v1 diffusion training process."""
         import transfer_queue as tq
@@ -190,7 +203,7 @@ class DiffusionTaskRunnerV1:
         except BaseException as exc:
             primary_error = exc
         finally:
-            finish_training_resources(self.trainer, config, tq.close, primary_error)
+            finish_training_resources(self.trainer, config, tq.close, primary_error, self._close_agent_loops)
 
 
 @hydra.main(config_path="./config", config_name="diffusion_trainer", version_base=None)

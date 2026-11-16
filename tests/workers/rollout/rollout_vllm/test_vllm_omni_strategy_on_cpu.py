@@ -68,6 +68,9 @@ def test_server_selects_one_generation_strategy(monkeypatch, output_mode, expect
 @pytest.mark.asyncio
 async def test_server_generate_delegates_without_changing_rpc_arguments():
     server = object.__new__(server_module.vLLMOmniHttpServer)
+    server._resume_event = asyncio.Event()
+    server._resume_event.set()
+    server._submission_paused = server._rejecting = False
     server._generate_strategy = SimpleNamespace(generate=AsyncMock(return_value="result"))
     prompt_mask = torch.tensor([True, True])
 

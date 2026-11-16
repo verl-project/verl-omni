@@ -193,6 +193,7 @@ async def test_sp_one_manager_delegates(monkeypatch):
     original = AsyncMock()
     monkeypatch.setattr(LLMServerManager, "_initialize_llm_servers", original)
     manager = object.__new__(DiffusionLLMServerManager)
+    manager._load_balancer_cls = None
     manager.rollout_config = DiffusionRolloutConfig()
     await manager._initialize_llm_servers(start_rank=3)
     original.assert_awaited_once_with(start_rank=3)
@@ -438,3 +439,32 @@ def test_deploy_config_marks_only_opted_in_stages_with_expert_parallel(monkeypat
 def test_deploy_config_omits_expert_parallel_by_default(monkeypatch):
     deploy = _run_ar_write_deploy_config(monkeypatch, expert_parallel_stage_ids=frozenset())
     assert all("enable_expert_parallel" not in stage for stage in deploy["stages"])
+
+
+@pytest.mark.parametrize("full_determinism", [False, True])
+async def test_manager_preserves_configured_routing_behavior(monkeypatch, full_determinism):
+    from verl.workers.rollout import router as router_module
+    from verl.workers.rollout.llm_server import LLMServerManager
+
+    from verl_omni.workers.rollout.replica import DiffusionLLMServerManager
+
+    manager = object.__new__(DiffusionLLMServerManager)
+    manager.rollout_config = OmegaConf.create({"full_determinism": full_determinism})
+    manager._load_balancer_cls = None
+    monkeypatch.setattr(LLMServerManager, "_initialize_llm_servers", AsyncMock())
+    await manager._initialize_llm_servers()
+    manager.server_addresses = ["first", "second"]
+    manager.server_handles = ["first handle", "second handle"]
+    monkeypatch.setattr(router_module.ray, "remote", lambda cls: SimpleNamespace(remote=lambda **kwargs: cls(**kwargs)))
+    request_id = "new request"
+    hashed = manager.server_addresses[hash(request_id) % 2]
+    other = manager.server_addresses[1 - manager.server_addresses.index(hashed)]
+    choose = Mock(return_value=other)
+    monkeypatch.setattr(router_module.random, "choice", choose)
+    await manager._init_global_load_balancer()
+    selected, _ = manager.global_load_balancer.acquire_server(request_id)
+    assert selected == (hashed if full_determinism else other)
+    if full_determinism:
+        choose.assert_not_called()
+    else:
+        choose.assert_called_once()
