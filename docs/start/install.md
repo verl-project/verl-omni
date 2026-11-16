@@ -104,13 +104,13 @@ The pinned stack is torch 2.14.0+cu130, and no prebuilt flash-attn wheel matches
 
 ```bash
 uv pip freeze --exclude-editable > /tmp/verl-omni-fa2-constraints.txt
-uv pip install -c /tmp/verl-omni-fa2-constraints.txt ninja packaging
+uv pip install -c /tmp/verl-omni-fa2-constraints.txt ninja packaging wheel
 MAX_JOBS=4 FLASH_ATTENTION_FORCE_BUILD=TRUE \
 uv pip install -c /tmp/verl-omni-fa2-constraints.txt \
-    --no-build-isolation --no-binary flash-attn --reinstall-package flash-attn flash-attn
+    --no-build-isolation --no-binary flash-attn --reinstall-package flash-attn 'flash-attn>=2.8.3'
 ```
 
-A CUDA 13 development toolkit (`nvcc` reachable via `CUDA_HOME`) is required. The constraints file keeps the added packages from moving the pinned torch/vLLM stack — an incompatibility should fail resolution rather than change torch — and `MAX_JOBS` caps compiler parallelism so the build fits in host RAM. Verified on H800 (sm90) with torch 2.14.0+cu130 and flash-attn 2.8.3.post2; check the extension loads:
+A CUDA 13 development toolkit (`nvcc` reachable via `CUDA_HOME`) is required. The constraints file keeps the added packages from moving the pinned torch/vLLM stack — an incompatibility should fail resolution rather than change torch. `MAX_JOBS` caps compiler parallelism; each compilation job peaks around 9 GB of RAM, so lower it on smaller hosts. Check the extension loads:
 
 ```bash
 python -c "from flash_attn import flash_attn_func, flash_attn_varlen_func; print('flash-attn OK')"
