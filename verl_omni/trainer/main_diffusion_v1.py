@@ -12,20 +12,28 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import logging
 import os
 from pprint import pprint
 
 import hydra
 import ray
+import torch
 from omegaconf import DictConfig, OmegaConf
-from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
+from verl.trainer.constants_ppo import available_physical_cores, get_ppo_ray_runtime_env
 from verl.utils.device import auto_set_device, is_cuda_available
 from verl.utils.import_utils import load_class_from_fqn
 
 from verl_omni.utils.config import validate_config
 from verl_omni.utils.diffusion_attention import validate_attention_consistency
 from verl_omni.utils.rl_insight import enable_rl_insight
+from verl_omni.workers.config.reward import (
+    get_reward_model_entries,
+    has_fsdp_reward_models,
+    parse_reward_model_config,
+    validate_reward_model_terms,
+)
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
@@ -106,12 +114,39 @@ def run_diffusion_v1(config, task_runner_class=None) -> None:
         ray.timeline(filename=timeline_json_file)
 
 
+def finish_training_resources(trainer, config, close_queue, primary_error=None):
+    """Close the opted-in FSDP deployment and queue on every fit/init exit."""
+    errors = [] if primary_error is None else [primary_error]
+    if has_fsdp_reward_models(config) and trainer is not None:
+        manager = getattr(trainer, "reward_loop_manager", None)
+        if manager is not None:
+            try:
+                asyncio.run(manager.multi_reward_model_manager.close_native_models())
+            except BaseException as exc:
+                errors.append(exc)
+    try:
+        close_queue()
+    except BaseException as exc:
+        errors.append(exc)
+    if len(errors) == 1:
+        raise errors[0]
+    if errors:
+        raise BaseExceptionGroup("Training and resource cleanup failed", errors)
+
+
 @ray.remote
 class DiffusionTaskRunnerV1:
     def __init__(self):
         self.config = None
         self.trainer = None
         self.agent_loop_manager = None
+
+        # Mirror verl's TaskRunnerV1: the job-wide OMP default is gone from the
+        # runtime env (#8592 scopes it to the offload-carrying training workers),
+        # so the runner sets its own thread count for the dataloader-driving process.
+        value = str(available_physical_cores())
+        os.environ["OMP_NUM_THREADS"] = value
+        torch.set_num_threads(int(value))
 
     def init_agent_loop_manager(self):
         from verl_omni.agent_loop import create_diffusion_agent_loop_manager
@@ -145,14 +180,17 @@ class DiffusionTaskRunnerV1:
 
         # initialize transfer queue inside the Ray task runner
         tq.init(config.transfer_queue)
+        primary_error = None
         try:
             trainer_cls = get_diffusion_trainer_cls(config.trainer.v1.trainer_mode)
             self.trainer = trainer_cls(config=config)
             self.trainer.init()
             self.init_agent_loop_manager()
             self.trainer.fit(self.agent_loop_manager)
+        except BaseException as exc:
+            primary_error = exc
         finally:
-            tq.close()
+            finish_training_resources(self.trainer, config, tq.close, primary_error)
 
 
 @hydra.main(config_path="./config", config_name="diffusion_trainer", version_base=None)
@@ -167,6 +205,18 @@ def main(config):
     OmegaConf.resolve(config)
     validate_config(config)
     validate_attention_consistency(config)
+
+    if has_fsdp_reward_models(config):
+        from verl_omni.reward_loop.native_fsdp import validate_executor_config
+
+        validate_reward_model_terms(config)
+        if not is_cuda_available:
+            raise ValueError("Native FSDP requires a supported GPU runtime")
+        for name, entry in get_reward_model_entries(config).items():
+            model = parse_reward_model_config(name, entry)
+            validate_executor_config(model.executor)
+            if max(model.placement.bundle_indices) >= config.reward.reward_model.n_gpus_per_node:
+                raise ValueError("Native FSDP bundle index exceeds the dedicated reward pool")
 
     if config.trainer.get("use_v1", False):
         run_diffusion_v1(config)

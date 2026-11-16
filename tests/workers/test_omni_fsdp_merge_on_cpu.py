@@ -57,7 +57,6 @@ def test_merged_weights_materialized_before_actor_restore(monkeypatch):
     engine.engine_config = SimpleNamespace(mixed_precision=None)
     engine._is_offload_param = False
     engine._uses_fsdp2_cpu_offload_policy = True
-    engine._qat_enabled = False
 
     params, peft_config = engine.get_per_tensor_param(base_sync_done=True)
     merged_weights = dict(params)
