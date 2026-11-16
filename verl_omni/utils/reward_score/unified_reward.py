@@ -173,6 +173,7 @@ async def compute_score_unified_reward(
     model_name: Optional[str] = None,
     *,
     user_prompt: Optional[str] = None,
+    on_malformed: str = "raise",
 ):
     """Compute a human-preference score via UnifiedReward 2.0.
 
@@ -182,12 +183,19 @@ async def compute_score_unified_reward(
 
     ``user_prompt`` overrides the default prompt. A ``pkg://`` spec names a
     builder called with ``caption``; literal text replaces ``{caption}``.
+
+    An entirely malformed reply raises by default.
+    When ``on_malformed=zero``, keep the same result keys and
+    a score of ``0.0`` instead of raising.
     """
     from verl.utils.ray_utils import get_event_loop
 
     from verl_omni.utils.reward_score.reward_utils import resolve_prompt_builder
 
     del data_source, reward_model_tokenizer
+
+    if on_malformed not in {"raise", "zero"}:
+        raise ValueError(f"on_malformed must be 'raise' or 'zero', got {on_malformed!r}")
 
     extra_info = extra_info or {}
     caption = extra_info.get("prompt") or extra_info.get("raw_prompt") or ground_truth or ""
@@ -222,20 +230,23 @@ async def compute_score_unified_reward(
 
     valid_results = [result for result in frame_results if result is not None]
     malformed_frames = len(frame_results) - len(valid_results)
-    # Always return this same schema. A raise is recorded by MultiVisualRewardManager
-    # as ``reward/dit/errors`` and omits these keys, so workers that saw a bad reply
-    # cannot be concatenated with workers that did not.
     if not valid_results:
-        logger.warning(
-            "UnifiedReward returned malformed output for every frame, using score 0.0; expected all three labeled axes "
+        message = (
+            "UnifiedReward returned malformed output for every frame; expected all three labeled axes "
             "(Alignment, Coherence, Style) with scores in [1, 5]."
         )
-        return {
-            "score": 0.0,
-            "raw_score": 0.0,
-            "response": "",
-            "malformed_frames": malformed_frames,
-        }
+        # When ``on_malformed=zero``, opts into a stable zero schema.
+        # A raise becomes reward/<key>/errors
+        # and drops these keys, so samples cannot be concatenated.
+        if on_malformed == "zero":
+            logger.warning("%s Using score 0.0.", message)
+            return {
+                "score": 0.0,
+                "raw_score": 0.0,
+                "response": "",
+                "malformed_frames": malformed_frames,
+            }
+        raise ValueError(message)
 
     normalized_scores = [result[0] for result in valid_results]
     raw_scores = [result[1] for result in valid_results]

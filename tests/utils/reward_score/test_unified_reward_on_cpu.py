@@ -152,9 +152,9 @@ class _Completion:
         self.choices = [_Choice(content)]
 
 
-async def _score_with_response(monkeypatch, content: str) -> dict:
-    async def fake_chat(**kwargs):
-        del kwargs
+async def _score_with_response(monkeypatch, content: str, **kwargs) -> dict:
+    async def fake_chat(**chat_kwargs):
+        del chat_kwargs
         return _Completion(content)
 
     monkeypatch.setattr(unified_reward, "_chat_complete", fake_chat)
@@ -165,6 +165,7 @@ async def _score_with_response(monkeypatch, content: str) -> dict:
         ground_truth="a cat",
         extra_info={"media_kind": "image", "prompt": "a cat"},
         reward_router_address="127.0.0.1:1",
+        **kwargs,
     )
 
 
@@ -178,17 +179,18 @@ def test_in_range_scores_normalize_and_keep_the_reward_schema(monkeypatch):
     assert result["score"] == pytest.approx((raw_score - 1.0) / 4.0)
 
 
-def test_out_of_range_alignment_returns_zero_with_the_same_keys(monkeypatch):
-    result = asyncio.run(_score_with_response(monkeypatch, _OUT_OF_RANGE_RESPONSE))
-    assert set(result) == _RESULT_KEYS
-    assert result["score"] == 0.0
-    assert result["raw_score"] == 0.0
-    assert result["response"] == ""
-    assert result["malformed_frames"] == 1
+def test_out_of_range_alignment_raises(monkeypatch):
+    with pytest.raises(ValueError, match="malformed output"):
+        asyncio.run(_score_with_response(monkeypatch, _OUT_OF_RANGE_RESPONSE))
 
 
-def test_unparseable_response_returns_zero_with_the_same_keys(monkeypatch):
-    result = asyncio.run(_score_with_response(monkeypatch, "sorry, no scores"))
+def test_unparseable_response_raises(monkeypatch):
+    with pytest.raises(ValueError, match="malformed output"):
+        asyncio.run(_score_with_response(monkeypatch, "sorry, no scores"))
+
+
+def test_dualgrpo_on_malformed_zero_keeps_the_result_schema(monkeypatch):
+    result = asyncio.run(_score_with_response(monkeypatch, "sorry, no scores", on_malformed="zero"))
     assert set(result) == _RESULT_KEYS
     assert result["score"] == 0.0
     assert result["raw_score"] == 0.0
