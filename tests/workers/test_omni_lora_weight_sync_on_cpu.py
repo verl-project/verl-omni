@@ -162,7 +162,7 @@ def test_lora_fast_path_rejected_rpc_does_not_publish_weight_version(reply, stag
         num_stages=2,
         collective_rpc=AsyncMock(side_effect=lambda **kwargs: reply if kwargs["stage_ids"] == [0] else []),
     )
-    server._generate_strategy = SimpleNamespace(collective_rpc_stage_ids=lambda method: stage_ids)
+    server._generate_strategy = SimpleNamespace(lora_stage_ids=None, collective_rpc_stage_ids=lambda method: stage_ids)
 
     rollout = object.__new__(vLLMOmniServerAdapter)
     rollout.zmq_handle = worker.rollout.zmq_handle
