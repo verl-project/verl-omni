@@ -29,6 +29,7 @@ from verl_omni.pipelines.diffusion_rollout_output import (
     with_visual_artifacts,
 )
 from verl_omni.pipelines.minimax_h3_diffusion_nft.common import (
+    MAX_REF_BLOCKS,
     MiniMaxH3RolloutWeightSyncMixin,
     _PromptTokenOverride,
     serialize_ref_blocks,
@@ -133,6 +134,14 @@ class MiniMaxH3ImageDiffusionNFTPipeline(MiniMaxH3RolloutWeightSyncMixin, MiniMa
             return super().forward(request)
         if sampling.seed is None:
             raise ValueError("MiniMax H3 image rollout requires a per-sample seed (the native default is seed 0).")
+        raw_prompt = request.prompts[0] if request.prompts else None
+        media = raw_prompt.get("multi_modal_data") if isinstance(raw_prompt, dict) else None
+        images = media.get("image") if isinstance(media, dict) else None
+        num_refs = 0 if images is None else len(images) if isinstance(images, list | tuple) else 1
+        if num_refs > MAX_REF_BLOCKS:
+            raise ValueError(
+                f"MiniMax H3 image DiffusionNFT supports at most {MAX_REF_BLOCKS} reference images, got {num_refs}."
+            )
         if sampling.generator_device is None:
             sampling.generator_device = "cpu"
         extra_args = sampling.extra_args or {}

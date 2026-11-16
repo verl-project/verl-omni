@@ -148,11 +148,22 @@ def _cast_replicated_params(module, param_dtype: Optional[torch.dtype]) -> None:
 
 def _check_replicated_params(module) -> None:
     """Fail on every rank at init unless all ranks hold finite, identical parameters."""
+    device = next((param.device for param in module.parameters()), torch.device("cpu"))
+    rank = torch.distributed.get_rank()
+    all_ok = True
     with torch.no_grad():
-        sums = torch.stack([param.detach().float().sum() for param in module.parameters()])
-    reference = sums.clone()
-    torch.distributed.broadcast(reference, src=0)
-    ok = torch.tensor(float(bool(torch.isfinite(sums).all()) and torch.equal(reference, sums)), device=sums.device)
+        for param in module.parameters():
+            data = param.detach()
+            if not bool(torch.isfinite(data).all()):
+                all_ok = False
+            if data.numel() == 0:
+                continue
+            raw = data.contiguous().view(-1).view(torch.uint8)
+            ref = raw.clone() if rank == 0 else torch.empty_like(raw)
+            torch.distributed.broadcast(ref, src=0)
+            if not torch.equal(raw, ref):
+                all_ok = False
+    ok = torch.tensor(float(all_ok), device=device)
     torch.distributed.all_reduce(ok, op=torch.distributed.ReduceOp.MIN)
     if ok.item() == 0:
         raise RuntimeError("replicate_frozen_base: replicated parameters differ across ranks or are non-finite.")

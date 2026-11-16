@@ -174,10 +174,13 @@ class MiniMaxH3PDDHeadLinear(torch.nn.Linear):
 def resolve_pdd_heads_path(model_config: Any) -> Path:
     """Find the fused heads next to the Actor transformer or in the native release root."""
     candidates: list[Path] = []
+    subfolder = getattr(model_config, "transformer_subfolder", None)
     for attr in ("config_path", "local_path", "path"):
         value = getattr(model_config, attr, None)
         if isinstance(value, str | os.PathLike) and str(value):
             root = Path(value)
+            if isinstance(subfolder, str) and subfolder:
+                candidates.append(root / subfolder / PDD_HEADS_FILENAME)
             candidates.extend([root / PDD_HEADS_FILENAME, root.parent / PDD_HEADS_FILENAME])
     for candidate in candidates:
         if candidate.is_file():

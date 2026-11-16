@@ -17,17 +17,18 @@ The recipe weights them ``0.5 * term_pickscore + 0.2 * term_ocr_guarded + 0.3 * 
 
 - ``term_ocr_guarded``: VLM OCR score (``genrm_ocr``) times a layout guard that is 0 when any PP-OCR text box touches
   the frame and ``min(1, OCR_GUARD_AREA_REF / text_area)`` otherwise. Without the guard the policy enlarges the text
-  until it fills or leaves the canvas; the preference terms do not see that. A failed PP-OCR request leaves the
-  guard at 1 (its identity) and reports ``guard_error=1``.
+  until it fills or leaves the canvas; the preference terms do not see that. A failed PP-OCR request raises
+  ``RuntimeError`` so the OCR term contributes 0 and records ``reward/ocr/errors=1`` (or fails the step when
+  ``required=true``) rather than leaving the guard at 1.
 - ``term_pickscore`` / ``term_hpsv2``: PickScore (logit / 26) and HPSv2.1 of the image against the full generation
-  prompt. Both terms share one scorer call per image.
+  prompt. Both terms share one scorer process and cache per reward-loop worker via a ``sys.modules`` state object.
 
 Each reward-loop worker process owns its own PP-OCR pool (``OCR_GUARD_PROCS`` processes) and one scorer process on
 ``PREFERENCE_SCORER_GPU``. A child process that exits or gives no reply within ``REWARD_WORKER_TIMEOUT_S`` is killed,
 its request raises, and a new process takes its place.
 
-The full generation prompt is looked up by ``extra_info["split"]`` / ``extra_info["index"]`` in ``TRAIN_FILES`` and
-``VAL_FILES`` (or taken from ``extra_info["prompt"]`` when the rows carry it).
+The full generation prompt is looked up by ``(extra_info.get("tier"), extra_info["split"], extra_info["index"])`` in
+``TRAIN_FILES`` and ``VAL_FILES`` (or taken from ``extra_info["prompt"]`` when the rows carry it).
 """
 
 import asyncio
@@ -37,6 +38,7 @@ import os
 import sys
 import tempfile
 import uuid
+from types import SimpleNamespace
 
 from verl_omni.utils.reward_score.genrm_ocr import compute_score_ocr
 from verl_omni.utils.reward_score.image_preference_utils import decoded_reward_image
@@ -50,12 +52,40 @@ SCORER_GPU = os.environ.get("PREFERENCE_SCORER_GPU", "3")
 TIMEOUT_S = float(os.environ.get("REWARD_WORKER_TIMEOUT_S", "300"))
 TMP = os.path.join(os.environ.get("OCR_REWARD_TMPDIR") or tempfile.gettempdir(), "ocr_preference_reward")
 
-_guard_pool = None
-_guard_lock = None
-_scorer = None
-_scorer_lock = None
-_prompts = None
-_last = (None, None)
+# load_extern_object executes this file once per registered reward name without caching in sys.modules.
+# Keep process/cache state in a single sys.modules sentinel so term_pickscore and term_hpsv2 share one scorer.
+_STATE_KEY = f"_verl_omni_minimax_h3_ocr_preference_state:{os.path.abspath(__file__)}"
+
+
+def _new_state() -> SimpleNamespace:
+    return SimpleNamespace(
+        loop=None,
+        guard_pool=None,
+        guard_lock=None,
+        scorer=None,
+        scorer_lock=None,
+        prompts=None,
+        last=(None, None),
+    )
+
+
+def _get_state() -> SimpleNamespace:
+    state = sys.modules.get(_STATE_KEY)
+    if state is None:
+        state = _new_state()
+        sys.modules[_STATE_KEY] = state
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    if loop is not None and state.loop is not None and state.loop is not loop:
+        state.guard_pool = None
+        state.guard_lock = None
+        state.scorer = None
+        state.scorer_lock = None
+    if loop is not None:
+        state.loop = loop
+    return state
 
 
 async def _kill(proc) -> None:
@@ -114,32 +144,39 @@ def _remove(path: str) -> None:
         pass
 
 
+def _prompt_key(info: dict) -> tuple[str | None, str, int]:
+    tier = info.get("tier")
+    return (None if tier is None else str(tier), str(info["split"]), int(info["index"]))
+
+
 def full_prompt(extra_info: dict) -> str:
-    global _prompts
+    state = _get_state()
     if extra_info.get("prompt"):
         return extra_info["prompt"]
-    if _prompts is None:
+    if state.prompts is None:
         import pyarrow.parquet as pq
 
         table = {}
         for key in ("TRAIN_FILES", "VAL_FILES"):
             for path in filter(None, os.environ.get(key, "").split(",")):
                 for row in pq.read_table(path, columns=["prompt", "extra_info"]).to_pylist():
-                    info = row["extra_info"]
-                    table[(str(info["split"]), int(info["index"]))] = row["prompt"][-1]["content"]
-        _prompts = table
-    key = (str(extra_info["split"]), int(extra_info["index"]))
-    if key not in _prompts:
+                    row_key = _prompt_key(row["extra_info"])
+                    if row_key in table:
+                        raise ValueError(f"Duplicate prompt key {row_key} in TRAIN_FILES / VAL_FILES.")
+                    table[row_key] = row["prompt"][-1]["content"]
+        state.prompts = table
+    key = _prompt_key(extra_info)
+    if key not in state.prompts:
         raise KeyError(f"No prompt for {key} in TRAIN_FILES / VAL_FILES.")
-    return _prompts[key]
+    return state.prompts[key]
 
 
 async def _layout(solution_image, extra_info: dict) -> dict:
-    global _guard_pool, _guard_lock
-    if _guard_lock is None:
-        _guard_lock = asyncio.Lock()
-    async with _guard_lock:
-        if _guard_pool is None:
+    state = _get_state()
+    if state.guard_lock is None:
+        state.guard_lock = asyncio.Lock()
+    async with state.guard_lock:
+        if state.guard_pool is None:
             procs = await asyncio.gather(
                 *[_spawn("ocr_layout_worker.py", dict(os.environ)) for _ in range(POOL_SIZE)], return_exceptions=True
             )
@@ -149,11 +186,11 @@ async def _layout(solution_image, extra_info: dict) -> dict:
                     if not isinstance(proc, BaseException):
                         await _kill(proc)
                 raise failed[0]
-            _guard_pool = asyncio.Queue()
+            state.guard_pool = asyncio.Queue()
             for proc in procs:
-                _guard_pool.put_nowait(proc)
+                state.guard_pool.put_nowait(proc)
     path = _save(solution_image, extra_info, "Layout guard")
-    proc = await _guard_pool.get()
+    proc = await state.guard_pool.get()
     try:
         return await _request(proc, "ocr_layout_worker.py", {"path": path})
     finally:
@@ -165,34 +202,38 @@ async def _layout(solution_image, extra_info: dict) -> dict:
                 logger.exception("Could not replace a dead PP-OCR layout worker")
                 proc = None
         if proc is not None:
-            _guard_pool.put_nowait(proc)
+            state.guard_pool.put_nowait(proc)
 
 
 async def _preference(solution_image, extra_info: dict) -> dict:
-    global _scorer, _scorer_lock, _last
-    if _last[0] is solution_image:
-        return _last[1]
-    if _scorer_lock is None:
-        _scorer_lock = asyncio.Lock()
-    path = _save(solution_image, extra_info, "Preference scorer")
-    try:
-        async with _scorer_lock:
-            if _scorer is None or _scorer.returncode is not None:
+    state = _get_state()
+    if state.last[0] is solution_image:
+        return state.last[1]
+    if state.scorer_lock is None:
+        state.scorer_lock = asyncio.Lock()
+    async with state.scorer_lock:
+        if state.last[0] is solution_image:
+            return state.last[1]
+        path = _save(solution_image, extra_info, "Preference scorer")
+        try:
+            if state.scorer is None or state.scorer.returncode is not None:
                 env = dict(os.environ)
                 env["CUDA_VISIBLE_DEVICES"] = SCORER_GPU
-                _scorer = await _spawn("preference_worker.py", env)
-            reply = await _request(_scorer, "preference_worker.py", {"path": path, "prompt": full_prompt(extra_info)})
-    finally:
-        _remove(path)
-    if "error" in reply:
-        raise RuntimeError(f"Preference scorer failed: {reply['error']}")
-    _last = (solution_image, reply)
-    return reply
+                state.scorer = await _spawn("preference_worker.py", env)
+            reply = await _request(
+                state.scorer, "preference_worker.py", {"path": path, "prompt": full_prompt(extra_info)}
+            )
+        finally:
+            _remove(path)
+        if "error" in reply:
+            raise RuntimeError(f"Preference scorer failed: {reply['error']}")
+        state.last = (solution_image, reply)
+        return reply
 
 
 def guard_value(geometry: dict) -> float:
     if geometry.get("error"):
-        return 1.0
+        raise RuntimeError(f"PP-OCR layout worker failed: {geometry['error']}")
     if geometry["border"]:
         return 0.0
     return min(1.0, AREA_REF / geometry["area"]) if geometry["area"] > 0 else 1.0
@@ -203,16 +244,14 @@ async def term_ocr_guarded(data_source, solution_image, ground_truth, extra_info
         compute_score_ocr(data_source, solution_image, ground_truth, extra_info, **kwargs),
         _layout(solution_image, extra_info),
     )
-    if geometry.get("error"):
-        logger.warning("PP-OCR layout request failed, guard left at 1: %s", geometry["error"])
-    ocr = float(result["score"])
     guard = guard_value(geometry)
+    ocr = float(result["score"])
     return {
         **result,
         "score": ocr * guard,
         "ocr_vlm": ocr,
         "guard": guard,
-        "guard_error": float(bool(geometry.get("error"))),
+        "guard_error": 0.0,
         "text_area": float(geometry["area"]),
         "border_touch": float(geometry["border"]),
         "line_height": float(geometry["line_h"]),

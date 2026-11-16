@@ -226,6 +226,11 @@ class TestPDDHeads:
         actor = _tiny_actor()
         head = ensure_pdd_heads(actor, _model_config(tmp_path))
         assert torch.equal(head.pdd_weight, _heads()[0])
+        subfolder_head = ensure_pdd_heads(
+            _tiny_actor(),
+            SimpleNamespace(config_path=None, local_path=str(tmp_path), transformer_subfolder="transformer"),
+        )
+        assert torch.equal(subfolder_head.pdd_weight, _heads()[0])
         with pytest.raises(FileNotFoundError):
             ensure_pdd_heads(
                 _tiny_actor(), SimpleNamespace(config_path=str(tmp_path / "missing" / "transformer"), local_path=None)

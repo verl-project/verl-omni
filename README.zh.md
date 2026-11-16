@@ -147,6 +147,13 @@
     <td>✅ 已支持</td>
   </tr>
   <tr>
+    <td><b><a href="examples/diffusionnft_trainer/minimax_h3_image/README.md">MiniMax-H3-Image</a></b></td>
+    <td>扩散生成模型</td>
+    <td>文本/图像 → 图像</td>
+    <td>DiffusionNFT</td>
+    <td>✅ 已支持</td>
+  </tr>
+  <tr>
     <td rowspan="2"><b>Boogu-Image</b></td>
     <td rowspan="2">扩散生成模型</td>
     <td rowspan="2">文本/图像 → 图像</td>

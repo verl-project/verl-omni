@@ -149,6 +149,13 @@ Visit our [documentation](https://verl-omni.readthedocs.io/en/latest/index.html)
     <td>✅</td>
   </tr>
   <tr>
+    <td><b><a href="examples/diffusionnft_trainer/minimax_h3_image/README.md">MiniMax-H3-Image</a></b></td>
+    <td>Diffusion generator</td>
+    <td>Text/Image → Image</td>
+    <td>DiffusionNFT</td>
+    <td>✅</td>
+  </tr>
+  <tr>
     <td rowspan="2"><b>Boogu-Image</b></td>
     <td rowspan="2">Diffusion generator</td>
     <td rowspan="2">Text/Image → Image</td>

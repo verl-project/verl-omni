@@ -38,7 +38,17 @@ _ROWS = (_LATENT_H // 2) * (_LATENT_W // 2)
 _HEIGHT, _WIDTH = _LATENT_H * 16, _LATENT_W * 16
 
 
-def _run(monkeypatch, *, output_type="pt", extra_args=None, seed=7, grids=(), run_denoise=True, dummy=False):
+def _run(
+    monkeypatch,
+    *,
+    output_type="pt",
+    extra_args=None,
+    seed=7,
+    grids=(),
+    run_denoise=True,
+    dummy=False,
+    prompt_images=None,
+):
     seen = {}
     target_rows = torch.arange(_ROWS * 96, dtype=torch.bfloat16).reshape(_ROWS, 96) / 64
     hidden = torch.randn(_TEXT_LEN, _TEXT_DIM).to(torch.bfloat16)
@@ -50,6 +60,7 @@ def _run(monkeypatch, *, output_type="pt", extra_args=None, seed=7, grids=(), ru
         return target_rows
 
     def native_forward(self, request):
+        seen["forward_called"] = True
         sampling = request.sampling_params
         seen["output_type"] = sampling.output_type
         seen["generator_device"] = sampling.generator_device
@@ -75,15 +86,23 @@ def _run(monkeypatch, *, output_type="pt", extra_args=None, seed=7, grids=(), ru
     pipeline.pdd_sigmas = _PDD_SIGMAS
     pipeline._h3_prompt_ids = None
     pipeline._nft_capture = None
+    prompt_entry = {"prompt": "a red cube"}
+    if prompt_images is not None:
+        prompt_entry["multi_modal_data"] = {"image": prompt_images}
     request = SimpleNamespace(
         request_id="h3-image-test",
-        prompts=[{"prompt": "a red cube"}],
+        prompts=[prompt_entry],
         sampling_params=OmniDiffusionSamplingParams(
             seed=seed, output_type=output_type, extra_args=extra_args or {}, num_outputs_per_prompt=1
         ),
         is_dummy_run=lambda: dummy,
     )
-    result = pipeline.forward(request)
+    try:
+        result = pipeline.forward(request)
+    except Exception:
+        if prompt_images is not None:
+            assert "forward_called" not in seen
+        raise
     return SimpleNamespace(
         result=result, seen=seen, request=request, pipeline=pipeline, target_rows=target_rows, hidden=hidden
     )
@@ -176,6 +195,14 @@ class TestEdit:
         assert rl["ref_block_count"].tolist() == [[2]]
         assert rl["ref_block_meta"][0, :2, 3:5].tolist() == [[4, 6], [2, 4]]
         assert not rl["ref_block_meta"][0, 2:].count_nonzero()
+
+    def test_reference_count_boundary_rejects_above_twelve_before_generation(self, monkeypatch):
+        grids_12 = ((2, 2),) * 12
+        run = _run(monkeypatch, grids=grids_12, prompt_images=[object()] * 12)
+        assert run.result.output["metadata"]["rl"]["ref_block_count"].tolist() == [[12]]
+
+        with pytest.raises(ValueError, match="at most 12 reference images"):
+            _run(monkeypatch, grids=((2, 2),) * 13, prompt_images=[object()] * 13)
 
 
 class TestPromptEncoding:

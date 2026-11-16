@@ -45,6 +45,10 @@ REWARD_GPU_MEM_UTIL=${REWARD_GPU_MEM_UTIL:-0.15}
 
 N_GPUS=${N_GPUS:-3}
 export PREFERENCE_SCORER_GPU=${PREFERENCE_SCORER_GPU:-$N_GPUS}
+if [[ ! $N_GPUS =~ ^[1-9][0-9]*$ || ! $PREFERENCE_SCORER_GPU =~ ^[0-9]+$ ]]; then
+    echo "N_GPUS ($N_GPUS) must be a positive integer and PREFERENCE_SCORER_GPU ($PREFERENCE_SCORER_GPU) must be a non-negative integer" >&2
+    exit 1
+fi
 export CUDA_VISIBLE_DEVICES=$(seq -s, 0 $((N_GPUS - 1)))
 if (( PREFERENCE_SCORER_GPU < N_GPUS )); then
     echo "PREFERENCE_SCORER_GPU=$PREFERENCE_SCORER_GPU must not be one of the $N_GPUS trainer GPUs" >&2

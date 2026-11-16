@@ -58,7 +58,7 @@ def _lora_dit():
     return model
 
 
-def _replicate_rank(rank: int, root: str, perturb_rank1: bool) -> None:
+def _replicate_rank(rank: int, root: str, mismatch_mode: str | None) -> None:
     from torch.distributed.device_mesh import init_device_mesh
     from torch.distributed.tensor import DTensor
 
@@ -68,10 +68,20 @@ def _replicate_rank(rank: int, root: str, perturb_rank1: bool) -> None:
     dist.init_process_group("gloo", init_method=f"file://{Path(root) / 'rendezvous'}", rank=rank, world_size=2)
     try:
         model = _lora_dit()
-        if perturb_rank1:
+        if mismatch_mode == "perturb":
             if rank == 1:
                 with torch.no_grad():
                     model.base_model.model.transformer_blocks[1].to_q.base_layer.weight[0, 0] += 1e-3
+            with pytest.raises(RuntimeError, match="differ across ranks"):
+                _check_replicated_params(model)
+            return
+        if mismatch_mode == "swap":
+            if rank == 1:
+                with torch.no_grad():
+                    row = model.base_model.model.transformer_blocks[1].to_q.base_layer.weight[0]
+                    first = row[0].clone()
+                    row[0] = row[1]
+                    row[1] = first
             with pytest.raises(RuntimeError, match="differ across ranks"):
                 _check_replicated_params(model)
             return
@@ -84,15 +94,20 @@ def _replicate_rank(rank: int, root: str, perturb_rank1: bool) -> None:
         for name, param in model.named_parameters():
             assert isinstance(param, DTensor) == ("lora_" in name), name
 
-        x = torch.randn(3, 4, generator=torch.Generator().manual_seed(1))
+        x_ranks = [
+            torch.randn(3, 4, generator=torch.Generator().manual_seed(1)),
+            torch.randn(3, 4, generator=torch.Generator().manual_seed(2)),
+        ]
+        x = x_ranks[rank]
         out = model(x)
         expected = reference(x)
         assert torch.allclose(out, expected, atol=1e-6)
         out.square().sum().backward()
-        expected.square().sum().backward()
+        ref_all = reference(torch.cat(x_ranks, dim=0))
+        (ref_all.square().sum() / 2.0).backward()
         for (name, param), (_, ref_param) in zip(model.named_parameters(), reference.named_parameters(), strict=True):
             if "lora_" in name:
-                assert torch.allclose(param.grad.full_tensor(), ref_param.grad, atol=1e-6), name
+                torch.testing.assert_close(param.grad.full_tensor(), ref_param.grad, rtol=1e-4, atol=1e-5)
             else:
                 assert param.grad is None, name
     finally:
@@ -100,9 +115,13 @@ def _replicate_rank(rank: int, root: str, perturb_rank1: bool) -> None:
 
 
 class TestReplicateFrozen:
-    @pytest.mark.parametrize("perturb_rank1", [False, True], ids=["identical-trains", "rank-mismatch-raises"])
-    def test_two_ranks(self, tmp_path, perturb_rank1):
-        mp.spawn(_replicate_rank, args=(str(tmp_path), perturb_rank1), nprocs=2, join=True)
+    @pytest.mark.parametrize(
+        "mismatch_mode",
+        [None, "perturb", "swap"],
+        ids=["identical-trains", "rank-mismatch-raises", "equal-sum-swap-raises"],
+    )
+    def test_two_ranks(self, tmp_path, mismatch_mode):
+        mp.spawn(_replicate_rank, args=(str(tmp_path), mismatch_mode), nprocs=2, join=True)
 
     def test_trainable_base_parameter_is_rejected(self):
         from verl_omni.utils.fsdp_utils import apply_fsdp2
