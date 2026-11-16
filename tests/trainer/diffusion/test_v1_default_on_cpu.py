@@ -289,6 +289,13 @@ def test_registered_trainer_uses_async_groups_and_exact_refill():
     assert trainer._generation_batch_size() == 1
 
 
+def test_resident_step_batch_rejected_only_by_colocate_mode():
+    overrides = ["actor_rollout_ref.rollout.free_cache_engine=false", "actor_rollout_ref.rollout.step_execution=true"]
+    with pytest.raises(ValueError, match="resident colocate_async requires request-level execution"):
+        get_diffusion_trainer_cls("colocate_async")(compose_diffusion_config(overrides))
+    get_diffusion_trainer_cls("sync")(compose_diffusion_config(overrides))
+
+
 @pytest.mark.parametrize(
     ("override", "message"),
     [

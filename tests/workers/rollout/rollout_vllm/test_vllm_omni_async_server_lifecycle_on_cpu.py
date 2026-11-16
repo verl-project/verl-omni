@@ -112,7 +112,7 @@ def _make_server(engine, rollout_mode=RolloutMode.HYBRID, node_rank=0, free_cach
     server.replica_rank = 0
     server.global_steps = 0
     server.rollout_mode = rollout_mode
-    server.config = SimpleNamespace(free_cache_engine=free_cache_engine)
+    server.config = SimpleNamespace(free_cache_engine=free_cache_engine, step_execution=False)
     server._lora_request_cache = None  # a valid cached value
     server._submission_paused = server._rejecting = False
     server._resume_event = asyncio.Event()
@@ -207,6 +207,38 @@ async def test_resident_rollout_pauses_until_explicit_resume_without_sleeping():
 
     await server.resume_generation()
     assert engine.resumed == 1
+
+
+@pytest.mark.parametrize("step_execution", [False, True])
+async def test_resident_standalone_pause_uses_supported_engine_mode(step_execution):
+    from vllm_omni.diffusion.diffusion_engine import DiffusionEngine, DiffusionExecutionMode
+    from vllm_omni.entrypoints import AsyncOmni
+
+    execution_mode = DiffusionExecutionMode.STEP_BATCH if step_execution else DiffusionExecutionMode.REQUEST_BATCH
+
+    async def engine_rpc(method, *, stage_ids, kwargs):
+        DiffusionEngine._check_pause_request(SimpleNamespace(execution_mode=execution_mode), kwargs)
+
+    frontend = SimpleNamespace(
+        _pause_cond=asyncio.Condition(),
+        _paused_stage_ids=set(),
+        _name="lifecycle-test",
+        _split_stage_ids_by_type=lambda stage_ids: ([], [0]),
+        _cancel_pending_submits=lambda: None,
+        _engine_core_rpc=engine_rpc,
+    )
+    engine = _FakeAsyncOmni()
+
+    async def pause(**kwargs):
+        await AsyncOmni.pause_generation(frontend, **kwargs)
+        engine.pause_calls.append(kwargs)
+
+    engine.pause_generation = pause
+    server = _make_server(engine, rollout_mode=RolloutMode.STANDALONE, free_cache_engine=False)
+    server.config.step_execution = step_execution
+    await server.abort_all_requests()
+    assert [call["mode"] for call in engine.pause_calls] == (["abort"] if step_execution else ["keep", "abort"])
+    assert frontend._paused and server._submission_paused
 
 
 @pytest.mark.parametrize("free_cache", [False, True])

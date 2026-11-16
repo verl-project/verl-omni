@@ -25,12 +25,12 @@ requires dedicated standalone rollout GPUs.
 ![VeRL-Omni Diffusion V1 training architecture](../assets/diffusion_v1_arch.svg)
 
 `main_diffusion_v1` starts the Ray task runner, enables TransferQueue, and selects
-the `sync` or `separate_async` trainer. The diffusion agent loop samples media
-trajectories through the configured rollout backend (commonly vLLM-Omni).
+the `sync`, `colocate_async` or `separate_async` trainer. The diffusion agent loop
+samples media trajectories through the configured rollout backend (commonly vLLM-Omni).
 TransferQueue is the center of the online experience data path. A row can hold
 prompt/group/session identity, generated media or latents, rollout
 log-probabilities, reward scores, extra fields, and policy-step metadata. In
-`separate_async`, prompt records and statuses can also be queued while generation
+asynchronous modes, prompt records and statuses can also be queued while generation
 is pending.
 
 Reward workers called by the agent loop receive the prompt and generated output;
@@ -46,13 +46,15 @@ The main implementation points are `main_diffusion_v1.py`,
 `trainer/diffusion/v1/trainer_base.py::_train_sampled_batch`, and
 `trainer/diffusion/v1/tq_utils.py::put_dataproto_fields_to_tq`. The trainer's
 checkpoint manager handles actor/dataloader checkpoints and rollout weight
-sync; separate-async checkpoints can also snapshot TransferQueue state. Training
+sync; asynchronous checkpoints can also snapshot TransferQueue state. Training
 rows are cleared after metric and rollout-dump handling.
 
 In `sync`, rollout and actor workers are colocated, and each training step waits
 for a complete rollout batch before updating the actor and refreshing rollout
-weights. In `separate_async`, standalone rollout workers can generate while the
-actor trains; `parameter_sync_step` controls how many local actor updates happen
+weights. In `colocate_async`, a prompt-group backlog spans updates, while rollout
+and actor computation take turns on shared GPUs. Routing and admission close
+before handoff and reopen after weight/version commit. In `separate_async`, standalone
+rollout workers can generate while the actor trains; `parameter_sync_step` controls how many local actor updates happen
 before rollout weights are refreshed. Set `sync_compatible=true` to pause
 standalone generation during actor updates. The replay buffer handles
 asynchronous batch availability and rollout staleness.
@@ -189,6 +191,9 @@ GPU memory together, set it to `false` to keep rollout weights resident and avoi
 their CPU offload and reload each step. Generation still pauses during actor
 computation and resumes after the new weights are installed. Measure peak GPU
 memory with the chosen image resolution and actor micro-batch size.
+Resident colocate-async requires `step_execution=false`: the pinned engine's
+keep barrier supports request-level execution only. Existing separate-async
+STEP_BATCH rollouts retain their abort/pause path.
 
 For SD3.5 LoRA runs with available actor memory, pass
 `actor_rollout_ref.model.enable_gradient_checkpointing=false` to avoid

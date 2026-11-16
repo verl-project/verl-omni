@@ -619,7 +619,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             self._rejecting = reject_request
             self._resume_event.clear()
 
-        if not self.config.free_cache_engine and not abort_only:
+        if not self.config.free_cache_engine and not getattr(self.config, "step_execution", False) and not abort_only:
             await engine.pause_generation(mode="keep", clear_cache=reset_prefix_cache)
 
         # ``engine.abort`` takes EXTERNAL ids; ``request_states`` is keyed by internal.
