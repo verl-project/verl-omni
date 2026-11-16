@@ -109,6 +109,59 @@ All the profiler keys below already exist in the composed config, so use
 plain `key=value` overrides — a `+key=value` append fails with "An item is
 already at ...".
 
+## Automatic capture after a sustained step-time regression
+
+Diffusion V1 `sync` can opt into a reporting-only performance watchdog. It
+compares existing `perf/time_per_step`, `perf/total_num_images`, and
+`timing_s/<phase>` metrics. After a confirmed regression, it starts one profile
+on the next training step and stops it at that step's normal V1 profile
+boundary. It does not tune settings, pause training, save a checkpoint, or
+change scheduling.
+
+The first version supports `torch`, `npu`, and `torch_memory` when at least one
+matching actor, rollout, or active reference role profiler is enabled. Existing
+per-role rank selection is honored. Set `global_profiler.profile_continuous_steps=false`.
+Dynamic `nsys` capture is rejected because its Ray worker and TaskRunner capture
+configuration is initialized from static profile steps. V1 `separate_async` is
+also rejected; asynchronous timing correlation remains a follow-up to issue
+[#712](https://github.com/verl-project/verl-omni/issues/712).
+
+For example, actor-only PyTorch profiling on rank 0 can be enabled with:
+
+```bash
+trainer.v1.performance_watchdog.enabled=true \
+global_profiler.tool=torch \
+global_profiler.profile_continuous_steps=false \
+actor_rollout_ref.actor.profiler.enable=true \
+actor_rollout_ref.actor.profiler.tool=torch \
+actor_rollout_ref.actor.profiler.all_ranks=false \
+actor_rollout_ref.actor.profiler.ranks=[0]
+```
+
+The default detector ignores five warmup steps, requires at least eight
+baseline observations, keeps at most twenty baseline steps, and compares three
+consecutive current steps with the median of the immediately preceding,
+non-overlapping baseline window. Each current step must be at or above 1.25x
+the baseline median to trigger one capture for that regression episode; the
+report includes the current-window median. A recovered later episode can trigger
+again after the 20-step cooldown. The baseline resets after missing metrics, a
+step gap, or a workload-signature change. The bounded signature uses sample
+count and fixed numeric config dimensions (batch size, rollout count, image
+dimensions, inference steps, sync step, and node/GPU counts); it never includes
+prompt text or sample payloads. Missing or incompatible evidence is logged and
+does not trigger a capture.
+
+The completed report includes baseline/current step windows and medians, the
+slowdown ratio, the top shared phase-time deltas, a workload fingerprint, the
+triggered profile step, configured role/rank selection, profiler tool, and
+`global_profiler.save_path` as the artifact reference. The training step timer
+includes checkpoint and post-step weight synchronization, while the V1 global
+worker trace wraps `step()` and enabled synchronous rollout generation; it
+excludes checkpointing, post-step weight sync, and validation. Phase deltas can
+therefore identify a slowdown outside the trace window. If the regression is
+detected on the final training step, the report states that there was no next
+eligible step and no profile was captured.
+
 ## Quick recipes
 
 The following GPU recipes add CLI overrides on top of
