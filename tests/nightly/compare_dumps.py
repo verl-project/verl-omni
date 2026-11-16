@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Compare debug dumps from the Qwen-Image FlowGRPO nightly run."""
+"""Compare debug dumps from a Qwen-Image nightly run."""
 
 from __future__ import annotations
 
@@ -36,6 +36,10 @@ INFORMATIONAL_TENSORS = frozenset(
         "batch.advantages",
         "batch.sample_level_rewards",
         "batch.sample_level_scores",
+        # DiffusionNFT reward_prob is a rescaled advantage, so OCR score flips
+        # move it even when the rollout latent is unchanged.
+        "batch.reward_prob",
+        "batch.returns",
     }
 )
 
@@ -354,7 +358,7 @@ def _print_conclusion(passed: bool, results: dict, report_path: Path) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Compare Qwen-Image FlowGRPO nightly debug dumps")
+    parser = argparse.ArgumentParser(description="Compare Qwen-Image L3 nightly debug dumps")
     parser.add_argument("--baseline", type=Path, required=True)
     parser.add_argument("--current", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)

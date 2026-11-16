@@ -7,9 +7,9 @@ paths:
 # Config Rules
 
 Dataclasses are the source of truth; YAML is composed by Hydra on top of them.
-There are 16 config dataclasses: 2 in `verl_omni/trainer/config/algorithm.py`
-(everything else in that directory is YAML), 14 in
-`verl_omni/workers/config/{diffusion,omni}/`.
+Config dataclasses live in `verl_omni/trainer/config/algorithm.py` and under
+`verl_omni/workers/config/` —
+`diffusion/`, `omni/`, and `reward.py`; the rest of `trainer/config/` is YAML.
 
 ## Dataclass shape
 
@@ -47,8 +47,8 @@ class DiffusionAlgoConfig(BaseConfig):
 
 ## Validation lives in `__post_init__`
 
-All 27 `raise ValueError` sites follow one shape — set membership, listing the
-valid values:
+Every config-validation `raise ValueError` follows one shape — set membership,
+listing the valid values:
 
 ```python
 def __post_init__(self):
@@ -82,13 +82,14 @@ Entry points are `@hydra.main` in `verl_omni/trainer/main_diffusion.py` and
 
 ## Generated YAML
 
-Three files, all headed `# Do not modify this file directly.`:
+Four files, all headed `# Do not modify this file directly.`:
 
 | File                                       | Generated from                                       |
 | ------------------------------------------ | ---------------------------------------------------- |
 | `_generated_diffusion_trainer.yaml`        | `diffusion_trainer.yaml`                             |
 | `_generated_diffusion_veomni_trainer.yaml` | same, with `diffusion/model_engine=veomni_diffusion` |
 | `_generated_omni_trainer.yaml`             | `omni_trainer.yaml`                                  |
+| `_generated_omni_megatron_trainer.yaml`    | `omni_megatron_trainer.yaml`                         |
 
 After touching any config dataclass:
 
@@ -101,14 +102,16 @@ The script regenerates **and verifies** (`git diff --exit-code` per target); the
 
 - A VeOmni-only field changes **only** the `veomni` file — don't assume one diff.
 - Without verl installed the script prints
-  `Skipping omni_trainer: verl is not installed` and still exits 0, so a green
+  `Skipping ${config_name}: 'import verl.trainer.config' failed` (for either
+  omni target) and still exits 0, so a green
   local run can leave `_generated_omni_trainer.yaml` stale. CI catches it.
 
 ## Hand-written YAML has an enforced doc format
 
-`tests/special_sanity/test_config_docs.py` gates a 9-file allowlist —
-`diffusion_trainer.yaml` and the
-`diffusion/{actor,ref,rollout,model,engine,model_engine}` groups (notably **not**
+`tests/special_sanity/test_config_docs.py` gates the allowlist —
+`diffusion_trainer.yaml`, the
+`diffusion/{actor,ref,rollout,model,engine,model_engine}` groups, and
+`diffusion/distillation/diffusion_distillation.yaml` (notably **not**
 `omni_trainer.yaml`). The rules: a comment above every field, a blank line between
 fields, no inline comments.
 

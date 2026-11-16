@@ -93,3 +93,53 @@ def test_omni_e2e_runner_forwards_trainer_args_to_every_run_test():
     for block in blocks:
         commands = [line for line in block.splitlines() if not line.lstrip().startswith("#")]
         assert any('"${omni_trainer_args[@]}"' in line for line in commands), block.splitlines()[0]
+
+
+def test_fsdp_engine_impls_select_their_e2e_smoke_groups():
+    selector = _load_selector()
+    assert selector.select_group_names(["verl_omni/workers/engine/fsdp/diffusers_impl.py"]) == [
+        "ci-core",
+        "ci-e2e-diffusion",
+    ]
+    assert selector.select_group_names(["verl_omni/workers/engine/fsdp/omni_impl.py"]) == [
+        "ci-core",
+        "ci-e2e-omni",
+    ]
+    assert selector.select_group_names(["verl_omni/workers/engine/lora_adapter_mixin.py"]) == [
+        "ci-core",
+        "ci-e2e-omni",
+        "ci-e2e-diffusion",
+    ]
+
+
+def test_worker_surfaces_every_trainer_runs_select_full_suite():
+    selector = _load_selector()
+    for path in (
+        "verl_omni/workers/engine_workers.py",
+        "verl_omni/workers/checkpoint_engine.py",
+        "verl_omni/workers/rollout/replica.py",
+        "verl_omni/workers/utils/losses.py",
+    ):
+        assert selector.select_group_names([path]) == selector.all_group_names(), path
+
+
+def test_worker_family_configs_and_rpc_surfaces_select_their_e2e_smoke():
+    selector = _load_selector()
+    assert "ci-e2e-omni" in selector.select_group_names(["verl_omni/workers/config/omni/model.py"])
+    assert "ci-e2e-omni" in selector.select_group_names(["verl_omni/workers/omni_engine_workers.py"])
+    assert "ci-e2e-diffusion" in selector.select_group_names(["verl_omni/workers/config/diffusion/actor.py"])
+    assert "ci-e2e-diffusion" in selector.select_group_names(["verl_omni/workers/detach_actor_worker.py"])
+
+
+def test_diffusion_e2e_support_files_select_diffusion_group():
+    selector = _load_selector()
+    for path in (
+        "tests/trainer/diffusion/test_artifact_preview_dump.py",
+        "tests/pipelines/test_minimax_h3_meta_output.py",
+        "tests/special_e2e/create_dummy_image_edit_data.py",
+        "tests/special_e2e/build_boogu_image_tiny_random.py",
+        "tests/special_e2e/build_minimax_h3_tiny_random.py",
+        "tests/special_e2e/create_dummy_h3_data.py",
+        "tests/special_e2e/minimax_h3_tiny_patch/patch.py",
+    ):
+        assert "ci-e2e-diffusion" in selector.select_group_names([path]), path

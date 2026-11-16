@@ -32,7 +32,7 @@ from typing import Any
 import hydra
 import ray
 from omegaconf import OmegaConf, open_dict
-from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
+from verl.trainer.constants_ppo import batch_invariant_requested, export_batch_invariant_env, get_ppo_ray_runtime_env
 from verl.trainer.ppo.utils import need_reference_policy
 from verl.utils.device import auto_set_device, is_cuda_available
 
@@ -289,6 +289,11 @@ def launch_ray_task_runner(
     """Initialize Ray (if needed) and run ``task_runner_class.run(config)`` remotely."""
     if propagate_determinism:
         maybe_set_determinism_env(config)
+
+    # Mirror verl's main_ppo: export before ray.init() so get_ppo_ray_runtime_env()
+    # forwards the batch-invariant env pair to every actor worker.
+    if batch_invariant_requested(config):
+        export_batch_invariant_env()
 
     if not ray.is_initialized():
         default_runtime_env = _resolve_ppo_runtime_env(config)

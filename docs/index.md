@@ -1,6 +1,6 @@
 # Welcome to VeRL-Omni's documentation!
 
-Last updated: 10/29/2026
+Last updated: 11/13/2026
 
 [VeRL-Omni](https://github.com/verl-project/verl-omni) is a general RL training framework focused on multimodal generative models, built on top of [verl](https://github.com/verl-project/verl). It originated from the multi-modal generation RL effort in `verl`, and now has a dedicated home so it can evolve in a more focused way.
 
@@ -55,6 +55,7 @@ advanced/diffusion_media_artifacts.md
 advanced/multi_turn_image_agents.md
 algo/async_reward.md
 algo/named_reward_models.md
+advanced/fsdp2_reward_models.md
 algo/rollout_correction.md
 algo/separate_async_omni.md
 start/rollout_batching.md
@@ -71,6 +72,7 @@ algo/flowdppo.md
 algo/diffusion_dpo.md
 algo/diffusionnft.md
 algo/dgpo.md
+algo/crd.md
 algo/grpo_guard.md
 algo/mixgrpo.md
 algo/diffusion_opd.md
@@ -99,6 +101,7 @@ examples/mixgrpo_trainer.md
 examples/diffusionnft_trainer.md
 examples/omninft_trainer.md
 examples/dgpo_trainer.md
+examples/crd_trainer.md
 examples/awm_trainer.md
 examples/diffusionopd_trainer.md
 examples/flowgrpo_trainer_sd35_drm.md
@@ -117,6 +120,7 @@ examples/qwen3_omni/gspo_trainer_qwen3_omni.md
 examples/dapo_trainer.md
 examples/stage_skip.md
 examples/qwen3_tts/grpo_trainer_qwen3_tts.md
+examples/minicpm_o/opd_trainer_minicpm_o.md
 ```
 
 ```{toctree}
@@ -124,6 +128,7 @@ examples/qwen3_tts/grpo_trainer_qwen3_tts.md
 :caption: Performance Tuning Guide
 
 perf/tuning_guide.md
+perf/offline_microbatch_tuner.md
 perf/diffusion_mfu.md
 perf/profiler.md
 perf/diffusion_consistency.md
@@ -181,7 +186,7 @@ VeRL-Omni is free software; you can redistribute it and/or modify it under the t
 of the Apache License 2.0. We welcome contributions.
 Join us on [GitHub](https://github.com/verl-project/verl-omni) for discussions.
 
-See the [2026 Q2 roadmap](https://github.com/verl-project/verl/issues/5755) for planned work.
+See the [project roadmap](https://github.com/verl-project/verl-omni/issues/700) for planned work.
 
 ### Code Linting and Formatting
 

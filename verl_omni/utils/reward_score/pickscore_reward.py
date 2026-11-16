@@ -152,8 +152,8 @@ class PickScoreNativeModel:
         if type(retain_weights_on_cpu) is not bool:
             raise TypeError("retain_weights_on_cpu must be a bool")
         target_device = torch.device(device) if device is not None else torch.device(get_device_name(), get_device_id())
-        if retain_weights_on_cpu and target_device.type != "cuda":
-            raise ValueError("retain_weights_on_cpu requires a CUDA device")
+        if retain_weights_on_cpu and target_device.type not in ("cuda", "xpu"):
+            raise ValueError("retain_weights_on_cpu requires a CUDA or Intel GPU device")
         self.supports_cpu_offload = retain_weights_on_cpu
         self._inferencer = _PickScoreInferencer(
             device=target_device,
