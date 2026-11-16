@@ -99,7 +99,7 @@ jobs:
       matrix:
         group: ${{ fromJSON(needs.resolve_groups.outputs.groups) }}
     runs-on: linux-aarch64-a2b4-8
-    timeout-minutes: 120
+    timeout-minutes: ${{ matrix.group == 'core' && 180 || 120 }}
     container:
       # Previous-generation image that exists in the registry; the pinned
       # stack is synced onto it by tests/npu_smoke/sync_npu_stack.sh.
