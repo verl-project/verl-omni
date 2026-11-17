@@ -1,6 +1,6 @@
 # Qwen3-Omni Thinker GSPO recipes
 
-Last updated: 10/24/2026
+Last updated: 11/09/2026
 
 This directory contains both FSDP2 and Megatron recipes. For non-Megatron
 setup, data preparation and training instructions, see the
@@ -50,7 +50,7 @@ upstream Megatron helpers without changing the worker/rollout HF configuration.
 Use the repository's pinned verl/vLLM-Omni runtime and install the audio extra
 (`uv pip install -e '.[audio]'`). Megatron also requires a compatible Megatron-Core,
 Transformer Engine, and Megatron-Bridge with Qwen3-Omni audio forward/export
-support. The recipe selects `use_mbridge=true`, `vanilla_mbridge=false`.
+support. The recipe selects `use_mbridge=true`.
 Upstream Megatron-Bridge already includes Qwen3-Omni Thinker conversion,
 audio-input forwarding, and checkpoint import/export from
 [#3317](https://github.com/NVIDIA-NeMo/Megatron-Bridge/pull/3317). Its main

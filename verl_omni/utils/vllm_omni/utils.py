@@ -23,7 +23,7 @@ except ImportError:
 from verl.utils.vllm import VLLMHijack
 from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.utils import get_adapter_absolute_path
-from vllm_omni.diffusion.lora.manager import DiffusionLoRAManager, logger
+from vllm_omni.lora.manager import DiffusionLoRAManager, logger
 from vllm_omni.lora.request import LoRARequest as OmniLoRARequest
 
 
@@ -49,15 +49,12 @@ class VLLMOmniHijack:
             return
         VLLMOmniHijack._patched = True
 
-        from verl_omni.utils.vllm_omni.patch import patch_vllm_lora_weights_mapper
-
-        patch_vllm_lora_weights_mapper()
         # verl's base vLLM LoRA hijack first, then the vllm-omni diffusion patches.
         VLLMHijack.hijack()
 
         def hijack__load_adapter(self, lora_request: OmniTensorLoRARequest) -> tuple[LoRAModel, PEFTHelper]:
             """
-            based on vllm_omni.diffusion.lora.manager.DiffusionLoRAManager._load_adapter,
+            based on vllm_omni.lora.manager.DiffusionLoRAManager._load_adapter,
             support load adapter with lora tensors
 
             Reason:
@@ -104,7 +101,6 @@ class VLLMOmniHijack:
                     peft_helper = PEFTHelper.from_local_dir(
                         lora_path,
                         max_position_embeddings=None,  # no need in diffusion
-                        tensorizer_config_dict=lora_request.tensorizer_config_dict,
                     )
 
             logger.info(
@@ -134,7 +130,6 @@ class VLLMOmniHijack:
                         device="cpu",  # consistent w/ vllm's behavior
                         dtype=self.dtype,
                         model_vocab_size=None,
-                        tensorizer_config_dict=lora_request.tensorizer_config_dict,
                         weights_mapper=None,
                     )
 

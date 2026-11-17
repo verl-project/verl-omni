@@ -251,11 +251,21 @@ class MiniMaxH3PipelineWithLogProb(MiniMaxH3WeightSyncMixin, MiniMaxH3Pipeline):
         base_schedule: Sequence[float] | None = None,
         pad_seq_len: int | None = None,
         locked_audio_rows: torch.Tensor | None = None,
+        control_context_scale: float | None = None,
+        request_context: dict[str, Any] | None = None,
+        sampler: str | None = None,
         **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # vLLM-Omni forwards every denoise input key and sets the unused ones to None. FlowGRPO rollouts have
         # no edit path, so a real value here must fail instead of silently producing plain generation.
         unsupported = sorted(name for name, value in kwargs.items() if value is not None)
+        # The pin adds ControlNet/sampler plumbing with non-None defaults; only their neutral values pass.
+        # request_context is the pipeline's own prepared-request channel, forwarded by its forward() —
+        # not an edit path; edit inputs arrive as the explicit kwargs guarded above.
+        if control_context_scale not in (None, 1.0):
+            unsupported.append("control_context_scale")
+        if sampler not in (None, "euler"):
+            unsupported.append("sampler")
         if unsupported:
             raise NotImplementedError(f"MiniMax H3 FlowGRPO rollout does not support {', '.join(unsupported)}.")
         target_video_rows, target_audio_rows = self._initial_noise(
