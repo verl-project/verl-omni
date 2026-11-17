@@ -16,6 +16,7 @@ REPO_ROOT=$(cd -- "${NIGHTLY_DIR}/../.." && pwd)
 : "${TRAIN_BATCH_SIZE:?set TRAIN_BATCH_SIZE}"
 
 L3_MODEL=${L3_MODEL:-qwen-image}
+L3_DATA_KIND=${L3_DATA_KIND:-ocr}
 L3_DATA_SOURCE=${L3_DATA_SOURCE:-${L3_TEST_CASE}}
 MODEL_PATH=${MODEL_PATH:-${HOME}/models/tiny-random/Qwen-Image}
 TOKENIZER_PATH=${TOKENIZER_PATH:-${MODEL_PATH}/tokenizer}
@@ -76,6 +77,7 @@ python3 "${NIGHTLY_DIR}/env_metadata.py" \
     --rollout-attn-backend "${ROLLOUT_ATTN_BACKEND}"
 
 python3 "${NIGHTLY_DIR}/create_sample_data.py" \
+    --kind "${L3_DATA_KIND}" \
     --local_save_dir "${DATA_DIR}" \
     --train_size "${TRAIN_BATCH_SIZE}" \
     --val_size 4 \

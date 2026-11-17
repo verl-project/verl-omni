@@ -7,10 +7,11 @@ This is the v1-trainer form of
 `tests/special_e2e/run_gspo_qwen3_omni_thinker_lora_v1_smoke.sh`:
 `verl_omni.trainer.main_omni`, `pipeline_name=qwen3_omni_moe`, and the same
 Thinker module filter, stretched to 20 steps on 1 GPU. The script builds the
-tiny checkpoint and distinct GSM8K prompts via
-`tests/nightly/create_sample_data.py --kind math` before training. Each row
-gets `extra_info.repeat_index` so dump comparison can realign prompts across
-runs. `data_source` stays `openai/gsm8k` for the naive GSM8K rule reward.
+tiny checkpoint and exports `L3_DATA_KIND=math`. `run_l3_case.sh` rewrites the
+distinct GSM8K prompts on every run through `tests/nightly/create_sample_data.py`.
+Each row gets `extra_info.repeat_index` so dump comparison can realign prompts
+across runs. `data_source` stays `openai/gsm8k` for the naive GSM8K rule
+reward; `--data_source` does not apply to this kind.
 
 Rollout is greedy (`temperature=0`, `do_sample=false`, `seed=42`). Dump
 comparison reads two payload kinds:

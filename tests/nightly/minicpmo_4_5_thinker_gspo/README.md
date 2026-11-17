@@ -7,8 +7,9 @@ This is the v1-trainer form of
 `tests/special_e2e/run_gspo_minicpmo_thinker_lora_v1_smoke.sh`:
 `verl_omni.trainer.main_omni`, `pipeline_name=minicpmo_4_5`, the AVQA dataset
 class, and the same frozen-tower exclusion, stretched to 20 steps on 1 GPU.
-The script builds the tiny checkpoint and one repeated image-audio prompt via
-`tests/nightly/create_sample_data.py --kind avqa`. Each row gets
+The script builds the tiny checkpoint and exports `L3_DATA_KIND=avqa`.
+`run_l3_case.sh` rewrites the repeated image-audio parquet on every run
+through `tests/nightly/create_sample_data.py`. Each row gets
 `extra_info.repeat_index` so dump comparison can realign prompts across runs.
 
 Rollout is greedy (`temperature=0`, `do_sample=false`, `seed=42`). Dump

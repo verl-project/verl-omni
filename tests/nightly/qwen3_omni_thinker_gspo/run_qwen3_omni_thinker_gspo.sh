@@ -18,12 +18,10 @@ export L3_TEST_CASE=${L3_TEST_CASE:-qwen3_omni_thinker_gspo}
 export L3_ALGORITHM=${L3_ALGORITHM:-gspo}
 export L3_CASE_LABEL=${L3_CASE_LABEL:-"Qwen3-Omni Thinker GSPO"}
 export L3_MODEL=${L3_MODEL:-qwen3-omni}
-export L3_DATA_SOURCE=${L3_DATA_SOURCE:-"openai/gsm8k"} # determine reward
+export L3_DATA_KIND=${L3_DATA_KIND:-math}
 export NUM_GPUS=${NUM_GPUS:-1}
 export TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-4}
-export L3_SKIP_DATASET=1
 export NIGHTLY_TRAINER_MODULE=verl_omni.trainer.main_omni
-export NIGHTLY_OMNI_DUMP=1
 export VERL_USE_EXTERNAL_MODULES=verl_omni
 
 export NCCL_IB_DISABLE=1
@@ -42,14 +40,6 @@ EXCLUDE_MODULES=".*talker.*|.*code2wav.*|.*code_predictor.*|.*visual.*|.*audio_t
 # ── Build tiny model ──────────────────────────────────────────────────────────
 python3 "${REPO_ROOT}/tests/special_e2e/build_qwen3_omni_tiny_random.py" \
     --output-dir "${POLICY_MODEL_PATH}" --force
-
-# ── Build dummy math dataset if not present ───────────────────────────────────
-python3 "${REPO_ROOT}/tests/nightly/create_sample_data.py" \
-    --kind math \
-    --local_save_dir "${DATA_DIR}" \
-    --train_size "${TRAIN_BATCH_SIZE}" \
-    --val_size 4 \
-    --data_source "${L3_DATA_SOURCE}"
 
 # ── Run V1 training (20 steps, LoRA, GSPO, vLLM-Omni AR rollout) ───────────────
 bash "${REPO_ROOT}/tests/nightly/run_l3_case.sh" \

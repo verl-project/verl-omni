@@ -130,7 +130,11 @@ def write_ocr(data_source: str, train_size: int, val_size: int, train_path: Path
 
 
 def write_math(train_size: int, val_size: int, train_path: Path, val_path: Path) -> None:
-    """Write GSM8K-format different fixed rows and stamp ``extra_info.repeat_index``."""
+    """Write GSM8K-format rows and stamp ``extra_info.repeat_index``.
+
+    ``data_source`` stays ``openai/gsm8k``. The naive GSM8K rule reward
+    dispatches on that value, so ``--data_source`` does not apply here.
+    """
     builder = _load_math_builder()
     for split, size, path in (("train", train_size, train_path), ("test", val_size, val_path)):
         _write_split(path, _repeat(builder.build_rows(split, size), split))
@@ -163,7 +167,10 @@ def main() -> None:
     parser.add_argument(
         "--data_source",
         default="qwen_image_flowgrpo",
-        help="Value stored in the data_source column.",
+        help=(
+            "data_source column for --kind ocr and --kind avqa. "
+            "Ignored for --kind math, which always writes openai/gsm8k so the GSM8K rule reward is selected."
+        ),
     )
     parser.add_argument("--kind", choices=("ocr", "avqa", "math"), default="ocr")
     args = parser.parse_args()
@@ -171,12 +178,6 @@ def main() -> None:
     output_dir = Path(os.path.expanduser(args.local_save_dir))
     train_path = output_dir / "train.parquet"
     val_path = output_dir / "test.parquet"
-
-    # Some cases write their own parquet first, skipping default ocr creation.
-    if train_path.is_file() and val_path.is_file():
-        print(f"Dataset already exists in {output_dir}. Skipping creation.")
-        return
-
     output_dir.mkdir(parents=True, exist_ok=True)
     if args.kind == "ocr":
         write_ocr(args.data_source, args.train_size, args.val_size, train_path, val_path)

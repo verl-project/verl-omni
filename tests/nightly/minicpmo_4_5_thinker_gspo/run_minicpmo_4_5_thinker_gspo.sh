@@ -14,12 +14,11 @@ export L3_TEST_CASE=${L3_TEST_CASE:-minicpmo_4_5_thinker_gspo}
 export L3_ALGORITHM=${L3_ALGORITHM:-gspo}
 export L3_CASE_LABEL=${L3_CASE_LABEL:-"MiniCPM-o 4.5 Thinker GSPO"}
 export L3_MODEL=${L3_MODEL:-minicpmo-4.5}
+export L3_DATA_KIND=${L3_DATA_KIND:-avqa}
 export L3_DATA_SOURCE=${L3_DATA_SOURCE:-${L3_TEST_CASE}}
 export NUM_GPUS=${NUM_GPUS:-1}
 export TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-4}
-export L3_SKIP_DATASET=1
 export NIGHTLY_TRAINER_MODULE=verl_omni.trainer.main_omni
-export NIGHTLY_OMNI_DUMP=1
 export VERL_USE_EXTERNAL_MODULES=verl_omni
 
 export NCCL_IB_DISABLE=1
@@ -37,13 +36,6 @@ EXCLUDE_MODULES=".*vpm.*|.*apm.*|.*talker.*|.*code2wav.*|.*code_predictor.*|.*co
 
 python3 "${REPO_ROOT}/tests/special_e2e/build_minicpmo_tiny_random.py" \
     --output-dir "${POLICY_MODEL_PATH}" --force
-
-python3 "${REPO_ROOT}/tests/nightly/create_sample_data.py" \
-    --kind avqa \
-    --local_save_dir "${DATA_DIR}" \
-    --train_size "${TRAIN_BATCH_SIZE}" \
-    --val_size 4 \
-    --data_source "${L3_DATA_SOURCE}"
 
 bash "${REPO_ROOT}/tests/nightly/run_l3_case.sh" \
     data.train_files="${TRAIN_FILES}" \
