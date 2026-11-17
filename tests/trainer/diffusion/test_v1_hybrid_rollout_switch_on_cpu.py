@@ -278,7 +278,7 @@ def test_setup_leaves_hybrid_in_rollout_mode_and_registered(monkeypatch):
     )
     monkeypatch.setattr(
         trainer_module,
-        "OmniCheckpointEngineManager",
+        "TimedOmniCheckpointEngineManager",
         lambda **kwargs: SimpleNamespace(backend=kwargs["config"].backend),
     )
     trainer.add_replicas_to_balancer = lambda: events.append("add")
@@ -319,7 +319,7 @@ def test_setup_applies_standalone_memory_budget_to_a_config_copy(monkeypatch):
     monkeypatch.setattr(trainer_module.LLMServerManager, "create", staticmethod(_record_create))
     monkeypatch.setattr(
         trainer_module,
-        "OmniCheckpointEngineManager",
+        "TimedOmniCheckpointEngineManager",
         lambda **kwargs: SimpleNamespace(backend=kwargs["config"].backend),
     )
     trainer.add_replicas_to_balancer = lambda: events.append("add")

@@ -251,6 +251,7 @@ def test_sync_compatible_prefetches_all_local_batches_before_training():
     trainer.parameter_sync_step = 2
     trainer.sync_compatible = True
     trainer.timing_raw = {}
+    trainer.replay_buffer = None
     trainer.current_mode = HybridEngineMode.TRAINER
     events = []
     trainer._add_batch_to_generate = lambda: events.append("feed")
