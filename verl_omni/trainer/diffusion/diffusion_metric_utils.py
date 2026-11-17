@@ -103,14 +103,16 @@ def compute_data_metrics_diffusion(batch: DataProto) -> dict[str, Any]:
 
 def compute_old_policy_metrics(
     update_result: tuple[bool, float, Literal["none", "copy", "ema"]],
+    *,
+    prefix: str = "old_policy",
 ) -> dict[str, Any]:
-    """Build metrics for old-policy adapter refreshes."""
+    """Build adapter-refresh metrics under the given policy prefix."""
     update_applied, decay, update_type = update_result
     return {
-        "old_policy/update_applied": float(update_applied),
-        "old_policy/copy_update": float(update_type == "copy"),
-        "old_policy/ema_update": float(update_type == "ema"),
-        "old_policy/decay": float(decay),
+        f"{prefix}/update_applied": float(update_applied),
+        f"{prefix}/copy_update": float(update_type == "copy"),
+        f"{prefix}/ema_update": float(update_type == "ema"),
+        f"{prefix}/decay": float(decay),
     }
 
 

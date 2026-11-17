@@ -14,6 +14,7 @@
 import copy
 import json
 import logging
+import math
 import os
 import tempfile
 from argparse import Namespace
@@ -23,7 +24,7 @@ import yaml
 from verl.utils.device import get_visible_devices_keyword
 from verl.workers.config import RolloutConfig
 from verl.workers.rollout.replica import TokenOutput
-from verl.workers.rollout.vllm_rollout.utils import extract_prompt_logprobs
+from verl.workers.rollout.vllm_rollout.utils import extract_prompt_logprobs, get_vllm_max_lora_rank
 from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMHttpServer
 from vllm import SamplingParams
 from vllm_omni.config.stage_config import StageExecutionType
@@ -43,6 +44,31 @@ logger = logging.getLogger(__file__)
 logger.setLevel(logging.INFO)
 
 _WORKER_EXTENSION = "verl_omni.workers.rollout.vllm_rollout.utils.vLLMOmniColocateWorkerExtension"
+_SCORED_PROMPT_IDS_KEY = "_verl_omni_scored_prompt_ids"  # popped before the engine call
+
+
+def lora_engine_extras(model_config: OmniModelConfig) -> dict[str, Any]:
+    """Per-stage vLLM LoRA engine args for the policy stage of an AR pipeline.
+
+    Mirrors verl's rollout LoRA predicate (``vllm_async_server.py``): rank from
+    ``lora["rank"]`` with the ``lora_rank`` fallback; ``lora.merge`` configs
+    keep the rollout engine LoRA-free. Returns ``{}`` without trainable LoRA.
+    """
+    lora_rank = model_config.lora.get("rank", 0)
+    if lora_rank <= 0:
+        lora_rank = model_config.lora_rank
+    if model_config.lora.get("merge", False):
+        lora_rank = 0
+    if lora_rank <= 0:
+        return {}
+    extras: dict[str, Any] = {
+        "enable_lora": True,
+        "max_loras": 1,
+        "max_lora_rank": get_vllm_max_lora_rank(lora_rank),
+    }
+    if model_config.lora.get("fully_sharded_loras", False):
+        extras["fully_sharded_loras"] = True
+    return extras
 
 
 def _drop_none_mapping_values(value: Any) -> Any:
@@ -138,7 +164,7 @@ class ARStrategy(OmniStrategyBase):
             f"pipeline ({supported_pipelines}), or leave expert_parallel_size=1."
         )
 
-    def apply_quantization(self) -> tuple[str | None, dict[str, Any]]:
+    def apply_quantization(self) -> dict[str, Any]:
         return vLLMHttpServer._apply_quantization(self.server)
 
     def override_generation_config(self) -> dict[str, Any]:
@@ -239,6 +265,11 @@ class ARStrategy(OmniStrategyBase):
             stage.stage_id: dict(adapter_cls.get_stage_engine_extras(stage.stage_id, pipeline_mode=pipeline_mode))
             for stage in stages
         }
+        # vLLM LoRA is per LLM stage: the policy stage owns the rollout's LoRA
+        # engine args, and adapter-delta syncs follow it (collective_rpc routing).
+        lora_extras = lora_engine_extras(self.server.model_config)
+        stage_extras[policy_stage_id].update(lora_extras)
+        self.lora_stage_ids = [policy_stage_id] if lora_extras else None
         capacity_fields = ("max_model_len", "max_num_batched_tokens")
         if any(field in extras for extras in stage_extras.values() for field in capacity_fields):
             for extras in stage_extras.values():
@@ -300,16 +331,18 @@ class ARStrategy(OmniStrategyBase):
     def prepare_engine_args(self, engine_args: dict[str, Any], args: Namespace) -> None:
         """Apply mode-specific engine arguments before the engine is created.
 
-        Expert parallelism is owned by the generated per-stage deploy config, so
-        the global ``enable_expert_parallel`` engine arg is dropped here: applied
-        globally it would reach every stage that owns the field, including
-        non-MoE stages that cannot shard experts.
+        ``enable_expert_parallel`` is dropped: the generated deploy config owns
+        expert parallelism, and the global would reach non-MoE stages that
+        cannot shard experts. The global LoRA flags are dropped only once that
+        config re-routed them to the policy stage; without one the globals are
+        the only carrier, and upstream accepts them on single-stage pipelines.
         """
         engine_args.pop("enable_expert_parallel", None)
-        if engine_args.get("enable_lora"):
-            from verl_omni.utils.vllm_omni.patch import patch_vllm_omni_lora_config
-
-            patch_vllm_omni_lora_config()
+        if self.lora_stage_ids is not None:
+            # vLLM LoRA is per LLM stage; upstream rejects these as global
+            # engine args on multi-stage pipelines.
+            for lora_key in ("enable_lora", "max_loras", "max_lora_rank", "fully_sharded_loras"):
+                engine_args.pop(lora_key, None)
         if self._rollout_output_modalities is not None:
             # The generated per-stage deploy config owns model_stage for
             # multi-output pipelines.
@@ -429,6 +462,10 @@ class ARStrategy(OmniStrategyBase):
             prompt.setdefault("multi_modal_data", multi_modal_data)
         if mm_processor_kwargs and not adapter_prepared_prompt:
             prompt.setdefault("mm_processor_kwargs", mm_processor_kwargs)
+        if policy_params.prompt_logprobs is not None:
+            # A teacher scores the request's own ids; the engine re-expands media itself,
+            # so run_generation checks that it scored exactly these.
+            prompt[_SCORED_PROMPT_IDS_KEY] = list(request.prompt.token_ids)
         if return_hidden:
             policy_stage_params = params[self._policy_stage_index] if isinstance(params, list) else params
             extra_args = dict(policy_stage_params.extra_args or {})
@@ -444,6 +481,7 @@ class ARStrategy(OmniStrategyBase):
         lora_request: Optional[LoRARequest],
         priority: int,
     ) -> Any:
+        scored_prompt_ids = prompt.pop(_SCORED_PROMPT_IDS_KEY, None)
         generate_kwargs = dict(
             prompt=prompt,
             sampling_params_list=params,
@@ -455,15 +493,22 @@ class ARStrategy(OmniStrategyBase):
             generate_kwargs["output_modalities"] = self._rollout_output_modalities
         generator = self.server.engine.generate(**generate_kwargs)
         if self._rollout_output_modalities is None:
-            return await self._collect_last_output(generator)
-
-        outputs = []
-        async for output in generator:
-            outputs.append(output)
-        if self._rollout_adapter is None:
-            raise RuntimeError("Retaining multiple stage outputs requires a registered rollout adapter.")
-        final_res, rollout_fields = self._rollout_adapter.combine_engine_outputs(outputs, prompt)
-        self._rollout_fields_by_request_id[request_id] = rollout_fields
+            final_res = await self._collect_last_output(generator)
+        else:
+            outputs = []
+            async for output in generator:
+                outputs.append(output)
+            if self._rollout_adapter is None:
+                raise RuntimeError("Retaining multiple stage outputs requires a registered rollout adapter.")
+            final_res, rollout_fields = self._rollout_adapter.combine_engine_outputs(outputs, prompt)
+            self._rollout_fields_by_request_id[request_id] = rollout_fields
+        if scored_prompt_ids is not None and final_res is not None:
+            req_output = getattr(final_res, "request_output", None) or final_res
+            if list(getattr(req_output, "prompt_token_ids", None) or []) != scored_prompt_ids:
+                raise RuntimeError(
+                    "The omni teacher scored a different token sequence than the request carried; "
+                    "its prompt log probabilities would not align with the student's tokens."
+                )
         return final_res
 
     def process_output(
@@ -490,14 +535,6 @@ class ARStrategy(OmniStrategyBase):
         extra_fields = {"global_steps": self.server.global_steps}
         extra_fields.update(rollout_fields)
 
-        num_prompt_logprobs = getattr(params, "prompt_logprobs", None)
-        if num_prompt_logprobs is not None and hasattr(req_output, "prompt_logprobs"):
-            extract_prompt_logprobs(
-                output=req_output,
-                num_prompt_logprobs=num_prompt_logprobs,
-                result_dict=extra_fields,
-            )
-
         # Teacher hidden states ride CompletionOutput.multimodal_output when the
         # request opted in via sampling_params["return_hidden_states"].
         hidden = extract_hidden_states(req_output)
@@ -506,6 +543,13 @@ class ARStrategy(OmniStrategyBase):
         token_ids = req_output.outputs[0].token_ids
         log_probs = None
         policy_params = params[self._policy_stage_index] if isinstance(params, list) else params
+        num_prompt_logprobs = getattr(policy_params, "prompt_logprobs", None)
+        if num_prompt_logprobs is not None:
+            if getattr(req_output, "prompt_logprobs", None) is None:
+                raise RuntimeError("The omni teacher did not return requested prompt log probabilities.")
+            extract_prompt_logprobs(req_output, num_prompt_logprobs, extra_fields)
+            if not all(math.isfinite(logprob) for row in extra_fields["prompt_logprobs"] for logprob in row):
+                raise RuntimeError("The omni teacher returned non-finite prompt log probabilities.")
         if policy_params.logprobs is not None:
             log_probs = [
                 logprobs[token_ids[index]].logprob for index, logprobs in enumerate(req_output.outputs[0].logprobs)

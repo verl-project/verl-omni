@@ -57,9 +57,10 @@ def patch_veomni_causal_mask_kwargs() -> bool:
     log-prob and training pass. Rebind the module-level symbol to a wrapper that
     removes only the obsolete ``cache_position`` argument.
 
-    This shim is specific to VeOmni 0.1.12's generated GPU model and was
-    validated with Transformers 5.14.1. Recheck it when either dependency is
-    upgraded; it is not a general compatibility layer for other signatures.
+    This shim is specific to VeOmni 0.1.12's generated GPU model: the masked
+    signature was re-verified at Transformers 5.19.0, and end-to-end behavior
+    was last validated at Transformers 5.14.1. It is not a general
+    compatibility layer for other signatures.
 
     Returns True when the shim was installed, False when it is unnecessary.
     """

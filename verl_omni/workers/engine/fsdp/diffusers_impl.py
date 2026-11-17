@@ -14,6 +14,7 @@
 """FSDP engines for diffusion models."""
 
 import gc
+import itertools
 import json
 import logging
 import os
@@ -86,14 +87,26 @@ def _cast_loaded_diffusers_module(
     *,
     preserve_fp32_modules: bool = True,
 ) -> None:
-    """Cast ordinary models while preserving diffusers-declared fp32 islands."""
+    """Cast to ``torch_dtype`` while preserving diffusers-declared fp32 islands.
+
+    ``from_pretrained`` applies ``torch_dtype`` to every checkpoint tensor except
+    ``_keep_in_fp32_modules`` entries. Modules built via ``from_config`` start in
+    fp32, so they must land on the same mixed layout — otherwise FSDP2 shards
+    differ between rank 0 and meta-initialized ranks and collectives mismatch.
+    """
     keep_in_fp32 = getattr(module, "_keep_in_fp32_modules", None)
+    if isinstance(keep_in_fp32, str):
+        keep_in_fp32 = [keep_in_fp32]
     if preserve_fp32_modules and keep_in_fp32:
         logger.info(
-            "Preserving mixed precision declared by %s._keep_in_fp32_modules=%s",
+            "Casting to %s except fp32 islands declared by %s._keep_in_fp32_modules=%s",
+            torch_dtype,
             type(module).__name__,
             keep_in_fp32,
         )
+        for name, tensor in itertools.chain(module.named_parameters(), module.named_buffers()):
+            if tensor.is_floating_point() and not any(part in name.split(".") for part in keep_in_fp32):
+                tensor.data = tensor.data.to(torch_dtype)
         return
     module.to(torch_dtype)
 
@@ -1446,7 +1459,8 @@ class NFTDiffusersFSDPEngine(DiffusersFSDPEngine):
             micro_batch=micro_batch, step=step
         )
 
-        with self.use_adapter("old"), torch.no_grad():
+        adapter_class = DiffusionModelBase.get_class(self.model_config)
+        with self.use_adapter(adapter_class.old_policy_adapter), torch.no_grad():
             old_prediction = forward(
                 module=self.module,
                 model_config=self.model_config,
@@ -1468,7 +1482,7 @@ class NFTDiffusersFSDPEngine(DiffusersFSDPEngine):
 
         with torch.no_grad():
             with self.disable_adapter():
-                ref_forward_prediction = forward(
+                ref_forward_prediction = adapter_class.forward_reference(
                     module=self.module,
                     model_config=self.model_config,
                     model_inputs=model_inputs,

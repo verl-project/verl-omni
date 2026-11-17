@@ -13,13 +13,29 @@
 # limitations under the License.
 import os
 
-import torch
+from verl.utils.device import get_device_name, get_torch_device
+
+# GPU types the GPU smoke tests are validated on; on any other device they skip as before.
+ENABLED_GPU_DEVICES = ("cuda", "xpu")
+
+
+def enabled_gpu_count() -> int:
+    """Return the number of visible GPUs, or 0 if the current device is not an enabled GPU type."""
+    if get_device_name() not in ENABLED_GPU_DEVICES:
+        return 0
+    return get_torch_device().device_count()
+
+
+def empty_gpu_cache() -> None:
+    """Release cached GPU memory on enabled GPU types; no-op on any other device."""
+    if enabled_gpu_count():
+        get_torch_device().empty_cache()
 
 
 def resolve_requested_num_gpus(default_num_gpus: int = 4) -> int:
-    """Resolve GPU count from NUM_GPUS env var, clamped by visible CUDA devices."""
+    """Resolve GPU count from NUM_GPUS env var, clamped by visible GPUs."""
     n = int(os.getenv("NUM_GPUS", str(default_num_gpus)))
-    available = torch.cuda.device_count()
+    available = enabled_gpu_count()
     if available <= 0:
         return 0
     return max(1, min(n, available))

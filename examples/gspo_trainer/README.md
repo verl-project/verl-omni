@@ -1,6 +1,6 @@
 # Qwen3-Omni Thinker GSPO Trainer
+Last updated: 11/12/2026
 
-Last updated: 10/24/2026
 
 This example shows how to post-train the **Qwen3-Omni-30B-A3B Thinker** with
 **GSPO** on multimodal reasoning tasks, using FSDP for the actor and `vllm-omni` as
@@ -142,6 +142,90 @@ Healthy signals (gsm8k, 4×H800, LoRA r=32):
 - `actor/loss` ≈ 1e-5, `actor/grad_norm` ∈ [1e-3, 1e-2], no OOM
   (`actor/perf/max_memory_allocated_gb` < 45).
 - `val-core/openai/gsm8k/acc/mean@1` rising with steps.
+
+## Training with `math_dapo`
+
+Pure-text math data with the built-in `math_dapo` reward, `+1` correct / `-1`
+wrong. No reward model and no critic. Select it with
+`reward.reward_manager.name=dapo` — the name refers to the dataset reward, not to
+the policy loss; the launcher below trains with **GSPO**.
+
+The scorer is not `\boxed{}`-only. It reads the last 300 characters of the
+response and tries, in order:
+
+1. the last `Answer: <value>` line (case-insensitive); the value is normalized
+   (LaTeX wrappers, spacing, thousand separators) and compared with the
+   normalized ground truth;
+2. only if no `Answer:` line is present, the last `\boxed{...}` within the last
+   100 characters, compared with the ground truth as an exact string.
+
+A response with neither form scores `-1`, so the prompt must elicit one of them.
+The DAPO math prompts do: the training rows end with "The last line of your
+response should be of the form Answer: $Answer", and the AIME validation rows
+end with "output the final answer within \boxed{}".
+
+### Prepare the dataset
+
+Each parquet row needs `data_source="math_dapo"`, `reward_model.ground_truth`,
+and a chat-style `prompt` column. Point the launcher at the converted files:
+
+```bash
+TRAIN_FILE=~/data/dapo_math/train.parquet \
+VAL_FILE=~/data/dapo_math/val.parquet \
+bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_math_dapo_separate_async_npu_v1.sh
+```
+
+### Run training on Ascend NPU (separate-async)
+
+16 NPUs split into a 12-die rollout pool and a 4-die FSDP2 trainer. Rollout uses
+TP=2 (6 replicas) and generates one batch ahead of training;
+`parameter_sync_step=4` syncs weights every four trainer steps.
+
+```bash
+TOTAL_TRAINING_STEPS=100 \
+bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_math_dapo_separate_async_npu_v1.sh
+```
+
+`TOTAL_TRAINING_STEPS` is read from the environment before Python starts, so the
+assignment has to precede `bash`; anything after the script path is forwarded to
+the trainer as a Hydra override. The launcher already defaults to 100, so the
+assignment is optional.
+
+The launcher enforces the V1 constraint
+`train_batch_size == parameter_sync_step * ppo_mini_batch_size` (`64 == 4 * 16`)
+and exposes `TRAINER_DIES`, `ROLLOUT_DIES`, `ROLLOUT_TP`, and `PARAM_SYNC_STEP`
+for other topologies. Source the CANN `set_env.sh` on every Ray node before
+launching; the script itself does not touch the CANN environment.
+
+### Measured step time
+
+Same model, data, batch shape (64 prompts × 16 responses), LoRA r=32,
+`max_response_length=16384`, 100 steps on 16 Ascend 910C NPUs (CANN 9.1,
+vllm-omni 0.28.0rc1). Step 1 is excluded from the averages (warm-up).
+
+| topology | step (s) | gen (s) | old_log_prob (s) | update_actor (s) | update_weights (s) |
+| --- | --- | --- | --- | --- | --- |
+| async 12 rollout / 4 train | 2160 | 432 (residual wait) | 451 | 1243 | 30 |
+| sync 16 shared | 2508 | 2002 (full generation) | 126 | 360 | 18 |
+
+`timing_s/gen` is the training-side wait for the next batch in async mode (the
+rollout pool keeps generating during the step), and the full generation time in
+sync mode, where generation runs inline on the same 16 dies.
+
+In the async layout the trainer pool is the bottleneck: `old_log_prob +
+update_actor` is ~78% of the step, and the rollout pool stays busy enough that
+the training-side wait (`timing_s/gen`) is ~430 s. In sync mode generation takes
+~2000 s and the update ~500 s. Reported async `timing_s/gen` is the residual
+wait, not full generation time.
+
+Validation uses 30 AIME-2024 prompts with greedy decoding (`n=1`,
+`do_sample=false`, `temperature=0`): one problem is 3.3 accuracy points and the
+binomial standard error near p≈0.3 is ~8 points. Across ten evaluations both
+layouts scored 5-14 of 30 (async mean 9.0, sync mean 8.4); the difference is well
+inside that noise, while training reward rose from ~0.45 to ~0.68 on both.
+
+Set `trainer.save_freq` to a positive value: `0` disables checkpointing entirely
+in this trainer, including the final step.
 
 ## Training with `MMK12`
 
@@ -517,27 +601,6 @@ Follow the [NPU installation guide](../../docs/start/install_npu.md), source
 CANN/ATB, and ensure FFmpeg and the media dependencies are available on every
 Ray worker.
 
-This recipe requires verl with
-[`use_no_sync_for_gradient_accumulation` support (#7458)](https://github.com/verl-project/verl/pull/7458).
-Commit `a0feb78fe8229fde644aec3bbec20b5dc4583509` (`0.10.0.dev`) includes
-that change. The repository's current verl pin `fefb080` and the v0.9.0
-release do not include the option. This recipe therefore requires a separate
-verl update after the standard environment installation; the repository-wide
-dependency pin is unchanged. The development version string alone is not
-sufficient to identify a compatible installation.
-
-To update verl in an existing NPU training environment without replacing its
-installed PyTorch or other runtime dependencies, run:
-
-```bash
-python -m pip install --no-deps --force-reinstall \
-    "verl @ git+https://github.com/verl-project/verl.git@a0feb78fe8229fde644aec3bbec20b5dc4583509"
-```
-
-Restart the training processes and Ray workers after updating. Reinstalling
-the repository (`uv pip install -e .`) may restore the repository's older pin;
-apply the recipe-specific verl update after that installation.
-
 Launch with the original full model checkpoint:
 
 ```bash
@@ -557,7 +620,7 @@ at the cost of additional gradient communication. Gradient accumulation and
 the optimizer-step boundary are preserved. This uses the upstream verl option;
 no local gradient-synchronization override is needed.
 
-The revision installed above defaults this option to `false` in its FSDP YAML, while its
+The pinned verl defaults this option to `false` in its FSDP YAML, while its
 `FSDPEngineConfig` dataclass defaults to `true`. The launcher sets it explicitly
 so this recipe does not depend on how the configuration was constructed.
 For a deferred-synchronization comparison, explicitly override it to `true`;
@@ -754,6 +817,7 @@ examples/gspo_trainer/
 │   ├── run_qwen3_omni_thinker_gspo_lora_mmk12_v1_nitrobrew_opd_npu.sh  ← V1 OPD script (NPU, MMK12, full-vocabulary)
 │   ├── run_qwen3_omni_thinker_gspo_avqa_v1.sh    ← V1 launch script (NPU, AVQA)
 │   ├── run_qwen3_omni_thinker_gspo_npu_nextqa_v1.sh  ← V1 launch script (NPU, NExT-QA)
+│   ├── run_qwen3_omni_thinker_gspo_lora_math_dapo_separate_async_npu_v1.sh  ← V1 launch script (NPU, separate-async, math_dapo)
 ├── data_process/
 │   ├── mmk12.py                                      ← MMK12 → verl RL parquet converter
 │   ├── avqa.py                                       ← AVQA → verl RL parquet converter

@@ -13,14 +13,18 @@ sep() { printf '%0.s-' {1..78}; echo; }
 
 NPU_SMOKE_GROUP="${NPU_SMOKE_GROUP:?NPU_SMOKE_GROUP must be set}"
 TIMESTAMP="$(date '+%Y%m%d_%H%M%S')"
-LOG_DIR="${LOG_DIR:-${REPO_ROOT}/logs/npu_smoke/${NPU_SMOKE_GROUP}/${TIMESTAMP}}"
+if [[ -z "${LOG_DIR:-}" ]]; then
+    NPU_SMOKE_LOG_ROOT="${REPO_ROOT}/logs/npu_smoke/${NPU_SMOKE_GROUP}"
+    mkdir -p "${NPU_SMOKE_LOG_ROOT}"
+    LOG_DIR="$(mktemp -d "${NPU_SMOKE_LOG_ROOT}/${TIMESTAMP}.XXXXXX")"
+fi
 mkdir -p "${LOG_DIR}"
 SUMMARY_LOG="${LOG_DIR}/summary.log"
 
 export PYTHONUNBUFFERED=1
 export RAY_DEDUP_LOGS=0
 export DEVICE_NAME=npu
-export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1
+export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES="${RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES-1}"
 export VLLM_PLUGINS="${VLLM_PLUGINS:-ascend}"
 
 if [[ "${LD_PRELOAD:-}" != *libjemalloc* ]]; then
@@ -78,6 +82,11 @@ build_npu_device_list() {
 }
 export ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES:-$(build_npu_device_list "${NUM_NPUS}")}"
 
+case "${NPU_SMOKE_SHARD_INDEX:-}" in
+    ''|0|1) ;;
+    *) fail "NPU_SMOKE_SHARD_INDEX must be unset, 0 or 1."; exit 2 ;;
+esac
+
 declare -a TEST_IDS=()
 declare -a TEST_NAMES=()
 declare -a TEST_RESULTS=()
@@ -85,6 +94,9 @@ declare -a TEST_DURATIONS=()
 declare -a TEST_LOG_FILES=()
 
 cleanup_runtime() {
+    if [[ "${NPU_SMOKE_SKIP_GLOBAL_CLEANUP:-0}" == 1 ]]; then
+        return
+    fi
     ray stop --force || true
     pkill -TERM -f DiffusionWorker || true
     pkill -TERM -f VLLMWorker || true
@@ -102,6 +114,11 @@ run_test() {
     shift 2
     local logfile="${LOG_DIR}/test_${id}.log"
 
+    if [[ -n "${NPU_SMOKE_SHARD_INDEX:-}" ]] && (( id % 2 != NPU_SMOKE_SHARD_INDEX )); then
+        log "[${id}] Assigned to the other NPU smoke shard."
+        return 0
+    fi
+
     cleanup_runtime
     sep
     log "Starting  [${id}] ${name}"
@@ -110,11 +127,17 @@ run_test() {
     sep
 
     local start_ts end_ts elapsed rc
+    local -a statuses
     start_ts="$(date +%s)"
     set +e
     "$@" 2>&1 | tee "${logfile}"
-    rc="${PIPESTATUS[0]}"
+    statuses=("${PIPESTATUS[@]}")
     set -e
+    rc="${statuses[0]}"
+    if [[ "${statuses[1]}" -ne 0 ]]; then
+        fail "[${id}] Unable to write test log: tee exit=${statuses[1]}"
+        [[ "${rc}" -ne 0 ]] || rc="${statuses[1]}"
+    fi
 
     end_ts="$(date +%s)"
     elapsed=$((end_ts - start_ts))
@@ -152,6 +175,7 @@ print_summary() {
     echo "Passed: ${passed}" | tee -a "${SUMMARY_LOG}"
     echo "Failed: ${failed}" | tee -a "${SUMMARY_LOG}"
     echo "Logs  : ${LOG_DIR}" | tee -a "${SUMMARY_LOG}"
+    [[ "${passed}" -gt 0 ]] || { fail "No tests executed."; return 1; }
     [[ "${failed}" -eq 0 ]]
 }
 
@@ -164,6 +188,7 @@ print_header() {
     echo "  Repo root : ${REPO_ROOT}"
     echo "  Log dir   : ${LOG_DIR}"
     echo "  NUM_NPUS  : ${NUM_NPUS}"
+    echo "  Shard     : ${NPU_SMOKE_SHARD_INDEX:-all} (even IDs: 0; odd IDs: 1)"
     echo "  ASCEND_RT_VISIBLE_DEVICES : ${ASCEND_RT_VISIBLE_DEVICES}"
     sep
 }

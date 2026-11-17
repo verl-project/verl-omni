@@ -19,10 +19,7 @@ from types import SimpleNamespace
 import torch
 
 from verl_omni.pipelines.model_base import DiffusionModelARBase
-from verl_omni.pipelines.qwen_image_dual_grpo.ar_training_adapter import (
-    QwenImageDualGRPOAR,
-    qwen2_vl_base_forward,
-)
+from verl_omni.pipelines.qwen_image_dual_grpo.ar_training_adapter import QwenImageDualGRPOAR
 
 
 def _module_with_nested_visual() -> torch.nn.Module:
@@ -50,10 +47,10 @@ def test_ar_adapter_registered_for_dual_grpo():
     assert QwenImageDualGRPOAR.get_fsdp_ignored_module_names(_dual_grpo_config()) == []
 
 
-def test_configure_ar_module_strips_nested_visual_and_patches_forward():
+def test_configure_ar_module_strips_nested_visual():
     module = _module_with_nested_visual()
     DiffusionModelARBase.maybe_configure_module(module, _dual_grpo_config())
-    assert module.model.forward.__func__ is qwen2_vl_base_forward
+    assert module.model.forward.__func__ is torch.nn.Module.forward
     _assert_dummy_visual(module.model.visual, module.device)
 
 
@@ -73,7 +70,7 @@ def test_configure_ar_module_warns_when_visual_is_missing(caplog):
     logger_name = "verl_omni.pipelines.qwen_image_dual_grpo.ar_training_adapter"
     with caplog.at_level(logging.WARNING, logger=logger_name):
         DiffusionModelARBase.maybe_configure_module(module, _dual_grpo_config())
-    assert module.model.forward.__func__ is qwen2_vl_base_forward
+    assert module.model.forward.__func__ is torch.nn.Module.forward
     assert "vision tower not found" in caplog.text
 
 
@@ -88,4 +85,4 @@ def test_unregistered_pipelines_leave_the_ar_module_alone():
         visual = module.model.visual
         DiffusionModelARBase.maybe_configure_module(module, cfg)
         assert module.model.visual is visual
-        assert getattr(module.model.forward, "__func__", None) is not qwen2_vl_base_forward
+        assert module.model.forward.__func__ is torch.nn.Module.forward

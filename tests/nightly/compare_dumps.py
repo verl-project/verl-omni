@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Compare debug dumps from the Qwen-Image FlowGRPO nightly run."""
+"""Compare debug dumps from a Qwen-Image nightly run."""
 
 from __future__ import annotations
 
@@ -36,8 +36,23 @@ INFORMATIONAL_TENSORS = frozenset(
         "batch.advantages",
         "batch.sample_level_rewards",
         "batch.sample_level_scores",
+        # DiffusionNFT reward_prob is a rescaled advantage, so OCR score flips
+        # move it even when the rollout latent is unchanged.
+        "batch.reward_prob",
+        "batch.returns",
     }
 )
+
+# Nested old_log_probs pads inconsistently on the tiny omni model;
+OMNI_INFORMATIONAL_TENSORS = frozenset({"batch.old_log_probs"})
+
+
+def _is_informational(key: str, rel_path: str) -> bool:
+    if key in INFORMATIONAL_TENSORS:
+        return True
+    # FlowGRPO's dense ``driver_forward/.../batch.old_log_probs`` must still fail the run,
+    # so this set is scoped to the omni actor_update_batch payload kind only.
+    return key in OMNI_INFORMATIONAL_TENSORS and Path(rel_path).parts[0] == "actor_update_batch"
 
 
 def _payload_files(root: Path) -> dict[str, Path]:
@@ -256,7 +271,7 @@ def compare(args: argparse.Namespace) -> tuple[bool, dict]:
                 baseline_tensors[key], current_tensors[key], key_thresholds.get("atol", args.atol)
             )
             metrics["thresholds"] = key_thresholds
-            informational = key in INFORMATIONAL_TENSORS
+            informational = _is_informational(key, rel_path)
             if informational:
                 metrics["informational"] = True
             file_result["tensors"][key] = metrics
@@ -354,7 +369,7 @@ def _print_conclusion(passed: bool, results: dict, report_path: Path) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Compare Qwen-Image FlowGRPO nightly debug dumps")
+    parser = argparse.ArgumentParser(description="Compare Qwen-Image L3 nightly debug dumps")
     parser.add_argument("--baseline", type=Path, required=True)
     parser.add_argument("--current", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)

@@ -11,6 +11,7 @@ on:
       - "pyproject.toml"
       - .github/workflows/cpu_unit_tests.yml
       - .github/qwen_tts_pin.txt
+      - .github/triton_cpu_pin.txt
       - .github/vllm_omni_pin.txt
       - .github/verl_pin.txt
   pull_request:
@@ -24,6 +25,7 @@ on:
       - "pyproject.toml"
       - .github/workflows/cpu_unit_tests.yml
       - .github/qwen_tts_pin.txt
+      - .github/triton_cpu_pin.txt
       - .github/vllm_omni_pin.txt
       - .github/verl_pin.txt
 
@@ -42,7 +44,7 @@ jobs:
       github.event_name != 'pull_request' ||
       contains(join(github.event.pull_request.labels.*.name, ','), 'ci')
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     strategy:
       matrix:
         python-version: ["3.12"]
@@ -59,18 +61,19 @@ jobs:
           cache-dependency-path: |
             pyproject.toml
             .github/qwen_tts_pin.txt
+            .github/triton_cpu_pin.txt
             .github/vllm_omni_pin.txt
             .github/verl_pin.txt
       - name: Install dependencies
         run: |
-          pip install --extra-index-url https://download.pytorch.org/whl/cpu "https://github.com/vllm-project/vllm/releases/download/v0.30.0/vllm-0.30.0+cpu-cp38-abi3-manylinux_2_39_x86_64.whl"
+          pip install --extra-index-url https://download.pytorch.org/whl/cpu "https://github.com/vllm-project/vllm/releases/download/v0.33.0rc3/vllm-0.33.0+cpu-cp38-abi3-manylinux_2_39_x86_64.whl"
           pip install uv
-          uv pip install --python "$(command -v python)" -e ".[omni,dev,ocr]"
+          uv pip install --python "$(command -v python)" --constraint .github/triton_cpu_pin.txt -e ".[omni,dev,ocr]"
           pip install --no-deps \
             "qwen-tts @ https://github.com/QwenLM/Qwen3-TTS/archive/$(cat .github/qwen_tts_pin.txt).tar.gz"
       - name: Verify the documented install resolves
         run: |
-          uv pip install --dry-run --python "$(command -v python)" -e .
+          uv pip install --dry-run --python "$(command -v python)" --constraint .github/triton_cpu_pin.txt -e .
       - name: Run CPU torch.compile contract tests
         env:
           TORCH_COMPILE_DISABLE: "0"
@@ -83,11 +86,19 @@ jobs:
           echo 'python_files = *_on_cpu.py' >> pytest.ini
           set -o pipefail
           pytest -s -x --asyncio-mode=auto \
+            -n auto --dist loadfile \
             --cov=verl_omni \
             --cov-report=term-missing \
             --cov-report=xml:coverage.xml \
             --ignore=tests/models/test_flash_attention_3_graph_break_on_cpu.py \
+            --ignore=tests/reward_loop/test_cpu_native_reward_ray_on_cpu.py \
             tests/ | tee pytest-coverage.txt
+      - name: Run real-Ray reward loop tests
+        # The sole L1 file allowed to use Ray (see
+        # docs/contributing/testing_guide.md). Ray state is process-global,
+        # so it gets a fresh sequential pytest invocation.
+        run: |
+          pytest -s -x --asyncio-mode=auto tests/reward_loop/test_cpu_native_reward_ray_on_cpu.py
       - name: Add coverage summary
         if: always()
         run: |
