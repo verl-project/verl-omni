@@ -1,6 +1,6 @@
 # Per-Stage Skip: Cache and Replay RL Pipeline Stages
 
-Last updated: 11/02/2026
+Last updated: 11/16/2026
 
 Stage skip replays the output of one RL pipeline stage for configured global
 steps instead of running it: reward scoring, old log-probs, reference outputs,
@@ -142,7 +142,7 @@ omni_skip:
 | `ref_log_prob` | Reference log-probs or, for direct preference, reference noise preds | `cache`, `repeat` | V1, V0 |
 | `advantage` | Driver-side advantage computation | `cache`, `repeat` | V1 (policy gradient) |
 | `actor_update` | The actor update | `cache`, `repeat`, `empty` | V1, V0 |
-| `weight_sync` | Mid-cycle rollout weight refresh | `empty` | V1 async modes |
+| `weight_sync` | Mid-cycle rollout weight refresh | `empty` | None today (see Guardrails) |
 
 Rollout itself is replayed by verl's roles under `skip:`. Use
 `skip.rollout_tq` on the V1 trainer and `skip.rollout` on the V0 trainer. The
@@ -207,7 +207,7 @@ inert or unsafe:
 | An enabled role with empty `steps` | It could never fire |
 | A misspelled role under `omni_skip` | It would be ignored |
 | `weight_sync` without `ack_stale_weights: true` | Replicas keep stale weights |
-| `weight_sync` on V0 or in `trainer.v1.trainer_mode=sync` | Those trainers have no mid-cycle sync |
+| `weight_sync` on V0 or in `trainer.v1.trainer_mode=sync` or `separate_async` | Those trainers keep the colocated replicas asleep through training, so they have no mid-cycle sync |
 | `reward` or `weight_sync` with streaming rewards | Scoring happens inside rollout; use the rollout roles |
 | `ref_log_prob` with no reference policy | The stage never runs |
 | `old_log_prob` + `algorithm.rollout_correction.bypass_mode` | Both substitute old log-probs |
@@ -229,5 +229,5 @@ missing cache would turn a later replay into a real run.
   plumbing tool rather than a reproduction tool.
 - Replaying a stage does not free the memory of its model: the reward model and
   rollout replicas still load, so profile runs need the same GPUs.
-- The V1 and V0 `weight_sync` limits above mean the role only applies to async
-  modes that also have a colocated reward model.
+- The `weight_sync` limits above leave no current trainer for the role: it only
+  applies to a mode that wakes the colocated replicas mid-cycle.
