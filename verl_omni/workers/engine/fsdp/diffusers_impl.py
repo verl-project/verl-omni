@@ -502,7 +502,14 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
                     torch.distributed.broadcast(param.data, src=0)
                 _cast_replicated_params(module, param_dtype)
                 _check_replicated_params(module)
-                apply_fsdp2(module, fsdp_kwargs, self.engine_config, ignored_names=ignored_names, replicate_frozen=True)
+                replicated_params = {param for name, param in module.named_parameters() if "lora_" not in name}
+                apply_fsdp2(
+                    module,
+                    fsdp_kwargs,
+                    self.engine_config,
+                    ignored_names=ignored_names,
+                    ignored_params=replicated_params,
+                )
             else:
                 full_state = module.state_dict()
                 apply_fsdp2(module, fsdp_kwargs, self.engine_config, ignored_names=ignored_names)

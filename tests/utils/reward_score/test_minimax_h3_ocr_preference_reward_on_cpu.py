@@ -55,6 +55,8 @@ class TestOcrPreferenceReward:
 
         async def fake_request(proc, script, payload):
             requests.append((proc, script, payload["prompt"]))
+            if payload["prompt"] == "other prompt":
+                return {"pickscore": 0.41, "hpsv2": 0.19}
             return {"pickscore": 0.72, "hpsv2": 0.31}
 
         for mod_fn in (pick_fn, hps_fn):
@@ -64,19 +66,22 @@ class TestOcrPreferenceReward:
 
         image = torch.full((3, 16, 16), 128, dtype=torch.uint8)
         extra_info = {"prompt": "cafe menu", "split": "train", "index": 0, "tier": "t20", "media_kind": "image"}
+        other_info = {"prompt": "other prompt", "split": "train", "index": 0, "tier": "t20", "media_kind": "image"}
 
         import asyncio
 
         async def run():
             pick = await pick_fn("src", image, "target", extra_info)
             hps = await hps_fn("src", image, "target", extra_info)
-            return pick, hps
+            other = await pick_fn("src", image, "target", other_info)
+            return pick, hps, other
 
-        pick, hps = asyncio.run(run())
+        pick, hps, other = asyncio.run(run())
         assert pick["score"] == pytest.approx(0.72)
         assert hps["score"] == pytest.approx(0.31)
+        assert other["score"] == pytest.approx(0.41)
         assert spawns == ["preference_worker.py"]
-        assert len(requests) == 1
+        assert [r[2] for r in requests] == ["cafe menu", "other prompt"]
 
     def test_ppocr_error_raises_instead_of_identity_guard(self, monkeypatch):
         _reset_shared_state()

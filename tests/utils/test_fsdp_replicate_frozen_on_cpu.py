@@ -89,7 +89,8 @@ def _replicate_rank(rank: int, root: str, mismatch_mode: str | None) -> None:
         reference = copy.deepcopy(model)
         _check_replicated_params(model)
         mesh = init_device_mesh("cpu", (2,), mesh_dim_names=("fsdp",))
-        apply_fsdp2(model, {"mesh": mesh}, {}, replicate_frozen=True)
+        replicated_params = {param for name, param in model.named_parameters() if "lora_" not in name}
+        apply_fsdp2(model, {"mesh": mesh}, {}, ignored_params=replicated_params)
 
         for name, param in model.named_parameters():
             assert isinstance(param, DTensor) == ("lora_" in name), name
@@ -114,6 +115,31 @@ def _replicate_rank(rank: int, root: str, mismatch_mode: str | None) -> None:
         dist.destroy_process_group()
 
 
+def _non_lora_ignored_rank(rank: int, root: str) -> None:
+    from torch.distributed.device_mesh import init_device_mesh
+    from torch.distributed.tensor import DTensor
+
+    from verl_omni.utils.fsdp_utils import apply_fsdp2
+
+    dist.init_process_group("gloo", init_method=f"file://{Path(root) / 'rendezvous'}", rank=rank, world_size=2)
+    try:
+        torch.manual_seed(0)
+        model = _TinyDiT()
+        for param in model.transformer_blocks[0].parameters():
+            param.requires_grad_(False)
+        ignored = set(model.transformer_blocks[0].parameters())
+        mesh = init_device_mesh("cpu", (2,), mesh_dim_names=("fsdp",))
+        apply_fsdp2(model, {"mesh": mesh}, {}, ignored_params=ignored)
+        for name, param in model.named_parameters():
+            assert isinstance(param, DTensor) == ("transformer_blocks.1." in name), name
+        x = torch.randn(2, 4, generator=torch.Generator().manual_seed(rank + 1))
+        model(x).square().sum().backward()
+        assert all(p.grad is None for p in model.transformer_blocks[0].parameters())
+        assert all(p.grad is not None for p in model.transformer_blocks[1].parameters())
+    finally:
+        dist.destroy_process_group()
+
+
 class TestReplicateFrozen:
     @pytest.mark.parametrize(
         "mismatch_mode",
@@ -128,8 +154,12 @@ class TestReplicateFrozen:
 
         model = _lora_dit()
         model.base_model.model.transformer_blocks[0].norm.weight.requires_grad_(True)
-        with pytest.raises(ValueError, match="every non-LoRA parameter to be frozen"):
-            apply_fsdp2(model, {"mesh": None}, {}, replicate_frozen=True)
+        replicated_params = {param for name, param in model.named_parameters() if "lora_" not in name}
+        with pytest.raises(ValueError, match="FSDP2-ignored parameters must be frozen"):
+            apply_fsdp2(model, {"mesh": None}, {}, ignored_params=replicated_params)
+
+    def test_apply_fsdp2_ignored_params_works_without_lora(self, tmp_path):
+        mp.spawn(_non_lora_ignored_rank, args=(str(tmp_path),), nprocs=2, join=True)
 
     @pytest.mark.parametrize(
         "param_dtype,expected_base",

@@ -92,9 +92,9 @@
     <th>当前支持状态</th>
   </tr>
   <tr>
-    <td rowspan="6">Qwen-Image 与 Qwen-Image-Edit</td>
+    <td rowspan="6">Qwen-Image</td>
     <td rowspan="6">扩散生成模型</td>
-    <td rowspan="6">文本/图像 → 图像</td>
+    <td rowspan="6">文本 → 图像</td>
     <td>FlowGRPO (+ CPS/SDE)</td>
     <td>✅ 已支持</td>
   </tr>
@@ -116,6 +116,13 @@
   </tr>
   <tr>
     <td>DPO</td>
+    <td>✅ 已支持</td>
+  </tr>
+  <tr>
+    <td>Qwen-Image-Edit</td>
+    <td>扩散生成模型</td>
+    <td>文本 + 图像 → 图像</td>
+    <td>FlowGRPO (+ CPS/SDE)</td>
     <td>✅ 已支持</td>
   </tr>
   <tr>

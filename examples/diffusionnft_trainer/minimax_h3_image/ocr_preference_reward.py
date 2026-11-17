@@ -65,7 +65,7 @@ def _new_state() -> SimpleNamespace:
         scorer=None,
         scorer_lock=None,
         prompts=None,
-        last=(None, None),
+        last=(None, None, None),
     )
 
 
@@ -207,27 +207,26 @@ async def _layout(solution_image, extra_info: dict) -> dict:
 
 async def _preference(solution_image, extra_info: dict) -> dict:
     state = _get_state()
-    if state.last[0] is solution_image:
-        return state.last[1]
+    prompt = full_prompt(extra_info)
+    if state.last[0] is solution_image and state.last[1] == prompt:
+        return state.last[2]
     if state.scorer_lock is None:
         state.scorer_lock = asyncio.Lock()
     async with state.scorer_lock:
-        if state.last[0] is solution_image:
-            return state.last[1]
+        if state.last[0] is solution_image and state.last[1] == prompt:
+            return state.last[2]
         path = _save(solution_image, extra_info, "Preference scorer")
         try:
             if state.scorer is None or state.scorer.returncode is not None:
                 env = dict(os.environ)
                 env["CUDA_VISIBLE_DEVICES"] = SCORER_GPU
                 state.scorer = await _spawn("preference_worker.py", env)
-            reply = await _request(
-                state.scorer, "preference_worker.py", {"path": path, "prompt": full_prompt(extra_info)}
-            )
+            reply = await _request(state.scorer, "preference_worker.py", {"path": path, "prompt": prompt})
         finally:
             _remove(path)
         if "error" in reply:
             raise RuntimeError(f"Preference scorer failed: {reply['error']}")
-        state.last = (solution_image, reply)
+        state.last = (solution_image, prompt, reply)
         return reply
 
 
