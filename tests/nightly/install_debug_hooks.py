@@ -204,7 +204,7 @@ def _non_tensor_subset(data: Any) -> dict[str, Any]:
         source = data
     # extra_info.repeat_index is stable across runs. uid is a per-run uuid4.
     _non_tensor_dump_keys = ("uid", "data_source", "extra_info", _DEBUG_STEP_KEY)
-    return _tensor_dict_subset(data, _non_tensor_dump_keys)
+    return _tensor_dict_subset(source, _non_tensor_dump_keys)
 
 
 def _extract_debug_step(data: Any = None, fallback: int | None = None) -> int | None:
