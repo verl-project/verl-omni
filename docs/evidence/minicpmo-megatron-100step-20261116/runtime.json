@@ -1,0 +1,25 @@
+{
+  "omni_base": "d65b2017fe09fc30a60f8aea70b445b604b5db45",
+  "verl_base": "fefb080262e1c015a0ea05f958822a6a512dc795",
+  "megatron_bridge": "e7a6dbfec036e2877a2bf785df94475b1b6c5eb7",
+  "megatron_core": "e0a4bfed7f1e233b857187ceff0104645858d7d1",
+  "vllm": "0.30.0",
+  "vllm_omni": "12e9280010afc41ce5c6a1f46900fc329cf08377",
+  "transformers": "5.14.1",
+  "source_inventory_sha256": "4f5bc984e394e036bfc9f4f7a9167fde33147457cdaa28012d2d65311580b406",
+  "pr_base": "b7e61b29ddea0a32d56b40327c4e1288d0787016",
+  "pr_current_public_verl_pin": "2b4ed6826a39205838d0ca004bdd942334dbe4b6",
+  "required_verl_changes": [
+    "builder-based get_model_config/get_model construction preserving model-specific pre-wrap hooks",
+    "megatron_utils bridge model construction",
+    "Megatron engine builder dispatch"
+  ],
+  "public_pin_e2e_qualified": false,
+  "tested_integration_sha256": {
+    "verl_omni/pipelines/minicpm/megatron_inputs.py": "4bb5cfd194ff74e3a720ddb1937101853bf21e4bef29c070f96df2349e07f574",
+    "verl_omni/pipelines/minicpm/thinker_training_adapter.py": "9bb56b38cf2e4085257aa69893f8f3905e06f35469395c9711e87a8b43292155",
+    "verl_omni/pipelines/model_base.py": "4b7a98cd181060f7d1a3fc2a23a91d52c9ffa39074c209c99a68b55d81bcc044",
+    "verl_omni/workers/engine/megatron/omni_impl.py": "cc7b69c7b4fd7562ec975e2b7462e2b3f16e1c172a8cdc501f9078087c315c63"
+  },
+  "tested_verl_helper_sha256": "e7e65bc2d0e5b71bbdfde55094d0cd9afcf4b1f12987d41222a1772e41c671bb"
+}
