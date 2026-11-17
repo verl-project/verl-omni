@@ -16,7 +16,7 @@
 from typing import Any
 
 import torch
-from vllm_omni.diffusion.models.minimax_h3 import pipeline_minimax_h3_image
+import vllm_omni.diffusion.models.minimax_h3.pipeline_minimax_h3_image as pipeline_minimax_h3_image
 from vllm_omni.diffusion.models.minimax_h3.pipeline_minimax_h3_image import (
     MiniMaxH3ImagePipeline,
     minimax_h3_image_run_sigmas,
@@ -94,20 +94,32 @@ class MiniMaxH3ImageDiffusionNFTPipeline(MiniMaxH3RolloutWeightSyncMixin, MiniMa
             )
         return super().map_lora_update_to_engine(tensors, peft_config)
 
-    def encode_prompt(self, prompt: str, references: list[Any]) -> tuple[torch.Tensor, torch.Tensor]:
-        """Encode Agent Loop token IDs verbatim while the native path builds reference vision spans."""
-        prompt_ids = getattr(self, "_h3_prompt_ids", None)
-        if prompt_ids is None:
+    def encode_prompt(
+        self,
+        prompt: str,
+        references: list[Any],
+        prompt_ids: tuple[int, ...] | torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Encode Agent Loop token IDs verbatim while the native path builds reference vision spans.
+
+        ``prompt_ids`` is surfaced as an explicit hashable argument when called from ``_encode_text`` so
+        ``PromptEmbedCache`` keys on the actual token IDs rather than the ``"[pretokenized]"`` placeholder.
+        """
+        resolved_ids = prompt_ids if prompt_ids is not None else getattr(self, "_h3_prompt_ids", None)
+        if resolved_ids is None:
             return super()._encode_text(prompt, references)
+        token_ids = torch.as_tensor(resolved_ids, dtype=torch.long)
         tokenizer = self.tokenizer
-        self.tokenizer = _PromptTokenOverride(tokenizer, prompt, prompt_ids)
+        self.tokenizer = _PromptTokenOverride(tokenizer, prompt, token_ids)
         try:
             return super()._encode_text(prompt, references)
         finally:
             self.tokenizer = tokenizer
 
     def _encode_text(self, prompt: str, references: list[Any]) -> tuple[torch.Tensor, torch.Tensor]:
-        return self.encode_prompt(prompt, references)
+        prompt_ids = getattr(self, "_h3_prompt_ids", None)
+        cache_ids = None if prompt_ids is None else tuple(int(token) for token in prompt_ids.tolist())
+        return self.encode_prompt(prompt, references, prompt_ids=cache_ids)
 
     def diffuse(self, **kwargs: Any) -> torch.Tensor:
         """Run the official PDD denoiser and retain the Actor's condition state."""
@@ -140,7 +152,8 @@ class MiniMaxH3ImageDiffusionNFTPipeline(MiniMaxH3RolloutWeightSyncMixin, MiniMa
         num_refs = 0 if images is None else len(images) if isinstance(images, list | tuple) else 1
         if num_refs > MAX_REF_BLOCKS:
             raise ValueError(
-                f"MiniMax H3 image DiffusionNFT supports at most {MAX_REF_BLOCKS} reference images, got {num_refs}."
+                f"MiniMax H3 image DiffusionNFT serializes at most {MAX_REF_BLOCKS} reference blocks "
+                f"(native pipeline allows 16), got {num_refs}."
             )
         if sampling.generator_device is None:
             sampling.generator_device = "cpu"

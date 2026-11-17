@@ -21,10 +21,9 @@ _IMAGE_PIPELINE_MODULE = "vllm_omni.diffusion.models.minimax_h3.pipeline_minimax
 
 try:
     from .vllm_omni_rollout_adapter import MiniMaxH3ImageDiffusionNFTPipeline  # noqa: F401
-except (ImportError, AttributeError) as error:
-    if isinstance(error, ModuleNotFoundError) and error.name not in (None, _IMAGE_PIPELINE_MODULE):
-        if not _IMAGE_PIPELINE_MODULE.startswith(f"{error.name}."):
-            raise
+except ModuleNotFoundError as error:
+    if error.name != _IMAGE_PIPELINE_MODULE:
+        raise
     logging.getLogger(__name__).warning(
         "MiniMaxH3ImagePipeline rollout adapter is not registered: installed vLLM-Omni lacks MiniMax H3 image "
         "support (%s).",

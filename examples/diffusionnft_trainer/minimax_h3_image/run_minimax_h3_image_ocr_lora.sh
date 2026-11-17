@@ -169,9 +169,9 @@ ${VERL_OMNI_ENTRY:-python3 -m verl_omni.trainer.main_diffusion} \
     "+reward.reward_functions.ocr.path=$reward_file" \
     +reward.reward_functions.ocr.name=term_ocr_guarded \
     +reward.reward_functions.ocr.weight=0.2 \
-    "+reward.reward_functions.aes.path=$reward_file" \
-    +reward.reward_functions.aes.name=term_hpsv2 \
-    +reward.reward_functions.aes.weight=0.3 \
+    "+reward.reward_functions.hps.path=$reward_file" \
+    +reward.reward_functions.hps.name=term_hpsv2 \
+    +reward.reward_functions.hps.weight=0.3 \
     reward.aggregation=weighted_sum \
     trainer.logger='["console","tensorboard"]' \
     trainer.project_name=diffusion_nft \

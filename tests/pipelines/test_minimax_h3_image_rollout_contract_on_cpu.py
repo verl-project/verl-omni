@@ -201,7 +201,7 @@ class TestEdit:
         run = _run(monkeypatch, grids=grids_12, prompt_images=[object()] * 12)
         assert run.result.output["metadata"]["rl"]["ref_block_count"].tolist() == [[12]]
 
-        with pytest.raises(ValueError, match="at most 12 reference images"):
+        with pytest.raises(ValueError, match="at most 12 reference blocks"):
             _run(monkeypatch, grids=((2, 2),) * 13, prompt_images=[object()] * 13)
 
 
@@ -249,3 +249,38 @@ class TestPromptEncoding:
         )
         with pytest.raises(ValueError, match="minimax_h3_diffusion_single_turn_agent"):
             pipeline._ensure_prompt_text(request)
+
+    def test_prompt_embed_cache_distinguishes_token_ids_under_pretokenized_placeholder(self, monkeypatch):
+        from vllm_omni.diffusion.cache.prompt_embed_cache import install_prompt_embed_cache
+
+        pipeline, calls = self._pipeline(monkeypatch)
+
+        def native_encode(self, prompt, references):
+            ids = self.tokenizer(prompt, add_special_tokens=False)["input_ids"]
+            calls.append(ids)
+            return torch.full((len(ids), _TEXT_DIM), float(ids[0])), torch.ones(len(ids), dtype=torch.long)
+
+        monkeypatch.setattr(MiniMaxH3ImagePipeline, "_encode_text", native_encode)
+        cache = install_prompt_embed_cache(pipeline, max_size=8, enabled=True)
+        assert cache is not None
+
+        req1 = SimpleNamespace(
+            prompts=[{"prompt": "first", "prompt_token_ids": [11, 12]}],
+            sampling_params=SimpleNamespace(extra_args={MINIMAX_H3_TOKEN_ID_NATIVE_KEY: True}),
+        )
+        req2 = SimpleNamespace(
+            prompts=[{"prompt": "second", "prompt_token_ids": [21, 22, 23]}],
+            sampling_params=SimpleNamespace(extra_args={MINIMAX_H3_TOKEN_ID_NATIVE_KEY: True}),
+        )
+
+        pipeline._ensure_prompt_text(req1)
+        h1, _ = pipeline._encode_text(req1.prompts[0]["prompt"], [])
+        pipeline._ensure_prompt_text(req1)
+        h1_repeat, _ = pipeline._encode_text(req1.prompts[0]["prompt"], [])
+        pipeline._ensure_prompt_text(req2)
+        h2, _ = pipeline._encode_text(req2.prompts[0]["prompt"], [])
+
+        assert calls == [[11, 12], [21, 22, 23]]
+        assert torch.equal(h1, h1_repeat)
+        assert h1.shape[0] == 2 and h2.shape[0] == 3 and float(h1[0, 0]) == 11.0 and float(h2[0, 0]) == 21.0
+        assert cache.hits == 1 and cache.misses == 2

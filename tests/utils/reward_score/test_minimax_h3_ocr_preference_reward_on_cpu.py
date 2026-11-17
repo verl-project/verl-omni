@@ -143,3 +143,156 @@ class TestOcrPreferenceReward:
         monkeypatch.setenv("TRAIN_FILES", f"{p_t5},{p_t5}")
         with pytest.raises(ValueError, match="Duplicate prompt key"):
             mod_fn({"split": "train", "index": 0, "tier": "t5"})
+
+    def test_request_timeout_kills_child_and_raises(self):
+        import asyncio
+
+        _reset_shared_state()
+        fn = load_extern_object(REWARD_PATH, "term_ocr_guarded")
+        request_fn = fn.__globals__["_request"]
+        fn.__globals__["TIMEOUT_S"] = 0.01
+
+        class _HangingStdout:
+            async def readline(self):
+                await asyncio.sleep(5)
+                return b""
+
+        class _FakeStdin:
+            def write(self, data):
+                pass
+
+            async def drain(self):
+                pass
+
+        class _FakeProc:
+            returncode = None
+            stdin = _FakeStdin()
+            stdout = _HangingStdout()
+            killed = False
+
+            def kill(self):
+                self.killed = True
+                self.returncode = -9
+
+            async def wait(self):
+                return self.returncode
+
+        proc = _FakeProc()
+        with pytest.raises(RuntimeError, match="gave no reply"):
+            asyncio.run(request_fn(proc, "ocr_layout_worker.py", {"path": "x.png"}))
+        assert proc.killed is True
+
+    def test_layout_pool_preserves_slot_on_failed_respawn_and_recovers(self, monkeypatch, tmp_path):
+        import asyncio
+
+        _reset_shared_state()
+        monkeypatch.setenv("OCR_REWARD_TMPDIR", str(tmp_path))
+        fn = load_extern_object(REWARD_PATH, "term_ocr_guarded")
+        ns = fn.__globals__
+        monkeypatch.setitem(ns, "POOL_SIZE", 1)
+        monkeypatch.setitem(ns, "TIMEOUT_S", 0.05)
+
+        class _Proc:
+            def __init__(self, idx, die_on_request=False):
+                self.idx = idx
+                self.returncode = None
+                self.die_on_request = die_on_request
+
+        spawn_count = 0
+        fail_next_spawn = False
+
+        async def fake_spawn(script, env):
+            nonlocal spawn_count
+            if fail_next_spawn:
+                raise RuntimeError("spawn failed")
+            spawn_count += 1
+            return _Proc(spawn_count, die_on_request=(spawn_count == 1))
+
+        async def fake_request(proc, script, payload):
+            if proc.die_on_request:
+                proc.returncode = 1
+                raise RuntimeError("worker died")
+            return {"area": 0.04, "border": 0, "line_h": 12.0}
+
+        monkeypatch.setitem(ns, "_spawn", fake_spawn)
+        monkeypatch.setitem(ns, "_request", fake_request)
+
+        image = torch.full((3, 16, 16), 128, dtype=torch.uint8)
+        extra_info = {"media_kind": "image"}
+        layout_fn = ns["_layout"]
+        get_state = ns["_get_state"]
+
+        async def run_phases():
+            nonlocal fail_next_spawn
+            # Phase 1: first call spawns worker 1, worker 1 dies during _request, respawn fails -> slot becomes None.
+            orig_request = fake_request
+
+            async def failing_first_request(proc, script, payload):
+                nonlocal fail_next_spawn
+                fail_next_spawn = True
+                return await orig_request(proc, script, payload)
+
+            monkeypatch.setitem(ns, "_request", failing_first_request)
+            with pytest.raises(RuntimeError, match="worker died"):
+                await layout_fn(image, extra_info)
+            assert get_state().guard_pool.qsize() == 1
+
+            # Phase 2: respawn succeeds on the next call using the preserved slot.
+            fail_next_spawn = False
+            monkeypatch.setitem(ns, "_request", orig_request)
+            res = await layout_fn(image, extra_info)
+            assert res == {"area": 0.04, "border": 0, "line_h": 12.0}
+            assert spawn_count == 2
+            assert get_state().guard_pool.qsize() == 1
+
+            # Phase 3: empty pool times out instead of hanging forever.
+            slot = await get_state().guard_pool.get()
+            try:
+                with pytest.raises(RuntimeError, match="no idle worker"):
+                    await layout_fn(image, extra_info)
+            finally:
+                get_state().guard_pool.put_nowait(slot)
+
+        asyncio.run(run_phases())
+
+    def test_preference_respawns_dead_worker(self, monkeypatch, tmp_path):
+        import asyncio
+
+        _reset_shared_state()
+        monkeypatch.setenv("OCR_REWARD_TMPDIR", str(tmp_path))
+        pick_fn = load_extern_object(REWARD_PATH, "term_pickscore")
+        ns = pick_fn.__globals__
+
+        class _Proc:
+            def __init__(self, idx):
+                self.idx = idx
+                self.returncode = None
+
+        spawned = []
+
+        async def fake_spawn(script, env):
+            proc = _Proc(len(spawned) + 1)
+            spawned.append(proc)
+            return proc
+
+        async def fake_request(proc, script, payload):
+            if proc.idx == 1:
+                proc.returncode = -9
+                raise RuntimeError("preference worker exited")
+            return {"pickscore": 0.65, "hpsv2": 0.25}
+
+        monkeypatch.setitem(ns, "_spawn", fake_spawn)
+        monkeypatch.setitem(ns, "_request", fake_request)
+
+        image = torch.full((3, 16, 16), 128, dtype=torch.uint8)
+        extra_info = {"prompt": "cafe menu", "media_kind": "image"}
+
+        async def run():
+            with pytest.raises(RuntimeError, match="exited"):
+                await pick_fn("src", image, "target", extra_info)
+            res = await pick_fn("src", image, "target", extra_info)
+            return res
+
+        res = asyncio.run(run())
+        assert res["score"] == pytest.approx(0.65)
+        assert len(spawned) == 2

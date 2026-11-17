@@ -58,41 +58,40 @@ def _lora_dit():
     return model
 
 
-def _replicate_rank(rank: int, root: str, mismatch_mode: str | None) -> None:
+def _replicate_rank(rank: int, root: str) -> None:
+    import verl.utils.fsdp_utils as verl_fsdp
+    from accelerate import init_empty_weights
     from torch.distributed.device_mesh import init_device_mesh
     from torch.distributed.tensor import DTensor
 
     from verl_omni.utils.fsdp_utils import apply_fsdp2
-    from verl_omni.workers.engine.fsdp.diffusers_impl import _check_replicated_params
+    from verl_omni.workers.engine.fsdp.diffusers_impl import _cast_replicated_params
+    from verl_omni.workers.engine.lora_adapter_mixin import cast_adapter_params_to_base
 
     dist.init_process_group("gloo", init_method=f"file://{Path(root) / 'rendezvous'}", rank=rank, world_size=2)
+    verl_fsdp.get_device_id = lambda: torch.device("cpu")
     try:
-        model = _lora_dit()
-        if mismatch_mode == "perturb":
-            if rank == 1:
-                with torch.no_grad():
-                    model.base_model.model.transformer_blocks[1].to_q.base_layer.weight[0, 0] += 1e-3
-            with pytest.raises(RuntimeError, match="differ across ranks"):
-                _check_replicated_params(model)
-            return
-        if mismatch_mode == "swap":
-            if rank == 1:
-                with torch.no_grad():
-                    row = model.base_model.model.transformer_blocks[1].to_q.base_layer.weight[0]
-                    first = row[0].clone()
-                    row[0] = row[1]
-                    row[1] = first
-            with pytest.raises(RuntimeError, match="differ across ranks"):
-                _check_replicated_params(model)
-            return
+        if rank == 0:
+            model = _lora_dit()
+            reference = copy.deepcopy(model)
+        else:
+            # Non-rank-0 starts on meta (and would draw different LoRA_A RNG); rank-0 load broadcasts both.
+            with init_empty_weights():
+                base = _TinyDiT()
+            torch.manual_seed(999)
+            model = get_peft_model(base, LoraConfig(r=2, lora_alpha=4, target_modules=["to_q"], bias="none"))
+            cast_adapter_params_to_base(model)
+            reference = _lora_dit()
 
-        reference = copy.deepcopy(model)
-        _check_replicated_params(model)
+        _cast_replicated_params(model, None)
+        full_state = model.state_dict()
         mesh = init_device_mesh("cpu", (2,), mesh_dim_names=("fsdp",))
         replicated_params = {param for name, param in model.named_parameters() if "lora_" not in name}
         apply_fsdp2(model, {"mesh": mesh}, {}, ignored_params=replicated_params)
+        verl_fsdp.fsdp2_load_full_state_dict(model, full_state, mesh, None)
 
         for name, param in model.named_parameters():
+            assert not param.is_meta, name
             assert isinstance(param, DTensor) == ("lora_" in name), name
 
         x_ranks = [
@@ -141,13 +140,8 @@ def _non_lora_ignored_rank(rank: int, root: str) -> None:
 
 
 class TestReplicateFrozen:
-    @pytest.mark.parametrize(
-        "mismatch_mode",
-        [None, "perturb", "swap"],
-        ids=["identical-trains", "rank-mismatch-raises", "equal-sum-swap-raises"],
-    )
-    def test_two_ranks(self, tmp_path, mismatch_mode):
-        mp.spawn(_replicate_rank, args=(str(tmp_path), mismatch_mode), nprocs=2, join=True)
+    def test_two_ranks_meta_init_and_rank0_broadcast(self, tmp_path):
+        mp.spawn(_replicate_rank, args=(str(tmp_path),), nprocs=2, join=True)
 
     def test_trainable_base_parameter_is_rejected(self):
         from verl_omni.utils.fsdp_utils import apply_fsdp2

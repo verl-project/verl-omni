@@ -175,6 +175,61 @@ class MiniMaxH3ImageDiffusionNFT(DiffusionModelBase):
         return model_inputs, None
 
     @classmethod
+    def _prepare_sample_inputs(
+        cls,
+        model_inputs: dict,
+        index: int,
+        num_text_tokens: int,
+        no_audio: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, int]:
+        """Build layout, condition slice, and row-wise timesteps for one sample in the micro-batch."""
+        latent_h, latent_w = model_inputs["latent_grid"]
+        ref_block_meta = model_inputs["ref_block_meta"]
+        ref_block_count = model_inputs["ref_block_count"]
+        prompt_token_tags = model_inputs["prompt_token_tags"]
+        condition_rows = model_inputs["condition_rows"]
+        condition_row_count = model_inputs["condition_row_count"]
+        timestep = model_inputs["timestep"]
+
+        num_refs = 0 if ref_block_count is None else int(ref_block_count[index].reshape(-1)[0])
+        position_ids, token_tags, image_indices, text_indices, num_condition = build_image_layout(
+            latent_h,
+            latent_w,
+            num_text_tokens,
+            ref_block_meta=None if ref_block_meta is None else ref_block_meta[index],
+            ref_block_count=num_refs,
+            text_token_tags=None if prompt_token_tags is None else prompt_token_tags[index, :num_text_tokens],
+        )
+        sample_condition = condition_rows[index]
+        if condition_row_count is not None:
+            sample_condition = sample_condition[: int(condition_row_count[index].reshape(-1)[0])]
+        if sample_condition.shape[0] != num_condition:
+            raise ValueError(
+                f"MiniMax H3 image condition rows {sample_condition.shape[0]} do not match layout rows {num_condition}."
+            )
+        unique_timesteps, timestep_indices = build_row_timesteps(
+            image_indices,
+            no_audio,
+            num_condition,
+            0,
+            num_text_tokens,
+            video_timestep=float(timestep[index]),
+            audio_timestep=float(timestep[index]),
+            condition_video_timestep=IMAGE_CONDITION_TIMESTEP,
+            condition_audio_timestep=1.0,
+        )
+        return (
+            sample_condition,
+            position_ids,
+            token_tags,
+            image_indices,
+            text_indices,
+            unique_timesteps,
+            timestep_indices,
+            num_condition,
+        )
+
+    @classmethod
     def forward(
         cls,
         module,
@@ -185,16 +240,9 @@ class MiniMaxH3ImageDiffusionNFT(DiffusionModelBase):
         """Run the DiT per sample with its step's fused head and return flow-match velocities."""
         del negative_model_inputs
         image_rows = model_inputs["image_rows"]
-        condition_rows = model_inputs["condition_rows"]
-        condition_row_count = model_inputs["condition_row_count"]
-        ref_block_meta = model_inputs["ref_block_meta"]
-        ref_block_count = model_inputs["ref_block_count"]
-        prompt_token_tags = model_inputs["prompt_token_tags"]
         encoder_hidden_states = model_inputs["encoder_hidden_states"]
         encoder_mask = model_inputs["encoder_mask"]
-        timestep = model_inputs["timestep"]
         pdd_steps = model_inputs["pdd_step"].tolist()
-        latent_h, latent_w = model_inputs["latent_grid"]
         device = image_rows.device
 
         head = ensure_pdd_heads(module, model_config)
@@ -214,34 +262,16 @@ class MiniMaxH3ImageDiffusionNFT(DiffusionModelBase):
         velocities = []
         for index in range(batch):
             num_text_tokens = int(text_lengths[index])
-            num_refs = 0 if ref_block_count is None else int(ref_block_count[index].reshape(-1)[0])
-            position_ids, token_tags, image_indices, text_indices, num_condition = build_image_layout(
-                latent_h,
-                latent_w,
-                num_text_tokens,
-                ref_block_meta=None if ref_block_meta is None else ref_block_meta[index],
-                ref_block_count=num_refs,
-                text_token_tags=None if prompt_token_tags is None else prompt_token_tags[index, :num_text_tokens],
-            )
-            sample_condition = condition_rows[index]
-            if condition_row_count is not None:
-                sample_condition = sample_condition[: int(condition_row_count[index].reshape(-1)[0])]
-            if sample_condition.shape[0] != num_condition:
-                raise ValueError(
-                    f"MiniMax H3 image condition rows {sample_condition.shape[0]} "
-                    f"do not match layout rows {num_condition}."
-                )
-            unique_timesteps, timestep_indices = build_row_timesteps(
+            (
+                sample_condition,
+                position_ids,
+                token_tags,
                 image_indices,
-                no_audio,
+                text_indices,
+                unique_timesteps,
+                timestep_indices,
                 num_condition,
-                0,
-                num_text_tokens,
-                video_timestep=float(timestep[index]),
-                audio_timestep=float(timestep[index]),
-                condition_video_timestep=IMAGE_CONDITION_TIMESTEP,
-                condition_audio_timestep=1.0,
-            )
+            ) = cls._prepare_sample_inputs(model_inputs, index, num_text_tokens, no_audio)
             head.pdd_step = int(pdd_steps[index])
             try:
                 result = module(
@@ -269,6 +299,10 @@ class MiniMaxH3ImageDiffusionNFT(DiffusionModelBase):
 
         Every op of the DiT is row-wise except attention, which runs per document (``ATTENTION_SEGMENTS``), and the
         per-step output head (``pdd_segments``).
+
+        Note: ``ATTENTION_SEGMENTS`` is a module-level dict keyed by total packed sequence length; concurrent
+        micro-batch forwards with the same total length would collide, so callers must serialize calls to
+        ``_forward_packed``.
         """
         if getattr(module, "gradient_checkpointing", False) and torch.is_grad_enabled():
             raise NotImplementedError(
@@ -276,15 +310,8 @@ class MiniMaxH3ImageDiffusionNFT(DiffusionModelBase):
                 "attention would not see the per-document segments."
             )
         image_rows = model_inputs["image_rows"]
-        condition_rows = model_inputs["condition_rows"]
-        condition_row_count = model_inputs["condition_row_count"]
-        ref_block_meta = model_inputs["ref_block_meta"]
-        ref_block_count = model_inputs["ref_block_count"]
-        prompt_token_tags = model_inputs["prompt_token_tags"]
         encoder_hidden_states = model_inputs["encoder_hidden_states"]
-        timestep = model_inputs["timestep"]
         pdd_steps = model_inputs["pdd_step"].tolist()
-        latent_h, latent_w = model_inputs["latent_grid"]
         device = image_rows.device
         batch = image_rows.shape[0]
         no_audio = torch.empty(0, dtype=torch.long)
@@ -295,34 +322,16 @@ class MiniMaxH3ImageDiffusionNFT(DiffusionModelBase):
         row_offset = text_offset = video_offset = timestep_offset = 0
         for index in range(batch):
             num_text_tokens = int(text_lengths[index])
-            num_refs = 0 if ref_block_count is None else int(ref_block_count[index].reshape(-1)[0])
-            position_ids, token_tags, image_indices, text_index, num_condition = build_image_layout(
-                latent_h,
-                latent_w,
-                num_text_tokens,
-                ref_block_meta=None if ref_block_meta is None else ref_block_meta[index],
-                ref_block_count=num_refs,
-                text_token_tags=None if prompt_token_tags is None else prompt_token_tags[index, :num_text_tokens],
-            )
-            sample_condition = condition_rows[index]
-            if condition_row_count is not None:
-                sample_condition = sample_condition[: int(condition_row_count[index].reshape(-1)[0])]
-            if sample_condition.shape[0] != num_condition:
-                raise ValueError(
-                    f"MiniMax H3 image condition rows {sample_condition.shape[0]} "
-                    f"do not match layout rows {num_condition}."
-                )
-            unique_timesteps, row_timestep_indices = build_row_timesteps(
+            (
+                sample_condition,
+                position_ids,
+                token_tags,
                 image_indices,
-                no_audio,
+                text_index,
+                unique_timesteps,
+                row_timestep_indices,
                 num_condition,
-                0,
-                num_text_tokens,
-                video_timestep=float(timestep[index]),
-                audio_timestep=float(timestep[index]),
-                condition_video_timestep=IMAGE_CONDITION_TIMESTEP,
-                condition_audio_timestep=1.0,
-            )
+            ) = cls._prepare_sample_inputs(model_inputs, index, num_text_tokens, no_audio)
             length = int(position_ids.shape[0])
             num_video = int(sample_condition.shape[0] + image_rows.shape[1])
             video_rows.extend([sample_condition, image_rows[index]])

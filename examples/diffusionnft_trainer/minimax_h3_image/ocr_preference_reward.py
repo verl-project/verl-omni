@@ -190,19 +190,24 @@ async def _layout(solution_image, extra_info: dict) -> dict:
             for proc in procs:
                 state.guard_pool.put_nowait(proc)
     path = _save(solution_image, extra_info, "Layout guard")
-    proc = await state.guard_pool.get()
     try:
+        proc = await asyncio.wait_for(state.guard_pool.get(), TIMEOUT_S)
+    except TimeoutError:
+        _remove(path)
+        raise RuntimeError(f"ocr_layout_worker.py pool had no idle worker within {TIMEOUT_S:g} s") from None
+    try:
+        if proc is None or proc.returncode is not None:
+            proc = await _spawn("ocr_layout_worker.py", dict(os.environ))
         return await _request(proc, "ocr_layout_worker.py", {"path": path})
     finally:
         _remove(path)
-        if proc.returncode is not None:
+        if proc is not None and proc.returncode is not None:
             try:
                 proc = await _spawn("ocr_layout_worker.py", dict(os.environ))
             except Exception:
                 logger.exception("Could not replace a dead PP-OCR layout worker")
                 proc = None
-        if proc is not None:
-            state.guard_pool.put_nowait(proc)
+        state.guard_pool.put_nowait(proc)
 
 
 async def _preference(solution_image, extra_info: dict) -> dict:

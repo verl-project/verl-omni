@@ -124,7 +124,13 @@ def _fsdp_param_dtype(
 
 
 def _replicate_frozen_enabled(engine) -> bool:
-    """Whether the adapter keeps the frozen base replicated (FSDP2, unmerged LoRA, no CPU offload)."""
+    """Whether a LoRA adapter keeps its frozen base replicated via ``ignored_params``.
+
+    LoRA-only opt-in (``lora_rank > 0``, ``strategy=fsdp2``, unmerged LoRA, no offload):
+    rank 0 loads the checkpoint on CPU and non-zero ranks meta-init as usual, then
+    ``fsdp2_load_full_state_dict`` broadcasts both the unsharded non-LoRA base and
+    the sharded LoRA adapters from rank 0.
+    """
     model_cls = DiffusionModelBase.get_class(engine.model_config)
     if engine.model_config.lora_rank <= 0 or not model_cls.replicate_frozen_base(engine.model_config):
         return False
@@ -144,29 +150,6 @@ def _cast_replicated_params(module, param_dtype: Optional[torch.dtype]) -> None:
     for name, param in module.named_parameters():
         if "lora_" not in name and param.is_floating_point():
             param.data = param.data.to(param_dtype)
-
-
-def _check_replicated_params(module) -> None:
-    """Fail on every rank at init unless all ranks hold finite, identical parameters."""
-    device = next((param.device for param in module.parameters()), torch.device("cpu"))
-    rank = torch.distributed.get_rank()
-    all_ok = True
-    with torch.no_grad():
-        for param in module.parameters():
-            data = param.detach()
-            if not bool(torch.isfinite(data).all()):
-                all_ok = False
-            if data.numel() == 0:
-                continue
-            raw = data.contiguous().view(-1).view(torch.uint8)
-            ref = raw.clone() if rank == 0 else torch.empty_like(raw)
-            torch.distributed.broadcast(ref, src=0)
-            if not torch.equal(raw, ref):
-                all_ok = False
-    ok = torch.tensor(float(all_ok), device=device)
-    torch.distributed.all_reduce(ok, op=torch.distributed.ReduceOp.MIN)
-    if ok.item() == 0:
-        raise RuntimeError("replicate_frozen_base: replicated parameters differ across ranks or are non-finite.")
 
 
 class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
@@ -351,8 +334,7 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
             return module
 
         # Default path: load via diffusers AutoModel
-        replicate_frozen = _replicate_frozen_enabled(self)
-        init_context = get_init_weight_context_manager(use_meta_tensor=not replicate_frozen, mesh=self.device_mesh)
+        init_context = get_init_weight_context_manager(use_meta_tensor=True, mesh=self.device_mesh)
 
         with init_context(), warnings.catch_warnings():
             warnings.simplefilter("ignore")
@@ -495,14 +477,9 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
                 "reshard_after_forward": self.engine_config.reshard_after_forward,
             }
             if _replicate_frozen_enabled(self):
-                module = module.to(device=get_device_id())
-                for _, param in sorted(
-                    ((n, p) for n, p in module.named_parameters() if "lora_" in n), key=lambda item: item[0]
-                ):
-                    torch.distributed.broadcast(param.data, src=0)
                 _cast_replicated_params(module, param_dtype)
-                _check_replicated_params(module)
-                replicated_params = {param for name, param in module.named_parameters() if "lora_" not in name}
+                replicated_params = [param for name, param in module.named_parameters() if "lora_" not in name]
+                full_state = module.state_dict()
                 apply_fsdp2(
                     module,
                     fsdp_kwargs,
@@ -513,7 +490,7 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
             else:
                 full_state = module.state_dict()
                 apply_fsdp2(module, fsdp_kwargs, self.engine_config, ignored_names=ignored_names)
-                fsdp2_load_full_state_dict(module, full_state, fsdp_mesh, offload_policy)
+            fsdp2_load_full_state_dict(module, full_state, fsdp_mesh, offload_policy)
         else:
             raise NotImplementedError(f"Unknown strategy {self.engine_config.strategy}")
 

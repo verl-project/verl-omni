@@ -50,13 +50,16 @@ One node with 4 GPUs: GPUs 0-2 run the trainer, rollout and OCR reward model; GP
 scorer (`PREFERENCE_SCORER_GPU`). Each of the 3 reward-loop workers starts one shared scorer process there (about
 7 GB each, serving both `term_pickscore` and `term_hpsv2`) and its own pool of 8 PP-OCR processes. 512x512 is generated directly, without the upscaled canvas.
 LoRA rank 66, lr 1e-4, 96 images per step, 2 updates per step. The frozen base is replicated on every rank
-(`VERL_OMNI_H3_IMAGE_REPLICATE_FROZEN=1`) and each micro-batch runs as one packed DiT call
-(`VERL_OMNI_H3_IMAGE_PACK_MICRO_BATCH=1`, requires gradient checkpointing off). Steps took 60-85 s on GB300.
+(`VERL_OMNI_H3_IMAGE_REPLICATE_FROZEN=1`), each micro-batch runs as one packed DiT call
+(`VERL_OMNI_H3_IMAGE_PACK_MICRO_BATCH=1`, requires gradient checkpointing off), and rollout normalization/LoRA
+kernels stay enabled by default (`VERL_OMNI_H3_IMAGE_ROLLOUT_KERNELS=1`, set `0` to fall back to stock Diffusers).
+Set `MINIMAX_H3_IMAGE_DEBUG_DIR` to dump per-step diagnostic tensors on evidence runs. Steps took 60-85 s on GB300.
 
 ## Result
 
 50 steps, seed 42, 64 held-out prompts (a quarter of them with scenes not seen in training). Guarded OCR is the OCR
-term without its weight; PP-OCR is a second OCR engine that is not part of the reward; contrast and edge are the
+term without its weight; the `PP-OCR` column reports raw diagnostic text accuracy from the same PP-OCRv6 engine (whose
+box geometry acts as the layout guard, while its text accuracy is not part of the reward); contrast and edge are the
 grayscale standard deviation and mean edge magnitude of the validation images.
 
 | step | reward | guarded OCR | raw OCR | PP-OCR | PickScore | HPSv2.1 | text area | border-touch | contrast | edge |

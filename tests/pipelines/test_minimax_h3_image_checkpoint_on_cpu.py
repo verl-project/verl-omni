@@ -224,6 +224,30 @@ class TestStateDictRoundTrip:
         with pytest.raises(ValueError, match="audio-free"):
             ckpt.convert_tensor("audio_patch_proj.weight", torch.zeros(2, 2), _HEADS, _HEAD_DIM)
 
+    def test_conversion_rules_invert_model_merger_plan(self):
+        actor = _tiny_actor()
+        shapes = {
+            name: tuple(tensor.shape)
+            for name, tensor in actor.state_dict().items()
+            if not name.startswith("audio_proj_")
+        }
+        plan = _h3_conversion_plan(shapes)
+        for native_name, (kind, diffusers_names) in plan.items():
+            assert ckpt.native_sources(native_name) == diffusers_names
+            if kind == "identity":
+                assert len(diffusers_names) == 1
+                assert ckpt.diffusers_name(native_name) == diffusers_names[0]
+            elif kind == "qkv":
+                assert len(diffusers_names) == 3
+                assert ckpt.convert_tensor(
+                    native_name, torch.zeros(_HEADS * 3 * _HEAD_DIM, _HIDDEN), _HEADS, _HEAD_DIM
+                ).keys() == set(diffusers_names)
+            elif kind == "geglu":
+                assert len(diffusers_names) == 1
+                assert ckpt.convert_tensor(
+                    native_name, torch.zeros(2 * _FFN, _HIDDEN), _HEADS, _HEAD_DIM
+                ).keys() == set(diffusers_names)
+
 
 class TestStreamingConversion:
     def test_sharded_release_converts_and_verifies(self, tmp_path):
@@ -275,3 +299,15 @@ class TestStreamingConversion:
 
         with pytest.raises(ValueError, match="rope.inv_freq"):
             ckpt.convert(tmp_path / "release", tmp_path / "out")
+
+    @pytest.mark.parametrize("missing_file", ckpt.PDD_FILES)
+    def test_missing_pdd_file_fails_before_creating_output(self, tmp_path, missing_file):
+        actor = _tiny_actor()
+        release = tmp_path / "release"
+        _write_release(release, actor, shards=1)
+        (release / missing_file).unlink()
+        output = tmp_path / "out"
+
+        with pytest.raises(FileNotFoundError, match=missing_file):
+            ckpt.convert(release, output)
+        assert not output.exists()
