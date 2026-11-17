@@ -12,7 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""The two frozen tools the agent can call: ``generate_image`` and ``judge_image``.
+"""Agent-facing tools and optional diagnostic libraries.
+
+The two frozen tools the agent can call are ``generate_image`` and ``judge_image``.
 
 Each is a plain Python function tagged with ``@function_tool`` that calls an HTTP
 sidecar and returns **text** (scores, findings, file paths) — pixels are never
@@ -22,4 +24,6 @@ file path, so importing this package registers nothing.
 Per-rollout state (which sample owns which PNG, the "judge said YES" flag) lives in
 ``trajectory/``, scoped per rollout rather than per thread because the shared thread
 pool is reused across samples. ``agent_helper/`` holds the agent-loop-side readers.
+``consistency_capture`` provides opt-in diffusion trainer diagnostics; it is not an
+agent-callable tool.
 """

@@ -1,4 +1,4 @@
-# Copyright 2026 Bytedance Ltd. and/or its affiliates
+# Copyright 2026 Bytedance Ltd. and/or its affiliates.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Verify the real typed LoRA resolver-to-EngineArgs path without model weights."""
+"""Verify the typed LoRA resolver-to-EngineArgs path without model weights."""
 
 from argparse import Namespace
 from types import SimpleNamespace
@@ -20,37 +20,36 @@ import pytest
 from vllm_omni.config import omni_config
 from vllm_omni.config.stage_config import DeployConfig, StageDeployConfig, StageExecutionType
 from vllm_omni.engine.stage_init_utils import _project_omni_stage_engine_args
-from vllm_omni.model_executor.models.qwen3_omni.pipeline import QWEN3_OMNI_THINKER_ONLY_PIPELINE
+from vllm_omni.model_executor.models.qwen3_omni.pipeline import (
+    QWEN3_OMNI_PIPELINE,
+    QWEN3_OMNI_THINKER_ONLY_PIPELINE,
+)
 
-from verl_omni.utils.vllm_omni import patch
-from verl_omni.workers.rollout.vllm_rollout.vllm_omni_ar_strategy import ARStrategy
-
-
-@pytest.fixture
-def lora_config_patch(monkeypatch):
-    # Keep the process-global compatibility changes local to each test.
-    for name in ("OmniStageLoadConfig", "_LLM_LOAD_ENGINE_FIELDS", "_LLM_STAGE_ENGINE_FIELDS", "_STAGE_ENGINE_FIELDS"):
-        monkeypatch.setattr(omni_config, name, getattr(omni_config, name))
-    for execution in (StageExecutionType.LLM_AR, StageExecutionType.LLM_GENERATION):
-        monkeypatch.setitem(
-            omni_config._STAGE_ENGINE_FIELDS_BY_EXECUTION_TYPE,
-            execution,
-            omni_config._STAGE_ENGINE_FIELDS_BY_EXECUTION_TYPE[execution],
-        )
-    field_map = omni_config._LOAD_STAGE_ENGINE_FIELD_MAP
-    original = dict(field_map)
-    yield
-    field_map.clear()
-    field_map.update(original)
+from verl_omni.workers.rollout.vllm_rollout.vllm_omni_ar_strategy import ARStrategy, lora_engine_extras
 
 
-@pytest.mark.parametrize("source", ["global", "stage", "deploy"])
-def test_lora_flags_reach_real_engine_args(lora_config_patch, source):
+def test_lora_engine_extras_mirror_verl_rollout_flags():
+    model_config = SimpleNamespace(lora={"rank": 66}, lora_rank=0)
+    assert lora_engine_extras(model_config) == {"enable_lora": True, "max_loras": 1, "max_lora_rank": 128}
+
+    model_config = SimpleNamespace(lora={}, lora_rank=8)
+    assert lora_engine_extras(model_config) == {"enable_lora": True, "max_loras": 1, "max_lora_rank": 8}
+
+    model_config = SimpleNamespace(lora={"rank": 66, "fully_sharded_loras": True}, lora_rank=0)
+    assert lora_engine_extras(model_config)["fully_sharded_loras"] is True
+
+
+def test_lora_engine_extras_empty_without_trainable_lora():
+    # Merged-LoRA configs keep the rollout engine LoRA-free: verl injects no
+    # flags for them, so the deploy config must not either.
+    assert lora_engine_extras(SimpleNamespace(lora={"rank": 66, "merge": True}, lora_rank=0)) == {}
+    assert lora_engine_extras(SimpleNamespace(lora={}, lora_rank=0)) == {}
+
+
+@pytest.mark.parametrize("source", ["stage", "deploy"])
+def test_lora_flags_reach_real_engine_args(source):
     flags = {"enable_lora": True, "max_lora_rank": 8, "max_loras": 1, "fully_sharded_loras": True}
-    engine_args = dict(flags)
-    ARStrategy(SimpleNamespace(config=SimpleNamespace())).prepare_engine_args(engine_args, Namespace())
-    assert all(engine_args[key] == value for key, value in flags.items())
-    cli = flags if source == "global" else {f"stage_0_{key}": value for key, value in flags.items()}
+    cli = {f"stage_0_{key}": value for key, value in flags.items()}
     deploy = None
     if source == "deploy":
         cli = {}
@@ -60,28 +59,50 @@ def test_lora_flags_reach_real_engine_args(lora_config_patch, source):
     )
     projected = _project_omni_stage_engine_args(config.stage_by_id(0))
     assert {key: projected[key] for key in flags} == flags
-    patch.patch_vllm_omni_lora_config()
-    assert omni_config.OmniStageLoadConfig is patch._OmniLoRALoadConfig
 
 
-def test_lora_patch_does_not_disable_unknown_field_validation(lora_config_patch):
-    patch.patch_vllm_omni_lora_config()
+def test_prepare_engine_args_drops_global_lora_flags():
+    strategy = ARStrategy(SimpleNamespace(config=SimpleNamespace()))
+    strategy.lora_stage_ids = [0]
+    engine_args = {"enable_lora": True, "max_loras": 1, "max_lora_rank": 128, "fully_sharded_loras": True}
+    strategy.prepare_engine_args(engine_args, Namespace())
+    assert engine_args.get("enable_lora") is None
+    assert engine_args.get("max_loras") is None
+    assert engine_args.get("max_lora_rank") is None
+    assert engine_args.get("fully_sharded_loras") is None
+
+
+def test_prepare_engine_args_keeps_global_lora_flags_without_a_generated_config():
+    # An externally configured pipeline has no generated deploy config to
+    # re-route the flags; upstream accepts the globals there.
+    strategy = ARStrategy(SimpleNamespace(config=SimpleNamespace()))
+    engine_args = {"enable_lora": True, "max_loras": 1, "max_lora_rank": 128, "fully_sharded_loras": True}
+    strategy.prepare_engine_args(engine_args, Namespace())
+    assert engine_args["enable_lora"] is True
+    assert engine_args["max_loras"] == 1
+    assert engine_args["max_lora_rank"] == 128
+    assert engine_args["fully_sharded_loras"] is True
+
+
+def test_global_lora_flags_rejected_on_multi_stage_pipelines():
+    # Why ``prepare_engine_args`` drops the globals: upstream vLLM-Omni owns
+    # vLLM LoRA per LLM stage and rejects the broadcast flags outright.
+    with pytest.raises(ValueError, match="set vLLM LoRA argument"):
+        omni_config.VllmOmniConfig.from_pipeline_config(
+            QWEN3_OMNI_PIPELINE, cli_overrides={"enable_lora": True, "max_loras": 1, "max_lora_rank": 8}
+        )
+
+
+def test_unknown_stage_engine_fields_still_rejected():
     with pytest.raises(ValueError, match="no structured config owner: not_an_engine_field"):
         omni_config.VllmOmniConfig.from_pipeline_config(
             QWEN3_OMNI_THINKER_ONLY_PIPELINE, cli_overrides={"stage_0_not_an_engine_field": True}
         )
 
 
-def test_lora_patch_does_not_give_diffusion_stages_llm_lora_fields(lora_config_patch):
-    before = omni_config._STAGE_ENGINE_FIELDS_BY_EXECUTION_TYPE[StageExecutionType.DIFFUSION]
-    patch.patch_vllm_omni_lora_config()
-    assert omni_config._STAGE_ENGINE_FIELDS_BY_EXECUTION_TYPE[StageExecutionType.DIFFUSION] == before
-    assert "enable_lora" not in before
-
-
-def test_lora_patch_is_not_installed_for_merged_lora(monkeypatch):
-    monkeypatch.setattr(patch, "patch_vllm_omni_lora_config", lambda: pytest.fail("unexpected LoRA patch"))
-    ARStrategy(SimpleNamespace(config=SimpleNamespace())).prepare_engine_args({}, Namespace())
+def test_diffusion_stages_own_no_llm_lora_fields():
+    diffusion_fields = omni_config._STAGE_ENGINE_FIELDS_BY_EXECUTION_TYPE[StageExecutionType.DIFFUSION]
+    assert "enable_lora" not in diffusion_fields
 
 
 def test_real_verl_tensor_lora_loader_preserves_qwen_prefixes(monkeypatch):
@@ -98,6 +119,7 @@ def test_real_verl_tensor_lora_loader_preserves_qwen_prefixes(monkeypatch):
     # The GPU wheel enables pinning at import; CPU tests must not allocate pinned memory.
     monkeypatch.setattr(lora_model, "PIN_MEMORY", False)
     VLLMHijack.hijack()
+
     modules = ["q_proj", "k_proj", "v_proj", "o_proj"]
     tensors = {}
     for index, module in enumerate(modules):

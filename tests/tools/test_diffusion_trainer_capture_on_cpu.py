@@ -29,7 +29,7 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-SOURCE = Path(__file__).resolve().parents[2] / "verl_omni" / "pipelines" / "consistency_capture.py"
+SOURCE = Path(__file__).resolve().parents[2] / "verl_omni" / "tools" / "consistency_capture.py"
 
 
 def _capture_module():
@@ -394,3 +394,31 @@ def test_native_dataproto_to_tensordict_metadata_transport():
     worker_batch = _to_diffusion_worker_tensordict(data)
     assert tu.get_non_tensor_data(worker_batch, key, default=None) == context
     assert data.meta_info[key] == context
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_nightly_worker_setup_loads_tools_capture(monkeypatch, tmp_path, enabled):
+    """Resolve the real tools library without unrelated model registrations."""
+    repo = Path(__file__).resolve().parents[2]
+    package = ModuleType("verl_omni")
+    package.__path__ = [str(repo / "verl_omni")]
+    monkeypatch.setitem(sys.modules, "verl_omni", package)
+    # Preserve prior cache entries while letting imports load the real files.
+    for name in ("verl_omni.tools", "verl_omni.tools.consistency_capture"):
+        monkeypatch.setitem(sys.modules, name, None)
+        sys.modules.pop(name)
+    capture = importlib.import_module("verl_omni.tools.consistency_capture")
+    assert Path(capture.__file__).resolve() == SOURCE.resolve()
+    calls = []
+    monkeypatch.setattr(capture, "install_trainer_capture", lambda: calls.append(True))
+    monkeypatch.setenv("DEBUG_DUMP_ENABLED", "0")
+    if enabled:
+        monkeypatch.setenv("DIFFUSION_CAPTURE_DIR", str(tmp_path / "capture"))
+    else:
+        monkeypatch.delenv("DIFFUSION_CAPTURE_DIR", raising=False)
+    source = repo / "tests" / "nightly" / "install_debug_hooks.py"
+    spec = importlib.util.spec_from_file_location("_tested_nightly_tools_capture", source)
+    nightly = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(nightly)
+    nightly.install_debug_hooks()
+    assert calls == ([True] if enabled else [])

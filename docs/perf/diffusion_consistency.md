@@ -1,8 +1,11 @@
 # Check pinned diffusion consistency artifacts
 
-Last updated: 11/15/2026
+Last updated: 11/17/2026
 
 ## Capture on the real trainer path
+
+The optional `verl_omni.tools.consistency_capture` library is installed by the
+nightly entrypoint in the driver and worker processes.
 
 For a pipeline integration, first screen the existing
 `rollout_corr/logprob_abs_diff_mean`, `rollout_corr/logprob_abs_diff_max` and
