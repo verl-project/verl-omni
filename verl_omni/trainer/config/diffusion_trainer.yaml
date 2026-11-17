@@ -676,7 +676,7 @@ omni_skip:
     # Action to take on those steps: empty no-ops the update, cache | repeat replay its metrics.
     action: empty
 
-  # Mid-cycle rollout weight refresh (V1 async modes with a colocated reward model only).
+  # Mid-cycle rollout weight refresh; no current trainer mode runs one (see examples/stage_skip/README.md).
   weight_sync:
 
     # Whether to enable this role.

@@ -60,12 +60,11 @@ def _check_skip_conflicts(config: DictConfig) -> None:
         return
 
     use_v1 = bool(OmegaConf.select(config, "trainer.use_v1", default=False))
-    if "weight_sync" in enabled and (
-        not use_v1 or OmegaConf.select(config, "trainer.v1.trainer_mode", default="sync") == "sync"
-    ):
+    trainer_mode = OmegaConf.select(config, "trainer.v1.trainer_mode", default="sync")
+    if "weight_sync" in enabled and (not use_v1 or trainer_mode in ("sync", "separate_async")):
         raise ValueError(
-            "omni_skip.weight_sync is inert here: only the V1 async modes have a mid-cycle sync. "
-            "Set trainer.use_v1=true with a non-sync trainer.v1.trainer_mode, or disable the role."
+            "omni_skip.weight_sync is inert here: the V0 trainer and the V1 sync and separate_async trainers keep "
+            "the colocated replicas asleep through training, so they have no mid-cycle sync. Disable the role."
         )
     if enabled & {"reward", "weight_sync"} and streaming_reward_enabled(config):
         raise ValueError(

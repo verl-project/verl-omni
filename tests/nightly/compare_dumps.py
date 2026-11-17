@@ -43,6 +43,17 @@ INFORMATIONAL_TENSORS = frozenset(
     }
 )
 
+# Nested old_log_probs pads inconsistently on the tiny omni model;
+OMNI_INFORMATIONAL_TENSORS = frozenset({"batch.old_log_probs"})
+
+
+def _is_informational(key: str, rel_path: str) -> bool:
+    if key in INFORMATIONAL_TENSORS:
+        return True
+    # FlowGRPO's dense ``driver_forward/.../batch.old_log_probs`` must still fail the run,
+    # so this set is scoped to the omni actor_update_batch payload kind only.
+    return key in OMNI_INFORMATIONAL_TENSORS and Path(rel_path).parts[0] == "actor_update_batch"
+
 
 def _payload_files(root: Path) -> dict[str, Path]:
     return {str(path.relative_to(root)): path for path in sorted(root.rglob("payload.pt"))}
@@ -260,7 +271,7 @@ def compare(args: argparse.Namespace) -> tuple[bool, dict]:
                 baseline_tensors[key], current_tensors[key], key_thresholds.get("atol", args.atol)
             )
             metrics["thresholds"] = key_thresholds
-            informational = key in INFORMATIONAL_TENSORS
+            informational = _is_informational(key, rel_path)
             if informational:
                 metrics["informational"] = True
             file_result["tensors"][key] = metrics
