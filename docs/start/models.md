@@ -1,6 +1,6 @@
 # Supported Models
 
-Last updated: 11/10/2026.
+Last updated: 11/17/2026.
 
 VeRL-Omni supports RL post-training for generative models across image, video,
 audio, and omni modalities. This page catalogues every model with a ready-to-run
@@ -20,6 +20,18 @@ requirements.
 ---
 
 ## Diffusion Image Models
+
+### MiniMax H3 Image
+
+| Property | Detail |
+|----------|--------|
+| **Architecture** | Native image-only transformer with six PDD output heads |
+| **Modality** | Text → Image |
+| **Algorithm** | FlowGRPO with CPS/SDE trajectory replay |
+| **Dependencies** | Diffusers ≥ 0.43.0; the repository-pinned vLLM-Omni |
+| **Status** | CPU boundary tests; accelerator validation pending |
+
+Use the [minimal FlowGRPO recipe](../examples/minimax_h3_image/flowgrpo_trainer_minimax_h3_image.md).
 
 ### Qwen-Image
 

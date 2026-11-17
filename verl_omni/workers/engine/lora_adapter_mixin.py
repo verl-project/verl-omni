@@ -15,9 +15,10 @@
 
 import logging
 from contextlib import contextmanager, nullcontext
+from pathlib import Path
 
 import torch
-from peft import LoraConfig
+from peft import LoraConfig, PeftModel, get_peft_model
 from verl.utils.py_functional import convert_to_regular_types
 
 from verl_omni.utils.config import resolve_lora_config
@@ -93,11 +94,21 @@ class LoRAAdapterMixin:
             local_adapter_path = copy_to_local(lora_adapter_path, use_shm=self.model_config.use_shm)
 
             # diffusers auto-names an unnamed first adapter "default_0"; name it explicitly.
-            module.load_lora_adapter(local_adapter_path, adapter_name=primary_adapter)
+            if hasattr(module, "load_lora_adapter"):
+                adapter_path = Path(local_adapter_path)
+                use_safetensors = adapter_path.suffix == ".safetensors" or any(adapter_path.glob("*.safetensors"))
+                module.load_lora_adapter(
+                    local_adapter_path, adapter_name=primary_adapter, use_safetensors=use_safetensors
+                )
+            else:
+                module = PeftModel.from_pretrained(
+                    module,
+                    local_adapter_path,
+                    adapter_name=primary_adapter,
+                    is_trainable=True,
+                    autocast_adapter_dtype=False,
+                )
             peft_config = getattr(module, "peft_config", {}).get(primary_adapter, None)
-            for adapter_name in extra_adapters:
-                if peft_config is not None and adapter_name not in getattr(module, "peft_config", {}):
-                    module.add_adapter(peft_config, adapter_name=adapter_name)
         else:
             lora_config = {
                 "r": lora_settings.rank,
@@ -108,9 +119,18 @@ class LoRAAdapterMixin:
                 "exclude_modules": convert_to_regular_types(self.model_config.exclude_modules),
                 "bias": "none",
             }
-            module.add_adapter(LoraConfig(**lora_config), adapter_name="default")
-            for adapter_name in extra_adapters:
-                module.add_adapter(LoraConfig(**lora_config), adapter_name=adapter_name)
+            peft_config = LoraConfig(**lora_config)
+            if hasattr(module, "add_adapter"):
+                module.add_adapter(peft_config, adapter_name="default")
+            else:
+                module = get_peft_model(module, peft_config, autocast_adapter_dtype=False)
+
+        for adapter_name in extra_adapters:
+            if peft_config is not None and adapter_name not in getattr(module, "peft_config", {}):
+                if isinstance(module, PeftModel):
+                    module.add_adapter(adapter_name, peft_config)
+                else:
+                    module.add_adapter(peft_config, adapter_name=adapter_name)
 
         # Adapters beyond the first skip peft's base-dtype cast; align them before sharding.
         cast_adapter_params_to_base(module)
@@ -214,6 +234,11 @@ class LoRAAdapterMixin:
     @contextmanager
     def disable_adapter(self):
         """Temporarily disable all PEFT adapters."""
+        module = getattr(self.module, "_fsdp_wrapped_module", self.module)
+        if isinstance(module, PeftModel):
+            with module.disable_adapter():
+                yield
+            return
         try:
             self.module.disable_adapters()
             yield

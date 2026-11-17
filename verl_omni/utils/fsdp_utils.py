@@ -467,12 +467,14 @@ def _layered_summon_lora_params_diffusers(
 
     lora_params = OrderedDict()
     prefix_list = []
+    peft_model = getattr(fsdp_module, "_fsdp_wrapped_module", fsdp_module)
     for lp in layer_prefixes:
+        if isinstance(peft_model, peft.PeftModel):
+            lp = f"base_model.model.{lp}"
         # FSDP1
         prefix_list.append(f"_fsdp_wrapped_module.{lp}")
         # FSDP2
         prefix_list.append(lp)
-    peft_model = getattr(fsdp_module, "_fsdp_wrapped_module", fsdp_module)
     for prefix in prefix_list:
         for name, submodule in _prefix_submodules(fsdp_module, prefix):
             block_prefix = name.replace("_fsdp_wrapped_module.", "")

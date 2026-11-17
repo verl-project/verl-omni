@@ -91,6 +91,7 @@ algo/performance.md
 
 examples/overview.md
 examples/flowgrpo_trainer.md
+examples/minimax_h3_image/flowgrpo_trainer_minimax_h3_image.md
 examples/flowdppo_trainer.md
 examples/dpo_trainer.md
 examples/minicpm/dpo_trainer_minicpm.md
