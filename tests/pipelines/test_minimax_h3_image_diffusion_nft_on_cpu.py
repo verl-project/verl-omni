@@ -85,6 +85,13 @@ def _heads(steps: int = 6) -> tuple[torch.Tensor, torch.Tensor]:
     return torch.randn(steps, 96, _HIDDEN, generator=generator), torch.randn(steps, 96, generator=generator)
 
 
+def _tiny_native_actor():
+    native = pytest.importorskip("diffusers.models.transformers.transformer_minimax_h3_image")
+    config = dict(_tiny_actor().config)
+    config.pop("audio_in_channels")
+    return native.MiniMaxH3ImageTransformer2DModel.from_config(config).eval()
+
+
 def _model_config(tmp_path) -> SimpleNamespace:
     weight, bias = _heads()
     save_file({"video_out.weight": weight, "video_out.bias": bias}, str(tmp_path / "pdd_fused_heads.safetensors"))
@@ -165,6 +172,10 @@ class TestPDDSchedule:
         for step, sigma in enumerate(run_sigmas):
             rollout[step : step + 1].fill_(float(1.0 - sigma))
         assert torch.equal(pdd_dit_timestep(torch.tensor(run_sigmas, dtype=torch.float32)), rollout)
+
+    def test_release_grid_model_time_needs_only_fp32(self):
+        sigmas = _run_sigmas()
+        torch.testing.assert_close(1.0 - sigmas, pdd_dit_timestep(sigmas), atol=0, rtol=0)
 
     def test_training_inputs_noise_at_the_exact_rollout_sigma(self):
         batch = 3
@@ -521,3 +532,111 @@ class TestForward:
     def test_reverse_sampling_is_rejected(self):
         with pytest.raises(NotImplementedError, match="forward-process"):
             MiniMaxH3ImageDiffusionNFT.forward_and_sample_previous_step(None, None, None, {}, None, None, 0)
+
+    def test_native_heads_keep_samples_separate_without_model_patches(self, monkeypatch):
+        monkeypatch.setattr(MiniMaxH3ImageDiffusionNFT, "pack_micro_batch", False)
+        monkeypatch.setattr(MiniMaxH3ImageDiffusionNFT, "use_rollout_kernels", True)
+        actor = _tiny_native_actor()
+        config = SimpleNamespace()  # Native heads are model parameters; no external head file is needed.
+        batch = _micro_batch(6, forward_noise=torch.randn(6, _NUM_ROWS * 96))
+        batch["train_timesteps"][:, 0] = pdd_train_timesteps(_run_sigmas()).long()
+        inputs = self._inputs(batch, 0, actor, config)
+        inputs["encoder_mask"][1, 3:] = 0
+        calls = []
+        handle = actor.register_forward_pre_hook(lambda _, args, kwargs: calls.append(kwargs), with_kwargs=True)
+        try:
+            with torch.no_grad():
+                actual = MiniMaxH3ImageDiffusionNFT.forward(actor, config, inputs)
+        finally:
+            handle.remove()
+        assert [call["pdd_step_index"] for call in calls] == list(range(6))
+        assert calls[1]["encoder_hidden_states"].shape[1] == 3
+        for step, call in enumerate(calls):
+            assert not {"audio_hidden_states", "audio_indices", "video_indices"}.intersection(call)
+            torch.testing.assert_close(call["timestep"], pdd_dit_timestep(_run_sigmas()[step : step + 1]))
+            with torch.no_grad():
+                expected = -actor(**call)[0].reshape(1, -1)
+            torch.testing.assert_close(actual[step : step + 1], expected)
+        assert not rollout_kernels_enabled(actor)
+        assert all("_stock_forward" not in child.__dict__ for child in actor.modules())
+
+    def test_native_edit_excludes_condition_rows_from_training_output(self, monkeypatch):
+        monkeypatch.setattr(MiniMaxH3ImageDiffusionNFT, "pack_micro_batch", False)
+        actor = _tiny_native_actor()
+        meta, count = serialize_ref_blocks([{"kind": "image", "latent_h": 4, "latent_w": 4}])
+        condition = torch.randn(1, 4, 96)
+        batch = _micro_batch(
+            1,
+            condition_video_rows=condition,
+            condition_video_row_count=torch.tensor([[4]]),
+            ref_block_meta=meta.unsqueeze(0),
+            ref_block_count=torch.tensor([[count]]),
+        )
+        inputs = self._inputs(batch, 3, actor, SimpleNamespace())
+        calls = []
+        handle = actor.register_forward_hook(
+            lambda _, args, kwargs, output: calls.append((kwargs, output)), with_kwargs=True
+        )
+        try:
+            actual = MiniMaxH3ImageDiffusionNFT.forward(actor, SimpleNamespace(), inputs)
+        finally:
+            handle.remove()
+        kwargs, output = calls[0]
+        torch.testing.assert_close(kwargs["hidden_states"][:, :4], condition)
+        reference_indices = kwargs["image_indices"][:4]
+        times = kwargs["timestep"][kwargs["timestep_indices"][reference_indices]]
+        torch.testing.assert_close(times, torch.full_like(times, IMAGE_CONDITION_TIMESTEP))
+        torch.testing.assert_close(actual, -output[0][:, 4:].reshape(1, -1))
+
+    def test_native_model_rejects_legacy_packing_option(self, monkeypatch):
+        monkeypatch.setattr(MiniMaxH3ImageDiffusionNFT, "pack_micro_batch", True)
+        actor = _tiny_native_actor()
+        inputs = self._inputs(_micro_batch(2), 0, actor, SimpleNamespace())
+        with pytest.raises(NotImplementedError, match="PACK_MICRO_BATCH=0"):
+            MiniMaxH3ImageDiffusionNFT.forward(actor, SimpleNamespace(), inputs)
+
+    @pytest.mark.parametrize("checkpointing", [False, True])
+    def test_native_lora_old_and_reference_are_isolated(self, monkeypatch, checkpointing):
+        from verl_omni.workers.engine.lora_adapter_mixin import LoRAAdapterMixin
+
+        monkeypatch.setattr(MiniMaxH3ImageDiffusionNFT, "pack_micro_batch", False)
+        actor = _tiny_native_actor().requires_grad_(False)
+        engine = LoRAAdapterMixin()
+        engine.model_config = SimpleNamespace(
+            lora_rank=2,
+            lora_alpha=4,
+            lora_init_weights=True,
+            target_modules=["to_q", "to_v"],
+            target_parameters=None,
+            exclude_modules=None,
+            policy_state_adapters=["default", "old"],
+            lora_adapter_path=None,
+        )
+        engine.module = engine._build_lora_module(actor)
+        engine.module.train()
+        if checkpointing:
+            engine.module.enable_gradient_checkpointing()
+        inputs = self._inputs(_micro_batch(1), 2, engine.module, engine.model_config)
+
+        def predict():
+            return MiniMaxH3ImageDiffusionNFT.forward(engine.module, engine.model_config, inputs)
+
+        with engine.disable_adapter(), torch.no_grad():
+            reference = predict().clone()
+        with torch.no_grad():
+            for name, parameter in engine.module.named_parameters():
+                if ".lora_B.default." in name:
+                    parameter.normal_(std=0.05)
+        engine.copy_adapter("default", "old")
+        with engine.use_adapter("old"), torch.no_grad():
+            old = predict().clone()
+        current = predict()
+        torch.testing.assert_close(current, old)
+        assert not torch.allclose(current, reference)
+        with engine.disable_adapter(), torch.no_grad():
+            torch.testing.assert_close(predict(), reference)
+        current.square().mean().backward()
+        grads = {name: p.grad for name, p in engine.module.named_parameters() if p.grad is not None}
+        assert grads and all(".default." in name for name in grads)
+        assert all(torch.isfinite(grad).all() for grad in grads.values())
+        assert any(grad.abs().sum() > 0 for grad in grads.values())

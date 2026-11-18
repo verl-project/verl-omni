@@ -37,9 +37,17 @@ def _reset_shared_state():
 
 
 class TestOcrPreferenceReward:
-    def test_preference_terms_share_one_scorer_across_separate_loads(self, monkeypatch, tmp_path):
+    @pytest.mark.parametrize(
+        ("device_kind", "visibility"), [("cuda", "CUDA_VISIBLE_DEVICES"), ("npu", "ASCEND_RT_VISIBLE_DEVICES")]
+    )
+    def test_preference_terms_share_one_scorer_across_separate_loads(
+        self, monkeypatch, tmp_path, device_kind, visibility
+    ):
         _reset_shared_state()
         monkeypatch.setenv("OCR_REWARD_TMPDIR", str(tmp_path))
+        monkeypatch.setenv("H3_IMAGE_DEVICE", device_kind)
+        monkeypatch.setenv("PREFERENCE_SCORER_GPU", "7")
+        monkeypatch.setenv(visibility, "0,1,2,3,4,5,6")
         pick_fn = load_extern_object(REWARD_PATH, "term_pickscore")
         hps_fn = load_extern_object(REWARD_PATH, "term_hpsv2")
 
@@ -50,6 +58,7 @@ class TestOcrPreferenceReward:
             returncode = None
 
         async def fake_spawn(script, env):
+            assert env[visibility] == "7"
             spawns.append(script)
             return _FakeProc()
 

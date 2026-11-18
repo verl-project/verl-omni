@@ -231,7 +231,11 @@ class MiniMaxH3ImageDiffusionNFT(DiffusionModelBase):
         model_inputs: dict,
         negative_model_inputs: Optional[dict] = None,
     ) -> torch.Tensor:
-        """Run the DiT per sample with its step's fused head and return flow-match velocities."""
+        """Run the DiT with each sample's PDD head and return flow-match velocities.
+
+        Native image checkpoints expose ``pdd_proj_out`` through PEFT/FSDP wrappers and take the head index
+        explicitly. Their forward keeps samples separate and uses the official model's operators.
+        """
         del negative_model_inputs
         image_rows = model_inputs["image_rows"]
         encoder_hidden_states = model_inputs["encoder_hidden_states"]
@@ -239,15 +243,25 @@ class MiniMaxH3ImageDiffusionNFT(DiffusionModelBase):
         pdd_steps = model_inputs["pdd_step"].tolist()
         device = image_rows.device
 
-        head = ensure_pdd_heads(module, model_config)
-        if cls.use_rollout_kernels:
+        native_image = hasattr(module, "pdd_proj_out")
+        if native_image and cls.pack_micro_batch:
+            raise NotImplementedError(
+                "Native MiniMaxH3ImageTransformer2DModel requires VERL_OMNI_H3_IMAGE_PACK_MICRO_BATCH=0; "
+                "its scalar PDD head and attention layout describe one sample per forward."
+            )
+        if not native_image and device.type == "npu":
+            raise ValueError(
+                "Ascend H3 Image training requires MiniMaxH3ImageTransformer2DModel weights from Diffusers>=0.43.0; "
+                "the legacy audio-enabled checkpoint is not supported on NPU."
+            )
+        head = None if native_image else ensure_pdd_heads(module, model_config)
+        if not native_image and cls.use_rollout_kernels:
             install_rollout_kernels(module)
         batch = image_rows.shape[0]
         if encoder_mask is not None:
             text_lengths = encoder_mask.long().sum(dim=1).tolist()
         else:
             text_lengths = [encoder_hidden_states.shape[1]] * batch
-        empty_audio = image_rows.new_zeros((1, 0, IMAGE_AUDIO_ROW_WIDTH))
         no_audio = torch.empty(0, dtype=torch.long)
 
         if cls.pack_micro_batch and cls.use_rollout_kernels and batch > 1:
@@ -266,23 +280,33 @@ class MiniMaxH3ImageDiffusionNFT(DiffusionModelBase):
                 timestep_indices,
                 num_condition,
             ) = cls._prepare_sample_inputs(model_inputs, index, num_text_tokens, no_audio)
-            head.pdd_step = int(pdd_steps[index])
-            try:
+            sample_inputs = {
+                "hidden_states": torch.cat([sample_condition, image_rows[index]], dim=0).unsqueeze(0),
+                "encoder_hidden_states": encoder_hidden_states[index : index + 1, :num_text_tokens],
+                "timestep": unique_timesteps.to(device),
+                "timestep_indices": timestep_indices.to(device),
+                "token_tags": token_tags.to(device),
+                "position_ids": position_ids.to(device),
+                "text_indices": text_indices.to(device),
+                "return_dict": False,
+            }
+            if native_image:
                 result = module(
-                    hidden_states=torch.cat([sample_condition, image_rows[index]], dim=0).unsqueeze(0),
-                    audio_hidden_states=empty_audio,
-                    encoder_hidden_states=encoder_hidden_states[index : index + 1, :num_text_tokens],
-                    timestep=unique_timesteps.to(device),
-                    timestep_indices=timestep_indices.to(device),
-                    token_tags=token_tags.to(device),
-                    position_ids=position_ids.to(device),
-                    video_indices=image_indices.to(device),
-                    audio_indices=no_audio.to(device),
-                    text_indices=text_indices.to(device),
-                    return_dict=False,
+                    **sample_inputs,
+                    image_indices=image_indices.to(device),
+                    pdd_step_index=int(pdd_steps[index]),
                 )
-            finally:
-                head.pdd_step = None
+            else:
+                head.pdd_step = int(pdd_steps[index])
+                try:
+                    result = module(
+                        **sample_inputs,
+                        audio_hidden_states=image_rows.new_zeros((1, 0, IMAGE_AUDIO_ROW_WIDTH)),
+                        video_indices=image_indices.to(device),
+                        audio_indices=no_audio.to(device),
+                    )
+                finally:
+                    head.pdd_step = None
             velocity = result[0][:, num_condition:]
             velocities.append(h3_velocity_to_flow_match(velocity).reshape(1, -1))
         return torch.cat(velocities, dim=0)

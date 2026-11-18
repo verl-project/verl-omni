@@ -14,8 +14,9 @@
 """PickScore and HPSv2.1 scorer process for the preference reward terms.
 
 One JSON request per stdin line (``{"path": image file, "prompt": full generation prompt}``), one JSON reply per
-stdout line (``{"pickscore": logit / 26, "hpsv2": score}``). Runs on the GPU given by ``CUDA_VISIBLE_DEVICES`` of
-this process. HPSv2.1 is ``compute_score_hpsv2`` and PickScore is ``_PickScoreInferencer.score``.
+stdout line (``{"pickscore": logit / 26, "hpsv2": score}``). The parent selects a physical device before spawning
+this process; models use device 0 within that mask. HPSv2.1 is ``compute_score_hpsv2`` and PickScore is
+``_PickScoreInferencer.score``.
 
 Requires ``PICKSCORE_PATH`` (``yuvalkirstain/PickScore_v1``), ``CLIP_H14_PATH``
 (``laion/CLIP-ViT-H-14-laion2B-s32B-b79K``) and the ``compute_score_hpsv2`` inputs ``HPSV2_PRETRAINED_PATH``
@@ -37,11 +38,22 @@ def main():
     from verl_omni.utils.reward_score.hpsv2_reward import compute_score_hpsv2
     from verl_omni.utils.reward_score.pickscore_reward import _PickScoreInferencer
 
-    if not torch.cuda.is_available():
-        raise RuntimeError("preference_worker.py needs a CUDA device")
-    os.environ["REWARD_DEVICE"] = "cuda"
+    device_kind = os.environ.get("H3_IMAGE_DEVICE", "cuda")
+    if device_kind == "npu":
+        import torch_npu  # noqa: F401
+
+        if not torch.npu.is_available():
+            raise RuntimeError("preference_worker.py needs an NPU device")
+        torch.npu.set_device(0)
+    elif device_kind == "cuda":
+        if not torch.cuda.is_available():
+            raise RuntimeError("preference_worker.py needs a CUDA device")
+    else:
+        raise ValueError(f"Unsupported H3_IMAGE_DEVICE: {device_kind}")
+    device = torch.device(f"{device_kind}:0")
+    os.environ["REWARD_DEVICE"] = str(device)
     pickscore = _PickScoreInferencer(
-        device=torch.device("cuda"),
+        device=device,
         dtype=torch.bfloat16,
         model_path=os.environ["PICKSCORE_PATH"],
         processor_path=os.environ["CLIP_H14_PATH"],

@@ -16,7 +16,7 @@
 #   REWARD_MODEL_NAME  Qwen3-VL-8B-Instruct repo id or local path (served by the reward worker)
 set -euo pipefail
 
-export VERL_OMNI_H3_IMAGE_PACK_MICRO_BATCH=1
+export VERL_OMNI_H3_IMAGE_PACK_MICRO_BATCH=${VERL_OMNI_H3_IMAGE_PACK_MICRO_BATCH:-1}
 export GENRM_OCR_TEMPERATURE=0
 export VLLM_ENGINE_READY_TIMEOUT_S=${VLLM_ENGINE_READY_TIMEOUT_S:-3600}
 : "${PPOCR_MODEL_DIR:?Set PPOCR_MODEL_DIR to the PP-OCRv6 medium ONNX directory}"
@@ -48,7 +48,11 @@ if [[ ! $N_GPUS =~ ^[1-9][0-9]*$ || ! $PREFERENCE_SCORER_GPU =~ ^[0-9]+$ ]]; the
     echo "N_GPUS ($N_GPUS) must be a positive integer and PREFERENCE_SCORER_GPU ($PREFERENCE_SCORER_GPU) must be a non-negative integer" >&2
     exit 1
 fi
-export CUDA_VISIBLE_DEVICES=$(seq -s, 0 $((N_GPUS - 1)))
+case "${H3_IMAGE_DEVICE:-cuda}" in
+    cuda) export CUDA_VISIBLE_DEVICES=$(seq -s, 0 $((N_GPUS - 1))) ;;
+    npu) ;;
+    *) echo "H3_IMAGE_DEVICE must be cuda or npu" >&2; exit 1 ;;
+esac
 if (( PREFERENCE_SCORER_GPU < N_GPUS )); then
     echo "PREFERENCE_SCORER_GPU=$PREFERENCE_SCORER_GPU must not be one of the $N_GPUS trainer GPUs" >&2
     exit 1

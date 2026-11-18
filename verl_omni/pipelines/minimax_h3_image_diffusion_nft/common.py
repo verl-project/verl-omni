@@ -106,7 +106,9 @@ def pdd_step_indices(timesteps: torch.Tensor, pdd_sigmas: torch.Tensor) -> torch
         or the grid is too dense for the lookup to be unambiguous.
     """
     timesteps = timesteps.reshape(-1)
-    grid = pdd_sigmas.to(device=timesteps.device, dtype=torch.float64) * PDD_TIMESTEP_SCALE
+    # The released six-point grid is well separated at FP32 precision; Ascend MinDim does not support FP64.
+    lookup_dtype = torch.float32 if timesteps.device.type == "npu" else torch.float64
+    grid = pdd_sigmas.to(device=timesteps.device, dtype=lookup_dtype) * PDD_TIMESTEP_SCALE
     if grid.ndim == 1:
         grid = grid.unsqueeze(0).expand(timesteps.shape[0], -1)
     if grid.ndim != 2 or grid.shape[0] != timesteps.shape[0] or grid.shape[1] < 1:
@@ -115,7 +117,7 @@ def pdd_step_indices(timesteps: torch.Tensor, pdd_sigmas: torch.Tensor) -> torch
         )
     if grid.shape[1] > 1 and float((grid[:, :-1] - grid[:, 1:]).min()) <= 2.0 * _PDD_LOOKUP_TOLERANCE:
         raise ValueError("MiniMax H3 image PDD sigmas must decrease by more than 0.002 per step.")
-    distance = (grid - timesteps.to(torch.float64).unsqueeze(1)).abs()
+    distance = (grid - timesteps.to(lookup_dtype).unsqueeze(1)).abs()
     nearest, indices = distance.min(dim=1)
     if bool((nearest >= _PDD_LOOKUP_TOLERANCE).any()):
         raise ValueError(
@@ -126,8 +128,9 @@ def pdd_step_indices(timesteps: torch.Tensor, pdd_sigmas: torch.Tensor) -> torch
 
 
 def pdd_dit_timestep(sigmas: torch.Tensor) -> torch.Tensor:
-    """Model time ``1 - sigma`` rounded exactly as the rollout loop rounds it (FP64 subtract, FP32 store)."""
-    return (1.0 - sigmas.to(torch.float64)).to(torch.float32)
+    """Compute model time ``1 - sigma``; the released FP32 grid needs no FP64 operations on Ascend."""
+    compute_dtype = torch.float32 if sigmas.device.type == "npu" else torch.float64
+    return (1.0 - sigmas.to(compute_dtype)).to(torch.float32)
 
 
 class MiniMaxH3PDDHeadLinear(torch.nn.Linear):

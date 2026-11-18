@@ -224,7 +224,10 @@ async def _preference(solution_image, extra_info: dict) -> dict:
         try:
             if state.scorer is None or state.scorer.returncode is not None:
                 env = dict(os.environ)
-                env["CUDA_VISIBLE_DEVICES"] = SCORER_GPU
+                visibility = (
+                    "ASCEND_RT_VISIBLE_DEVICES" if env.get("H3_IMAGE_DEVICE") == "npu" else "CUDA_VISIBLE_DEVICES"
+                )
+                env[visibility] = SCORER_GPU
                 state.scorer = await _spawn("preference_worker.py", env)
             reply = await _request(state.scorer, "preference_worker.py", {"path": path, "prompt": prompt})
         finally:
