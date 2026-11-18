@@ -118,6 +118,72 @@ def test_lora_component_matches_peft_merge_and_actor_forward(tmp_path, architect
     torch.testing.assert_close(run_forward(loaded, architecture), expected, rtol=1e-5, atol=1e-5)
 
 
+def test_resaving_restored_pissa_weights_blocks_lora_only_export(tmp_path):
+    from fsdp2_tiny_train_checkpoint import _patch_diffusers_checkpoint_config
+    from torch.distributed.device_mesh import init_device_mesh
+    from torch.distributed.fsdp import fully_shard
+
+    from verl_omni.workers.engine.fsdp.checkpoint import DiffusersFSDPCheckpointManager
+
+    architecture = "QwenImagePipeline"
+    base = tmp_path / "base"
+    full = tmp_path / "actor"
+    only = tmp_path / "actor_lora_only"
+    actor = tiny_transformer(architecture)
+    transformer_class = type(actor)
+    actor.save_pretrained(base)
+
+    def add_adapters(model, old_initialization):
+        for name, initialization in (("default", "gaussian"), ("old", old_initialization)):
+            config = LoraConfig(r=RANK, lora_alpha=ALPHA, target_modules=["to_q"], init_lora_weights=initialization)
+            model.add_adapter(config, adapter_name=name)
+        model.set_adapter("default")
+        _patch_diffusers_checkpoint_config(model)
+        return model
+
+    checkpoint_config = {"save_contents": ["model"], "load_contents": ["model"]}
+    torch.distributed.init_process_group("gloo", init_method=f"file://{tmp_path / 'rendezvous'}", rank=0, world_size=1)
+    try:
+        mesh = init_device_mesh("cpu", (1,))
+        fully_shard(add_adapters(actor, "pissa_niter_2"), mesh=mesh)
+        DiffusersFSDPCheckpointManager(model=actor, checkpoint_config=checkpoint_config).save_checkpoint(str(full))
+
+        resumed = fully_shard(add_adapters(tiny_transformer(architecture), "gaussian"), mesh=mesh)
+        manager = DiffusersFSDPCheckpointManager(
+            model=resumed, checkpoint_config={**checkpoint_config, "save_lora_only": True}
+        )
+        manager.load_checkpoint(str(full))
+        expected = run_forward(resumed, architecture)
+        manager.save_checkpoint(str(only))
+    finally:
+        torch.distributed.destroy_process_group()
+
+    config = ModelMergerConfig(
+        operation="merge",
+        backend="fsdp",
+        base_model=str(base),
+        local_dir=str(full),
+        target_dir=str(tmp_path / "fused"),
+        output_format="transformer",
+        trust_checkpoint=True,
+        fuse_lora=True,
+    )
+    only_config = replace(
+        config,
+        local_dir=str(only),
+        hf_model_config_path=str(only / "huggingface"),
+        target_dir=str(tmp_path / "lora-only-output"),
+    )
+    for fuse_weights in (False, True):
+        with pytest.raises(ValueError, match="modified base weights.*save_lora_only=false"):
+            merge_model(replace(only_config, fuse_lora=fuse_weights))
+    assert not Path(only_config.target_dir).exists()
+
+    result = merge_model(config)
+    loaded = transformer_class.from_pretrained(result.output_dir, local_files_only=True)
+    torch.testing.assert_close(run_forward(loaded, architecture), expected, rtol=1e-5, atol=1e-6)
+
+
 @pytest.mark.parametrize("lora_only", [False, True], ids=["full_state", "lora_only"])
 def test_lora_fusion_accepts_fsdp_wrapped_peft_state(tmp_path, lora_only):
     config, actor = _lora_case(tmp_path, "QwenImagePipeline", lora_only=lora_only)

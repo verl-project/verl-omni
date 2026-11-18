@@ -1,6 +1,6 @@
 # Offline diffusion model publishing
 
-Last updated: 11/16/2026
+Last updated: 11/18/2026
 
 `verl_omni.model_merger` converts an existing FSDP actor checkpoint into a local
 transformer or self-contained inference pipeline. It follows verl's
@@ -248,13 +248,13 @@ Fusion accepts two checkpoint layouts and requires a locally available `--base_m
   for training. This layout is valid only when adapter initialization leaves
   the base weights unchanged, as with default `gaussian` (`lora_init_weights`)
   and PEFT's `true`/`false`. PEFT's `pissa` (including `pissa_niter_*`), `olora`,
-  `corda` and `loftq` rewrite the base weights before training, and
-  `save_lora_only` drops the rewritten weights. `lora_train_meta.json` does not
-  record the initialization, so the merger cannot detect this and fusing onto the
-  original base publishes the wrong model; use the full-state layout for those
-  initializations, and check any other initialization against PEFT first. A native
-  MiniMax H3 pipeline base uses the fused native layout and is rejected here;
-  export the standalone transformer from a Diffusers H3 base.
+  `corda` and `loftq` rewrite the base weights before training. Diffusers FSDP
+  checkpoints record this in `lora_train_meta.json` as `base_weights_modified`
+  and carry the marker forward when restoring the base weights. Both adapter
+  export and fusion require a full checkpoint when this flag is true. If the
+  marker is missing and the initializer rewrote the base weights, use a full
+  checkpoint. MiniMax H3 LoRA-only fusion requires a Diffusers H3 base and
+  standalone transformer output.
 
 `--adapter-name` (default `default`) selects exactly one adapter. Other adapters,
 such as DiffusionNFT's `old`, are not fused and are listed in the manifest's
