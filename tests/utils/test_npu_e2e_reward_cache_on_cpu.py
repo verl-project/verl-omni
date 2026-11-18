@@ -32,14 +32,32 @@ _SCRIPTS = Path(__file__).resolve().parents[1] / "special_e2e"
         ("run_online_dpo_qwen_image_npu.sh", "run_online_dpo_qwen_image.sh"),
     ],
 )
-@pytest.mark.parametrize("explicit", [False, True])
-def test_reward_launcher_does_not_write_the_core_checkpoint(tmp_path, wrapper, delegate, explicit):
+@pytest.mark.parametrize(
+    "model_source", ["owned", "env", "cli", "cli+", "cli++", "parent", "parent++", "root", "root++"]
+)
+@pytest.mark.parametrize("override", [False, True])
+def test_reward_launcher_does_not_write_the_core_checkpoint(tmp_path, wrapper, delegate, model_source, override):
     """Exercise real wrappers while only builder/trainer command boundaries are stubbed."""
     root = tmp_path / "fixture repo"
     scripts = root / "tests/special_e2e"
     scripts.mkdir(parents=True)
     shutil.copyfile(_SCRIPTS / wrapper, scripts / wrapper)
-    (scripts / "lib_npu_e2e.sh").write_text('NUM_NPUS=8\nNPU_RUNTIME_ARGS=("trainer.device=npu")\n')
+    for helper in ("lib_npu_e2e.sh", "npu_runtime.py"):
+        shutil.copyfile(_SCRIPTS / helper, scripts / helper)
+    bash_env = tmp_path / "bash_env"
+    bash_env.write_text(
+        """source() {
+    case "$1" in */set_env.sh) return 0 ;; *) builtin source "$@" ;; esac
+}
+python3() {
+    if [[ "$#" -eq 1 && "$1" == - ]]; then
+        cat >/dev/null
+    else
+        "$TEST_PYTHON" "$@"
+    fi
+}
+"""
+    )
     (root / "tests/__init__.py").touch()
     reward_module = root / "tests/reward_loop"
     reward_module.mkdir()
@@ -59,10 +77,11 @@ def ensure_tiny_qwen25_vl_reward_checkpoint(path):
 """
     )
     (scripts / delegate).write_text(
-        f"#!/usr/bin/env bash\n\"{sys.executable}\" - <<'PY'\n"
-        "import json, os\nfrom pathlib import Path\n"
+        f'#!/usr/bin/env bash\n"{sys.executable}" - "$@" <<\'PY\'\n'
+        "import json, os, sys\nfrom pathlib import Path\n"
         "with Path(os.environ['EVENTS']).open('a') as stream:\n"
-        "    stream.write(json.dumps({'kind': 'trainer', 'path': os.environ['REWARD_MODEL_PATH']}) + '\\n')\n"
+        "    stream.write(json.dumps({'kind': 'trainer', 'path': os.environ['REWARD_MODEL_PATH'], "
+        "'argv': sys.argv[1:]}) + '\\n')\n"
         "PY\n"
     )
     home = tmp_path / "home with spaces"
@@ -86,11 +105,28 @@ def ensure_tiny_qwen25_vl_reward_checkpoint(path):
         PATH=str(Path(sys.executable).parent) + os.pathsep + os.environ["PATH"],
         DATA_DIR=str(tmp_path / "data"),
         EVENTS=str(events),
+        BASH_ENV=str(bash_env),
+        TEST_PYTHON=sys.executable,
+        NUM_NPUS="8",
+        TORCHNPU_PRECOMPILE_THREADS="2",
     )
-    if explicit:
+    if model_source == "env":
         env["QWEN_IMAGE_REWARD_MODEL_PATH"] = str(custom)
+    user_args = []
+    if model_source.startswith("cli"):
+        user_args.append(f"{model_source.removeprefix('cli')}reward.reward_model.model_path={custom}")
+    elif model_source.startswith("parent"):
+        user_args.append(
+            f"{model_source.removeprefix('parent')}reward.reward_model={{model_path:{json.dumps(str(custom))}}}"
+        )
+    elif model_source.startswith("root"):
+        user_args.append(
+            f"{model_source.removeprefix('root')}reward={{reward_model:{{model_path:{json.dumps(str(custom))}}}}}"
+        )
+    if override:
+        user_args.append("reward.reward_model.rollout.max_num_seqs=4")
     result = subprocess.run(
-        ["bash", str(scripts / wrapper)], cwd=root, env=env, capture_output=True, text=True, timeout=20
+        ["bash", str(scripts / wrapper), *user_args], cwd=root, env=env, capture_output=True, text=True, timeout=20
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
@@ -98,8 +134,20 @@ def ensure_tiny_qwen25_vl_reward_checkpoint(path):
     assert list(core.iterdir()) == [marker]
     assert weights.read_bytes() == b"user reward weights"
     recorded = [json.loads(line) for line in events.read_text().splitlines()]
-    assert [entry["kind"] for entry in recorded] == (["trainer"] if explicit else ["builder", "trainer"])
-    if explicit:
+    assert [entry["kind"] for entry in recorded] == (["trainer"] if model_source == "env" else ["builder", "trainer"])
+    defaults = [
+        "reward.reward_model.rollout.max_num_batched_tokens=512",
+        "reward.reward_model.rollout.max_num_seqs=8",
+        "++reward.reward_model.rollout.engine_kwargs.vllm.limit_mm_per_prompt={image:1,video:0}",
+        "++reward.reward_model.rollout.engine_kwargs.vllm.kv_cache_memory_bytes=67108864",
+    ]
+    argv = recorded[-1]["argv"]
+    for default in defaults:
+        assert (default in argv) is (model_source == "owned")
+    if user_args:
+        assert argv[-len(user_args) :] == user_args
+    assert not any(key in arg for arg in argv for key in ("max_model_len", "mm_processor_kwargs", "skip_mm_profiling"))
+    if model_source == "env":
         assert recorded[0]["path"] == str(custom)
     else:
         assert recorded[0]["path"] == recorded[1]["path"]

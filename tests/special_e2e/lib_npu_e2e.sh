@@ -71,3 +71,21 @@ while IFS= read -r override; do
     NPU_RUNTIME_ARGS+=("${override}")
 done <<< "${NPU_RUNTIME_ARGS_TEXT}"
 unset NPU_RUNTIME_ARGS_TEXT
+
+# Only for the owned two-layer Qwen2.5-VL fixture; custom reward models keep their limits.
+npu_e2e_add_tiny_reward_defaults() {
+    local override
+    for override in "$@"; do
+        override="${override#+}"
+        override="${override#+}"
+        case "${override}" in
+            reward=*|reward.reward_model=*|reward.reward_model.model_path=*) return 0 ;;
+        esac
+    done
+    NPU_RUNTIME_ARGS+=(
+        reward.reward_model.rollout.max_num_batched_tokens=512
+        reward.reward_model.rollout.max_num_seqs=8
+        '++reward.reward_model.rollout.engine_kwargs.vllm.limit_mm_per_prompt={image:1,video:0}'
+        ++reward.reward_model.rollout.engine_kwargs.vllm.kv_cache_memory_bytes=67108864
+    )
+}
