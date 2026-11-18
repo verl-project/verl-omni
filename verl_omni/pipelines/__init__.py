@@ -23,6 +23,7 @@ from . import (
     minimax_h3_diffusion_nft,
     minimax_h3_flow_grpo,
     minimax_h3_image_diffusion_nft,
+    minimax_h3_image_flow_grpo,
     qwen3_omni,
     qwen3_tts,
     qwen_image_diffusion_nft,
