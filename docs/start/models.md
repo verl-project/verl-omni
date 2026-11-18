@@ -1,6 +1,6 @@
 # Supported Models
 
-Last updated: 11/16/2026.
+Last updated: 11/18/2026.
 
 VeRL-Omni supports RL post-training for generative models across image, video,
 audio, and omni modalities. This page catalogues every model with a ready-to-run
@@ -180,6 +180,7 @@ See [Examples - MiniMax-H3-Image DiffusionNFT](../examples/minimax_h3_image/diff
 
 | Trainer | Example script | GPU config |
 |---------|---------------|------------|
+| FlowGRPO (text-to-image LoRA, native Diffusers ≥ 0.43.0) | [H3 Image FlowGRPO recipe](../examples/minimax_h3_image/flowgrpo_trainer_minimax_h3_image.md) | Accelerator validation pending |
 | DiffusionNFT (LoRA, dense-text OCR) | `examples/diffusionnft_trainer/minimax_h3_image/run_minimax_h3_image_ocr_lora.sh` | 4×GPU (3 trainer/rollout/VLM-OCR + 1 preference scorer) |
 
 **Reward models:** Weighted sum of PickScore (`yuvalkirstain/PickScore_v1`, 0.5), `Qwen/Qwen3-VL-8B-Instruct` OCR gated by a PP-OCRv6 layout guard (0.2), and HPSv2.1 (`HPS_v2.1_compressed.pt`, 0.3).
