@@ -233,9 +233,11 @@ def test_actor_update_empty_action_returns_empty_metrics(tmp_path, reset_skip_ma
     assert skip_stage_metrics() == {"skip/actor_update/calls": 1, "skip/actor_update/steps": 1}
 
 
-def test_weight_sync_empty_action(tmp_path, reset_skip_manager, dummy):
+def test_weight_sync_empty_action(tmp_path, reset_skip_manager, dummy, monkeypatch):
     config = make_config(tmp_path)
     config.omni_skip.weight_sync.update({"enable": True, "steps": [1], "action": "empty", "ack_stale_weights": True})
+    # No current trainer mode has a mid-cycle sync, so bypass the mode check to exercise the action itself.
+    monkeypatch.setattr("verl_omni.utils.skip.manager._check_skip_conflicts", lambda config: None)
     init_skip_manager(config)
     SkipManager.set_step(1)
 
@@ -310,8 +312,8 @@ def test_disabled_stage_not_instantiated(tmp_path, reset_skip_manager):
 
 @pytest.mark.parametrize(
     "use_v1, trainer_mode",
-    [(False, "separate_async"), (True, "sync")],
-    ids=["v0", "v1_sync"],
+    [(False, "separate_async"), (True, "sync"), (True, "separate_async")],
+    ids=["v0", "v1_sync", "v1_separate_async"],
 )
 def test_weight_sync_inert_without_mid_cycle_sync(tmp_path, reset_skip_manager, use_v1, trainer_mode):
     config = make_config(tmp_path, v1={"trainer_mode": trainer_mode})

@@ -72,7 +72,11 @@ def _hccl_probe_ok():
         return False
 
 module = module_map.get(backend)
-if module is not None:
+# A hardware plugin can register its own engine under these names (on Intel GPU,
+# verl-hardware-plugin registers its XCCL engine as "nccl"), so accept any registered engine.
+from verl.checkpoint_engine import CheckpointEngineRegistry
+
+if module is not None and backend not in CheckpointEngineRegistry._registry:
     try:
         importlib.import_module(module)
     except Exception as error:
