@@ -16,6 +16,8 @@
 
 import asyncio
 import json
+import logging
+import os
 import re
 from typing import Optional
 
@@ -25,6 +27,9 @@ import torch
 from openai.types.chat import ChatCompletion
 from PIL import Image
 from transformers import PreTrainedTokenizer
+
+logger = logging.getLogger(__file__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 DEFAULT_UNIFIED_REWARD_MODEL_PATH = "CodeGoat24/UnifiedReward-2.0-qwen3vl-2b"
 DEFAULT_UNIFIED_REWARD_SAMPLING_PARAMS = {"temperature": 0.0, "top_p": 1.0, "max_tokens": 512}
@@ -150,6 +155,9 @@ async def _score_single_image(
     unified_reward_response = result.choices[0].message.content or ""
     axis_scores = _parse_unified_reward_scores(unified_reward_response)
     if not axis_scores:
+        logger.warning(
+            "UnifiedReward failed to parse response",
+        )
         return None
     normalized_score, raw_score = _aggregate_unified_reward_scores(axis_scores)
     return normalized_score, raw_score, unified_reward_response
@@ -165,6 +173,7 @@ async def compute_score_unified_reward(
     model_name: Optional[str] = None,
     *,
     user_prompt: Optional[str] = None,
+    on_malformed: str = "raise",
 ):
     """Compute a human-preference score via UnifiedReward 2.0.
 
@@ -174,12 +183,19 @@ async def compute_score_unified_reward(
 
     ``user_prompt`` overrides the default prompt. A ``pkg://`` spec names a
     builder called with ``caption``; literal text replaces ``{caption}``.
+
+    An entirely malformed reply raises by default.
+    When ``on_malformed=zero``, keep the same result keys and
+    a score of ``0.0`` instead of raising.
     """
     from verl.utils.ray_utils import get_event_loop
 
     from verl_omni.utils.reward_score.reward_utils import resolve_prompt_builder
 
     del data_source, reward_model_tokenizer
+
+    if on_malformed not in {"raise", "zero"}:
+        raise ValueError(f"on_malformed must be 'raise' or 'zero', got {on_malformed!r}")
 
     extra_info = extra_info or {}
     caption = extra_info.get("prompt") or extra_info.get("raw_prompt") or ground_truth or ""
@@ -214,15 +230,23 @@ async def compute_score_unified_reward(
 
     valid_results = [result for result in frame_results if result is not None]
     malformed_frames = len(frame_results) - len(valid_results)
-    reward_extra_info = {}
-    if malformed_frames:
-        reward_extra_info["malformed_frames"] = malformed_frames
-        extra_info["unified_reward/malformed_frames"] = malformed_frames
     if not valid_results:
-        raise ValueError(
+        message = (
             "UnifiedReward returned malformed output for every frame; expected all three labeled axes "
             "(Alignment, Coherence, Style) with scores in [1, 5]."
         )
+        # When ``on_malformed=zero``, opts into a stable zero schema.
+        # A raise becomes reward/<key>/errors
+        # and drops these keys, so samples cannot be concatenated.
+        if on_malformed == "zero":
+            logger.warning("%s Using score 0.0.", message)
+            return {
+                "score": 0.0,
+                "raw_score": 0.0,
+                "response": "",
+                "malformed_frames": malformed_frames,
+            }
+        raise ValueError(message)
 
     normalized_scores = [result[0] for result in valid_results]
     raw_scores = [result[1] for result in valid_results]
@@ -234,5 +258,5 @@ async def compute_score_unified_reward(
         "score": score,
         "raw_score": raw_score,
         "response": unified_reward_response,
-        "reward_extra_info": reward_extra_info,
+        "malformed_frames": malformed_frames,
     }
