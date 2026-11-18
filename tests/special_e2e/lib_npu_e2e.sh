@@ -79,7 +79,7 @@ npu_e2e_add_tiny_reward_defaults() {
         override="${override#+}"
         override="${override#+}"
         case "${override}" in
-            reward=*|reward.reward_model=*|reward.reward_model.model_path=*) return 0 ;;
+            reward=*|reward.reward_model=*|reward.reward_model.model_path=*|reward.models=*|reward.models.*=*) return 0 ;;
         esac
     done
     NPU_RUNTIME_ARGS+=(

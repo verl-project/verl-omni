@@ -37,14 +37,26 @@ ROLLOUT_TP=${ROLLOUT_TP:-1}
 ENGINE=vllm_omni
 max_prompt_length=256
 
-if [[ -z "${ATTN_BACKEND:-}" || -z "${ROLLOUT_ATTN_BACKEND:-}" ]]; then
+if [[ -z "${ATTN_BACKEND:-}" && -z "${ROLLOUT_ATTN_BACKEND:-}" ]]; then
     if python3 -c 'from verl_omni.utils.diffusion_attention import fa_available; raise SystemExit(0 if fa_available() else 1)' >/dev/null 2>&1; then
-        ATTN_BACKEND=${ATTN_BACKEND:-_flash_3_varlen_hub}
-        ROLLOUT_ATTN_BACKEND=${ROLLOUT_ATTN_BACKEND:-FLASH_ATTN}
+        ATTN_BACKEND=_flash_3_varlen_hub
+        ROLLOUT_ATTN_BACKEND=FLASH_ATTN
     else
-        ATTN_BACKEND=${ATTN_BACKEND:-native}
-        ROLLOUT_ATTN_BACKEND=${ROLLOUT_ATTN_BACKEND:-TORCH_SDPA}
+        ATTN_BACKEND=native
+        ROLLOUT_ATTN_BACKEND=TORCH_SDPA
     fi
+elif [[ -z "${ROLLOUT_ATTN_BACKEND:-}" ]]; then
+    case "${ATTN_BACKEND}" in
+        native|_native_npu) ROLLOUT_ATTN_BACKEND=TORCH_SDPA ;;
+        flash_varlen_hub|_flash_3_varlen_hub) ROLLOUT_ATTN_BACKEND=FLASH_ATTN ;;
+        *) echo "Cannot infer rollout attention for ATTN_BACKEND=${ATTN_BACKEND}" >&2; exit 2 ;;
+    esac
+elif [[ -z "${ATTN_BACKEND:-}" ]]; then
+    case "${ROLLOUT_ATTN_BACKEND}" in
+        TORCH_SDPA) ATTN_BACKEND=native ;;
+        FLASH_ATTN|FLASH_ATTN_HUB|FLASH_ATTN_3_HUB) ATTN_BACKEND=_flash_3_varlen_hub ;;
+        *) echo "Cannot infer actor attention for ROLLOUT_ATTN_BACKEND=${ROLLOUT_ATTN_BACKEND}" >&2; exit 2 ;;
+    esac
 fi
 
 # Surface a missing checkpoint backend dependency before Ray workers start.

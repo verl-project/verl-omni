@@ -33,7 +33,22 @@ _SCRIPTS = Path(__file__).resolve().parents[1] / "special_e2e"
     ],
 )
 @pytest.mark.parametrize(
-    "model_source", ["owned", "env", "cli", "cli+", "cli++", "parent", "parent++", "root", "root++"]
+    "model_source",
+    [
+        "owned",
+        "env",
+        "cli",
+        "cli+",
+        "cli++",
+        "parent",
+        "parent++",
+        "root",
+        "root++",
+        "models",
+        "models++",
+        "named",
+        "named++",
+    ],
 )
 @pytest.mark.parametrize("override", [False, True])
 def test_reward_launcher_does_not_write_the_core_checkpoint(tmp_path, wrapper, delegate, model_source, override):
@@ -123,6 +138,14 @@ def ensure_tiny_qwen25_vl_reward_checkpoint(path):
         user_args.append(
             f"{model_source.removeprefix('root')}reward={{reward_model:{{model_path:{json.dumps(str(custom))}}}}}"
         )
+    elif model_source.startswith(("models", "named")):
+        engine = f"{{backend:engine,model_path:{json.dumps(str(custom))}}}"
+        selector = (
+            f"{model_source.removeprefix('models') or '+'}reward.models={{ocr:{engine}}}"
+            if model_source.startswith("models")
+            else f"{model_source.removeprefix('named') or '+'}reward.models.ocr={engine}"
+        )
+        user_args.extend(["reward.reward_model.enable=False", selector])
     if override:
         user_args.append("reward.reward_model.rollout.max_num_seqs=4")
     result = subprocess.run(
@@ -147,6 +170,18 @@ def ensure_tiny_qwen25_vl_reward_checkpoint(path):
     if user_args:
         assert argv[-len(user_args) :] == user_args
     assert not any(key in arg for arg in argv for key in ("max_model_len", "mm_processor_kwargs", "skip_mm_profiling"))
+    if model_source.startswith(("models", "named")):
+        from hydra import compose, initialize_config_dir
+
+        with initialize_config_dir(config_dir=str(_SCRIPTS.parents[1] / "verl_omni/trainer/config"), version_base=None):
+            config = compose(config_name="diffusion_trainer", overrides=argv)
+        assert config.reward.reward_model.enable is False
+        assert config.reward.models.ocr.model_path == str(custom)
+        rollout = config.reward.reward_model.rollout
+        assert rollout.max_num_batched_tokens == 8192
+        assert rollout.max_num_seqs == (4 if override else 1024)
+        assert "kv_cache_memory_bytes" not in rollout.engine_kwargs.vllm
+        assert "limit_mm_per_prompt" not in rollout.engine_kwargs.vllm
     if model_source == "env":
         assert recorded[0]["path"] == str(custom)
     else:
