@@ -69,6 +69,7 @@ from tests.special_e2e.create_dummy_h3_data import (  # noqa: E402
     build_dummy_h3_ref2va_data,
     build_dummy_h3_t2va_data,
 )
+from tests.special_e2e.npu_runtime import npu_precompile_threads, npu_runtime_overrides  # noqa: E402
 
 _DEFAULT_DATA_DIR = os.path.expanduser("~/data/dummy_h3_flowgrpo")
 _TINY_PATCH_DIR = _REPO_ROOT / "tests" / "special_e2e" / "minimax_h3_tiny_patch"
@@ -296,25 +297,8 @@ def _hydra_overrides(
     elif task == "ref2va":
         overrides.append("actor_rollout_ref.rollout.pipeline.reference_image_short_edge=256")
     if device == "npu":
-        overrides.extend(
-            [
-                "trainer.device=npu",
-                "actor_rollout_ref.rollout.enforce_eager=True",
-            ]
-        )
-        for name, value in {
-            "ASCEND_VISIBLE_DEVICES": os.environ["ASCEND_VISIBLE_DEVICES"],
-            "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES": os.environ.get(
-                "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES", "1"
-            ),
-            "HF_HUB_OFFLINE": "1",
-            "TRANSFORMERS_OFFLINE": "1",
-        }.items():
-            overrides.append(f"++ray_kwargs.ray_init.runtime_env.env_vars.{name}={json.dumps(value)}")
-        if ports := os.environ.get("RAY_MASTER_PORT_RANGE"):
-            overrides.append(f"trainer.ray_master_port_range=[{ports}]")
-        if os.environ.get("NPU_SMOKE_SKIP_GLOBAL_CLEANUP") == "1":
-            overrides.append("+ray_kwargs.ray_init.address=local")
+        overrides.extend(npu_runtime_overrides())
+        overrides.append("actor_rollout_ref.rollout.enforce_eager=True")
     return overrides
 
 
@@ -355,6 +339,7 @@ def run_smoke(
     output_dir = os.path.expanduser(output_dir)
     print(f"[1/3] ensuring tiny MiniMax-H3 checkpoint at {tiny_model_dir}", flush=True)
     if device == "npu":
+        os.environ["TORCHNPU_PRECOMPILE_THREADS"] = npu_precompile_threads()
         if force_rebuild or not _checkpoint_is_complete(Path(tiny_model_dir)):
             raise ValueError(
                 "NPU smoke requires a complete prebuilt tiny MiniMax-H3 checkpoint and does not rebuild it. "
@@ -482,6 +467,8 @@ def _parse_args() -> argparse.Namespace:
 def main() -> None:
     """Run the selected H3 tasks sequentially and stop on the first nonzero exit."""
     args = _parse_args()
+    if args.device == "npu":
+        os.environ["TORCHNPU_PRECOMPILE_THREADS"] = npu_precompile_threads()
     _require_minimax_h3_diffusers()
     tasks = ("t2va", "fl2va", "ref2va") if args.task == "all" else (args.task,)
     for index, task in enumerate(tasks, start=1):

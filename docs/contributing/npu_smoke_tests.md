@@ -190,10 +190,15 @@ devices, validate it in the test entry point and fail with a clear message.
 The Resolve NPU CI groups step maps labels to groups as listed in
 [CI Triggers](#ci-triggers). Multiple labels produce the union of their groups.
 When both groups are selected, two eight-NPU jobs partition the test IDs into
-even and odd shards. Each job runs its core cases on NPUs 0-3 and its e2e cases
-on NPUs 4-7 concurrently; trainers within a shard remain sequential. A single
+shards balanced by observed runtime. Each job runs its core cases on NPUs 0-3
+and its e2e cases on NPUs 4-7 concurrently; trainers within a shard remain sequential. A single
 group label retains the eight-NPU group job. The setup_runner check succeeds
 only when every selected job passes.
+
+Tiny NPU trainer smokes share runtime defaults: two compiler threads per worker,
+an in-process data loader, and two TransferQueue storage units on the single node.
+`TORCHNPU_PRECOMPILE_THREADS` accepts a positive override; trailing Hydra arguments
+can override the loader and storage settings. Training steps and assertions are unchanged.
 
 If the new test lives outside current path filters, add its path. Current
 filters include verl_omni/**, tests/npu_smoke/**, tests/agent_loop/**,

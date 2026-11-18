@@ -24,6 +24,11 @@ export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES="${RAY_EXPERIMENTAL_NOSE
 export HCCL_NPU_SOCKET_PORT_RANGE="${HCCL_NPU_SOCKET_PORT_RANGE:-auto}"
 export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
+export TORCHNPU_PRECOMPILE_THREADS="${TORCHNPU_PRECOMPILE_THREADS:-2}"
+if [[ ! "${TORCHNPU_PRECOMPILE_THREADS}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "TORCHNPU_PRECOMPILE_THREADS must be a positive integer." >&2
+    exit 2
+fi
 # vllm-ascend rejects FRACTAL_NZ weights on wake_up in RL scenarios; keep NZ
 # off for every NPU e2e entry (same guard the Qwen3-Omni launcher uses).
 export VLLM_ASCEND_ENABLE_NZ="${VLLM_ASCEND_ENABLE_NZ:-0}"
@@ -60,23 +65,9 @@ PY
 export ATTN_BACKEND="${ATTN_BACKEND:-native}"
 export ROLLOUT_ATTN_BACKEND="${ROLLOUT_ATTN_BACKEND:-TORCH_SDPA}"
 
-NPU_VISIBLE_DEVICES_JSON="\"${ASCEND_VISIBLE_DEVICES}\""
-export NPU_VISIBLE_DEVICES_JSON
-NPU_RUNTIME_ARGS=(
-    "trainer.device=npu"
-    "++ray_kwargs.ray_init.runtime_env.env_vars.ASCEND_VISIBLE_DEVICES=${NPU_VISIBLE_DEVICES_JSON}"
-    "++ray_kwargs.ray_init.runtime_env.env_vars.RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=\"${RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES}\""
-    '++ray_kwargs.ray_init.runtime_env.env_vars.HF_HUB_OFFLINE="1"'
-    '++ray_kwargs.ray_init.runtime_env.env_vars.TRANSFORMERS_OFFLINE="1"'
-    '++ray_kwargs.ray_init.runtime_env.env_vars.VLLM_ASCEND_ENABLE_NZ="0"'
-    '++actor_rollout_ref.rollout.engine_kwargs.vllm_omni.additional_config.weight_nz_mode=0'
-    # vllm-ascend defaults weight_nz_mode=1 and wake_up rejects FRACTAL_NZ in RL
-    # scenarios; reward-model vLLM servers sleep/wake too, so guard them as well.
-    '++reward.reward_model.rollout.engine_kwargs.vllm.additional_config.weight_nz_mode=0'
-)
-if [[ -n "${RAY_MASTER_PORT_RANGE:-}" ]]; then
-    NPU_RUNTIME_ARGS+=("trainer.ray_master_port_range=[${RAY_MASTER_PORT_RANGE}]")
-fi
-if [[ "${NPU_SMOKE_SKIP_GLOBAL_CLEANUP:-0}" == 1 ]]; then
-    NPU_RUNTIME_ARGS+=("+ray_kwargs.ray_init.address=local")
-fi
+NPU_RUNTIME_ARGS_TEXT=$(python3 "${NPU_E2E_REPO_ROOT}/tests/special_e2e/npu_runtime.py")
+NPU_RUNTIME_ARGS=()
+while IFS= read -r override; do
+    NPU_RUNTIME_ARGS+=("${override}")
+done <<< "${NPU_RUNTIME_ARGS_TEXT}"
+unset NPU_RUNTIME_ARGS_TEXT

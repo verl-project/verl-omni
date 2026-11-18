@@ -26,6 +26,12 @@ export RAY_DEDUP_LOGS=0
 export DEVICE_NAME=npu
 export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES="${RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES-1}"
 export VLLM_PLUGINS="${VLLM_PLUGINS:-ascend}"
+# torch-npu eagerly starts this many compiler threads in every imported worker.
+export TORCHNPU_PRECOMPILE_THREADS="${TORCHNPU_PRECOMPILE_THREADS:-2}"
+[[ "${TORCHNPU_PRECOMPILE_THREADS}" =~ ^[1-9][0-9]*$ ]] || {
+    fail "TORCHNPU_PRECOMPILE_THREADS must be a positive integer."
+    exit 2
+}
 
 if [[ "${LD_PRELOAD:-}" != *libjemalloc* ]]; then
     if [[ -z "${JEMALLOC_PATH:-}" ]] && ! JEMALLOC_PATH=$(ldconfig -p 2>/dev/null \
@@ -114,7 +120,12 @@ run_test() {
     shift 2
     local logfile="${LOG_DIR}/test_${id}.log"
 
-    if [[ -n "${NPU_SMOKE_SHARD_INDEX:-}" ]] && (( id % 2 != NPU_SMOKE_SHARD_INDEX )); then
+    local shard=$((id % 2))
+    # Balance measured startup-heavy workloads while retaining stable test IDs.
+    case "${NPU_SMOKE_GROUP}:${id}" in
+        core:3|core:5|core:14|e2e:2|e2e:18|e2e:23) shard=$((1 - shard)) ;;
+    esac
+    if [[ -n "${NPU_SMOKE_SHARD_INDEX:-}" ]] && (( shard != NPU_SMOKE_SHARD_INDEX )); then
         log "[${id}] Assigned to the other NPU smoke shard."
         return 0
     fi
@@ -188,7 +199,7 @@ print_header() {
     echo "  Repo root : ${REPO_ROOT}"
     echo "  Log dir   : ${LOG_DIR}"
     echo "  NUM_NPUS  : ${NUM_NPUS}"
-    echo "  Shard     : ${NPU_SMOKE_SHARD_INDEX:-all} (even IDs: 0; odd IDs: 1)"
+    echo "  Shard     : ${NPU_SMOKE_SHARD_INDEX:-all} (balanced core/e2e workloads)"
     echo "  ASCEND_RT_VISIBLE_DEVICES : ${ASCEND_RT_VISIBLE_DEVICES}"
     sep
 }
