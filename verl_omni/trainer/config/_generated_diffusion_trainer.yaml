@@ -850,9 +850,3 @@ omni_skip:
     dump_dir: ~/.verl/stage_dump
     steps: []
     action: empty
-  weight_sync:
-    enable: false
-    dump_dir: ~/.verl/stage_dump
-    steps: []
-    action: empty
-    ack_stale_weights: false

@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 
 from verl.base_config import BaseConfig
 
-__all__ = ["ActorUpdateSkipConfig", "OmniSkipConfig", "StageSkipConfig", "WeightSyncSkipConfig"]
+__all__ = ["ActorUpdateSkipConfig", "OmniSkipConfig", "StageSkipConfig"]
 
 
 @dataclass
@@ -54,30 +54,6 @@ class ActorUpdateSkipConfig(StageSkipConfig):
 
 
 @dataclass
-class WeightSyncSkipConfig(StageSkipConfig):
-    """Skip settings of the mid-cycle weight sync.
-
-    Args:
-        ack_stale_weights: Must be true when enabled: replicas keep pre-update weights until the next sync.
-
-    Raises:
-        ValueError: If the role is enabled without the acknowledgment.
-    """
-
-    action: str = "empty"
-    ack_stale_weights: bool = False
-
-    def __post_init__(self) -> None:
-        super().__post_init__()
-        if self.enable and not self.ack_stale_weights:
-            raise ValueError(
-                "omni_skip.weight_sync leaves rollout replicas on pre-update weights until the next lifecycle "
-                "sync, silently degrading training. Set omni_skip.weight_sync.ack_stale_weights=true to "
-                "acknowledge (debug runs only)."
-            )
-
-
-@dataclass
 class OmniSkipConfig(BaseConfig):
     """Top-level ``omni_skip:`` config: one entry per stage role."""
 
@@ -86,4 +62,3 @@ class OmniSkipConfig(BaseConfig):
     ref_log_prob: StageSkipConfig = field(default_factory=StageSkipConfig)
     advantage: StageSkipConfig = field(default_factory=StageSkipConfig)
     actor_update: ActorUpdateSkipConfig = field(default_factory=ActorUpdateSkipConfig)
-    weight_sync: WeightSyncSkipConfig = field(default_factory=WeightSyncSkipConfig)
