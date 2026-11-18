@@ -123,35 +123,6 @@ def _fsdp_param_dtype(
     return configured_dtype
 
 
-def _replicate_frozen_enabled(engine) -> bool:
-    """Whether a LoRA adapter keeps its frozen base replicated via ``ignored_params``.
-
-    LoRA-only opt-in (``lora_rank > 0``, ``strategy=fsdp2``, unmerged LoRA, no offload):
-    rank 0 loads the checkpoint on CPU and non-zero ranks meta-init as usual, then
-    ``fsdp2_load_full_state_dict`` broadcasts both the unsharded non-LoRA base and
-    the sharded LoRA adapters from rank 0.
-    """
-    model_cls = DiffusionModelBase.get_class(engine.model_config)
-    if engine.model_config.lora_rank <= 0 or not model_cls.replicate_frozen_base(engine.model_config):
-        return False
-    if engine.engine_config.strategy != "fsdp2":
-        raise ValueError("replicate_frozen_base requires strategy=fsdp2.")
-    if resolve_lora_config(engine.model_config).merge:
-        raise ValueError("replicate_frozen_base does not support model.lora.merge=True.")
-    if engine.engine_config.param_offload:
-        raise ValueError("replicate_frozen_base requires param_offload=False.")
-    return not (engine.engine_config.offload_policy or engine.engine_config.forward_only)
-
-
-def _cast_replicated_params(module, param_dtype: Optional[torch.dtype]) -> None:
-    """Store the frozen base in the FSDP compute dtype; FSDP2 casts only the parameters it shards."""
-    if param_dtype is None:
-        return
-    for name, param in module.named_parameters():
-        if "lora_" not in name and param.is_floating_point():
-            param.data = param.data.to(param_dtype)
-
-
 class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
     """Base Diffusers engine using PyTorch FullyShardedDataParallel (FSDP).
 
@@ -476,20 +447,8 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
                 "offload_policy": offload_policy,
                 "reshard_after_forward": self.engine_config.reshard_after_forward,
             }
-            if _replicate_frozen_enabled(self):
-                _cast_replicated_params(module, param_dtype)
-                replicated_params = [param for name, param in module.named_parameters() if "lora_" not in name]
-                full_state = module.state_dict()
-                apply_fsdp2(
-                    module,
-                    fsdp_kwargs,
-                    self.engine_config,
-                    ignored_names=ignored_names,
-                    ignored_params=replicated_params,
-                )
-            else:
-                full_state = module.state_dict()
-                apply_fsdp2(module, fsdp_kwargs, self.engine_config, ignored_names=ignored_names)
+            full_state = module.state_dict()
+            apply_fsdp2(module, fsdp_kwargs, self.engine_config, ignored_names=ignored_names)
             fsdp2_load_full_state_dict(module, full_state, fsdp_mesh, offload_policy)
         else:
             raise NotImplementedError(f"Unknown strategy {self.engine_config.strategy}")

@@ -16,7 +16,6 @@
 #   REWARD_MODEL_NAME  Qwen3-VL-8B-Instruct repo id or local path (served by the reward worker)
 set -euo pipefail
 
-export VERL_OMNI_H3_IMAGE_REPLICATE_FROZEN=1
 export VERL_OMNI_H3_IMAGE_PACK_MICRO_BATCH=1
 export GENRM_OCR_TEMPERATURE=0
 export VLLM_ENGINE_READY_TIMEOUT_S=${VLLM_ENGINE_READY_TIMEOUT_S:-3600}

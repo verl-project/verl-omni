@@ -18,7 +18,7 @@ FSDP utilities for verl-omni
 import json
 import logging
 from collections import OrderedDict
-from collections.abc import Iterable, Sequence
+from collections.abc import Sequence
 from contextlib import ExitStack, contextmanager
 from functools import partial
 from pathlib import Path
@@ -77,14 +77,8 @@ def _filter_ignored_wrap_targets(wrap_targets, root, ignored_names):
     return kept
 
 
-def apply_fsdp2(
-    model,
-    fsdp_kwargs,
-    config,
-    ignored_names: Sequence[str] = (),
-    ignored_params: Iterable[torch.nn.Parameter] = (),
-):
-    """FSDP2 wrap; ``ignored_names`` subtrees and ``ignored_params`` stay unsharded.
+def apply_fsdp2(model, fsdp_kwargs, config, ignored_names: Sequence[str] = ()):
+    """FSDP2 wrap; ``ignored_names`` subtrees stay unsharded.
 
     Adapted from verl's ``apply_fsdp2``; deltas are DIFF-marked.
     """
@@ -99,18 +93,18 @@ def apply_fsdp2(
     assert CPUOffloadPolicy is not None, "PyTorch version >= 2.4 is required for using fully_shard API (FSDP2)"
 
     # DIFF vs upstream: fail on trainable ignored params — FSDP2 never syncs their gradients
-    resolved_ignored = set(ignored_params)
+    ignored_params = set()
     trainable_ignored: list[str] = []
     for name, param in model.named_parameters():
         if any(part in ignored_names for part in name.split(".")):
-            resolved_ignored.add(param)
-        if param in resolved_ignored and param.requires_grad:
-            trainable_ignored.append(name)
+            ignored_params.add(param)
+            if param.requires_grad:
+                trainable_ignored.append(name)
     mesh = fsdp_kwargs.get("mesh")
     if trainable_ignored and (mesh is None or mesh.size() > 1):
         raise ValueError(
             "FSDP2-ignored parameters must be frozen, but these require "
-            f"gradients: {trainable_ignored}. Either remove them from ignored_names/ignored_params or exclude "
+            f"gradients: {trainable_ignored}. Either remove them from ignored_names or exclude "
             "them from training (LoRA target/exclude modules) — ignored params get no gradient "
             "synchronization."
         )
@@ -133,17 +127,13 @@ def apply_fsdp2(
     )
 
     for idx, module in enumerate(modules):
-        module_ignored = resolved_ignored.intersection(module.parameters()) if resolved_ignored else None
         with maybe_patch_fsdp_module(module):
-            if module_ignored:
-                fully_shard(module, ignored_params=module_ignored, **fsdp_kwargs)
-            else:
-                fully_shard(module, **fsdp_kwargs)
+            fully_shard(module, **fsdp_kwargs)
 
     with maybe_patch_fsdp_module(model):
-        # DIFF vs upstream: root carries resolved_ignored so ignored params stay unsharded
+        # DIFF vs upstream: only the root call carries ignored_params
         # fsdp2 will not reshard_after_forward for root module
-        fully_shard(model, ignored_params=resolved_ignored, **fsdp_kwargs)
+        fully_shard(model, ignored_params=ignored_params, **fsdp_kwargs)
 
     # oneCCL (xccl) can abort on the ReduceOp.AVG that FSDP2 uses for fp32/bf16 gradient
     # reduce-scatter; reduce with SUM and divide instead, as verl-hardware-plugin does for

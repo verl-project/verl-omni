@@ -35,6 +35,8 @@ python verl_omni/pipelines/minimax_h3_image_diffusion_nft/checkpoint.py convert 
   (with `open_clip_pytorch_model.bin`, the default `HPSV2_PRETRAINED_PATH`). `CUSTOM_REWARD_MODEL_PATH`:
   `HPS_v2.1_compressed.pt` from `xswu/HPSv2`. HPSv2.1 is scored by `compute_score_hpsv2`.
 - Rollout needs vLLM-Omni with MiniMax H3 image support (vLLM-Omni 0.33, #878).
+- Actor training needs `diffusers>=0.43.0` (where `MiniMaxH3Transformer3DModel` first shipped; the repository's
+  `diffusers>=0.41.0` floor is too old for this model).
 
 The data rows carry the target text in `reward_model.ground_truth`. The reward looks the full prompt up in
 `TRAIN_FILES` / `VAL_FILES` by `(extra_info.tier, extra_info.split, extra_info.index)`.
@@ -49,8 +51,7 @@ bash examples/diffusionnft_trainer/minimax_h3_image/run_minimax_h3_image_ocr_lor
 One node with 4 GPUs: GPUs 0-2 run the trainer, rollout and OCR reward model; GPU 3 runs the PickScore / HPSv2.1
 scorer (`PREFERENCE_SCORER_GPU`). Each of the 3 reward-loop workers starts one shared scorer process there (about
 7 GB each, serving both `term_pickscore` and `term_hpsv2`) and its own pool of 8 PP-OCR processes. 512x512 is generated directly, without the upscaled canvas.
-LoRA rank 66, lr 1e-4, 96 images per step, 2 updates per step. The frozen base is replicated on every rank
-(`VERL_OMNI_H3_IMAGE_REPLICATE_FROZEN=1`), each micro-batch runs as one packed DiT call
+LoRA rank 66, lr 1e-4, 96 images per step, 2 updates per step. Each micro-batch runs as one packed DiT call
 (`VERL_OMNI_H3_IMAGE_PACK_MICRO_BATCH=1`, requires gradient checkpointing off), and rollout normalization/LoRA
 kernels stay enabled by default (`VERL_OMNI_H3_IMAGE_ROLLOUT_KERNELS=1`, set `0` to fall back to stock Diffusers).
 Set `MINIMAX_H3_IMAGE_DEBUG_DIR` to dump per-step diagnostic tensors on evidence runs. Steps took 60-85 s on GB300.
