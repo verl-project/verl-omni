@@ -109,6 +109,7 @@ source "$TEST_LIB"
     assert '++ray_kwargs.ray_init.runtime_env.env_vars.VLLM_ASCEND_ENABLE_NZ="0"' in shared
     threads = "3" if parallel else "2"
     assert f'++ray_kwargs.ray_init.runtime_env.env_vars.TORCHNPU_PRECOMPILE_THREADS="{threads}"' in shared
+    assert "++ray_kwargs.ray_init.include_dashboard=False" in shared
     assert "data.dataloader_num_workers=0" in shared
     assert "transfer_queue.backend.SimpleStorage.num_data_storage_units=2" in shared
     assert ("+ray_kwargs.ray_init.address=local" in shared) is parallel
@@ -160,11 +161,14 @@ def test_compile_thread_setting_defaults_and_explicit_override():
     assert npu_precompile_threads({"TORCHNPU_PRECOMPILE_THREADS": "4"}) == "4"
 
 
-def test_shared_smoke_config_accepts_caller_overrides(monkeypatch):
+@pytest.mark.parametrize("dashboard", [False, True])
+def test_shared_smoke_config_accepts_caller_overrides(monkeypatch, dashboard):
     from hydra import compose, initialize_config_dir
 
     monkeypatch.setenv("ASCEND_VISIBLE_DEVICES", "0,1")
     overrides = npu_runtime_overrides()
+    if dashboard:
+        overrides.append("ray_kwargs.ray_init.include_dashboard=True")
     with initialize_config_dir(config_dir=str(_SCRIPTS.parents[1] / "verl_omni/trainer/config"), version_base=None):
         cfg = compose(
             config_name="diffusion_trainer",
@@ -174,6 +178,7 @@ def test_shared_smoke_config_accepts_caller_overrides(monkeypatch):
                 "transfer_queue.backend.SimpleStorage.num_data_storage_units=4",
             ],
         )
+    assert cfg.ray_kwargs.ray_init.include_dashboard is dashboard
     assert cfg.data.dataloader_num_workers == 3
     assert cfg.transfer_queue.backend.SimpleStorage.num_data_storage_units == 4
     assert cfg.actor_rollout_ref.rollout.engine_kwargs.vllm_omni.additional_config.weight_nz_mode == 0

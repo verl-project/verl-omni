@@ -33,6 +33,7 @@ def npu_runtime_overrides(environ: Mapping[str, str] | None = None) -> list[str]
     env = os.environ if environ is None else environ
     overrides = [
         "trainer.device=npu",
+        "++ray_kwargs.ray_init.include_dashboard=False",
         "data.dataloader_num_workers=0",
         "transfer_queue.backend.SimpleStorage.num_data_storage_units=2",
     ]
