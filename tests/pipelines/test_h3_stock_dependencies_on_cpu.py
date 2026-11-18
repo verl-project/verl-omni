@@ -19,21 +19,26 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from diffusers import MiniMaxH3ImageTransformer2DModel
-from peft import PeftModel, get_peft_model_state_dict
+from peft import get_peft_model_state_dict
 
 from verl_omni.pipelines.minimax_h3_diffusion_nft.common import map_lora_tensors
 from verl_omni.pipelines.minimax_h3_flow_grpo.common import configure_flow_scheduler
-from verl_omni.pipelines.minimax_h3_image_flow_grpo.diffusers_training_adapter import MiniMaxH3ImageFlowGRPO
+from verl_omni.pipelines.minimax_h3_image_flow_grpo.diffusers_training_adapter import (
+    MiniMaxH3ImageFlowGRPO,
+    _actor_model_class,
+)
 from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
 from verl_omni.workers.engine.lora_adapter_mixin import LoRAAdapterMixin
 from verl_omni.workers.engine.lora_export import export_lora_for_sync
+
+diffusers = pytest.importorskip("diffusers", minversion="0.43.0")
+MiniMaxH3ImageTransformer2DModel = diffusers.MiniMaxH3ImageTransformer2DModel
 
 
 def tiny_model():
     """Create a real six-head model using only the released Diffusers constructor."""
     torch.manual_seed(17)
-    return MiniMaxH3ImageTransformer2DModel(
+    return _actor_model_class()(
         num_attention_heads=2,
         attention_head_dim=16,
         hidden_size=32,
@@ -93,11 +98,11 @@ def replay(model, head):
 def test_stock_heads_lora_backward_and_no_forward_rebinding(head):
     """All native PDD heads support checkpointed LoRA replay without patched forwards."""
     stock = tiny_model()
-    assert not hasattr(stock, "add_adapter"), "This check requires the unmodified 0.43.0 image model"
+    assert hasattr(stock, "add_adapter")
     with torch.no_grad():
         expected = replay(stock, head)[0]
     engine = engine_for(stock)
-    assert isinstance(engine.module, PeftModel)
+    assert isinstance(engine.module, MiniMaxH3ImageTransformer2DModel)
     engine.module.enable_gradient_checkpointing()
     engine.module.train()
     score, *_ = replay(engine.module, head)
@@ -126,13 +131,13 @@ def test_stock_adapter_copy_disable_restore_and_optimizer():
     engine.copy_adapter("default", "old")
     with engine.use_adapter("old"):
         torch.testing.assert_close(replay(model, 2)[0], changed)
-    assert model.active_adapters == ["default"]
+    assert model.active_adapters() == ["default"]
     with pytest.raises(RuntimeError, match="sentinel"):
         with engine.disable_adapter():
             torch.testing.assert_close(replay(model, 2)[0], baseline)
             raise RuntimeError("sentinel")
     torch.testing.assert_close(replay(model, 2)[0], changed)
-    assert model.active_adapters == ["default"]
+    assert model.active_adapters() == ["default"]
 
 
 def test_stock_adapter_save_load_and_weight_export(tmp_path):
@@ -163,7 +168,21 @@ def test_stock_adapter_save_load_and_weight_export(tmp_path):
         mapped = map_lora_tensors(exported, "transformer", 24, strict=True)
         assert len(mapped) == len(exported)
         assert all(name.startswith(("transformer.blocks.", "transformer.token_refiner.blocks.")) for name in mapped)
-    engine.module.save_pretrained(tmp_path, selected_adapters=["default"])
+    engine.module.save_lora_adapter(tmp_path / "model")
+    restored_model = tiny_model()
+    restored_model.load_state_dict(base_state)
+    restored_model.load_lora_adapter(tmp_path / "model", prefix=None, use_safetensors=True, adapter_name="default")
+    torch.testing.assert_close(replay(restored_model, 1)[0], expected)
+
+    # The shared engine loads pipeline-prefixed weights using the default .bin filename.
+    stream, _ = export_lora_for_sync(
+        engine.module,
+        model_config=engine.model_config,
+        base_sync_done=True,
+        is_diffusers=True,
+        key_prefix="transformer.",
+    )
+    torch.save(dict(stream), tmp_path / "pytorch_lora_weights.bin")
     restored_base = tiny_model()
     restored_base.load_state_dict(base_state)
     restored = engine_for(restored_base, str(tmp_path))
@@ -172,8 +191,7 @@ def test_stock_adapter_save_load_and_weight_export(tmp_path):
     torch.testing.assert_close(replay(restored.module, 1)[0], expected)
 
 
-@pytest.mark.parametrize("wrapped", [True, False])
-def test_layered_collection_resolves_peft_prefix(monkeypatch, wrapped):
+def test_layered_collection_keeps_native_prefix(monkeypatch):
     """Mock only collective contexts; collect real tuner weights under both root layouts."""
     import verl.utils.device as device_utils
     from torch.distributed.fsdp import FullyShardedDataParallel
@@ -181,7 +199,7 @@ def test_layered_collection_resolves_peft_prefix(monkeypatch, wrapped):
     import verl_omni.utils.fsdp_utils as fsdp_utils
 
     engine = engine_for(tiny_model())
-    model = engine.module if wrapped else engine.module.get_base_model()
+    model = engine.module
     blocks = set(model.transformer_blocks) | set(model.token_refiner.refiner_blocks)
     monkeypatch.setattr(fsdp_utils, "fsdp_version", lambda module: 2 if module in blocks else 0)
     monkeypatch.setattr(FullyShardedDataParallel, "summon_full_params", lambda *args, **kwargs: nullcontext())
@@ -194,3 +212,36 @@ def test_layered_collection_resolves_peft_prefix(monkeypatch, wrapped):
     assert result and set(result) == set(expected)
     for name in result:
         torch.testing.assert_close(result[name], expected[name])
+
+
+def test_native_checkpoint_loader_and_peft_interface(tmp_path):
+    """The production loader preserves native parameters, outputs and adapter APIs."""
+    original = tiny_model()
+    original.save_pretrained(tmp_path)
+    config = SimpleNamespace(config_path=str(tmp_path), local_path=None, attn_backend="native")
+    restored = MiniMaxH3ImageFlowGRPO.build_module(config, torch.float32)
+    assert restored.forward.__func__ is MiniMaxH3ImageTransformer2DModel.forward
+    assert set(restored.state_dict()) == set(original.state_dict())
+    torch.testing.assert_close(replay(restored, 2)[0], replay(original, 2)[0])
+    assert hasattr(restored, "add_adapter")
+
+
+def test_missing_native_class_has_actionable_error(monkeypatch):
+    """Older Diffusers installs fail at model construction with a recipe-specific message."""
+    import builtins
+
+    original_import = builtins.__import__
+
+    def without_image(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "diffusers" and "MiniMaxH3ImageTransformer2DModel" in fromlist:
+            raise ImportError("image model absent")
+        return original_import(name, globals, locals, fromlist, level)
+
+    _actor_model_class.cache_clear()
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(builtins, "__import__", without_image)
+            with pytest.raises(ImportError, match="Diffusers 0.43.0"):
+                _actor_model_class()
+    finally:
+        _actor_model_class.cache_clear()

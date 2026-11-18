@@ -1,6 +1,6 @@
 # MiniMax H3 Image FlowGRPO
 
-Last updated: 11/17/2026.
+Last updated: 11/18/2026.
 
 Text-to-image LoRA training using the released six-step PDD grid. The actor uses
 Diffusers' native `MiniMaxH3ImageTransformer2DModel`; rollout uses vLLM-Omni's
@@ -12,7 +12,8 @@ records both endpoints for replay. Validation keeps the release's Euler updates.
 
 ## Dependencies and weights
 
-Use an isolated environment with Diffusers 0.43.0 or newer and the vLLM-Omni
+**This recipe requires Diffusers 0.43.0 or newer.** The repository-wide minimum
+remains unchanged. Use an isolated environment and the vLLM-Omni
 revision pinned by this repository. No Diffusers fork, source patch, injected
 PDD head, empty-audio workaround, or replacement actor kernel is required.
 
@@ -22,10 +23,11 @@ actor weights under `transformer_diffusers/` (or set `ACTOR_PATH`). Keep the nat
 rollout's `pdd_fused_heads.safetensors`; the actor uses its own native PDD heads.
 This recipe does not convert older video/audio checkpoints into image models.
 
-Install through the repository's documented `uv` workflow. Its existing
-`override-dependencies` selects the required Diffusers and Accelerate versions
-over the older transitive pins declared by vLLM-Omni; this integration raises the
-Diffusers minimum to 0.43.0. No installed dependency metadata is edited.
+Install through the repository's documented `uv` workflow, then explicitly select
+`diffusers>=0.43.0` for this recipe. The native image model currently lacks
+`PeftAdapterMixin`; the image adapter adds that interface with a temporary local
+subclass, preserving the native forward and checkpoint layout. It uses the
+native class directly once upstream includes the mixin.
 CPU API tests do not establish a working accelerator environment.
 
 ## Minimal run

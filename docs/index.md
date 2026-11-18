@@ -91,7 +91,6 @@ algo/performance.md
 
 examples/overview.md
 examples/flowgrpo_trainer.md
-examples/minimax_h3_image/flowgrpo_trainer_minimax_h3_image.md
 examples/flowdppo_trainer.md
 examples/dpo_trainer.md
 examples/minicpm/dpo_trainer_minicpm.md
@@ -112,6 +111,7 @@ examples/ltx2/flowgrpo_trainer_ltx2.md
 examples/ltx2/omninft_trainer_ltx2.md
 examples/ltx2/diffusionopd_trainer_ltx2.md
 examples/minimax_h3/flowgrpo_trainer_minimax_h3.md
+examples/minimax_h3_image/flowgrpo_trainer_minimax_h3_image.md
 examples/minimax_h3/diffusionnft_trainer_minimax_h3.md
 examples/boogu_image/flowgrpo_trainer_boogu_image.md
 examples/boogu_image/diffusionnft_trainer_boogu_image.md

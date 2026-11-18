@@ -14,6 +14,7 @@
 """Replay MiniMax H3 Image PDD transitions for FlowGRPO."""
 
 import json
+from functools import lru_cache
 from pathlib import Path
 
 import torch
@@ -31,11 +32,41 @@ from verl_omni.pipelines.model_base import DiffusionModelBase
 from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
 
 
+@lru_cache
+def _actor_model_class():
+    """Add the missing PEFT interface locally until Diffusers provides it upstream."""
+    try:
+        from diffusers import MiniMaxH3ImageTransformer2DModel
+        from diffusers.loaders import PeftAdapterMixin
+    except ImportError as exc:
+        raise ImportError("H3 Image FlowGRPO requires Diffusers 0.43.0 or newer.") from exc
+
+    if issubclass(MiniMaxH3ImageTransformer2DModel, PeftAdapterMixin):
+        return MiniMaxH3ImageTransformer2DModel
+
+    # TODO: remove after the native Diffusers image model inherits PeftAdapterMixin.
+    class _MiniMaxH3ImageActorModel(MiniMaxH3ImageTransformer2DModel, PeftAdapterMixin):
+        """Native image model with the standard Diffusers LoRA interface."""
+
+    return _MiniMaxH3ImageActorModel
+
+
 @DiffusionModelBase.register("MiniMaxH3ImagePipeline", algorithm="flow_grpo")
 class MiniMaxH3ImageFlowGRPO(DiffusionModelBase):
     """Score the recorded next image rows with the original step's frozen PDD head."""
 
     prepare_processor_files = staticmethod(prepare_h3_processor_files)
+
+    @classmethod
+    def build_module(cls, model_config, torch_dtype):
+        """Load native image weights with a model-local PEFT compatibility mixin."""
+        module = _actor_model_class().from_pretrained(
+            model_config.config_path or model_config.local_path,
+            subfolder="" if model_config.config_path else model_config.transformer_subfolder,
+            torch_dtype=torch_dtype,
+        )
+        module.set_attention_backend(model_config.attn_backend)
+        return module
 
     @classmethod
     def validate_lora_config(cls, model_config):

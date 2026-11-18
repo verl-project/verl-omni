@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# H3 Image needs Diffusers >=0.43.0; do not change the repository-wide minimum.
+python -c 'from importlib.metadata import version; from packaging.version import Version; assert Version(version("diffusers")) >= Version("0.43.0"), "H3 Image FlowGRPO requires diffusers>=0.43.0"'
+
 : "${MODEL_PATH:?Set MODEL_PATH to the native MiniMax-H3-Image release}"
 : "${TRAIN_FILES:?Set TRAIN_FILES to a prompt parquet file}"
 : "${VAL_FILES:?Set VAL_FILES to a validation parquet file}"
