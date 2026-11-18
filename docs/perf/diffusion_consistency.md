@@ -1,6 +1,6 @@
 # Check pinned diffusion consistency artifacts
 
-Last updated: 11/17/2026
+Last updated: 11/18/2026
 
 ## Capture on the real trainer path
 
@@ -77,6 +77,44 @@ the affected raw timestep, sigma index and current/next field, then verify the
 restored result matches the baseline. This tests a known logic fault, rather
 than labelling ordinary kernel/dtype differences as a scheduling bug. Captures
 do not independently attest model weights or prove a naturally occurring bug.
+
+## Escalate to module-level localization
+
+For a mismatch that needs module or operator evidence, use the existing
+[training/inference consistency workflow](https://github.com/verl-project/verl-omni/blob/main/.agents/skills/train-infer-consistency/SKILL.md)
+introduced by [#620](https://github.com/verl-project/verl-omni/pull/620).
+It routes collection and analysis to the MindStudio skills instead of
+maintaining a separate model-specific module map in this recipe.
+
+The two capture formats serve different purposes:
+
+| Artifact | Evidence and consumer |
+| --- | --- |
+| Shared trainer `record.json` / `payload.pt` and replay report | Saved log-probability pairs, timestep/sigma inputs and event identities; consumed by the CPU replay reader above. |
+| Paired training/rollout MSProbe dumps | Module/operator tensors for the existing collection and analysis workflow; needed for module-level localization. |
+
+The shared events are screening and pairing context for the investigation;
+they do not contain complete module dumps and cannot replace either dump input
+to the analysis script. SD3.5 remains a validated reference recipe, not an
+automatic cross-backend module mapper.
+
+1. Use the replay report's step, batch, rank and affected timesteps to select
+   the diagnostic window. Retain the launch configuration and pairing evidence;
+   event IDs and payload hashes alone do not establish equal inputs or weights.
+2. Follow the existing collection workflow to obtain or validate paired MSProbe
+   dumps for the same sample, branch and computation. Record both backend/source
+   versions, input and weight identities, and tensor layouts.
+3. Let the analysis workflow's agent propose `output_0_key_mapping.json` from
+   those dumps and current implementations. Validate corresponding semantic
+   boundaries and layouts, including fused/split operations; leave unsupported
+   or ambiguous correspondences unresolved rather than forcing a name match.
+4. Run that workflow's deterministic comparison and root-cause scripts on the
+   accepted mapping and tensor data. The agent explains the resulting evidence;
+   it does not decide tensor equality or turn an unverified mapping into a pass.
+
+Recheck the mapping when model or backend implementations change. Reuse the
+existing workflow to maintain it; this recipe adds no second mapping registry
+or automatic fused/split transformation engine.
 
 ## Standalone pinned artifact checker
 

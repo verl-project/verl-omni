@@ -1,6 +1,6 @@
 # How to Integrate a New Diffusion Model for FlowGRPO Training
 
-Last updated: 11/15/2026.
+Last updated: 11/18/2026.
 
 This guide walks you through everything required to integrate a new diffusion
 model into VeRL-Omni so it can be trained end-to-end with the **FlowGRPO**
@@ -737,6 +737,14 @@ and keep bypass disabled. Include a controlled scheduler mismatch and restoratio
 the report should localize the affected raw timestep and sigma field, and the
 restored run should reproduce the baseline. Other algorithms need their own
 comparison contract; they must not be presented as PPO log-probability pairs.
+
+When a mismatch needs module/operator evidence, follow the
+[module-level localization handoff](../perf/diffusion_consistency.md#escalate-to-module-level-localization)
+to the existing agent-assisted consistency workflow from #620. Shared log-probability
+and scheduler events select the investigation window; paired MSProbe dumps supply
+the module evidence. Keep mapping proposals separate from deterministic tensor
+comparisons, especially across fused/split backend implementations. The SD3.5
+recipe is the validated reference, not a universal module mapper.
 
 Add an end-to-end smoke test under `tests/special_e2e/` modelled on
 [`tests/special_e2e/run_flowgrpo_qwen_image.sh`](../../tests/special_e2e/run_flowgrpo_qwen_image.sh).
