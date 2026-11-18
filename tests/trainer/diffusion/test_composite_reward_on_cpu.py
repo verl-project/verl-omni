@@ -33,14 +33,14 @@ import pytest
 import torch
 from verl import DataProto
 
-from verl_omni.trainer.diffusion.ray_diffusion_trainer import PolicyGradientRayTrainer
+from verl_omni.trainer.diffusion.ray_diffusion_trainer import CompositePolicyGradientRayTrainer
 
 AR_REWARD_KEY = "reward/ar"
 
 
 class DummyTrainer:
     def _extract_ar_reward_tensor(self, batch_reward, ar_batch, avg_size):
-        return PolicyGradientRayTrainer._extract_ar_reward_tensor(self, batch_reward, ar_batch, avg_size)
+        return CompositePolicyGradientRayTrainer._extract_ar_reward_tensor(self, batch_reward, ar_batch, avg_size)
 
 
 class TestExtractARRewardsFromColocateBatch:
