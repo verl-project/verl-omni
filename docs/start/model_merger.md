@@ -250,11 +250,14 @@ Fusion accepts two checkpoint layouts and requires a locally available `--base_m
   and PEFT's `true`/`false`. PEFT's `pissa` (including `pissa_niter_*`), `olora`,
   `corda` and `loftq` rewrite the base weights before training. Diffusers FSDP
   checkpoints record this in `lora_train_meta.json` as `base_weights_modified`
-  and carry the marker forward when restoring the base weights. Both adapter
-  export and fusion require a full checkpoint when this flag is true. If the
-  marker is missing and the initializer rewrote the base weights, use a full
-  checkpoint. MiniMax H3 LoRA-only fusion requires a Diffusers H3 base and
-  standalone transformer output.
+  and carry the marker forward when restoring the base weights. Restoring a full
+  checkpoint without this marker records `null` (unknown) in subsequent saves.
+  Use a full checkpoint for adapter export or fusion when the marker is `true`
+  or `null`. For legacy LoRA-only checkpoints without a marker, verify that the
+  supplied base matches the weights used for training. To select PiSSA on
+  Diffusers FSDP, set `actor_rollout_ref.model.lora_init_weights=pissa`.
+  MiniMax H3 LoRA-only fusion requires a Diffusers H3 base and standalone
+  transformer output.
 
 `--adapter-name` (default `default`) selects exactly one adapter. Other adapters,
 such as DiffusionNFT's `old`, are not fused and are listed in the manifest's

@@ -663,9 +663,12 @@ class FSDPModelMerger(BaseModelMerger):
             raise ValueError("--fuse-lora requires a LoRA checkpoint")
         lora_metadata_path = source / LORA_METADATA_NAME
         lora_metadata = read_json(lora_metadata_path) if self.config.fuse_lora or lora_only else {}
-        if lora_only and lora_metadata.get("base_weights_modified") is True:
+        # Preserve export compatibility for legacy LoRA-only checkpoints with no marker.
+        base_weights_modified = lora_metadata.get("base_weights_modified", False)
+        if lora_only and base_weights_modified is not False:
+            reason = "modified base weights" if base_weights_modified is True else "unknown base-weight provenance"
             raise ValueError(
-                "Cannot export a LoRA-only checkpoint with modified base weights. "
+                f"Cannot export a LoRA-only checkpoint with {reason}. "
                 "Export a full checkpoint saved with actor_rollout_ref.actor.checkpoint.save_lora_only=false."
             )
         if lora_only and not self.config.fuse_lora:

@@ -13,8 +13,9 @@
 # limitations under the License.
 
 import json
-from pathlib import Path
+import os
 
+from verl.utils import fs
 from verl.utils.checkpoint.fsdp_checkpoint_manager import FSDPCheckpointManager
 
 
@@ -34,7 +35,7 @@ class DiffusersFSDPCheckpointManager(FSDPCheckpointManager):
 
     def _get_lora_train_meta(self, unwrap_model):
         metadata = super()._get_lora_train_meta(unwrap_model)
-        if metadata is not None and self._base_weights_modified is not None:
+        if metadata is not None:
             metadata["base_weights_modified"] = self._base_weights_modified
         return metadata
 
@@ -54,6 +55,8 @@ class DiffusersFSDPCheckpointManager(FSDPCheckpointManager):
             super().load_checkpoint(local_path, hdfs_path, del_local_after_load)
 
         if base_loaded:
-            path = Path(local_path) / "lora_train_meta.json"
-            metadata = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
-            self._base_weights_modified = metadata.get("base_weights_modified")
+            self._base_weights_modified = None
+            metadata_path = os.path.join(local_path, "lora_train_meta.json")
+            if fs.exists(metadata_path):
+                with open(fs.copy_to_local(metadata_path), encoding="utf-8") as file:
+                    self._base_weights_modified = json.load(file).get("base_weights_modified")
