@@ -68,6 +68,16 @@ EXPERIMENTS = [
         "label": "Qwen-Image + Online DPO",
         "layer": "l3-nightly",
     },
+    {
+        "id": "qwen3_omni_thinker_gspo",
+        "label": "Qwen3-Omni Thinker + GSPO",
+        "layer": "l3-nightly",
+    },
+    {
+        "id": "minicpmo_4_5_thinker_gspo",
+        "label": "MiniCPM-o 4.5 Thinker + GSPO",
+        "layer": "l3-nightly",
+    },
 ]
 PERF_CHART_KEYS = {
     "perf/time_per_step",
