@@ -49,7 +49,7 @@ def make_config(tmp_path, *, algorithm=None, omni_skip_overrides=None, trainer_t
             "enable": False,
             "dump_dir": str(tmp_path / DUMP_DIR),
             "steps": [],
-            "action": "empty" if role in ("actor_update", "weight_sync") else "cache",
+            "action": "empty" if role == "actor_update" else "cache",
         }
         for role in STAGE_SKIP_ROLES
     }
@@ -87,11 +87,6 @@ class DummyTrainer:
 
     def __init__(self):
         self.calls: dict[str, int] = {}
-        self.woken = 0
-        self.checkpoint_manager = SimpleNamespace(wake_up_replicas=self._wake_up)
-
-    def _wake_up(self) -> None:
-        self.woken += 1
 
     def _bump(self, role: str) -> None:
         self.calls[role] = self.calls.get(role, 0) + 1
@@ -106,10 +101,6 @@ class DummyTrainer:
     def update_actor(self, data: DataProto) -> DataProto:
         self._bump("actor_update")
         return DataProto.from_single_dict(data={}, meta_info={"metrics": {"actor/loss": 1.0}})
-
-    @SkipManager.annotate(role="weight_sync")
-    def sync_weights(self) -> None:
-        self._bump("weight_sync")
 
 
 @pytest.fixture
@@ -233,27 +224,6 @@ def test_actor_update_empty_action_returns_empty_metrics(tmp_path, reset_skip_ma
     assert skip_stage_metrics() == {"skip/actor_update/calls": 1, "skip/actor_update/steps": 1}
 
 
-def test_weight_sync_empty_action(tmp_path, reset_skip_manager, dummy, monkeypatch):
-    config = make_config(tmp_path)
-    config.omni_skip.weight_sync.update({"enable": True, "steps": [1], "action": "empty", "ack_stale_weights": True})
-    # No current trainer mode has a mid-cycle sync, so bypass the mode check to exercise the action itself.
-    monkeypatch.setattr("verl_omni.utils.skip.manager._check_skip_conflicts", lambda config: None)
-    init_skip_manager(config)
-    SkipManager.set_step(1)
-
-    assert dummy.sync_weights() is None
-    assert dummy.calls == {}
-    assert dummy.woken == 1  # the next step's sleep must not hit a sleeping replica
-    assert skip_stage_metrics() == {"skip/weight_sync/calls": 1, "skip/weight_sync/steps": 1}
-
-
-def test_weight_sync_requires_stale_weights_ack(tmp_path, reset_skip_manager):
-    config = make_config(tmp_path)
-    enable_stage(config, "weight_sync", steps=[1], action="empty")
-    with pytest.raises(ValueError, match="ack_stale_weights"):
-        init_skip_manager(config)
-
-
 def test_old_log_prob_conflicts_with_rollout_correction_bypass(tmp_path, reset_skip_manager):
     config = make_config(tmp_path, algorithm={"rollout_correction": {"bypass_mode": True}})
     enable_stage(config, "old_log_prob", steps=[1])
@@ -310,16 +280,10 @@ def test_disabled_stage_not_instantiated(tmp_path, reset_skip_manager):
             assert role not in SkipManager.skip_instances
 
 
-@pytest.mark.parametrize(
-    "use_v1, trainer_mode",
-    [(False, "separate_async"), (True, "sync"), (True, "separate_async")],
-    ids=["v0", "v1_sync", "v1_separate_async"],
-)
-def test_weight_sync_inert_without_mid_cycle_sync(tmp_path, reset_skip_manager, use_v1, trainer_mode):
-    config = make_config(tmp_path, v1={"trainer_mode": trainer_mode})
-    config.trainer.use_v1 = use_v1
-    config.omni_skip.weight_sync.update({"enable": True, "steps": [1], "ack_stale_weights": True})
-    with pytest.raises(ValueError, match="mid-cycle"):
+def test_removed_weight_sync_role_rejected(tmp_path, reset_skip_manager):
+    config = make_config(tmp_path)
+    OmegaConf.update(config, "omni_skip.weight_sync", {"enable": True, "steps": [1], "action": "empty"})
+    with pytest.raises(ConfigKeyError):
         init_skip_manager(config)
 
 
@@ -356,7 +320,6 @@ def test_misspelled_stage_rejected(tmp_path, reset_skip_manager):
 @pytest.mark.parametrize("enabled", [False, True])
 def test_misspelled_action_rejected_even_when_disabled(tmp_path, reset_skip_manager, role, enabled):
     config = make_config(tmp_path, omni_skip_overrides={role: {"action": "cahce", "enable": enabled, "steps": [1]}})
-    config.omni_skip.weight_sync.ack_stale_weights = True
     with pytest.raises(ValueError, match="[Aa]ction"):
         init_skip_manager(config)
 
@@ -370,7 +333,6 @@ def test_misspelled_action_rejected_even_when_disabled(tmp_path, reset_skip_mana
         (PolicyGradientDiffusionTrainerV1, "_compute_ref_noise_pred", "ref_log_prob"),
         (PolicyGradientDiffusionTrainerV1, "_compute_advantage", "advantage"),
         (PolicyGradientDiffusionTrainerV1, "_update_actor", "actor_update"),
-        (PolicyGradientDiffusionTrainerV1, "_update_rollout_weights_mid_cycle", "weight_sync"),
         (PolicyGradientDiffusionTrainerV1SeparateAsync, "_compute_old_log_prob", "old_log_prob"),
         (BaseRayDiffusionTrainer, "_compute_reward_colocate", "reward"),
         (BaseRayDiffusionTrainer, "_update_actor", "actor_update"),
@@ -402,8 +364,7 @@ def test_real_trainer_stage_uses_expected_skip_role(reset_skip_manager, trainer_
     if trainer_cls is PolicyGradientDiffusionTrainerV1SeparateAsync:
         trainer = object.__new__(trainer_cls)
         trainer.parameter_sync_step = 1
-    args = () if role == "weight_sync" else (_batch(),)
-    assert getattr(trainer_cls, method_name)(trainer, *args) is sentinel
+    assert getattr(trainer_cls, method_name)(trainer, _batch()) is sentinel
     assert intercepted == [(1, method_name)]
 
 
