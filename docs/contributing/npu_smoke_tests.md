@@ -196,9 +196,12 @@ group label retains the eight-NPU group job. The setup_runner check succeeds
 only when every selected job passes.
 
 Tiny NPU trainer smokes share runtime defaults: two compiler threads per worker,
-an in-process data loader, and two TransferQueue storage units on the single node.
-`TORCHNPU_PRECOMPILE_THREADS` accepts a positive override; trailing Hydra arguments
-can override the loader and storage settings. Training steps and assertions are unchanged.
+an in-process data loader, two TransferQueue storage units on the single node,
+and no Ray dashboard. `TORCHNPU_PRECOMPILE_THREADS` accepts a positive override;
+trailing Hydra arguments can override the remaining defaults. IDs 18 and 20
+bound their owned tiny reward fixture to eight active sequences, 512 batched
+tokens and 64 MiB of KV cache; custom reward models retain their own limits.
+Training steps, samples, multimodal profiling and assertions are unchanged.
 
 If the new test lives outside current path filters, add its path. Current
 filters include verl_omni/**, tests/npu_smoke/**, tests/agent_loop/**,
