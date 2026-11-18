@@ -280,9 +280,10 @@ def test_disabled_stage_not_instantiated(tmp_path, reset_skip_manager):
             assert role not in SkipManager.skip_instances
 
 
-def test_removed_weight_sync_role_rejected(tmp_path, reset_skip_manager):
+@pytest.mark.parametrize("enable", [False, True])
+def test_removed_weight_sync_role_rejected(tmp_path, reset_skip_manager, enable):
     config = make_config(tmp_path)
-    OmegaConf.update(config, "omni_skip.weight_sync", {"enable": True, "steps": [1], "action": "empty"})
+    OmegaConf.update(config, "omni_skip.weight_sync", {"enable": enable, "steps": [1], "action": "empty"})
     with pytest.raises(ConfigKeyError):
         init_skip_manager(config)
 
