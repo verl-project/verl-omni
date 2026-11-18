@@ -215,8 +215,6 @@ class MultiRewardManager(RewardManagerBase, ABC):
                             model.get("rollout") or {}, self.config.reward.reward_model.get("rollout") or {}
                         )
                         sub_kwargs["sampling_params"] = _sampling_params_from_rollout(rollout)
-                    if "reward_model_tokenizer" in sig.parameters:
-                        sub_kwargs["reward_model_tokenizer"] = executor.tokenizer
                 else:
                     executor = self._native_reward_executors.get(model_name)
                 if executor is None:
@@ -246,6 +244,10 @@ class MultiRewardManager(RewardManagerBase, ABC):
 
         async def run_term(sub, filtered_kwargs):
             fn = sub["fn"]
+            executor = self._engine_reward_executors.get(sub["model"])
+            if executor is not None and "reward_model_tokenizer" in sub["sig"].parameters:
+                # Loaded here so a failure is handled like any other failure of this term.
+                filtered_kwargs = {**filtered_kwargs, "reward_model_tokenizer": executor.tokenizer}
 
             async def invoke():
                 if sub["is_async"]:

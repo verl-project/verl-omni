@@ -1,6 +1,6 @@
 # Named Reward Models
 
-Last updated: 11/14/2026
+Last updated: 11/18/2026
 
 This guide describes how to configure and extend named model-backed rewards
 under `reward.models` in `verl-omni`. For the general Reward Loop interface and
@@ -221,8 +221,12 @@ this order:
    default (256).
 
 The OCR scorer counts the ground truth with the judge's tokenizer and raises
-before sending a request when it needs more tokens than the budget, so a text
-the judge cannot transcribe in full fails the run instead of lowering the score.
+before sending a request when it needs more tokens than the budget. A
+`required=true` term then stops the run; an optional term records
+`reward/<term>/errors` and contributes 0, so set `required=true` when an
+over-budget ground truth must stop training. The check needs the judge's
+tokenizer, which the engine backend passes to the scorer; a caller that does not
+supply one skips the check.
 
 ## Model-to-reward binding
 
