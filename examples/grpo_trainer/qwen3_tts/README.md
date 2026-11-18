@@ -1,6 +1,6 @@
 # Qwen3-TTS GRPO with an audio reward
 
-Last updated: 11/09/2026.
+Last updated: 11/18/2026.
 
 This example full-parameter tunes the codec-0 policy of
 `Qwen/Qwen3-TTS-12Hz-0.6B-Base`. It uses verl's stock GRPO advantage,
@@ -231,6 +231,12 @@ CUDA_VISIBLE_DEVICES=0 python \
   --model /path/to/whisper-large-v3-turbo \
   --device cuda:0 --dtype float16 --port 18080
 ```
+
+The scorer transcribes one clip at a time by default. Add `--max-batch-size 16`
+to group concurrent requests into batches of up to 16 clips. After taking the
+first request in a batch, the worker waits up to `--max-wait-ms` (default 10)
+for more clips. Batched inference can change individual transcripts and CER
+rewards.
 
 In another shell, launch training with one fixed speaker embedding:
 

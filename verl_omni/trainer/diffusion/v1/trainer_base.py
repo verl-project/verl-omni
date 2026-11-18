@@ -586,17 +586,12 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         # [OPTIONAL] colocated reward model
         if self.reward_loop_manager.reward_loop_worker_handles is None and self.use_rm:
             with marked_timer("reward", timing_raw, color="yellow"):
-                # Replicas the mode hooks already put to sleep stay asleep through
-                # the training phases below: update_weights resumes their weights
-                # (~55GB for Qwen-Image at rollout TP=1) and the actor update would
-                # OOM next to them. The hook that next hands them to generation
+                # The mode hooks (sync on_sample_end, separate_async switch_to_trainer)
+                # already put the colocated replicas to sleep; they stay asleep through
+                # training (~55GB of Qwen-Image weights at rollout TP=1 would OOM next to
+                # the actor update), and the hook that next hands them to generation
                 # wakes and weight-syncs them.
-                replicas_asleep = self._colocated_replicas_asleep()
-                if not replicas_asleep:
-                    self.checkpoint_manager.sleep_replicas()
                 data = data.union(self._compute_reward_colocate(data))
-                if not replicas_asleep:
-                    self._update_rollout_weights_mid_cycle()
 
         if self._is_direct_preference:
             return self._train_direct_preference_batch(metrics, timing_raw, batch_meta, data)
@@ -1388,19 +1383,6 @@ class PolicyGradientDiffusionTrainerV1(ABC):
     def _add_batch_to_generate(self):
         batch = self._next_train_batch()
         self._submit_batch_to_rollout(batch)
-
-    def _colocated_replicas_asleep(self) -> bool:
-        """Whether the mode hooks put the colocated rollout replicas to sleep before training."""
-        return self.trainer_mode == "sync"  # on_sample_end sleeps them
-
-    @SkipManager.annotate(role="weight_sync")
-    def _update_rollout_weights_mid_cycle(self) -> None:
-        """Wake colocated replicas after the reward phase and refresh their weights.
-
-        Lifecycle syncs (init, step end, validation) always run; skipping this
-        refresh still wakes the replicas, on pre-update weights.
-        """
-        self.checkpoint_manager.update_weights(self.global_steps)
 
     @SkipManager.annotate(role="reward")
     def _compute_reward_colocate(self, data: DataProto) -> DataProto:

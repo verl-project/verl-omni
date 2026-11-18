@@ -1,6 +1,6 @@
 # Supported Models
 
-Last updated: 11/10/2026.
+Last updated: 11/18/2026.
 
 VeRL-Omni supports RL post-training for generative models across image, video,
 audio, and omni modalities. This page catalogues every model with a ready-to-run
@@ -163,6 +163,27 @@ generative VLM judge; the Edit recipes use PickScore
 reward workers). Prompts are user-supplied text files converted to parquet by
 `examples/dancegrpo_trainer/flux1/dataprocess/prepare_prompts.py`. See
 [Examples - FLUX.1-dev DanceGRPO](../examples/flux1/dancegrpo_trainer_flux1.md).
+
+### MiniMax-H3-Image
+
+| Property | Detail |
+|----------|--------|
+| **Checkpoint** | Local MiniMax-H3-Image release root with `pdd_config.json` and `pdd_fused_heads.safetensors` (`MODEL_PATH`) plus a converted Diffusers-layout transformer (`ACTOR_PATH`) via `checkpoint.py convert` |
+| **Architecture** | Audio-free MiniMax H3 DiT with per-step fused PDD output heads |
+| **Modality** | Text → Image and Text + Reference Images → Image (`MiniMaxH3ImagePipeline`, up to 12 serialized reference blocks in DiffusionNFT) |
+| **Pipeline** | 6-step CFG-distilled PDD sampler (`minimax_h3_image_diffusion_nft`) |
+| **Agent loop** | `minimax_h3_diffusion_single_turn_agent` (tokenizes text once for the H3 Qwen3-VL text encoder) |
+
+See [Examples - MiniMax-H3-Image DiffusionNFT](../examples/minimax_h3_image/diffusionnft_trainer_minimax_h3_image.md) for data preparation, checkpoint conversion, and launch instructions.
+
+**Supported trainers:**
+
+| Trainer | Example script | GPU config |
+|---------|---------------|------------|
+| FlowGRPO (text-to-image LoRA, native Diffusers ≥ 0.43.0) | [H3 Image FlowGRPO recipe](../examples/minimax_h3_image/flowgrpo_trainer_minimax_h3_image.md) | Accelerator validation pending |
+| DiffusionNFT (LoRA, dense-text OCR) | `examples/diffusionnft_trainer/minimax_h3_image/run_minimax_h3_image_ocr_lora.sh` | 4×GPU (3 trainer/rollout/VLM-OCR + 1 preference scorer) |
+
+**Reward models:** Weighted sum of PickScore (`yuvalkirstain/PickScore_v1`, 0.5), `Qwen/Qwen3-VL-8B-Instruct` OCR gated by a PP-OCRv6 layout guard (0.2), and HPSv2.1 (`HPS_v2.1_compressed.pt`, 0.3).
 
 ---
 
@@ -396,6 +417,7 @@ reward (`avqa`, `mmk12` rule-based, or `gsm8k` via `data_source="openai/gsm8k"`)
 | Wan2.2-TI2V-5B | Wan DiT | T5 |
 | LTX-2.3 | LTX-2 DiT | LTX text encoder |
 | MiniMax-H3 | MiniMax H3 transformer | H3 text encoder |
+| MiniMax-H3-Image | Audio-free MiniMax H3 DiT (6-step PDD) | Qwen3-VL |
 | BAGEL | Unified MM | — |
 | Qwen3-Omni-30B | Omni MoE | Qwen3 |
 | MiniCPM-o 4.5 | Omni-modality AR (Thinker) | MiniCPM-o |
@@ -431,21 +453,21 @@ trainer's README in `examples/`.
 
 ## Which Trainer for Which Model?
 
-| Algorithm | Qwen-Image | Qwen-Image-Edit | SD3.5 | Boogu-Image | FLUX.1-dev | Wan2.2 | LTX-2.3 | MiniMax-H3 | BAGEL | Qwen3-Omni | MiniCPM-o 4.5 | Qwen3-TTS |
-|-----------|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| GRPO | — | — | — | — | — | — | — | — | — | — | — | GPU ✅ |
-| Flow-GRPO | NPU ✅<br>GPU ✅ | NPU ✅<br>GPU ✅ | GPU ✅ | GPU ✅ | — | — | NPU ✅<br>GPU ✅ | NPU ✅<br>GPU ✅<br>MLU ✅ | GPU ✅ | — | — | — |
-| Flow-DPPO | GPU ✅ | — | — | — | — | — | — | — | — | — | — | — |
-| GRPO-Guard | NPU ✅<br>GPU ✅ | — | — | — | — | — | — | — | — | — | — | — |
-| Mix-GRPO | NPU ✅<br>GPU ✅ | — | — | — | — | — | — | — | — | — | — | — |
-| DanceGRPO | — | — | — | — | NPU ✅ | NPU ✅<br>GPU ✅ | — | — | — | — | — | — |
-| DPO | NPU ✅<br>GPU ✅ | — | GPU ✅ | — | — | — | — | — | — | GPU ✅ | GPU ✅ | — |
-| DiffusionNFT | NPU ✅<br>GPU ✅ | — | — | GPU ✅ | — | — | — | NPU ✅ (T2VA)<br>GPU ✅ | — | — | — | — |
-| OmniNFT | — | — | — | — | — | — | ✅ | — | — | — | — | — |
-| [CRD](../algo/crd.md) | — | — | GPU ✅ (Medium LoRA, FSDP2) | — | — | — | — | — | — | — | — | — |
-| [DGPO](../algo/dgpo.md) | — | — | GPU ✅ | — | — | — | — | — | — | — | — | — |
-| [DiffusionOPD](../algo/diffusion_opd.md) (incl. MOPD) | — | — | GPU ✅ | — | — | — | NPU ✅ | — | — | — | — | — |
-| GSPO (incl. OPD) | — | — | — | — | — | — | — | — | — | NPU ✅<br>GPU ✅ | GPU ✅ | — |
+| Algorithm | Qwen-Image | Qwen-Image-Edit | SD3.5 | Boogu-Image | FLUX.1-dev | Wan2.2 | LTX-2.3 | MiniMax-H3 | MiniMax-H3-Image | BAGEL | Qwen3-Omni | MiniCPM-o 4.5 | Qwen3-TTS |
+|-----------|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| GRPO | — | — | — | — | — | — | — | — | — | — | — | — | GPU ✅ |
+| Flow-GRPO | NPU ✅<br>GPU ✅ | NPU ✅<br>GPU ✅ | GPU ✅ | GPU ✅ | — | — | NPU ✅<br>GPU ✅ | NPU ✅<br>GPU ✅<br>MLU ✅ | — | GPU ✅ | — | — | — |
+| Flow-DPPO | GPU ✅ | — | — | — | — | — | — | — | — | — | — | — | — |
+| GRPO-Guard | NPU ✅<br>GPU ✅ | — | — | — | — | — | — | — | — | — | — | — | — |
+| Mix-GRPO | NPU ✅<br>GPU ✅ | — | — | — | — | — | — | — | — | — | — | — | — |
+| DanceGRPO | — | — | — | — | NPU ✅ | NPU ✅<br>GPU ✅ | — | — | — | — | — | — | — |
+| DPO | NPU ✅<br>GPU ✅ | — | GPU ✅ | — | — | — | — | — | — | — | GPU ✅ | GPU ✅ | — |
+| DiffusionNFT | NPU ✅<br>GPU ✅ | — | — | GPU ✅ | — | — | — | NPU ✅ (T2VA)<br>GPU ✅ | GPU ✅ | — | — | — | — |
+| OmniNFT | — | — | — | — | — | — | ✅ | — | — | — | — | — | — |
+| [CRD](../algo/crd.md) | — | — | GPU ✅ (Medium LoRA, FSDP2) | — | — | — | — | — | — | — | — | — | — |
+| [DGPO](../algo/dgpo.md) | — | — | GPU ✅ | — | — | — | — | — | — | — | — | — | — |
+| [DiffusionOPD](../algo/diffusion_opd.md) (incl. MOPD) | — | — | GPU ✅ | — | — | — | NPU ✅ | — | — | — | — | — | — |
+| GSPO (incl. OPD) | — | — | — | — | — | — | — | — | — | — | NPU ✅<br>GPU ✅ | GPU ✅ | — |
 
 HunyuanImage-3.0 (MixGRPO / SRPO) appears on the project README as Planned or
 WIP and does not yet have a ready-to-run recipe, so it is omitted from the

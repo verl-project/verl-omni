@@ -573,9 +573,6 @@ class PolicyGradientDiffusionTrainerV1SeparateAsync(PolicyGradientDiffusionTrain
         self.checkpoint_manager.sleep_replicas()
         self.current_mode = HybridEngineMode.TRAINER
 
-    def _colocated_replicas_asleep(self) -> bool:
-        return self.current_mode == HybridEngineMode.TRAINER  # switch_to_rollout wakes and weight-syncs them
-
     def add_replicas_to_balancer(self):
         global_load_balancer = self.standalone_server_manager.global_load_balancer
         servers = dict(
