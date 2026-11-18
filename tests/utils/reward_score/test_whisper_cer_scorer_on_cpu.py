@@ -19,7 +19,11 @@ import json
 import sys
 import threading
 import urllib.request
+import weakref
+from concurrent.futures import Future
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import numpy as np
 import pytest
@@ -166,6 +170,163 @@ def test_http_server_implements_audio_json_contract(scorer):
         thread.join(timeout=2)
 
     assert result == {"score": 0.25, "sample_rate": 16_000, "prompt": "सही"}
+
+
+def _new_cpu_scorer(scorer, **kwargs):
+    return scorer.WhisperCERScorer(
+        "mock-whisper",
+        revision=None,
+        device="cpu",
+        dtype="float32",
+        language="hi",
+        local_files_only=True,
+        **kwargs,
+    )
+
+
+@pytest.fixture
+def make_scorer(scorer, monkeypatch):
+    instances = []
+    monkeypatch.setattr(scorer, "_import_torchaudio_functional", lambda: None)
+
+    def extract_features(waveform, **kwargs):
+        return SimpleNamespace(input_features=torch.from_numpy(waveform).reshape(1, 1, -1))
+
+    def create(generate, **options):
+        processor = Mock(side_effect=extract_features)
+        processor.batch_decode.side_effect = lambda transcripts, **kwargs: transcripts
+        model = Mock()
+        model.to.return_value = model
+        model.generate.side_effect = lambda features, **kwargs: generate(features)
+        transformers = SimpleNamespace(
+            AutoProcessor=SimpleNamespace(from_pretrained=Mock(return_value=processor)),
+            AutoModelForSpeechSeq2Seq=SimpleNamespace(from_pretrained=Mock(return_value=model)),
+        )
+        monkeypatch.setitem(sys.modules, "transformers", transformers)
+        instance = _new_cpu_scorer(scorer, **options)
+        instances.append(instance)
+        return instance
+
+    yield create
+
+    for instance in instances:
+        instance.close()
+
+
+def test_existing_constructor_defaults_to_single_clip_inference(make_scorer):
+    instance = make_scorer(lambda features: [" सही "])
+
+    assert instance._batch_worker is None
+    assert instance.transcribe(np.zeros(8, dtype=np.float32), 16_000) == "सही"
+    assert instance.model.generate.call_args.args[0].shape == (1, 1, 8)
+    instance.close()
+    assert instance.model is None
+
+
+@pytest.mark.parametrize(
+    ("option", "value"),
+    [
+        ("max_batch_size", 0),
+        ("max_batch_size", 1.5),
+        ("max_wait_ms", "10"),
+        ("max_wait_ms", -1),
+        ("max_wait_ms", float("inf")),
+        ("max_wait_ms", float("nan")),
+        ("max_wait_ms", (threading.TIMEOUT_MAX + 1) * 1000),
+    ],
+)
+def test_batch_configuration_is_validated_before_model_loading(scorer, monkeypatch, option, value):
+    monkeypatch.setitem(sys.modules, "transformers", None)
+
+    with pytest.raises(ValueError, match=option):
+        _new_cpu_scorer(scorer, **{option: value})
+
+
+def _transcribe_concurrently(instance, waveforms):
+    results = [None] * len(waveforms)
+
+    def run(index):
+        try:
+            results[index] = instance.transcribe(waveforms[index], 16_000)
+        except Exception as exc:
+            results[index] = exc
+
+    threads = [threading.Thread(target=run, args=(index,), daemon=True) for index in range(len(waveforms))]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+        assert not thread.is_alive(), "Transcription did not complete."
+    return results
+
+
+def _label_by_first_sample(features):
+    return [f"clip-{int(row[0, 0])}" for row in features]
+
+
+def test_concurrent_transcriptions_share_one_generate_call(make_scorer):
+    instance = make_scorer(_label_by_first_sample, max_batch_size=4, max_wait_ms=5_000)
+    waveforms = [np.full(8, index, dtype=np.float32) for index in range(4)]
+
+    assert _transcribe_concurrently(instance, waveforms) == [f"clip-{index}" for index in range(4)]
+    instance.model.generate.assert_called_once()
+    assert instance.model.generate.call_args.args[0].shape == (4, 1, 8)
+
+
+def test_batches_never_exceed_max_batch_size(make_scorer):
+    instance = make_scorer(_label_by_first_sample, max_batch_size=2, max_wait_ms=50)
+    waveforms = [np.full(8, index, dtype=np.float32) for index in range(5)]
+
+    assert _transcribe_concurrently(instance, waveforms) == [f"clip-{index}" for index in range(5)]
+    batch_sizes = [call.args[0].shape[0] for call in instance.model.generate.call_args_list]
+    assert max(batch_sizes) <= 2
+    assert sum(batch_sizes) == 5
+
+
+def test_failed_inference_releases_tensors_before_serving_the_next_batch(make_scorer, caplog):
+    activation = None
+
+    def generate(features):
+        nonlocal activation
+        if activation is None:
+            temporary_tensor = torch.ones(1)
+            activation = weakref.ref(temporary_tensor)
+            raise torch.OutOfMemoryError("simulated allocation failure")
+        assert activation() is None
+        return ["ok"] * features.shape[0]
+
+    instance = make_scorer(generate, max_batch_size=2, max_wait_ms=5_000)
+    waveforms = [np.zeros(8, dtype=np.float32)] * 2
+
+    failed = _transcribe_concurrently(instance, waveforms)
+    assert all(isinstance(result, RuntimeError) for result in failed)
+    assert failed[0] is not failed[1]
+    assert "OutOfMemoryError: simulated allocation failure" in caplog.text
+    assert _transcribe_concurrently(instance, waveforms) == ["ok", "ok"]
+
+
+def test_batch_with_missing_transcript_fails_each_request(make_scorer):
+    instance = make_scorer(lambda features: ["one result"], max_batch_size=2, max_wait_ms=5_000)
+    waveforms = [np.zeros(8, dtype=np.float32)] * 2
+
+    results = _transcribe_concurrently(instance, waveforms)
+
+    assert all(isinstance(result, RuntimeError) and "1 transcripts for 2 clips" in str(result) for result in results)
+
+
+def test_close_finishes_a_partial_batch_and_rejects_new_requests(make_scorer):
+    instance = make_scorer(_label_by_first_sample, max_batch_size=4, max_wait_ms=5_000)
+    future = Future()
+    instance._pending.put((torch.zeros(1, 1, 8), future))
+
+    instance.close()
+    instance.close()
+
+    assert future.result(timeout=1) == "clip-0"
+    assert not instance._batch_worker.is_alive()
+    assert instance.model is None
+    with pytest.raises(RuntimeError, match="scorer is closed"):
+        instance.transcribe(np.zeros(8, dtype=np.float32), 16_000)
 
 
 class _FakeDeviceType:
