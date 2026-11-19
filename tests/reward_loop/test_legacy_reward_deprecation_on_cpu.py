@@ -96,6 +96,20 @@ def test_text_manager_config_stays_silent():
     assert _launch_notices(_config(text_manager)) == []
 
 
+def test_audio_manager_with_legacy_engine_stays_silent():
+    def audio_engine(config):
+        config.reward.reward_manager.name = "AudioRewardManager"
+        config.reward.reward_model.enable = True
+
+    assert _launch_notices(_config(audio_engine)) == []
+
+
+def test_null_custom_reward_function_does_not_crash():
+    config = _config(lambda config: config.reward.__setattr__("custom_reward_function", None))
+    notices = _launch_notices(config)
+    assert any("VisualRewardManager is deprecated" in message for message in notices)
+
+
 def test_manager_warning_shares_the_launch_notice_text():
     """VisualRewardManager's constructor warning and the launch notice are one constant."""
     from verl_omni.reward_loop.reward_manager.visual import VisualRewardManager
