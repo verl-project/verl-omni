@@ -197,7 +197,12 @@ class MiniCPMThinkerAdapter(OmniModelBase):
 
         Args:
             model_inputs: Standard language-model inputs prepared by verl.
-            micro_batch: The micro batch being prepared (unused).
+            micro_batch: The micro batch being prepared; a duplex batch (one
+                carrying the namespaced ``duplex_replay`` key) takes the
+                explicit-bounds path instead of the marker scan — the engine's
+                duplex layout uses bare audio placeholders without
+                ``<|audio_start|>`` markers, so the bounds must arrive with
+                the replay instead of being re-derived from markers.
             model_config: The ``OmniModelConfig`` carrying the processor.
 
         Returns:
@@ -212,8 +217,13 @@ class MiniCPMThinkerAdapter(OmniModelBase):
         model_inputs.pop("image_sizes", None)
         # Split into the remote forward's data dict plus the inner LLM's kwargs.
         data, llm_kwargs = split_minicpm_forward_kwargs(model_inputs)
-        # Re-derive the media bounds from the ids and cross-check the span counts.
-        _apply_media_bounds(data, model_config)
+        duplex_replays = _duplex_replay_payloads(micro_batch)
+        if duplex_replays is not None:
+            # Duplex replay: media arrive with explicit per-unit bounds.
+            _apply_duplex_media(data, duplex_replays)
+        else:
+            # Re-derive the media bounds from the ids and cross-check the span counts.
+            _apply_media_bounds(data, model_config)
         if _is_packed_batch(data):
             # Fold the per-sample media into MiniCPMO's single-row packed layout.
             _merge_packed_media(data)
@@ -221,6 +231,93 @@ class MiniCPMThinkerAdapter(OmniModelBase):
             # would contradict the packed layout.
             llm_kwargs.pop("attention_mask", None)
         return {"data": data, **llm_kwargs}
+
+
+def _duplex_replay_payloads(micro_batch: Any) -> list[dict[str, Any]] | None:
+    """The micro-batch's duplex replay payloads, or ``None`` when not duplex.
+
+    ``AgentLoopWorker`` exposes agent-loop ``extra_fields`` keys at the top
+    level of the actor micro-batch; a duplex rollout puts its replay under
+    the namespaced ``duplex_replay`` key, one payload per sample.
+    """
+    from verl_omni.utils.dataset.duplex.replay import DUPLEX_REPLAY_KEY
+
+    if micro_batch is None:
+        return None
+    payloads = micro_batch.get(DUPLEX_REPLAY_KEY)
+    if payloads is None:
+        return None
+    if isinstance(payloads, list | tuple) and not isinstance(payloads, dict):
+        entries = list(payloads)
+    elif hasattr(payloads, "tolist"):
+        entries = list(payloads.tolist())  # np object column from DataProto
+    else:
+        entries = [payloads]
+    if not all(isinstance(entry, dict) and entry for entry in entries):
+        raise ValueError(
+            f"{DUPLEX_REPLAY_KEY!r} entries must be non-empty replay payload mappings; "
+            "got " + ", ".join(type(entry).__name__ for entry in entries)
+        )
+    return entries
+
+
+def _apply_duplex_media(data: dict[str, Any], replays: list[dict[str, Any]]) -> None:
+    """Merge per-sample duplex media (features + explicit bounds) into ``data``.
+
+    Per-sample bounds are full-row (prompt + response) coordinates; a packed
+    batch (rmpad flattening) shifts every sample after the first by its
+    predecessor's row length, so bounds are re-based on the packed offsets
+    derived from the position-id resets before ``_merge_packed_media`` folds
+    the per-sample containers.
+    """
+    import numpy as np
+
+    packed = _is_packed_batch(data)
+    row_count = _batch_size_from_input_ids(data["input_ids"])
+    batch_size = len(replays)
+    if (packed and row_count != 1) or (not packed and batch_size != row_count):
+        raise ValueError(
+            f"duplex batch carries {batch_size} replay payloads over {row_count} id rows "
+            f"({'packed' if packed else 'padded'} layout); the replay column and the ids disagree"
+        )
+    packed_offsets = [0] * batch_size
+    if packed:
+        position_ids = data["position_ids"].reshape(-1)
+        reset_positions = (position_ids == 0).nonzero(as_tuple=True)[0].tolist()
+        if len(reset_positions) != batch_size or reset_positions[0] != 0:
+            raise ValueError(
+                "duplex packed batch has ambiguous sample boundaries: "
+                f"{len(reset_positions)} position-id resets for {batch_size} replay payloads"
+            )
+        packed_offsets = reset_positions
+    audio_features: list[list] = []
+    audio_feature_lens: list[list] = []
+    audio_bounds: list[list] = []
+    for sample, payload in enumerate(replays):
+        mels = payload.get("unit_mels")
+        mel_lens = payload.get("unit_mel_lens")
+        bounds = payload.get("audio_bounds")
+        if mels is None or mel_lens is None or not bounds:
+            raise ValueError(
+                "a duplex replay payload is missing its mel features or audio bounds; "
+                "the rollout adapter must attach them before training"
+            )
+        offset = packed_offsets[sample]
+        shifted = [[int(start) + offset, int(end) + offset] for start, end in bounds]
+        audio_features.append([np.asarray(mel) for mel in mels])
+        audio_feature_lens.append([int(value) for value in mel_lens])
+        audio_bounds.append(shifted)
+    _require_span_count(
+        [span for spans in audio_bounds for span in spans],
+        sum(len(sample) for sample in audio_feature_lens),
+        "audio",
+    )
+    data["audio_features"] = audio_features
+    data["audio_feature_lens"] = audio_feature_lens
+    data["audio_bounds"] = audio_bounds
+    data.setdefault("pixel_values", [[] for _ in range(batch_size)])
+    data.setdefault("tgt_sizes", [[] for _ in range(batch_size)])
+    data.setdefault("image_bound", [[] for _ in range(batch_size)])
 
 
 def _keep_rotary_frequencies_dtype(module) -> None:

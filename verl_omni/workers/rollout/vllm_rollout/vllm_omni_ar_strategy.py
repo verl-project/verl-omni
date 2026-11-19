@@ -89,6 +89,9 @@ class ARStrategy(OmniStrategyBase):
 
     rollout_config_cls = RolloutConfig
     model_config_cls = OmniModelConfig
+    #: The server monkey-patches the model runner for this mode
+    #: (``collective_rpc("monkey_patch_model")`` after engine start).
+    patches_model_runner = True
 
     def __init__(self, server: Any) -> None:
         super().__init__(server)
@@ -283,6 +286,11 @@ class ARStrategy(OmniStrategyBase):
         tp_size = self.server.config.tensor_model_parallel_size
 
         deploy_dict: dict[str, object] = {"pipeline": pipeline_id}
+        # Tolerant like the other adapter hooks: out-of-tree/test adapters
+        # may predate this one.
+        overrides_hook = getattr(adapter_cls, "deploy_config_overrides", None)
+        if callable(overrides_hook):
+            deploy_dict.update(overrides_hook(pipeline_mode))
         async_chunk = engine_kwargs.get("async_chunk", engine_kwargs.get("async-chunk"))
         if async_chunk is not None:
             deploy_dict["async_chunk"] = async_chunk

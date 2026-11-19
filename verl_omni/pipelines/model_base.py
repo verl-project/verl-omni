@@ -1068,6 +1068,21 @@ class OmniRolloutPipelineBase:
         return
 
     @classmethod
+    def deploy_config_overrides(cls, pipeline_mode: str = "thinker_only") -> dict:
+        """Return top-level deploy-config fields this mode requires.
+
+        Merged into the generated deploy-config YAML — e.g. a duplex rollout
+        declares ``session_mode: duplex``. Default: none.
+
+        Args:
+            pipeline_mode: The mode used to build the stages.
+
+        Returns:
+            dict: Deploy-config key-value overrides.
+        """
+        return {}
+
+    @classmethod
     def get_engine_hf_overrides(cls, pipeline_mode: str = "thinker_only") -> dict:
         """Return HF config overrides per *pipeline_mode*.
 

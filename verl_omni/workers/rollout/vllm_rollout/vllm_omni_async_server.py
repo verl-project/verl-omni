@@ -48,6 +48,7 @@ from verl_omni.workers.rollout.base import get_rollout_sequence_parallel_size, g
 from verl_omni.workers.rollout.replica import DiffusionOutput
 from verl_omni.workers.rollout.vllm_rollout.vllm_omni_ar_strategy import ARStrategy
 from verl_omni.workers.rollout.vllm_rollout.vllm_omni_diffusion_strategy import DiffusionStrategy
+from verl_omni.workers.rollout.vllm_rollout.vllm_omni_duplex_strategy import DuplexStrategy
 
 logger = logging.getLogger(__file__)
 logger.setLevel(logging.INFO)
@@ -125,6 +126,15 @@ def _drop_defaulted_engine_args(engine_args: dict) -> dict:
         for key, value in engine_args.items()
         if key == "model" or key not in defaults or not _is_defaulted_value(key, value, defaults[key])
     }
+
+
+def resolve_output_mode_strategy(output_mode: str) -> type:
+    """The rollout strategy class for an ``output_mode`` selector value."""
+    if output_mode == "ar":
+        return ARStrategy
+    if output_mode == "duplex":
+        return DuplexStrategy
+    return DiffusionStrategy
 
 
 def _normalize_rollout_logging_level() -> None:
@@ -209,7 +219,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         omni_kwargs = engine_kwargs.get("vllm_omni", {}) or {}
         # TODO (mike): drop this once the legacy omni training script is removed.
         # It should be automatically inferred from the model config.
-        strategy_cls = ARStrategy if omni_kwargs.get("output_mode", "diffusion") == "ar" else DiffusionStrategy
+        strategy_cls = resolve_output_mode_strategy(omni_kwargs.get("output_mode", "diffusion"))
         self._generate_strategy = strategy_cls(self)
         self._rollout_flags: dict[int, dict] = {}
         rollout_config = self._generate_strategy.init_config(config)
@@ -342,7 +352,9 @@ class vLLMOmniHttpServer(vLLMHttpServer):
                 attn_backend,
             )
 
-        engine_client = AsyncOmni(**engine_args)
+        engine_client_factory = getattr(type(self._generate_strategy), "engine_client_cls", None)
+        engine_client_cls = engine_client_factory() if engine_client_factory is not None else AsyncOmni
+        engine_client = engine_client_cls(**engine_args)
         app = build_app(args)
         await omni_init_app_state(engine_client, app.state, args)
 
@@ -352,7 +364,9 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             self._temp_deploy_ctx = None
 
         self.engine = engine_client
-        if isinstance(self._generate_strategy, ARStrategy):
+        if isinstance(self._generate_strategy, ARStrategy) and getattr(
+            self._generate_strategy, "patches_model_runner", True
+        ):
             # attach engine-level monkey patches
             await self.collective_rpc(method="monkey_patch_model")
         self._server_port, self._server_task = await run_uvicorn(app, args, self._server_address)
@@ -361,6 +375,16 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         """Run headless server in a separate thread."""
         # TODO (mike): support multi node
         raise NotImplementedError("vLLM-Omni headless mode is not implemented yet.")
+
+    async def run_duplex_episode(self, run_spec: dict[str, Any]) -> dict[str, Any]:
+        """Drive one duplex session on the active strategy (agent-loop entry)."""
+        strategy = getattr(self, "_generate_strategy", None)
+        if not isinstance(strategy, DuplexStrategy):
+            raise RuntimeError(
+                "run_duplex_episode requires engine_kwargs.vllm_omni.output_mode=duplex; "
+                f"the server runs {type(strategy).__name__}"
+            )
+        return await strategy.run_duplex_episode(run_spec)
 
     async def collective_rpc(
         self,
