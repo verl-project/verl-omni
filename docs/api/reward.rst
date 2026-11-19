@@ -21,6 +21,8 @@ profiler control over the reward-model rollout servers.
 
    verl_omni.reward_loop.reward_loop.OmniRewardLoopManager
    verl_omni.reward_loop.reward_manager.MultiRewardManager
+   verl_omni.reward_loop.reward_manager.MultiAudioRewardManager
+   verl_omni.reward_loop.reward_manager.MultiVisualRewardManager
    verl_omni.reward_loop.reward_manager.VisualRewardManager
    verl_omni.reward_loop.reward_manager.AudioRewardManager
    verl_omni.utils.reward_score.default_compute_score_image
@@ -39,6 +41,10 @@ Reward Manager
 
 .. autoclass:: verl_omni.reward_loop.reward_manager.MultiRewardManager
    :members: __init__, run_single
+
+.. autoclass:: verl_omni.reward_loop.reward_manager.MultiAudioRewardManager
+
+.. autoclass:: verl_omni.reward_loop.reward_manager.MultiVisualRewardManager
 
 .. autoclass:: verl_omni.reward_loop.reward_manager.VisualRewardManager
    :members: __init__, run_single

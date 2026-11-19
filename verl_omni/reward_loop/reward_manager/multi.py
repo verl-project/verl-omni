@@ -20,14 +20,17 @@ import math
 from abc import ABC, abstractmethod
 from collections import ChainMap
 
+import numpy as np
 import torch
 from verl import DataProto
 from verl.experimental.reward_loop.reward_manager.base import RewardManagerBase
 from verl.utils.import_utils import load_extern_object
 
 from verl_omni.pipelines.rollout_media import ArtifactContractError
+from verl_omni.utils.reward_score.reward_utils import get_audio
 from verl_omni.workers.config.reward import get_reward_model_entries, resolve_reward_model_name
 
+from .audio import AudioRewardManager, _audio_reward_kwargs
 from .media import _reward_extra_info
 from .visual import _sampling_params_from_rollout, _validate_visual_response
 
@@ -54,6 +57,19 @@ def _filter_kwargs(all_kwargs: dict, sig: inspect.Signature) -> dict:
             return all_kwargs
     # Only pass declared parameters
     return {k: v for k, v in all_kwargs.items() if k in params}
+
+
+def _extract_solution_audio(extra_info: dict) -> tuple[np.ndarray, int]:
+    if "media_artifacts" in extra_info:
+        waveform, sample_rate = get_audio(extra_info)
+    else:
+        try:
+            if extra_info.get("media_kind") not in ("image", "video"):
+                return AudioRewardManager._extract_audio(extra_info)
+            waveform, sample_rate = get_audio(extra_info, audio_layout=extra_info.get("audio_layout", "CT"))
+        except (KeyError, TypeError, ValueError, RuntimeError, OverflowError) as exc:
+            raise ArtifactContractError(f"Invalid solution_audio: {exc}") from exc
+    return waveform.numpy(), sample_rate
 
 
 class MultiRewardManager(RewardManagerBase, ABC):
@@ -186,8 +202,30 @@ class MultiRewardManager(RewardManagerBase, ABC):
     async def _build_reward_kwargs(self, data_item: DataProto) -> dict:
         """Build scorer kwargs for one sample in a modality-specific subclass."""
 
+    async def _select_solution_audio(self, all_kwargs: dict) -> tuple[np.ndarray, int] | None:
+        if "solution_audio" in all_kwargs:
+            return None
+        params = [
+            sub["sig"].parameters["solution_audio"]
+            for sub in self._sub_rewards
+            if "solution_audio" in sub["sig"].parameters and "solution_audio" not in sub["extra_args"]
+        ]
+        if not params:
+            return None
+        extra_info = all_kwargs.get("extra_info", {})
+        artifacts = extra_info.get("media_artifacts")
+        has_audio = (
+            "audio" in artifacts
+            if artifacts is not None
+            else extra_info.get("audio") is not None or extra_info.get("audio_sample_rate") is not None
+        )
+        if has_audio or any(param.default is inspect.Parameter.empty for param in params):
+            return await asyncio.to_thread(_extract_solution_audio, extra_info)
+        return None
+
     async def _run_multi_reward(self, all_kwargs: dict, data: DataProto) -> dict:
         """Execute configured reward terms and preserve their weighted outputs."""
+        solution_audio = await self._select_solution_audio(all_kwargs)
         combined_score = 0.0
         reward_extra_info = {}
         admitted_tasks = []
@@ -204,6 +242,8 @@ class MultiRewardManager(RewardManagerBase, ABC):
             # Do not change kwargs received by existing **kwargs-only scorers.
             if sig is not None and "batch" in sig.parameters:
                 sub_kwargs["batch"] = data
+            if solution_audio is not None and "solution_audio" in sig.parameters:
+                sub_kwargs.setdefault("solution_audio", solution_audio)
             filtered_kwargs = _filter_kwargs(sub_kwargs, sig) if sig is not None else {}
 
             if model_name is not None:
@@ -356,7 +396,7 @@ class MultiRewardManager(RewardManagerBase, ABC):
 
 
 class MultiVisualRewardManager(MultiRewardManager):
-    """Visual input contract backed by the shared multi-reward aggregator."""
+    """Aggregate visual rollout rewards with optional generated audio."""
 
     @classmethod
     def assemble_rm_scores(cls, data: DataProto, scores: list[float]) -> torch.Tensor:
@@ -391,5 +431,19 @@ class MultiVisualRewardManager(MultiRewardManager):
                 reward_model_tokenizer=self.reward_model_tokenizer,
                 model_name=self.config.reward.reward_model.model_path,
                 sampling_params=sampling_params,
+            )
+        return reward_kwargs
+
+
+class MultiAudioRewardManager(MultiRewardManager):
+    """Aggregate waveform rewards for token rollouts with per-token score placement."""
+
+    async def _build_reward_kwargs(self, data_item: DataProto) -> dict:
+        reward_kwargs = _audio_reward_kwargs(data_item)
+        if self.reward_router_address is not None:
+            reward_kwargs.update(
+                reward_router_address=self.reward_router_address,
+                reward_model_tokenizer=self.reward_model_tokenizer,
+                model_name=self.config.reward.reward_model.model_path,
             )
         return reward_kwargs

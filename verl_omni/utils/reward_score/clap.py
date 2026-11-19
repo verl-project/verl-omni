@@ -209,9 +209,9 @@ async def _ensure_consumer(state: _BatchingState):
 
 async def compute_score(
     data_source: str,
-    solution_image,
-    ground_truth: str,
-    extra_info: dict,
+    solution_image=None,
+    ground_truth: str | None = None,
+    extra_info: dict | None = None,
     device: str | None = None,
     model_name_or_path: str = _DEFAULT_MODEL,
     *,
@@ -231,6 +231,7 @@ async def compute_score(
     reward_model owns inference and lifecycle. A single-sample batch takes
     precedence over legacy extra_info audio and its sample rate. Named audio
     artifacts remain authoritative and must satisfy the media contract.
+    The legacy solution_image argument is optional for audio-only rollouts.
     prompt_key selects reward_inputs.text[prompt_key] from batch;
     without it, ground_truth supplies the text. Apply scale/offset to cosine,
     then optional lower/upper bounds. No recipe or checkpoint is hardcoded.
