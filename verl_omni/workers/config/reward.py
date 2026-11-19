@@ -509,13 +509,20 @@ def accelerator_workers_enabled(config) -> bool:
 def warn_deprecated_reward_config(config) -> None:
     """Emit the trainer-launch deprecation notices for legacy reward paths."""
     reward = config.reward
+    if reward.custom_reward_function.get("use_accelerator", False):
+        warnings.warn(
+            "reward.custom_reward_function.use_accelerator is deprecated since v0.4.0 and will be removed "
+            "in a future release. Set reward.accelerator_workers.enabled instead.",
+            DeprecationWarning,
+            stacklevel=3,
+        )
     if reward.reward_manager.get("name") == "VisualRewardManager":
         warnings.warn(
             "VisualRewardManager is deprecated since v0.4.0 and will be removed in a future release. "
             "Set reward.reward_manager.name=MultiVisualRewardManager and configure scorers under "
             "reward.reward_functions; see docs/algo/named_reward_models.md.",
             DeprecationWarning,
-            stacklevel=2,
+            stacklevel=3,
         )
     if reward.reward_model.get("enable", False) and not reward.get("reward_functions"):
         warnings.warn(
@@ -524,7 +531,7 @@ def warn_deprecated_reward_config(config) -> None:
             "release. Configure a named engine model under reward.models and bind it from "
             "reward.reward_functions; see docs/algo/named_reward_models.md.",
             DeprecationWarning,
-            stacklevel=2,
+            stacklevel=3,
         )
 
 
