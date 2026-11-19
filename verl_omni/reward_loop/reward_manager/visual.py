@@ -27,7 +27,10 @@ from .media import _reward_extra_info
 
 def _sampling_params_from_rollout(rollout_config) -> dict:
     """Build the OCR-compatible generation overrides from a rollout config."""
-    params = {"max_tokens": rollout_config.get("response_length") or 4096}
+    params = {}
+    response_length = rollout_config.get("response_length")
+    if response_length:
+        params["max_tokens"] = response_length
     if rollout_config.get("full_determinism", False):
         params["seed"] = rollout_config.get("seed", 42)
     return params
