@@ -318,7 +318,7 @@ def tiny_pipeline(architecture, transformer):
             mllm=mllm,
             processor=processor,
         )
-    from diffusers.pipelines.ltx2.connectors import LTX2TextConnectors
+    from diffusers import LTX2TextConnectors
     from diffusers.pipelines.ltx2.vocoder import LTX2Vocoder
 
     vae = d.AutoencoderKLLTX2Video(
