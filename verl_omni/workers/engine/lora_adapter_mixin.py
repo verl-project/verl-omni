@@ -108,9 +108,14 @@ class LoRAAdapterMixin:
                 "exclude_modules": convert_to_regular_types(self.model_config.exclude_modules),
                 "bias": "none",
             }
-            module.add_adapter(LoraConfig(**lora_config), adapter_name="default")
-            for adapter_name in extra_adapters:
-                module.add_adapter(LoraConfig(**lora_config), adapter_name=adapter_name)
+            # PEFT initializers such as PiSSA write into adapter weights before
+            # PEFT moves them to the base device. Allocate them on meta when the
+            # base weights are placeholders for the FSDP state broadcast.
+            device = next(module.parameters()).device
+            with device if device.type == "meta" else nullcontext():
+                module.add_adapter(LoraConfig(**lora_config), adapter_name="default")
+                for adapter_name in extra_adapters:
+                    module.add_adapter(LoraConfig(**lora_config), adapter_name=adapter_name)
 
         # Adapters beyond the first skip peft's base-dtype cast; align them before sharding.
         cast_adapter_params_to_base(module)
