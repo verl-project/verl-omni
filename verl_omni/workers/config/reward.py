@@ -518,7 +518,7 @@ def accelerator_workers_enabled(config) -> bool:
 
 def warn_deprecated_reward_config(config) -> None:
     """Emit the trainer-launch deprecation notices for legacy reward paths."""
-    reward = config.reward
+    reward = config.get("reward", {}) or {}
     custom_reward = reward.get("custom_reward_function", {}) or {}
     reward_manager = reward.get("reward_manager", {}) or {}
     reward_model = reward.get("reward_model", {}) or {}

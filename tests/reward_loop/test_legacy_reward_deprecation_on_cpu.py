@@ -110,6 +110,11 @@ def test_null_custom_reward_function_does_not_crash():
     assert any("VisualRewardManager is deprecated" in message for message in notices)
 
 
+def test_config_without_reward_node_stays_silent():
+    # Entrypoint unit tests call run_* with minimal configs lacking the reward group.
+    assert _launch_notices(OmegaConf.create({})) == []
+
+
 def test_manager_warning_shares_the_launch_notice_text():
     """VisualRewardManager's constructor warning and the launch notice are one constant."""
     from verl_omni.reward_loop.reward_manager.visual import VisualRewardManager
