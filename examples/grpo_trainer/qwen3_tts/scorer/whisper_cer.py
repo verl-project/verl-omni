@@ -21,18 +21,28 @@ import base64
 import binascii
 import json
 import logging
+import queue
 import re
 import threading
+import time
+import traceback
 import unicodedata
+from concurrent.futures import Future
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
+
+if TYPE_CHECKING:
+    from torch import Tensor
 
 __all__ = ["WhisperCERScorer"]
 
 logger = logging.getLogger(__name__)
+
+_DEFAULT_MAX_BATCH_SIZE = 1
+_DEFAULT_MAX_WAIT_MS = 10.0
 
 # Device types that expose a torch.<device>.is_available() probe, in preference order.
 # MPS is deliberately absent: Whisper on MPS is untested here and ``auto`` must not
@@ -180,6 +190,9 @@ class WhisperCERScorer:
     mono float32 waveform, its sample rate, the reference text, and optional
     metadata. ``score`` returns the audio reward together with the raw and capped
     CER, transcript, normalized texts, and sample ID.
+
+    Batch sizes above one group concurrent requests. The collection window starts
+    when the worker takes the first clip. Call close when done.
     """
 
     def __init__(
@@ -191,7 +204,21 @@ class WhisperCERScorer:
         dtype: str,
         language: str,
         local_files_only: bool,
+        max_batch_size: int = _DEFAULT_MAX_BATCH_SIZE,
+        max_wait_ms: float = _DEFAULT_MAX_WAIT_MS,
     ) -> None:
+        if isinstance(max_batch_size, bool) or not isinstance(max_batch_size, int) or max_batch_size < 1:
+            raise ValueError(f"max_batch_size must be a positive integer, got {max_batch_size!r}.")
+        max_supported_wait_ms = threading.TIMEOUT_MAX * 1000
+        if (
+            isinstance(max_wait_ms, bool)
+            or not isinstance(max_wait_ms, int | float)
+            or not 0 <= max_wait_ms <= max_supported_wait_ms
+        ):
+            raise ValueError(
+                f"max_wait_ms must be a number between 0 and {max_supported_wait_ms:g}, got {max_wait_ms!r}."
+            )
+
         import torch
         from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor
 
@@ -221,8 +248,78 @@ class WhisperCERScorer:
         ).to(device)
         self.model.eval()
         self._lock = threading.Lock()
+        self._closed = False
+        self._batch_worker: threading.Thread | None = None
+        if max_batch_size > 1:
+            self._max_batch_size = max_batch_size
+            self._max_wait_s = max_wait_ms / 1000
+            self._pending: queue.SimpleQueue[tuple[Tensor, Future[str]] | None] = queue.SimpleQueue()
+            self._batch_worker = threading.Thread(target=self._serve_batches, name="whisper-cer-batcher", daemon=True)
+            self._batch_worker.start()
+
+    def close(self) -> None:
+        """Stop accepting requests, then drain work before releasing the model."""
+        worker = self._batch_worker
+        with self._lock:
+            if worker is not None and not self._closed:
+                self._pending.put(None)
+            self._closed = True
+        if worker is not None:
+            worker.join()
+        self.model = None
 
     def transcribe(self, waveform: np.ndarray, sample_rate: int) -> str:
+        features = self._extract_features(waveform, sample_rate)
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("Whisper CER scorer is closed.")
+            if self._batch_worker is None:
+                return self._generate(features)[0]
+            future: Future[str] = Future()
+            self._pending.put((features, future))
+        return future.result()
+
+    def _serve_batches(self) -> None:
+        while self._serve_next_batch():
+            pass
+
+    def _serve_next_batch(self) -> bool:
+        """Release the current batch before the worker waits again."""
+        import torch
+
+        first = self._pending.get()
+        if first is None:
+            return False
+        batch = [first]
+        stopping = False
+        started = time.monotonic()
+        try:
+            while len(batch) < self._max_batch_size:
+                remaining = max(0.0, self._max_wait_s - (time.monotonic() - started))
+                try:
+                    request = self._pending.get(timeout=remaining)
+                except queue.Empty:
+                    break
+                if request is None:
+                    stopping = True
+                    break
+                batch.append(request)
+            transcripts = self._generate(torch.cat([features for features, _ in batch], dim=0))
+            if len(transcripts) != len(batch):
+                raise RuntimeError(f"Whisper returned {len(transcripts)} transcripts for {len(batch)} clips.")
+        except Exception as exc:
+            # Keep traceback frames out of the futures so failed tensors can be freed.
+            logger.error("Whisper failed scoring a batch of %d clips:\n%s", len(batch), traceback.format_exc())
+            message = f"{type(exc).__name__}: {exc}"
+            for _, future in batch:
+                future.set_exception(RuntimeError(message))
+        else:
+            for (_, future), transcript in zip(batch, transcripts, strict=True):
+                future.set_result(transcript)
+        return not stopping
+
+    def _extract_features(self, waveform: np.ndarray, sample_rate: int) -> Tensor:
+        """Return CPU log-mel features with shape (1, n_mels, frames)."""
         import torch
 
         audio_functional = _import_torchaudio_functional()
@@ -233,20 +330,25 @@ class WhisperCERScorer:
                 samples = audio_functional.resample(samples, sample_rate, 16_000)
             else:
                 samples = _linear_resample(samples, sample_rate, 16_000)
-        features = self.processor(
+        return self.processor(
             samples.numpy(),
             sampling_rate=16_000,
             return_tensors="pt",
-        ).input_features.to(device=self.device, dtype=self.dtype)
-        with self._lock, torch.inference_mode():
+        ).input_features
+
+    def _generate(self, features: Tensor) -> list[str]:
+        """Decode one transcript per row of the feature batch."""
+        import torch
+
+        with torch.inference_mode():
             generated = self.model.generate(
-                features,
+                features.to(device=self.device, dtype=self.dtype),
                 language=self.language,
                 task="transcribe",
                 do_sample=False,
                 condition_on_prev_tokens=False,
             )
-        return self.processor.batch_decode(generated, skip_special_tokens=True)[0].strip()
+        return [text.strip() for text in self.processor.batch_decode(generated, skip_special_tokens=True)]
 
     def score(
         self,
@@ -403,6 +505,18 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=18080)
     parser.add_argument("--allow-download", action="store_true")
+    parser.add_argument(
+        "--max-batch-size",
+        type=int,
+        default=_DEFAULT_MAX_BATCH_SIZE,
+        help="Max clips per Whisper generate call (default: %(default)s, one clip at a time)",
+    )
+    parser.add_argument(
+        "--max-wait-ms",
+        type=float,
+        default=_DEFAULT_MAX_WAIT_MS,
+        help="Time in milliseconds to collect more clips for a batch (default: %(default)s)",
+    )
     args = parser.parse_args()
 
     scorer = WhisperCERScorer(
@@ -412,13 +526,15 @@ def main() -> None:
         dtype=args.dtype,
         language=args.language,
         local_files_only=not args.allow_download,
+        max_batch_size=args.max_batch_size,
+        max_wait_ms=args.max_wait_ms,
     )
-    server = WhisperCERHTTPServer((args.host, args.port), scorer)
-    print(json.dumps({"status": "ready", "host": args.host, "port": server.server_port}), flush=True)
     try:
-        server.serve_forever()
+        with WhisperCERHTTPServer((args.host, args.port), scorer) as server:
+            print(json.dumps({"status": "ready", "host": args.host, "port": server.server_port}), flush=True)
+            server.serve_forever()
     finally:
-        server.server_close()
+        scorer.close()
 
 
 if __name__ == "__main__":

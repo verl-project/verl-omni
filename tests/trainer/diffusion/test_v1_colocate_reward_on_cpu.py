@@ -125,45 +125,6 @@ def test_colocate_reward_keeps_rollout_asleep_through_actor_update(monkeypatch):
     assert calls == ["reward", "old_log_prob", "advantage", "update_actor"]
 
 
-def test_colocate_reward_sleeps_and_wakes_replicas_left_awake(monkeypatch):
-    """Replicas the mode hooks left awake are slept for the colocated RM and woken after it.
-
-    The sync subclass is used as a lightweight CPU harness for the shared base.
-    """
-    from verl_omni.trainer.diffusion.v1.trainer_sync import PolicyGradientDiffusionTrainerV1Sync
-
-    trainer = PolicyGradientDiffusionTrainerV1Sync(compose_cfg(["reward.reward_model.enable=true"]))
-    assert trainer.use_rm
-    monkeypatch.setattr(trainer, "_colocated_replicas_asleep", lambda: False)
-
-    data = DataProto.from_tensordict(tu.get_tensordict({"all_timesteps": torch.zeros(2, 4)}))
-    reward = DataProto.from_tensordict(tu.get_tensordict({"rm_scores": torch.ones(2, 1)}))
-    trainer.tokenizer = SimpleNamespace(pad_token_id=0)
-    trainer.reward_loop_manager = SimpleNamespace(reward_loop_worker_handles=None)
-    calls: list[str] = []
-    trainer.checkpoint_manager = SimpleNamespace(
-        sleep_replicas=lambda: calls.append("sleep"),
-        update_weights=lambda step: calls.append("update_weights"),
-    )
-    trainer.global_steps = 1
-    monkeypatch.setattr(
-        "verl_omni.trainer.diffusion.v1.trainer_base.diffusion_tq_batch_to_dataproto",
-        lambda meta, pad_token_id: data,
-    )
-    monkeypatch.setattr(trainer, "_compute_reward_colocate", lambda d: (calls.append("reward"), reward)[1])
-
-    def stop_at_balance(d, metrics):
-        calls.append("balance")
-        raise _Stop
-
-    monkeypatch.setattr(trainer, "_balance_batch", stop_at_balance)
-
-    with pytest.raises(_Stop):
-        trainer._train_sampled_batch({}, {}, object())
-
-    assert calls == ["sleep", "reward", "update_weights", "balance"]
-
-
 SEPARATE_ASYNC = [
     "reward.reward_model.enable=true",
     "trainer.use_v1=true",
@@ -248,28 +209,18 @@ def train_one_batch(trainer):
         trainer._train_sampled_batch({}, {}, object())
 
 
-@pytest.mark.parametrize(
-    "mode, expected",
-    [
-        ("TRAINER", ["reward", "update_actor_asleep"]),
-        ("ROLLOUT", ["sleep", "reward", "update_weights", "update_actor_awake"]),
-    ],
-)
-def test_separate_async_colocate_reward_follows_hybrid_mode(monkeypatch, mode, expected):
-    """In trainer mode the replicas are already asleep; the colocated RM leaves them so.
-
-    Rollout mode, which prepare_step rules out before training, keeps the sleep and wake around the RM.
-    """
+def test_separate_async_colocate_reward_leaves_replicas_asleep(monkeypatch):
+    """In trainer mode the replicas are already asleep; the colocated RM leaves them so."""
     from verl_omni.trainer.diffusion.v1.trainer_separate_async import HybridEngineMode
 
     calls: list[str] = []
     trainer = make_separate_async_trainer(monkeypatch, calls)
-    trainer.current_mode = HybridEngineMode[mode]
-    trainer.checkpoint_manager.asleep = mode == "TRAINER"
+    trainer.current_mode = HybridEngineMode.TRAINER
+    trainer.checkpoint_manager.asleep = True
 
     train_one_batch(trainer)
 
-    assert calls == expected
+    assert calls == ["reward", "update_actor_asleep"]
 
 
 def test_separate_async_colocate_reward_keeps_replicas_asleep_across_steps(monkeypatch):

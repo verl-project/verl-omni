@@ -1,0 +1,83 @@
+# verl-omni AMD GPU (ROCm) image on the prebuilt vLLM ROCm image — no vLLM source build.
+# Model agnostic: recipes add their own extras on top (see the recipe READMEs).
+#
+# Build (from repo root):
+#   docker build -f docker/Dockerfile.rocm-prebuilt -t verl-omni:rocm-prebuilt .
+#
+# vLLM-Omni and verl default to .github/vllm_omni_pin.txt and .github/verl_pin.txt; override with
+#   --build-arg VLLM_OMNI_REF=<ref> --build-arg VERL_GIT_REF=<ref>
+#
+# Run:
+#   docker run --device=/dev/kfd --device=/dev/dri --group-add video \
+#     --security-opt seccomp=unconfined --ipc=host --shm-size=64g -it verl-omni:rocm-prebuilt
+#
+# A checkout bind-mounted from the host is owned by the host user; trust only that path:
+#   git config --global --add safe.directory /workspace/verl-omni
+
+# Base provides torch 2.13 + ROCm 10.0, vLLM 0.33.0 (gfx90a / gfx942 / gfx950) and flash_attn.
+ARG BASE_IMAGE=vllm/vllm-openai-rocm:v0.33.0
+
+FROM ${BASE_IMAGE}
+
+ARG VLLM_OMNI_REF=
+ARG VERL_GIT_REF=
+
+# The base is vLLM's serving stage, whose ENTRYPOINT is `vllm serve`.
+ENTRYPOINT []
+CMD ["/bin/bash"]
+
+# opencv-python, pulled in by vLLM-Omni's requirements, needs libGL, which the base lacks.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libgl1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Keep the base image's ROCm builds: PyPI only carries CUDA wheels.
+RUN pip list --format=freeze | grep -E "^(torch|torchvision|torchaudio|triton|vllm|flash_attn|numpy)==" \
+    > /opt/rocm-constraints.txt
+ENV PIP_CONSTRAINT=/opt/rocm-constraints.txt
+
+WORKDIR /workspace/verl-omni
+
+COPY .github/verl_pin.txt .github/vllm_omni_pin.txt ./.github/
+
+# Step 1 — vLLM-Omni (editable at /workspace/vllm-omni) with its ROCm requirements; --no-deps keeps the base
+# image's vLLM. As in vLLM-Omni's own ROCm image, onnxruntime-rocm is the only onnxruntime distribution.
+RUN VLLM_OMNI_REF="${VLLM_OMNI_REF:-$(tr -d '[:space:]' < .github/vllm_omni_pin.txt)}" \
+    && git clone https://github.com/vllm-project/vllm-omni.git /workspace/vllm-omni \
+    && git -C /workspace/vllm-omni checkout "${VLLM_OMNI_REF}" \
+    && pip install -r /workspace/vllm-omni/requirements/rocm.txt \
+    && VLLM_OMNI_TARGET_DEVICE=rocm pip install --no-deps --no-build-isolation -e /workspace/vllm-omni \
+    && pip uninstall -y onnxruntime \
+    && pip install --force-reinstall --no-deps "onnxruntime-rocm>=1.22.2" \
+    && python3 -c "import importlib.metadata as m; \
+assert not any(d.metadata['Name'] == 'onnxruntime' for d in m.distributions()); \
+print('vllm-omni', m.version('vllm-omni'), '| onnxruntime-rocm', m.version('onnxruntime-rocm'))"
+
+# Step 2 — verl core dependency (from .github/verl_pin.txt, overridable via VERL_GIT_REF)
+RUN VERL_REF="${VERL_GIT_REF:-$(tr -d '[:space:]' < .github/verl_pin.txt)}" \
+    && echo "Installing verl@${VERL_REF}" \
+    && pip install --no-deps "verl @ git+https://github.com/verl-project/verl.git@${VERL_REF}"
+
+# Step 3 — verl-omni's core dependencies, read from its own metadata against a placeholder package so source
+# edits do not invalidate this layer. vllm, vllm-omni and verl are installed above. verl-omni overrides
+# vLLM-Omni's exact diffusers / accelerate pins, as on the other platforms; torchao >=0.16 is required by peft.
+COPY pyproject.toml setup.py README.md ./
+COPY verl_omni/version ./verl_omni/version
+RUN touch verl_omni/__init__.py \
+    && pip install --no-deps -e . \
+    && python3 -c "import re; from importlib.metadata import requires; \
+print('\n'.join(r for r in requires('verl-omni') if 'extra ==' not in r \
+and re.split(r'[\s<>=!@;\[]', r, maxsplit=1)[0] not in ('vllm', 'vllm-omni', 'verl')))" \
+        > /tmp/verl-omni-requirements.txt \
+    && pip install -r /tmp/verl-omni-requirements.txt diffusers==0.41.0 accelerate==1.15.0 "torchao>=0.16.0" \
+    && rm /tmp/verl-omni-requirements.txt
+
+# Step 4 — verl-omni source; the editable install above already points here.
+COPY verl_omni ./verl_omni
+
+# Device-independent checks only; vllm_omni / verl_omni need a GPU to import.
+RUN python3 -c "import torch; print('torch', torch.__version__, '| HIP', torch.version.hip)" \
+    && python3 -c "import vllm; print('vllm', vllm.__version__)" \
+    && python3 -c "import verl; print('verl', verl.__version__)" \
+    && python3 -c "from importlib.metadata import version as v; \
+print('vllm-omni', v('vllm-omni'), '| diffusers', v('diffusers'), '| transformers', v('transformers'))"
