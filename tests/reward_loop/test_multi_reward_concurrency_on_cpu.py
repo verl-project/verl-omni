@@ -1100,7 +1100,10 @@ def test_file_reward_function_and_registered_scorer_share_one_module(tmp_path):
     scorer_cls = import_from_spec(f"file://{path}:CustomScorer")
     assert get_scorer_cls(name) is scorer_cls
     assert manager._sub_rewards[0]["fn"].__globals__["CustomScorer"] is scorer_cls
-    assert _manager({"one": {"path": str(path.parent / "." / path.name), "name": "compute_score"}})
+    alias = str(path.parent) + "/./" + path.name
+    assert alias != str(path)
+    second = _manager({"one": {"path": alias, "name": "compute_score"}})
+    assert second._sub_rewards[0]["fn"] is manager._sub_rewards[0]["fn"]
     duplicate = tmp_path / "different_reward.py"
     duplicate.write_text(path.read_text())
     with pytest.raises(RuntimeError, match="Error loading module") as caught:

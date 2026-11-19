@@ -32,6 +32,24 @@ def _recording_scorer(calls, *, fail=None):
     return score_batch
 
 
+@pytest.mark.parametrize("method", ["start", "submit", "pause", "close"])
+def test_batcher_rejects_another_event_loop_before_mutation(method):
+    loop = asyncio.new_event_loop()
+    batcher = ScorerMicrobatcher(_recording_scorer([]))
+    try:
+        loop.run_until_complete(batcher.start())
+        loop.run_until_complete(batcher.pause())
+        call = getattr(batcher, method)
+        with pytest.raises(RuntimeError, match="across event loops"):
+            asyncio.run(call({"i": 1}) if method == "submit" else call())
+        assert batcher._state == "paused"
+        assert batcher._consumer is None
+        assert not batcher._queue
+    finally:
+        loop.run_until_complete(batcher.close())
+        loop.close()
+
+
 @pytest_asyncio.fixture
 async def microbatcher_factory():
     owned = []
@@ -56,6 +74,56 @@ async def test_lone_request_scores_immediately_at_batch_one(microbatcher_factory
     await microbatcher.start()
     assert await microbatcher.submit({"i": 7}) == {"score": 7}
     assert calls == [[7]]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("callable_instance", [False, True])
+async def test_awaitable_forward_result_is_awaited(microbatcher_factory, callable_instance):
+    async def result(requests):
+        return [{"score": request["i"]} for request in requests]
+
+    class AsyncCallable:
+        async def __call__(self, requests):
+            return await result(requests)
+
+    def sync_factory(requests):
+        return result(requests)
+
+    batcher = microbatcher_factory(AsyncCallable() if callable_instance else sync_factory)
+    await batcher.start()
+    assert await batcher.submit({"i": 3}) == {"score": 3}
+
+
+@pytest.mark.asyncio
+async def test_cancelled_dependency_fails_only_its_batch(microbatcher_factory):
+    entered = asyncio.Event()
+    dependency = asyncio.get_running_loop().create_future()
+
+    async def score(requests):
+        if requests[0]["i"] == 0:
+            entered.set()
+            await dependency
+        return [{"score": request["i"]} for request in requests]
+
+    batcher = microbatcher_factory(score)
+    await batcher.start()
+    first = asyncio.create_task(batcher.submit({"i": 0}))
+    await asyncio.wait_for(entered.wait(), 5)
+    second = asyncio.create_task(batcher.submit({"i": 1}))
+    try:
+        async with asyncio.timeout(5):
+            while not batcher._queue:
+                await asyncio.sleep(0)
+        dependency.cancel()
+        with pytest.raises(RuntimeError, match="cancelled its batch") as caught:
+            await asyncio.wait_for(first, 5)
+        assert isinstance(caught.value.__cause__, asyncio.CancelledError)
+        assert await asyncio.wait_for(second, 5) == {"score": 1}
+        assert batcher._state == "running"
+        assert await batcher.submit({"i": 2}) == {"score": 2}
+    finally:
+        dependency.cancel()
+        await asyncio.gather(first, second, return_exceptions=True)
 
 
 @pytest.mark.asyncio

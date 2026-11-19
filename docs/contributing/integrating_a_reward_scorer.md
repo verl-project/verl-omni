@@ -74,6 +74,11 @@ Then add the import to `scorers/__init__.py` (registration is an import side
 effect, like `pipelines/__init__.py`), and select the scorer from a named native
 model (see below).
 
+Registered names become visible after their importing plugin initializes
+successfully. A failed import discards its registrations, including aliases of
+classes imported from other modules; successfully imported dependencies remain
+registered.
+
 **Contract:**
 
 - `score_batch` is len-preserving and order-preserving: `out[i]` corresponds to
@@ -91,6 +96,27 @@ model (see below).
   [named media contract](../advanced/diffusion_media_artifacts.md) — select
   streams by name from `extra_info["media_artifacts"]`, never by position or
   rank; contract violations are fatal, not zero scores.
+
+## Recovery from a non-returning forward
+
+The hosting worker's `sleep()` and `close()` stop admission and drain accepted
+forwards before offloading or disposing weights. Cancellation of a lifecycle
+caller does not interrupt a synchronous forward thread. Scorers must put finite
+timeouts on backend I/O they own; cancelling a Python task cannot safely stop
+such a thread.
+
+If a forward exceeds the deployment's request or shutdown deadline, the job
+supervisor/operator must terminate the hosting worker process and confirm its
+death before recreating the worker and model. For a Ray actor, use
+`ray.kill(worker, no_restart=True)` on the affected actor, then confirm actor
+termination; for a colocated worker, terminate the containing process/job. Fail
+its outstanding requests and recover through the normal worker/job restart path.
+Do not retry `sleep()`/`close()` in that process or offload weights while its
+forward may still run. The executor does not automatically kill workers or impose
+a universal scoring deadline: this escalation belongs to the deployment owner.
+
+An async scorer's cancelled dependency is instead a failure of that microbatch;
+it does not cancel the consumer or prevent subsequent requests from scoring.
 
 ## Worked example: PickScore
 

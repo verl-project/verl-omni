@@ -48,8 +48,23 @@ __all__ = [
 ]
 
 _REGISTERED: dict[str, type[RewardScorer]] = {}
+_REGISTRY_LOCK = threading.RLock()
+_PENDING: dict[str, dict[str, type[RewardScorer]]] = {}
+_FILE_INITIALIZING: set[str] = set()
 _FILE_MODULES: dict[str, ModuleType] = {}
 _FILE_IMPORT_LOCK = threading.RLock()
+_FILE_LOCKS: dict[str, Any] = {}
+
+
+def _settle_registrations() -> None:
+    """Publish completed package imports; discard failed imports under the registry lock."""
+    for name, entries in list(_PENDING.items()):
+        module = sys.modules.get(name)
+        if name in _FILE_INITIALIZING or getattr(getattr(module, "__spec__", None), "_initializing", False):
+            continue
+        del _PENDING[name]
+        if module is not None:
+            _REGISTERED.update(entries)
 
 
 def register_scorer(name: str) -> Callable[[type[RewardScorer]], type[RewardScorer]]:
@@ -67,19 +82,12 @@ def register_scorer(name: str) -> Callable[[type[RewardScorer]], type[RewardScor
             the class is not a :class:`RewardScorer`, or its declarations are
             invalid.
     """
+    # The importing plugin owns registration even when it aliases another module's class.
+    registration_module = sys._getframe(1).f_globals["__name__"]
 
     def decorator(cls: type[RewardScorer]) -> type[RewardScorer]:
         if not isinstance(name, str) or not name or ":" in name:
             raise ValueError(f"Scorer name must be a non-empty string without ':', got {name!r}")
-        if name in _REGISTERED and _REGISTERED[name] is not cls:
-            registered = _REGISTERED[name]
-            raise ValueError(
-                f"Reward scorer {name!r} has already been registered: "
-                f"{registered.__module__}.{registered.__qualname__} vs "
-                f"{cls.__module__}.{cls.__qualname__}"
-            )
-        if name in _REGISTERED:
-            return cls
         if not (isinstance(cls, type) and issubclass(cls, RewardScorer)):
             raise ValueError(f"register_scorer({name!r}) requires a RewardScorer subclass, got {cls!r}")
         if cls.max_batch_size is not None and (
@@ -88,7 +96,26 @@ def register_scorer(name: str) -> Callable[[type[RewardScorer]], type[RewardScor
             raise ValueError(f"Reward scorer {name!r} max_batch_size must be a positive integer or None")
         if type(cls.supports_cpu_offload) is not bool:
             raise ValueError(f"Reward scorer {name!r} supports_cpu_offload must be a bool")
-        _REGISTERED[name] = cls
+        with _REGISTRY_LOCK:
+            _settle_registrations()
+            registered = _REGISTERED.get(name)
+            if registered is None:
+                registered = next((entries[name] for entries in _PENDING.values() if name in entries), None)
+            if registered is not None:
+                if registered is cls:
+                    return cls
+                raise ValueError(
+                    f"Reward scorer {name!r} has already been registered: "
+                    f"{registered.__module__}.{registered.__qualname__} vs "
+                    f"{cls.__module__}.{cls.__qualname__}"
+                )
+            module = sys.modules.get(registration_module)
+            if registration_module in _FILE_INITIALIZING or getattr(
+                getattr(module, "__spec__", None), "_initializing", False
+            ):
+                _PENDING.setdefault(registration_module, {})[name] = cls
+            else:
+                _REGISTERED[name] = cls
         return cls
 
     return decorator
@@ -96,7 +123,9 @@ def register_scorer(name: str) -> Callable[[type[RewardScorer]], type[RewardScor
 
 def peek_registered_scorers() -> dict[str, type[RewardScorer]]:
     """Return a snapshot of registered scorer classes keyed by name."""
-    return dict(_REGISTERED)
+    with _REGISTRY_LOCK:
+        _settle_registrations()
+        return dict(_REGISTERED)
 
 
 def get_scorer_cls(ref: str) -> type[RewardScorer]:
@@ -145,25 +174,51 @@ def load_reward_object(module_path: str, object_name: str) -> Any:
     from verl.utils.import_utils import load_extern_object, load_module
 
     if module_path.startswith("pkg://"):
-        return load_extern_object(module_path=module_path, object_name=object_name)
+        try:
+            return load_extern_object(module_path=module_path, object_name=object_name)
+        finally:
+            with _REGISTRY_LOCK:
+                _settle_registrations()
     path = Path(module_path.removeprefix("file://")).resolve()
     key = str(path)
     with _FILE_IMPORT_LOCK:
         module = _FILE_MODULES.get(key)
+        file_lock = _FILE_LOCKS.setdefault(key, threading.RLock())
     if module is None:
         # Package imports keep their own context and import lock. Never wait for
         # another thread's package initialization while holding our file lock.
-        module = _source_module(path)
+        try:
+            module = _source_module(path)
+        finally:
+            with _REGISTRY_LOCK:
+                _settle_registrations()
         spec = getattr(module, "__spec__", None)
         if getattr(spec, "_initializing", False):
             return getattr(importlib.import_module(spec.name), object_name)
-        with _FILE_IMPORT_LOCK:
-            if key not in _FILE_MODULES:
+        with file_lock:
+            with _FILE_IMPORT_LOCK:
+                cached = _FILE_MODULES.get(key)
+            if cached is None:
                 if module is None:
                     module_name = "_verl_omni_reward_" + hashlib.sha256(key.encode()).hexdigest()
-                    module = load_module(key, module_name=module_name)
-                _FILE_MODULES[key] = module
-            module = _FILE_MODULES[key]
+                    with _REGISTRY_LOCK:
+                        _FILE_INITIALIZING.add(module_name)
+                    try:
+                        module = load_module(key, module_name=module_name)
+                    except BaseException:
+                        with _REGISTRY_LOCK:
+                            _PENDING.pop(module_name, None)
+                        raise
+                    else:
+                        with _REGISTRY_LOCK:
+                            _REGISTERED.update(_PENDING.pop(module_name, {}))
+                    finally:
+                        with _REGISTRY_LOCK:
+                            _FILE_INITIALIZING.discard(module_name)
+                with _FILE_IMPORT_LOCK:
+                    _FILE_MODULES[key] = module
+            else:
+                module = cached
     return getattr(module, object_name)
 
 

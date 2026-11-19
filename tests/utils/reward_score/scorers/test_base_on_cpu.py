@@ -233,3 +233,197 @@ def test_explicit_file_does_not_initialize_an_unrelated_shadow_package(scorer_pa
     cls = import_from_spec(f"{package.source}:CustomScorer")
     assert cls().score_batch([{}]) == [{"score": 1}]
     assert package.name not in sys.modules
+
+
+@pytest.mark.parametrize("package_import", [False, True])
+@pytest.mark.parametrize("alias_registration", [False, True])
+def test_failed_plugin_registration_is_not_published_and_can_retry(
+    tmp_path, monkeypatch, package_import, alias_registration
+):
+    import sys
+    from uuid import uuid4
+
+    from verl_omni.utils.reward_score.scorers import registry
+
+    name = "retry_" + uuid4().hex
+    good = "good_" + uuid4().hex
+    missing = "dependency_" + uuid4().hex
+    monkeypatch.syspath_prepend(str(tmp_path))
+    template = (
+        "from verl_omni.utils.reward_score.scorers.base import RewardScorer\n"
+        "from verl_omni.utils.reward_score.scorers.registry import register_scorer\n"
+        "@register_scorer({name!r})\n"
+        "class Scorer(RewardScorer):\n"
+        "    def score_batch(self, batch): return [{{'score': 1}} for _ in batch]\n"
+    )
+    (tmp_path / (good + ".py")).write_text(template.format(name=good))
+    folder = tmp_path / (name if package_import else "not-a-package")
+    folder.mkdir()
+    if package_import:
+        (folder / "__init__.py").write_text("")
+    path = folder / "plugin.py"
+    registration = (
+        "from verl_omni.utils.reward_score.scorers.registry import register_scorer\n"
+        f"from {good} import Scorer\n"
+        f"register_scorer({name!r})(Scorer)\n"
+        if alias_registration
+        else template.format(name=name)
+    )
+    path.write_text(f"import {good}\n" + registration + f"import {missing}\n")
+    ref = f"{name}.plugin:Scorer" if package_import else f"{path}:Scorer"
+    try:
+        with pytest.raises((ImportError, RuntimeError)):
+            registry.import_from_spec(ref)
+        assert name not in registry.peek_registered_scorers(), "failed imports must not expose a class"
+        successful = registry.get_scorer_cls(good)
+        with pytest.raises(ValueError, match="Unknown reward scorer"):
+            registry.get_scorer_cls(name)
+        (tmp_path / (missing + ".py")).write_text("ready = True\n")
+        cls = registry.import_from_spec(ref)
+        assert registry.get_scorer_cls(name) is cls
+        assert registry.get_scorer_cls(good) is successful
+    finally:
+        registry.peek_registered_scorers()
+        registry._REGISTERED.pop(name, None)
+        registry._REGISTERED.pop(good, None)
+        registry._FILE_MODULES.pop(str(path), None)
+        for key in list(sys.modules):
+            if key in (good, missing, name) or key.startswith(name + "."):
+                sys.modules.pop(key, None)
+
+
+def test_concurrent_duplicate_registration_has_one_winner(monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+
+    from verl_omni.utils.reward_score.scorers import registry
+
+    entered, release, second_started = Event(), Event(), Event()
+
+    class First(_MinimalScorer):
+        pass
+
+    class Second(_MinimalScorer):
+        pass
+
+    class GatedRegistry(dict):
+        def __setitem__(self, key, value):
+            if key == "registration-race" and value is First:
+                entered.set()
+                if not release.wait(5):
+                    raise TimeoutError("registration gate was not released")
+            super().__setitem__(key, value)
+
+    monkeypatch.setattr(registry, "_REGISTERED", GatedRegistry(registry.peek_registered_scorers()))
+
+    def competing_registration():
+        second_started.set()
+        return registry.register_scorer("registration-race")(Second)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(registry.register_scorer("registration-race"), First)
+        try:
+            assert entered.wait(5)
+            second = pool.submit(competing_registration)
+            assert second_started.wait(5)
+            with pytest.raises(TimeoutError):
+                second.result(timeout=0.1)
+        finally:
+            release.set()
+        assert first.result(timeout=5) is First
+        with pytest.raises(ValueError, match="already been registered"):
+            second.result(timeout=5)
+    assert registry.register_scorer("registration-race")(First) is First
+    assert registry.get_scorer_cls("registration-race") is First
+
+
+def test_standalone_import_does_not_block_a_different_file_from_package_init(tmp_path):
+    import subprocess
+    import sys
+    import textwrap
+
+    from verl.utils import import_utils
+
+    from verl_omni.utils.reward_score.scorers import registry
+
+    script = textwrap.dedent("""
+        import ast
+        import importlib
+        import runpy
+        import sys
+        from concurrent.futures import ThreadPoolExecutor
+        from pathlib import Path
+        from threading import Event
+        from types import ModuleType
+
+        # Exercise the actual registry and pinned file loader with only stdlib
+        # dependencies. This probe uses no scorer/tensor operation; importing
+        # the full accelerator stack would obscure the import-lock deadline.
+        for name in ('verl', 'verl.utils', 'verl_omni', 'verl_omni.utils',
+                     'verl_omni.utils.reward_score', 'verl_omni.utils.reward_score.scorers'):
+            package = ModuleType(name)
+            package.__path__ = []
+            sys.modules[name] = package
+        helper = ModuleType('verl.utils.import_utils')
+        helper.__dict__.update(runpy.run_path(sys.argv[3]))
+        sys.modules['verl.utils.import_utils'] = helper
+        name = 'verl_omni.utils.reward_score.scorers.registry'
+        registry = ModuleType(name)
+        registry.__file__ = sys.argv[2]
+        registry.RewardScorer = object
+        sys.modules[name] = registry
+        tree = ast.parse(Path(sys.argv[2]).read_text())
+        tree.body = [node for node in tree.body if not (
+            isinstance(node, ast.ImportFrom) and
+            node.module == 'verl_omni.utils.reward_score.scorers.base')]
+        exec(compile(tree, sys.argv[2], 'exec'), registry.__dict__)
+        import_from_spec = registry.import_from_spec
+
+        root = Path(sys.argv[1])
+        state = ModuleType('reward_import_gate')
+        state.package_entered = Event()
+        state.file_entered = Event()
+        sys.modules[state.__name__] = state
+        sys.path.insert(0, str(root))
+        folder = root / 'standalone-files'
+        folder.mkdir()
+        other = folder / 'other.py'
+        other.write_text('value = 9\\n')
+        package = root / 'initializing_reward_package'
+        package.mkdir()
+        (package / '__init__.py').write_text(
+            'import reward_import_gate as state\\n'
+            'from verl_omni.utils.reward_score.scorers.registry import import_from_spec\\n'
+            'state.package_entered.set()\\n'
+            'assert state.file_entered.wait(5)\\n'
+            f'value = import_from_spec({str(other) + ":value"!r})\\n'
+        )
+        source = folder / 'first.py'
+        source.write_text(
+            'import reward_import_gate as state\\n'
+            'state.file_entered.set()\\n'
+            'import initializing_reward_package\\n'
+            'value = initializing_reward_package.value\\n'
+        )
+        print('IMPORT_LOCK_PROBE_ENTERED', flush=True)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            package_future = pool.submit(importlib.import_module, 'initializing_reward_package')
+            assert state.package_entered.wait(5)
+            file_future = pool.submit(import_from_spec, str(source) + ':value')
+            assert file_future.result(timeout=5) == 9
+            assert package_future.result(timeout=5).value == 9
+        print('IMPORT_LOCK_PROBE_PASSED', flush=True)
+    """)
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", script, str(tmp_path), registry.__file__, import_utils.__file__],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except subprocess.TimeoutExpired as error:
+        assert b"IMPORT_LOCK_PROBE_ENTERED" in (error.stdout or b"")
+        pytest.fail("IMPORT_LOCK_PROBE_STALLED after entering the real import interleaving")
+    assert "IMPORT_LOCK_PROBE_ENTERED" in result.stdout, result.stderr
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "IMPORT_LOCK_PROBE_PASSED" in result.stdout

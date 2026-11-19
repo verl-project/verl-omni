@@ -162,6 +162,26 @@ def _executor(
     )
 
 
+@pytest.mark.parametrize("method", ["wake_up", "score", "infer", "sleep", "close"])
+def test_executor_rejects_another_event_loop_before_mutation(monkeypatch, method):
+    loop = asyncio.new_event_loop()
+    executor = _executor(monkeypatch, f"{_TEST_MODULE}:FakeScorer")
+    try:
+        loop.run_until_complete(executor.wake_up())
+        loop.run_until_complete(executor.sleep())
+        model = executor._model
+        calls = list(model.calls)
+        call = getattr(executor, method)
+        with pytest.raises(RuntimeError, match="across event loops"):
+            asyncio.run(call({"i": 1}) if method in ("score", "infer") else call())
+        assert executor._model is model
+        assert model.calls == calls
+        assert not executor._awake and not executor._closed
+    finally:
+        loop.run_until_complete(executor.close())
+        loop.close()
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_ref", ["cpu-fake-scorer", f"{_TEST_MODULE}:FakeScorer"])
 async def test_wake_loads_scorer_and_scores_through_the_microbatcher(monkeypatch, model_ref):
