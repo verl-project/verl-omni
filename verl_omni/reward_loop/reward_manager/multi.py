@@ -154,6 +154,12 @@ class MultiRewardManager(RewardManagerBase, ABC):
 
             fn = load_extern_object(path, name) if path is not None else None
             sig = inspect.signature(fn) if fn is not None else None
+            audio_param = sig.parameters.get("solution_audio") if sig is not None else None
+            if audio_param is not None and audio_param.kind not in (
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                inspect.Parameter.KEYWORD_ONLY,
+            ):
+                audio_param = None
             is_async = inspect.iscoroutinefunction(fn) if fn is not None else True
             if independent and (
                 not is_async
@@ -172,6 +178,7 @@ class MultiRewardManager(RewardManagerBase, ABC):
                     "required": required,
                     "independent": independent,
                     "sig": sig,
+                    "audio_param": audio_param,
                     "is_async": is_async,
                     "extra_args": extra_args,
                     "model": model_name,
@@ -206,9 +213,9 @@ class MultiRewardManager(RewardManagerBase, ABC):
         if "solution_audio" in all_kwargs:
             return None
         params = [
-            sub["sig"].parameters["solution_audio"]
+            sub["audio_param"]
             for sub in self._sub_rewards
-            if "solution_audio" in sub["sig"].parameters and "solution_audio" not in sub["extra_args"]
+            if sub["audio_param"] is not None and "solution_audio" not in sub["extra_args"]
         ]
         if not params:
             return None
@@ -242,7 +249,7 @@ class MultiRewardManager(RewardManagerBase, ABC):
             # Do not change kwargs received by existing **kwargs-only scorers.
             if sig is not None and "batch" in sig.parameters:
                 sub_kwargs["batch"] = data
-            if solution_audio is not None and "solution_audio" in sig.parameters:
+            if solution_audio is not None and sub["audio_param"] is not None:
                 sub_kwargs.setdefault("solution_audio", solution_audio)
             filtered_kwargs = _filter_kwargs(sub_kwargs, sig) if sig is not None else {}
 
