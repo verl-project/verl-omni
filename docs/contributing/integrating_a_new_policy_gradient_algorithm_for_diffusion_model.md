@@ -1,6 +1,6 @@
 # How to Integrate a New Policy-Gradient Algorithm for Diffusion Model
 
-Last updated: 07/06/2026.
+Last updated: 10/27/2026.
 
 This guide explains how to add a new PPO-like policy-gradient algorithm to
 VeRL-Omni's diffusion trainer. Policy-gradient diffusion algorithms operate on
@@ -223,7 +223,9 @@ class QwenImagePipelineWithLogProb(QwenImagePipeline):
 The adapter contracts (the four `DiffusionModelBase` classmethods, the
 rollout `forward()` shape) are documented in
 [`integrating_a_diffusion_model.md`](integrating_a_diffusion_model.md);
-nothing about them changes when you swap algorithms.
+nothing about them changes when you swap algorithms. If the algorithm
+also trains the AR module of a diffusion model, add `ar_training_adapter.py` beside the DiT adapter and follow
+[Composite AR training adapter](integrating_a_diffusion_model.md#composite-ar-training-adapter).
 
 **Code reuse.** Algorithms in the same family typically share most
 adapter code. Two patterns work well:

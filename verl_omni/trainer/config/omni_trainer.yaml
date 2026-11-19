@@ -59,6 +59,12 @@ actor_rollout_ref:
     # Shuffle training data across PPO epochs.
     shuffle: false
 
+    # Checkpoint config.
+    checkpoint:
+
+      # Save only LoRA model weights with the FSDP checkpoint saver.
+      save_lora_only: false
+
 # Trainer configuration.
 trainer:
 
@@ -102,6 +108,14 @@ algorithm:
 # accepted by _validate_topk_logprobs; all other defaults are inherited from
 # verl's distillation group.
 distillation:
+
+  distillation_loss:
+
+    # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+    _target_: verl_omni.workers.config.omni.distillation.OmniDistillationLossConfig
+
+    # Temperature for the hidden-state (nitrobrew) distillation loss modes.
+    kd_temperature: 1.0
 
   teacher_models:
 

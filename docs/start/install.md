@@ -1,8 +1,8 @@
 # Installation
 
-Last updated: 09/24/2026
+Last updated: 11/16/2026
 
-For Ascend NPU, see the {doc}`NPU installation guide <install_npu>`. For AMD GPU, see the {doc}`ROCm installation guide <install_rocm>`. For Intel GPU, see the {doc}`Intel GPU installation guide <install_xpu>`.
+For Ascend NPU, see the {doc}`NPU installation guide <install_npu>`. For AMD GPU, see the {doc}`ROCm installation guide <install_rocm>`. For Intel GPU, see the {doc}`Intel GPU installation guide <install_xpu>`. For Cambricon MLU, see the {doc}`MLU installation guide <install_mlu>`.
 
 ## Requirements
 
@@ -50,7 +50,7 @@ source .venv/bin/activate
 2. Install vLLM
 
 ```bash
-uv pip install vllm==0.30.0 --torch-backend=auto
+uv pip install vllm==0.33.0 --torch-backend=auto
 ```
 
 3. Install the rollout engine and training stack
@@ -67,7 +67,7 @@ In the cuda-compat environment, pass `--python "$CONDA_PREFIX/bin/python"` and u
 
 | Extra       | Adds                                                          | When                     |
 | ----------- | ------------------------------------------------------------- | ------------------------ |
-| `gpu`       | `kernels==0.16.0`, `liger-kernel`, `cupy-cuda13x` | CUDA rollout + actor FA3 |
+| `gpu`       | `kernels==0.16.1`, `liger-kernel`, `cupy-cuda13x` | CUDA rollout + actor FA3 |
 | `omni`      | omni-trainer runtime (`librosa`, `torchaudio`, `av`, …)       | Omni-modality training   |
 | `fa2`       | `flash-attn` (source build, needs a CUDA toolkit)             | Omni trainer FA2 default |
 | `audio`     | `qwen-omni-utils`, `audioread`                                 | Audio parsing (omni data) |
@@ -76,7 +76,7 @@ In the cuda-compat environment, pass `--python "$CONDA_PREFIX/bin/python"` and u
 
 ### Flash Attention 3
 
-The `gpu` extra pulls `kernels==0.16.0` for Diffusers actor FA3 (`attn_backend=_flash_3_varlen_hub`).
+The `gpu` extra pulls `kernels==0.16.1` for Diffusers actor FA3 (`attn_backend=_flash_3_varlen_hub`).
 Defaults pair actor and rollout on the same Hub kernel backend:
 
 ```bash
@@ -98,15 +98,27 @@ actor_rollout_ref.rollout.rollout_attn_backend=FLASH_ATTN_HUB
 
 ### Flash Attention 2 (omni trainer)
 
-The omni trainer's actor is a transformers LLM; following verl's practice for LLM training, it defaults to `flash_attention_2`, which requires the local `flash-attn` package:
+The omni trainer's actor is a transformers LLM; following verl's practice for LLM training, it defaults to `flash_attention_2`, which requires the local `flash-attn` package. The VeOmni Thinker recipes and the legacy `FLASH_ATTN` rollout backend also load it.
+
+The pinned stack is torch 2.14.0+cu130, and no prebuilt flash-attn wheel matches it: the 2.8.x line stops at torch 2.8 on CUDA 12 (PyPI carries the source tarball only), and upstream verl's [wheelhouse](https://verl-project.github.io/verl-wheelhouse/simple/flash-attn/) builds for torch 2.13/CUDA 13.2 — its wheel fails on torch 2.14 with `undefined symbol` at import. A plain `uv pip install -e ".[fa2]"` fails as well: the sdist's `setup.py` imports `torch`, which build isolation does not provide. FA2 therefore installs from source, against the installed stack:
 
 ```bash
-uv pip install -e ".[fa2]"
+uv pip freeze --exclude-editable > /tmp/verl-omni-fa2-constraints.txt
+uv pip install -c /tmp/verl-omni-fa2-constraints.txt ninja packaging wheel
+MAX_JOBS=4 FLASH_ATTENTION_FORCE_BUILD=TRUE \
+uv pip install -c /tmp/verl-omni-fa2-constraints.txt \
+    --no-build-isolation --no-binary flash-attn --reinstall-package flash-attn 'flash-attn>=2.8.3'
+```
+
+A CUDA 13 development toolkit (`nvcc` reachable via `CUDA_HOME`) is required. The constraints file keeps the added packages from moving the pinned torch/vLLM stack — an incompatibility should fail resolution rather than change torch. `MAX_JOBS` caps compiler parallelism; each compilation job peaks around 9 GB of RAM, so lower it on smaller hosts. Check the extension loads:
+
+```bash
+python -c "from flash_attn import flash_attn_func, flash_attn_varlen_func; print('flash-attn OK')"
 ```
 
 ### Optional engine backends
 
-VeRL-Omni defaults to FSDP2; the diffusion trainer and Qwen3-Omni Thinker can alternatively use VeOmni — see {doc}`Optional engine backends <engine_backends>`.
+VeRL-Omni trains with FSDP by default (`fsdp2` is a selectable strategy); the diffusion trainer and Qwen3-Omni Thinker can alternatively use VeOmni — see {doc}`Optional engine backends <engine_backends>`.
 
 ## Post-Installation Verification
 
@@ -184,7 +196,7 @@ Notes:
 
 ## Example: Qwen-Image FlowGRPO training in Docker
 
-This walkthrough follows the [FlowGRPO quickstart](flowgrpo_quickstart.md) using the OCR dataset and `examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora.sh`.
+This walkthrough follows the [FlowGRPO quickstart](flowgrpo_quickstart.md) using the OCR dataset and `examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora_v1.sh`.
 
 Use the **`ocr` image target** (`verl-omni:gpu-ocr`) so the `Levenshtein` dependency is present.
 
@@ -215,14 +227,15 @@ export WANDB_API_KEY=<your_wandb_api_key>
 
 ### 4. Run FlowGRPO training
 
-The default OCR LoRA script uses 4 GPUs by default:
+The default OCR LoRA script (V1 sync — the default trainer path since v0.3.0)
+uses 4 GPUs by default:
 
 ```bash
-bash examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora.sh
+bash examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora_v1.sh
 ```
 
-The script launches `python3 -m verl_omni.trainer.main_diffusion` with FlowGRPO + `vllm_omni` rollout and OCR reward (`compute_score_ocr`). Checkpoints are written to:
+The script launches `python3 -m verl_omni.trainer.main_diffusion_v1` with FlowGRPO + `vllm_omni` rollout and OCR reward (`compute_score_ocr`). Checkpoints are written to:
 
 ```bash
-checkpoints/flow_grpo/qwen_image_ocr_lora
+checkpoints/flow_grpo/qwen_image_ocr_lora_v1
 ```

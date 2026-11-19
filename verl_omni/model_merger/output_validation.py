@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Portable validation for published Diffusers model artifacts."""
+"""Portable validation for published Diffusers model and PEFT adapter artifacts."""
 
 from pathlib import Path
 
@@ -61,8 +61,12 @@ def validate_artifact(target: str | Path) -> dict:
         raise ValueError("Invalid native MiniMax H3 artifact")
     if adapter:
         config = read_json(root / "adapter_config.json")
-        if config.get("peft_type") != "LORA" or config.get("task_type") is not None:
-            raise ValueError("Expected a diffusion PEFT LoRA configuration")
+        # Manifests without task_type predate omni adapter export and are diffusion adapters.
+        task_type = manifest.get("task_type")
+        if config.get("peft_type") != "LORA" or not (task_type is None or task_type == "CAUSAL_LM"):
+            raise ValueError("Expected a diffusion or causal LM PEFT LoRA configuration")
+        if config.get("task_type") != task_type:
+            raise ValueError("Adapter task type conflicts with manifest")
         if manifest.get("weight_layout") != "peft":
             raise ValueError("Unsupported adapter weight layout")
     else:

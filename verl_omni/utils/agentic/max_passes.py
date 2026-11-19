@@ -16,7 +16,7 @@
 
 from __future__ import annotations
 
-from verl_omni.tools.trajectory.hydra_env import agentic_get
+from verl_omni.utils.agentic.config import agentic_get
 
 
 def max_generate_passes() -> int:

@@ -109,16 +109,41 @@ def test_init_tokenizer_wires_omni_model_config():
 
 class TestLoraAwareWiring:
     def test_actor_worker_is_omni_detach_worker(self):
+        # With hybrid replicas disabled (the default), the parent lays out
+        # Role.Actor, not Role.ActorRolloutRef; every actor-ish role present in
+        # the mapping must resolve to the omni worker, or the actor silently
+        # runs the upstream DetachActorWorker (full PEFT dump, no
+        # get_lora_peft_config) and LoRA syncs misroute into the dense path.
         from verl.trainer.ppo.utils import Role
 
         from verl_omni.workers.omni_engine_workers import OmniDetachActorWorker
 
-        trainer = OmniPPOTrainerSeparateAsync(_compose_config())
-        trainer._init_resource_pool_mgr()
-        role = Role.ActorRolloutRef if Role.ActorRolloutRef in trainer.role_worker_mapping else Role.ActorRollout
-        modified = trainer.role_worker_mapping[role].__ray_metadata__.modified_class
-        assert modified.__name__ == OmniDetachActorWorker.__name__
-        assert modified.__module__.startswith("verl_omni"), modified.__module__
+        # (overrides, expected actor-ish roles) over the parent's four layouts:
+        # hybrid off/on x reference policy separate/fused.
+        layouts = [
+            ([], {Role.Actor}),
+            (["actor_rollout_ref.actor.use_kl_loss=true"], {Role.Actor, Role.RefPolicy}),
+            (["trainer.v1.separate_async.hybrid_rollout.enable_switch=True"], {Role.ActorRollout}),
+            (
+                [
+                    "actor_rollout_ref.actor.use_kl_loss=true",
+                    "trainer.v1.separate_async.hybrid_rollout.enable_switch=True",
+                ],
+                {Role.ActorRolloutRef},
+            ),
+        ]
+        for overrides, expected_roles in layouts:
+            trainer = OmniPPOTrainerSeparateAsync(_compose_config(overrides))
+            trainer._init_resource_pool_mgr()
+            actor_roles = {
+                role
+                for role in (Role.Actor, Role.RefPolicy, Role.ActorRolloutRef, Role.ActorRollout)
+                if role in trainer.role_worker_mapping
+            }
+            assert actor_roles == expected_roles, (overrides, actor_roles)
+            for role in actor_roles:
+                modified = trainer.role_worker_mapping[role].__ray_metadata__.modified_class
+                assert issubclass(modified, OmniDetachActorWorker), (overrides, role, modified)
 
     def test_detach_worker_mro_keeps_omni_lora_methods(self):
         # The omni worker must win the MRO: its update_weights carries the

@@ -1,8 +1,8 @@
 # Installation (NPU)
 
-Last updated: 10/18/2026
+Last updated: 11/10/2026
 
-For NVIDIA GPU, see the {doc}`GPU installation guide <install>`. For AMD GPU, see the {doc}`ROCm installation guide <install_rocm>`. For Intel GPU, see the {doc}`Intel GPU installation guide <install_xpu>`.
+For NVIDIA GPU, see the {doc}`GPU installation guide <install>`. For AMD GPU, see the {doc}`ROCm installation guide <install_rocm>`. For Intel GPU, see the {doc}`Intel GPU installation guide <install_xpu>`. For Cambricon MLU, see the {doc}`MLU installation guide <install_mlu>`.
 
 ## Requirements
 
@@ -34,7 +34,7 @@ uv pip install --force-reinstall \
     torch==2.10.0+cpu torchvision==0.25.0+cpu torchaudio==2.10.0+cpu \
     --extra-index-url https://download.pytorch.org/whl/cpu/ \
     --index-strategy unsafe-best-match
-uv pip install --force-reinstall torch-npu==2.10.0.post4 \
+uv pip install --force-reinstall torch-npu==2.10.0.post7 \
     --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi \
     --extra-index-url https://download.pytorch.org/whl/cpu/ \
     --index-strategy unsafe-best-match
@@ -51,7 +51,7 @@ source "${ASCEND_HOME_PATH:-/usr/local/Ascend/ascend-toolkit/latest}/set_env.sh"
 source /usr/local/Ascend/nnal/atb/set_env.sh
 
 cd ..
-git clone --depth 1 -b v0.30.0 https://github.com/vllm-project/vllm.git
+git clone --depth 1 -b v0.33.0 https://github.com/vllm-project/vllm.git
 cd vllm
 VLLM_TARGET_DEVICE=empty uv pip install -e ".[audio]"
 uv pip uninstall -y triton || true
@@ -67,9 +67,38 @@ uv pip install -e . \
     --extra-index-url https://download.pytorch.org/whl/cpu/ \
     --index-strategy unsafe-best-match
 cd ..
-uv pip install --reinstall --no-deps triton-ascend==3.2.2 \
+uv pip install --reinstall --no-deps triton-ascend==3.6.0.post2 \
+    --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
+# Kernel operators vllm-ascend's worker init imports on Ascend A2/A3/950 —
+# swap the -a2 suffix for your device's variant (-a3 / -a5).
+uv pip install --no-deps "flash-linear-attention-npu-a2==26.9.1" \
     --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
 cd verl-omni
+```
+
+The `uv pip install -e .` on vLLM-Ascend is a full source build:
+`COMPILE_CUSTOM_KERNELS` defaults to `1`, compiling the `vllm_ascend_C` C++
+extension and the AscendC custom-op package (`vllm_ascend/_cann_ops_custom`).
+It needs the CANN environment sourced above plus `cmake` and a C++ toolchain,
+and takes tens of minutes. If `npu-smi` is unreachable on the build host (for
+example a CPU-only machine), export `SOC_VERSION` first — `ascend910b1` on A2,
+`ascend910_9391` on A3 — or the build aborts with "Could not determine chip
+type automatically via 'npu-smi'".
+
+```{warning}
+Setting `COMPILE_CUSTOM_KERNELS=0` installs vLLM-Ascend pure-python and skips
+**both** compiled artifacts:
+
+- `vllm_ascend_C`: sleep mode (colocated rollout `sleep`/`wake_up`) asserts
+  with `camem allocator is not available` without it.
+- the `_cann_ops_custom` aclnn-op package: Qwen2.5-VL-class reward engines
+  fail with `aclnnAddRmsNormBias ... not in libopapi.so`, because that op is
+  resolved from this package, not from stock CANN.
+
+If you skipped compilation, `tests/npu_smoke/sync_npu_stack.sh` is the
+reference recipe for building `vllm_ascend_C` (targeted cmake) and the
+`add_rms_norm_bias` op (`csrc/build.sh --pkg`) after the fact. Prebuilt
+vLLM-Ascend wheels ship both artifacts.
 ```
 
 4. Install vLLM-Omni and VeRL-Omni
@@ -97,6 +126,8 @@ python -c "from importlib.metadata import version; import torch, torch_npu; prin
 python -c "import vllm; print('vllm', vllm.__version__)"
 python -c "import triton; from triton.backends import backends; print('triton', triton.__version__, sorted(backends))"
 python -c "from importlib.metadata import version; import vllm_ascend; print('vllm-ascend', version('vllm-ascend'))"
+python -c "import vllm_ascend.vllm_ascend_C; print('vllm_ascend_C ok')"
+python -c "import os, vllm_ascend; p = os.path.join(os.path.dirname(vllm_ascend.__file__), '_cann_ops_custom/vendors/custom_transformer/op_api/lib/libcust_opapi.so'); assert os.path.exists(p), f'missing aclnn op library: {p}'; print('aclnn custom ops ok')"
 python -c "from importlib.metadata import version; import vllm_omni; print('vllm-omni', version('vllm-omni'))"
 python -c "import verl; print('verl', verl.__version__)"
 python -c "import verl_omni; print('VeRL-Omni ready')"
@@ -110,47 +141,105 @@ for all supported Ascend devices. The image includes CANN, `torch-npu`,
 
 ### Build
 
-Set `NPU_DEVICE` to `a2`, `a3` (default), or `a5`. The Dockerfile selects the
-base image and compiler target automatically.
+Pass `BASE_IMAGE` and `SOC_VERSION` from the same row, and set
+`FLA_NPU_PACKAGE` to the row's `flash-linear-attention-npu-<variant>`
+(`a2`/`a3`/`a5`, same version). The Dockerfile has a
+single `FROM`, so the build pulls only that image. Omitting both build args
+uses the A3 row.
+
+| Device | `BASE_IMAGE` | `SOC_VERSION` |
+| --- | --- | --- |
+| A2 | `quay.io/ascend/cann:9.1.0-910b-ubuntu22.04-py3.12` | `ascend910b1` |
+| A3 | `quay.io/ascend/cann:9.1.0-a3-ubuntu22.04-py3.12` | `ascend910_9391` |
+| A5 | `quay.io/ascend/cann:9.1.0-950-ubuntu22.04-py3.12` | `ascend950dt_9582` |
+
+Other CANN versions, operating systems, and Python versions are listed in the
+[Ascend CANN container image tags](https://github.com/Ascend/cann-container-image/blob/main/supported_tags.md).
+Use `quay.io/ascend/cann:<tag>` as `BASE_IMAGE`, and keep `SOC_VERSION` aligned
+with the chip series in that tag.
+
+Example for A5:
 
 ```bash
-NPU_DEVICE=a5
+BASE_IMAGE=quay.io/ascend/cann:9.1.0-950-ubuntu22.04-py3.12
+SOC_VERSION=ascend950dt_9582
+IMAGE=verl-omni:npu-a5
 
 docker build \
   -f docker/Dockerfile.npu \
-  --build-arg NPU_DEVICE=$NPU_DEVICE \
-  -t verl-omni:npu-$NPU_DEVICE \
+  --build-arg BASE_IMAGE=$BASE_IMAGE \
+  --build-arg SOC_VERSION=$SOC_VERSION \
+  -t $IMAGE \
   .
 ```
 
 ### Run
 
 The host needs the Ascend driver and firmware compatible with CANN 9.1.0.
-Set `NPU_DEVICE` to the image you built and `NPU_DEVICE_IDS` to the devices
-to expose, as listed by `npu-smi info`.
+Use the command matching your machine, and adjust the `davinci` range to the
+NPUs you want to expose.
+
+A2:
 
 ```bash
-NPU_DEVICE=a5
-NPU_DEVICE_IDS=(0 1 2 3 4 5 6 7)
-DEVICES=()
-for id in "${NPU_DEVICE_IDS[@]}"; do
-  DEVICES+=(--device="/dev/davinci${id}")
-done
-for device in /dev/davinci_manager /dev/devmm_svm /dev/hisi_hdc; do
-  if [[ -e "$device" ]]; then
-    DEVICES+=(--device="$device")
-  fi
-done
+DEVICES=""
+for i in {0..7}; do DEVICES+=" --device=/dev/davinci$i"; done
 
-docker run -it --rm \
+docker run -it \
   --name verl_omni_npu \
   --network host \
   --ipc host \
-  "${DEVICES[@]}" \
+  $DEVICES \
+  --device=/dev/davinci_manager \
+  --device=/dev/devmm_svm \
+  --device=/dev/hisi_hdc \
   -v /usr/local/sbin/npu-smi:/usr/local/sbin/npu-smi:ro \
   -v /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro \
-  -v /mnt/data:/mnt/data \
-  verl-omni:npu-$NPU_DEVICE \
+  -v /home:/home \
+  verl-omni:npu-a2 \
+  bash
+```
+
+A3:
+
+```bash
+DEVICES=""
+for i in {0..15}; do DEVICES+=" --device=/dev/davinci$i"; done
+
+docker run -it \
+  --name verl_omni_npu \
+  --network host \
+  --ipc host \
+  $DEVICES \
+  --device=/dev/davinci_manager \
+  --device=/dev/devmm_svm \
+  --device=/dev/hisi_hdc \
+  -v /usr/local/sbin/npu-smi:/usr/local/sbin/npu-smi:ro \
+  -v /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro \
+  -v /home:/home \
+  verl-omni:npu-a3 \
+  bash
+```
+
+A5:
+
+```bash
+DEVICES=""
+for i in {0..7}; do DEVICES+=" --device=/dev/davinci$i"; done
+
+docker run -it \
+  --name verl_omni_npu \
+  --network host \
+  --ipc host \
+  $DEVICES \
+  --device=/dev/davinci_manager \
+  --device=/dev/hisi_hdc \
+  --device=/dev/ummu \
+  --device=/dev/uburma \
+  -v /usr/local/sbin/npu-smi:/usr/local/sbin/npu-smi:ro \
+  -v /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro \
+  -v /home:/home \
+  verl-omni:npu-a5 \
   bash
 ```
 
@@ -203,7 +292,11 @@ If you run the training command manually, make sure to include the NPU-specific 
 actor_rollout_ref.model.attn_backend=_native_npu
 ```
 
-The script launches `python3 -m verl_omni.trainer.main_diffusion` with FlowGRPO + `vllm_omni` rollout and OCR reward (`compute_score_ocr`). Checkpoints are written to:
+The script launches `python3 -m verl_omni.trainer.main_diffusion` (the
+deprecated v0 trainer — this NPU launcher keeps v0 until an NPU V1 recipe for
+Qwen-Image FlowGRPO lands, tracked in
+[verl-project/verl-omni#389](https://github.com/verl-project/verl-omni/issues/389);
+expect a `DeprecationWarning` at launch) with FlowGRPO + `vllm_omni` rollout and OCR reward (`compute_score_ocr`). Checkpoints are written to:
 
 ```bash
 checkpoints/flow_grpo/qwen_image_ocr_lora

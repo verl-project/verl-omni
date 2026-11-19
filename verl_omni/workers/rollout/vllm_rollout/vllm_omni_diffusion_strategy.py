@@ -38,6 +38,7 @@ from verl_omni.pipelines.rollout_media import (
     select_artifact,
 )
 from verl_omni.pipelines.rollout_request import OmniRolloutRequest, _alias_values_match
+from verl_omni.utils.config import coerce_expert_parallel_size
 from verl_omni.workers.config import DiffusionModelConfig, DiffusionRolloutConfig
 from verl_omni.workers.rollout.replica import DiffusionOutput
 from verl_omni.workers.rollout.vllm_rollout.vllm_omni_strategy_base import OmniStrategyBase
@@ -52,25 +53,19 @@ _NPU_WORKER_EXTENSION = "verl_omni.workers.rollout.vllm_rollout.npu_utils.vLLMOm
 def _diffusion_ingress_allowed_fields() -> frozenset[str]:
     """Mirror vllm-omni's diffusion ingress allowlist.
 
-    TODO (vllm-omni): Clean up OmniEngineArgs boundary; tracked in
-    https://github.com/vllm-project/vllm-omni/issues/8503.
+    The ingress validator rejects every field without an owner, and LLM-only
+    OmniEngineArgs fields have none on diffusion stages — this mirror is what
+    strips them. TODO (mike): drop the hand-copy once upstream exposes the
+    diffusion ingress allowlist as a public getter.
     """
     from dataclasses import fields
     from typing import Any, cast
 
     import vllm_omni.config.omni_config as omni_config_mod
+    from vllm.entrypoints.common.cli_args import FrontendArgs
     from vllm_omni.config import VllmOmniOrchestratorConfig
     from vllm_omni.diffusion.data import OmniDiffusionConfig
     from vllm_omni.engine.arg_utils import orchestrator_field_names
-
-    try:
-        from vllm.entrypoints.launchers.cli_args import FrontendArgs
-    except ModuleNotFoundError as error:
-        if error.name not in {"vllm.entrypoints.launchers", "vllm.entrypoints.launchers.cli_args"}:
-            raise
-        # The Ascend NPU smoke image can expose frontend args at the
-        # pre-launchers path even though the GPU v0.30 wheel uses launchers.
-        from vllm.entrypoints.openai.cli_args import FrontendArgs
 
     frontend_fields = {f.name for f in fields(FrontendArgs)}
 
@@ -232,6 +227,40 @@ class DiffusionStrategy(OmniStrategyBase):
             return _NPU_WORKER_EXTENSION
         return _GPU_WORKER_EXTENSION
 
+    def validate_configs(self) -> None:
+        """Refuse expert parallelism the diffusion rollout cannot honor.
+
+        No diffusion stage reads ``expert_parallel_size``, and vLLM-Omni enables
+        diffusion EP only for pipelines that opt in through their own stage
+        config. The rollout copies ``engine_kwargs.vllm_omni`` into the engine
+        verbatim, so both engine-flag spellings are refused here as well.
+
+        Raises:
+            ValueError: If EP is requested, by size or by either engine flag.
+        """
+        config = self.server.config
+        # The launcher compares this field, so an unset value must become 1.
+        if config.expert_parallel_size is None:
+            config.expert_parallel_size = 1
+        ep_size = coerce_expert_parallel_size(config.expert_parallel_size)
+        omni_kwargs = config.engine_kwargs.get("vllm_omni", {}) or {}
+        parallel_config = omni_kwargs.get("parallel_config") or {}
+        nested_flag = hasattr(parallel_config, "get") and bool(parallel_config.get("enable_expert_parallel", False))
+        flat_flag = bool(omni_kwargs.get("enable_expert_parallel", False))
+        stage_flag = any(
+            hasattr(overrides, "get") and bool(overrides.get("enable_expert_parallel", False))
+            for overrides in (omni_kwargs.get("stage_overrides") or {}).values()
+        )
+        if ep_size == 1 and not (nested_flag or flat_flag or stage_flag):
+            return
+        raise ValueError(
+            "Expert parallelism is not wired for the diffusion rollout: no diffusion stage consumes "
+            "actor_rollout_ref.rollout.expert_parallel_size, and vLLM-Omni enables diffusion EP only for "
+            "pipelines that opt in through their own stage config. Leave expert_parallel_size=1 and drop "
+            "any enable_expert_parallel entry from engine_kwargs.vllm_omni (flat key, parallel_config, "
+            "or stage_overrides)."
+        )
+
     def prepare_engine_args(self, engine_args: dict[str, Any], args: Namespace) -> None:
         config = self.server.config
         parallel_config = engine_args.get("parallel_config")
@@ -344,8 +373,8 @@ class DiffusionStrategy(OmniStrategyBase):
         engine_args["enable_prompt_embed_cache"] = self.server.config.enable_prompt_embed_cache
         engine_args["prompt_embed_cache_size"] = self.server.config.prompt_embed_cache_size
 
-        # Strip LLM-only fields from OmniEngineArgs before passing to diffusion ingress.
-        # Tracked upstream in https://github.com/vllm-project/vllm-omni/issues/8503.
+        # Strip LLM-only fields before diffusion ingress: the validator rejects
+        # every field without an owner, and LLM-only fields have none there.
         allowed = _diffusion_ingress_allowed_fields()
         dropped = sorted(key for key in engine_args if key not in allowed)
         for key in dropped:

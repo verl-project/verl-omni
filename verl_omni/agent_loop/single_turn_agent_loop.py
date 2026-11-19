@@ -154,12 +154,18 @@ class DiffusionSingleTurnAgentLoop(AgentLoopBase):
 
         # 2. build the initial prompt with Continuous Token
         self._assert_mm_supported(bool(multi_modal_data))
-        prompt_ids = await self.ct_build_initial_tokens(
-            raw_prompt,
-            images=images,
-            videos=videos,
-            audios=audios,
-        )
+        if kwargs.get("prompt_token_ids") is not None:
+            prompt_ids = list(kwargs["prompt_token_ids"])
+            sampling_params = {**sampling_params, "native_prompt_tokens": True}
+            if len(prompt_ids) > self.rollout_config.prompt_length:
+                raise ValueError("Pre-tokenized prompt exceeds rollout.prompt_length; do not truncate its framing.")
+        else:
+            prompt_ids = await self.ct_build_initial_tokens(
+                raw_prompt,
+                images=images,
+                videos=videos,
+                audios=audios,
+            )
 
         if raw_negative_prompt is not None:
             negative_prompt_ids = await self.ct_build_initial_tokens(

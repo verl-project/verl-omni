@@ -21,6 +21,7 @@ from types import SimpleNamespace
 import pytest
 from verl.workers.rollout.replica import RolloutMode
 
+from verl_omni.utils.config import LoRASettings
 from verl_omni.utils.rl_insight import enable_rl_insight
 from verl_omni.workers import engine_workers
 from verl_omni.workers.rollout.vllm_rollout import vllm_omni_async_server, vllm_omni_strategy_base
@@ -217,13 +218,16 @@ def test_weight_sync_trace_uses_actor_rank(monkeypatch):
     worker = object.__new__(engine_workers.ActorRolloutRefWorker)
     worker._rank = 5
     worker.rollout_adapter = "default"
+    worker.lora_settings = LoRASettings(
+        rank=0, alpha=0, adapter_path=None, merge=False, adapters=("default",), enabled=False
+    )
+    worker.base_sync_done = True
     worker.config = SimpleNamespace(
         rollout=SimpleNamespace(
             checkpoint_engine=SimpleNamespace(backend="remote"),
         )
     )
     worker.actor = SimpleNamespace(engine=Engine())
-    worker.peft_merge = False
     worker.checkpoint_engine = SimpleNamespace(send_weights=send_weights)
 
     asyncio.run(worker.update_weights(mode="remote"))

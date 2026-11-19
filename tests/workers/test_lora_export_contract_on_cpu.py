@@ -15,25 +15,24 @@
 
 Pins, for both engines behind one implementation:
 - the dtype matrix (adapter tensors keep training dtype; full-weight DTensor
-  gathers cast floating point to bf16; plain tensors pass through),
+  gathers use the requested dtype, defaulting to bf16; plain tensors pass through),
 - merged streams materialize inside ``merged_lora_context`` and stay valid
-  after the actor is restored,
-- engine memory management runs at the right point of each path,
-- the colocated sync ordering rows (base before adapter; single full sync in
-  merge/non-LoRA modes).
+  after the actor is restored; on FSDP2 with vanilla LoRA they are computed per
+  tensor, bitwise equal to PEFT's merge, without modifying the module,
+- engine memory management runs at the right point of each path.
+
+The colocated sync ordering rows live in ``test_lora_sync_plan_on_cpu.py``.
 """
 
-import asyncio
 import contextlib
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 import torch
 from torch.distributed.tensor import DTensor
 
 import verl_omni.workers.engine.lora_export as lora_export
-import verl_omni.workers.engine_workers as ew
 from verl_omni.workers.engine.lora_export import export_lora_for_sync
 
 # ---------------------------------------------------------------------------
@@ -128,6 +127,26 @@ def test_full_weight_export_casts_only_floating_dtensors(monkeypatch, is_diffuse
     assert weights["dti" if not is_diffusers else "transformer.dti"].dtype is torch.int64
 
 
+def test_ar_full_weight_export_preserves_fp32_dtensor(monkeypatch):
+    floating = _floating_dtensor(1.0001)
+    integer = _integer_dtensor()
+    _patch_export_machinery(monkeypatch, collect=MagicMock(return_value={"weight": floating, "count": integer}))
+    monkeypatch.setattr(lora_export, "replace_lora_wrapper", lambda name, config: name)
+
+    params, _ = export_lora_for_sync(
+        _peft_module(),
+        model_config=_model_config(),
+        base_sync_done=False,
+        is_diffusers=False,
+        full_weight_dtype=torch.float32,
+    )
+
+    weights = dict(params)
+    torch.testing.assert_close(weights["weight"], torch.tensor([1.0001]), atol=0, rtol=0)
+    assert weights["weight"].dtype is torch.float32
+    assert weights["count"].dtype is torch.int64
+
+
 def test_non_lora_full_weights_cast_policy(monkeypatch):
     plain = torch.tensor([1.5], dtype=torch.float32)
     module = _plain_module()
@@ -192,6 +211,29 @@ def test_merged_stream_materializes_inside_context(monkeypatch):
     torch.testing.assert_close(module.weight, torch.tensor([1.0]))  # actor restored after the stream
 
 
+@pytest.mark.parametrize("full_weight_dtype", [torch.bfloat16, torch.float32])
+def test_merged_dtensor_uses_full_weight_dtype(monkeypatch, full_weight_dtype):
+    module = _FakeModule()
+    floating = _floating_dtensor(1.0001)
+    monkeypatch.setattr(module, "state_dict", lambda: {"weight": floating})
+    monkeypatch.setattr(lora_export, "merged_lora_context", _merged_context(module))
+    monkeypatch.setattr(lora_export, "normalize_peft_param_name", lambda state: state)
+    _patch_export_machinery(monkeypatch)
+
+    params, _ = export_lora_for_sync(
+        module,
+        model_config=_model_config(merge=True),
+        base_sync_done=True,
+        is_diffusers=False,
+        full_weight_dtype=full_weight_dtype,
+    )
+
+    weights = dict(params)
+    expected = torch.tensor([1.0001]).to(full_weight_dtype)
+    torch.testing.assert_close(weights["weight"], expected, atol=0, rtol=0)
+    assert weights["weight"].dtype is full_weight_dtype
+
+
 def test_merged_stream_keeps_prefix(monkeypatch):
     module = _FakeModule()
     monkeypatch.setattr(lora_export, "merged_lora_context", _merged_context(module))
@@ -243,6 +285,169 @@ def test_non_merged_offload_runs_before_return(monkeypatch):
 
     dict(params)
     assert offloads == [1]
+
+
+def _lora_model(**lora_kwargs):
+    from peft import LoraConfig, get_peft_model
+
+    torch.manual_seed(0)
+    base = torch.nn.Sequential()
+    base.add_module("up", torch.nn.Linear(16, 32, bias=False))
+    base.add_module("down", torch.nn.Linear(32, 16, bias=False))
+    model = get_peft_model(base, LoraConfig(r=4, lora_alpha=8, target_modules=["up", "down"], **lora_kwargs))
+    with torch.no_grad():
+        for name, param in model.named_parameters():
+            if "lora_B" in name:
+                param.normal_()  # B starts at zero; a zero delta would hide a missing merge
+    return model
+
+
+def _fail_merged_context(actor, backup_adapters):
+    raise AssertionError("the per-tensor path must not merge in place")
+
+
+def test_fsdp2_merged_stream_matches_peft_merge_without_touching_module(monkeypatch):
+    import copy
+
+    model = _lora_model()
+    expected = copy.deepcopy(model).merge_and_unload().state_dict()
+    before = {name: param.detach().clone() for name, param in model.named_parameters()}
+    monkeypatch.setattr(lora_export, "fsdp_version", lambda module: 2)
+    monkeypatch.setattr(lora_export, "merged_lora_context", _fail_merged_context)
+    _patch_export_machinery(monkeypatch)
+    offloads = []
+
+    params, peft_config = export_lora_for_sync(
+        model,
+        model_config=_model_config(merge=True),
+        base_sync_done=True,
+        is_diffusers=False,
+        offload_fn=lambda: offloads.append(1),
+    )
+    assert offloads == []
+    weights = dict(params)
+
+    assert peft_config is None
+    assert offloads == [1]
+    assert set(weights) == set(expected)
+    for name, tensor in expected.items():
+        assert torch.equal(weights[name], tensor), name
+    for name, param in model.named_parameters():
+        assert torch.equal(param, before[name]), name
+    assert not any(getattr(module, "merged", False) for module in model.modules())
+
+
+def test_fsdp2_merged_stream_owns_merged_storage(monkeypatch):
+    """A sender may flush after the stream ends; merged tensors must not alias
+    live parameters that later in-place writes could overwrite."""
+    import copy
+
+    model = _lora_model()
+    expected = copy.deepcopy(model).merge_and_unload().state_dict()
+    monkeypatch.setattr(lora_export, "fsdp_version", lambda module: 2)
+    monkeypatch.setattr(lora_export, "merged_lora_context", _fail_merged_context)
+    _patch_export_machinery(monkeypatch)
+
+    params, _ = export_lora_for_sync(
+        model, model_config=_model_config(merge=True), base_sync_done=True, is_diffusers=False
+    )
+    held = list(params)
+    live = {param.untyped_storage().data_ptr() for param in model.parameters()}
+    with torch.no_grad():
+        for param in model.parameters():
+            param.zero_()
+
+    assert {name for name, _ in held} == set(expected)
+    for name, tensor in held:
+        assert tensor.untyped_storage().data_ptr() not in live, name
+        assert torch.equal(tensor, expected[name]), name
+
+
+def test_fsdp2_per_tensor_stream_casts_floating_dtensors(monkeypatch):
+    """The per-tensor merged path must honor full_weight_dtype too, not just the
+    in-place path; a DTensor outside the LoRA bases exercises its cast site."""
+    from peft import LoraConfig, get_peft_model
+
+    torch.manual_seed(0)
+    base = torch.nn.Sequential()
+    base.add_module("up", torch.nn.Linear(16, 32, bias=False))
+    base.add_module("tail", torch.nn.Linear(32, 16, bias=False))
+    model = get_peft_model(base, LoraConfig(r=4, lora_alpha=8, target_modules=["up"]))
+    monkeypatch.setattr(lora_export, "fsdp_version", lambda module: 2)
+    monkeypatch.setattr(lora_export, "merged_lora_context", _fail_merged_context)
+    _patch_export_machinery(monkeypatch)
+
+    floating = _floating_dtensor(1.0001)
+    state = dict(model.state_dict())
+    plain = next(name for name in state if "lora" not in name and name.endswith("tail.weight"))
+    state[plain] = floating
+    monkeypatch.setattr(model, "state_dict", lambda: dict(state))
+
+    params, _ = export_lora_for_sync(
+        model,
+        model_config=_model_config(merge=True),
+        base_sync_done=True,
+        is_diffusers=False,
+        full_weight_dtype=torch.float32,
+    )
+    weights = dict(params)
+    # convert_weight_keys renames keys on export; match by suffix.
+    plain_out = next(name for name in weights if name.endswith("tail.weight"))
+    torch.testing.assert_close(weights[plain_out], torch.tensor([1.0001]), atol=0, rtol=0)
+    assert weights[plain_out].dtype is torch.float32
+    # The LoRA bases still stream through the per-tensor merge, proving the
+    # fast path (not the in-place fallback) produced this result.
+    assert any(name.endswith("up.weight") for name in weights)
+
+
+@pytest.mark.parametrize("lora_kwargs", [{"use_dora": True}, {"lora_bias": True}])
+def test_fsdp2_merged_stream_falls_back_for_unsupported_lora(monkeypatch, lora_kwargs):
+    model = _lora_model(**lora_kwargs)
+    merged_context = MagicMock(return_value=contextlib.nullcontext())
+    monkeypatch.setattr(lora_export, "fsdp_version", lambda module: 2)
+    monkeypatch.setattr(lora_export, "merged_lora_context", merged_context)
+    _patch_export_machinery(monkeypatch)
+
+    params, _ = export_lora_for_sync(
+        model, model_config=_model_config(merge=True), base_sync_done=True, is_diffusers=False
+    )
+    dict(params)
+
+    merged_context.assert_called_once()
+
+
+@pytest.mark.parametrize("target_modules", [["up", "mid"], ["up"]], ids=["lora_lora", "lora_plain"])
+def test_fsdp2_merged_stream_merges_shared_base_weight_once(monkeypatch, target_modules):
+    """A tied base weight receives every delta in the in-place merge, and all of
+    its keys stream that one tensor; a clone per key would miss the other deltas."""
+    import copy
+
+    from peft import LoraConfig, get_peft_model
+
+    torch.manual_seed(0)
+    base = torch.nn.Sequential()
+    base.add_module("up", torch.nn.Linear(16, 16, bias=False))
+    base.add_module("mid", torch.nn.Linear(16, 16, bias=False))
+    base.mid.weight = base.up.weight
+    model = get_peft_model(base, LoraConfig(r=4, lora_alpha=8, target_modules=target_modules))
+    with torch.no_grad():
+        for name, param in model.named_parameters():
+            if "lora_B" in name:
+                param.normal_()
+    expected = copy.deepcopy(model).merge_and_unload().state_dict()
+    monkeypatch.setattr(lora_export, "fsdp_version", lambda module: 2)
+    monkeypatch.setattr(lora_export, "merged_lora_context", _fail_merged_context)
+    _patch_export_machinery(monkeypatch)
+
+    params, _ = export_lora_for_sync(
+        model, model_config=_model_config(merge=True), base_sync_done=True, is_diffusers=False
+    )
+    weights = dict(params)
+
+    assert set(weights) == set(expected) == {"up.weight", "mid.weight"}
+    for name, tensor in expected.items():
+        assert torch.equal(weights[name], tensor), name
+    assert not torch.equal(weights["up.weight"], base.up.weight)
 
 
 def test_merged_export_rejects_named_adapter(monkeypatch):
@@ -335,88 +540,3 @@ def test_collect_receives_diffusers_layer_prefixes(monkeypatch):
 
     export_lora_for_sync(_peft_module(), model_config=_model_config(), base_sync_done=True, is_diffusers=False)
     assert collect.call_args.kwargs["layer_prefixes"] == ("transformer_blocks.",)
-
-
-# ---------------------------------------------------------------------------
-# Colocated sync ordering (real worker, mocked engine/rollout)
-# ---------------------------------------------------------------------------
-
-
-class _NoopRLInsight:
-    @staticmethod
-    def trace_state(*args, **kwargs):
-        return contextlib.nullcontext()
-
-
-def _slow_path_worker(*, has_lora: bool, peft_merge: bool, base_sync_done: bool):
-    worker = object.__new__(ew.ActorRolloutRefWorker)
-
-    engine = MagicMock(spec=["module", "get_per_tensor_param", "get_lora_peft_config"])
-    engine.module = _peft_module() if has_lora else _plain_module()
-    # A merged engine's export returns peft_config=None (the rollout gets a
-    # plain full-weight update), so the probe cannot discover adapter mode.
-    peft_config = {"r": 8} if has_lora and not peft_merge else None
-    engine.get_lora_peft_config = MagicMock(return_value=peft_config)
-
-    def _get_per_tensor_param(*, layered_summon=False, base_sync_done=True, adapter_name="default", **kwargs):
-        tensors = [("adapter.lora_A.weight", torch.zeros(1))] if base_sync_done else [("base.weight", torch.zeros(1))]
-        return (iter(tensors), peft_config)
-
-    engine.get_per_tensor_param = MagicMock(side_effect=_get_per_tensor_param)
-    worker.actor = SimpleNamespace(engine=engine)
-
-    rollout = AsyncMock()
-    rollout.resume = AsyncMock()
-    rollout.update_weights = AsyncMock()
-    rollout.sleep_level = 2
-    worker.rollout = rollout
-
-    worker.config = SimpleNamespace(rollout=SimpleNamespace(free_cache_engine=False))
-    worker.peft_merge = peft_merge
-    worker.base_sync_done = base_sync_done
-    worker.layered_summon = False
-    worker.rollout_adapter = "default"
-    worker._rank = 0  # update_weights stamps timings/metrics with f"rank_{self.rank}"
-    worker._offload_actor_and_empty_cache = lambda *args, **kwargs: None
-    return worker
-
-
-def _run_naive_update(monkeypatch, worker):
-    monkeypatch.setattr(ew, "RLInsightLogger", _NoopRLInsight)
-    monkeypatch.setattr(ew, "set_expandable_segments", MagicMock())
-    monkeypatch.setattr(ew, "log_gpu_memory_usage", MagicMock())
-    asyncio.run(ew.ActorRolloutRefWorker.update_weights(worker, mode="naive", global_steps=3))
-    return worker
-
-
-def test_adapter_mode_first_sync_sends_base_then_adapter(monkeypatch):
-    worker = _run_naive_update(monkeypatch, _slow_path_worker(has_lora=True, peft_merge=False, base_sync_done=False))
-
-    engine = worker.actor.engine
-    assert engine.get_per_tensor_param.call_count == 2
-    probe, base = engine.get_per_tensor_param.call_args_list
-    assert probe.kwargs["base_sync_done"] is True
-    assert base.kwargs["base_sync_done"] is False
-    assert worker.rollout.update_weights.await_count == 2
-    first, second = worker.rollout.update_weights.await_args_list
-    assert first.kwargs["base_sync_done"] is False  # base weights first
-    assert second.kwargs["base_sync_done"] is True  # then adapter deltas
-    assert worker.rollout.sleep_level == 1  # adapter mode pins level-1 sleep
-
-
-def test_merge_mode_sends_single_full_sync(monkeypatch):
-    worker = _run_naive_update(monkeypatch, _slow_path_worker(has_lora=True, peft_merge=True, base_sync_done=False))
-
-    engine = worker.actor.engine
-    assert engine.get_per_tensor_param.call_count == 1
-    worker.rollout.update_weights.assert_awaited_once()
-    assert worker.rollout.update_weights.await_args.kwargs["base_sync_done"] is True
-    assert worker.rollout.sleep_level == 2  # untouched: merged sync is a plain full update
-
-
-def test_non_lora_sends_single_sync(monkeypatch):
-    worker = _run_naive_update(monkeypatch, _slow_path_worker(has_lora=False, peft_merge=False, base_sync_done=False))
-
-    worker.rollout.update_weights.assert_awaited_once()
-    assert worker.rollout.update_weights.await_args.kwargs["base_sync_done"] is True
-    assert worker.rollout.sleep_level == 2

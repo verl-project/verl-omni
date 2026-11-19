@@ -26,6 +26,8 @@ from verl_omni.pipelines.ltx2_omni_nft.vllm_omni_rollout_adapter import LTX2Pipe
 @pytest.mark.parametrize("as_list", [False, True])
 def test_rollout_keeps_replay_and_named_media(monkeypatch, as_list):
     pipeline = object.__new__(LTX23OmniNFTPipeline)
+    # object.__new__ skips nn.Module.__init__; monkeypatch teardown's delattr needs that state.
+    torch.nn.Module.__init__(pipeline)
     pipeline.distributed_video_decode = False
     pipeline.vocoder = SimpleNamespace(config=SimpleNamespace(output_sampling_rate=24000))
     request = SimpleNamespace(request_id="smoke", sampling_params=SimpleNamespace(extra_args={}))
@@ -75,6 +77,7 @@ def test_rollout_keeps_replay_and_named_media(monkeypatch, as_list):
 
 def test_warmup_does_not_require_decoded_artifacts(monkeypatch):
     pipeline = object.__new__(LTX23OmniNFTPipeline)
+    torch.nn.Module.__init__(pipeline)
     request = SimpleNamespace(request_id="dummy_req_id")
     monkeypatch.setattr(pipeline, "_prepare_request", lambda value: value)
     monkeypatch.setattr(LTX2Pipeline, "forward", lambda self, req: DiffusionOutput(output=(torch.empty(0), None)))
