@@ -48,11 +48,36 @@ if [[ ! $N_GPUS =~ ^[1-9][0-9]*$ || ! $PREFERENCE_SCORER_GPU =~ ^[0-9]+$ ]]; the
     echo "N_GPUS ($N_GPUS) must be a positive integer and PREFERENCE_SCORER_GPU ($PREFERENCE_SCORER_GPU) must be a non-negative integer" >&2
     exit 1
 fi
+RAY_GPU_ARGS=()
 case "${H3_IMAGE_DEVICE:-cuda}" in
-    cuda) export CUDA_VISIBLE_DEVICES=$(seq -s, 0 $((N_GPUS - 1))) ;;
-    npu) ;;
+    cuda) TORCH_BACKEND=$(python3 -c "import torch; print('rocm' if torch.version.hip else 'cuda')") ;;
+    npu) TORCH_BACKEND=npu ;;
     *) echo "H3_IMAGE_DEVICE must be cuda or npu" >&2; exit 1 ;;
 esac
+if [[ $TORCH_BACKEND == rocm ]]; then
+    # vLLM's ROCm platform copies a driver-level HIP_VISIBLE_DEVICES into CUDA_VISIBLE_DEVICES; Ray workers
+    # inherit that while Ray sets a per-worker HIP_VISIBLE_DEVICES, and ROCm aborts on the mismatch.
+    # Leave visibility unset and start a local Ray capped at the first N_GPUS devices instead, so the trainer
+    # GPUs and the scorer GPU both follow N_GPUS. ROCR_VISIBLE_DEVICES goes too: Ray's AMD manager raises
+    # when it is set without HIP_VISIBLE_DEVICES.
+    if [[ -n ${RAY_ADDRESS:-} ]]; then
+        echo "RAY_ADDRESS=$RAY_ADDRESS: on ROCm this launcher starts its own local Ray capped at N_GPUS; unset it" >&2
+        exit 1
+    fi
+    for arg in "$@"; do
+        if [[ $arg =~ ^\+*(ray_kwargs\.ray_init\.(num_gpus|address)|trainer\.n_gpus_per_node)= ]]; then
+            echo "$arg: set N_GPUS instead; it also reserves the preference scorer GPU" >&2
+            exit 1
+        fi
+    done
+    unset CUDA_VISIBLE_DEVICES HIP_VISIBLE_DEVICES ROCR_VISIBLE_DEVICES
+    RAY_GPU_ARGS=(
+        ++ray_kwargs.ray_init.address=local
+        ++ray_kwargs.ray_init.num_gpus="$N_GPUS"
+    )
+elif [[ $TORCH_BACKEND == cuda ]]; then
+    export CUDA_VISIBLE_DEVICES=$(seq -s, 0 $((N_GPUS - 1)))
+fi
 if (( PREFERENCE_SCORER_GPU < N_GPUS )); then
     echo "PREFERENCE_SCORER_GPU=$PREFERENCE_SCORER_GPU must not be one of the $N_GPUS trainer GPUs" >&2
     exit 1
@@ -191,4 +216,5 @@ ${VERL_OMNI_ENTRY:-python3 -m verl_omni.trainer.main_diffusion} \
     trainer.test_freq=10 \
     trainer.total_epochs=15 \
     trainer.total_training_steps="$TOTAL_TRAINING_STEPS" \
+    "${RAY_GPU_ARGS[@]}" \
     "$@"

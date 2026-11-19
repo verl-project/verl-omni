@@ -140,6 +140,32 @@ def test_partial_allocation_is_rejected_before_training(launch):
     assert "physical NPUs 0 through 7" in result.stderr
 
 
+@pytest.mark.parametrize("override", [None, "ray_kwargs.ray_init.num_gpus=8"])
+def test_rocm_launcher_visibility_and_ray_allocation(launch, tmp_path, override):
+    run, actor = launch
+    (tmp_path / "torch.py").write_text("from types import SimpleNamespace\nversion = SimpleNamespace(hip='7.0')\n")
+    args = [] if override is None else [override]
+    result, captured = run(
+        *args,
+        script="run_minimax_h3_image_ocr_lora.sh",
+        ACTOR_PATH=actor.as_posix(),
+        PYTHONPATH=tmp_path.as_posix(),
+        CUDA_VISIBLE_DEVICES="0,1,2",
+        HIP_VISIBLE_DEVICES="0,1,2",
+        ROCR_VISIBLE_DEVICES="0,1,2",
+    )
+    if override:
+        assert result.returncode != 0 and captured is None
+        assert "set N_GPUS instead" in result.stderr
+        return
+    assert result.returncode == 0, result.stderr
+    assert "++ray_kwargs.ray_init.address=local" in captured["args"]
+    assert "++ray_kwargs.ray_init.num_gpus=3" in captured["args"]
+    assert all(
+        name not in captured["env"] for name in ("CUDA_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES")
+    )
+
+
 def test_legacy_actor_weights_are_rejected_before_training(launch):
     run, actor = launch
     (actor / "config.json").write_text(json.dumps({"_class_name": "MiniMaxH3Transformer3DModel"}))

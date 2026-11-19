@@ -47,14 +47,22 @@ class TestOcrPreferenceReward:
             scorer_device()
 
     @pytest.mark.parametrize(
-        ("device_kind", "visibility"), [("cuda", "CUDA_VISIBLE_DEVICES"), ("npu", "ASCEND_RT_VISIBLE_DEVICES")]
+        ("device_kind", "hip", "visibility"),
+        [
+            ("cuda", None, "CUDA_VISIBLE_DEVICES"),
+            ("npu", None, "ASCEND_RT_VISIBLE_DEVICES"),
+            ("cuda", "7.0", "HIP_VISIBLE_DEVICES"),
+        ],
     )
     def test_preference_terms_share_one_scorer_across_separate_loads(
-        self, monkeypatch, tmp_path, device_kind, visibility
+        self, monkeypatch, tmp_path, device_kind, hip, visibility
     ):
         _reset_shared_state()
         monkeypatch.setenv("OCR_REWARD_TMPDIR", str(tmp_path))
         monkeypatch.setenv("H3_IMAGE_DEVICE", device_kind)
+        monkeypatch.setattr(torch.version, "hip", hip)
+        monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1,2")
+        monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "0,1,2")
         monkeypatch.setenv("PREFERENCE_SCORER_GPU", "7")
         monkeypatch.setenv(visibility, "0,1,2,3,4,5,6")
         pick_fn = load_extern_object(REWARD_PATH, "term_pickscore")
@@ -68,6 +76,9 @@ class TestOcrPreferenceReward:
 
         async def fake_spawn(script, env):
             assert env[visibility] == "7"
+            if hip:
+                assert "CUDA_VISIBLE_DEVICES" not in env
+                assert "ROCR_VISIBLE_DEVICES" not in env
             spawns.append(script)
             return _FakeProc()
 
