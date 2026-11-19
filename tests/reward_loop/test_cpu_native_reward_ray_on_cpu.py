@@ -430,8 +430,15 @@ def test_cpu_phase_failure_drains_accepted_samples_before_sleep(tmp_path, monkey
                 await asyncio.wait_for(failing_worker.wait_for_failure.remote(), timeout=30)
                 completed, _ = await asyncio.wait({scoring}, timeout=0.2)
             finally:
-                await asyncio.gather(failing_worker.release_failure.remote(), delayed_worker.release_delay.remote())
+                releases = await asyncio.gather(
+                    failing_worker.release_failure.remote(),
+                    delayed_worker.release_delay.remote(),
+                    return_exceptions=True,
+                )
                 result = (await asyncio.gather(scoring, return_exceptions=True))[0]
+            for release in releases:
+                if isinstance(release, BaseException):
+                    raise release
             state = await delayed_worker.delayed_sample_state.remote()
             assert not completed, "The phase returned while an accepted sample was still waiting to infer"
             assert isinstance(result, ray.exceptions.RayTaskError)

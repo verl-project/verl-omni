@@ -25,6 +25,10 @@ the same fail-fast posture as ``DiffusionModelBase.get_class_by_name``.
 
 from __future__ import annotations
 
+import hashlib
+import threading
+from pathlib import Path
+from types import ModuleType
 from typing import TYPE_CHECKING, Any
 
 from verl_omni.utils.reward_score.scorers.base import RewardScorer
@@ -35,11 +39,14 @@ if TYPE_CHECKING:
 __all__ = [
     "get_scorer_cls",
     "import_from_spec",
+    "load_reward_object",
     "peek_registered_scorers",
     "register_scorer",
 ]
 
 _REGISTERED: dict[str, type[RewardScorer]] = {}
+_FILE_MODULES: dict[str, ModuleType] = {}
+_FILE_IMPORT_LOCK = threading.RLock()
 
 
 def register_scorer(name: str) -> Callable[[type[RewardScorer]], type[RewardScorer]]:
@@ -118,12 +125,29 @@ def import_from_spec(ref: str) -> Any:
     ``file://``-prefixed); a bare dotted module is ``pkg://``-prefixed before
     delegating to verl's :func:`load_extern_object`.
     """
-    from verl.utils.import_utils import load_extern_object
-
     module_path, object_name = ref.rsplit(":", 1)
     if not module_path.startswith("pkg://") and "/" not in module_path and not module_path.endswith(".py"):
         module_path = f"pkg://{module_path}"
-    return load_extern_object(module_path=module_path, object_name=object_name)
+    return load_reward_object(module_path, object_name)
+
+
+def load_reward_object(module_path: str, object_name: str) -> Any:
+    """Share a file module between reward functions and registered scorer classes.
+
+    File imports execute once per canonical path in this worker process, just
+    like package imports. In particular, resolving two attributes must not rerun
+    class-registration decorators or recreate module-owned model state.
+    """
+    from verl.utils.import_utils import load_extern_object, load_module
+
+    if module_path.startswith("pkg://"):
+        return load_extern_object(module_path=module_path, object_name=object_name)
+    path = str(Path(module_path.removeprefix("file://")).resolve())
+    with _FILE_IMPORT_LOCK:
+        if path not in _FILE_MODULES:
+            module_name = "_verl_omni_reward_" + hashlib.sha256(path.encode()).hexdigest()
+            _FILE_MODULES[path] = load_module(path, module_name=module_name)
+        return getattr(_FILE_MODULES[path], object_name)
 
 
 def _load_ref(ref: str) -> Any:

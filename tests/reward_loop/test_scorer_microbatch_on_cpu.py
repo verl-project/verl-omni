@@ -19,7 +19,7 @@ import pytest
 import pytest_asyncio
 import torch
 
-from verl_omni.reward_loop.reward_model_executor import ScorerMicrobatcher
+from verl_omni.reward_loop.reward_model_executor import NativeRewardExecutor, ScorerMicrobatcher
 
 
 def _recording_scorer(calls, *, fail=None):
@@ -529,8 +529,9 @@ async def test_submit_fails_fast_when_the_consumer_was_cancelled_before_its_firs
     with pytest.raises(asyncio.CancelledError):
         await consumer
 
-    with pytest.raises(RuntimeError, match="consumer was cancelled"):
-        await asyncio.wait_for(microbatcher.submit({"i": 0}), 5)
+    async with asyncio.timeout(5):
+        with pytest.raises(RuntimeError, match="consumer was cancelled"):
+            await microbatcher.submit({"i": 0})
     assert calls == []
     assert microbatcher._state == "closed"
 
@@ -581,3 +582,129 @@ def test_constructor_rejects_invalid_bounds():
         ScorerMicrobatcher(_recording_scorer([]), max_batch_size=0)
     with pytest.raises(ValueError, match="max_inflight"):
         ScorerMicrobatcher(_recording_scorer([]), max_inflight=0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("second_action", ["start", "pause", "close"])
+async def test_lifecycle_callers_join_the_same_live_forward(microbatcher_factory, second_action):
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def score_batch(requests):
+        entered.set()
+        await release.wait()
+        return [{"score": 1} for _ in requests]
+
+    microbatcher = microbatcher_factory(score_batch)
+    await microbatcher.start()
+    scoring = asyncio.create_task(microbatcher.submit({}))
+    async with asyncio.timeout(5):
+        await entered.wait()
+        first = asyncio.create_task(microbatcher.pause())
+        await asyncio.sleep(0)
+        second = asyncio.create_task(getattr(microbatcher, second_action)())
+        await asyncio.sleep(0)
+        try:
+            assert not first.done()
+            assert not second.done(), "every lifecycle caller must wait for the accepted forward"
+        finally:
+            release.set()
+            await asyncio.gather(scoring, first, second)
+    if second_action == "start":
+        assert await microbatcher.submit({}) == {"score": 1}
+
+
+@pytest.mark.asyncio
+async def test_concurrent_close_and_cancelled_joiner_still_drain(microbatcher_factory):
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def score_batch(requests):
+        entered.set()
+        await release.wait()
+        return [{"score": 1} for _ in requests]
+
+    microbatcher = microbatcher_factory(score_batch)
+    await microbatcher.start()
+    scoring = asyncio.create_task(microbatcher.submit({}))
+    async with asyncio.timeout(5):
+        await entered.wait()
+        first = asyncio.create_task(microbatcher.close())
+        await asyncio.sleep(0)
+        first.cancel()
+        second = asyncio.create_task(microbatcher.close())
+        await asyncio.sleep(0)
+        try:
+            assert not first.done()
+            assert not second.done()
+        finally:
+            release.set()
+            outcomes = await asyncio.gather(scoring, first, second, return_exceptions=True)
+        assert outcomes[0] == {"score": 1}
+        assert isinstance(outcomes[1], asyncio.CancelledError)
+        assert outcomes[2] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("raised", [False, True])
+async def test_stop_iteration_is_delivered_without_stranding_requests(microbatcher_factory, raised):
+    def score_batch(requests):
+        error = StopIteration("scorer stopped")
+        if raised:
+            raise error
+        return [error, {"score": 2}]
+
+    microbatcher = microbatcher_factory(score_batch, max_batch_size=2)
+    await microbatcher.start()
+    async with asyncio.timeout(5):
+        outcomes = await asyncio.gather(microbatcher.submit({}), microbatcher.submit({}), return_exceptions=True)
+    assert isinstance(outcomes[0], RuntimeError)
+    assert isinstance(outcomes[0].__cause__, StopIteration)
+    if raised:
+        assert isinstance(outcomes[1], RuntimeError)
+    else:
+        assert outcomes[1] == {"score": 2}
+
+
+@pytest.mark.parametrize("target", ["microbatcher", "hook", "legacy"])
+def test_loop_shutdown_owns_sync_forward_until_thread_settles(target):
+    import contextvars
+    import threading
+    from types import SimpleNamespace
+
+    value = contextvars.ContextVar("score-context", default="missing")
+    entered, release, finished = threading.Event(), threading.Event(), threading.Event()
+    settled = []
+
+    def score_batch(requests):
+        entered.set()
+        assert release.wait(5), "shutdown probe did not release its scorer thread"
+        assert value.get() == "request-context"
+        finished.set()
+        return [{"score": 1}]
+
+    async def run():
+        value.set("request-context")
+        if target == "microbatcher":
+            microbatcher = ScorerMicrobatcher(score_batch)
+            await microbatcher.start()
+            microbatcher._consumer.add_done_callback(lambda _: settled.append(finished.is_set()))
+            scoring = asyncio.create_task(microbatcher.submit({}))
+        else:
+            if target == "hook":
+                call = NativeRewardExecutor._call(score_batch, [{}])
+            else:
+                owner = SimpleNamespace(_lock=asyncio.Lock(), _inflight=1, _idle=asyncio.Event())
+                call = NativeRewardExecutor._infer_owned(owner, SimpleNamespace(infer=score_batch), ([{}],), {})
+            scoring = asyncio.create_task(call)
+            scoring.add_done_callback(lambda _: settled.append(finished.is_set()))
+        scoring.add_done_callback(lambda task: task.cancelled() or task.exception())
+        async with asyncio.timeout(5):
+            while not entered.is_set():
+                await asyncio.sleep(0)
+        # Return while forward is active: asyncio.run cancels ALL wrapper tasks.
+        threading.Timer(0.1, release.set).start()
+
+    try:
+        asyncio.run(run())
+        assert settled == [True], "consumer shutdown detached a live synchronous forward"
+    finally:
+        release.set()

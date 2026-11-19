@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import gc
 import inspect
 import logging
@@ -42,6 +43,30 @@ __all__ = [
 ]
 
 logger = logging.getLogger(__name__)
+
+
+def _future_error(error: Exception) -> Exception:
+    # asyncio Futures reject StopIteration rather than delivering it to the
+    # awaiting request. Preserve the scorer's error as the explicit cause.
+    if isinstance(error, StopIteration):
+        normalized = RuntimeError("Reward scorer raised StopIteration")
+        normalized.__cause__ = error
+        return normalized
+    return error
+
+
+async def _run_sync_owned(method, *args, **kwargs):
+    """Join a synchronous reward call even during global event-loop shutdown."""
+    context = contextvars.copy_context()
+
+    def forward():
+        try:
+            return context.run(method, *args, **kwargs)
+        except StopIteration as error:
+            # asyncio cannot chain StopIteration into its executor Future.
+            raise _future_error(error) from error
+
+    return await await_owned(asyncio.get_running_loop().run_in_executor(None, forward))
 
 
 class EngineRouterClient:
@@ -249,7 +274,7 @@ class NativeRewardExecutor:
             if inspect.iscoroutinefunction(infer_fn):
                 result = await infer_fn(*args, **kwargs)
             else:
-                result = await asyncio.to_thread(infer_fn, *args, **kwargs)
+                result = await _run_sync_owned(infer_fn, *args, **kwargs)
             return await result if inspect.isawaitable(result) else result
         finally:
             async with self._lock:
@@ -362,7 +387,7 @@ class NativeRewardExecutor:
 
     @staticmethod
     async def _call(method, *args):
-        result = await method(*args) if inspect.iscoroutinefunction(method) else await asyncio.to_thread(method, *args)
+        result = await method(*args) if inspect.iscoroutinefunction(method) else await _run_sync_owned(method, *args)
         return await result if inspect.isawaitable(result) else result
 
     def _placement_device(self) -> torch.device:
@@ -444,19 +469,21 @@ class ScorerMicrobatcher:
         self._queue: deque[tuple[dict[str, Any], asyncio.Future]] = deque()
         self._state = "idle"  # idle -> running -> (paused -> running)* | closed
         self._consumer: asyncio.Task | None = None
+        self._lifecycle_lock = asyncio.Lock()
 
     async def start(self) -> None:
         """Open admission and start the consumer (idempotent while running)."""
-        async with self._cond:
-            if self._state == "closed":
-                raise RuntimeError(f"Reward scorer microbatcher {self._name!r} is closed")
-            if self._state == "running" and self._consumer is not None and not self._consumer.done():
-                return
-            # Also revives a consumer cancelled before its first step; the
-            # settlement its done callback queued yields to the replacement.
-            self._state = "running"
-            self._consumer = asyncio.create_task(self._consumer_loop())
-            self._consumer.add_done_callback(self._consumer_died)
+        async with self._lifecycle_lock:
+            async with self._cond:
+                if self._state == "closed":
+                    raise RuntimeError(f"Reward scorer microbatcher {self._name!r} is closed")
+                if self._state == "running" and self._consumer is not None and not self._consumer.done():
+                    return
+                # Also revives a consumer cancelled before its first step; the
+                # settlement its done callback queued yields to the replacement.
+                self._state = "running"
+                self._consumer = asyncio.create_task(self._consumer_loop())
+                self._consumer.add_done_callback(self._consumer_died)
 
     def _consumer_died(self, task: asyncio.Task) -> None:
         """Settle admission when a consumer dies without running its handler.
@@ -536,55 +563,45 @@ class ScorerMicrobatcher:
             return False
 
     async def pause(self) -> None:
-        """Stop admission, fail unaccepted requests, drain accepted work, join the consumer."""
-        async with self._cond:
-            if self._state != "running":
-                return
-            self._state = "paused"
-            queued = list(self._queue)
-            self._queue.clear()
-            consumer, self._consumer = self._consumer, None
-            self._cond.notify_all()
-        for _, future in queued:
-            if not future.done():
-                future.set_exception(
-                    RuntimeError(
-                        f"Reward scorer {self._name!r} went to sleep before this request was accepted; "
-                        "retry after wake_up"
-                    )
-                )
-        if consumer is not None:
-            try:
-                await consumer
-            except asyncio.CancelledError:
-                # A cancelled consumer settled its own work; reaping it must not
-                # cancel the lifecycle caller joining it.
-                if not consumer.cancelled():
-                    raise
+        """Stop admission and join accepted work before permitting another start."""
+        await self._stop(closed=False)
 
     async def close(self) -> None:
-        """Fail every not-yet-accepted request, then await the in-flight forward."""
-        async with self._cond:
-            if self._state == "closed" and self._consumer is None:
-                return
-            self._state = "closed"
-            queued = list(self._queue)
-            self._queue.clear()
-            consumer, self._consumer = self._consumer, None
-            self._cond.notify_all()
-        for _, future in queued:
-            if not future.done():
-                future.set_exception(
-                    RuntimeError(f"Reward scorer {self._name!r} closed before this request was accepted")
-                )
-        if consumer is not None:
-            try:
-                await consumer
-            except asyncio.CancelledError:
-                # A cancelled consumer settled its own work; reaping it must not
-                # cancel the lifecycle caller joining it.
-                if not consumer.cancelled():
-                    raise
+        """Stop admission permanently and join accepted work for every caller."""
+        await self._stop(closed=True)
+
+    async def _stop(self, *, closed: bool) -> None:
+        # Keep the lifecycle owner until settlement. Concurrent start/close/pause
+        # callers cannot mistake a detached, still-running consumer for idle.
+        async with self._lifecycle_lock:
+            async with self._cond:
+                if not closed and self._state != "running":
+                    return
+                self._state = "closed" if closed else "paused"
+                queued = list(self._queue)
+                self._queue.clear()
+                consumer = self._consumer
+                self._cond.notify_all()
+            message = (
+                f"Reward scorer {self._name!r} closed before this request was accepted"
+                if closed
+                else f"Reward scorer {self._name!r} went to sleep before this request was accepted; retry after wake_up"
+            )
+            for _, future in queued:
+                if not future.done():
+                    future.set_exception(RuntimeError(message))
+            if consumer is not None:
+                try:
+                    await await_owned(consumer)
+                except asyncio.CancelledError:
+                    # Joining an already cancelled consumer does not cancel the
+                    # joiner. Cancellation of the lifecycle caller still propagates
+                    # after its owned consumer has settled.
+                    if asyncio.current_task().cancelling():
+                        raise
+                finally:
+                    if self._consumer is consumer:
+                        self._consumer = None
 
     async def _consumer_loop(self) -> None:
         batch: list[tuple[dict[str, Any], asyncio.Future]] = []
@@ -654,7 +671,7 @@ class ScorerMicrobatcher:
             return
         for (_, future), result in zip(batch, results, strict=True):
             if isinstance(result, Exception) and not future.done():
-                future.set_exception(result)
+                future.set_exception(_future_error(result))
             elif not future.done():
                 future.set_result(result)
 
@@ -664,7 +681,9 @@ class ScorerMicrobatcher:
             return await self._score_batch(requests)
         # Owned to thread settlement: cancelling the consumer cannot stop the
         # thread, so weights are never offloaded under a live forward.
-        return await await_owned(asyncio.to_thread(self._score_batch, requests))
+        # A bare executor Future is not in asyncio.run's all-Tasks cancellation
+        # sweep, so shutdown cannot detach the still-running thread wrapper.
+        return await _run_sync_owned(self._score_batch, requests)
 
 
 def _empty_accelerator_cache() -> None:

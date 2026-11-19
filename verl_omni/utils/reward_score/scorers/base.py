@@ -72,8 +72,9 @@ class RewardScorer(ABC):
         Args:
             batch: one dict per sample, carrying the per-sample keys a
                 ``compute_score`` function receives (``data_source``,
-                ``solution_image``, ``ground_truth``, ``extra_info``) plus any
-                configured ``executor.kwargs``.
+                ``solution_image``, ``ground_truth``, ``extra_info``) and options
+                supplied by the reward function. Configured ``executor.kwargs``
+                are passed to the scorer constructor, not merged into requests.
 
         Returns:
             one entry per input, in input order: a score dict
