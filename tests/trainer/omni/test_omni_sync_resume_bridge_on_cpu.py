@@ -11,12 +11,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""omni_sync resume-bridge ordering.
+"""Rollout-side admission-resume ordering for omni naive weight sync.
 
-``AsyncOmni.sleep()`` sets an admission hold that ``wake_up()`` does not clear,
-and the naive-backend ``update_weights`` restores weights without resuming
-generation. Without the ``OmniPPOTrainerSync`` bridge the first ``generate()``
-of init and of every step would block on the pause condition.
+``AsyncOmni.sleep()`` sets an admission hold that worker-side ``rollout.resume()``
+does not clear, and upstream verl's naive-backend ``CheckpointEngineManager``
+restores weights without resuming generation. ``OmniCheckpointEngineManager``
+owns ``resume_generation_replicas()`` on the naive weight-sync boundary so
+``OmniPPOTrainerSync`` and other trainers inherit the stock hooks without
+duplicating per-trainer resume bridges (#517).
 """
 
 from types import SimpleNamespace
@@ -25,117 +27,131 @@ import pytest
 
 pytest.importorskip("verl_omni.trainer.omni.ray_omni_trainer")
 
+from verl.checkpoint_engine import CheckpointEngineManager  # noqa: E402
 from verl.trainer.ppo.v1.trainer_sync import PPOTrainerSync  # noqa: E402
 
 from verl_omni.trainer.omni.ray_omni_trainer import OmniPPOTrainerSync  # noqa: E402
+from verl_omni.workers.checkpoint_engine import OmniCheckpointEngineManager  # noqa: E402
 
 
-class _HoldModel:
-    """Emulates the engine-side admission hold + a recording checkpoint manager.
+class _FakeReplica:
+    """Emulates a rollout replica with an engine-side admission hold."""
 
-    ``sleep_replicas`` sets the hold; ``update_weights`` does not clear it;
-    only ``resume_generation_replicas`` lifts it.
-    """
+    def __init__(self, calls: list[str], state: dict[str, bool]):
+        self.calls = calls
+        self.state = state
 
-    def __init__(self):
-        self.calls: list[str] = []
-        self.hold = False
-
-    # -- CheckpointEngineManager surface (sync, as the sync trainer calls it) ----
-    def update_weights(self, global_steps):
-        del global_steps
-        self.calls.append("update_weights")
-
-    def sleep_replicas(self):
+    async def sleep(self):
         self.calls.append("sleep_replicas")
-        self.hold = True
+        self.state["hold"] = True
 
-    def resume_generation_replicas(self):
+    async def resume_generation(self):
         self.calls.append("resume_generation_replicas")
-        self.hold = False
-
-    # -- trainer_base._load_checkpoint stand-in ---------------------------------
-    def load_checkpoint(self):
-        self.calls.append("load_checkpoint")
-
-    # -- rollout generate stand-in ----------------------------------------------
-    def generate(self):
-        assert not self.hold, "generate() reached while admission is held"
-        self.calls.append("generate")
+        self.state["hold"] = False
 
 
-def _trainer(model):
+class _FakeActorWG:
+    """Emulates the actor worker group's naive weight sync (does not lift hold)."""
+
+    def __init__(self, calls: list[str]):
+        self.calls = calls
+
+    def update_weights(self, global_steps=None, mode="naive"):
+        del global_steps, mode
+
+        async def _sync():
+            self.calls.append("actor_update_weights")
+
+        return [_sync()]
+
+
+def _make_harness():
+    calls: list[str] = []
+    state = {"hold": False}
+    manager = object.__new__(OmniCheckpointEngineManager)
+    manager.backend = "naive"
+    manager.actor_wg = _FakeActorWG(calls)
+    manager.replicas = [_FakeReplica(calls, state)]
+
     trainer = object.__new__(OmniPPOTrainerSync)
-    trainer.checkpoint_manager = model
+    trainer.checkpoint_manager = manager
     trainer.global_steps = 0
     trainer.timing_raw = {}
-    return trainer
+
+    def load_checkpoint():
+        calls.append("load_checkpoint")
+
+    def generate():
+        assert not state["hold"], "generate() reached while admission is held"
+        calls.append("generate")
+
+    return SimpleNamespace(
+        trainer=trainer,
+        manager=manager,
+        calls=calls,
+        state=state,
+        load_checkpoint=load_checkpoint,
+        generate=generate,
+    )
 
 
-def test_on_init_end_resumes_after_update_weights():
-    model = _HoldModel()
-    _trainer(model).on_init_end()
-    assert model.calls == ["update_weights", "resume_generation_replicas"]
-    assert not model.hold
+def test_omni_sync_trainer_inherits_stock_hooks_without_bridge():
+    """OmniPPOTrainerSync delegates on_init_end/on_step_end directly to PPOTrainerSync."""
+    assert OmniPPOTrainerSync.on_init_end is PPOTrainerSync.on_init_end
+    assert OmniPPOTrainerSync.on_step_end is PPOTrainerSync.on_step_end
 
 
-def test_on_step_end_resumes_after_update_weights():
-    model = _HoldModel()
-    _trainer(model).on_step_end()
-    assert model.calls == ["update_weights", "resume_generation_replicas"]
-    assert not model.hold
+def test_on_init_end_resumes_after_naive_weight_sync():
+    h = _make_harness()
+    h.manager.sleep_replicas()
+    h.load_checkpoint()
+    h.trainer.on_init_end()
+    h.generate()
 
-
-def test_init_sequence_generates_only_after_bridge_resume():
-    """_setup tail -> _load_checkpoint -> on_init_end -> first generate (verl order)."""
-    model = _HoldModel()
-    trainer = _trainer(model)
-
-    # trainer_base._setup() tail: sleep replicas to load the checkpoint.
-    model.sleep_replicas()
-    model.load_checkpoint()
-    trainer.on_init_end()
-    model.generate()  # must not raise: the bridge lifted the hold
-
-    assert model.calls == [
+    assert not h.state["hold"]
+    assert h.calls == [
         "sleep_replicas",
         "load_checkpoint",
-        "update_weights",
+        "actor_update_weights",
         "resume_generation_replicas",
         "generate",
     ]
 
 
-def test_step_sequence_generates_only_after_bridge_resume():
-    """Per step: sample (generate) -> on_sample_end sleep -> update -> resume."""
-    model = _HoldModel()
-    trainer = _trainer(model)
+def test_on_step_end_resumes_after_naive_weight_sync():
+    h = _make_harness()
+    h.generate()
+    h.manager.sleep_replicas()
+    h.trainer.on_step_end()
+    h.generate()
 
-    model.generate()
-    model.sleep_replicas()  # on_sample_end inside _step_once
-    trainer.on_step_end()  # actor update happened before this in fit()
-    model.generate()  # next step's first action
-
-    assert model.calls == [
+    assert not h.state["hold"]
+    assert h.calls == [
         "generate",
         "sleep_replicas",
-        "update_weights",
+        "actor_update_weights",
         "resume_generation_replicas",
         "generate",
     ]
 
 
-def test_unbridged_parent_hooks_leave_hold_set():
-    """Without the bridge (parent hooks alone) the hold survives and generate blocks."""
-    model = _HoldModel()
-    trainer = _trainer(model)
+def test_stock_verl_checkpoint_manager_leaves_hold_set():
+    """Contrast: upstream CheckpointEngineManager alone never resumes naive admission."""
+    calls: list[str] = []
+    state = {"hold": False}
+    stock_manager = object.__new__(CheckpointEngineManager)
+    stock_manager.backend = "naive"
+    stock_manager.actor_wg = _FakeActorWG(calls)
+    stock_manager.replicas = [_FakeReplica(calls, state)]
 
-    model.sleep_replicas()
-    PPOTrainerSync.on_init_end(trainer)
-    PPOTrainerSync.on_step_end(trainer)
-    assert model.hold, "parent hooks never resume generation"
-    with pytest.raises(AssertionError, match="admission is held"):
-        model.generate()
+    trainer = object.__new__(OmniPPOTrainerSync)
+    trainer.checkpoint_manager = stock_manager
+    trainer.global_steps = 0
+    trainer.timing_raw = {}
+
+    stock_manager.sleep_replicas()
+    trainer.on_init_end()
+    assert state["hold"], "upstream CheckpointEngineManager does not resume naive admission"
 
 
 async def test_server_wake_up_resumes_admission_after_ack():

@@ -54,7 +54,6 @@ import transfer_queue as tq
 from omegaconf import DictConfig, OmegaConf
 from transfer_queue import KVBatchMeta
 from verl import DataProto
-from verl.checkpoint_engine import CheckpointEngineManager
 from verl.trainer.config import HybridRolloutSwitchConfig
 from verl.trainer.ppo.utils import Role
 from verl.utils.config import omega_conf_to_dataclass
@@ -260,7 +259,7 @@ class PolicyGradientDiffusionTrainerV1SeparateAsync(PolicyGradientDiffusionTrain
         )
         colocated_ckpt_config = omega_conf_to_dataclass(self.config.actor_rollout_ref.rollout.checkpoint_engine)
         colocated_ckpt_config.backend = "naive"
-        self.checkpoint_manager = CheckpointEngineManager(
+        self.checkpoint_manager = OmniCheckpointEngineManager(
             config=colocated_ckpt_config,
             actor_wg=self.actor_rollout_wg,
             replicas=self.llm_server_manager.get_replicas(),
@@ -556,13 +555,13 @@ class PolicyGradientDiffusionTrainerV1SeparateAsync(PolicyGradientDiffusionTrain
     def switch_to_rollout(self):
         """Install committed weights and make Hybrid replicas available for generation.
 
-        The naive update resumes the slept replicas' weights and cache before
-        installing the actor weights, so no frontend wake-up is needed. The
-        replicas are registered with the balancer only after that, because the
-        engine rejects requests while any sleeping tag is set.
+        ``OmniCheckpointEngineManager.update_weights`` resumes the slept replicas'
+        weights, cache, and generation admission before returning, so no frontend
+        wake-up or separate resume bridge is needed. Replicas are registered with
+        the balancer only after that, because the engine rejects requests while
+        any sleeping tag or admission hold is set.
         """
         self.checkpoint_manager.update_weights(self.global_steps)
-        self.checkpoint_manager.resume_generation_replicas()
         self.add_replicas_to_balancer()
         self.current_mode = HybridEngineMode.ROLLOUT
 

@@ -24,7 +24,6 @@ import logging
 from functools import partial
 
 from omegaconf import OmegaConf
-from verl.checkpoint_engine import CheckpointEngineManager
 from verl.experimental.reward_loop import RewardLoopManager
 from verl.experimental.teacher_loop import MultiTeacherModelManager
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup, create_colocated_worker_cls
@@ -37,6 +36,7 @@ from verl.workers.utils.losses import value_loss
 
 from verl_omni.utils.config import resolve_lora_config
 from verl_omni.utils.net_utils import worker_group_port_ranges
+from verl_omni.workers.checkpoint_engine import OmniCheckpointEngineManager
 
 __all__ = ["OmniPPOTrainer"]
 
@@ -210,7 +210,7 @@ class OmniPPOTrainer(PPOTrainer):
         # 10. initialize checkpoint engine manager
         checkpoint_engine_config = omega_conf_to_dataclass(self.config.actor_rollout_ref.rollout.checkpoint_engine)
         checkpoint_engine_config.backend = "naive"
-        self.checkpoint_manager: CheckpointEngineManager = CheckpointEngineManager(
+        self.checkpoint_manager: OmniCheckpointEngineManager = OmniCheckpointEngineManager(
             config=checkpoint_engine_config,
             actor_wg=self.actor_rollout_wg,
             replicas=self.llm_server_manager.get_replicas(),

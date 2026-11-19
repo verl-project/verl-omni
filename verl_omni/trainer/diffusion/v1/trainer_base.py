@@ -35,7 +35,6 @@ from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm import tqdm
 from transfer_queue import KVBatchMeta
 from verl import DataProto
-from verl.checkpoint_engine import CheckpointEngineManager
 from verl.experimental.agent_loop import AgentLoopManager
 from verl.protocol import pad_dataproto_to_divisor
 from verl.single_controller.ray import (
@@ -111,6 +110,7 @@ from verl_omni.utils.config import resolve_lora_config
 from verl_omni.utils.net_utils import worker_group_port_ranges
 from verl_omni.utils.skip import init_skip_manager, log_skip_summary
 from verl_omni.utils.tracking import batch_items, validate_audio_batch
+from verl_omni.workers.checkpoint_engine import OmniCheckpointEngineManager
 from verl_omni.workers.config.reward import (
     reward_is_enabled,
     reward_pool_is_separate,
@@ -1187,7 +1187,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         )
 
         checkpoint_engine_config = omega_conf_to_dataclass(self.config.actor_rollout_ref.rollout.checkpoint_engine)
-        self.checkpoint_manager = CheckpointEngineManager(
+        self.checkpoint_manager = OmniCheckpointEngineManager(
             config=checkpoint_engine_config,
             actor_wg=self.actor_rollout_wg,
             replicas=self.llm_server_manager.get_replicas(),

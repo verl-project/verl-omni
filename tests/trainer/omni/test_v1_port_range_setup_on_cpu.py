@@ -182,7 +182,7 @@ def stubbed_setup(monkeypatch):
     monkeypatch.setattr(omni_trainer_base, "RayClassWithInitArgs", lambda **kwargs: kwargs)
     monkeypatch.setattr(omni_trainer_base, "RewardLoopManager", _FakeServerSide)
     monkeypatch.setattr(omni_trainer_base, "LLMServerManager", _FakeServerSide)
-    monkeypatch.setattr(omni_trainer_base, "CheckpointEngineManager", _FakeServerSide)
+    monkeypatch.setattr(omni_trainer_base, "OmniCheckpointEngineManager", _FakeServerSide)
     monkeypatch.setattr(omni_trainer_base, "omega_conf_to_dataclass", lambda cfg: cfg)
     monkeypatch.setattr(omni_trainer_base, "value_loss", lambda *args, **kwargs: None)
     return _RecordingWorkerGroup

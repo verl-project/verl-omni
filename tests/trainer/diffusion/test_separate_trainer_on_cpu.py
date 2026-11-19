@@ -250,7 +250,7 @@ def test_rollout_stack_selects_manager_arguments_and_sleep(
     reward_loop.OmniRewardLoopManager = FakeRewardLoopManager
     monkeypatch.setitem(sys.modules, "verl_omni.reward_loop", reward_loop)
     monkeypatch.setattr(ray_diffusion_trainer, "LLMServerManager", FakeLLMServerManager)
-    monkeypatch.setattr(ray_diffusion_trainer, "CheckpointEngineManager", FakeCheckpointManager)
+    monkeypatch.setattr(ray_diffusion_trainer, "OmniCheckpointEngineManager", FakeCheckpointManager)
     monkeypatch.setattr(ray_diffusion_trainer, "load_class_from_fqn", lambda *_args: FakeAgentLoopManager)
     monkeypatch.setattr(ray_diffusion_trainer, "omega_conf_to_dataclass", lambda value: value)
 

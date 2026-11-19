@@ -438,10 +438,10 @@ def test_step_lends_the_engine_out_and_reclaims_it_exactly_once():
     assert trainer.current_mode == HybridEngineMode.ROLLOUT
     assert trainer.standalone_checkpoint_manager.update_calls == [1]
     assert trainer.checkpoint_manager.update_calls == [1]
-    assert trainer.checkpoint_manager.resume_calls == 1
+    assert trainer.checkpoint_manager.resume_calls == 0
     assert trainer.checkpoint_manager.wake_calls == 0
-    # Hybrid replicas join the balancer only after the naive sync has resumed them.
-    assert trainer.events == ["standalone_update", "hybrid_update", "hybrid_resume", "add", "clear"]
+    # Hybrid replicas join the balancer only after the naive sync (which owns admission resume).
+    assert trainer.events == ["standalone_update", "hybrid_update", "add", "clear"]
     assert trainer.timing_raw["switch_to_rollout"] >= 0.0
     assert len(trainer._to_rollout_costs) == 1
     assert "separate_async/decision/per_sample_time_seconds" not in trainer._pending_sync_metrics
@@ -684,16 +684,16 @@ def test_validation_lends_the_engine_and_leaves_it_for_the_next_step():
 
     trainer.on_validate_begin()
     assert trainer.current_mode == HybridEngineMode.ROLLOUT
-    assert trainer.events == ["hybrid_update", "hybrid_resume", "add", "standalone_wait"]
+    assert trainer.events == ["hybrid_update", "add", "standalone_wait"]
     assert trainer.checkpoint_manager.wake_calls == 0
 
     trainer.on_validate_end()
     assert trainer.current_mode == HybridEngineMode.ROLLOUT
-    assert trainer.events == ["hybrid_update", "hybrid_resume", "add", "standalone_wait"]
+    assert trainer.events == ["hybrid_update", "add", "standalone_wait"]
 
     trainer.on_step_begin()
     assert trainer.current_mode == HybridEngineMode.TRAINER
-    assert trainer.events[4:] == ["remove", "hybrid_abort", "hybrid_sleep"]
+    assert trainer.events[3:] == ["remove", "hybrid_abort", "hybrid_sleep"]
 
 
 def test_validation_does_not_switch_when_already_in_rollout_mode():

@@ -76,21 +76,27 @@ def _flatten_flush_stream(flushes):
 
 
 class OmniCheckpointEngineManager(CheckpointEngineManager):
-    """``CheckpointEngineManager`` subclass that forwards the actor's LoRA
-    ``peft_config`` to standalone rollout replicas for separate-async NCCL
-    weight sync.
+    """``CheckpointEngineManager`` subclass for omni and diffusion trainers.
+
+    - Non-naive backends: forwards the actor's LoRA ``peft_config`` to
+      standalone rollout replicas before weight sync.
+    - Naive backend: resumes rollout generation admission after weight sync
+      completes, since ``AsyncOmni.sleep()`` holds admission across
+      worker-side ``rollout.resume()`` and naive sync does not otherwise lift
+      the hold.
     """
 
     @auto_await
     async def update_weights(self, global_steps: int = None):
-        """Fetch the actor's LoRA ``peft_config`` and stash it on the rollout
-        workers before delegating to the parent ``update_weights``.
-        """
+        """Sync actor weights to rollout replicas and lift naive admission holds."""
         if self.backend != "naive":
             peft_config = self._fetch_actor_lora_peft_config()
             self._lora_peft_config = peft_config
             await self._push_lora_peft_config_to_replicas(peft_config)
-        await super().update_weights(global_steps=global_steps)
+        result = await super().update_weights(global_steps=global_steps)
+        if self.backend == "naive":
+            await self.resume_generation_replicas()
+        return result
 
     async def _push_lora_peft_config_to_replicas(self, peft_config: dict | None) -> None:
         """Fetch ``peft_config`` from the actor (collective-free) and stash it

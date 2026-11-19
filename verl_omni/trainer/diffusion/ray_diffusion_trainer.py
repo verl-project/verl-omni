@@ -35,7 +35,6 @@ from torch.utils.data import Dataset, Sampler
 from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm import tqdm
 from verl import DataProto
-from verl.checkpoint_engine import CheckpointEngineManager
 from verl.plugin.platform import get_platform
 from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup, ResourcePoolManager
@@ -98,6 +97,7 @@ from verl_omni.utils.tracking import (
     log_val_samples,
     validate_audio_batch,
 )
+from verl_omni.workers.checkpoint_engine import OmniCheckpointEngineManager
 from verl_omni.workers.config.reward import reward_is_enabled, reward_role_required, streaming_reward_enabled
 from verl_omni.workers.rollout.replica import DiffusionLLMServerManager as LLMServerManager
 from verl_omni.workers.utils.padding import embeds_padding_2_no_padding
@@ -1085,7 +1085,7 @@ class BaseRayDiffusionTrainer(ABC):
         )
 
         checkpoint_engine_config = omega_conf_to_dataclass(self.config.actor_rollout_ref.rollout.checkpoint_engine)
-        self.checkpoint_manager = CheckpointEngineManager(
+        self.checkpoint_manager = OmniCheckpointEngineManager(
             config=checkpoint_engine_config,
             actor_wg=self.actor_rollout_wg,
             replicas=self.llm_server_manager.get_replicas(),
