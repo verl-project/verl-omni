@@ -33,7 +33,10 @@ def load_functions(path, names, **namespace):
 
 def contract(samples, **kwargs):
     ns = load_functions(
-        "verl_omni/pipelines/bagel_flow_grpo/agentic_und_gen/episode.py", ["trusted_image_reward_fields"], math=math
+        "verl_omni/pipelines/bagel_flow_grpo/agentic_und_gen/und_reward.py",
+        ["trusted_image_reward_fields"],
+        math=math,
+        TRUSTED_RM_SOURCE="bagel_corl_tool_rm",
     )
     return ns["trusted_image_reward_fields"](samples, **kwargs)
 
@@ -353,7 +356,9 @@ def test_reordered_transport_retains_call_chronology():
 
 def test_v2_terminal_composite_is_authoritative_for_tq_reward():
     ns = load_functions(
-        "verl_omni/pipelines/bagel_flow_grpo/agentic_und_gen/episode.py", ["episode_und_reward"], EpisodeRollout=object
+        "verl_omni/pipelines/bagel_flow_grpo/agentic_und_gen/und_reward.py",
+        ["episode_und_reward"],
+        EpisodeRollout=object,
     )
     ep = SimpleNamespace(
         corl_reward_version="v2",
@@ -377,52 +382,34 @@ def test_nonfinite_rm_response_is_rejected():
 
 
 def test_fixed_original_request_reaches_generator_prompt():
-    tree = ast.parse(
-        (ROOT / "verl_omni/pipelines/bagel_flow_grpo/agentic_und_gen/episode.py").read_text(encoding="utf8")
+    from verl_omni.pipelines.bagel_flow_grpo.agentic_und_gen.gen_tool import resolve_gen_prompt
+
+    assert (
+        resolve_gen_prompt(
+            "policy wrote a blue dog", fixed_gen_prompt="__user_request__", active_user_prompt="draw a red fox"
+        )
+        == "draw a red fox"
     )
-    run = next(n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name == "run_serial_episode")
-    block = next(
-        n
-        for n in ast.walk(run)
-        if isinstance(n, ast.If) and isinstance(n.test, ast.Name) and n.test.id == "fixed_gen_prompt"
+    assert resolve_gen_prompt("policy wrote a blue dog", fixed_gen_prompt="", active_user_prompt="x") == (
+        "policy wrote a blue dog"
     )
-    ns = {
-        "fixed_gen_prompt": "__user_request__",
-        "active_user_prompt": "draw a red fox",
-        "prompt": "policy wrote a blue dog",
-    }
-    exec(compile(ast.fix_missing_locations(ast.Module(body=[block], type_ignores=[])), "fixed_prompt", "exec"), ns)
-    assert ns["prompt"] == "draw a red fox"
+    with pytest.raises(ValueError, match="nonempty original request"):
+        resolve_gen_prompt("anything", fixed_gen_prompt="__user_request__", active_user_prompt="")
 
 
 def test_forced_done_cannot_be_autonomous():
-    tree = ast.parse(
-        (ROOT / "verl_omni/pipelines/bagel_flow_grpo/agentic_und_gen/episode.py").read_text(encoding="utf8")
-    )
-    run = next(n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name == "run_serial_episode")
-    block = next(
-        n
-        for n in ast.walk(run)
-        if isinstance(n, ast.If)
-        and isinstance(n.test, ast.Compare)
-        and isinstance(n.test.left, ast.Name)
-        and n.test.left.id == "kind"
-        and isinstance(n.test.comparators[0], ast.Constant)
-        and n.test.comparators[0].value == "done"
-    )
-    loop = ast.For(
-        target=ast.Name(id="unused", ctx=ast.Store()),
-        iter=ast.Tuple(elts=[ast.Constant(value=0)], ctx=ast.Load()),
-        body=[block],
-        orelse=[],
-    )
+    """A ``Done.`` accepted after a forced reflection is attributed to the harness, not the policy."""
+    from verl_omni.pipelines.bagel_flow_grpo.agentic_und_gen.episode import _SerialEpisode
+
+    spent = SimpleNamespace(remaining_passes=lambda: 0, max_generate_passes=1)
     for forced in (True, False):
-        spent = type("SpentTool", (), {"remaining_passes": staticmethod(lambda: 0)})()
-        ns = {"kind": "done", "forced": forced, "autonomous_done": False, "generate_tool": spent}
-        exec(
-            compile(ast.fix_missing_locations(ast.Module(body=[loop], type_ignores=[])), "done_attribution", "exec"), ns
-        )
-        assert ns["autonomous_done"] is (not forced)
+        episode = _SerialEpisode.__new__(_SerialEpisode)
+        episode.spec = SimpleNamespace(generate_tool=spent)
+        episode.forced = forced
+        episode.autonomous_done = False
+        episode.pending_judge = None
+        assert episode._on_done("Done.", {}) is True
+        assert episode.autonomous_done is (not forced)
 
 
 @pytest.mark.parametrize("failure", ["timeout", "reward_failure", "missing_score", "wrong_seed_count"])

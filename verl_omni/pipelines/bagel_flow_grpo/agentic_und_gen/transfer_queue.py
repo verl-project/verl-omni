@@ -36,15 +36,14 @@ from verl.utils.ray_utils import auto_await
 from verl.utils.tensordict_utils import list_of_dict_to_tensordict
 
 from verl_omni.agent_loop.diffusion_agent_loop import _config_to_sampling_dict
-from verl_omni.pipelines.bagel_flow_grpo.agentic_und_gen.episode import (
+from verl_omni.pipelines.bagel_flow_grpo.agentic_und_gen.reward import bind_bagel_rm_handles
+from verl_omni.pipelines.bagel_flow_grpo.agentic_und_gen.samples import (
     EpisodeRollout,
     GenSample,
-    _as_gen_sample,
-    episode_und_reward,
+    gen_sample_from_row,
     strip_pixels_for_actor,
-    und_episode_rm_scores,
 )
-from verl_omni.pipelines.bagel_flow_grpo.agentic_und_gen.reward import bind_bagel_rm_handles
+from verl_omni.pipelines.bagel_flow_grpo.agentic_und_gen.und_reward import episode_und_reward, und_episode_rm_scores
 from verl_omni.utils.agentic.artifacts import bind_run_artifacts
 from verl_omni.utils.agentic.config import bind_agentic_image_gen
 from verl_omni.utils.agentic_val_viz import VAL_VIZ_PROMPT_KEY, resolve_agentic_val_viz_provider
@@ -370,7 +369,7 @@ def episode_from_agent_extra(
     raw_samples = extra.get("gen_samples") or []
     samples: list[GenSample] = []
     for item in raw_samples:
-        sample = _as_gen_sample(item)
+        sample = gen_sample_from_row(item)
         if sample is not None:
             samples.append(sample)
     turns = int(extra.get("turns") or extra.get("num_turns") or 1)

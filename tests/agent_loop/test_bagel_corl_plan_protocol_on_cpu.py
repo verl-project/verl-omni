@@ -19,11 +19,9 @@ import asyncio
 
 import pytest
 
-from verl_omni.pipelines.bagel_flow_grpo.agentic_und_gen.episode import (
-    BagelGenerateImageTool,
-    parse_und_tool_call,
-    run_serial_episode,
-)
+from verl_omni.pipelines.bagel_flow_grpo.agentic_und_gen.episode import run_serial_episode
+from verl_omni.pipelines.bagel_flow_grpo.agentic_und_gen.gen_tool import BagelGenerateImageTool
+from verl_omni.pipelines.bagel_flow_grpo.agentic_und_gen.tool_calls import parse_und_tool_call
 
 GENERATE = '<tool_call>\n{"name": "generate_image", "arguments": {"prompt": "subtask"}}\n</tool_call>'
 JUDGE = (
@@ -136,7 +134,7 @@ NO_VERDICT = VERDICT.replace("good_enough=YES", "good_enough=NO").replace("0.800
 @pytest.mark.parametrize("terminal", ["Done", "Done.", "Done<|im_end|>", "Done.<|im_end|>"])
 def test_a_done_without_the_period_still_ends_the_episode(terminal):
     """The checkpoint writes ``Done`` as often as ``Done.``; a missing period is not a continuation."""
-    from verl_omni.pipelines.bagel_flow_grpo.agentic_und_gen.episode import und_turn_kind
+    from verl_omni.pipelines.bagel_flow_grpo.agentic_und_gen.tool_calls import und_turn_kind
 
     assert und_turn_kind(terminal) == "done"
 

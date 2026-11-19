@@ -16,7 +16,7 @@
 
 import pytest
 
-from verl_omni.pipelines.bagel_flow_grpo.agentic_und_gen.episode import (
+from verl_omni.pipelines.bagel_flow_grpo.agentic_und_gen.protocol import (
     REFLECTION_SYSTEM_PROMPT,
     resolve_task_type,
     with_reflection_system_prompt,

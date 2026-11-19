@@ -16,7 +16,7 @@
 
 import pytest
 
-from verl_omni.pipelines.bagel_flow_grpo.agentic_und_gen.episode import (
+from verl_omni.pipelines.bagel_flow_grpo.agentic_und_gen.episode_metrics import (
     TRAIN_REWARD_DIM_KEYS,
     aggregate_reward_breakdown_metrics,
     und_record_field_keys,

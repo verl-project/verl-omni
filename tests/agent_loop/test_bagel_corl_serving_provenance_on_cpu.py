@@ -29,38 +29,26 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def load_lib():
-    spec = importlib.util.spec_from_file_location(
-        "provenance_protocol", ROOT / "verl_omni/pipelines/bagel_flow_grpo/agentic_und_gen/turn_protocol.py"
-    )
-    protocol = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(protocol)
-    path = ROOT / "verl_omni/pipelines/bagel_flow_grpo/agentic_und_gen/episode.py"
-    tree = ast.parse(path.read_text(encoding="utf-8"))
-    tree.body = [
-        node
-        for node in tree.body
-        if not (isinstance(node, ast.ImportFrom) and (node.module or "").startswith("verl_omni"))
-    ]
+    """One namespace over the ``agentic_und_gen`` episode modules, for the AST-projected helpers below."""
+    package = "verl_omni.pipelines.bagel_flow_grpo.agentic_und_gen"
     module = ModuleType("serving_provenance_lib")
     sys.modules[module.__name__] = module
-    from verl_omni.tools.trajectory import EpisodeState, current_episode, episode_scope
-
-    latch = [False]
-    module.__dict__.update(
-        EpisodeState=EpisodeState,
-        current_episode=current_episode,
-        episode_scope=episode_scope,
-        build_forced_reflection=protocol.build_forced_reflection,
-        derive_good_enough_from_scores=protocol.derive_good_enough_from_scores,
-        format_rm_scores_as_judge_text=protocol.format_rm_scores_as_judge_text,
-        derive_rollout_seed=lambda base, index: base + index,
-        register_tool_artifact=lambda **kwargs: None,
-        get_active_user_prompt=lambda: "a cube",
-        clear_good_enough_yes_reached=lambda: latch.__setitem__(0, False),
-        get_good_enough_yes_reached=lambda: latch[0],
-        set_good_enough_yes_reached=lambda value: latch.__setitem__(0, value),
-    )
-    exec(compile(tree, str(path), "exec"), module.__dict__)
+    for name in (
+        "serving",
+        "protocol",
+        "tool_calls",
+        "und_decode",
+        "samples",
+        "gen_tool",
+        "judge_text",
+        "und_reward",
+        "episode_metrics",
+        "episode_state",
+        "episode",
+    ):
+        source = importlib.import_module(f"{package}.{name}")
+        module.__dict__.update({key: value for key, value in vars(source).items() if not key.startswith("__")})
+    module._as_gen_sample = module.gen_sample_from_row
     return module
 
 
@@ -272,21 +260,15 @@ def test_live_und_decode_keeps_observed_output_metadata():
 @pytest.mark.parametrize("rewrite", [False, True])
 def test_generation_metadata_reads_only_the_current_episode(tmp_path, rewrite):
     """The pipeline owns call metadata while shared state owns generation history."""
-    from verl_omni.tools.trajectory import EpisodeState, current_episode, episode_scope
+    from verl_omni.pipelines.bagel_flow_grpo.agentic_und_gen.gen_tool import build_generate_call_meta
+    from verl_omni.tools.trajectory import EpisodeState, episode_scope
 
-    path = ROOT / "verl_omni/pipelines/bagel_flow_grpo/agentic_und_gen/episode.py"
-    tree = ast.parse(path.read_text(encoding="utf-8"))
-    helper = next(
-        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_build_generate_call_meta"
-    )
-    namespace = {"current_episode": current_episode}
-    exec(compile(ast.Module(body=[helper], type_ignores=[]), str(path), "exec"), namespace)
     image = tmp_path / "previous.png"
     image.write_bytes(b"image")
     with episode_scope(EpisodeState(episode_id="metadata")) as state:
         if rewrite:
             state.record_generation(prompt="previous", paths=[str(image)])
-        meta = namespace["_build_generate_call_meta"](prompt="next", user_prompt="request")
+        meta = build_generate_call_meta(prompt="next", user_prompt="request")
         assert meta["call_role"] == ("rewrite" if rewrite else "initial")
         assert meta["controlled_by_reflection"] is rewrite
         assert meta["prev_tool_prompt"] == ("previous" if rewrite else "")

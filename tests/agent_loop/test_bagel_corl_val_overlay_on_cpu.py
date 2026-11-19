@@ -275,7 +275,7 @@ def test_training_row_still_carries_the_full_trajectory(tmp_path):
 
 def test_a_valid_row_without_traj_is_dropped_from_the_gen_training_lane():
     """The row shape validation produces must be one the packer already understands."""
-    from verl_omni.pipelines.bagel_flow_grpo.agentic_und_gen.episode import GenSample
+    from verl_omni.pipelines.bagel_flow_grpo.agentic_und_gen.samples import GenSample
 
     sample = GenSample(
         gen_sample_uid="g.01",

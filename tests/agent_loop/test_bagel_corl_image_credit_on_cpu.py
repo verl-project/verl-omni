@@ -16,13 +16,8 @@
 
 import pytest
 
-from verl_omni.pipelines.bagel_flow_grpo.agentic_und_gen.episode import (
-    EpisodeRollout,
-    GenSample,
-    episode_und_reward,
-    gen_sample_uid,
-    image_credit_reward,
-)
+from verl_omni.pipelines.bagel_flow_grpo.agentic_und_gen.samples import EpisodeRollout, GenSample, gen_sample_uid
+from verl_omni.pipelines.bagel_flow_grpo.agentic_und_gen.und_reward import episode_und_reward, image_credit_reward
 
 
 def _sample(*, call: str, index: int, score: float | None, valid: bool = True) -> GenSample:

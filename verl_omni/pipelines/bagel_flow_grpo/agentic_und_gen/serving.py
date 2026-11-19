@@ -26,6 +26,20 @@ import torch
 
 logger = logging.getLogger(__name__)
 
+
+def _force_info_logging() -> None:
+    """Make this process emit INFO diagnostics after vLLM raises the root level to ERROR."""
+    level = logging.INFO
+    for name in ("verl_omni", "verl"):
+        logging.getLogger(name).setLevel(level)
+    root = logging.getLogger()
+    root.setLevel(level)
+    for handler in root.handlers:
+        handler.setLevel(level)
+    if not root.handlers:
+        logging.basicConfig(level=level, force=True)
+
+
 _AR_ONLY_SAMPLING_KEYS = frozenset(
     {
         "temperature",

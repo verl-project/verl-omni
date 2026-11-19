@@ -18,9 +18,6 @@ Ray/CUDA are replaced only at process boundaries. This is not serving parity.
 """
 
 import ast
-import logging
-import math
-import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -64,16 +61,9 @@ def test_requested_policy_version_uses_tq_request_step_only():
 @pytest.mark.parametrize("stale", [False, True])
 def test_publication_verifies_multiple_sentinels_and_sleeps_on_failure(monkeypatch, stale):
     import verl_omni.workers.rollout.vllm_rollout.weight_fingerprint  # noqa: F401
+    from verl_omni.trainer.omni.bagel_corl_und_ar_runtime import publish_und_ar_weights
 
     monkeypatch.setitem(sys.modules, "ray", SimpleNamespace(get=lambda result: result))
-    path = ROOT / "verl_omni/trainer/omni/bagel_corl_trainer.py"
-    flatten = load_function(path, "_flatten_rpc_results")
-    publish = load_function(
-        path,
-        "_publish_und_ar_weights",
-        {"_flatten_rpc_results": flatten, "logger": logging.getLogger(__name__)},
-        "OmniBagelCoRLTrainerSync",
-    )
     events = []
     names = (
         "language_model.model.layers.0.self_attn.o_proj.weight",
@@ -98,22 +88,21 @@ def test_publication_verifies_multiple_sentinels_and_sleeps_on_failure(monkeypat
         assert kwargs["receiver_ranks"] == [0]
         return [{"num_tensors": 50, "checksum": 1.25, "checksums": expected}]
 
-    trainer = SimpleNamespace(
-        und_rollout_replicas=[SimpleNamespace(servers=[server], replica_rank=0)],
-        _und_stage_devices=lambda _: {0: [0], 1: [1]},
-        _und_deploy_config_path=lambda: "deploy",
-        UND_AR_POLICY_STAGE_ID=0,
-        UND_AR_SYNC_CHECK_PARAM=names[0],
-        UND_AR_SYNC_CHECK_PARAMS=names,
+    replicas = [SimpleNamespace(servers=[server], replica_rank=0)]
+    publish = lambda: publish_und_ar_weights(
+        replicas,
         actor_rollout_wg=SimpleNamespace(update_bagel_und_ar_weights=update),
+        receiver_ranks=[0],
+        check_names=names,
         global_steps=26,
     )
     if stale:
         with pytest.raises(RuntimeError, match="pushed weights"):
-            publish(trainer)
+            publish()
     else:
-        publish(trainer)
-        assert trainer._pending_sync_metrics["bagel_corl/und_sync/num_tensors"] == 50
+        num_tensors, fingerprint, _seconds = publish()
+        assert num_tensors == 50
+        assert fingerprint == 1.25
     assert set(names).issubset(events)
     assert events[-1] == "sleep"
 
@@ -121,7 +110,8 @@ def test_publication_verifies_multiple_sentinels_and_sleeps_on_failure(monkeypat
 def test_ar_builder_disables_engine_lora_and_routes_to_thinker(tmp_path):
     from omegaconf import OmegaConf
 
-    path = ROOT / "verl_omni/trainer/omni/bagel_corl_trainer.py"
+    from verl_omni.trainer.omni.bagel_corl_und_ar import build_und_ar_entrypoint_config
+
     fixture_path = ROOT / "tests/trainer/omni/test_bagel_corl_und_ar_weights_on_cpu.py"
     config = load_function(fixture_path, "_entry_config", {"OmegaConf": OmegaConf})()
     deploy = tmp_path / "deploy.yaml"
@@ -129,67 +119,30 @@ def test_ar_builder_disables_engine_lora_and_routes_to_thinker(tmp_path):
         "stages:\n  - stage_id: 0\n    devices: '0'\n    max_model_len: 16384\n  - stage_id: 1\n    devices: '1'\n",
         encoding="utf-8",
     )
-    builder = load_function(
-        path,
-        "_build_und_ar_entrypoint_config",
-        {
-            "_actor_merges_lora": load_function(path, "_actor_merges_lora"),
-        },
-        "OmniBagelCoRLTrainerSync",
-    )
-    trainer = SimpleNamespace(
-        config=config,
-        UND_AR_LOAD_FORMAT="auto",
-        UND_AR_POLICY_STAGE_ID=0,
-        _und_deploy_config_path=lambda: str(deploy),
-        _resolve_und_hf_config_path=lambda *args: "llm.json",
-        _und_ar_stage_ids=lambda _: (0, 1),
-    )
-    max_len = load_function(
-        path,
-        "_und_stage_max_model_len",
-        {"OmegaConf": OmegaConf, "os": os},
-        "OmniBagelCoRLTrainerSync",
-    )
-    trainer._und_stage_max_model_len = max_len
-    result = builder(trainer)
+    config.actor_rollout_ref.rollout.agent.und_deploy_config = str(deploy)
+    result = build_und_ar_entrypoint_config(config, load_format="auto", policy_stage_id=0, hf_config_path="llm.json")
     assert result.actor_rollout_ref.model.lora_rank == 0
+    assert result.actor_rollout_ref.model.hf_config_path == "llm.json"
     assert result.actor_rollout_ref.rollout.engine_kwargs.vllm_omni.weight_sync_stage_ids == [0]
+    assert result.actor_rollout_ref.rollout.engine_kwargs.vllm_omni.stage_overrides == {
+        "0": {"tensor_parallel_size": 1},
+        "1": {"tensor_parallel_size": 1},
+    }
+    assert result.actor_rollout_ref.rollout.max_model_len == 16384
     assert result.actor_rollout_ref.rollout.load_format == "auto"
     assert config.actor_rollout_ref.rollout.load_format == "dummy"
 
 
 def test_trainer_rollout_gap_preserves_distinct_update_and_reference_metrics():
-    # Execute the production metric publication suffix without initializing a trainer.
-    tree = ast.parse(
-        (Path(__file__).resolve().parents[3] / "verl_omni/trainer/omni/bagel_corl_trainer.py").read_text(
-            encoding="utf-8"
-        )
-    )
-    method = next(node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == "_update_actor")
-    start = next(
-        i
-        for i, node in enumerate(method.body)
-        if isinstance(node, ast.For) and ast.unparse(node.iter) == "list(metrics.items())"
-    )
-    end = next(
-        i
-        for i, node in enumerate(method.body)
-        if isinstance(node, ast.Expr)
-        and isinstance(node.value, ast.Call)
-        and isinstance(node.value.func, ast.Attribute)
-        and node.value.func.attr == "_divergence_tripwire"
-    )
+    from verl_omni.trainer.omni.bagel_corl_metrics import publish_lane_metrics
+
     metrics = {
         "actor/und/update_kl": 0.03,
         "actor/und/ref_kl": 0.7,
         "actor/gen/update_kl": 0.002,
         "rollout_corr/kl": 0.19,
     }
-    exec(
-        compile(ast.Module(body=method.body[start:end], type_ignores=[]), "trainer_metric_suffix", "exec"),
-        {"metrics": metrics, "math": math},
-    )
+    publish_lane_metrics(metrics)
     assert metrics["und/update_kl"] == 0.03
     assert metrics["und/ref_kl"] == 0.7
     assert metrics["gen/update_kl"] == 0.002

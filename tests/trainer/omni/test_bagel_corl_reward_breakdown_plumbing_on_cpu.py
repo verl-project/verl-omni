@@ -22,10 +22,8 @@ any one of the three is computed and then thrown away, which is indistinguishabl
 never having computed it.
 """
 
-from verl_omni.pipelines.bagel_flow_grpo.agentic_und_gen.episode import aggregate_reward_breakdown_metrics
-from verl_omni.trainer.omni.bagel_corl_trainer import (
-    _bagel_corl_step_metric_keys,
-)
+from verl_omni.pipelines.bagel_flow_grpo.agentic_und_gen.episode_metrics import aggregate_reward_breakdown_metrics
+from verl_omni.trainer.omni.bagel_corl_metrics import step_metric_keys
 
 
 def _record(score, credit, breakdown):
@@ -49,20 +47,20 @@ def test_every_key_the_aggregator_emits_survives_the_allowlist():
     extra = dict(aggregated)
     extra["episode/J"] = 4.0
 
-    published = set(_bagel_corl_step_metric_keys(extra))
+    published = set(step_metric_keys(extra))
     assert set(aggregated) <= published, sorted(set(aggregated) - published)
     assert "episode/J" in published
 
 
 def test_static_keys_are_reported_only_when_present():
-    assert _bagel_corl_step_metric_keys({}) == []
-    assert _bagel_corl_step_metric_keys({"episode/K_zero": 0.0}) == ["episode/K_zero"]
+    assert step_metric_keys({}) == []
+    assert step_metric_keys({"episode/K_zero": 0.0}) == ["episode/K_zero"]
 
 
 def test_a_key_held_as_none_is_not_published():
     """A copy of ``None`` reads as a measurement downstream; it must not be forwarded."""
-    assert _bagel_corl_step_metric_keys({"episode/J": None}) == []
-    assert _bagel_corl_step_metric_keys({"bagel_corl/reward_valid/mean": None}) == []
+    assert step_metric_keys({"episode/J": None}) == []
+    assert step_metric_keys({"bagel_corl/reward_valid/mean": None}) == []
 
 
 def test_static_keys_come_first_and_prefix_keys_are_sorted():
@@ -72,7 +70,7 @@ def test_static_keys_come_first_and_prefix_keys_are_sorted():
         "bagel_corl/reward_dim/image/mean": 0.6,
         "und/no_image_credit": 0.0,
     }
-    keys = _bagel_corl_step_metric_keys(extra)
+    keys = step_metric_keys(extra)
     assert keys[:2] == ["und/no_image_credit", "episode/K"]
     assert keys[2:] == ["bagel_corl/reward_dim/image/mean", "bagel_corl/reward_valid/mean"]
 
@@ -80,4 +78,4 @@ def test_static_keys_come_first_and_prefix_keys_are_sorted():
 def test_an_unrelated_key_is_never_published():
     """``extra`` carries the whole lane state; only the allowlist reaches the step log."""
     extra = {"bagel_corl_gen": {"advantages": 1}, "raw_prompt": ["secret"], "episode/K": 2.0}
-    assert _bagel_corl_step_metric_keys(extra) == ["episode/K"]
+    assert step_metric_keys(extra) == ["episode/K"]

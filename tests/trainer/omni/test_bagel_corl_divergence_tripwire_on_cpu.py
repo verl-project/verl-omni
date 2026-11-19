@@ -27,11 +27,9 @@ import logging
 import pytest
 import torch
 
-from verl_omni.trainer.omni.bagel_corl_trainer import (
-    OmniBagelCoRLTrainerSync,
-    _as_ray_actor_class,
-    _metric_scalar,
-)
+from verl_omni.trainer.omni.bagel_corl_metrics import metric_scalar
+from verl_omni.trainer.omni.bagel_corl_trainer import OmniBagelCoRLTrainerSync
+from verl_omni.trainer.omni.bagel_corl_und_ar_runtime import as_ray_actor_class
 
 
 class _PlainActorFixture:
@@ -43,10 +41,10 @@ def test_load_balancer_actor_class_is_decorated_only_when_the_class_is_plain():
     import ray
 
     assert not hasattr(_PlainActorFixture, "remote"), "the fixture must start un-decorated"
-    assert hasattr(_as_ray_actor_class(_PlainActorFixture), "remote"), "plain class must be wrapped"
+    assert hasattr(as_ray_actor_class(_PlainActorFixture), "remote"), "plain class must be wrapped"
 
     decorated = ray.remote(_PlainActorFixture)
-    assert _as_ray_actor_class(decorated) is decorated, "an actor class must not be re-decorated"
+    assert as_ray_actor_class(decorated) is decorated, "an actor class must not be re-decorated"
 
 
 def _tripwire_trainer():
@@ -57,7 +55,7 @@ def _tripwire_trainer():
     return trainer
 
 
-def test_metric_scalar_unwraps_floats_tensors_and_metric_objects():
+def testmetric_scalar_unwraps_floats_tensors_and_metric_objects():
     """The step metrics dict mixes all three; a tripwire that read one would miss the run."""
     from verl.utils.metric import Metric
 
@@ -68,12 +66,12 @@ def test_metric_scalar_unwraps_floats_tensors_and_metric_objects():
         "non_scalar_tensor": torch.zeros(2),
         "not_a_number": "n/a",
     }
-    assert _metric_scalar(metrics, "plain") == 0.5
-    assert _metric_scalar(metrics, "tensor") == 2.0
-    assert _metric_scalar(metrics, "metric") == 3.0
-    assert _metric_scalar(metrics, "non_scalar_tensor") is None
-    assert _metric_scalar(metrics, "not_a_number") is None
-    assert _metric_scalar(metrics, "absent") is None
+    assert metric_scalar(metrics, "plain") == 0.5
+    assert metric_scalar(metrics, "tensor") == 2.0
+    assert metric_scalar(metrics, "metric") == 3.0
+    assert metric_scalar(metrics, "non_scalar_tensor") is None
+    assert metric_scalar(metrics, "not_a_number") is None
+    assert metric_scalar(metrics, "absent") is None
 
 
 def test_the_tripwire_warns_on_kl_and_publishes_the_metric(caplog):
