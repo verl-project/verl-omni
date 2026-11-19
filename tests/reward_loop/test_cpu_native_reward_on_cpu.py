@@ -81,7 +81,7 @@ async def test_cancelled_native_inference_keeps_model_until_actual_completion(mo
 
     if kind == "async":
         Model.infer = async_infer
-    monkeypatch.setattr(executor_module, "_load_native_model", lambda _: Model)
+    monkeypatch.setattr(executor_module, "import_from_spec", lambda _: Model)
     executor = NativeRewardExecutor(
         RewardModelSpec(name="quality", backend="native", device_type="cpu", executor_config={"model": "test:model"})
     )
@@ -131,7 +131,7 @@ async def test_cpu_native_executor_uses_unindexed_cpu_device(monkeypatch):
         assert device == torch.device("cpu")
         return model
 
-    monkeypatch.setattr(executor_module, "_load_native_model", lambda _: build_model)
+    monkeypatch.setattr(executor_module, "import_from_spec", lambda _: build_model)
     monkeypatch.setattr(executor_module, "_empty_accelerator_cache", lambda: pytest.fail("CPU sleep cleared GPU cache"))
     await executor.wake_up()
     assert await executor.infer(1) == 2
@@ -150,7 +150,7 @@ async def test_native_executor_explicit_cpu_device_does_not_probe_accelerator(mo
             device_type="cpu",
         )
     )
-    monkeypatch.setattr(executor_module, "_load_native_model", lambda _: lambda device: SimpleNamespace(device=device))
+    monkeypatch.setattr(executor_module, "import_from_spec", lambda _: lambda device: SimpleNamespace(device=device))
     monkeypatch.setattr(executor_module, "get_device_name", lambda: pytest.fail("Explicit device was ignored"))
     await executor.wake_up()
     assert executor._model.device == "cpu"

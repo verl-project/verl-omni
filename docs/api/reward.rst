@@ -89,6 +89,21 @@ UnifiedReward Scorer
 .. automodule:: verl_omni.utils.reward_score.unified_reward
    :members: compute_score_unified_reward
 
+Class-based Scorer Protocol
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. automodule:: verl_omni.utils.reward_score.scorers.base
+   :members: RewardScorer
+
+.. automodule:: verl_omni.utils.reward_score.scorers.registry
+   :members: register_scorer, get_scorer_cls
+
+PickScore Scorer (class-based)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. automodule:: verl_omni.utils.reward_score.scorers.pickscore
+   :members: PickScoreScorer, compute_score_pickscore_batched
+
 Reward Utilities
 ^^^^^^^^^^^^^^^^^^
 

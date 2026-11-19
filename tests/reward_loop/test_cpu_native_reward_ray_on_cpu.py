@@ -411,6 +411,11 @@ def test_cpu_phase_failure_drains_accepted_samples_before_sleep(tmp_path, monkey
     ray.init(num_cpus=4, num_gpus=0, include_dashboard=False, object_store_memory=128 * 1024**2)
     try:
         manager = OmniRewardLoopManager(_full_config(tmp_path, True))
+        # Match the actor-restart startup budget before timing scoring-control signals.
+        ray.get(
+            [worker.__ray_ready__.remote() for workers in manager._reward_worker_groups.values() for worker in workers],
+            timeout=120,
+        )
         data = DataProto.concat([_full_data(), _full_data()[2:]])
         data.non_tensor_batch["reward_model"][0] = {"ground_truth": "controlled-fail"}
         data.non_tensor_batch["reward_model"][2 if separate_replica else 1] = {"ground_truth": "delay"}
@@ -422,10 +427,10 @@ def test_cpu_phase_failure_drains_accepted_samples_before_sleep(tmp_path, monkey
             try:
                 await asyncio.wait_for(delayed_worker.wait_for_delayed_sample.remote(), timeout=30)
                 await failing_worker.release_failure.remote()
-                await failing_worker.wait_for_failure.remote()
+                await asyncio.wait_for(failing_worker.wait_for_failure.remote(), timeout=30)
                 completed, _ = await asyncio.wait({scoring}, timeout=0.2)
             finally:
-                await delayed_worker.release_delay.remote()
+                await asyncio.gather(failing_worker.release_failure.remote(), delayed_worker.release_delay.remote())
                 result = (await asyncio.gather(scoring, return_exceptions=True))[0]
             state = await delayed_worker.delayed_sample_state.remote()
             assert not completed, "The phase returned while an accepted sample was still waiting to infer"
@@ -445,6 +450,11 @@ def test_cpu_phase_cancellation_drains_accepted_samples_before_sleep(tmp_path, m
     ray.init(num_cpus=4, num_gpus=0, include_dashboard=False, object_store_memory=128 * 1024**2)
     try:
         manager = OmniRewardLoopManager(_full_config(tmp_path, True))
+        # Match the actor-restart startup budget before timing scoring-control signals.
+        ray.get(
+            [worker.__ray_ready__.remote() for workers in manager._reward_worker_groups.values() for worker in workers],
+            timeout=120,
+        )
         data = _full_data()
         data.non_tensor_batch["reward_model"][1] = {"ground_truth": "delay"}
         worker = manager._reward_worker_groups["quality"][0]
