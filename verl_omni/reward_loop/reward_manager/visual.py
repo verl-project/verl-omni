@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import inspect
+import warnings
 
 import torch
 from verl import DataProto
@@ -78,9 +79,20 @@ def _validate_visual_response(response_visual, config, *, is_validate: bool, ext
 
 
 class VisualRewardManager(RewardManagerBase):
-    """The reward manager for visual response."""
+    """The reward manager for visual response.
+
+    Deprecated since v0.4.0 and replaced by :class:`MultiVisualRewardManager`
+    with ``reward.reward_functions``; it will be removed in a future release.
+    """
 
     def __init__(self, config, tokenizer, compute_score, reward_router_address=None, reward_model_tokenizer=None):
+        warnings.warn(
+            "VisualRewardManager is deprecated since v0.4.0 and will be removed in a future release. "
+            "Set reward.reward_manager.name=MultiVisualRewardManager and configure scorers under "
+            "reward.reward_functions; see docs/algo/named_reward_models.md.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         super().__init__(config, tokenizer, compute_score)
 
         if compute_score is None or compute_score is _upstream_default_compute_score:

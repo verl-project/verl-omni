@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import math
+import warnings
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
@@ -496,7 +497,35 @@ def accelerator_workers_enabled(config) -> bool:
     reward = config.reward
     accelerator_workers = reward.get("accelerator_workers", {}) or {}
     custom_reward = reward.get("custom_reward_function", {}) or {}
+    if custom_reward.get("use_accelerator", False):
+        warnings.warn(
+            "reward.custom_reward_function.use_accelerator is deprecated since v0.4.0 and will be removed "
+            "in a future release. Set reward.accelerator_workers.enabled instead.",
+            DeprecationWarning,
+        )
     return bool(accelerator_workers.get("enabled", False) or custom_reward.get("use_accelerator", False))
+
+
+def warn_deprecated_reward_config(config) -> None:
+    """Emit the trainer-launch deprecation notices for legacy reward paths."""
+    reward = config.reward
+    if reward.reward_manager.get("name") == "VisualRewardManager":
+        warnings.warn(
+            "VisualRewardManager is deprecated since v0.4.0 and will be removed in a future release. "
+            "Set reward.reward_manager.name=MultiVisualRewardManager and configure scorers under "
+            "reward.reward_functions; see docs/algo/named_reward_models.md.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+    if reward.reward_model.get("enable", False) and not reward.get("reward_functions"):
+        warnings.warn(
+            "The single global reward model (reward.reward_model.enable=true with one "
+            "reward.custom_reward_function) is deprecated since v0.4.0 and will be removed in a future "
+            "release. Configure a named engine model under reward.models and bind it from "
+            "reward.reward_functions; see docs/algo/named_reward_models.md.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
 
 
 def parse_reward_model_placement(name: str, value) -> RewardModelPlacementConfig:
