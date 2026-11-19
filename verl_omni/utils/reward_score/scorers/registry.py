@@ -26,6 +26,9 @@ the same fail-fast posture as ``DiffusionModelBase.get_class_by_name``.
 from __future__ import annotations
 
 import hashlib
+import importlib
+import importlib.machinery
+import sys
 import threading
 from pathlib import Path
 from types import ModuleType
@@ -135,19 +138,88 @@ def load_reward_object(module_path: str, object_name: str) -> Any:
     """Share a file module between reward functions and registered scorer classes.
 
     File imports execute once per canonical path in this worker process, just
-    like package imports. In particular, resolving two attributes must not rerun
+    like package imports. Importable files retain their package context.
+    In particular, resolving two attributes must not rerun
     class-registration decorators or recreate module-owned model state.
     """
     from verl.utils.import_utils import load_extern_object, load_module
 
     if module_path.startswith("pkg://"):
         return load_extern_object(module_path=module_path, object_name=object_name)
-    path = str(Path(module_path.removeprefix("file://")).resolve())
+    path = Path(module_path.removeprefix("file://")).resolve()
+    key = str(path)
     with _FILE_IMPORT_LOCK:
-        if path not in _FILE_MODULES:
-            module_name = "_verl_omni_reward_" + hashlib.sha256(path.encode()).hexdigest()
-            _FILE_MODULES[path] = load_module(path, module_name=module_name)
-        return getattr(_FILE_MODULES[path], object_name)
+        module = _FILE_MODULES.get(key)
+    if module is None:
+        # Package imports keep their own context and import lock. Never wait for
+        # another thread's package initialization while holding our file lock.
+        module = _source_module(path)
+        spec = getattr(module, "__spec__", None)
+        if getattr(spec, "_initializing", False):
+            return getattr(importlib.import_module(spec.name), object_name)
+        with _FILE_IMPORT_LOCK:
+            if key not in _FILE_MODULES:
+                if module is None:
+                    module_name = "_verl_omni_reward_" + hashlib.sha256(key.encode()).hexdigest()
+                    module = load_module(key, module_name=module_name)
+                _FILE_MODULES[key] = module
+            module = _FILE_MODULES[key]
+    return getattr(module, object_name)
+
+
+def _source_module(path: Path) -> ModuleType | None:
+    """Reuse a loaded source or import it under its normal package name."""
+    sources = [
+        (module, vars(module).get("__file__"))
+        for module in sys.modules.copy().values()
+        if isinstance(module, ModuleType)
+    ]
+    # The common package-loaded path needs no filesystem walk over other modules.
+    for module, source in sources:
+        if source == str(path):
+            return module
+    for module, source in sources:
+        if isinstance(source, str) and source:
+            try:
+                if Path(source).resolve() == path:
+                    return module
+            except (OSError, RuntimeError):
+                continue
+    for entry in sys.path:
+        if not isinstance(entry, str):
+            continue
+        try:
+            relative = path.relative_to(Path(entry or ".").resolve())
+        except (ValueError, OSError, RuntimeError):
+            continue
+        if relative.suffix != ".py":
+            continue
+        parts = relative.with_suffix("").parts
+        if parts[-1] == "__init__":
+            parts = parts[:-1]
+        if not parts or not all(part.isidentifier() for part in parts):
+            continue
+        search = None
+        spec = None
+        # Resolve filesystem locations before importing: an unrelated package
+        # with the same name must not execute during an explicit file lookup.
+        for length in range(1, len(parts) + 1):
+            name = ".".join(parts[:length])
+            loaded = sys.modules.get(name)
+            if isinstance(loaded, ModuleType):
+                spec = vars(loaded).get("__spec__")
+                search = vars(loaded).get("__path__")
+            elif loaded is not None:
+                break
+            else:
+                spec = importlib.machinery.PathFinder.find_spec(name, search)
+                search = spec.submodule_search_locations if spec is not None else None
+            if length < len(parts) and search is None:
+                break
+        else:
+            if spec is not None and spec.origin and Path(spec.origin).resolve() == path:
+                return importlib.import_module(name)
+    return None
 
 
 def _load_ref(ref: str) -> Any:

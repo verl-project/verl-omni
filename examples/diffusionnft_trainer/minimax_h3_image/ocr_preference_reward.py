@@ -226,7 +226,9 @@ async def _preference(solution_image, extra_info: dict) -> dict:
         try:
             if state.scorer is None or state.scorer.returncode is not None:
                 env = dict(os.environ)
-                if torch.version.hip:
+                if env.get("H3_IMAGE_DEVICE") == "npu":
+                    env["ASCEND_RT_VISIBLE_DEVICES"] = SCORER_GPU
+                elif torch.version.hip:
                     # ROCm aborts on conflicting visibility; the inherited values name the trainer GPUs.
                     env.pop("CUDA_VISIBLE_DEVICES", None)
                     env.pop("ROCR_VISIBLE_DEVICES", None)
