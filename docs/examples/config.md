@@ -1,6 +1,6 @@
 # Config Explanation
 
-Last updated: 10/25/2026
+Last updated: 11/19/2026
 
 VeRL-Omni builds on [verl](https://github.com/verl-project/verl) and reuses the
 same Hydra config surface for shared RL trainer fields (`data`, FSDP actor /
@@ -538,6 +538,9 @@ actor_rollout_ref:
 - `actor_rollout_ref.model.model_stage`: Which stage to train: `thinker`, `talker`, or `all`.
 - `actor_rollout_ref.model.hf_config_name`: Sub-config key for the trainable component (e.g. `thinker_config`, `talker_config`).
 - `actor_rollout_ref.model.override_config`: Dict merged into HF config load (e.g. `attn_implementation`).
+- Qwen3-Omni Thinker on Ascend can select verl's grouped expert matrix multiplication for BF16
+  FSDP training with `+actor_rollout_ref.model.override_config.experts_implementation=ascend_grouped_mm`.
+  This requires SiLU experts and also applies to the Thinker policy's log-probability forward.
 - `actor_rollout_ref.model.enable_activation_offload` / `use_remove_padding`: Memory / packing flags for the FSDP actor.
 - `actor_rollout_ref.model.lora_*` / `target_modules` / `policy_state_adapters` / `fsdp_layer_prefixes`: Same LoRA roles as diffusion (defaults differ slightly, e.g. `lora_alpha: 16`).
 - `actor_rollout_ref.model.use_liger` / `use_fused_kernels`: Unsupported by omni FSDP/FSDP2 and must remain `false`; enabling either fails before model loading. The adjacent `fused_kernel_options` / `tiled_mlp` fields are backend-specific.

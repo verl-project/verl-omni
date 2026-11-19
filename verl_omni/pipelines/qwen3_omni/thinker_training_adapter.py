@@ -91,6 +91,10 @@ class Qwen3OmniThinkerAdapter(OmniModelBase):
             forward/embedding accessors redirected to thinker.
         """
         module = super().configure_model(module, model_config)
+        if getattr(model_config, "override_config", {}).get("experts_implementation") == "ascend_grouped_mm":
+            from .ascend_experts import enable_ascend_grouped_mm
+
+            enable_ascend_grouped_mm(module.thinker.model)
         module.forward = module.thinker.forward
         module.get_input_embeddings = module.thinker.get_input_embeddings
         module.set_input_embeddings = module.thinker.set_input_embeddings

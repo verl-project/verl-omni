@@ -41,6 +41,75 @@ def _has_lora(module: nn.Module) -> bool:
     return hasattr(module, "lora_A") and hasattr(module, "lora_B")
 
 
+def test_ascend_expert_dispatch_is_local_to_the_selected_thinker(monkeypatch):
+    from transformers.integrations.moe import ALL_EXPERTS_FUNCTIONS
+    from transformers.models.qwen3_omni_moe.configuration_qwen3_omni_moe import Qwen3OmniMoeTextConfig
+    from transformers.models.qwen3_omni_moe.modeling_qwen3_omni_moe import (
+        Qwen3OmniMoeThinkerTextExperts,
+        Qwen3OmniMoeThinkerTextModel,
+    )
+
+    from verl_omni.pipelines.qwen3_omni import ascend_experts
+
+    config = Qwen3OmniMoeTextConfig(
+        vocab_size=16,
+        hidden_size=32,
+        moe_intermediate_size=32,
+        num_hidden_layers=0,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        num_experts=4,
+        num_experts_per_tok=2,
+        hidden_act="silu",
+        experts_implementation="eager",
+    )
+    selected_model = Qwen3OmniMoeThinkerTextModel(config)
+    untouched = Qwen3OmniMoeThinkerTextExperts(config)
+    experts = Qwen3OmniMoeThinkerTextExperts(config)
+    selected_model.experts = experts
+    original_parameters = dict(experts.named_parameters())
+    original_class_forward = type(experts).forward
+
+    monkeypatch.setattr(ascend_experts, "is_torch_npu_available", lambda: True)
+    monkeypatch.setattr(type(ALL_EXPERTS_FUNCTIONS), "_global_mapping", ALL_EXPERTS_FUNCTIONS._global_mapping.copy())
+    monkeypatch.setattr(ascend_experts, "_ascend_grouped_mm", lambda *args: args[1])
+    ascend_experts.enable_ascend_grouped_mm(selected_model)
+
+    assert selected_model.config._experts_implementation == "ascend_grouped_mm"
+    assert experts.config is selected_model.config
+    assert untouched.config is config
+    assert config._experts_implementation == "eager"
+    assert type(experts).forward is original_class_forward
+    assert dict(experts.named_parameters()).keys() == original_parameters.keys()
+    assert all(parameter is original_parameters[name] for name, parameter in experts.named_parameters())
+    hidden = torch.randn(1, config.hidden_size)
+    assert experts(hidden, torch.tensor([[0, 1]]), torch.tensor([[0.5, 0.5]])) is hidden
+
+
+@pytest.mark.parametrize("option,enabled", [(None, False), ("grouped_mm", False), ("ascend_grouped_mm", True)])
+def test_configure_model_selects_ascend_experts_only_when_requested(monkeypatch, option, enabled):
+    from verl_omni.pipelines.qwen3_omni import ascend_experts
+
+    text_model = object()
+    thinker = SimpleNamespace(
+        model=text_model,
+        forward=lambda: None,
+        get_input_embeddings=lambda: None,
+        set_input_embeddings=lambda _: None,
+    )
+    module = SimpleNamespace(thinker=thinker, talker=object())
+    calls = []
+    monkeypatch.setattr(ascend_experts, "enable_ascend_grouped_mm", calls.append)
+
+    result = Qwen3OmniThinkerAdapter.configure_model(
+        module, SimpleNamespace(override_config={"experts_implementation": option})
+    )
+    assert result is module
+    assert result.forward is thinker.forward
+    assert not hasattr(result, "talker")
+    assert calls == ([text_model] if enabled else [])
+
+
 def test_configure_processor_binds_multimodal_pad_dedup(monkeypatch):
     """The V1 processor path must collapse image, video, and audio pad runs."""
     pytest.importorskip("transformers")
