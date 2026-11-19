@@ -31,8 +31,7 @@ from verl_omni.pipelines.minimax_h3_image_diffusion_nft.diffusers_training_adapt
 def test_native_device_preparation_all_heads_and_backward(monkeypatch):
     """Start with NPU tensors so neither lookup nor model-time conversion bypasses the device path."""
     pytest.importorskip("torch_npu")
-    from diffusers import MiniMaxH3ImageTransformer2DModel
-
+    from verl_omni.pipelines.minimax_h3_image_diffusion_nft.diffusers_training_adapter import _actor_model_class
     from verl_omni.workers.engine.fsdp.diffusers_impl import _cast_loaded_diffusers_module
     from verl_omni.workers.engine.lora_adapter_mixin import LoRAAdapterMixin
 
@@ -43,10 +42,15 @@ def test_native_device_preparation_all_heads_and_backward(monkeypatch):
     )
     sigmas = sigmas_cpu.to("npu")
     expected_indices = torch.arange(6)
+    # These endpoints round to a gap of 2.0 after scaling both to FP32 timesteps.
+    close_grid = torch.tensor([0.9675236940383911, 0.9655236601829529], device="npu")
+    assert pdd_step_indices(close_grid * 1000, close_grid).tolist() == [0, 1]
+    with pytest.raises(ValueError, match="decrease by more than"):
+        pdd_step_indices(close_grid[:1] * 1000, close_grid + torch.tensor([0.0, 1e-6], device="npu"))
     for timesteps in (pdd_train_timesteps(sigmas_cpu), pdd_train_timesteps(sigmas_cpu).long()):
         torch.testing.assert_close(pdd_step_indices(timesteps.to("npu"), sigmas).cpu(), expected_indices)
     torch.testing.assert_close(pdd_dit_timestep(sigmas).cpu(), pdd_dit_timestep(sigmas_cpu), rtol=0, atol=0)
-    actor = MiniMaxH3ImageTransformer2DModel(
+    actor = _actor_model_class()(
         num_attention_heads=2,
         attention_head_dim=16,
         hidden_size=32,

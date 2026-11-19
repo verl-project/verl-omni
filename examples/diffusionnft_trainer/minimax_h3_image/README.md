@@ -1,6 +1,6 @@
 # MiniMax H3 image: DiffusionNFT OCR LoRA
 
-Last updated: 11/18/2026
+Last updated: 11/19/2026
 
 DiffusionNFT LoRA training for the MiniMax H3 image model (6-step PDD sampler) on a dense-text rendering task.
 
@@ -24,9 +24,11 @@ react to that. A failed PP-OCR request raises `RuntimeError` so the OCR term con
 
 ```bash
 pip install rapidocr onnxruntime open_clip_torch
-python examples/diffusionnft_trainer/minimax_h3_image/prepare_dense_text_data.py --output-dir $DATA_DIR
+python examples/diffusionnft_trainer/minimax_h3_image/prepare_dense_text_data.py \
+    --output-dir "$DATA_DIR"
 python verl_omni/pipelines/minimax_h3_image_diffusion_nft/checkpoint.py convert \
-    --native-root $MODEL_PATH --output $ACTOR_PATH
+    --native-root "$MODEL_PATH" \
+    --output "$ACTOR_PATH"
 ```
 
 - `rapidocr` must support `OCRVersion.PPOCRV6`; `PPOCR_MODEL_DIR` holds `PP-OCRv6_det_medium.onnx` and
@@ -35,8 +37,7 @@ python verl_omni/pipelines/minimax_h3_image_diffusion_nft/checkpoint.py convert 
   (with `open_clip_pytorch_model.bin`, the default `HPSV2_PRETRAINED_PATH`). `CUSTOM_REWARD_MODEL_PATH`:
   `HPS_v2.1_compressed.pt` from `xswu/HPSv2`. HPSv2.1 is scored by `compute_score_hpsv2`.
 - Rollout needs vLLM-Omni with MiniMax H3 image support (vLLM-Omni 0.33, #878).
-- Actor training needs `diffusers>=0.43.0` (where `MiniMaxH3Transformer3DModel` first shipped; the repository's
-  `diffusers>=0.41.0` floor is too old for this model).
+- Install `diffusers>=0.43.0` for this recipe.
 
 The data rows carry the target text in `reward_model.ground_truth`. The reward looks the full prompt up in
 `TRAIN_FILES` / `VAL_FILES` by `(extra_info.tier, extra_info.split, extra_info.index)`.
@@ -73,17 +74,28 @@ Keep the native rollout weights and `pdd_fused_heads.safetensors` in `MODEL_PATH
 
 Configure the Ascend driver, CANN and matching PyTorch/torch-npu environment before
 starting the recipe, and use the core verl revision pinned in `pyproject.toml`.
-The native Image entrypoint completed three training steps on eight Ascend 950DT
-NPUs with PyTorch 2.10.0, torch-npu 2.10.0.post7 and CANN 9.2.0, using
-Diffusers 0.43.0 and PEFT 0.21.2. The smoke run used four prompts with two samples
-each, completed reward scoring and LoRA updates, synchronized rollout weights,
-and saved the step-three checkpoint. All three steps had finite gradients.
+The H3 model adapter supplies the standard Diffusers `PeftAdapterMixin`.
+The recipe completed three training steps on eight Ascend 950DT NPUs with
+PyTorch 2.10.0, torch-npu 2.10.0.post7, CANN 9.2.0, Diffusers 0.43.0 and PEFT
+0.21.2. Each step generated two samples per prompt for four prompts, computed
+all three rewards, updated LoRA with finite gradients and synchronized the
+rollout weights. The run saved the step-three checkpoint and exited with code
+0. A single-NPU regression checked exact and truncated timesteps, the PDD grid
+spacing boundary and LoRA gradients for all six PDD heads. CPU regression
+tests covered two-rank FSDP2 loading, FP32 module preservation, policy adapter
+switching, LoRA export and adapter reload.
 
-| Physical NPUs | Workload |
+For layered LoRA export, keep both `transformer_blocks.` and
+`token_refiner.refiner_blocks.` in `fsdp_layer_prefixes` so rollout receives both
+block stacks. For a Diffusers pipeline warm start, set `LORA_WARMSTART_PATH` to
+the directory containing `pytorch_lora_weights.safetensors` or
+`pytorch_lora_weights.bin`. The Actor prefers the former when both are present.
+
+| NPU allocation | Workload |
 |---|---|
-| 0–3 | Four-rank FSDP2 Actor and two colocated TP2 rollout replicas |
-| 4–6 | Three Qwen3-VL OCR reward replicas |
-| 7 | PickScore and HPSv2.1 subprocesses |
+| 4 NPUs assigned by Ray | Four-rank FSDP2 Actor and two colocated TP2 rollout replicas |
+| 3 NPUs assigned by Ray | Three Qwen3-VL OCR reward replicas |
+| Physical NPU 7 | PickScore and HPSv2.1 subprocesses |
 
 The launcher requires a full-node allocation of NPUs 0–7 and a local Ray runtime.
 Actor parameter/optimizer CPU offload and gradient checkpointing are enabled;

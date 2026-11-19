@@ -53,10 +53,16 @@ def launch(tmp_path):
         "sys.exit(int(os.environ.get('STUB_EXIT', '0')))\nPY\n"
     )
     stub.chmod(0o755)
-    env = dict(os.environ)
-    for name in ("ASCEND_RT_VISIBLE_DEVICES", "ACTOR_PATH", "TRAIN_FILES", "VAL_FILES", "TOTAL_TRAINING_STEPS"):
-        env.pop(name, None)
+    # Stub the device-node check so the real launcher can also run on a CPU-only host.
+    bash_env = tmp_path / "devices.sh"
+    bash_env.write_text(
+        "test() { if [[ $1 == -c && $2 == /dev/davinci[0-7] ]]; then\n"
+        '    [[ $2 != "${MISSING_DEVICE:-}" ]]; else builtin test "$@"; fi; }\n'
+    )
+    env = {name: os.environ[name] for name in ("PATH", "SystemRoot") if name in os.environ}
     env.update(
+        HOME=tmp_path.as_posix(),
+        BASH_ENV=bash_env.as_posix(),
         PATH=str(tools) + os.pathsep + env.get("PATH", ""),
         MODEL_PATH=model.as_posix(),
         DATA_DIR=(tmp_path / "data files").as_posix(),
@@ -70,6 +76,7 @@ def launch(tmp_path):
     )
 
     def run(*args, script="run_minimax_h3_image_ocr_lora_npu.sh", **updates):
+        capture.unlink(missing_ok=True)
         result = subprocess.run(
             [bash, str(RECIPE / script), *args],
             env=env | updates,
@@ -140,3 +147,9 @@ def test_legacy_actor_weights_are_rejected_before_training(launch):
     assert result.returncode != 0
     assert captured is None
     assert "MiniMaxH3ImageTransformer2DModel" in result.stderr
+
+
+def test_unset_mask_requires_scorer_device(launch):
+    result, captured = launch[0](MISSING_DEVICE="/dev/davinci7")
+    assert result.returncode != 0 and captured is None
+    assert "missing /dev/davinci7" in result.stderr

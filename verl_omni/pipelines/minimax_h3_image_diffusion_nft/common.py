@@ -108,15 +108,20 @@ def pdd_step_indices(timesteps: torch.Tensor, pdd_sigmas: torch.Tensor) -> torch
     timesteps = timesteps.reshape(-1)
     # The released six-point grid is well separated at FP32 precision; Ascend MinDim does not support FP64.
     lookup_dtype = torch.float32 if timesteps.device.type == "npu" else torch.float64
-    grid = pdd_sigmas.to(device=timesteps.device, dtype=lookup_dtype) * PDD_TIMESTEP_SCALE
+    grid = pdd_sigmas.to(device=timesteps.device, dtype=lookup_dtype)
     if grid.ndim == 1:
         grid = grid.unsqueeze(0).expand(timesteps.shape[0], -1)
     if grid.ndim != 2 or grid.shape[0] != timesteps.shape[0] or grid.shape[1] < 1:
         raise ValueError(
             f"pdd_sigmas must be (B, K) or (K,), got {tuple(pdd_sigmas.shape)} for B={timesteps.shape[0]}."
         )
-    if grid.shape[1] > 1 and float((grid[:, :-1] - grid[:, 1:]).min()) <= 2.0 * _PDD_LOOKUP_TOLERANCE:
+    # Compare in sigma units before rounding each scaled endpoint separately.
+    if (
+        grid.shape[1] > 1
+        and float((grid[:, :-1] - grid[:, 1:]).min()) <= 2.0 * _PDD_LOOKUP_TOLERANCE / PDD_TIMESTEP_SCALE
+    ):
         raise ValueError("MiniMax H3 image PDD sigmas must decrease by more than 0.002 per step.")
+    grid = grid * PDD_TIMESTEP_SCALE
     distance = (grid - timesteps.to(lookup_dtype).unsqueeze(1)).abs()
     nearest, indices = distance.min(dim=1)
     if bool((nearest >= _PDD_LOOKUP_TOLERANCE).any()):

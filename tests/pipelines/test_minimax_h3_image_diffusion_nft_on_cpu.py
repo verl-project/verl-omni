@@ -86,10 +86,12 @@ def _heads(steps: int = 6) -> tuple[torch.Tensor, torch.Tensor]:
 
 
 def _tiny_native_actor():
-    native = pytest.importorskip("diffusers.models.transformers.transformer_minimax_h3_image")
+    pytest.importorskip("diffusers.models.transformers.transformer_minimax_h3_image")
+    from verl_omni.pipelines.minimax_h3_image_diffusion_nft.diffusers_training_adapter import _actor_model_class
+
     config = dict(_tiny_actor().config)
     config.pop("audio_in_channels")
-    return native.MiniMaxH3ImageTransformer2DModel.from_config(config).eval()
+    return _actor_model_class().from_config(config).eval()
 
 
 def _model_config(tmp_path) -> SimpleNamespace:
@@ -132,7 +134,7 @@ class TestRegistry:
         ids=["block-targets", "all-linear"],
     )
     def test_lora_targets_share_the_h3_whitelist(self, targets, accepted):
-        config = SimpleNamespace(lora_rank=64, target_modules=targets)
+        config = SimpleNamespace(lora_rank=64, target_modules=targets, fsdp_layer_prefixes=[])
         if accepted:
             MiniMaxH3ImageDiffusionNFT.validate_lora_config(config)
         else:

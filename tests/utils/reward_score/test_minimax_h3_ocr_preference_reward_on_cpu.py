@@ -37,6 +37,15 @@ def _reset_shared_state():
 
 
 class TestOcrPreferenceReward:
+    def test_worker_backend_matches_launcher(self, monkeypatch):
+        scorer_device = load_extern_object(str(Path(REWARD_PATH).with_name("preference_worker.py")), "_scorer_device")
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+        monkeypatch.setenv("H3_IMAGE_DEVICE", "")
+        assert scorer_device() == torch.device("cuda:0")
+        monkeypatch.setenv("H3_IMAGE_DEVICE", "typo")
+        with pytest.raises(ValueError, match="Unsupported H3_IMAGE_DEVICE"):
+            scorer_device()
+
     @pytest.mark.parametrize(
         ("device_kind", "visibility"), [("cuda", "CUDA_VISIBLE_DEVICES"), ("npu", "ASCEND_RT_VISIBLE_DEVICES")]
     )

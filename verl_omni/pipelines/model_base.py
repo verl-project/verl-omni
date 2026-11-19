@@ -170,6 +170,11 @@ class DiffusionModelBase(ABC):
         return None
 
     @classmethod
+    def diffusers_model_class(cls, model_config: DiffusionModelConfig):
+        """Optionally select a concrete Diffusers class for the standard FSDP loader."""
+        return None
+
+    @classmethod
     def configure_train_mode(cls, module: torch.nn.Module) -> None:
         """Hook called after ``module.train()`` for architecture-specific overrides."""
         return

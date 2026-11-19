@@ -13,7 +13,10 @@
 # limitations under the License.
 """MiniMax H3 image training adapter for DiffusionNFT."""
 
+import json
 import os
+from functools import lru_cache
+from pathlib import Path
 from typing import Any, Optional
 
 import torch
@@ -50,6 +53,32 @@ from verl_omni.workers.config import DiffusionModelConfig
 __all__ = ["MiniMaxH3ImageDiffusionNFT"]
 
 
+@lru_cache(maxsize=1)
+def _actor_model_class():
+    """Supply the native image model's missing Diffusers LoRA interface locally."""
+    try:
+        from diffusers import MiniMaxH3ImageTransformer2DModel as NativeImageModel
+        from diffusers.loaders import PeftAdapterMixin
+        from diffusers.loaders.lora_base import LORA_WEIGHT_NAME, LORA_WEIGHT_NAME_SAFE
+    except ImportError as exc:
+        raise ImportError("Native H3 Image DiffusionNFT requires Diffusers 0.43.0 or newer.") from exc
+
+    class MiniMaxH3ImageTransformer2DModel(NativeImageModel, PeftAdapterMixin):
+        """Keep the native checkpoint class name and supply the Diffusers LoRA interface."""
+
+        def load_lora_adapter(self, pretrained_model_name_or_path_or_dict, *args, **kwargs):
+            path = pretrained_model_name_or_path_or_dict
+            if isinstance(path, str | os.PathLike) and not {"weight_name", "use_safetensors"} & kwargs.keys():
+                directory = Path(path) / (kwargs.get("subfolder") or "")
+                for name in (LORA_WEIGHT_NAME_SAFE, LORA_WEIGHT_NAME):
+                    if (directory / name).is_file():
+                        kwargs["weight_name"] = name
+                        break
+            return super().load_lora_adapter(path, *args, **kwargs)
+
+    return MiniMaxH3ImageTransformer2DModel
+
+
 def _pdd_sigmas(micro_batch: TensorDict) -> torch.Tensor:
     sigmas = micro_batch.get("pdd_sigmas", None)
     if sigmas is None:
@@ -75,10 +104,28 @@ class MiniMaxH3ImageDiffusionNFT(DiffusionModelBase):
     use_rollout_kernels = os.environ.get("VERL_OMNI_H3_IMAGE_ROLLOUT_KERNELS", "1") != "0"
 
     @classmethod
+    def diffusers_model_class(cls, model_config: DiffusionModelConfig):
+        """Use the image-only Actor for native checkpoints on both weight-loading and meta ranks."""
+        load_path = model_config.config_path or model_config.local_path
+        subfolder = "" if model_config.config_path else model_config.transformer_subfolder
+        with open(os.path.join(load_path, subfolder, "config.json"), encoding="utf-8") as handle:
+            config = json.load(handle)
+        if config.get("_class_name") != "MiniMaxH3ImageTransformer2DModel":
+            return None
+        return _actor_model_class()
+
+    @classmethod
     def validate_lora_config(cls, model_config: DiffusionModelConfig) -> None:
         """Reject LoRA targets the rollout weight sync cannot transport (shares the H3 whitelist)."""
         if model_config.lora_rank > 0:
             validate_lora_target_modules(model_config.target_modules)
+            prefixes = model_config.fsdp_layer_prefixes
+            required = {"transformer_blocks.", "token_refiner.refiner_blocks."}
+            if prefixes and not required.issubset(prefixes):
+                raise ValueError(
+                    "H3 Image layered LoRA export requires both transformer_blocks. and "
+                    "token_refiner.refiner_blocks. in fsdp_layer_prefixes, or [] for full export."
+                )
 
     @classmethod
     def validate_engine_config(cls, engine_config) -> None:

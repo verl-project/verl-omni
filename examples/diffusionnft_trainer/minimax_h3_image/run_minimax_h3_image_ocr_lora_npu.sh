@@ -3,7 +3,15 @@
 set -euo pipefail
 
 case "${ASCEND_RT_VISIBLE_DEVICES:-}" in
-    ""|0,1,2,3,4,5,6,7) ;;
+    "")
+        for device in /dev/davinci{0..7}; do
+            if ! test -c "$device"; then
+                echo "This recipe requires physical NPUs 0 through 7; missing $device." >&2
+                exit 1
+            fi
+        done
+        ;;
+    0,1,2,3,4,5,6,7) ;;
     *) echo "This recipe requires an allocation of physical NPUs 0 through 7." >&2; exit 1 ;;
 esac
 : "${MODEL_PATH:?Set MODEL_PATH to the native MiniMax H3 Image release root}"

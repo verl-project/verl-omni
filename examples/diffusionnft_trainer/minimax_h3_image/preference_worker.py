@@ -28,17 +28,10 @@ import os
 import sys
 
 
-def main():
-    real_stdout = os.fdopen(os.dup(1), "w")
-    os.dup2(2, 1)
-
+def _scorer_device():
     import torch
-    from PIL import Image
 
-    from verl_omni.utils.reward_score.hpsv2_reward import compute_score_hpsv2
-    from verl_omni.utils.reward_score.pickscore_reward import _PickScoreInferencer
-
-    device_kind = os.environ.get("H3_IMAGE_DEVICE", "cuda")
+    device_kind = os.environ.get("H3_IMAGE_DEVICE") or "cuda"
     if device_kind == "npu":
         import torch_npu  # noqa: F401
 
@@ -50,7 +43,20 @@ def main():
             raise RuntimeError("preference_worker.py needs a CUDA device")
     else:
         raise ValueError(f"Unsupported H3_IMAGE_DEVICE: {device_kind}")
-    device = torch.device(f"{device_kind}:0")
+    return torch.device(f"{device_kind}:0")
+
+
+def main():
+    real_stdout = os.fdopen(os.dup(1), "w")
+    os.dup2(2, 1)
+
+    import torch
+    from PIL import Image
+
+    from verl_omni.utils.reward_score.hpsv2_reward import compute_score_hpsv2
+    from verl_omni.utils.reward_score.pickscore_reward import _PickScoreInferencer
+
+    device = _scorer_device()
     os.environ["REWARD_DEVICE"] = str(device)
     pickscore = _PickScoreInferencer(
         device=device,
