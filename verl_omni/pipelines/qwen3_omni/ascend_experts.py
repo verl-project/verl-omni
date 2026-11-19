@@ -35,10 +35,19 @@ def _ascend_grouped_mm(
     if hidden_states.shape[0] == 0:
         return torch.zeros_like(hidden_states)
 
-    from verl.models.transformers.npu_patch import qwen3_5_moe_experts_forward_npu
+    import torch_npu
+    from verl.models.transformers.npu_patch import NPUGmmFunction
 
-    # Thinker and Qwen3.5 store gate/up and down in the same [expert, out, in] layout.
-    return qwen3_5_moe_experts_forward_npu(experts, hidden_states, top_k_index, top_k_weights)
+    # As in verl-omni #819, keep the packed parameters and pass transposed views to GMM.
+    gate_up_weight = experts.gate_up_proj.transpose(1, 2)
+    down_weight = experts.down_proj.transpose(1, 2)
+    permuted, row_ids = torch_npu.npu_moe_token_permute(hidden_states, top_k_index.to(torch.int32))
+    counts = torch.histc(top_k_index, bins=experts.num_experts, min=0, max=experts.num_experts)
+    gate_up = NPUGmmFunction.apply(permuted, gate_up_weight, counts)
+    activated = torch_npu.npu_swiglu(gate_up, dim=-1)
+    output = NPUGmmFunction.apply(activated, down_weight, counts)
+    unpermuted = torch_npu.npu_moe_token_unpermute(output.to(top_k_weights.dtype), row_ids, probs=top_k_weights)
+    return unpermuted.to(hidden_states.dtype)
 
 
 def enable_ascend_grouped_mm(text_model: Qwen3OmniMoeThinkerTextModel) -> None:
