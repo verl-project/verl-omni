@@ -146,6 +146,13 @@ Visit our [documentation](https://verl-omni.readthedocs.io/en/latest/index.html)
     <td>✅</td>
   </tr>
   <tr>
+    <td><a href="examples/flowgrpo_trainer/minimax_h3_image/README.md">MiniMax H3 Image</a></td>
+    <td>Diffusion generator</td>
+    <td>Text → Image</td>
+    <td>FlowGRPO</td>
+    <td>CPU tested; accelerator validation pending</td>
+  </tr>
+  <tr>
     <td rowspan="2"><b>MiniMax-H3</b></td>
     <td rowspan="2">Diffusion generator</td>
     <td rowspan="2">Any → Video + Audio</td>

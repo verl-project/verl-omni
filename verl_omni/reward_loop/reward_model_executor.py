@@ -20,10 +20,13 @@ import gc
 import importlib
 import inspect
 import logging
+from functools import cached_property
 from typing import Any
 
 import torch
+from verl.utils import hf_tokenizer
 from verl.utils.device import get_device_id, get_device_name
+from verl.utils.fs import copy_to_local
 
 from verl_omni.workers.config.reward import RewardModelSpec, is_engine_backend
 
@@ -85,6 +88,11 @@ class EngineRewardExecutor:
 
     def reward_kwargs(self) -> dict[str, str]:
         return self._client.reward_kwargs()
+
+    @cached_property
+    def tokenizer(self):
+        """Tokenizer of the served model, loaded on first use."""
+        return hf_tokenizer(copy_to_local(self.spec.model_path), trust_remote_code=True)
 
 
 class NativeRewardExecutor:
