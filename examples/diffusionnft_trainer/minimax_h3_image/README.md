@@ -1,6 +1,6 @@
 # MiniMax H3 image: DiffusionNFT OCR LoRA
 
-Last updated: 11/16/2026
+Last updated: 11/18/2026
 
 DiffusionNFT LoRA training for the MiniMax H3 image model (6-step PDD sampler) on a dense-text rendering task.
 
@@ -37,6 +37,22 @@ python verl_omni/pipelines/minimax_h3_image_diffusion_nft/checkpoint.py convert 
 - Rollout needs vLLM-Omni with MiniMax H3 image support (vLLM-Omni 0.33, #878).
 - Actor training needs `diffusers>=0.43.0` (where `MiniMaxH3Transformer3DModel` first shipped; the repository's
   `diffusers>=0.41.0` floor is too old for this model).
+
+### ROCm
+
+Build the shared [`docker/Dockerfile.rocm-prebuilt`](../../../docker/Dockerfile.rocm-prebuilt) image and add this
+recipe's extras inside it. The image's `onnxruntime-rocm` already provides the `onnxruntime` module PP-OCR runs on,
+so do not install `onnxruntime`:
+
+```bash
+docker build -f docker/Dockerfile.rocm-prebuilt -t verl-omni:rocm-prebuilt .
+docker run --device=/dev/kfd --device=/dev/dri --group-add video --security-opt seccomp=unconfined \
+    --ipc=host --shm-size=64g -it verl-omni:rocm-prebuilt
+pip install Levenshtein rapidocr==3.10.0 open_clip_torch==4.2.2
+```
+
+On ROCm the launcher leaves GPU visibility unset and starts its own local Ray capped at `N_GPUS`; set `N_GPUS`
+rather than overriding `ray_kwargs.ray_init` or `trainer.n_gpus_per_node`, and leave `RAY_ADDRESS` unset.
 
 The data rows carry the target text in `reward_model.ground_truth`. The reward looks the full prompt up in
 `TRAIN_FILES` / `VAL_FILES` by `(extra_info.tier, extra_info.split, extra_info.index)`.
