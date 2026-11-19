@@ -189,6 +189,22 @@ def test_meta_rank_adapters_beyond_the_first_match_base_dtype_and_device():
     _assert_meta_bf16(built)
 
 
+def test_meta_rank_can_initialize_pissa():
+    engine = _make_engine(
+        lora_rank=4,
+        lora_alpha=8,
+        lora_init_weights="pissa_niter_4",
+        target_modules=["to_q"],
+        target_parameters=None,
+        exclude_modules=None,
+    )
+
+    module = engine._build_lora_module(_make_meta_bf16_module())
+
+    assert module.peft_config["default"].init_lora_weights == "pissa_niter_4"
+    _assert_meta_bf16(module)
+
+
 def test_lora_dtype_casts_every_adapter_including_inactive_policy_states():
     """lora_dtype must reach inactive adapters or optimizer states split dtypes.
 

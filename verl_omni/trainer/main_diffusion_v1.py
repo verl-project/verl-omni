@@ -22,10 +22,11 @@ import ray
 import torch
 from omegaconf import DictConfig, OmegaConf
 from verl.trainer.constants_ppo import available_physical_cores, get_ppo_ray_runtime_env
+from verl.trainer.ppo.utils import need_reference_policy
 from verl.utils.device import auto_set_device, is_cuda_available
 from verl.utils.import_utils import load_class_from_fqn
 
-from verl_omni.utils.config import validate_config
+from verl_omni.utils.config import resolve_lora_config, validate_config
 from verl_omni.utils.diffusion_attention import validate_attention_consistency
 from verl_omni.utils.rl_insight import enable_rl_insight
 from verl_omni.workers.config.reward import (
@@ -48,6 +49,22 @@ def run_diffusion_v1(config, task_runner_class=None) -> None:
                 settings, model paths, and training hyperparameters.
         task_runner_class: For recipe to change TaskRunner.
     """
+    init_weights = OmegaConf.select(config, "actor_rollout_ref.model.lora_init_weights")
+    if isinstance(init_weights, str) and init_weights.startswith("pissa"):
+        lora = resolve_lora_config(config.actor_rollout_ref.model)
+        if lora.enabled and lora.adapter_path is None:
+            if need_reference_policy(config):
+                raise ValueError(
+                    "PiSSA initialization is incompatible with KL loss or KL reward because disabling LoRA "
+                    "exposes the residual weights. Disable actor_rollout_ref.actor.use_kl_loss and "
+                    "algorithm.use_kl_in_reward."
+                )
+            if any(adapter not in ("default", "reference") for adapter in lora.adapters):
+                raise ValueError(
+                    "PiSSA initialization is incompatible with extra policy snapshot adapters. "
+                    "Set actor_rollout_ref.model.policy_state_adapters=[default]."
+                )
+
     # Reject unsupported profiling combinations before starting Ray or workers.
     if OmegaConf.select(config, "global_profiler.steps"):
         if (

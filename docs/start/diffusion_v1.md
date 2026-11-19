@@ -156,6 +156,23 @@ the {doc}`FlowGRPO quickstart <flowgrpo_quickstart>` (use `qwenimage_ocr.py`,
 not the SD3 converter above). Checkpoints default to
 `checkpoints/flow_grpo/qwen_image_ocr_lora_v1`.
 
+#### PiSSA initialization
+
+Use the same Qwen-Image OCR data and run the PiSSA recipe from the repository root.
+
+```bash
+bash examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_pissa_v1.sh
+```
+
+The recipe uses PEFT's fast PiSSA initialization (`pissa_niter_4`) to
+decompose the frozen transformer weights. FSDP2 merges and streams the
+transformer weights one tensor at a time on each rollout sync. Full
+checkpoints preserve the residual base weights for resume and default to
+`checkpoints/flow_grpo/qwen_image_ocr_pissa_v1`.
+
+When initializing with PiSSA, disable KL loss and KL reward and use
+`actor_rollout_ref.model.policy_state_adapters=[default]`.
+
 ### Wan2.2 DanceGRPO (default CUDA recipe)
 
 Wan2.2 DanceGRPO on CUDA now defaults to the same V1 sync trainer:
