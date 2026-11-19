@@ -244,6 +244,10 @@ class MultiRewardManager(RewardManagerBase, ABC):
 
         async def run_term(sub, filtered_kwargs):
             fn = sub["fn"]
+            executor = self._engine_reward_executors.get(sub["model"])
+            if executor is not None and "reward_model_tokenizer" in sub["sig"].parameters:
+                # Loaded here so a failure is handled like any other failure of this term.
+                filtered_kwargs = {**filtered_kwargs, "reward_model_tokenizer": executor.tokenizer}
 
             async def invoke():
                 if sub["is_async"]:

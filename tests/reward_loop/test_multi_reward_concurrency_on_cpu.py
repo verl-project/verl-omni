@@ -57,6 +57,16 @@ class _EngineExecutor:
         return {"reward_router_address": "engine-router", "model_name": "engine"}
 
 
+class _EngineExecutorWithBrokenTokenizer(_EngineExecutor):
+    @property
+    def tokenizer(self):
+        raise OSError("no tokenizer files")
+
+
+async def _score_with_tokenizer(reward_model_tokenizer):
+    return 1.0
+
+
 class _NativeExecutor:
     def __init__(self, model, omit_model=False):
         self.model = model
@@ -161,6 +171,21 @@ def test_engine_term_opts_in_and_reserved_field_is_not_forwarded():
     manager.set_reward_executors({"engine": _EngineExecutor()}, None)
     result = manager.loop.run_until_complete(manager.run_single(_sample("engine-sample")))
     assert result["reward_score"] == 1.0
+
+
+@pytest.mark.parametrize("independent", [False, True])
+def test_optional_engine_term_survives_a_tokenizer_that_fails_to_load(independent):
+    manager = _manager(
+        {"one": _term("_score_with_tokenizer", independent=independent, model="engine", required=False)},
+        concurrency=2,
+        models={"engine": {"backend": "engine"}},
+    )
+    manager.set_reward_executors({"engine": _EngineExecutorWithBrokenTokenizer()}, None)
+
+    result = manager.loop.run_until_complete(manager.run_single(_sample("engine-sample")))
+
+    assert result["reward_score"] == 0.0
+    assert result["reward_extra_info"]["reward/one/errors"] == 1
 
 
 @pytest.mark.parametrize("independent", [False, True])
