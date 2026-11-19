@@ -42,11 +42,11 @@ from verl.utils.device import get_device_name, get_torch_device, is_cuda_availab
 from verl.utils.distributed import initialize_global_process_group_ray
 from verl.utils.fsdp_utils import apply_fsdp2, fsdp2_load_full_state_dict
 
+from verl_omni.utils.asyncio_utils import await_owned
 from verl_omni.utils.reward_score.image_preference_utils import clip_feature_tensor
 
 from .accelerator_reward_workers import _IndexedResourcePool
 from .reward_model import NativeManagedRewardModel
-from .reward_model_executor import _await_owned
 
 logger = logging.getLogger(__name__)
 
@@ -322,7 +322,7 @@ class NativeFSDPExecutor:
 
     async def infer(self, prompts, images):
         """Retain ownership through caller cancellation and return per-sample outputs."""
-        output = await _await_owned(asyncio.to_thread(self.replica.infer, prompts, images))
+        output = await await_owned(asyncio.to_thread(self.replica.infer, prompts, images))
         return [
             {
                 "text_embeddings": output["text_embeddings"][index],
@@ -334,15 +334,15 @@ class NativeFSDPExecutor:
 
     async def wake_up(self):
         """Wake every rank before returning to the lifecycle owner."""
-        return await _await_owned(asyncio.to_thread(self.replica.wake_up))
+        return await await_owned(asyncio.to_thread(self.replica.wake_up))
 
     async def sleep(self):
         """Drain and unload every rank before returning."""
-        return await _await_owned(asyncio.to_thread(self.replica.sleep))
+        return await await_owned(asyncio.to_thread(self.replica.sleep))
 
     async def close(self):
         """Drain, close, and confirm rank termination."""
-        return await _await_owned(asyncio.to_thread(self.replica.close))
+        return await await_owned(asyncio.to_thread(self.replica.close))
 
 
 class NativeFSDPManagedRewardModel(NativeManagedRewardModel):
@@ -398,7 +398,7 @@ class NativeFSDPManagedRewardModel(NativeManagedRewardModel):
             return result.result()
         except BaseException as primary:
             try:
-                await _await_owned(asyncio.to_thread(self._terminate_owned))
+                await await_owned(asyncio.to_thread(self._terminate_owned))
             except BaseException as cleanup:
                 raise BaseExceptionGroup("FSDP facade operation and cleanup failed", [primary, cleanup]) from None
             raise
@@ -413,7 +413,7 @@ class NativeFSDPManagedRewardModel(NativeManagedRewardModel):
             raise RuntimeError(f"Native reward model {self.name!r} has no bound workers")
         await self.run_rpc(method, self.name)
         if method == "close_reward_model":
-            await _await_owned(asyncio.to_thread(self._terminate_owned))
+            await await_owned(asyncio.to_thread(self._terminate_owned))
 
     async def _close(self):
         """Wait for active termination before reporting its retained error."""

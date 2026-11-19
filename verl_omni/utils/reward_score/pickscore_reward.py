@@ -24,6 +24,7 @@ from PIL import Image
 from transformers import CLIPModel, CLIPProcessor
 from verl.utils.device import get_device_id, get_device_name
 
+from verl_omni.utils.asyncio_utils import await_owned
 from verl_omni.utils.reward_score.image_preference_utils import clip_feature_tensor, decoded_reward_image, to_rgb_image
 
 logger = logging.getLogger(__name__)
@@ -38,28 +39,6 @@ _score_queue = asyncio.Queue()
 _consumer_task = None
 _consumer_started = False
 _consumer_lock = asyncio.Lock()
-
-
-async def _await_owned(awaitable):
-    """Finish an accepted transition before reporting caller cancellation."""
-    task = asyncio.ensure_future(awaitable)
-    cancelled = False
-    while not task.done():
-        try:
-            await asyncio.shield(task)
-        except asyncio.CancelledError:
-            if asyncio.current_task().cancelling():
-                cancelled = True
-        except BaseException:
-            if not task.done():
-                raise
-    if cancelled:
-        try:
-            task.result()
-        except BaseException:
-            pass
-        raise asyncio.CancelledError
-    return task.result()
 
 
 def _pairwise_pickscore(
@@ -240,7 +219,8 @@ class PickScoreNativeModel:
         return await asyncio.gather(*futures)
 
     async def sleep(self):
-        await _await_owned(self._sleep())
+        """Drain queued scores and move retained weights to CPU; requires CPU retention."""
+        await await_owned(self._sleep())
 
     async def _sleep(self):
         if not self.supports_cpu_offload:
@@ -269,7 +249,8 @@ class PickScoreNativeModel:
                 raise
 
     async def wake_up(self):
-        await _await_owned(self._wake_up())
+        """Restore retained weights to the target device before accepting new scores."""
+        await await_owned(self._wake_up())
 
     async def _wake_up(self):
         if not self.supports_cpu_offload:
@@ -292,7 +273,8 @@ class PickScoreNativeModel:
                 raise
 
     async def close(self):
-        await _await_owned(self._close())
+        """Drain queued scores and release the model before reporting caller cancellation."""
+        await await_owned(self._close())
 
     async def _close(self):
         async with self._lifecycle_lock:

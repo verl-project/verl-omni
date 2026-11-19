@@ -13,13 +13,14 @@
 # limitations under the License.
 
 from copy import deepcopy
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 
 import pytest
 import torch
 from omegaconf import OmegaConf
 from verl.trainer.ppo.v1.replay_buffer import ReplayBuffer, ReplayBufferAsync
 
+from verl_omni.pipelines.rollout_media import ArtifactContractError
 from verl_omni.trainer.diffusion.v1 import trainer_base as trainer_base_module
 from verl_omni.trainer.diffusion.v1.trainer_base import PolicyGradientDiffusionTrainerV1
 
@@ -98,7 +99,7 @@ def _make_trainer(
     train_batch_size=3,
     trainer_mode="sync",
 ):
-    return SimpleNamespace(
+    trainer = SimpleNamespace(
         config=_make_config(
             drop_incomplete_groups=drop_incomplete_groups,
             trainer_mode=trainer_mode,
@@ -111,6 +112,8 @@ def _make_trainer(
         _add_prompts_to_generate=refill_fn,
         _trajectory_uid=PolicyGradientDiffusionTrainerV1._trajectory_uid,
     )
+    trainer._sample_rollout_batch = MethodType(PolicyGradientDiffusionTrainerV1._sample_rollout_batch, trainer)
+    return trainer
 
 
 def _patch_transfer_queue(monkeypatch, fake_tq):
@@ -404,3 +407,46 @@ def test_factory_rejects_non_sync_policy_and_invalid_round_limit():
     trainer = SimpleNamespace(config=config, trainer_mode="sync")
     with pytest.raises(ValueError, match="must be a positive integer"):
         PolicyGradientDiffusionTrainerV1._build_replay_buffer(trainer)
+
+
+@pytest.mark.parametrize("partition_id", ["train", "val"])
+@pytest.mark.parametrize("empty", [False, True])
+def test_streaming_contract_failure_overrides_sample_or_empty_error(partition_id, empty):
+    calls = []
+
+    def sample(**kwargs):
+        calls.append(kwargs)
+        if empty:
+            raise RuntimeError("no materializable trajectories")
+        return "partial sibling batch", {}
+
+    def check():
+        raise ArtifactContractError("preview artifact is absent")
+
+    trainer = SimpleNamespace(
+        config=OmegaConf.create({"reward": {"streaming": {"enabled": True}}}),
+        global_steps=7,
+        replay_buffer=SimpleNamespace(sample=sample),
+        agent_loop_manager=SimpleNamespace(raise_if_reward_failed=check),
+    )
+    with pytest.raises(ArtifactContractError, match="preview artifact is absent"):
+        PolicyGradientDiffusionTrainerV1._sample_rollout_batch(trainer, partition_id=partition_id, batch_size=2)
+    assert calls == [{"global_steps": 7, "partition_id": partition_id, "batch_size": 2}]
+
+
+def test_streaming_contract_failure_prevents_incomplete_group_refill(monkeypatch):
+    fake_tq = _FakeTransferQueue({})
+    fake_tq.add_group("broken", status="failure", trajectories=1)
+    _patch_transfer_queue(monkeypatch, fake_tq)
+    refill_calls = []
+    trainer = _make_trainer(refill_fn=lambda n: refill_calls.append(n), train_batch_size=1)
+    trainer.config.reward = {"streaming": {"enabled": True}}
+
+    def check():
+        raise ArtifactContractError("preview artifact is absent")
+
+    trainer.agent_loop_manager = SimpleNamespace(raise_if_reward_failed=check)
+    with pytest.raises(ArtifactContractError, match="preview artifact is absent"):
+        _sample(trainer, 1)
+    assert not refill_calls
+    assert "broken_0_0" in fake_tq.items["train"]
