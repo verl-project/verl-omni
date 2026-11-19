@@ -26,7 +26,20 @@ from omegaconf import OmegaConf
 from verl.base_config import BaseConfig
 from verl.utils.device import get_device_name
 
+# Shared verbatim so the launch notices and the manager-level warning cannot drift.
+DEPRECATED_USE_ACCELERATOR_MESSAGE = (
+    "reward.custom_reward_function.use_accelerator is deprecated since v0.4.0 and will be removed "
+    "in a future release. Set reward.accelerator_workers.enabled instead."
+)
+DEPRECATED_VISUAL_MANAGER_MESSAGE = (
+    "VisualRewardManager is deprecated since v0.4.0 and will be removed in a future release. "
+    "Set reward.reward_manager.name=MultiVisualRewardManager and configure scorers under "
+    "reward.reward_functions; see docs/algo/named_reward_models.md."
+)
+
 __all__ = [
+    "DEPRECATED_USE_ACCELERATOR_MESSAGE",
+    "DEPRECATED_VISUAL_MANAGER_MESSAGE",
     "EngineRewardModelConfig",
     "NativeRewardModelConfig",
     "NativeRewardFSDPConfig",
@@ -50,6 +63,7 @@ __all__ = [
     "streaming_reward_enabled",
     "to_mapping",
     "validate_reward_model_terms",
+    "warn_deprecated_reward_config",
 ]
 
 _ENGINE_BACKENDS = {"engine"}
@@ -498,11 +512,7 @@ def accelerator_workers_enabled(config) -> bool:
     accelerator_workers = reward.get("accelerator_workers", {}) or {}
     custom_reward = reward.get("custom_reward_function", {}) or {}
     if custom_reward.get("use_accelerator", False):
-        warnings.warn(
-            "reward.custom_reward_function.use_accelerator is deprecated since v0.4.0 and will be removed "
-            "in a future release. Set reward.accelerator_workers.enabled instead.",
-            DeprecationWarning,
-        )
+        warnings.warn(DEPRECATED_USE_ACCELERATOR_MESSAGE, DeprecationWarning)
     return bool(accelerator_workers.get("enabled", False) or custom_reward.get("use_accelerator", False))
 
 
@@ -510,20 +520,9 @@ def warn_deprecated_reward_config(config) -> None:
     """Emit the trainer-launch deprecation notices for legacy reward paths."""
     reward = config.reward
     if reward.custom_reward_function.get("use_accelerator", False):
-        warnings.warn(
-            "reward.custom_reward_function.use_accelerator is deprecated since v0.4.0 and will be removed "
-            "in a future release. Set reward.accelerator_workers.enabled instead.",
-            DeprecationWarning,
-            stacklevel=3,
-        )
+        warnings.warn(DEPRECATED_USE_ACCELERATOR_MESSAGE, DeprecationWarning, stacklevel=3)
     if reward.reward_manager.get("name") == "VisualRewardManager":
-        warnings.warn(
-            "VisualRewardManager is deprecated since v0.4.0 and will be removed in a future release. "
-            "Set reward.reward_manager.name=MultiVisualRewardManager and configure scorers under "
-            "reward.reward_functions; see docs/algo/named_reward_models.md.",
-            DeprecationWarning,
-            stacklevel=3,
-        )
+        warnings.warn(DEPRECATED_VISUAL_MANAGER_MESSAGE, DeprecationWarning, stacklevel=3)
     if reward.reward_model.get("enable", False) and not reward.get("reward_functions"):
         warnings.warn(
             "The single global reward model (reward.reward_model.enable=true with one "

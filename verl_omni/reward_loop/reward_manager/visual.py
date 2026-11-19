@@ -22,6 +22,7 @@ from verl.utils.reward_score import default_compute_score as _upstream_default_c
 
 from verl_omni.pipelines.rollout_media import PRIMARY_ARTIFACT, ArtifactContractError
 from verl_omni.utils.reward_score import default_compute_score_image
+from verl_omni.workers.config.reward import DEPRECATED_VISUAL_MANAGER_MESSAGE
 
 from .media import _reward_extra_info
 
@@ -86,13 +87,7 @@ class VisualRewardManager(RewardManagerBase):
     """
 
     def __init__(self, config, tokenizer, compute_score, reward_router_address=None, reward_model_tokenizer=None):
-        warnings.warn(
-            "VisualRewardManager is deprecated since v0.4.0 and will be removed in a future release. "
-            "Set reward.reward_manager.name=MultiVisualRewardManager and configure scorers under "
-            "reward.reward_functions; see docs/algo/named_reward_models.md.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
+        warnings.warn(DEPRECATED_VISUAL_MANAGER_MESSAGE, DeprecationWarning, stacklevel=2)
         super().__init__(config, tokenizer, compute_score)
 
         if compute_score is None or compute_score is _upstream_default_compute_score:
