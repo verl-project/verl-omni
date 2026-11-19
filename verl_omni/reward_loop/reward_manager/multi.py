@@ -26,7 +26,7 @@ from verl import DataProto
 from verl.experimental.reward_loop.reward_manager.base import RewardManagerBase
 from verl.utils.import_utils import load_extern_object
 
-from verl_omni.pipelines.rollout_media import ArtifactContractError
+from verl_omni.pipelines.rollout_media import PRIMARY_ARTIFACT, ArtifactContractError
 from verl_omni.utils.reward_score.reward_utils import get_audio
 from verl_omni.workers.config.reward import get_reward_model_entries, resolve_reward_model_name
 
@@ -59,16 +59,28 @@ def _filter_kwargs(all_kwargs: dict, sig: inspect.Signature) -> dict:
     return {k: v for k, v in all_kwargs.items() if k in params}
 
 
-def _extract_solution_audio(extra_info: dict) -> tuple[np.ndarray, int]:
-    if "media_artifacts" in extra_info:
+def _extract_solution_audio(extra_info: dict, *, use_named_audio: bool) -> tuple[np.ndarray, int]:
+    if use_named_audio:
         waveform, sample_rate = get_audio(extra_info)
-    else:
-        try:
-            if extra_info.get("media_kind") not in ("image", "video"):
-                return AudioRewardManager._extract_audio(extra_info)
-            waveform, sample_rate = get_audio(extra_info, audio_layout=extra_info.get("audio_layout", "CT"))
-        except (KeyError, TypeError, ValueError, RuntimeError, OverflowError) as exc:
-            raise ArtifactContractError(f"Invalid solution_audio: {exc}") from exc
+        return waveform.numpy(), sample_rate
+
+    try:
+        media_kind = extra_info.get("media_kind")
+        primary = (extra_info.get("media_artifacts") or {}).get(extra_info.get(PRIMARY_ARTIFACT))
+        if media_kind is None and primary is not None:
+            media_kind = primary.spec.modality
+        if media_kind not in ("image", "video"):
+            return AudioRewardManager._extract_audio(extra_info)
+
+        sample_rate = extra_info.get("audio_sample_rate")
+        if isinstance(sample_rate, np.ndarray) and sample_rate.size == 1:
+            sample_rate = sample_rate.item()
+        waveform, sample_rate = get_audio(
+            {"audio": extra_info.get("audio"), "audio_sample_rate": sample_rate},
+            audio_layout=extra_info.get("audio_layout", "CT"),
+        )
+    except (KeyError, TypeError, ValueError, RuntimeError, OverflowError) as exc:
+        raise ArtifactContractError(f"Invalid solution_audio: {exc}") from exc
     return waveform.numpy(), sample_rate
 
 
@@ -220,14 +232,12 @@ class MultiRewardManager(RewardManagerBase, ABC):
         if not params:
             return None
         extra_info = all_kwargs.get("extra_info", {})
-        artifacts = extra_info.get("media_artifacts")
+        use_named_audio = "audio" in (extra_info.get("media_artifacts") or {})
         has_audio = (
-            "audio" in artifacts
-            if artifacts is not None
-            else extra_info.get("audio") is not None or extra_info.get("audio_sample_rate") is not None
+            use_named_audio or extra_info.get("audio") is not None or extra_info.get("audio_sample_rate") is not None
         )
         if has_audio or any(param.default is inspect.Parameter.empty for param in params):
-            return await asyncio.to_thread(_extract_solution_audio, extra_info)
+            return await asyncio.to_thread(_extract_solution_audio, extra_info, use_named_audio=use_named_audio)
         return None
 
     async def _run_multi_reward(self, all_kwargs: dict, data: DataProto) -> dict:

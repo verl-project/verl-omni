@@ -42,9 +42,8 @@ def score_both(solution_image, *, solution_audio):
     return float(solution_image.flatten()[0]) + float(solution_audio[0].mean())
 
 
-def score_optional_audio(solution_audio=None):
-    assert solution_audio is None
-    return 0.25
+async def score_optional_audio(solution_audio=None):
+    return 0.25 if solution_audio is None else await score_audio(solution_audio)
 
 
 def _manager(name, *, models=None, **terms):
@@ -72,16 +71,15 @@ def _data(responses, *, tensors=None, **metadata):
     )
 
 
-@pytest.mark.parametrize(("layout", "fps"), [("CHW", None), ("TCHW", 24)])
-async def test_named_media_routes_only_requested_inputs(layout, fps):
+@pytest.mark.parametrize(("layout", "fps", "audio_layout"), [("CHW", None, "T"), ("TCHW", 24, "CT")])
+async def test_named_media_routes_only_requested_inputs(layout, fps, audio_layout):
     kind = "image" if fps is None else "video"
     pixels = torch.full((3, 2, 2) if fps is None else (2, 3, 2, 2), 4, dtype=torch.uint8)
+    waveform = torch.tensor([0.0, 1.0]) if audio_layout == "T" else torch.tensor([[0.0], [1.0]])
     fields = artifact_fields(
         {
             "visual": MediaArtifact(MediaSpec(kind, "decoded", layout, fps=fps), pixels),
-            "audio": MediaArtifact(
-                MediaSpec("audio", "decoded", "CT", sample_rate=32_000), torch.tensor([[0.0], [1.0]])
-            ),
+            "audio": MediaArtifact(MediaSpec("audio", "decoded", audio_layout, sample_rate=32_000), waveform),
         },
         "visual",
         "visual",
@@ -89,6 +87,7 @@ async def test_named_media_routes_only_requested_inputs(layout, fps):
     data = _data(
         pixels,
         tensors={key: value.unsqueeze(0) for key, value in fields.items() if isinstance(value, torch.Tensor)},
+        tool_extra_fields=[{"audio": torch.zeros(2), "audio_sample_rate": 16_000}],
         **{key: [value] for key, value in fields.items() if not isinstance(value, torch.Tensor)},
     )
     manager = _manager(
@@ -111,6 +110,34 @@ async def test_legacy_video_routes_channels_first_audio():
     manager = _manager("MultiVisualRewardManager", audio={"name": "score_audio"})
 
     assert (await manager.run_single(data))["reward_score"] == 0.5
+
+
+@pytest.mark.parametrize("named_audio", [False, True], ids=["visual-only", "invalid-named-audio"])
+async def test_legacy_audio_fallback_with_named_visual_media(named_audio):
+    pixels = torch.zeros(3, 2, 2, dtype=torch.uint8)
+    waveform = torch.tensor([[0.0], [1.0]])
+    artifacts = {"visual": MediaArtifact(MediaSpec("image", "decoded", "CHW"), pixels)}
+    if named_audio:
+        artifacts["audio"] = MediaArtifact(MediaSpec("audio", "latent", "CT"), waveform)
+    fields = artifact_fields(artifacts, "visual", "visual")
+    data = _data(
+        pixels,
+        tensors={key: value.unsqueeze(0) for key, value in fields.items() if isinstance(value, torch.Tensor)},
+        tool_extra_fields=[{"audio": waveform, "audio_sample_rate": np.array(32_000)}],
+        **{key: [value] for key, value in fields.items() if not isinstance(value, torch.Tensor)},
+    )
+    manager = _manager(
+        "MultiVisualRewardManager",
+        optional_audio={"name": "score_optional_audio", "required": False},
+    )
+    if named_audio:
+        with pytest.raises(ArtifactContractError, match="expected audio/decoded"):
+            await manager.run_single(data)
+        return
+
+    result = await manager.run_single(data)
+    assert result["reward_score"] == 0.5
+    assert result["reward_extra_info"]["reward/optional_audio/rate"] == 32_000
 
 
 async def test_audio_token_rollout_supports_waveform_and_named_clap():

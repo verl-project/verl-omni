@@ -39,14 +39,16 @@ With `MultiVisualRewardManager`, scorers continue to receive the primary rollout
 response as `solution_image` and can select decoded previews or latents through
 `extra_info["media_artifacts"]`. To also receive decoded audio, declare a
 `solution_audio` parameter. The shared manager supplies a pair containing a
-mono NumPy `float32` waveform and its integer sample rate, using the named
-`audio` artifact or the legacy rollout waveform and sample rate. Scorers can
-declare both arguments or select named media directly from `extra_info`.
+mono NumPy `float32` waveform and its integer sample rate. A named `audio`
+artifact takes precedence. When it is absent, the manager uses the legacy
+rollout waveform and sample rate, including when named visual artifacts are
+present. Scorers can declare both arguments or select named media directly
+from `extra_info`.
 
-If the scorer requires `solution_audio`, missing or invalid audio aborts scoring
-even for a term with `required: false`. A parameter with a default can omit
-audio when the rollout provides none. Existing `**kwargs` scorers receive the
-new argument only when they explicitly declare it.
+Invalid audio, or missing audio for a scorer that requires `solution_audio`,
+aborts scoring even for a term with `required: false`. A parameter with a
+default keeps that default when the rollout provides no audio. Existing
+`**kwargs` scorers receive the new argument only when they explicitly declare it.
 
 For audio token rollouts such as Qwen3-TTS, replace the single scorer's reward
 overrides with the multi-reward manager and one entry per scorer. For example,
