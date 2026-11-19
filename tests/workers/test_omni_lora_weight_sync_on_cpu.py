@@ -27,6 +27,18 @@ import pytest
 import torch
 
 import verl_omni.workers.engine_workers as ew
+from verl_omni.utils.config import LoRASettings
+
+
+def _lora_settings(*, enabled=True, merge=False) -> LoRASettings:
+    return LoRASettings(
+        rank=8 if enabled else 0,
+        alpha=16,
+        adapter_path=None,
+        merge=merge,
+        adapters=("default",),
+        enabled=enabled,
+    )
 
 
 def _fast_path_worker(rollout_rank=0):
@@ -58,7 +70,7 @@ def _fast_path_worker(rollout_rank=0):
         )
     )
     worker._rank = 0
-    worker.peft_merge = False
+    worker.lora_settings = _lora_settings(enabled=True)
     worker.base_sync_done = True
     worker.layered_summon = False
     worker.rollout_adapter = "default"
@@ -91,7 +103,7 @@ def test_non_naive_sync_preserves_peft_and_full_weight_paths(has_lora, merge):
     worker = _fast_path_worker()
     if not has_lora:
         worker.actor.engine.module = torch.nn.Linear(2, 2)
-    worker.peft_merge = merge
+    worker.lora_settings = _lora_settings(enabled=has_lora, merge=merge)
     worker.checkpoint_engine = SimpleNamespace(send_weights=AsyncMock())
     asyncio.run(worker.update_weights(mode="nccl", global_steps=3))
     expected = {"adapter_name": "default"}
@@ -150,7 +162,7 @@ def test_lora_fast_path_rejected_rpc_does_not_publish_weight_version(reply, stag
         num_stages=2,
         collective_rpc=AsyncMock(side_effect=lambda **kwargs: reply if kwargs["stage_ids"] == [0] else []),
     )
-    server._generate_strategy = SimpleNamespace(collective_rpc_stage_ids=lambda method: stage_ids)
+    server._generate_strategy = SimpleNamespace(lora_stage_ids=None, collective_rpc_stage_ids=lambda method: stage_ids)
 
     rollout = object.__new__(vLLMOmniServerAdapter)
     rollout.zmq_handle = worker.rollout.zmq_handle

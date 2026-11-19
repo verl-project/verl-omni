@@ -214,6 +214,7 @@ def test_named_streaming_requires_opt_in():
         ("reward.aggregation", "preserve_components", "aggregation=weighted_sum"),
         ("reward.models.quality.backend", "engine", "only native"),
         ("reward.models.quality.placement.resource", "cpu", "accelerator placement"),
+        ("reward.models.quality.placement.replica_groups", [[0, 1]], "Native FSDP does not support streaming"),
         ("reward.reward_model.enable_resource_pool", False, "enable_resource_pool=true"),
         ("reward.models.quality.offload", True, "offload=false"),
     ],

@@ -51,12 +51,11 @@ __all__ = [
     "RefLogProbSkip",
     "RewardSkip",
     "StageSkip",
-    "WeightSyncSkip",
     "log_skip_summary",
     "skip_stage_metrics",
 ]
 
-STAGE_SKIP_ROLES = ("reward", "old_log_prob", "ref_log_prob", "advantage", "actor_update", "weight_sync")
+STAGE_SKIP_ROLES = ("reward", "old_log_prob", "ref_log_prob", "advantage", "actor_update")
 
 PAYLOAD_NAME = "stage_payload.pt"
 
@@ -217,22 +216,6 @@ class ActorUpdateSkip(StageSkip):
 
     def empty_result(self, *args, **kwargs) -> DataProto:
         return DataProto.from_single_dict(data={}, meta_info={"metrics": {}})
-
-
-@register_skip("weight_sync")
-class WeightSyncSkip(StageSkip):
-    """Skip the mid-cycle rollout-weight refresh (``omni_skip.weight_sync``).
-
-    ``empty`` only. The real call also wakes the replicas slept for the
-    colocated reward model, so the skip still wakes them: they resume on
-    pre-update weights, and the next step's sleep never hits a sleeping replica.
-    """
-
-    role = "weight_sync"
-    support_actions = [SkipAction.EMPTY]
-
-    def empty_result(self, trainer: Any, *args, **kwargs) -> None:
-        trainer.checkpoint_manager.wake_up_replicas()
 
 
 @register_skip("rollout")

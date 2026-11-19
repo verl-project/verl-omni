@@ -95,7 +95,7 @@ _SEED = 42
 _VIDEO_LATENT_CHANNELS = 24
 _AUDIO_LATENT_CHANNELS = 32
 _PATCH_VOLUME = 4  # MiniMax-H3 uses a (1, 2, 2) video patch.
-_CHECKPOINT_FORMAT_VERSION = 5
+_CHECKPOINT_FORMAT_VERSION = 6
 _VLLM_TEXT_VOCAB_SIZE = 512
 _VLLM_TEXT_NUM_LAYERS = 1
 
@@ -171,6 +171,11 @@ class _TinyVideoCore(nn.Module):
     def split_tiles(self, input_len: int, is_decoder: bool = False):
         del is_decoder
         return [0], [input_len], []
+
+    def _all_gather_tiled_results(self, tasks: list[torch.Tensor], num_tiles: int) -> list[torch.Tensor]:
+        # Part of the native VAE contract: on Intel GPU the vLLM-Omni adapter rebinds this method
+        # at load time. The tiny core decodes a single tile, so nothing may call it.
+        raise NotImplementedError("the tiny H3 VAE decodes a single tile and never gathers tiles")
 
     def encode_images(self, image, *, use_fp16_latent: bool = True):
         del use_fp16_latent

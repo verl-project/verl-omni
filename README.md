@@ -17,6 +17,7 @@
 It originated from the multi-modal generation RL effort in `verl`, and now has a dedicated home so it can evolve in a more focused way.
 
 ## News 🔥
+- **[2026-11]** 🔥 Day 0 support for **MiniMax-H3-Image** (6-step PDD text-to-image & editing) with [DiffusionNFT](examples/diffusionnft_trainer/minimax_h3_image/README.md) LoRA and multi-reward dense-text OCR training.
 - **[2026-10]** 🎉 We have released [v0.3.0](https://github.com/verl-project/verl-omni/releases/tag/v0.3.0) for fully async diffusion/omni RL with the v1 trainer as the default.
 - **[2026-10]** [OmniNFT](examples/omninft_trainer/README.md) is now supported for audio-video post-training. The [LTX2.3](examples/omninft_trainer/ltx2/README.md) text-to-video+audio LoRA recipe runs on Ascend NPU with modality-wise advantage routing.
 - **[2026-09]** The [v1 trainer](docs/start/diffusion_v1.md) (TransferQueue + ReplayBuffer) is now the default for diffusion models; the legacy v0 trainer is deprecated, while offline DPO remains on v0 by design.
@@ -93,9 +94,9 @@ Visit our [documentation](https://verl-omni.readthedocs.io/en/latest/index.html)
     <th>Status</th>
   </tr>
   <tr>
-    <td rowspan="6">Qwen-Image & Qwen-Image-Edit</td>
+    <td rowspan="6">Qwen-Image</td>
     <td rowspan="6">Diffusion generator</td>
-    <td rowspan="6">Text/Image → Image</td>
+    <td rowspan="6">Text → Image</td>
     <td>FlowGRPO (+ CPS/SDE)</td>
     <td>✅</td>
   </tr>
@@ -120,6 +121,13 @@ Visit our [documentation](https://verl-omni.readthedocs.io/en/latest/index.html)
     <td>✅</td>
   </tr>
   <tr>
+    <td>Qwen-Image-Edit</td>
+    <td>Diffusion generator</td>
+    <td>Text + Image → Image</td>
+    <td>FlowGRPO (+ CPS/SDE)</td>
+    <td>✅</td>
+  </tr>
+  <tr>
     <td>Wan2.2</td>
     <td>Diffusion generator</td>
     <td>Text → Video</td>
@@ -138,6 +146,13 @@ Visit our [documentation](https://verl-omni.readthedocs.io/en/latest/index.html)
     <td>✅</td>
   </tr>
   <tr>
+    <td><a href="examples/flowgrpo_trainer/minimax_h3_image/README.md">MiniMax H3 Image</a></td>
+    <td>Diffusion generator</td>
+    <td>Text → Image</td>
+    <td>FlowGRPO</td>
+    <td>CPU tested; accelerator validation pending</td>
+  </tr>
+  <tr>
     <td rowspan="2"><b>MiniMax-H3</b></td>
     <td rowspan="2">Diffusion generator</td>
     <td rowspan="2">Any → Video + Audio</td>
@@ -146,6 +161,13 @@ Visit our [documentation](https://verl-omni.readthedocs.io/en/latest/index.html)
   </tr>
   <tr>
     <td>FlowGRPO</td>
+    <td>✅</td>
+  </tr>
+  <tr>
+    <td><b><a href="examples/diffusionnft_trainer/minimax_h3_image/README.md">MiniMax-H3-Image</a></b></td>
+    <td>Diffusion generator</td>
+    <td>Text/Image → Image</td>
+    <td>DiffusionNFT</td>
     <td>✅</td>
   </tr>
   <tr>

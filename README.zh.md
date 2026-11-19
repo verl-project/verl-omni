@@ -17,6 +17,7 @@
 它源自 `verl` 在多模态生成强化学习方面的探索与实践，现已建立独立代码库，以便更加聚焦、敏捷地持续演进。
 
 ## 最新动态 🔥
+- **[2026-11]** 🔥 首发（Day 0）支持 **MiniMax-H3-Image**（6 步 PDD 文生图与图像编辑），提供 [DiffusionNFT](examples/diffusionnft_trainer/minimax_h3_image/README.md) LoRA 及多奖励密集文本渲染（OCR）训练配方。
 - **[2026-10]** 🎉 我们正式发布了 [v0.3.0](https://github.com/verl-project/verl-omni/releases/tag/v0.3.0)，支持扩散模型与全模态模型的全异步强化学习，并将 v1 训练器设为默认配置。
 - **[2026-10]** 正式支持 [OmniNFT](examples/omninft_trainer/README.md) 音视频后训练。[LTX2.3](examples/omninft_trainer/ltx2/README.md) 文本生成视频+音频 LoRA 配方现可在昇腾 NPU 上按模态路由优势。
 - **[2026-09]** [v1 训练器](docs/start/diffusion_v1.md)（TransferQueue + ReplayBuffer）现已成为扩散模型的默认配置；旧版 v0 训练器已弃用，离线 DPO 按设计保持在 v0。
@@ -91,9 +92,9 @@
     <th>当前支持状态</th>
   </tr>
   <tr>
-    <td rowspan="6">Qwen-Image 与 Qwen-Image-Edit</td>
+    <td rowspan="6">Qwen-Image</td>
     <td rowspan="6">扩散生成模型</td>
-    <td rowspan="6">文本/图像 → 图像</td>
+    <td rowspan="6">文本 → 图像</td>
     <td>FlowGRPO (+ CPS/SDE)</td>
     <td>✅ 已支持</td>
   </tr>
@@ -115,6 +116,13 @@
   </tr>
   <tr>
     <td>DPO</td>
+    <td>✅ 已支持</td>
+  </tr>
+  <tr>
+    <td>Qwen-Image-Edit</td>
+    <td>扩散生成模型</td>
+    <td>文本 + 图像 → 图像</td>
+    <td>FlowGRPO (+ CPS/SDE)</td>
     <td>✅ 已支持</td>
   </tr>
   <tr>
@@ -144,6 +152,13 @@
   </tr>
   <tr>
     <td>FlowGRPO</td>
+    <td>✅ 已支持</td>
+  </tr>
+  <tr>
+    <td><b><a href="examples/diffusionnft_trainer/minimax_h3_image/README.md">MiniMax-H3-Image</a></b></td>
+    <td>扩散生成模型</td>
+    <td>文本/图像 → 图像</td>
+    <td>DiffusionNFT</td>
     <td>✅ 已支持</td>
   </tr>
   <tr>

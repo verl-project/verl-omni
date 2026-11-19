@@ -10,7 +10,7 @@
 # Override pinned versions (defaults match pyproject.toml extras):
 #   docker build -f docker/Dockerfile.rocm -t verl-omni:rocm \
 #     --build-arg VLLM_VERSION=v0.33.0 \
-#     --build-arg VERL_GIT_REF=fefb080262e1c015a0ea05f958822a6a512dc795 .
+#     --build-arg VERL_GIT_REF=2b4ed6826a39205838d0ca004bdd942334dbe4b6 .
 #
 # Run:
 #   docker run --device=/dev/kfd --device=/dev/dri --group-add video \

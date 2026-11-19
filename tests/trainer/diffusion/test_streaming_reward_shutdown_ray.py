@@ -14,19 +14,23 @@
 """Real-Ray regressions for failed shutdown and late prompt registration."""
 
 import asyncio
+import os
 import tempfile
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 import ray
 import torch
 import transfer_queue as tq
+from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
 from tensordict import NonTensorData, TensorDict
 from verl.protocol import DataProto
 
 from verl_omni.agent_loop.diffusion_agent_loop_tq import DiffusionAgentLoopManagerTQ, DiffusionAgentLoopWorkerTQ
-from verl_omni.pipelines.rollout_media import ArtifactContractError
+from verl_omni.pipelines.rollout_media import ArtifactContractError, MediaArtifact, MediaSpec, artifact_fields
+from verl_omni.reward_loop.reward_loop import OmniRewardLoopWorker
 from verl_omni.reward_loop.streaming import create_async_reward_client
 from verl_omni.trainer.main_diffusion_v1 import DiffusionTaskRunnerV1
 from verl_omni.workers.config.reward import StreamingRewardConfig
@@ -156,9 +160,16 @@ def cluster():
 
 
 @pytest.mark.asyncio
-async def test_real_ray_batch_scoring_keeps_ownership_after_cancellation():
+@pytest.mark.parametrize("peer_death", [False, True])
+async def test_real_ray_batch_scoring_drains_after_cancellation_or_worker_death(peer_death):
     worker = GatedReward.remote()
-    client = create_async_reward_client({"quality": (worker,)}, StreamingRewardConfig(max_inflight=1))
+    peer = GatedReward.remote() if peer_death else None
+    groups = {"quality": (worker,)}
+    if peer is not None:
+        groups["peer"] = (peer,)
+    async with asyncio.timeout(180):
+        await asyncio.gather(worker.state.remote(), *([peer.state.remote()] if peer is not None else []))
+    client = create_async_reward_client(groups, StreamingRewardConfig(max_inflight=1))
 
     async def score():
         async with client.sample_slot():
@@ -170,13 +181,16 @@ async def test_real_ray_batch_scoring_keeps_ownership_after_cancellation():
         async with asyncio.timeout(30):
             while not (await worker.state.remote())[0]:
                 await asyncio.sleep(0.01)
-            task.cancel()
+            if peer is not None:
+                ray.kill(peer)
+            else:
+                task.cancel()
             close = asyncio.create_task(client.close())
             await asyncio.sleep(0)
             assert not task.done() and not close.done()
             assert await worker.state.remote() == (True, False)
             await worker.release.remote()
-            with pytest.raises(asyncio.CancelledError):
+            with pytest.raises(ray.exceptions.RayActorError if peer_death else asyncio.CancelledError):
                 await task
             await close
             assert await worker.state.remote() == (True, True)
@@ -184,6 +198,8 @@ async def test_real_ray_batch_scoring_keeps_ownership_after_cancellation():
         await worker.release.remote()
         await asyncio.gather(task, *([close] if close is not None else []), return_exceptions=True)
         ray.kill(worker)
+        if peer is not None:
+            ray.kill(peer)
 
 
 @pytest.mark.asyncio
@@ -192,6 +208,8 @@ async def test_real_ray_late_contract_error_outranks_expiry_and_peer_failure(exi
     """Drain both accepted RPCs and propagate the fatal error after caller expiry."""
     peer = GatedReward.remote(RuntimeError)
     fatal = GatedReward.remote(ArtifactContractError)
+    async with asyncio.timeout(180):
+        await asyncio.gather(peer.state.remote(), fatal.state.remote())
     client = create_async_reward_client(
         {"peer": (peer,), "fatal": (fatal,)},
         StreamingRewardConfig(max_inflight=1, timeout=0.01 if exit_kind == "timeout" else None),
@@ -236,11 +254,14 @@ async def test_real_ray_late_contract_error_outranks_expiry_and_peer_failure(exi
 async def test_failed_rpc_waits_for_peer_before_returning(monkeypatch, operation):
     peer = GatedAgent.remote()
     failed = FailingAgent.remote(peer)
+    async with asyncio.timeout(180):
+        await asyncio.gather(peer.state.remote(), failed.has_failed.remote())
     events = []
 
     async def close_models():
         events.append("models_closed")
 
+    monkeypatch.setattr("verl_omni.trainer.main_diffusion_v1.available_physical_cores", lambda: 2)
     runner = DiffusionTaskRunnerV1.__ray_metadata__.modified_class()
     manager = object.__new__(DiffusionAgentLoopManagerTQ)
     manager.agent_loop_workers = [failed, peer]
@@ -293,3 +314,70 @@ async def test_failed_rpc_waits_for_peer_before_returning(monkeypatch, operation
         await asyncio.gather(task, return_exceptions=True)
         ray.kill(failed)
         ray.kill(peer)
+
+
+def score_image_shapes(data_source, solution_image, ground_truth, extra_info):
+    """Require pipeline geometry at the real reward worker's scorer boundary."""
+    shapes = extra_info["img_shapes"]
+    assert shapes == [(1, 4, 6), (1, 8, 8)]
+    return {"score": float(sum(height * width for (_, height, width) in shapes))}
+
+
+@pytest.mark.asyncio
+async def test_real_ray_named_media_matches_batch_and_rejects_invalid_preview():
+    """Exercise serialization and both worker entrypoints with an optional scorer."""
+    with initialize_config_dir(config_dir=str(Path("verl_omni/trainer/config").resolve()), version_base=None):
+        config = compose(config_name="diffusion_trainer")
+    config.actor_rollout_ref.model.tokenizer_path = os.environ["STREAMING_TEST_TOKENIZER"]
+    config.reward.reward_manager.name = "MultiVisualRewardManager"
+    config.reward.reward_functions = OmegaConf.create(
+        {
+            "jpeg": {
+                "path": "pkg://verl_omni.utils.reward_score.jpeg_compressibility",
+                "name": "compute_score",
+                "weight": 0.3,
+                "required": False,
+            },
+            "geometry": {
+                "path": str(Path(__file__).resolve()),
+                "name": "score_image_shapes",
+                "weight": 0.7,
+                "required": True,
+            },
+        }
+    )
+    worker = ray.remote(OmniRewardLoopWorker).options(num_cpus=1).remote(config)
+    client = create_async_reward_client({"jpeg": (worker,)}, StreamingRewardConfig(extra_fields=[]))
+    try:
+        latent = torch.ones(16, 2, 2)
+        fields = artifact_fields(
+            {
+                "image_latent": MediaArtifact(MediaSpec("image", "latent", "CHW"), latent),
+                "image_preview": MediaArtifact(
+                    MediaSpec("image", "decoded", "CHW"), torch.zeros(3, 8, 8, dtype=torch.uint8)
+                ),
+            },
+            "image_latent",
+            "image_preview",
+        )
+        fields["img_shapes"] = [(1, 4, 6), (1, 8, 8)]
+        sample = DataProto.from_dict(
+            tensors={"responses": latent.unsqueeze(0)},
+            non_tensors={
+                "data_source": ["ray"],
+                "reward_model": [{"ground_truth": "prompt"}],
+                "tool_extra_fields": [fields],
+            },
+        )
+        batch = await worker.compute_score_batch.remote(sample)
+        assert batch[0]["reward_extra_info"]["reward/geometry"] == 88.0
+        async with client.sample_slot():
+            assert await client.compute_score(sample) == batch[0]
+        fields["preview_artifact"] = "absent"
+        for invoke in (worker.compute_score_batch.remote, client.compute_score):
+            with pytest.raises(ray.exceptions.RayTaskError, match="absent"):
+                async with client.sample_slot():
+                    await invoke(sample)
+    finally:
+        await client.close()
+        ray.kill(worker)

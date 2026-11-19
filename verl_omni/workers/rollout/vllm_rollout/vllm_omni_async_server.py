@@ -52,6 +52,12 @@ from verl_omni.workers.rollout.vllm_rollout.vllm_omni_diffusion_strategy import 
 logger = logging.getLogger(__file__)
 logger.setLevel(logging.INFO)
 
+
+def _abort_ack_timeout_s() -> float:
+    """RPC timeout for engine abort acknowledgements; env-overridable for tests."""
+    return float(os.getenv("VERL_OMNI_ABORT_ACK_TIMEOUT_S", "120"))
+
+
 # Sentinel: ``None`` is a valid cached value (LoRA not loaded).
 # TODO: Move LoRA request cache resolution/invalidation upstream to AsyncOmni.
 _LORA_REQUEST_CACHE_MISS = object()
@@ -242,13 +248,16 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         self._generate_strategy.post_init(cuda_visible_devices)
         self._lora_request_cache: LoRARequest | None | object = _LORA_REQUEST_CACHE_MISS
         self._lora_resolve_lock = asyncio.Lock()
+        # Mirrors the workers' set_pending stash: the bare follow-up
+        # update_weights_from_ipc routes as an adapter-delta sync.
+        self._pending_lora_delta = False
         super()._post_init(cuda_visible_devices)
 
     # -----------------------------------------------------------------------
     # launch_server hooks
     # -----------------------------------------------------------------------
 
-    def _apply_quantization(self) -> tuple[str | None, dict]:
+    def _apply_quantization(self) -> dict:
         return self._generate_strategy.apply_quantization()
 
     def _get_override_generation_config(self) -> dict:
@@ -363,7 +372,12 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         require_ack: bool = False,
     ):
         """Dispatch a shared RPC to the stages selected by the active strategy."""
+        rpc_kwargs = kwargs or {}
+        if method == "set_pending_lora_peft_config":
+            self._pending_lora_delta = bool(rpc_kwargs.get("peft_config"))
         stage_ids = self._generate_strategy.collective_rpc_stage_ids(method)
+        if method in {"set_pending_lora_peft_config", "update_weights_from_ipc"}:
+            stage_ids = self._resolve_lora_scoped_stages(method, stage_ids, rpc_kwargs)
         if require_ack:
             return await self._collective_rpc_with_ack(method, timeout, args, kwargs, stage_ids)
         return await self.engine.collective_rpc(
@@ -373,6 +387,32 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             kwargs=kwargs,
             stage_ids=stage_ids,
         )
+
+    def _resolve_lora_scoped_stages(
+        self, method: str, stage_ids: list[int] | None, rpc_kwargs: dict[str, Any]
+    ) -> list[int] | None:
+        """Route LoRA-scoped weight-sync RPCs to ``lora_stage_ids``.
+
+        Stash installation and adapter deltas reach only the LoRA-carrying
+        stages; every other stage rejects ``remove_lora``/``add_lora`` ("LoRA
+        is not enabled"), and a stash left there would misroute its next
+        full-weight sync into the adapter path. A delta is explicit
+        (``peft_config`` and ``base_sync_done`` — the worker's own adapter-path
+        condition) or stashed (mirrored in ``_pending_lora_delta``). Everything
+        else, including no-LoRA rollouts, passes ``stage_ids`` through.
+        """
+        lora_stage_ids = self._generate_strategy.lora_stage_ids
+        if lora_stage_ids is None:
+            return stage_ids
+        if method == "set_pending_lora_peft_config":
+            return list(lora_stage_ids)
+        explicit_delta = bool(rpc_kwargs.get("peft_config")) and bool(rpc_kwargs.get("base_sync_done"))
+        if explicit_delta:
+            return list(lora_stage_ids)
+        if self._pending_lora_delta and rpc_kwargs.get("peft_config") is None:
+            self._pending_lora_delta = False
+            return list(lora_stage_ids)
+        return stage_ids
 
     async def _collective_rpc_with_ack(
         self, method: Any, timeout: float | None, args: tuple, kwargs: dict[str, Any] | None, stage_ids: Any
@@ -520,7 +560,10 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         extra_prompt_ids: Optional[dict[str, list[int]]] = None,
         negative_extra_prompt_ids: Optional[dict[str, list[int]]] = None,
         priority: int = 0,
+        session_id: Optional[str] = None,
     ) -> DiffusionOutput | TokenOutput:
+        # session_id (cross-request server affinity in the vLLM path) has no
+        # AsyncOmni counterpart; routing stickiness is owned by the load balancer.
         return await self._generate_strategy.generate(
             prompt_ids=prompt_ids,
             sampling_params=sampling_params,
@@ -584,11 +627,23 @@ class vLLMOmniHttpServer(vLLMHttpServer):
     # so the parent's AsyncLLM-specific implementation must be overridden.
     # -----------------------------------------------------------------------
 
-    async def abort_all_requests(self, reset_prefix_cache: bool = True) -> dict[str, Any]:
-        """Abort all in-flight requests on the AsyncOmni engine."""
+    async def abort_all_requests(
+        self, reset_prefix_cache: bool = True, reject_request: bool = False, abort_only: bool = False
+    ) -> dict[str, Any]:
+        """Abort all in-flight requests on the AsyncOmni engine.
+
+        ``abort_only`` cancels current engine requests and keeps admission open;
+        the other flags shape the pause that otherwise follows. The AsyncOmni
+        engine parks requests that arrive behind its pause (it has no reject
+        knob), so ``reject_request`` only reaches engines that support it.
+        """
         engine = self.engine
         if getattr(engine, "output_processor", None) is not None:
-            return await super().abort_all_requests(reset_prefix_cache)
+            return await super().abort_all_requests(
+                reset_prefix_cache, reject_request=reject_request, abort_only=abort_only
+            )
+        if reject_request and not abort_only:
+            logger.warning("AsyncOmni has no admission gate: requests arriving behind the pause park until resume")
 
         # ``engine.abort`` takes EXTERNAL ids; ``request_states`` is keyed by internal.
         in_flight: list[tuple[str, str, Any]] = []
@@ -601,11 +656,20 @@ class vLLMOmniHttpServer(vLLMHttpServer):
 
         request_ids = [external_id for _, external_id, _ in in_flight]
 
+        if abort_only:
+            try:
+                await asyncio.wait_for(engine.abort(request_ids), timeout=_abort_ack_timeout_s())
+            except Exception:
+                # Same cleanup as the pause path: synthetic terminals unblock waiting generators.
+                for internal_id, _, state in in_flight:
+                    self._enqueue_abort_output(internal_id, state)
+                raise
+            logger.info("Aborted %d request(s) (admission left open): %s", len(request_ids), request_ids)
+            return {"aborted_count": len(request_ids), "request_ids": request_ids}
+
         aborted = False
         try:
-            await asyncio.wait_for(
-                engine.abort(request_ids), timeout=float(os.getenv("VERL_OMNI_ABORT_ACK_TIMEOUT_S", "120"))
-            )
+            await asyncio.wait_for(engine.abort(request_ids), timeout=_abort_ack_timeout_s())
             aborted = True
             # Pause even with nothing to abort: holds admission until resume_generation.
             await engine.pause_generation(
@@ -673,9 +737,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
                 break
 
         try:
-            await asyncio.wait_for(
-                engine.abort(request_id), timeout=float(os.getenv("VERL_OMNI_ABORT_ACK_TIMEOUT_S", "120"))
-            )
+            await asyncio.wait_for(engine.abort(request_id), timeout=_abort_ack_timeout_s())
         except Exception:
             if in_flight_state is not None:
                 self._enqueue_abort_output(in_flight_state.request_id, in_flight_state)

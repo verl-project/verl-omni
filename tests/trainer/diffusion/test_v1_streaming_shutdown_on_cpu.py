@@ -22,7 +22,7 @@ from omegaconf import OmegaConf
 from verl_omni.trainer.main_diffusion_v1 import DiffusionTaskRunnerV1
 
 
-@pytest.mark.parametrize("failure", ["init", "fit", "close"])
+@pytest.mark.parametrize("failure", [None, "init", "fit", "close", "fit_and_close"])
 def test_runner_failure_orders_streaming_shutdown(monkeypatch, failure):
     events = []
 
@@ -34,7 +34,7 @@ def test_runner_failure_orders_streaming_shutdown(monkeypatch, failure):
             raise ValueError("trainer init failed")
 
     def fit(manager):
-        if failure == "fit":
+        if failure in {"fit", "fit_and_close"}:
             raise ValueError("trainer fit failed")
 
     trainer = SimpleNamespace(
@@ -44,6 +44,7 @@ def test_runner_failure_orders_streaming_shutdown(monkeypatch, failure):
             multi_reward_model_manager=SimpleNamespace(close_native_models=close_native_models)
         ),
     )
+    monkeypatch.setattr("verl_omni.trainer.main_diffusion_v1.available_physical_cores", lambda: 2)
     runner = DiffusionTaskRunnerV1.__ray_metadata__.modified_class()
 
     def init_agents():
@@ -53,7 +54,7 @@ def test_runner_failure_orders_streaming_shutdown(monkeypatch, failure):
 
     def get(refs):
         assert refs == ["drain_ref"]
-        if failure == "close":
+        if failure in {"close", "fit_and_close"}:
             raise ValueError("trainer close failed")
         events.append("agents_drained")
 
@@ -77,13 +78,22 @@ def test_runner_failure_orders_streaming_shutdown(monkeypatch, failure):
             },
         }
     )
-    with pytest.raises(ValueError, match=f"trainer {failure} failed"):
+    if failure == "fit_and_close":
+        with pytest.raises(BaseExceptionGroup) as error:
+            runner.run(config)
+        assert [str(exc) for exc in error.value.exceptions] == ["trainer fit failed", "trainer close failed"]
+    elif failure is None:
         runner.run(config)
+    else:
+        with pytest.raises(ValueError, match=f"trainer {failure} failed"):
+            runner.run(config)
     assert (
         events
         == {
+            None: ["init_tq", "agents_settled", "agents_drained", "close_models", "close_tq"],
             "init": ["init_tq", "close_models", "close_tq"],
             "fit": ["init_tq", "agents_settled", "agents_drained", "close_models", "close_tq"],
             "close": ["init_tq", "agents_settled"],
+            "fit_and_close": ["init_tq", "agents_settled"],
         }[failure]
     )
