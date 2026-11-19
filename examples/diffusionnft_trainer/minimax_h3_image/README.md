@@ -1,6 +1,6 @@
 # MiniMax H3 image: DiffusionNFT OCR LoRA
 
-Last updated: 11/18/2026
+Last updated: 11/19/2026
 
 DiffusionNFT LoRA training for the MiniMax H3 image model (6-step PDD sampler) on a dense-text rendering task.
 
@@ -24,9 +24,11 @@ react to that. A failed PP-OCR request raises `RuntimeError` so the OCR term con
 
 ```bash
 pip install rapidocr onnxruntime open_clip_torch
-python examples/diffusionnft_trainer/minimax_h3_image/prepare_dense_text_data.py --output-dir $DATA_DIR
+python examples/diffusionnft_trainer/minimax_h3_image/prepare_dense_text_data.py \
+    --output-dir "$DATA_DIR"
 python verl_omni/pipelines/minimax_h3_image_diffusion_nft/checkpoint.py convert \
-    --native-root $MODEL_PATH --output $ACTOR_PATH
+    --native-root "$MODEL_PATH" \
+    --output "$ACTOR_PATH"
 ```
 
 - `rapidocr` must support `OCRVersion.PPOCRV6`; `PPOCR_MODEL_DIR` holds `PP-OCRv6_det_medium.onnx` and
@@ -35,8 +37,7 @@ python verl_omni/pipelines/minimax_h3_image_diffusion_nft/checkpoint.py convert 
   (with `open_clip_pytorch_model.bin`, the default `HPSV2_PRETRAINED_PATH`). `CUSTOM_REWARD_MODEL_PATH`:
   `HPS_v2.1_compressed.pt` from `xswu/HPSv2`. HPSv2.1 is scored by `compute_score_hpsv2`.
 - Rollout needs vLLM-Omni with MiniMax H3 image support (vLLM-Omni 0.33, #878).
-- Actor training needs `diffusers>=0.43.0` (where `MiniMaxH3Transformer3DModel` first shipped; the repository's
-  `diffusers>=0.41.0` floor is too old for this model).
+- Install `diffusers>=0.43.0` for this recipe.
 
 ### ROCm
 
@@ -71,6 +72,72 @@ LoRA rank 66, lr 1e-4, 96 images per step, 2 updates per step. Each micro-batch 
 (`VERL_OMNI_H3_IMAGE_PACK_MICRO_BATCH=1`, requires gradient checkpointing off), and rollout normalization/LoRA
 kernels stay enabled by default (`VERL_OMNI_H3_IMAGE_ROLLOUT_KERNELS=1`, set `0` to fall back to stock Diffusers).
 Set `MINIMAX_H3_IMAGE_DEBUG_DIR` to dump per-step diagnostic tensors on evidence runs. Steps took 60-85 s on GB300.
+
+## Single-node Ascend 950
+
+The eight-NPU entrypoint uses the official `MiniMaxH3ImageTransformer2DModel` from
+Diffusers 0.43.0 or newer, with its built-in PDD heads and gradient checkpointing.
+It requires no Diffusers source patch, empty-audio placeholder or replacement Actor kernels.
+The existing GPU recipe above retains its converted `MiniMaxH3Transformer3DModel` path.
+
+Use the native release root as `MODEL_PATH`. `ACTOR_PATH` defaults to its published
+`transformer_diffusers/` directory and must contain a `config.json` whose `_class_name`
+is `MiniMaxH3ImageTransformer2DModel`. If those weights are unavailable, use the
+[official Diffusers conversion script](https://github.com/huggingface/diffusers/blob/v0.43.0/scripts/convert_minimax_h3_to_diffusers.py)
+with `--version image` and point `ACTOR_PATH` at the resulting `transformer/` directory.
+The legacy converter shown above produces a different Actor class and is not used by this entrypoint.
+Keep the native rollout weights and `pdd_fused_heads.safetensors` in `MODEL_PATH`.
+
+Configure the Ascend driver, CANN and matching PyTorch/torch-npu environment before
+starting the recipe, and use the core verl revision pinned in `pyproject.toml`.
+The H3 model adapter supplies the standard Diffusers `PeftAdapterMixin`.
+The recipe completed three training steps on eight Ascend 950DT NPUs with
+PyTorch 2.10.0, torch-npu 2.10.0.post7, CANN 9.2.0, Diffusers 0.43.0 and PEFT
+0.21.2. Each step generated two samples per prompt for four prompts, computed
+all three rewards, updated LoRA with finite gradients and synchronized the
+rollout weights. The run saved the step-three checkpoint and exited with code
+0. A single-NPU regression checked exact and truncated timesteps, the PDD grid
+spacing boundary and LoRA gradients for all six PDD heads. CPU regression
+tests covered two-rank FSDP2 loading, FP32 module preservation, policy adapter
+switching, LoRA export and adapter reload.
+
+For layered LoRA export, keep both `transformer_blocks.` and
+`token_refiner.refiner_blocks.` in `fsdp_layer_prefixes` so rollout receives both
+block stacks. For a Diffusers pipeline warm start, set `LORA_WARMSTART_PATH` to
+the directory containing `pytorch_lora_weights.safetensors` or
+`pytorch_lora_weights.bin`. The Actor prefers the former when both are present.
+
+| NPU allocation | Workload |
+|---|---|
+| 4 NPUs assigned by Ray | Four-rank FSDP2 Actor and two colocated TP2 rollout replicas |
+| 3 NPUs assigned by Ray | Three Qwen3-VL OCR reward replicas |
+| Physical NPU 7 | PickScore and HPSv2.1 subprocesses |
+
+The launcher requires a full-node allocation of NPUs 0–7 and a local Ray runtime.
+Actor parameter/optimizer CPU offload and gradient checkpointing are enabled;
+Actor microbatch size is one. The text encoder uses TP2. Each reward worker selects
+the scorer's physical NPU before starting its child process, which uses local `npu:0`.
+
+From the repository root, export the reward and data paths listed above, then run:
+
+```bash
+export MODEL_PATH=/path/to/MiniMax-H3-Image
+export ACTOR_PATH="$MODEL_PATH/transformer_diffusers"
+export DATA_DIR=/path/to/dense-text-data
+export OUTPUT_DIR=/path/to/h3-image-nft-output
+bash examples/diffusionnft_trainer/minimax_h3_image/run_minimax_h3_image_ocr_lora_npu.sh
+```
+
+Defaults are 100 training steps, learning rate `1e-4`, LoRA rank/alpha 66/132,
+12 prompts × 8 samples, 512×512 images and six denoising steps. Validation uses
+64 held-out prompts before training and every five steps; checkpoints are saved
+every 50 steps and rollout samples every ten steps. TensorBoard writes to
+`$OUTPUT_DIR/tensorboard` unless `TENSORBOARD_DIR` is set. Extra Hydra overrides
+are forwarded last; for a one-step smoke run, append `trainer.total_training_steps=1`.
+
+The earlier Ascend implementation reached validation rewards 0.52441, 0.60182 and
+0.62208 at steps 0, 50 and 100. Those results used the legacy Actor and its NPU
+adaptations. They are experimental context, not validation results for this native entrypoint.
 
 ## Result
 
