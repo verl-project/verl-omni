@@ -88,6 +88,26 @@ def test_offline_dpo_v0_launch_stays_silent():
 
 
 @pytest.mark.parametrize(
+    ("override", "error"),
+    [
+        ("actor_rollout_ref.actor.use_kl_loss=true", "PiSSA.*KL loss"),
+        ("actor_rollout_ref.model.policy_state_adapters=[default,old]", "PiSSA.*policy_state_adapters"),
+    ],
+    ids=["kl-loss", "snapshot-adapter"],
+)
+def test_run_diffusion_v1_rejects_unsupported_pissa_config(monkeypatch, override, error):
+    import verl_omni.trainer.main_diffusion_v1 as main_v1
+
+    config = compose_diffusion_config(
+        ["actor_rollout_ref.model.lora_rank=4", "actor_rollout_ref.model.lora_init_weights=pissa_niter_4", override]
+    )
+    monkeypatch.setattr(main_v1, "enable_rl_insight", lambda _: pytest.fail("Invalid config reached runtime startup"))
+
+    with pytest.raises(ValueError, match=error):
+        main_v1.run_diffusion_v1(config)
+
+
+@pytest.mark.parametrize(
     "overrides",
     [[], ["+ray_kwargs.ray_init.runtime_env.env_vars.OMP_NUM_THREADS='8'"]],
     ids=["default", "user_env_vars"],

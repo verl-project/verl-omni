@@ -170,6 +170,9 @@ transformer weights one tensor at a time on each rollout sync. Full
 checkpoints preserve the residual base weights for resume and default to
 `checkpoints/flow_grpo/qwen_image_ocr_pissa_v1`.
 
+When initializing with PiSSA, disable KL loss and KL reward and use
+`actor_rollout_ref.model.policy_state_adapters=[default]`.
+
 ### Wan2.2 DanceGRPO (default CUDA recipe)
 
 Wan2.2 DanceGRPO on CUDA now defaults to the same V1 sync trainer:
