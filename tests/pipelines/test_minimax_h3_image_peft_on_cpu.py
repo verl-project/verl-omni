@@ -201,6 +201,25 @@ def test_registry_loading_preserves_dtype_and_native_checkpoint(tmp_path, config
     assert type(restored) is NativeModel
 
 
+@pytest.mark.parametrize("expected_subfolder", ["", "transformer"])
+def test_native_actor_config_from_hub(tmp_path, monkeypatch, expected_subfolder):
+    repo_id = "example/h3-image"
+    config_file = tmp_path / "config.json"
+    config_file.write_text(json.dumps({"_class_name": NativeModel.__name__}))
+
+    def cached_download(repo, *, filename, subfolder, **kwargs):
+        assert (repo, filename, subfolder) == (repo_id, "config.json", expected_subfolder)
+        return str(config_file)
+
+    monkeypatch.setattr("diffusers.configuration_utils.hf_hub_download", cached_download)
+    config = SimpleNamespace(
+        config_path=None if expected_subfolder else repo_id,
+        local_path=repo_id if expected_subfolder else None,
+        transformer_subfolder="transformer",
+    )
+    assert MiniMaxH3ImageDiffusionNFT.diffusers_model_class(config) is _actor_model_class()
+
+
 def test_legacy_checkpoint_still_uses_default_loader(tmp_path, monkeypatch):
     (tmp_path / "config.json").write_text(json.dumps({"_class_name": "MiniMaxH3Transformer3DModel"}))
     config = SimpleNamespace(config_path=str(tmp_path), local_path=None)

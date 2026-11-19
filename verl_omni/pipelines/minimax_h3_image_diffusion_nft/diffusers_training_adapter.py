@@ -13,7 +13,6 @@
 # limitations under the License.
 """MiniMax H3 image training adapter for DiffusionNFT."""
 
-import json
 import os
 from functools import lru_cache
 from pathlib import Path
@@ -106,10 +105,11 @@ class MiniMaxH3ImageDiffusionNFT(DiffusionModelBase):
     @classmethod
     def diffusers_model_class(cls, model_config: DiffusionModelConfig):
         """Use the image-only Actor for native checkpoints on both weight-loading and meta ranks."""
+        from diffusers import AutoModel
+
         load_path = model_config.config_path or model_config.local_path
         subfolder = "" if model_config.config_path else model_config.transformer_subfolder
-        with open(os.path.join(load_path, subfolder, "config.json"), encoding="utf-8") as handle:
-            config = json.load(handle)
+        config = AutoModel.load_config(load_path, subfolder=subfolder)
         if config.get("_class_name") != "MiniMaxH3ImageTransformer2DModel":
             return None
         return _actor_model_class()
