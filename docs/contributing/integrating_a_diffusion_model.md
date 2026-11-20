@@ -1,6 +1,6 @@
 # How to Integrate a New Diffusion Model for FlowGRPO Training
 
-Last updated: 11/10/2026.
+Last updated: 11/11/2026.
 
 This guide walks you through everything required to integrate a new diffusion
 model into VeRL-Omni so it can be trained end-to-end with the **FlowGRPO**
@@ -447,17 +447,19 @@ The worked example is
 
 Training an AR adapter pairs with the `composite_single_turn_agent` loop,
 which runs AR and diffusion generation in one rollout: one AR sample per
-input row, each expanded into its diffusion group. Its contract, in brief:
+input row, each expanded into its diffusion group. Worker and manager coverage
+is [`tests/agent_loop/test_composite_agent_loop.py`](../../tests/agent_loop/test_composite_agent_loop.py).
+Its contract, in brief:
 
 - Loop selection: `actor_rollout_ref.rollout.agent.default_agent_loop=composite_single_turn_agent`
   (a per-sample `agent_name` override must select a loop that returns the
   composite output contract — one AR result plus its diffusion samples per
   row — or the worker's unpack fails).
-- `rollout.m` is the AR repeat count: callers repeat each prompt row themselves
-  (`batch.repeat(rollout.m)`, as the composite test does) to draw `m` AR
-  rollouts per prompt — the loop emits one AR output per row; `rollout.n` is
-  the diffusion group size per AR sample (`rollout.val_kwargs.n` replaces it
-  for validation batches).
+- `rollout.m` is the AR repeat count. The loop emits one AR output per input
+  row; `CompositePolicyGradientRayTrainer` repeats each prompt
+  (`batch.repeat(rollout.m)`) before `generate_sequences`.
+  `rollout.n` is the diffusion group size per AR sample. Validation repeats
+  with `rollout.val_kwargs.m` and `rollout.val_kwargs.n`.
 - AR sampling lives under `actor_rollout_ref.rollout.ar.*`.
 - The reward config must define a function named `ar` with `weight: 0` — AR
   reward is derived from the per-image `reward/ar` extras and the loop asserts
@@ -469,16 +471,17 @@ input row, each expanded into its diffusion group. Its contract, in brief:
   selected via `+actor_rollout_ref.rollout.agent.agent_loop_manager_class`
   (the `+` prefix is needed — the key is absent from the shipped config).
 
-**Trainer status — read before wiring a run.** The manager's
-`generate_sequences` returns an `(ar_batch, diffusion_batch)` tuple, while the
-shipped trainers (both `main_diffusion` and the V1 path) consume a single
-`DataProto`. No in-tree trainer or example recipe consumes the composite
-manager today; the machinery is exercised by
-[`tests/agent_loop/test_composite_agent_loop.py`](../../tests/agent_loop/test_composite_agent_loop.py)
-at the worker/manager level. Integrating a composite model end-to-end needs
-trainer-side support for the tuple — raise it with the maintainers first.
-The AR training adapter half (above) and the `qwen_image_dual_grpo` package
-remain valid references.
+**Trainer status.** `CompositeAgentLoopManager.generate_sequences` returns an
+`(ar_batch, diffusion_batch)` tuple. The v0 trainer
+[`CompositePolicyGradientRayTrainer`](../../verl_omni/trainer/diffusion/ray_diffusion_trainer.py)
+unpacks that tuple and runs a policy-gradient update on each batch:
+`rollout.m` AR traces per prompt and `rollout.n` images per trace. Launch it
+with `python -m verl_omni.trainer.main_diffusion`,
+`algorithm.trainer_type=policy_gradient`, and `+trainer.train_ar=true`. [`_get_trainer_cls`](../../verl_omni/trainer/main_diffusion.py)
+selects the class through `use_composite_policy_gradient`. This trainer rejects a reference model
+or a teacher. The end-to-end smoke is
+[`tests/special_e2e/run_dual_grpo_qwen_image_async_reward.sh`](../../tests/special_e2e/run_dual_grpo_qwen_image_async_reward.sh).
+Composite support in the V1 trainer (`main_diffusion_v1`) is future work.
 
 Models that are not composite stay on the default `diffusion_single_turn_agent`
 loop. Put model-specific rollout behavior in adapter hooks first — registering
