@@ -20,11 +20,11 @@ comparison reads two payload kinds:
   `ref_log_prob`, and `rollout_log_probs` when those fields are present.
 - `lora_gradients`: LoRA parameter gradients before the optimizer step.
 
-`batch.responses`, `batch.advantages`, and `batch.old_log_probs` stay
-informational. Nested `old_log_probs` pads inconsistently on the tiny model;
-`rollout_log_probs` covers token-id drift. A token-id change still fails the
-run when it moves `rollout_log_probs`, `ref_log_prob`, or the LoRA gradients.
-Rule reward scores are compared. There is no reward model.
+`batch.responses`, `batch.advantages`, `batch.old_log_probs`, and
+`batch.rollout_log_probs` stay informational. Nested `old_log_probs` pads
+inconsistently on the tiny model; `rollout_log_probs` is informational for
+the same omni actor-update path. Rule reward scores are compared. There is no
+reward model.
 
 The language-model MFU counter is collected. `collect_metrics.py` warns that
 this model and algorithm pair is not in the diffusion MFU allowlist.
