@@ -329,19 +329,27 @@ def test_validation_restores_after_scoring_cancellation(validation):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("cleanup_fails", [False, True])
-async def test_manager_cancellation_waits_for_cleanup_and_retains_its_error(validation, cleanup_fails):
+@pytest.mark.parametrize("score_fails", [False, True])
+async def test_manager_cancellation_waits_for_cleanup_and_retains_errors(validation, cleanup_fails, score_fails):
     _, manager, calls = validation()
     entered = asyncio.Event()
     release = asyncio.Event()
-    failure = RuntimeError("cleanup failed")
+    cleanup_failure = RuntimeError("cleanup failed")
+    score_failure = ValueError("scoring failed")
+
+    async def fail_score(batch):
+        calls.append("score")
+        raise score_failure
 
     async def delayed_sleep():
         entered.set()
         await release.wait()
         if cleanup_fails:
-            raise failure
+            raise cleanup_failure
         calls.append("reward sleep")
 
+    if score_fails:
+        manager._compute_named_model_scores = fail_score
     manager.multi_reward_model_manager.sleep = delayed_sleep
     data = DataProto.from_dict(tensors={"prompts": torch.arange(2).view(2, 1)})
     scoring = asyncio.create_task(manager.async_compute_rm_score(data, on_release=lambda: calls.append("released")))
@@ -357,15 +365,19 @@ async def test_manager_cancellation_waits_for_cleanup_and_retains_its_error(vali
     finally:
         release.set()
         await asyncio.wait({scoring}, timeout=5)
-    if cleanup_fails:
+    if score_fails or cleanup_fails:
         with pytest.raises(BaseExceptionGroup) as caught:
             scoring.result()
-        cancellation, cleanup = caught.value.exceptions
+        errors = list(caught.value.exceptions)
+        if score_fails:
+            assert errors.pop(0) is score_failure
+        cancellation = errors.pop(0)
         assert isinstance(cancellation, asyncio.CancelledError)
         assert cancellation.args == ("first cancellation",)
-        assert cleanup is failure
-        assert calls == ["reward wake", "score"]
+        assert errors == ([cleanup_failure] if cleanup_fails else [])
     else:
         with pytest.raises(asyncio.CancelledError, match="first cancellation"):
             scoring.result()
-        assert calls == ["reward wake", "score", "reward sleep", "released"]
+    assert calls == (
+        ["reward wake", "score"] if cleanup_fails else ["reward wake", "score", "reward sleep", "released"]
+    )

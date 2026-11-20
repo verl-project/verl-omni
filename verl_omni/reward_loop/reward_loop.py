@@ -407,10 +407,12 @@ class OmniRewardLoopManager(RewardLoopManager):
     async def async_compute_rm_score(self, data, *, on_release: Callable[[], None] | None = None):
         """Score a batch and optionally acknowledge release before returning or raising.
 
-        The callback records release for this call only and runs under the score lock.
-        Callers must use offload-enabled shared models with an acknowledged sleep
-        contract and serialize access to their pool across the full rollout handoff.
-        The callback must return synchronously and must never score or raise.
+        The callback runs at most once under the score lock after accepted scoring
+        work settles and reward wake and sleep succeed. It confirms reward release
+        for this call only. The caller owns rollout restoration and must serialize
+        access across the handoff and use offload-enabled shared models with an
+        acknowledged sleep contract. The callback must be synchronous, must not
+        re-enter scoring, and must not raise.
         """
         if not self.multi_reward_model_manager.models:
             if on_release is not None:
@@ -461,23 +463,24 @@ class OmniRewardLoopManager(RewardLoopManager):
                 primary_error = exc
 
         sleep_error, sleep_cancellation = await self._settle_lifecycle(models.sleep())
-        if primary_error is None:
-            primary_error = sleep_cancellation
-        if wake_error is None and sleep_error is None:
+        if isinstance(primary_error, asyncio.CancelledError):
+            sleep_cancellation = None
+        released = wake_error is None and sleep_error is None
+        if released:
             on_release()
-            if primary_error is not None:
-                raise primary_error
-            return result
 
         # A failed wake can leave a fail-closed worker whose later sleep is a no-op.
         if wake_error is not None:
             wake_error.add_note("Named reward wake failed")
         if sleep_error is not None:
             sleep_error.add_note("Named reward sleep failed")
-        errors = [error for error in (wake_error, primary_error, sleep_error) if error is not None]
+        errors = [error for error in (wake_error, primary_error, sleep_cancellation, sleep_error) if error is not None]
+        if not errors:
+            return result
         if len(errors) == 1:
             raise errors[0]
-        raise BaseExceptionGroup("Named reward release unconfirmed", errors)
+        message = "Named reward scoring failed" if released else "Named reward release unconfirmed"
+        raise BaseExceptionGroup(message, errors)
 
     async def _compute_named_model_scores(self, data: DataProto) -> DataProto:
         if has_fsdp_reward_models(self.config):
