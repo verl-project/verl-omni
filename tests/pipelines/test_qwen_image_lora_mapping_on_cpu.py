@@ -111,7 +111,7 @@ def _export_qwen_actor(monkeypatch, backend):
 @pytest.fixture(params=["fsdp2", "veomni"])
 def runtime_manager(monkeypatch, request):
     import vllm.distributed.parallel_state as parallel_state
-    from vllm.config import DeviceConfig, VllmConfig, set_current_vllm_config
+    from vllm.config import VllmConfig, set_current_vllm_config
     from vllm_omni.diffusion.data import OmniDiffusionConfig
     from vllm_omni.diffusion.models.qwen_image import qwen_image_transformer as qwen
     from vllm_omni.lora.manager import DiffusionLoRAManager
@@ -127,7 +127,7 @@ def runtime_manager(monkeypatch, request):
     monkeypatch.setattr(DiffusionLoRAManager, "_load_adapter", DiffusionLoRAManager._load_adapter)
     monkeypatch.setattr("verl_omni.utils.vllm_omni.utils.VLLMHijack.hijack", lambda: None)
     VLLMOmniHijack.hijack()
-    with set_current_vllm_config(VllmConfig(device_config=DeviceConfig(device="cpu"))):
+    with set_current_vllm_config(VllmConfig()):
         transformer = qwen.QwenImageTransformer2DModel(
             OmniDiffusionConfig(),
             num_layers=1,

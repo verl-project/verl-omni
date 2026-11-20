@@ -614,7 +614,7 @@ class TestRegisteredPipelinesExposeTheMapper:
 @pytest.fixture
 def boogu_manager(monkeypatch):
     import vllm.distributed.parallel_state as parallel_state
-    from vllm.config import DeviceConfig, VllmConfig, set_current_vllm_config
+    from vllm.config import VllmConfig, set_current_vllm_config
     from vllm_omni.diffusion.data import OmniDiffusionConfig, TransformerConfig
     from vllm_omni.diffusion.models.boogu_image import boogu_image_transformer as boogu
     from vllm_omni.lora.manager import DiffusionLoRAManager
@@ -630,7 +630,7 @@ def boogu_manager(monkeypatch):
     monkeypatch.setattr(DiffusionLoRAManager, "_load_adapter", DiffusionLoRAManager._load_adapter)
     monkeypatch.setattr("verl_omni.utils.vllm_omni.utils.VLLMHijack.hijack", lambda: None)
     VLLMOmniHijack.hijack()
-    with set_current_vllm_config(VllmConfig(device_config=DeviceConfig(device="cpu"))):
+    with set_current_vllm_config(VllmConfig()):
         transformer = boogu.BooguImageTransformer2DModel(
             OmniDiffusionConfig(
                 tf_model_config=TransformerConfig.from_dict(
