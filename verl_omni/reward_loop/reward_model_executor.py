@@ -199,7 +199,9 @@ class NativeRewardExecutor:
                 else:
                     self._model = None
                     self._close_failed = True
-                    await self._dispose(model)
+                    await self._close_model(model)
+                    del model
+                    gc.collect()
                     self._close_failed = False
                 if self.spec.device_type != "cpu":
                     _empty_accelerator_cache()
@@ -222,7 +224,8 @@ class NativeRewardExecutor:
             await self._idle.wait()
             model, self._model = self._model, None
             self._close_failed = True
-            await self._dispose(model)
+            await self._close_model(model)
+            gc.collect()
             if self.spec.device_type != "cpu":
                 _empty_accelerator_cache()
             self._close_failed = False
@@ -236,7 +239,8 @@ class NativeRewardExecutor:
             return
         self._close_failed = True
         try:
-            await self._dispose(model)
+            await self._close_model(model)
+            gc.collect()
             if self.spec.device_type != "cpu":
                 _empty_accelerator_cache()
         except BaseException:
@@ -245,12 +249,11 @@ class NativeRewardExecutor:
             self._close_failed = False
 
     @classmethod
-    async def _dispose(cls, model) -> None:
+    async def _close_model(cls, model) -> None:
         if model is not None:
             close = getattr(model, "close", None)
             if callable(close):
                 await cls._call(close)
-        gc.collect()
 
 
 def build_engine_reward_executors(specs: dict[str, RewardModelSpec]) -> dict[str, EngineRewardExecutor]:

@@ -15,6 +15,7 @@
 
 import asyncio
 import threading
+import weakref
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -209,6 +210,25 @@ async def test_default_sleep_reconstructs_and_final_close(monkeypatch):
     assert executor._model is not first
     await executor.close()
     assert executor._closed
+
+
+@pytest.mark.asyncio
+async def test_reconstruction_sleep_collects_model_before_flushing_cache(monkeypatch):
+    class Model:
+        def __init__(self, **kwargs):
+            self.cycle = self
+
+    executor = _executor(monkeypatch, Model)
+    await executor.wake_up()
+    model_ref = weakref.ref(executor._model)
+    model_alive_at_flush = []
+    monkeypatch.setattr(
+        executor_module, "_empty_accelerator_cache", lambda: model_alive_at_flush.append(model_ref() is not None)
+    )
+
+    await executor.sleep()
+
+    assert model_alive_at_flush == [False]
 
 
 @pytest.mark.asyncio
