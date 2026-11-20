@@ -22,6 +22,7 @@ Patches dropped from the adapter:
 
 import importlib.metadata
 from types import SimpleNamespace
+from unittest.mock import Mock, call
 
 import pytest
 import torch
@@ -87,8 +88,8 @@ def test_ascend_expert_dispatch_is_local_to_the_selected_thinker(monkeypatch):
 
 
 @pytest.mark.parametrize("option,enabled", [(None, False), ("grouped_mm", False), ("ascend_grouped_mm", True)])
-def test_configure_model_selects_ascend_experts_only_when_requested(monkeypatch, option, enabled):
-    from verl_omni.pipelines.qwen3_omni import ascend_experts
+def test_configure_model_enables_ascend_fusions_only_when_requested(monkeypatch, option, enabled):
+    from verl_omni.pipelines.qwen3_omni import ascend_experts, ascend_text_fusions
 
     text_model = object()
     thinker = SimpleNamespace(
@@ -98,8 +99,10 @@ def test_configure_model_selects_ascend_experts_only_when_requested(monkeypatch,
         set_input_embeddings=lambda _: None,
     )
     module = SimpleNamespace(thinker=thinker, talker=object())
-    calls = []
-    monkeypatch.setattr(ascend_experts, "enable_ascend_grouped_mm", calls.append)
+    enable_experts = Mock()
+    enable_text_fusions = Mock()
+    monkeypatch.setattr(ascend_experts, "enable_ascend_grouped_mm", enable_experts)
+    monkeypatch.setattr(ascend_text_fusions, "enable_ascend_rmsnorm_rope", enable_text_fusions)
 
     result = Qwen3OmniThinkerAdapter.configure_model(
         module, SimpleNamespace(override_config={"experts_implementation": option})
@@ -107,7 +110,8 @@ def test_configure_model_selects_ascend_experts_only_when_requested(monkeypatch,
     assert result is module
     assert result.forward is thinker.forward
     assert not hasattr(result, "talker")
-    assert calls == ([text_model] if enabled else [])
+    assert enable_experts.call_args_list == ([call(text_model)] if enabled else [])
+    assert enable_text_fusions.call_args_list == ([call()] if enabled else [])
 
 
 def test_configure_processor_binds_multimodal_pad_dedup(monkeypatch):

@@ -11,7 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Ascend grouped matmul for Qwen3-Omni Thinker experts."""
 
 from copy import copy
 
@@ -38,7 +37,6 @@ def _ascend_grouped_mm(
     import torch_npu
     from verl.models.transformers.npu_patch import NPUGmmFunction
 
-    # As in verl-omni #819, keep the packed parameters and pass transposed views to GMM.
     gate_up_weight = experts.gate_up_proj.transpose(1, 2)
     down_weight = experts.down_proj.transpose(1, 2)
     permuted, row_ids = torch_npu.npu_moe_token_permute(hidden_states, top_k_index.to(torch.int32))
@@ -51,14 +49,12 @@ def _ascend_grouped_mm(
 
 
 def enable_ascend_grouped_mm(text_model: Qwen3OmniMoeThinkerTextModel) -> None:
-    """Select verl's Ascend experts backend for the loaded Thinker text model."""
     if not is_torch_npu_available():
         raise ValueError("ascend_grouped_mm requires an available Ascend NPU.")
     if text_model.config.hidden_act != "silu":
         raise ValueError("ascend_grouped_mm requires SiLU Thinker experts.")
 
     ALL_EXPERTS_FUNCTIONS.register("ascend_grouped_mm", _ascend_grouped_mm)
-    # FSDP meta initialization can reuse the caller's HF config.
     text_model.config = copy(text_model.config)
     text_model.set_experts_implementation("ascend_grouped_mm")
     for experts in text_model.modules():

@@ -11,7 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Single-NPU numerical coverage for the Ascend Thinker experts backend."""
 
 import math
 
@@ -21,7 +20,6 @@ import torch
 
 def _assert_bf16_close(actual, expected):
     error = (actual.detach().cpu().float() - expected.detach()).abs()
-    # Compare against the tensor scale to handle near-zero values after summing routes.
     assert error.norm() <= 0.01 * expected.norm()
     assert error.max() <= 0.015 * expected.abs().max()
 

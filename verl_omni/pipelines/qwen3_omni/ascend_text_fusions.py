@@ -11,14 +11,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""RMSNorm and RoPE benchmark variant from verl-omni PR #819."""
 
 import torch
 from transformers.models.qwen3_omni_moe import modeling_qwen3_omni_moe as modeling
 
 
 def enable_ascend_rmsnorm_rope() -> None:
-    """Enable the two text fusions in the benchmark's training process."""
     from verl.models.transformers.npu_patch import apply_rotary_pos_emb_npu, rms_norm_forward_npu
 
     if modeling.Qwen3OmniMoeThinkerTextRMSNorm.forward is rms_norm_forward_npu:
