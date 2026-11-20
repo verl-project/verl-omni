@@ -350,27 +350,28 @@ def test_v1_invalid_dtype_fails_before_background_submission(tmp_path, outputs):
 
 
 @pytest.mark.parametrize("media_kinds", [["video", "video"], ["video", "image"], ["video", "depth"]])
-def test_v1_rollout_dump_sorts_and_forwards_media_metadata(monkeypatch, media_kinds):
+def test_v1_rollout_dump_preserves_reader_order_and_forwards_media_metadata(monkeypatch, media_kinds):
     trainer = object.__new__(_ConcreteTrainer)
     trainer.config = OmegaConf.create({"trainer": {"rollout_data_max_samples": 1, "video_fps": 12}})
     trainer.tokenizer = SimpleNamespace(
         pad_token_id=0,
-        batch_decode=lambda prompts, skip_special_tokens: ["second", "first"],
+        batch_decode=lambda prompts, skip_special_tokens: ["first", "second"],
     )
     captured = {}
     trainer._dump_generations = lambda **kwargs: captured.update(kwargs)
 
-    audio = torch.stack((torch.full((1, 4), 2.0), torch.full((1, 4), 1.0)))
+    # 真实 TQ reader 已排序；dump 必须保持读出的媒体、分数与文本同序。
+    audio = torch.stack((torch.full((1, 4), 1.0), torch.full((1, 4), 2.0)))
     data = _FakeData(
         batch={
-            "prompts": torch.tensor([[2], [1]]),
+            "prompts": torch.tensor([[1], [2]]),
             "responses": torch.stack(
                 (
-                    torch.full((2, 3, 4, 4), 2, dtype=torch.uint8),
                     torch.full((2, 3, 4, 4), 1, dtype=torch.uint8),
+                    torch.full((2, 3, 4, 4), 2, dtype=torch.uint8),
                 )
             ),
-            "sample_level_scores": torch.tensor([[2.0], [1.0]]),
+            "sample_level_scores": torch.tensor([[1.0], [2.0]]),
             "audio": audio,
         },
         non_tensor_batch={
@@ -391,8 +392,9 @@ def test_v1_rollout_dump_sorts_and_forwards_media_metadata(monkeypatch, media_ki
 
     assert captured["inputs"] == ["first", "second"]
     assert captured["scores"] == [1.0, 2.0]
-    torch.testing.assert_close(captured["outputs"][0], data.batch["responses"][1])
-    torch.testing.assert_close(captured["audios"][0], audio[1])
+    torch.testing.assert_close(captured["outputs"][0], data.batch["responses"][0])
+    torch.testing.assert_close(captured["audios"][0], audio[0])
+    assert captured["reward_extra_infos_dict"]["uid"] == ["first_0_0", "second_0_0"]
     assert captured["audio_sample_rates"] == [48_000, 48_000]
     assert captured["media_kind"] == "video"
     assert captured["max_samples"] == 1

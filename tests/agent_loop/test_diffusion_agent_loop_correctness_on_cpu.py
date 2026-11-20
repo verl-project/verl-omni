@@ -102,6 +102,7 @@ async def test_single_turn_agent_forwards_all_multimodal_inputs():
         enable_prompt_embed_cache_routing_affinity=False,
     )
     agent_loop.extra_tokenizer_map = {}
+    agent_loop.model_adapter = None
     agent_loop.mm_processor_kwargs = {"fps": 24}
     agent_loop.processor = None
     agent_loop.process_multi_modal_info = AsyncMock(
@@ -133,6 +134,7 @@ async def test_single_turn_agent_forwards_all_multimodal_inputs():
 @pytest.mark.asyncio
 async def test_single_turn_agent_accepts_numpy_negative_prompt():
     agent_loop = object.__new__(DiffusionSingleTurnAgentLoop)
+    agent_loop.model_adapter = None
     agent_loop.rollout_config = SimpleNamespace(
         enable_prompt_embed_cache=False,
         enable_prompt_embed_cache_routing_affinity=False,
@@ -607,3 +609,54 @@ async def test_async_reward_data_proto_preserves_validate_meta_info(validate: bo
     received_data = reward_loop_worker_handle.compute_score.received_data
     assert received_data is not None
     assert received_data.meta_info == {"validate": validate}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("key", ["condition_image_rows", "condition_video_rows", "condition_audio_rows"])
+async def test_tq_reference_rows_keep_valid_lengths_across_prompt_groups(monkeypatch, key):
+    """V1 writes groups directly to TQ, bypassing the ordinary batch postprocessor."""
+    from verl_omni.workers.engine.fsdp.diffusers_impl import DiffusersFSDPEngine
+    from verl_omni.workers.utils.padding import embeds_padding_2_no_padding
+
+    worker_cls = DiffusionAgentLoopWorkerTQ.__ray_metadata__.modified_class
+    worker = object.__new__(worker_cls)
+    worker.max_prompt_embed_length = 16
+    stored = []
+    monkeypatch.setattr(diffusion_agent_loop_tq, "list_of_dict_to_tensordict", lambda rows: rows)
+
+    async def capture(*, keys, fields, tags, partition_id):
+        stored.extend(fields)
+
+    monkeypatch.setattr(diffusion_agent_loop_tq.tq, "async_kv_batch_put", capture)
+    counts = [0, 4, 8]
+    originals = [torch.arange(count * 4, dtype=torch.float32).reshape(1, count, 4) for count in counts]
+    count_key = key.replace("_rows", "_row_count")
+    for index, (count, original) in enumerate(zip(counts, originals, strict=True)):
+        internal = SimpleNamespace(
+            prompt_ids=torch.tensor([[1, 2]]),
+            response_diffusion_output=torch.zeros(1, 3, 2, 2),
+            response_logprobs=None,
+            reward_score=None,
+            num_turns=1,
+            extra_fields={key: original, count_key: torch.tensor([[count]])},
+        )
+        await worker._write_trajectories_to_tq(
+            [(0, internal)], uid=f"prompt-{index}", trajectory={"step": 1}, validate=False
+        )
+    mask_key = f"{key}_mask"
+    assert all(mask_key in row for row in stored)
+    data = TensorDict(
+        {name: tq_utils._stack_field([row[name] for row in stored]) for name in (key, mask_key, count_key)},
+        batch_size=[len(counts)],
+    )
+    data = embeds_padding_2_no_padding(data)
+    engine = SimpleNamespace(_unpad_nested_embeds=DiffusersFSDPEngine._unpad_nested_embeds)
+    micro_batches = tu.chunk_tensordict(data, len(counts))
+    for index, (count, micro) in enumerate(zip(counts, micro_batches, strict=True)):
+        DiffusersFSDPEngine._unpad_condition_rows(engine, micro)
+        assert micro[key].shape == (1, count, 4)
+        torch.testing.assert_close(micro[key], originals[index])
+        assert micro[mask_key].shape == (1, count)
+        assert bool(micro[mask_key].all())
+        torch.testing.assert_close(micro[count_key], torch.tensor([[count]]))
+        torch.testing.assert_close(stored[index][key][:count], originals[index][0])

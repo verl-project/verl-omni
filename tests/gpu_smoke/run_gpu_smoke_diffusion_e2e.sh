@@ -86,4 +86,12 @@ run_test 12 "CRD SD3 v1 sync trainer and checkpoint e2e" \
     env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" \
     bash tests/special_e2e/run_crd_sd35.sh "${diffusion_trainer_args[@]}"
 
+run_test 13 "Qwen-Image 2.1 DiffusionNFT LoRA T2I e2e" \
+    env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" NUM_REFERENCE_IMAGES=0 \
+    bash tests/special_e2e/run_diffusionnft_qwen_image_21.sh "${diffusion_trainer_args[@]}"
+
+run_test 14 "Qwen-Image 2.1 DiffusionNFT LoRA editing e2e" \
+    env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" NUM_REFERENCE_IMAGES=1 \
+    bash tests/special_e2e/run_diffusionnft_qwen_image_21.sh "${diffusion_trainer_args[@]}"
+
 gpu_smoke_summary

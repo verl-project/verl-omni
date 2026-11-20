@@ -284,9 +284,8 @@ def test_rollout_dump_fetches_only_dump_fields(monkeypatch):
     assert "prompt_embeds" not in captured["select_fields"]
     assert "old_log_probs" not in captured["select_fields"]
     assert len(dumps) == 1
-    # Rows are sorted by uid (prompt_0_0 first); the persisted
-    # sample_level_scores are dumped, not the [0.0, 0.0] no-scores fallback.
-    assert dumps[0]["scores"] == [7.0, 3.0]
+    # get_data 模拟已排序的读取结果，dump 不能再次重排或回退到零分。
+    assert dumps[0]["scores"] == [3.0, 7.0]
 
 
 @pytest.mark.parametrize("policy_gradient", [True, False])
@@ -568,3 +567,132 @@ def test_rollout_dump_projection_restores_media_artifacts(monkeypatch, preview_n
 def test_dump_artifact_prefix_matches_rollout_media():
     assert MEDIA_ARTIFACT_FIELD_PREFIX == ARTIFACT_PREFIX
     assert tq_utils.MEDIA_ARTIFACT_FIELD_PREFIX is MEDIA_ARTIFACT_FIELD_PREFIX
+
+
+def _install_storage(monkeypatch, uid_numbers, *, positional_tags=True):
+    """只替换 TQ I/O；保留真实读取、组装、写回及展示代码。"""
+    rows, keys, tags = {}, [], []
+    for prompt, number in enumerate(uid_numbers):
+        uid = f"{number:08x}-0000-4000-8000-000000000000"
+        for session in range(8):
+            key = f"{uid}_{session}_0"
+            value = prompt * 8 + session
+            keys.append(key)
+            tags.append({"gen_batch_seq": 5 + prompt // 4, "prompt_index": prompt % 4} if positional_tags else {})
+            rows[key] = {
+                "prompts": torch.tensor([prompt, session]),
+                "responses": torch.full((3, 2, 2), value, dtype=torch.uint8),
+                "sample_level_scores": torch.tensor([float(value)]),
+                "sample_level_rewards": torch.tensor([float(value)]),
+                "uid": uid,
+                "reward_model": {"ground_truth": f"text-{prompt}"},
+                "extra_fields": {"min_global_steps": 3, "max_global_steps": 3},
+            }
+
+    def get_fields(*, keys, partition_id, select_fields=None):
+        assert partition_id == "train"
+        selected = list(rows[keys[0]]) if select_fields is None else select_fields
+        return {field: [rows[key][field] for key in keys] for field in selected if field in rows[keys[0]]}
+
+    def put_fields(*, keys, partition_id, fields):
+        assert partition_id == "train"
+        assert len(keys) == len(fields)
+        for index, key in enumerate(keys):
+            rows[key].update({field: values[index].clone() for field, values in fields.items()})
+
+    monkeypatch.setattr(tq_utils.tq, "kv_batch_get", get_fields)
+    monkeypatch.setattr(tq_utils.tq, "kv_batch_put", put_fields)
+    monkeypatch.setattr(
+        tq_utils.tq,
+        "get_client",
+        lambda: SimpleNamespace(kv_retrieve_meta=lambda **kwargs: SimpleNamespace(field_names=list(rows[keys[0]]))),
+    )
+    # 非自逆排列使第二次重排无法偶然抵消；顺序与 UUID、prompt 都无关。
+    permutation = [(index * 7 + 5) % len(keys) for index in range(len(keys))]
+    meta = KVBatchMeta(
+        partition_id="train",
+        keys=[keys[index] for index in permutation],
+        tags=[tags[index] for index in permutation],
+    )
+    return meta, rows, keys
+
+
+def test_uuid_changes_preserve_data_reward_writeback_and_four_rank_rows(monkeypatch):
+    expected = torch.tensor([[prompt, session] for prompt in range(8) for session in range(8)])
+    dp_rows = []
+    for uid_numbers in ([7, 6, 5, 4, 3, 2, 1, 0], [2, 7, 1, 6, 0, 5, 3, 4]):
+        meta, rows, expected_keys = _install_storage(monkeypatch, uid_numbers)
+        data = tq_utils.diffusion_tq_batch_to_dataproto(meta)
+        torch.testing.assert_close(data.batch["prompts"], expected)
+        ordered = tq_utils.canonicalize_diffusion_tq_meta(meta)
+        assert list(ordered.keys) == expected_keys
+        canonical_data = tq_utils.diffusion_tq_batch_to_dataproto(ordered)
+        torch.testing.assert_close(canonical_data.batch["responses"], data.batch["responses"])
+
+        # 实际 batch64/DP4 的连续分片，每张卡都必须收到同样的16条轨迹。
+        dp_rows.append([chunk["prompts"].tolist() for chunk in data.batch.chunk(4, dim=0)])
+        rewards = torch.arange(64, dtype=torch.float32).unsqueeze(-1) + 100
+        data.batch["sample_level_scores"] = rewards
+        data.batch["sample_level_rewards"] = rewards
+        tq_utils.put_dataproto_fields_to_tq(
+            meta,
+            data,
+            fields=tq_utils.diffusion_persisted_tq_fields("direct_preference"),
+        )
+        for index, key in enumerate(expected_keys):
+            torch.testing.assert_close(rows[key]["sample_level_scores"], rewards[index])
+            torch.testing.assert_close(rows[key]["sample_level_rewards"], rewards[index])
+
+        metrics_data = tq_utils.diffusion_tq_batch_to_dataproto(
+            meta, select_fields=tq_utils.diffusion_metric_tq_fields("direct_preference")
+        )
+        torch.testing.assert_close(metrics_data.batch["sample_level_scores"], rewards)
+        assert metrics_data.non_tensor_batch["uid"].tolist() == [rows[key]["uid"] for key in expected_keys]
+    assert dp_rows[0] == dp_rows[1]
+    assert [len(chunk) for chunk in dp_rows[0]] == [16, 16, 16, 16]
+
+
+@pytest.mark.parametrize("positional_tags", [True, False])
+def test_dump_keeps_prompt_pixels_ground_truth_score_and_uid_on_same_row(monkeypatch, positional_tags):
+    meta, rows, canonical_keys = _install_storage(
+        monkeypatch, [7, 6, 5, 4, 3, 2, 1, 0], positional_tags=positional_tags
+    )
+    expected_keys = canonical_keys if positional_tags else sorted(canonical_keys)
+    dumps = []
+    trainer = SimpleNamespace(
+        tokenizer=SimpleNamespace(
+            pad_token_id=0,
+            batch_decode=lambda ids, **kwargs: [f"prompt-{int(row[0])}/session-{int(row[1])}" for row in ids],
+        ),
+        config=SimpleNamespace(trainer={}),
+        _dump_generations=lambda **kwargs: dumps.append(kwargs),
+    )
+    trainer_base_module.PolicyGradientDiffusionTrainerV1._log_rollout_data(trainer, meta, {}, "/tmp/dump")
+    assert len(dumps) == 1
+    dumped = dumps[0]
+    assert dumped["reward_extra_infos_dict"]["uid"] == expected_keys
+    assert dumped["inputs"] == [
+        f"prompt-{int(rows[key]['prompts'][0])}/session-{int(rows[key]['prompts'][1])}" for key in expected_keys
+    ]
+    assert dumped["gts"] == [rows[key]["reward_model"]["ground_truth"] for key in expected_keys]
+    assert dumped["scores"] == pytest.approx([float(rows[key]["sample_level_scores"][0]) for key in expected_keys])
+    torch.testing.assert_close(dumped["outputs"], torch.stack([rows[key]["responses"] for key in expected_keys]))
+
+
+@pytest.mark.parametrize("tags", [None, [], [{}, {}, {}, {}]])
+def test_legacy_keys_without_position_tags_keep_numeric_session_order(tags):
+    keys = ["bbb_0_0", "aaa_10_0", "aaa_2_1", "aaa_2_0"]
+    assert tq_utils.sort_diffusion_tq_keys(keys, tags) == [3, 2, 1, 0]
+
+
+@pytest.mark.parametrize("tags", [[], [{}, {}]])
+def test_canonicalize_falls_back_when_legacy_tags_have_no_position_fields(tags):
+    meta = KVBatchMeta(partition_id="train", keys=["b_0_0", "a_0_0"], tags=tags)
+    ordered = tq_utils.canonicalize_diffusion_tq_meta(meta)
+    assert list(ordered.keys) == ["a_0_0", "b_0_0"]
+    assert ordered.tags == meta.tags
+
+
+def test_rejects_misaligned_nonempty_tags():
+    with pytest.raises(ValueError, match="tags must align"):
+        tq_utils.sort_diffusion_tq_keys(["a_0_0", "b_0_0"], [{"gen_batch_seq": 0, "prompt_index": 0}])

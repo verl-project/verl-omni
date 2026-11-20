@@ -1799,7 +1799,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         self._dump_futures.append((future, global_step))
 
     def _log_rollout_data(self, batch_meta: KVBatchMeta, timing_raw: dict, rollout_data_dir: str):
-        """Fetch rollout rows from TQ and dump sorted by uid.
+        """Fetch rollout rows from TQ and preserve the reader's canonical order.
 
         Reads only the dump's fields; the trainer-only latents/embeds stay in
         TransferQueue instead of crossing the wire a second time.
@@ -1831,16 +1831,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             media_kinds = _resolve_rollout_media_field(data, tool_extra, "media_kind")
             previews = previews_from_batch(data)
 
-            sort_idx = sort_diffusion_tq_keys(list(batch_meta.keys))
-            if previews is not None:
-                previews = [previews[i] for i in sort_idx]
-            inputs = [inputs[i] for i in sort_idx]
-            outputs = outputs[torch.tensor(sort_idx)]
-            gts = [gts[i] for i in sort_idx]
-            scores = [scores[i] for i in sort_idx]
-            audios = [audios[i] for i in sort_idx]
-            audio_sample_rates = [audio_sample_rates[i] for i in sort_idx]
-            media_kinds = [media_kinds[i] for i in sort_idx]
+            sort_idx = sort_diffusion_tq_keys(list(batch_meta.keys), getattr(batch_meta, "tags", None))
             reward_extra_infos_dict = {"uid": [batch_meta.keys[i] for i in sort_idx]}
             self._dump_generations(
                 inputs=inputs,

@@ -178,15 +178,20 @@ def visual_reward_frames(solution_image, extra_info: dict, frame_interval: int =
     return artifact.data[::frame_interval]
 
 
-def image_tensor_to_pil(image: torch.Tensor) -> Image.Image:
-    """Convert an explicitly canonical uint8 CHW image to RGB PIL."""
+def image_tensor_to_pil(image: torch.Tensor, alpha_background: tuple[int, int, int] | None = None) -> Image.Image:
+    """Convert canonical uint8 CHW pixels to RGB, optionally compositing alpha."""
     from verl_omni.pipelines.rollout_media import MediaArtifact, MediaSpec
 
     MediaArtifact(MediaSpec("image", "decoded", "CHW"), image).validate(context="PIL conversion", name="image")
     array = image.detach().permute(1, 2, 0).cpu().numpy()
     if image.shape[0] == 1:
         array = array[:, :, 0]
-    return Image.fromarray(array).convert("RGB")
+    result = Image.fromarray(array)
+    if result.mode == "RGBA" and alpha_background is not None:
+        background = Image.new("RGB", result.size, alpha_background)
+        background.paste(result, mask=result.getchannel("A"))
+        return background
+    return result.convert("RGB")
 
 
 def video_reward_tensor(solution_image, extra_info: dict, fps: float) -> torch.Tensor:

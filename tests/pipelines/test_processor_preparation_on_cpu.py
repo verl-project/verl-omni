@@ -12,13 +12,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import json
-from unittest.mock import patch
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
+import torch
 from omegaconf import OmegaConf
+from PIL import Image
 
 from verl_omni.pipelines.model_base import DiffusionModelBase
+from verl_omni.pipelines.qwen_image_21_diffusion_nft.agent_loop import QwenImage21DiffusionSingleTurnAgentLoop
+from verl_omni.pipelines.qwen_image_21_diffusion_nft.diffusers_training_adapter import QwenImage21DiffusionNFT
+from verl_omni.pipelines.qwen_image_21_diffusion_nft.prompt import prepare_reference_media
+from verl_omni.trainer.diffusion.v1.trainer_base import PolicyGradientDiffusionTrainerV1
 from verl_omni.workers.config.diffusion.model import DiffusionModelConfig
 
 
@@ -168,3 +177,182 @@ class TestProcessorPreparationHook:
             ("hook", str(model_dir)),
             ("processor", str(alternate_processor)),
         ]
+
+
+@pytest.fixture
+def processor_checkpoint(tmp_path, monkeypatch):
+    """只替换外部模型加载，保留配置、registry 和 agent 的生产控制流。"""
+    processor_dir = tmp_path / "processor"
+    processor_dir.mkdir()
+    (tmp_path / "model_index.json").write_text(json.dumps({"_class_name": "QwenImage21Pipeline"}))
+    encoder_dir = tmp_path / "text_encoder"
+    encoder_dir.mkdir()
+    (encoder_dir / "config.json").write_text(json.dumps({"model_type": "qwen3_vl", "text_config": {}}))
+    tokenizer = Mock()
+    tokenizer.encode.return_value = [198]
+    tokenizer.convert_tokens_to_ids.return_value = 151645
+    processor = Mock(spec=["tokenizer"], tokenizer=tokenizer)
+    processor.return_value = SimpleNamespace(
+        input_ids=torch.tensor([[1, 2, 3]]), attention_mask=torch.ones(1, 3, dtype=torch.long)
+    )
+
+    def load_processor(path, **kwargs):
+        assert json.loads((Path(path) / "config.json").read_text())["model_type"] == "qwen3_vl"
+        return processor
+
+    loader = Mock(side_effect=load_processor)
+    monkeypatch.setattr("verl_omni.workers.config.diffusion.model.hf_processor", loader)
+    monkeypatch.setattr("verl.utils.hf_processor", loader)
+    monkeypatch.setattr("verl_omni.workers.config.diffusion.model.hf_tokenizer", Mock(return_value=tokenizer))
+    monkeypatch.setattr("verl.utils.hf_tokenizer", Mock(return_value=tokenizer))
+    return tmp_path, tokenizer, processor, loader
+
+
+@pytest.mark.parametrize("nrefs", range(5))
+def test_model_config_processor_reaches_agent_tokenization(processor_checkpoint, nrefs):
+    root, tokenizer, processor, loader = processor_checkpoint
+    QwenImage21DiffusionNFT.prepare_processor_files(str(root))
+    config = DiffusionModelConfig(
+        path=str(root),
+        tokenizer_path=str(root / "processor"),
+        algorithm="diffusion_nft",
+        attn_backend="native",
+    )
+    assert config.processor is processor
+    loader.assert_called_once_with(str(root / "processor"), trust_remote_code=False)
+    assert (root / "processor/config.json").read_bytes() == (root / "text_encoder/config.json").read_bytes()
+    assert DiffusionModelBase.get_class(config) is QwenImage21DiffusionNFT
+
+    async def tokenize():
+        rollout = SimpleNamespace(prompt_length=32768)
+        trainer = SimpleNamespace(config=SimpleNamespace(actor_rollout_ref=SimpleNamespace(rollout=rollout)))
+        agent = QwenImage21DiffusionSingleTurnAgentLoop(
+            trainer,
+            server_manager=object(),
+            tokenizer=tokenizer,
+            processor=config.processor,
+            dataset_cls=None,
+            data_config=SimpleNamespace(config={}),
+        )
+        images = [Image.new("RGB", (64, 64), (40 * index, 80, 120)) for index in range(nrefs)]
+        media = prepare_reference_media({"images": images})
+        ids = await agent.ct_build_initial_tokens([{"role": "user", "content": "draw a sign"}], images=media["images"])
+        return ids, media
+
+    ids, media = asyncio.run(tokenize())
+    assert ids == [1, 2, 3]
+    assert len(media["images"]) == nrefs
+    processor.assert_called_once()
+    assert processor.call_args.kwargs["text"][0].count("<|image_pad|>") == nrefs
+
+
+def test_v1_driver_uses_existing_processor_preparation(processor_checkpoint):
+    root, _, processor, loader = processor_checkpoint
+    config = OmegaConf.create(
+        {
+            "actor_rollout_ref": {
+                "model": {
+                    "path": str(root),
+                    "tokenizer_path": str(root / "processor"),
+                    "algorithm": "diffusion_nft",
+                }
+            },
+            "data": {"trust_remote_code": False},
+        }
+    )
+    trainer = SimpleNamespace(config=config)
+    PolicyGradientDiffusionTrainerV1._init_tokenizer(trainer)
+    assert trainer.processor is processor
+    loader.assert_called_once_with(
+        str(root / "processor"),
+        trust_remote_code=False,
+        use_fast=True,
+    )
+    assert (root / "processor/config.json").read_bytes() == (root / "text_encoder/config.json").read_bytes()
+
+
+def test_processor_preparation_preserves_existing_config(processor_checkpoint):
+    root, *_ = processor_checkpoint
+    config = root / "processor/config.json"
+    content = '{"model_type": "qwen3_vl", "checkpoint_metadata": true}'
+    config.write_text(content)
+    assert QwenImage21DiffusionNFT.prepare_processor_files(str(root)) == str(config.parent)
+    assert config.read_text() == content
+
+
+def test_processor_preparation_rejects_wrong_encoder(processor_checkpoint):
+    root, *_ = processor_checkpoint
+    (root / "text_encoder/config.json").write_text('{"model_type": "qwen2_vl"}')
+    with pytest.raises(ValueError, match="Qwen3-VL"):
+        QwenImage21DiffusionNFT.prepare_processor_files(str(root))
+    assert not (root / "processor/config.json").exists()
+
+
+@pytest.mark.parametrize("nrefs", [0, 1, 4])
+def test_qwen21_agent_reuses_base_run_with_same_condition_images(monkeypatch, nrefs):
+    from verl_omni.agent_loop.single_turn_agent_loop import DiffusionSingleTurnAgentLoop
+
+    async def run():
+        source = [Image.new("RGBA", (96, 64), (10, 20, 30, 80)) for _ in range(nrefs)]
+        monkeypatch.setattr(
+            DiffusionSingleTurnAgentLoop, "process_multi_modal_info", AsyncMock(return_value={"images": source})
+        )
+        agent = object.__new__(QwenImage21DiffusionSingleTurnAgentLoop)
+        agent.loop = asyncio.get_running_loop()
+        agent.rollout_config = SimpleNamespace(
+            prompt_length=32768, enable_prompt_embed_cache=False, enable_prompt_embed_cache_routing_affinity=False
+        )
+        agent.processor = Mock(
+            return_value=SimpleNamespace(
+                input_ids=torch.tensor([[1, 2, 3]]), attention_mask=torch.ones(1, 3, dtype=torch.long)
+            )
+        )
+        agent.extra_tokenizer_map = {}
+        agent._assert_mm_supported = Mock()
+        agent._get_mm_processor_kwargs = Mock(return_value={})
+        output = SimpleNamespace(
+            num_preempted=0, diffusion_output=torch.zeros(3, 8, 8), log_probs=None, extra_fields={}
+        )
+        agent.server_manager = SimpleNamespace(generate=AsyncMock(return_value=output))
+        assert QwenImage21DiffusionSingleTurnAgentLoop.run is DiffusionSingleTurnAgentLoop.run
+        result = await agent.run(
+            {},
+            raw_prompt=[{"role": "user", "content": "edit"}],
+            raw_negative_prompt=[{"role": "user", "content": " "}],
+        )
+        sent = agent.server_manager.generate.call_args.kwargs
+        assert result.prompt_ids == sent["prompt_ids"] == sent["negative_prompt_ids"] == [1, 2, 3]
+        assert agent.processor.call_count == 2
+        assert len(sent["image_data"]) == nrefs
+        for call in agent.processor.call_args_list:
+            assert call.kwargs["text"][0].count("<|image_pad|>") == nrefs
+            assert [image.size for image in call.kwargs.get("images", [])] == [
+                image.size for image in sent["image_data"]
+            ]
+        assert all(image.mode == "RGBA" for image in sent["image_data"])
+        assert all(image.size == (96, 64) for image in source)
+
+    asyncio.run(run())
+
+
+def test_qwen21_processor_uses_standard_hf_loader(tmp_path):
+    from transformers import Qwen2VLImageProcessor, Qwen3VLConfig, Qwen3VLProcessor, Qwen3VLVideoProcessor
+    from verl.utils import hf_processor
+
+    from tests.special_e2e.build_qwen_image_tiny_random import _build_tiny_chatml_tokenizer
+
+    tokenizer = _build_tiny_chatml_tokenizer()
+    processor = Qwen3VLProcessor(
+        image_processor=Qwen2VLImageProcessor(patch_size=16, merge_size=2),
+        video_processor=Qwen3VLVideoProcessor(patch_size=16, merge_size=2),
+        tokenizer=tokenizer,
+        chat_template=tokenizer.chat_template,
+    )
+    processor.save_pretrained(tmp_path / "processor")
+    Qwen3VLConfig().save_pretrained(tmp_path / "text_encoder")
+    path = QwenImage21DiffusionNFT.prepare_processor_files(str(tmp_path))
+    loaded = hf_processor(path, local_files_only=True)
+    assert isinstance(loaded, Qwen3VLProcessor)
+    assert loaded.config.model_type == "qwen3_vl"
+    assert callable(loaded.get_rope_index)
+    assert loaded.tokenizer.encode("draw a sign") == tokenizer.encode("draw a sign")

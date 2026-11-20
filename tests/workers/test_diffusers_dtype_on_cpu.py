@@ -154,3 +154,32 @@ def test_bare_string_island_declaration_is_normalized():
 
     assert model.sensitive.weight.dtype == torch.float32
     assert model.regular.weight.dtype == torch.bfloat16
+
+
+def test_qwen21_timestep_frequencies_survive_uniform_cast_on_loaded_and_meta_ranks(tmp_path):
+    from accelerate import init_empty_weights
+    from diffusers import QwenImage21Transformer2DModel
+
+    from tests.special_e2e.build_qwen_image_21_tiny_random import build_transformer
+    from verl_omni.pipelines.qwen_image_21_diffusion_nft.diffusers_training_adapter import QwenImage21DiffusionNFT
+
+    tiny = build_transformer()
+    expected = tiny.time_text_embed.time_proj.freqs.detach().clone()
+    assert expected.dtype == torch.float32
+    assert not torch.equal(expected, expected.bfloat16().float())
+    tiny.save_pretrained(tmp_path)
+    loaded = QwenImage21Transformer2DModel.from_pretrained(tmp_path, torch_dtype=torch.bfloat16)
+    with init_empty_weights(include_buffers=False):
+        meta = QwenImage21Transformer2DModel.from_config(tiny.config)
+    assert next(meta.parameters()).is_meta
+
+    for model in (loaded, meta):
+        _cast_loaded_diffusers_module(
+            model,
+            torch.bfloat16,
+            preserve_fp32_modules=QwenImage21DiffusionNFT.preserve_fp32_modules(),
+            preserve_buffer_names=QwenImage21DiffusionNFT.preserve_buffer_names,
+        )
+        assert {parameter.dtype for parameter in model.parameters()} == {torch.bfloat16}
+        torch.testing.assert_close(model.time_text_embed.time_proj.freqs, expected, atol=0, rtol=0)
+        assert "time_text_embed.time_proj.freqs" not in model.state_dict()
