@@ -1942,7 +1942,9 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             infos = data.non_tensor_batch["reward_extra_info"].tolist()
             keys = infos[0].keys() if infos and isinstance(infos[0], dict) else []
             for key in keys:
-                reward_extra_infos_dict[key] = [info.get(key) for info in infos]
+                values = [info.get(key) for info in infos]
+                if all(isinstance(value, int | float) for value in values):
+                    reward_extra_infos_dict[key] = values
         metrics.update(compute_reward_extra_metrics_diffusion(reward_extra_infos_dict))
         gradient_norm = metrics.get("actor/grad_norm", None)
         if "advantages" in data.batch:
