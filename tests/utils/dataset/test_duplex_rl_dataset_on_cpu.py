@@ -59,8 +59,12 @@ def test_build_episode_chunks_pads_the_final_chunk_and_rejects_bad_windows(user_
     assert np.all(chunks[-1]["pcm"][8000:] == 0.0)
     with pytest.raises(ValueError, match="empty"):
         build_episode_chunks(samples, start_s=2.0, end_s=2.0)
-    with pytest.raises(ValueError, match="outruns"):
-        build_episode_chunks(samples, start_s=0.0, end_s=20.0)
+    with pytest.raises(ValueError, match="past the audio"):
+        build_episode_chunks(samples, start_s=20.0, end_s=21.0)
+    # A window whose tail outruns the track clips to the audio (the last
+    # utterance of a corpus dialogue ends at the file end).
+    clipped = build_episode_chunks(samples, start_s=0.0, end_s=20.0)
+    assert len(clipped) == 10
 
 
 def _row(spec: DuplexEpisodeSpec, words: list[dict]) -> dict:

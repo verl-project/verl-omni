@@ -125,6 +125,17 @@ class DuplexEpisodeSpec:
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> DuplexEpisodeSpec:
+        """Rebuild a spec from its parquet-stored dict (numpy-safe)."""
+
+        def _pair(value: Any) -> tuple[float, float] | None:
+            if value is None:
+                return None
+            values = list(value)
+            return (float(values[0]), float(values[1])) if len(values) == 2 else None
+
+        def _optional_float(value: Any) -> float | None:
+            return None if value is None else float(value)
+
         event = payload["event"]
         return cls(
             episode_id=str(payload["episode_id"]),
@@ -134,12 +145,12 @@ class DuplexEpisodeSpec:
             end_s=float(payload["end_s"]),
             event=DuplexEpisodeEvent(
                 axis=str(event["axis"]),
-                pause_window_s=tuple(event["pause_window_s"]) if event.get("pause_window_s") else None,
-                user_turn_end_s=event.get("user_turn_end_s"),
-                interrupt_speech_end_s=event.get("interrupt_speech_end_s"),
+                pause_window_s=_pair(event.get("pause_window_s")),
+                user_turn_end_s=_optional_float(event.get("user_turn_end_s")),
+                interrupt_speech_end_s=_optional_float(event.get("interrupt_speech_end_s")),
             ),
-            interrupt_speech_s=(tuple(payload["interrupt_speech_s"]) if payload.get("interrupt_speech_s") else None),
-            inject_delay_s=payload.get("inject_delay_s"),
+            interrupt_speech_s=_pair(payload.get("interrupt_speech_s")),
+            inject_delay_s=_optional_float(payload.get("inject_delay_s")),
             provenance=dict(payload.get("provenance") or {}),
         )
 

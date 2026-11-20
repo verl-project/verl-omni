@@ -141,7 +141,7 @@ async def test_run_maps_one_episode_onto_the_policy_sequence():
     assert "unit_pcm" not in payload
     # The server saw the run spec with the seed and the chunks.
     (run_spec,) = server.episodes
-    assert run_spec["seed"] == 11
+    assert 0 <= run_spec["seed"] < 2**63  # uuid-mixed from the dataset seed (group diversity)
     assert len(run_spec["chunks"]) == 5
     assert run_spec["temperature"] == 0.7
     assert server._result is not None
@@ -222,3 +222,15 @@ async def test_out_of_range_interruption_anchor_fails():
     loop, _ = _loop(result)
     with pytest.raises(ValueError, match="fed chunks"):
         await loop.run({}, duplex_episode=_episode("interruption"), duplex_seed=3)
+
+
+@pytest.mark.asyncio
+async def test_group_members_get_distinct_session_seeds():
+    # rollout.n copies share one dataset row; their sessions must not share
+    # the seed or the group collapses to identical rollouts.
+    loop, server = _loop(_server_result())
+    await loop.run({}, duplex_episode=_episode(), duplex_seed=42)
+    await loop.run({}, duplex_episode=_episode(), duplex_seed=42)
+    first, second = server.episodes
+    assert first["seed"] != second["seed"]
+    assert (first["seed"] - 42 + 2**63) % 2**63 < 2**63  # derived from the dataset seed

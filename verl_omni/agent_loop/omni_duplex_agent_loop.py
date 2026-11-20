@@ -116,7 +116,13 @@ class OmniDuplexAgentLoop(AgentLoopBase):
                 "omni_duplex_agent requires a duplex_episode mapping on every sample "
                 "(produced by the duplex episode dataset)."
             )
-        seed = int(kwargs.get("duplex_seed", 0) or 0)
+        # Group members (rollout.n copies of one sample) share the dataset
+        # row, so the dataset seed alone would make their sessions draw
+        # identically whenever batch composition coincides — a degenerate
+        # GRPO group. Each episode mixes in a fresh uuid; the effective seed
+        # rides every sealed record set, so per-episode replay determinism
+        # (same seed => same tokens) is preserved and auditable.
+        seed = (int(kwargs.get("duplex_seed", 0) or 0) + uuid4().int) % (2**63)
         run_spec = self._run_spec(episode, seed=seed, sampling_params=sampling_params)
 
         metrics = {}

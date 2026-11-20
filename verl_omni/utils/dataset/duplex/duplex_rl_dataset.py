@@ -79,11 +79,14 @@ def build_episode_chunks(
     end_sample = int(round(end_s * sample_rate))
     if end_sample <= start_sample:
         raise ValueError(f"duplex episode window [{start_s}, {end_s}) is empty")
-    if end_sample > waveform.shape[-1]:
+    if start_sample >= waveform.shape[-1]:
         raise ValueError(
-            f"duplex episode window ends at sample {end_sample} but the user track has "
-            f"{waveform.shape[-1]}; the mined window outruns the audio"
+            f"duplex episode window starts at sample {start_sample} but the user track has "
+            f"{waveform.shape[-1]}; the mined window lies past the audio"
         )
+    # A corpus's last utterance can end at the file end, so the mined tail
+    # may outrun the track — clip to what exists (the final chunk pads).
+    end_sample = min(end_sample, waveform.shape[-1])
     segment = np.asarray(waveform[start_sample:end_sample], dtype=np.float32)
     words = list(words or [])
     chunks: list[dict[str, Any]] = []
@@ -148,9 +151,13 @@ class DuplexEpisodeDataset(Dataset):
 
         row = self.dataframe.iloc[index].to_dict()
         spec = DuplexEpisodeSpec.from_dict(row["episode"] if isinstance(row["episode"], Mapping) else row)
+        # Parquet hands back numpy containers; truth-testing an ndarray is
+        # ambiguous, so normalize explicitly.
+        words = row.get("user_words")
+        words = [] if words is None else list(words)
         window_words = [
             {"start_s": float(word["start_s"]), "end_s": float(word["end_s"])}
-            for word in (row.get("user_words") or [])
+            for word in words
             if float(word["end_s"]) > spec.start_s and float(word["start_s"]) < spec.end_s
         ]
         chunks = build_episode_chunks(
