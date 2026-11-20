@@ -105,6 +105,27 @@ class MiniCPMThinkerAdapter(OmniModelBase):
     auto_model_class = MiniCPMO
 
     @classmethod
+    def prepare_megatron_config(cls, model_config, engine_config):
+        """Validate dense Thinker training and isolate the Bridge config view."""
+        from .megatron_inputs import prepare_minicpm_megatron_config
+
+        return prepare_minicpm_megatron_config(model_config, engine_config)
+
+    @classmethod
+    def get_megatron_forward(cls):
+        """Return the MiniCPM multimodal BSHD forward."""
+        from .megatron_inputs import minicpm_forward_model_engine
+
+        return minicpm_forward_model_engine
+
+    @classmethod
+    def bind_megatron_forward(cls, model_config):
+        """Bind this run's processor metadata without storing class-level state."""
+        from functools import partial
+
+        return partial(cls.get_megatron_forward(), model_config=model_config)
+
+    @classmethod
     def get_strip_modules(cls, model_config) -> list[str]:
         return ["tts"]
 

@@ -1,0 +1,81 @@
+{
+  "finite_scalar_tags": 92,
+  "official_reward_mismatches": 0,
+  "response_tokens": {
+    "first_step": 67.125,
+    "last_step": 29.75,
+    "min": 29.75,
+    "max": 104.125,
+    "denominator": "training response tokens per output"
+  },
+  "response_clip_ratio": {
+    "first_step": 0.125,
+    "last_step": 0.125,
+    "min": 0.125,
+    "max": 0.625,
+    "denominator": "8 training outputs per step"
+  },
+  "gradients": {
+    "steps": 100,
+    "first": 7.8543925285339355,
+    "last": 0.0,
+    "min": 0.0,
+    "max": 8.49292278289795,
+    "zero_steps": 56,
+    "zero_step_explanation": "Every sampled reward group tied, independently audited; not treated as nonzero updates"
+  },
+  "pearson": {
+    "steps": 100,
+    "first": 0.9934173226356506,
+    "last": 0.9913581013679504,
+    "min": 0.9868965744972229,
+    "max": 0.9956994652748108
+  },
+  "rollout_k3_kl": {
+    "steps": 100,
+    "first": 0.008782322518527508,
+    "last": 0.00817055907100439,
+    "min": 0.004643603228032589,
+    "max": 0.022220754995942116
+  },
+  "staleness": {
+    "steps": 100,
+    "first": 0.0,
+    "last": 1.0,
+    "min": 0.0,
+    "max": 1.0
+  },
+  "reference_kl": "N/A (disabled)",
+  "warnings": {
+    "Vision missing": 245,
+    "APM missing": 241,
+    "Traceback": 0,
+    "AccumulateGrad": 0
+  },
+  "total_walltime_s": 5668.616027832031,
+  "scope": "single-seed 100-update AVQA run; no baseline equivalence or causality claim",
+  "updates": 100,
+  "validation_outputs": 21021,
+  "training_outputs": 800,
+  "validation_steps": [
+    0,
+    10,
+    20,
+    30,
+    40,
+    50,
+    60,
+    70,
+    80,
+    90,
+    100
+  ],
+  "status": "passed_with_shutdown_observation",
+  "signals_sent": [],
+  "released": true,
+  "seed_count": 1,
+  "clean_public_pins": false,
+  "raw_archive_files": 137,
+  "raw_archive_bytes": 34697307,
+  "raw_archive_manifest_sha256": "aff05700481e48d19420406bbe756a685e9b843d7e519a6c51a0f1e002e68ede"
+}

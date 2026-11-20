@@ -22,7 +22,7 @@ class OmniMegatronEngine(MegatronEngineWithLMHead):
     def __init__(self, model_config, engine_config, optimizer_config, checkpoint_config):
         self.model_adapter_cls = OmniModelBase.get_class(model_config)
         model_config = self.model_adapter_cls.prepare_megatron_config(model_config, engine_config)
-        self.model_forward = self.model_adapter_cls.get_megatron_forward()
+        self.model_forward = self.model_adapter_cls.bind_megatron_forward(model_config)
         super().__init__(model_config, engine_config, optimizer_config, checkpoint_config)
 
     def forward_step(self, batch_iter, model, logits_processor_func, postprocess_micro_batch_func):
