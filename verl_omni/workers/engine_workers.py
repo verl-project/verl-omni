@@ -78,6 +78,8 @@ from verl_omni.workers.lora_sync import SyncExport, resolve_lora_sync_plan
 from verl_omni.workers.rollout.base import get_rollout_sequence_parallel_size
 from verl_omni.workers.rollout.vllm_rollout.zmq_utils import make_update_zmq_handle, make_update_zmq_id
 from verl_omni.workers.utils.losses import diffusion_loss, omni_loss
+from verl_omni.workers.utils.parameter_revision import parameter_access, parameter_to_thread
+from verl_omni.workers.utils.training_output import prepare_single_update_batch, restore_single_update_output
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -234,7 +236,13 @@ class TrainingWorker(Worker, DistProfilerExtension):
 
         self.loss_fn = None
 
+    def _check_training_output_support(self):
+        capability = getattr(self.engine, "supports_detached_training_output", None)
+        if not callable(capability) or capability() is not True:
+            raise ValueError("The engine does not support detached training outputs in this configuration")
+
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    @parameter_access()
     def to(self, device, model=True, optimizer=True, grad=True):
         """Manual control of load/offload"""
         assert device in ["cpu", "device"]
@@ -245,6 +253,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
         self.engine.to(device=device, model=model, optimizer=optimizer, grad=grad)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    @parameter_access()
     def set_loss_fn(self, loss_fn):
         self.loss_fn = loss_fn
 
@@ -258,12 +267,16 @@ class TrainingWorker(Worker, DistProfilerExtension):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def copy_adapter(self, source: str = "default", target: str = "old"):
+        if getattr(self.engine, "_parameter_revision", None) is not None:
+            raise ValueError("Adapter mutation is unsupported with parameter tracking")
         if not hasattr(self.engine, "copy_adapter"):
             raise NotImplementedError(f"Engine {type(self.engine).__name__} does not support copy_adapter.")
         self.engine.copy_adapter(source=source, target=target)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def ema_update_adapter(self, source: str = "default", target: str = "old", decay: float = 0.0):
+        if getattr(self.engine, "_parameter_revision", None) is not None:
+            raise ValueError("Adapter mutation is unsupported with parameter tracking")
         if not hasattr(self.engine, "ema_update_adapter"):
             raise NotImplementedError(f"Engine {type(self.engine).__name__} does not support ema_update_adapter.")
         self.engine.ema_update_adapter(source=source, target=target, decay=decay)
@@ -352,6 +365,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
         return final_output
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="train"), blocking=False)
+    @parameter_access(internal=True)
     def train_mini_batch(self, data: TensorDict) -> TensorDict:
         """Split a batch into N mini-batches run for multiple epochs
 
@@ -381,14 +395,27 @@ class TrainingWorker(Worker, DistProfilerExtension):
             )
             mini_batch_size_per_gpu = mini_batch_size // self.engine.get_data_parallel_size()
 
-        # make iterator
-        dataloader = tu.make_iterator(
-            data,
-            mini_batch_size=mini_batch_size_per_gpu,
-            epochs=epochs,
-            seed=seed + self.engine.get_data_parallel_rank(),
-            dataloader_kwargs=dataloader_kwargs,
-        )
+        return_model_output = tu.get(data, key="return_model_output", default=False)
+        if type(return_model_output) is not bool:
+            raise TypeError("return_model_output must be boolean")
+        if return_model_output:
+            self._check_training_output_support()
+            batch, output_order = prepare_single_update_batch(
+                data,
+                mini_batch_size=mini_batch_size_per_gpu,
+                epochs=epochs,
+                seed=seed + self.engine.get_data_parallel_rank(),
+                dataloader_kwargs=dataloader_kwargs,
+            )
+            dataloader = iter([batch])
+        else:
+            dataloader = tu.make_iterator(
+                data,
+                mini_batch_size=mini_batch_size_per_gpu,
+                epochs=epochs,
+                seed=seed + self.engine.get_data_parallel_rank(),
+                dataloader_kwargs=dataloader_kwargs,
+            )
 
         with (
             self.engine.train_mode(disable_auto_offload=disable_auto_offload),
@@ -438,14 +465,22 @@ class TrainingWorker(Worker, DistProfilerExtension):
                             )
                     append_to_dict(metrics, output)
 
-                output = tu.get_tensordict(tensor_dict={}, non_tensor_dict={"metrics": metrics}).cpu()
+                if return_model_output:
+                    output = restore_single_update_output(output_lst[0], output_order)
+                    tu.assign_non_tensor_data(output, key="metrics", val=metrics)
+                    output = output.cpu()
+                else:
+                    output = tu.get_tensordict(tensor_dict={}, non_tensor_dict={"metrics": metrics}).cpu()
             else:
                 output = None
         return output
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="train"), blocking=False)
     @DistProfiler.annotate(color="red", role="train_batch")
+    @parameter_access(internal=True)
     def train_batch(self, data: TensorDict) -> TensorDict:
+        if tu.get(data, key="return_model_output", default=False):
+            self._check_training_output_support()
         assert self.loss_fn is not None, "loss function can't be None when calling train_batch"
         assert not self.engine_config.forward_only, "Can't run `train_batch` when forward_only is in the engine config."
         # global_token_num should be a list of number of tokens of each seq in this batch
@@ -488,8 +523,13 @@ class TrainingWorker(Worker, DistProfilerExtension):
             lr = None
 
         if self.engine.is_mp_src_rank_with_outputs():
-            # we don't need model_output in training. Maybe we change out mind later
-            output.pop("model_output")
+            if tu.get(data, key="return_model_output", default=False):
+                output["model_output"] = {
+                    key: value.detach() if isinstance(value, torch.Tensor) else value
+                    for key, value in output["model_output"].items()
+                }
+            else:
+                output.pop("model_output")
             if lr is not None:
                 output["metrics"]["lr"] = lr
             final_output = self._postprocess_output(
@@ -506,6 +546,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
         return final_output
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="train"), blocking=False)
+    @parameter_access()
     def infer_batch(self, data: TensorDict) -> TensorDict:
         # add mfu calculator
         global_token_num = tu.get(data, key="global_token_num")
@@ -558,6 +599,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
         return final_output
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    @parameter_access()
     def save_checkpoint(self, local_path, hdfs_path=None, global_step=0, max_ckpt_to_keep=None):
         return self.engine.save_checkpoint(local_path, hdfs_path, global_step, max_ckpt_to_keep)
 
@@ -1134,6 +1176,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         self.actor.save_checkpoint(local_path, hdfs_path, global_step, max_ckpt_to_keep)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
+    @parameter_access("actor.engine")
     async def update_weights(self, global_steps: int = None, mode: str = "auto"):
         """Update weights from trainer to rollout.
 
@@ -1261,7 +1304,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                     finally:
                         self._offload_actor_and_empty_cache(timings)
 
-                gather_task = asyncio.create_task(asyncio.to_thread(run_on_caller_device, gather_then_offload))
+                gather_task = parameter_to_thread(run_on_caller_device, gather_then_offload)
                 try:
                     lora_weights, peft_config = await asyncio.shield(gather_task)
                 except asyncio.CancelledError as cancelled:
@@ -1288,13 +1331,11 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             else:
                 # Preserve gather/resume and offload/IPC overlap when the actor
                 # does not offload parameters.
-                gather_task = asyncio.create_task(asyncio.to_thread(run_on_caller_device, self._gather_lora_weights))
+                gather_task = parameter_to_thread(run_on_caller_device, self._gather_lora_weights)
                 if resume_weights_task is not None:
                     await resume_weights_task
                 lora_weights, peft_config = await gather_task
-                offload_task = asyncio.create_task(
-                    asyncio.to_thread(run_on_caller_device, self._offload_actor_and_empty_cache)
-                )
+                offload_task = parameter_to_thread(run_on_caller_device, self._offload_actor_and_empty_cache)
             log_gpu_memory_usage("After resume weights", logger=logger)
 
             try:
