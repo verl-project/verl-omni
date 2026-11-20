@@ -31,7 +31,7 @@ from verl.utils.fs import copy_to_local
 
 from verl_omni.utils.asyncio_utils import await_owned
 from verl_omni.utils.reward_score.scorers.base import RewardScorer
-from verl_omni.utils.reward_score.scorers.registry import get_scorer_cls, import_from_spec
+from verl_omni.utils.reward_score.scorers.registry import import_from_spec
 from verl_omni.workers.config.reward import RewardModelSpec, is_engine_backend
 
 __all__ = [
@@ -217,9 +217,7 @@ class NativeRewardExecutor:
                 return
             try:
                 if self._model_cls is None:
-                    # A registry name (no colon) selects a scorer class; anything else is an import spec.
-                    ref = self.spec.executor_config["model"]
-                    self._model_cls = get_scorer_cls(ref) if ":" not in ref else import_from_spec(ref)
+                    self._model_cls = import_from_spec(self.spec.executor_config["model"])
                     self._is_scorer = isinstance(self._model_cls, type) and issubclass(self._model_cls, RewardScorer)
                 if self._is_scorer:
                     await self._wake_up_scorer()

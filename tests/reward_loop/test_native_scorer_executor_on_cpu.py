@@ -24,7 +24,7 @@ from verl_omni.reward_loop import reward_model_executor as executor_module
 from verl_omni.reward_loop.reward_model_executor import NativeRewardExecutor
 from verl_omni.utils.reward_score.scorers.base import RewardScorer
 from verl_omni.utils.reward_score.scorers.registry import register_scorer
-from verl_omni.workers.config.reward import RewardModelSpec
+from verl_omni.workers.config.reward import NativeRewardModelExecutorConfig, RewardModelSpec
 
 _TEST_MODULE = "tests.reward_loop.test_native_scorer_executor_on_cpu"
 
@@ -183,7 +183,7 @@ def test_executor_rejects_another_event_loop_before_mutation(monkeypatch, method
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("model_ref", ["cpu-fake-scorer", f"{_TEST_MODULE}:FakeScorer"])
+@pytest.mark.parametrize("model_ref", [f"{_TEST_MODULE}:FakeScorer", f"pkg://{_TEST_MODULE}:FakeScorer"])
 async def test_wake_loads_scorer_and_scores_through_the_microbatcher(monkeypatch, model_ref):
     FakeScorer.instances = 0
     executor = _executor(monkeypatch, model_ref)
@@ -220,14 +220,14 @@ async def test_spec_model_path_forwarding_precedence_and_loud_rejection(monkeypa
     await overridden.close()
 
     # FakeScorer takes no model_path; the injection must fail loudly.
-    rejected = _executor(monkeypatch, "cpu-fake-scorer", model_path="/weights/from-spec")
+    rejected = _executor(monkeypatch, f"{_TEST_MODULE}:FakeScorer", model_path="/weights/from-spec")
     with pytest.raises(TypeError, match="model_path"):
         await rejected.wake_up()
 
 
 @pytest.mark.asyncio
 async def test_scoring_requires_awake_scorer_and_infer_is_rejected(monkeypatch):
-    executor = _executor(monkeypatch, "cpu-fake-scorer")
+    executor = _executor(monkeypatch, f"{_TEST_MODULE}:FakeScorer")
     with pytest.raises(RuntimeError, match="not awake"):
         await executor.score({"i": 0})
     await executor.wake_up()
@@ -244,7 +244,7 @@ async def test_scoring_requires_awake_scorer_and_infer_is_rejected(monkeypatch):
 @pytest.mark.asyncio
 async def test_offload_sleep_pauses_consumer_and_reuses_instance_on_wake(monkeypatch):
     FakeScorer.instances = 0
-    executor = _executor(monkeypatch, "cpu-fake-scorer")
+    executor = _executor(monkeypatch, f"{_TEST_MODULE}:FakeScorer")
     await executor.wake_up()
     scorer = executor._model
     assert await executor.score({"i": 0}) == {"score": 0}
@@ -282,7 +282,7 @@ async def test_non_offload_sleep_disposes_scorer_and_wake_rebuilds(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_failed_load_fails_closed(monkeypatch):
-    executor = _executor(monkeypatch, "cpu-fake-scorer", kwargs={"fail_load": True})
+    executor = _executor(monkeypatch, f"{_TEST_MODULE}:FakeScorer", kwargs={"fail_load": True})
     with pytest.raises(OSError, match="weights unavailable"):
         await executor.wake_up()
     assert executor._closed
@@ -540,3 +540,17 @@ def test_empty_accelerator_cache_only_runs_on_an_available_accelerator(monkeypat
     monkeypatch.setattr(executor_module, "get_device_name", lambda: "mps")
     executor_module._empty_accelerator_cache()
     assert calls == ["flushed"], "backends without a cache or unavailable must be skipped"
+
+
+@pytest.mark.parametrize("model", ["cpu-fake-scorer", "unknown-scorer"])
+def test_executor_config_rejects_bare_registered_names(model):
+    """The public config accepts import specs rather than registry-name shorthand."""
+    with pytest.raises(ValueError, match="requires executor.model"):
+        NativeRewardModelExecutorConfig(model=model)
+
+
+@pytest.mark.parametrize(
+    "model", [f"{_TEST_MODULE}:FakeScorer", f"pkg://{_TEST_MODULE}:FakeScorer", "reward.py:Scorer"]
+)
+def test_executor_config_accepts_import_specs(model):
+    assert NativeRewardModelExecutorConfig(model=model).model == model

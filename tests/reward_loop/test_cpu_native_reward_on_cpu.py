@@ -48,7 +48,14 @@ def test_cpu_native_role_resolves_placement_interpolations():
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", ["thread", "async", "awaitable"])
 async def test_cancelled_native_inference_keeps_model_until_actual_completion(monkeypatch, kind):
-    entered, release, finished, closed = (Event() for _ in range(4))
+    entered, release, finished, closed, collected = (Event() for _ in range(5))
+
+    def collect_after_close():
+        assert finished.is_set() and closed.is_set()
+        collected.set()
+
+    # This tests draining and close ordering, not process-wide collection latency.
+    monkeypatch.setattr(executor_module, "gc", SimpleNamespace(collect=collect_after_close))
 
     async def async_infer(self, value):
         entered.set()
@@ -99,13 +106,14 @@ async def test_cancelled_native_inference_keeps_model_until_actual_completion(mo
         assert not finished.is_set()
         sleeping = asyncio.create_task(executor.sleep())
         await asyncio.wait({sleeping}, timeout=0.02)
+        print("NATIVE_DRAIN_ASSERT_ENTERED", kind, flush=True)
         assert not sleeping.done()
         assert not closed.is_set()
         release.set()
         await asyncio.wait_for(sleeping, 1)
         with pytest.raises(asyncio.CancelledError):
             await asyncio.wait_for(asyncio.shield(caller), 1)
-        assert finished.is_set() and closed.is_set()
+        assert finished.is_set() and closed.is_set() and collected.is_set()
         assert executor._inflight == 0 and executor._model is None
     finally:
         release.set()

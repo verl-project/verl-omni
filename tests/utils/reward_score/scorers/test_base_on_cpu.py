@@ -337,6 +337,144 @@ def test_concurrent_duplicate_registration_has_one_winner(monkeypatch):
     assert registry.get_scorer_cls("registration-race") is First
 
 
+@pytest.mark.parametrize("package_import", [False, True])
+@pytest.mark.parametrize("successful_first", [False, True])
+def test_successful_plugin_retains_a_registration_shared_with_a_failed_plugin(
+    tmp_path, monkeypatch, package_import, successful_first
+):
+    import sys
+    from uuid import uuid4
+
+    from verl_omni.utils.reward_score.scorers import registry
+
+    name = "shared_registration_" + uuid4().hex
+    folder = tmp_path / name
+    folder.mkdir()
+    (folder / "__init__.py").write_text("")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    (folder / "shared.py").write_text(
+        "from verl_omni.utils.reward_score.scorers.base import RewardScorer\n"
+        "class Shared(RewardScorer):\n"
+        "    def score_batch(self, batch): return [{'score': 1} for _ in batch]\n"
+    )
+    registration = (
+        "from verl_omni.utils.reward_score.scorers.registry import register_scorer\n"
+        f"from {name}.shared import Shared\n"
+        f"register_scorer({name!r})(Shared)\n"
+    )
+    (folder / "successful.py").write_text(registration)
+    if package_import:
+        failing = folder / "failing.py"
+        ref = f"{name}.failing:Shared"
+    else:
+        standalone = tmp_path / "standalone-files"
+        standalone.mkdir()
+        failing = standalone / "failing.py"
+        ref = f"{failing}:Shared"
+    successful_import = f"import {name}.successful\n"
+    source = successful_import + registration if successful_first else registration + successful_import
+    failing.write_text(source + "raise RuntimeError('first plugin failed')\n")
+    try:
+        with pytest.raises(RuntimeError) as caught:
+            registry.import_from_spec(ref)
+        assert str(caught.value.__cause__ or caught.value) == "first plugin failed"
+        shared = sys.modules[name + ".shared"].Shared
+        print("SHARED_REGISTRATION_ASSERT_ENTERED", package_import, successful_first, flush=True)
+        assert registry.get_scorer_cls(name) is shared, "a successful owner must retain its shared registration"
+        failing.write_text(source)
+        assert registry.import_from_spec(ref) is shared
+        assert registry.get_scorer_cls(name) is shared
+
+        class Different(shared):
+            pass
+
+        with pytest.raises(ValueError, match="already been registered"):
+            registry.register_scorer(name)(Different)
+    finally:
+        registry.peek_registered_scorers()
+        registry._REGISTERED.pop(name, None)
+        module = registry._FILE_MODULES.pop(str(failing), None)
+        if module is not None:
+            sys.modules.pop(module.__name__, None)
+        for key in list(sys.modules):
+            if key == name or key.startswith(name + "."):
+                sys.modules.pop(key, None)
+
+
+@pytest.mark.parametrize("package_import", [False, True])
+def test_concurrent_same_class_claims_survive_one_import_failure(tmp_path, monkeypatch, package_import):
+    import importlib
+    import sys
+    from concurrent.futures import ThreadPoolExecutor
+    from uuid import uuid4
+
+    from verl_omni.utils.reward_score.scorers import registry
+
+    name = "concurrent_claim_" + uuid4().hex
+    folder = tmp_path / name
+    folder.mkdir()
+    monkeypatch.syspath_prepend(str(tmp_path))
+    (folder / "__init__.py").write_text("")
+    (folder / "state.py").write_text(
+        "from threading import Event\n"
+        "first_entered = Event()\nsecond_entered = Event()\n"
+        "release_failure = Event()\nrelease_success = Event()\n"
+    )
+    (folder / "shared.py").write_text(
+        "from verl_omni.utils.reward_score.scorers.base import RewardScorer\n"
+        "class Shared(RewardScorer):\n"
+        "    def score_batch(self, batch): return [{'score': 1} for _ in batch]\n"
+    )
+    state = importlib.import_module(name + ".state")
+    shared = importlib.import_module(name + ".shared").Shared
+    registration = (
+        "from verl_omni.utils.reward_score.scorers.registry import register_scorer\n"
+        f"from {name}.shared import Shared\nfrom {name} import state\n"
+        f"register_scorer({name!r})(Shared)\n"
+    )
+    sources = folder if package_import else tmp_path / "standalone-files"
+    sources.mkdir(exist_ok=True)
+    first, second = sources / "first.py", sources / "second.py"
+    first.write_text(
+        registration + "state.first_entered.set()\n"
+        "assert state.release_failure.wait(5)\nraise RuntimeError('first plugin failed')\n"
+    )
+    second.write_text(registration + "state.second_entered.set()\nassert state.release_success.wait(5)\n")
+    first_ref = f"{name}.first:Shared" if package_import else f"{first}:Shared"
+    second_ref = f"{name}.second:Shared" if package_import else f"{second}:Shared"
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            failed = pool.submit(registry.import_from_spec, first_ref)
+            try:
+                assert state.first_entered.wait(5)
+                succeeded = pool.submit(registry.import_from_spec, second_ref)
+                assert state.second_entered.wait(5), "both pending owners must reach registration"
+                state.release_failure.set()
+                with pytest.raises(RuntimeError) as caught:
+                    failed.result(timeout=5)
+                assert str(caught.value.__cause__ or caught.value) == "first plugin failed"
+                assert name not in registry.peek_registered_scorers(), "the surviving import is still initializing"
+                state.release_success.set()
+                assert succeeded.result(timeout=5) is shared
+                print("CONCURRENT_REGISTRATION_ASSERT_ENTERED", package_import, flush=True)
+                assert registry.get_scorer_cls(name) is shared, "the surviving owner must publish its claim"
+            finally:
+                state.release_failure.set()
+                state.release_success.set()
+        first.write_text(registration)
+        assert registry.import_from_spec(first_ref) is shared
+    finally:
+        registry.peek_registered_scorers()
+        registry._REGISTERED.pop(name, None)
+        for path in (first, second):
+            module = registry._FILE_MODULES.pop(str(path), None)
+            if module is not None:
+                sys.modules.pop(module.__name__, None)
+        for key in list(sys.modules):
+            if key == name or key.startswith(name + "."):
+                sys.modules.pop(key, None)
+
+
 def test_standalone_import_does_not_block_a_different_file_from_package_init(tmp_path):
     import subprocess
     import sys

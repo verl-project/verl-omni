@@ -101,14 +101,14 @@ def register_scorer(name: str) -> Callable[[type[RewardScorer]], type[RewardScor
             registered = _REGISTERED.get(name)
             if registered is None:
                 registered = next((entries[name] for entries in _PENDING.values() if name in entries), None)
-            if registered is not None:
-                if registered is cls:
-                    return cls
+            if registered is not None and registered is not cls:
                 raise ValueError(
                     f"Reward scorer {name!r} has already been registered: "
                     f"{registered.__module__}.{registered.__qualname__} vs "
                     f"{cls.__module__}.{cls.__qualname__}"
                 )
+            if registered is cls and name in _REGISTERED:
+                return cls
             module = sys.modules.get(registration_module)
             if registration_module in _FILE_INITIALIZING or getattr(
                 getattr(module, "__spec__", None), "_initializing", False

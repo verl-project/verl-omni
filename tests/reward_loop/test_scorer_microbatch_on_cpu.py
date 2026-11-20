@@ -776,3 +776,57 @@ def test_loop_shutdown_owns_sync_forward_until_thread_settles(target):
         assert settled == [True], "consumer shutdown detached a live synchronous forward"
     finally:
         release.set()
+
+
+@pytest.mark.asyncio
+async def test_dequeue_wakes_capacity_blocked_submitter(microbatcher_factory, monkeypatch):
+    """Normal dequeue frees capacity without cancellation or a lifecycle transition."""
+    entered = [asyncio.Event(), asyncio.Event()]
+    release = [asyncio.Event(), asyncio.Event()]
+    waiting = asyncio.Event()
+    calls = []
+
+    async def score(requests):
+        index = requests[0]["i"]
+        calls.append(index)
+        if index < 2:
+            entered[index].set()
+            await release[index].wait()
+        return [{"score": index}]
+
+    batcher = microbatcher_factory(score, max_batch_size=None, max_inflight=1)
+    await batcher.start()
+    first = asyncio.create_task(batcher.submit({"i": 0}))
+    queued = blocked = None
+    try:
+        await asyncio.wait_for(entered[0].wait(), 5)
+        queued = asyncio.create_task(batcher.submit({"i": 1}))
+        async with asyncio.timeout(5), batcher._cond:
+            await batcher._cond.wait_for(lambda: len(batcher._queue) == 1)
+        original_wait = batcher._cond.wait
+
+        async def observe_wait():
+            if asyncio.current_task() is blocked:
+                waiting.set()
+            return await original_wait()
+
+        monkeypatch.setattr(batcher._cond, "wait", observe_wait)
+        blocked = asyncio.create_task(batcher.submit({"i": 2}))
+        await asyncio.wait_for(waiting.wait(), 5)
+        release[0].set()
+        await asyncio.wait_for(entered[1].wait(), 5)
+        print("CAPACITY_DEQUEUE_WAKE_ASSERT_ENTERED", flush=True)
+        async with asyncio.timeout(5), batcher._cond:
+            await batcher._cond.wait_for(lambda: any(request["i"] == 2 for request, _ in batcher._queue))
+        assert calls == [0, 1] and not blocked.done()
+        release[1].set()
+        results = await asyncio.wait_for(asyncio.gather(first, queued, blocked), 5)
+        assert results == [{"score": 0}, {"score": 1}, {"score": 2}]
+        assert calls == [0, 1, 2]
+    finally:
+        for event in release:
+            event.set()
+        await asyncio.wait_for(batcher.close(), 5)
+        await asyncio.wait_for(
+            asyncio.gather(*(task for task in (first, queued, blocked) if task is not None), return_exceptions=True), 5
+        )

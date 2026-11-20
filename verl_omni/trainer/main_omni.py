@@ -49,7 +49,11 @@ from verl_omni.utils.config import (
 )
 from verl_omni.utils.fs import resolve_model_local_dir
 from verl_omni.utils.rl_insight import enable_rl_insight
-from verl_omni.workers.config.reward import reward_pool_is_separate, reward_role_required
+from verl_omni.workers.config.reward import (
+    reward_pool_is_separate,
+    reward_role_required,
+    warn_deprecated_reward_config,
+)
 
 __all__ = [
     "RayTrainerTaskRunner",
@@ -341,6 +345,7 @@ def uses_v1_trainer(config) -> bool:
 
 def run_omni(config, task_runner_class=None) -> None:
     """Initialize Ray and run distributed Omni training."""
+    warn_deprecated_reward_config(config)
     enable_rl_insight(config)
 
     if uses_v1_trainer(config):

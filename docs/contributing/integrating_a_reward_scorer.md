@@ -144,13 +144,14 @@ class, then reference it from a reward term that submits one sample at a time:
 +reward.reward_functions.ps.model=pickscore
 ```
 
-Selection resolution order (name → `pkg.module:Attr` → `file.py:Attr`)
-is fail-fast: an unknown name raises with the registered names listed, and a
-reference resolved through the scorer registry to a non-`RewardScorer` class is rejected.
-Legacy native import-specs remain supported through the existing `infer()` adapter. The
-`executor.model` config key currently requires an import-spec form;
-bare registered names (`executor.model=pickscore`) are not yet accepted by
-the config validation. The named model's top-level `model_path`, when set,
+`executor.model` accepts an import spec: `pkg.module:Class`,
+`pkg://pkg.module:Class` or `/path/to/reward.py:Class`. Bare registered names
+(`executor.model=pickscore`) are rejected by configuration validation; registry
+name lookup is a separate API. A resolved `RewardScorer` subclass uses batch
+scoring and scorer lifecycle hooks. Other native model classes or factories
+retain the legacy `infer()` adapter; they are not validated as `RewardScorer`
+subclasses. The legacy adapter requires an `infer()` method when invoked.
+The named model's top-level `model_path`, when set,
 is forwarded to the scorer constructor as a `model_path` kwarg —
 `executor.kwargs.model_path` takes precedence; a scorer whose constructor
 takes no `model_path` fails construction with a clear `TypeError`.
