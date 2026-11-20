@@ -492,7 +492,10 @@ def _layered_summon_lora_params_diffusers(
                         peft_model, state_dict=state_dict, adapter_name=adapter_name
                     )
                     if not sub_lora_params:
-                        sub_lora_params = _lora_params_by_name(submodule, adapter_name)
+                        sub_lora_params = {
+                            f"{block_prefix}.{param_name}": param
+                            for param_name, param in _lora_params_by_name(submodule, adapter_name).items()
+                        }
                     sub_lora_params = {
                         param_name.replace("_fsdp_wrapped_module.", ""): _param_to_cpu(param)
                         for param_name, param in sub_lora_params.items()
