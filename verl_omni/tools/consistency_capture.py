@@ -33,6 +33,11 @@ _WRAPPED = "__diffusion_consistency_capture_wrapped__"
 _ENGINE_CONTEXT: ContextVar[dict | None] = ContextVar("diffusion_capture_batch", default=None)
 _MISSING = object()
 
+# Units belong to the observer, keyed by the resolved adapter rather than its architecture alias.
+_TIMESTEP_UNITS = {
+    ("verl_omni.pipelines.sd3_flow_grpo.diffusers_training_adapter", "StableDiffusion3FlowGRPO"): "training_step",
+}
+
 
 def _selected(step: int) -> bool:
     raw = os.environ.get("DIFFUSION_CAPTURE_STEPS", "1")
@@ -102,7 +107,8 @@ def _schedule_inputs(engine, micro_batch, step: int) -> tuple[dict, bool]:
     }
     adapter = DiffusionModelBase.get_class(engine.model_config)
     contract = (
-        isinstance(scheduler, FlowMatchSDEDiscreteScheduler) and adapter.consistency_timestep_unit == "training_step"
+        isinstance(scheduler, FlowMatchSDEDiscreteScheduler)
+        and _TIMESTEP_UNITS.get((adapter.__module__, adapter.__qualname__)) == "training_step"
     )
     if contract:
         import torch

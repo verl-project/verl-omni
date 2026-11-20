@@ -21,12 +21,17 @@ first sample and scheduler step captured by each role.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import io
 import json
 import re
 from pathlib import Path
 
-import check_diffusion_consistency as checker
+_checker_spec = importlib.util.spec_from_file_location(
+    "_diffusion_consistency_checker", Path(__file__).resolve().parents[1] / "check_diffusion_consistency.py"
+)
+checker = importlib.util.module_from_spec(_checker_spec)
+_checker_spec.loader.exec_module(checker)
 
 INPUTS = ("hidden_states", "prompt_embeds", "pooled_projections")
 FILES = ("rollout/manifest.json", "rollout/actor_batch.pt", "actor/comparison.json", "actor/comparison.pt")

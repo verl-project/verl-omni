@@ -15,7 +15,7 @@
 import functools
 import logging
 from abc import ABC, abstractmethod
-from typing import Any, Callable, ClassVar, Literal, Optional
+from typing import Any, Callable, Optional
 
 import torch
 from diffusers import ModelMixin, SchedulerMixin
@@ -48,10 +48,6 @@ class DiffusionModelBase(ABC):
     """
 
     _registry: dict[tuple[str, str], type["DiffusionModelBase"]] = {}
-
-    # Unit of all_timesteps consumed by the scheduler, not the transformer input.
-    # None keeps capture numeric-only; training_step enables sigma = timestep / scale.
-    consistency_timestep_unit: ClassVar[Literal["training_step", "sigma"] | None] = None
 
     @classmethod
     def register(cls, architecture: str, algorithm: str):

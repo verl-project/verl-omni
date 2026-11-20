@@ -23,7 +23,7 @@ from unittest.mock import patch
 
 import torch
 
-RECIPE = Path(__file__).resolve().parents[2] / "examples/flowgrpo_trainer/sd35/consistency"
+RECIPE = Path(__file__).resolve().parents[2] / "tools/consistency_checking/sd3"
 spec = importlib.util.spec_from_file_location("sd35_capture_scope", RECIPE / "capture_scope.py")
 assert spec and spec.loader
 module = importlib.util.module_from_spec(spec)

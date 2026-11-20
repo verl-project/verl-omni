@@ -23,7 +23,7 @@ from pathlib import Path
 import pytest
 
 torch = pytest.importorskip("torch")
-SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "replay_diffusion_trainer_capture.py"
+SCRIPT = Path(__file__).resolve().parents[2] / "tools" / "consistency_checking" / "replay_diffusion_trainer_capture.py"
 BATCH = "a" * 32
 SOURCE = "b" * 64
 
@@ -244,3 +244,21 @@ def test_output_exclusive_and_no_cuda_initialization(tmp_path):
     result, _ = run(root, root / "inside.json")
     assert result.returncode != 0 and "output must be outside root" in result.stderr
     assert not torch.cuda.is_initialized()
+
+
+@pytest.mark.parametrize("relative_script", ["replay_diffusion_trainer_capture.py", "sd3/replay.py"])
+def test_cli_ignores_an_unrelated_tools_package(tmp_path, monkeypatch, relative_script):
+    """A dependency's regular tools package must not capture the repository CLI."""
+    foreign = tmp_path / "tools"
+    foreign.mkdir()
+    (foreign / "__init__.py").write_text("raise RuntimeError('unrelated tools package imported')\n")
+    monkeypatch.setenv("PYTHONPATH", str(tmp_path))
+    script = SCRIPT.parent / relative_script
+    result = subprocess.run(
+        [sys.executable, str(script), "--help"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "--root" in result.stdout

@@ -24,7 +24,7 @@ from pathlib import Path
 import pytest
 import torch
 
-SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "replay_sd35_consistency.py"
+SCRIPT = Path(__file__).resolve().parents[2] / "tools" / "consistency_checking" / "sd3" / "replay.py"
 SHA = "a" * 64
 INPUTS = {
     name: {"sha256": SHA, "dtype": "torch.float32", "shape": [1]}

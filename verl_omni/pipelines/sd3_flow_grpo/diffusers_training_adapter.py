@@ -55,8 +55,6 @@ class StableDiffusion3FlowGRPO(DiffusionModelBase):
     recomputation with the same SDE math as the rollout scheduler.
     """
 
-    consistency_timestep_unit = "training_step"
-
     @classmethod
     def build_scheduler(cls, model_config: DiffusionModelConfig):
         scheduler = FlowMatchSDEDiscreteScheduler.from_pretrained(

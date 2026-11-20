@@ -26,7 +26,7 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
-RECIPE = ROOT / "examples/flowgrpo_trainer/sd35/consistency"
+RECIPE = ROOT / "tools/consistency_checking/sd3"
 
 
 def module(name: str):

@@ -8,7 +8,7 @@ if (($# != 1)); then
 fi
 : "${SOURCE_ROOT:?absolute deployed source checkout required}"
 : "${PYTHON:?Python executable required}"
-recipe="$SOURCE_ROOT/examples/flowgrpo_trainer/sd35/consistency"
+recipe="$SOURCE_ROOT/tools/consistency_checking/sd3"
 case "$mode" in
   manifest)
     : "${SOURCE_MANIFEST:?fresh source manifest path required}"
@@ -51,7 +51,7 @@ case "$mode" in
     : "${REPLAY_OUTPUT:?fresh replay output path required}"
     cd -- "$SOURCE_ROOT"
     export PYTHONPATH="$SOURCE_ROOT${PYTHONPATH:+:$PYTHONPATH}"
-    "$PYTHON" scripts/replay_sd35_consistency.py --root "$OUTPUT_ROOT/$RUN_ID" \
+    "$PYTHON" tools/consistency_checking/sd3/replay.py --root "$OUTPUT_ROOT/$RUN_ID" \
       --pins "$PIN_FILE" --pins-sha256 "$TRUSTED_PIN_SHA256" --output "$REPLAY_OUTPUT"
     ;;
   *) echo "unknown mode: $mode" >&2; exit 2 ;;

@@ -21,6 +21,7 @@ weights or execution provenance. Engine probes do not establish full coverage.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import io
 import json
 import re
@@ -28,7 +29,11 @@ import stat
 from pathlib import Path
 from typing import Any
 
-import check_diffusion_consistency as checker
+_checker_spec = importlib.util.spec_from_file_location(
+    "_diffusion_consistency_checker", Path(__file__).with_name("check_diffusion_consistency.py")
+)
+checker = importlib.util.module_from_spec(_checker_spec)
+_checker_spec.loader.exec_module(checker)
 
 _UUID_HEX = re.compile(r"[0-9a-f]{32}\Z")
 _COMMON = {

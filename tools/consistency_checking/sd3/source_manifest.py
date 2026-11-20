@@ -28,12 +28,12 @@ OWNERS = (
     "verl_omni/pipelines/sd3_flow_grpo/diffusers_training_adapter.py",
     "verl_omni/pipelines/sd3_flow_grpo/vllm_omni_rollout_adapter.py",
     "verl_omni/pipelines/diffusion_rollout_output.py",
-    "examples/flowgrpo_trainer/sd35/consistency/capture.py",
-    "examples/flowgrpo_trainer/sd35/consistency/capture_scope.py",
-    "examples/flowgrpo_trainer/sd35/consistency/model_contract.py",
-    "examples/flowgrpo_trainer/sd35/consistency/source_manifest.py",
-    "examples/flowgrpo_trainer/sd35/consistency/pin_producer.py",
-    "examples/flowgrpo_trainer/sd35/consistency/run.sh",
+    "tools/consistency_checking/sd3/capture.py",
+    "tools/consistency_checking/sd3/capture_scope.py",
+    "tools/consistency_checking/sd3/model_contract.py",
+    "tools/consistency_checking/sd3/source_manifest.py",
+    "tools/consistency_checking/sd3/pin_producer.py",
+    "tools/consistency_checking/sd3/run.sh",
 )
 
 

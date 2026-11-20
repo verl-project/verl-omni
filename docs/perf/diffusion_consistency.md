@@ -1,6 +1,6 @@
 # Check pinned diffusion consistency artifacts
 
-Last updated: 11/18/2026
+Last updated: 11/20/2026
 
 ## Capture on the real trainer path
 
@@ -42,12 +42,13 @@ engine; bypass and direct-preference algorithms do not provide that pair.
 
 The driver saves every row and timestep of the rollout/recomputed pair.
 Engine records save the consumed microbatch's log probabilities, raw
-timesteps, and current/next sigma values when a FlowMatch SDE adapter explicitly
-declares `consistency_timestep_unit = "training_step"`. This describes the
-`all_timesteps` consumed by the scheduler, before any transformer-input scaling.
-SD3 FlowGRPO declares this contract. Adapters using sigma units (such as BAGEL)
-or leaving the declaration unset retain numerical comparison without sigma
-diagnosis. The observer does not infer units from observed timestep/sigma values.
+timesteps, and current/next sigma values when the observer
+recognizes the resolved FlowMatch SDE adapter in its own timestep-unit map.
+The map records the units of `all_timesteps` consumed by the scheduler, before
+transformer-input scaling; the training adapters have no diagnostic fields.
+SD3 FlowGRPO uses training-step units. Adapters using sigma units (such as BAGEL),
+unrecognized adapters and out-of-tree replacements retain numerical comparison
+without sigma diagnosis. The observer does not infer units from observed timestep/sigma values.
 Record completion is written after the detached CPU payload and its hash.
 Temporary batch metadata and engine context are restored on exceptions.
 Capturing selected steps adds observation and I/O cost; it is not a
@@ -56,7 +57,7 @@ throughput benchmark.
 Replay the resulting events on CPU, with the report outside the input root:
 
 ```bash
-python3 scripts/replay_diffusion_trainer_capture.py \
+python3 tools/consistency_checking/replay_diffusion_trainer_capture.py \
   --root /absolute/fresh/run/captures \
   --output /absolute/fresh/run/report.json
 ```
@@ -118,7 +119,7 @@ or automatic fused/split transformation engine.
 
 ## Standalone pinned artifact checker
 
-`scripts/check_diffusion_consistency.py` checks a saved rollout and actor
+`tools/consistency_checking/check_diffusion_consistency.py` checks a saved rollout and actor
 log-probability comparison on CPU. It accepts a caller-defined manifest and an
 independently hashed list of artifact bytes. It runs no model or rollout and
 does not require the training framework to import for `--help`.
@@ -201,7 +202,7 @@ artifacts. Supply that digest as `--pins-sha256`; computing it from the current
 file immediately before checking gives no independent tamper evidence.
 
 ```bash
-python scripts/check_diffusion_consistency.py \
+python tools/consistency_checking/check_diffusion_consistency.py \
   --root /absolute/saved-pair \
   --manifest manifest.json \
   --pins pins.sha256 \
@@ -218,7 +219,7 @@ root folders because every input path is relative to the root.
 
 ## Collect a new public SD3.5 producer pair
 
-The [public SD3.5 capture recipe](../../examples/flowgrpo_trainer/sd35/consistency/GUIDE.md)
+The [public SD3.5 capture recipe](../../tools/consistency_checking/sd3/GUIDE.md)
 provides source-byte inventory, CPU admission, separate real rollout and actor
 processes, and external producer pins before this replay bridge. The raw
 MSProbe captures cover the first sample's first transformer forward per role.
@@ -231,7 +232,7 @@ memory usage and validation scope.
 
 ## Replay an existing SD3.5 producer pair
 
-`scripts/replay_sd35_consistency.py` bridges the existing two-prompt,
+`tools/consistency_checking/sd3/replay.py` bridges the existing two-prompt,
 two-step SD3.5 producer artifacts to the checker above. It does not collect a
 new capture or run a model. Prepare `producer-pins.sha256` outside the capture
 root, with root-relative entries
@@ -268,7 +269,7 @@ print(hashlib.sha256(data).hexdigest())
 ```
 
 ```bash
-python scripts/replay_sd35_consistency.py \
+python tools/consistency_checking/sd3/replay.py \
   --root /absolute/existing-capture \
   --pins /absolute/producer-pins.sha256 \
   --pins-sha256 "$TRUSTED_PRODUCER_PINS_SHA256" \

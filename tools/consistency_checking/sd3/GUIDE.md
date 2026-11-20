@@ -3,7 +3,7 @@
 Last updated: 11/09/2026
 
 This recipe collects a real SD3.5 Medium rollout and PPO FSDP actor pair for
-`scripts/replay_sd35_consistency.py`. It needs a local complete SD3.5 Medium
+`tools/consistency_checking/sd3/replay.py`. It needs a local complete SD3.5 Medium
 checkpoint at revision `b940f670f0eda2d07fbb75229e779da1ad11eb80`, a
 compatible installed vLLM Omni and MSProbe runtime, and one visible 80 GB GPU
 for the default capture.
@@ -26,7 +26,7 @@ byte inventory, not an external source attestation.
 export SOURCE_ROOT=/absolute/source PYTHON=/absolute/python
 export SOURCE_MANIFEST=/absolute/source-manifest.json
 # For a deployed snapshot: export SOURCE_HEAD=<40-character-Git-revision>
-bash "$SOURCE_ROOT/examples/flowgrpo_trainer/sd35/consistency/run.sh" manifest
+bash "$SOURCE_ROOT/tools/consistency_checking/sd3/run.sh" manifest
 # Retain the printed manifest SHA256 separately, then supply it:
 export SOURCE_MANIFEST_SHA256=<printed-sha256>
 export SOURCE_HEAD=<declared-or-git-head>
@@ -34,9 +34,9 @@ export MODEL_DIR=/absolute/local/model OUTPUT_ROOT=/absolute/capture-parent
 export RUN_ID=sd35-public-001 PIN_FILE=/absolute/outside-capture/producer-pins.sha256
 # Optional: set before both admit and capture; default is none.
 # export SD35_ROLLOUT_OFFLOAD=dit-layerwise
-bash "$SOURCE_ROOT/examples/flowgrpo_trainer/sd35/consistency/run.sh" admit
+bash "$SOURCE_ROOT/tools/consistency_checking/sd3/run.sh" admit
 # On the GPU host, using the same source, model, manifest, run ID, and output root:
-bash "$SOURCE_ROOT/examples/flowgrpo_trainer/sd35/consistency/run.sh" capture
+bash "$SOURCE_ROOT/tools/consistency_checking/sd3/run.sh" capture
 ```
 
 `admit` masks CUDA visibility and checks API/config/scheduler contracts without
@@ -69,7 +69,7 @@ untrusted pin file at replay time supplies no independent byte evidence.
 ```bash
 export TRUSTED_PIN_SHA256=<independently-retained-pin-file-digest>
 export REPLAY_OUTPUT=/absolute/fresh-replay-output
-bash "$SOURCE_ROOT/examples/flowgrpo_trainer/sd35/consistency/run.sh" replay
+bash "$SOURCE_ROOT/tools/consistency_checking/sd3/run.sh" replay
 ```
 
 The reader verifies the eight producer pins and compares the full 2 × 2

@@ -13,6 +13,7 @@
 # limitations under the License.
 """CPU tests for diffusion FSDP LoRA param collection."""
 
+import pytest
 import torch
 import torch.nn as nn
 from peft import LoraConfig, get_peft_model
@@ -195,3 +196,97 @@ def test_collect_strips_nested_fsdp_wrapper_tokens_for_vllm(monkeypatch):
     assert list(params) == ["transformer_blocks.0.attn.to_q.lora_A.weight"]
     assert all("_fsdp_wrapped_module" not in name for name in params)
     assert all(".default." not in name for name in params)
+
+
+@pytest.mark.parametrize("version", [1, 2])
+@pytest.mark.parametrize("adapter_name", ["default", "old"])
+@pytest.mark.parametrize("empty_peft_dump", [False, True])
+def test_layered_lora_export_preserves_all_block_paths(monkeypatch, version, adapter_name, empty_peft_dump):
+    """Block-local fallback keys must retain their parent path and selected adapter."""
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+
+    from peft import get_peft_model_state_dict, inject_adapter_in_model
+
+    import verl_omni.utils.fsdp_utils as fsdp_utils
+    from verl_omni.workers.engine.lora_export import export_lora_for_sync
+
+    model = _TinyDiT()
+    model.transformer_blocks.append(_Block())
+    config = LoraConfig(r=2, lora_alpha=4, target_modules=["to_q"], bias="none")
+    inject_adapter_in_model(config, model)
+    inject_adapter_in_model(config, model, adapter_name="old")
+    with torch.no_grad():
+        for index, (_, parameter) in enumerate(model.named_parameters()):
+            parameter.fill_(index + 1)
+    expected = get_peft_model_state_dict(model, adapter_name=adapter_name)
+    assert len(expected) == 4
+
+    class Wrapped(nn.Module):
+        def __init__(self, module):
+            super().__init__()
+            self._fsdp_wrapped_module = module
+
+        def state_dict(self, *args, **kwargs):
+            return self._fsdp_wrapped_module.state_dict(*args, **kwargs)
+
+    if version == 1:
+        for index, block in enumerate(model.transformer_blocks):
+            model.transformer_blocks[index] = Wrapped(block)
+        module = Wrapped(model)
+        units = [module, *model.transformer_blocks]
+    else:
+        module = model
+        units = [model, *model.transformer_blocks]
+    monkeypatch.setattr(fsdp_utils, "fsdp_version", lambda item: version if any(item is unit for unit in units) else 0)
+    monkeypatch.setattr(
+        "torch.distributed.fsdp.FullyShardedDataParallel.summon_full_params",
+        lambda *args, **kwargs: nullcontext(),
+    )
+    if empty_peft_dump:
+        monkeypatch.setattr(fsdp_utils, "get_peft_model_state_dict", lambda *args, **kwargs: {})
+
+    stream, peft_config = export_lora_for_sync(
+        module,
+        model_config=SimpleNamespace(lora={"merge": False}, fsdp_layer_prefixes=["transformer_blocks."]),
+        base_sync_done=True,
+        adapter_name=adapter_name,
+        layered_summon=True,
+        is_diffusers=True,
+        key_prefix="transformer.",
+    )
+    actual = dict(stream)
+    expected = {f"transformer.{name}": tensor for name, tensor in expected.items()}
+    print("LAYERED_LORA_ASSERT_ENTERED", version, adapter_name, empty_peft_dump, flush=True)
+    assert set(actual) == set(expected), "block-local fallback must not lose or overwrite layer paths"
+    for name, tensor in expected.items():
+        torch.testing.assert_close(actual[name], tensor, rtol=0, atol=0)
+
+    if version == 1 and adapter_name == "old" and empty_peft_dump:
+        from verl_omni.workers.rollout.vllm_rollout.utils import vLLMOmniColocateWorkerExtension
+
+        class Receiver:
+            def __init__(self, **kwargs):
+                pass
+
+            def receive_weights(self, on_bucket_received):
+                weights = list(actual.items())
+                on_bucket_received(weights[:2])
+                on_bucket_received(weights[2:])
+
+        requests = []
+        monkeypatch.setattr(
+            "verl.workers.rollout.vllm_rollout.bucketed_weight_transfer.BucketedWeightReceiver", Receiver
+        )
+        worker = SimpleNamespace(
+            device="cpu",
+            _get_zmq_handle=lambda: "unused",
+            _get_standard_weight_model_and_config=lambda: None,
+            remove_lora=lambda _: None,
+            add_lora=requests.append,
+        )
+        vLLMOmniColocateWorkerExtension.update_weights_from_ipc(worker, peft_config=peft_config, base_sync_done=True)
+        assert len(requests) == 1
+        assert set(requests[0].lora_tensors) == set(expected)
+        for name, tensor in expected.items():
+            torch.testing.assert_close(requests[0].lora_tensors[name], tensor, rtol=0, atol=0)
