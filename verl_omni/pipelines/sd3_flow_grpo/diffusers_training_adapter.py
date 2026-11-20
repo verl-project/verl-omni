@@ -56,6 +56,17 @@ class StableDiffusion3FlowGRPO(DiffusionModelBase):
     """
 
     @classmethod
+    def tq_trajectory_fields(cls, model_config: DiffusionModelConfig) -> tuple[set[str], set[str]]:
+        """Declare SD3 FlowGRPO trajectory and CFG conditioning tensors."""
+        required = {"all_latents", "prompt_embeds", "pooled_prompt_embeds"}
+        optional = {"prompt_embeds_mask", "negative_prompt_embeds_mask", "latents_clean"}
+        if (model_config.pipeline.guidance_scale or 0.0) > 1.0:
+            required.update({"negative_prompt_embeds", "negative_pooled_prompt_embeds"})
+        else:
+            optional.update({"negative_prompt_embeds", "negative_pooled_prompt_embeds"})
+        return required, optional
+
+    @classmethod
     def build_scheduler(cls, model_config: DiffusionModelConfig):
         scheduler = FlowMatchSDEDiscreteScheduler.from_pretrained(
             pretrained_model_name_or_path=model_config.local_path,

@@ -1,7 +1,7 @@
 (tuning_guide)=
 # Performance Tuning Guide
 
-Last updated: 10/17/2026
+Last updated: 11/12/2026
 
 This page is the starting point for tuning a VeRL-Omni diffusion RL run. It
 does not repeat the detail already covered by the more specific pages —
@@ -107,6 +107,21 @@ Symptoms that show up regardless of which stage causes them:
   disabling it under offload tends to OOM during weight sync.
 
 **Step time dominated by data transfer between worker groups (video models)**
+- For SD3 FlowGRPO and Wan2.2 DanceGRPO V1 `sync` runs with rollout-side rewards,
+  opt into `trainer.v1.worker_side_trajectory=true` to read core fields on the
+  driver and fetch trajectory tensors on the actor/ref workers. The default
+  is `false`. Actual timesteps stay on the driver for rollout diagnostics.
+  Async modes, teacher scoring, direct-preference training, and driver-side
+  reward consumers are rejected when this option is enabled; pipelines must
+  declare their trajectory field contract. Validation keeps its full read.
+  Required fields and transition shapes are checked without falling back to a
+  full training read. Compare matched workloads: small payloads may be slower
+  because worker fetching adds metadata requests.
+- Measure training reads and worker fetching with a synthetic Wan2.2 payload:
+  `python scripts/benchmark_diffusion_tq_field_projection.py --read-mode training --payload wan22 --batch-size 2 --steps 2 --storage-units 1 --warmup 1 --iterations 5`.
+  The benchmark reports driver-returned tensor bytes, driver read latency, and
+  read plus worker SHA-256 verification latency. It checks every field/row on every round;
+  it does not measure a complete RL training step or wire-protocol bytes.
 - This shows up as idle GPU time between rollout and training rather than
   inside either stage's compute, and is more likely on video/audio
   generation where trajectories are larger than for image models. It's a V1

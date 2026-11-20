@@ -207,6 +207,18 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         self.use_reference_policy = need_reference_policy(config) or (loss_mode == "dpo")
         self.use_rm = reward_is_enabled(config)
         self.use_teacher_policy = is_distillation_enabled(config.get("distillation"))
+        self.worker_side_trajectory = config.trainer.v1.get("worker_side_trajectory", False)
+        if not isinstance(self.worker_side_trajectory, bool):
+            raise ValueError("trainer.v1.worker_side_trajectory must be a boolean")
+        if self.worker_side_trajectory and self.trainer_mode != "sync":
+            raise ValueError("worker_side_trajectory currently requires trainer.v1.trainer_mode=sync")
+        if self.worker_side_trajectory and (
+            self._is_direct_preference or self.use_teacher_policy or not streaming_reward_enabled(config)
+        ):
+            raise ValueError(
+                "worker_side_trajectory currently requires policy-gradient training with rollout-side rewards "
+                "and no teacher; direct-preference and driver-side reward consumers require full trajectories."
+            )
         self.distillation_config = omega_conf_to_dataclass(config.distillation) if self.use_teacher_policy else None
         validate_distillation_config(config)
         self.skip_old_log_prob = skip_old_log_prob(config)
@@ -564,9 +576,16 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             self.on_sample_end()
         return batch_meta
 
+    def _read_training_batch(self, batch_meta: KVBatchMeta) -> DataProto:
+        """Read the driver's training fields and retain row-aligned trajectory keys."""
+        kwargs = {}
+        if self.worker_side_trajectory:
+            kwargs["trajectory_fields"] = self._trajectory_field_groups
+        return diffusion_tq_batch_to_dataproto(batch_meta, pad_token_id=self.tokenizer.pad_token_id or 0, **kwargs)
+
     def _convert_and_dispatch(self, batch_meta: KVBatchMeta):
         """Convert a sampled batch and start teacher scoring without waiting on it."""
-        data = diffusion_tq_batch_to_dataproto(batch_meta, pad_token_id=self.tokenizer.pad_token_id or 0)
+        data = self._read_training_batch(batch_meta)
         return batch_meta, data, self.teacher_model_manager.dispatch_prev_sample_mean(data)
 
     def _train_sampled_batch(
@@ -578,10 +597,9 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         teacher_handle=None,
     ) -> KVBatchMeta:
         """Run one diffusion policy-gradient update on an already sampled mini-batch."""
-        # Convert TQ rows to diffusion DataProto; from here on the driver owns the
-        # DataProto compute contract (no KVBatchMeta passed to diffusion workers).
+        # Deferred keys follow the same DataProto slicing and padding as core data.
         if data is None:
-            data = diffusion_tq_batch_to_dataproto(batch_meta, pad_token_id=self.tokenizer.pad_token_id or 0)
+            data = self._read_training_batch(batch_meta)
 
         # [OPTIONAL] colocated reward model
         if self.reward_loop_manager.reward_loop_worker_handles is None and self.use_rm:
@@ -901,11 +919,14 @@ class PolicyGradientDiffusionTrainerV1(ABC):
 
         from verl_omni.pipelines.model_base import DiffusionModelBase
 
-        prepared_processor_path = DiffusionModelBase.get_class_by_name(
+        model_adapter = DiffusionModelBase.get_class_by_name(
             architecture,
             model_config.algorithm,
             model_config.get("external_lib"),
-        ).prepare_processor_files(local_path)
+        )
+        if self.worker_side_trajectory:
+            self._trajectory_field_groups = model_adapter.tq_trajectory_fields(model_config)
+        prepared_processor_path = model_adapter.prepare_processor_files(local_path)
         processor_path = os.path.join(local_path, "processor")
         if prepared_processor_path is not None:
             processor_path = prepared_processor_path
