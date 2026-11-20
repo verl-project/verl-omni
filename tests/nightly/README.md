@@ -243,9 +243,7 @@ Qwen3-Omni and MiniCPM-o dump `actor_update_batch` and `lora_gradients`. The
 actor mini-batch includes `old_log_probs`, `ref_log_prob`, and
 `rollout_log_probs` when present. Both cases write `extra_info.repeat_index`
 through `tests/nightly/create_sample_data.py` so dump comparison can realign
-rows. Rollout is greedy; a token-id change still fails when it moves
-`rollout_log_probs`, `ref_log_prob`, or the LoRA gradients. Case READMEs list
-the exact payload fields.
+rows. Rollout is greedy. Case READMEs list the exact payload fields.
 
 Dumped but never failing for Qwen-Image:
 
@@ -256,10 +254,12 @@ Dumped but never failing for Qwen-Image:
   vLLM-Omni request packing (`max_num_seqs` > 1) changes the pre-window ODE
   batch shape, which flips individual OCR scores by ~1/255 pixel drift.
 
-For the GSPO omni cases, `batch.responses`, `batch.advantages`, and
-`batch.old_log_probs` stay informational. Nested `old_log_probs` pads
-inconsistently on the tiny model; `rollout_log_probs` covers token-id drift.
-Rule or choice reward scores are compared.
+For the GSPO omni cases, `batch.responses`, `batch.advantages`,
+`batch.old_log_probs`, and `batch.rollout_log_probs` stay informational.
+Nested `old_log_probs` pads inconsistently on the tiny model. On the
+repeated single-prompt AVQA dataset, `extra_info.repeat_index` is only a row
+label, so comparator realignment can mis-pair identical content and move
+`rollout_log_probs`. Rule or choice reward scores are compared.
 
 These informational tensors are measured and reported but cannot fail the run.
 They carry `informational: true` in `dump_compare.json` and are listed under
