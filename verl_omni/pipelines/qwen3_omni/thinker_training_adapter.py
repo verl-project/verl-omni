@@ -91,6 +91,13 @@ class Qwen3OmniThinkerAdapter(OmniModelBase):
             forward/embedding accessors redirected to thinker.
         """
         module = super().configure_model(module, model_config)
+        from verl.utils.device import is_npu_available
+
+        if is_npu_available:
+            from verl_omni.models.transformers.qwen3_omni_npu import apply_qwen3_omni_thinker_npu_patch
+
+            apply_qwen3_omni_thinker_npu_patch(module.thinker.config.text_config)
+
         module.forward = module.thinker.forward
         module.get_input_embeddings = module.thinker.get_input_embeddings
         module.set_input_embeddings = module.thinker.set_input_embeddings
