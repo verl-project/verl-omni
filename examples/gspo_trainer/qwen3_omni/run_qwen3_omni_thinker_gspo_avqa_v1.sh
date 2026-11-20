@@ -9,14 +9,62 @@ export VERL_USE_EXTERNAL_MODULES=verl_omni
 
 # DEVICE is auto-detected by querying npu-smi; override only for special cases.
 DEVICE=${DEVICE:-$(command -v npu-smi >/dev/null 2>&1 && npu-smi info >/dev/null 2>&1 && echo npu || echo gpu)}
-VLLM_OMNI_CUDAGRAPH_MODE=${VLLM_OMNI_CUDAGRAPH_MODE:-PIECEWISE}
 if [[ "${DEVICE}" != "npu" && "${DEVICE}" != "gpu" ]]; then
     echo "DEVICE must be npu or gpu, got '${DEVICE}'." >&2
     exit 2
 fi
 
+default_num_devices=16
+default_graph_mode=PIECEWISE
+attn_implementation=sdpa
+ascend_performance_args=()
+
 if [[ "${DEVICE}" == "npu" ]]; then
-    ASCEND_HOME_PATH=${ASCEND_HOME_PATH:-/usr/local/Ascend/cann-9.1.0}
+    ascend950dt_node=false
+    if npu-smi info 2>/dev/null | awk -F'|' '
+        $2 ~ /^[[:space:]]*[0-9]+[[:space:]]*$/ && $3 ~ /^[[:space:]]*Ascend/ {
+            devices++
+            if ($3 ~ /^[[:space:]]*Ascend950DT[[:space:]]*$/) ascend950dt++
+        }
+        END { exit !(devices == 8 && ascend950dt == 8) }
+    '; then
+        ascend950dt_node=true
+    fi
+    default_ascend_home=/usr/local/Ascend/cann-9.1.0
+    a5_ascend_home=/usr/local/Ascend/cann-9.3.0
+    if [[ "${ascend950dt_node}" == true && -r "${a5_ascend_home}/set_env.sh" ]] &&
+        grep -Fxq 'Version=9.3.0' "${a5_ascend_home}/share/info/asc-devkit/version.info" 2>/dev/null; then
+        default_ascend_home=${a5_ascend_home}
+    fi
+    ASCEND_HOME_PATH=${ASCEND_HOME_PATH:-${default_ascend_home}}
+    if [[ "${ascend950dt_node}" == true ]] &&
+        grep -Fxq 'Version=9.3.0' "${ASCEND_HOME_PATH}/share/info/asc-devkit/version.info" 2>/dev/null; then
+        default_num_devices=8
+        default_graph_mode=FULL_AND_PIECEWISE
+        attn_implementation=flash_attention_2
+        ascend_performance_args=(
+            actor_rollout_ref.actor.freeze_vision_tower=false
+            actor_rollout_ref.actor.fsdp_config.optimizer_offload=false
+            actor_rollout_ref.ref.fsdp_config.model_dtype=fp32
+            actor_rollout_ref.rollout.gpu_memory_utilization=0.45
+            actor_rollout_ref.rollout.enable_chunked_prefill=true
+            actor_rollout_ref.rollout.max_num_batched_tokens=1536
+        )
+        added_defaults=(
+            '++actor_rollout_ref.model.override_config.experts_implementation=ascend_grouped_mm'
+            '++actor_rollout_ref.rollout.engine_kwargs.vllm_omni.compilation_config.cudagraph_capture_sizes=[1,16,128,1536]'
+            '++actor_rollout_ref.rollout.engine_kwargs.vllm_omni.compilation_config.max_cudagraph_capture_size=1536'
+        )
+        for default_arg in "${added_defaults[@]}"; do
+            default_key=${default_arg%%=*}
+            for arg in "$@"; do
+                if [[ "${arg}" == "${default_key#+}="* ]]; then
+                    continue 2
+                fi
+            done
+            ascend_performance_args+=("${default_arg}")
+        done
+    fi
     source "${ASCEND_HOME_PATH}/set_env.sh"
     source "${ASCEND_HOME_PATH}/../nnal/atb/set_env.sh"
 fi
@@ -25,8 +73,9 @@ MODEL_PATH=${MODEL_PATH:-"Qwen/Qwen3-Omni-30B-A3B-Instruct"}
 TRAIN_FILE=${TRAIN_FILE:-"$HOME/data/avqa_r1_6k/train.parquet"}
 VAL_FILE=${VAL_FILE:-"$HOME/data/avqa_r1_6k/validation.parquet"}
 
-NUM_GPUS_ACTOR_ROLLOUT_REWARD=${NUM_GPUS_ACTOR_ROLLOUT_REWARD:-16}
+NUM_GPUS_ACTOR_ROLLOUT_REWARD=${NUM_GPUS_ACTOR_ROLLOUT_REWARD:-${default_num_devices}}
 ROLLOUT_TP=${ROLLOUT_TP:-2}
+VLLM_OMNI_CUDAGRAPH_MODE=${VLLM_OMNI_CUDAGRAPH_MODE:-${default_graph_mode}}
 
 python3 -m verl_omni.trainer.main_omni \
     data.train_files="${TRAIN_FILE}" \
@@ -45,7 +94,7 @@ python3 -m verl_omni.trainer.main_omni \
     data.custom_cls.name=QwenOmniRLHFDataset \
     ++data.mm_processor_kwargs.sampling_rate=16000 \
     actor_rollout_ref.model.path="${MODEL_PATH}" \
-    +actor_rollout_ref.model.override_config.attn_implementation=sdpa \
+    +actor_rollout_ref.model.override_config.attn_implementation="${attn_implementation}" \
     actor_rollout_ref.model.lora_rank=0 \
     actor_rollout_ref.model.enable_gradient_checkpointing=true \
     actor_rollout_ref.model.use_remove_padding=true \
@@ -114,5 +163,6 @@ python3 -m verl_omni.trainer.main_omni \
     trainer.save_freq=50 \
     trainer.test_freq=10 \
     trainer.total_epochs=10 \
+    "${ascend_performance_args[@]}" \
     "$@" \
     2>&1 | tee run_qwen3omni_npu_avqa_v1.log

@@ -548,25 +548,25 @@ actor_rollout_ref:
 - `actor_rollout_ref.model.max_image_tokens` / `max_audio_tokens` / `max_video_tokens`: Multimodal token budgets (`null` = unset).
 - `actor_rollout_ref.model.lora` / `mtp`: Megatron-style LoRA block and multi-token prediction (speculative decoding) configs; see the YAML comments in `omni/model/omni_model.yaml`.
 
-### AVQA rollout graphs on Ascend
+### AVQA performance defaults on Ascend 950DT
 
-The Qwen3-Omni AVQA recipe accepts `VLLM_OMNI_CUDAGRAPH_MODE` and defaults to `PIECEWISE`.
-The generated Thinker-only deployment uses the vLLM-Omni V1 model runner by default.
-For a three-step `FULL_AND_PIECEWISE` run on eight Ascend 950 NPUs with CANN 9.3.0,
-set `ASCEND_HOME_PATH`, `MODEL_PATH`, `TRAIN_FILE`, and `VAL_FILE` for your installation and run:
+On an eight-device Ascend 950DT host with CANN 9.3.0, the Qwen3-Omni AVQA recipe uses
+eight devices by default, FlashAttention 2 and `ascend_grouped_mm` for training, and
+`FULL_AND_PIECEWISE` for rollout.
+The generated Thinker-only deployment uses the vLLM-Omni V1 model runner.
+The recipe uses capture sizes `[1,16,128,1536]`, a batched-token limit of `1536`,
+and rollout memory utilization of `0.45`. Actor parameter offload is enabled and optimizer
+offload is disabled. GPU and other Ascend setups default to SDPA and `PIECEWISE`.
+
+Export `ASCEND_HOME_PATH`, `MODEL_PATH`, `TRAIN_FILE`, and `VAL_FILE` for your setup,
+then run the recipe from the repository root.
 
 ```bash
-DEVICE=npu NUM_GPUS_ACTOR_ROLLOUT_REWARD=8 VLLM_OMNI_CUDAGRAPH_MODE=FULL_AND_PIECEWISE \
-  bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_avqa_v1.sh \
-  +actor_rollout_ref.model.override_config.experts_implementation=ascend_grouped_mm \
-  ++actor_rollout_ref.model.override_config.attn_implementation=flash_attention_2 \
-  actor_rollout_ref.actor.fsdp_config.optimizer_offload=false \
-  actor_rollout_ref.rollout.gpu_memory_utilization=0.45 \
-  '++actor_rollout_ref.rollout.engine_kwargs.vllm_omni.compilation_config.cudagraph_capture_sizes=[1,16,128,1536]' \
-  ++actor_rollout_ref.rollout.engine_kwargs.vllm_omni.compilation_config.max_cudagraph_capture_size=1536 \
-  trainer.total_training_steps=3 trainer.val_before_train=false trainer.test_freq=3 \
-  trainer.save_freq=-1 trainer.resume_mode=disable
+bash -o pipefail examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_avqa_v1.sh
 ```
+
+Use `VLLM_OMNI_CUDAGRAPH_MODE=PIECEWISE` to select PIECEWISE rollout.
+Hydra arguments passed to the script can override the recipe defaults.
 
 ### `actor_rollout_ref.actor` — `OmniActorConfig` / `omni_loss`
 
