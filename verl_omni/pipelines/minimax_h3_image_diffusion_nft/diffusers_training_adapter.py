@@ -14,6 +14,8 @@
 """MiniMax H3 image training adapter for DiffusionNFT."""
 
 import os
+from functools import lru_cache
+from pathlib import Path
 from typing import Any, Optional
 
 import torch
@@ -50,6 +52,32 @@ from verl_omni.workers.config import DiffusionModelConfig
 __all__ = ["MiniMaxH3ImageDiffusionNFT"]
 
 
+@lru_cache(maxsize=1)
+def _actor_model_class():
+    """Supply the native image model's missing Diffusers LoRA interface locally."""
+    try:
+        from diffusers import MiniMaxH3ImageTransformer2DModel as NativeImageModel
+        from diffusers.loaders import PeftAdapterMixin
+        from diffusers.loaders.lora_base import LORA_WEIGHT_NAME, LORA_WEIGHT_NAME_SAFE
+    except ImportError as exc:
+        raise ImportError("Native H3 Image DiffusionNFT requires Diffusers 0.43.0 or newer.") from exc
+
+    class MiniMaxH3ImageTransformer2DModel(NativeImageModel, PeftAdapterMixin):
+        """Keep the native checkpoint class name and supply the Diffusers LoRA interface."""
+
+        def load_lora_adapter(self, pretrained_model_name_or_path_or_dict, *args, **kwargs):
+            path = pretrained_model_name_or_path_or_dict
+            if isinstance(path, str | os.PathLike) and not {"weight_name", "use_safetensors"} & kwargs.keys():
+                directory = Path(path) / (kwargs.get("subfolder") or "")
+                for name in (LORA_WEIGHT_NAME_SAFE, LORA_WEIGHT_NAME):
+                    if (directory / name).is_file():
+                        kwargs["weight_name"] = name
+                        break
+            return super().load_lora_adapter(path, *args, **kwargs)
+
+    return MiniMaxH3ImageTransformer2DModel
+
+
 def _pdd_sigmas(micro_batch: TensorDict) -> torch.Tensor:
     sigmas = micro_batch.get("pdd_sigmas", None)
     if sigmas is None:
@@ -75,10 +103,29 @@ class MiniMaxH3ImageDiffusionNFT(DiffusionModelBase):
     use_rollout_kernels = os.environ.get("VERL_OMNI_H3_IMAGE_ROLLOUT_KERNELS", "1") != "0"
 
     @classmethod
+    def diffusers_model_class(cls, model_config: DiffusionModelConfig):
+        """Use the image-only Actor for native checkpoints on both weight-loading and meta ranks."""
+        from diffusers import AutoModel
+
+        load_path = model_config.config_path or model_config.local_path
+        subfolder = "" if model_config.config_path else model_config.transformer_subfolder
+        config = AutoModel.load_config(load_path, subfolder=subfolder)
+        if config.get("_class_name") != "MiniMaxH3ImageTransformer2DModel":
+            return None
+        return _actor_model_class()
+
+    @classmethod
     def validate_lora_config(cls, model_config: DiffusionModelConfig) -> None:
         """Reject LoRA targets the rollout weight sync cannot transport (shares the H3 whitelist)."""
         if model_config.lora_rank > 0:
             validate_lora_target_modules(model_config.target_modules)
+            prefixes = model_config.fsdp_layer_prefixes
+            required = {"transformer_blocks.", "token_refiner.refiner_blocks."}
+            if prefixes and not required.issubset(prefixes):
+                raise ValueError(
+                    "H3 Image layered LoRA export requires both transformer_blocks. and "
+                    "token_refiner.refiner_blocks. in fsdp_layer_prefixes, or [] for full export."
+                )
 
     @classmethod
     def validate_engine_config(cls, engine_config) -> None:
@@ -231,7 +278,11 @@ class MiniMaxH3ImageDiffusionNFT(DiffusionModelBase):
         model_inputs: dict,
         negative_model_inputs: Optional[dict] = None,
     ) -> torch.Tensor:
-        """Run the DiT per sample with its step's fused head and return flow-match velocities."""
+        """Run the DiT with each sample's PDD head and return flow-match velocities.
+
+        Native image checkpoints expose ``pdd_proj_out`` through PEFT/FSDP wrappers and take the head index
+        explicitly. Their forward keeps samples separate and uses the official model's operators.
+        """
         del negative_model_inputs
         image_rows = model_inputs["image_rows"]
         encoder_hidden_states = model_inputs["encoder_hidden_states"]
@@ -239,15 +290,25 @@ class MiniMaxH3ImageDiffusionNFT(DiffusionModelBase):
         pdd_steps = model_inputs["pdd_step"].tolist()
         device = image_rows.device
 
-        head = ensure_pdd_heads(module, model_config)
-        if cls.use_rollout_kernels:
+        native_image = hasattr(module, "pdd_proj_out")
+        if native_image and cls.pack_micro_batch:
+            raise NotImplementedError(
+                "Native MiniMaxH3ImageTransformer2DModel requires VERL_OMNI_H3_IMAGE_PACK_MICRO_BATCH=0; "
+                "its scalar PDD head and attention layout describe one sample per forward."
+            )
+        if not native_image and device.type == "npu":
+            raise ValueError(
+                "Ascend H3 Image training requires MiniMaxH3ImageTransformer2DModel weights from Diffusers>=0.43.0; "
+                "the legacy audio-enabled checkpoint is not supported on NPU."
+            )
+        head = None if native_image else ensure_pdd_heads(module, model_config)
+        if not native_image and cls.use_rollout_kernels:
             install_rollout_kernels(module)
         batch = image_rows.shape[0]
         if encoder_mask is not None:
             text_lengths = encoder_mask.long().sum(dim=1).tolist()
         else:
             text_lengths = [encoder_hidden_states.shape[1]] * batch
-        empty_audio = image_rows.new_zeros((1, 0, IMAGE_AUDIO_ROW_WIDTH))
         no_audio = torch.empty(0, dtype=torch.long)
 
         if cls.pack_micro_batch and cls.use_rollout_kernels and batch > 1:
@@ -266,23 +327,33 @@ class MiniMaxH3ImageDiffusionNFT(DiffusionModelBase):
                 timestep_indices,
                 num_condition,
             ) = cls._prepare_sample_inputs(model_inputs, index, num_text_tokens, no_audio)
-            head.pdd_step = int(pdd_steps[index])
-            try:
+            sample_inputs = {
+                "hidden_states": torch.cat([sample_condition, image_rows[index]], dim=0).unsqueeze(0),
+                "encoder_hidden_states": encoder_hidden_states[index : index + 1, :num_text_tokens],
+                "timestep": unique_timesteps.to(device),
+                "timestep_indices": timestep_indices.to(device),
+                "token_tags": token_tags.to(device),
+                "position_ids": position_ids.to(device),
+                "text_indices": text_indices.to(device),
+                "return_dict": False,
+            }
+            if native_image:
                 result = module(
-                    hidden_states=torch.cat([sample_condition, image_rows[index]], dim=0).unsqueeze(0),
-                    audio_hidden_states=empty_audio,
-                    encoder_hidden_states=encoder_hidden_states[index : index + 1, :num_text_tokens],
-                    timestep=unique_timesteps.to(device),
-                    timestep_indices=timestep_indices.to(device),
-                    token_tags=token_tags.to(device),
-                    position_ids=position_ids.to(device),
-                    video_indices=image_indices.to(device),
-                    audio_indices=no_audio.to(device),
-                    text_indices=text_indices.to(device),
-                    return_dict=False,
+                    **sample_inputs,
+                    image_indices=image_indices.to(device),
+                    pdd_step_index=int(pdd_steps[index]),
                 )
-            finally:
-                head.pdd_step = None
+            else:
+                head.pdd_step = int(pdd_steps[index])
+                try:
+                    result = module(
+                        **sample_inputs,
+                        audio_hidden_states=image_rows.new_zeros((1, 0, IMAGE_AUDIO_ROW_WIDTH)),
+                        video_indices=image_indices.to(device),
+                        audio_indices=no_audio.to(device),
+                    )
+                finally:
+                    head.pdd_step = None
             velocity = result[0][:, num_condition:]
             velocities.append(h3_velocity_to_flow_match(velocity).reshape(1, -1))
         return torch.cat(velocities, dim=0)
