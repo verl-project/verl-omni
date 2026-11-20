@@ -1,6 +1,6 @@
 # NPU Smoke Tests
 
-Last updated: 11/11/2026.
+Last updated: 11/17/2026.
 
 This guide explains how to add CI test cases for Huawei Ascend devices in verl-omni.
 
@@ -37,6 +37,11 @@ into these runners:
 | 20 | e2e | Qwen-Image online DPO V1 sync | tests/special_e2e/run_online_dpo_qwen_image_npu.sh | 8 |
 | 21 | e2e | Qwen-Image DiffusionNFT V1 sync | tests/special_e2e/run_diffusionnft_qwen_image_npu.sh | 8 |
 | 22 | e2e | Qwen-Image FlowGRPO V1 separate-async | tests/special_e2e/run_flowgrpo_qwen_image_v1_separate_async_npu.sh | 8 |
+| 23 | e2e | OPD V1 sync with colocated teachers | tests/special_e2e/run_diffusion_teacher_smoke_npu.sh (SMOKE=sync) | 8 |
+| 24 | e2e | OPD V1 separate-async with standalone teachers | tests/special_e2e/run_diffusion_teacher_smoke_npu.sh (SMOKE=async) | 8 |
+| 25 | e2e | Bagel PickScore LoRA FlowGRPO | tests/special_e2e/run_flowgrpo_bagel_pickscore_npu.sh | 8 |
+| 26 | e2e | Qwen-Image synchronous separate FlowGRPO | tests/special_e2e/run_flowgrpo_qwen_image_separate_npu.sh | 8 |
+| 34 | e2e | MiniMax-H3 T2VA FlowGRPO | tests/special_e2e/run_flowgrpo_minimax_h3_npu.sh | 8 |
 
 Test IDs stay stable across companion PRs, so gaps are intentional. Core
 entries collect pytest cases; e2e entries run trainer workloads. These are
@@ -130,6 +135,18 @@ Single-group runs retain the eight-NPU allocation. Full-CI shards use four
 NPUs per group; launchers derive their batches from that allocation and retain
 the training steps.
 
+### Teacher and model trainer variants
+
+Entries 23-26 reuse the GPU teacher, Bagel/PickScore and synchronous separate
+trainer workloads, with native Ascend attention and independent model/data
+paths. Teacher and reward processes retain their original workload assertions.
+Entry 34 generates a local tiny MiniMax-H3 T2VA checkpoint with attention
+geometry supported by Ascend and runs the original FlowGRPO training steps.
+These are execution smokes, not generation-quality or convergence checks.
+
+Run them through the e2e group after configuring the runtime below. Each
+builder or trainer must exit 0; native aborts remain failures.
+
 ## Add a New NPU Smoke Test
 
 ### 1. Add the smallest useful entry point
@@ -173,10 +190,18 @@ devices, validate it in the test entry point and fail with a clear message.
 The Resolve NPU CI groups step maps labels to groups as listed in
 [CI Triggers](#ci-triggers). Multiple labels produce the union of their groups.
 When both groups are selected, two eight-NPU jobs partition the test IDs into
-even and odd shards. Each job runs its core cases on NPUs 0-3 and its e2e cases
-on NPUs 4-7 concurrently; trainers within a shard remain sequential. A single
+shards balanced by observed runtime. Each job runs its core cases on NPUs 0-3
+and its e2e cases on NPUs 4-7 concurrently; trainers within a shard remain sequential. A single
 group label retains the eight-NPU group job. The setup_runner check succeeds
 only when every selected job passes.
+
+Tiny NPU trainer smokes share runtime defaults: two compiler threads per worker,
+an in-process data loader, two TransferQueue storage units on the single node,
+and no Ray dashboard. `TORCHNPU_PRECOMPILE_THREADS` accepts a positive override;
+trailing Hydra arguments can override the remaining defaults. IDs 18 and 20
+bound their owned tiny reward fixture to eight active sequences, 512 batched
+tokens and 64 MiB of KV cache; custom reward models retain their own limits.
+Training steps, samples, multimodal profiling and assertions are unchanged.
 
 If the new test lives outside current path filters, add its path. Current
 filters include verl_omni/**, tests/npu_smoke/**, tests/agent_loop/**,
