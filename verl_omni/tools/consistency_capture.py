@@ -13,7 +13,7 @@
 # limitations under the License.
 """Opt-in observation of real diffusion trainer recomputation and SDE inputs.
 
-Installed by the existing nightly worker setup hook. No model configuration,
+Installed by an explicit Ray worker-process setup hook. No model configuration,
 RNG state, loss, optimizer or precision setting is changed by this observer.
 """
 
@@ -129,7 +129,7 @@ def _schedule_inputs(engine, micro_batch, step: int) -> tuple[dict, bool]:
 
 
 def install_trainer_capture() -> None:
-    """Observe selected real trainer batches using the existing worker setup.
+    """Observe selected real trainer batches through Ray worker setup.
 
     The current consumer is PPO/SDE recomputation through the shared Diffusers
     engine. Other algorithms are not inferred from an architecture name.

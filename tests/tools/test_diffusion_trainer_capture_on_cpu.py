@@ -417,8 +417,8 @@ def test_native_dataproto_to_tensordict_metadata_transport():
 
 
 @pytest.mark.parametrize("enabled", [True, False])
-def test_nightly_worker_setup_loads_tools_capture(monkeypatch, tmp_path, enabled):
-    """Resolve the real tools library without unrelated model registrations."""
+def test_ray_worker_setup_loads_tools_capture(monkeypatch, tmp_path, enabled):
+    """Ray resolves the capture callback without importing a nightly entrypoint."""
     repo = Path(__file__).resolve().parents[2]
     package = ModuleType("verl_omni")
     package.__path__ = [str(repo / "verl_omni")]
@@ -431,14 +431,12 @@ def test_nightly_worker_setup_loads_tools_capture(monkeypatch, tmp_path, enabled
     assert Path(capture.__file__).resolve() == SOURCE.resolve()
     calls = []
     monkeypatch.setattr(capture, "install_trainer_capture", lambda: calls.append(True))
-    monkeypatch.setenv("DEBUG_DUMP_ENABLED", "0")
     if enabled:
         monkeypatch.setenv("DIFFUSION_CAPTURE_DIR", str(tmp_path / "capture"))
     else:
         monkeypatch.delenv("DIFFUSION_CAPTURE_DIR", raising=False)
-    source = repo / "tests" / "nightly" / "install_debug_hooks.py"
-    spec = importlib.util.spec_from_file_location("_tested_nightly_tools_capture", source)
-    nightly = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(nightly)
-    nightly.install_debug_hooks()
-    assert calls == ([True] if enabled else [])
+    from ray._private.runtime_env.setup_hook import load_and_execute_setup_hook
+
+    result = load_and_execute_setup_hook("verl_omni.tools.consistency_capture.install_trainer_capture")
+    assert result is None
+    assert calls == [True]

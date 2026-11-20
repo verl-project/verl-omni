@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Nightly entrypoint for V1 trainers with optional diffusion capture.
+"""Nightly entrypoint for L3 regressions on the v1 trainer.
 
 Qwen-Image cases use ``verl_omni.trainer.main_diffusion_v1``.
 MiniCPM-o and Qwen3-Omni cases use ``verl_omni.trainer.main_omni``.
@@ -41,7 +41,7 @@ _ALLOWED_TRAINER_MODULES = frozenset(
     }
 )
 
-_FORWARDED_ENV_PREFIXES = ("DEBUG_DUMP_", "GENRM_OCR_", "DIFFUSION_CAPTURE_")
+_FORWARDED_ENV_PREFIXES = ("DEBUG_DUMP_", "GENRM_OCR_")
 _FORWARDED_ENV_NAMES = {
     "CUBLAS_WORKSPACE_CONFIG",
     "DEBUG_METRICS_JSONL",

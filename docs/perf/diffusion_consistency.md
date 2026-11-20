@@ -4,8 +4,9 @@ Last updated: 11/20/2026
 
 ## Capture on the real trainer path
 
-The optional `verl_omni.tools.consistency_capture` library is installed by the
-nightly entrypoint in the driver and worker processes.
+The optional `verl_omni.tools.consistency_capture` library is installed through
+Ray's existing worker-process setup hook. The normal trainer entrypoint and
+nightly CI remain unchanged.
 
 For a pipeline integration, first screen the existing
 `rollout_corr/logprob_abs_diff_mean`, `rollout_corr/logprob_abs_diff_max` and
@@ -15,17 +16,25 @@ log probabilities are not the old-policy values consumed by the loss;
 bypass/on-policy modes have a different consistency requirement.
 
 To collect evidence under the recipe's actual precision, LoRA and microbatch
-settings, keep its Hydra overrides and replace only
-`python3 -m verl_omni.trainer.main_diffusion_v1` with
-`DEBUG_DUMP_ENABLED=0 python3 tests/nightly/run.py`. Add
-`actor_rollout_ref.rollout.calculate_log_probs=true` so the rollout returns
-the reference log probabilities. Use the normal PPO/SDE recomputation path,
-with bypass disabled. Set:
+settings, keep its normal `python3 -m verl_omni.trainer.main_diffusion_v1`
+command and existing Hydra overrides. Append:
 
 ```bash
-export DIFFUSION_CAPTURE_DIR=/absolute/fresh/run/captures
-export DIFFUSION_CAPTURE_STEPS=1
+actor_rollout_ref.rollout.calculate_log_probs=true \
++ray_kwargs.ray_init.runtime_env.worker_process_setup_hook=verl_omni.tools.consistency_capture.install_trainer_capture \
++ray_kwargs.ray_init.runtime_env.env_vars.DIFFUSION_CAPTURE_DIR=/absolute/fresh/run/captures \
+"+ray_kwargs.ray_init.runtime_env.env_vars.DIFFUSION_CAPTURE_STEPS='1'"
 ```
+
+Use the normal PPO/SDE recomputation path, with bypass disabled. The capture
+step list must remain a string in Ray's `env_vars`. Start a fresh Ray job with
+these settings; an already initialized Ray runtime keeps its existing job
+configuration. This add-only override applies to a recipe with no existing
+setup hook; Hydra rejects adding the same key twice. It does not compose
+callbacks. If a recipe already owns a callback, its owner must explicitly add
+`install_trainer_capture()` to that callback and omit only the
+`worker_process_setup_hook` override. Keep both `DIFFUSION_CAPTURE_*` env-var
+overrides above; without a capture directory the installer intentionally does nothing.
 
 For multi-node runs, use the same capture path on storage accessible to every
 worker and the driver, or copy every worker's event directories into one replay
@@ -33,8 +42,8 @@ input root after collection. Node-local roots contain only that host's events;
 the reader cannot detect probes left on another host. Keep the same capture-root
 basename on every host, because it identifies the run in each event record.
 
-The existing Ray worker setup forwards these variables and installs the
-observer in each worker. It does not select a model, change seeds, force
+The explicit Ray runtime environment forwards these variables and installs the
+observer in the task-runner and engine workers. It does not select a model, change seeds, force
 FP32, disable LoRA, or change the microbatch. With no capture directory,
 the observer is not installed. The current integration covers diffusion
 PPO/SDE old-log-probability recomputation through the shared Diffusers
@@ -219,7 +228,7 @@ root folders because every input path is relative to the root.
 
 ## Collect a new public SD3.5 producer pair
 
-The [public SD3.5 capture recipe](../../tools/consistency_checking/sd3/GUIDE.md)
+The [public SD3.5 capture recipe](../../tools/consistency_checking/sd3/README.md)
 provides source-byte inventory, CPU admission, separate real rollout and actor
 processes, and external producer pins before this replay bridge. The raw
 MSProbe captures cover the first sample's first transformer forward per role.
