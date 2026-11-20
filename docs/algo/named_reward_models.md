@@ -91,8 +91,24 @@ The engine path documented here uses vLLM. vLLM-Omni reward serving is not
 implemented; vLLM-Omni can still be used independently for actor rollout.
 
 Existing jobs without `reward.models` continue to use the existing single-model
-reward path. Do not set `reward.reward_model.enable=true` together with
-`reward.models`.
+reward path; that path is deprecated since v0.4.0 (see
+[Deprecated legacy paths](#deprecated-legacy-paths)). Do not set
+`reward.reward_model.enable=true` together with `reward.models`.
+
+## Deprecated legacy paths
+
+Deprecated since v0.4.0, warning-only until removal in a future release:
+
+- `VisualRewardManager` with one `reward.custom_reward_function` — use
+  `MultiVisualRewardManager` with `reward.reward_functions`.
+- The single global reward model (`reward.reward_model.enable=true` serving one
+  `custom_reward_function`) — use a named `engine` model under `reward.models`;
+  see [Migrate an existing engine reward](#migrate-an-existing-engine-reward).
+- `reward.custom_reward_function.use_accelerator` — use
+  `reward.accelerator_workers.enabled`.
+
+`AudioRewardManager` and the upstream `naive`/text reward managers are not
+deprecated; shared-manager audio and text input contracts are follow-up work.
 
 ## Migrate an existing engine reward
 

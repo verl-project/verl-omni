@@ -16,7 +16,7 @@
 #   REWARD_MODEL_NAME  Qwen3-VL-8B-Instruct repo id or local path (served by the reward worker)
 set -euo pipefail
 
-export VERL_OMNI_H3_IMAGE_PACK_MICRO_BATCH=1
+export VERL_OMNI_H3_IMAGE_PACK_MICRO_BATCH=${VERL_OMNI_H3_IMAGE_PACK_MICRO_BATCH:-1}
 export GENRM_OCR_TEMPERATURE=0
 export VLLM_ENGINE_READY_TIMEOUT_S=${VLLM_ENGINE_READY_TIMEOUT_S:-3600}
 : "${PPOCR_MODEL_DIR:?Set PPOCR_MODEL_DIR to the PP-OCRv6 medium ONNX directory}"
@@ -49,7 +49,11 @@ if [[ ! $N_GPUS =~ ^[1-9][0-9]*$ || ! $PREFERENCE_SCORER_GPU =~ ^[0-9]+$ ]]; the
     exit 1
 fi
 RAY_GPU_ARGS=()
-TORCH_BACKEND=$(python3 -c "import torch; print('rocm' if torch.version.hip else 'cuda')")
+case "${H3_IMAGE_DEVICE:-cuda}" in
+    cuda) TORCH_BACKEND=$(python3 -c "import torch; print('rocm' if torch.version.hip else 'cuda')") ;;
+    npu) TORCH_BACKEND=npu ;;
+    *) echo "H3_IMAGE_DEVICE must be cuda or npu" >&2; exit 1 ;;
+esac
 if [[ $TORCH_BACKEND == rocm ]]; then
     # vLLM's ROCm platform copies a driver-level HIP_VISIBLE_DEVICES into CUDA_VISIBLE_DEVICES; Ray workers
     # inherit that while Ray sets a per-worker HIP_VISIBLE_DEVICES, and ROCm aborts on the mismatch.
@@ -67,8 +71,11 @@ if [[ $TORCH_BACKEND == rocm ]]; then
         fi
     done
     unset CUDA_VISIBLE_DEVICES HIP_VISIBLE_DEVICES ROCR_VISIBLE_DEVICES
-    RAY_GPU_ARGS=(++ray_kwargs.ray_init.address=local ++ray_kwargs.ray_init.num_gpus="$N_GPUS")
-else
+    RAY_GPU_ARGS=(
+        ++ray_kwargs.ray_init.address=local
+        ++ray_kwargs.ray_init.num_gpus="$N_GPUS"
+    )
+elif [[ $TORCH_BACKEND == cuda ]]; then
     export CUDA_VISIBLE_DEVICES=$(seq -s, 0 $((N_GPUS - 1)))
 fi
 if (( PREFERENCE_SCORER_GPU < N_GPUS )); then

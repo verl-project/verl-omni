@@ -44,7 +44,8 @@ INFORMATIONAL_TENSORS = frozenset(
 )
 
 # Nested old_log_probs pads inconsistently on the tiny omni model;
-OMNI_INFORMATIONAL_TENSORS = frozenset({"batch.old_log_probs"})
+# rollout_log_probs ordering is inconsistent on minicpm models with repeated prompts.
+OMNI_INFORMATIONAL_TENSORS = frozenset({"batch.old_log_probs", "batch.rollout_log_probs"})
 
 
 def _is_informational(key: str, rel_path: str) -> bool:
