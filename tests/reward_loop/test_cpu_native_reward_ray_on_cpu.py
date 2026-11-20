@@ -440,7 +440,8 @@ def test_cpu_phase_failure_drains_accepted_samples_before_sleep(tmp_path, monkey
         ray.shutdown()
 
 
-def test_cpu_phase_cancellation_drains_accepted_samples_before_sleep(tmp_path, monkeypatch):
+@pytest.mark.parametrize("confirm_release", [False, True])
+def test_cpu_phase_cancellation_drains_accepted_samples_before_sleep(tmp_path, monkeypatch, confirm_release):
     monkeypatch.setattr(OmniRewardLoopManager, "_create_native_workers", _controlled_native_workers)
     ray.init(num_cpus=4, num_gpus=0, include_dashboard=False, object_store_memory=128 * 1024**2)
     try:
@@ -450,21 +451,25 @@ def test_cpu_phase_cancellation_drains_accepted_samples_before_sleep(tmp_path, m
         worker = manager._reward_worker_groups["quality"][0]
 
         async def run():
-            scoring = asyncio.create_task(manager.async_compute_rm_score(data))
+            released = asyncio.Event()
+            options = {"on_release": released.set} if confirm_release else {}
+            scoring = asyncio.create_task(manager.async_compute_rm_score(data, **options))
             try:
                 await asyncio.wait_for(worker.wait_for_delayed_sample.remote(), timeout=30)
                 for _ in range(2):
                     scoring.cancel()
-                    completed, _ = await asyncio.wait({scoring}, timeout=0.2)
-                    if completed:
-                        break
+                    checkpoint = asyncio.Event()
+                    asyncio.get_running_loop().call_soon(checkpoint.set)
+                    await checkpoint.wait()
+                    assert not scoring.done(), "Cancellation returned before accepted RPCs completed"
+                    assert not released.is_set(), "Release was acknowledged while an accepted RPC was still running"
             finally:
                 await worker.release_delay.remote()
                 result = (await asyncio.gather(scoring, return_exceptions=True))[0]
             state = await worker.delayed_sample_state.remote()
-            assert not completed, "Cancellation returned before accepted RPCs completed"
             assert isinstance(result, asyncio.CancelledError)
             assert state == (True, True, 0)
+            assert released.is_set() == confirm_release
 
         asyncio.run(run())
         recovered = manager.compute_rm_score(_full_data())
