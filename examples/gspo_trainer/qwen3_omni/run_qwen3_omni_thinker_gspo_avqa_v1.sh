@@ -16,11 +16,10 @@ fi
 
 default_num_devices=16
 default_graph_mode=PIECEWISE
-attn_implementation=sdpa
 ascend_performance_args=()
 
 if [[ "${DEVICE}" == "npu" ]]; then
-    ascend950dt_node=false
+    default_ascend_home=/usr/local/Ascend/cann-9.1.0
     if npu-smi info 2>/dev/null | awk -F'|' '
         $2 ~ /^[[:space:]]*[0-9]+[[:space:]]*$/ && $3 ~ /^[[:space:]]*Ascend/ {
             devices++
@@ -28,20 +27,11 @@ if [[ "${DEVICE}" == "npu" ]]; then
         }
         END { exit !(devices == 8 && ascend950dt == 8) }
     '; then
-        ascend950dt_node=true
-    fi
-    default_ascend_home=/usr/local/Ascend/cann-9.1.0
-    a5_ascend_home=/usr/local/Ascend/cann-9.3.0
-    if [[ "${ascend950dt_node}" == true && -r "${a5_ascend_home}/set_env.sh" ]] &&
-        grep -Fxq 'Version=9.3.0' "${a5_ascend_home}/share/info/asc-devkit/version.info" 2>/dev/null; then
-        default_ascend_home=${a5_ascend_home}
-    fi
-    ASCEND_HOME_PATH=${ASCEND_HOME_PATH:-${default_ascend_home}}
-    if [[ "${ascend950dt_node}" == true ]] &&
-        grep -Fxq 'Version=9.3.0' "${ASCEND_HOME_PATH}/share/info/asc-devkit/version.info" 2>/dev/null; then
+        if [[ -r /usr/local/Ascend/cann-9.3.0/set_env.sh ]]; then
+            default_ascend_home=/usr/local/Ascend/cann-9.3.0
+        fi
         default_num_devices=8
         default_graph_mode=FULL_AND_PIECEWISE
-        attn_implementation=flash_attention_2
         ascend_performance_args=(
             actor_rollout_ref.actor.freeze_vision_tower=false
             actor_rollout_ref.actor.fsdp_config.optimizer_offload=false
@@ -65,6 +55,7 @@ if [[ "${DEVICE}" == "npu" ]]; then
             ascend_performance_args+=("${default_arg}")
         done
     fi
+    ASCEND_HOME_PATH=${ASCEND_HOME_PATH:-${default_ascend_home}}
     source "${ASCEND_HOME_PATH}/set_env.sh"
     source "${ASCEND_HOME_PATH}/../nnal/atb/set_env.sh"
 fi
@@ -94,7 +85,7 @@ python3 -m verl_omni.trainer.main_omni \
     data.custom_cls.name=QwenOmniRLHFDataset \
     ++data.mm_processor_kwargs.sampling_rate=16000 \
     actor_rollout_ref.model.path="${MODEL_PATH}" \
-    +actor_rollout_ref.model.override_config.attn_implementation="${attn_implementation}" \
+    ++actor_rollout_ref.model.override_config.attn_implementation=flash_attention_2 \
     actor_rollout_ref.model.lora_rank=0 \
     actor_rollout_ref.model.enable_gradient_checkpointing=true \
     actor_rollout_ref.model.use_remove_padding=true \

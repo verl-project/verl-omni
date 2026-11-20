@@ -550,13 +550,14 @@ actor_rollout_ref:
 
 ### AVQA performance defaults on Ascend 950DT
 
-On an eight-device Ascend 950DT host with CANN 9.3.0, the Qwen3-Omni AVQA recipe uses
-eight devices by default, FlashAttention 2 and `ascend_grouped_mm` for training, and
-`FULL_AND_PIECEWISE` for rollout.
+The Qwen3-Omni AVQA recipe selects FlashAttention 2 for training by default.
+On an eight-device Ascend 950DT host, the recipe also defaults to eight devices,
+`ascend_grouped_mm` for training, and `FULL_AND_PIECEWISE` for rollout.
 The generated Thinker-only deployment uses the vLLM-Omni V1 model runner.
 The recipe uses capture sizes `[1,16,128,1536]`, a batched-token limit of `1536`,
 and rollout memory utilization of `0.45`. Actor parameter offload is enabled and optimizer
-offload is disabled. GPU and other Ascend setups default to SDPA and `PIECEWISE`.
+offload is disabled. The eight-device configuration was benchmarked with CANN 9.3.0.
+GPU and other Ascend setups default to `PIECEWISE` rollout.
 
 Export `ASCEND_HOME_PATH`, `MODEL_PATH`, `TRAIN_FILE`, and `VAL_FILE` for your setup,
 then run the recipe from the repository root.
