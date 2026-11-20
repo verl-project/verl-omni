@@ -9,6 +9,7 @@ export VERL_USE_EXTERNAL_MODULES=verl_omni
 
 # DEVICE is auto-detected by querying npu-smi; override only for special cases.
 DEVICE=${DEVICE:-$(command -v npu-smi >/dev/null 2>&1 && npu-smi info >/dev/null 2>&1 && echo npu || echo gpu)}
+VLLM_OMNI_CUDAGRAPH_MODE=${VLLM_OMNI_CUDAGRAPH_MODE:-PIECEWISE}
 if [[ "${DEVICE}" != "npu" && "${DEVICE}" != "gpu" ]]; then
     echo "DEVICE must be npu or gpu, got '${DEVICE}'." >&2
     exit 2
@@ -87,7 +88,7 @@ python3 -m verl_omni.trainer.main_omni \
     +actor_rollout_ref.rollout.engine_kwargs.vllm_omni.output_mode=ar \
     +actor_rollout_ref.rollout.engine_kwargs.vllm_omni.pipeline_name=qwen3_omni_moe \
     ++actor_rollout_ref.rollout.engine_kwargs.vllm_omni.additional_config.weight_nz_mode=0 \
-    ++actor_rollout_ref.rollout.engine_kwargs.vllm_omni.compilation_config.cudagraph_mode=PIECEWISE \
+    ++actor_rollout_ref.rollout.engine_kwargs.vllm_omni.compilation_config.cudagraph_mode="${VLLM_OMNI_CUDAGRAPH_MODE}" \
     actor_rollout_ref.rollout.val_kwargs.n=1 \
     actor_rollout_ref.rollout.val_kwargs.temperature=0 \
     actor_rollout_ref.rollout.val_kwargs.top_p=1.0 \

@@ -67,6 +67,9 @@ class Qwen3OmniThinkerAdapter(OmniModelBase):
     @classmethod
     def prepare_megatron_config(cls, model_config, engine_config):
         """Validate the Thinker BSHD path and expose its nested text config."""
+        if getattr(model_config, "override_config", {}).get("experts_implementation") == "ascend_grouped_mm":
+            raise ValueError("ascend_grouped_mm requires the FSDP or FSDP2 engine for Qwen3-Omni Thinker.")
+
         from .megatron_inputs import prepare_qwen3_omni_megatron_config
 
         return prepare_qwen3_omni_megatron_config(model_config, engine_config)

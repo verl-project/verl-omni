@@ -114,6 +114,13 @@ def test_configure_model_enables_ascend_fusions_only_when_requested(monkeypatch,
     assert enable_text_fusions.call_args_list == ([call()] if enabled else [])
 
 
+def test_prepare_megatron_config_rejects_ascend_grouped_mm():
+    model_config = SimpleNamespace(override_config={"experts_implementation": "ascend_grouped_mm"})
+
+    with pytest.raises(ValueError, match="ascend_grouped_mm requires the FSDP or FSDP2 engine"):
+        Qwen3OmniThinkerAdapter.prepare_megatron_config(model_config, None)
+
+
 def test_configure_processor_binds_multimodal_pad_dedup(monkeypatch):
     """The V1 processor path must collapse image, video, and audio pad runs."""
     pytest.importorskip("transformers")

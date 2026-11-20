@@ -539,13 +539,34 @@ actor_rollout_ref:
 - `actor_rollout_ref.model.hf_config_name`: Sub-config key for the trainable component (e.g. `thinker_config`, `talker_config`).
 - `actor_rollout_ref.model.override_config`: Dict merged into HF config load (e.g. `attn_implementation`).
 - Qwen3-Omni Thinker on Ascend can select verl's grouped expert matrix multiplication for BF16
-  FSDP training with `+actor_rollout_ref.model.override_config.experts_implementation=ascend_grouped_mm`.
-  This requires SiLU experts and also applies to the Thinker policy's log-probability forward.
+  FSDP/FSDP2 training with `+actor_rollout_ref.model.override_config.experts_implementation=ascend_grouped_mm`.
+  The same override enables the Thinker RMSNorm and RoPE fusions. It requires SiLU experts, applies to
+  training and the Thinker policy's log-probability forward, and is unsupported by the Megatron engine.
 - `actor_rollout_ref.model.enable_activation_offload` / `use_remove_padding`: Memory / packing flags for the FSDP actor.
 - `actor_rollout_ref.model.lora_*` / `target_modules` / `policy_state_adapters` / `fsdp_layer_prefixes`: Same LoRA roles as diffusion (defaults differ slightly, e.g. `lora_alpha: 16`).
 - `actor_rollout_ref.model.use_liger` / `use_fused_kernels`: Unsupported by omni FSDP/FSDP2 and must remain `false`; enabling either fails before model loading. The adjacent `fused_kernel_options` / `tiled_mlp` fields are backend-specific.
 - `actor_rollout_ref.model.max_image_tokens` / `max_audio_tokens` / `max_video_tokens`: Multimodal token budgets (`null` = unset).
 - `actor_rollout_ref.model.lora` / `mtp`: Megatron-style LoRA block and multi-token prediction (speculative decoding) configs; see the YAML comments in `omni/model/omni_model.yaml`.
+
+### AVQA rollout graphs on Ascend
+
+The Qwen3-Omni AVQA recipe accepts `VLLM_OMNI_CUDAGRAPH_MODE` and defaults to `PIECEWISE`.
+The generated Thinker-only deployment uses the vLLM-Omni V1 model runner by default.
+For a three-step `FULL_AND_PIECEWISE` run on eight Ascend 950 NPUs with CANN 9.3.0,
+set `ASCEND_HOME_PATH`, `MODEL_PATH`, `TRAIN_FILE`, and `VAL_FILE` for your installation and run:
+
+```bash
+DEVICE=npu NUM_GPUS_ACTOR_ROLLOUT_REWARD=8 VLLM_OMNI_CUDAGRAPH_MODE=FULL_AND_PIECEWISE \
+  bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_avqa_v1.sh \
+  +actor_rollout_ref.model.override_config.experts_implementation=ascend_grouped_mm \
+  ++actor_rollout_ref.model.override_config.attn_implementation=flash_attention_2 \
+  actor_rollout_ref.actor.fsdp_config.optimizer_offload=false \
+  actor_rollout_ref.rollout.gpu_memory_utilization=0.45 \
+  '++actor_rollout_ref.rollout.engine_kwargs.vllm_omni.compilation_config.cudagraph_capture_sizes=[1,16,128,1536]' \
+  ++actor_rollout_ref.rollout.engine_kwargs.vllm_omni.compilation_config.max_cudagraph_capture_size=1536 \
+  trainer.total_training_steps=3 trainer.val_before_train=false trainer.test_freq=3 \
+  trainer.save_freq=-1 trainer.resume_mode=disable
+```
 
 ### `actor_rollout_ref.actor` — `OmniActorConfig` / `omni_loss`
 

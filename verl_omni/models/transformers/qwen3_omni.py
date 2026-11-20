@@ -11,7 +11,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Ascend training fusions for the Qwen3-Omni Thinker."""
 
+import logging
 from copy import copy
 
 import torch
@@ -23,6 +25,10 @@ from transformers.models.qwen3_omni_moe.modeling_qwen3_omni_moe import (
 )
 from transformers.utils import is_torch_npu_available
 
+logger = logging.getLogger(__name__)
+
+__all__ = ["enable_ascend_grouped_mm", "enable_ascend_rmsnorm_rope"]
+
 
 def _ascend_grouped_mm(
     experts: Qwen3OmniMoeThinkerTextExperts,
@@ -32,8 +38,6 @@ def _ascend_grouped_mm(
 ) -> torch.Tensor:
     if hidden_states.device.type != "npu" or hidden_states.dtype != torch.bfloat16:
         raise ValueError("ascend_grouped_mm requires BF16 Thinker activations on an Ascend NPU.")
-    if hidden_states.shape[0] == 0:
-        return torch.zeros_like(hidden_states)
 
     import torch_npu
     from verl.models.transformers.npu_patch import NPUGmmFunction
@@ -85,4 +89,4 @@ def enable_ascend_rmsnorm_rope() -> None:
     modeling.Qwen3OmniMoeThinkerTextRMSNorm.forward = rms_norm_forward_npu
     modeling.Qwen3OmniMoeTextRMSNorm.forward = rms_norm_forward_npu
     modeling.apply_rotary_pos_emb = apply_rotary_pos_emb
-    print("AVQA Ascend text fusions enabled (RMSNorm, RoPE)", flush=True)
+    logger.info("Enabled Ascend RMSNorm and RoPE fusions for Qwen3-Omni Thinker.")
