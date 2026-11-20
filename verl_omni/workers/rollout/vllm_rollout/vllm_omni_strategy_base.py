@@ -72,6 +72,10 @@ class OmniStrategyBase(ABC):
     rollout_config_cls: type
     #: Model-config dataclass the mode expects. Subclasses must set this.
     model_config_cls: type
+    #: Engine-client class ``run_server`` builds; a mode serving a different
+    #: client (e.g. duplex sessions instead of ``generate``) overrides this.
+    #: Looked up on the class so unconfigured stand-ins fall back cleanly.
+    engine_client_cls: type | None = None
     #: Stages carrying a vLLM LoRA manager; the server routes adapter-delta
     #: weight syncs there. ``None`` (default) when the rollout has no LoRA —
     #: diffusion LoRA rides the diffusion LoRA manager and never sets this.
