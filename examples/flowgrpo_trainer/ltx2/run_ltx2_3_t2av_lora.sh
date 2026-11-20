@@ -115,7 +115,8 @@ python3 -m verl_omni.trainer.main_diffusion \
     '+reward.reward_functions.clap.weight=1.0' \
     '+reward.reward_functions.clap.device=cuda:0' \
     '+reward.reward_functions.clap.model_name_or_path=laion/larger_clap_general' \
-    '+reward/models@reward.models.imagebind=imagebind' \
+    'hydra.searchpath=[pkg://verl_omni.utils.reward_score]' \
+    '+presets@reward.models.imagebind=imagebind' \
     '+reward.reward_functions.imagebind.path=pkg://verl_omni.utils.reward_score.imagebind' \
     '+reward.reward_functions.imagebind.name=compute_score_native' \
     '+reward.reward_functions.imagebind.weight=1.0' \

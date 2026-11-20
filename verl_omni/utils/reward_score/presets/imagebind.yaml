@@ -1,4 +1,4 @@
-# Worker-local native ImageBind deployment for the H3 and LTX2 recipes.
+# Shared native ImageBind deployment for the H3 and LTX2 recipes.
 backend: native
 
 model_path: .checkpoints/imagebind_huge.pth

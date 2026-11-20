@@ -455,8 +455,8 @@ reward pool and synchronous V1 diffusion training. See the
 [FSDP2 reward model design](../advanced/fsdp2_reward_models.md) for configuration,
 lifecycle guarantees and the supported scope.
 
-The LTX2 and MiniMax-H3 ImageBind recipes select
-`+reward/models@reward.models.imagebind=imagebind`. Set
+The LTX2 and MiniMax-H3 recipes add `pkg://verl_omni.utils.reward_score` to
+Hydra's search path and select `+presets@reward.models.imagebind=imagebind`. Set
 `reward.models.imagebind.model_path` to the ImageBind checkpoint. The scorer
 `compute_score_native` uses decoded `video_preview` and/or `audio` artifacts
 and the sample's ground-truth text according to `mode`. For `all`, the
