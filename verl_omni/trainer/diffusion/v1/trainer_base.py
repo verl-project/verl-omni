@@ -1255,7 +1255,9 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         rollout_seed_cfg = self.config.actor_rollout_ref.rollout.get("seed")
         if rollout_seed_cfg is None:
             return
-        tu.assign_non_tensor_data(batch, "rollout_seed", int(rollout_seed_cfg) + self.global_steps - 1)
+        batch["rollout_seed"] = torch.full(
+            (num_prompts,), int(rollout_seed_cfg) + self.global_steps - 1, dtype=torch.int64
+        )
         # ``index`` restarts in every generation batch, and refills reuse this
         # step's seed base, so seed from the position among the step's prompts.
         if self._rollout_seed_step != self.global_steps:
@@ -2065,24 +2067,27 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             for key, tag in items.items()
             if tag.get("is_prompt", False) and tag.get("status") in ("pending", "running")
         ]
+        prompt_uids = {key for key, tag in items.items() if tag.get("is_prompt", False)}
+        inflight_uid_set = set(inflight_uids)
+        # Checkpoints precede the sampled rows' final clear in fit(). Rows
+        # without a prompt were already consumed; unfinished groups restart.
+        discarded_trajectory_keys = [
+            key
+            for key, tag in items.items()
+            if not tag.get("is_prompt", False)
+            and (self._trajectory_uid(key) in inflight_uid_set or self._trajectory_uid(key) not in prompt_uids)
+        ]
+        if discarded_trajectory_keys:
+            tq.kv_clear(keys=discarded_trajectory_keys, partition_id=partition_id)
         if not inflight_uids:
             return 0
 
         batch = tq.kv_batch_get(keys=inflight_uids, partition_id=partition_id)
-        inflight_uid_set = set(inflight_uids)
-        partial_trajectory_keys = [
-            key
-            for key, tag in items.items()
-            if not tag.get("is_prompt", False) and self._trajectory_uid(key) in inflight_uid_set
-        ]
-        if partial_trajectory_keys:
-            tq.kv_clear(keys=partial_trajectory_keys, partition_id=partition_id)
-
         tu.assign_non_tensor_data(batch, "global_steps", self.global_steps)
-        # The TQ round trip drops ``rollout_seed`` (NonTensorData). Re-stamp the seed
-        # positions too: prompts submitted later in this step count from the same
-        # step-wide counter and would otherwise reuse the restored ones.
-        self._assign_rollout_seed(batch, len(inflight_uids))
+        # Older checkpoints did not persist the seed tensor. New checkpoints
+        # retain both the original base and prompt position for whole-sample retries.
+        if "rollout_seed" not in batch:
+            self._assign_rollout_seed(batch, len(inflight_uids))
         tags = [{"is_prompt": True, "status": "pending", "global_steps": self.global_steps} for _ in inflight_uids]
         from tensordict.tensorclass import NonTensorData
 
@@ -2095,9 +2100,9 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         self.agent_loop_manager.generate_sequences(batch)
 
         logger.info(
-            "Re-issued %d in-flight prompts for step %d; cleared %d partial trajectories",
+            "Re-issued %d in-flight prompts for step %d; cleared %d discarded trajectories",
             len(inflight_uids),
             self.global_steps,
-            len(partial_trajectory_keys),
+            len(discarded_trajectory_keys),
         )
         return len(inflight_uids)

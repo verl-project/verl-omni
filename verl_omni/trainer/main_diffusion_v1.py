@@ -116,9 +116,14 @@ def run_diffusion_v1(config, task_runner_class=None) -> None:
         ray.timeline(filename=timeline_json_file)
 
 
-def finish_training_resources(trainer, config, close_queue, primary_error=None):
+def finish_training_resources(trainer, config, close_queue, primary_error=None, close_agent_loops=None):
     """Close the opted-in FSDP deployment and queue on every fit/init exit."""
     errors = [] if primary_error is None else [primary_error]
+    if close_agent_loops is not None:
+        try:
+            close_agent_loops()
+        except BaseException as exc:
+            errors.append(exc)
     if has_fsdp_reward_models(config) and trainer is not None:
         manager = getattr(trainer, "reward_loop_manager", None)
         if manager is not None:
@@ -168,6 +173,13 @@ class DiffusionTaskRunnerV1:
                 reward_loop_worker_handles=self.trainer.get_reward_handles(),
             )
 
+    def _close_agent_loops(self):
+        if self.agent_loop_manager is None or self.config.actor_rollout_ref.rollout.agent.get(
+            "agent_loop_manager_class"
+        ):
+            return
+        ray.get([worker.close.remote() for worker in self.agent_loop_manager.agent_loop_workers], timeout=30)
+
     def run(self, config: DictConfig):
         """Run the v1 diffusion training process."""
         import transfer_queue as tq
@@ -192,7 +204,7 @@ class DiffusionTaskRunnerV1:
         except BaseException as exc:
             primary_error = exc
         finally:
-            finish_training_resources(self.trainer, config, tq.close, primary_error)
+            finish_training_resources(self.trainer, config, tq.close, primary_error, self._close_agent_loops)
 
 
 @hydra.main(config_path="./config", config_name="diffusion_trainer", version_base=None)
