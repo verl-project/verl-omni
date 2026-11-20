@@ -1,0 +1,13 @@
+# Shared native ImageBind deployment for the H3 and LTX2 recipes.
+backend: native
+
+model_path: .checkpoints/imagebind_huge.pth
+
+# Reuse the loaded weights across reward phases, as in the local scorer.
+offload: false
+
+placement:
+  devices: [1]
+
+executor:
+  model: verl_omni.utils.reward_score.imagebind:ImageBindModel

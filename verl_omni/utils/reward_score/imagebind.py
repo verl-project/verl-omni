@@ -51,33 +51,37 @@ _DEFAULT_WEIGHTS = {
 }
 
 
+def _create_imagebind(device, model_path: str):
+    try:
+        from imagebind.models import imagebind_model
+    except ImportError as exc:
+        raise ImportError(
+            "ImageBind reward requires `pip install git+https://github.com/facebookresearch/ImageBind.git` "
+            "and is licensed CC-BY-NC-SA 4.0 for non-commercial use."
+        ) from exc
+    warnings.warn(
+        "ImageBind is licensed CC-BY-NC-SA 4.0 (NonCommercial).",
+        stacklevel=2,
+    )
+
+    model = imagebind_model.imagebind_huge(pretrained=False)
+    if not os.path.exists(model_path):
+        print(f"Downloading ImageBind weights to {model_path} ...")
+        os.makedirs(os.path.dirname(os.path.abspath(model_path)), exist_ok=True)
+        torch.hub.download_url_to_file(
+            "https://dl.fbaipublicfiles.com/imagebind/imagebind_huge.pth",
+            model_path,
+            progress=True,
+        )
+
+    model.load_state_dict(torch.load(model_path, weights_only=True))
+    return model.to(device).eval()
+
+
 def _load_imagebind(device: str, model_path: str):
     key = (model_path, device)
     if key not in _MODEL_CACHE:
-        try:
-            from imagebind.models import imagebind_model
-        except ImportError as exc:
-            raise ImportError(
-                "ImageBind reward requires `pip install git+https://github.com/facebookresearch/ImageBind.git` "
-                "and is licensed CC-BY-NC-SA 4.0 for non-commercial use."
-            ) from exc
-        warnings.warn(
-            "ImageBind is licensed CC-BY-NC-SA 4.0 (NonCommercial).",
-            stacklevel=2,
-        )
-
-        model = imagebind_model.imagebind_huge(pretrained=False)
-        if not os.path.exists(model_path):
-            print(f"Downloading ImageBind weights to {model_path} ...")
-            os.makedirs(os.path.dirname(os.path.abspath(model_path)), exist_ok=True)
-            torch.hub.download_url_to_file(
-                "https://dl.fbaipublicfiles.com/imagebind/imagebind_huge.pth",
-                model_path,
-                progress=True,
-            )
-
-        model.load_state_dict(torch.load(model_path, weights_only=True))
-        _MODEL_CACHE[key] = model.to(device).eval()
+        _MODEL_CACHE[key] = _create_imagebind(device, model_path)
     return _MODEL_CACHE[key]
 
 
@@ -190,11 +194,13 @@ def _cosine_similarity(first: torch.Tensor, second: torch.Tensor) -> float:
     return (first * second).sum(dim=-1)[0].float().item()
 
 
-def _compute_similarities(embeddings: dict, modality_type) -> dict[str, float]:
+def _compute_similarities(embeddings: dict) -> dict[str, float]:
+    from imagebind.models.imagebind_model import ModalityType
+
     modality_pairs = {
-        "audio_video": (modality_type.AUDIO, modality_type.VISION),
-        "text_audio": (modality_type.TEXT, modality_type.AUDIO),
-        "text_video": (modality_type.TEXT, modality_type.VISION),
+        "audio_video": (ModalityType.AUDIO, ModalityType.VISION),
+        "text_audio": (ModalityType.TEXT, ModalityType.AUDIO),
+        "text_video": (ModalityType.TEXT, ModalityType.VISION),
     }
     return {
         name: _cosine_similarity(embeddings[first], embeddings[second])
@@ -211,6 +217,51 @@ def _aggregate_similarities(similarities: dict[str, float], weights: Mapping[str
     return sum(float(selected_weights[name]) * similarities[name] for name in _PAIR_MODES)
 
 
+def _select_media(ground_truth: str, extra_info: dict, mode: str):
+    from verl_omni.pipelines.rollout_media import select_artifact
+
+    if mode not in _SUPPORTED_MODES:
+        raise ValueError(f"Unknown ImageBind mode {mode!r}; expected one of: {', '.join(_SUPPORTED_MODES)}.")
+
+    artifacts = extra_info.get("media_artifacts", {})
+    video = audio = text = None
+    if mode in {"audio_video", "text_video", "all"}:
+        video = select_artifact(artifacts, name="video_preview", modality="video", representation="decoded")
+    if mode in {"audio_video", "text_audio", "all"}:
+        audio = select_artifact(artifacts, name="audio", modality="audio", representation="decoded")
+        if audio.spec.layout != "CT":
+            raise ValueError(f"ImageBind requires canonical CT audio, got {audio.spec.layout}")
+    if mode in {"text_audio", "text_video", "all"}:
+        text = ground_truth or ""
+    return text, audio, video
+
+
+def _prepare_inputs(text, audio, video, device):
+    try:
+        from imagebind.models.imagebind_model import ModalityType
+    except ImportError as exc:
+        raise ImportError("ImageBind reward requires the non-commercial ImageBind package.") from exc
+
+    inputs = {}
+    if text is not None:
+        inputs[ModalityType.TEXT] = _preprocess_text(text, device)
+    if audio is not None:
+        inputs[ModalityType.AUDIO] = _preprocess_audio(audio.data, audio.spec.sample_rate, device)
+    if video is not None:
+        inputs[ModalityType.VISION] = _preprocess_video(video, device)
+    return inputs
+
+
+def _score_result(similarities, mode, weights):
+    if mode == "all":
+        score = _aggregate_similarities(similarities, weights)
+        return {
+            "score": score,
+            **{f"{name}_similarity": value for name, value in similarities.items()},
+        }
+    return {"score": similarities[mode]}
+
+
 def compute_score(
     data_source: str,
     solution_image,
@@ -223,48 +274,43 @@ def compute_score(
     **kwargs,
 ) -> dict:
     """Compute a configured ImageBind cross-modal cosine similarity."""
-    del data_source, kwargs
-    try:
-        from imagebind.models.imagebind_model import ModalityType
-    except ImportError as exc:
-        raise ImportError("ImageBind reward requires the non-commercial ImageBind package.") from exc
-
-    if mode not in _SUPPORTED_MODES:
-        raise ValueError(f"Unknown ImageBind mode {mode!r}; expected one of: {', '.join(_SUPPORTED_MODES)}.")
-
     device = device or get_device_name()
-    need_text = mode in {"text_audio", "text_video", "all"}
-    need_audio = mode in {"audio_video", "text_audio", "all"}
-    need_video = mode in {"audio_video", "text_video", "all"}
-
-    from verl_omni.pipelines.rollout_media import select_artifact
-
-    artifacts = extra_info.get("media_artifacts", {})
-    if need_video:
-        solution_image = select_artifact(artifacts, name="video_preview", modality="video", representation="decoded")
-    if need_audio:
-        audio_artifact = select_artifact(artifacts, name="audio", modality="audio", representation="decoded")
-        if audio_artifact.spec.layout != "CT":
-            raise ValueError(f"ImageBind requires canonical CT audio, got {audio_artifact.spec.layout}")
-    inputs = {}
-    if need_text:
-        inputs[ModalityType.TEXT] = _preprocess_text(ground_truth or "", device)
-    if need_audio:
-        inputs[ModalityType.AUDIO] = _preprocess_audio(audio_artifact.data, audio_artifact.spec.sample_rate, device)
-    if need_video:
-        if solution_image is None:
-            raise ValueError("ImageBind reward requires video in solution_image.")
-        inputs[ModalityType.VISION] = _preprocess_video(solution_image, device)
-
+    inputs = _prepare_inputs(*_select_media(ground_truth, extra_info, mode), device)
     with _MODEL_LOCK, torch.no_grad():
         model = _load_imagebind(device, model_name_or_path)
-        embeddings = model(inputs)
-        similarities = _compute_similarities(embeddings, ModalityType)
+        similarities = _compute_similarities(model(inputs))
+    return _score_result(similarities, mode, weights)
 
-    if mode == "all":
-        score = _aggregate_similarities(similarities, weights)
-        return {
-            "score": score,
-            **{f"{name}_similarity": value for name, value in similarities.items()},
-        }
-    return {"score": similarities[mode]}
+
+class ImageBindModel:
+    """ImageBind instance owned by one native reward executor."""
+
+    def __init__(self, model_path: str, device):
+        self.device = device
+        self.model = _create_imagebind(device, model_path)
+        self._infer_lock = threading.Lock()
+
+    @torch.inference_mode()
+    def infer(self, text, audio, video) -> dict[str, torch.Tensor]:
+        """Return embeddings in model dtype on the worker's assigned device."""
+        inputs = _prepare_inputs(text, audio, video, self.device)
+        with self._infer_lock:
+            return self.model(inputs)
+
+    def close(self) -> None:
+        """Release the worker's model after outstanding inference has drained."""
+        self.model = None
+
+
+async def compute_score_native(
+    ground_truth: str,
+    extra_info: dict,
+    *,
+    reward_model,
+    mode: str = _DEFAULT_MODE,
+    weights: Mapping[str, float] | None = None,
+) -> dict:
+    """Score one sample through its configured ImageBind deployment."""
+    media = _select_media(ground_truth, extra_info, mode)
+    embeddings = await reward_model.infer(*media)
+    return _score_result(_compute_similarities(embeddings), mode, weights)

@@ -41,9 +41,9 @@ def diffusion_persisted_tq_fields(
     the [batch, num_timesteps] tensor back would be dead TQ traffic.
     """
     if algorithm == "policy_gradient":
-        return ["advantages", "returns", "sample_level_scores", "sample_level_rewards"]
+        return ["advantages", "returns", "sample_level_scores", "sample_level_rewards", "reward_extra_info"]
     if algorithm == "direct_preference":
-        return ["sample_level_scores", "sample_level_rewards"]
+        return ["sample_level_scores", "sample_level_rewards", "reward_extra_info"]
     raise ValueError(f"Unsupported diffusion trainer algorithm: {algorithm}")
 
 
@@ -97,9 +97,17 @@ def diffusion_metric_tq_fields(
 ) -> list[str]:
     """Return fields persisted and consumed by diffusion metric computation."""
     if algorithm == "policy_gradient":
-        return ["sample_level_rewards", "sample_level_scores", "advantages", "returns", "uid", "extra_fields"]
+        return [
+            "sample_level_rewards",
+            "sample_level_scores",
+            "advantages",
+            "returns",
+            "uid",
+            "extra_fields",
+            "reward_extra_info",
+        ]
     if algorithm == "direct_preference":
-        return ["sample_level_rewards", "sample_level_scores", "uid", "extra_fields"]
+        return ["sample_level_rewards", "sample_level_scores", "uid", "extra_fields", "reward_extra_info"]
     raise ValueError(f"Unsupported diffusion trainer algorithm: {algorithm}")
 
 
@@ -228,7 +236,7 @@ def put_dataproto_fields_to_tq(
     data: DataProto,
     fields: list[str],
 ) -> None:
-    """Write selected ``DataProto`` batch fields back to TransferQueue.
+    """Write selected tensors and trainer-computed reward diagnostics back to TransferQueue.
 
     Args:
         batch_meta: ``KVBatchMeta`` whose ``keys`` and ``partition_id`` target
@@ -238,9 +246,11 @@ def put_dataproto_fields_to_tq(
     """
     output: dict[str, Any] = {}
     for field in fields:
-        if field not in data.batch:
-            continue
-        output[field] = data.batch[field]
+        if field in data.batch:
+            output[field] = data.batch[field]
+        elif field == "reward_extra_info" and (keys := data.meta_info.get("reward_extra_keys")):
+            columns = [data.non_tensor_batch[key].tolist() for key in keys]
+            output[field] = [dict(zip(keys, row, strict=True)) for row in zip(*columns, strict=True)]
     if not output:
         return
     sort_idx = sort_diffusion_tq_keys(list(batch_meta.keys))
