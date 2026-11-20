@@ -33,7 +33,7 @@ def test_ascend_grouped_mm_matches_eager_values_and_gradients(top_k):
     from transformers.models.qwen3_omni_moe.configuration_qwen3_omni_moe import Qwen3OmniMoeTextConfig
     from transformers.models.qwen3_omni_moe.modeling_qwen3_omni_moe import Qwen3OmniMoeThinkerTextExperts
 
-    from verl_omni.pipelines.qwen3_omni.ascend_experts import _ascend_grouped_mm
+    from verl_omni.models.transformers.qwen3_omni import _ascend_grouped_mm
 
     config = Qwen3OmniMoeTextConfig(
         hidden_size=128, moe_intermediate_size=256, num_experts=8, num_experts_per_tok=top_k, hidden_act="silu"

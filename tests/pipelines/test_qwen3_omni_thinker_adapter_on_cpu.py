@@ -50,7 +50,7 @@ def test_ascend_expert_dispatch_is_local_to_the_selected_thinker(monkeypatch):
         Qwen3OmniMoeThinkerTextModel,
     )
 
-    from verl_omni.pipelines.qwen3_omni import ascend_experts
+    from verl_omni.models.transformers import qwen3_omni
 
     config = Qwen3OmniMoeTextConfig(
         vocab_size=16,
@@ -71,10 +71,10 @@ def test_ascend_expert_dispatch_is_local_to_the_selected_thinker(monkeypatch):
     original_parameters = dict(experts.named_parameters())
     original_class_forward = type(experts).forward
 
-    monkeypatch.setattr(ascend_experts, "is_torch_npu_available", lambda: True)
+    monkeypatch.setattr(qwen3_omni, "is_torch_npu_available", lambda: True)
     monkeypatch.setattr(type(ALL_EXPERTS_FUNCTIONS), "_global_mapping", ALL_EXPERTS_FUNCTIONS._global_mapping.copy())
-    monkeypatch.setattr(ascend_experts, "_ascend_grouped_mm", lambda *args: args[1])
-    ascend_experts.enable_ascend_grouped_mm(selected_model)
+    monkeypatch.setattr(qwen3_omni, "_ascend_grouped_mm", lambda *args: args[1])
+    qwen3_omni.enable_ascend_grouped_mm(selected_model)
 
     assert selected_model.config._experts_implementation == "ascend_grouped_mm"
     assert experts.config is selected_model.config
@@ -89,7 +89,7 @@ def test_ascend_expert_dispatch_is_local_to_the_selected_thinker(monkeypatch):
 
 @pytest.mark.parametrize("option,enabled", [(None, False), ("grouped_mm", False), ("ascend_grouped_mm", True)])
 def test_configure_model_enables_ascend_fusions_only_when_requested(monkeypatch, option, enabled):
-    from verl_omni.pipelines.qwen3_omni import ascend_experts, ascend_text_fusions
+    from verl_omni.models.transformers import qwen3_omni
 
     text_model = object()
     thinker = SimpleNamespace(
@@ -101,8 +101,8 @@ def test_configure_model_enables_ascend_fusions_only_when_requested(monkeypatch,
     module = SimpleNamespace(thinker=thinker, talker=object())
     enable_experts = Mock()
     enable_text_fusions = Mock()
-    monkeypatch.setattr(ascend_experts, "enable_ascend_grouped_mm", enable_experts)
-    monkeypatch.setattr(ascend_text_fusions, "enable_ascend_rmsnorm_rope", enable_text_fusions)
+    monkeypatch.setattr(qwen3_omni, "enable_ascend_grouped_mm", enable_experts)
+    monkeypatch.setattr(qwen3_omni, "enable_ascend_rmsnorm_rope", enable_text_fusions)
 
     result = Qwen3OmniThinkerAdapter.configure_model(
         module, SimpleNamespace(override_config={"experts_implementation": option})

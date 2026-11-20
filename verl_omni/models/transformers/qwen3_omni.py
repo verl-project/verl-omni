@@ -16,6 +16,7 @@ from copy import copy
 
 import torch
 from transformers.integrations.moe import ALL_EXPERTS_FUNCTIONS
+from transformers.models.qwen3_omni_moe import modeling_qwen3_omni_moe as modeling
 from transformers.models.qwen3_omni_moe.modeling_qwen3_omni_moe import (
     Qwen3OmniMoeThinkerTextExperts,
     Qwen3OmniMoeThinkerTextModel,
@@ -60,3 +61,28 @@ def enable_ascend_grouped_mm(text_model: Qwen3OmniMoeThinkerTextModel) -> None:
     for experts in text_model.modules():
         if isinstance(experts, Qwen3OmniMoeThinkerTextExperts):
             experts.config = text_model.config
+
+
+def enable_ascend_rmsnorm_rope() -> None:
+    from verl.models.transformers.npu_patch import apply_rotary_pos_emb_npu, rms_norm_forward_npu
+
+    if modeling.Qwen3OmniMoeThinkerTextRMSNorm.forward is rms_norm_forward_npu:
+        return
+
+    eager_rope = modeling.apply_rotary_pos_emb
+
+    def apply_rotary_pos_emb(
+        q: torch.Tensor,
+        k: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        unsqueeze_dim: int = 1,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if q.device.type == "npu" and q.dtype == torch.bfloat16 and k.dtype == torch.bfloat16:
+            return apply_rotary_pos_emb_npu(q, k, cos, sin, unsqueeze_dim=unsqueeze_dim)
+        return eager_rope(q, k, cos, sin, unsqueeze_dim=unsqueeze_dim)
+
+    modeling.Qwen3OmniMoeThinkerTextRMSNorm.forward = rms_norm_forward_npu
+    modeling.Qwen3OmniMoeTextRMSNorm.forward = rms_norm_forward_npu
+    modeling.apply_rotary_pos_emb = apply_rotary_pos_emb
+    print("AVQA Ascend text fusions enabled (RMSNorm, RoPE)", flush=True)

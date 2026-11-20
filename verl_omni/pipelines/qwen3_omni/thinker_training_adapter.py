@@ -92,8 +92,7 @@ class Qwen3OmniThinkerAdapter(OmniModelBase):
         """
         module = super().configure_model(module, model_config)
         if getattr(model_config, "override_config", {}).get("experts_implementation") == "ascend_grouped_mm":
-            from .ascend_experts import enable_ascend_grouped_mm
-            from .ascend_text_fusions import enable_ascend_rmsnorm_rope
+            from verl_omni.models.transformers.qwen3_omni import enable_ascend_grouped_mm, enable_ascend_rmsnorm_rope
 
             enable_ascend_grouped_mm(module.thinker.model)
             enable_ascend_rmsnorm_rope()
