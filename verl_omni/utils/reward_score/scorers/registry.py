@@ -49,8 +49,8 @@ __all__ = [
 
 _REGISTERED: dict[str, type[RewardScorer]] = {}
 _REGISTRY_LOCK = threading.RLock()
-_PENDING: dict[str, dict[str, type[RewardScorer]]] = {}
-_FILE_INITIALIZING: set[str] = set()
+_PENDING: dict[ModuleType, dict[str, type[RewardScorer]]] = {}
+_FILE_INITIALIZING: dict[str, dict[str, type[RewardScorer]]] = {}
 _FILE_MODULES: dict[str, ModuleType] = {}
 _FILE_IMPORT_LOCK = threading.RLock()
 _FILE_LOCKS: dict[str, Any] = {}
@@ -58,13 +58,15 @@ _FILE_LOCKS: dict[str, Any] = {}
 
 def _settle_registrations() -> None:
     """Publish completed package imports; discard failed imports under the registry lock."""
-    for name, entries in list(_PENDING.items()):
-        module = sys.modules.get(name)
+    for module, entries in list(_PENDING.items()):
+        name = module.__name__
+        if sys.modules.get(name) is not module:
+            del _PENDING[module]
+            continue
         if name in _FILE_INITIALIZING or getattr(getattr(module, "__spec__", None), "_initializing", False):
             continue
-        del _PENDING[name]
-        if module is not None:
-            _REGISTERED.update(entries)
+        del _PENDING[module]
+        _REGISTERED.update(entries)
 
 
 def register_scorer(name: str) -> Callable[[type[RewardScorer]], type[RewardScorer]]:
@@ -100,7 +102,14 @@ def register_scorer(name: str) -> Callable[[type[RewardScorer]], type[RewardScor
             _settle_registrations()
             registered = _REGISTERED.get(name)
             if registered is None:
-                registered = next((entries[name] for entries in _PENDING.values() if name in entries), None)
+                registered = next(
+                    (
+                        entries[name]
+                        for entries in (*_PENDING.values(), *_FILE_INITIALIZING.values())
+                        if name in entries
+                    ),
+                    None,
+                )
             if registered is not None and registered is not cls:
                 raise ValueError(
                     f"Reward scorer {name!r} has already been registered: "
@@ -110,10 +119,11 @@ def register_scorer(name: str) -> Callable[[type[RewardScorer]], type[RewardScor
             if registered is cls and name in _REGISTERED:
                 return cls
             module = sys.modules.get(registration_module)
-            if registration_module in _FILE_INITIALIZING or getattr(
-                getattr(module, "__spec__", None), "_initializing", False
-            ):
-                _PENDING.setdefault(registration_module, {})[name] = cls
+            if registration_module in _FILE_INITIALIZING:
+                # verl's file loader publishes the module only after exec_module returns.
+                _FILE_INITIALIZING[registration_module][name] = cls
+            elif getattr(getattr(module, "__spec__", None), "_initializing", False):
+                _PENDING.setdefault(module, {})[name] = cls
             else:
                 _REGISTERED[name] = cls
         return cls
@@ -202,19 +212,14 @@ def load_reward_object(module_path: str, object_name: str) -> Any:
                 if module is None:
                     module_name = "_verl_omni_reward_" + hashlib.sha256(key.encode()).hexdigest()
                     with _REGISTRY_LOCK:
-                        _FILE_INITIALIZING.add(module_name)
+                        _FILE_INITIALIZING[module_name] = {}
                     try:
                         module = load_module(key, module_name=module_name)
-                    except BaseException:
                         with _REGISTRY_LOCK:
-                            _PENDING.pop(module_name, None)
-                        raise
-                    else:
-                        with _REGISTRY_LOCK:
-                            _REGISTERED.update(_PENDING.pop(module_name, {}))
+                            _REGISTERED.update(_FILE_INITIALIZING[module_name])
                     finally:
                         with _REGISTRY_LOCK:
-                            _FILE_INITIALIZING.discard(module_name)
+                            _FILE_INITIALIZING.pop(module_name)
                 with _FILE_IMPORT_LOCK:
                     _FILE_MODULES[key] = module
             else:
@@ -273,7 +278,11 @@ def _source_module(path: Path) -> ModuleType | None:
                 break
         else:
             if spec is not None and spec.origin and Path(spec.origin).resolve() == path:
-                return importlib.import_module(name)
+                module = importlib.import_module(name)
+                origin = vars(module).get("__file__")
+                if not isinstance(origin, str) or Path(origin).resolve() != path:
+                    raise ImportError(f"Reward module {name!r} resolved to {origin!r}; expected {str(path)!r}")
+                return module
     return None
 
 

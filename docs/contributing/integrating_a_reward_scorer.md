@@ -49,7 +49,7 @@ class MyScorer(RewardScorer):
     max_batch_size = 16            # executor packs up to this many requests per forward
     supports_cpu_offload = True    # sleep() can park weights on CPU; wake_up() restores
 
-    def __init__(self, model_path=..., ...):   # configuration only — no weights, no device
+    def __init__(self, model_path=None):   # configuration only — no weights, no device
         ...
 
     def load(self, device):                    # construct weights, place on device
@@ -65,9 +65,8 @@ class MyScorer(RewardScorer):
     # and self.device in load() inherits all three defaults; override a
     # hook only for extra bookkeeping. The executor — never the scorer —
     # calls them, and it owns gc + accelerator-cache clearing.
-    def wake_up(self): ...                     # default: model.to(self.device)
-    def sleep(self): ...                       # default: model.to("cpu")
-    def close(self): ...                       # default: drop self.model
+    # Inherited defaults: wake_up() moves model to self.device; sleep() moves
+    # model to CPU; close() drops model. Keep those methods unless extra work is needed.
 ```
 
 Then add the import to `scorers/__init__.py` (registration is an import side
@@ -110,7 +109,8 @@ supervisor/operator must terminate the hosting worker process and confirm its
 death before recreating the worker and model. For a Ray actor, use
 `ray.kill(worker, no_restart=True)` on the affected actor, then confirm actor
 termination; for a colocated worker, terminate the containing process/job. Fail
-its outstanding requests and recover through the normal worker/job restart path.
+its outstanding requests and restart the job. Recreating only the actor does
+not replace handles held by the reward worker groups or the native owner.
 Do not retry `sleep()`/`close()` in that process or offload weights while its
 forward may still run. The executor does not automatically kill workers or impose
 a universal scoring deadline: this escalation belongs to the deployment owner.
@@ -151,6 +151,9 @@ name lookup is a separate API. A resolved `RewardScorer` subclass uses batch
 scoring and scorer lifecycle hooks. Other native model classes or factories
 retain the legacy `infer()` adapter; they are not validated as `RewardScorer`
 subclasses. The legacy adapter requires an `infer()` method when invoked.
+Class-based `RewardScorer` models require flat `placement.devices` (complete
+replicas). `placement.replica_groups` supports only the legacy
+`PickScoreNativeModel` adapter, not class-based scorers.
 The named model's top-level `model_path`, when set,
 is forwarded to the scorer constructor as a `model_path` kwarg —
 `executor.kwargs.model_path` takes precedence; a scorer whose constructor

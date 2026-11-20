@@ -645,7 +645,7 @@ class ScorerMicrobatcher:
                 batch = []
         except asyncio.CancelledError:
             # Unsettled futures would hang shielded submitters and the executor's idle gate.
-            await self._fail_pending(batch)
+            await await_owned(self._fail_pending(batch))
             raise
 
     async def _fail_pending(
@@ -677,6 +677,8 @@ class ScorerMicrobatcher:
     async def _run_batch(self, batch: list[tuple[dict[str, Any], asyncio.Future]]) -> None:
         try:
             results = await self._forward([request for request, _ in batch])
+            if asyncio.current_task().cancelling():
+                raise asyncio.CancelledError
             if not isinstance(results, list | tuple) or len(results) != len(batch):
                 raise ValueError(
                     f"score_batch for {self._name!r} must return one entry per request in input order, "
@@ -684,10 +686,11 @@ class ScorerMicrobatcher:
                     f"for {len(batch)} requests"
                 )
         except BaseException as error:
+            # A scorer may translate or suppress cancellation while cleaning up.
+            # The consumer still owns its requested cancellation after it settles.
+            if asyncio.current_task().cancelling():
+                raise asyncio.CancelledError from error
             if isinstance(error, asyncio.CancelledError):
-                if asyncio.current_task().cancelling():
-                    # Only cancellation requested on this consumer closes admission.
-                    raise
                 failure = RuntimeError(f"Reward scorer {self._name!r} cancelled its batch")
                 failure.__cause__ = error
                 error = failure

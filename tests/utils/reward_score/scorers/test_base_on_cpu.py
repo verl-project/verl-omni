@@ -565,3 +565,72 @@ def test_standalone_import_does_not_block_a_different_file_from_package_init(tmp
     assert "IMPORT_LOCK_PROBE_ENTERED" in result.stdout, result.stderr
     assert result.returncode == 0, result.stdout + result.stderr
     assert "IMPORT_LOCK_PROBE_PASSED" in result.stdout
+
+
+@pytest.mark.parametrize("retry_through_file", [False, True])
+def test_failed_direct_import_retry_uses_the_new_module_owner(scorer_package, retry_through_file):
+    import importlib
+    import sys
+
+    from verl_omni.utils.reward_score.scorers import registry
+
+    name = scorer_package.name
+    state = importlib.import_module(name + ".state")
+    state.fail = True
+    source = scorer_package.source
+    source.write_text(source.read_text() + "\nif state.fail:\n    raise RuntimeError('direct import failed')\n")
+    with pytest.raises(RuntimeError, match="direct import failed"):
+        importlib.import_module(name + ".scorer")
+    assert name + ".scorer" not in sys.modules
+    state.fail = False
+    print("DIRECT_IMPORT_RETRY_ASSERT_ENTERED", retry_through_file, flush=True)
+    if retry_through_file:
+        scorer = registry.load_reward_object(str(source), "CustomScorer")
+    else:
+        scorer = importlib.import_module(name + ".scorer").CustomScorer
+    assert registry.get_scorer_cls(name) is scorer
+    assert state.loads == 2
+
+
+def test_file_lookup_rejects_package_path_redirection(scorer_package, tmp_path):
+    from verl_omni.utils.reward_score.scorers import registry
+
+    source = scorer_package.source
+    source.write_text("value = 'requested'\n")
+    redirected = tmp_path / "redirected"
+    redirected.mkdir()
+    (redirected / "scorer.py").write_text("value = 'redirected'\n")
+    (scorer_package.folder / "__init__.py").write_text(f"__path__ = [{str(redirected)!r}]\n")
+    print("MODULE_ORIGIN_ASSERT_ENTERED", flush=True)
+    with pytest.raises(ImportError, match="resolved to.*expected") as error:
+        registry.load_reward_object(str(source), "value")
+    assert str(source.resolve()) in str(error.value)
+    assert str(redirected / "scorer.py") in str(error.value)
+    assert str(source.resolve()) not in registry._FILE_MODULES
+    assert registry.load_reward_object(str(source), "value") == "requested"
+
+
+def test_documented_scorer_scaffold_parses_and_inherits_lifecycle():
+    import ast
+    import re
+    from pathlib import Path
+
+    doc = Path(__file__).resolve().parents[4] / "docs/contributing/integrating_a_reward_scorer.md"
+    examples = [
+        block for block in re.findall(r"```python\n(.*?)```", doc.read_text(), re.DOTALL) if "class MyScorer(" in block
+    ]
+    assert len(examples) == 1
+    tree = ast.parse(examples[0])
+    cls = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "MyScorer")
+    cls.decorator_list = []
+    namespace = {"RewardScorer": RewardScorer}
+    exec(compile(ast.Module(body=[cls], type_ignores=[]), str(doc), "exec"), namespace)
+    scorer = namespace["MyScorer"]()
+    weights = _Weights()
+    scorer.model = weights
+    scorer.device = torch.device("meta")
+    scorer.sleep()
+    scorer.wake_up()
+    assert weights.moves == [torch.device("cpu"), torch.device("meta")]
+    scorer.close()
+    assert scorer.model is None
