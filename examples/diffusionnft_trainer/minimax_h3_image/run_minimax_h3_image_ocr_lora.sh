@@ -17,7 +17,6 @@
 set -euo pipefail
 
 export VERL_OMNI_H3_IMAGE_PACK_MICRO_BATCH=${VERL_OMNI_H3_IMAGE_PACK_MICRO_BATCH:-1}
-export GENRM_OCR_TEMPERATURE=0
 export VLLM_ENGINE_READY_TIMEOUT_S=${VLLM_ENGINE_READY_TIMEOUT_S:-3600}
 : "${PPOCR_MODEL_DIR:?Set PPOCR_MODEL_DIR to the PP-OCRv6 medium ONNX directory}"
 : "${PICKSCORE_PATH:?Set PICKSCORE_PATH to yuvalkirstain/PickScore_v1}"
@@ -186,6 +185,7 @@ ${VERL_OMNI_ENTRY:-python3 -m verl_omni.trainer.main_diffusion} \
     reward.reward_model.rollout.tensor_model_parallel_size="$REWARD_TP" \
     reward.reward_model.rollout.gpu_memory_utilization="$REWARD_GPU_MEM_UTIL" \
     reward.reward_model.rollout.max_model_len=8192 \
+    reward.reward_model.rollout.temperature=0.0 \
     reward.reward_model.rollout.response_length=160 \
     reward.custom_reward_function.path=pkg://verl_omni.reward_loop.reward_manager.multi \
     reward.custom_reward_function.name=_multi_reward_placeholder \

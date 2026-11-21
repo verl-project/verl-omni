@@ -85,6 +85,8 @@ bash "${REPO_ROOT}/tests/nightly/run_l3_case.sh" \
     reward.reward_model.rollout.enforce_eager=True \
     reward.reward_model.rollout.do_sample=False \
     reward.reward_model.rollout.temperature=0.0 \
+    reward.reward_model.rollout.full_determinism=True \
+    reward.reward_model.rollout.seed=${NIGHTLY_DETERMINISTIC_SEED:-42} \
     reward.reward_model.rollout.prompt_length=${MAX_PROMPT_LENGTH} \
     reward.reward_model.rollout.response_length=32 \
     reward.custom_reward_function.path=verl_omni/utils/reward_score/genrm_ocr.py \
