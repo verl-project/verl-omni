@@ -109,11 +109,59 @@ class ARStrategy(OmniStrategyBase):
             config.expert_parallel_size = 1
         reject_engine_side_expert_parallel(self._omni_engine_kwargs())
         pipeline_name, pipeline_mode = self._pipeline_selection()
+        self._validate_routing_replay(pipeline_name)
         self._expert_parallel_stage_ids = self._resolve_expert_parallel_stage_ids(pipeline_name, pipeline_mode)
 
     def _omni_engine_kwargs(self) -> Any:
         """Return the configured ``engine_kwargs.vllm_omni`` mapping."""
         return (self.server.config.engine_kwargs or {}).get("vllm_omni", {}) or {}
+
+    def _routing_replay_enabled(self) -> bool:
+        """Whether R3 rollout routing replay is requested."""
+        return bool(getattr(self.server.config, "enable_rollout_routing_replay", False))
+
+    def _validate_routing_replay(self, pipeline_name: Any) -> None:
+        """Reject configuration that cannot produce replayable rollout routes.
+
+        vLLM keys routed-expert rows by prefix-cache block hash, so R3 requires
+        prefix caching and PP=1. verl-omni additionally replays routes against
+        the policy token sequence, which only holds when the rollout pipeline
+        returns the model's own tokens (no adapter token remapping).
+        """
+        if not self._routing_replay_enabled():
+            return
+        config = self.server.config
+        if not getattr(config, "enable_prefix_caching", True):
+            raise ValueError(
+                "actor_rollout_ref.rollout.enable_rollout_routing_replay requires "
+                "actor_rollout_ref.rollout.enable_prefix_caching=True: vLLM binds routed-expert "
+                "rows to prefix-cache block hashes."
+            )
+        if int(getattr(config, "pipeline_model_parallel_size", 1) or 1) != 1:
+            raise ValueError(
+                "actor_rollout_ref.rollout.enable_rollout_routing_replay requires "
+                "pipeline_model_parallel_size=1: vLLM rejects routed-experts capture with PP > 1."
+            )
+        adapter_cls = OmniRolloutPipelineBase.get_class(pipeline_name)
+        if adapter_cls is None:
+            # Reported once the pipeline is resolved and the deploy config is written.
+            return
+        base_hook = getattr(
+            OmniRolloutPipelineBase.postprocess_agent_loop_output,
+            "__func__",
+            OmniRolloutPipelineBase.postprocess_agent_loop_output,
+        )
+        adapter_hook = getattr(
+            adapter_cls.postprocess_agent_loop_output,
+            "__func__",
+            adapter_cls.postprocess_agent_loop_output,
+        )
+        if adapter_hook is not base_hook:
+            raise NotImplementedError(
+                f"{adapter_cls.__name__} remaps the policy token sequence in "
+                "postprocess_agent_loop_output, so its rollout routed_experts would not align "
+                "with the replayed tokens; disable enable_rollout_routing_replay for this pipeline."
+            )
 
     def _pipeline_selection(self) -> tuple[Any, str]:
         """Return the configured ``(pipeline_name, pipeline_mode)``."""
@@ -201,6 +249,13 @@ class ARStrategy(OmniStrategyBase):
                 hf_overrides.update(adapter_overrides)
                 engine_kwargs["hf_overrides"] = hf_overrides
 
+        if self._routing_replay_enabled() and self._rollout_adapter is None:
+            raise NotImplementedError(
+                "actor_rollout_ref.rollout.enable_rollout_routing_replay requires a registered "
+                "vLLM-Omni rollout pipeline (engine_kwargs.vllm_omni.pipeline_name): the generated "
+                "per-stage deploy config is what selects Model Runner V2 for routed-experts capture."
+            )
+
         stage_init_timeout = engine_kwargs.get("stage_init_timeout") or engine_kwargs.get("stage-init-timeout")
         init_timeout = engine_kwargs.get("init_timeout") or engine_kwargs.get("init-timeout")
         if stage_init_timeout is not None and init_timeout is None:
@@ -237,6 +292,25 @@ class ARStrategy(OmniStrategyBase):
             )
         self._policy_stage_index = stage_ids.index(policy_stage_id)
         self._policy_sampling_constraints = dict(stages[self._policy_stage_index].sampling_constraints)
+
+        routing_replay = self._routing_replay_enabled()
+        if routing_replay:
+            # R3 routes are captured by the policy stage's engine and must line
+            # up with the policy token sequence the trainer replays.
+            if len(stages) != 1:
+                raise NotImplementedError(
+                    "actor_rollout_ref.rollout.enable_rollout_routing_replay currently supports "
+                    f"single-stage AR pipelines only; pipeline_mode={pipeline_mode!r} has "
+                    f"{len(stages)} stages."
+                )
+            policy_stage = stages[self._policy_stage_index]
+            if not policy_stage.final_output or policy_stage.execution_type != StageExecutionType.LLM_AR:
+                raise NotImplementedError(
+                    "actor_rollout_ref.rollout.enable_rollout_routing_replay requires the policy stage "
+                    "to be the pipeline's final autoregressive output stage; "
+                    f"pipeline_mode={pipeline_mode!r} sets final_output={policy_stage.final_output} and "
+                    f"execution_type={policy_stage.execution_type}."
+                )
 
         weight_sync_stage_ids = adapter_cls.weight_sync_stage_ids(pipeline_mode=pipeline_mode)
         if weight_sync_stage_ids is not None:
@@ -306,6 +380,9 @@ class ARStrategy(OmniStrategyBase):
                     # the ranks the stage already spans; the size itself is not a
                     # world dimension, so only opted-in stages get the flag.
                     **({"enable_expert_parallel": True} if stage.stage_id in expert_parallel_stage_ids else {}),
+                    # Routed-experts capture (R3) lives on the vLLM Model Runner V2
+                    # aux-output connector; only the policy stage needs it.
+                    **({"model_runner": "v2"} if routing_replay and stage.stage_id == policy_stage_id else {}),
                     "engine_extras": stage_extras[stage.stage_id],
                 }
                 for stage in stages
@@ -356,6 +433,11 @@ class ARStrategy(OmniStrategyBase):
         for key, value in omni_kwargs.items():
             if key in engine_args and value is not None:
                 engine_args[key] = value
+
+        if self._routing_replay_enabled():
+            # Routed-experts capture is requested by the rollout config and must
+            # survive the engine_kwargs overrides above.
+            engine_args["enable_return_routed_experts"] = True
 
         if isinstance(engine_args.get("compilation_config"), dict):
             engine_args["compilation_config"] = _drop_none_mapping_values(engine_args["compilation_config"])
@@ -511,6 +593,14 @@ class ARStrategy(OmniStrategyBase):
                 )
         return final_res
 
+    @staticmethod
+    def _extract_routed_experts(req_output: Any) -> Any:
+        """Return the terminal ``routed_experts`` array, if the engine sent one."""
+        outputs = getattr(req_output, "outputs", None)
+        if not outputs:
+            return None
+        return getattr(outputs[0], "routed_experts", None)
+
     def process_output(
         self,
         final_res: Any,
@@ -559,9 +649,22 @@ class ARStrategy(OmniStrategyBase):
         stop_reason = self._map_stop_reason(finish_reason)
         num_preempted = self._extract_num_preempted(req_output)
 
+        routed_experts = None
+        if self._routing_replay_enabled():
+            routed_experts = self._extract_routed_experts(req_output)
+            if routed_experts is None and stop_reason != "aborted":
+                # R3 must not silently degrade: the trainer would otherwise
+                # replay another micro-batch's routes or run without replay.
+                raise RuntimeError(
+                    "rollout.enable_rollout_routing_replay=True but the vLLM-Omni engine returned "
+                    "no 'routed_experts' on the completion output; routed-experts capture requires "
+                    "Model Runner V2 with the aux-output connector."
+                )
+
         return TokenOutput(
             token_ids=token_ids,
             log_probs=log_probs,
+            routed_experts=routed_experts,
             stop_reason=stop_reason,
             num_preempted=num_preempted,
             extra_fields=extra_fields,

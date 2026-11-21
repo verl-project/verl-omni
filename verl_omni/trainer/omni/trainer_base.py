@@ -43,6 +43,33 @@ __all__ = ["OmniPPOTrainer"]
 logger = logging.getLogger(__name__)
 
 
+def validate_rollout_routing_replay(config) -> None:
+    """Fail fast when R3 rollout routes would not be replayed by the actor engine.
+
+    ``rollout.enable_rollout_routing_replay`` makes the rollout engine capture
+    routed experts; only a router-replay-capable actor engine with
+    ``router_replay.mode='R3'`` consumes them. R2 records routes inside the
+    trainer and must not be combined with rollout capture.
+    """
+    rollout_cfg = config.actor_rollout_ref.rollout
+    if not rollout_cfg.get("enable_rollout_routing_replay", False):
+        return
+    actor_cfg = config.actor_rollout_ref.actor
+    strategy = actor_cfg.get("strategy", "")
+    if strategy not in ("megatron", "veomni"):
+        raise NotImplementedError(
+            "actor_rollout_ref.rollout.enable_rollout_routing_replay requires an actor strategy "
+            f"that replays routes ('megatron' or 'veomni'), got {strategy!r}."
+        )
+    mode = OmegaConf.select(actor_cfg, f"{strategy}.router_replay.mode", default=None)
+    if mode != "R3":
+        raise ValueError(
+            "actor_rollout_ref.rollout.enable_rollout_routing_replay captures R3 rollout routes; "
+            f"set actor_rollout_ref.actor.{strategy}.router_replay.mode='R3' "
+            f"(got {mode!r}) so the actor engine replays them."
+        )
+
+
 class OmniPPOTrainer(PPOTrainer):
     """``PPOTrainer`` whose worker groups get rendezvous port sub-ranges.
 
@@ -50,6 +77,7 @@ class OmniPPOTrainer(PPOTrainer):
     """
 
     def _setup(self):
+        validate_rollout_routing_replay(self.config)
         # Faithful copy of verl's PPOTrainer._setup; deltas are DIFF-marked.
         self._init_tokenizer()
         self._init_dataloader()
