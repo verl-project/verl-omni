@@ -33,6 +33,7 @@ from verl_omni.workers.config.reward import (
     has_fsdp_reward_models,
     parse_reward_model_config,
     validate_reward_model_terms,
+    warn_deprecated_reward_config,
 )
 
 logger = logging.getLogger(__name__)
@@ -48,6 +49,7 @@ def run_diffusion_v1(config, task_runner_class=None) -> None:
                 settings, model paths, and training hyperparameters.
         task_runner_class: For recipe to change TaskRunner.
     """
+    warn_deprecated_reward_config(config)
     # Reject unsupported profiling combinations before starting Ray or workers.
     if OmegaConf.select(config, "global_profiler.steps"):
         if (

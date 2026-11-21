@@ -1079,3 +1079,34 @@ def test_cancelled_sync_barrier_returns_before_executor_thread_exits(concurrency
             await asyncio.gather(caller, return_exceptions=True)
 
     manager.loop.run_until_complete(scenario())
+
+
+def test_file_reward_function_and_registered_scorer_share_one_module(tmp_path):
+    from verl_omni.utils.reward_score.scorers.registry import get_scorer_cls, import_from_spec
+
+    path = tmp_path / "custom_reward.py"
+    name = f"file-scorer-{tmp_path.name}"
+    path.write_text(
+        "from verl_omni.utils.reward_score.scorers.base import RewardScorer\n"
+        "from verl_omni.utils.reward_score.scorers.registry import register_scorer\n"
+        f"@register_scorer({name!r})\n"
+        "class CustomScorer(RewardScorer):\n"
+        "    def score_batch(self, batch):\n"
+        "        return [{'score': 1} for _ in batch]\n"
+        "async def compute_score(**kwargs):\n"
+        "    return {'score': 1}\n"
+    )
+    manager = _manager({"one": {"path": str(path), "name": "compute_score"}})
+    scorer_cls = import_from_spec(f"file://{path}:CustomScorer")
+    assert get_scorer_cls(name) is scorer_cls
+    assert manager._sub_rewards[0]["fn"].__globals__["CustomScorer"] is scorer_cls
+    alias = str(path.parent) + "/./" + path.name
+    assert alias != str(path)
+    second = _manager({"one": {"path": alias, "name": "compute_score"}})
+    assert second._sub_rewards[0]["fn"] is manager._sub_rewards[0]["fn"]
+    duplicate = tmp_path / "different_reward.py"
+    duplicate.write_text(path.read_text())
+    with pytest.raises(RuntimeError, match="Error loading module") as caught:
+        import_from_spec(f"{duplicate}:CustomScorer")
+    assert isinstance(caught.value.__cause__, ValueError)
+    assert "already been registered" in str(caught.value.__cause__)
