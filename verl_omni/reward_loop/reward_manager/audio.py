@@ -27,6 +27,20 @@ from verl.utils.reward_score import default_compute_score as _upstream_default_c
 from verl_omni.reward_loop.reward_manager.media import _reward_extra_info
 
 
+def _audio_reward_kwargs(item) -> dict:
+    batch = item.non_tensor_batch
+    extra_info = _reward_extra_info(item)
+    if "__num_turns__" in batch:
+        extra_info["num_turns"] = batch["__num_turns__"]
+    if "global_steps" in batch:
+        extra_info["global_steps"] = batch["global_steps"]
+    return {
+        "data_source": batch["data_source"],
+        "ground_truth": batch["reward_model"]["ground_truth"],
+        "extra_info": extra_info,
+    }
+
+
 class AudioRewardManager(RewardManagerBase):
     """Route one validated waveform per rollout to a custom reward function."""
 
@@ -83,21 +97,8 @@ class AudioRewardManager(RewardManagerBase):
     async def run_single(self, data: DataProto) -> dict:
         if len(data) != 1:
             raise ValueError(f"AudioRewardManager scores one sample at a time, got batch size {len(data)}.")
-        item = data[0]
-        batch = item.non_tensor_batch
-        extra_info = _reward_extra_info(item)
-        if "__num_turns__" in batch:
-            extra_info["num_turns"] = batch["__num_turns__"]
-        if "global_steps" in batch:
-            extra_info["global_steps"] = batch["global_steps"]
-        ground_truth = batch["reward_model"]["ground_truth"]
-        audio = await asyncio.to_thread(self._extract_audio, extra_info)
-        kwargs = {
-            "data_source": batch["data_source"],
-            "solution_audio": audio,
-            "ground_truth": ground_truth,
-            "extra_info": extra_info,
-        }
+        kwargs = _audio_reward_kwargs(data[0])
+        kwargs["solution_audio"] = await asyncio.to_thread(self._extract_audio, kwargs["extra_info"])
         if self.reward_router_address is not None:
             kwargs.update(
                 reward_router_address=self.reward_router_address,
