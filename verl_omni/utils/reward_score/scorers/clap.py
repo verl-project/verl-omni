@@ -84,6 +84,9 @@ class CLAPScorer(RewardScorer):
                         raise ValueError("CLAP prompt_key requires a single-sample batch.")
                     prompt = sample_batch[0].non_tensor_batch["reward_inputs"]["text"][prompt_key]
 
+                audio = extra_info.get("audio")
+                if "media_artifacts" not in extra_info and isinstance(audio, np.ndarray) and audio.dtype == object:
+                    extra_info["audio"] = np.asarray(audio, dtype=np.float32)
                 waveform, source_rate = _frozen._get_audio(extra_info)
                 waveform = _frozen.resample_audio(waveform, source_rate, _frozen._CLAP_SAMPLE_RATE)
                 waveforms.append(waveform.numpy().astype(np.float32, copy=False))
@@ -174,11 +177,11 @@ class CLAPScorer(RewardScorer):
 
 async def compute_score_clap_batched(
     data_source: str,
-    solution_image,
     ground_truth: str,
     extra_info: dict,
     reward_model,
     *,
+    solution_image=None,
     batch=None,
     **kwargs,
 ) -> dict:

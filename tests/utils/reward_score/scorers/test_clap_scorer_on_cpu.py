@@ -17,6 +17,7 @@ import asyncio
 import os
 import re
 import threading
+from functools import partial
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -28,6 +29,8 @@ from verl import DataProto
 
 from verl_omni.pipelines.rollout_media import ArtifactContractError, MediaArtifact, MediaSpec, artifact_fields
 from verl_omni.reward_loop import reward_model_executor as executor_module
+from verl_omni.reward_loop.reward_manager import multi as manager_module
+from verl_omni.reward_loop.reward_manager.audio import AudioRewardManager
 from verl_omni.reward_loop.reward_manager.multi import MultiVisualRewardManager
 from verl_omni.reward_loop.reward_model import NativeManagedRewardModel
 from verl_omni.reward_loop.reward_model_executor import NativeRewardExecutor, build_native_reward_executors
@@ -189,7 +192,10 @@ async def test_actual_executor_batches_zero_single_burst_and_tail(monkeypatch, f
         await executor.close()
 
 
-def test_named_artifact_prompt_key_layout_rate_and_float32_mono(fake_adapter, monkeypatch):
+@pytest.mark.parametrize(
+    "legacy_audio", [torch.tensor([[9.0, 9.0], [7.0, 7.0]]), np.array([["invalid"]], dtype=object)]
+)
+def test_named_artifact_prompt_key_layout_rate_and_float32_mono(fake_adapter, monkeypatch, legacy_audio):
     resamples = []
 
     def resample(waveform, source_rate, target_rate):
@@ -201,7 +207,7 @@ def test_named_artifact_prompt_key_layout_rate_and_float32_mono(fake_adapter, mo
     scorer.load("cpu")
     sample = SimpleNamespace(
         batch={
-            "audio": torch.tensor([[9.0, 9.0], [7.0, 7.0]]),
+            "audio": legacy_audio,
             "audio_sample_rate": 24_000,
             "audio_layout": "CT",
         },
@@ -657,3 +663,57 @@ async def test_wrapper_forwards_the_original_request_kwargs_exactly():
         "score_scale": 2.0,
         "custom_option": "kept",
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("manager_name", ["AudioRewardManager", "MultiAudioRewardManager"])
+@pytest.mark.parametrize("transport", ["streamed", "finalized"])
+async def test_audio_manager_calls_batched_entry_without_solution_image(
+    monkeypatch, fake_adapter, manager_name, transport
+):
+    if manager_name == "MultiAudioRewardManager":
+        manager_cls = getattr(manager_module, manager_name, None)
+        if manager_cls is None:
+            pytest.skip("MultiAudioRewardManager is introduced by #920")
+    else:
+        manager_cls = AudioRewardManager
+
+    with initialize_config_dir(config_dir=os.path.abspath("verl_omni/trainer/config"), version_base=None):
+        config = compose(
+            config_name="diffusion_trainer",
+            overrides=[
+                "reward.reward_model.enable=false",
+                "+reward.models.clap.backend=native",
+                "+reward.models.clap.placement.devices=[0]",
+                "+reward.models.clap.executor.model=pkg://verl_omni.utils.reward_score.scorers.clap:CLAPScorer",
+                "+reward.reward_functions.clap.path=pkg://verl_omni.utils.reward_score.scorers.clap",
+                "+reward.reward_functions.clap.name=compute_score_clap_batched",
+                "+reward.reward_functions.clap.model=clap",
+                "+reward.reward_functions.clap.required=true",
+            ],
+        )
+    executor = _executor(monkeypatch)
+    compute_score = partial(port.compute_score_clap_batched, reward_model=executor)
+    manager = manager_cls(config, MagicMock(), compute_score=compute_score)
+    if manager_name == "MultiAudioRewardManager":
+        manager.set_reward_executors(None, {"clap": executor})
+    audio = {"audio": torch.tensor([[0.0, 1.0]]), "audio_sample_rate": 48_000}
+    metadata = (
+        {"tool_extra_fields": [audio]} if transport == "streamed" else {key: [value] for key, value in audio.items()}
+    )
+    data = DataProto.from_dict(
+        tensors={"responses": torch.zeros(1, 4, dtype=torch.long)},
+        non_tensors={"data_source": ["audio"], "reward_model": [{"ground_truth": "up"}], **metadata},
+    )
+    await executor.wake_up()
+    try:
+        result = await manager.run_single(data)
+        assert result["reward_score"] == pytest.approx(1.0)
+        rate_key = "source_sample_rate" if manager_name == "AudioRewardManager" else "reward/clap/source_sample_rate"
+        assert result["reward_extra_info"][rate_key] == 48_000
+        assert len(fake_adapter[0].calls) == 1
+        waveforms, prompts = fake_adapter[0].calls[0]
+        assert prompts == ["up"]
+        np.testing.assert_array_equal(waveforms[0], np.array([0.0, 1.0], dtype=np.float32))
+    finally:
+        await executor.close()
