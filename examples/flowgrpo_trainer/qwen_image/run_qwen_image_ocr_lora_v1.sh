@@ -20,7 +20,7 @@ ocr_test_path=$WORKSPACE/data/ocr/qwen_image/test.parquet
 
 model_name=Qwen/Qwen-Image
 reward_model_name=Qwen/Qwen3-VL-8B-Instruct
-reward_function_path=verl_omni/utils/reward_score/genrm_ocr.py
+reward_function_path=pkg://verl_omni.utils.reward_score.genrm_ocr
 
 NUM_GPUS_ACTOR_ROLLOUT_REWARD=4
 ROLLOUT_TP=1
@@ -88,13 +88,21 @@ python3 -m verl_omni.trainer.main_diffusion_v1 \
     +actor_rollout_ref.rollout.engine_kwargs.vllm_omni.request_batch_max_wait_ms=${REQUEST_BATCH_MAX_WAIT_MS} \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=$LOG_PROB_MICRO_BATCH_SIZE \
     reward.num_workers=$((NUM_GPUS_ACTOR_ROLLOUT_REWARD / REWARD_TP)) \
-    reward.reward_model.enable=True \
-    reward.reward_model.model_path=$reward_model_name \
-    reward.reward_model.rollout.name=$REWARD_ENGINE \
-    reward.reward_model.rollout.response_length=256 \
-    reward.reward_model.rollout.tensor_model_parallel_size=$REWARD_TP \
-    reward.custom_reward_function.path=$reward_function_path \
-    reward.custom_reward_function.name=compute_score_ocr \
+    reward.reward_model.enable=False \
+    reward.reward_manager.name=MultiVisualRewardManager \
+    +reward.models.ocr.backend=engine \
+    +reward.models.ocr.offload=True \
+    +reward.models.ocr.model_path=$reward_model_name \
+    +reward.models.ocr.n_gpus_per_node=$NUM_GPUS_ACTOR_ROLLOUT_REWARD \
+    +reward.models.ocr.nnodes=1 \
+    +reward.models.ocr.rollout.name=$REWARD_ENGINE \
+    +reward.models.ocr.rollout.response_length=256 \
+    +reward.models.ocr.rollout.tensor_model_parallel_size=$REWARD_TP \
+    +reward.reward_functions.ocr.path=$reward_function_path \
+    +reward.reward_functions.ocr.name=compute_score_ocr \
+    +reward.reward_functions.ocr.weight=1.0 \
+    +reward.reward_functions.ocr.required=True \
+    +reward.reward_functions.ocr.use_rollout_sampling_params=True \
     trainer.logger='["console", "wandb"]' \
     trainer.project_name=flow_grpo \
     trainer.experiment_name=qwen_image_ocr_lora_v1 \

@@ -18,7 +18,7 @@ ocr_test_path=$WORKSPACE/data/ocr/sd3/test.parquet
 
 model_name=${MODEL_PATH:-stabilityai/stable-diffusion-3.5-medium}
 reward_model_name=${REWARD_MODEL_PATH:-Qwen/Qwen2.5-VL-3B-Instruct}
-reward_function_path=verl_omni/utils/reward_score/genrm_ocr.py
+reward_function_path=pkg://verl_omni.utils.reward_score.genrm_ocr
 custom_chat_template='{% for message in messages %}{% if message['\''role'\''] == '\''user'\'' %}{{ message['\''content'\''] }}{% endif %}{% endfor %}'
 custom_user_prompt=${CUSTOM_USER_PROMPT:-"Read the text in this image and output it exactly, with nothing else."}
 

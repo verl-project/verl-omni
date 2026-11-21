@@ -55,7 +55,7 @@ class TestBooguImageRecipe(unittest.TestCase):
             self.assertIn("actor_rollout_ref.model.tokenizer_path=/tmp/boogu snapshot/processor", args)
             self.assertIn(f"data.train_files={env['WORKSPACE']}/data/ocr/boogu_image/train.parquet", args)
             self.assertIn(f"data.val_files={env['WORKSPACE']}/data/ocr/boogu_image/test.parquet", args)
-            self.assertIn("reward.reward_model.model_path=/tmp/reward model", args)
+            self.assertIn("+reward.models.ocr.model_path=/tmp/reward model", args)
             self.assertEqual(args[-1], override)
 
             captured_args.unlink()
