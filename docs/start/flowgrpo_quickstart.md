@@ -108,8 +108,9 @@ The provided example script launches `python3 -m verl_omni.trainer.main_diffusio
 
 - `algorithm.adv_estimator=flow_grpo`
 - `actor_rollout_ref.rollout.name=vllm_omni`
-- `reward.custom_reward_function.path=verl_omni/utils/reward_score/genrm_ocr.py`
-- `reward.custom_reward_function.name=compute_score_ocr`
+- `reward.reward_manager.name=MultiVisualRewardManager`
+- `reward.models.ocr` serving the judge model with the `engine` backend
+- `reward.reward_functions.ocr` binding `compute_score_ocr` to the named model
 - LoRA fine-tuning on `stabilityai/stable-diffusion-3.5-medium`
 - a single-node layout: `2` GPUs for actor + rollout, `1` GPU for the reward model in its own dedicated resource pool
 - image resolution `384×384`, `10` inference steps per rollout sample

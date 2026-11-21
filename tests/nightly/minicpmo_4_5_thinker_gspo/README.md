@@ -19,10 +19,10 @@ comparison reads two payload kinds:
   `ref_log_prob`, and `rollout_log_probs` when those fields are present.
 - `lora_gradients`: LoRA parameter gradients before the optimizer step.
 
-`batch.responses`, `batch.advantages`, and `batch.old_log_probs` stay
-informational. Nested `old_log_probs` pads inconsistently on the tiny model;
-`rollout_log_probs` covers token-id drift. A token-id change still fails the
-run when it moves `rollout_log_probs`, `ref_log_prob`, or the LoRA gradients.
+`batch.responses`, `batch.advantages`, `batch.old_log_probs`, and
+`batch.rollout_log_probs` stay informational. Nested `old_log_probs` pads
+inconsistently on the tiny model. The repeated AVQA prompt makes
+`repeat_index` only a row label, so `rollout_log_probs` is informational.
 The choice reward is compared. There is no reward model.
 
 The builder needs the MiniCPM-o 4.5 remote code and tokenizer. It does not

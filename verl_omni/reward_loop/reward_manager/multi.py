@@ -24,10 +24,10 @@ import numpy as np
 import torch
 from verl import DataProto
 from verl.experimental.reward_loop.reward_manager.base import RewardManagerBase
-from verl.utils.import_utils import load_extern_object
 
 from verl_omni.pipelines.rollout_media import PRIMARY_ARTIFACT, ArtifactContractError
 from verl_omni.utils.reward_score.reward_utils import get_audio
+from verl_omni.utils.reward_score.scorers.registry import load_reward_object as load_extern_object
 from verl_omni.workers.config.reward import get_reward_model_entries, resolve_reward_model_name
 
 from .audio import AudioRewardManager, _audio_reward_kwargs

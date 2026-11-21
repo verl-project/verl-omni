@@ -40,6 +40,8 @@ import tempfile
 import uuid
 from types import SimpleNamespace
 
+import torch
+
 from verl_omni.utils.reward_score.genrm_ocr import compute_score_ocr
 from verl_omni.utils.reward_score.image_preference_utils import decoded_reward_image
 
@@ -52,8 +54,8 @@ SCORER_GPU = os.environ.get("PREFERENCE_SCORER_GPU", "3")
 TIMEOUT_S = float(os.environ.get("REWARD_WORKER_TIMEOUT_S", "300"))
 TMP = os.path.join(os.environ.get("OCR_REWARD_TMPDIR") or tempfile.gettempdir(), "ocr_preference_reward")
 
-# load_extern_object executes this file once per registered reward name without caching in sys.modules.
-# Keep process/cache state in a single sys.modules sentinel so term_pickscore and term_hpsv2 share one scorer.
+# Reward managers use load_reward_object and share one module per canonical file.
+# Retain the sentinel for direct legacy load_extern_object callers that load terms separately.
 _STATE_KEY = f"_verl_omni_minimax_h3_ocr_preference_state:{os.path.abspath(__file__)}"
 
 
@@ -224,7 +226,15 @@ async def _preference(solution_image, extra_info: dict) -> dict:
         try:
             if state.scorer is None or state.scorer.returncode is not None:
                 env = dict(os.environ)
-                env["CUDA_VISIBLE_DEVICES"] = SCORER_GPU
+                if env.get("H3_IMAGE_DEVICE") == "npu":
+                    env["ASCEND_RT_VISIBLE_DEVICES"] = SCORER_GPU
+                elif torch.version.hip:
+                    # ROCm aborts on conflicting visibility; the inherited values name the trainer GPUs.
+                    env.pop("CUDA_VISIBLE_DEVICES", None)
+                    env.pop("ROCR_VISIBLE_DEVICES", None)
+                    env["HIP_VISIBLE_DEVICES"] = SCORER_GPU
+                else:
+                    env["CUDA_VISIBLE_DEVICES"] = SCORER_GPU
                 state.scorer = await _spawn("preference_worker.py", env)
             reply = await _request(state.scorer, "preference_worker.py", {"path": path, "prompt": prompt})
         finally:

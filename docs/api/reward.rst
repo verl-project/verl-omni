@@ -10,7 +10,10 @@ computation is dispatched per sample by reward managers. The input-agnostic
 :class:`~verl_omni.reward_loop.reward_manager.MultiRewardManager` provides the
 shared named-term dispatch, per-term outputs, failure handling, and weighted
 aggregation used by input-specific subclasses. Modality-specific managers include
-:class:`~verl_omni.reward_loop.reward_manager.VisualRewardManager` and
+:class:`~verl_omni.reward_loop.reward_manager.VisualRewardManager` (deprecated
+since v0.4.0; use
+:class:`~verl_omni.reward_loop.reward_manager.MultiVisualRewardManager` with
+``reward.reward_functions``) and
 :class:`~verl_omni.reward_loop.reward_manager.AudioRewardManager`. They plug
 into :class:`~verl_omni.reward_loop.reward_loop.OmniRewardLoopManager` — verl's
 :class:`~verl.experimental.reward_loop.RewardLoopManager` extended with
@@ -94,6 +97,21 @@ UnifiedReward Scorer
 
 .. automodule:: verl_omni.utils.reward_score.unified_reward
    :members: compute_score_unified_reward
+
+Class-based Scorer Protocol
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. automodule:: verl_omni.utils.reward_score.scorers.base
+   :members: RewardScorer
+
+.. automodule:: verl_omni.utils.reward_score.scorers.registry
+   :members: register_scorer, get_scorer_cls
+
+PickScore Scorer (class-based)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. automodule:: verl_omni.utils.reward_score.scorers.pickscore
+   :members: PickScoreScorer, compute_score_pickscore_batched
 
 Reward Utilities
 ^^^^^^^^^^^^^^^^^^

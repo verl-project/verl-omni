@@ -37,9 +37,34 @@ def _reset_shared_state():
 
 
 class TestOcrPreferenceReward:
-    def test_preference_terms_share_one_scorer_across_separate_loads(self, monkeypatch, tmp_path):
+    def test_worker_backend_matches_launcher(self, monkeypatch):
+        scorer_device = load_extern_object(str(Path(REWARD_PATH).with_name("preference_worker.py")), "_scorer_device")
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+        monkeypatch.setenv("H3_IMAGE_DEVICE", "")
+        assert scorer_device() == torch.device("cuda:0")
+        monkeypatch.setenv("H3_IMAGE_DEVICE", "typo")
+        with pytest.raises(ValueError, match="Unsupported H3_IMAGE_DEVICE"):
+            scorer_device()
+
+    @pytest.mark.parametrize(
+        ("device_kind", "hip", "visibility"),
+        [
+            ("cuda", None, "CUDA_VISIBLE_DEVICES"),
+            ("npu", None, "ASCEND_RT_VISIBLE_DEVICES"),
+            ("cuda", "7.0", "HIP_VISIBLE_DEVICES"),
+        ],
+    )
+    def test_preference_terms_share_one_scorer_across_separate_loads(
+        self, monkeypatch, tmp_path, device_kind, hip, visibility
+    ):
         _reset_shared_state()
         monkeypatch.setenv("OCR_REWARD_TMPDIR", str(tmp_path))
+        monkeypatch.setenv("H3_IMAGE_DEVICE", device_kind)
+        monkeypatch.setattr(torch.version, "hip", hip)
+        monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1,2")
+        monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "0,1,2")
+        monkeypatch.setenv("PREFERENCE_SCORER_GPU", "7")
+        monkeypatch.setenv(visibility, "0,1,2,3,4,5,6")
         pick_fn = load_extern_object(REWARD_PATH, "term_pickscore")
         hps_fn = load_extern_object(REWARD_PATH, "term_hpsv2")
 
@@ -50,6 +75,10 @@ class TestOcrPreferenceReward:
             returncode = None
 
         async def fake_spawn(script, env):
+            assert env[visibility] == "7"
+            if hip:
+                assert "CUDA_VISIBLE_DEVICES" not in env
+                assert "ROCR_VISIBLE_DEVICES" not in env
             spawns.append(script)
             return _FakeProc()
 
