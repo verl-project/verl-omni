@@ -1,7 +1,7 @@
 (tuning_guide)=
 # Performance Tuning Guide
 
-Last updated: 10/17/2026
+Last updated: 11/04/2026
 
 This page is the starting point for tuning a VeRL-Omni diffusion RL run. It
 does not repeat the detail already covered by the more specific pages —
@@ -194,9 +194,9 @@ tuning surfaces differ accordingly:
   [Async Reward](../algo/async_reward.md) and
   [HTTP Scorer](../start/http_scorer.md).
 - **Monitoring and profiling.** [RL-Insight](../start/rl_insight.md) works
-  for `main_omni` runs. For step-based profiling, omni PPO V1 is supported
-  while diffusion V1 is not — see the caveat in
-  [profiler.md](profiler.md).
+  for `main_omni` runs. For step-based profiling, diffusion (v0 and V1) is
+  validated with the PyTorch and NPU backends and omni PPO V1 with NPU, while
+  Nsight on diffusion V1 is unverified — see [profiler.md](profiler.md).
 
 The only measured omni throughput reference points are in
 [Separate-Async Omni Training](../algo/separate_async_omni.md) — the
