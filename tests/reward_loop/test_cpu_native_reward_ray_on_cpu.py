@@ -440,36 +440,59 @@ def test_cpu_phase_failure_drains_accepted_samples_before_sleep(tmp_path, monkey
         ray.shutdown()
 
 
-@pytest.mark.parametrize("confirm_release", [False, True])
-def test_cpu_phase_cancellation_drains_accepted_samples_before_sleep(tmp_path, monkeypatch, confirm_release):
+@pytest.mark.parametrize(
+    ("confirm_release", "score_fails"),
+    [(False, False), (True, False), (False, True), (True, True)],
+    ids=["False", "True", "plain-scoring-error", "release-aware-scoring-error"],
+)
+def test_cpu_phase_cancellation_drains_accepted_samples_before_sleep(
+    tmp_path, monkeypatch, confirm_release, score_fails
+):
     monkeypatch.setattr(OmniRewardLoopManager, "_create_native_workers", _controlled_native_workers)
     ray.init(num_cpus=4, num_gpus=0, include_dashboard=False, object_store_memory=128 * 1024**2)
     try:
         manager = OmniRewardLoopManager(_full_config(tmp_path, True))
         data = _full_data()
-        data.non_tensor_batch["reward_model"][1] = {"ground_truth": "delay"}
-        worker = manager._reward_worker_groups["quality"][0]
+        failing_worker, peer = manager._reward_worker_groups["quality"]
+        if score_fails:
+            data = DataProto.concat([data, data[2:]])
+            data.non_tensor_batch["reward_model"][0] = {"ground_truth": "controlled-fail"}
+        data.non_tensor_batch["reward_model"][2 if score_fails else 1] = {"ground_truth": "delay"}
+        delayed_worker = peer if score_fails else failing_worker
 
         async def run():
-            released = asyncio.Event()
-            options = {"on_release": released.set} if confirm_release else {}
+            releases = []
+            options = {"on_release": lambda: releases.append("released")} if confirm_release else {}
             scoring = asyncio.create_task(manager.async_compute_rm_score(data, **options))
             try:
-                await asyncio.wait_for(worker.wait_for_delayed_sample.remote(), timeout=30)
+                await asyncio.wait_for(delayed_worker.wait_for_delayed_sample.remote(), timeout=30)
+                if score_fails:
+                    await failing_worker.release_failure.remote()
+                    await asyncio.wait_for(failing_worker.wait_for_failure.remote(), timeout=30)
                 for _ in range(2):
-                    scoring.cancel()
+                    scoring.cancel("caller cancelled")
                     checkpoint = asyncio.Event()
                     asyncio.get_running_loop().call_soon(checkpoint.set)
                     await checkpoint.wait()
                     assert not scoring.done(), "Cancellation returned before accepted RPCs completed"
-                    assert not released.is_set(), "Release was acknowledged while an accepted RPC was still running"
+                    assert not releases, "Release was acknowledged while an accepted RPC was still running"
             finally:
-                await worker.release_delay.remote()
+                if score_fails:
+                    await failing_worker.release_failure.remote()
+                await delayed_worker.release_delay.remote()
                 result = (await asyncio.gather(scoring, return_exceptions=True))[0]
-            state = await worker.delayed_sample_state.remote()
-            assert isinstance(result, asyncio.CancelledError)
+            state = await delayed_worker.delayed_sample_state.remote()
             assert state == (True, True, 0)
-            assert released.is_set() == confirm_release
+            assert releases == (["released"] if confirm_release else [])
+            if confirm_release and score_fails:
+                assert isinstance(result, BaseExceptionGroup)
+                score_error, cancellation = result.exceptions
+                assert isinstance(score_error, ray.exceptions.RayTaskError)
+                assert "intentional scoring failure" in str(score_error)
+                assert isinstance(cancellation, asyncio.CancelledError)
+                assert cancellation.args == ("caller cancelled",)
+            else:
+                assert isinstance(result, asyncio.CancelledError)
 
         asyncio.run(run())
         recovered = manager.compute_rm_score(_full_data())

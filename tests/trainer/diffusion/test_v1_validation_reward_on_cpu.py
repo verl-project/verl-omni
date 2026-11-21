@@ -59,7 +59,7 @@ def validation(monkeypatch):
         async def sleep():
             calls.append("reward sleep")
 
-        async def score(batch):
+        async def score(batch, *, preserve_scoring_error_on_cancel=False):
             calls.append("score")
             return DataProto.from_dict(tensors={"rm_scores": batch.batch["prompts"].float()})
 
@@ -113,7 +113,7 @@ def test_validation_restores_after_scoring_failure(validation):
     trainer, reward_manager, calls = validation()
     failure = ValueError("scoring failed")
 
-    async def fail(batch):
+    async def fail(batch, *, preserve_scoring_error_on_cancel=False):
         raise failure
 
     reward_manager._compute_named_model_scores = fail
@@ -152,7 +152,7 @@ def test_validation_preserves_scoring_and_reward_sleep_failures(validation):
     scoring = ValueError("scoring failed")
     cleanup = RuntimeError("reward sleep failed")
 
-    async def fail(batch):
+    async def fail(batch, *, preserve_scoring_error_on_cancel=False):
         raise scoring
 
     async def fail_sleep():
@@ -284,7 +284,7 @@ def test_validation_preserves_restore_failure(validation, score_fails):
     scoring = ValueError("scoring failed")
     restore = RuntimeError("weight sync failed")
 
-    async def fail(batch):
+    async def fail(batch, *, preserve_scoring_error_on_cancel=False):
         calls.append("score")
         raise scoring
 
@@ -317,7 +317,7 @@ def test_validation_restores_after_scoring_cancellation(validation):
     trainer, manager, calls = validation()
     cancellation = asyncio.CancelledError("scoring cancelled")
 
-    async def cancel(batch):
+    async def cancel(batch, *, preserve_scoring_error_on_cancel=False):
         raise cancellation
 
     manager._compute_named_model_scores = cancel
@@ -337,7 +337,7 @@ async def test_manager_cancellation_waits_for_cleanup_and_retains_errors(validat
     cleanup_failure = RuntimeError("cleanup failed")
     score_failure = ValueError("scoring failed")
 
-    async def fail_score(batch):
+    async def fail_score(batch, *, preserve_scoring_error_on_cancel=False):
         calls.append("score")
         raise score_failure
 

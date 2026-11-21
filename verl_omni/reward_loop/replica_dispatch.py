@@ -19,13 +19,20 @@ from verl.protocol import DataProto, pad_dataproto_to_divisor
 
 
 async def dispatch_reward_groups(
-    data: DataProto, worker_groups: dict, batch_sizes: dict[str, int], rpc_owners: dict | None = None
+    data: DataProto,
+    worker_groups: dict,
+    batch_sizes: dict[str, int],
+    rpc_owners: dict | None = None,
+    *,
+    preserve_scoring_error_on_cancel: bool = False,
 ) -> dict[str, list]:
     """Score groups, restore sample order and drain accepted RPCs before returning.
 
     Groups absent from ``batch_sizes`` retain static padded splitting. Other
     groups dispatch at most one microbatch per replica, replenishing on completion.
     Failure or caller cancellation stops new dispatch, but does not cancel an RPC.
+    With ``preserve_scoring_error_on_cancel``, group the first scoring error with
+    caller cancellation after all accepted RPCs settle.
     """
     outputs = {}
     next_index = {}
@@ -90,9 +97,11 @@ async def dispatch_reward_groups(
             # Remote work can outlive a cancelled await; keep its ownership until completion.
             stopped = True
             cancellation = exc
+    scoring_error = next((result for result in results if isinstance(result, BaseException)), None)
     if cancellation is not None:
+        if preserve_scoring_error_on_cancel and scoring_error is not None:
+            raise BaseExceptionGroup("Reward scoring failed during cancellation", [scoring_error, cancellation])
         raise cancellation
-    for result in results:
-        if isinstance(result, BaseException):
-            raise result
+    if scoring_error is not None:
+        raise scoring_error
     return {name: values[: len(data)] for name, values in outputs.items()}

@@ -458,7 +458,7 @@ class OmniRewardLoopManager(RewardLoopManager):
         wake_error, primary_error = await self._settle_lifecycle(models.wake_up())
         if wake_error is None and primary_error is None:
             try:
-                result = await self._compute_named_model_scores(data)
+                result = await self._compute_named_model_scores(data, preserve_scoring_error_on_cancel=True)
             except BaseException as exc:
                 primary_error = exc
 
@@ -482,7 +482,9 @@ class OmniRewardLoopManager(RewardLoopManager):
         message = "Named reward scoring failed" if released else "Named reward release unconfirmed"
         raise BaseExceptionGroup(message, errors)
 
-    async def _compute_named_model_scores(self, data: DataProto) -> DataProto:
+    async def _compute_named_model_scores(
+        self, data: DataProto, *, preserve_scoring_error_on_cancel: bool = False
+    ) -> DataProto:
         if has_fsdp_reward_models(self.config):
             group_outputs = await dispatch_reward_groups(
                 data,
@@ -496,7 +498,10 @@ class OmniRewardLoopManager(RewardLoopManager):
             )
         else:
             group_outputs = await dispatch_reward_groups(
-                data, self._reward_worker_groups, self._reward_dispatch_batch_sizes
+                data,
+                self._reward_worker_groups,
+                self._reward_dispatch_batch_sizes,
+                preserve_scoring_error_on_cancel=preserve_scoring_error_on_cancel,
             )
 
         merged_scores = []
