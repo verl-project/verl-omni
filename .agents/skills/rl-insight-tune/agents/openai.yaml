@@ -1,0 +1,3 @@
+interface:
+  display_name: "RL-Insight Performance Tuning"
+  short_description: "Diagnose RL bottlenecks and verify tuning gains"
