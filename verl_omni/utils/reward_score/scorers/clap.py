@@ -87,6 +87,13 @@ class CLAPScorer(RewardScorer):
                 audio = extra_info.get("audio")
                 if "media_artifacts" not in extra_info and isinstance(audio, np.ndarray) and audio.dtype == object:
                     extra_info["audio"] = np.asarray(audio, dtype=np.float32)
+                sample_rate = extra_info.get("audio_sample_rate")
+                if (
+                    "media_artifacts" not in extra_info
+                    and isinstance(sample_rate, np.ndarray)
+                    and sample_rate.size == 1
+                ):
+                    extra_info["audio_sample_rate"] = sample_rate.item()
                 waveform, source_rate = _frozen._get_audio(extra_info)
                 waveform = _frozen.resample_audio(waveform, source_rate, _frozen._CLAP_SAMPLE_RATE)
                 waveforms.append(waveform.numpy().astype(np.float32, copy=False))

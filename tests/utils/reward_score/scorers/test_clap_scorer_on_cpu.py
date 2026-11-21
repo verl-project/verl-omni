@@ -262,6 +262,60 @@ def test_legacy_audio_is_resampled_after_channel_mean(fake_adapter, monkeypatch)
     assert result["source_sample_rate"] == 24_000
 
 
+@pytest.mark.parametrize(
+    "sample_rate", [np.array(48_000), np.array([48_000]), np.array([[48_000]])], ids=["0d", "1d", "2d"]
+)
+def test_legacy_audio_accepts_singleton_numpy_sample_rates(fake_adapter, sample_rate):
+    scorer = CLAPScorer()
+    scorer.load("cpu")
+    request = _request(prompt="up")
+    request["extra_info"] = {"audio": torch.tensor([0.0, 1.0]), "audio_sample_rate": sample_rate}
+
+    (result,) = scorer.score_batch([request])
+
+    assert result == {"score": pytest.approx(1.0), "source_sample_rate": 48_000}
+    assert request["extra_info"]["audio_sample_rate"] is sample_rate
+
+
+@pytest.mark.parametrize(
+    "sample_rate",
+    [
+        np.array([], dtype=np.int64),
+        np.array([48_000, 48_000]),
+        np.array([True]),
+        np.array([float("nan")]),
+        np.array([48_000.5]),
+        np.array([0]),
+        np.array(["48_000"]),
+    ],
+    ids=["empty", "multiple", "bool", "nonfinite", "fractional", "nonpositive", "string"],
+)
+def test_legacy_audio_rejects_invalid_numpy_sample_rates(fake_adapter, sample_rate):
+    scorer = CLAPScorer()
+    scorer.load("cpu")
+    request = _request()
+    request["extra_info"] = {"audio": torch.tensor([0.0, 1.0]), "audio_sample_rate": sample_rate}
+
+    (result,) = scorer.score_batch([request])
+
+    assert isinstance(result, ValueError)
+    assert "sample rate" in str(result)
+    assert request["extra_info"]["audio_sample_rate"] is sample_rate
+
+
+def test_named_artifact_ignores_invalid_legacy_numpy_sample_rate(fake_adapter):
+    scorer = CLAPScorer()
+    scorer.load("cpu")
+    request = _request()
+    invalid_legacy_rate = np.array([0])
+    request["extra_info"]["audio_sample_rate"] = invalid_legacy_rate
+
+    (result,) = scorer.score_batch([request])
+
+    assert result == {"score": pytest.approx(1.0), "source_sample_rate": 48_000}
+    assert request["extra_info"]["audio_sample_rate"] is invalid_legacy_rate
+
+
 def test_forward_uses_active_accelerator_device_context(fake_adapter, monkeypatch):
     events = []
 
@@ -668,8 +722,9 @@ async def test_wrapper_forwards_the_original_request_kwargs_exactly():
 @pytest.mark.asyncio
 @pytest.mark.parametrize("manager_name", ["AudioRewardManager", "MultiAudioRewardManager"])
 @pytest.mark.parametrize("transport", ["streamed", "finalized"])
+@pytest.mark.parametrize("sample_rate", [48_000, np.array([48_000])], ids=["scalar", "numpy"])
 async def test_audio_manager_calls_batched_entry_without_solution_image(
-    monkeypatch, fake_adapter, manager_name, transport
+    monkeypatch, fake_adapter, manager_name, transport, sample_rate
 ):
     if manager_name == "MultiAudioRewardManager":
         manager_cls = getattr(manager_module, manager_name, None)
@@ -697,7 +752,7 @@ async def test_audio_manager_calls_batched_entry_without_solution_image(
     manager = manager_cls(config, MagicMock(), compute_score=compute_score)
     if manager_name == "MultiAudioRewardManager":
         manager.set_reward_executors(None, {"clap": executor})
-    audio = {"audio": torch.tensor([[0.0, 1.0]]), "audio_sample_rate": 48_000}
+    audio = {"audio": torch.tensor([[0.0, 1.0]]), "audio_sample_rate": sample_rate}
     metadata = (
         {"tool_extra_fields": [audio]} if transport == "streamed" else {key: [value] for key, value in audio.items()}
     )
