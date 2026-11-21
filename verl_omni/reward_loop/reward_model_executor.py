@@ -206,8 +206,8 @@ class NativeRewardExecutor:
                 )
             self._inflight += 1
             self._idle.clear()
-            model = self._model
-        return await await_owned(self._infer_owned(model, args, kwargs))
+            inference = self._infer_owned(self._model, args, kwargs)
+        return await await_owned(inference)
 
     async def _wake_up(self) -> None:
         async with self._lifecycle_lock:
@@ -321,21 +321,23 @@ class NativeRewardExecutor:
         if self._supports_cpu_offload(self._model):
             await self._call(self._model.sleep)
         else:
-            await self._drop_model(self._model)
+            await self._drop_model()
 
     async def _sleep_legacy_model(self) -> None:
         """Park the frozen ``infer()`` adapter — dropped at post-window cleanup (#723)."""
         if self._supports_cpu_offload(self._model):
             await self._call(self._model.sleep)
         else:
-            await self._drop_model(self._model)
+            await self._drop_model()
 
-    async def _drop_model(self, model) -> None:
+    async def _drop_model(self) -> None:
         """Dispose weights that cannot be parked on the host; the microbatcher goes with them."""
-        self._model = None
+        model, self._model = self._model, None
         self._microbatcher = None
         self._close_failed = True
-        await self._dispose(model)
+        await self._close_model(model)
+        del model
+        gc.collect()
         self._close_failed = False
 
     async def _close(self) -> None:
@@ -356,6 +358,8 @@ class NativeRewardExecutor:
                 await self._microbatcher.close()
             await self._idle.wait()
             await self._teardown(model)
+            del model
+            self._collect_and_clear_cache()
             self._close_failed = False
 
     async def _fail_closed(self) -> None:
@@ -368,27 +372,31 @@ class NativeRewardExecutor:
         self._close_failed = True
         try:
             await self._teardown(model)
+            del model
+            self._collect_and_clear_cache()
         except BaseException:
             logger.exception("Failed to clean up native reward model %s", self.spec.name)
         else:
             self._close_failed = False
 
     async def _teardown(self, model) -> None:
-        """Close the microbatcher (scorer path), dispose the model, clear the accelerator cache."""
+        """Close the microbatcher and run the model's optional close hook."""
         microbatcher, self._microbatcher = self._microbatcher, None
         if microbatcher is not None:
             await microbatcher.close()
-        await self._dispose(model)
+        await self._close_model(model)
+
+    def _collect_and_clear_cache(self) -> None:
+        gc.collect()
         if self.spec.device_type != "cpu":
             _empty_accelerator_cache()
 
     @classmethod
-    async def _dispose(cls, model) -> None:
+    async def _close_model(cls, model) -> None:
         if model is not None:
             close = getattr(model, "close", None)
             if callable(close):
                 await cls._call(close)
-        gc.collect()
 
     @staticmethod
     def _supports_cpu_offload(model) -> bool:
