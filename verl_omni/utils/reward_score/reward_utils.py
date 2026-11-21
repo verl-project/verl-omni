@@ -78,8 +78,9 @@ def get_audio(extra_info: dict, *, audio_layout: str | None = None) -> tuple[tor
     if audio is None:
         raise KeyError("Audio reward requires decoded audio in extra_info['audio'].")
     audio = torch.as_tensor(audio).detach().float().cpu()
-    if audio.numel() == 0 or not torch.isfinite(audio).all():
-        raise ValueError("Audio reward requires non-empty audio containing only finite samples.")
+    waveform_error = "Audio reward requires non-empty audio containing only finite samples."
+    if audio.numel() == 0:
+        raise ValueError(waveform_error)
     declared_layout = extra_info.get("audio_layout")
     if audio_layout is not None and declared_layout is not None and audio_layout != declared_layout:
         raise ValueError("Conflicting audio_layout in scorer config and extra_info.")
@@ -94,6 +95,8 @@ def get_audio(extra_info: dict, *, audio_layout: str | None = None) -> tuple[tor
         audio = audio.mean(dim=0)
     elif audio.ndim != 1:
         raise ValueError(f"Expected audio shape (T,) or (C,T), got {tuple(audio.shape)}.")
+    if not torch.isfinite(audio).all():
+        raise ValueError(waveform_error)
     sample_rate = extra_info.get("audio_sample_rate")
     if isinstance(sample_rate, torch.Tensor):
         if sample_rate.numel() != 1:

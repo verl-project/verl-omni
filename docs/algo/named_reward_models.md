@@ -45,6 +45,10 @@ rollout waveform and sample rate, including when named visual artifacts are
 present. Scorers can declare both arguments or select named media directly
 from `extra_info`.
 
+Legacy visual audio accepts numeric NumPy object arrays. Legacy layout
+declarations in rollout fields, `tool_extra_fields` and `extra_info` must agree.
+Named audio uses its artifact layout.
+
 Invalid audio, or missing audio for a scorer that requires `solution_audio`,
 aborts scoring even for a term with `required: false`. A parameter with a
 default keeps that default when the rollout provides no audio. Existing
@@ -338,7 +342,9 @@ final_reward = sum(term.weight * term.score)
 ```
 
 `required=true` makes a scoring failure fatal. An optional term records the
-error and contributes zero. Model setup and lifecycle failures are always
+error and contributes zero. Non-finite scores follow this policy. Weights must
+be finite, and the combined reward must fit the float32 reward range.
+Model setup and lifecycle failures are always
 fatal. `ArtifactContractError` is fatal for every term, including optional
 terms, so missing or invalid named media cannot silently contribute zero.
 

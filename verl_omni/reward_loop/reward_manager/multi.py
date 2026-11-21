@@ -72,11 +72,14 @@ def _extract_solution_audio(extra_info: dict, *, use_named_audio: bool) -> tuple
         if media_kind not in ("image", "video"):
             return AudioRewardManager._extract_audio(extra_info)
 
+        audio = extra_info.get("audio")
+        if isinstance(audio, np.ndarray) and audio.dtype == object:
+            audio = np.asarray(audio, dtype=np.float32)
         sample_rate = extra_info.get("audio_sample_rate")
         if isinstance(sample_rate, np.ndarray) and sample_rate.size == 1:
             sample_rate = sample_rate.item()
         waveform, sample_rate = get_audio(
-            {"audio": extra_info.get("audio"), "audio_sample_rate": sample_rate},
+            {"audio": audio, "audio_sample_rate": sample_rate},
             audio_layout=extra_info.get("audio_layout", "CT"),
         )
     except (KeyError, TypeError, ValueError, RuntimeError, OverflowError) as exc:
@@ -144,6 +147,8 @@ class MultiRewardManager(RewardManagerBase, ABC):
             if model_name is not None and path is None:
                 raise ValueError(f"Model-backed reward function {key!r} requires path/name")
             weight = float(entry.get("weight", 1.0))
+            if not math.isfinite(weight):
+                raise ValueError(f"Reward function {key!r} weight must be finite, got {weight!r}.")
             required_value = entry.get("required", False)
             if isinstance(required_value, str):
                 normalized = required_value.lower()
@@ -377,13 +382,13 @@ class MultiRewardManager(RewardManagerBase, ABC):
                         score = 0.0
                     else:
                         try:
+                            score = float(result["score"] if isinstance(result, dict) else result)
+                            if not math.isfinite(score):
+                                raise ValueError(f"Reward score must be finite, got {score!r}.")
                             if isinstance(result, dict):
-                                score = float(result["score"])
-                                for rk, rv in result.items():
-                                    if rk != "score":
-                                        reward_extra_info[f"reward/{key}/{rk}"] = rv
-                            else:
-                                score = float(result)
+                                reward_extra_info.update(
+                                    {f"reward/{key}/{rk}": rv for rk, rv in result.items() if rk != "score"}
+                                )
                         except ArtifactContractError:
                             raise
                         except Exception as exc:
@@ -402,6 +407,8 @@ class MultiRewardManager(RewardManagerBase, ABC):
             await drain_tasks()
             raise
 
+        if not math.isfinite(combined_score) or abs(combined_score) > torch.finfo(torch.float32).max:
+            raise ValueError(f"Combined reward must be within the finite float32 range, got {combined_score!r}.")
         reward_extra_info["reward/combined"] = combined_score
         return {"reward_score": combined_score, "reward_extra_info": reward_extra_info}
 

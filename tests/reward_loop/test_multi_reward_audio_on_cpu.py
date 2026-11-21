@@ -73,7 +73,8 @@ async def test_named_media_routes_only_requested_inputs(layout, fps, audio_layou
             "visual": MediaArtifact(MediaSpec(kind, "decoded", layout, fps=fps), pixels),
             "audio": MediaArtifact(MediaSpec("audio", "decoded", audio_layout, sample_rate=32_000), waveform),
         },
-        tool_extra_fields=[{"audio": torch.zeros(2), "audio_sample_rate": 16_000}],
+        audio_layout=["TC"],
+        tool_extra_fields=[{"audio": torch.zeros(2), "audio_sample_rate": 16_000, "audio_layout": "T"}],
     )
     manager = _manager(
         MultiVisualRewardManager,
@@ -97,7 +98,7 @@ async def test_legacy_audio_fallback_with_named_visual_media(named_audio):
     data = _named_visual_data(
         pixels,
         artifacts,
-        tool_extra_fields=[{"audio": waveform, "audio_sample_rate": np.array(32_000)}],
+        tool_extra_fields=[{"audio": np.array([[0.0], [1.0]], dtype=object), "audio_sample_rate": np.array(32_000)}],
     )
     manager = _manager(
         MultiVisualRewardManager,
@@ -111,6 +112,24 @@ async def test_legacy_audio_fallback_with_named_visual_media(named_audio):
     result = await manager.run_single(data)
     assert result["reward_score"] == 0.5
     assert result["reward_extra_info"]["reward/optional_audio/rate"] == 32_000
+
+
+@pytest.mark.parametrize("other_source", [None, "tool_extra_fields", "extra_info"])
+async def test_legacy_visual_audio_layout_is_projected(other_source):
+    pixels = torch.zeros(3, 2, 2, dtype=torch.uint8)
+    tool_fields = {"audio": torch.ones(2, 3), "audio_sample_rate": 32_000}
+    metadata = {"audio_layout": ["TC"], "tool_extra_fields": [tool_fields]}
+    if other_source == "tool_extra_fields":
+        tool_fields["audio_layout"] = "CT"
+    elif other_source == "extra_info":
+        metadata["extra_info"] = [{"audio_layout": "CT"}]
+    data = _named_visual_data(
+        pixels, {"visual": MediaArtifact(MediaSpec("image", "decoded", "CHW"), pixels)}, **metadata
+    )
+    manager = _manager(MultiVisualRewardManager, audio={"name": "score_audio", "required": False})
+    message = "Conflicting.*audio_layout" if other_source else "channels-last audio is not supported"
+    with pytest.raises(ArtifactContractError, match=message):
+        await manager.run_single(data)
 
 
 async def test_audio_token_reward_uses_last_valid_response_token():
