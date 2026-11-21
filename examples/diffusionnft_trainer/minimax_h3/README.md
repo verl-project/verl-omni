@@ -310,6 +310,12 @@ and `ROLLOUT_ATTN_BACKEND=TORCH_SDPA`; exporting those environment variables
 before launching does not override them. These are the settings used in the
 validated NPU run.
 
+The DiffusionNFT actor uses [CANN RMSNorm](https://gitcode.com/cann/ops-nn/tree/master/norm/rms_norm)
+through `torch_npu.npu_rms_norm` for contiguous BF16 activations and weights.
+The dispatch applies to the H3 training module, including its old and reference
+policy forwards. The actor keeps the original RMSNorm parameters, including
+their checkpoint names.
+
 FSDP2's CPU-offload policy must manage parameter placement during old-policy
 adapter copy/EMA updates. Manually moving the module in that context can
 leave DTensor device metadata inconsistent with its local CPU shard and
