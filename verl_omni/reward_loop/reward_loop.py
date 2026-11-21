@@ -26,6 +26,7 @@ from verl.experimental.reward_loop.reward_loop import RewardLoopWorker
 from verl.protocol import DataProto
 from verl.trainer.ppo.reward import resolve_reward_manager_cls
 
+from verl_omni.utils.asyncio_utils import await_owned
 from verl_omni.workers.config.reward import (
     accelerator_workers_enabled,
     get_reward_model_entries,
@@ -42,7 +43,6 @@ from .reward_model import MultiRewardModelManager
 from .reward_model_executor import (
     EngineRewardExecutor,
     NativeRewardExecutor,
-    _await_owned,
     build_engine_reward_executors,
     build_native_reward_executors,
 )
@@ -112,7 +112,7 @@ class OmniRewardLoopWorker(RewardLoopWorker):
         await executor.sleep()
 
     async def close_reward_model(self, name: str | None = None) -> None:
-        await _await_owned(self._close_reward_model(name))
+        await await_owned(self._close_reward_model(name))
 
     async def _close_reward_model(self, name: str | None = None) -> None:
         if name is None:

@@ -25,11 +25,12 @@ from verl_omni.reward_loop import reward_model_executor as executor_module
 from verl_omni.reward_loop.reward_loop import OmniRewardLoopWorker
 from verl_omni.reward_loop.reward_model import MultiRewardModelManager, NativeManagedRewardModel
 from verl_omni.reward_loop.reward_model_executor import NativeRewardExecutor
+from verl_omni.utils.asyncio_utils import await_owned
 from verl_omni.workers.config.reward import RewardModelSpec
 
 
 def _executor(monkeypatch, model_class):
-    monkeypatch.setattr(executor_module, "_load_native_model", lambda _: model_class)
+    monkeypatch.setattr(executor_module, "import_from_spec", lambda _: model_class)
     monkeypatch.setattr(executor_module, "get_device_name", lambda: "cpu")
     monkeypatch.setattr(executor_module, "get_device_id", lambda: 0)
     return NativeRewardExecutor(
@@ -57,7 +58,7 @@ async def test_owned_failure_after_repeated_cancellation_is_consumed():
         finally:
             settled.set()
 
-    caller = asyncio.create_task(executor_module._await_owned(fail()))
+    caller = asyncio.create_task(await_owned(fail()))
     await started.wait()
     caller.cancel()
     await asyncio.sleep(0)
@@ -229,6 +230,84 @@ async def test_reconstruction_sleep_collects_model_before_flushing_cache(monkeyp
     await executor.sleep()
 
     assert model_alive_at_flush == [False]
+
+
+@pytest.mark.asyncio
+async def test_reconstruction_sleep_releases_model_after_inflight_inference(monkeypatch):
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class Model:
+        def __init__(self, **kwargs):
+            pass
+
+        async def infer(self):
+            started.set()
+            await release.wait()
+            return 1
+
+    executor = _executor(monkeypatch, Model)
+    await executor.wake_up()
+    model_ref = weakref.ref(executor._model)
+    model_alive_at_flush = []
+    monkeypatch.setattr(
+        executor_module, "_empty_accelerator_cache", lambda: model_alive_at_flush.append(model_ref() is not None)
+    )
+    inference = asyncio.create_task(executor.infer())
+    await asyncio.wait_for(started.wait(), 2)
+    sleep = asyncio.create_task(executor.sleep())
+
+    async def wait_for_sleep():
+        while executor._awake:
+            await asyncio.sleep(0)
+
+    try:
+        await asyncio.wait_for(wait_for_sleep(), 2)
+        assert not model_alive_at_flush
+    finally:
+        release.set()
+        await sleep
+        assert await inference == 1
+    assert model_alive_at_flush == [False]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fail_closed", [False, True])
+async def test_terminal_cleanup_collects_model_before_flushing_cache(monkeypatch, fail_closed):
+    class Model:
+        supports_cpu_offload = True
+
+        def __init__(self, **kwargs):
+            self.cycle = self
+
+        async def sleep(self):
+            pass
+
+        async def wake_up(self):
+            pass
+
+        async def close(self):
+            pass
+
+    executor = _executor(monkeypatch, Model)
+    await executor.wake_up()
+    model_ref = weakref.ref(executor._model)
+    model_alive_at_flush = []
+
+    def flush_cache():
+        model_alive_at_flush.append(model_ref() is not None)
+        if fail_closed and len(model_alive_at_flush) == 1:
+            raise OSError("cache flush failed")
+
+    monkeypatch.setattr(executor_module, "_empty_accelerator_cache", flush_cache)
+    if fail_closed:
+        with pytest.raises(OSError, match="cache flush failed"):
+            await executor.sleep()
+        assert model_alive_at_flush == [True, False]
+    else:
+        await executor.close()
+        assert model_alive_at_flush == [False]
+    assert executor._model is None and executor._closed
 
 
 @pytest.mark.asyncio
