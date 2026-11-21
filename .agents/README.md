@@ -47,6 +47,7 @@ thing, the guide wins and the file links to it.
 | [profile](skills/profile/SKILL.md)                  | select a profiler and capture the relevant processes/workload |
 | [perf-tuning](skills/perf-tuning/SKILL.md)          | measured, regression-safe workflow for speeding up a Python/PyTorch hot path |
 | [train-infer-consistency](skills/train-infer-consistency/SKILL.md) | rollout / actor consistency collection and analysis using MindStudio skills |
+| [experiment-campaign](skills/experiment-campaign/SKILL.md) | bounded optimisation sessions: PRELUDE→ENABLEMENT→FRAMEWORK→KERNEL→SWEEP→CLOSE, keep/revert on re-measured evidence, append-only round log, recipe KB |
 
 `commit-and-pr` holds the authoritative module list; other files link to it rather
 than duplicating it.
