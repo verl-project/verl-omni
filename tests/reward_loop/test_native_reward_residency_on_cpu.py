@@ -24,11 +24,12 @@ from verl_omni.reward_loop import reward_model_executor as executor_module
 from verl_omni.reward_loop.reward_loop import OmniRewardLoopWorker
 from verl_omni.reward_loop.reward_model import MultiRewardModelManager, NativeManagedRewardModel
 from verl_omni.reward_loop.reward_model_executor import NativeRewardExecutor
+from verl_omni.utils.asyncio_utils import await_owned
 from verl_omni.workers.config.reward import RewardModelSpec
 
 
 def _executor(monkeypatch, model_class):
-    monkeypatch.setattr(executor_module, "_load_native_model", lambda _: model_class)
+    monkeypatch.setattr(executor_module, "import_from_spec", lambda _: model_class)
     monkeypatch.setattr(executor_module, "get_device_name", lambda: "cpu")
     monkeypatch.setattr(executor_module, "get_device_id", lambda: 0)
     return NativeRewardExecutor(
@@ -56,7 +57,7 @@ async def test_owned_failure_after_repeated_cancellation_is_consumed():
         finally:
             settled.set()
 
-    caller = asyncio.create_task(executor_module._await_owned(fail()))
+    caller = asyncio.create_task(await_owned(fail()))
     await started.wait()
     caller.cancel()
     await asyncio.sleep(0)
