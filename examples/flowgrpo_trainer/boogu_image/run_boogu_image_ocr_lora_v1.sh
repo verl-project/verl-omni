@@ -45,7 +45,7 @@
 #       No FA3 requirement on this path; set these if the transformer fails to
 #       fetch kernels-community/flash-attn3 from the Hub (no egress / untrusted
 #       remote code). Where the kernel loads, the default is faster.
-#   reward.reward_model.rollout.max_model_len=8192
+#   +reward.models.ocr.rollout.max_model_len=8192
 #   actor_rollout_ref.rollout.gpu_memory_utilization
 #       Qwen3-VL advertises a 262144 context, and the reward engine shares these
 #       GPUs with the rollout. Cap the context, or lower the rollout's memory
@@ -75,7 +75,7 @@ else
     model_name=$(hf download --quiet Boogu/Boogu-Image-0.1-Base)
 fi
 reward_model_name=${REWARD_MODEL_PATH:-Qwen/Qwen3-VL-8B-Instruct}
-reward_function_path=verl_omni/utils/reward_score/genrm_ocr.py
+reward_function_path=pkg://verl_omni.utils.reward_score.genrm_ocr
 
 NUM_GPUS_ACTOR_ROLLOUT_REWARD=4
 # The vllm-omni BooguImagePipeline supports neither TP nor SP nor CFG-parallel.
@@ -139,13 +139,21 @@ python3 -m verl_omni.trainer.main_diffusion_v1 \
     actor_rollout_ref.rollout.val_kwargs.algo.noise_level=0.0 \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=${MAX_NUM_SEQS} \
     reward.num_workers=$((NUM_GPUS_ACTOR_ROLLOUT_REWARD / REWARD_TP)) \
-    reward.reward_model.enable=True \
-    "reward.reward_model.model_path=$reward_model_name" \
-    reward.reward_model.rollout.name=$REWARD_ENGINE \
-    reward.reward_model.rollout.response_length=256 \
-    reward.reward_model.rollout.tensor_model_parallel_size=$REWARD_TP \
-    reward.custom_reward_function.path=$reward_function_path \
-    reward.custom_reward_function.name=compute_score_ocr \
+    reward.reward_model.enable=False \
+    reward.reward_manager.name=MultiVisualRewardManager \
+    +reward.models.ocr.backend=engine \
+    +reward.models.ocr.offload=True \
+    "+reward.models.ocr.model_path=$reward_model_name" \
+    +reward.models.ocr.n_gpus_per_node=$NUM_GPUS_ACTOR_ROLLOUT_REWARD \
+    +reward.models.ocr.nnodes=1 \
+    +reward.models.ocr.rollout.name=$REWARD_ENGINE \
+    +reward.models.ocr.rollout.response_length=256 \
+    +reward.models.ocr.rollout.tensor_model_parallel_size=$REWARD_TP \
+    +reward.reward_functions.ocr.path=$reward_function_path \
+    +reward.reward_functions.ocr.name=compute_score_ocr \
+    +reward.reward_functions.ocr.weight=1.0 \
+    +reward.reward_functions.ocr.required=True \
+    +reward.reward_functions.ocr.use_rollout_sampling_params=True \
     trainer.logger='["console", "wandb"]' \
     trainer.project_name=flow_grpo \
     trainer.experiment_name=boogu_image_ocr_lora_v1_convergence \
