@@ -79,6 +79,17 @@ class Wan22DanceGRPO(DiffusionModelBase):
     """
 
     @classmethod
+    def tq_trajectory_fields(cls, model_config: DiffusionModelConfig) -> tuple[set[str], set[str]]:
+        """Declare DanceGRPO trajectory tensors and optional CFG conditioning."""
+        required = {"all_latents", "prompt_embeds"}
+        optional = {"prompt_embeds_mask", "negative_prompt_embeds_mask"}
+        if model_config.pipeline.get("true_cfg_scale", 1.0) > 1.0:
+            required.add("negative_prompt_embeds")
+        else:
+            optional.add("negative_prompt_embeds")
+        return required, optional
+
+    @classmethod
     def preserve_fp32_modules(cls) -> bool:
         """Use one dtype because Wan blocks mix direct fp32 and bf16 parameters under FSDP1."""
         return False

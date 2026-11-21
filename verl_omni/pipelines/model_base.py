@@ -50,6 +50,11 @@ class DiffusionModelBase(ABC):
     _registry: dict[tuple[str, str], type["DiffusionModelBase"]] = {}
 
     @classmethod
+    def tq_trajectory_fields(cls, model_config: DiffusionModelConfig) -> tuple[set[str], set[str]]:
+        """Declare required/optional worker tensors; timesteps stay on the driver."""
+        raise NotImplementedError(f"Worker-side trajectory fetching is not declared by {cls.__name__}")
+
+    @classmethod
     def register(cls, architecture: str, algorithm: str):
         """Class decorator that registers a subclass for ``(architecture, algorithm)``."""
 

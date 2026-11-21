@@ -62,6 +62,7 @@ from verl.workers.utils.losses import ppo_loss
 import verl_omni.trainer.distillation.losses as _omni_distill_losses  # noqa: E402, F401
 from verl_omni.pipelines.utils import build_scheduler
 from verl_omni.utils.config import LoRASettings, resolve_lora_config
+from verl_omni.utils.diffusion_tq import materialize_diffusion_trajectory
 from verl_omni.utils.mfu import (
     DiffusionFlopsCounter,
     allgather_diffusion_flops_meta,
@@ -128,6 +129,16 @@ def _iter_actor_lora_peft_models(engine, adapter_name: str = "default"):
     peft_model = get_peft_model_from_engine(engine)
     if peft_model is not None:
         yield peft_model
+
+
+def _with_diffusion_trajectory(func):
+    """Materialize deferred diffusion inputs before actor/ref computation."""
+
+    @functools.wraps(func)
+    def wrapper(self, data: TensorDict, *args, **kwargs):
+        return func(self, materialize_diffusion_trajectory(data), *args, **kwargs)
+
+    return wrapper
 
 
 def _with_routing_replay_flag(enabled: bool):
@@ -932,6 +943,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="ref"))
     @DistProfiler.annotate(color="olive", role="infer_ref_batch")
+    @_with_diffusion_trajectory
     @_with_routing_replay_flag(enabled=False)
     def infer_ref_batch(self, data: TensorDict) -> TensorDict:
         output = self.ref.infer_batch(data=data)
@@ -947,6 +959,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
     @DistProfiler.annotate(color="blue", role="infer_actor_batch")
+    @_with_diffusion_trajectory
     @_with_routing_replay_flag(enabled=True)
     def infer_actor_batch(self, data: TensorDict) -> TensorDict:
         output = self.actor.infer_batch(data)
@@ -988,6 +1001,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
     @DistProfiler.annotate(color="red", role="actor_update", scheduled=True)
+    @_with_diffusion_trajectory
     @_with_routing_replay_flag(enabled=True)
     def update_actor(self, data: TensorDict) -> TensorDict:
         tu.assign_non_tensor(data, enable_timestep_staging=self.config.actor.get("enable_timestep_staging", False))

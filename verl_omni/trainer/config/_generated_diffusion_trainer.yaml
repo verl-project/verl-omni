@@ -716,6 +716,7 @@ trainer:
   device: cuda
   use_v1: true
   v1:
+    worker_side_trajectory: false
     watchdog:
       enabled: false
       window_size: 3

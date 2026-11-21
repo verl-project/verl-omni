@@ -21,11 +21,12 @@ import numpy as np
 import torch
 import transfer_queue as tq
 from tensordict import TensorDict
-from transfer_queue import KVBatchMeta
+from transfer_queue import BatchMeta, KVBatchMeta
 from verl.protocol import DataProto
 from verl.utils import tensordict_utils as tu
 
 from verl_omni.trainer.diffusion.diffusion_trainer_utils import MEDIA_ARTIFACT_FIELD_PREFIX
+from verl_omni.utils.diffusion_tq import TRAJECTORY_KEYS, TRAJECTORY_META
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
@@ -163,10 +164,25 @@ def _stack_field(value: Any, padding: float = 0.0) -> torch.Tensor | None:
     return torch.as_tensor(value)
 
 
+def _uniform_tq_field_shape(metadata: BatchMeta, field: str) -> tuple[int, ...]:
+    schema = metadata.field_schema[field]
+    if schema["is_nested"]:
+        shapes = schema.get("per_sample_shapes", [])
+    else:
+        shapes = [schema["shape"]] * metadata.size
+    if len(shapes) != metadata.size or not shapes or any(shape is None for shape in shapes):
+        raise ValueError(f"Missing per-row shapes for deferred training field {field!r}")
+    shapes = [tuple(shape) for shape in shapes]
+    if len(set(shapes)) != 1:
+        raise ValueError(f"Deferred training requires uniform {field!r} shapes in the selected batch")
+    return shapes[0]
+
+
 def diffusion_tq_batch_to_dataproto(
     batch_meta: KVBatchMeta,
     pad_token_id: int = 0,
     select_fields: list[str] | None = None,
+    trajectory_fields: tuple[set[str], set[str]] | None = None,
 ) -> DataProto:
     """Read TQ rows and assemble a diffusion ``DataProto``.
 
@@ -175,6 +191,8 @@ def diffusion_tq_batch_to_dataproto(
         pad_token_id: Padding token id for variable-length prompt token tensors.
         select_fields: Optional TQ fields to retrieve. ``None`` preserves the
             full-payload behavior required by training and validation.
+        trajectory_fields: Required and optional tensor fields fetched on workers.
+            Mutually exclusive with ``select_fields``.
 
     Returns:
         ``DataProto`` whose ``batch`` carries diffusion tensors (prompts,
@@ -184,6 +202,39 @@ def diffusion_tq_batch_to_dataproto(
     sort_idx = sort_diffusion_tq_keys(list(batch_meta.keys))
     keys = [batch_meta.keys[i] for i in sort_idx]
     partition_id = batch_meta.partition_id
+
+    descriptor = None
+    if trajectory_fields is not None:
+        if select_fields is not None:
+            raise ValueError("Cannot combine a TQ field projection with deferred trajectory fields")
+        required, optional = trajectory_fields
+        if not {"all_latents", "prompt_embeds"}.issubset(required):
+            raise ValueError("Deferred trajectories require latents and prompt embeddings")
+        if "all_timesteps" in required | optional:
+            raise ValueError("all_timesteps must remain driver-owned for rollout diagnostics")
+        metadata = tq.get_client().kv_retrieve_meta(keys=keys, partition_id=partition_id, create=False)
+        stored = set(metadata.field_names)
+        missing = (required | {"prompts", "uid", "rm_scores", "all_timesteps"}) - stored
+        if missing or metadata.size != len(keys):
+            raise ValueError(f"Missing training fields in partition={partition_id!r}, keys={keys!r}: {sorted(missing)}")
+        selected_trajectory = sorted((required | optional) & stored)
+        if not metadata.select_fields(selected_trajectory).is_ready:
+            raise ValueError(f"Trajectory fields are not ready in partition={partition_id!r}, keys={keys!r}")
+        shape = _uniform_tq_field_shape(metadata, "all_timesteps")
+        if len(shape) != 1 or shape[0] < 1:
+            raise ValueError("Deferred trajectories require a uniform nonempty timestep sequence")
+        latent_shape = _uniform_tq_field_shape(metadata, "all_latents")
+        if len(latent_shape) < 2 or latent_shape[0] != shape[0] + 1:
+            raise ValueError("Deferred trajectories require S+1 latents for S timesteps")
+        select_fields = sorted(stored - set(selected_trajectory))
+        if TRAJECTORY_KEYS in stored or TRAJECTORY_META in stored:
+            raise ValueError("Stored fields collide with diffusion TQ trajectory metadata")
+        descriptor = {
+            "partition_id": partition_id,
+            "fields": selected_trajectory,
+            "required": sorted(required),
+            "num_timesteps": int(shape[0]),
+        }
 
     data = tq.kv_batch_get(
         keys=keys,
@@ -220,7 +271,18 @@ def diffusion_tq_batch_to_dataproto(
                 non_tensor_batch[k][i] = v
 
     batch = TensorDict(batch_dict, batch_size=len(keys))
-    return DataProto(batch=batch, non_tensor_batch=non_tensor_batch)
+    result = DataProto(batch=batch, non_tensor_batch=non_tensor_batch)
+    if descriptor is not None:
+        missing = {"prompts", "rm_scores", "all_timesteps"} - set(batch.keys())
+        if "uid" not in non_tensor_batch:
+            missing.add("uid")
+        if missing:
+            raise ValueError(f"Projected training read is missing core data: {sorted(missing)}")
+        if batch["all_timesteps"].shape != (len(keys), descriptor["num_timesteps"]):
+            raise ValueError("Timestep shape changed during projected training read")
+        result.non_tensor_batch[TRAJECTORY_KEYS] = _to_object_array(keys)
+        result.meta_info[TRAJECTORY_META] = descriptor
+    return result
 
 
 def put_dataproto_fields_to_tq(
