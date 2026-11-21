@@ -102,6 +102,21 @@ Audio HTTP Scorer Client
 .. automodule:: verl_omni.utils.reward_score.audio_http_scorer_client
    :members: compute_score
 
+Class-based Scorer Protocol
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. automodule:: verl_omni.utils.reward_score.scorers.base
+   :members: RewardScorer
+
+.. automodule:: verl_omni.utils.reward_score.scorers.registry
+   :members: register_scorer, get_scorer_cls
+
+PickScore Scorer (class-based)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. automodule:: verl_omni.utils.reward_score.scorers.pickscore
+   :members: PickScoreScorer, compute_score_pickscore_batched
+
 Reward Utilities
 ^^^^^^^^^^^^^^^^^^
 
