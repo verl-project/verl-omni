@@ -249,7 +249,15 @@ def put_dataproto_fields_to_tq(
         if field in data.batch:
             output[field] = data.batch[field]
         elif field == "reward_extra_info" and (keys := data.meta_info.get("reward_extra_keys")):
-            columns = [data.non_tensor_batch[key].tolist() for key in keys]
+            columns = []
+            expected = len(batch_meta.keys)
+            for key in keys:
+                if key not in data.non_tensor_batch:
+                    raise ValueError(f"reward_extra_info: missing non_tensor_batch column {key!r}")
+                column = data.non_tensor_batch[key]
+                if len(column) != expected:
+                    raise ValueError(f"reward_extra_info column {key!r}: expected {expected} rows, got {len(column)}")
+                columns.append(column.tolist())
             output[field] = [dict(zip(keys, row, strict=True)) for row in zip(*columns, strict=True)]
     if not output:
         return

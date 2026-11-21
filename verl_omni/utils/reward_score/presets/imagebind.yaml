@@ -7,6 +7,8 @@ model_path: .checkpoints/imagebind_huge.pth
 offload: false
 
 placement:
+  # Bundle indices in the trainer-selected parent pool. The default needs at least two bundles.
+  # For a one-bundle pool, pass 'reward.models.imagebind.placement.devices=[0]' to the launcher.
   devices: [1]
 
 executor:
