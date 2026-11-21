@@ -318,10 +318,15 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
             # Ranks on meta get their weights from rank 0 when FSDP wraps the module,
             # but diffusers' from_pretrained still reads every checkpoint tensor
             # under init_empty_weights. from_config reads only the config JSON.
+            model_cls = DiffusionModelBase.get_class(self.model_config)
+            loader = model_cls.diffusers_model_class(self.model_config) or AutoModel
             if init_context is init_empty_weights:
-                module = AutoModel.from_config(load_path, **load_kwargs)
+                if loader is AutoModel:
+                    module = loader.from_config(load_path, **load_kwargs)
+                else:
+                    module = loader.from_config(loader.load_config(load_path, subfolder=load_kwargs["subfolder"]))
             else:
-                module = AutoModel.from_pretrained(load_path, torch_dtype=torch_dtype, **load_kwargs)
+                module = loader.from_pretrained(load_path, torch_dtype=torch_dtype, **load_kwargs)
             try:
                 module.set_attention_backend(self.model_config.attn_backend)
             except Exception as e:
@@ -333,7 +338,6 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
 
             # Keep architecture-declared fp32 islands unless the adapter marks
             # them as incompatible with its FSDP wrapping units.
-            model_cls = DiffusionModelBase.get_class(self.model_config)
             _cast_loaded_diffusers_module(
                 module,
                 torch_dtype,

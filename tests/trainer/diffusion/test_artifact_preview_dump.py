@@ -17,6 +17,7 @@ import pytest
 import torch
 from PIL import Image
 from test_artifact_preview_dump_on_cpu import _dump_image_previews
+from verl.utils.device import get_device_name, get_torch_device
 
 from verl_omni.pipelines.rollout_media import MediaArtifact, MediaSpec
 
@@ -24,15 +25,16 @@ from verl_omni.pipelines.rollout_media import MediaArtifact, MediaSpec
 @pytest.mark.parametrize("version", [0, 1])
 @pytest.mark.parametrize("latent_shape", [(2, 16), (2, 16, 2, 2)])
 def test_cuda_latent_primary_exports_image_previews(tmp_path, version, latent_shape):
-    assert torch.cuda.is_available()
-    latents = torch.randn(latent_shape, dtype=torch.bfloat16, device="cuda")
+    assert get_torch_device().is_available()
+    device = get_device_name()
+    latents = torch.randn(latent_shape, dtype=torch.bfloat16, device=device)
     before = latents.clone()
     previews = [
         MediaArtifact(
-            MediaSpec("image", "decoded", "CHW"), torch.full((3, 4, 5), 37, dtype=torch.uint8, device="cuda")
+            MediaSpec("image", "decoded", "CHW"), torch.full((3, 4, 5), 37, dtype=torch.uint8, device=device)
         ),
         MediaArtifact(
-            MediaSpec("image", "decoded", "HWC"), torch.full((2, 3, 3), 211, dtype=torch.uint8, device="cuda")
+            MediaSpec("image", "decoded", "HWC"), torch.full((2, 3, 3), 211, dtype=torch.uint8, device=device)
         ),
     ]
     rows = _dump_image_previews(tmp_path, version, latents, previews)
@@ -41,5 +43,5 @@ def test_cuda_latent_primary_exports_image_previews(tmp_path, version, latent_sh
         with Image.open(row["output"]) as image:
             assert image.size == size
             assert image.getpixel((0, 0)) == (value, value, value)
-    assert latents.is_cuda and all(preview.data.is_cuda for preview in previews)
+    assert latents.device.type == device and all(preview.data.device.type == device for preview in previews)
     torch.testing.assert_close(latents, before)

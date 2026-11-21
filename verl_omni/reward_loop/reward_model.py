@@ -78,6 +78,10 @@ class MultiRewardModelManager:
                 self.models[name] = EngineManagedRewardModel(
                     name, model, base_config, engine_pools.get(name), fallback_model
                 )
+            elif model.placement.replica_groups:
+                from .native_fsdp import NativeFSDPManagedRewardModel
+
+                self.models[name] = NativeFSDPManagedRewardModel(name, model)
             else:
                 self.models[name] = NativeManagedRewardModel(name, model)
 
@@ -141,14 +145,14 @@ class MultiRewardModelManager:
         for name, model in native_entries:
             if model.placement.is_cpu:
                 continue
-            for device in model.placement.devices:
+            for device in model.placement.bundle_indices:
                 if device in claimed_devices:
                     raise ValueError(
                         f"Native reward model {name!r} placement.devices overlaps parent-pool index {device} "
                         f"already assigned to {claimed_devices[device]!r}"
                     )
                 claimed_devices[device] = name
-            assignments[name] = tuple(model.placement.devices)
+            assignments[name] = tuple(model.placement.bundle_indices)
         return assignments
 
     def _split_engine_resource_pool(self, engine_entries, base_config) -> dict[str, Any]:

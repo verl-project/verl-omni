@@ -32,7 +32,7 @@ from typing import Any
 import hydra
 import ray
 from omegaconf import OmegaConf, open_dict
-from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
+from verl.trainer.constants_ppo import batch_invariant_requested, export_batch_invariant_env, get_ppo_ray_runtime_env
 from verl.trainer.ppo.utils import need_reference_policy
 from verl.utils.device import auto_set_device, is_cuda_available
 
@@ -49,7 +49,11 @@ from verl_omni.utils.config import (
 )
 from verl_omni.utils.fs import resolve_model_local_dir
 from verl_omni.utils.rl_insight import enable_rl_insight
-from verl_omni.workers.config.reward import reward_pool_is_separate, reward_role_required
+from verl_omni.workers.config.reward import (
+    reward_pool_is_separate,
+    reward_role_required,
+    warn_deprecated_reward_config,
+)
 
 __all__ = [
     "RayTrainerTaskRunner",
@@ -290,6 +294,11 @@ def launch_ray_task_runner(
     if propagate_determinism:
         maybe_set_determinism_env(config)
 
+    # Mirror verl's main_ppo: export before ray.init() so get_ppo_ray_runtime_env()
+    # forwards the batch-invariant env pair to every actor worker.
+    if batch_invariant_requested(config):
+        export_batch_invariant_env()
+
     if not ray.is_initialized():
         default_runtime_env = _resolve_ppo_runtime_env(config)
         ray_init_kwargs = config.ray_kwargs.get("ray_init", {})
@@ -336,6 +345,7 @@ def uses_v1_trainer(config) -> bool:
 
 def run_omni(config, task_runner_class=None) -> None:
     """Initialize Ray and run distributed Omni training."""
+    warn_deprecated_reward_config(config)
     enable_rl_insight(config)
 
     if uses_v1_trainer(config):

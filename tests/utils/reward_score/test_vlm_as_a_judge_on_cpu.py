@@ -51,8 +51,9 @@ UNIFIED_EXPECTED_PROMPT = (
     "Text Caption: [a cat]"
 )
 
-# Captured from origin/main (017658d) by patching the historical transport with the
-# same stub image and model name. The lengths and digests pin the exact JSON bytes.
+# Captured from origin/main (718b2ef, including #840's 256-token OCR budget) by patching
+# the historical transport with the same stub image and model name. The lengths and
+# digests pin the exact JSON bytes.
 OCR_EXPECTED_REQUEST = {
     "messages": [
         {"role": "system", "content": "You are a helpful assistant."},
@@ -67,10 +68,10 @@ OCR_EXPECTED_REQUEST = {
     "model": "judge-model",
     "temperature": 0.7,
     "top_p": 0.8,
-    "max_tokens": 4096,
+    "max_tokens": 256,
 }
-OCR_EXPECTED_LENGTH = 392
-OCR_EXPECTED_SHA256 = "84335dbe74bc935ef5992cfdee9dd8f93537d7aff6c13aa156a6665cf17f40b1"
+OCR_EXPECTED_LENGTH = 391
+OCR_EXPECTED_SHA256 = "482cc89a294dc2266eac64c14ccf33ea56bd7563ebe4109a45a2f7fede0d6b46"
 
 UNIFIED_EXPECTED_REQUEST = {
     "messages": [
@@ -341,7 +342,7 @@ def test_sampling_params_merge_defaults_without_mutating_them():
     assert vlm_as_a_judge.DEFAULT_SAMPLING_PARAMS == {
         "temperature": 0.7,
         "top_p": 0.8,
-        "max_tokens": 4096,
+        "max_tokens": 256,
     }
 
 
@@ -369,7 +370,7 @@ async def test_unified_public_helper_forwards_shared_default_extra_keys(monkeypa
 
     assert requests[0]["max_tokens"] == 512
     assert requests[0]["top_k"] == 7
-    assert vlm_as_a_judge.DEFAULT_SAMPLING_PARAMS["max_tokens"] == 4096
+    assert vlm_as_a_judge.DEFAULT_SAMPLING_PARAMS["max_tokens"] == 256
 
 
 @pytest.mark.asyncio

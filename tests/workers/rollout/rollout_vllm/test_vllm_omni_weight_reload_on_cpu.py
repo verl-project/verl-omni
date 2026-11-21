@@ -201,7 +201,6 @@ def test_lora_sync_owns_tensors_across_reused_ipc_buckets(monkeypatch, ar_worker
         _pending_lora_peft_config=None,
         _get_zmq_handle=lambda: "test-lora-reload",
         _get_standard_weight_model_and_config=lambda: (object(), object()) if ar_worker else None,
-        _move_diffusion_lora_stacks_to_device=lambda: None,
         remove_lora=lambda lora_id: None,
         add_lora=added.append,
     )

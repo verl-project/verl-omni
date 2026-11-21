@@ -40,7 +40,9 @@ DEFAULT_GRM_PROMPT = (
     "Please output only the text content from the image without any additional descriptions or formatting."
 )
 DEFAULT_GRM_MODEL_PATH = "~/models/tiny-random/qwen3-vl"
-DEFAULT_SAMPLING_PARAMS = {"temperature": 0.7, "top_p": 0.8, "max_tokens": 4096}
+# OCR transcriptions are a few dozen tokens; the budget only bounds degenerate
+# repetition loops, which otherwise run to the limit at single-sequence decode speed.
+DEFAULT_SAMPLING_PARAMS = {"temperature": 0.7, "top_p": 0.8, "max_tokens": 256}
 DEFAULT_UNIFIED_REWARD_MODEL_PATH = "CodeGoat24/UnifiedReward-2.0-qwen3vl-2b"
 DEFAULT_UNIFIED_REWARD_SAMPLING_PARAMS = {"temperature": 0.0, "top_p": 1.0, "max_tokens": 512}
 UNIFIED_REWARD_SCORE_PATTERN = re.compile(
@@ -211,8 +213,8 @@ async def compute_score_ocr(
         extra_info: Additional information; ``frame_interval`` controls video
             frame subsampling.
         reward_router_address: ``host:port`` of the GRM router.
-        reward_model_tokenizer: Tokenizer for the reward model. Unused, kept
-            for interface consistency.
+        reward_model_tokenizer: Tokenizer for the reward model. When given,
+            a ground truth longer than the output budget is rejected.
         model_name: Name or path of the GRM. Defaults to
             ``DEFAULT_GRM_MODEL_PATH``.
         sampling_params: Overrides applied on top of the shared sampling
@@ -223,6 +225,9 @@ async def compute_score_ocr(
 
     Returns:
         dict: ``{"score": float, "genrm_response": str}``.
+
+    Raises:
+        ValueError: If ``ground_truth`` needs more tokens than ``max_tokens``.
     """
     from verl_omni.utils.reward_score.reward_utils import resolve_prompt_builder
 
@@ -238,6 +243,13 @@ async def compute_score_ocr(
     else:
         prompt = user_prompt
     params = _sampling_params(sampling_params)
+    if reward_model_tokenizer is not None:
+        num_tokens = len(reward_model_tokenizer.encode(ground_truth, add_special_tokens=False))
+        if num_tokens > params["max_tokens"]:
+            raise ValueError(
+                f"OCR ground truth needs {num_tokens} tokens but the judge output budget is "
+                f"max_tokens={params['max_tokens']}; raise the budget so a correct transcription is not truncated."
+            )
 
     grm_response = ""
     scores = []

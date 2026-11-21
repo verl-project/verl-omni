@@ -28,14 +28,8 @@ on:
           - qwen_image_flowgrpo
           - qwen_image_diffusion_nft
           - qwen_image_online_dpo
-      model_path:
-        description: "Optional local Qwen-Image model path"
-        required: false
-        default: ""
-      reward_model_path:
-        description: "Optional local Qwen-VL reward model path"
-        required: false
-        default: ""
+          - qwen3_omni_thinker_gspo
+          - minicpmo_4_5_thinker_gspo
       output_root:
         description: "Output directory for dumps, logs, and reports"
         required: false
@@ -75,10 +69,8 @@ env:
   REPORT_ARTIFACT_PREFIX: l3-nightly-reports
   RUN_MODE: ${{ github.event_name == 'schedule' && 'nightly' || github.event_name == 'pull_request' && 'nightly' || github.event.inputs.mode || 'nightly' }}
   L3_CASE: ${{ github.event.inputs.case || 'all' }}
-  ALL_L3_CASES: qwen_image_flowgrpo qwen_image_diffusion_nft qwen_image_online_dpo
+  ALL_L3_CASES: qwen_image_flowgrpo qwen_image_diffusion_nft qwen_image_online_dpo qwen3_omni_thinker_gspo minicpmo_4_5_thinker_gspo
   NUM_GPUS: ${{ github.event.inputs.num_gpus || '1' }}
-  MODEL_PATH: ${{ github.event.inputs.model_path || '' }}
-  REWARD_MODEL_PATH: ${{ github.event.inputs.reward_model_path || '' }}
   OUTPUT_ROOT: ${{ github.event.inputs.output_root || 'outputs/debug_dumps' }}
   BASELINE_BRANCH: ${{ github.event.inputs.baseline_branch || 'main' }}
 
@@ -214,7 +206,7 @@ jobs:
       UV_SYSTEM_PYTHON: "1"
       UV_BREAK_SYSTEM_PACKAGES: "1"
       PIP_BREAK_SYSTEM_PACKAGES: "1"
-      NIGHTLY_PIN_TRANSFORMERS: "5.14.1"
+      NIGHTLY_PIN_TRANSFORMERS: "5.19.0"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -238,11 +230,11 @@ jobs:
           uv pip install --system --break-system-packages -e ".[gpu,dev,audio,ocr]"
           # veomni's [gpu] extra pins torch 2.11 and would conflict with the vLLM stack.
           # See docs/start/engine_backends.md.
-          # TODO: rm --no-deps when VeOmni supports the vLLM torch pin (torch 2.13 as of vLLM 0.30).
+          # TODO: rm --no-deps when VeOmni supports the vLLM torch pin (torch 2.14 as of vLLM 0.33).
           uv pip install --system --break-system-packages veomni==0.1.12 --no-deps
           uv pip install --system --break-system-packages torchcodec librosa soundfile av audioread
           uv pip install --system --break-system-packages "transformers[mistral-common]==${NIGHTLY_PIN_TRANSFORMERS}"
-          python3 -c "import importlib.metadata as m; print('[NIGHTLY] pinned deps:', 'transformers='+m.version('transformers'), 'kernels='+m.version('kernels'), 'fa3-fwd='+m.version('fa3-fwd'))"
+          python3 -c "import importlib.metadata as m; print('[NIGHTLY] pinned deps:', 'transformers='+m.version('transformers'), 'kernels='+m.version('kernels'))"
           if ! command -v python >/dev/null 2>&1; then
             ln -sfn "$(command -v python3)" /usr/local/bin/python
           fi
@@ -259,12 +251,6 @@ jobs:
           set -euo pipefail
 
           export OUTPUT_ROOT="${OUTPUT_ROOT}"
-          if [ -n "${MODEL_PATH}" ]; then
-            export MODEL_PATH="${MODEL_PATH}"
-          fi
-          if [ -n "${REWARD_MODEL_PATH}" ]; then
-            export REWARD_MODEL_PATH="${REWARD_MODEL_PATH}"
-          fi
 
           if [ "${RUN_MODE}" = "baseline" ]; then
             export BOOTSTRAP_MISSING_BASELINE=1
@@ -277,7 +263,10 @@ jobs:
           # NUM_GPUS is the workflow input (default 1) and applies to every case.
           # L3_CASE=all runs every case. A named case skips the others, so a
           # baseline run replaces only that case inside the downloaded artifact.
+          # Keep running remaining cases after a failure; fail the step at the end.
           read -r -a all_cases <<< "${ALL_L3_CASES}"
+          failed=0
+          failed_names=()
           for case_name in "${all_cases[@]}"; do
             if [ "${L3_CASE}" != "all" ] && [ "${L3_CASE}" != "${case_name}" ]; then
               echo "[NIGHTLY] skip ${case_name}; L3_CASE=${L3_CASE}"
@@ -289,8 +278,19 @@ jobs:
               exit 1
             fi
             ray stop --force || true
-            bash "${script}"
+            if bash "${script}"; then
+              echo "[NIGHTLY][PASS] ${case_name}"
+            else
+              echo "[NIGHTLY][FAIL] ${case_name}"
+              failed=1
+              failed_names+=("${case_name}")
+            fi
           done
+
+          if [ "${failed}" -ne 0 ]; then
+            echo "[NIGHTLY] failed cases: ${failed_names[*]}"
+            exit 1
+          fi
 
       - name: Upload current nightly artifacts
         if: always() && env.RUN_MODE == 'nightly'

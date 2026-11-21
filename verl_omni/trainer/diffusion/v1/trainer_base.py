@@ -453,12 +453,9 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             SkipManager.set_step(self.global_steps)
             current_epoch = (self.global_steps - 1) // self.steps_per_epoch
             if is_last_step:
-                log_skip_summary(self.logger, self.global_steps)
-                self._shutdown_dump_executor()
                 pprint(f"Final validation metrics: {last_val_metrics}")
                 progress_bar.close()
-                self._shutdown_dataloaders()
-                return
+                break
 
         self.on_train_end()
         log_skip_summary(self.logger, self.global_steps)
@@ -589,25 +586,12 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         # [OPTIONAL] colocated reward model
         if self.reward_loop_manager.reward_loop_worker_handles is None and self.use_rm:
             with marked_timer("reward", timing_raw, color="yellow"):
-                # Sync sampling hooks already put colocated rollout replicas to
-                # sleep. Sleeping them again can unmap the same accelerator
-                # memory twice. Async modes still need the explicit mid-cycle
-                # sleep because they do not share the sync hook guarantee.
-                if self.trainer_mode != "sync":
-                    self.checkpoint_manager.sleep_replicas()
+                # The mode hooks (sync on_sample_end, separate_async switch_to_trainer)
+                # already put the colocated replicas to sleep; they stay asleep through
+                # training (~55GB of Qwen-Image weights at rollout TP=1 would OOM next to
+                # the actor update), and the hook that next hands them to generation
+                # wakes and weight-syncs them.
                 data = data.union(self._compute_reward_colocate(data))
-                if self.trainer_mode != "sync":
-                    # Async modes have no guaranteed per-step wake of the
-                    # colocated replicas (separate_async's on_step_end only
-                    # syncs the standalone rollout, and switch_to_rollout is
-                    # not guaranteed to fire), so keep the mid-cycle wake+sync
-                    # or colocated generation stalls on stale weights.
-                    self._update_rollout_weights_mid_cycle()
-                # In sync mode the replicas must stay asleep through the
-                # training phases below: update_weights resumes their weights
-                # (~55GB for Qwen-Image at rollout TP=1) and the actor update
-                # would OOM next to them. on_step_end wakes and weight-syncs
-                # for the next rollout.
 
         if self._is_direct_preference:
             return self._train_direct_preference_batch(metrics, timing_raw, batch_meta, data)
@@ -1399,15 +1383,6 @@ class PolicyGradientDiffusionTrainerV1(ABC):
     def _add_batch_to_generate(self):
         batch = self._next_train_batch()
         self._submit_batch_to_rollout(batch)
-
-    @SkipManager.annotate(role="weight_sync")
-    def _update_rollout_weights_mid_cycle(self) -> None:
-        """Wake colocated replicas after the reward phase and refresh their weights (async modes).
-
-        Lifecycle syncs (init, step end, validation) always run; skipping this
-        refresh still wakes the replicas, on pre-update weights.
-        """
-        self.checkpoint_manager.update_weights(self.global_steps)
 
     @SkipManager.annotate(role="reward")
     def _compute_reward_colocate(self, data: DataProto) -> DataProto:

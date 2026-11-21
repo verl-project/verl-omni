@@ -1,10 +1,10 @@
 # Per-Stage Skip: Cache and Replay RL Pipeline Stages
 
-Last updated: 11/02/2026
+Last updated: 11/17/2026
 
 Stage skip replays the output of one RL pipeline stage for configured global
 steps instead of running it: reward scoring, old log-probs, reference outputs,
-advantages, the actor update, or the mid-cycle weight sync. It extends rollout
+advantages, or the actor update. It extends rollout
 skip, which replays generations, to the stages computed after them. Everything
 is built on verl's `SkipManager` (`BaseSkip`, `SKIP_REGISTRY`,
 `@SkipManager.annotate`) and every role starts disabled.
@@ -142,7 +142,6 @@ omni_skip:
 | `ref_log_prob` | Reference log-probs or, for direct preference, reference noise preds | `cache`, `repeat` | V1, V0 |
 | `advantage` | Driver-side advantage computation | `cache`, `repeat` | V1 (policy gradient) |
 | `actor_update` | The actor update | `cache`, `repeat`, `empty` | V1, V0 |
-| `weight_sync` | Mid-cycle rollout weight refresh | `empty` | V1 async modes |
 
 Rollout itself is replayed by verl's roles under `skip:`. Use
 `skip.rollout_tq` on the V1 trainer and `skip.rollout` on the V0 trainer. The
@@ -170,10 +169,6 @@ stage caches: its batches carry a `validate` marker that bypasses every role.
 - `actor_update` with `empty` no-ops the update and the metrics pipeline runs on
   empty metrics. `cache` and `repeat` replay the metrics of an earlier real
   update, with the weights left unchanged. Neither writes checkpoint content.
-- `weight_sync` with `empty` skips the refresh but still wakes the replicas that
-  were slept for the colocated reward model, on pre-update weights. Lifecycle
-  syncs (init, step end, validation) always run. Training quality silently
-  degrades, which is why the role requires `ack_stale_weights: true`.
 
 ### Cache layout
 
@@ -206,9 +201,7 @@ inert or unsafe:
 |---|---|
 | An enabled role with empty `steps` | It could never fire |
 | A misspelled role under `omni_skip` | It would be ignored |
-| `weight_sync` without `ack_stale_weights: true` | Replicas keep stale weights |
-| `weight_sync` on V0 or in `trainer.v1.trainer_mode=sync` | Those trainers have no mid-cycle sync |
-| `reward` or `weight_sync` with streaming rewards | Scoring happens inside rollout; use the rollout roles |
+| `reward` with streaming rewards | Scoring happens inside rollout; use the rollout roles |
 | `ref_log_prob` with no reference policy | The stage never runs |
 | `old_log_prob` + `algorithm.rollout_correction.bypass_mode` | Both substitute old log-probs |
 | `old_log_prob` or `advantage` with `algorithm.trainer_type=direct_preference` | Those stages never run |
@@ -229,5 +222,3 @@ missing cache would turn a later replay into a real run.
   plumbing tool rather than a reproduction tool.
 - Replaying a stage does not free the memory of its model: the reward model and
   rollout replicas still load, so profile runs need the same GPUs.
-- The V1 and V0 `weight_sync` limits above mean the role only applies to async
-  modes that also have a colocated reward model.

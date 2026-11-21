@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import inspect
+import warnings
 from functools import partial
 from pathlib import Path
 
@@ -23,6 +24,7 @@ from verl.utils.reward_score import default_compute_score as _upstream_default_c
 
 from verl_omni.pipelines.rollout_media import PRIMARY_ARTIFACT, ArtifactContractError
 from verl_omni.utils.reward_score import default_compute_score_image
+from verl_omni.workers.config.reward import DEPRECATED_VISUAL_MANAGER_MESSAGE
 
 from .media import _reward_extra_info
 
@@ -89,12 +91,16 @@ def _is_legacy_unified_reward_entry(compute_score, config) -> bool:
 def _sampling_params_from_rollout(rollout_config) -> dict:
     """Build judge generation overrides from a reward rollout config.
 
-    The response length is always forwarded. Temperature and top-p are
-    forwarded together once either is tuned away from the upstream rollout
-    defaults, and top-k is forwarded when it is set. Configs that keep the
-    upstream defaults retain the scorer's own sampling setup.
+    Response length is forwarded as ``max_tokens`` when set; unset rollout
+    lengths leave the output budget to the scorer default. Temperature and
+    top-p are forwarded together once either is tuned away from the upstream
+    rollout defaults, and top-k is forwarded when it is set. Configs that keep
+    the upstream defaults retain the scorer's own sampling setup.
     """
-    params = {"max_tokens": rollout_config.get("response_length") or 4096}
+    params = {}
+    response_length = rollout_config.get("response_length")
+    if response_length:
+        params["max_tokens"] = response_length
     top_k = rollout_config.get("top_k", -1)
     if top_k != -1:
         params["top_k"] = top_k
@@ -150,9 +156,14 @@ def _validate_visual_response(response_visual, config, *, is_validate: bool, ext
 
 
 class VisualRewardManager(RewardManagerBase):
-    """The reward manager for visual response."""
+    """The reward manager for visual response.
+
+    Deprecated since v0.4.0 and replaced by :class:`MultiVisualRewardManager`
+    with ``reward.reward_functions``; it will be removed in a future release.
+    """
 
     def __init__(self, config, tokenizer, compute_score, reward_router_address=None, reward_model_tokenizer=None):
+        warnings.warn(DEPRECATED_VISUAL_MANAGER_MESSAGE, DeprecationWarning, stacklevel=2)
         super().__init__(config, tokenizer, compute_score)
 
         if compute_score is None or compute_score is _upstream_default_compute_score:
