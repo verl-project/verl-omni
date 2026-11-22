@@ -108,9 +108,10 @@ Symptoms that show up regardless of which stage causes them:
 
 **Step time dominated by data transfer between worker groups (video models)**
 - For SD3 FlowGRPO and Wan2.2 DanceGRPO V1 `sync` runs with rollout-side rewards,
-  opt into `trainer.v1.worker_side_trajectory=true` to read core fields on the
-  driver and fetch trajectory tensors on the actor/ref workers. The default
-  is `false`. Actual timesteps stay on the driver for rollout diagnostics.
+  opt into `trainer.v1.worker_side_trajectory=true` to read an explicit core
+  allowlist on the driver and fetch trajectory tensors on the actor/ref workers.
+  The default is `false`. Actual timesteps stay on the driver for rollout diagnostics.
+  Decoded responses and named media artifacts remain in TQ for the separate dump read.
   Async modes, teacher scoring, direct-preference training, and driver-side
   reward consumers are rejected when this option is enabled; pipelines must
   declare their trajectory field contract. Validation keeps its full read.

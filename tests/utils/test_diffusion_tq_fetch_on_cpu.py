@@ -47,6 +47,10 @@ def storage(monkeypatch):
             "uid": NonTensorStack("a", "b"),
             "rm_scores": torch.tensor([[1.0], [3.0]]),
             "responses": torch.zeros(2, 3, 8, 8, dtype=torch.uint8),
+            "media_artifact__image_preview": torch.zeros(2, 3, 8, 8, dtype=torch.uint8),
+            "extra_fields": NonTensorStack(
+                *({"reward_extra_info": {"brightness": float(index)}} for index in range(2))
+            ),
             "all_latents": torch.arange(96, dtype=torch.float32).reshape(2, 3, 1, 4, 4),
             "all_timesteps": torch.tensor([[900.0, 500.0], [900.0, 500.0]]),
             "prompt_embeds": torch.arange(64, dtype=torch.float32).reshape(2, 4, 8),
@@ -108,10 +112,12 @@ def read_core():
     )
 
 
-def test_core_read_excludes_trajectory_and_records_actual_sde_window(storage):
+def test_core_read_uses_explicit_allowlist_and_records_actual_sde_window(storage):
     data = read_core()
     assert REQUIRED.isdisjoint(data.batch.keys())
-    assert set(storage.core_reads[0]) == {"prompts", "uid", "rm_scores", "responses", "all_timesteps"}
+    assert set(storage.core_reads[0]) == {"prompts", "uid", "rm_scores", "all_timesteps", "extra_fields"}
+    assert "responses" not in data.batch and "media_artifact__image_preview" not in data.batch
+    assert [item["brightness"] for item in data.non_tensor_batch["reward_extra_info"]] == [0.0, 1.0]
     assert data.non_tensor_batch[diffusion_tq.TRAJECTORY_KEYS].tolist() == ["a_0_0", "b_0_0"]
     assert data.meta_info[diffusion_tq.TRAJECTORY_META]["num_timesteps"] == 2
     assert "negative_prompt_embeds" not in data.meta_info[diffusion_tq.TRAJECTORY_META]["fields"]
@@ -138,7 +144,7 @@ def test_non_tq_worker_batches_keep_their_existing_contract():
 def test_worker_fetch_preserves_reordered_padded_rows_and_driver_overlays(storage):
     data = read_core().select_idxs([1, 0, 1, 1])
     data.batch["advantages"] = torch.arange(8, dtype=torch.float32).reshape(4, 2)
-    sent = data.to_tensordict().exclude("responses")
+    sent = data.to_tensordict()
     output = diffusion_tq.materialize_diffusion_trajectory(sent)
     torch.testing.assert_close(output["all_latents"], storage.payload["all_latents"][[1, 0, 1, 1]])
     torch.testing.assert_close(output["advantages"], data.batch["advantages"])
@@ -310,6 +316,24 @@ def test_masked_ragged_embeds_match_full_read_after_reorder_and_duplication(stor
     for field in ("prompt_embeds", "prompt_embeds_mask"):
         for full_row, projected_row in zip(expected[field].unbind(), actual[field].unbind(), strict=True):
             torch.testing.assert_close(full_row, projected_row, rtol=0, atol=0)
+
+
+def test_unmasked_ragged_embeds_fail_closed(storage):
+    storage.payload["prompt_embeds"] = torch.nested.as_nested_tensor(
+        [torch.ones(3, 8), torch.ones(2, 8)], layout=torch.jagged
+    )
+    storage.payload = storage.payload.exclude("prompt_embeds_mask")
+    with pytest.raises(ValueError, match="requires 'prompt_embeds_mask'"):
+        diffusion_tq.materialize_diffusion_trajectory(read_core().to_tensordict())
+
+
+def test_ragged_embeds_reject_mismatched_mask(storage):
+    storage.payload["prompt_embeds"] = torch.nested.as_nested_tensor(
+        [torch.ones(3, 8), torch.ones(2, 8)], layout=torch.jagged
+    )
+    storage.payload["prompt_embeds_mask"] = torch.ones(2, 4, dtype=torch.long)
+    with pytest.raises(ValueError, match="incompatible 'prompt_embeds_mask'"):
+        diffusion_tq.materialize_diffusion_trajectory(read_core().to_tensordict())
 
 
 def test_timestep_fields_cannot_be_deferred(storage):

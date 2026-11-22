@@ -32,6 +32,11 @@ logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 
+DIFFUSION_TRAINING_CORE_FIELDS = frozenset(
+    {"prompts", "uid", "rm_scores", "all_timesteps", "rollout_log_probs", "extra_fields"}
+)
+
+
 def diffusion_persisted_tq_fields(
     algorithm: Literal["policy_gradient", "direct_preference"],
 ) -> list[str]:
@@ -192,12 +197,12 @@ def diffusion_tq_batch_to_dataproto(
         select_fields: Optional TQ fields to retrieve. ``None`` preserves the
             full-payload behavior required by training and validation.
         trajectory_fields: Required and optional tensor fields fetched on workers.
-            Mutually exclusive with ``select_fields``.
+            Mutually exclusive with ``select_fields``. The driver read is restricted
+            to ``DIFFUSION_TRAINING_CORE_FIELDS`` when this is set.
 
     Returns:
-        ``DataProto`` whose ``batch`` carries diffusion tensors (prompts,
-        responses, rollout_log_probs, rm_scores, embeds, ...) and whose
-        ``non_tensor_batch`` carries uid/reward_model/data_source/extra_fields.
+        ``DataProto`` whose ``batch`` carries the retrieved diffusion tensors and
+        whose ``non_tensor_batch`` carries row metadata and ``extra_fields``.
     """
     sort_idx = sort_diffusion_tq_keys(list(batch_meta.keys))
     keys = [batch_meta.keys[i] for i in sort_idx]
@@ -226,7 +231,7 @@ def diffusion_tq_batch_to_dataproto(
         latent_shape = _uniform_tq_field_shape(metadata, "all_latents")
         if len(latent_shape) < 2 or latent_shape[0] != shape[0] + 1:
             raise ValueError("Deferred trajectories require S+1 latents for S timesteps")
-        select_fields = sorted(stored - set(selected_trajectory))
+        select_fields = sorted(DIFFUSION_TRAINING_CORE_FIELDS & stored)
         if TRAJECTORY_KEYS in stored or TRAJECTORY_META in stored:
             raise ValueError("Stored fields collide with diffusion TQ trajectory metadata")
         descriptor = {

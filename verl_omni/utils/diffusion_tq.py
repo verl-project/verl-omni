@@ -24,6 +24,24 @@ TRAJECTORY_KEYS = "_diffusion_tq_keys"
 TRAJECTORY_META = "_diffusion_tq_trajectory"
 
 
+def _validate_nested_embed_mask(field: str, values: torch.Tensor, mask: torch.Tensor | None, context: str) -> None:
+    mask_field = f"{field}_mask"
+    if not isinstance(mask, torch.Tensor):
+        raise ValueError(f"Nested trajectory field {field!r} requires {mask_field!r} ({context})")
+
+    value_rows = values.unbind()
+    lengths = [row.shape[0] for row in value_rows]
+    if mask.is_nested:
+        mask_rows = mask.unbind()
+        valid = len(mask_rows) == len(value_rows) and all(
+            mask_row.shape == (length,) for mask_row, length in zip(mask_rows, lengths, strict=True)
+        )
+    else:
+        valid = mask.ndim == 2 and mask.shape[0] == len(value_rows) and mask.sum(dim=1).tolist() == lengths
+    if not valid:
+        raise ValueError(f"Nested trajectory field {field!r} has an incompatible {mask_field!r} ({context})")
+
+
 def materialize_diffusion_trajectory(data: TensorDict) -> TensorDict:
     """Fetch this worker shard's trajectory, preserving overlays and duplicated rows.
 
@@ -81,6 +99,8 @@ def materialize_diffusion_trajectory(data: TensorDict) -> TensorDict:
         value = fetched[field]
         if not isinstance(value, torch.Tensor):
             raise ValueError(f"Expected tensor trajectory field {field!r} ({context})")
+        if value.is_nested and field in {"prompt_embeds", "negative_prompt_embeds"}:
+            _validate_nested_embed_mask(field, value, fetched.get(f"{field}_mask", None), context)
         if value.is_nested:
             value = value.to_padded_tensor(padding=0.0)
         if value.shape[0] != len(unique_keys):

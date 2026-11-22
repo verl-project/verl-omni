@@ -291,6 +291,12 @@ def main() -> None:
                 elapsed_ms = (time.perf_counter_ns() - started) / 1_000_000
                 tensor_bytes[name] = _tensor_nbytes(tensors)
                 returned_fields[name] = sorted(tensors.keys())
+                if args.read_mode == "training" and name == "projected":
+                    unexpected = {
+                        field for field in tensors.keys() if field == "responses" or field.startswith(ARTIFACT_PREFIX)
+                    }
+                    if unexpected:
+                        raise RuntimeError(f"Projected driver read included media fields: {sorted(unexpected)}")
                 if args.read_mode == "training":
                     from verl_omni.trainer.diffusion.diffusion_trainer_utils import _to_diffusion_worker_tensordict
                     from verl_omni.workers.utils.padding import embeds_padding_2_no_padding
