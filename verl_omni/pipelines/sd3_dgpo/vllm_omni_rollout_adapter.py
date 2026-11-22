@@ -33,6 +33,7 @@ class StableDiffusion3DGPOPipeline(StableDiffusion3PipelineWithLogProb):
     """
 
     supports_request_batch = True
+    supports_step_execution = False
     emit_clean_latents = True
 
     def diffuse(

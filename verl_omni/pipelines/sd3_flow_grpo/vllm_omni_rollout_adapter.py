@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import ast
+import copy
 import os
 from typing import Any, Literal
 
@@ -25,8 +26,11 @@ from vllm_omni.diffusion.data import DiffusionOutput, OmniDiffusionConfig
 from vllm_omni.diffusion.distributed.utils import get_local_device
 from vllm_omni.diffusion.models.sd3 import pipeline_sd3
 from vllm_omni.diffusion.models.sd3.pipeline_sd3 import StableDiffusion3Pipeline
+from vllm_omni.diffusion.models.sd3.step_state import export_step_state, restore_step_state, step_execution_profile
 from vllm_omni.diffusion.request import DUMMY_DIFFUSION_REQUEST_ID, OmniDiffusionRequest
 from vllm_omni.diffusion.worker.request_batch import DiffusionRequestBatch
+from vllm_omni.diffusion.worker.utils import StepRequestState
+from vllm_omni.inputs.data import OmniDiffusionSamplingParams
 
 from verl_omni.pipelines.diffusion_rollout_output import (
     install_rollout_postprocessor,
@@ -180,6 +184,7 @@ class StableDiffusion3PipelineWithLogProb(SD3TokenIdPromptMixin, StableDiffusion
     always_encode_negative_prompt = False
 
     supports_request_batch = True
+    supports_step_execution = True
     #: Also return the final latents as ``latents_clean`` when the output type is not ``both``.
     emit_clean_latents = False
 
@@ -221,6 +226,29 @@ class StableDiffusion3PipelineWithLogProb(SD3TokenIdPromptMixin, StableDiffusion
     def _model_dtype(self) -> torch.dtype:
         return self.od_config.dtype
 
+    def export_step_state(self, state: StepRequestState, *, policy_ref: str, max_bytes: int) -> bytes:
+        """Export SDE state; the caller supplies its actual generation-policy reference."""
+        if state.sampling.generator is None:
+            raise ValueError("SD3 SDE recovery requires a request-owned generator")
+        return export_step_state(
+            state,
+            policy_ref=policy_ref,
+            max_bytes=max_bytes,
+            execution_profile=step_execution_profile(self.od_config, self.device),
+            scheduler_cls=FlowMatchSDEDiscreteScheduler,
+        )
+
+    def restore_step_state(self, payload: bytes, *, policy_ref: str, max_bytes: int) -> StepRequestState:
+        """Restore SDE state after the caller verifies the installed policy."""
+        return restore_step_state(
+            payload,
+            policy_ref=policy_ref,
+            device=self.device,
+            max_bytes=max_bytes,
+            execution_profile=step_execution_profile(self.od_config, self.device),
+            scheduler_cls=FlowMatchSDEDiscreteScheduler,
+        )
+
     def _decode_latents(self, latents: torch.Tensor, output_type: str | None = None) -> torch.Tensor:
         output_type = self.output_type if output_type is None else output_type
         if output_type == "latent":
@@ -228,6 +256,129 @@ class StableDiffusion3PipelineWithLogProb(SD3TokenIdPromptMixin, StableDiffusion
         latents = latents.to(self.vae.dtype)
         latents = (latents / self.vae.config.scaling_factor) + self.vae.config.shift_factor
         return self.vae.decode(latents, return_dict=False)[0]
+
+    @staticmethod
+    def _sde_history(batch_size: int) -> dict[str, list[list[Any]]]:
+        return {name: [[] for _ in range(batch_size)] for name in ("all_latents", "all_log_probs", "all_timesteps")}
+
+    @staticmethod
+    def _trajectory_output(
+        state: StepRequestState,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor]:
+        history = state.extra
+        latents = torch.stack([torch.stack(row) for row in history["all_latents"]])
+        log_probs = history["all_log_probs"]
+        stacked_log_probs = (
+            torch.stack([torch.stack(row) for row in log_probs])
+            if log_probs and log_probs[0] and log_probs[0][0] is not None
+            else None
+        )
+        timesteps = torch.stack([torch.stack(row) for row in history["all_timesteps"]])
+        return state.latents, latents, stacked_log_probs, timesteps
+
+    def prepare_encode(self, state: StepRequestState, **kwargs: Any) -> StepRequestState:
+        """Prepare one request using the full-loop encoder, sampling and window rules."""
+        request = OmniDiffusionRequest(
+            request_id=state.request_id, prompt=state.prompt, sampling_params=copy.copy(state.sampling)
+        )
+        context = self._prepare_generation_context(DiffusionRequestBatch(requests=[request]))
+        if context is None:
+            raise ValueError("SD3 FlowGRPO step execution requires a usable text or tokenized prompt")
+        state.latents = context.pop("latents")
+        state.timesteps = context.pop("timesteps")
+        state.prompt_embeds = context.pop("prompt_embeds")
+        state.negative_prompt_embeds = context.pop("negative_prompt_embeds")
+        state.prompt_embeds_mask = context.pop("prompt_embeds_mask")
+        state.negative_prompt_embeds_mask = context.pop("negative_prompt_embeds_mask")
+        state.do_true_cfg = context.pop("do_cfg")
+        state.sampling.generator = context.pop("generator")
+        state.scheduler = copy.deepcopy(self.scheduler)
+        state.scheduler.set_begin_index(0)
+        state.step_index = 0
+        context["sde_windows"] = context.pop("sde_window")
+        state.extra.update(context)
+        state.extra.update(self._sde_history(state.latents.shape[0]))
+        return state
+
+    def _predict_noise(
+        self,
+        latents: torch.Tensor,
+        timestep: torch.Tensor,
+        prompt_embeds: torch.Tensor,
+        pooled_prompt_embeds: torch.Tensor | None,
+        negative_prompt_embeds: torch.Tensor | None,
+        negative_pooled_prompt_embeds: torch.Tensor | None,
+        do_true_cfg: bool,
+        guidance_scale: float,
+        cfg_normalize: bool = False,
+    ) -> torch.Tensor:
+        return super()._predict_noise(
+            latents.to(self._model_dtype()),
+            timestep,
+            prompt_embeds,
+            pooled_prompt_embeds,
+            negative_prompt_embeds,
+            negative_pooled_prompt_embeds,
+            do_true_cfg,
+            guidance_scale,
+            cfg_normalize,
+        )
+
+    def post_decode(self, state: StepRequestState, **kwargs: Any) -> DiffusionOutput:
+        """Return complete training tensors and the same named media as full execution."""
+        # InputBatch normalizes masks to bool; retain the training-output dtype.
+        context = {
+            **state.extra,
+            "prompt_embeds": state.prompt_embeds,
+            "negative_prompt_embeds": state.negative_prompt_embeds,
+            "prompt_embeds_mask": state.prompt_embeds_mask.to(torch.int64),
+            "negative_prompt_embeds_mask": (
+                state.negative_prompt_embeds_mask.to(torch.int64)
+                if state.negative_prompt_embeds_mask is not None
+                else None
+            ),
+        }
+        request = OmniDiffusionRequest(request_id=state.request_id, prompt=state.prompt, sampling_params=state.sampling)
+        windows = state.extra["sde_windows"]
+        if state.request_id == DUMMY_DIFFUSION_REQUEST_ID and windows[0][0] == windows[0][1]:
+            trajectory = (state.latents, None, None, None)
+        else:
+            trajectory = self._trajectory_output(state)
+        return self._finish_rollout(context, DiffusionRequestBatch(requests=[request]), *trajectory)[0]
+
+    def step_scheduler(self, state: StepRequestState, noise_pred: torch.Tensor, **kwargs: Any) -> None:
+        """Commit one SDE step and its FP32 training trajectory to request-owned state."""
+        i, timestep = state.step_index, state.current_timestep
+        windows = state.extra["sde_windows"]
+        latents = state.latents
+        batch_size = latents.shape[0]
+        for row, (start, end) in enumerate(windows):
+            if i == start:
+                state.extra["all_latents"][row].append(latents[row].detach().float().clone())
+        levels = [float(state.extra["noise_level"]) if start <= i < end else 0.0 for start, end in windows]
+        noise_level = (
+            levels[0]
+            if all(level == levels[0] for level in levels)
+            else torch.tensor(levels, device=latents.device, dtype=torch.float32).view(
+                batch_size, *([1] * (latents.ndim - 1))
+            )
+        )
+        state.latents, log_prob, _, _ = state.scheduler.step(
+            noise_pred.float(),
+            timestep,
+            latents,
+            generator=state.sampling.generator,
+            noise_level=noise_level,
+            sde_type=state.extra["sde_type"],
+            return_logprobs=state.extra["logprobs"],
+            return_dict=False,
+        )
+        for row, (start, end) in enumerate(windows):
+            if start <= i < end:
+                state.extra["all_latents"][row].append(state.latents[row].detach().float().clone())
+                state.extra["all_log_probs"][row].append(None if log_prob is None else log_prob[row])
+                state.extra["all_timesteps"][row].append(timestep)
+        state.step_index += 1
 
     def diffuse(
         self,
@@ -252,91 +403,46 @@ class StableDiffusion3PipelineWithLogProb(SD3TokenIdPromptMixin, StableDiffusion
             raise ValueError(f"Expected {batch_size} SDE windows, got {len(windows)}.")
         if len({end - start for start, end in windows}) != 1:
             raise ValueError("Packed SDE windows must share the same size.")
-        all_latents: list[list[torch.Tensor]] = [[] for _ in range(batch_size)]
-        all_log_probs: list[list[Any]] = [[] for _ in range(batch_size)]
-        all_timesteps: list[list[Any]] = [[] for _ in range(batch_size)]
-
-        model_dtype = self._model_dtype()
         self.scheduler.set_begin_index(0)
+        state = StepRequestState(
+            request_id="",
+            sampling=OmniDiffusionSamplingParams(generator=generator),
+            latents=latents,
+            timesteps=timesteps,
+            scheduler=self.scheduler,
+            extra={
+                "sde_windows": windows,
+                "noise_level": noise_level,
+                "sde_type": sde_type,
+                "logprobs": logprobs,
+                **self._sde_history(batch_size),
+            },
+        )
 
-        for i, timestep_value in enumerate(timesteps):
+        for timestep_value in timesteps:
             if self.interrupt:
                 continue
 
-            for batch_idx, (start, end) in enumerate(windows):
-                if i == start:
-                    all_latents[batch_idx].append(latents[batch_idx].detach().float().clone())
-            levels = [float(noise_level) if start <= i < end else 0.0 for start, end in windows]
-            cur_noise_level: float | torch.Tensor = (
-                levels[0]
-                if all(level == levels[0] for level in levels)
-                else torch.tensor(levels, device=latents.device, dtype=torch.float32).view(
-                    batch_size, *([1] * (latents.ndim - 1))
-                )
-            )
-
             self._current_timestep = timestep_value
-            timestep = timestep_value.expand(latents.shape[0]).to(device=self.device, dtype=model_dtype)
-
-            # Cast to model dtype for the transformer forward (the scheduler
-            # returns fp32 latents).
-            x = latents.to(model_dtype)
-
-            positive_kwargs = {
-                "hidden_states": x,
-                "timestep": timestep,
-                "encoder_hidden_states": prompt_embeds,
-                "pooled_projections": pooled_prompt_embeds,
-                "return_dict": False,
-            }
-            negative_kwargs = None
-            if do_cfg:
-                negative_kwargs = {
-                    "hidden_states": x,
-                    "timestep": timestep,
-                    "encoder_hidden_states": negative_prompt_embeds,
-                    "pooled_projections": negative_pooled_prompt_embeds,
-                    "return_dict": False,
-                }
-
-            noise_pred = self.predict_noise_maybe_with_cfg(
+            noise_pred = self._predict_noise(
+                latents,
+                timestep_value,
+                prompt_embeds,
+                pooled_prompt_embeds,
+                negative_prompt_embeds,
+                negative_pooled_prompt_embeds,
                 do_cfg,
                 guidance_scale,
-                positive_kwargs,
-                negative_kwargs,
-                False,
             )
 
-            latents, log_prob, _, _ = self.scheduler.step(
-                noise_pred.float(),
-                timestep_value,
-                latents,
-                generator=generator,
-                noise_level=cur_noise_level,
-                sde_type=sde_type,
-                return_logprobs=logprobs,
-                return_dict=False,
-            )
+            self.step_scheduler(state, noise_pred)
+            latents = state.latents
 
-            # Save fp32 trajectory BEFORE casting back to model dtype, so the
-            # trainer recomputes log-probs on full-precision latents.
-            for batch_idx, (start, end) in enumerate(windows):
-                if start <= i < end:
-                    all_latents[batch_idx].append(latents[batch_idx].detach().float().clone())
-                    all_log_probs[batch_idx].append(None if log_prob is None else log_prob[batch_idx])
-                    all_timesteps[batch_idx].append(timestep_value)
+        return self._trajectory_output(state)
 
-        all_latents_t = torch.stack([torch.stack(traj, dim=0) for traj in all_latents], dim=0)
-        if all_log_probs and all_log_probs[0] and all_log_probs[0][0] is not None:
-            all_log_probs_t = torch.stack([torch.stack(traj, dim=0) for traj in all_log_probs], dim=0)
-        else:
-            all_log_probs_t = None
-        all_timesteps_t = torch.stack([torch.stack(traj, dim=0) for traj in all_timesteps], dim=0)
-        return latents, all_latents_t, all_log_probs_t, all_timesteps_t
-
-    def forward(
+    def _prepare_generation_context(
         self,
-        req: OmniDiffusionRequest | DiffusionRequestBatch,
+        request_batch: DiffusionRequestBatch,
         prompt: str | list[str] | None = None,
         negative_prompt: str | list[str] | None = None,
         height: int | None = None,
@@ -354,10 +460,8 @@ class StableDiffusion3PipelineWithLogProb(SD3TokenIdPromptMixin, StableDiffusion
         sde_type: Literal["sde", "cps"] = "sde",
         logprobs: bool = True,
         output_type: Literal["image", "latent", "both"] = "image",
-    ) -> DiffusionOutput | list[DiffusionOutput]:
-        """End-to-end SD3.5 generation with rollout trajectory collection."""
-        request_batch = req if isinstance(req, DiffusionRequestBatch) else DiffusionRequestBatch(requests=[req])
-        return_batch = isinstance(req, DiffusionRequestBatch)
+    ) -> dict[str, Any] | None:
+        """Prepare shared full-request and incremental FlowGRPO inputs."""
         req_prompts = request_batch.prompts or []
         extra_prompt_ids = _extract_extra_prompt_ids(req_prompts)
         negative_extra_prompt_ids = (
@@ -378,8 +482,7 @@ class StableDiffusion3PipelineWithLogProb(SD3TokenIdPromptMixin, StableDiffusion
                     "(see examples/flowgrpo_trainer/sd35/run_sd35_medium_ocr_lora.sh)."
                 )
             # Engine warm-up / dummy run without a usable prompt.
-            outputs = [DiffusionOutput(output=None) for _ in range(request_batch.num_reqs)]
-            return outputs if return_batch else outputs[0]
+            return None
         if isinstance(prompt, str):
             prompt = [prompt]
 
@@ -402,7 +505,6 @@ class StableDiffusion3PipelineWithLogProb(SD3TokenIdPromptMixin, StableDiffusion
         sde_type = _coalesce_not_none(sampling_params.extra_args.get("sde_type", None), sde_type)
         logprobs = _coalesce_not_none(sampling_params.extra_args.get("logprobs", None), logprobs)
         output_type = _resolve_output_type(sampling_params, output_type)
-        decode = output_type != "latent" or "image_preview" in requested_outputs
 
         req_num_outputs = getattr(sampling_params, "num_outputs_per_prompt", None)
         if req_num_outputs and req_num_outputs > 0:
@@ -491,40 +593,46 @@ class StableDiffusion3PipelineWithLogProb(SD3TokenIdPromptMixin, StableDiffusion
             device=self.device,
         )
 
-        if request_batch.requests[0].request_id == DUMMY_DIFFUSION_REQUEST_ID and sde_window[0][0] == sde_window[0][1]:
-            output = self._decode_latents(latents, "image") if decode else None
-            result = with_visual_artifacts(
-                DiffusionOutput(output=output, to_cpu=True),
-                decoded=output,
-                latents=latents,
-                latent_layout="CHW",
-                output_type=output_type,
-                context=f"pipeline={type(self).__name__}, request_id={request_batch.requests[0].request_id}",
-                requested=requested_outputs,
-            )
-            outputs = _split_diffusion_output_by_request(
-                result,
-                request_batch,
-                num_outputs_per_prompt=num_images_per_prompt,
-            )
-            return outputs if return_batch else outputs[0]
+        return {
+            "prompt_embeds": prompt_embeds,
+            "pooled_prompt_embeds": pooled_prompt_embeds,
+            "negative_prompt_embeds": negative_prompt_embeds,
+            "negative_pooled_prompt_embeds": negative_pooled_prompt_embeds,
+            "latents": latents,
+            "timesteps": timesteps,
+            "do_cfg": do_cfg,
+            "guidance_scale": guidance_scale,
+            "noise_level": noise_level,
+            "sde_window": sde_window,
+            "sde_type": sde_type,
+            "generator": generator,
+            "logprobs": logprobs,
+            "prompt_embeds_mask": prompt_embeds_mask,
+            "negative_prompt_embeds_mask": negative_prompt_embeds_mask,
+            "output_type": output_type,
+            "requested_outputs": requested_outputs,
+            "num_images_per_prompt": num_images_per_prompt,
+        }
 
-        latents, all_latents, all_log_probs, all_timesteps = self.diffuse(
-            prompt_embeds,
-            pooled_prompt_embeds,
-            negative_prompt_embeds,
-            negative_pooled_prompt_embeds,
-            latents,
-            timesteps,
-            do_cfg,
-            guidance_scale,
-            noise_level,
-            sde_window,
-            sde_type,
-            generator,
-            logprobs,
-        )
-
+    def _finish_rollout(
+        self,
+        context: dict[str, Any],
+        request_batch: DiffusionRequestBatch,
+        latents: torch.Tensor,
+        all_latents: torch.Tensor | None,
+        all_log_probs: torch.Tensor | None,
+        all_timesteps: torch.Tensor | None,
+    ) -> list[DiffusionOutput]:
+        output_type = context["output_type"]
+        requested_outputs = context["requested_outputs"]
+        num_images_per_prompt = context["num_images_per_prompt"]
+        prompt_embeds = context["prompt_embeds"]
+        pooled_prompt_embeds = context["pooled_prompt_embeds"]
+        negative_prompt_embeds = context["negative_prompt_embeds"]
+        negative_pooled_prompt_embeds = context["negative_pooled_prompt_embeds"]
+        prompt_embeds_mask = context["prompt_embeds_mask"]
+        negative_prompt_embeds_mask = context["negative_prompt_embeds_mask"]
+        decode = output_type != "latent" or "image_preview" in requested_outputs
         self._current_timestep = None
         output = self._decode_latents(latents, "image") if decode else None
         rl = {}
@@ -561,4 +669,93 @@ class StableDiffusion3PipelineWithLogProb(SD3TokenIdPromptMixin, StableDiffusion
             request_batch,
             num_outputs_per_prompt=num_images_per_prompt,
         )
+        return outputs
+
+    def forward(
+        self,
+        req: OmniDiffusionRequest | DiffusionRequestBatch,
+        prompt: str | list[str] | None = None,
+        negative_prompt: str | list[str] | None = None,
+        height: int | None = None,
+        width: int | None = None,
+        num_inference_steps: int = 28,
+        sigmas: list[float] | None = None,
+        guidance_scale: float = 0.0,
+        num_images_per_prompt: int = 1,
+        generator: torch.Generator | list[torch.Generator] | None = None,
+        latents: torch.Tensor | None = None,
+        max_sequence_length: int = 256,
+        noise_level: float = 0.7,
+        sde_window_size: int | None = None,
+        sde_window_range: tuple[int, int] = (0, 5),
+        sde_type: Literal["sde", "cps"] = "sde",
+        logprobs: bool = True,
+        output_type: Literal["image", "latent", "both"] = "image",
+    ) -> DiffusionOutput | list[DiffusionOutput]:
+        """End-to-end SD3.5 generation with rollout trajectory collection."""
+        request_batch = req if isinstance(req, DiffusionRequestBatch) else DiffusionRequestBatch(requests=[req])
+        return_batch = isinstance(req, DiffusionRequestBatch)
+        context = self._prepare_generation_context(
+            request_batch,
+            prompt=prompt,
+            negative_prompt=negative_prompt,
+            height=height,
+            width=width,
+            num_inference_steps=num_inference_steps,
+            sigmas=sigmas,
+            guidance_scale=guidance_scale,
+            num_images_per_prompt=num_images_per_prompt,
+            generator=generator,
+            latents=latents,
+            max_sequence_length=max_sequence_length,
+            noise_level=noise_level,
+            sde_window_size=sde_window_size,
+            sde_window_range=sde_window_range,
+            sde_type=sde_type,
+            logprobs=logprobs,
+            output_type=output_type,
+        )
+        if context is None:
+            outputs = [DiffusionOutput(output=None) for _ in range(request_batch.num_reqs)]
+            return outputs if return_batch else outputs[0]
+        latents = context["latents"]
+        sde_window = context["sde_window"]
+        output_type = context["output_type"]
+        requested_outputs = context["requested_outputs"]
+        num_images_per_prompt = context["num_images_per_prompt"]
+        decode = output_type != "latent" or "image_preview" in requested_outputs
+        if request_batch.requests[0].request_id == DUMMY_DIFFUSION_REQUEST_ID and sde_window[0][0] == sde_window[0][1]:
+            output = self._decode_latents(latents, "image") if decode else None
+            result = with_visual_artifacts(
+                DiffusionOutput(output=output, to_cpu=True),
+                decoded=output,
+                latents=latents,
+                latent_layout="CHW",
+                output_type=output_type,
+                context=f"pipeline={type(self).__name__}, request_id={request_batch.requests[0].request_id}",
+                requested=requested_outputs,
+            )
+            outputs = _split_diffusion_output_by_request(
+                result,
+                request_batch,
+                num_outputs_per_prompt=num_images_per_prompt,
+            )
+            return outputs if return_batch else outputs[0]
+
+        trajectory = self.diffuse(
+            context["prompt_embeds"],
+            context["pooled_prompt_embeds"],
+            context["negative_prompt_embeds"],
+            context["negative_pooled_prompt_embeds"],
+            context["latents"],
+            context["timesteps"],
+            context["do_cfg"],
+            context["guidance_scale"],
+            context["noise_level"],
+            context["sde_window"],
+            context["sde_type"],
+            context["generator"],
+            context["logprobs"],
+        )
+        outputs = self._finish_rollout(context, request_batch, *trajectory)
         return outputs if return_batch else outputs[0]
