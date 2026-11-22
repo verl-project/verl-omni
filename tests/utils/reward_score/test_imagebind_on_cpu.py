@@ -18,6 +18,7 @@ import sys
 from pathlib import Path
 from types import ModuleType
 
+import numpy as np
 import pytest
 import torch
 
@@ -175,3 +176,71 @@ def test_model_cache_is_scoped_by_model_path_and_device(monkeypatch):
     assert imagebind._load_imagebind("cpu", "first.pth") is first
     assert imagebind._load_imagebind("cpu", "second.pth") is not first
     assert len(created_models) == 2
+
+
+@pytest.mark.asyncio
+async def test_native_score_matches_legacy_and_close_preserves_cached_model(monkeypatch, tmp_path):
+    from verl_omni.reward_loop.reward_model_executor import NativeRewardExecutor
+    from verl_omni.utils.reward_score import imagebind as scorer
+    from verl_omni.workers.config.reward import RewardModelSpec
+
+    class TinyImageBind(torch.nn.Module):
+        def __init__(self, *, pretrained):
+            super().__init__()
+            self.register_buffer("audio", torch.zeros(1, 2))
+            self.register_buffer("vision", torch.zeros(1, 2))
+
+        def forward(self, inputs):
+            return {modality: getattr(self, modality) for modality in inputs}
+
+    upstream = ModuleType("imagebind.models.imagebind_model")
+    upstream.imagebind_huge = TinyImageBind
+    _install_imagebind_modules(monkeypatch, upstream)
+    checkpoint = str(tmp_path / "imagebind.pth")
+    torch.save({"audio": torch.tensor([[3.0, 4.0]]), "vision": torch.tensor([[0.0, 1.0]])}, checkpoint)
+
+    # Subsampled frames and audio from row 1 of the MiniMax-H3 example:
+    # https://github.com/user-attachments/assets/5fb70550-6c1e-428d-bd0c-dad21154745e
+    with np.load(Path(__file__).parent / "fixtures/imagebind_h3.npz") as clip:
+        media = {
+            "video_preview": MediaArtifact(
+                MediaSpec("video", "decoded", "TCHW", fps=float(clip["fps"])), torch.from_numpy(clip["video"])
+            ),
+            "audio": MediaArtifact(
+                MediaSpec("audio", "decoded", "CT", sample_rate=int(clip["sample_rate"])),
+                torch.from_numpy(clip["audio"]),
+            ),
+        }
+    sample = {"ground_truth": "", "extra_info": {"media_artifacts": media}, "mode": "audio_video"}
+
+    def legacy_score():
+        return scorer.compute_score("minimax_h3", None, device="cpu", model_name_or_path=checkpoint, **sample)["score"]
+
+    executor = NativeRewardExecutor(
+        RewardModelSpec(
+            name="imagebind",
+            backend="native",
+            device_type="cpu",
+            model_path=checkpoint,
+            executor_config={"model": f"{scorer.__name__}:ImageBindModel"},
+        )
+    )
+    key = (checkpoint, "cpu")
+    try:
+        legacy = legacy_score()
+        assert legacy == pytest.approx(0.8)
+        cached = scorer._MODEL_CACHE[key]
+        await executor.wake_up()
+        try:
+            adapter = executor._model
+            assert adapter.model is not cached
+            native = await scorer.compute_score_native(**sample, **executor.reward_kwargs())
+            assert native["score"] == pytest.approx(legacy)
+        finally:
+            await executor.close()
+        assert adapter.model is None
+        assert scorer._MODEL_CACHE.get(key) is cached
+        assert legacy_score() == pytest.approx(legacy)
+        assert scorer._MODEL_CACHE[key] is cached
+    finally:
+        scorer._MODEL_CACHE.pop(key, None)
