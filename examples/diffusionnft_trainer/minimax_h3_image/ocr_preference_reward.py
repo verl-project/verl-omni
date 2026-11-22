@@ -54,8 +54,8 @@ SCORER_GPU = os.environ.get("PREFERENCE_SCORER_GPU", "3")
 TIMEOUT_S = float(os.environ.get("REWARD_WORKER_TIMEOUT_S", "300"))
 TMP = os.path.join(os.environ.get("OCR_REWARD_TMPDIR") or tempfile.gettempdir(), "ocr_preference_reward")
 
-# load_extern_object executes this file once per registered reward name without caching in sys.modules.
-# Keep process/cache state in a single sys.modules sentinel so term_pickscore and term_hpsv2 share one scorer.
+# Reward managers use load_reward_object and share one module per canonical file.
+# Retain the sentinel for direct legacy load_extern_object callers that load terms separately.
 _STATE_KEY = f"_verl_omni_minimax_h3_ocr_preference_state:{os.path.abspath(__file__)}"
 
 
