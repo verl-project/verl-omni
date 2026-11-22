@@ -15,6 +15,7 @@
 import logging
 import math
 import os
+import secrets
 import time
 import uuid
 from abc import ABC, abstractmethod
@@ -183,6 +184,8 @@ class PolicyGradientDiffusionTrainerV1(ABC):
     (when rollout replicas sleep, abort, resume, or receive updated weights).
     """
 
+    _checkpoint_manager_cls = CheckpointEngineManager
+
     def __init__(self, config):
         self.config = config
         self.trainer_mode = config.trainer.v1.trainer_mode
@@ -233,7 +236,9 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             raise ValueError("trainer.v1.watchdog.enabled must be a boolean")
         self._training_watchdog = TrainingWatchdog(loss_mode=loss_mode, **watchdog_config) if watchdog_enabled else None
 
-    def _build_replay_buffer(self) -> ReplayBuffer:
+    def _build_replay_buffer(
+        self, *, async_replay_buffer_cls: type[ReplayBufferAsync] = ReplayBufferAsync
+    ) -> ReplayBuffer:
         sampler_config = self.config.trainer.v1.sampler
         if sampler_config.get("drop_incomplete_groups", False):
             if self.trainer_mode != "sync":
@@ -242,7 +247,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             if isinstance(max_refill_rounds, bool) or not isinstance(max_refill_rounds, int) or max_refill_rounds <= 0:
                 raise ValueError("max_incomplete_group_refill_rounds must be a positive integer")
 
-        replay_buffer_cls = ReplayBuffer if self.trainer_mode == "sync" else ReplayBufferAsync
+        replay_buffer_cls = ReplayBuffer if self.trainer_mode == "sync" else async_replay_buffer_cls
         # ReplayBuffer.sample() discovers finished groups by sleeping a fixed
         # poll_interval between tq.kv_list() calls. The upstream 2.0s default
         # quantizes sync gen: sample() returns only on a poll boundary, so a
@@ -1215,7 +1220,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         )
 
         checkpoint_engine_config = omega_conf_to_dataclass(self.config.actor_rollout_ref.rollout.checkpoint_engine)
-        self.checkpoint_manager = CheckpointEngineManager(
+        self.checkpoint_manager = self._checkpoint_manager_cls(
             config=checkpoint_engine_config,
             actor_wg=self.actor_rollout_wg,
             replicas=self.llm_server_manager.get_replicas(),
@@ -1282,6 +1287,9 @@ class PolicyGradientDiffusionTrainerV1(ABC):
     def _assign_rollout_seed(self, batch: tu.TensorDict, num_prompts: int) -> None:
         rollout_seed_cfg = self.config.actor_rollout_ref.rollout.get("seed")
         if rollout_seed_cfg is None:
+            if self.trainer_mode != "sync":
+                batch["rollout_seed"] = torch.full((num_prompts,), secrets.randbits(63), dtype=torch.int64)
+                batch["rollout_seed_index"] = torch.arange(num_prompts, dtype=torch.int64)
             return
         batch["rollout_seed"] = torch.full(
             (num_prompts,), int(rollout_seed_cfg) + self.global_steps - 1, dtype=torch.int64
@@ -2047,10 +2055,15 @@ class PolicyGradientDiffusionTrainerV1(ABC):
                 os.path.join(local_global_step_folder, "transfer_queue"),
                 metadata={"global_steps": self.global_steps},
             )
+            self._save_rollout_checkpoint(local_global_step_folder)
 
         latest = os.path.join(self.config.trainer.default_local_dir, "latest_checkpointed_iteration.txt")
         with open(latest, "w") as f:
             f.write(str(self.global_steps))
+
+    def _save_rollout_checkpoint(self, checkpoint_folder: str) -> None:
+        """Save mode-specific rollout state alongside TransferQueue."""
+        return None
 
     def _load_checkpoint(self):
         self.global_steps = 0
@@ -2097,10 +2110,42 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             elif os.path.exists(tq_checkpoint):
                 logger.info(f"Loading TransferQueue state from {tq_checkpoint}")
                 tq.load_checkpoint(tq_checkpoint)
+                self._load_rollout_checkpoint(global_step_folder)
             else:
                 logger.warning(f"No TransferQueue state at {tq_checkpoint}; async queue state will start empty")
 
-    def _reissue_inflight_prompts(self, partition_id: str = "train") -> int:
+    def _load_rollout_checkpoint(self, checkpoint_folder: str) -> None:
+        return None
+
+    def _recover_complete_prompt_groups(
+        self, partition_id: str, items: dict[str, dict], inflight_uids: list[str]
+    ) -> set[str]:
+        """Finish the prompt marker when the checkpoint contains every successful session."""
+        rollout_n = self.config.actor_rollout_ref.rollout.n
+        counts = Counter(self._trajectory_uid(key) for key, tag in items.items() if not tag.get("is_prompt", False))
+        recovered = {}
+        for uid in inflight_uids:
+            if counts[uid] != rollout_n:
+                continue
+            members = [items.get(f"{uid}_{session}_0", {}) for session in range(rollout_n)]
+            if all(
+                tag.get("status") == "success"
+                and tag.get("min_global_steps", tag["global_steps"]) == tag.get("max_global_steps", tag["global_steps"])
+                for tag in members
+            ):
+                oldest = min(tag.get("min_global_steps", tag["global_steps"]) for tag in members)
+                recovered[uid] = {"status": "finished", "global_steps": oldest + 1}
+        if recovered:
+            tq.kv_batch_put(keys=list(recovered), partition_id=partition_id, tags=list(recovered.values()))
+        return set(recovered)
+
+    def _reissue_inflight_prompts(
+        self,
+        partition_id: str = "train",
+        *,
+        preserve_complete_groups: bool = False,
+        checkpoint_outputs: dict | None = None,
+    ) -> int:
         """Restart checkpointed pending and running prompt groups."""
         if self.trainer_mode == "sync" or not _tq_supports_checkpoint():
             return 0
@@ -2114,6 +2159,31 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             for key, tag in items.items()
             if tag.get("is_prompt", False) and tag.get("status") in ("pending", "running")
         ]
+        if preserve_complete_groups and inflight_uids:
+            recovered = self._recover_complete_prompt_groups(partition_id, items, inflight_uids)
+            inflight_uids = [uid for uid in inflight_uids if uid not in recovered]
+        checkpoint_members = {}
+        kept_keys = set()
+        if checkpoint_outputs is not None:
+            rollout_n = self.config.actor_rollout_ref.rollout.n
+            threshold = self.config.trainer.v1.sampler.max_off_policy_threshold
+            for uid in inflight_uids:
+                members = {}
+                for session in range(rollout_n):
+                    key = f"{uid}_{session}_0"
+                    tag = items.get(key, {})
+                    if tag.get("status") == "success":
+                        version = tag["global_steps"]
+                        if tag.get("min_global_steps", version) == tag.get("max_global_steps", version) == version and (
+                            threshold is None or self.global_steps - version <= threshold
+                        ):
+                            members[session] = version
+                            kept_keys.add(key)
+                    elif key in checkpoint_outputs:
+                        members[session] = checkpoint_outputs[key]
+                if members:
+                    checkpoint_members[uid] = members
+
         prompt_uids = {key for key, tag in items.items() if tag.get("is_prompt", False)}
         inflight_uid_set = set(inflight_uids)
         # Checkpoints precede the sampled rows' final clear in fit(). Rows
@@ -2122,16 +2192,23 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             key
             for key, tag in items.items()
             if not tag.get("is_prompt", False)
+            and key not in kept_keys
             and (self._trajectory_uid(key) in inflight_uid_set or self._trajectory_uid(key) not in prompt_uids)
         ]
         if discarded_trajectory_keys:
             tq.kv_clear(keys=discarded_trajectory_keys, partition_id=partition_id)
+        # New batches must follow finished groups and unfinished prompts from this checkpoint.
+        restored_trajectory_seq = max((tag.get("gen_batch_seq", -1) for tag in items.values()), default=-1)
+        self._gen_batch_seq = max(self._gen_batch_seq, restored_trajectory_seq + 1)
         if not inflight_uids:
             return 0
 
         batch = tq.kv_batch_get(keys=inflight_uids, partition_id=partition_id)
+        if "gen_batch_seq" in batch:
+            next_sequence = max(int(sequence) for sequence in batch["gen_batch_seq"]) + 1
+            self._gen_batch_seq = max(self._gen_batch_seq, next_sequence)
         tu.assign_non_tensor_data(batch, "global_steps", self.global_steps)
-        # Older checkpoints did not persist the seed tensor. New checkpoints
+        # Older checkpoints may not have a seed tensor. New checkpoints
         # retain both the original base and prompt position for whole-sample retries.
         if "rollout_seed" not in batch:
             self._assign_rollout_seed(batch, len(inflight_uids))
@@ -2144,6 +2221,12 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             tags=tags,
             fields=batch.select(*[key for key in batch.keys() if not isinstance(batch.get(key), NonTensorData)]),
         )
+        if checkpoint_members:
+            from tensordict import NonTensorStack
+
+            batch["checkpoint_members"] = NonTensorStack.from_list(
+                [checkpoint_members.get(uid, {}) for uid in inflight_uids]
+            )
         self.agent_loop_manager.generate_sequences(batch)
 
         logger.info(

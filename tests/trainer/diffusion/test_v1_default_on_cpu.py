@@ -16,6 +16,7 @@
 import os
 import warnings
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from hydra import compose, initialize_config_dir
@@ -289,11 +290,149 @@ def test_registered_trainer_uses_async_groups_and_exact_refill():
     assert trainer._generation_batch_size() == 1
 
 
+def test_deterministic_colocate_replay_orders_equal_version_groups():
+    trainer = PolicyGradientDiffusionTrainerV1ColocateAsync(
+        compose_diffusion_config(
+            ["trainer.v1.trainer_mode=colocate_async", "actor_rollout_ref.rollout.full_determinism=true"]
+        )
+    )
+    replay = trainer.replay_buffer
+    sampleable = {"earlier-policy", "prompt-a", "prompt-b", "prompt-c", "prompt-d"}
+    tied = [uid for uid in sampleable if uid != "earlier-policy"]
+    order = dict(zip(reversed(tied), range(len(tied)), strict=True))
+    replay.prompt_global_steps["train"].update(dict.fromkeys(sampleable, 7))
+    replay.prompt_global_steps["train"]["earlier-policy"] = 6
+    replay.partitions["train"].update(
+        {f"{uid}_0_0": {"gen_batch_seq": seq, "prompt_index": 0} for uid, seq in order.items()}
+    )
+    selected, _, _ = replay._select_prompt_uids("train", sampleable, 3)
+    assert selected == ["earlier-policy", tied[-1], tied[-2]]
+
+
+def test_colocate_sampling_timeout_when_no_groups_finish(monkeypatch):
+    from verl_omni.trainer.diffusion.v1 import trainer_colocate_async
+
+    trainer = PolicyGradientDiffusionTrainerV1ColocateAsync(
+        compose_diffusion_config(
+            ["trainer.v1.trainer_mode=colocate_async", "+trainer.v1.colocate_async.request_timeout_s=0.01"]
+        )
+    )
+    monkeypatch.setattr(
+        trainer_colocate_async.tq,
+        "kv_list",
+        lambda: {"train": {"waiting": {"is_prompt": True, "status": "running", "global_steps": 1}}},
+    )
+    now = 0.0
+
+    def tick(seconds):
+        nonlocal now
+        assert now == 0, "sample polled again after its deadline"
+        now += seconds
+
+    monkeypatch.setattr(trainer_colocate_async.time, "monotonic", lambda: now)
+    monkeypatch.setattr(trainer_colocate_async.time, "sleep", tick)
+    refill = trainer.replay_buffer.refill_fn
+    with pytest.raises(TimeoutError, match="waiting for complete rollout groups"):
+        trainer._sample_training_batch(1)
+    assert trainer.replay_buffer.refill_fn == refill
+    assert trainer.replay_buffer.sampling_deadline is None
+
+
 def test_resident_step_batch_rejected_only_by_colocate_mode():
     overrides = ["actor_rollout_ref.rollout.free_cache_engine=false", "actor_rollout_ref.rollout.step_execution=true"]
     with pytest.raises(ValueError, match="resident colocate_async requires request-level execution"):
         get_diffusion_trainer_cls("colocate_async")(compose_diffusion_config(overrides))
     get_diffusion_trainer_cls("sync")(compose_diffusion_config(overrides))
+
+
+@pytest.mark.parametrize(
+    ("threshold", "strategy", "restore"),
+    [(2, "drop", True), (1, "drop", False), (1, "wait", True)],
+)
+def test_colocate_snapshot_handoff_syncs_then_restores_before_opening(monkeypatch, threshold, strategy, restore):
+    calls = []
+
+    def remote(name, result=None):
+        def invoke(*args):
+            calls.append((name, args))
+            return result
+
+        return SimpleNamespace(remote=invoke)
+
+    monkeypatch.setattr("ray.get", lambda value, **kwargs: value)
+    trainer = PolicyGradientDiffusionTrainerV1ColocateAsync(
+        compose_diffusion_config(
+            [
+                "trainer.v1.trainer_mode=colocate_async",
+                "+trainer.v1.colocate_async.resume_denoising=true",
+                "actor_rollout_ref.model.lora_rank=8",
+                "actor_rollout_ref.rollout.name=vllm_omni",
+                "actor_rollout_ref.rollout.step_execution=true",
+                "+actor_rollout_ref.rollout.engine_kwargs.vllm_omni.max_cpu_loras=2",
+                f"trainer.v1.sampler.max_off_policy_threshold={threshold}",
+                f"trainer.v1.sampler.max_off_policy_strategy={strategy}",
+            ]
+        )
+    )
+    server = SimpleNamespace(
+        suspend_diffusion_steps=remote("suspend", 124),
+        restore_diffusion_steps=remote("restore"),
+        close_diffusion_engine=remote("shutdown engine"),
+    )
+
+    async def sleep():
+        calls.append(("sleep", ()))
+
+    async def resume():
+        calls.append(("resume", ()))
+
+    async def abort_all_requests(*, reject_request):
+        assert not reject_request
+        calls.append(("abort", ()))
+
+    replicas = [SimpleNamespace(sleep=sleep, resume_generation=resume, abort_all_requests=abort_all_requests)]
+    manager = SimpleNamespace(
+        server_handles=[server],
+        server_addresses=["rollout"],
+        global_load_balancer=SimpleNamespace(remove_servers=remote("route close"), add_servers=remote("route open")),
+        get_replicas=lambda: replicas,
+    )
+
+    def update_weights(*, global_steps, mode, lora_adapter_id=None):
+        async def commit():
+            assert mode == "naive"
+            calls.append(("commit", (global_steps, lora_adapter_id)))
+
+        return [commit()]
+
+    monkeypatch.setattr("verl_omni.reward_loop.OmniRewardLoopManager", lambda **kwargs: None)
+    monkeypatch.setattr(
+        "verl_omni.trainer.diffusion.v1.trainer_base.LLMServerManager.create",
+        lambda **kwargs: manager,
+    )
+    trainer.actor_rollout_wg = SimpleNamespace(update_weights=update_weights)
+    trainer._init_online_rollout_stack(None)
+    trainer.global_steps = 5
+    timing = {}
+    try:
+        trainer._quiesce_rollout(timing)
+        trainer._resume_rollout(timing)
+        trainer.close_rollout()
+    finally:
+        trainer.checkpoint_manager.close()
+    expected = [
+        "route close",
+        "suspend" if restore else "abort",
+        "sleep",
+        "commit",
+        *(["restore"] if restore else []),
+        "resume",
+        "route open",
+        "shutdown engine",
+    ]
+    assert [name for name, _ in calls] == expected
+    assert calls[3][1] == (5, 124 if restore else None)
+    assert trainer._next_lora_adapter_id is None
 
 
 @pytest.mark.parametrize(

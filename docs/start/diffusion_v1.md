@@ -248,9 +248,22 @@ abort are unavailable from the current request-level engine API.
 Handoff timers include validation switches when rewards share the rollout pool;
 trained-trajectory throughput excludes validation.
 
-Intermediate denoising recovery is unsupported: the current engine does not
-export a resumable request containing scheduler/RNG state and the full training
-trajectory. An old latent must never be continued with a newly committed policy.
+Experimental SD3.5 FlowGRPO denoising recovery requires one rollout replica,
+offloaded rollout weights, step execution, and two runtime LoRA slots. Add
+these Hydra overrides to the colocate smoke command below.
+
+```text
++trainer.v1.colocate_async.resume_denoising=true
+actor_rollout_ref.rollout.free_cache_engine=true
+actor_rollout_ref.rollout.step_execution=true
+++actor_rollout_ref.rollout.engine_kwargs.vllm_omni.max_cpu_loras=2
+trainer.v1.sampler.max_off_policy_threshold=2
+```
+
+A resumed request keeps the runtime LoRA and trajectory prefix from its
+original policy. Checkpoint recovery verifies the local base model and the
+snapshot's execution profile before resuming at the next denoising step. A
+missing or incompatible snapshot falls back to whole-sample retry.
 
 Run a small pretrained-model smoke with a real JPEG image reward (no OCR reward
 GPU required), validation and LoRA checkpoints:

@@ -13,6 +13,7 @@
 # limitations under the License.
 from __future__ import annotations
 
+import asyncio
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -31,6 +32,19 @@ if TYPE_CHECKING:
 
     from verl_omni.workers.rollout.replica import DiffusionOutput
     from verl_omni.workers.rollout.vllm_rollout.vllm_omni_async_server import vLLMOmniHttpServer
+
+
+class _RolloutSubmission(asyncio.Future[None]):
+    """Capture the serving version synchronously at AsyncOmni's submission ACK."""
+
+    def __init__(self, server: vLLMOmniHttpServer):
+        super().__init__()
+        self._server = server
+        self.global_steps: int | None = None
+
+    def set_result(self, result: None) -> None:
+        super().set_result(result)
+        self.global_steps = self._server.global_steps
 
 
 class OmniStrategyBase(ABC):
@@ -189,6 +203,8 @@ class OmniStrategyBase(ABC):
         extra_prompt_ids: Optional[dict[str, list[int]]] = None,
         negative_extra_prompt_ids: Optional[dict[str, list[int]]] = None,
         priority: int = 0,
+        *,
+        submitted: _RolloutSubmission,
     ) -> DiffusionOutput | TokenOutput:
         """Shared generation template used by both modes.
 
@@ -215,8 +231,11 @@ class OmniStrategyBase(ABC):
         lora_request = await self.server._resolve_lora_request()
         prompt, params = self.preprocess_input(request, sampling_params, lora_request)
         with RLInsightLogger.trace_state("vllm_generate", state_lane_id=f"replica_{self.server.replica_rank}"):
-            final_res = await self.run_generation(prompt, params, request_id, lora_request, priority)
-        return self.process_output(final_res, params, sampling_params)
+            final_res = await self.run_generation(
+                prompt, params, request_id, lora_request, priority, submitted=submitted
+            )
+        submitted.result()
+        return self.process_output(final_res, params, sampling_params, global_steps=submitted.global_steps)
 
     @staticmethod
     def _map_stop_reason(finish_reason: Optional[str]) -> Optional[str]:
@@ -278,6 +297,8 @@ class OmniStrategyBase(ABC):
         request_id: str,
         lora_request: Optional[LoRARequest],
         priority: int,
+        *,
+        submitted: asyncio.Future[None] | None = None,
     ) -> Any:
         """Submit the request to the engine and return the final raw output.
 
@@ -289,7 +310,9 @@ class OmniStrategyBase(ABC):
         """
 
     @abstractmethod
-    def process_output(self, final_res: Any, params: Any, sampling_params: dict[str, Any]) -> Any:
+    def process_output(
+        self, final_res: Any, params: Any, sampling_params: dict[str, Any], *, global_steps: int | None
+    ) -> Any:
         """Convert the raw engine output into the mode's rollout output type.
 
         Args:

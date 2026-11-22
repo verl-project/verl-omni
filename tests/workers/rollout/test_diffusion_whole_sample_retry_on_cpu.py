@@ -95,6 +95,15 @@ async def test_retry_exhaustion_fails_instead_of_returning_empty_success(monkeyp
     assert generate.await_count == 2
 
 
+@pytest.mark.parametrize("error_type", [RuntimeError, TimeoutError, asyncio.CancelledError])
+async def test_retry_propagates_errors_and_cancellation_without_resubmitting(monkeypatch, error_type):
+    generate = AsyncMock(side_effect=error_type("generation interrupted"))
+    monkeypatch.setattr(LLMServerClient, "generate", generate)
+    with pytest.raises(error_type):
+        await _client(max_retries=2).generate("request", prompt_ids=[1], sampling_params={"seed": 42})
+    assert generate.await_count == 1
+
+
 @pytest.mark.parametrize("params", [{}, {"seed": None}])
 async def test_unseeded_sample_chooses_one_seed_for_all_attempts(monkeypatch, params):
     """One random seed belongs to the whole sample, including interrupted attempts."""

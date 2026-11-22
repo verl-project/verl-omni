@@ -20,7 +20,9 @@ delivers tokens; diffusion sleep/wake ACKs are not engine-checked.
 
 import asyncio
 import queue
+from contextlib import nullcontext
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -103,12 +105,17 @@ class _FakeAsyncOmni:
     async def is_sleeping(self):
         return bool(self.sleeping_tags)
 
+    async def collective_rpc(self, method, timeout=None, kwargs=None):
+        self.calls.append(method)
+        return [True]
+
 
 def _make_server(engine, rollout_mode=RolloutMode.HYBRID, node_rank=0, free_cache_engine=True):
     # HYBRID default: release/resume_kv_cache are skipped in COLOCATED mode
     # (parent semantics), so their delegation is exercised via HYBRID.
     server = object.__new__(vLLMOmniHttpServer)
     server.engine = engine
+    server._step_handoff_lock = asyncio.Lock()
     server.node_rank = node_rank
     server.replica_rank = 0
     server.global_steps = 0
@@ -116,9 +123,35 @@ def _make_server(engine, rollout_mode=RolloutMode.HYBRID, node_rank=0, free_cach
     server.config = SimpleNamespace(free_cache_engine=free_cache_engine, step_execution=False)
     server._lora_request_cache = None  # a valid cached value
     server._submission_paused = server._rejecting = False
+    server._admitting = 0
     server._resume_event = asyncio.Event()
     server._resume_event.set()
     return server
+
+
+async def test_diffusion_engine_shutdown_rejects_parked_and_late_requests():
+    engine = _FakeAsyncOmni()
+    server = _make_server(engine)
+    server._submission_paused = True
+    server._resume_event.clear()
+
+    def shutdown():
+        assert server._submission_paused and server._rejecting
+        engine.calls.append("shutdown")
+
+    engine.shutdown = shutdown
+    parked = asyncio.create_task(server._park_until_admitted("parked"))
+    try:
+        await asyncio.sleep(0)
+        assert not parked.done()
+        await server.close_diffusion_engine()
+        assert (await asyncio.wait_for(parked, timeout=1)).stop_reason == "aborted"
+        assert (await server._park_until_admitted("late")).stop_reason == "aborted"
+        assert engine.calls == ["shutdown"]
+    finally:
+        if not parked.done():
+            parked.cancel()
+            await asyncio.gather(parked, return_exceptions=True)
 
 
 # ---------------------------------------------------------------------------
@@ -184,6 +217,33 @@ async def test_stragglers_are_aborted_after_pause_and_failures_hold_admission(fa
         assert result["request_ids"] == ["late-external"]
     assert not server._resume_event.is_set()
     assert late.queue.get_nowait().finished
+
+
+async def test_straggler_retry_with_reused_external_id_is_aborted():
+    from vllm_omni.entrypoints import AsyncOmni
+
+    original = _FakeRequestState("original-internal", "sample")
+    late = _FakeRequestState("retry-internal", "sample")
+    engine = _FakeAsyncOmni(states={original.request_id: original})
+    aborted = []
+
+    async def settle_pending(internal_ids):
+        # Native abort has already selected its internal IDs at this boundary.
+        engine.request_states[late.request_id] = late
+
+    async def abort_internal(internal_ids, *, timeout=None):
+        aborted.append(internal_ids)
+        for internal_id in internal_ids:
+            engine.request_states[internal_id].queue.put_nowait(_terminal(internal_id, [7]))
+
+    engine._settle_pending_submits = settle_pending
+    engine._abort = abort_internal
+    engine.abort = lambda request_ids: AsyncOmni.abort(engine, request_ids)
+    server = _make_server(engine)
+    await server.abort_all_requests()
+    assert aborted == [[original.request_id], [original.request_id, late.request_id]]
+    assert late.queue.get_nowait().finished
+    assert server._submission_paused and not server._resume_event.is_set()
 
 
 async def test_resident_rollout_pauses_until_explicit_resume_without_sleeping():
@@ -364,23 +424,86 @@ async def test_parked_admission_is_bounded_and_cancellable(monkeypatch, cancel):
     assert not server._resume_event.is_set()
 
 
-async def test_generate_accepts_session_id_without_forwarding():
+@pytest.mark.parametrize("failure", [False, True])
+async def test_generate_accepts_session_id_without_forwarding(failure):
     engine = _FakeAsyncOmni()
     server = _make_server(engine)
     forwarded: dict = {}
 
     async def _record_generate(**kwargs):
         forwarded.update(kwargs)
+        if failure:
+            raise RuntimeError("pre-submit failed")
+        kwargs["submitted"].set_result(None)
         return SimpleNamespace()
 
     server._generate_strategy = SimpleNamespace(generate=_record_generate)
 
-    await server.generate(prompt_ids=[1], sampling_params={"top_p": 1.0}, request_id="req-1", session_id="sess-1")
+    with pytest.raises(RuntimeError, match="pre-submit failed") if failure else nullcontext():
+        await server.generate(prompt_ids=[1], sampling_params={"top_p": 1.0}, request_id="req-1", session_id="sess-1")
+    await asyncio.sleep(0)
 
     # Cross-request server affinity has no AsyncOmni counterpart; routing
     # stickiness stays owned by the load balancer.
     assert forwarded["request_id"] == "req-1"
     assert "session_id" not in forwarded
+    assert server._admitting == 0
+
+
+async def test_replica_sleep_does_not_add_an_explicit_admission_hold():
+    from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMReplica
+
+    engine = _FakeAsyncOmni()
+    server = _make_server(engine)
+    replica = SimpleNamespace(
+        servers=[
+            SimpleNamespace(
+                wait_for_requests_to_drain=SimpleNamespace(remote=server.wait_for_requests_to_drain),
+                sleep=SimpleNamespace(remote=server.sleep),
+            )
+        ]
+    )
+    await vLLMReplica.sleep(replica)
+    assert not server._submission_paused
+    await server.wake_up()
+    assert engine.resumed == 1
+
+
+async def test_admission_rechecks_a_gate_closed_again_before_wakeup(monkeypatch):
+    server = _make_server(_FakeAsyncOmni())
+    server._submission_paused = True
+    server._resume_event.clear()
+    parked, reparked = asyncio.Event(), asyncio.Event()
+    wait = server._resume_event.wait
+    waits, calls = [], []
+
+    async def observed_wait():
+        waits.append(None)
+        (parked if len(waits) == 1 else reparked).set()
+        return await wait()
+
+    async def generate(*, submitted=None, **kwargs):
+        calls.append(kwargs["request_id"])
+        if submitted is not None:
+            submitted.set_result(None)
+        return SimpleNamespace()
+
+    monkeypatch.setattr(server._resume_event, "wait", observed_wait)
+    server._generate_strategy = SimpleNamespace(generate=generate)
+    request = asyncio.create_task(server.generate(prompt_ids=[1], sampling_params={}, request_id="waiting"))
+    try:
+        await asyncio.wait_for(parked.wait(), 1)
+        await server.open_submission_gate()
+        server._submission_paused = True
+        server._resume_event.clear()
+        await asyncio.wait_for(reparked.wait(), 1)
+        assert calls == [] and server._admitting == 0
+        await server.resume_generation()
+        await asyncio.wait_for(request, 1)
+        assert calls == ["waiting"] and server._admitting == 0
+    finally:
+        request.cancel()
+        await asyncio.gather(request, return_exceptions=True)
 
 
 # ---------------------------------------------------------------------------
@@ -426,6 +549,182 @@ async def test_sleep_and_wake_delegate_with_level_one_and_keyword_tags():
         # Full wake must include kv_cache; weights-only leaves generate() rejected.
         assert engine.wake_calls == [{"stage_ids": None, "tags": ["kv_cache", "weights"]}]
         assert server._lora_request_cache is server_module._LORA_REQUEST_CACHE_MISS
+
+
+async def test_weight_version_commit_selects_exact_installed_adapter():
+    engine = _FakeAsyncOmni()
+    engine.list_loras = AsyncMock(return_value=[server_module.VLLM_LORA_INT_ID, 124])
+    server = _make_server(engine)
+    server.model_config = SimpleNamespace(lora_rank=32, lora={})
+    server._lora_resolve_lock = asyncio.Lock()
+    server._invalidate_lora_request_cache()
+    assert (await server._resolve_lora_request()).lora_int_id == server_module.VLLM_LORA_INT_ID
+
+    server._submission_paused = True
+    await server.set_global_steps(7, lora_adapter_id=124)
+    assert server.global_steps == 7
+    assert (await server._resolve_lora_request()).lora_int_id == 124
+    assert engine.list_loras.await_count == 2
+
+    await server.set_global_steps(8, lora_adapter_id=125)
+    with pytest.raises(RuntimeError, match="committed LoRA adapter 125"):
+        await server._resolve_lora_request()
+
+
+@pytest.mark.parametrize("drain_ok", [True, False])
+@pytest.mark.parametrize("frontend_has_old_request", [True, False])
+async def test_step_handoff_retires_previous_adapter_before_reusing_slot(drain_ok, frontend_has_old_request):
+    engine = _FakeAsyncOmni(states={"old": _FakeRequestState("old", "prior-session")})
+    engine.num_stages = 1
+    server = _make_server(engine)
+    server._lora_resolve_lock = asyncio.Lock()
+    original = server_module.VLLM_LORA_INT_ID
+    bundle = [{"old": b"snapshot"}]
+    operations = []
+    pending_backend = {"old", "current"}
+
+    async def rpc(method, timeout, *, args=(), kwargs=None):
+        operations.append((method, args))
+        if method == "export_step_requests":
+            return [[bundle]]
+        if method == "weight_sharing_drain":
+            assert kwargs == {"request_ids": ["old"]}
+            assert engine.abort_calls == ([["prior-session"]] if frontend_has_old_request else [])
+            if drain_ok:
+                pending_backend.remove("old")
+            return [drain_ok]
+        if method == "remove_lora":
+            assert pending_backend == {"current"}
+        return [True]
+
+    server._step_handoff_rpc = rpc
+    server.abort_all_requests = AsyncMock()
+    assert await server.suspend_diffusion_steps(3, 1024) == original + 1
+    assert server._submission_paused
+    await server.set_global_steps(1, lora_adapter_id=original + 1)
+    await server.restore_diffusion_steps(3, 1024)
+    assert operations == [
+        ("pin_lora", (original,)),
+        ("export_step_requests", ()),
+        ("release_step_requests", (["old"],)),
+        ("restore_step_requests", (bundle,)),
+    ]
+    if not frontend_has_old_request:
+        engine.request_states.pop("old")
+    engine.request_states["current"] = _FakeRequestState("current", "current-session")
+    bundle = [{"current": b"current-snapshot"}]
+    operations.clear()
+    if drain_ok:
+        assert await server.suspend_diffusion_steps(3, 1024) == original
+        assert operations == [
+            ("weight_sharing_drain", ()),
+            ("remove_lora", (original,)),
+            ("pin_lora", (original + 1,)),
+            ("export_step_requests", ()),
+            ("release_step_requests", (["current"],)),
+        ]
+        assert server._diffusion_step_handoff.request_ids == {"current"}
+        assert server._diffusion_step_handoff.snapshots == bundle
+    else:
+        with pytest.raises(RuntimeError, match="drain"):
+            await server.suspend_diffusion_steps(3, 1024)
+        assert operations == [("weight_sharing_drain", ())]
+        assert server._diffusion_step_handoff.adapter_id == original
+    server.abort_all_requests.assert_not_awaited()
+    assert server._submission_paused
+
+
+@pytest.mark.parametrize(
+    ("failed_method", "drain_acknowledged"),
+    [("export_step_requests", True), ("release_step_requests", False)],
+)
+async def test_step_snapshot_fallback_waits_for_backend_drain(failed_method, drain_acknowledged):
+    engine = _FakeAsyncOmni(states={"old": _FakeRequestState("old", "old-session")})
+    engine.num_stages = 1
+    server = _make_server(engine)
+    server.config.step_execution = True
+    original = server_module.VLLM_LORA_INT_ID
+    backend_tasks = {"old"}
+    calls = []
+    abort = engine.abort
+
+    async def abort_with_frontend_cleanup(request_ids):
+        await abort(request_ids)
+        engine.request_states.clear()
+
+    async def rpc(method, timeout, *, args=(), kwargs=None):
+        calls.append(method)
+        if method == failed_method:
+            raise TimeoutError("snapshot RPC did not acknowledge")
+        if method == "export_step_requests":
+            return [[[{"old": b"snapshot"}]]]
+        if method == "weight_sharing_drain":
+            assert kwargs == {"request_ids": ["old"]}
+            assert engine.request_states == {} and engine.abort_calls == [["old-session"]]
+            assert backend_tasks == {"old"}
+            if drain_acknowledged:
+                backend_tasks.clear()
+            return [drain_acknowledged]
+        return [True]
+
+    engine.abort = abort_with_frontend_cleanup
+    server._step_handoff_rpc = rpc
+    if drain_acknowledged:
+        assert await server.suspend_diffusion_steps(3, 1024) == original + 1
+        assert backend_tasks == set()
+        assert server._diffusion_step_handoff.snapshots is None
+    else:
+        with pytest.raises(RuntimeError, match="drain"):
+            await server.suspend_diffusion_steps(3, 1024)
+        assert backend_tasks == {"old"}
+        assert server._diffusion_step_handoff is None
+    assert calls[-1] == "weight_sharing_drain"
+    assert server._submission_paused and not server._resume_event.is_set()
+
+
+async def test_step_checkpoint_only_exports_mapped_inflight_sessions(tmp_path):
+    engine = _FakeAsyncOmni()
+    engine.request_states = {
+        "old": SimpleNamespace(external_request_id="train_1_0"),
+        "unrelated": SimpleNamespace(external_request_id="other_0_0"),
+    }
+    server = _make_server(engine)
+    weights = tmp_path / "model.safetensors"
+    weights.write_bytes(b"base-v1")
+    server._diffusion_checkpoint_model_fingerprint = server_module._DiffusionCheckpointModel(tmp_path).verify()
+    server._diffusion_step_handoff = server_module._DiffusionStepHandoff(
+        124,
+        "rollout-step-3",
+        frozenset(engine.request_states),
+        [{"old": b"selected", "unrelated": b"other", "gone": b"canceled"}],
+    )
+    server._step_handoff_rpc = AsyncMock(return_value=[[b"installed-adapter"]])
+
+    assert await server.export_diffusion_checkpoint({"none"}, 9, 1024) is None
+    server._step_handoff_rpc.assert_not_awaited()
+    handoff = await server.export_diffusion_checkpoint({"train_1_0"}, 9, 1024)
+    model_fingerprint = server_module.fingerprint(server_module.inventory(tmp_path, [weights]))
+    assert handoff == {
+        "policy_ref": "rollout-step-3",
+        "model_fingerprint": model_fingerprint,
+        "requests": {"train_1_0": "old"},
+        "snapshots": [{"old": b"selected"}],
+        "adapters": [b"installed-adapter"],
+    }
+    server._step_handoff_rpc.assert_awaited_once_with("export_runtime_lora", 9, args=(124,), kwargs={"max_bytes": 1024})
+
+    weights.write_bytes(b"base-v2")
+
+    fresh_engine = _FakeAsyncOmni()
+    fresh_engine.restore_diffusion_step_streaming = AsyncMock()
+    fresh_server = _make_server(fresh_engine)
+    fresh_server._submission_paused = True
+    fresh_server._committed_lora_adapter_id = 125
+    fresh_server._diffusion_checkpoint_model_fingerprint = server_module._DiffusionCheckpointModel(tmp_path).verify()
+    fresh_server._step_handoff_rpc = AsyncMock()
+    assert await fresh_server.recover_diffusion_checkpoint(handoff, 124, {}, 9, 1024) == {}
+    fresh_server._step_handoff_rpc.assert_not_awaited()
+    fresh_engine.restore_diffusion_step_streaming.assert_not_awaited()
 
 
 async def test_release_and_resume_kv_cache_route_both_halves_through_delegation():
@@ -773,3 +1072,39 @@ async def test_failed_wake_skips_admission_resume():
         await server.wake_up()
 
     assert engine.resumed == 0
+
+
+async def test_step_suspend_reuses_the_snapshot_for_retried_handoff():
+    engine = _FakeAsyncOmni(states={"request": _FakeRequestState("request", "session")})
+    engine.num_stages = 1
+    server = _make_server(engine)
+    exporting, allow_export, retry_entered = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    operations = []
+    bundle = [{"request": b"snapshot"}]
+
+    async def rpc(method, timeout, *, args=(), kwargs=None):
+        operations.append(method)
+        if method == "export_step_requests":
+            exporting.set()
+            await allow_export.wait()
+            return [[bundle]]
+        return [True]
+
+    async def retry():
+        retry_entered.set()
+        return await server.suspend_diffusion_steps(3, 1024)
+
+    server._step_handoff_rpc = rpc
+    async with asyncio.timeout(5), asyncio.TaskGroup() as jobs:
+        initial = jobs.create_task(server.suspend_diffusion_steps(3, 1024))
+        await exporting.wait()
+        overlapping_retry = jobs.create_task(retry())
+        await retry_entered.wait()
+        allow_export.set()
+    next_slot = server_module.VLLM_LORA_INT_ID + 1
+    assert initial.result() == overlapping_retry.result() == next_slot
+    assert await server.suspend_diffusion_steps(3, 1024) == next_slot
+    assert operations == ["pin_lora", "export_step_requests", "release_step_requests"]
+    assert server._diffusion_step_handoff.snapshots is bundle
+    assert not engine.abort_calls
+    assert server._submission_paused and not server._resume_event.is_set()

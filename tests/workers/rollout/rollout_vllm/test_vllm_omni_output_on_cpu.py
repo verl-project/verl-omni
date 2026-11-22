@@ -80,7 +80,9 @@ def test_diffusion_prompt_preserves_multimodal_processor_kwargs(diffusion_strate
 
 def test_pixel_output_is_always_uint8(diffusion_strategy):
     pixels = torch.tensor([-1.0, 0.0, 0.25, 0.5, 1.0, 2.0])
-    output = diffusion_strategy.process_output(_pixels_output(pixels), None, {})
+    output = diffusion_strategy.process_output(
+        _pixels_output(pixels), None, {}, global_steps=diffusion_strategy.server.global_steps
+    )
     assert output.diffusion_output.dtype == torch.uint8
     assert output.diffusion_output.flatten().tolist() == [0, 0, 64, 128, 255, 255]
 
@@ -89,7 +91,9 @@ def test_pixel_output_is_always_uint8(diffusion_strategy):
 def test_pixel_quantization_does_not_mutate_input(diffusion_strategy, dtype):
     pixels = torch.tensor([-1.0, 0.25, 0.5, 2.0], dtype=dtype)
     original = pixels.clone()
-    output = diffusion_strategy.process_output(_pixels_output(pixels), None, {})
+    output = diffusion_strategy.process_output(
+        _pixels_output(pixels), None, {}, global_steps=diffusion_strategy.server.global_steps
+    )
     torch.testing.assert_close(pixels, original)
     assert output.diffusion_output.flatten().tolist() == [0, 64, 128, 255]
 
@@ -113,6 +117,7 @@ def test_pixel_quantization_preserves_float_audio(diffusion_strategy):
         ),
         None,
         {},
+        global_steps=diffusion_strategy.server.global_steps,
     )
     torch.testing.assert_close(output.extra_fields["audio"], audio)
     assert output.extra_fields["audio_sample_rate"] == 48000
@@ -130,6 +135,7 @@ def test_latent_output_preserves_native_dtype_and_axes(diffusion_strategy, dtype
         ),
         None,
         {"output_type": "latent"},
+        global_steps=diffusion_strategy.server.global_steps,
     )
     torch.testing.assert_close(output.diffusion_output, latents)
     assert output.diffusion_output.data_ptr() == latents.data_ptr()
@@ -138,7 +144,12 @@ def test_latent_output_preserves_native_dtype_and_axes(diffusion_strategy, dtype
 @pytest.mark.parametrize("raw", [torch.zeros(1, 3, 2, 2), (torch.zeros(3, 2, 2), torch.zeros(2, 8))])
 def test_legacy_output_is_not_interpreted_from_shape(diffusion_strategy, raw):
     with pytest.raises(ValueError, match="named media_artifacts declaration required"):
-        diffusion_strategy.process_output(OmniRequestOutput.from_diffusion(request_id="legacy", images=[raw]), None, {})
+        diffusion_strategy.process_output(
+            OmniRequestOutput.from_diffusion(request_id="legacy", images=[raw]),
+            None,
+            {},
+            global_steps=diffusion_strategy.server.global_steps,
+        )
 
 
 @pytest.mark.parametrize(
@@ -150,6 +161,8 @@ def test_legacy_output_is_not_interpreted_from_shape(diffusion_strategy, raw):
     ],
 )
 def test_empty_output_uses_modality_dtype(diffusion_strategy, sampling_params, expected_dtype):
-    output = diffusion_strategy.process_output(None, None, sampling_params)
+    output = diffusion_strategy.process_output(
+        None, None, sampling_params, global_steps=diffusion_strategy.server.global_steps
+    )
     assert output.diffusion_output.dtype == expected_dtype
     assert output.diffusion_output.numel() == 0

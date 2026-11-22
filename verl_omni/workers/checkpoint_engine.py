@@ -11,6 +11,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
+
 import ray
 from verl.checkpoint_engine import CheckpointEngineManager, CheckpointEngineRegistry
 from verl.utils.ray_utils import auto_await
@@ -82,10 +84,19 @@ class OmniCheckpointEngineManager(CheckpointEngineManager):
     """
 
     @auto_await
-    async def update_weights(self, global_steps: int = None):
+    async def update_weights(self, global_steps: int = None, *, lora_adapter_id: int | None = None):
         """Fetch the actor's LoRA ``peft_config`` and stash it on the rollout
         workers before delegating to the parent ``update_weights``.
         """
+        if lora_adapter_id is not None:
+            if self.backend != "naive":
+                raise ValueError("Versioned LoRA sync requires the colocated checkpoint backend")
+            await asyncio.gather(
+                *self.actor_wg.update_weights(
+                    global_steps=global_steps, mode=self.backend, lora_adapter_id=lora_adapter_id
+                )
+            )
+            return {}
         if self.backend != "naive":
             peft_config = self._fetch_actor_lora_peft_config()
             self._lora_peft_config = peft_config

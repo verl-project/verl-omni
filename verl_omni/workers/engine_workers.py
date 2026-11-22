@@ -1134,7 +1134,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         self.actor.save_checkpoint(local_path, hdfs_path, global_step, max_ckpt_to_keep)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
-    async def update_weights(self, global_steps: int = None, mode: str = "auto"):
+    async def update_weights(self, global_steps: int = None, mode: str = "auto", *, lora_adapter_id: int | None = None):
         """Update weights from trainer to rollout.
 
         1. For sync training with colocated trainer and rollout (``mode="naive"``),
@@ -1157,10 +1157,19 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 ``config.rollout.checkpoint_engine.backend``; ``"naive"`` uses direct
                 colocated sync; any other value delegates to
                 ``checkpoint_engine.send_weights``.
+            lora_adapter_id: Install a new slot on a paused diffusion rollout
+                for a versioned adapter-only update.
         """
 
         # Resolve mode: "auto" falls back to config, explicit values take precedence
         effective_mode = mode if mode != "auto" else self.config.rollout.checkpoint_engine.backend
+        versioned = {}
+        if lora_adapter_id is not None:
+            if type(lora_adapter_id) is not int or lora_adapter_id <= 0:
+                raise ValueError("lora_adapter_id must be a positive integer")
+            if effective_mode != "naive" or global_steps is None:
+                raise ValueError("Versioned LoRA requires colocated sync with a training step")
+            versioned["lora_adapter_id"] = lora_adapter_id
 
         # 0. send_weights only for async training with disaggregated trainer and rollout
         if effective_mode != "naive":
@@ -1209,9 +1218,6 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         timings: dict[str, float] = {}
         update_weights_start = time.perf_counter()
 
-        set_expandable_segments(False)
-        log_gpu_memory_usage("Before resume weights", logger=logger)
-
         # Read adapter metadata without triggering a collective parameter gather,
         # then resolve the one sync plan for this update.
         actor_has_lora = _get_engine_lora_config(self.actor.engine, self.rollout_adapter) is not None
@@ -1226,6 +1232,10 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         # the base weights and stays at level-1 sleep); every other row is the
         # standard bucketed sync, which also stages the first base weights.
         use_lora_fast_path = plan.export is SyncExport.ADAPTER
+        if versioned and not use_lora_fast_path:
+            raise ValueError("Versioned LoRA requires an adapter-only update after base sync")
+        set_expandable_segments(False)
+        log_gpu_memory_usage("Before resume weights", logger=logger)
         # With actor parameter offload, the actor and resumed rollout weights
         # cannot safely coexist on a capacity-bound colocated GPU.
         release_actor_before_resume = use_lora_fast_path and self.actor.engine.is_param_offload_enabled
@@ -1315,6 +1325,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                         "base_sync_done": True,
                         "use_shm": self.rollout.use_shm,
                         "zmq_update_id": zmq_update_id,
+                        **versioned,
                     },
                 )
                 # The sender allocates and IPC-maps a device buffer of the bucket size on every sync;
@@ -1335,7 +1346,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 if self.rollout.rollout_rank == 0 and self.rollout._ensure_server_handle():
                     await self.rollout.server_handle.clear_kv_cache.remote()
                     if global_steps is not None:
-                        await self.rollout.server_handle.set_global_steps.remote(global_steps)
+                        await self.rollout.server_handle.set_global_steps.remote(global_steps, **versioned)
                 timings["update_weights_sync"] = time.perf_counter() - sync_start
             except BaseException:
                 if kv_cache_resumed:

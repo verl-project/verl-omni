@@ -116,11 +116,13 @@ def run_diffusion_v1(config, task_runner_class=None) -> None:
 
 
 def finish_training_resources(trainer, config, close_queue, primary_error=None, close_agent_loops=None):
-    """Close the opted-in FSDP deployment and queue on every fit/init exit."""
+    """Close owned training resources on every fit/init exit."""
     errors = [] if primary_error is None else [primary_error]
-    if close_agent_loops is not None:
+    for close in (close_agent_loops, getattr(trainer, "close_rollout", None)):
+        if close is None:
+            continue
         try:
-            close_agent_loops()
+            close()
         except BaseException as exc:
             errors.append(exc)
     if has_fsdp_reward_models(config) and trainer is not None:

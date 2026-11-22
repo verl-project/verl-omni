@@ -367,7 +367,7 @@ def test_colocate_failed_group_refills_are_bounded_without_replacing_the_buffer(
     trainer.trainer_mode = "colocate_async"
     trainer.global_steps = 5
     trainer._add_prompts_to_generate = refill
-    trainer.replay_buffer = PolicyGradientDiffusionTrainerV1._build_replay_buffer(trainer)
+    trainer.replay_buffer = trainer._build_replay_buffer()
     if persistent:
         with pytest.raises(TimeoutError, match="refill deadline"):
             trainer._sample_training_batch(1)

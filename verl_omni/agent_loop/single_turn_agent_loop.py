@@ -188,18 +188,20 @@ class DiffusionSingleTurnAgentLoop(AgentLoopBase):
         # 4. generate sequences
         metrics = {}
         with simple_timer("generate_sequences", metrics):
-            output = await self.server_manager.generate(
-                request_id=self._get_routing_request_id(kwargs.get("uid")),
-                prompt_ids=prompt_ids,
-                sampling_params=sampling_params,
-                image_data=images,
-                video_data=videos,
-                audio_data=audios,
-                mm_processor_kwargs=self._get_mm_processor_kwargs(audios),
-                negative_prompt_ids=negative_prompt_ids,
-                extra_prompt_ids=extra_prompt_ids,
-                negative_extra_prompt_ids=negative_extra_prompt_ids,
-            )
+            output = kwargs.get("restored_output")
+            if output is None:
+                output = await self.server_manager.generate(
+                    request_id=kwargs.get("step_resume_key") or self._get_routing_request_id(kwargs.get("uid")),
+                    prompt_ids=prompt_ids,
+                    sampling_params=sampling_params,
+                    image_data=images,
+                    video_data=videos,
+                    audio_data=audios,
+                    mm_processor_kwargs=self._get_mm_processor_kwargs(audios),
+                    negative_prompt_ids=negative_prompt_ids,
+                    extra_prompt_ids=extra_prompt_ids,
+                    negative_extra_prompt_ids=negative_extra_prompt_ids,
+                )
         if metrics.get("num_preempted") is None:
             metrics["num_preempted"] = output.num_preempted if output.num_preempted is not None else -1
 

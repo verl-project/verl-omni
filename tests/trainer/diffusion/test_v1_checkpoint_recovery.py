@@ -19,6 +19,7 @@ import os
 import uuid
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import ray
 import torch
@@ -26,12 +27,14 @@ import transfer_queue as tq
 from omegaconf import OmegaConf
 from PIL import Image
 from transfer_queue import KVBatchMeta
+from verl.trainer.ppo.v1.replay_buffer import ReplayBufferAsync
 from verl.utils import tensordict_utils as tu
 
 from verl_omni.agent_loop.diffusion_agent_loop_tq import DiffusionAgentLoopWorkerTQ
 from verl_omni.pipelines.rollout_media import MediaArtifact, MediaSpec, artifact_fields, previews_from_batch
 from verl_omni.reward_loop.reward_manager.visual import _reward_extra_info, _validate_visual_response
 from verl_omni.trainer.diffusion.v1 import tq_utils
+from verl_omni.trainer.diffusion.v1.trainer_colocate_async import PolicyGradientDiffusionTrainerV1ColocateAsync
 from verl_omni.trainer.diffusion.v1.trainer_separate_async import PolicyGradientDiffusionTrainerV1SeparateAsync
 
 
@@ -127,9 +130,9 @@ def test_preinitialized_ray_forwards_reward_environment(initialized_tq, tmp_path
 
 
 @pytest.mark.parametrize("trainer_mode", ["separate_async", "colocate_async"])
-@pytest.mark.parametrize("preview_name", ["image_preview", None])
+@pytest.mark.parametrize("preview_name, rollout_seed", [("image_preview", 42), (None, None)])
 def test_transfer_queue_checkpoint_roundtrip_and_reissue(
-    initialized_tq, tmp_path, monkeypatch, trainer_mode, preview_name
+    initialized_tq, tmp_path, monkeypatch, trainer_mode, preview_name, rollout_seed
 ):
     """Round-trip named rows, then check reissue cleanup, reward and sorted preview export."""
     partition_id = f"test-{uuid.uuid4().hex}"
@@ -140,16 +143,24 @@ def test_transfer_queue_checkpoint_roundtrip_and_reissue(
             "raw_prompt": ["pending prompt", "finished prompt"],
             "index": torch.tensor([0, 1]),
             "rollout_seed_index": torch.tensor([4, 5]),
+            "gen_batch_seq": np.array([53, 41]),
         }
     )
-    trainer = object.__new__(PolicyGradientDiffusionTrainerV1SeparateAsync)
+    recover_complete = trainer_mode == "colocate_async"
+    trainer_type = (
+        PolicyGradientDiffusionTrainerV1ColocateAsync
+        if recover_complete
+        else PolicyGradientDiffusionTrainerV1SeparateAsync
+    )
+    trainer = object.__new__(trainer_type)
+    trainer._resume_denoising = recover_complete
     trainer.trainer_mode = trainer_mode
     trainer.global_steps = 3
     trainer.config = OmegaConf.create(
         {
             "data": {"train_batch_size": 2, "gen_batch_size": 1},
             "trainer": {"v1": {"sampler": {"drop_incomplete_groups": False}}},
-            "actor_rollout_ref": {"rollout": {"seed": 42}},
+            "actor_rollout_ref": {"rollout": {"seed": rollout_seed}},
         }
     )
     chunks = iter(prompt_batch.split(1))
@@ -157,6 +168,11 @@ def test_transfer_queue_checkpoint_roundtrip_and_reissue(
     trainer._rollout_seed_next_index = 0
     trainer._fetch_one_gen_batch = lambda: next(chunks)
     prompt_batch = trainer._next_train_batch()
+    assert "rollout_seed" in prompt_batch
+    original_seed = int(prompt_batch["rollout_seed"][0])
+    assert 0 <= original_seed < 2**63
+    if rollout_seed is not None:
+        assert original_seed == 44
     trainer.agent_loop_manager = SimpleNamespace(generate_sequences=lambda batch: None)
     real_put = tq.kv_batch_put
     with monkeypatch.context() as patch:
@@ -167,12 +183,25 @@ def test_transfer_queue_checkpoint_roundtrip_and_reissue(
         partition_id=partition_id,
         tags=[
             {"is_prompt": True, "status": "running", "global_steps": 3},
-            {"is_prompt": True, "status": "finished", "global_steps": 3},
+            {"is_prompt": True, "status": "running" if recover_complete else "finished", "global_steps": 3},
         ],
     )
     pending_trajectory = f"{pending}_0_0"
     finished_trajectory = f"{finished}_0_0"
     consumed_trajectory = f"{uuid.uuid4().hex}_0_0"
+    failed = uuid.uuid4().hex
+    failed_trajectory = f"{failed}_0_0"
+    tq.kv_put(
+        key=failed,
+        partition_id=partition_id,
+        tag={"is_prompt": True, "status": "failure", "global_steps": 3},
+    )
+    tq.kv_put(
+        key=failed_trajectory,
+        partition_id=partition_id,
+        fields={"input_ids": torch.tensor([1, 2, 3])},
+        tag={"is_prompt": False, "global_steps": 3},
+    )
     for key in (pending_trajectory, consumed_trajectory):
         tq.kv_put(
             key=key,
@@ -199,7 +228,7 @@ def test_transfer_queue_checkpoint_roundtrip_and_reissue(
         }
         fields = artifact_fields(artifacts, "image_latent", preview_name)
         fields.update(
-            global_steps=3 + session,
+            global_steps=2 + session,
             reward_extra_info={"ocr": value / 255},
             rollout_retries=session,
             rollout_retry_wait_s=session * 0.25,
@@ -224,7 +253,7 @@ def test_transfer_queue_checkpoint_roundtrip_and_reissue(
 
     with monkeypatch.context() as patch:
         patch.setattr(tq, "async_kv_batch_put", put_in_partition)
-        asyncio.run(
+        group_version = asyncio.run(
             worker._write_trajectories_to_tq(
                 outputs,
                 uid=finished,
@@ -232,7 +261,15 @@ def test_transfer_queue_checkpoint_roundtrip_and_reissue(
                 validate=False,
                 reward_model={"ground_truth": "ground truth"},
                 data_source="named-media",
+                gen_batch_seq=41,
+                index=0,
             )
+        )
+    if not recover_complete:
+        tq.kv_put(
+            key=finished,
+            partition_id=partition_id,
+            tag={"status": "finished", "global_steps": group_version + 1},
         )
 
     checkpoint_dir = tmp_path / "transfer_queue"
@@ -246,7 +283,13 @@ def test_transfer_queue_checkpoint_roundtrip_and_reissue(
 
     submitted = []
     trainer.global_steps = 4
-    trainer.config = OmegaConf.create({"actor_rollout_ref": {"rollout": {"seed": 7}}, "trainer": {}})
+    trainer._gen_batch_seq = 0
+    trainer.config = OmegaConf.create(
+        {
+            "actor_rollout_ref": {"rollout": {"seed": 7, "n": 2}},
+            "trainer": {"v1": {"sampler": {"max_off_policy_threshold": 2}}},
+        }
+    )
     trainer._rollout_seed_step = None
     trainer._rollout_seed_next_index = 0
     trainer.agent_loop_manager = SimpleNamespace(generate_sequences=submitted.append)
@@ -255,20 +298,23 @@ def test_transfer_queue_checkpoint_roundtrip_and_reissue(
         items = tq.kv_list(partition_id)[partition_id]
         assert items[pending]["status"] == "pending"
         assert items[finished]["status"] == "finished"
+        assert items[finished]["global_steps"] == group_version + 1
         assert pending_trajectory not in items
         assert consumed_trajectory not in items
         assert finished_trajectory in items
         assert list(submitted[0]["uid"]) == [pending]
         assert list(submitted[0]["raw_prompt"]) == ["pending prompt"]
         assert int(submitted[0]["global_steps"]) == 4
-        assert int(submitted[0]["rollout_seed"][0]) == 44
+        assert int(submitted[0]["rollout_seed"][0]) == original_seed
         assert int(submitted[0]["rollout_seed_index"][0]) == 0
         persisted_prompt = tq.kv_batch_get(keys=[pending], partition_id=partition_id)
         assert list(persisted_prompt["uid"]) == [pending]
         assert list(persisted_prompt["raw_prompt"]) == ["pending prompt"]
         assert int(persisted_prompt["index"][0]) == 0
-        assert int(persisted_prompt["rollout_seed"][0]) == 44
+        assert int(persisted_prompt["rollout_seed"][0]) == original_seed
         assert int(persisted_prompt["rollout_seed_index"][0]) == 0
+        assert int(persisted_prompt["gen_batch_seq"][0]) == 53
+        assert trainer._gen_batch_seq == 54
 
         # Read in reverse session order; tensors, declarations and row metadata
         # must stay aligned through the real TQ checkpoint and retry cleanup.
@@ -276,8 +322,8 @@ def test_transfer_queue_checkpoint_roundtrip_and_reissue(
         meta = KVBatchMeta(partition_id=partition_id, keys=keys, tags=[items[k] for k in keys])
         data = tq_utils.diffusion_tq_batch_to_dataproto(meta)
         assert data.non_tensor_batch["preview_artifact"].tolist() == [preview_name] * 2
-        assert data.non_tensor_batch["min_global_steps"].tolist() == [4, 3]
-        assert data.non_tensor_batch["max_global_steps"].tolist() == [4, 3]
+        assert data.non_tensor_batch["min_global_steps"].tolist() == [3, 2]
+        assert data.non_tensor_batch["max_global_steps"].tolist() == [3, 2]
         for row, value, session in zip(data, (179, 41), (1, 0), strict=True):
             extra = _reward_extra_info(row)
             assert extra["media_artifact_context"] == f"request={finished}, session={session}"
@@ -315,5 +361,20 @@ def test_transfer_queue_checkpoint_roundtrip_and_reissue(
             for row, value in zip(rows, (41, 179), strict=True):
                 with Image.open(row["output"]) as image:
                     assert image.getpixel((0, 0)) == (value,) * 3
+        refills = []
+        replay = ReplayBufferAsync(
+            trainer_mode="separate_async",
+            trainer_config={},
+            max_off_policy_threshold=2,
+            max_off_policy_strategy="drop",
+            sampler_kwargs={},
+            refill_fn=refills.append,
+        )
+        assert replay.get_sampleable_count(4, partition_id) == 1
+        sampled, _ = replay.sample(4, partition_id, batch_size=1)
+        assert set(sampled.keys) == set(keys)
+        assert refills == [1]
+        remaining = tq.kv_list(partition_id)[partition_id]
+        assert failed not in remaining and failed_trajectory not in remaining
     finally:
         tq.kv_clear(keys=list(tq.kv_list(partition_id)[partition_id]), partition_id=partition_id)

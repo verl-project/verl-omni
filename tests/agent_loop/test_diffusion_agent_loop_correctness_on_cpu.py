@@ -61,25 +61,33 @@ class _DummyDiffusionAgentLoopWorker:
 
 
 @pytest.mark.asyncio
-async def test_close_cancels_and_settles_owned_prompt_tasks():
+async def test_close_cancels_and_settles_owned_prompt_tasks(monkeypatch):
     worker_cls = DiffusionAgentLoopWorkerTQ.__ray_metadata__.modified_class
     worker = object.__new__(worker_cls)
+    worker.rollout_config = SimpleNamespace(n=2)
     started = asyncio.Event()
-    cleaned = asyncio.Event()
+    running, cleaned = set(), set()
 
-    async def prompt():
-        started.set()
+    async def session(sampling_params, *, session_id, **kwargs):
+        running.add(session_id)
+        if len(running) == 2:
+            started.set()
         try:
             await asyncio.Future()
         finally:
-            cleaned.set()
+            await asyncio.sleep(0)
+            cleaned.add(session_id)
 
-    task = asyncio.create_task(prompt())
+    put = AsyncMock()
+    monkeypatch.setattr(diffusion_agent_loop_tq.tq, "async_kv_put", put)
+    worker._run_agent_loop = session
+    task = asyncio.create_task(worker._run_prompt({"uid": "sample"}, {}, {"validate": False}, prompt_index=0))
     worker.background_tasks = {task}
     task.add_done_callback(worker.background_tasks.discard)
     await started.wait()
     await worker.close()
-    assert cleaned.is_set() and task.cancelled() and not worker.background_tasks
+    assert cleaned == {0, 1} and task.cancelled() and not worker.background_tasks
+    assert [call.kwargs["tag"]["status"] for call in put.await_args_list] == ["running"]
 
 
 @pytest.mark.asyncio
@@ -162,7 +170,8 @@ def test_prompt_cache_routing_affinity_requires_sample_uid():
 
 
 @pytest.mark.asyncio
-async def test_single_turn_agent_forwards_all_multimodal_inputs():
+@pytest.mark.parametrize("step_resume_key", [None, "sample_1_0"])
+async def test_single_turn_agent_forwards_all_multimodal_inputs(step_resume_key):
     agent_loop = object.__new__(DiffusionSingleTurnAgentLoop)
     agent_loop.rollout_config = SimpleNamespace(
         enable_prompt_embed_cache=False,
@@ -188,13 +197,31 @@ async def test_single_turn_agent_forwards_all_multimodal_inputs():
         )
     )
 
-    await agent_loop.run({}, raw_prompt=[{"role": "user", "content": "prompt"}])
+    await agent_loop.run({}, raw_prompt=[{"role": "user", "content": "prompt"}], step_resume_key=step_resume_key)
 
     call = agent_loop.server_manager.generate.await_args.kwargs
     assert call["image_data"] == ["image"]
     assert call["video_data"] == ["video"]
     assert call["audio_data"] == ["audio"]
     assert call["mm_processor_kwargs"] == {"fps": 24}
+    if step_resume_key is not None:
+        assert call["request_id"] == step_resume_key
+
+
+@pytest.mark.asyncio
+async def test_tq_rollout_checkpoint_identity_is_bound_to_training_session(monkeypatch):
+    worker_cls = DiffusionAgentLoopWorkerTQ.__ray_metadata__.modified_class
+    worker = object.__new__(worker_cls)
+    worker._resume_denoising = True
+    run = AsyncMock()
+    monkeypatch.setattr(DiffusionAgentLoopWorker, "_run_agent_loop", run)
+    args = {"uid": "sample", "agent_name": "diffusion_single_turn_agent"}
+
+    await worker._run_agent_loop({}, session_id=0, trajectory={"validate": False}, **args)
+    await worker._run_agent_loop({}, session_id=1, trajectory={"validate": False}, **args)
+    await worker._run_agent_loop({}, session_id=1, trajectory={"validate": True}, **args)
+
+    assert [call.kwargs.get("step_resume_key") for call in run.await_args_list] == ["sample_0_0", "sample_1_0", None]
 
 
 @pytest.mark.asyncio
@@ -359,7 +386,8 @@ async def test_tq_writer_preserves_allowlisted_non_tensor_trajectory_metadata(mo
 
 
 @pytest.mark.asyncio
-async def test_run_prompt_batches_prompt_group_into_one_put(monkeypatch):
+@pytest.mark.parametrize("recovering", [False, True])
+async def test_run_prompt_batches_prompt_group_into_one_put(monkeypatch, recovering):
     """All of a prompt's session rows must land in a single batched TQ put."""
     worker_cls = DiffusionAgentLoopWorkerTQ.__ray_metadata__.modified_class
     worker = object.__new__(worker_cls)
@@ -376,28 +404,44 @@ async def test_run_prompt_batches_prompt_group_into_one_put(monkeypatch):
         )
 
     captured = {}
+    calls = {}
+    statuses = []
+    resumed = object()
 
     async def fake_run_agent_loop(self, sampling_params, *, session_id, **kwargs):
-        del self, sampling_params, kwargs
-        return make_output(with_log_probs=True)
+        calls[session_id] = kwargs.get("restored_output")
+        output = make_output(with_log_probs=True)
+        if calls[session_id] is resumed:
+            output.extra_fields.update(global_steps=2, rollout_denoising_resumed=True)
+        return output
 
     async def fake_kv_batch_put(*, keys, fields, tags, partition_id):
         captured.update(keys=keys, fields=fields, tags=tags, partition_id=partition_id)
 
     async def fake_kv_put(*, key, partition_id, tag):
-        del key, partition_id, tag
+        statuses.append(tag)
 
     worker._run_agent_loop = MethodType(fake_run_agent_loop, worker)
     monkeypatch.setattr(diffusion_agent_loop_tq.tq, "async_kv_batch_put", fake_kv_batch_put)
     monkeypatch.setattr(diffusion_agent_loop_tq.tq, "async_kv_put", fake_kv_put)
 
+    prompt = {"uid": "sample", "agent_name": "diffusion_single_turn_agent"}
+    if recovering:
+        prompt["checkpoint_members"] = {0: 1, 1: resumed}
     await worker._run_prompt(
-        prompt={"uid": "sample", "agent_name": "diffusion_single_turn_agent"},
+        prompt=prompt,
         sampling_params={"global_steps": 3},
         trajectory={"validate": False, "step": 3},
         prompt_index=0,
     )
 
+    if recovering:
+        assert calls == {1: resumed}
+        assert captured["keys"] == ["sample_1_0"]
+        assert captured["tags"][0]["global_steps"] == 2
+        assert captured["tags"][0]["rollout_denoising_resumed"] is True
+        assert statuses == [{"status": "running"}, {"status": "finished", "global_steps": 2}]
+        return
     assert captured["keys"] == ["sample_0_0", "sample_1_0"]
     assert captured["partition_id"] == "train"
     assert len(captured["tags"]) == 2

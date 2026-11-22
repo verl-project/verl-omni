@@ -17,7 +17,9 @@ import json
 import logging
 import os
 import uuid
-from dataclasses import asdict
+from contextlib import AsyncExitStack
+from dataclasses import asdict, dataclass, replace
+from pathlib import Path
 from typing import Any, Optional
 
 import ray
@@ -44,6 +46,7 @@ from vllm_omni.entrypoints.openai.api_server import omni_init_app_state
 from vllm_omni.lora.request import LoRARequest
 from vllm_omni.utils.tracking_parser import TrackingArgumentParser
 
+from verl_omni.model_merger.utils import fingerprint, inventory, tree_files
 from verl_omni.utils.net_utils import get_non_ephemeral_free_port
 from verl_omni.workers.config import DiffusionModelConfig, DiffusionRolloutConfig, OmniModelConfig
 from verl_omni.workers.rollout.base import get_rollout_sequence_parallel_size, get_rollout_world_size
@@ -51,6 +54,7 @@ from verl_omni.workers.rollout.diffusion_llm_server import DEFAULT_REQUEST_TIMEO
 from verl_omni.workers.rollout.replica import DiffusionOutput
 from verl_omni.workers.rollout.vllm_rollout.vllm_omni_ar_strategy import ARStrategy
 from verl_omni.workers.rollout.vllm_rollout.vllm_omni_diffusion_strategy import DiffusionStrategy
+from verl_omni.workers.rollout.vllm_rollout.vllm_omni_strategy_base import _RolloutSubmission
 
 logger = logging.getLogger(__file__)
 logger.setLevel(logging.INFO)
@@ -62,11 +66,22 @@ def _abort_ack_timeout_s() -> float:
 
 
 class _RolloutAsyncOmni(AsyncOmni):
-    """Bound scheduler RPCs without duplicating upstream pause/resume logic."""
+    """Bound lifecycle RPCs without duplicating upstream control logic."""
 
     async def collective_rpc(self, method, timeout=None, args=(), kwargs=None, stage_ids=None):
-        """Use bounded, nonblocking transport for scheduler control."""
-        if method not in {"pause_scheduler", "resume_scheduler"}:
+        """Use bounded, nonblocking transport for lifecycle control."""
+        if method not in {
+            "pause_scheduler",
+            "resume_scheduler",
+            "weight_sharing_drain",
+            "synchronize_device",
+            "export_runtime_lora",
+            "restore_runtime_lora",
+            "remove_lora",
+            "export_step_requests",
+            "release_step_requests",
+            "restore_step_requests",
+        }:
             return await super().collective_rpc(method, timeout, args, kwargs, stage_ids)
         if timeout is None:
             timeout = _abort_ack_timeout_s()
@@ -99,6 +114,37 @@ class _RolloutAsyncOmni(AsyncOmni):
 # Sentinel: ``None`` is a valid cached value (LoRA not loaded).
 # TODO: Move LoRA request cache resolution/invalidation upstream to AsyncOmni.
 _LORA_REQUEST_CACHE_MISS = object()
+
+
+@dataclass(frozen=True)
+class _DiffusionStepHandoff:
+    adapter_id: int
+    policy_ref: str
+    request_ids: frozenset[str]
+    snapshots: list[dict[str, bytes]] | None
+
+
+class _DiffusionCheckpointModel:
+    def __init__(self, root: Path):
+        self.root = root.resolve(strict=True)
+        self.loaded_files = self._file_state()
+        if not self.loaded_files:
+            raise ValueError("Diffusion checkpoint base model has no local files")
+        self.digest = fingerprint(inventory(self.root, self.loaded_files))
+        self.verify()
+
+    def _file_state(self) -> dict[Path, tuple[int, int, int, int, int]]:
+        files = {}
+        for path in tree_files(self.root):
+            st = path.stat()
+            files[path] = (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+        return files
+
+    def verify(self) -> str:
+        if self._file_state() != self.loaded_files:
+            raise ValueError("Diffusion base model files changed during rollout startup")
+        return self.digest
+
 
 # Lazily-computed upstream argument defaults, used to forward only explicitly
 # set engine arguments (see ``_drop_defaulted_engine_args``).
@@ -237,6 +283,10 @@ class vLLMOmniHttpServer(vLLMHttpServer):
     ```
     """
 
+    _committed_lora_adapter_id: int | None = None
+    _diffusion_step_handoff: _DiffusionStepHandoff | None = None
+    _diffusion_checkpoint_model_fingerprint: str | None = None
+
     # -----------------------------------------------------------------------
     # Initialisation hooks
     # -----------------------------------------------------------------------
@@ -286,6 +336,10 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         self._generate_strategy.post_init(cuda_visible_devices)
         self._lora_request_cache: LoRARequest | None | object = _LORA_REQUEST_CACHE_MISS
         self._lora_resolve_lock = asyncio.Lock()
+        self._step_handoff_lock = asyncio.Lock()
+        # Mirrors the workers' set_pending stash: the bare follow-up
+        # update_weights_from_ipc routes as an adapter-delta sync.
+        self._pending_lora_delta = False
         super()._post_init(cuda_visible_devices)
 
     # -----------------------------------------------------------------------
@@ -377,7 +431,25 @@ class vLLMOmniHttpServer(vLLMHttpServer):
                 attn_backend,
             )
 
+        checkpoint_model = None
+        if (
+            isinstance(self._generate_strategy, DiffusionStrategy)
+            and self.rollout_mode == RolloutMode.HYBRID
+            and self.model_config.algorithm == "flow_grpo"
+            and engine_args.get("step_execution")
+            and engine_args.get("max_cpu_loras") == 2
+            and "dummy" not in self.config.load_format
+        ):
+            try:
+                checkpoint_model = await asyncio.to_thread(_DiffusionCheckpointModel, Path(engine_args["model"]))
+            except (OSError, ValueError):
+                logger.info("Diffusion checkpoint recovery requires a verifiable local pipeline snapshot")
         engine_client = _RolloutAsyncOmni(**engine_args)
+        if checkpoint_model is not None:
+            try:
+                self._diffusion_checkpoint_model_fingerprint = checkpoint_model.verify()
+            except (OSError, ValueError):
+                logger.warning("Could not verify the loaded diffusion checkpoint base model", exc_info=True)
         app = build_app(args)
         await omni_init_app_state(engine_client, app.state, args)
 
@@ -396,6 +468,13 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         """Run headless server in a separate thread."""
         # TODO (mike): support multi node
         raise NotImplementedError("vLLM-Omni headless mode is not implemented yet.")
+
+    async def close_diffusion_engine(self) -> None:
+        """Shut down the engine before Ray tears down the rollout actor."""
+        self._submission_paused = True
+        self._rejecting = True
+        self._resume_event.set()
+        self.engine.shutdown()
 
     async def collective_rpc(
         self,
@@ -489,10 +568,14 @@ class vLLMOmniHttpServer(vLLMHttpServer):
                 await self.engine.resume_generation()
             self._invalidate_lora_request_cache()
 
-    async def set_global_steps(self, global_steps: int):
-        if global_steps != self.global_steps:
-            self._invalidate_lora_request_cache()
-        await super().set_global_steps(global_steps)
+    async def set_global_steps(self, global_steps: int, *, lora_adapter_id: int | None = None):
+        async with self._lora_resolve_lock:
+            if lora_adapter_id is not None and not self._submission_paused:
+                raise RuntimeError("Versioned LoRA commit requires paused rollout admission")
+            if global_steps != self.global_steps or lora_adapter_id != self._committed_lora_adapter_id:
+                self._invalidate_lora_request_cache()
+            await super().set_global_steps(global_steps)
+            self._committed_lora_adapter_id = lora_adapter_id
 
     async def sleep(self):
         if self.node_rank != 0 or not self.config.free_cache_engine:
@@ -571,21 +654,34 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             return TokenOutput(token_ids=[], stop_reason="aborted", extra_fields={"global_steps": self.global_steps})
         timeout_s = float(os.getenv("VERL_OMNI_ADMISSION_TIMEOUT_S", str(DEFAULT_REQUEST_TIMEOUT_S)))
         async with asyncio.timeout(timeout_s):
-            await self._resume_event.wait()
-        return await self._generate_strategy.generate(
-            prompt_ids=prompt_ids,
-            sampling_params=sampling_params,
-            request_id=request_id,
-            image_data=image_data,
-            video_data=video_data,
-            audio_data=audio_data,
-            mm_processor_kwargs=mm_processor_kwargs,
-            negative_prompt_ids=negative_prompt_ids,
-            prompt_mask=prompt_mask,
-            extra_prompt_ids=extra_prompt_ids,
-            negative_extra_prompt_ids=negative_extra_prompt_ids,
-            priority=priority,
-        )
+            rejected = await self._park_until_admitted(request_id)
+        if rejected is not None:
+            return rejected
+        submitted = _RolloutSubmission(self)
+
+        def release_admission(_):
+            self._admitting -= 1
+
+        submitted.add_done_callback(release_admission)
+        try:
+            return await self._generate_strategy.generate(
+                prompt_ids=prompt_ids,
+                sampling_params=sampling_params,
+                request_id=request_id,
+                image_data=image_data,
+                video_data=video_data,
+                audio_data=audio_data,
+                mm_processor_kwargs=mm_processor_kwargs,
+                negative_prompt_ids=negative_prompt_ids,
+                prompt_mask=prompt_mask,
+                extra_prompt_ids=extra_prompt_ids,
+                negative_extra_prompt_ids=negative_extra_prompt_ids,
+                priority=priority,
+                submitted=submitted,
+            )
+        finally:
+            if not submitted.done():
+                submitted.cancel()
 
     # -----------------------------------------------------------------------
     # Shared LoRA state
@@ -613,13 +709,23 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         async with self._lora_resolve_lock:
             if self._lora_request_cache is not _LORA_REQUEST_CACHE_MISS:
                 return self._lora_request_cache  # type: ignore[return-value]
+            committed_id = self._committed_lora_adapter_id
+            lora_id = VLLM_LORA_INT_ID if committed_id is None else committed_id
             try:
-                lora_loaded = VLLM_LORA_INT_ID in await self.engine.list_loras()
+                lora_loaded = lora_id in await self.engine.list_loras()
             except TypeError:
+                if committed_id is not None:
+                    raise
                 # Some engine backends return a non-iterable; treat as loaded.
                 lora_loaded = True
+            if not lora_loaded and committed_id is not None:
+                raise RuntimeError(f"Missing committed LoRA adapter {committed_id}")
             self._lora_request_cache = (
-                LoRARequest(lora_name=VLLM_LORA_NAME, lora_int_id=VLLM_LORA_INT_ID, lora_path=VLLM_LORA_PATH)
+                LoRARequest(
+                    lora_name=VLLM_LORA_NAME if committed_id is None else str(lora_id),
+                    lora_int_id=lora_id,
+                    lora_path=VLLM_LORA_PATH,
+                )
                 if lora_loaded
                 else None
             )
@@ -628,6 +734,202 @@ class vLLMOmniHttpServer(vLLMHttpServer):
     async def wait_for_requests_to_drain(self):
         # TODO (mike): implement this once DP is supported.
         pass
+
+    async def _step_handoff_rpc(self, method, timeout, *, args=(), kwargs=None):
+        return await self._collective_rpc_with_ack(method, timeout, args, kwargs, [0])
+
+    async def _drain_step_requests(self, request_ids: list[str], timeout: float) -> None:
+        replies = await self._step_handoff_rpc("weight_sharing_drain", timeout, kwargs={"request_ids": request_ids})
+        if replies != [True]:
+            raise RuntimeError("Could not drain requests from the retiring rollout adapter")
+
+    async def _retire_step_handoff(self, timeout: float) -> None:
+        handoff = self._diffusion_step_handoff
+        if handoff is None:
+            return
+        request_ids = sorted(handoff.request_ids)
+        if request_ids:
+            states = self.engine.request_states
+            external_ids = [states[rid].external_request_id for rid in request_ids if rid in states]
+            if external_ids:
+                await asyncio.wait_for(self.engine.abort(external_ids), timeout=timeout)
+            await self._drain_step_requests(request_ids, timeout)
+        if await self._step_handoff_rpc("remove_lora", timeout, args=(handoff.adapter_id,)) != [True]:
+            raise RuntimeError(f"Could not retire rollout adapter {handoff.adapter_id}")
+        self._diffusion_step_handoff = None
+
+    async def suspend_diffusion_steps(self, timeout: float, max_bytes: int) -> int:
+        """Park resumable rollout work and reserve the other adapter slot."""
+        async with self._step_handoff_lock:
+            policy_ref = f"rollout-step-{self.global_steps}"
+            handoff = self._diffusion_step_handoff
+            if handoff is None or handoff.policy_ref != policy_ref:
+                handoff = await self._suspend_diffusion_steps(policy_ref, timeout, max_bytes)
+                self._diffusion_step_handoff = handoff
+            return VLLM_LORA_INT_ID + int(handoff.adapter_id == VLLM_LORA_INT_ID)
+
+    async def _suspend_diffusion_steps(self, policy_ref: str, timeout: float, max_bytes: int) -> _DiffusionStepHandoff:
+        if self.engine.num_stages != 1:
+            raise ValueError("Diffusion step handoff requires one rollout stage")
+        self._submission_paused = True
+        self._rejecting = False
+        self._resume_event.clear()
+        async with asyncio.timeout(timeout):
+            while self._admitting:
+                await asyncio.sleep(0.01)
+        await self.engine.pause_generation(mode="step_boundary", timeout=timeout)
+
+        previous = self._diffusion_step_handoff
+        retired_ids = previous.request_ids if previous is not None else frozenset()
+        if previous is not None:
+            await self._retire_step_handoff(timeout)
+
+        adapter = self._committed_lora_adapter_id or VLLM_LORA_INT_ID
+        request_ids = frozenset(self.engine.request_states) - retired_ids
+        if await self._step_handoff_rpc("pin_lora", timeout, args=(adapter,)) != [True]:
+            raise RuntimeError(f"Could not pin rollout adapter {adapter}")
+        snapshots = None
+        if request_ids:
+            options = {"policy_ref": policy_ref, "max_bytes": max_bytes}
+            try:
+                ((bundle,),) = await self._step_handoff_rpc("export_step_requests", timeout, kwargs=options)
+                if bundle[0]:
+                    await self._step_handoff_rpc("release_step_requests", timeout, args=(list(bundle[0]),))
+                    snapshots = bundle
+            except (RuntimeError, ValueError, TimeoutError):
+                logger.warning("Diffusion step handoff falling back to whole-sample retry", exc_info=True)
+                await self.abort_all_requests(reset_prefix_cache=False)
+                await self._drain_step_requests(sorted(request_ids), timeout)
+                request_ids = frozenset()
+        logger.info("Diffusion handoff policy=%s snapshots=%d", policy_ref, len(snapshots[0]) if snapshots else 0)
+        return _DiffusionStepHandoff(adapter, policy_ref, request_ids, snapshots)
+
+    async def export_diffusion_checkpoint(self, session_keys: set[str], timeout: float, max_bytes: int) -> dict | None:
+        """Collect the parked requests and the exact policy that produced them."""
+        handoff = self._diffusion_step_handoff
+        if handoff is None or handoff.snapshots is None:
+            return None
+        states = self.engine.request_states
+        requests = {
+            states[rid].external_request_id: rid
+            for rid in handoff.snapshots[0]
+            if rid in states and states[rid].external_request_id in session_keys
+        }
+        if not requests:
+            return None
+        model_fingerprint = self._diffusion_checkpoint_model_fingerprint
+        if model_fingerprint is None:
+            return None
+        try:
+            (adapters,) = await self._step_handoff_rpc(
+                "export_runtime_lora", timeout, args=(handoff.adapter_id,), kwargs={"max_bytes": max_bytes}
+            )
+            if len(adapters) != len(handoff.snapshots) or not all(isinstance(part, bytes) for part in adapters):
+                raise ValueError("Rollout checkpoint adapter topology does not match the parked requests")
+        except (RuntimeError, ValueError, TimeoutError):
+            logger.warning("Rollout checkpoint will use whole-sample retry", exc_info=True)
+            return None
+        return {
+            "policy_ref": handoff.policy_ref,
+            "model_fingerprint": model_fingerprint,
+            "requests": requests,
+            "snapshots": [{rid: rank[rid] for rid in requests.values()} for rank in handoff.snapshots],
+            "adapters": adapters,
+        }
+
+    async def recover_diffusion_checkpoint(
+        self, handoff, adapter_id: int, sampling_params: dict, timeout: float, max_bytes: int
+    ) -> dict[str, DiffusionOutput]:
+        """Finish the saved sessions while ordinary rollout admission is closed."""
+        if not self._submission_paused or self._committed_lora_adapter_id in (None, adapter_id):
+            raise RuntimeError("Checkpoint recovery requires closed admission and a separate committed adapter")
+        engine = self.engine
+        if not hasattr(engine, "restore_diffusion_step_streaming"):
+            return {}
+        model_fingerprint = self._diffusion_checkpoint_model_fingerprint
+        if model_fingerprint is None or model_fingerprint != handoff["model_fingerprint"]:
+            logger.warning("Ignoring diffusion checkpoint with a different or unverifiable base model")
+            return {}
+        await engine.pause_generation(mode="step_boundary", timeout=timeout)
+        try:
+            (replies,) = await self._step_handoff_rpc(
+                "restore_runtime_lora", timeout, args=(handoff["adapters"][0],), kwargs={"max_bytes": max_bytes}
+            )
+            if replies != [True]:
+                raise RuntimeError(f"Checkpoint LoRA restore was rejected: {replies}")
+            async with asyncio.timeout(timeout), AsyncExitStack() as contexts:
+                streams = {}
+                for session, inner in handoff["requests"].items():
+                    try:
+                        streams[session] = await contexts.enter_async_context(
+                            engine.restore_diffusion_step_streaming(
+                                inner,
+                                session,
+                                [{inner: handoff["snapshots"][0][inner]}],
+                                policy_ref=handoff["policy_ref"],
+                                max_bytes=max_bytes,
+                                timeout=timeout,
+                            )
+                        )
+                    except (RuntimeError, ValueError, TimeoutError):
+                        logger.warning("Checkpoint session %s will retry the whole sample", session, exc_info=True)
+                if not streams:
+                    return {}
+                replies = await self._step_handoff_rpc("resume_scheduler", timeout)
+                _validate_collective_rpc_reply("resume_scheduler", replies)
+                outputs = await asyncio.gather(
+                    *(self._generate_strategy._collect_last_output(stream) for stream in streams.values()),
+                    return_exceptions=True,
+                )
+                version = int(handoff["policy_ref"].removeprefix("rollout-step-"))
+                recovered = {}
+                for session, output in zip(streams, outputs, strict=True):
+                    if isinstance(output, RuntimeError | ValueError | TimeoutError) or output is None:
+                        continue
+                    if isinstance(output, BaseException):
+                        raise output
+                    sample = self._generate_strategy.process_output(output, None, sampling_params, global_steps=version)
+                    if sample.stop_reason == "completed":
+                        sample.extra_fields["rollout_denoising_resumed"] = True
+                        recovered[session] = sample
+                return recovered
+        except (RuntimeError, ValueError, TimeoutError):
+            logger.warning("Diffusion checkpoint will use whole-sample retry", exc_info=True)
+            return {}
+        finally:
+            # A failed or timed-out request must settle before dropping its weights.
+            await engine.pause_generation(mode="step_boundary", timeout=timeout)
+            replies = await self._step_handoff_rpc("weight_sharing_drain", timeout)
+            if replies != [True]:
+                raise RuntimeError("Could not drain checkpoint recovery")
+            replies = await self._step_handoff_rpc("remove_lora", timeout, args=(adapter_id,))
+            if replies not in ([True], [False]):
+                raise RuntimeError(f"Could not retire checkpoint LoRA {adapter_id}")
+
+    async def restore_diffusion_steps(self, timeout: float, max_bytes: int) -> None:
+        """Restore released denoise state before reopening admission."""
+        handoff = self._diffusion_step_handoff
+        assert handoff is not None
+        if self._committed_lora_adapter_id in (None, handoff.adapter_id):
+            raise RuntimeError("The next rollout adapter has not been committed")
+        if handoff.snapshots is not None:
+            try:
+                options = {"policy_ref": handoff.policy_ref, "max_bytes": max_bytes}
+                await self._step_handoff_rpc(
+                    "restore_step_requests", timeout, args=(handoff.snapshots,), kwargs=options
+                )
+            except (RuntimeError, ValueError, TimeoutError):
+                logger.warning("Diffusion step restore falling back to whole-sample retry", exc_info=True)
+                await self.abort_all_requests(reset_prefix_cache=False)
+                await self._retire_step_handoff(timeout)
+                return
+            logger.info(
+                "Restored diffusion handoff policy=%s snapshots=%d", handoff.policy_ref, len(handoff.snapshots[0])
+            )
+        if handoff.request_ids & self.engine.request_states.keys():
+            self._diffusion_step_handoff = replace(handoff, snapshots=None)
+        else:
+            await self._retire_step_handoff(timeout)
 
     # -----------------------------------------------------------------------
     # Abort: AsyncOmni has no `output_processor` (it routes through an
@@ -667,6 +969,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         # ``engine.abort`` takes EXTERNAL ids; ``request_states`` is keyed by internal.
         in_flight: list[tuple[str, str, Any]] = []
         seen: set[str] = set()
+        initial_ids = set(engine.request_states)
         for state in engine.request_states.values():
             if not state.external_request_id or state.external_request_id in seen:
                 continue
@@ -706,7 +1009,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         stragglers = {
             state.external_request_id: state
             for state in engine.request_states.values()
-            if state.external_request_id and state.external_request_id not in seen
+            if state.external_request_id and state.request_id not in initial_ids
         }
         if stragglers:
             try:

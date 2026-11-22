@@ -34,6 +34,7 @@ from verl.workers.rollout.llm_server import LLMServerClient
 
 from verl_omni.agent_loop.utils import per_rollout_seeds_or_entropy
 from verl_omni.workers.config import DiffusionModelConfig, DiffusionRolloutConfig
+from verl_omni.workers.rollout.replica import DiffusionOutput
 
 
 def _config_to_sampling_dict(config: Optional[BaseConfig]) -> dict:
@@ -259,6 +260,7 @@ class DiffusionAgentLoopWorker:
         *,
         agent_name: str,
         validate: bool = False,
+        restored_output: DiffusionOutput | None = None,
         **kwargs,
     ) -> _InternalDiffusionAgentLoopOutput:
         assert agent_name in _agent_loop_registry, (
@@ -277,7 +279,11 @@ class DiffusionAgentLoopWorker:
             hf_model_type=self.hf_model_type,
             extra_tokenizer_map=self.model_config.extra_tokenizer_map,
         )
-        output: DiffusionAgentLoopOutput = await agent_loop.run(sampling_params, **kwargs)
+        output: DiffusionAgentLoopOutput = await agent_loop.run(
+            sampling_params,
+            **kwargs,
+            **({"restored_output": restored_output} if restored_output is not None else {}),
+        )
         return await self._agent_loop_postprocess(output, validate=validate, **kwargs)
 
     async def _agent_loop_postprocess(

@@ -157,11 +157,14 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
         use_shm: bool = False,
         zmq_update_id: str | None = None,
         delta_flush: bool | None = None,
+        lora_adapter_id: int | None = None,
     ):
         """Update the weights of the rollout model.
 
         For LoRA updates, all LoRA tensors are accumulated across buckets and loaded
         atomically via a single ``add_lora`` call, avoiding per-bucket partial loading.
+        A diffusion caller can supply a new adapter ID to preserve installed
+        versions. The caller owns adapter pinning and retirement.
         For full-weight updates, weights are streamed bucket-by-bucket via
         ``load_weights`` to keep GPU memory usage bounded.
         The ``omni_delta_sharded`` engine streams its flushes over the same bucketed
@@ -185,6 +188,14 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
                 "run full-weight training or use a non-delta checkpoint engine backend."
             )
 
+        adapter_update = bool(peft_config and base_sync_done)
+        standard_adapter = self._get_standard_weight_model_and_config() if adapter_update else None
+        if lora_adapter_id is not None:
+            if type(lora_adapter_id) is not int or lora_adapter_id <= 0:
+                raise ValueError("lora_adapter_id must be a positive integer")
+            if not adapter_update or standard_adapter is not None:
+                raise ValueError("An explicit LoRA adapter ID requires an adapter-only diffusion update")
+
         if self.device is None:
             raise RuntimeError("Worker device is not set.")
         zmq_handle = self._get_zmq_handle()
@@ -196,10 +207,10 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
             use_shm=use_shm,
         )
 
-        if peft_config and base_sync_done:
-            # In async mode, make sure the old lora is removed before adding the new one
+        if adapter_update:
             t0 = time.perf_counter()
-            self.remove_lora(VLLM_LORA_INT_ID)
+            if lora_adapter_id is None:
+                self.remove_lora(VLLM_LORA_INT_ID)
             t1 = time.perf_counter()
             logger.debug("remove_lora took %.3f ms", (t1 - t0) * 1000)
 
@@ -224,7 +235,7 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
             # dispatches on ``isinstance(req, TensorLoRARequest)``; diffusion workers
             # go through vllm-omni's DiffusionLoRAManager, which expects the
             # OmniLoRARequest-derived ``OmniTensorLoRARequest``. Pick by worker type.
-            if self._get_standard_weight_model_and_config() is not None:
+            if standard_adapter is not None:
                 from verl.utils.vllm.utils import TensorLoRARequest
 
                 lora_request = TensorLoRARequest(
@@ -236,14 +247,16 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
                 )
             else:
                 lora_request = OmniTensorLoRARequest(
-                    lora_name=VLLM_LORA_NAME,
-                    lora_int_id=VLLM_LORA_INT_ID,
+                    lora_name=VLLM_LORA_NAME if lora_adapter_id is None else str(lora_adapter_id),
+                    lora_int_id=VLLM_LORA_INT_ID if lora_adapter_id is None else lora_adapter_id,
                     lora_path=VLLM_LORA_PATH,
                     peft_config=peft_config,
                     lora_tensors=accumulated_weights,
                 )
             t2 = time.perf_counter()
-            self.add_lora(lora_request)
+            installed = self.add_lora(lora_request)
+            if lora_adapter_id is not None and not installed:
+                raise RuntimeError(f"Diffusion LoRA adapter {lora_adapter_id} was not installed")
             t3 = time.perf_counter()
             logger.debug("add_lora took %.3f ms", (t3 - t2) * 1000)
             logger.debug(

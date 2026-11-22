@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 import copy
 import json
 import logging
@@ -449,6 +450,8 @@ class ARStrategy(OmniStrategyBase):
         request_id: str,
         lora_request: Optional[LoRARequest],
         priority: int,
+        *,
+        submitted: asyncio.Future[None] | None = None,
     ) -> Any:
         scored_prompt_ids = prompt.pop(_SCORED_PROMPT_IDS_KEY, None)
         generate_kwargs = dict(
@@ -457,6 +460,7 @@ class ARStrategy(OmniStrategyBase):
             request_id=request_id,
             lora_request=lora_request,
             priority=priority,
+            submitted=submitted,
         )
         if self._rollout_output_modalities is not None:
             generate_kwargs["output_modalities"] = self._rollout_output_modalities
@@ -485,6 +489,8 @@ class ARStrategy(OmniStrategyBase):
         final_res: Any,
         params: SamplingParams | list[Any],
         sampling_params: dict[str, Any],
+        *,
+        global_steps: int | None,
     ) -> TokenOutput:
         if final_res is None:
             raise RuntimeError("AR mode: vLLM-Omni engine yielded no output for the prompt.")
@@ -501,7 +507,7 @@ class ARStrategy(OmniStrategyBase):
         if not req_output.outputs:
             raise RuntimeError("AR mode expects outputs with token IDs, but got None or empty.")
 
-        extra_fields = {"global_steps": self.server.global_steps}
+        extra_fields = {"global_steps": global_steps}
         extra_fields.update(rollout_fields)
 
         # Teacher hidden states ride CompletionOutput.multimodal_output when the

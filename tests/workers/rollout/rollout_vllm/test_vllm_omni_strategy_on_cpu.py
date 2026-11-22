@@ -17,7 +17,7 @@ import inspect
 from argparse import Namespace
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 import torch
@@ -33,6 +33,50 @@ from verl_omni.workers.rollout.vllm_rollout import vllm_omni_async_server as ser
 from verl_omni.workers.rollout.vllm_rollout import vllm_omni_diffusion_strategy as diffusion_strategy_module
 from verl_omni.workers.rollout.vllm_rollout.vllm_omni_ar_strategy import ARStrategy
 from verl_omni.workers.rollout.vllm_rollout.vllm_omni_diffusion_strategy import DiffusionStrategy
+from verl_omni.workers.rollout.vllm_rollout.vllm_omni_strategy_base import _RolloutSubmission
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["ar", "diffusion"])
+async def test_generation_version_is_bound_to_submission_not_delivery(monkeypatch, mode):
+    entered, admit, acknowledged, deliver = (asyncio.Event() for _ in range(4))
+
+    async def resolve_lora():
+        return None
+
+    server = SimpleNamespace(global_steps=7, replica_rank=0, model_config=None, _resolve_lora_request=resolve_lora)
+    if mode == "diffusion":
+        strategy = DiffusionStrategy(server)
+        final, _ = _joint_video_audio_final_res()
+        params = []
+    else:
+        strategy = ARStrategy(server)
+        completion = SimpleNamespace(token_ids=[7], finish_reason="stop", num_preempted=0)
+        final = SimpleNamespace(request_output=SimpleNamespace(outputs=[completion]))
+        params = ar_strategy_module.SamplingParams()
+
+    async def generate(*, submitted=None, **kwargs):
+        entered.set()
+        await admit.wait()
+        if submitted is not None:
+            submitted.set_result(None)
+        acknowledged.set()
+        await deliver.wait()
+        yield final
+
+    server.engine = SimpleNamespace(generate=generate)
+    monkeypatch.setattr(strategy, "preprocess_input", lambda *args: ({}, params))
+    task = asyncio.create_task(
+        strategy.generate([1], {"output_type": "pt"}, "request", submitted=_RolloutSubmission(server))
+    )
+    await entered.wait()
+    server.global_steps = 8
+    admit.set()
+    await acknowledged.wait()
+    server.global_steps = 9
+    deliver.set()
+    output = await task
+    assert output.extra_fields["global_steps"] == 8
 
 
 @pytest.mark.parametrize(
@@ -71,6 +115,7 @@ async def test_server_generate_delegates_without_changing_rpc_arguments():
     server._resume_event = asyncio.Event()
     server._resume_event.set()
     server._submission_paused = server._rejecting = False
+    server._admitting = 0
     server._generate_strategy = SimpleNamespace(generate=AsyncMock(return_value="result"))
     prompt_mask = torch.tensor([True, True])
 
@@ -103,6 +148,7 @@ async def test_server_generate_delegates_without_changing_rpc_arguments():
         extra_prompt_ids={"encoder": [5]},
         negative_extra_prompt_ids={"encoder": [6]},
         priority=2,
+        submitted=ANY,
     )
 
 
@@ -209,9 +255,7 @@ def test_ar_strategy_preserves_output_conversion():
     final_res = SimpleNamespace(request_output=SimpleNamespace(outputs=[completion]))
 
     output = strategy.process_output(
-        final_res,
-        params=SimpleNamespace(logprobs=0),
-        sampling_params={},
+        final_res, params=SimpleNamespace(logprobs=0), sampling_params={}, global_steps=strategy.server.global_steps
     )
 
     assert output.token_ids == [7, 8]
@@ -512,7 +556,9 @@ def test_ar_strategy_prepares_sampling_params_for_nonzero_policy_stage():
         request_output=SimpleNamespace(outputs=[completion]),
     )
     strategy._rollout_fields_by_request_id["request-0"] = {}
-    assert strategy.process_output(final_res, params, {}).log_probs == [-0.25]
+    assert strategy.process_output(final_res, params, {}, global_steps=strategy.server.global_steps).log_probs == [
+        -0.25
+    ]
     assert strategy._rollout_fields_by_request_id == {}
 
 
@@ -553,6 +599,8 @@ async def test_ar_strategy_retains_requested_stage_outputs_and_targets_weight_sy
 
         async def generate(self, **kwargs):
             self.generate_kwargs = kwargs
+            if kwargs.get("submitted") is not None:
+                kwargs["submitted"].set_result(None)
             yield policy
 
         async def collective_rpc(self, **kwargs):
@@ -587,7 +635,9 @@ async def test_ar_strategy_retains_requested_stage_outputs_and_targets_weight_sy
     assert server.engine.rpc_kwargs["stage_ids"] == [0]
     assert rpc_result == [None]
 
-    output = strategy.process_output(result, ar_strategy_module.SamplingParams(), {})
+    output = strategy.process_output(
+        result, ar_strategy_module.SamplingParams(), {}, global_steps=strategy.server.global_steps
+    )
     assert output.extra_fields == {"global_steps": 3, "audio_sample_rate": 24_000}
     assert strategy._rollout_fields_by_request_id == {}
 
@@ -602,6 +652,7 @@ async def test_ar_strategy_retains_requested_stage_outputs_and_targets_weight_sy
         image_data=["image"],
         audio_data=["audio"],
         mm_processor_kwargs={"size": 224},
+        submitted=_RolloutSubmission(server),
     )
 
     assert server.engine.generate_kwargs["prompt"] == {
@@ -986,6 +1037,7 @@ def test_ar_strategy_preserves_qwen3_omni_thinker_only_contract():
         SimpleNamespace(request_output=SimpleNamespace(outputs=[completion])),
         params=params,
         sampling_params={},
+        global_steps=strategy.server.global_steps,
     )
     assert output.extra_fields == {"global_steps": 12}
 
@@ -1208,7 +1260,9 @@ def test_diffusion_strategy_uses_declared_audio_sample_rate(monkeypatch):
     )
     final_res, audio = _joint_video_audio_final_res()
 
-    processed = DiffusionStrategy(server).process_output(final_res, None, {"output_type": "pt", "logprobs": False})
+    processed = DiffusionStrategy(server).process_output(
+        final_res, None, {"output_type": "pt", "logprobs": False}, global_steps=server.global_steps
+    )
 
     # The audio sample rate comes from the adapter-declared DiffusionIOSpec,
     # not the strategy's legacy 32 kHz fallback.
@@ -1233,7 +1287,7 @@ def test_diffusion_strategy_rejects_conflicting_media_kind(monkeypatch, runtime_
     final_res.multimodal_output["metadata"]["rl"] = {"media_kind": runtime_kind}
 
     with pytest.raises(ValueError, match="request-conflict.*media_kind"):
-        strategy.process_output(final_res, None, {"output_type": "pt"})
+        strategy.process_output(final_res, None, {"output_type": "pt"}, global_steps=strategy.server.global_steps)
 
 
 def test_diffusion_strategy_accepts_matching_kind_and_runtime_audio_rate(monkeypatch):
@@ -1246,7 +1300,7 @@ def test_diffusion_strategy_accepts_matching_kind_and_runtime_audio_rate(monkeyp
     final_res, _ = _joint_video_audio_final_res(sample_rate=24000)
     final_res.multimodal_output["metadata"]["rl"] = {"media_kind": "video", "audio_sample_rate": 24000}
 
-    result = strategy.process_output(final_res, None, {"output_type": "pt"})
+    result = strategy.process_output(final_res, None, {"output_type": "pt"}, global_steps=strategy.server.global_steps)
     assert result.extra_fields["media_kind"] == "video"
     assert result.extra_fields["audio_sample_rate"] == 24000
 
@@ -1260,7 +1314,7 @@ def test_diffusion_strategy_rejects_extra_tuple_streams(monkeypatch, declared):
     final_res.images = [(final_res.images[0]["video_preview"], audio, audio.clone())]
     final_res.multimodal_output.clear()
     with pytest.raises(ValueError, match="named media_artifacts declaration required"):
-        strategy.process_output(final_res, None, {"output_type": "pt"})
+        strategy.process_output(final_res, None, {"output_type": "pt"}, global_steps=strategy.server.global_steps)
 
 
 def test_diffusion_strategy_rejects_undeclared_named_audio(monkeypatch):
@@ -1276,7 +1330,7 @@ def test_diffusion_strategy_rejects_undeclared_named_audio(monkeypatch):
     )
     final_res, _ = _joint_video_audio_final_res()
     with pytest.raises(ValueError, match="undeclared artifact='audio'"):
-        strategy.process_output(final_res, None, {"output_type": "pt"})
+        strategy.process_output(final_res, None, {"output_type": "pt"}, global_steps=strategy.server.global_steps)
 
 
 def test_diffusion_strategy_uses_runtime_header_without_static_spec(monkeypatch):
@@ -1292,7 +1346,9 @@ def test_diffusion_strategy_uses_runtime_header_without_static_spec(monkeypatch)
     )
     final_res, audio = _joint_video_audio_final_res()
 
-    processed = DiffusionStrategy(server).process_output(final_res, None, {"output_type": "pt", "logprobs": False})
+    processed = DiffusionStrategy(server).process_output(
+        final_res, None, {"output_type": "pt", "logprobs": False}, global_steps=server.global_steps
+    )
 
     torch.testing.assert_close(processed.extra_fields["audio"], audio)
     assert processed.extra_fields["audio_sample_rate"] == 48000
@@ -1302,8 +1358,8 @@ def test_diffusion_strategy_uses_runtime_header_without_static_spec(monkeypatch)
 @pytest.mark.parametrize(
     ("strategy_cls", "priority", "expected_extra_keys"),
     [
-        (ARStrategy, 3, {"lora_request", "priority"}),
-        (DiffusionStrategy, 0, set()),
+        (ARStrategy, 3, {"lora_request", "priority", "submitted"}),
+        (DiffusionStrategy, 0, {"submitted"}),
     ],
 )
 @pytest.mark.asyncio
@@ -1341,7 +1397,9 @@ def test_diffusion_empty_output_preserves_completion_state(finish_reason, expect
 
     final = OmniRequestOutput.from_diffusion(request_id="empty", images=[])
     final.outputs = [SimpleNamespace(finish_reason=finish_reason)]
-    result = DiffusionStrategy(SimpleNamespace(global_steps=1, model_config=None)).process_output(final, None, {})
+    result = DiffusionStrategy(SimpleNamespace(global_steps=1, model_config=None)).process_output(
+        final, None, {}, global_steps=1
+    )
     assert result.diffusion_output.numel() == 0
     assert result.stop_reason == expected
 
@@ -1357,7 +1415,9 @@ def test_diffusion_named_output_preserves_completion_and_preemption_state(wrappe
         final.request_output.outputs = [completion]
     else:
         final.outputs = [completion]
-    result = DiffusionStrategy(SimpleNamespace(global_steps=1, model_config=None)).process_output(final, None, {})
+    result = DiffusionStrategy(SimpleNamespace(global_steps=1, model_config=None)).process_output(
+        final, None, {}, global_steps=1
+    )
     assert result.stop_reason == "completed"
     assert result.num_preempted == 3
     assert result.artifacts["video_preview"].data.dtype == torch.uint8
@@ -1368,7 +1428,9 @@ def test_diffusion_rejects_incomplete_header_with_request_context(field):
     final, _ = _joint_video_audio_final_res()
     final.multimodal_output["metadata"]["media_artifacts"].pop(field)
     with pytest.raises(ValueError, match="joint-output.*invalid media_artifacts header"):
-        DiffusionStrategy(SimpleNamespace(global_steps=1, model_config=None)).process_output(final, None, {})
+        DiffusionStrategy(SimpleNamespace(global_steps=1, model_config=None)).process_output(
+            final, None, {}, global_steps=1
+        )
 
 
 def test_diffusion_rejects_non_tensor_named_payload_with_context():
@@ -1376,7 +1438,9 @@ def test_diffusion_rejects_non_tensor_named_payload_with_context():
     final.request_id = "bad-tensor"
     final.images[0]["audio"] = [0.0, 1.0]
     with pytest.raises(TypeError, match="bad-tensor.*artifact='audio'.*expected tensor"):
-        DiffusionStrategy(SimpleNamespace(global_steps=1, model_config=None)).process_output(final, None, {})
+        DiffusionStrategy(SimpleNamespace(global_steps=1, model_config=None)).process_output(
+            final, None, {}, global_steps=1
+        )
 
 
 def test_drop_defaulted_engine_args_keeps_only_explicit_overrides():

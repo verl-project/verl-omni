@@ -14,11 +14,13 @@
 
 import os
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
+import torch
 from verl.utils.device import get_visible_devices_keyword
 from verl.workers.rollout.vllm_rollout import bucketed_weight_transfer
+from verl.workers.rollout.vllm_rollout.utils import VLLM_LORA_INT_ID
 
 from verl_omni.workers.rollout.vllm_rollout.utils import vLLMOmniColocateWorkerExtension
 from verl_omni.workers.rollout.vllm_rollout.zmq_utils import make_update_zmq_handle, make_update_zmq_id
@@ -194,6 +196,44 @@ def _get_handle(local_rank, env_extra, clear=False):
     env = {"VERL_RAY_JOB_ID": "job", "VERL_REPLICA_RANK": "0", **env_extra}
     with patch.dict(os.environ, env, clear=clear):
         return vLLMOmniColocateWorkerExtension._get_zmq_handle(worker)
+
+
+@pytest.mark.parametrize("target_id, installed", [(None, True), (124, True), (124, False)])
+def test_diffusion_ipc_loads_versioned_adapter_without_replacing_old(target_id, installed):
+    tensor = torch.ones(1)
+
+    class Receiver:
+        def __init__(self, **kwargs):
+            pass
+
+        def receive_weights(self, on_bucket_received):
+            on_bucket_received([("lora.weight", tensor)])
+
+    worker = SimpleNamespace(
+        device=torch.device("cpu"),
+        _get_zmq_handle=lambda: "ipc:///unused.sock",
+        _get_standard_weight_model_and_config=lambda: None,
+        add_lora=Mock(return_value=installed),
+        remove_lora=Mock(),
+    )
+    kwargs = {"peft_config": {"r": 1}, "base_sync_done": True}
+    if target_id is not None:
+        kwargs["lora_adapter_id"] = target_id
+    with patch.object(bucketed_weight_transfer, "BucketedWeightReceiver", Receiver):
+        if installed:
+            vLLMOmniColocateWorkerExtension.update_weights_from_ipc(worker, **kwargs)
+        else:
+            with pytest.raises(RuntimeError, match="adapter 124 was not installed"):
+                vLLMOmniColocateWorkerExtension.update_weights_from_ipc(worker, **kwargs)
+
+    if target_id is None:
+        worker.remove_lora.assert_called_once_with(VLLM_LORA_INT_ID)
+    else:
+        worker.remove_lora.assert_not_called()
+    request = worker.add_lora.call_args.args[0]
+    assert request.lora_int_id == (target_id or VLLM_LORA_INT_ID)
+    received = request.lora_tensors["lora.weight"]
+    assert torch.equal(received, tensor) and received is not tensor
 
 
 def test_stage_local_rank_is_remapped_to_node_local_index():

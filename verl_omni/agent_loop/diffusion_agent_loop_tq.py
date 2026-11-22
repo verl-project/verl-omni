@@ -21,6 +21,7 @@ from typing import Any
 import ray
 import torch
 import transfer_queue as tq
+from omegaconf import OmegaConf
 from tensordict import NonTensorData, NonTensorStack, TensorDict
 from verl.experimental.agent_loop import get_trajectory_info
 from verl.utils.ray_utils import auto_await
@@ -44,6 +45,11 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self._resume_denoising = OmegaConf.select(
+            self.config, "trainer.v1.trainer_mode"
+        ) == "colocate_async" and OmegaConf.select(
+            self.config, "trainer.v1.colocate_async.resume_denoising", default=False
+        )
         tq.init()
         self.background_tasks = set()
 
@@ -137,11 +143,17 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
         uid = prompt["uid"]
         partition_id = "val" if trajectory["validate"] else "train"
         await tq.async_kv_put(key=uid, partition_id=partition_id, tag={"status": "running"})
-        tasks = []
+        checkpoint_members = prompt.pop("checkpoint_members", {})
+        tasks = {}
+        completed_versions = []
         try:
             config = self.rollout_config
             n = config.val_kwargs.n if trajectory["validate"] else config.n
             for session_id in range(n):
+                checkpoint_member = checkpoint_members.get(session_id)
+                if type(checkpoint_member) is int:
+                    completed_versions.append(checkpoint_member)
+                    continue
                 run_sampling_params = dict(sampling_params)
                 if rollout_base_seed is not None and not trajectory["validate"]:
                     # Seed from the position among the step's prompts (v0
@@ -156,20 +168,20 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
                     # Ray-forked replicas share RNG state and unseeded requests
                     # routed to different replicas would collide bit-exactly.
                     run_sampling_params["seed"] = secrets.randbits(63)
-                task = asyncio.create_task(
+                tasks[session_id] = asyncio.create_task(
                     self._run_agent_loop(
                         run_sampling_params,
                         session_id=session_id,
                         trajectory=trajectory,
+                        **({"restored_output": checkpoint_member} if checkpoint_member is not None else {}),
                         **prompt,
                     )
                 )
-                tasks.append(task)
 
-            results = await asyncio.gather(*tasks, return_exceptions=True)
+            results = await asyncio.gather(*tasks.values(), return_exceptions=True)
             successes = [
                 (session_id, result)
-                for session_id, result in enumerate(results)
+                for session_id, result in zip(tasks, results, strict=True)
                 if not isinstance(result, BaseException)
             ]
             errors = [result for result in results if isinstance(result, BaseException)]
@@ -183,7 +195,7 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
             # replay buffer waits for the whole group anyway, so per-session
             # puts serialize the gen tail (64 -> 16 puts at rollout.n=4).
             if successes:
-                group_version = await self._write_trajectories_to_tq(
+                version = await self._write_trajectories_to_tq(
                     successes,
                     uid=uid,
                     trajectory=trajectory,
@@ -191,13 +203,16 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
                     global_steps=sampling_params.get("global_steps"),
                     **{k: v for k, v in prompt.items() if k not in {"uid", "global_steps"}},
                 )
+                completed_versions.append(version)
             # Replay counts training iterations: model version v is current at step v + 1.
-            tag = {"status": "failure"} if errors else {"status": "finished", "global_steps": group_version + 1}
+            tag = (
+                {"status": "failure"} if errors else {"status": "finished", "global_steps": min(completed_versions) + 1}
+            )
             await tq.async_kv_put(key=uid, partition_id=partition_id, tag=tag)
         except Exception as e:
             logger.exception(f"Error in _run_prompt for uid={uid}: {e}")
             if tasks:
-                await asyncio.gather(*tasks, return_exceptions=True)
+                await asyncio.gather(*tasks.values(), return_exceptions=True)
             await tq.async_kv_put(key=uid, partition_id=partition_id, tag={"status": "failure"})
 
     async def _run_agent_loop(
@@ -210,10 +225,13 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
         **kwargs,
     ) -> _InternalDiffusionAgentLoopOutput:
         """Run one diffusion agent loop session; the TQ write is batched per prompt."""
+        validate = trajectory["validate"] if trajectory else False
+        if self._resume_denoising and not validate:
+            kwargs["step_resume_key"] = f"{kwargs['uid']}_{session_id}_0"
         return await super()._run_agent_loop(
             sampling_params,
             agent_name=agent_name,
-            validate=trajectory["validate"] if trajectory else False,
+            validate=validate,
             **kwargs,
         )
 
@@ -303,7 +321,7 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
                 "min_global_steps": min_step,
                 "max_global_steps": max_step,
             }
-            for name in ("rollout_retries", "rollout_retry_wait_s"):
+            for name in ("rollout_retries", "rollout_retry_wait_s", "rollout_denoising_resumed"):
                 if name in extra:
                     tag[name] = extra[name]
             # Identity of the prompt group for the trainer's v0 prompt-major

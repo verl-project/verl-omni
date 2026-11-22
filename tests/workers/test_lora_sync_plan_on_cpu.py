@@ -113,7 +113,7 @@ def _bare_worker(
     return worker
 
 
-def _run_naive_update(monkeypatch, worker, global_steps=3):
+def _run_naive_update(monkeypatch, worker, global_steps=3, **kwargs):
     monkeypatch.setattr(ew, "RLInsightLogger", _NoopRLInsight)
     monkeypatch.setattr(ew, "set_expandable_segments", MagicMock())
     monkeypatch.setattr(ew, "log_gpu_memory_usage", MagicMock())
@@ -121,7 +121,7 @@ def _run_naive_update(monkeypatch, worker, global_steps=3):
     sender = MagicMock()
     sender.async_send_weights = AsyncMock()
     with patch.object(ew, "BucketedWeightSender", return_value=sender):
-        asyncio.run(ew.ActorRolloutRefWorker.update_weights(worker, mode="naive", global_steps=global_steps))
+        asyncio.run(ew.ActorRolloutRefWorker.update_weights(worker, mode="naive", global_steps=global_steps, **kwargs))
     return worker
 
 
@@ -263,6 +263,31 @@ def test_naive_adapter_delta_rides_the_direct_ipc_fast_path(monkeypatch):
     assert ipc_call.kwargs["kwargs"]["peft_config"] == {"r": 8}
     assert ipc_call.kwargs["kwargs"]["base_sync_done"] is True
     assert worker.rollout.sleep_level == 1
+
+
+@pytest.mark.parametrize("installed", [True, False])
+def test_naive_version_commit_waits_for_checked_install(monkeypatch, installed):
+    worker = _wire_fast_path_rollout(_bare_worker(has_lora=True))
+    worker.rollout.rollout_rank = 0
+    commit = worker.rollout.server_handle.set_global_steps.remote
+
+    async def receive_ack():
+        commit.assert_not_awaited()
+        if not installed:
+            raise RuntimeError("adapter installation failed")
+
+    async def update_receiver(*args, **kwargs):
+        assert kwargs["kwargs"]["lora_adapter_id"] == 124
+        return receive_ack()
+
+    worker.rollout._execute_method.side_effect = update_receiver
+    if installed:
+        _run_naive_update(monkeypatch, worker, global_steps=7, lora_adapter_id=124)
+        commit.assert_awaited_once_with(7, lora_adapter_id=124)
+    else:
+        with pytest.raises(RuntimeError, match="adapter installation failed"):
+            _run_naive_update(monkeypatch, worker, global_steps=7, lora_adapter_id=124)
+        commit.assert_not_awaited()
 
 
 def test_naive_old_adapter_delta_ships_the_old_policy(monkeypatch):

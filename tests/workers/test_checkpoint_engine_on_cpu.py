@@ -23,6 +23,22 @@ def _manager_with_actor(actor_wg):
     return manager
 
 
+def test_versioned_lora_sync_uses_colocated_actor_rpc():
+    calls = []
+
+    class ActorWorkerGroup:
+        def update_weights(self, **kwargs):
+            async def install():
+                calls.append(kwargs)
+
+            return [install()]
+
+    manager = _manager_with_actor(ActorWorkerGroup())
+    manager.backend = "naive"
+    assert manager.update_weights(global_steps=7, lora_adapter_id=124) == {}
+    assert calls == [{"global_steps": 7, "mode": "naive", "lora_adapter_id": 124}]
+
+
 def test_lora_probe_allows_backend_without_capability():
     manager = _manager_with_actor(object())
 

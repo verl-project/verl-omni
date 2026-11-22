@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 import logging
 from argparse import Namespace
 from collections.abc import Mapping
@@ -431,6 +432,8 @@ class DiffusionStrategy(OmniStrategyBase):
         request_id: str,
         lora_request: Optional[LoRARequest],
         priority: int,
+        *,
+        submitted: asyncio.Future[None] | None = None,
     ) -> Any:
         if priority != 0:
             raise ValueError("DiffusionStrategy does not support nonzero request priority")
@@ -439,6 +442,7 @@ class DiffusionStrategy(OmniStrategyBase):
                 prompt=prompt,
                 request_id=request_id,
                 sampling_params_list=params,
+                submitted=submitted,
             )
         )
 
@@ -507,9 +511,11 @@ class DiffusionStrategy(OmniStrategyBase):
                     raise ValueError(f"{context}, artifact={name!r}: expected {expected}, got {actual}")
         return artifacts
 
-    def _training_output_fields(self, final_res: OmniRequestOutput, *, context: str) -> dict[str, Any]:
+    def _training_output_fields(
+        self, final_res: OmniRequestOutput, *, context: str, global_steps: int | None
+    ) -> dict[str, Any]:
         """Remove only declared training batch axes and preserve algorithm-owned keys."""
-        fields: dict[str, Any] = {"global_steps": self.server.global_steps}
+        fields: dict[str, Any] = {"global_steps": global_steps}
         for name, source, value in (
             ("all_latents", "trajectory_latents", final_res.trajectory_latents),
             ("all_timesteps", "trajectory_timesteps", final_res.trajectory_timesteps),
@@ -524,7 +530,12 @@ class DiffusionStrategy(OmniStrategyBase):
         return fields
 
     def process_output(
-        self, final_res: OmniRequestOutput | None, params: Any, sampling_params: dict[str, Any]
+        self,
+        final_res: OmniRequestOutput | None,
+        params: Any,
+        sampling_params: dict[str, Any],
+        *,
+        global_steps: int | None,
     ) -> DiffusionOutput:
         output_type = _diffusion_output_type(sampling_params)
         model_config = self.server.model_config
@@ -545,7 +556,7 @@ class DiffusionStrategy(OmniStrategyBase):
             logger.debug(
                 "diffusion rollout produced no image (finish_reason=%s); returning %s", finish_reason, stop_reason
             )
-            extra_fields: dict[str, Any] = {"global_steps": self.server.global_steps}
+            extra_fields: dict[str, Any] = {"global_steps": global_steps}
             if final_res is not None:
                 for metadata_group in _rollout_metadata_groups(final_res.multimodal_output):
                     for key, value in metadata_group.items():
@@ -563,7 +574,7 @@ class DiffusionStrategy(OmniStrategyBase):
         artifacts = self._parse_media_artifacts(final_res, header, sampling_params, context=context)
         primary_name = header["primary"]
         primary = artifacts[primary_name]
-        fields = self._training_output_fields(final_res, context=context)
+        fields = self._training_output_fields(final_res, context=context, global_steps=global_steps)
         if fields.get("media_kind", primary.spec.modality) != primary.spec.modality:
             raise ValueError(f"{context}: media_kind conflicts with primary artifact")
         fields["media_kind"] = primary.spec.modality
