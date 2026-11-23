@@ -181,7 +181,7 @@ def diffusion_tq_batch_to_dataproto(
         responses, rollout_log_probs, rm_scores, embeds, ...) and whose
         ``non_tensor_batch`` carries uid/reward_model/data_source/extra_fields.
     """
-    sort_idx = sort_diffusion_tq_keys(list(batch_meta.keys))
+    sort_idx = sort_diffusion_tq_keys(list(batch_meta.keys), getattr(batch_meta, "tags", None))
     keys = [batch_meta.keys[i] for i in sort_idx]
     partition_id = batch_meta.partition_id
 
@@ -233,7 +233,8 @@ def put_dataproto_fields_to_tq(
     Args:
         batch_meta: ``KVBatchMeta`` whose ``keys`` and ``partition_id`` target
             the rows to update.
-        data: ``DataProto`` containing the computed tensor fields.
+        data: ``DataProto`` containing computed fields in the same canonical row
+            order returned by ``diffusion_tq_batch_to_dataproto``.
         fields: Batch field names to persist; missing fields are skipped.
     """
     output: dict[str, Any] = {}
@@ -243,7 +244,7 @@ def put_dataproto_fields_to_tq(
         output[field] = data.batch[field]
     if not output:
         return
-    sort_idx = sort_diffusion_tq_keys(list(batch_meta.keys))
+    sort_idx = sort_diffusion_tq_keys(list(batch_meta.keys), getattr(batch_meta, "tags", None))
     sorted_keys = [batch_meta.keys[i] for i in sort_idx]
     tq.kv_batch_put(
         keys=sorted_keys,
@@ -252,16 +253,29 @@ def put_dataproto_fields_to_tq(
     )
 
 
-def sort_diffusion_tq_keys(keys: list[str]) -> list[int]:
-    """Return indices that sort TransferQueue keys in rollout order.
+def sort_diffusion_tq_keys(keys: list[str], tags: list[dict[str, Any]] | None = None) -> list[int]:
+    """按生成批次、prompt 位置和 session/output 返回统一的 TQ 行顺序。
 
     Args:
-        keys: TransferQueue row keys from ``KVBatchMeta.keys``.
+        keys: ``KVBatchMeta.keys`` 中的轨迹键。
+        tags: 与 keys 对齐的 tags；缺少位置标签的旧数据继续按 uid 排序。
 
     Returns:
-        Permutation indices that reorder ``keys`` by ``(uid, rollout, output)``.
+        可同时重排 keys 和 tags 的索引；完整位置标签不依赖随机 uid。
     """
-    return sorted(range(len(keys)), key=lambda i: _parse_tq_key(keys[i]))
+    if tags is not None and len(tags) not in (0, len(keys)):
+        raise ValueError("TransferQueue tags must align with trajectory keys.")
+
+    def sort_key(i: int) -> tuple:
+        uid, session, output = _parse_tq_key(keys[i])
+        tag = tags[i] if tags else None
+        prompt_index = tag.get("prompt_index") if isinstance(tag, dict) else None
+        gen_batch_seq = tag.get("gen_batch_seq") if isinstance(tag, dict) else None
+        if prompt_index is None or gen_batch_seq is None:
+            return (1, uid, session, output)
+        return (0, int(gen_batch_seq), int(prompt_index), session, output)
+
+    return sorted(range(len(keys)), key=sort_key)
 
 
 def _parse_tq_key(key: str) -> tuple[str, int, int]:
@@ -292,20 +306,12 @@ def canonicalize_diffusion_tq_meta(batch_meta: KVBatchMeta) -> KVBatchMeta:
     if len(batch_meta.keys) < 2:
         return batch_meta
 
-    def sort_key(i: int) -> tuple:
-        uid, session, output = _parse_tq_key(batch_meta.keys[i])
-        tag = batch_meta.tags[i]
-        prompt_index = tag.get("prompt_index") if isinstance(tag, dict) else None
-        gen_batch_seq = tag.get("gen_batch_seq") if isinstance(tag, dict) else None
-        if prompt_index is None or gen_batch_seq is None:
-            return (1, uid, session, output)
-        return (0, int(gen_batch_seq), int(prompt_index), session, output)
-
-    perm = sorted(range(len(batch_meta.keys)), key=sort_key)
+    tags = batch_meta.tags
+    perm = sort_diffusion_tq_keys(list(batch_meta.keys), tags)
     # replace() carries fields/extra_info over so future consumers reading
     # them (e.g. a kv_batch_get driven by batch_meta.fields) see real values.
     return dataclasses.replace(
         batch_meta,
         keys=[batch_meta.keys[i] for i in perm],
-        tags=[batch_meta.tags[i] for i in perm],
+        tags=[tags[i] for i in perm] if tags else tags,
     )

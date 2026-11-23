@@ -86,6 +86,7 @@ def _cast_loaded_diffusers_module(
     torch_dtype: torch.dtype,
     *,
     preserve_fp32_modules: bool = True,
+    preserve_buffer_names: tuple[str, ...] = (),
 ) -> None:
     """Cast to ``torch_dtype`` while preserving diffusers-declared fp32 islands.
 
@@ -105,10 +106,20 @@ def _cast_loaded_diffusers_module(
             keep_in_fp32,
         )
         for name, tensor in itertools.chain(module.named_parameters(), module.named_buffers()):
-            if tensor.is_floating_point() and not any(part in name.split(".") for part in keep_in_fp32):
+            if (
+                name not in preserve_buffer_names
+                and tensor.is_floating_point()
+                and not any(part in name.split(".") for part in keep_in_fp32)
+            ):
                 tensor.data = tensor.data.to(torch_dtype)
         return
+    # Module.to replaces registered buffers. Keep the original tensors for
+    # adapter-declared buffers whose values cannot be recovered after rounding.
+    preserved = {name: module.get_buffer(name) for name in preserve_buffer_names}
     module.to(torch_dtype)
+    for name, buffer in preserved.items():
+        parent, _, attr = name.rpartition(".")
+        setattr(module.get_submodule(parent), attr, buffer)
 
 
 def _fsdp_param_dtype(
@@ -342,6 +353,7 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
                 module,
                 torch_dtype,
                 preserve_fp32_modules=model_cls.preserve_fp32_modules(),
+                preserve_buffer_names=model_cls.preserve_buffer_names,
             )
 
             if self.model_config.enable_gradient_checkpointing:
@@ -670,7 +682,7 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
         nested tensor's jagged dim-0, so restore them to dense padded tensors and
         validate the declared row counts against the validity mask.
         """
-        for key in ("condition_video_rows", "condition_audio_rows"):
+        for key in ("condition_video_rows", "condition_audio_rows", "condition_image_rows"):
             values = micro_batch.get(key, None)
             if not isinstance(values, torch.Tensor):
                 continue

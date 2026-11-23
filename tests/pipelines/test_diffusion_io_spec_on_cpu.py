@@ -42,6 +42,12 @@ _PRIMARY_MODALITY = [
         "diffusion_nft",
         "image",
     ),
+    (
+        "verl_omni.pipelines.qwen_image_21_diffusion_nft.vllm_omni_rollout_adapter",
+        "QwenImage21Pipeline",
+        "diffusion_nft",
+        "image",
+    ),
     ("verl_omni.pipelines.qwen_image_dpo.vllm_omni_rollout_adapter", "QwenImagePipeline", "dpo", "image"),
     # dual_grpo / mix_grpo subclass QwenImagePipelineWithLogProb and inherit the spec.
     ("verl_omni.pipelines.qwen_image_dual_grpo.vllm_omni_rollout_adapter", "QwenImagePipeline", "dual_grpo", "image"),

@@ -28,7 +28,6 @@ import aiohttp
 import numpy as np
 import torch
 from openai.types.chat import ChatCompletion
-from PIL import Image
 from transformers import PreTrainedTokenizer
 
 DEFAULT_GRM_PROMPT = (
@@ -48,17 +47,6 @@ async def _chat_complete(router_address: str, chat_complete_request: dict) -> Ch
         async with session.post(url, json=chat_complete_request) as resp:
             output = await resp.text()
     return ChatCompletion(**json.loads(output))
-
-
-def _to_pil(image) -> Image.Image:
-    """Convert a uint8 tensor / array / PIL image to an RGB PIL image."""
-    if isinstance(image, torch.Tensor):
-        image = image.permute(1, 2, 0).cpu().numpy()
-    if isinstance(image, np.ndarray):
-        assert image.shape[-1] == 3, "must be in HWC format"
-        image = Image.fromarray(image)
-    assert isinstance(image, Image.Image)
-    return image
 
 
 def _levenshtein_score(text: str, ground_truth: str) -> float:
@@ -141,6 +129,7 @@ async def compute_score_ocr(
     from verl.utils.ray_utils import get_event_loop
 
     from verl_omni.utils.reward_score.reward_utils import (
+        image_tensor_to_pil,
         pil_image_to_base64,
         resolve_prompt_builder,
         visual_reward_frames,
@@ -170,7 +159,7 @@ async def compute_score_ocr(
     grm_response = ""
     scores = []
     for image in solution_image:
-        pil_image = _to_pil(image)
+        pil_image = image_tensor_to_pil(image, alpha_background=(255, 255, 255))
         image_base64 = await loop.run_in_executor(None, pil_image_to_base64, pil_image)
 
         messages = [

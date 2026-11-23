@@ -30,6 +30,7 @@ from verl_omni.agent_loop.diffusion_agent_loop import (
     DiffusionAgentLoopWorker,
     _config_to_sampling_dict,
     _InternalDiffusionAgentLoopOutput,
+    _pad_reference_rows,
 )
 from verl_omni.agent_loop.utils import derive_rollout_seed
 from verl_omni.pipelines.rollout_media import ARTIFACT_CONTEXT, ARTIFACT_SPECS, PREVIEW_ARTIFACT, PRIMARY_ARTIFACT
@@ -254,6 +255,20 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
                     field[extra_key] = value.squeeze(0) if value.dim() >= 1 and value.shape[0] == 1 else value
                 elif extra_key == "audio_sample_rate":
                     field[extra_key] = value
+
+            # TQ writes sessions directly, bypassing the ordinary batch postprocessor.
+            for name in ("condition_video_rows", "condition_audio_rows", "condition_image_rows"):
+                if name not in field:
+                    continue
+                count_key = name.replace("_rows", "_row_count")
+                count = field.get(count_key)
+                if not isinstance(count, torch.Tensor):
+                    raise ValueError(f"{name} requires a tensor {count_key} for every sample.")
+                padded, masks = _pad_reference_rows(
+                    name, [field[name].unsqueeze(0)], [count], self.max_prompt_embed_length
+                )
+                field[name] = padded[0].squeeze(0)
+                field[f"{name}_mask"] = masks[0].squeeze(0)
 
             # Non-tensor dataset fields forwarded as-is.
             for non_tensor_key in ["reward_model", "data_source", "extra_info", "raw_prompt"]:

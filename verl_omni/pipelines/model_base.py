@@ -115,6 +115,9 @@ class DiffusionModelBase(ABC):
             noise = noise[:, step]
         return {"x0": x0, "xt": (1.0 - t) * x0 + t * noise, "t_expanded": t}
 
+    # Qualified buffer names that must keep their loaded dtype during FSDP model initialization.
+    preserve_buffer_names: tuple[str, ...] = ()
+
     # Adapter used for the detached loss-reference prediction.
     old_policy_adapter: str = "old"
 
