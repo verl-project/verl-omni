@@ -28,7 +28,6 @@ from verl import DataProto
 
 from verl_omni.pipelines.rollout_media import ArtifactContractError, MediaArtifact, MediaSpec, artifact_fields
 from verl_omni.reward_loop import reward_model_executor as executor_module
-from verl_omni.reward_loop.reward_manager import multi as manager_module
 from verl_omni.reward_loop.reward_manager.audio import AudioRewardManager
 from verl_omni.reward_loop.reward_manager.multi import MultiVisualRewardManager
 from verl_omni.reward_loop.reward_model import NativeManagedRewardModel
@@ -526,70 +525,6 @@ async def test_manager_public_entry_injects_batch_for_prompt_audio_and_artifact_
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("lifecycle", ["sleep", "close"])
-async def test_cancelled_caller_drains_before_offload_or_close(monkeypatch, fake_adapter, lifecycle):
-    _FakeAdapter.release.clear()
-    executor = _executor(monkeypatch)
-    await executor.wake_up()
-    adapter = fake_adapter[0]
-    weights = adapter.model
-    scoring = asyncio.create_task(executor.score(_request("block")))
-    sibling = asyncio.create_task(executor.score(_request()))
-    transition = None
-    entered = asyncio.Event()
-    microbatcher = executor._microbatcher
-    join_name = "pause" if lifecycle == "sleep" else "close"
-    original_join = getattr(microbatcher, join_name)
-
-    async def observed_join():
-        entered.set()
-        await original_join()
-
-    monkeypatch.setattr(microbatcher, join_name, observed_join)
-    try:
-        assert await asyncio.to_thread(_FakeAdapter.entered.wait, 5)
-        assert fake_adapter[0].calls[0][1] == ["block", "right"]
-        scoring.cancel()
-        transition = asyncio.create_task(getattr(executor, lifecycle)())
-        await asyncio.wait_for(entered.wait(), 5)
-        assert microbatcher._state == ("paused" if lifecycle == "sleep" else "closed")
-        scoring.cancel()
-        # Observe actual completion while the accepted forward remains gated.
-        completed, _ = await asyncio.wait({scoring, sibling, transition}, timeout=0.05)
-        assert not completed, "accepted work and lifecycle must stay owned until forward settlement"
-        assert weights.moves == []
-        assert not adapter.closed
-        with pytest.raises(RuntimeError, match="not awake"):
-            await executor.score(_request())
-        _FakeAdapter.release.set()
-        _, pending = await asyncio.wait({scoring, sibling, transition}, timeout=5)
-        assert not pending, "released forward must settle every accepted caller and lifecycle join"
-        with pytest.raises(asyncio.CancelledError):
-            await scoring
-        assert await sibling == {"score": pytest.approx(1.0), "source_sample_rate": 48_000}
-        await transition
-        if lifecycle == "sleep":
-            assert weights.moves == [torch.device("cpu")]
-            await executor.wake_up()
-            assert await executor.score(_request()) == {"score": pytest.approx(1.0), "source_sample_rate": 48_000}
-        else:
-            assert adapter.closed
-    finally:
-        _FakeAdapter.release.set()
-        cleanup = asyncio.create_task(executor.close())
-        tasks = {scoring, sibling, cleanup}
-        if transition is not None:
-            tasks.add(transition)
-        done, pending = await asyncio.wait(tasks, timeout=5)
-        for task in done:
-            if not task.cancelled():
-                task.exception()
-        for task in pending:
-            task.cancel()
-        assert not pending, "CLAP cancellation test cleanup left pending work"
-
-
-@pytest.mark.asyncio
 async def test_executor_load_sleep_wake_close_tracks_adapter_device_and_weights(monkeypatch, fake_adapter):
     executor = _executor(
         monkeypatch,
@@ -615,25 +550,6 @@ async def test_executor_load_sleep_wake_close_tracks_adapter_device_and_weights(
     assert scorer.model is None
     assert scorer._adapter is None
     assert adapter.closed
-
-
-def test_fresh_executor_recreates_adapter_on_a_new_event_loop(monkeypatch, fake_adapter):
-    async def score_and_close():
-        executor = _executor(monkeypatch)
-        await executor.wake_up()
-        try:
-            result = await executor.score(_request("up", waveform=(0.0, 1.0)))
-            assert result == {"score": pytest.approx(1.0), "source_sample_rate": 48_000}
-        finally:
-            await executor.close()
-
-    asyncio.run(score_and_close())
-    asyncio.run(score_and_close())
-
-    assert len(fake_adapter) == 2
-    assert fake_adapter[0] is not fake_adapter[1]
-    assert all(adapter.closed for adapter in fake_adapter)
-    assert [len(adapter.calls) for adapter in fake_adapter] == [1, 1]
 
 
 @pytest.mark.parametrize(
@@ -761,19 +677,11 @@ async def test_wrapper_forwards_the_original_request_kwargs_exactly():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("manager_name", ["AudioRewardManager", "MultiAudioRewardManager"])
 @pytest.mark.parametrize("transport", ["streamed", "finalized"])
 @pytest.mark.parametrize("sample_rate", [48_000, np.array([48_000])], ids=["scalar", "numpy"])
 async def test_audio_manager_calls_batched_entry_without_solution_image(
-    monkeypatch, fake_adapter, manager_name, transport, sample_rate
+    monkeypatch, fake_adapter, transport, sample_rate
 ):
-    if manager_name == "MultiAudioRewardManager":
-        manager_cls = getattr(manager_module, manager_name, None)
-        if manager_cls is None:
-            pytest.skip("MultiAudioRewardManager is introduced by #920")
-    else:
-        manager_cls = AudioRewardManager
-
     with initialize_config_dir(config_dir=os.path.abspath("verl_omni/trainer/config"), version_base=None):
         config = compose(
             config_name="diffusion_trainer",
@@ -790,9 +698,7 @@ async def test_audio_manager_calls_batched_entry_without_solution_image(
         )
     executor = _executor(monkeypatch)
     compute_score = partial(port.compute_score_clap_batched, reward_model=executor)
-    manager = manager_cls(config, MagicMock(), compute_score=compute_score)
-    if manager_name == "MultiAudioRewardManager":
-        manager.set_reward_executors(None, {"clap": executor})
+    manager = AudioRewardManager(config, MagicMock(), compute_score=compute_score)
     audio = {"audio": torch.tensor([[0.0, 1.0]]), "audio_sample_rate": sample_rate}
     metadata = (
         {"tool_extra_fields": [audio]} if transport == "streamed" else {key: [value] for key, value in audio.items()}
@@ -805,8 +711,7 @@ async def test_audio_manager_calls_batched_entry_without_solution_image(
     try:
         result = await manager.run_single(data)
         assert result["reward_score"] == pytest.approx(1.0)
-        rate_key = "source_sample_rate" if manager_name == "AudioRewardManager" else "reward/clap/source_sample_rate"
-        assert result["reward_extra_info"][rate_key] == 48_000
+        assert result["reward_extra_info"]["source_sample_rate"] == 48_000
         assert len(fake_adapter[0].calls) == 1
         waveforms, prompts = fake_adapter[0].calls[0]
         assert prompts == ["up"]

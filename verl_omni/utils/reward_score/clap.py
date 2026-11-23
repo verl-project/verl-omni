@@ -73,13 +73,6 @@ def _get_audio(extra_info: dict) -> tuple[torch.Tensor, int]:
     info = dict(extra_info)
     info.setdefault("audio_sample_rate", _CLAP_SAMPLE_RATE)
     info.setdefault("audio_layout", "CT")
-    if "media_artifacts" not in info:
-        audio = info.get("audio")
-        if isinstance(audio, np.ndarray) and audio.dtype == object:
-            info["audio"] = np.asarray(audio, dtype=np.float32)
-        sample_rate = info.get("audio_sample_rate")
-        if isinstance(sample_rate, np.ndarray) and sample_rate.size == 1:
-            info["audio_sample_rate"] = sample_rate.item()
     return get_audio(info, audio_layout=info["audio_layout"])
 
 
