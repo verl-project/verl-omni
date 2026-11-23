@@ -150,12 +150,15 @@ python3 -m verl_omni.trainer.main_diffusion \
   '+reward.reward_functions.clap.weight=1.0' \
   '+reward.reward_functions.clap.device=cuda:0' \
   '+reward.reward_functions.clap.model_name_or_path=laion/larger_clap_general' \
-  '+reward/models@reward.models.imagebind=imagebind' \
+  '+reward.models.imagebind.backend=native' \
+  '+reward.models.imagebind.model_path=.checkpoints/imagebind_huge.pth' \
+  '+reward.models.imagebind.offload=false' \
+  '+reward.models.imagebind.placement.devices=[1]' \
+  '+reward.models.imagebind.executor.model=verl_omni.utils.reward_score.imagebind:ImageBindModel' \
   '+reward.reward_functions.imagebind.path=pkg://verl_omni.utils.reward_score.imagebind' \
   '+reward.reward_functions.imagebind.name=compute_score_native' \
   '+reward.reward_functions.imagebind.weight=1.0' \
   '+reward.reward_functions.imagebind.model=imagebind' \
-  'reward.models.imagebind.model_path=.checkpoints/imagebind_huge.pth' \
   '+reward.reward_functions.imagebind.mode=audio_video' \
   reward.aggregation=weighted_sum \
   trainer.logger='["console","tensorboard","wandb"]' \

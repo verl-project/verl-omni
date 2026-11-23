@@ -455,9 +455,11 @@ reward pool and synchronous V1 diffusion training. See the
 [FSDP2 reward model design](../advanced/fsdp2_reward_models.md) for configuration,
 lifecycle guarantees and the supported scope.
 
-The LTX2 and MiniMax-H3 recipes select the ImageBind preset from the trainer
-config group with `+reward/models@reward.models.imagebind=imagebind`. Set
-`reward.models.imagebind.model_path` to the ImageBind checkpoint. The scorer
+The LTX2 and MiniMax-H3 launchers configure the native ImageBind model under
+`reward.models.imagebind`. Set `reward.models.imagebind.model_path` to the
+ImageBind checkpoint. The launchers use bundle 1 of the trainer-selected pool,
+which requires at least two bundles. For a one-bundle pool, pass
+`'reward.models.imagebind.placement.devices=[0]'` to the launcher. The scorer
 `compute_score_native` uses decoded `video_preview` and/or `audio` artifacts
 and the sample's ground-truth text according to `mode`. For `all`, the
 `weights` on the reward term combine the three similarities before the
