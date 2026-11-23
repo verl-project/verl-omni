@@ -25,7 +25,6 @@ from verl import DataProto
 from verl.experimental.reward_loop.reward_manager.base import RewardManagerBase
 
 from verl_omni.pipelines.rollout_media import ArtifactContractError
-from verl_omni.pipelines.rollout_media import ArtifactContractError
 from verl_omni.utils.reward_score.scorers.registry import load_reward_object as load_extern_object
 from verl_omni.workers.config.reward import (
     get_reward_model_entries,
