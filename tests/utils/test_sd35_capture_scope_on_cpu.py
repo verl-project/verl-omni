@@ -31,6 +31,12 @@ spec.loader.exec_module(module)
 capture_forward = module.capture_forward
 
 
+def test_checker_constants_are_shared():
+    assert module._HEX64 is module.checker._HEX64
+    assert module._STEP is module.checker._STEP
+    assert module._PHASE is module.checker._PHASE
+
+
 class FakeDebugger:
     def __init__(self, *, config_path, events, dump_count=1, stop_error=None):
         self.config = json.loads(Path(config_path).read_text(encoding="utf-8"))

@@ -30,6 +30,7 @@ OWNERS = (
     "verl_omni/pipelines/diffusion_rollout_output.py",
     "tools/consistency_checking/sd3/capture.py",
     "tools/consistency_checking/sd3/capture_scope.py",
+    "tools/consistency_checking/check_diffusion_consistency.py",
     "tools/consistency_checking/sd3/model_contract.py",
     "tools/consistency_checking/sd3/source_manifest.py",
     "tools/consistency_checking/sd3/pin_producer.py",

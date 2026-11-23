@@ -41,7 +41,7 @@ def put_json(path, value):
     path.write_text(json.dumps(value) + "\n")
 
 
-def fixture(tmp_path, nested=True):
+def fixture(tmp_path):
     root = tmp_path / "capture"
     root.mkdir()
     policy = "b" * 64
@@ -66,10 +66,9 @@ def fixture(tmp_path, nested=True):
             "timestep_input": {"sha256": SHA, "dtype": "torch.float32", "shape": [1]},
             "dump_path": str(root / dump),
         }
-        row.update({"inputs": INPUTS} if nested else INPUTS)
+        row["inputs"] = INPUTS
         # The producer's raw capture always has nested input metadata.
-        raw = {**row, "inputs": INPUTS}
-        put_json(root / folder / "record.json", raw)
+        put_json(root / folder / "record.json", row)
         records[role] = row
     batch = {"old_log_probs": torch.ones(2, 2, dtype=torch.float32)}
     tensor_path = root / "rollout/actor_batch.pt"
@@ -157,9 +156,8 @@ def run(root, sha, output):
     )
 
 
-@pytest.mark.parametrize("nested", [True, False])
-def test_cli_replays_captured_first_pair(tmp_path, nested):
-    root = fixture(tmp_path, nested)
+def test_cli_replays_captured_first_pair(tmp_path):
+    root = fixture(tmp_path)
     original = {p.relative_to(root): p.read_bytes() for p in root.rglob("*") if p.is_file()}
     sha = pin(root)
     result = run(root, sha, tmp_path / "report")
@@ -175,6 +173,22 @@ def test_cli_replays_captured_first_pair(tmp_path, nested):
         "rtol": 1e-3,
     }
     assert all((root / path).read_bytes() == data for path, data in original.items())
+
+
+def test_cli_rejects_flat_only_capture_inputs(tmp_path):
+    root = fixture(tmp_path)
+    path = root / "actor/captures/actor/capture-id/record.json"
+    raw = json.loads(path.read_text())
+    raw.update(raw.pop("inputs"))
+    put_json(path, raw)
+    comparison = root / "actor/comparison.json"
+    owner = json.loads(comparison.read_text())
+    owner["capture_record"] = raw
+    put_json(comparison, owner)
+    sha = pin(root)
+    result = run(root, sha, tmp_path / "report")
+    assert result.returncode != 0
+    assert "capture inputs invalid" in result.stderr
 
 
 def test_cli_replays_unchanged_bytes_after_relocation(tmp_path):

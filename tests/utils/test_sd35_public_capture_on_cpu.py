@@ -48,6 +48,20 @@ def test_cli_help_without_training_imports():
         assert "usage:" in done.stdout
 
 
+def test_source_manifest_tracks_checker_and_runtime_owners():
+    inventory = module("source_manifest")
+    assert "tools/consistency_checking/check_diffusion_consistency.py" in inventory.OWNERS
+    sys.path.insert(0, str(RECIPE))
+    try:
+        import importlib
+
+        capture = importlib.import_module("capture")
+        assert capture.OWNERS == tuple(name for name in inventory.OWNERS if name.startswith("verl_omni/"))
+    finally:
+        sys.path.remove(str(RECIPE))
+        sys.modules.pop("capture", None)
+
+
 def test_debugger_classmethod_admission_is_signature_only(monkeypatch):
     monkeypatch.syspath_prepend(str(RECIPE))
     capture = module("capture")
@@ -188,7 +202,7 @@ def test_admission_token_missing_and_stale(tmp_path, monkeypatch):
             "rollout_transformer_config": {"num_layers": 1},
         }
         path.write_text(json.dumps(payload))
-        assert capture.validate_admission(args, identity, {}, tmp_path) == hashlib.sha256(path.read_bytes()).hexdigest()
+        assert capture.validate_admission(args, identity, {}, tmp_path) is None
         args.rollout_offload = "dit-layerwise"
         with pytest.raises(ValueError, match="token"):
             capture.validate_admission(args, identity, {}, tmp_path)

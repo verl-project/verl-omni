@@ -399,6 +399,20 @@ def test_training_loss_and_gradient_are_unchanged(hooks):
     assert not root.exists() and capture._ENGINE_CONTEXT.get() is None
 
 
+def test_capture_root_rejects_symlinked_parent_before_write(hooks, monkeypatch, tmp_path):
+    capture, root, *_ = hooks
+    linked_parent = tmp_path / "linked"
+    linked_parent.symlink_to(tmp_path, target_is_directory=True)
+    monkeypatch.setenv("DIFFUSION_CAPTURE_DIR", str(linked_parent / "capture"))
+    with pytest.raises(ValueError, match="symlink"):
+        capture._write("driver_pair", {}, {"value": torch.ones(1)})
+    assert not root.exists()
+
+    monkeypatch.setenv("DIFFUSION_CAPTURE_DIR", str(root))
+    capture._write("driver_pair", {}, {"value": torch.ones(1)})
+    assert len(_events(root)) == 1
+
+
 def test_native_dataproto_to_tensordict_metadata_transport():
     if importlib.util.find_spec("verl") is None:
         pytest.skip("optional verl package is unavailable")

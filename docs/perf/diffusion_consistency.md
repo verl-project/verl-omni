@@ -252,29 +252,14 @@ corresponding `dump/step0/rank0/dump.json` for each record. Record the SHA256
 of the pin list independently before replay; a digest freshly calculated from
 the same untrusted capture provides no independent evidence.
 
-For an already trusted capture, prepare the list once with Python's standard
-library. Set `CAPTURE_ROOT` and `PIN_FILE` to absolute paths; put `PIN_FILE`
-outside `CAPTURE_ROOT`. Keep the resulting digest in an independent record.
+For an already trusted capture, prepare the list once with the producer pin
+utility. Put the output outside the capture root. Record the printed SHA256
+digest independently from the producer artifacts and retain it for replay.
 
-```python
-import hashlib
-import os
-from pathlib import Path
-
-root = Path(os.environ["CAPTURE_ROOT"])
-pin_file = Path(os.environ["PIN_FILE"])
-names = ["rollout/manifest.json", "rollout/actor_batch.pt",
-         "actor/comparison.json", "actor/comparison.pt"]
-for role in ("rollout", "actor"):
-    records = list((root / role / "captures" / role).glob("*/record.json"))
-    assert len(records) == 1
-    names += [str(records[0].relative_to(root)),
-              str((records[0].parent / "dump/step0/rank0/dump.json").relative_to(root))]
-data = "".join(f"{hashlib.sha256((root / name).read_bytes()).hexdigest()}  {name}\n"
-               for name in names).encode()
-with pin_file.open("xb") as stream:
-    stream.write(data)
-print(hashlib.sha256(data).hexdigest())
+```bash
+python tools/consistency_checking/sd3/pin_producer.py \
+  --root /absolute/existing-capture \
+  --output /absolute/producer-pins.sha256
 ```
 
 ```bash
@@ -289,8 +274,8 @@ The output directory must be fresh and outside the input root. It contains
 `case/` with derived checker inputs, `report.json` from the public checker,
 and `audit.json` with the overall replay status, full log-probability
 comparison, source pin digest, and selected tensor row.
-Original producer files are read only. Legacy nested input records and newer
-flat records are normalized to the same checker record. The bridge binds the
+Original producer files are read only. Producer records use nested input
+metadata; replay exposes those fields to the checker. The bridge binds the
 captured sample to the producer's ordered `request_map`, verifies both saved
 rollout tensor copies, and compares all four saved log probabilities. The
 public checker validates the captured forward for row 0, step 0, so

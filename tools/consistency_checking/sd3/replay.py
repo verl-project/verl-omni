@@ -49,8 +49,6 @@ def encoded(value: object) -> bytes:
 def normalize(record: object, original: Path, dump: str) -> dict:
     require(type(record) is dict, "capture record must be an object")
     nested = record.get("inputs")
-    if nested is None:
-        nested = {name: record.get(name) for name in INPUTS}
     require(
         type(nested) is dict and set(nested) == set(INPUTS) and all(type(value) is dict for value in nested.values()),
         "capture inputs invalid",

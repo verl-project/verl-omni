@@ -19,15 +19,21 @@ weight equality. Official MSProbe tensor analysis owns that comparison.
 """
 
 import hashlib
+import importlib.util
 import json
 import math
-import re
 import stat
 from pathlib import Path
 
-_HEX64 = re.compile(r"[0-9a-f]{64}\Z")
-_STEP = re.compile(r"(?:0|-[1-9][0-9]*|[1-9][0-9]*)\Z")
-_PHASE = {"actor": "actorlog_prob", "rollout": "rolloutgenerate"}
+_checker_spec = importlib.util.spec_from_file_location(
+    "_diffusion_consistency_checker", Path(__file__).resolve().parents[1] / "check_diffusion_consistency.py"
+)
+checker = importlib.util.module_from_spec(_checker_spec)
+_checker_spec.loader.exec_module(checker)
+
+_HEX64 = checker._HEX64
+_STEP = checker._STEP
+_PHASE = checker._PHASE
 _INPUT_NAMES = ("hidden_states", "encoder_hidden_states", "pooled_projections", "timestep")
 
 

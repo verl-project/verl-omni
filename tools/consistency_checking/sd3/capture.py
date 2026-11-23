@@ -35,15 +35,10 @@ from pathlib import Path
 
 import capture_scope
 import model_contract as probe
+import source_manifest
 
 HERE = Path(__file__).resolve().parent
-OWNERS = (
-    "verl_omni/workers/engine/fsdp/diffusers_impl.py",
-    "verl_omni/workers/utils/losses.py",
-    "verl_omni/pipelines/sd3_flow_grpo/diffusers_training_adapter.py",
-    "verl_omni/pipelines/sd3_flow_grpo/vllm_omni_rollout_adapter.py",
-    "verl_omni/pipelines/diffusion_rollout_output.py",
-)
+OWNERS = tuple(name for name in source_manifest.OWNERS if name.startswith("verl_omni/"))
 UIDS = ("sd35-prompt-0", "sd35-prompt-1")
 PROMPTS = ("A red cube on a white table.", "A blue sphere on a white table.")
 SEEDS = (1234, 1235)
@@ -286,7 +281,7 @@ def run_record(record: dict, shared_root: Path) -> dict:
     return {**record, **inputs, "dump_path": str(path.relative_to(shared_root))}
 
 
-def provenance(args, _probe, manifest: dict, weight_sha: str) -> dict:
+def provenance(args, manifest: dict, weight_sha: str) -> dict:
     _, actor_config = probe.configure(args.model)
     config_bytes = json.dumps(dataclasses.asdict(actor_config), sort_keys=True, default=str).encode()
     return {
@@ -427,7 +422,7 @@ def admit(args, probe, identity: dict, manifest: dict, root: Path):
             {
                 "role": "admit",
                 "identity": identity,
-                "provenance": provenance(args, probe, manifest, probe.WEIGHT_SHA256),
+                "provenance": provenance(args, manifest, probe.WEIGHT_SHA256),
                 "rollout_transformer_config": derived_config,
                 "scheduler_timesteps": scheduler.timesteps.tolist(),
                 "cuda_initialized": False,
@@ -438,11 +433,10 @@ def admit(args, probe, identity: dict, manifest: dict, root: Path):
     )
 
 
-def validate_admission(args, identity: dict, manifest: dict, shared_root: Path) -> str:
+def validate_admission(args, identity: dict, manifest: dict, shared_root: Path) -> None:
     path = shared_root / "admit/admission.json"
-    raw = path.read_bytes()
-    admission = json.loads(raw)
-    expected = provenance(args, probe, manifest, probe.WEIGHT_SHA256)
+    admission = json.loads(path.read_bytes())
+    expected = provenance(args, manifest, probe.WEIGHT_SHA256)
     expected["transformer_weight_hash_verified"] = False
     if (
         type(admission) is not dict
@@ -455,7 +449,6 @@ def validate_admission(args, identity: dict, manifest: dict, shared_root: Path) 
         or type(admission.get("rollout_transformer_config")) is not dict
     ):
         raise ValueError("CPU admission token does not match this run/source/model/config")
-    return hashlib.sha256(raw).hexdigest()
 
 
 class NumericalMismatch(RuntimeError):
@@ -549,7 +542,7 @@ def rollout(args, probe, identity: dict, manifest: dict, root: Path, weight_sha:
                     "shared_run_root": str(root.parent.resolve()),
                     "rollout_root": str(root.resolve()),
                     "identity": identity,
-                    "provenance": provenance(args, probe, manifest, weight_sha),
+                    "provenance": provenance(args, manifest, weight_sha),
                     "request_map": mapping,
                     "actor_batch_sha256": sha(root / "actor_batch.pt"),
                     "capture_record": record,
@@ -585,7 +578,7 @@ def actor(args, probe, identity: dict, manifest: dict, root: Path, weight_sha: s
     ):
         raise ValueError("rollout identity or real-prompt declaration mismatch")
     if rollout_manifest.get("identity") != identity or rollout_manifest.get("provenance") != provenance(
-        args, probe, manifest, weight_sha
+        args, manifest, weight_sha
     ):
         raise ValueError("rollout complete provenance differs from actor")
     request_map = rollout_manifest.get("request_map")
@@ -647,7 +640,7 @@ def actor(args, probe, identity: dict, manifest: dict, root: Path, weight_sha: s
             comparison = {
                 "role": "actor",
                 "identity": identity,
-                "provenance": provenance(args, probe, manifest, weight_sha),
+                "provenance": provenance(args, manifest, weight_sha),
                 "shared_run_root": str(root.parent.resolve()),
                 "rollout_root": str(rollout_root),
                 "rollout_batch_sha256": sha(batch_path),
@@ -656,7 +649,6 @@ def actor(args, probe, identity: dict, manifest: dict, root: Path, weight_sha: s
                 "allclose_atol": 1e-5,
                 "allclose_rtol": 1e-3,
                 "allclose": close,
-                "pair_status": "pending_public_replay",
                 "capture_record": actor_record,
             }
             # The public CPU replay reader owns pairing and byte validation.
@@ -685,9 +677,8 @@ def source_identity(source: Path, manifest: dict) -> dict:
     from verl_omni.pipelines.sd3_flow_grpo.vllm_omni_rollout_adapter import StableDiffusion3PipelineWithLogProb
     from verl_omni.workers.engine.fsdp.diffusers_impl import PPODiffusersFSDPEngine
 
-    for owner in (verl_omni,):
-        if not Path(owner.__file__).resolve().is_relative_to(source):
-            raise RuntimeError("package imported from outside declared source")
+    if not Path(verl_omni.__file__).resolve().is_relative_to(source):
+        raise RuntimeError("package imported from outside declared source")
     for symbol in (PPODiffusersFSDPEngine, StableDiffusion3PipelineWithLogProb):
         if not Path(inspect.getfile(symbol)).resolve().is_relative_to(source):
             raise RuntimeError("owner imported from outside declared source")

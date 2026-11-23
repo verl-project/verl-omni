@@ -56,8 +56,8 @@ def _write(kind: str, context: dict, payload: dict, **extra: Any) -> None:
     import torch.distributed as dist
 
     root = Path(os.environ["DIFFUSION_CAPTURE_DIR"]).absolute()
-    if root.is_symlink():
-        raise ValueError("capture root must not be a symlink")
+    if root != root.resolve():
+        raise ValueError("capture root must not contain a symlink")
     root.mkdir(parents=True, exist_ok=True)
     event = root / f"{kind}-{uuid4().hex}"
     event.mkdir()
@@ -193,7 +193,7 @@ def install_trainer_capture() -> None:
         @wraps(original_step)
         def step_with_capture(self, micro_batch, loss_function, forward_only, step, *args, **kwargs):
             context = _ENGINE_CONTEXT.get()
-            capture = context is not None and forward_only and self.is_mp_src_rank_with_outputs()
+            capture = context is not None and self.is_mp_src_rank_with_outputs()
             snapshot, contract = _schedule_inputs(self, micro_batch, step) if capture else (None, False)
             loss, output = original_step(self, micro_batch, loss_function, forward_only, step, *args, **kwargs)
             if capture:
