@@ -14,15 +14,28 @@ if [[ ${AVQA_VIDEO_CONFIG_ONLY:-0} != 1 ]]; then
   TRAIN_FILE="$(cd -- "$(dirname -- "$TRAIN_FILE")" && pwd -P)/$(basename -- "$TRAIN_FILE")"
   VAL_FILE="$(cd -- "$(dirname -- "$VAL_FILE")" && pwd -P)/$(basename -- "$VAL_FILE")"
 fi
+ACTOR_GPUS=4
 ROLLOUT_GPUS=${ROLLOUT_GPUS:-4}
 ROLLOUT_TP=${ROLLOUT_TP:-4}
 for value in "$ROLLOUT_GPUS" "$ROLLOUT_TP"; do
   [[ $value =~ ^[1-9][0-9]*$ ]] || { echo "Expected a positive GPU count" >&2; exit 2; }
 done
 (( ROLLOUT_GPUS % ROLLOUT_TP == 0 )) || { echo "Rollout GPUs must be divisible by TP" >&2; exit 2; }
-NUM_GPUS=${NUM_GPUS:-$((4 + ROLLOUT_GPUS))}
+NUM_GPUS=${NUM_GPUS:-$((ACTOR_GPUS + ROLLOUT_GPUS))}
 [[ $NUM_GPUS =~ ^[1-9][0-9]*$ ]] || { echo "NUM_GPUS must be a positive GPU count" >&2; exit 2; }
-(( NUM_GPUS == 4 + ROLLOUT_GPUS )) || { echo "NUM_GPUS must equal four actor GPUs plus ROLLOUT_GPUS" >&2; exit 2; }
+(( NUM_GPUS == ACTOR_GPUS + ROLLOUT_GPUS )) || { echo "NUM_GPUS must equal four actor GPUs plus ROLLOUT_GPUS" >&2; exit 2; }
+MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-8192}
+MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-1024}
+for arg in "$@"; do
+  case "${arg#+}" in
+    data.max_prompt_length=*|+data.max_prompt_length=*) MAX_PROMPT_LENGTH=${arg#*=} ;;
+    data.max_response_length=*|+data.max_response_length=*) MAX_RESPONSE_LENGTH=${arg#*=} ;;
+  esac
+done
+for value in "$MAX_PROMPT_LENGTH" "$MAX_RESPONSE_LENGTH"; do
+  [[ $value =~ ^[1-9][0-9]*$ ]] || { echo "Prompt and response lengths must be positive integers" >&2; exit 2; }
+done
+MODEL_LENGTH=$((MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH))
 OUTPUT_DIR=${OUTPUT_DIR:-$(mktemp -d "${TMPDIR:-/tmp}/avqa_video-run.XXXXXX")}
 mkdir -p "${OUTPUT_DIR}"
 OUTPUT_DIR=$(cd "${OUTPUT_DIR}" && pwd)
@@ -48,8 +61,8 @@ args=(
   data.truncation=error
   data.val_max_samples=-1
   data.train_batch_size=4
-  data.max_prompt_length=8192
-  data.max_response_length=1024
+  "data.max_prompt_length=${MAX_PROMPT_LENGTH}"
+  "data.max_response_length=${MAX_RESPONSE_LENGTH}"
   data.filter_overlong_prompts=true
   actor_rollout_ref.model.model_type=omni_model
   actor_rollout_ref.model.use_remove_padding=false
@@ -104,9 +117,9 @@ args=(
   "actor_rollout_ref.rollout.n_gpus_per_node=${ROLLOUT_GPUS}"
   "actor_rollout_ref.rollout.tensor_model_parallel_size=${ROLLOUT_TP}"
   actor_rollout_ref.rollout.load_format=safetensors
-  actor_rollout_ref.rollout.max_model_len=9216
+  "actor_rollout_ref.rollout.max_model_len=${MODEL_LENGTH}"
   actor_rollout_ref.rollout.max_num_seqs=32
-  actor_rollout_ref.rollout.max_num_batched_tokens=9216
+  "actor_rollout_ref.rollout.max_num_batched_tokens=${MODEL_LENGTH}"
   actor_rollout_ref.rollout.gpu_memory_utilization=0.6
   actor_rollout_ref.rollout.enable_prefix_caching=false
   actor_rollout_ref.rollout.logprobs_mode=raw_logprobs
@@ -135,7 +148,8 @@ args=(
   trainer.v1.sampler.max_off_policy_threshold=1
   trainer.v1.sampler.max_off_policy_strategy=drop
   trainer.nnodes=1
-  trainer.n_gpus_per_node=4
+  "trainer.n_gpus_per_node=${ACTOR_GPUS}"
+  "+ray_kwargs.ray_init.num_gpus=${NUM_GPUS}"
   trainer.total_training_steps=20
   trainer.val_before_train=true
   trainer.save_freq=-1

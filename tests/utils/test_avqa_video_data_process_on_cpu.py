@@ -47,7 +47,12 @@ def test_original_avqa_parquet_preserves_video_identity_and_split(tmp_path):
     source.write_text(json.dumps([record(), record(id=1140, video_name="missing")]))
     target = tmp_path / "validation.parquet"
     summary = avqa_video.convert_split(source, tmp_path, target, "validation")
-    assert summary == {"input": 2, "kept": 1, "dropped": {"missing_video": 1}}
+    assert summary == {
+        "input": 2,
+        "kept": 1,
+        "dropped": {"missing_video": 1},
+        "dropped_rows_by_reason": {"missing_video": [{"index": 1, "question_id": "1140"}]},
+    }
     [row] = pd.read_parquet(target).to_dict("records")
     assert row["data_source"] == "avqa_video"
     assert row["reward_model"]["ground_truth"] == "<answer>D</answer>"
@@ -138,7 +143,11 @@ def test_source_audit_does_not_require_media_or_change_annotation_bytes(tmp_path
     validation.write_text(json.dumps([record(id=1140, video_name="not_mounted")]))
     original = {path: path.read_bytes() for path in (train, validation)}
     audit = avqa_video.audit_annotation_splits(train, validation)
-    assert audit["source_split_overlap"] == {"question_ids": 0, "video_names": 1}
+    assert audit["source_split_overlap"] == {
+        "question_ids": 0,
+        "video_names": 1,
+        "shared_video_names": ["not_mounted"],
+    }
     for split, path in (("train", train), ("validation", validation)):
         assert path.read_bytes() == original[path]
         assert audit["annotation_sources"][split] == {
@@ -171,11 +180,20 @@ def test_official_clip_overlap_is_reported_without_repartitioning(tmp_path, monk
     )
     avqa_video.main()
     manifest = json.loads((output / "manifest.json").read_text())
-    assert manifest["source_split_overlap"] == {"question_ids": 0, "video_names": 1}
+    assert manifest["source_split_overlap"] == {
+        "question_ids": 0,
+        "video_names": 1,
+        "shared_video_names": ["06GyG4-wONQ_000006"],
+    }
     assert (
         manifest["annotation_sources"]["train"]["annotation_sha256"] == hashlib.sha256(train.read_bytes()).hexdigest()
     )
-    assert manifest["train"] == {"input": 2, "kept": 1, "dropped": {"duplicate_options": 1}}
+    assert manifest["train"] == {
+        "input": 2,
+        "kept": 1,
+        "dropped": {"duplicate_options": 1},
+        "dropped_rows_by_reason": {"duplicate_options": [{"index": 1, "question_id": "1140"}]},
+    }
     assert manifest["validation"]["kept"] == 1
     for split, identity in (("train", "1139"), ("validation", "1141")):
         [row] = pd.read_parquet(output / f"{split}.parquet").to_dict("records")
@@ -261,5 +279,5 @@ def test_failed_conversion_preserves_output_and_allows_retry(tmp_path, monkeypat
     for split, identity in (("train", "1139"), ("validation", "1140")):
         [row] = pd.read_parquet(output / f"{split}.parquet").to_dict("records")
         assert row["extra_info"]["problem_id"] == identity
-        assert manifest[split] == {"input": 1, "kept": 1, "dropped": {}}
+        assert manifest[split] == {"input": 1, "kept": 1, "dropped": {}, "dropped_rows_by_reason": {}}
     assert not list(tmp_path.glob(".output-*"))

@@ -311,7 +311,9 @@ both frames and audio through the actual dataset before scheduling RL.
 Conversion validates
 annotation identities, four choices, zero-based answers, media paths and
 kept/dropped counts; actual video/soundtrack decoding occurs in the loader.
-The manifest records annotation SHA256 hashes and source video-name overlap.
+The manifest records annotation SHA256 hashes, shared clip names, and dropped
+question IDs grouped by reason. Dropped entries also carry their zero-based
+source row index, including entries without a valid question ID.
 Duplicate question IDs are rejected within and across splits before media
 filtering. Shared clip names are reported while retaining the official splits;
 this is not a clip-disjoint repartition. Duplicate answer options are dropped
@@ -337,9 +339,11 @@ validation every 10 updates and no checkpoints. Check these length limits
 against actual clips before scheduling GPU training. The shared Megatron
 dependency prerequisites above apply.
 
-The rollout context and default prefill token budget are both 9216 tokens;
-the recipe does not depend on chunked prefill to admit its maximum prompt.
-CLI overrides remain last, including shorter test horizons and resource settings.
+The rollout context and default prefill token budget both use the sum of
+`MAX_PROMPT_LENGTH` and `MAX_RESPONSE_LENGTH` (9216 tokens by default). The
+equivalent `data.max_prompt_length` and `data.max_response_length` CLI
+overrides also update both defaults. Explicit rollout settings supplied on
+the CLI take precedence. The launcher passes the combined GPU budget to Ray.
 
 Frontend multimodal caching is disabled with the native `mm_processor_cache_gb=0`
 option. The tested Omni runtime clears the receiver cache at sleep/weight-sync

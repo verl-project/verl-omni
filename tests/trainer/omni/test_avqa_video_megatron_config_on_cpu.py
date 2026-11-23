@@ -24,7 +24,7 @@ def _compose(tmp_path, overrides, *arguments):
         OUTPUT_DIR=str(tmp_path),
         PYTHON=sys.executable,
     )
-    for key in ("NUM_GPUS", "ROLLOUT_GPUS", "ROLLOUT_TP"):
+    for key in ("NUM_GPUS", "ROLLOUT_GPUS", "ROLLOUT_TP", "MAX_PROMPT_LENGTH", "MAX_RESPONSE_LENGTH"):
         env.pop(key, None)
     env.update(overrides)
     process = subprocess.Popen(
@@ -71,11 +71,13 @@ def test_avqa_video_recipe(tmp_path, overrides, num_gpus, rollout_gpus, rollout_
     assert config.data.max_prompt_length == 8192 and config.data.max_response_length == 1024
     assert dict(rollout.engine_kwargs.vllm_omni.limit_mm_per_prompt) == {"image": 0, "video": 1, "audio": 1}
     assert rollout.engine_kwargs.vllm_omni.mm_processor_cache_gb == 0
-    assert rollout.max_model_len == 9216 and rollout.n == 4
-    assert rollout.max_num_batched_tokens >= rollout.max_model_len
+    assert rollout.n == 4
+    assert rollout.max_model_len == config.data.max_prompt_length + config.data.max_response_length
+    assert rollout.max_num_batched_tokens == rollout.max_model_len
     assert config.trainer.n_gpus_per_node == 4
     assert rollout.n_gpus_per_node == rollout_gpus and rollout.tensor_model_parallel_size == rollout_tp
     assert config.trainer.n_gpus_per_node + rollout.n_gpus_per_node == num_gpus
+    assert config.ray_kwargs.ray_init.num_gpus == num_gpus
     assert actor.policy_loss.loss_mode == "gspo" and actor.loss_agg_mode == "seq-mean-token-mean"
     assert actor.optim.use_precision_aware_optimizer
     assert actor.optim.override_optimizer_config.optimizer_cpu_offload
@@ -93,13 +95,21 @@ def test_avqa_video_recipe(tmp_path, overrides, num_gpus, rollout_gpus, rollout_
 
 def test_video_launcher_preserves_caller_overrides(tmp_path):
     returncode, stderr = _compose(
-        tmp_path, {}, "trainer.total_training_steps=3", "trainer.test_freq=1", "ray_kwargs.ray_init.num_cpus=2"
+        tmp_path,
+        {"MAX_RESPONSE_LENGTH": "512"},
+        "data.max_prompt_length=4096",
+        "trainer.total_training_steps=3",
+        "trainer.test_freq=1",
+        "ray_kwargs.ray_init.num_cpus=2",
     )
     assert returncode == 0, stderr[-3000:]
     [path] = tmp_path.glob("run.*/config.yaml")
     config = OmegaConf.load(path)
     assert config.trainer.total_training_steps == 3 and config.trainer.test_freq == 1
     assert config.ray_kwargs.ray_init.num_cpus == 2
+    assert config.data.max_prompt_length == 4096 and config.data.max_response_length == 512
+    rollout = config.actor_rollout_ref.rollout
+    assert rollout.max_model_len == rollout.max_num_batched_tokens == 4608
 
 
 @pytest.mark.parametrize(

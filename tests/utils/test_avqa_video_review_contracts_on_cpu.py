@@ -264,6 +264,9 @@ def test_conversion_caches_audio_probe_and_counts_drops(tmp_path, monkeypatch, c
         "input": 3,
         "kept": 3 if status is None else 1,
         "dropped": {} if status is None else {status: 2},
+        "dropped_rows_by_reason": {}
+        if status is None
+        else {status: [{"index": 0, "question_id": "1"}, {"index": 1, "question_id": "2"}]},
     }
     import pandas as pd
 

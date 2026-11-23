@@ -5,7 +5,7 @@
 import argparse
 import hashlib
 import json
-from collections import Counter
+from collections import defaultdict
 from numbers import Integral
 from pathlib import Path
 from shutil import copy2, rmtree
@@ -22,6 +22,13 @@ SYSTEM_PROMPT = (
     "Consider both the visual and audio information in the video. Explain your reasoning inside "
     "<think> </think> tags, then give only the correct option letter inside <answer> </answer> tags."
 )
+
+
+def _question_id(record):
+    qid = record.get("id")
+    if isinstance(qid, bool) or not isinstance(qid, str | Integral) or not str(qid).strip():
+        return None
+    return str(qid)
 
 
 def build_rl_row(record, video_root, split, index, fps=1.0, max_frames=32):
@@ -47,8 +54,8 @@ def build_rl_row(record, video_root, split, index, fps=1.0, max_frames=32):
     video = (root / (clip + ".mp4")).resolve()
     if not video.is_relative_to(root) or not video.is_file():
         return None, "missing_video"
-    qid = record.get("id")
-    if isinstance(qid, bool) or not isinstance(qid, str | Integral) or not str(qid).strip():
+    qid = _question_id(record)
+    if qid is None:
         return None, "invalid_question_id"
     letter = "ABCD"[answer]
     options = dict(zip("ABCD", choices, strict=True))
@@ -73,7 +80,7 @@ def build_rl_row(record, video_root, split, index, fps=1.0, max_frames=32):
         "extra_info": {
             "split": split,
             "index": index,
-            "problem_id": str(qid),
+            "problem_id": qid,
             "video_id": str(record.get("video_id", "")),
             "video_name": clip,
             "dataset": "AVQA",
@@ -96,10 +103,9 @@ def read_annotations(input_json):
     for record in records:
         if not isinstance(record, dict):
             continue
-        qid = record.get("id")
-        if isinstance(qid, bool) or not isinstance(qid, str | Integral) or not str(qid).strip():
+        identity = _question_id(record)
+        if identity is None:
             continue
-        identity = str(qid)
         if identity in seen:
             raise ValueError(f"Duplicate question id {identity!r} in {input_json}")
         seen.add(identity)
@@ -115,9 +121,9 @@ def audit_annotation_splits(train_json, validation_json):
         for record in records:
             if not isinstance(record, dict):
                 continue
-            qid = record.get("id")
-            if not isinstance(qid, bool) and isinstance(qid, str | Integral) and str(qid).strip():
-                identities[split].add(str(qid))
+            qid = _question_id(record)
+            if qid is not None:
+                identities[split].add(qid)
             clip = record.get("video_name")
             if isinstance(clip, str) and clip.strip():
                 clips[split].add(clip)
@@ -130,11 +136,13 @@ def audit_annotation_splits(train_json, validation_json):
     question_overlap = identities["train"] & identities["validation"]
     if question_overlap:
         raise ValueError(f"Train/validation question ids overlap: {len(question_overlap)}")
+    shared_clips = sorted(clips["train"] & clips["validation"])
     return {
         "annotation_sources": sources,
         "source_split_overlap": {
             "question_ids": 0,
-            "video_names": len(clips["train"] & clips["validation"]),
+            "video_names": len(shared_clips),
+            "shared_video_names": shared_clips,
         },
     }
 
@@ -142,30 +150,35 @@ def audit_annotation_splits(train_json, validation_json):
 def convert_split(input_json, video_root, output, split, fps=1.0, max_frames=32):
     """Write valid original annotations with exact kept/dropped counts."""
     records = read_annotations(input_json)
-    rows, dropped = [], Counter()
+    rows, dropped_rows = [], defaultdict(list)
     audio_status_by_video = {}
     for index, record in enumerate(records):
-        if not isinstance(record, dict):
-            dropped["invalid_record"] += 1
-            continue
-        row, reason = build_rl_row(record, video_root, split, index, fps, max_frames)
-        if row is None:
-            dropped[reason] += 1
-            continue
-        video_path = row["videos"][0]["video"]
-        if video_path not in audio_status_by_video:
-            audio_status_by_video[video_path] = probe_audio_stream(video_path)
-        audio_reason = audio_status_by_video[video_path]
-        if audio_reason is not None:
-            dropped[audio_reason] += 1
-            continue
-        rows.append(row)
+        if isinstance(record, dict):
+            row, reason = build_rl_row(record, video_root, split, index, fps, max_frames)
+            question_id = _question_id(record)
+        else:
+            row, reason, question_id = None, "invalid_record", None
+        if row is not None:
+            video_path = row["videos"][0]["video"]
+            if video_path not in audio_status_by_video:
+                audio_status_by_video[video_path] = probe_audio_stream(video_path)
+            reason = audio_status_by_video[video_path]
+        if reason is None:
+            rows.append(row)
+        else:
+            dropped_rows[reason].append({"index": index, "question_id": question_id})
+    dropped = {reason: len(records) for reason, records in sorted(dropped_rows.items())}
     if not rows:
         raise ValueError(f"No valid video examples: {dict(dropped)}")
     output = Path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(rows).to_parquet(output, engine="pyarrow", index=False, use_dictionary=False)
-    return {"input": len(records), "kept": len(rows), "dropped": dict(sorted(dropped.items()))}
+    return {
+        "input": len(records),
+        "kept": len(rows),
+        "dropped": dropped,
+        "dropped_rows_by_reason": dict(sorted(dropped_rows.items())),
+    }
 
 
 def main():
