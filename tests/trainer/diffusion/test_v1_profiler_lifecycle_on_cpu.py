@@ -269,21 +269,26 @@ def test_failed_step_end_closes_continuous_window(monkeypatch):
     assert not trainer._profile_window_active
 
 
-def test_finish_hook_runs_at_last_reachable_selected_step(monkeypatch):
+@pytest.mark.parametrize("total_training_steps", [4, 100], ids=["step-limit", "epoch-limit"])
+def test_finish_hook_runs_at_last_reachable_selected_step(monkeypatch, total_training_steps):
     trainer, _ = make_trainer(monkeypatch)
     trainer.config.global_profiler.steps = [1, 100]
+    trainer.total_training_steps = total_training_steps
     trainer.fit(Mock())
     assert [kwargs["run_command"] for name, kwargs in trainer.profile_stop_calls if name == "actor"] == [True]
 
 
-def test_training_limit_closes_continuous_window(monkeypatch):
+@pytest.mark.parametrize("total_training_steps, expected_steps", [(2, 2), (100, 4)], ids=["step-limit", "epoch-limit"])
+def test_training_limit_closes_continuous_window(monkeypatch, total_training_steps, expected_steps):
     trainer, events = make_trainer(monkeypatch, continuous=True)
-    trainer.config.global_profiler.steps = [1, 2, 3]
-    trainer.total_training_steps = 2
+    trainer.config.global_profiler.steps = [1, 2, 3, 4, 5]
+    trainer.total_training_steps = total_training_steps
 
     trainer.fit(Mock())
 
+    assert [e[1] for e in events if e[0] == "feed"] == list(range(1, expected_steps + 1))
     assert [e[2]["profile_step"] for e in events if e[:2] == ("actor", "start")] == [1]
     assert [kwargs for name, kwargs in trainer.profile_stop_calls if name == "actor"] == [{"run_command": True}]
     assert events.count(("rollout", "start", {})) == events.count(("rollout", "stop")) == 1
     assert not trainer._profile_window_active
+    assert trainer.total_training_steps == total_training_steps

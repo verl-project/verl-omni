@@ -276,6 +276,11 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         for target, _ in self._policy_adapter_specs():
             self.actor_rollout_wg.copy_adapter(source="default", target=target)
 
+    @property
+    def _training_step_limit(self) -> int:
+        """Last step allowed by both the epoch and configured step limits."""
+        return min(self.total_training_steps, self.steps_per_epoch * self.config.trainer.total_epochs)
+
     def _rollout_server_managers(self) -> list:
         """LLM server managers whose inference engines take part in rollout profiling.
 
@@ -407,7 +412,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             if self.config.global_profiler.steps is not None
             else False
         )
-        is_last_step = self.global_steps >= self.total_training_steps
+        is_last_step = self.global_steps >= self._training_step_limit
         do_profile = (
             this_step_profile and (not self.next_step_profile or is_last_step)
             if self.config.global_profiler.profile_continuous_steps
@@ -418,7 +423,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
 
         if do_profile:
             profiled_steps = [
-                step for step in (self.config.global_profiler.steps or []) if step <= self.total_training_steps
+                step for step in (self.config.global_profiler.steps or []) if step <= self._training_step_limit
             ]
             run_command = bool(
                 this_step_profile and profiled_steps and (self.global_steps == max(profiled_steps) or is_last_step)
@@ -474,8 +479,9 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         try:
             self.on_train_begin()
             last_val_metrics = None
-            while current_epoch < self.config.trainer.total_epochs and self.global_steps <= self.total_training_steps:
-                is_last_step = self.global_steps >= self.total_training_steps
+            while self.global_steps <= self._training_step_limit:
+                # Final checkpoint/validation and early return use the configured step cap.
+                is_step_limit_reached = self.global_steps >= self.total_training_steps
                 metrics: dict = {}
                 self.timing_raw: dict = {}
                 with marked_timer("step", self.timing_raw):
@@ -484,7 +490,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
                     batch = self.step(metrics, self.timing_raw)
                     self._on_profiling_step_end()
                     if self.config.trainer.save_freq > 0 and (
-                        is_last_step or self.global_steps % self.config.trainer.save_freq == 0
+                        is_step_limit_reached or self.global_steps % self.config.trainer.save_freq == 0
                     ):
                         with marked_timer("save_checkpoint", self.timing_raw, color="green"):
                             self._save_checkpoint()
@@ -492,13 +498,13 @@ class PolicyGradientDiffusionTrainerV1(ABC):
                     metrics.update(self._consume_sync_metrics())
 
                 if self.config.trainer.test_freq > 0 and (
-                    is_last_step or self.global_steps % self.config.trainer.test_freq == 0
+                    is_step_limit_reached or self.global_steps % self.config.trainer.test_freq == 0
                 ):
                     with marked_timer("testing", self.timing_raw, color="green"):
                         self.on_validate_begin()
                         val_metrics = self._validate()
                         self.on_validate_end()
-                        if is_last_step:
+                        if is_step_limit_reached:
                             last_val_metrics = val_metrics
                     metrics.update(val_metrics)
 
@@ -518,7 +524,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
                 self.global_steps += 1
                 SkipManager.set_step(self.global_steps)
                 current_epoch = (self.global_steps - 1) // self.steps_per_epoch
-                if is_last_step:
+                if is_step_limit_reached:
                     log_skip_summary(self.logger, self.global_steps)
                     self._shutdown_dump_executor()
                     pprint(f"Final validation metrics: {last_val_metrics}")
