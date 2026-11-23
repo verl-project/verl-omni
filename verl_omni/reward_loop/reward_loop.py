@@ -22,6 +22,7 @@ from omegaconf import open_dict
 from tensordict import TensorDict
 from verl.experimental.reward_loop import RewardLoopManager
 from verl.experimental.reward_loop.reward_loop import RewardLoopWorker
+from verl.plugin.platform import get_platform
 from verl.protocol import DataProto
 from verl.trainer.ppo.reward import resolve_reward_manager_cls
 from verl.utils.profiler import build_ray_actor_nsight_launch_options, resolve_ray_actor_profiler_config
@@ -299,7 +300,11 @@ class OmniRewardLoopManager(RewardLoopManager):
                 profiler_config, rank=rank_offset + index, role="reward_loop"
             )
             if nsight_options is not None:
-                options["runtime_env"] = {"nsight": nsight_options}
+                # The profiler API needs device visibility even without a GPU allocation.
+                options["runtime_env"] = {
+                    "nsight": nsight_options,
+                    "env_vars": {name: "1" for name in get_platform().ray_noset_envvars()},
+                }
             workers.append(
                 self.reward_loop_workers_class.options(**options).remote(config, self.reward_router_address, specs)
             )

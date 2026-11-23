@@ -115,11 +115,17 @@ def test_serving_profiler_ranks_use_flattened_group_offset(monkeypatch):
     monkeypatch.setattr(
         reward_module.ray, "nodes", lambda: [{"NodeID": "01" * 28, "Alive": True, "Resources": {"CPU": 1}}]
     )
+    monkeypatch.setattr(
+        reward_module,
+        "get_platform",
+        lambda: SimpleNamespace(ray_noset_envvars=lambda: ["RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES"]),
+    )
 
     workers = manager._create_node_affinity_workers(config, {}, "reward-worker")
 
     assert "runtime_env" not in workers[0].options
     assert workers[1].options["runtime_env"]["nsight"]["o"] == "reward_loop_rank_3"
+    assert workers[1].options["runtime_env"]["env_vars"] == {"RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1"}
 
 
 @pytest.mark.parametrize("method,kwargs", [("start_profile", {"profile_step": 2}), ("stop_profile", {})])
