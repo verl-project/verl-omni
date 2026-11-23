@@ -33,9 +33,14 @@ __all__ = ["CLAPScorer", "compute_score_clap_batched"]
 class CLAPScorer(RewardScorer):
     """LAION CLAP text-audio alignment as a batch-native scorer.
 
-    ``model_path`` selects weights and the processor. ``model_kwargs`` and
-    ``processor_kwargs`` are forwarded to their respective ``from_pretrained``
-    calls when the executor loads the model.
+    Args:
+        model_path: LAION CLAP checkpoint for weights and the processor
+            (default ``laion/larger_clap_general``); the named model's top-level
+            ``model_path`` forwards here unless ``executor.kwargs`` sets one.
+        model_kwargs: Extra keyword arguments forwarded to
+            ``ClapModel.from_pretrained`` when the executor loads the model.
+        processor_kwargs: Extra keyword arguments forwarded to
+            ``AutoProcessor.from_pretrained`` when the executor loads the processor.
     """
 
     max_batch_size = _frozen._MAX_BATCH_SIZE
