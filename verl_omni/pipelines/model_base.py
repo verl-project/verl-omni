@@ -15,7 +15,7 @@
 import functools
 import logging
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Any, Callable, Optional
+from typing import Any, Callable, Optional
 
 import torch
 from diffusers import ModelMixin, SchedulerMixin
@@ -23,9 +23,6 @@ from tensordict import TensorDict
 from verl.utils import tensordict_utils as tu
 
 from verl_omni.workers.config import DiffusionModelConfig
-
-if TYPE_CHECKING:
-    from verl_omni.utils.diffusion_tq import TQTrainingFields
 
 logger = logging.getLogger(__name__)
 
@@ -51,11 +48,6 @@ class DiffusionModelBase(ABC):
     """
 
     _registry: dict[tuple[str, str], type["DiffusionModelBase"]] = {}
-
-    @classmethod
-    def tq_trajectory_fields(cls, model_config: DiffusionModelConfig) -> "TQTrainingFields":
-        """Declare pipeline-specific fields and shape requirements for projected training."""
-        raise NotImplementedError(f"Worker-side trajectory fetching is not declared by {cls.__name__}")
 
     @classmethod
     def register(cls, architecture: str, algorithm: str):

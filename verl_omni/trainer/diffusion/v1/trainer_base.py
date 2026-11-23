@@ -111,6 +111,11 @@ from verl_omni.utils.config import resolve_lora_config
 from verl_omni.utils.net_utils import worker_group_port_ranges
 from verl_omni.utils.skip import init_skip_manager, log_skip_summary
 from verl_omni.utils.tracking import batch_items, validate_audio_batch
+from verl_omni.workers.config.diffusion.model import (
+    DIFFUSION_TQ_DRIVER_FIELDS,
+    DIFFUSION_TQ_DRIVER_REQUIRED,
+    DIFFUSION_TQ_KEYS,
+)
 from verl_omni.workers.config.reward import (
     reward_is_enabled,
     reward_pool_is_separate,
@@ -219,6 +224,10 @@ class PolicyGradientDiffusionTrainerV1(ABC):
                 "worker_side_trajectory currently requires policy-gradient training with rollout-side rewards "
                 "and no teacher; direct-preference and driver-side reward consumers require full trajectories."
             )
+        if self.worker_side_trajectory:
+            fields = omega_conf_to_dataclass(config.actor_rollout_ref.model.trajectory_fields)
+            if not fields.required:
+                raise ValueError("worker_side_trajectory requires actor_rollout_ref.model.trajectory_fields.required")
         self.distillation_config = omega_conf_to_dataclass(config.distillation) if self.use_teacher_policy else None
         validate_distillation_config(config)
         self.skip_old_log_prob = skip_old_log_prob(config)
@@ -577,11 +586,23 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         return batch_meta
 
     def _read_training_batch(self, batch_meta: KVBatchMeta) -> DataProto:
-        """Read the driver's training fields and retain row-aligned trajectory keys."""
-        kwargs = {}
-        if self.worker_side_trajectory:
-            kwargs["trajectory_fields"] = self._trajectory_field_groups
-        return diffusion_tq_batch_to_dataproto(batch_meta, pad_token_id=self.tokenizer.pad_token_id or 0, **kwargs)
+        """Read training data; projected batches carry row keys, not KVBatchMeta, to workers."""
+        pad_token_id = self.tokenizer.pad_token_id or 0
+        if not self.worker_side_trajectory:
+            return diffusion_tq_batch_to_dataproto(batch_meta, pad_token_id=pad_token_id)
+
+        batch = diffusion_tq_batch_to_dataproto(
+            batch_meta, pad_token_id=pad_token_id, select_fields=list(DIFFUSION_TQ_DRIVER_FIELDS)
+        )
+        available = set(batch.batch.keys())
+        if "uid" in batch.non_tensor_batch:
+            available.add("uid")
+        if missing := DIFFUSION_TQ_DRIVER_REQUIRED - available:
+            raise ValueError(f"Projected training read is missing required driver fields: {sorted(missing)}")
+        # The converter uses the same order; the keys then follow DataProto slicing and padding.
+        order = sort_diffusion_tq_keys(list(batch_meta.keys))
+        batch.non_tensor_batch[DIFFUSION_TQ_KEYS] = np.array([batch_meta.keys[i] for i in order], dtype=object)
+        return batch
 
     def _convert_and_dispatch(self, batch_meta: KVBatchMeta):
         """Convert a sampled batch and start teacher scoring without waiting on it."""
@@ -597,7 +618,6 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         teacher_handle=None,
     ) -> KVBatchMeta:
         """Run one diffusion policy-gradient update on an already sampled mini-batch."""
-        # Deferred keys follow the same DataProto slicing and padding as core data.
         if data is None:
             data = self._read_training_batch(batch_meta)
 
@@ -924,8 +944,6 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             model_config.algorithm,
             model_config.get("external_lib"),
         )
-        if self.worker_side_trajectory:
-            self._trajectory_field_groups = model_adapter.tq_trajectory_fields(model_config)
         prepared_processor_path = model_adapter.prepare_processor_files(local_path)
         processor_path = os.path.join(local_path, "processor")
         if prepared_processor_path is not None:

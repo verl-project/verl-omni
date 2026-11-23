@@ -62,7 +62,6 @@ from verl.workers.utils.losses import ppo_loss
 import verl_omni.trainer.distillation.losses as _omni_distill_losses  # noqa: E402, F401
 from verl_omni.pipelines.utils import build_scheduler
 from verl_omni.utils.config import LoRASettings, resolve_lora_config
-from verl_omni.utils.diffusion_tq import materialize_diffusion_trajectory
 from verl_omni.utils.mfu import (
     DiffusionFlopsCounter,
     allgather_diffusion_flops_meta,
@@ -74,7 +73,9 @@ from verl_omni.workers.config import (
     OmniModelConfig,
 )
 from verl_omni.workers.config.diffusion import DiffusionDistillationTeacherModelConfig
+from verl_omni.workers.config.diffusion.model import DIFFUSION_TQ_KEYS
 from verl_omni.workers.config.omni.distillation import HIDDEN_STATE_LOSS_MODES
+from verl_omni.workers.diffusion_tq import materialize_diffusion_trajectory
 from verl_omni.workers.lora_sync import SyncExport, resolve_lora_sync_plan
 from verl_omni.workers.rollout.base import get_rollout_sequence_parallel_size
 from verl_omni.workers.rollout.vllm_rollout.zmq_utils import make_update_zmq_handle, make_update_zmq_id
@@ -136,7 +137,9 @@ def _with_diffusion_trajectory(func):
 
     @functools.wraps(func)
     def wrapper(self, data: TensorDict, *args, **kwargs):
-        return func(self, materialize_diffusion_trajectory(data), *args, **kwargs)
+        if DIFFUSION_TQ_KEYS in data.keys():
+            data = materialize_diffusion_trajectory(data, self._trajectory_fields)
+        return func(self, data, *args, **kwargs)
 
     return wrapper
 
@@ -697,6 +700,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             "diffusion_dpo_model",
             "diffusion_nft_model",
         )
+        self._trajectory_fields = model_config.get("trajectory_fields")
 
         # 1. build reference model
         if "ref" in self.role:

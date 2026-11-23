@@ -12,37 +12,29 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 
-import numpy as np
 import pytest
 import torch
 from hydra import compose, initialize_config_dir
-from omegaconf import OmegaConf
 from tensordict import NonTensorStack, TensorDict
-from transfer_queue import BatchMeta, KVBatchMeta
-from transfer_queue.controller import FieldMeta
-from transfer_queue.metadata import extract_field_schema
+from transfer_queue import KVBatchMeta
 from verl.protocol import BatchData
 from verl.utils import tensordict_utils as tu
+from verl.utils.config import omega_conf_to_dataclass
 
 import verl_omni
-from verl_omni.pipelines.model_base import DiffusionModelBase
-from verl_omni.pipelines.sd3_flow_grpo.diffusers_training_adapter import StableDiffusion3FlowGRPO
-from verl_omni.pipelines.wan22_dance_grpo.diffusers_training_adapter import Wan22DanceGRPO
 from verl_omni.trainer.diffusion.rollout_correction import compute_rollout_corr_metrics_from_batch
 from verl_omni.trainer.diffusion.v1 import tq_utils, trainer_base
-from verl_omni.utils import diffusion_tq
-from verl_omni.workers.engine_workers import ActorRolloutRefWorker, _with_routing_replay_flag
+from verl_omni.workers.config.diffusion.model import DIFFUSION_TQ_KEYS, DiffusionTrajectoryFieldsConfig
+from verl_omni.workers.diffusion_tq import materialize_diffusion_trajectory
+from verl_omni.workers.engine_workers import ActorRolloutRefWorker
 from verl_omni.workers.utils.padding import embeds_padding_2_no_padding
 
-REQUIRED = {"all_latents", "prompt_embeds", "pooled_prompt_embeds"}
-FIELDS = diffusion_tq.TQTrainingFields(
-    worker_required=frozenset(REQUIRED),
-    worker_optional=frozenset({"prompt_embeds_mask", "negative_prompt_embeds"}),
-    transition_fields=frozenset({"all_latents"}),
-    sequence_masks=(("prompt_embeds", "prompt_embeds_mask"),),
+FIELDS = DiffusionTrajectoryFieldsConfig(
+    required=["all_latents", "prompt_embeds", "pooled_prompt_embeds"],
+    optional=["prompt_embeds_mask", "negative_prompt_embeds"],
 )
 
 
@@ -63,409 +55,180 @@ def storage(monkeypatch):
             "prompt_embeds": torch.arange(64, dtype=torch.float32).reshape(2, 4, 8),
             "prompt_embeds_mask": torch.tensor([[1, 1, 1, 0], [1, 1, 0, 0]]),
             "pooled_prompt_embeds": torch.ones(2, 4),
+            "rollout_log_probs": torch.zeros(2, 2),
         },
         batch_size=[2],
     )
-    state = SimpleNamespace(
-        payload=payload,
-        core_reads=[],
-        worker_reads=[],
-        ready=True,
-        drop_fetched=None,
-        schema_overrides={},
-        metadata_extra_row=False,
-    )
+    state = SimpleNamespace(payload=payload, reads=[], missing_keys=set())
 
-    def retrieve(*, keys, partition_id, create=False):
-        indices = [0 if key.startswith("a_") else 1 for key in keys]
-        if state.metadata_extra_row:
-            indices.append(0)
-        schema = extract_field_schema(state.payload)
-        schema.update(state.schema_overrides)
-        return BatchMeta(
-            global_indexes=indices,
-            partition_ids=[partition_id] * len(indices),
-            field_schema=schema,
-            production_status=np.full(len(indices), int(state.ready), dtype=np.int8),
-        )
-
-    def select_payload(indices, fields=None):
-        payload = state.payload if fields is None else state.payload.select(*fields)
-        nested_fields = [key for key, value in payload.items() if isinstance(value, torch.Tensor) and value.is_nested]
-        result = payload.exclude(*nested_fields)[indices]
-        for field in nested_fields:
-            rows = payload[field].unbind()
+    def get(*, keys, partition_id, select_fields):
+        assert partition_id == "train"
+        state.reads.append((list(keys), select_fields))
+        indices = [0 if key.startswith("a_") else 1 for key in keys if key not in state.missing_keys]
+        selected = state.payload
+        if select_fields is not None:
+            selected = selected.select(*(field for field in select_fields if field in selected.keys()))
+        nested = [key for key, value in selected.items() if isinstance(value, torch.Tensor) and value.is_nested]
+        result = selected.exclude(*nested)[indices]
+        for field in nested:
+            rows = selected[field].unbind()
             result[field] = torch.nested.as_nested_tensor([rows[index] for index in indices], layout=torch.jagged)
         return result
 
-    def core_read(*, keys, partition_id, select_fields):
-        state.core_reads.append(select_fields)
-        indices = [0 if key.startswith("a_") else 1 for key in keys]
-        return select_payload(indices, select_fields)
-
-    def bridge(meta):
-        state.worker_reads.append(meta)
-        return retrieve(keys=meta.keys, partition_id=meta.partition_id).select_fields(meta.fields)
-
-    def worker_read(meta):
-        result = select_payload(meta.global_indexes, meta.field_names)
-        if state.drop_fetched is not None:
-            result = result.exclude(state.drop_fetched)
-        return result
-
-    client = SimpleNamespace(kv_retrieve_meta=retrieve, get_data=worker_read)
-    monkeypatch.setattr(tq_utils.tq, "get_client", lambda: client)
-    monkeypatch.setattr(tq_utils.tq, "kv_batch_get", core_read)
-    monkeypatch.setattr(diffusion_tq, "kv_batch_meta2batch_meta", bridge)
+    monkeypatch.setattr(tq_utils.tq, "kv_batch_get", get)
     return state
 
 
-def read_core():
-    return tq_utils.diffusion_tq_batch_to_dataproto(
-        KVBatchMeta(keys=["b_0_0", "a_0_0"], tags=[{}, {}], partition_id="train"),
-        trajectory_fields=FIELDS,
+def read_training_batch(projected=True):
+    trainer = SimpleNamespace(worker_side_trajectory=projected, tokenizer=SimpleNamespace(pad_token_id=0))
+    meta = KVBatchMeta(keys=["b_0_0", "a_0_0"], tags=[{}, {}], partition_id="train")
+    return trainer_base.PolicyGradientDiffusionTrainerV1._read_training_batch(trainer, meta)
+
+
+def compose_trainer(overrides):
+    with initialize_config_dir(config_dir=str(Path(verl_omni.__file__).parent / "trainer/config"), version_base=None):
+        return compose(config_name="diffusion_trainer", overrides=overrides)
+
+
+def test_projection_carries_only_row_keys_and_preserves_driver_diagnostics(storage):
+    projected = read_training_batch()
+    fields = storage.reads[0][1]
+    assert set(fields) == {"prompts", "uid", "rm_scores", "all_timesteps", "extra_fields", "rollout_log_probs"}
+    assert projected.meta_info == {}
+    assert projected.non_tensor_batch[DIFFUSION_TQ_KEYS].tolist() == ["a_0_0", "b_0_0"]
+    assert [info["brightness"] for info in projected.non_tensor_batch["reward_extra_info"]] == [0.0, 1.0]
+    full = read_training_batch(projected=False)
+    assert DIFFUSION_TQ_KEYS not in full.non_tensor_batch
+    for data in (projected, full):
+        data.batch["old_log_probs"] = torch.tensor([[0.1, -0.1], [0.2, -0.2]])
+    before = compute_rollout_corr_metrics_from_batch(full, bypass_mode=False)
+    after = compute_rollout_corr_metrics_from_batch(projected, bypass_mode=False)
+    assert any("/ts_" in key for key in before)
+    assert after == before
+
+
+def test_configured_worker_fields_and_training_artifact_follow_reordered_rows(storage):
+    config = compose_trainer(
+        [
+            "actor_rollout_ref.model.trajectory_fields.required=[denoise_states,media_artifact__source_latent]",
+            "actor_rollout_ref.model.trajectory_fields.optional=[unused_field,advantages]",
+        ]
     )
-
-
-def test_core_read_uses_explicit_allowlist_and_records_actual_sde_window(storage):
-    data = read_core()
-    assert REQUIRED.isdisjoint(data.batch.keys())
-    assert set(storage.core_reads[0]) == {"prompts", "uid", "rm_scores", "all_timesteps", "extra_fields"}
-    assert "responses" not in data.batch and "media_artifact__image_preview" not in data.batch
-    assert [item["brightness"] for item in data.non_tensor_batch["reward_extra_info"]] == [0.0, 1.0]
-    assert data.non_tensor_batch[diffusion_tq.TRAJECTORY_KEYS].tolist() == ["a_0_0", "b_0_0"]
-    assert data.meta_info[diffusion_tq.TRAJECTORY_META]["num_timesteps"] == 2
-    assert "negative_prompt_embeds" not in data.meta_info[diffusion_tq.TRAJECTORY_META]["fields"]
-
-
-def test_registered_pipeline_controls_driver_worker_and_dump_fields(storage, monkeypatch):
-    class CustomAdapter(DiffusionModelBase):
-        @classmethod
-        def tq_trajectory_fields(cls, model_config):
-            return diffusion_tq.TQTrainingFields(
-                worker_required=frozenset({model_config.states, "conditioning", "media_artifact__source_latent"}),
-                worker_optional=frozenset({"conditioning_valid"}),
-                driver_required=frozenset({"sample_weight"}),
-                transition_fields=frozenset({model_config.states}),
-                sequence_masks=(("conditioning", "conditioning_valid"),),
-            )
-
-    monkeypatch.setattr(DiffusionModelBase, "_registry", {})
-    DiffusionModelBase.register("CustomPipeline", "flow_grpo")(CustomAdapter)
-    adapter = DiffusionModelBase.get_class_by_name("CustomPipeline", "flow_grpo")
+    fields = omega_conf_to_dataclass(config.actor_rollout_ref.model.trajectory_fields)
+    assert isinstance(fields, DiffusionTrajectoryFieldsConfig)
     states = storage.payload["all_latents"]
-    conditioning_rows = [torch.ones(3, 4), torch.full((2, 4), 2.0)]
-    storage.payload = storage.payload.exclude("all_latents", "prompt_embeds", "prompt_embeds_mask")
     storage.payload["denoise_states"] = states
-    storage.payload["conditioning"] = torch.nested.as_nested_tensor(conditioning_rows, layout=torch.jagged)
-    storage.payload["conditioning_valid"] = torch.tensor([[1, 1, 1], [1, 1, 0]])
     storage.payload["media_artifact__source_latent"] = states[:, 0]
-    storage.payload["sample_weight"] = torch.tensor([0.5, 1.0])
-    trainer = SimpleNamespace(
-        worker_side_trajectory=True,
-        _trajectory_field_groups=adapter.tq_trajectory_fields(SimpleNamespace(states="denoise_states")),
-        tokenizer=SimpleNamespace(pad_token_id=0),
-    )
-    meta = KVBatchMeta(keys=["a_0_0", "b_0_0"], tags=[{}, {}], partition_id="train")
-    data = trainer_base.PolicyGradientDiffusionTrainerV1._read_training_batch(trainer, meta)
-    assert set(storage.core_reads[-1]) == {
-        "prompts",
-        "uid",
-        "rm_scores",
-        "all_timesteps",
-        "extra_fields",
-        "sample_weight",
-    }
-    assert "media_artifact__image_preview" in tq_utils.diffusion_dump_tq_fields(meta)
+    storage.payload["advantages"] = torch.zeros(2, 2)
+    data = read_training_batch().select_idxs([1, 0, 1]).to_tensordict()
+    data["advantages"] = torch.ones(3, 2)
 
-    result = diffusion_tq.materialize_diffusion_trajectory(data.select_idxs([1, 0, 1]).to_tensordict())
-    assert set(storage.worker_reads[-1].fields) == {
-        "denoise_states",
-        "conditioning",
-        "conditioning_valid",
-        "media_artifact__source_latent",
-    }
-    assert "media_artifact__image_preview" not in result.keys()
-    torch.testing.assert_close(result["sample_weight"], torch.tensor([1.0, 0.5, 1.0]))
+    result = materialize_diffusion_trajectory(data, fields)
+    assert storage.reads[1] == (["b_0_0", "a_0_0"], fields.required + fields.optional)
+    assert len(storage.reads) == 2
+    assert DIFFUSION_TQ_KEYS not in result
+    assert "media_artifact__image_preview" not in result
+    assert "unused_field" not in result
     torch.testing.assert_close(result["denoise_states"], states[[1, 0, 1]])
     torch.testing.assert_close(result["media_artifact__source_latent"], states[[1, 0, 1], 0])
-    for actual, expected in zip(
-        result["conditioning"].unbind(), [conditioning_rows[1], conditioning_rows[0], conditioning_rows[1]], strict=True
-    ):
-        torch.testing.assert_close(actual, expected)
-
-    storage.payload["denoise_states"] = states[:, :2]
-    with pytest.raises(ValueError, match=r"S\+1 latents.*denoise_states"):
-        trainer_base.PolicyGradientDiffusionTrainerV1._read_training_batch(trainer, meta)
+    torch.testing.assert_close(result["advantages"], data["advantages"])
 
 
-def test_projected_training_rejects_conflicting_field_ownership(storage):
-    meta = KVBatchMeta(keys=["a_0_0", "b_0_0"], tags=[{}, {}], partition_id="train")
-    fields = replace(FIELDS, driver_optional=frozenset({"all_latents"}))
-    with pytest.raises(ValueError, match="both driver- and worker-owned.*all_latents"):
-        tq_utils.diffusion_tq_batch_to_dataproto(meta, trajectory_fields=fields)
-    assert storage.core_reads == []
+@pytest.mark.parametrize("stage,field", [("driver", "rm_scores"), ("worker", "all_latents")])
+def test_missing_required_fields_fail_without_full_read(storage, stage, field):
+    storage.payload = storage.payload.exclude(field)
+    with pytest.raises(ValueError, match=rf"(?i)missing required .*fields.*{field}"):
+        data = read_training_batch()
+        if stage == "worker":
+            materialize_diffusion_trajectory(data.to_tensordict(), FIELDS)
+    assert len(storage.reads) == (1 if stage == "driver" else 2)
+    assert all(selected is not None for _, selected in storage.reads)
 
 
-def test_missing_adapter_driver_input_fails_before_read(storage):
-    meta = KVBatchMeta(keys=["a_0_0", "b_0_0"], tags=[{}, {}], partition_id="train")
-    fields = replace(FIELDS, driver_required=frozenset({"sample_weight"}))
-    with pytest.raises(ValueError, match="Missing training fields.*sample_weight"):
-        tq_utils.diffusion_tq_batch_to_dataproto(meta, trajectory_fields=fields)
-    assert storage.core_reads == []
+def test_worker_reports_row_dropped_by_tq(storage):
+    data = read_training_batch().to_tensordict()
+    storage.missing_keys.add("b_0_0")
+    with pytest.raises(ValueError, match="row count mismatch: expected 2, got 1"):
+        materialize_diffusion_trajectory(data, FIELDS)
 
 
-def test_non_tq_worker_batches_keep_their_existing_contract():
-    batch = TensorDict({"input_ids": torch.ones(2, 4, dtype=torch.long)}, batch_size=[2])
-    assert diffusion_tq.materialize_diffusion_trajectory(batch) is batch
-
-
-def test_worker_fetch_preserves_reordered_padded_rows_and_driver_overlays(storage):
-    data = read_core().select_idxs([1, 0, 1, 1])
-    data.batch["advantages"] = torch.arange(8, dtype=torch.float32).reshape(4, 2)
-    sent = data.to_tensordict()
-    output = diffusion_tq.materialize_diffusion_trajectory(sent)
-    torch.testing.assert_close(output["all_latents"], storage.payload["all_latents"][[1, 0, 1, 1]])
-    torch.testing.assert_close(output["advantages"], data.batch["advantages"])
-    assert storage.worker_reads[0].keys == ["b_0_0", "a_0_0"]
-    assert set(storage.worker_reads[0].fields) == REQUIRED | {"prompt_embeds_mask"}
-    assert [len(row) for row in output["prompt_embeds"].unbind()] == [2, 3, 2, 2]
-    assert diffusion_tq.TRAJECTORY_KEYS not in output.keys()
-    assert diffusion_tq.TRAJECTORY_KEYS in sent.keys()
-    assert "all_latents" not in data.batch.keys()
-
-
-def test_real_dp_dispatch_preserves_single_row_key_handles(storage):
-    chunks = BatchData(read_core().to_tensordict()).chunk(chunks=2)
-    for index, chunk in enumerate(chunks):
-        result = diffusion_tq.materialize_diffusion_trajectory(chunk)
+def test_data_parallel_dispatch_keeps_keys_aligned(storage):
+    data = read_training_batch().to_tensordict()
+    for index, chunk in enumerate(BatchData(data).chunk(chunks=2)):
+        result = materialize_diffusion_trajectory(chunk, FIELDS)
         torch.testing.assert_close(result["all_latents"], storage.payload["all_latents"][index : index + 1])
-    assert [meta.keys for meta in storage.worker_reads] == [["a_0_0"], ["b_0_0"]]
-
-
-def test_driver_rejects_misaligned_transition_shape_before_read(storage):
-    storage.payload["all_latents"] = torch.zeros(2, 4, 1, 4, 4)
-    with pytest.raises(ValueError, match="S\\+1 latents"):
-        read_core()
-    assert storage.core_reads == []
-
-
-@pytest.mark.parametrize("missing", sorted(REQUIRED | {"prompts", "uid", "rm_scores", "all_timesteps"}))
-def test_required_field_miss_never_falls_back_to_full_read(storage, missing):
-    storage.payload = storage.payload.exclude(missing)
-    with pytest.raises(ValueError, match="Missing training fields"):
-        read_core()
-    assert storage.core_reads == []
-
-
-def test_driver_distinguishes_metadata_row_count_mismatch(storage):
-    storage.metadata_extra_row = True
-    with pytest.raises(ValueError, match="row count mismatch.*expected 2, got 3"):
-        read_core()
-    assert storage.core_reads == []
-
-
-def test_worker_rejects_corrupted_required_field_handle_before_fetch(storage):
-    data = read_core()
-    descriptor = data.meta_info[diffusion_tq.TRAJECTORY_META]
-    descriptor["fields"] = [field for field in descriptor["fields"] if field != "all_latents"]
-    with pytest.raises(ValueError, match="omits required trajectory fields"):
-        diffusion_tq.materialize_diffusion_trajectory(data.to_tensordict())
-    assert storage.worker_reads == []
-
-
-def test_worker_rejects_field_disappearing_after_core_read(storage):
-    data = read_core().to_tensordict()
-    storage.payload = storage.payload.exclude("all_latents")
-    with pytest.raises(ValueError, match="missing fields=.*all_latents"):
-        diffusion_tq.materialize_diffusion_trajectory(data)
-
-
-def test_worker_rejects_missing_returned_data(storage):
-    data = read_core().to_tensordict()
-    storage.drop_fetched = "prompt_embeds"
-    with pytest.raises(ValueError, match="Missing diffusion trajectory data"):
-        diffusion_tq.materialize_diffusion_trajectory(data)
-
-
-@pytest.mark.parametrize("stage", ["driver", "worker"])
-def test_unready_rows_fail_closed(storage, stage):
-    data = read_core() if stage == "worker" else None
-    storage.ready = False
-    with pytest.raises(ValueError, match="not ready|Invalid diffusion trajectory metadata"):
-        read_core() if data is None else diffusion_tq.materialize_diffusion_trajectory(data.to_tensordict())
-
-
-def test_worker_rejects_stale_trajectory_overriding_driver_data(storage):
-    data = read_core().to_tensordict()
-    data["all_latents"] = storage.payload["all_latents"]
-    with pytest.raises(ValueError, match="conflicts with driver-owned"):
-        diffusion_tq.materialize_diffusion_trajectory(data)
-
-
-@pytest.mark.parametrize("field", [diffusion_tq.TRAJECTORY_KEYS, diffusion_tq.TRAJECTORY_META])
-def test_incomplete_handle_raises(storage, field):
-    data = read_core().to_tensordict().exclude(field)
-    with pytest.raises(ValueError, match="Incomplete"):
-        diffusion_tq.materialize_diffusion_trajectory(data)
 
 
 @pytest.mark.parametrize("method", ["infer_actor_batch", "infer_ref_batch", "update_actor"])
-def test_actual_worker_entrypoints_fetch_and_preserve_return_contract(storage, method):
-    data = read_core().to_tensordict()
+def test_worker_entrypoints_keep_tensor_dict_rpc_contract(storage, method):
+    data = read_training_batch().to_tensordict()
     expected = TensorDict({"log_probs": torch.ones(2, 2)}, batch_size=[2])
 
     def compute(data):
         torch.testing.assert_close(data["all_latents"], storage.payload["all_latents"])
-        assert diffusion_tq.TRAJECTORY_KEYS not in data.keys()
+        assert DIFFUSION_TQ_KEYS not in data
         assert tu.get_non_tensor_data(data, "enable_routing_replay", None) == (method != "infer_ref_batch")
         return expected
 
     engine = SimpleNamespace(infer_batch=compute, train_mini_batch=compute)
-    worker = SimpleNamespace(actor=engine, ref=engine, enable_routing_replay=True, config=SimpleNamespace(actor={}))
+    worker = SimpleNamespace(
+        actor=engine,
+        ref=engine,
+        _trajectory_fields=FIELDS,
+        enable_routing_replay=True,
+        config=SimpleNamespace(actor={}),
+    )
     result = getattr(ActorRolloutRefWorker, method)(worker, data)
     torch.testing.assert_close(result["log_probs"], expected["log_probs"])
-    assert len(storage.worker_reads) == 1
-    assert diffusion_tq.TRAJECTORY_KEYS in data.keys()
+    assert len(storage.reads) == 2
 
 
-def test_routing_wrapper_does_not_fetch_trajectory(storage):
-    data = read_core().to_tensordict()
-
-    @_with_routing_replay_flag(enabled=False)
-    def infer(self, batch):
-        return batch
-
-    assert infer(SimpleNamespace(enable_routing_replay=False), data) is data
-    assert storage.worker_reads == []
-
-
-def test_advantage_uses_core_timesteps_without_latent_read(storage, monkeypatch):
-    data = read_core()
-    trainer = SimpleNamespace(
-        config=OmegaConf.create(
-            {"algorithm": {"norm_adv_by_std_in_grpo": True, "adv_estimator": "grpo", "global_std": False}}
-        )
-    )
-    monkeypatch.setattr(trainer_base, "compute_advantage", lambda data, **kwargs: data)
-    result = trainer_base.PolicyGradientDiffusionTrainerV1._compute_advantage(trainer, data)
-    assert result.batch["sample_level_rewards"].shape == (2, 2)
-    torch.testing.assert_close(result.batch["sample_level_rewards"], torch.tensor([[1.0, 1.0], [3.0, 3.0]]))
-    assert len(storage.core_reads) == 1 and storage.worker_reads == []
-
-
-def test_projection_preserves_per_timestep_rollout_diagnostics(storage):
-    storage.payload["all_timesteps"][1] = torch.tensor([850.0, 450.0])
-    storage.payload["rollout_log_probs"] = torch.zeros(2, 2)
-    meta = KVBatchMeta(keys=["a_0_0", "b_0_0"], tags=[{}, {}], partition_id="train")
-    full = tq_utils.diffusion_tq_batch_to_dataproto(meta)
-    projected = read_core()
-    timestep_metrics = []
-    for data in (full, projected):
-        data.batch["old_log_probs"] = torch.ones(2, 2)
-        metrics = compute_rollout_corr_metrics_from_batch(data, bypass_mode=False)
-        timestep_metrics.append({key: value for key, value in metrics.items() if "/ts_" in key})
-    assert len(timestep_metrics[0]) == 4
-    assert timestep_metrics[0] == timestep_metrics[1]
-    assert storage.worker_reads == []
-
-
-@pytest.mark.parametrize("field", ["all_latents", "all_timesteps"])
-@pytest.mark.parametrize("select_other_shape", [False, True])
-def test_partition_shapes_are_checked_only_for_selected_rows(storage, field, select_other_shape):
-    schema = extract_field_schema(storage.payload)[field]
-    partition = FieldMeta(global_indexes={0, 1}, **schema)
-    other_shape = (3,) if field == "all_timesteps" else (3, 1, 8, 8)
-    partition.update({**schema, "shape": other_shape}, [2])
-    indexes = [0, 2] if select_other_shape else [0, 1]
-    storage.schema_overrides[field] = partition.to_batch_schema(indexes)
-    if select_other_shape:
-        with pytest.raises(ValueError, match=f"uniform '{field}' shapes"):
-            read_core()
-        assert storage.core_reads == []
-    else:
-        result = diffusion_tq.materialize_diffusion_trajectory(read_core().to_tensordict())
-        torch.testing.assert_close(result["all_latents"], storage.payload["all_latents"])
-        torch.testing.assert_close(result["all_timesteps"], storage.payload["all_timesteps"])
-
-
-@pytest.mark.parametrize("field", ["all_latents", "all_timesteps"])
-def test_missing_per_row_shape_metadata_fails_before_core_read(storage, field):
-    storage.schema_overrides[field] = {"is_nested": True, "shape": None}
-    with pytest.raises(ValueError, match="Missing per-row shapes"):
-        read_core()
-    assert storage.core_reads == []
-
-
-def test_masked_ragged_embeds_match_full_read_after_reorder_and_duplication(storage):
+@pytest.fixture
+def ragged_storage(storage):
     storage.payload["prompt_embeds"] = torch.nested.as_nested_tensor(
         [torch.arange(24).reshape(3, 8).float(), torch.arange(16).reshape(2, 8).float()], layout=torch.jagged
     )
     storage.payload["prompt_embeds_mask"] = torch.nested.as_nested_tensor(
         [torch.ones(3, dtype=torch.long), torch.ones(2, dtype=torch.long)], layout=torch.jagged
     )
-    meta = KVBatchMeta(keys=["a_0_0", "b_0_0"], tags=[{}, {}], partition_id="train")
-    full = tq_utils.diffusion_tq_batch_to_dataproto(meta).select_idxs([1, 0, 1])
+    return storage
+
+
+def test_ragged_embeds_match_full_read(ragged_storage):
+    order = [1, 0, 1]
+    full = read_training_batch(projected=False).select_idxs(order)
+    projected = read_training_batch().select_idxs(order)
     expected = embeds_padding_2_no_padding(full.to_tensordict())
-    actual = diffusion_tq.materialize_diffusion_trajectory(read_core().select_idxs([1, 0, 1]).to_tensordict())
-    for field in ("prompt_embeds", "prompt_embeds_mask"):
-        for full_row, projected_row in zip(expected[field].unbind(), actual[field].unbind(), strict=True):
-            torch.testing.assert_close(full_row, projected_row, rtol=0, atol=0)
+    actual = materialize_diffusion_trajectory(projected.to_tensordict(), FIELDS)
+    for key in ("prompt_embeds", "prompt_embeds_mask"):
+        for expected_row, actual_row in zip(expected[key].unbind(), actual[key].unbind(), strict=True):
+            torch.testing.assert_close(expected_row, actual_row, rtol=0, atol=0)
 
 
-def test_unmasked_ragged_embeds_fail_closed(storage):
-    storage.payload["prompt_embeds"] = torch.nested.as_nested_tensor(
-        [torch.ones(3, 8), torch.ones(2, 8)], layout=torch.jagged
-    )
-    storage.payload = storage.payload.exclude("prompt_embeds_mask")
-    with pytest.raises(ValueError, match="requires 'prompt_embeds_mask'"):
-        diffusion_tq.materialize_diffusion_trajectory(read_core().to_tensordict())
+@pytest.mark.parametrize("mask", [None, [[1, 1, 1, 1], [1, 1, 1, 1]], [[1, 1, 1], [1, 0, 1]]])
+def test_invalid_mask_on_ragged_embeds_fails_closed(ragged_storage, mask):
+    if mask is None:
+        ragged_storage.payload = ragged_storage.payload.exclude("prompt_embeds_mask")
+    else:
+        ragged_storage.payload["prompt_embeds_mask"] = torch.tensor(mask, dtype=torch.long)
+    with pytest.raises(ValueError, match="requires 'prompt_embeds_mask'|incompatible 'prompt_embeds_mask'"):
+        materialize_diffusion_trajectory(read_training_batch().to_tensordict(), FIELDS)
 
 
-@pytest.mark.parametrize("mask", [[[1, 1, 1, 1], [1, 1, 1, 1]], [[1, 1, 1], [1, 0, 1]]])
-def test_ragged_embeds_reject_mismatched_mask(storage, mask):
-    storage.payload["prompt_embeds"] = torch.nested.as_nested_tensor(
-        [torch.ones(3, 8), torch.ones(2, 8)], layout=torch.jagged
-    )
-    storage.payload["prompt_embeds_mask"] = torch.tensor(mask, dtype=torch.long)
-    with pytest.raises(ValueError, match="incompatible 'prompt_embeds_mask'"):
-        diffusion_tq.materialize_diffusion_trajectory(read_core().to_tensordict())
-
-
-def test_timestep_fields_cannot_be_deferred(storage):
-    meta = KVBatchMeta(keys=["a_0_0", "b_0_0"], tags=[{}, {}], partition_id="train")
-    with pytest.raises(ValueError, match="all_timesteps must remain driver-owned"):
-        fields = replace(FIELDS, worker_required=FIELDS.worker_required | {"all_timesteps"})
-        tq_utils.diffusion_tq_batch_to_dataproto(meta, trajectory_fields=fields)
-    assert storage.core_reads == []
-
-
-def test_worker_rejects_missing_core_timesteps_before_fetch(storage):
-    data = read_core().to_tensordict().exclude("all_timesteps")
-    with pytest.raises(ValueError, match="driver-owned timesteps"):
-        diffusion_tq.materialize_diffusion_trajectory(data)
-    assert storage.worker_reads == []
-
-
-@pytest.mark.parametrize("cfg", [1.0, 5.0])
-def test_pipeline_contracts_require_cfg_fields_only_when_enabled(cfg):
-    config = SimpleNamespace(pipeline=OmegaConf.create({"guidance_scale": cfg, "true_cfg_scale": cfg}))
-    sd3_required = StableDiffusion3FlowGRPO.tq_trajectory_fields(config).worker_required
-    wan_required = Wan22DanceGRPO.tq_trajectory_fields(config).worker_required
-    assert ("negative_pooled_prompt_embeds" in sd3_required) == (cfg > 1)
-    assert ("negative_prompt_embeds" in wan_required) == (cfg > 1)
+@pytest.mark.parametrize("optional", [["all_latents"], ["all_timesteps"], [DIFFUSION_TQ_KEYS], [""]])
+def test_invalid_field_groups_rejected_during_config_construction(optional):
+    with pytest.raises(ValueError, match="distinct non-empty names|driver-owned"):
+        DiffusionTrajectoryFieldsConfig(required=["all_latents"], optional=optional)
 
 
 @pytest.mark.parametrize(
     "overrides, message",
     [
         (["trainer.v1.worker_side_trajectory=bad"], "must be a boolean"),
-        (
-            ["trainer.v1.worker_side_trajectory=true", "trainer.v1.trainer_mode=separate_async"],
-            "trainer_mode=sync",
-        ),
+        (["trainer.v1.worker_side_trajectory=true", "trainer.v1.trainer_mode=separate_async"], "trainer_mode=sync"),
         (["trainer.v1.worker_side_trajectory=true", "reward.reward_model.enable=true"], "rollout-side rewards"),
         (["trainer.v1.worker_side_trajectory=true", "distillation.enabled=true"], "no teacher"),
+        (["trainer.v1.worker_side_trajectory=true"], "trajectory_fields.required"),
         (
             [
                 "trainer.v1.worker_side_trajectory=true",
@@ -477,11 +240,7 @@ def test_pipeline_contracts_require_cfg_fields_only_when_enabled(cfg):
     ],
 )
 def test_unsupported_enabled_modes_fail_at_trainer_construction(overrides, message):
-    from pathlib import Path
-
     from verl_omni.trainer.diffusion.v1.trainer_sync import PolicyGradientDiffusionTrainerV1Sync
 
-    with initialize_config_dir(config_dir=str(Path(verl_omni.__file__).parent / "trainer/config"), version_base=None):
-        config = compose(config_name="diffusion_trainer", overrides=overrides)
     with pytest.raises(ValueError, match=message):
-        PolicyGradientDiffusionTrainerV1Sync(config)
+        PolicyGradientDiffusionTrainerV1Sync(compose_trainer(overrides))

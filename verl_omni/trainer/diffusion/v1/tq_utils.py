@@ -21,27 +21,14 @@ import numpy as np
 import torch
 import transfer_queue as tq
 from tensordict import TensorDict
-from transfer_queue import BatchMeta, KVBatchMeta
+from transfer_queue import KVBatchMeta
 from verl.protocol import DataProto
 from verl.utils import tensordict_utils as tu
 
 from verl_omni.trainer.diffusion.diffusion_trainer_utils import MEDIA_ARTIFACT_FIELD_PREFIX
-from verl_omni.utils.diffusion_tq import (
-    TRAJECTORY_KEYS,
-    TRAJECTORY_META,
-    TQTrainingFields,
-    TrajectoryDescriptor,
-    validate_transition_shape,
-)
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
-
-
-_TRAJECTORY_HANDLE_FIELDS = {TRAJECTORY_KEYS, TRAJECTORY_META}
-_TRAINER_REQUIRED_TENSORS = {"prompts", "rm_scores", "all_timesteps"}
-_TRAINER_REQUIRED_FIELDS = _TRAINER_REQUIRED_TENSORS | {"uid"}
-_TRAINER_OPTIONAL_FIELDS = {"rollout_log_probs", "extra_fields"}
 
 
 def diffusion_persisted_tq_fields(
@@ -176,96 +163,10 @@ def _stack_field(value: Any, padding: float = 0.0) -> torch.Tensor | None:
     return torch.as_tensor(value)
 
 
-def _uniform_tq_field_shape(metadata: BatchMeta, field: str) -> tuple[int, ...]:
-    schema = metadata.field_schema[field]
-    if schema["is_nested"]:
-        shapes = schema.get("per_sample_shapes", [])
-    else:
-        shapes = [schema["shape"]] * metadata.size
-    if len(shapes) != metadata.size or not shapes or any(shape is None for shape in shapes):
-        raise ValueError(f"Missing per-row shapes for deferred training field {field!r}")
-    shapes = [tuple(shape) for shape in shapes]
-    if len(set(shapes)) != 1:
-        raise ValueError(f"Deferred training requires uniform {field!r} shapes in the selected batch")
-    return shapes[0]
-
-
-def _validate_training_fields(fields: TQTrainingFields, driver_fields: set[str]) -> None:
-    worker_fields = fields.worker_fields
-    if "all_timesteps" in worker_fields:
-        raise ValueError("all_timesteps must remain driver-owned for rollout diagnostics")
-    if conflicts := driver_fields & worker_fields:
-        raise ValueError(f"Training fields cannot be both driver- and worker-owned: {sorted(conflicts)}")
-    if reserved := (driver_fields | worker_fields) & _TRAJECTORY_HANDLE_FIELDS:
-        raise ValueError(f"Training fields collide with reserved trajectory metadata: {sorted(reserved)}")
-    if not fields.worker_required:
-        raise ValueError("Deferred training requires at least one required worker field")
-    if not fields.transition_fields.issubset(fields.worker_required):
-        raise ValueError("Transition fields must be declared as required worker fields")
-    if undeclared := {field for pair in fields.sequence_masks for field in pair} - worker_fields:
-        raise ValueError(f"Sequence and mask fields must be declared as worker fields: {sorted(undeclared)}")
-
-
-def _plan_training_read(
-    keys: list[str], partition_id: str, fields: TQTrainingFields
-) -> tuple[list[str], TrajectoryDescriptor]:
-    driver_required = _TRAINER_REQUIRED_FIELDS | fields.driver_required
-    driver_fields = driver_required | _TRAINER_OPTIONAL_FIELDS | fields.driver_optional
-    _validate_training_fields(fields, driver_fields)
-
-    metadata = tq.get_client().kv_retrieve_meta(keys=keys, partition_id=partition_id, create=False)
-    stored = set(metadata.field_names)
-    context = f"partition={partition_id!r}, keys={keys!r}"
-    if missing := (driver_required | fields.worker_required) - stored:
-        raise ValueError(f"Missing training fields in {context}: {sorted(missing)}")
-    if metadata.size != len(keys):
-        raise ValueError(
-            f"Training metadata row count mismatch in {context}: expected {len(keys)}, got {metadata.size}"
-        )
-    if stored & _TRAJECTORY_HANDLE_FIELDS:
-        raise ValueError("Stored fields collide with diffusion TQ trajectory metadata")
-
-    worker_fields = sorted(fields.worker_fields & stored)
-    if not metadata.select_fields(worker_fields).is_ready:
-        raise ValueError(f"Trajectory fields are not ready in {context}")
-    timestep_shape = _uniform_tq_field_shape(metadata, "all_timesteps")
-    if len(timestep_shape) != 1 or timestep_shape[0] < 1:
-        raise ValueError("Deferred trajectories require a uniform nonempty timestep sequence")
-    steps = int(timestep_shape[0])
-    for field in sorted(fields.transition_fields):
-        validate_transition_shape(_uniform_tq_field_shape(metadata, field), steps, field, context)
-
-    descriptor: TrajectoryDescriptor = {
-        "partition_id": partition_id,
-        "fields": worker_fields,
-        "required": sorted(fields.worker_required),
-        "num_timesteps": steps,
-        "transition_fields": sorted(fields.transition_fields),
-        "sequence_masks": {field: mask for field, mask in fields.sequence_masks if field in stored},
-    }
-    return sorted(driver_fields & stored), descriptor
-
-
-def _attach_trajectory_handle(
-    data: DataProto, keys: list[str], descriptor: TrajectoryDescriptor, adapter_required: frozenset[str]
-) -> None:
-    missing = _TRAINER_REQUIRED_TENSORS - set(data.batch.keys())
-    if "uid" not in data.non_tensor_batch:
-        missing.add("uid")
-    missing.update(adapter_required - set(data.batch.keys()) - set(data.non_tensor_batch))
-    if missing:
-        raise ValueError(f"Projected training read is missing core data: {sorted(missing)}")
-    if data.batch["all_timesteps"].shape != (len(keys), descriptor["num_timesteps"]):
-        raise ValueError("Timestep shape changed during projected training read")
-    data.non_tensor_batch[TRAJECTORY_KEYS] = _to_object_array(keys)
-    data.meta_info[TRAJECTORY_META] = descriptor
-
-
 def diffusion_tq_batch_to_dataproto(
     batch_meta: KVBatchMeta,
     pad_token_id: int = 0,
     select_fields: list[str] | None = None,
-    trajectory_fields: TQTrainingFields | None = None,
 ) -> DataProto:
     """Read TQ rows and assemble a diffusion ``DataProto``.
 
@@ -274,8 +175,6 @@ def diffusion_tq_batch_to_dataproto(
         pad_token_id: Padding token id for variable-length prompt token tensors.
         select_fields: Optional TQ fields to retrieve. ``None`` preserves the
             full-payload behavior required by training and validation.
-        trajectory_fields: Adapter's training field declaration. Enables projected
-            reads and is mutually exclusive with ``select_fields``.
 
     Returns:
         ``DataProto`` whose ``batch`` carries the retrieved diffusion tensors and
@@ -284,12 +183,6 @@ def diffusion_tq_batch_to_dataproto(
     sort_idx = sort_diffusion_tq_keys(list(batch_meta.keys))
     keys = [batch_meta.keys[i] for i in sort_idx]
     partition_id = batch_meta.partition_id
-
-    descriptor = None
-    if trajectory_fields is not None:
-        if select_fields is not None:
-            raise ValueError("Cannot combine a TQ field projection with deferred trajectory fields")
-        select_fields, descriptor = _plan_training_read(keys, partition_id, trajectory_fields)
 
     data = tq.kv_batch_get(
         keys=keys,
@@ -326,10 +219,7 @@ def diffusion_tq_batch_to_dataproto(
                 non_tensor_batch[k][i] = v
 
     batch = TensorDict(batch_dict, batch_size=len(keys))
-    result = DataProto(batch=batch, non_tensor_batch=non_tensor_batch)
-    if descriptor is not None and trajectory_fields is not None:
-        _attach_trajectory_handle(result, keys, descriptor, trajectory_fields.driver_required)
-    return result
+    return DataProto(batch=batch, non_tensor_batch=non_tensor_batch)
 
 
 def put_dataproto_fields_to_tq(

@@ -455,6 +455,10 @@ actor_rollout_ref:
     mtp:
       _target_: verl.workers.config.MtpConfig
       enable: false
+    trajectory_fields:
+      _target_: verl_omni.workers.config.diffusion.DiffusionTrajectoryFieldsConfig
+      required: []
+      optional: []
     pipeline:
       _target_: verl_omni.workers.config.diffusion.DiffusionPipelineConfig
       height: ${oc.select:actor_rollout_ref.rollout.pipeline.height,512}
