@@ -24,6 +24,58 @@ from verl_omni.utils.config import resolve_lora_config
 
 logger = logging.getLogger(__name__)
 
+# peft stores adapter weights in per-adapter containers on each tuner layer.
+_ADAPTER_MODULE_CONTAINERS = ("lora_A", "lora_B", "lora_magnitude_vector")
+_ADAPTER_PARAMETER_CONTAINERS = ("lora_embedding_A", "lora_embedding_B")
+
+
+def cast_adapter_params_to_base(module: torch.nn.Module) -> None:
+    """Cast every PEFT adapter parameter to its base layer's device and dtype.
+
+    peft applies the base layer's device and dtype only when it first wraps a
+    module into a tuner layer; adapters added to an already-wrapped layer are
+    created on CPU in the default dtype. On modules built on the meta device
+    that mixes dtypes inside FSDP wrapping units, so normalize before sharding.
+    """
+    from peft.tuners.tuners_utils import BaseTunerLayer
+
+    for submodule in module.modules():
+        if not isinstance(submodule, BaseTunerLayer):
+            continue
+        base_param = next(submodule.get_base_layer().parameters(), None)
+        if base_param is None:
+            continue
+        for attr in _ADAPTER_MODULE_CONTAINERS:
+            container = getattr(submodule, attr, None)
+            if isinstance(container, torch.nn.ModuleDict):
+                for adapter_name, layer in container.items():
+                    container[adapter_name] = layer.to(device=base_param.device, dtype=base_param.dtype)
+        for attr in _ADAPTER_PARAMETER_CONTAINERS:
+            container = getattr(submodule, attr, None)
+            if isinstance(container, torch.nn.ParameterDict):
+                for adapter_name, param in container.items():
+                    container[adapter_name] = torch.nn.Parameter(
+                        param.to(device=base_param.device, dtype=base_param.dtype),
+                        requires_grad=param.requires_grad,
+                    )
+
+
+def apply_lora_dtype(module: torch.nn.Module, target_dtype: torch.dtype) -> None:
+    """Cast every LoRA adapter parameter to ``target_dtype`` and pin adapter inputs.
+
+    Covers inactive adapters too: peft marks only the active adapter trainable,
+    so a requires_grad-filtered cast leaves "old" policy adapters in the base
+    dtype and mixes dtypes inside FSDP wrapping units and optimizer states.
+    """
+    from peft.tuners.tuners_utils import BaseTunerLayer
+
+    for name, param in module.named_parameters():
+        if ".lora_" in name or name.startswith("lora_"):
+            param.data = param.data.to(target_dtype)
+    for submodule in module.modules():
+        if isinstance(submodule, BaseTunerLayer):
+            submodule.cast_input_dtype_enabled = False
+
 
 class LoRAAdapterMixin:
     """Backend-agnostic helpers for named PEFT/LoRA policy adapters."""
@@ -60,24 +112,17 @@ class LoRAAdapterMixin:
             for adapter_name in extra_adapters:
                 module.add_adapter(LoraConfig(**lora_config), adapter_name=adapter_name)
 
+        # Adapters beyond the first skip peft's base-dtype cast; align them before sharding.
+        cast_adapter_params_to_base(module)
+
         if "default" in policy_state_adapters and hasattr(module, "set_adapter"):
             module.set_adapter("default")
 
         lora_dtype = getattr(self.model_config, "lora_dtype", None)
         if lora_dtype is not None:
-            from peft.tuners.tuners_utils import BaseTunerLayer
             from verl.utils.torch_dtypes import PrecisionType
 
-            target_dtype = PrecisionType.to_dtype(lora_dtype)
-            for name, param in module.named_parameters():
-                if param.requires_grad:
-                    orig_dtype = param.dtype
-                    param.data = param.data.to(target_dtype)
-                    logger.debug("LoRA param %s: %s -> %s", name, orig_dtype, param.dtype)
-
-            for submodule in module.modules():
-                if isinstance(submodule, BaseTunerLayer):
-                    submodule.cast_input_dtype_enabled = False
+            apply_lora_dtype(module, PrecisionType.to_dtype(lora_dtype))
 
         return module
 

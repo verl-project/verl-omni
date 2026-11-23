@@ -74,7 +74,7 @@ def good_enough_threshold(raw: object | None = None) -> float:
         ValueError: If the value is not a float in ``[0, 1]``.
     """
     if raw is None:
-        from verl_omni.tools.trajectory.hydra_env import agentic_get
+        from verl_omni.utils.agentic.config import agentic_get
 
         raw = agentic_get("good_enough_threshold")
     try:

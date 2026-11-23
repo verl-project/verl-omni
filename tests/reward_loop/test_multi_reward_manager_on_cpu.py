@@ -86,6 +86,10 @@ async def reward_uses_named_engine_router(reward_router_address, model_name):
     return {"score": 0.6, "backend": "engine-function"}
 
 
+async def reward_captures_model_tokenizer(reward_model_tokenizer):
+    return {"score": 0.5, "tokens": reward_model_tokenizer.encode("one two", add_special_tokens=False)}
+
+
 async def reward_captures_ocr_request(
     data_source,
     solution_image,
@@ -111,6 +115,11 @@ async def reward_captures_sampling_params(**kwargs):
     return {"score": 0.5, "has_sampling_params": "sampling_params" in kwargs}
 
 
+def build_ocr_user_prompt() -> str:
+    """Return an OCR user prompt loaded through pkg://."""
+    return "Prompt from the test-module builder."
+
+
 async def reward_uses_legacy_router(reward_router_address, model_name, sampling_params):
     assert reward_router_address == "legacy-router"
     assert model_name == "legacy-model"
@@ -134,8 +143,22 @@ class _NativeModelExecutor:
 
 
 class _EngineRouterClient:
+    tokenizer = SimpleNamespace(encode=lambda text, add_special_tokens: text.split())
+
     def reward_kwargs(self):
         return {"reward_router_address": "engine-router", "model_name": "ocr-model"}
+
+
+class _EngineRouterClientWithoutTokenizer(_EngineRouterClient):
+    @property
+    def tokenizer(self):
+        raise AssertionError("the tokenizer loads only for a scorer that declares it")
+
+
+class _EngineRouterClientWithBrokenTokenizer(_EngineRouterClient):
+    @property
+    def tokenizer(self):
+        raise OSError("no tokenizer files")
 
 
 # ---------------------------------------------------------------------------
@@ -367,7 +390,7 @@ class TestMultiRewardManagerRunSingle:
         )
         manager.loop.run_until_complete(manager.run_single(data))
         previous, current = requests
-        assert previous["max_tokens"] == 4096
+        assert previous["max_tokens"] == 256
         assert previous["seed"] == 777
         if not inherit:
             assert current == previous
@@ -377,6 +400,64 @@ class TestMultiRewardManagerRunSingle:
                 assert current["seed"] == 42
             else:
                 assert "seed" not in current
+
+    def test_genrm_ocr_user_prompt_is_per_reward_term(self, monkeypatch):
+        from verl_omni.utils.reward_score import genrm_ocr
+
+        requests = []
+
+        async def chat_complete(router_address, chat_complete_request):
+            requests.append(chat_complete_request)
+            return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="hello"))])
+
+        monkeypatch.setattr(genrm_ocr, "_chat_complete", chat_complete)
+        scorer_path = "pkg://verl_omni.utils.reward_score.genrm_ocr"
+        config = _make_config(
+            {
+                "ocr_default": {
+                    "model": "ocr_engine",
+                    "path": scorer_path,
+                    "name": "compute_score_ocr",
+                },
+                "ocr_literal": {
+                    "model": "ocr_engine",
+                    "path": scorer_path,
+                    "name": "compute_score_ocr",
+                    "user_prompt": "Read the text in this image.",
+                },
+                "ocr_pkg": {
+                    "model": "ocr_engine",
+                    "path": scorer_path,
+                    "name": "compute_score_ocr",
+                    "user_prompt": "pkg://tests.reward_loop.test_multi_reward_manager_on_cpu.build_ocr_user_prompt",
+                },
+            }
+        )
+        config.reward.models = OmegaConf.create({"ocr_engine": {"backend": "engine"}})
+        manager = MultiVisualRewardManager(config, MagicMock(), compute_score=None)
+        manager.set_reward_executors({"ocr_engine": _EngineRouterClient()}, None)
+        data = _make_single_data()
+        item = data[0]
+
+        manager.loop.run_until_complete(
+            genrm_ocr.compute_score_ocr(
+                data_source="test",
+                solution_image=item.batch["responses"],
+                ground_truth="hello",
+                extra_info=_reward_extra_info(item),
+                reward_router_address="engine-router",
+                model_name="ocr-model",
+            )
+        )
+        manager.loop.run_until_complete(manager.run_single(data))
+
+        baseline, default, literal, package = requests
+        assert default == baseline
+        assert default["messages"][0] == {"role": "system", "content": "You are a helpful assistant."}
+        assert default["messages"][1]["content"][1] == {"type": "text", "text": genrm_ocr.DEFAULT_GRM_PROMPT}
+        assert literal["messages"][1]["content"][1]["text"] == "Read the text in this image."
+        assert package["messages"][1]["content"][1]["text"] == "Prompt from the test-module builder."
+        assert all(request["messages"][0] == default["messages"][0] for request in requests)
 
     def test_named_engine_preserves_explicit_scorer_sampling_params(self):
         explicit = {"max_tokens": 7, "temperature": 0.2}
@@ -668,6 +749,76 @@ class TestMultiRewardManagerRunSingle:
 
         assert result["reward_score"] == pytest.approx(0.6)
         assert result["reward_extra_info"]["reward/ocr/backend"] == "engine-function"
+
+    def test_engine_reward_function_receives_the_model_tokenizer_it_declares(self):
+        manager = _build_manager(
+            {
+                "ocr": {
+                    "model": "ocr_engine",
+                    "path": DUMMY_REWARDS_PATH,
+                    "name": "reward_captures_model_tokenizer",
+                    "weight": 1.0,
+                },
+            }
+        )
+        manager.set_reward_executors({"ocr_engine": _EngineRouterClient()}, None)
+
+        result = manager.loop.run_until_complete(manager.run_single(_make_single_data()))
+
+        assert result["reward_extra_info"]["reward/ocr/tokens"] == ["one", "two"]
+
+    def test_optional_engine_reward_survives_a_tokenizer_that_fails_to_load(self):
+        manager = _build_manager(
+            {
+                "ocr": {
+                    "model": "ocr_engine",
+                    "path": DUMMY_REWARDS_PATH,
+                    "name": "reward_captures_model_tokenizer",
+                    "weight": 1.0,
+                    "required": False,
+                },
+            }
+        )
+        manager.set_reward_executors({"ocr_engine": _EngineRouterClientWithBrokenTokenizer()}, None)
+
+        result = manager.loop.run_until_complete(manager.run_single(_make_single_data()))
+
+        assert result["reward_score"] == 0.0
+        assert result["reward_extra_info"]["reward/ocr/errors"] == 1
+
+    def test_required_engine_reward_fails_on_a_tokenizer_that_fails_to_load(self):
+        manager = _build_manager(
+            {
+                "ocr": {
+                    "model": "ocr_engine",
+                    "path": DUMMY_REWARDS_PATH,
+                    "name": "reward_captures_model_tokenizer",
+                    "weight": 1.0,
+                    "required": True,
+                },
+            }
+        )
+        manager.set_reward_executors({"ocr_engine": _EngineRouterClientWithBrokenTokenizer()}, None)
+
+        with pytest.raises(RuntimeError, match="Required sub-reward 'ocr' failed: no tokenizer files"):
+            manager.loop.run_until_complete(manager.run_single(_make_single_data()))
+
+    def test_engine_reward_function_without_a_tokenizer_argument_does_not_load_one(self):
+        manager = _build_manager(
+            {
+                "ocr": {
+                    "model": "ocr_engine",
+                    "path": DUMMY_REWARDS_PATH,
+                    "name": "reward_uses_named_engine_router",
+                    "weight": 1.0,
+                },
+            }
+        )
+        manager.set_reward_executors({"ocr_engine": _EngineRouterClientWithoutTokenizer()}, None)
+
+        result = manager.loop.run_until_complete(manager.run_single(_make_single_data()))
+
+        assert result["reward_score"] == pytest.approx(0.6)
 
     def test_jpeg_reward_via_file_path(self):
         """JPEG reward loaded via file path must not fail on relative imports."""

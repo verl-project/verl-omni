@@ -112,6 +112,7 @@ python3 -m verl_omni.trainer.main_diffusion_v1 \
     +reward.models.ocr.n_gpus_per_node=$NUM_GPUS_REWARD \
     +reward.models.ocr.nnodes=1 \
     +reward.models.ocr.rollout.name=$REWARD_ENGINE \
+    +reward.models.ocr.rollout.response_length=256 \
     +reward.models.ocr.rollout.gpu_memory_utilization=0.9 \
     +reward.models.ocr.rollout.tensor_model_parallel_size=$REWARD_TP \
     +reward.models.ocr.rollout.enforce_eager=False \

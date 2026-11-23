@@ -1,6 +1,6 @@
 # Welcome to VeRL-Omni's documentation!
 
-Last updated: 10/16/2026
+Last updated: 11/13/2026
 
 [VeRL-Omni](https://github.com/verl-project/verl-omni) is a general RL training framework focused on multimodal generative models, built on top of [verl](https://github.com/verl-project/verl). It originated from the multi-modal generation RL effort in `verl`, and now has a dedicated home so it can evolve in a more focused way.
 
@@ -30,6 +30,8 @@ start/install.md
 start/engine_backends.md
 start/install_npu.md
 start/install_rocm.md
+start/install_xpu.md
+start/install_mlu.md
 start/models.md
 start/flowgrpo_quickstart.md
 start/diffusion_v1.md
@@ -50,8 +52,10 @@ examples/config.md
 :caption: Advanced Features
 
 advanced/diffusion_media_artifacts.md
+advanced/multi_turn_image_agents.md
 algo/async_reward.md
 algo/named_reward_models.md
+advanced/fsdp2_reward_models.md
 algo/rollout_correction.md
 algo/separate_async_omni.md
 start/rollout_batching.md
@@ -68,6 +72,7 @@ algo/flowdppo.md
 algo/diffusion_dpo.md
 algo/diffusionnft.md
 algo/dgpo.md
+algo/crd.md
 algo/grpo_guard.md
 algo/mixgrpo.md
 algo/diffusion_opd.md
@@ -96,21 +101,28 @@ examples/mixgrpo_trainer.md
 examples/diffusionnft_trainer.md
 examples/omninft_trainer.md
 examples/dgpo_trainer.md
+examples/crd_trainer.md
+examples/awm_trainer.md
 examples/diffusionopd_trainer.md
 examples/flowgrpo_trainer_sd35_drm.md
 examples/qwen_image/flowgrpo_trainer_qwen_image.md
 examples/qwen_image_edit/flowgrpo_trainer_qwen_image_edit.md
 examples/ltx2/flowgrpo_trainer_ltx2.md
 examples/ltx2/omninft_trainer_ltx2.md
+examples/ltx2/diffusionopd_trainer_ltx2.md
 examples/minimax_h3/flowgrpo_trainer_minimax_h3.md
+examples/minimax_h3_image/flowgrpo_trainer_minimax_h3_image.md
 examples/minimax_h3/diffusionnft_trainer_minimax_h3.md
+examples/minimax_h3_image/diffusionnft_trainer_minimax_h3_image.md
 examples/boogu_image/flowgrpo_trainer_boogu_image.md
 examples/boogu_image/diffusionnft_trainer_boogu_image.md
 examples/bagel/flowgrpo_trainer_bagel.md
 examples/gspo_trainer.md
 examples/qwen3_omni/gspo_trainer_qwen3_omni.md
 examples/dapo_trainer.md
+examples/stage_skip.md
 examples/qwen3_tts/grpo_trainer_qwen3_tts.md
+examples/minicpm_o/opd_trainer_minicpm_o.md
 ```
 
 ```{toctree}
@@ -118,8 +130,10 @@ examples/qwen3_tts/grpo_trainer_qwen3_tts.md
 :caption: Performance Tuning Guide
 
 perf/tuning_guide.md
+perf/offline_microbatch_tuner.md
 perf/diffusion_mfu.md
 perf/profiler.md
+perf/diffusion_consistency.md
 ```
 
 ```{toctree}
@@ -156,6 +170,7 @@ contributing/integrating_a_non_diffusers_model.md
 contributing/integrating_a_stepwise_continuous_batching_model.md
 contributing/integrating_a_new_policy_gradient_algorithm_for_diffusion_model.md
 contributing/integrating_a_new_direct_preference_algorithm_for_diffusion_model.md
+contributing/integrating_a_reward_scorer.md
 contributing/gpu_smoke_tests.md
 contributing/npu_smoke_tests.md
 contributing/common_pitfalls.md
@@ -174,7 +189,7 @@ VeRL-Omni is free software; you can redistribute it and/or modify it under the t
 of the Apache License 2.0. We welcome contributions.
 Join us on [GitHub](https://github.com/verl-project/verl-omni) for discussions.
 
-See the [2026 Q2 roadmap](https://github.com/verl-project/verl/issues/5755) for planned work.
+See the [project roadmap](https://github.com/verl-project/verl-omni/issues/700) for planned work.
 
 ### Code Linting and Formatting
 

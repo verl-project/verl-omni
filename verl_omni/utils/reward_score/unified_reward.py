@@ -117,13 +117,13 @@ def _aggregate_unified_reward_scores(scores: dict[str, float]) -> tuple[float, f
 
 async def _score_single_image(
     image,
-    caption: str,
+    prompt: str,
     router_address: str,
     model_name: str,
     loop,
     session: aiohttp.ClientSession,
 ) -> tuple[float, float, str]:
-    """Score one image frame against ``caption`` via UnifiedReward."""
+    """Score one image frame against ``prompt`` via UnifiedReward."""
     from verl_omni.utils.reward_score.reward_utils import pil_image_to_base64
 
     pil_image = _to_pil(image)
@@ -133,7 +133,7 @@ async def _score_single_image(
             "role": "user",
             "content": [
                 {"type": "image_url", "image_url": {"url": image_base64}},
-                {"type": "text", "text": _build_unified_reward_prompt(caption)},
+                {"type": "text", "text": prompt},
             ],
         },
     ]
@@ -163,14 +163,21 @@ async def compute_score_unified_reward(
     reward_router_address: str,
     reward_model_tokenizer: PreTrainedTokenizer = None,
     model_name: Optional[str] = None,
+    *,
+    user_prompt: Optional[str] = None,
 ):
     """Compute a human-preference score via UnifiedReward 2.0.
 
     The reward model scores the generated image against its text caption on
     Alignment, Coherence, and Style axes. The returned ``score`` is the mean of
     those axes normalized from the model's 1-5 scale to ``[0, 1]``.
+
+    ``user_prompt`` overrides the default prompt. A ``pkg://`` spec names a
+    builder called with ``caption``; literal text replaces ``{caption}``.
     """
     from verl.utils.ray_utils import get_event_loop
+
+    from verl_omni.utils.reward_score.reward_utils import resolve_prompt_builder
 
     del data_source, reward_model_tokenizer
 
@@ -178,6 +185,13 @@ async def compute_score_unified_reward(
     caption = extra_info.get("prompt") or extra_info.get("raw_prompt") or ground_truth or ""
     frame_interval = extra_info.get("frame_interval", 1)
     solution_image = _prepare_solution_frames(solution_image, frame_interval, extra_info=extra_info)
+
+    if user_prompt is None:
+        prompt = _build_unified_reward_prompt(caption)
+    elif user_prompt.startswith("pkg://"):
+        prompt = resolve_prompt_builder(user_prompt)(caption)
+    else:
+        prompt = user_prompt.replace("{caption}", caption)
 
     model_name = model_name or DEFAULT_UNIFIED_REWARD_MODEL_PATH
     loop = get_event_loop()
@@ -188,7 +202,7 @@ async def compute_score_unified_reward(
             *[
                 _score_single_image(
                     image=image,
-                    caption=caption,
+                    prompt=prompt,
                     router_address=reward_router_address,
                     model_name=model_name,
                     loop=loop,

@@ -47,8 +47,16 @@ Our test suites run on GitHub Actions. Check these [workflows](https://github.co
 
 If possible, please add CI test(s) for your new feature:
 
-1. Find the most relevant workflow yml file under `.github/workflows/`.
-2. Add related path patterns to the `paths` section if not already included.
+1. CPU unit tests: add `tests/<module>/test_*_on_cpu.py` (auto-collected by
+   the CPU CI job) or a check under `tests/special_sanity/` — no workflow edit
+   needed.
+2. GPU/NPU smoke: register the script in `tests/gpu_smoke/run_gpu_smoke_*.sh`
+   (GPU) or `tests/npu_smoke/run_npu_smoke_{core,e2e}.sh` (NPU), and extend the
+   GPU group patterns in
+   `tests/gpu_smoke/select_gpu_smoke_groups.py` if needed
+   (see [GPU smoke tests](docs/contributing/gpu_smoke_tests.md) and
+   [NPU smoke tests](docs/contributing/npu_smoke_tests.md)). Do not edit
+   `.github/workflows/` — CI infrastructure changes need maintainer approval.
 3. Minimize the workload of the test script(s) (see existing scripts for examples).
 
 ## Building the Docs
@@ -88,14 +96,17 @@ pairs or online DiffusionNFT-style forward-process training), follow:
 
 Additional guides:
 
+- [How to Integrate a Reward Scorer](docs/contributing/integrating_a_reward_scorer.md)
 - [How to Integrate an Image-to-Image Diffusion Model](docs/contributing/integrating_an_i2i_diffusion_model.md)
 - [How to Integrate a Non-Diffusers Model for FlowGRPO Training](docs/contributing/integrating_a_non_diffusers_model.md)
 - [How to Add a New Omni Model](docs/contributing/integrating_an_omni_model.md)
 - [How to Add Continuous Batching (Step-Execution) Support for a Diffusion Model](docs/contributing/integrating_a_stepwise_continuous_batching_model.md)
 - [Testing Guide](docs/contributing/testing_guide.md)
 - [GPU Smoke Tests](docs/contributing/gpu_smoke_tests.md)
+- [NPU Smoke Tests](docs/contributing/npu_smoke_tests.md)
 - [CI/CD Layers](docs/contributing/ci_cd.md)
 - [Common Pitfalls](docs/contributing/common_pitfalls.md)
+- [Integrating the Diffusion Prompt-Embedding Cache](docs/contributing/integrating_prompt_embedding_cache.md)
 
 ## Governance
 

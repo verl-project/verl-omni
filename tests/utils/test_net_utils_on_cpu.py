@@ -13,6 +13,7 @@
 # limitations under the License.
 """CPU tests for the non-ephemeral MASTER_PORT picker."""
 
+import random
 import socket
 
 import pytest
@@ -32,6 +33,37 @@ def test_returns_bindable_port_below_ephemeral_range():
     assert 1024 <= port < lo
     holder = _bind("127.0.0.1", port)  # raises if the picker handed out a busy port
     holder.close()
+
+
+def test_seeded_replicas_can_listen_on_selected_ports(monkeypatch):
+    # Keep port choices repeatable while resetting Python's global RNG below.
+    port_rng = random.Random(0)
+    monkeypatch.setattr(net_utils.random, "SystemRandom", lambda: port_rng)
+    global_rng_state = random.getstate()
+    holders = []
+    try:
+        # Select every port before any worker starts listening.
+        ports = []
+        rng_unchanged = []
+        for _ in range(4):
+            random.seed(42)
+            before = random.getstate()
+            ports.append(net_utils.get_non_ephemeral_free_port("127.0.0.1"))
+            rng_unchanged.append(random.getstate() == before)
+
+        # Identical global RNG states must not force replicas to select the same port.
+        assert len(set(ports)) == len(ports), ports
+        # Port selection must not advance Python's global RNG state.
+        assert all(rng_unchanged), rng_unchanged
+
+        for port in ports:
+            holder = _bind("127.0.0.1", port)
+            holders.append(holder)
+            holder.listen()
+    finally:
+        for holder in holders:
+            holder.close()
+        random.setstate(global_rng_state)
 
 
 def test_skips_ports_already_bound(monkeypatch):

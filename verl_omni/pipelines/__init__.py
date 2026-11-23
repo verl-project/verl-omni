@@ -22,6 +22,8 @@ from . import (
     minicpm,
     minimax_h3_diffusion_nft,
     minimax_h3_flow_grpo,
+    minimax_h3_image_diffusion_nft,
+    minimax_h3_image_flow_grpo,
     qwen3_omni,
     qwen3_tts,
     qwen_image_diffusion_nft,
@@ -30,6 +32,8 @@ from . import (
     qwen_image_edit_flow_grpo,
     qwen_image_flow_grpo,
     qwen_image_mix_grpo,
+    sd3_awm,
+    sd3_crd,
     sd3_dgpo,
     sd3_dpo,
     sd3_flow_grpo,
@@ -44,6 +48,8 @@ from .ltx2_omni_nft import *  # noqa: F401, F403
 from .minicpm import *  # noqa: F401, F403
 from .minimax_h3_diffusion_nft import *  # noqa: F401, F403
 from .minimax_h3_flow_grpo import *  # noqa: F401, F403
+from .minimax_h3_image_diffusion_nft import *  # noqa: F401, F403
+from .minimax_h3_image_flow_grpo import *  # noqa: F401, F403
 from .qwen3_omni import *  # noqa: F401, F403
 from .qwen3_tts import *  # noqa: F401, F403
 from .qwen_image_diffusion_nft import *  # noqa: F401, F403
@@ -52,6 +58,8 @@ from .qwen_image_dual_grpo import *  # noqa: F401, F403
 from .qwen_image_edit_flow_grpo import *  # noqa: F401, F403
 from .qwen_image_flow_grpo import *  # noqa: F401, F403
 from .qwen_image_mix_grpo import *  # noqa: F401, F403
+from .sd3_awm import *  # noqa: F401, F403
+from .sd3_crd import *  # noqa: F401, F403
 from .sd3_dgpo import *  # noqa: F401, F403
 from .sd3_dpo import *  # noqa: F401, F403
 from .sd3_flow_grpo import *  # noqa: F401, F403
@@ -68,6 +76,10 @@ __all__ += list(ltx2_omni_nft.__all__)
 __all__ += list(minicpm.__all__)
 __all__ += list(minimax_h3_diffusion_nft.__all__)
 __all__ += list(minimax_h3_flow_grpo.__all__)
+__all__ += list(minimax_h3_image_diffusion_nft.__all__)
+__all__ += list(minimax_h3_image_flow_grpo.__all__)
+__all__ += list(sd3_crd.__all__)
+__all__ += list(sd3_awm.__all__)
 __all__ += list(sd3_dgpo.__all__)
 __all__ += list(sd3_dpo.__all__)
 __all__ += list(sd3_flow_grpo.__all__)

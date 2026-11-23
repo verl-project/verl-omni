@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import inspect
+import warnings
 
 import torch
 from verl import DataProto
@@ -21,13 +22,17 @@ from verl.utils.reward_score import default_compute_score as _upstream_default_c
 
 from verl_omni.pipelines.rollout_media import PRIMARY_ARTIFACT, ArtifactContractError
 from verl_omni.utils.reward_score import default_compute_score_image
+from verl_omni.workers.config.reward import DEPRECATED_VISUAL_MANAGER_MESSAGE
 
 from .media import _reward_extra_info
 
 
 def _sampling_params_from_rollout(rollout_config) -> dict:
     """Build the OCR-compatible generation overrides from a rollout config."""
-    params = {"max_tokens": rollout_config.get("response_length") or 4096}
+    params = {}
+    response_length = rollout_config.get("response_length")
+    if response_length:
+        params["max_tokens"] = response_length
     if rollout_config.get("full_determinism", False):
         params["seed"] = rollout_config.get("seed", 42)
     return params
@@ -75,9 +80,14 @@ def _validate_visual_response(response_visual, config, *, is_validate: bool, ext
 
 
 class VisualRewardManager(RewardManagerBase):
-    """The reward manager for visual response."""
+    """The reward manager for visual response.
+
+    Deprecated since v0.4.0 and replaced by :class:`MultiVisualRewardManager`
+    with ``reward.reward_functions``; it will be removed in a future release.
+    """
 
     def __init__(self, config, tokenizer, compute_score, reward_router_address=None, reward_model_tokenizer=None):
+        warnings.warn(DEPRECATED_VISUAL_MANAGER_MESSAGE, DeprecationWarning, stacklevel=2)
         super().__init__(config, tokenizer, compute_score)
 
         if compute_score is None or compute_score is _upstream_default_compute_score:

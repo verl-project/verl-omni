@@ -134,10 +134,28 @@ def _is_missing(value: Any) -> bool:
 
 
 def _append_media_path(media: dict[str, list[Any]], key: str, value: Any) -> None:
-    if _is_missing(value):
-        return
-    if value not in media[key]:
-        media[key].append(value)
+    # One entry per media token; None marks a reference without its own path.
+    media[key].append(None if _is_missing(value) else value)
+
+
+def _resolve_media_order(declared: list[Any], refs: list[Any]) -> list[Any]:
+    """Return media paths in prompt token order.
+
+    An inline path that is also declared at the top level claims that entry, so it counts once.
+    References without a path take the remaining top-level entries in order.
+    """
+    unclaimed = list(declared)
+    for path in refs:
+        if path is not None and path in unclaimed:
+            unclaimed.remove(path)
+    resolved = []
+    for path in refs:
+        if path is not None:
+            resolved.append(path)
+        elif unclaimed:
+            resolved.append(unclaimed.pop(0))
+    # Leftover top-level entries are kept so alignment validation reports the mismatch.
+    return resolved + unclaimed
 
 
 def _normalise_media_list(value: Any) -> list[Any]:
@@ -189,13 +207,14 @@ def _content_to_text(content: Any) -> str:
     return str(content)
 
 
-def _append_string_content(conversation: list[Any], content: str) -> None:
+def _append_string_content(conversation: list[Any], content: str, media: dict[str, list[Any]]) -> None:
     cursor = 0
     for match in _MEDIA_TOKEN_PATTERN.finditer(content):
         text = content[cursor : match.start()]
         if text:
             conversation.append(("text", text))
         conversation.append((match.group(1), None))
+        _append_media_path(media, f"{match.group(1)}s", None)
         cursor = match.end()
     remaining = content[cursor:]
     if remaining:
@@ -205,7 +224,7 @@ def _append_string_content(conversation: list[Any], content: str) -> None:
 def _append_content(conversation: list[Any], content: Any, media: dict[str, list[Any]]) -> None:
     content = _as_python(content)
     if isinstance(content, str):
-        _append_string_content(conversation, content)
+        _append_string_content(conversation, content, media)
         return
 
     for item in content or []:
@@ -253,6 +272,7 @@ def _validate_media_alignment(conversations: Sequence[Sequence[Any]], media: dic
 def _build_preference_branch(sample: dict[str, Any], answer: Any) -> dict[str, Any]:
     prompt = _as_python(sample.get("prompt", []))
     media = _initial_media(sample)
+    media_refs: dict[str, list[Any]] = {key: [] for key in media}
     conversations: list[list[Any]] = []
 
     for message in prompt:
@@ -263,9 +283,11 @@ def _build_preference_branch(sample: dict[str, Any], answer: Any) -> dict[str, A
         if role == "system":
             continue
         conversation = [role or "user"]
-        _append_content(conversation, message.get("content", ""), media)
+        _append_content(conversation, message.get("content", ""), media_refs)
         if len(conversation) > 1:
             conversations.append(conversation)
+
+    media = {key: _resolve_media_order(media[key], media_refs[key]) for key in media}
 
     _validate_media_alignment(conversations, media)
     conversations.append(["assistant", ("text", _answer_text(answer))])
@@ -304,7 +326,7 @@ def _collate_tensor_values(key: str, values: Sequence[torch.Tensor | None]) -> t
     padded = []
     for value in values:
         if value is None:
-            value = torch.zeros(max_shape, dtype=present[0].dtype, device=present[0].device)
+            value = torch.full(max_shape, pad_value, dtype=present[0].dtype, device=present[0].device)
         padded.append(_pad_tensor_to_shape(value, max_shape, pad_value))
     return torch.stack(padded, dim=0)
 
@@ -390,6 +412,51 @@ def _collate_no_padding_values(key: str, values: Sequence[Any]) -> Any:
     if isinstance(first, torch.Tensor):
         return _collate_no_padding_tensor_values(key, values)
     return torch.stack([NonTensorData(value) for value in values], dim=0)
+
+
+_MEDIA_MASK_KEYS = ("image_mask", "video_mask", "audio_mask")
+
+
+def _media_placeholder_counts(branch: dict[str, Any]) -> dict[str, int]:
+    """Count the media placeholder tokens a branch still carries.
+
+    ``process_qwen3_omni_sample`` leaves the original token ids in ``input_ids``, so the
+    placeholder positions are only recoverable from the modality masks it emits alongside.
+    """
+    counts: dict[str, int] = {}
+    for key in _MEDIA_MASK_KEYS:
+        mask = branch.get(key)
+        if isinstance(mask, torch.Tensor) and mask.dtype == torch.bool:
+            counts[key] = int(mask.sum())
+    return counts
+
+
+def _media_placeholders_dropped(before: dict[str, int], after: dict[str, int]) -> str:
+    dropped = []
+    for key, count in before.items():
+        remaining = after.get(key, 0)
+        if remaining != count:
+            dropped.append(f"{key}: {count} -> {remaining}")
+    return ", ".join(dropped)
+
+
+def _has_media_features(multi_modal_inputs: dict[str, Any]) -> bool:
+    """Whether the branch actually carries a media payload.
+
+    MiniCPM always emits an empty ``image_bound`` tensor, text-only rows included, so
+    checking for non-``None`` values alone would block text-only truncation.
+    """
+    for value in multi_modal_inputs.values():
+        if value is None:
+            continue
+        if isinstance(value, torch.Tensor):
+            if value.numel() > 0:
+                return True
+            continue
+        if isinstance(value, list | tuple | dict) and not value:
+            continue
+        return True
+    return False
 
 
 def _pad_mode_value(pad_mode: DatasetPadMode | str) -> str:
@@ -704,9 +771,30 @@ class OfflineMLLMDPODataset(MultiTurnSFTDataset):
         if sequence_length > self.max_length and self.truncation == "error":
             raise ValueError(f"sequence_length={sequence_length} is larger than self.max_length={self.max_length}")
         if sequence_length > self.max_length:
+            media_tokens_before = _media_placeholder_counts(res)
+            multi_modal_inputs = res.get("multi_modal_inputs") or {}
+            if not media_tokens_before and _has_media_features(multi_modal_inputs):
+                # This transform emits no bool modality masks (e.g. ``process_minicpm_sample``),
+                # so a placeholder cut cannot be detected. Fail closed instead of skipping the
+                # check and letting a desynchronised sample through.
+                raise ValueError(
+                    f"truncation={self.truncation!r} to max_length={self.max_length} may cut placeholder "
+                    f"runs of the media inputs: this transform emits no bool image_mask/video_mask/audio_mask, "
+                    f"so the cut cannot be verified while multi_modal_inputs keeps their features, and the "
+                    f"sample would reach the model desynchronised. Raise max_length, shorten the "
+                    f"prompt/response, or use truncation='error'."
+                )
             for key in _TEXT_MODEL_KEYS:
                 if key in res:
                     res[key] = self._truncate_sequence_value(key, res[key], self.max_length, self.truncation)
+            dropped = _media_placeholders_dropped(media_tokens_before, _media_placeholder_counts(res))
+            if dropped:
+                raise ValueError(
+                    f"truncation={self.truncation!r} to max_length={self.max_length} would cut placeholder "
+                    f"runs of the media inputs ({dropped}) while multi_modal_inputs keeps their features, "
+                    f"so the sample would reach the model desynchronised. Raise max_length, shorten the "
+                    f"prompt/response, or use truncation='error'."
+                )
         return res
 
     def _build_preference_branch(self, sample: dict[str, Any], answer: Any) -> dict[str, Any]:
@@ -967,7 +1055,7 @@ def _offline_mllm_dpo_collate_fn(features, pad_mode: DatasetPadMode | str | None
         for feature in features
         for key, value in feature.items()
         if key != "multi_modal_inputs" and not isinstance(value, torch.Tensor)
-    }
+    } - tensor_keys
 
     batch: dict[str, Any] = {}
     for key in sorted(tensor_keys):
