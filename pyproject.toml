@@ -36,8 +36,9 @@ dependencies = [
     "safetensors>=0.4.5",
     "tensordict>=0.8.0,<=0.10.0,!=0.9.0",
     "torchdata",
-    # Mirrors vllm-omni's requirements/common.txt bound at the pinned commit.
-    "transformers>=5.16.1,<5.20.0",
+    # Inside vllm-omni's requirements/common.txt bound at the pinned commit; the
+    # 5.18 floor is where transformers' Kernel Hub range accepts kernels 0.17.
+    "transformers>=5.18.0,<5.20.0",
     "wandb",
     "swanlab>=0.10.3",
     "soundfile>=0.12.1",
@@ -73,7 +74,7 @@ fa2 = [
     "flash-attn>=2.8.3",
 ]
 gpu = [
-    "kernels==0.16.1",
+    "kernels==0.17.3",
     "liger-kernel",
     "cupy-cuda13x",
 ]
@@ -208,6 +209,6 @@ verl_omni = [
 override-dependencies = [
     "accelerate>=1.14.0",
     "diffusers>=0.43.0",
-    "kernels==0.16.1",
-    "transformers>=5.16.1,<5.20.0",
+    "kernels==0.17.3",
+    "transformers>=5.18.0,<5.20.0",
 ]
