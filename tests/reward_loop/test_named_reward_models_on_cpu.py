@@ -937,6 +937,30 @@ def test_reward_model_terms_fail_fast(models, term, message):
         validate_reward_model_terms(config)
 
 
+def test_named_reward_weight_sum_is_checked_before_worker_split():
+    model = {"backend": "native", "executor": {"model": "verl_omni.utils.reward_score.imagebind:ImageBindModel"}}
+    config = _config({"imagebind": model})
+    config.reward.reward_functions = {
+        "clap": {"path": "pkg://verl_omni.utils.reward_score.clap", "name": "compute_score", "weight": 1.0},
+        "imagebind": {
+            "model": "imagebind",
+            "path": "pkg://verl_omni.utils.reward_score.imagebind",
+            "name": "compute_score_native",
+            "weight": -0.5,
+        },
+    }
+    validate_reward_model_terms(config)
+
+    worker_config = config.copy()
+    worker_config.reward.reward_functions = OmegaConf.masked_copy(config.reward.reward_functions, ["imagebind"])
+    manager = MultiVisualRewardManager(worker_config, tokenizer=None, compute_score=None)
+    assert [(term["key"], term["weight"]) for term in manager._sub_rewards] == [("imagebind", -0.5)]
+
+    config.reward.reward_functions.clap.weight = -1.0
+    with pytest.raises(ValueError, match=r"Total weight of reward functions must be > 0, got -1\.5"):
+        validate_reward_model_terms(config)
+
+
 def test_engine_pickscore_term_uses_a_reward_function():
     config = _config({"pickscore": {"backend": "engine"}})
     config.reward.reward_functions = OmegaConf.create(

@@ -242,7 +242,12 @@ def put_dataproto_fields_to_tq(
         batch_meta: ``KVBatchMeta`` whose ``keys`` and ``partition_id`` target
             the rows to update.
         data: ``DataProto`` containing the computed tensor fields.
-        fields: Batch field names to persist; missing fields are skipped.
+        fields: Fields to persist. Absent fields are skipped unless
+            ``reward_extra_info`` is requested and ``reward_extra_keys`` declares
+            diagnostic columns. Each declared column must have one entry per batch key.
+
+    Raises:
+        ValueError: A declared diagnostic column is missing or has the wrong length.
     """
     output: dict[str, Any] = {}
     for field in fields:
