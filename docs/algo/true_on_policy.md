@@ -1,6 +1,6 @@
 # True On-Policy for the Qwen3-Omni Thinker
 
-Last updated: 11/15/2026.
+Last updated: 11/23/2026.
 
 With `actor_rollout_ref.model.true_on_policy=true`, the log-probs the vLLM-Omni rollout reports for the Qwen3-Omni thinker are bitwise equal to the log-probs the FSDP actor recomputes for the same tokens with the same weights. PPO's old policy and the sampling policy are then the same distribution, with no numerical gap to correct for.
 
@@ -24,6 +24,7 @@ python3 -m verl_omni.trainer.main_omni \
     actor_rollout_ref.rollout.top_p=1.0 \
     actor_rollout_ref.rollout.top_k=-1 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
+    actor_rollout_ref.rollout.enable_prefix_caching=False \
     actor_rollout_ref.model.lora_rank=0 \
     +actor_rollout_ref.rollout.engine_kwargs.vllm_omni.output_mode=ar \
     +actor_rollout_ref.rollout.engine_kwargs.vllm_omni.pipeline_name=qwen3_omni_moe \
@@ -41,12 +42,16 @@ The trainer refuses to start unless all of these hold, and lists every violation
 | `actor_rollout_ref.rollout.top_k` | `-1` |
 | `actor_rollout_ref.rollout.tensor_model_parallel_size` | `1` |
 | `actor_rollout_ref.rollout.calculate_log_probs` | `true` |
+| `actor_rollout_ref.rollout.enable_prefix_caching` | `false` |
 | `actor_rollout_ref.model.lora_rank` | `0` |
+| `actor_rollout_ref.model.lora_adapter_path` | `null` |
 | `actor_rollout_ref.model.use_remove_padding` | `true` |
 | `actor_rollout_ref.actor.strategy` | `fsdp` or `fsdp2` |
 | `actor_rollout_ref.actor.fsdp_config.batch_invariant` | `true` |
 | `actor_rollout_ref.actor.fsdp_config.ulysses_sequence_parallel_size` | `1` |
 | `trainer.v1.trainer_mode` | `omni_sync` |
+
+`actor_rollout_ref.rollout.engine_kwargs.vllm_omni.pipeline_name` must name a rollout pipeline that supports the mode (`qwen3_omni_moe`); the rollout server refuses to start without one, because nothing else would turn on `hf_numerics`. Prefix caching is required off because every validated run had it off.
 
 `actor_rollout_ref.model.override_config.attn_implementation` may be left unset or set to `hub_fa3`, and `override_config.experts_implementation` unset or set to `vllm_fused_moe`; anything else is an error. CUDA graphs on the rollout (`enforce_eager=false`) are supported.
 
@@ -67,7 +72,7 @@ Each source of difference is fixed on the side that owns it. The HF layers keep 
 | batch-invariant actor ops, log-prob formula | verl | `actor_rollout_ref.actor.fsdp_config.batch_invariant`: installs vLLM's batch-invariant kernels in the actor and computes log-probs with the vLLM sampler formula (fp32 `log_softmax` + gather); verl-omni's entrypoint exports `VLLM_BATCH_INVARIANT=1` to the rollout under the same flag |
 | gate metric | verl | `training/rollout_logprobs_mismatch_count` |
 
-Dense GEMMs, the embedding, `lm_head` and synced weights are already bitwise equal on both sides.
+Dense GEMMs, the embedding, `lm_head` and synced weights need no change: they came out bitwise equal on both sides in every gate and full-depth run. That is a measured result at the pinned versions, not something the kernels guarantee, so rerun the gate after a vLLM, CUDA or cuBLAS upgrade.
 
 ## Scope
 
@@ -76,7 +81,7 @@ Supported: Qwen3-Omni thinker, text-only prompts, full-parameter training, rollo
 Not supported:
 
 - LoRA: merged and unmerged weights differ by construction.
-- Multimodal inputs and the vision/audio towers. An image input fails in the actor with a `ValueError` from `hub_fa3`, which serves the text decoder only.
+- Multimodal inputs and the vision/audio towers. The actor raises a `ValueError` on the first batch that carries image, video or audio features.
 - TP or EP > 1 on the rollout; the vLLM-Omni option refuses them.
 - The separate-async trainer (`omni_separate_async`): its rollout replicas can generate with weights the actor has already updated.
 - Run-to-run reproducibility of training: only the rollout-vs-actor log-probs within a run are covered.
@@ -100,9 +105,9 @@ Runs a tiny random Qwen3-Omni thinker on 2 Hopper GPUs, with a bf16 actor as in 
 CPU tests:
 
 ```bash
-pytest tests/utils/test_config_on_cpu.py tests/pipelines/test_qwen3_omni_hub_fa3_attention_on_cpu.py \
-    tests/pipelines/test_qwen3_omni_vllm_fused_moe_experts_on_cpu.py tests/pipelines/test_qwen3_omni_exact_mrope_on_cpu.py \
-    tests/pipelines/test_qwen3_omni_true_on_policy_contract_on_cpu.py \
+pytest tests/utils/test_config_on_cpu.py tests/models/test_qwen3_omni_hub_fa3_attention_on_cpu.py \
+    tests/models/test_qwen3_omni_vllm_fused_moe_experts_on_cpu.py tests/models/test_qwen3_omni_exact_mrope_on_cpu.py \
+    tests/pipelines/test_qwen3_omni_true_on_policy_contract_on_cpu.py tests/pipelines/test_qwen3_omni_thinker_adapter_on_cpu.py \
     tests/workers/config/test_omni_config_on_cpu.py tests/workers/rollout/rollout_vllm/test_vllm_omni_strategy_on_cpu.py
 ```
 
@@ -111,5 +116,5 @@ pytest tests/utils/test_config_on_cpu.py tests/pipelines/test_qwen3_omni_hub_fa3
 GPU test of the experts implementation against vLLM's kernel and the `grouped_mm` backward:
 
 ```bash
-pytest tests/pipelines/test_qwen3_omni_vllm_fused_moe_experts_gpu.py
+pytest tests/models/test_qwen3_omni_vllm_fused_moe_experts_gpu.py
 ```

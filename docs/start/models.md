@@ -1,6 +1,6 @@
 # Supported Models
 
-Last updated: 11/18/2026.
+Last updated: 11/23/2026.
 
 VeRL-Omni supports RL post-training for generative models across image, video,
 audio, and omni modalities. This page catalogues every model with a ready-to-run
@@ -327,6 +327,7 @@ a supported recipe until that validation lands.
 | **FSDP** | FSDP2 with LoRA (rank 32 for V1), param and optimizer CPU offload |
 | **Rollout** | vLLM-Omni TP=2 colocated on the same GPUs as the FSDP actor |
 | **Stage config** | Auto-generated deploy config via `+actor_rollout_ref.rollout.engine_kwargs.vllm_omni.pipeline_name="qwen3_omni_moe"` |
+| **True on-policy** | Optional bitwise-equal rollout and actor log-probs for text-only, full-parameter GSPO runs; see [True On-Policy](../algo/true_on_policy.md) |
 
 For version requirements and detailed setup instructions, see
 [Examples - Qwen3-Omni Thinker GSPO Trainer](../examples/gspo_trainer.md).

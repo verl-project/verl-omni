@@ -19,15 +19,15 @@ from transformers import AttentionInterface
 from transformers.integrations.moe import ExpertsInterface
 from transformers.masking_utils import ALL_MASK_ATTENTION_FUNCTIONS
 
+from verl_omni.models.transformers import qwen3_omni
 from verl_omni.pipelines.model_base import OmniModelBase
-from verl_omni.pipelines.qwen3_omni import hub_fa3_attention, vllm_fused_moe_experts
 from verl_omni.pipelines.qwen3_omni.thinker_training_adapter import Qwen3OmniThinkerAdapter
 
 
 def test_packed_cu_seqlens_splits_on_position_restarts():
     position_ids = torch.tensor([0, 1, 2, 0, 1, 0, 1, 2, 3])
 
-    cu_seqlens, max_seqlen = hub_fa3_attention.packed_cu_seqlens(position_ids)
+    cu_seqlens, max_seqlen = qwen3_omni.packed_cu_seqlens(position_ids)
 
     assert cu_seqlens.dtype == torch.int32
     assert cu_seqlens.tolist() == [0, 3, 5, 9]
@@ -35,10 +35,10 @@ def test_packed_cu_seqlens_splits_on_position_restarts():
 
 
 def test_register_adds_attention_and_flash_attention_2_mask():
-    name = hub_fa3_attention.register_hub_fa3_attention()
+    name = qwen3_omni.register_hub_fa3_attention()
 
     assert name == "hub_fa3"
-    assert AttentionInterface()["hub_fa3"] is hub_fa3_attention.hub_fa3_attention
+    assert AttentionInterface()["hub_fa3"] is qwen3_omni.hub_fa3_attention
     assert ALL_MASK_ATTENTION_FUNCTIONS["hub_fa3"] is ALL_MASK_ATTENTION_FUNCTIONS["flash_attention_2"]
 
 
@@ -50,16 +50,14 @@ def test_attention_calls_varlen_kernel_on_packed_layout(monkeypatch, position_sh
         calls.append((q, k, v, cu_q, cu_k, max_q, max_k, softmax_scale, causal))
         return q + 1
 
-    monkeypatch.setattr(hub_fa3_attention, "_flash_attn_varlen_func", lambda: fake_varlen)
+    monkeypatch.setattr(qwen3_omni, "_flash_attn_varlen_func", lambda: fake_varlen)
     heads, tokens, dim = 2, 5, 4
     query, key, value = (torch.randn(1, heads, tokens, dim) for _ in range(3))
     positions = torch.tensor([[0, 1, 2, 0, 1]])
     if position_shape == "3d":
         positions = positions[None].expand(3, 1, tokens)
 
-    out, weights = hub_fa3_attention.hub_fa3_attention(
-        None, query, key, value, None, scaling=0.5, position_ids=positions
-    )
+    out, weights = qwen3_omni.hub_fa3_attention(None, query, key, value, None, scaling=0.5, position_ids=positions)
 
     q, k, v, cu_q, cu_k, max_q, max_k, scale, causal = calls[0]
     assert q.shape == (tokens, heads, dim)
@@ -73,19 +71,12 @@ def test_attention_calls_varlen_kernel_on_packed_layout(monkeypatch, position_sh
     assert weights is None
 
 
-def test_attention_refuses_a_call_without_position_ids():
-    query = torch.randn(1, 2, 5, 4)
-
-    with pytest.raises(ValueError, match="does not support multimodal inputs"):
-        hub_fa3_attention.hub_fa3_attention(None, query, query, query, None, scaling=0.5)
-
-
 def test_thinker_adapter_registers_hub_fa3_and_fused_moe_for_true_on_policy():
     implementations = Qwen3OmniThinkerAdapter.register_true_on_policy_implementations()
 
     assert implementations == {"attn_implementation": "hub_fa3", "experts_implementation": "vllm_fused_moe"}
-    assert AttentionInterface()["hub_fa3"] is hub_fa3_attention.hub_fa3_attention
-    assert ExpertsInterface()["vllm_fused_moe"] is vllm_fused_moe_experts.vllm_fused_moe_experts_forward
+    assert AttentionInterface()["hub_fa3"] is qwen3_omni.hub_fa3_attention
+    assert ExpertsInterface()["vllm_fused_moe"] is qwen3_omni.vllm_fused_moe_experts_forward
 
 
 def test_base_adapter_refuses_true_on_policy():

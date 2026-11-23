@@ -258,6 +258,7 @@ def _true_on_policy_config(**overrides):
             "full_determinism": False,
             "calculate_log_probs": True,
             "enforce_eager": False,
+            "enable_prefix_caching": False,
         },
     }
     for path, value in overrides.items():
@@ -282,7 +283,9 @@ def test_validate_config_does_not_require_rollout_full_determinism():
         ("actor_rollout_ref.rollout.top_k", 20),
         ("actor_rollout_ref.rollout.tensor_model_parallel_size", 2),
         ("actor_rollout_ref.rollout.calculate_log_probs", False),
+        ("actor_rollout_ref.rollout.enable_prefix_caching", True),
         ("actor_rollout_ref.model.lora_rank", 32),
+        ("actor_rollout_ref.model.lora_adapter_path", "/tmp/adapter"),
         ("actor_rollout_ref.model.use_remove_padding", False),
         ("actor_rollout_ref.actor.fsdp_config.batch_invariant", False),
         ("actor_rollout_ref.actor.fsdp_config.ulysses_sequence_parallel_size", 2),

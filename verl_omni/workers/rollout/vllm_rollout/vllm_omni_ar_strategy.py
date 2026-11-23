@@ -181,6 +181,11 @@ class ARStrategy(OmniStrategyBase):
         pipeline_mode = engine_kwargs.pop("pipeline_mode", "thinker_only")
 
         adapter_cls = OmniRolloutPipelineBase.get_class(pipeline_name)
+        if adapter_cls is None and self.server.model_config.true_on_policy:
+            raise ValueError(
+                "actor_rollout_ref.model.true_on_policy=true requires a registered rollout pipeline, got "
+                f"actor_rollout_ref.rollout.engine_kwargs.vllm_omni.pipeline_name={pipeline_name!r}."
+            )
         if adapter_cls is not None:
             async_chunk = engine_kwargs.get("async_chunk", engine_kwargs.get("async-chunk", True))
             if not isinstance(async_chunk, bool):

@@ -36,7 +36,7 @@ from verl.workers.config import FSDPEngineConfig
 from vllm.model_executor.layers.fused_moe import fused_experts
 from vllm_omni.model_executor.models.qwen3_omni import hf_numerics, qwen3_omni_moe_thinker
 
-from verl_omni.pipelines.qwen3_omni.exact_mrope import ExactMRotaryEmbedding
+from verl_omni.models.transformers.qwen3_omni import ExactMRotaryEmbedding
 from verl_omni.pipelines.qwen3_omni.omni_rollout_adapter import Qwen3OmniRolloutAdapter
 
 HIDDEN, HEADS, KV_HEADS, HEAD_DIM, TOKENS, NUM_EXPERTS, TOP_K = 64, 4, 2, 16, 37, 8, 2

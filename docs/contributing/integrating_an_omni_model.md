@@ -1,6 +1,6 @@
 # How to Add a New Omni Model
 
-Last updated: 11/15/2026.
+Last updated: 11/23/2026.
 
 This guide walks through adding a new omni (multimodal autoregressive) model to
 the verl-omni training framework. It uses the Qwen3-Omni Thinker adapter as a
@@ -190,7 +190,8 @@ Optional overrides fall into four groups:
 - Pipeline setup: `ensure_pipeline_registered`, `get_engine_hf_overrides`,
   `get_stage_engine_extras`, and `get_true_on_policy_engine_extras(stage_id)`.
   The strategy merges the last one over a stage's extras only when
-  `model.true_on_policy` is on; the base implementation returns `{}`. See
+  `model.true_on_policy` is on; the base implementation raises, so the flag is
+  refused for adapters that do not override it. See
   [True On-Policy](../algo/true_on_policy.md).
 - Policy and resource behavior: `policy_stage_id` identifies the stage whose
   sampling parameters and logprobs define the trained policy;

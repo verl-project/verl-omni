@@ -232,7 +232,7 @@
     <td>✅ 已支持</td>
   </tr>
   <tr>
-    <td>GSPO</td>
+    <td>GSPO（可选 <a href="docs/algo/true_on_policy.md">true on-policy</a> log-probs）</td>
     <td>✅ 已支持</td>
   </tr>
   <tr>

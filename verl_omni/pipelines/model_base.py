@@ -1117,7 +1117,7 @@ class OmniRolloutPipelineBase:
         Returns:
             dict: Extra key-value pairs merged over :meth:`get_stage_engine_extras`.
         """
-        return {}
+        raise NotImplementedError(f"{cls.__name__} does not support true_on_policy.")
 
     @classmethod
     def prepare_engine_prompt(

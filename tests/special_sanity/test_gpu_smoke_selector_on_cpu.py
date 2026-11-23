@@ -88,12 +88,12 @@ def test_true_on_policy_files_select_the_groups_that_run_their_gpu_tests():
     selector = _load_selector()
 
     for path in (
-        "verl_omni/pipelines/qwen3_omni/vllm_fused_moe_experts.py",
-        "tests/pipelines/test_qwen3_omni_vllm_fused_moe_experts_gpu.py",
+        "verl_omni/models/transformers/qwen3_omni.py",
+        "tests/models/test_qwen3_omni_vllm_fused_moe_experts_gpu.py",
     ):
         assert "ci-core" in selector.select_group_names([path]), path
     for path in (
-        "verl_omni/pipelines/qwen3_omni/hub_fa3_attention.py",
+        "verl_omni/models/transformers/qwen3_omni.py",
         "tests/special_e2e/run_qwen3_omni_true_on_policy_gate.sh",
     ):
         assert "ci-e2e-omni" in selector.select_group_names([path]), path

@@ -83,8 +83,10 @@ class Qwen3OmniThinkerAdapter(OmniModelBase):
 
     @classmethod
     def register_true_on_policy_implementations(cls) -> dict[str, str]:
-        from .hub_fa3_attention import register_hub_fa3_attention
-        from .vllm_fused_moe_experts import register_vllm_fused_moe_experts
+        from verl_omni.models.transformers.qwen3_omni import (
+            register_hub_fa3_attention,
+            register_vllm_fused_moe_experts,
+        )
 
         return {
             "attn_implementation": register_hub_fa3_attention(),
@@ -114,10 +116,23 @@ class Qwen3OmniThinkerAdapter(OmniModelBase):
         module.set_input_embeddings = module.thinker.set_input_embeddings
         module._no_split_modules = ["Qwen3OmniMoeThinkerTextDecoderLayer"]
         if model_config.true_on_policy:
-            from .exact_mrope import ExactMRotaryEmbedding
+            from verl_omni.models.transformers.qwen3_omni import ExactMRotaryEmbedding
 
             module.thinker.model.rotary_emb = ExactMRotaryEmbedding.from_hf(module.thinker.model.rotary_emb)
         return module
+
+    @classmethod
+    def prepare_model_inputs(cls, model_inputs: dict[str, Any], micro_batch, model_config) -> dict[str, Any]:
+        """Reject multimodal batches under true on-policy, which covers text-only prompts.
+
+        Raises:
+            ValueError: If ``true_on_policy`` is on and the batch carries image, video or audio features.
+        """
+        if model_config.true_on_policy:
+            media_keys = sorted(model_inputs.keys() & {"pixel_values", "pixel_values_videos", "input_features"})
+            if media_keys:
+                raise ValueError(f"true_on_policy supports text-only prompts, got multimodal inputs {media_keys}.")
+        return model_inputs
 
     @classmethod
     def configure_processor(cls, model_path: str, model_config) -> Any:

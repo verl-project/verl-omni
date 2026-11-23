@@ -21,7 +21,7 @@ from torch import nn
 from transformers import Qwen3OmniMoeTextConfig
 from transformers.models.qwen3_omni_moe.modeling_qwen3_omni_moe import Qwen3OmniMoeThinkerTextRotaryEmbedding
 
-from verl_omni.pipelines.qwen3_omni.exact_mrope import ExactMRotaryEmbedding
+from verl_omni.models.transformers.qwen3_omni import ExactMRotaryEmbedding
 from verl_omni.pipelines.qwen3_omni.thinker_training_adapter import Qwen3OmniThinkerAdapter
 
 HEAD_DIM, HIDDEN, SEQ = 16, 32, 6

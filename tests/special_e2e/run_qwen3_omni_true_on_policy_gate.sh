@@ -43,7 +43,7 @@ OUTPUT_DIR=${OUTPUT_DIR:-$(mktemp -d)}
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 python3 "${REPO_ROOT}/tests/special_e2e/build_qwen3_omni_tiny_random.py" \
-    --output-dir "${MODEL_PATH}" --head-dim 128 --num-hidden-layers 4 --vocab-size-multiple 64 --force
+    --output-dir "${MODEL_PATH}" --head-dim 128 --num-hidden-layers 4 --vocab-size-multiple 64
 
 if [ ! -f "${DATA_DIR}/train.parquet" ]; then
     python3 "${REPO_ROOT}/tests/special_e2e/create_dummy_math_data.py" \

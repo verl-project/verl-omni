@@ -18,7 +18,7 @@ from transformers import Qwen3OmniMoeTextConfig
 from transformers.integrations.moe import ExpertsInterface, grouped_mm_experts_forward
 from transformers.models.qwen3_omni_moe.modeling_qwen3_omni_moe import Qwen3OmniMoeThinkerTextExperts
 
-from verl_omni.pipelines.qwen3_omni import vllm_fused_moe_experts
+from verl_omni.models.transformers import qwen3_omni
 
 HIDDEN, INTERMEDIATE, NUM_EXPERTS, TOP_K, TOKENS = 16, 8, 4, 2, 6
 
@@ -44,10 +44,10 @@ def _routing():
 
 
 def test_register_adds_experts_implementation():
-    name = vllm_fused_moe_experts.register_vllm_fused_moe_experts()
+    name = qwen3_omni.register_vllm_fused_moe_experts()
 
     assert name == "vllm_fused_moe"
-    assert ExpertsInterface()["vllm_fused_moe"] is vllm_fused_moe_experts.vllm_fused_moe_experts_forward
+    assert ExpertsInterface()["vllm_fused_moe"] is qwen3_omni.vllm_fused_moe_experts_forward
 
 
 def test_forward_runs_the_kernel_and_backward_differentiates_grouped_mm(monkeypatch):
@@ -57,8 +57,8 @@ def test_forward_runs_the_kernel_and_backward_differentiates_grouped_mm(monkeypa
         calls.append((hidden_states, gate_up_proj, down_proj, top_k_index, top_k_weights))
         return torch.full_like(hidden_states, 7.0)
 
-    monkeypatch.setattr(vllm_fused_moe_experts, "fused_experts", fake_fused_experts)
-    vllm_fused_moe_experts.register_vllm_fused_moe_experts()
+    monkeypatch.setattr(qwen3_omni, "fused_experts", fake_fused_experts)
+    qwen3_omni.register_vllm_fused_moe_experts()
     experts, reference = _experts("vllm_fused_moe"), _experts("grouped_mm")
     hidden_states, top_k_index, top_k_weights = _routing()
     ref_hidden_states = hidden_states.detach().requires_grad_()
@@ -82,8 +82,8 @@ def test_forward_runs_the_kernel_and_backward_differentiates_grouped_mm(monkeypa
 
 
 def test_no_grad_forward_skips_autograd(monkeypatch):
-    monkeypatch.setattr(vllm_fused_moe_experts, "fused_experts", lambda h, *_args: h + 1)
-    vllm_fused_moe_experts.register_vllm_fused_moe_experts()
+    monkeypatch.setattr(qwen3_omni, "fused_experts", lambda h, *_args: h + 1)
+    qwen3_omni.register_vllm_fused_moe_experts()
     experts = _experts("vllm_fused_moe")
     hidden_states, top_k_index, top_k_weights = _routing()
 

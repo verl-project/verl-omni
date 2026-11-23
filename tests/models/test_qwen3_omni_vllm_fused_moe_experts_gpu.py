@@ -20,7 +20,7 @@ from transformers.models.qwen3_omni_moe.modeling_qwen3_omni_moe import Qwen3Omni
 from verl.utils.device import get_device_name
 
 from tests.utils.gpu_test_topology import enabled_gpu_count
-from verl_omni.pipelines.qwen3_omni import vllm_fused_moe_experts
+from verl_omni.models.transformers import qwen3_omni
 
 pytestmark = pytest.mark.skipif(not enabled_gpu_count(), reason="requires a GPU")
 
@@ -58,7 +58,7 @@ def _run(experts, hidden_states, top_k_index, top_k_weights, grad_output):
 def test_forward_is_the_vllm_kernel_and_backward_is_grouped_mm():
     from vllm.model_executor.layers.fused_moe import fused_experts
 
-    vllm_fused_moe_experts.register_vllm_fused_moe_experts()
+    qwen3_omni.register_vllm_fused_moe_experts()
     experts, reference = _experts("vllm_fused_moe", torch.bfloat16), _experts("grouped_mm", torch.bfloat16)
     hidden_states, top_k_index, top_k_weights = _routing(torch.bfloat16)
     ref_inputs = (hidden_states.detach().requires_grad_(), top_k_index, top_k_weights.detach().requires_grad_())
@@ -83,7 +83,7 @@ def test_forward_is_the_vllm_kernel_and_backward_is_grouped_mm():
 
 
 def test_backward_tracks_the_fp32_reference():
-    vllm_fused_moe_experts.register_vllm_fused_moe_experts()
+    qwen3_omni.register_vllm_fused_moe_experts()
     experts, reference = _experts("vllm_fused_moe", torch.bfloat16), _experts("grouped_mm", torch.float32)
     hidden_states, top_k_index, top_k_weights = _routing(torch.bfloat16)
     ref_inputs = (
@@ -111,12 +111,10 @@ def test_rows_do_not_depend_on_the_batch(monkeypatch):
     hidden_states, top_k_index, top_k_weights = _routing(torch.bfloat16)
 
     with torch.no_grad():
-        whole = vllm_fused_moe_experts.vllm_fused_moe_experts_forward(
-            experts, hidden_states, top_k_index, top_k_weights
-        )
+        whole = qwen3_omni.vllm_fused_moe_experts_forward(experts, hidden_states, top_k_index, top_k_weights)
         for chunk in (1, 8, 32, 256):
             parts = [
-                vllm_fused_moe_experts.vllm_fused_moe_experts_forward(
+                qwen3_omni.vllm_fused_moe_experts_forward(
                     experts, hidden_states[i : i + chunk], top_k_index[i : i + chunk], top_k_weights[i : i + chunk]
                 )
                 for i in range(0, TOKENS, chunk)
