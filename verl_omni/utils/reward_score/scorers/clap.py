@@ -18,11 +18,13 @@ from __future__ import annotations
 from contextlib import nullcontext
 from typing import Any
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from verl.utils.device import get_device_name, get_torch_device
 
 from verl_omni.utils.reward_score import clap as _frozen
+from verl_omni.utils.reward_score.reward_utils import audio_info_from_batch
 from verl_omni.utils.reward_score.scorers.base import RewardScorer
 from verl_omni.utils.reward_score.scorers.registry import register_scorer
 
@@ -78,14 +80,22 @@ class CLAPScorer(RewardScorer):
 
         for index, request in enumerate(batch):
             try:
-                prompt, extra_info = _frozen._prepare_request(
-                    request.get("ground_truth"),
-                    request.get("extra_info"),
-                    request.get("batch"),
-                    request.get("audio_layout"),
-                    request.get("prompt_key"),
-                )
-                waveform, source_rate = _frozen._prepare_waveform(extra_info)
+                single_batch = request.get("batch")
+                extra_info = audio_info_from_batch(request.get("extra_info"), single_batch, scorer="CLAP")
+                audio_layout = request.get("audio_layout")
+                if audio_layout is not None:
+                    if extra_info.get("audio_layout") not in (None, audio_layout):
+                        raise ValueError("Conflicting audio_layout in scorer config and extra_info.")
+                    extra_info["audio_layout"] = audio_layout
+                prompt = request.get("ground_truth") or ""
+                prompt_key = request.get("prompt_key")
+                if prompt_key is not None:
+                    if single_batch is None:
+                        raise ValueError("CLAP prompt_key requires a single-sample batch.")
+                    prompt = single_batch[0].non_tensor_batch["reward_inputs"]["text"][prompt_key]
+                waveform, source_rate = _frozen._get_audio(extra_info)
+                waveform = _frozen.resample_audio(waveform, source_rate, _frozen._CLAP_SAMPLE_RATE)
+                waveform = waveform.numpy().astype(np.float32, copy=False)
                 calibration = (
                     request.get("score_scale", 1.0),
                     request.get("score_offset", 0.0),
@@ -119,9 +129,12 @@ class CLAPScorer(RewardScorer):
         for position, index in enumerate(valid_indices):
             try:
                 scale, offset, score_min, score_max = calibrations[position]
-                results[index] = _frozen._calibrate_score(
-                    scores[position].item(), source_rates[position], scale, offset, score_min, score_max
-                )
+                score = scores[position].item() * scale + offset
+                if score_min is not None:
+                    score = max(score, score_min)
+                if score_max is not None:
+                    score = min(score, score_max)
+                results[index] = {"score": score, "source_sample_rate": source_rates[position]}
             except Exception as error:
                 results[index] = error
         return results
@@ -158,12 +171,12 @@ async def compute_score_clap_batched(
     batch=None,
     **kwargs,
 ) -> dict:
-    """Submit one sample to the executor-hosted batch-native CLAP scorer.
+    """Submit one sample to the batched CLAP scorer hosted by ``reward_model``.
 
-    ``data_source``, ``ground_truth``, ``extra_info``, optional ``solution_image``
-    and ``batch``, and scorer options in ``kwargs`` form the executor request.
-    ``reward_model`` owns the executor and returns its score dictionary with
-    ``score`` and ``source_sample_rate``.
+    ``reward_model`` is the native executor of the named model whose
+    ``executor.model`` resolves to :class:`CLAPScorer`; concurrent
+    submissions are packed into CLAP batches. Configured via
+    ``reward_functions.<key>.path`` and ``.name`` plus ``model=<name>``.
     """
     request = {
         "data_source": data_source,

@@ -687,7 +687,7 @@ def test_score_batch_all_invalid_preserves_error_objects_without_inference(fake_
     def fail_preprocessing(extra_info, sample_batch, *, scorer):
         raise errors_by_info[id(extra_info)]
 
-    monkeypatch.setattr(port._frozen, "audio_info_from_batch", fail_preprocessing)
+    monkeypatch.setattr(port, "audio_info_from_batch", fail_preprocessing)
     monkeypatch.setattr(fake_adapter[0], "infer", lambda *_: pytest.fail("adapter called for all-invalid batch"))
 
     results = scorer.score_batch(requests)

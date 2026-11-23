@@ -1,7 +1,7 @@
 (integrating_a_reward_scorer)=
 # How to Integrate a Reward Scorer
 
-Last updated: 11/21/2026.
+Last updated: 11/19/2026.
 
 This guide covers adding a **reward scorer** to VeRL-Omni: the function or class
 that turns one generated sample into a score. Most scorers are a single
@@ -158,27 +158,6 @@ The named model's top-level `model_path`, when set,
 is forwarded to the scorer constructor as a `model_path` kwarg —
 `executor.kwargs.model_path` takes precedence; a scorer whose constructor
 takes no `model_path` fails construction with a clear `TypeError`.
-
-### CLAP opt-in
-
-CLAP uses the same native-model association, with model construction options
-owned by the executor and per-request scoring options forwarded by the wrapper:
-
-```bash
-+reward.models.clap.backend=native \
-+reward.models.clap.placement.devices=[0] \
-+reward.models.clap.executor.model=pkg://verl_omni.utils.reward_score.scorers.clap:CLAPScorer \
-+reward.models.clap.executor.kwargs.model_path=laion/larger_clap_general \
-"+reward.reward_functions.clap.path=pkg://verl_omni.utils.reward_score.scorers.clap" \
-+reward.reward_functions.clap.name=compute_score_clap_batched \
-+reward.reward_functions.clap.model=clap
-```
-
-The wrapper accepts the legacy CLAP request options (`batch`, `audio_layout`,
-`prompt_key`, and score calibration fields) without managing model lifecycle.
-The executor batches up to 16 requests per model forward. Audio preprocessing,
-cosine scoring and source sample-rate metrics retain the legacy managed-adapter
-semantics; the legacy free-function entry point and existing recipes are unchanged.
 
 ## Tests
 

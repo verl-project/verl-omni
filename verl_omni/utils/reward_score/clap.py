@@ -83,36 +83,6 @@ def _get_audio(extra_info: dict) -> tuple[torch.Tensor, int]:
     return get_audio(info, audio_layout=info["audio_layout"])
 
 
-def _prepare_request(ground_truth, extra_info, batch, audio_layout, prompt_key) -> tuple[str, dict]:
-    """Resolve the single-sample text and audio metadata without mutating the caller."""
-    info = audio_info_from_batch(extra_info, batch, scorer="CLAP")
-    if audio_layout is not None:
-        if info.get("audio_layout") not in (None, audio_layout):
-            raise ValueError("Conflicting audio_layout in scorer config and extra_info.")
-        info["audio_layout"] = audio_layout
-    prompt = ground_truth or ""
-    if prompt_key is not None:
-        if batch is None:
-            raise ValueError("CLAP prompt_key requires a single-sample batch.")
-        prompt = batch[0].non_tensor_batch["reward_inputs"]["text"][prompt_key]
-    return prompt, info
-
-
-def _prepare_waveform(extra_info: dict) -> tuple[np.ndarray, int]:
-    waveform, source_rate = _get_audio(extra_info)
-    waveform = resample_audio(waveform, source_rate, _CLAP_SAMPLE_RATE)
-    return waveform.numpy().astype(np.float32, copy=False), source_rate
-
-
-def _calibrate_score(score, source_rate, scale, offset, score_min, score_max) -> dict:
-    score = score * scale + offset
-    if score_min is not None:
-        score = max(score, score_min)
-    if score_max is not None:
-        score = min(score, score_max)
-    return {"score": score, "source_sample_rate": source_rate}
-
-
 def _load_clap(model_name_or_path: str, device: str):
     key = (model_name_or_path, device)
     if key not in _MODEL_CACHE:
@@ -130,9 +100,12 @@ def _score_batch(requests) -> list[tuple[float, int] | Exception]:
     grouped_requests = {}
     for index, (prompt, extra_info, model_name_or_path, device, _) in enumerate(requests):
         try:
-            waveform, source_rate = _prepare_waveform(extra_info)
+            waveform, source_rate = _get_audio(extra_info)
+            waveform = resample_audio(waveform, source_rate, _CLAP_SAMPLE_RATE)
             key = (model_name_or_path, device)
-            grouped_requests.setdefault(key, []).append((index, prompt, waveform, source_rate))
+            grouped_requests.setdefault(key, []).append(
+                (index, prompt, waveform.numpy().astype(np.float32), source_rate)
+            )
         except Exception as e:
             results[index] = e
 
@@ -270,7 +243,16 @@ async def compute_score(
     then optional lower/upper bounds. No recipe or checkpoint is hardcoded.
     """
     del data_source, solution_image, kwargs
-    prompt, extra_info = _prepare_request(ground_truth, extra_info, batch, audio_layout, prompt_key)
+    prompt = ground_truth or ""
+    extra_info = audio_info_from_batch(extra_info, batch, scorer="CLAP")
+    if audio_layout is not None:
+        if extra_info.get("audio_layout") not in (None, audio_layout):
+            raise ValueError("Conflicting audio_layout in scorer config and extra_info.")
+        extra_info["audio_layout"] = audio_layout
+    if prompt_key is not None:
+        if batch is None:
+            raise ValueError("CLAP prompt_key requires a single-sample batch.")
+        prompt = batch[0].non_tensor_batch["reward_inputs"]["text"][prompt_key]
 
     if reward_model is None:
         device = device or get_device_name()
@@ -282,13 +264,19 @@ async def compute_score(
         await _ensure_consumer(state)
         score, source_rate = await future
     else:
-        waveform, source_rate = _prepare_waveform(extra_info)
-        output = await reward_model.infer([waveform], [prompt])
+        waveform, source_rate = _get_audio(extra_info)
+        waveform = resample_audio(waveform, source_rate, _CLAP_SAMPLE_RATE)
+        output = await reward_model.infer([waveform.numpy().astype(np.float32, copy=False)], [prompt])
         audio_embeddings = F.normalize(output["audio_embeddings"].float(), p=2, dim=-1)
         text_embeddings = F.normalize(output["text_embeddings"].float(), p=2, dim=-1)
         score = (audio_embeddings * text_embeddings).sum(dim=-1).item()
 
-    return _calibrate_score(score, source_rate, score_scale, score_offset, score_min, score_max)
+    score = score * score_scale + score_offset
+    if score_min is not None:
+        score = max(score, score_min)
+    if score_max is not None:
+        score = min(score, score_max)
+    return {"score": score, "source_sample_rate": source_rate}
 
 
 class CLAPModel:
