@@ -108,8 +108,6 @@ class PolicyGradientDiffusionTrainerV1Sync(PolicyGradientDiffusionTrainerV1):
                 exc.add_note("Validation reward release unconfirmed")
                 raise
             scoring_error = exc
-        if not released:
-            raise RuntimeError("Validation reward release unconfirmed")
 
         try:
             self.checkpoint_manager.update_weights(self.global_steps)

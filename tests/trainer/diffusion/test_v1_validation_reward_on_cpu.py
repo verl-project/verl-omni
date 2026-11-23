@@ -206,30 +206,24 @@ def test_validation_stops_when_rollout_sleep_fails(validation):
     assert calls == ["generate", "rollout sleep failed"]
 
 
-def test_validation_does_not_restore_after_unconfirmed_wake(validation):
+@pytest.mark.parametrize(
+    ("method", "reward_calls"),
+    [("wake_up", ["reward sleep"]), ("sleep", ["reward wake", "score"])],
+    ids=["wake", "sleep"],
+)
+def test_validation_does_not_restore_after_reward_lifecycle_failure(validation, method, reward_calls):
     trainer, manager, calls = validation()
-    failure = RuntimeError("wake failed")
+    failure = RuntimeError(f"Reward {method} failed")
 
     async def fail():
         raise failure
 
-    manager.multi_reward_model_manager.wake_up = fail
+    setattr(manager.multi_reward_model_manager, method, fail)
     with pytest.raises(RuntimeError) as caught:
         trainer._validate()
     assert caught.value is failure
     assert "Validation reward release unconfirmed" in failure.__notes__
-    assert calls == ["generate", "rollout sleep", "reward sleep"]
-
-
-def test_validation_does_not_restore_if_scoring_returns_without_release(validation, monkeypatch):
-    trainer, manager, calls = validation()
-    rewards = DataProto.from_dict(tensors={"rm_scores": torch.ones(2, 1)})
-    monkeypatch.setattr(manager, "compute_rm_score", Mock(return_value=rewards))
-
-    with pytest.raises(RuntimeError, match="^Validation reward release unconfirmed$"):
-        trainer._validate()
-
-    assert calls == ["generate", "rollout sleep"]
+    assert calls == ["generate", "rollout sleep", *reward_calls]
 
 
 def test_validation_preserves_scoring_and_weight_commit_failures(validation):
