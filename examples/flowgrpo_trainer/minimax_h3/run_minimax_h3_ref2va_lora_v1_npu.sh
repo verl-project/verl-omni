@@ -160,8 +160,7 @@ python3 -m verl_omni.trainer.main_diffusion_v1 \
     '+reward.reward_functions.clap.required=true' \
     "+reward.reward_functions.clap.device=$REWARD_DEVICE:0" \
     "+reward.reward_functions.clap.model_name_or_path=$CLAP_MODEL_PATH" \
-    'hydra.searchpath=[pkg://verl_omni.utils.reward_score]' \
-    '+presets@reward.models.imagebind=imagebind' \
+    '+reward/models@reward.models.imagebind=imagebind' \
     '+reward.reward_functions.imagebind.path=pkg://verl_omni.utils.reward_score.imagebind' \
     '+reward.reward_functions.imagebind.name=compute_score_native' \
     '+reward.reward_functions.imagebind.weight=1.0' \

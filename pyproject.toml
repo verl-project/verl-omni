@@ -199,7 +199,6 @@ verl_omni = [
   "trainer/config/*/*.yaml",
   "trainer/config/*/*/*.yaml",
   "utils/agentic/*.json",
-  "utils/reward_score/presets/*.yaml",
 ]
 
 # -------------------------------
