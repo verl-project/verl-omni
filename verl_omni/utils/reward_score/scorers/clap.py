@@ -18,10 +18,9 @@ from __future__ import annotations
 from contextlib import nullcontext
 from typing import Any
 
-import numpy as np
 import torch
 import torch.nn.functional as F
-from verl.utils.device import get_device_id, get_device_name, get_torch_device
+from verl.utils.device import get_device_name, get_torch_device
 
 from verl_omni.utils.reward_score import clap as _frozen
 from verl_omni.utils.reward_score.scorers.base import RewardScorer
@@ -32,7 +31,12 @@ __all__ = ["CLAPScorer", "compute_score_clap_batched"]
 
 @register_scorer("clap")
 class CLAPScorer(RewardScorer):
-    """LAION CLAP text-audio alignment as a batch-native scorer."""
+    """LAION CLAP text-audio alignment as a batch-native scorer.
+
+    ``model_path`` selects weights and the processor. ``model_kwargs`` and
+    ``processor_kwargs`` are forwarded to their respective ``from_pretrained``
+    calls when the executor loads the model.
+    """
 
     max_batch_size = _frozen._MAX_BATCH_SIZE
     supports_cpu_offload = True
@@ -49,7 +53,7 @@ class CLAPScorer(RewardScorer):
         self._adapter: _frozen.CLAPModel | None = None
 
     def load(self, device: Any) -> None:
-        target = torch.device(device) if device is not None else torch.device(get_device_name(), get_device_id())
+        target = torch.device(device)
         self._adapter = _frozen.CLAPModel(
             model_path=self.model_path,
             device=target,
@@ -61,7 +65,7 @@ class CLAPScorer(RewardScorer):
 
     def score_batch(self, batch: list[dict[str, Any]]) -> list[dict[str, Any] | Exception]:
         results: list[dict[str, Any] | Exception] = [None] * len(batch)
-        waveforms: list[np.ndarray] = []
+        waveforms = []
         prompts: list[str] = []
         source_rates: list[int] = []
         calibrations: list[tuple[Any, Any, Any, Any]] = []
@@ -69,44 +73,24 @@ class CLAPScorer(RewardScorer):
 
         for index, request in enumerate(batch):
             try:
-                sample_batch = request.get("batch")
-                extra_info = _frozen.audio_info_from_batch(request.get("extra_info"), sample_batch, scorer="CLAP")
-                audio_layout = request.get("audio_layout")
-                if audio_layout is not None:
-                    if extra_info.get("audio_layout") not in (None, audio_layout):
-                        raise ValueError("Conflicting audio_layout in scorer config and extra_info.")
-                    extra_info["audio_layout"] = audio_layout
-
-                prompt = request.get("ground_truth") or ""
-                prompt_key = request.get("prompt_key")
-                if prompt_key is not None:
-                    if sample_batch is None:
-                        raise ValueError("CLAP prompt_key requires a single-sample batch.")
-                    prompt = sample_batch[0].non_tensor_batch["reward_inputs"]["text"][prompt_key]
-
-                audio = extra_info.get("audio")
-                if "media_artifacts" not in extra_info and isinstance(audio, np.ndarray) and audio.dtype == object:
-                    extra_info["audio"] = np.asarray(audio, dtype=np.float32)
-                sample_rate = extra_info.get("audio_sample_rate")
-                if (
-                    "media_artifacts" not in extra_info
-                    and isinstance(sample_rate, np.ndarray)
-                    and sample_rate.size == 1
-                ):
-                    extra_info["audio_sample_rate"] = sample_rate.item()
-                waveform, source_rate = _frozen._get_audio(extra_info)
-                waveform = _frozen.resample_audio(waveform, source_rate, _frozen._CLAP_SAMPLE_RATE)
-                waveforms.append(waveform.numpy().astype(np.float32, copy=False))
+                prompt, extra_info = _frozen._prepare_request(
+                    request.get("ground_truth"),
+                    request.get("extra_info"),
+                    request.get("batch"),
+                    request.get("audio_layout"),
+                    request.get("prompt_key"),
+                )
+                waveform, source_rate = _frozen._prepare_waveform(extra_info)
+                calibration = (
+                    request.get("score_scale", 1.0),
+                    request.get("score_offset", 0.0),
+                    request.get("score_min"),
+                    request.get("score_max"),
+                )
+                waveforms.append(waveform)
                 prompts.append(prompt)
                 source_rates.append(source_rate)
-                calibrations.append(
-                    (
-                        request.get("score_scale", 1.0),
-                        request.get("score_offset", 0.0),
-                        request.get("score_min"),
-                        request.get("score_max"),
-                    )
-                )
+                calibrations.append(calibration)
                 valid_indices.append(index)
             except Exception as error:
                 results[index] = error
@@ -123,45 +107,22 @@ class CLAPScorer(RewardScorer):
             output = self._require_adapter().infer(waveforms, prompts)
         audio_embeddings = output["audio_embeddings"]
         text_embeddings = output["text_embeddings"]
-        expected = len(valid_indices)
-        if (
-            not isinstance(audio_embeddings, torch.Tensor)
-            or not isinstance(text_embeddings, torch.Tensor)
-            or audio_embeddings.ndim != 2
-            or text_embeddings.ndim != 2
-            or audio_embeddings.shape[0] != expected
-            or text_embeddings.shape[0] != expected
-        ):
-            raise ValueError(
-                "CLAP adapter must return one audio and text embedding per request; "
-                f"got audio={getattr(audio_embeddings, 'shape', type(audio_embeddings).__name__)} "
-                f"text={getattr(text_embeddings, 'shape', type(text_embeddings).__name__)} "
-                f"for {expected} requests"
-            )
-        if audio_embeddings.shape != text_embeddings.shape or audio_embeddings.shape[1] == 0:
-            raise ValueError(
-                "CLAP adapter audio and text embeddings must have identical non-empty [B, D] shapes; "
-                f"got audio={tuple(audio_embeddings.shape)} text={tuple(text_embeddings.shape)}"
-            )
         audio_embeddings = F.normalize(audio_embeddings.float(), p=2, dim=-1)
         text_embeddings = F.normalize(text_embeddings.float(), p=2, dim=-1)
         scores = (audio_embeddings * text_embeddings).sum(dim=-1)
-        if scores.ndim != 1 or scores.shape[0] != expected:
-            raise ValueError(f"CLAP cosine output must contain {expected} scalar scores, got {tuple(scores.shape)}")
 
         for position, index in enumerate(valid_indices):
             try:
                 scale, offset, score_min, score_max = calibrations[position]
-                score = scores[position].item() * scale + offset
-                if score_min is not None:
-                    score = max(score, score_min)
-                if score_max is not None:
-                    score = min(score, score_max)
-                results[index] = {"score": score, "source_sample_rate": source_rates[position]}
+                results[index] = _frozen._calibrate_score(
+                    scores[position].item(), source_rates[position], scale, offset, score_min, score_max
+                )
             except Exception as error:
                 results[index] = error
         return results
 
+    # TODO(zhtmike): drop both overrides once the migrated adapter derives
+    # placement from model parameters — tracked in #723 (post-window cleanup).
     def wake_up(self) -> None:
         super().wake_up()
         self._require_adapter().device = self.device
@@ -192,7 +153,13 @@ async def compute_score_clap_batched(
     batch=None,
     **kwargs,
 ) -> dict:
-    """Submit one sample to the executor-hosted batch-native CLAP scorer."""
+    """Submit one sample to the executor-hosted batch-native CLAP scorer.
+
+    ``data_source``, ``ground_truth``, ``extra_info``, optional ``solution_image``
+    and ``batch``, and scorer options in ``kwargs`` form the executor request.
+    ``reward_model`` owns the executor and returns its score dictionary with
+    ``score`` and ``source_sample_rate``.
+    """
     request = {
         "data_source": data_source,
         "solution_image": solution_image,

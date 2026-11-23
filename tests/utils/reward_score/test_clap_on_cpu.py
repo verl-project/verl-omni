@@ -19,6 +19,7 @@ import threading
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
+import numpy as np
 import pytest
 import torch
 from verl.utils.import_utils import load_extern_object, load_module
@@ -320,3 +321,26 @@ def test_legacy_clap_preserves_explicit_source_rate(rate):
     audio, actual_rate = clap._get_audio({"audio": torch.ones(2, 16), "audio_sample_rate": rate})
     assert audio.shape == (16,)
     assert actual_rate == int(rate)
+
+
+@pytest.mark.asyncio
+async def test_cached_legacy_clap_accepts_numeric_object_audio_and_numpy_rate(monkeypatch):
+    state = _reset_consumer(monkeypatch)
+    processor = _FakeProcessor()
+    monkeypatch.setattr(clap, "_load_clap", lambda model_name_or_path, device: (_FakeModel(), processor))
+    extra_info = {
+        "audio": np.array([["0.0", "1.0"]], dtype=object),
+        "audio_sample_rate": np.array([48_000]),
+        "audio_layout": "CT",
+    }
+
+    try:
+        result = await clap.compute_score("test", None, "up", extra_info, device="cpu", score_scale=2.0, score_max=1.5)
+    finally:
+        await _stop_consumer(state)
+
+    assert result == {"score": pytest.approx(1.5), "source_sample_rate": 48_000}
+    assert processor.batches[0][0] == ["up"]
+    np.testing.assert_array_equal(processor.batches[0][1][0], np.array([0.0, 1.0], dtype=np.float32))
+    assert extra_info["audio"].dtype == object
+    assert extra_info["audio_sample_rate"].shape == (1,)

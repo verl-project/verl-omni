@@ -15,7 +15,6 @@
 
 import asyncio
 import os
-import re
 import threading
 from functools import partial
 from types import SimpleNamespace
@@ -77,10 +76,6 @@ class _FakeAdapter:
         audio = torch.tensor(np.stack([waveform[:2] for waveform in waveforms]))
         prompt_features = {"right": [1.0, 0.0], "up": [0.0, 1.0], "block": [1.0, 0.0]}
         text = torch.tensor([prompt_features.get(prompt, [1.0, 0.0]) for prompt in prompts])
-        if "bad-cardinality" in prompts:
-            audio = audio[:-1]
-        if "broadcast-shape" in prompts:
-            text = text[:, :1]
         return {"audio_embeddings": audio, "text_embeddings": text}
 
     def close(self):
@@ -277,6 +272,74 @@ def test_legacy_audio_accepts_singleton_numpy_sample_rates(fake_adapter, sample_
     assert request["extra_info"]["audio_sample_rate"] is sample_rate
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sample_rate", [np.array(48_000), np.array([48_000]), np.array([[48_000]])])
+async def test_legacy_and_native_share_numpy_audio_and_calibration(fake_adapter, sample_rate):
+    scorer = CLAPScorer()
+    scorer.load("cpu")
+    audio = np.array([["0.0", "1.0"]], dtype=object)
+    extra_info = {"audio": audio, "audio_sample_rate": sample_rate, "audio_layout": "CT"}
+    request = _request(
+        prompt="up", extra_info=extra_info, score_scale=2.0, score_offset=0.25, score_min=-1.0, score_max=2.0
+    )
+
+    class _ManagedModel:
+        async def infer(self, waveforms, prompts):
+            return fake_adapter[0].infer(waveforms, prompts)
+
+    native = scorer.score_batch([request])[0]
+    legacy = await port._frozen.compute_score(
+        data_source="test",
+        solution_image=None,
+        ground_truth="up",
+        extra_info=extra_info,
+        reward_model=_ManagedModel(),
+        score_scale=2.0,
+        score_offset=0.25,
+        score_min=-1.0,
+        score_max=2.0,
+    )
+
+    assert native == legacy == {"score": pytest.approx(2.0), "source_sample_rate": 48_000}
+    assert extra_info["audio"] is audio
+    assert extra_info["audio_sample_rate"] is sample_rate
+    for waveforms, prompts in fake_adapter[0].calls:
+        assert prompts == ["up"]
+        np.testing.assert_array_equal(waveforms[0], np.array([0.0, 1.0], dtype=np.float32))
+
+
+@pytest.mark.asyncio
+async def test_legacy_and_native_reject_bad_object_audio_and_calibration_per_request(fake_adapter):
+    scorer = CLAPScorer()
+    scorer.load("cpu")
+    malformed = {
+        "audio": np.array([["invalid", "1.0"]], dtype=object),
+        "audio_sample_rate": np.array([48_000]),
+    }
+    bad_calibration = {"audio": np.array([["1.0", "0.0"]], dtype=object), "audio_sample_rate": 48_000}
+    requests = [
+        _request(extra_info=malformed),
+        _request(extra_info=bad_calibration, score_scale="bad"),
+        _request(),
+    ]
+    results = scorer.score_batch(requests)
+    assert isinstance(results[0], ValueError)
+    assert isinstance(results[1], TypeError)
+    assert results[2] == {"score": pytest.approx(1.0), "source_sample_rate": 48_000}
+    assert fake_adapter[0].calls[0][1] == ["right", "right"]
+
+    class _ManagedModel:
+        async def infer(self, waveforms, prompts):
+            return fake_adapter[0].infer(waveforms, prompts)
+
+    with pytest.raises(ValueError):
+        await port._frozen.compute_score("test", None, "right", malformed, reward_model=_ManagedModel())
+    with pytest.raises(TypeError):
+        await port._frozen.compute_score(
+            "test", None, "right", bad_calibration, reward_model=_ManagedModel(), score_scale="bad"
+        )
+
+
 @pytest.mark.parametrize(
     "sample_rate",
     [
@@ -387,7 +450,7 @@ async def test_executor_isolates_request_errors_and_propagates_artifact_contract
 
 
 @pytest.mark.asyncio
-async def test_shared_forward_and_cardinality_fail_the_whole_microbatch(monkeypatch, fake_adapter):
+async def test_shared_forward_error_fails_microbatch_and_later_request_recovers(monkeypatch, fake_adapter):
     executor = _executor(monkeypatch)
     await executor.wake_up()
     try:
@@ -398,15 +461,8 @@ async def test_shared_forward_and_cardinality_fail_the_whole_microbatch(monkeypa
         )
         assert all(isinstance(result, RuntimeError) for result in failed)
 
-        with pytest.raises(ValueError, match="one audio and text embedding per request"):
-            await executor.score(_request("bad-cardinality"))
-        mismatched = await asyncio.gather(
-            executor.score(_request("broadcast-shape")),
-            executor.score(_request("right")),
-            return_exceptions=True,
-        )
-        assert all(isinstance(result, ValueError) for result in mismatched)
-        assert all("identical non-empty [B, D] shapes" in str(result) for result in mismatched)
+        recovered = await executor.score(_request("right"))
+        assert recovered == {"score": pytest.approx(1.0), "source_sample_rate": 48_000}
     finally:
         await executor.close()
 
@@ -606,34 +662,6 @@ def test_preprocessing_failures_stay_in_their_slot(fake_adapter, sample_request,
     assert isinstance(result, error)
     assert message in str(result)
     assert good["score"] == pytest.approx(1.0)
-
-
-@pytest.mark.parametrize(
-    "audio_embeddings, text_embeddings, message",
-    [
-        ([[1.0, 0.0], [0.0, 1.0]], torch.ones(2, 2), "one audio and text embedding per request"),
-        (torch.ones(2, 2), [[1.0, 0.0], [0.0, 1.0]], "one audio and text embedding per request"),
-        (torch.ones(2), torch.ones(2, 2), "one audio and text embedding per request"),
-        (torch.ones(2, 2), torch.ones(2, 1, 2), "one audio and text embedding per request"),
-        (torch.ones(1, 2), torch.ones(2, 2), "one audio and text embedding per request"),
-        (torch.ones(2, 2), torch.ones(3, 2), "one audio and text embedding per request"),
-        (torch.ones(2, 2), torch.ones(2, 1), "identical non-empty [B, D] shapes"),
-        (torch.empty(2, 0), torch.empty(2, 0), "identical non-empty [B, D] shapes"),
-    ],
-)
-def test_score_batch_rejects_malformed_adapter_embeddings(
-    fake_adapter, monkeypatch, audio_embeddings, text_embeddings, message
-):
-    scorer = CLAPScorer()
-    scorer.load("cpu")
-    monkeypatch.setattr(
-        fake_adapter[0],
-        "infer",
-        lambda waveforms, prompts: {"audio_embeddings": audio_embeddings, "text_embeddings": text_embeddings},
-    )
-
-    with pytest.raises(ValueError, match=re.escape(message)):
-        scorer.score_batch([_request("right"), _request("up", waveform=(0.0, 1.0))])
 
 
 def test_score_batch_all_invalid_preserves_error_objects_without_inference(fake_adapter, monkeypatch):
