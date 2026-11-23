@@ -1,6 +1,6 @@
 # Named Reward Models
 
-Last updated: 11/19/2026
+Last updated: 11/22/2026
 
 This guide describes how to configure and extend named model-backed rewards
 under `reward.models` in `verl-omni`. For the general Reward Loop interface and
@@ -695,10 +695,17 @@ whose size is controlled by `reward.reward_model.n_gpus_per_node` and `nnodes`.
 
 ## Lifecycle and execution
 
-`offload` has the same meaning for both backends:
+`offload` controls model residency for both backends:
 
 - `true` (default): wake before scoring and sleep afterward;
-- `false`: keep the model resident across training steps.
+- `false` (where supported): keep the model resident across training steps.
+
+V1 synchronous diffusion with batch scoring requires effective `offload=true`
+at startup for named accelerator rewards sharing the rollout pool. When all
+accelerator reward models in that pool are unsharded native models, validation
+uses release confirmation and also requires
+`actor_rollout_ref.rollout.free_cache_engine=true`. CPU-only deployments and
+dedicated reward pools can still use `offload=false`.
 
 Independent named models are woken, scored, and slept concurrently. Native
 batches are padded and split evenly across the workers assigned to that model
@@ -708,6 +715,21 @@ with `dispatch_batch_size`; see [Native replica scheduling](#native-replica-sche
 The reward loop exposes `async_compute_rm_score()` for asynchronous callers and
 keeps `compute_rm_score()` as the synchronous compatibility entrypoint used by
 current trainers. Cleanup is attempted even when inference or scoring fails.
+
+Both entrypoints accept the optional keyword-only `on_release` callback for
+named reward models. The reward manager calls it at most once under its score
+lock, after accepted scoring work settles and reward wake and sleep succeed.
+The callback can run even when scoring raises. It must be synchronous and return
+without raising or re-entering scoring. A caller using it for a shared pool must
+use offload-enabled models whose sleep operation releases accelerator resources
+and serialize access across the handoff. For release-confirmed V1 synchronous
+validation, the trainer sleeps rollout before scoring, restores it only after
+the callback, and waits for the weight update to commit before continuing.
+
+During V1 synchronous colocated training, a scoring or reward sleep error aborts
+the step before the step-end rollout weight update. If both fail, the manager logs
+the sleep error and propagates the scoring error. Reporting both failures in this
+path is tracked as part of the lifecycle follow-up in [RFC #723 §5.5](https://github.com/verl-project/verl-omni/issues/723#55-lifecycle-manager-owned-choreography).
 
 Native PickScore can retain its existing weights on CPU while sleeping by setting
 `executor.kwargs.retain_weights_on_cpu: true`. This opt-in requires a CUDA or Intel GPU worker;

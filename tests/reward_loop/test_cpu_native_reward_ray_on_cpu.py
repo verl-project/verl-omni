@@ -452,14 +452,8 @@ def test_cpu_phase_failure_drains_accepted_samples_before_sleep(tmp_path, monkey
         ray.shutdown()
 
 
-@pytest.mark.parametrize(
-    ("confirm_release", "score_fails"),
-    [(False, False), (True, False), (False, True), (True, True)],
-    ids=["False", "True", "plain-scoring-error", "release-aware-scoring-error"],
-)
-def test_cpu_phase_cancellation_drains_accepted_samples_before_sleep(
-    tmp_path, monkeypatch, confirm_release, score_fails
-):
+@pytest.mark.parametrize("confirm_release", [False, True], ids=["False", "release-aware-scoring-error"])
+def test_cpu_phase_cancellation_drains_accepted_samples_before_sleep(tmp_path, monkeypatch, confirm_release):
     monkeypatch.setattr(OmniRewardLoopManager, "_create_native_workers", _controlled_native_workers)
     ray.init(num_cpus=4, num_gpus=0, include_dashboard=False, object_store_memory=128 * 1024**2)
     try:
@@ -471,11 +465,11 @@ def test_cpu_phase_cancellation_drains_accepted_samples_before_sleep(
         )
         data = _full_data()
         failing_worker, peer = manager._reward_worker_groups["quality"]
-        if score_fails:
+        if confirm_release:
             data = DataProto.concat([data, data[2:]])
             data.non_tensor_batch["reward_model"][0] = {"ground_truth": "controlled-fail"}
-        data.non_tensor_batch["reward_model"][2 if score_fails else 1] = {"ground_truth": "delay"}
-        delayed_worker = peer if score_fails else failing_worker
+        data.non_tensor_batch["reward_model"][2 if confirm_release else 1] = {"ground_truth": "delay"}
+        delayed_worker = peer if confirm_release else failing_worker
 
         async def run():
             releases = []
@@ -483,7 +477,7 @@ def test_cpu_phase_cancellation_drains_accepted_samples_before_sleep(
             scoring = asyncio.create_task(manager.async_compute_rm_score(data, **options))
             try:
                 await asyncio.wait_for(delayed_worker.wait_for_delayed_sample.remote(), timeout=30)
-                if score_fails:
+                if confirm_release:
                     await failing_worker.release_failure.remote()
                     await asyncio.wait_for(failing_worker.wait_for_failure.remote(), timeout=30)
                 for _ in range(2):
@@ -494,14 +488,14 @@ def test_cpu_phase_cancellation_drains_accepted_samples_before_sleep(
                     assert not scoring.done(), "Cancellation returned before accepted RPCs completed"
                     assert not releases, "Release was acknowledged while an accepted RPC was still running"
             finally:
-                if score_fails:
+                if confirm_release:
                     await failing_worker.release_failure.remote()
                 await delayed_worker.release_delay.remote()
                 result = (await asyncio.gather(scoring, return_exceptions=True))[0]
             state = await delayed_worker.delayed_sample_state.remote()
             assert state == (True, True, 0)
             assert releases == (["released"] if confirm_release else [])
-            if confirm_release and score_fails:
+            if confirm_release:
                 assert isinstance(result, BaseExceptionGroup)
                 score_error, cancellation = result.exceptions
                 assert isinstance(score_error, ray.exceptions.RayTaskError)

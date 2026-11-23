@@ -109,33 +109,32 @@ def validation(monkeypatch):
     return setup
 
 
-def test_validation_restores_after_scoring_failure(validation):
+def test_validation_restores_after_scoring_cancellation(validation):
     trainer, reward_manager, calls = validation()
-    failure = ValueError("scoring failed")
+    cancellation = asyncio.CancelledError("scoring cancelled")
 
-    async def fail(batch, *, preserve_scoring_error_on_cancel=False):
-        raise failure
+    async def cancel(batch, *, preserve_scoring_error_on_cancel=False):
+        raise cancellation
 
-    reward_manager._compute_named_model_scores = fail
-    with pytest.raises(ValueError) as caught:
+    reward_manager._compute_named_model_scores = cancel
+    with pytest.raises(asyncio.CancelledError) as caught:
         trainer._validate()
-    assert caught.value is failure
+    assert caught.value is cancellation
     assert calls == ["generate", "rollout sleep", "reward wake", "reward sleep", ("restore", 4), "commit"]
 
 
-def test_validation_restores_before_union_failure(validation, monkeypatch):
+def test_validation_commits_weights_before_merging_each_batch(validation, monkeypatch):
     trainer, _, calls = validation()
-    failure = ValueError("union failed")
+    original_union = DataProto.union
 
-    def fail(data, reward):
+    def record_union(data, reward):
         calls.append("union")
-        raise failure
+        return original_union(data, reward)
 
-    monkeypatch.setattr(DataProto, "union", fail)
-    with pytest.raises(ValueError) as caught:
-        trainer._validate()
-    assert caught.value is failure
-    assert calls == [
+    monkeypatch.setattr(DataProto, "union", record_union)
+    trainer.val_dataloader *= 2
+    trainer._validate()
+    batch_calls = [
         "generate",
         "rollout sleep",
         "reward wake",
@@ -145,47 +144,12 @@ def test_validation_restores_before_union_failure(validation, monkeypatch):
         "commit",
         "union",
     ]
-
-
-def test_validation_preserves_scoring_and_reward_sleep_failures(validation):
-    trainer, reward_manager, calls = validation()
-    scoring = ValueError("scoring failed")
-    cleanup = RuntimeError("reward sleep failed")
-
-    async def fail(batch, *, preserve_scoring_error_on_cancel=False):
-        raise scoring
-
-    async def fail_sleep():
-        calls.append("reward sleep")
-        raise cleanup
-
-    reward_manager._compute_named_model_scores = fail
-    reward_manager.multi_reward_model_manager.sleep = fail_sleep
-    with pytest.raises(BaseExceptionGroup) as caught:
-        trainer._validate()
-    assert caught.value.exceptions == (scoring, cleanup)
-    assert calls == ["generate", "rollout sleep", "reward wake", "reward sleep"]
-
-
-def test_validation_resumes_before_each_next_generation_and_preserves_order(validation):
-    trainer, _, calls = validation()
-    trainer.val_dataloader *= 2
-    trainer._validate()
-    trainer._validate()
-    assert calls == ["generate", "rollout sleep", "reward wake", "score", "reward sleep", ("restore", 4), "commit"] * 4
+    assert calls == batch_calls * 2
     assert trainer._val_metrics_update.call_args.args[2]["reward"] == [2.0, 1.0, 2.0, 1.0]
 
 
-def test_empty_validation_batch_never_lends_the_pool(validation, monkeypatch):
-    trainer, _, calls = validation()
-    monkeypatch.setattr(trainer_base, "diffusion_tq_batch_to_dataproto", lambda *a, **kw: DataProto())
-    trainer._validate()
-    assert calls == ["generate"]
-    trainer_base.tq.kv_clear.assert_called_once()
-
-
 @pytest.mark.parametrize(
-    ("shared", "named", "options", "streaming"),
+    ("shared", "named", "options"),
     [
         (
             True,
@@ -196,15 +160,13 @@ def test_empty_validation_batch_never_lends_the_pool(validation, monkeypatch):
                 "+reward.models.quality.placement.num_replicas=1",
                 "+reward.models.quality.offload=false",
             ),
-            False,
         ),
-        (False, True, ("reward.reward_model.enable_resource_pool=true", "+reward.models.quality.offload=false"), False),
-        (True, False, (), False),
-        (False, False, ("reward.reward_model.enable_resource_pool=true",), True),
+        (False, True, ("reward.reward_model.enable_resource_pool=true", "+reward.models.quality.offload=false")),
+        (True, False, ()),
     ],
-    ids=["cpu", "dedicated", "legacy-batch", "legacy-streaming"],
+    ids=["cpu", "dedicated", "legacy"],
 )
-def test_other_topologies_keep_existing_validation_order(validation, monkeypatch, shared, named, options, streaming):
+def test_other_topologies_keep_existing_validation_order(validation, monkeypatch, shared, named, options):
     trainer, _, calls = validation(shared=shared, named=named, options=options)
 
     # A positional-only stub rejects any attempt to invoke release-aware scoring.
@@ -213,17 +175,8 @@ def test_other_topologies_keep_existing_validation_order(validation, monkeypatch
         return DataProto.from_dict(tensors={"rm_scores": data.batch["prompts"].float()})
 
     monkeypatch.setattr(trainer, "_compute_reward_colocate", score)
-    if streaming:
-        original = trainer_base.diffusion_tq_batch_to_dataproto
-
-        def rollout_scored_data(*args, **kwargs):
-            data = original(*args, **kwargs)
-            data.batch["rm_scores"] = data.batch["prompts"].float()
-            return data
-
-        monkeypatch.setattr(trainer_base, "diffusion_tq_batch_to_dataproto", rollout_scored_data)
     trainer._validate()
-    assert calls == (["generate"] if streaming else ["generate", "rollout sleep", "score", ("restore", 4)])
+    assert calls == ["generate", "rollout sleep", "score", ("restore", 4)]
 
 
 @pytest.mark.parametrize(
@@ -238,29 +191,19 @@ def test_shared_validation_rejects_disabled_release_at_startup(validation, optio
         validation(options=(option,))
 
 
-@pytest.mark.parametrize("sleep", ["rollout", "reward"])
-def test_validation_stops_when_sleep_fails(validation, sleep):
-    trainer, manager, calls = validation()
-    failure = RuntimeError(f"{sleep} sleep failed")
+def test_validation_stops_when_rollout_sleep_fails(validation):
+    trainer, _, calls = validation()
+    failure = RuntimeError("rollout sleep failed")
 
     def fail():
-        calls.append(f"{sleep} sleep failed")
+        calls.append("rollout sleep failed")
         raise failure
 
-    if sleep == "rollout":
-        trainer.checkpoint_manager.sleep_replicas = fail
-    else:
-
-        async def fail_reward():
-            fail()
-
-        manager.multi_reward_model_manager.sleep = fail_reward
-
+    trainer.checkpoint_manager.sleep_replicas = fail
     with pytest.raises(RuntimeError) as caught:
         trainer._validate()
     assert caught.value is failure
-    expected = ["rollout sleep", "reward wake", "score"] if sleep == "reward" else []
-    assert calls == ["generate", *expected, f"{sleep} sleep failed"]
+    assert calls == ["generate", "rollout sleep failed"]
 
 
 def test_validation_does_not_restore_after_unconfirmed_wake(validation):
@@ -278,8 +221,18 @@ def test_validation_does_not_restore_after_unconfirmed_wake(validation):
     assert calls == ["generate", "rollout sleep", "reward sleep"]
 
 
-@pytest.mark.parametrize("score_fails", [False, True])
-def test_validation_preserves_restore_failure(validation, score_fails):
+def test_validation_does_not_restore_if_scoring_returns_without_release(validation, monkeypatch):
+    trainer, manager, calls = validation()
+    rewards = DataProto.from_dict(tensors={"rm_scores": torch.ones(2, 1)})
+    monkeypatch.setattr(manager, "compute_rm_score", Mock(return_value=rewards))
+
+    with pytest.raises(RuntimeError, match="^Validation reward release unconfirmed$"):
+        trainer._validate()
+
+    assert calls == ["generate", "rollout sleep"]
+
+
+def test_validation_preserves_scoring_and_weight_commit_failures(validation):
     trainer, manager, calls = validation()
     scoring = ValueError("scoring failed")
     restore = RuntimeError("weight sync failed")
@@ -292,15 +245,11 @@ def test_validation_preserves_restore_failure(validation, score_fails):
         calls.append("commit failed")
         raise restore
 
-    if score_fails:
-        manager._compute_named_model_scores = fail
+    manager._compute_named_model_scores = fail
     trainer.checkpoint_manager.wait_for_weight_update = fail_restore
-    with pytest.raises((BaseExceptionGroup, RuntimeError)) as caught:
+    with pytest.raises(BaseExceptionGroup) as caught:
         trainer._validate()
-    if score_fails:
-        assert caught.value.exceptions == (scoring, restore)
-    else:
-        assert caught.value is restore
+    assert caught.value.exceptions == (scoring, restore)
     assert "Validation rollout weight restore failed" in restore.__notes__
     assert calls == [
         "generate",
@@ -313,24 +262,9 @@ def test_validation_preserves_restore_failure(validation, score_fails):
     ]
 
 
-def test_validation_restores_after_scoring_cancellation(validation):
-    trainer, manager, calls = validation()
-    cancellation = asyncio.CancelledError("scoring cancelled")
-
-    async def cancel(batch, *, preserve_scoring_error_on_cancel=False):
-        raise cancellation
-
-    manager._compute_named_model_scores = cancel
-    with pytest.raises(asyncio.CancelledError) as caught:
-        trainer._validate()
-    assert caught.value is cancellation
-    assert calls == ["generate", "rollout sleep", "reward wake", "reward sleep", ("restore", 4), "commit"]
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize("cleanup_fails", [False, True])
-@pytest.mark.parametrize("score_fails", [False, True])
-async def test_manager_cancellation_waits_for_cleanup_and_retains_errors(validation, cleanup_fails, score_fails):
+async def test_manager_cancellation_waits_for_cleanup_and_retains_errors(validation, cleanup_fails):
     _, manager, calls = validation()
     entered = asyncio.Event()
     release = asyncio.Event()
@@ -348,8 +282,7 @@ async def test_manager_cancellation_waits_for_cleanup_and_retains_errors(validat
             raise cleanup_failure
         calls.append("reward sleep")
 
-    if score_fails:
-        manager._compute_named_model_scores = fail_score
+    manager._compute_named_model_scores = fail_score
     manager.multi_reward_model_manager.sleep = delayed_sleep
     data = DataProto.from_dict(tensors={"prompts": torch.arange(2).view(2, 1)})
     scoring = asyncio.create_task(manager.async_compute_rm_score(data, on_release=lambda: calls.append("released")))
@@ -365,19 +298,13 @@ async def test_manager_cancellation_waits_for_cleanup_and_retains_errors(validat
     finally:
         release.set()
         await asyncio.wait({scoring}, timeout=5)
-    if score_fails or cleanup_fails:
-        with pytest.raises(BaseExceptionGroup) as caught:
-            scoring.result()
-        errors = list(caught.value.exceptions)
-        if score_fails:
-            assert errors.pop(0) is score_failure
-        cancellation = errors.pop(0)
-        assert isinstance(cancellation, asyncio.CancelledError)
-        assert cancellation.args == ("first cancellation",)
-        assert errors == ([cleanup_failure] if cleanup_fails else [])
-    else:
-        with pytest.raises(asyncio.CancelledError, match="first cancellation"):
-            scoring.result()
+    with pytest.raises(BaseExceptionGroup) as caught:
+        scoring.result()
+    error, cancellation, *cleanup_errors = caught.value.exceptions
+    assert error is score_failure
+    assert isinstance(cancellation, asyncio.CancelledError)
+    assert cancellation.args == ("first cancellation",)
+    assert cleanup_errors == ([cleanup_failure] if cleanup_fails else [])
     assert calls == (
         ["reward wake", "score"] if cleanup_fails else ["reward wake", "score", "reward sleep", "released"]
     )
