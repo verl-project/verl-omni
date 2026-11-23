@@ -356,10 +356,4 @@ def _prepare_engine_config(model, base_config, fallback_model=None):
     config.rollout.enable_sleep_mode = offload
     if OmegaConf.is_missing(config.rollout, "name") or config.rollout.get("name") == "???":
         config.rollout.name = "vllm"
-    engine_kwargs = config.rollout.get("engine_kwargs") or {}
-    vllm_kwargs = engine_kwargs.get("vllm") or {}
-    if config.rollout.name == "vllm" and vllm_kwargs.get("runner") == "pooling":
-        worker_extension_cls = "verl_omni.workers.rollout.vllm_rollout.pooling_utils.PoolingRewardModelWorkerExtension"
-        if vllm_kwargs.get("worker_extension_cls") is None:
-            config.rollout.engine_kwargs.vllm.worker_extension_cls = worker_extension_cls
     return config

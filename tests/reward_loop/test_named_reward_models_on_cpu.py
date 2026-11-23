@@ -842,24 +842,6 @@ def test_engine_offload_rejects_legacy_sleep_aliases(setting):
         )
 
 
-def test_pooling_engine_uses_pooling_safe_worker_extension():
-    config = _config()
-    engine_config = _prepare_engine_config(
-        OmegaConf.create(
-            {
-                "backend": "engine",
-                "model_path": "/models/clip",
-                "rollout": {"name": "vllm", "engine_kwargs": {"vllm": {"runner": "pooling"}}},
-            }
-        ),
-        config.reward.reward_model,
-    )
-
-    assert engine_config.rollout.engine_kwargs.vllm.worker_extension_cls == (
-        "verl_omni.workers.rollout.vllm_rollout.pooling_utils.PoolingRewardModelWorkerExtension"
-    )
-
-
 def test_pooling_engine_preserves_explicit_worker_extension():
     config = _config()
     engine_config = _prepare_engine_config(
