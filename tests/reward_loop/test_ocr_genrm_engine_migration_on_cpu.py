@@ -11,13 +11,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""CPU composition parity tests for the V1 OCR GenRM named-engine migration.
+"""CPU regression checks for the V1 OCR GenRM named-engine migration.
 
-Maintained V1 OCR recipes register a named ``reward.models.<name>`` engine and
-bind ``reward.reward_functions.<term>`` to it instead of using the deprecated
-``reward.reward_model.enable=True`` + ``reward.custom_reward_function`` path.
-This test composes every V1 OCR recipe without a GPU and checks its engine,
-placement, offload lifecycle, judge output budget, and reward-term bindings.
+Maintained V1 OCR recipes and test harnesses register a named
+``reward.models.<name>`` engine and bind ``reward.reward_functions.<term>`` to
+it instead of using the deprecated ``reward.reward_model.enable=True`` +
+``reward.custom_reward_function`` path. This suite composes every V1 OCR shell
+entry without a GPU and checks its engine, placement, offload lifecycle, judge
+output budget, scorer loadability, and reward-term bindings.
 """
 
 from __future__ import annotations
@@ -46,16 +47,18 @@ from verl_omni.workers.config.reward import (
 
 ROOT = Path(__file__).parents[2]
 CONFIG_DIR = ROOT / "verl_omni/trainer/config"
-EXAMPLES_DIR = ROOT / "examples"
 
 OCR_SCORER_PATH = "pkg://verl_omni.utils.reward_score.genrm_ocr"
+JPEG_SCORER_PATH = "pkg://verl_omni.utils.reward_score.jpeg_compressibility"
 MIXED_SCORER_PATH = "examples/diffusionopd_trainer/sd35/mixed_task_reward.py"
 
 EXPECTED_MAX_TOKENS = 256
+HARNESS_MAX_TOKENS = 32
 LEGACY_DEFAULT_GRM_PROMPT = (
     "Please output only the text content from the image without any additional descriptions or formatting."
 )
 CUSTOM_USER_PROMPT = "Read the text exactly."
+TINY_REWARD_MODEL_PATH = "/tmp/tiny-random-qwen3-vl"
 
 
 @dataclass(frozen=True)
@@ -65,14 +68,16 @@ class TermCase:
     name: str
     path: str
     scorer_name: str
-    model: str
+    model: str | None
     weight: float = 1.0
+    required: bool = True
+    use_rollout_sampling_params: bool = True
     user_prompt: str | None = None
 
 
 @dataclass(frozen=True)
 class RecipeCase:
-    """One V1 OCR recipe and its expected named-engine reward contract."""
+    """One V1 OCR script and its expected named-engine reward contract."""
 
     case_id: str
     recipe: str
@@ -87,13 +92,17 @@ class RecipeCase:
     terms: tuple[TermCase, ...]
     gpu_memory_utilization: float
     enforce_eager: bool
+    response_length: int = EXPECTED_MAX_TOKENS
     max_model_len: int | None = None
+    prompt_length: int | None = None
+    do_sample: bool | None = None
+    temperature: float | None = None
     trainer_mode: str = "sync"
     reward_num_workers: int = 1
 
 
-def _ocr_term() -> TermCase:
-    return TermCase("ocr", OCR_SCORER_PATH, "compute_score_ocr", "ocr")
+def _ocr_term(*, weight: float = 1.0) -> TermCase:
+    return TermCase("ocr", OCR_SCORER_PATH, "compute_score_ocr", "ocr", weight=weight)
 
 
 def _colocated_qwen3_vl(case_id: str, recipe: str, *, enforce_eager: bool = True) -> RecipeCase:
@@ -138,6 +147,59 @@ def _dedicated_sd35(
         trainer_mode=trainer_mode,
     )
 
+
+def _nightly_qwen_image(case_id: str, recipe: str) -> RecipeCase:
+    return RecipeCase(
+        case_id=case_id,
+        recipe=recipe,
+        model_name="ocr",
+        model_path=TINY_REWARD_MODEL_PATH,
+        offload=True,
+        n_gpus_per_node=1,
+        nnodes=1,
+        tensor_parallel_size=1,
+        enable_resource_pool=False,
+        parent_pool_world_size=1,
+        terms=(_ocr_term(),),
+        gpu_memory_utilization=0.4,
+        enforce_eager=True,
+        response_length=HARNESS_MAX_TOKENS,
+        prompt_length=256,
+        do_sample=False,
+        temperature=0.0,
+    )
+
+
+def _special_e2e_qwen_image(
+    case_id: str,
+    recipe: str,
+    *,
+    n_gpus_per_node: int,
+    terms: tuple[TermCase, ...],
+) -> RecipeCase:
+    return RecipeCase(
+        case_id=case_id,
+        recipe=recipe,
+        model_name="ocr",
+        model_path=TINY_REWARD_MODEL_PATH,
+        offload=True,
+        n_gpus_per_node=n_gpus_per_node,
+        nnodes=1,
+        tensor_parallel_size=1,
+        enable_resource_pool=False,
+        parent_pool_world_size=n_gpus_per_node,
+        terms=terms,
+        gpu_memory_utilization=0.4,
+        enforce_eager=True,
+        response_length=HARNESS_MAX_TOKENS,
+        prompt_length=256,
+    )
+
+
+FLOWGRPO_SD35_CASE = _dedicated_sd35(
+    "flowgrpo_sd35",
+    "examples/flowgrpo_trainer/sd35/run_sd35_medium_ocr_lora_v1.sh",
+)
 
 RECIPES = (
     _colocated_qwen3_vl(
@@ -218,23 +280,80 @@ RECIPES = (
         enforce_eager=False,
         max_model_len=8192,
     ),
-    _dedicated_sd35(
-        "flowgrpo_sd35",
-        "examples/flowgrpo_trainer/sd35/run_sd35_medium_ocr_lora_v1.sh",
+    FLOWGRPO_SD35_CASE,
+    _nightly_qwen_image(
+        "nightly_flowgrpo_qwen_image",
+        "tests/nightly/qwen_image_flowgrpo/run_qwen_image_flowgrpo.sh",
+    ),
+    _nightly_qwen_image(
+        "nightly_diffusionnft_qwen_image",
+        "tests/nightly/qwen_image_diffusion_nft/run_qwen_image_diffusion_nft.sh",
+    ),
+    _nightly_qwen_image(
+        "nightly_online_dpo_qwen_image",
+        "tests/nightly/qwen_image_online_dpo/run_qwen_image_online_dpo.sh",
+    ),
+    _special_e2e_qwen_image(
+        "special_e2e_flowgrpo_qwen_image",
+        "tests/special_e2e/run_flowgrpo_qwen_image.sh",
+        n_gpus_per_node=4,
+        terms=(
+            TermCase(
+                "jpeg",
+                JPEG_SCORER_PATH,
+                "compute_score",
+                None,
+                weight=0.5,
+                required=False,
+                use_rollout_sampling_params=False,
+            ),
+            _ocr_term(weight=0.5),
+        ),
+    ),
+    _special_e2e_qwen_image(
+        "special_e2e_online_dpo_qwen_image",
+        "tests/special_e2e/run_online_dpo_qwen_image.sh",
+        n_gpus_per_node=2,
+        terms=(_ocr_term(),),
     ),
 )
 
+_PYTHON_CAPTURE_SHIM = (
+    "python3() { "
+    'if [[ "${1:-}" == "-m" && "${2:-}" == "verl_omni.trainer.main_diffusion_v1" ]]; then '
+    'shift 2; printf "%s\\0" "$@" > "${HYDRA_CAPTURE_FILE}"; '
+    'elif [[ "${1:-}" == */tests/nightly/run.py ]]; then '
+    'shift 1; printf "%s\\0" "$@" > "${HYDRA_CAPTURE_FILE}"; '
+    "fi; "
+    "}; "
+    "nvidia-smi() { return 0; }; "
+    "export -f python3 nvidia-smi; "
+    'bash "$@"'
+)
 
-def _compose_recipe(case: RecipeCase, tmp_path: Path):
-    """Run a recipe with a ``python3`` stub and compose its Hydra config."""
+
+def _compose_recipe(
+    case: RecipeCase,
+    tmp_path: Path,
+    *,
+    workspace: Path | None = None,
+    extra_overrides: tuple[str, ...] = ("trainer.logger=[console]",),
+):
+    """Run a recipe or harness with a ``python3`` stub and compose its Hydra config."""
     recipe = ROOT / case.recipe
-    workspace = tmp_path / "workspace"
+    resolved_workspace = workspace if workspace is not None else tmp_path / "workspace"
+    capture_file = tmp_path / f"{case.case_id}.hydra_overrides"
     env = {
-        **os.environ,
-        "OCR_WORKSPACE": str(workspace),
+        **{k: v for k, v in os.environ.items() if k != "REWARD_MODEL_PATH"},
+        "HYDRA_CAPTURE_FILE": str(capture_file),
+        "OCR_WORKSPACE": str(resolved_workspace),
         "FA3": "0",
+        "ATTN_BACKEND": "native",
+        "ROLLOUT_ATTN_BACKEND": "TORCH_SDPA",
         # Keep Boogu's ``hf download`` branch out of the CPU test.
         "MODEL_PATH": "dummy/model",
+        "DATA_DIR": str(tmp_path / "data"),
+        "OUTPUT_ROOT": str(tmp_path / "debug_dumps"),
         # OPD recipes require explicit teacher checkpoints at shell level.
         "TEACHER_PATH": str(tmp_path / "teacher"),
         "OCR_TEACHER_PATH": str(tmp_path / "ocr-teacher"),
@@ -242,27 +361,17 @@ def _compose_recipe(case: RecipeCase, tmp_path: Path):
         "GENEVAL_TEACHER_PATH": str(tmp_path / "geneval-teacher"),
         "CUSTOM_USER_PROMPT": CUSTOM_USER_PROMPT,
     }
-    result = subprocess.run(
-        [
-            "bash",
-            "-c",
-            'python3() { printf "%s\\0" "$@"; }; export -f python3; bash "$@"',
-            "bash",
-            str(recipe),
-            "trainer.logger=[console]",
-        ],
+    if case.model_path == TINY_REWARD_MODEL_PATH:
+        env["REWARD_MODEL_PATH"] = TINY_REWARD_MODEL_PATH
+    subprocess.run(
+        ["bash", "-c", _PYTHON_CAPTURE_SHIM, "bash", str(recipe), *extra_overrides],
         env=env,
         check=True,
         capture_output=True,
     )
-    tokens = result.stdout.decode().rstrip("\0").split("\0")
-    starts = [
-        index
-        for index in range(len(tokens) - 1)
-        if tokens[index] == "-m" and tokens[index + 1] == "verl_omni.trainer.main_diffusion_v1"
-    ]
-    assert starts, f"{case.recipe} did not invoke the V1 trainer"
-    overrides = tokens[starts[-1] + 2 :]
+    assert capture_file.is_file(), f"{case.recipe} did not invoke the V1 trainer"
+    raw = capture_file.read_bytes()
+    overrides = [token.decode() for token in raw.rstrip(b"\0").split(b"\0") if token]
     with initialize_config_dir(config_dir=str(CONFIG_DIR), version_base=None):
         return compose(config_name="diffusion_trainer", overrides=overrides)
 
@@ -305,7 +414,7 @@ def test_ocr_v1_recipe_keeps_legacy_reward_contract(case: RecipeCase, tmp_path: 
     assert model.n_gpus_per_node == case.n_gpus_per_node
     assert model.nnodes == case.nnodes
     assert model.rollout["name"] == "vllm"
-    assert model.rollout["response_length"] == EXPECTED_MAX_TOKENS
+    assert model.rollout["response_length"] == case.response_length
     assert model.rollout["tensor_model_parallel_size"] == case.tensor_parallel_size
     assert model.rollout.get("data_parallel_size", 1) == 1
     assert model.rollout.get("pipeline_model_parallel_size", 1) == 1
@@ -325,16 +434,22 @@ def test_ocr_v1_recipe_keeps_legacy_reward_contract(case: RecipeCase, tmp_path: 
     assert prepared.enable is True
     assert prepared.model_path == case.model_path
     assert prepared.rollout.name == "vllm"
-    assert prepared.rollout.response_length == EXPECTED_MAX_TOKENS
+    assert prepared.rollout.response_length == case.response_length
     assert prepared.rollout.tensor_model_parallel_size == case.tensor_parallel_size
     assert prepared.rollout.gpu_memory_utilization == case.gpu_memory_utilization
     assert prepared.rollout.enforce_eager == case.enforce_eager
     assert prepared.rollout.max_model_len == case.max_model_len
+    if case.prompt_length is not None:
+        assert prepared.rollout.prompt_length == case.prompt_length
+    if case.do_sample is not None:
+        assert prepared.rollout.do_sample is case.do_sample
+    if case.temperature is not None:
+        assert prepared.rollout.temperature == pytest.approx(case.temperature)
     assert prepared.rollout.free_cache_engine is case.offload
     assert prepared.rollout.enable_sleep_mode is case.offload
 
     effective_rollout = ChainMap(model.rollout, base.rollout)
-    assert _sampling_params_from_rollout(effective_rollout) == {"max_tokens": EXPECTED_MAX_TOKENS}
+    assert _sampling_params_from_rollout(effective_rollout) == {"max_tokens": case.response_length}
 
     assert set(config.reward.reward_functions) == {term.name for term in case.terms}
     total_weight = 0.0
@@ -343,13 +458,11 @@ def test_ocr_v1_recipe_keeps_legacy_reward_contract(case: RecipeCase, tmp_path: 
         assert entry["path"] == term.path
         assert entry["name"] == term.scorer_name
         assert entry["weight"] == pytest.approx(term.weight)
-        assert entry["required"] is True
-        assert entry["use_rollout_sampling_params"] is True
+        assert bool(entry.get("required", False)) is term.required
+        assert bool(entry.get("use_rollout_sampling_params", False)) is term.use_rollout_sampling_params
         assert resolve_reward_model_name(term.name, entry, config.reward.models) == term.model
-        if term.path == OCR_SCORER_PATH:
-            assert callable(load_extern_object(term.path, term.scorer_name))
-        else:
-            assert (ROOT / term.path).is_file()
+        scorer_path = term.path if term.path.startswith("pkg://") else str(ROOT / term.path)
+        assert callable(load_extern_object(scorer_path, term.scorer_name))
         if term.user_prompt is None:
             assert "user_prompt" not in entry
             assert "system_prompt" not in entry
@@ -360,9 +473,78 @@ def test_ocr_v1_recipe_keeps_legacy_reward_contract(case: RecipeCase, tmp_path: 
     assert DEFAULT_GRM_PROMPT == LEGACY_DEFAULT_GRM_PROMPT
 
 
+@pytest.mark.parametrize("executor_override", [None, "mp"])
+def test_sd35_v1_ocr_recipe_handles_spaces_in_workspace_and_executor_override(
+    tmp_path: Path,
+    executor_override: str | None,
+):
+    workspace = tmp_path / "workspace with spaces"
+    overrides = ["trainer.logger=[console]"]
+    if executor_override is not None:
+        overrides.append(
+            f"++actor_rollout_ref.rollout.engine_kwargs.vllm_omni.distributed_executor_backend={executor_override}"
+        )
+
+    config = _compose_recipe(
+        FLOWGRPO_SD35_CASE,
+        tmp_path,
+        workspace=workspace,
+        extra_overrides=tuple(overrides),
+    )
+
+    validate_reward_model_terms(config)
+    model = parse_reward_model_config("ocr", config.reward.models.ocr)
+    assert model.backend == "engine"
+    assert model.model_path == "Qwen/Qwen2.5-VL-3B-Instruct"
+    assert model.resolved_offload is False
+    assert model.rollout["tensor_model_parallel_size"] == 1
+    assert model.rollout["response_length"] == EXPECTED_MAX_TOKENS
+    assert config.reward.reward_model.enable is False
+    assert config.reward.reward_manager.name == "MultiVisualRewardManager"
+    assert config.reward.reward_functions.ocr.name == "compute_score_ocr"
+    assert config.reward.reward_functions.ocr.required is True
+    assert config.reward.reward_functions.ocr.use_rollout_sampling_params is True
+    assert config.trainer.use_v1 is True
+    assert config.trainer.v1.trainer_mode == "sync"
+    assert config.actor_rollout_ref.rollout.tensor_model_parallel_size == 1
+    if executor_override is not None:
+        assert (
+            config.actor_rollout_ref.rollout.engine_kwargs.vllm_omni.distributed_executor_backend == executor_override
+        )
+    assert list(config.trainer.logger) == ["console"]
+    assert config.data.train_files == str(workspace / "data/ocr/sd3/train.parquet")
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        case
+        for case in RECIPES
+        if case.case_id in {"special_e2e_flowgrpo_qwen_image", "special_e2e_online_dpo_qwen_image"}
+    ],
+    ids=lambda case: case.case_id,
+)
+def test_special_e2e_ocr_scripts_inherit_npu_weight_nz_guard(case: RecipeCase, tmp_path: Path):
+    """Ensure lib_npu_e2e.sh's base reward rollout override still reaches named engines."""
+    config = _compose_recipe(
+        case,
+        tmp_path,
+        extra_overrides=(
+            "trainer.logger=[console]",
+            "++reward.reward_model.rollout.engine_kwargs.vllm.additional_config.weight_nz_mode=0",
+        ),
+    )
+    model = parse_reward_model_config(case.model_name, config.reward.models[case.model_name])
+    prepared = _prepare_engine_config(model, config.reward.reward_model)
+    assert prepared.rollout.engine_kwargs.vllm.additional_config.weight_nz_mode == 0
+
+
 def test_no_v1_ocr_recipe_uses_legacy_global_reward_model():
     legacy_recipes = []
-    for path in sorted(EXAMPLES_DIR.rglob("*.sh")):
+    for path in sorted(ROOT.rglob("*.sh")):
+        rel_parts = path.relative_to(ROOT).parts
+        if any(part.startswith(".") for part in rel_parts):
+            continue
         text = path.read_text()
         is_v1 = "main_diffusion_v1" in text or "use_v1=true" in text or "use_v1=True" in text
         is_ocr = "compute_score_ocr" in text or "genrm_ocr" in text or "mixed_task_reward" in text
