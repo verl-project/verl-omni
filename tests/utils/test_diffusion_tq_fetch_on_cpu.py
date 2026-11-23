@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from dataclasses import replace
 from types import SimpleNamespace
 
 import numpy as np
@@ -27,6 +28,7 @@ from verl.protocol import BatchData
 from verl.utils import tensordict_utils as tu
 
 import verl_omni
+from verl_omni.pipelines.model_base import DiffusionModelBase
 from verl_omni.pipelines.sd3_flow_grpo.diffusers_training_adapter import StableDiffusion3FlowGRPO
 from verl_omni.pipelines.wan22_dance_grpo.diffusers_training_adapter import Wan22DanceGRPO
 from verl_omni.trainer.diffusion.rollout_correction import compute_rollout_corr_metrics_from_batch
@@ -36,7 +38,12 @@ from verl_omni.workers.engine_workers import ActorRolloutRefWorker, _with_routin
 from verl_omni.workers.utils.padding import embeds_padding_2_no_padding
 
 REQUIRED = {"all_latents", "prompt_embeds", "pooled_prompt_embeds"}
-OPTIONAL = {"prompt_embeds_mask", "negative_prompt_embeds"}
+FIELDS = diffusion_tq.TQTrainingFields(
+    worker_required=frozenset(REQUIRED),
+    worker_optional=frozenset({"prompt_embeds_mask", "negative_prompt_embeds"}),
+    transition_fields=frozenset({"all_latents"}),
+    sequence_masks=(("prompt_embeds", "prompt_embeds_mask"),),
+)
 
 
 @pytest.fixture
@@ -116,7 +123,7 @@ def storage(monkeypatch):
 def read_core():
     return tq_utils.diffusion_tq_batch_to_dataproto(
         KVBatchMeta(keys=["b_0_0", "a_0_0"], tags=[{}, {}], partition_id="train"),
-        trajectory_fields=(REQUIRED, OPTIONAL),
+        trajectory_fields=FIELDS,
     )
 
 
@@ -131,17 +138,81 @@ def test_core_read_uses_explicit_allowlist_and_records_actual_sde_window(storage
     assert "negative_prompt_embeds" not in data.meta_info[diffusion_tq.TRAJECTORY_META]["fields"]
 
 
-def test_trainer_read_wires_enabled_field_groups(storage):
+def test_registered_pipeline_controls_driver_worker_and_dump_fields(storage, monkeypatch):
+    class CustomAdapter(DiffusionModelBase):
+        @classmethod
+        def tq_trajectory_fields(cls, model_config):
+            return diffusion_tq.TQTrainingFields(
+                worker_required=frozenset({model_config.states, "conditioning", "media_artifact__source_latent"}),
+                worker_optional=frozenset({"conditioning_valid"}),
+                driver_required=frozenset({"sample_weight"}),
+                transition_fields=frozenset({model_config.states}),
+                sequence_masks=(("conditioning", "conditioning_valid"),),
+            )
+
+    monkeypatch.setattr(DiffusionModelBase, "_registry", {})
+    DiffusionModelBase.register("CustomPipeline", "flow_grpo")(CustomAdapter)
+    adapter = DiffusionModelBase.get_class_by_name("CustomPipeline", "flow_grpo")
+    states = storage.payload["all_latents"]
+    conditioning_rows = [torch.ones(3, 4), torch.full((2, 4), 2.0)]
+    storage.payload = storage.payload.exclude("all_latents", "prompt_embeds", "prompt_embeds_mask")
+    storage.payload["denoise_states"] = states
+    storage.payload["conditioning"] = torch.nested.as_nested_tensor(conditioning_rows, layout=torch.jagged)
+    storage.payload["conditioning_valid"] = torch.tensor([[1, 1, 1], [1, 1, 0]])
+    storage.payload["media_artifact__source_latent"] = states[:, 0]
+    storage.payload["sample_weight"] = torch.tensor([0.5, 1.0])
     trainer = SimpleNamespace(
         worker_side_trajectory=True,
-        _trajectory_field_groups=(REQUIRED, OPTIONAL),
+        _trajectory_field_groups=adapter.tq_trajectory_fields(SimpleNamespace(states="denoise_states")),
         tokenizer=SimpleNamespace(pad_token_id=0),
     )
-    data = trainer_base.PolicyGradientDiffusionTrainerV1._read_training_batch(
-        trainer, KVBatchMeta(keys=["a_0_0", "b_0_0"], tags=[{}, {}], partition_id="train")
-    )
-    assert "all_latents" not in data.batch.keys()
-    assert diffusion_tq.TRAJECTORY_META in data.meta_info
+    meta = KVBatchMeta(keys=["a_0_0", "b_0_0"], tags=[{}, {}], partition_id="train")
+    data = trainer_base.PolicyGradientDiffusionTrainerV1._read_training_batch(trainer, meta)
+    assert set(storage.core_reads[-1]) == {
+        "prompts",
+        "uid",
+        "rm_scores",
+        "all_timesteps",
+        "extra_fields",
+        "sample_weight",
+    }
+    assert "media_artifact__image_preview" in tq_utils.diffusion_dump_tq_fields(meta)
+
+    result = diffusion_tq.materialize_diffusion_trajectory(data.select_idxs([1, 0, 1]).to_tensordict())
+    assert set(storage.worker_reads[-1].fields) == {
+        "denoise_states",
+        "conditioning",
+        "conditioning_valid",
+        "media_artifact__source_latent",
+    }
+    assert "media_artifact__image_preview" not in result.keys()
+    torch.testing.assert_close(result["sample_weight"], torch.tensor([1.0, 0.5, 1.0]))
+    torch.testing.assert_close(result["denoise_states"], states[[1, 0, 1]])
+    torch.testing.assert_close(result["media_artifact__source_latent"], states[[1, 0, 1], 0])
+    for actual, expected in zip(
+        result["conditioning"].unbind(), [conditioning_rows[1], conditioning_rows[0], conditioning_rows[1]], strict=True
+    ):
+        torch.testing.assert_close(actual, expected)
+
+    storage.payload["denoise_states"] = states[:, :2]
+    with pytest.raises(ValueError, match=r"S\+1 latents.*denoise_states"):
+        trainer_base.PolicyGradientDiffusionTrainerV1._read_training_batch(trainer, meta)
+
+
+def test_projected_training_rejects_conflicting_field_ownership(storage):
+    meta = KVBatchMeta(keys=["a_0_0", "b_0_0"], tags=[{}, {}], partition_id="train")
+    fields = replace(FIELDS, driver_optional=frozenset({"all_latents"}))
+    with pytest.raises(ValueError, match="both driver- and worker-owned.*all_latents"):
+        tq_utils.diffusion_tq_batch_to_dataproto(meta, trajectory_fields=fields)
+    assert storage.core_reads == []
+
+
+def test_missing_adapter_driver_input_fails_before_read(storage):
+    meta = KVBatchMeta(keys=["a_0_0", "b_0_0"], tags=[{}, {}], partition_id="train")
+    fields = replace(FIELDS, driver_required=frozenset({"sample_weight"}))
+    with pytest.raises(ValueError, match="Missing training fields.*sample_weight"):
+        tq_utils.diffusion_tq_batch_to_dataproto(meta, trajectory_fields=fields)
+    assert storage.core_reads == []
 
 
 def test_non_tq_worker_batches_keep_their_existing_contract():
@@ -351,11 +422,12 @@ def test_unmasked_ragged_embeds_fail_closed(storage):
         diffusion_tq.materialize_diffusion_trajectory(read_core().to_tensordict())
 
 
-def test_ragged_embeds_reject_mismatched_mask(storage):
+@pytest.mark.parametrize("mask", [[[1, 1, 1, 1], [1, 1, 1, 1]], [[1, 1, 1], [1, 0, 1]]])
+def test_ragged_embeds_reject_mismatched_mask(storage, mask):
     storage.payload["prompt_embeds"] = torch.nested.as_nested_tensor(
         [torch.ones(3, 8), torch.ones(2, 8)], layout=torch.jagged
     )
-    storage.payload["prompt_embeds_mask"] = torch.ones(2, 4, dtype=torch.long)
+    storage.payload["prompt_embeds_mask"] = torch.tensor(mask, dtype=torch.long)
     with pytest.raises(ValueError, match="incompatible 'prompt_embeds_mask'"):
         diffusion_tq.materialize_diffusion_trajectory(read_core().to_tensordict())
 
@@ -363,7 +435,8 @@ def test_ragged_embeds_reject_mismatched_mask(storage):
 def test_timestep_fields_cannot_be_deferred(storage):
     meta = KVBatchMeta(keys=["a_0_0", "b_0_0"], tags=[{}, {}], partition_id="train")
     with pytest.raises(ValueError, match="all_timesteps must remain driver-owned"):
-        tq_utils.diffusion_tq_batch_to_dataproto(meta, trajectory_fields=(REQUIRED | {"all_timesteps"}, OPTIONAL))
+        fields = replace(FIELDS, worker_required=FIELDS.worker_required | {"all_timesteps"})
+        tq_utils.diffusion_tq_batch_to_dataproto(meta, trajectory_fields=fields)
     assert storage.core_reads == []
 
 
@@ -377,8 +450,8 @@ def test_worker_rejects_missing_core_timesteps_before_fetch(storage):
 @pytest.mark.parametrize("cfg", [1.0, 5.0])
 def test_pipeline_contracts_require_cfg_fields_only_when_enabled(cfg):
     config = SimpleNamespace(pipeline=OmegaConf.create({"guidance_scale": cfg, "true_cfg_scale": cfg}))
-    sd3_required, _ = StableDiffusion3FlowGRPO.tq_trajectory_fields(config)
-    wan_required, _ = Wan22DanceGRPO.tq_trajectory_fields(config)
+    sd3_required = StableDiffusion3FlowGRPO.tq_trajectory_fields(config).worker_required
+    wan_required = Wan22DanceGRPO.tq_trajectory_fields(config).worker_required
     assert ("negative_pooled_prompt_embeds" in sd3_required) == (cfg > 1)
     assert ("negative_prompt_embeds" in wan_required) == (cfg > 1)
 

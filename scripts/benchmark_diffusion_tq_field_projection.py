@@ -240,7 +240,7 @@ def main() -> None:
             trajectory_fields = adapter.tq_trajectory_fields(
                 OmegaConf.create({"pipeline": {"guidance_scale": 4.5, "true_cfg_scale": 4.5}})
             )
-            for field_idx, field in enumerate(sorted(trajectory_fields[0])):
+            for field_idx, field in enumerate(sorted(trajectory_fields.worker_required)):
                 for row_idx in range(args.batch_size):
                     row = payload[field][row_idx]
                     pattern = torch.arange(row.numel(), dtype=torch.int64).remainder_(127).reshape(row.shape)
@@ -303,9 +303,7 @@ def main() -> None:
 
                     if args.check_row_order:
                         data = data.select_idxs(list(reversed(range(len(data)))) + [0])
-                    fields = sorted(
-                        (trajectory_fields[0] | trajectory_fields[1] | {"all_timesteps"}) & set(payload.keys())
-                    )
+                    fields = sorted((trajectory_fields.worker_fields | {"all_timesteps"}) & set(payload.keys()))
                     worker_inputs = embeds_padding_2_no_padding(_to_diffusion_worker_tensordict(data))
                     checksums[name] = ray.get(worker.read.remote(worker_inputs, fields))
                     worker_ms = (time.perf_counter_ns() - started) / 1_000_000
@@ -359,8 +357,8 @@ def main() -> None:
         "trajectory_fields": None
         if trajectory_fields is None
         else {
-            "required": sorted(trajectory_fields[0]),
-            "optional": sorted(trajectory_fields[1]),
+            "required": sorted(trajectory_fields.worker_required),
+            "optional": sorted(trajectory_fields.worker_optional),
         },
         "returned_fields": returned_fields,
         "returned_tensor_bytes": tensor_bytes,

@@ -13,11 +13,13 @@
 # limitations under the License.
 """Padding utilities for model training."""
 
+from collections.abc import Mapping
+
 import torch
 from tensordict import TensorDict
 
 
-def embeds_padding_2_no_padding(data: TensorDict) -> TensorDict:
+def embeds_padding_2_no_padding(data: TensorDict, *, sequence_masks: Mapping[str, str] | None = None) -> TensorDict:
     """
     Convert padded diffusion sequence fields to jagged nested tensors.
 
@@ -26,6 +28,8 @@ def embeds_padding_2_no_padding(data: TensorDict) -> TensorDict:
 
     Args:
         data: TensorDict containing padded sequence tensors and their masks.
+        sequence_masks: Explicit value-to-mask field names. If omitted, use the
+            default prompt embedding fields and discover ``*_rows_mask`` fields.
 
     Returns:
         TensorDict with padding stripped from prompt embeddings and masked row
@@ -57,15 +61,16 @@ def embeds_padding_2_no_padding(data: TensorDict) -> TensorDict:
             torch.nested.as_nested_tensor(mask_list, layout=torch.jagged),
         )
 
-    padded_keys = {"prompt_embeds", "negative_prompt_embeds"}
-    padded_keys.update(
-        key.removesuffix("_mask") for key in data.keys() if isinstance(key, str) and key.endswith("_rows_mask")
-    )
-    for key in padded_keys:
+    if sequence_masks is None:
+        padded_keys = {"prompt_embeds", "negative_prompt_embeds"}
+        padded_keys.update(
+            key.removesuffix("_mask") for key in data.keys() if isinstance(key, str) and key.endswith("_rows_mask")
+        )
+        sequence_masks = {key: f"{key}_mask" for key in padded_keys}
+    for key, mask_key in sequence_masks.items():
         values = data.get(key, None)
         if not isinstance(values, torch.Tensor) or values.is_nested:
             continue
-        mask_key = f"{key}_mask"
         mask = data.get(mask_key, None)
         data[key], data[mask_key] = _to_nested(values, mask, key)
 

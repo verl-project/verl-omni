@@ -108,13 +108,16 @@ Symptoms that show up regardless of which stage causes them:
 
 **Step time dominated by data transfer between worker groups (video models)**
 - For SD3 FlowGRPO and Wan2.2 DanceGRPO V1 `sync` runs with rollout-side rewards,
-  opt into `trainer.v1.worker_side_trajectory=true` to read an explicit core
-  allowlist on the driver and fetch trajectory tensors on the actor/ref workers.
-  The default is `false`. Actual timesteps stay on the driver for rollout diagnostics.
-  Decoded responses and named media artifacts remain in TQ for the separate dump read.
+  opt into `trainer.v1.worker_side_trajectory=true` to project the driver read
+  and fetch trajectory tensors on the actor/ref workers. The default is `false`.
+  Timesteps stay on the driver for rollout diagnostics. Dump-only media remains
+  in TQ for the separate dump read.
   Async modes, teacher scoring, direct-preference training, and driver-side
   reward consumers are rejected when this option is enabled; pipelines must
-  declare their trajectory field contract. Validation keeps its full read.
+  declare extra driver fields, worker fields, and any transition or mask
+  requirements through the training adapter's `tq_trajectory_fields()` hook.
+  A pipeline can declare a named artifact as a worker field if training needs it.
+  Validation keeps its full read.
   Required fields and transition shapes are checked without falling back to a
   full training read. Compare matched workloads: small payloads may be slower
   because worker fetching adds metadata requests.

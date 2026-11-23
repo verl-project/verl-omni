@@ -23,6 +23,7 @@ from verl.utils.device import get_device_name
 
 from verl_omni.pipelines.model_base import DiffusionModelBase
 from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
+from verl_omni.utils.diffusion_tq import TQTrainingFields
 from verl_omni.workers.config import DiffusionModelConfig
 
 __all__ = ["StableDiffusion3FlowGRPO"]
@@ -56,7 +57,7 @@ class StableDiffusion3FlowGRPO(DiffusionModelBase):
     """
 
     @classmethod
-    def tq_trajectory_fields(cls, model_config: DiffusionModelConfig) -> tuple[set[str], set[str]]:
+    def tq_trajectory_fields(cls, model_config: DiffusionModelConfig) -> TQTrainingFields:
         """Declare SD3 FlowGRPO trajectory and CFG conditioning tensors."""
         required = {"all_latents", "prompt_embeds", "pooled_prompt_embeds"}
         optional = {"prompt_embeds_mask", "negative_prompt_embeds_mask", "latents_clean"}
@@ -64,7 +65,15 @@ class StableDiffusion3FlowGRPO(DiffusionModelBase):
             required.update({"negative_prompt_embeds", "negative_pooled_prompt_embeds"})
         else:
             optional.update({"negative_prompt_embeds", "negative_pooled_prompt_embeds"})
-        return required, optional
+        return TQTrainingFields(
+            worker_required=frozenset(required),
+            worker_optional=frozenset(optional),
+            transition_fields=frozenset({"all_latents"}),
+            sequence_masks=(
+                ("prompt_embeds", "prompt_embeds_mask"),
+                ("negative_prompt_embeds", "negative_prompt_embeds_mask"),
+            ),
+        )
 
     @classmethod
     def build_scheduler(cls, model_config: DiffusionModelConfig):

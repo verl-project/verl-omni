@@ -13,6 +13,9 @@
 # limitations under the License.
 """Worker-side materialization of diffusion trajectory fields."""
 
+from dataclasses import dataclass
+from typing import TypedDict
+
 import torch
 import transfer_queue as tq
 from tensordict import TensorDict
@@ -20,96 +23,146 @@ from transfer_queue import KVBatchMeta
 from verl.utils import tensordict_utils as tu
 from verl.utils.transferqueue_utils import kv_batch_meta2batch_meta
 
+from verl_omni.workers.utils.padding import embeds_padding_2_no_padding
+
 TRAJECTORY_KEYS = "_diffusion_tq_keys"
 TRAJECTORY_META = "_diffusion_tq_trajectory"
 
 
-def _validate_nested_embed_mask(field: str, values: torch.Tensor, mask: torch.Tensor | None, context: str) -> None:
-    mask_field = f"{field}_mask"
+@dataclass(frozen=True)
+class TQTrainingFields:
+    """Fields an adapter needs beyond the V1 trainer's common driver inputs.
+
+    Declare S+1 state tensors in `transition_fields` and variable-length
+    worker sequences as (value, mask) pairs in `sequence_masks`. A dense
+    sequence may omit its mask if the mask field is optional.
+    """
+
+    worker_required: frozenset[str]
+    worker_optional: frozenset[str] = frozenset()
+    driver_required: frozenset[str] = frozenset()
+    driver_optional: frozenset[str] = frozenset()
+    transition_fields: frozenset[str] = frozenset()
+    sequence_masks: tuple[tuple[str, str], ...] = ()
+
+    @property
+    def worker_fields(self) -> frozenset[str]:
+        """Return the fields eligible for the worker read."""
+        return self.worker_required | self.worker_optional
+
+
+class TrajectoryDescriptor(TypedDict):
+    """Batch-wide worker projection metadata carried beside the per-row keys."""
+
+    partition_id: str
+    fields: list[str]
+    required: list[str]
+    num_timesteps: int
+    transition_fields: list[str]
+    sequence_masks: dict[str, str]
+
+
+def validate_transition_shape(shape: tuple[int, ...], steps: int, field: str, context: str) -> None:
+    """Require one more latent state than timesteps in the per-sample tensor."""
+    if len(shape) < 2 or shape[0] != steps + 1:
+        raise ValueError(f"Expected S+1 latents for S timesteps in {field!r} ({context})")
+
+
+def _validate_nested_embed_mask(
+    field: str, values: torch.Tensor, fetched: TensorDict, mask_field: str, context: str
+) -> None:
+    mask = fetched.get(mask_field, None)
     if not isinstance(mask, torch.Tensor):
         raise ValueError(f"Nested trajectory field {field!r} requires {mask_field!r} ({context})")
 
-    value_rows = values.unbind()
-    lengths = [row.shape[0] for row in value_rows]
+    lengths = [row.shape[0] for row in values.unbind()]
     if mask.is_nested:
         mask_rows = mask.unbind()
-        valid = len(mask_rows) == len(value_rows) and all(
+        valid = len(mask_rows) == len(lengths) and all(
             mask_row.shape == (length,) for mask_row, length in zip(mask_rows, lengths, strict=True)
         )
     else:
-        valid = mask.ndim == 2 and mask.shape[0] == len(value_rows) and mask.sum(dim=1).tolist() == lengths
+        max_length = max(lengths)
+        columns = torch.arange(max_length, device=mask.device)
+        expected = columns < mask.new_tensor(lengths, dtype=torch.long)[:, None]
+        valid = torch.equal(mask.bool(), expected)
     if not valid:
         raise ValueError(f"Nested trajectory field {field!r} has an incompatible {mask_field!r} ({context})")
 
 
-def materialize_diffusion_trajectory(data: TensorDict) -> TensorDict:
-    """Fetch this worker shard's trajectory, preserving overlays and duplicated rows.
-
-    Args:
-        data: TensorDict whose row keys follow its batch dimension through DP
-            dispatch and padding. Batches without a TQ handle pass through.
-
-    Returns:
-        A worker-owned TensorDict with padded trajectory tensors and jagged embeds.
-
-    Raises:
-        ValueError: A handle, required field, or trajectory shape is inconsistent.
-    """
+def _read_trajectory_handle(data: TensorDict) -> tuple[TrajectoryDescriptor, list[str]] | None:
     descriptor = tu.get_non_tensor_data(data, TRAJECTORY_META, None)
     row_keys = data.get(TRAJECTORY_KEYS, None)
     if descriptor is None and row_keys is None:
-        return data
+        return None
     if descriptor is None or row_keys is None:
         raise ValueError("Incomplete diffusion TQ trajectory handle")
     keys = row_keys.tolist()
     if len(keys) != len(data) or not all(isinstance(key, str) for key in keys):
         raise ValueError("Diffusion TQ keys must match the worker batch dimension")
+    if not keys:
+        raise ValueError("Cannot materialize an empty diffusion TQ shard")
     timesteps = data.get("all_timesteps", None)
     num_timesteps = descriptor["num_timesteps"]
     if not isinstance(timesteps, torch.Tensor) or timesteps.shape != (len(keys), num_timesteps):
         raise ValueError("Deferred training requires driver-owned timesteps matching the trajectory handle")
-    fields = descriptor["fields"]
-    required = set(descriptor["required"])
-    if not required.issubset(fields):
+    fields = set(descriptor["fields"])
+    if not set(descriptor["required"]).issubset(fields):
         raise ValueError("Diffusion TQ projection omits required trajectory fields")
-    if set(fields) & set(data.keys()):
+    if fields & set(data.keys()):
         raise ValueError("Diffusion TQ trajectory conflicts with driver-owned fields")
-    unique_keys = list(dict.fromkeys(keys))
-    if not unique_keys:
-        raise ValueError("Cannot materialize an empty diffusion TQ shard")
-    context = f"partition={descriptor['partition_id']!r}, keys={unique_keys!r}"
+    return descriptor, keys
+
+
+def _fetch_trajectory_rows(descriptor: TrajectoryDescriptor, keys: list[str], context: str) -> TensorDict:
+    fields = descriptor["fields"]
     metadata = kv_batch_meta2batch_meta(
-        KVBatchMeta(
-            keys=unique_keys, tags=[{} for _ in unique_keys], partition_id=descriptor["partition_id"], fields=fields
-        )
+        KVBatchMeta(keys=keys, tags=[{} for _ in keys], partition_id=descriptor["partition_id"], fields=fields)
     )
     missing = set(fields) - set(metadata.field_names)
-    if missing or metadata.size != len(unique_keys) or not metadata.is_ready:
+    if missing or metadata.size != len(keys) or not metadata.is_ready:
         raise ValueError(f"Invalid diffusion trajectory metadata ({context}); missing fields={sorted(missing)}")
     fetched = tq.get_client().get_data(metadata)
     missing = set(fields) - set(fetched.keys())
     if missing:
         raise ValueError(f"Missing diffusion trajectory data ({context}): {sorted(missing)}")
-    positions = {key: index for index, key in enumerate(unique_keys)}
-    indices = torch.tensor([positions[key] for key in keys], dtype=torch.long)
-    result = data.clone(recurse=False)
-    result.pop(TRAJECTORY_KEYS)
-    result.pop(TRAJECTORY_META)
-    for field in fields:
+    return fetched
+
+
+def _restore_trajectory_fields(
+    fetched: TensorDict, descriptor: TrajectoryDescriptor, indices: torch.Tensor, unique_count: int, context: str
+) -> dict[str, torch.Tensor]:
+    restored = {}
+    sequence_masks = descriptor["sequence_masks"]
+    transition_fields = set(descriptor["transition_fields"])
+    for field in descriptor["fields"]:
         value = fetched[field]
         if not isinstance(value, torch.Tensor):
             raise ValueError(f"Expected tensor trajectory field {field!r} ({context})")
-        if value.is_nested and field in {"prompt_embeds", "negative_prompt_embeds"}:
-            _validate_nested_embed_mask(field, value, fetched.get(f"{field}_mask", None), context)
         if value.is_nested:
+            if field in sequence_masks:
+                _validate_nested_embed_mask(field, value, fetched, sequence_masks[field], context)
             value = value.to_padded_tensor(padding=0.0)
-        if value.shape[0] != len(unique_keys):
+        if not value.ndim or value.shape[0] != unique_count:
             raise ValueError(f"Invalid batch dimension for trajectory field {field!r} ({context})")
-        result[field] = value[indices.to(value.device)]
-    latents = result["all_latents"]
-    if latents.ndim < 3 or latents.shape[1] != num_timesteps + 1:
-        raise ValueError(f"Expected S+1 trajectory latents for S timesteps ({context})")
+        if field in transition_fields:
+            validate_transition_shape(value.shape[1:], descriptor["num_timesteps"], field, context)
+        restored[field] = value[indices.to(value.device)]
+    return restored
 
-    from verl_omni.workers.utils.padding import embeds_padding_2_no_padding
 
-    return embeds_padding_2_no_padding(result)
+def materialize_diffusion_trajectory(data: TensorDict) -> TensorDict:
+    """Load this worker shard's declared inputs, preserving row order and overlays."""
+    handle = _read_trajectory_handle(data)
+    if handle is None:
+        return data
+
+    descriptor, keys = handle
+    positions = {key: index for index, key in enumerate(dict.fromkeys(keys))}
+    unique_keys = list(positions)
+    context = f"partition={descriptor['partition_id']!r}, keys={unique_keys!r}"
+    fetched = _fetch_trajectory_rows(descriptor, unique_keys, context)
+    indices = torch.tensor([positions[key] for key in keys], dtype=torch.long)
+    fields = _restore_trajectory_fields(fetched, descriptor, indices, len(unique_keys), context)
+    result = data.exclude(TRAJECTORY_KEYS, TRAJECTORY_META).update(fields)
+    return embeds_padding_2_no_padding(result, sequence_masks=descriptor["sequence_masks"])
