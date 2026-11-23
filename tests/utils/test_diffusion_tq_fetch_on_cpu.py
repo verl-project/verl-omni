@@ -60,18 +60,26 @@ def storage(monkeypatch):
         batch_size=[2],
     )
     state = SimpleNamespace(
-        payload=payload, core_reads=[], worker_reads=[], ready=True, drop_fetched=None, schema_overrides={}
+        payload=payload,
+        core_reads=[],
+        worker_reads=[],
+        ready=True,
+        drop_fetched=None,
+        schema_overrides={},
+        metadata_extra_row=False,
     )
 
     def retrieve(*, keys, partition_id, create=False):
         indices = [0 if key.startswith("a_") else 1 for key in keys]
+        if state.metadata_extra_row:
+            indices.append(0)
         schema = extract_field_schema(state.payload)
         schema.update(state.schema_overrides)
         return BatchMeta(
             global_indexes=indices,
-            partition_ids=[partition_id] * len(keys),
+            partition_ids=[partition_id] * len(indices),
             field_schema=schema,
-            production_status=np.full(len(keys), int(state.ready), dtype=np.int8),
+            production_status=np.full(len(indices), int(state.ready), dtype=np.int8),
         )
 
     def select_payload(indices, fields=None):
@@ -177,6 +185,22 @@ def test_required_field_miss_never_falls_back_to_full_read(storage, missing):
     with pytest.raises(ValueError, match="Missing training fields"):
         read_core()
     assert storage.core_reads == []
+
+
+def test_driver_distinguishes_metadata_row_count_mismatch(storage):
+    storage.metadata_extra_row = True
+    with pytest.raises(ValueError, match="row count mismatch.*expected 2, got 3"):
+        read_core()
+    assert storage.core_reads == []
+
+
+def test_worker_rejects_corrupted_required_field_handle_before_fetch(storage):
+    data = read_core()
+    descriptor = data.meta_info[diffusion_tq.TRAJECTORY_META]
+    descriptor["fields"] = [field for field in descriptor["fields"] if field != "all_latents"]
+    with pytest.raises(ValueError, match="omits required trajectory fields"):
+        diffusion_tq.materialize_diffusion_trajectory(data.to_tensordict())
+    assert storage.worker_reads == []
 
 
 def test_worker_rejects_field_disappearing_after_core_read(storage):

@@ -220,8 +220,13 @@ def diffusion_tq_batch_to_dataproto(
         metadata = tq.get_client().kv_retrieve_meta(keys=keys, partition_id=partition_id, create=False)
         stored = set(metadata.field_names)
         missing = (required | {"prompts", "uid", "rm_scores", "all_timesteps"}) - stored
-        if missing or metadata.size != len(keys):
+        if missing:
             raise ValueError(f"Missing training fields in partition={partition_id!r}, keys={keys!r}: {sorted(missing)}")
+        if metadata.size != len(keys):
+            raise ValueError(
+                f"Training metadata row count mismatch in partition={partition_id!r}, keys={keys!r}: "
+                f"expected {len(keys)}, got {metadata.size}"
+            )
         selected_trajectory = sorted((required | optional) & stored)
         if not metadata.select_fields(selected_trajectory).is_ready:
             raise ValueError(f"Trajectory fields are not ready in partition={partition_id!r}, keys={keys!r}")
