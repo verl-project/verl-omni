@@ -118,12 +118,6 @@ def test_audio_rejects_empty_or_nonfinite_input(audio):
         _MODULE.get_audio({"audio": audio, "audio_sample_rate": 24000})
 
 
-def test_audio_rejects_nonfinite_legacy_channel_mean():
-    audio = torch.full((2, 3), torch.finfo(torch.float32).max)
-    with pytest.raises(ValueError, match="non-empty audio containing only finite"):
-        _MODULE.get_audio({"audio": audio, "audio_sample_rate": 24000, "audio_layout": "CT"})
-
-
 @pytest.mark.parametrize("shape", [(8, 2), (2, 8), (1, 2, 8)])
 def test_audio_does_not_guess_two_dimensional_layout(shape):
     with pytest.raises(ValueError, match="explicit audio_layout='CT'"):

@@ -30,7 +30,7 @@ from verl_omni.utils.reward_score.reward_utils import get_audio
 from verl_omni.utils.reward_score.scorers.registry import load_reward_object as load_extern_object
 from verl_omni.workers.config.reward import get_reward_model_entries, resolve_reward_model_name
 
-from .audio import AudioRewardManager, _audio_reward_kwargs
+from .audio import _audio_reward_kwargs, _extract_legacy_mono_audio
 from .media import _reward_extra_info
 from .visual import _sampling_params_from_rollout, _validate_visual_response
 
@@ -70,7 +70,7 @@ def _extract_solution_audio(extra_info: dict, *, use_named_audio: bool) -> tuple
         if media_kind is None and primary is not None:
             media_kind = primary.spec.modality
         if media_kind not in ("image", "video"):
-            return AudioRewardManager._extract_audio(extra_info)
+            return _extract_legacy_mono_audio(extra_info)
 
         audio = extra_info.get("audio")
         if isinstance(audio, np.ndarray) and audio.dtype == object:
@@ -227,6 +227,7 @@ class MultiRewardManager(RewardManagerBase, ABC):
         """Build scorer kwargs for one sample in a modality-specific subclass."""
 
     async def _select_solution_audio(self, all_kwargs: dict) -> tuple[np.ndarray, int] | None:
+        """With no shared key, extract for keyword opt-ins lacking overrides if audio exists or any lacks a default."""
         if "solution_audio" in all_kwargs:
             return None
         params = [
@@ -407,8 +408,6 @@ class MultiRewardManager(RewardManagerBase, ABC):
             await drain_tasks()
             raise
 
-        if not math.isfinite(combined_score) or abs(combined_score) > torch.finfo(torch.float32).max:
-            raise ValueError(f"Combined reward must be within the finite float32 range, got {combined_score!r}.")
         reward_extra_info["reward/combined"] = combined_score
         return {"reward_score": combined_score, "reward_extra_info": reward_extra_info}
 

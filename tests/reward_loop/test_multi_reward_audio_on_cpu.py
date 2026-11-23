@@ -23,8 +23,8 @@ from verl_omni.pipelines.rollout_media import ArtifactContractError, MediaArtifa
 from verl_omni.reward_loop.reward_manager import MultiAudioRewardManager, MultiVisualRewardManager
 
 
-def score_visual(solution_image, **solution_audio):
-    assert "solution_audio" not in solution_audio
+def score_visual(solution_image, **kwargs):
+    assert "solution_audio" not in kwargs
     return float(solution_image.flatten()[0])
 
 
@@ -34,8 +34,10 @@ async def score_audio(solution_audio):
     return {"score": float(waveform.mean()), "rate": rate}
 
 
-def score_both(solution_image, *, solution_audio):
-    return float(solution_image.flatten()[0]) + float(solution_audio[0].mean())
+async def score_both(solution_image, *, solution_audio):
+    result = await score_audio(solution_audio)
+    result["score"] += float(solution_image.flatten()[0])
+    return result
 
 
 async def score_optional_audio(solution_audio=None):
@@ -73,19 +75,17 @@ async def test_named_media_routes_only_requested_inputs(layout, fps, audio_layou
             "visual": MediaArtifact(MediaSpec(kind, "decoded", layout, fps=fps), pixels),
             "audio": MediaArtifact(MediaSpec("audio", "decoded", audio_layout, sample_rate=32_000), waveform),
         },
-        audio_layout=["TC"],
         tool_extra_fields=[{"audio": torch.zeros(2), "audio_sample_rate": 16_000, "audio_layout": "T"}],
     )
     manager = _manager(
         MultiVisualRewardManager,
-        visual={"name": "score_visual", "weight": 0.25},
-        audio={"name": "score_audio", "weight": 0.5},
-        both={"name": "score_both", "weight": 0.25},
+        visual={"name": "score_visual", "weight": 0.5},
+        both={"name": "score_both", "weight": 0.5},
     )
 
     result = await manager.run_single(data)
-    assert result["reward_score"] == 2.375
-    assert result["reward_extra_info"]["reward/audio/rate"] == 32_000
+    assert result["reward_score"] == pytest.approx(4.25)
+    assert result["reward_extra_info"]["reward/both/rate"] == 32_000
 
 
 @pytest.mark.parametrize("named_audio", [False, True], ids=["visual-only", "invalid-named-audio"])
@@ -114,21 +114,25 @@ async def test_legacy_audio_fallback_with_named_visual_media(named_audio):
     assert result["reward_extra_info"]["reward/optional_audio/rate"] == 32_000
 
 
-@pytest.mark.parametrize("other_source", [None, "tool_extra_fields", "extra_info"])
-async def test_legacy_visual_audio_layout_is_projected(other_source):
+@pytest.mark.parametrize(
+    ("extra_info", "error"),
+    [
+        ({}, "Two-dimensional audio requires explicit"),
+        ({"audio_layout": "CT"}, "Conflicting.*audio_layout"),
+    ],
+    ids=["layout-mismatch", "conflicting-layouts"],
+)
+async def test_legacy_visual_audio_layout_is_projected(extra_info, error):
     pixels = torch.zeros(3, 2, 2, dtype=torch.uint8)
-    tool_fields = {"audio": torch.ones(2, 3), "audio_sample_rate": 32_000}
-    metadata = {"audio_layout": ["TC"], "tool_extra_fields": [tool_fields]}
-    if other_source == "tool_extra_fields":
-        tool_fields["audio_layout"] = "CT"
-    elif other_source == "extra_info":
-        metadata["extra_info"] = [{"audio_layout": "CT"}]
     data = _named_visual_data(
-        pixels, {"visual": MediaArtifact(MediaSpec("image", "decoded", "CHW"), pixels)}, **metadata
+        pixels,
+        {"visual": MediaArtifact(MediaSpec("image", "decoded", "CHW"), pixels)},
+        audio_layout=["T"],
+        extra_info=[extra_info],
+        tool_extra_fields=[{"audio": torch.ones(2, 3), "audio_sample_rate": 32_000}],
     )
     manager = _manager(MultiVisualRewardManager, audio={"name": "score_audio", "required": False})
-    message = "Conflicting.*audio_layout" if other_source else "channels-last audio is not supported"
-    with pytest.raises(ArtifactContractError, match=message):
+    with pytest.raises(ArtifactContractError, match=error):
         await manager.run_single(data)
 
 
@@ -151,7 +155,7 @@ async def test_audio_token_reward_uses_last_valid_response_token():
 
 
 async def test_missing_audio_respects_scorer_signature():
-    data = _data(torch.tensor([1]), extra_info=[{"audio": [0.5], "audio_sample_rate": 16_000}])
+    data = _data(torch.tensor([1]))
     defaulted = _manager(MultiAudioRewardManager, audio={"name": "score_optional_audio", "required": False})
     assert (await defaulted.run_single(data))["reward_score"] == 0.25
 

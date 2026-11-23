@@ -13,10 +13,8 @@
 # limitations under the License.
 """CPU tests for generic waveform reward routing."""
 
-import importlib.util
 import threading
 from functools import partial
-from pathlib import Path
 from unittest.mock import MagicMock
 
 import numpy as np
@@ -26,17 +24,7 @@ from omegaconf import OmegaConf
 from verl import DataProto
 from verl.utils.reward_score import default_compute_score
 
-
-def _load_audio_reward_manager():
-    path = Path(__file__).parents[2] / "verl_omni/reward_loop/reward_manager/audio.py"
-    spec = importlib.util.spec_from_file_location("audio_reward_manager_under_test", path)
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(module)
-    return module.AudioRewardManager
-
-
-AudioRewardManager = _load_audio_reward_manager()
+from verl_omni.reward_loop.reward_manager import audio as audio_manager
 
 
 def _config():
@@ -44,7 +32,7 @@ def _config():
 
 
 def _manager(compute_score):
-    return AudioRewardManager(_config(), MagicMock(), compute_score=compute_score)
+    return audio_manager.AudioRewardManager(_config(), MagicMock(), compute_score=compute_score)
 
 
 def _data(audio=None, sample_rate=24_000, *, layout="streamed"):
@@ -80,7 +68,7 @@ def test_assemble_scores_preserves_one_reward_per_sample():
         }
     )
 
-    scores = AudioRewardManager.assemble_rm_scores(data, [0.1, -1.0, 2.5])
+    scores = audio_manager.AudioRewardManager.assemble_rm_scores(data, [0.1, -1.0, 2.5])
 
     assert scores.shape == (3, 4)
     assert scores.dtype == torch.float32
@@ -147,7 +135,7 @@ def test_run_single_forwards_reward_router_arguments():
         return 0.5
 
     config = OmegaConf.create({"reward": {"reward_model": {"model_path": "reward-model"}}})
-    manager = AudioRewardManager(
+    manager = audio_manager.AudioRewardManager(
         config,
         MagicMock(),
         compute_score=compute_score,
@@ -287,7 +275,7 @@ async def test_waveform_extraction_runs_off_the_event_loop(monkeypatch):
     async def compute_score(**kwargs):
         return 0.5
 
-    monkeypatch.setattr(AudioRewardManager, "_extract_audio", staticmethod(extract_audio))
+    monkeypatch.setattr(audio_manager, "_extract_legacy_mono_audio", extract_audio)
     result = await _manager(compute_score).run_single(_data(np.ones(8, dtype=np.float32)))
 
     assert result["reward_score"] == 0.5

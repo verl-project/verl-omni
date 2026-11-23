@@ -342,11 +342,10 @@ final_reward = sum(term.weight * term.score)
 ```
 
 `required=true` makes a scoring failure fatal. An optional term records the
-error and contributes zero. Non-finite scores follow this policy. Weights must
-be finite, and the combined reward must fit the float32 reward range.
-Model setup and lifecycle failures are always
-fatal. `ArtifactContractError` is fatal for every term, including optional
-terms, so missing or invalid named media cannot silently contribute zero.
+error and contributes zero. Non-finite scores follow this policy, and weights
+must be finite. Model setup and lifecycle failures are always fatal.
+`ArtifactContractError` is fatal for every term, including optional terms,
+so missing or invalid named media cannot silently contribute zero.
 
 ## Concurrent independent reward terms
 

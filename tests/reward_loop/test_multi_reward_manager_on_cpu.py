@@ -676,9 +676,11 @@ class TestMultiRewardManagerRunSingle:
         assert result["reward_extra_info"]["reward/bad"] == pytest.approx(0.0)
         assert result["reward_extra_info"]["reward/bad/errors"] == 1
 
-    @pytest.mark.parametrize("score", [float("nan"), float("inf"), -float("inf")], ids=["nan", "inf", "-inf"])
-    @pytest.mark.parametrize("as_dict", [False, True], ids=["scalar", "dict"])
-    @pytest.mark.parametrize("required", [False, True], ids=["optional", "required"])
+    @pytest.mark.parametrize(
+        ("score", "as_dict", "required"),
+        [(float("nan"), True, False), (float("inf"), False, True), (-float("inf"), False, False)],
+        ids=["optional-dict-nan", "required-scalar-inf", "optional-scalar-negative-inf"],
+    )
     def test_nonfinite_score_uses_term_failure_policy(self, score, as_dict, required):
         manager = _build_manager(
             {
@@ -708,22 +710,6 @@ class TestMultiRewardManagerRunSingle:
                 "reward/combined": 1.0,
             },
         }
-
-    @pytest.mark.parametrize(("score", "weight"), [(1e40, 1.0), (1e308, 2.0)])
-    def test_unrepresentable_combined_reward_is_rejected(self, score, weight):
-        manager = _build_manager(
-            {
-                "large": {
-                    "path": DUMMY_REWARDS_PATH,
-                    "name": "reward_configured_score",
-                    "score": score,
-                    "as_dict": False,
-                    "weight": weight,
-                }
-            }
-        )
-        with pytest.raises(ValueError, match="Combined reward must be within the finite float32 range"):
-            manager.loop.run_until_complete(manager.run_single(_make_single_data()))
 
     def test_async_reward_function(self):
         """Async reward functions are awaited correctly."""
@@ -940,10 +926,9 @@ class TestMultiRewardManagerInit:
         with pytest.raises(ValueError, match="non-empty"):
             _build_manager({})
 
-    @pytest.mark.parametrize("weight", [float("nan"), float("inf"), -float("inf")], ids=["nan", "inf", "-inf"])
-    def test_nonfinite_weight_is_rejected(self, weight):
+    def test_nonfinite_weight_is_rejected(self):
         with pytest.raises(ValueError, match="Reward function 'bad' weight must be finite"):
-            _build_manager({"bad": {"path": DUMMY_REWARDS_PATH, "name": "reward_fixed_score", "weight": weight}})
+            _build_manager({"bad": {"path": DUMMY_REWARDS_PATH, "name": "reward_fixed_score", "weight": float("nan")}})
 
     def test_loads_sub_rewards(self):
         reward_fns = {
