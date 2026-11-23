@@ -59,7 +59,7 @@ def storage(monkeypatch):
         },
         batch_size=[2],
     )
-    state = SimpleNamespace(payload=payload, reads=[], missing_keys=set())
+    state = SimpleNamespace(payload=payload, reads=[], missing_keys=set(), last_read=None)
 
     def get(*, keys, partition_id, select_fields):
         assert partition_id == "train"
@@ -73,6 +73,7 @@ def storage(monkeypatch):
         for field in nested:
             rows = selected[field].unbind()
             result[field] = torch.nested.as_nested_tensor([rows[index] for index in indices], layout=torch.jagged)
+        state.last_read = result
         return result
 
     monkeypatch.setattr(tq_utils.tq, "kv_batch_get", get)
@@ -159,6 +160,13 @@ def test_data_parallel_dispatch_keeps_keys_aligned(storage):
         torch.testing.assert_close(result["all_latents"], storage.payload["all_latents"][index : index + 1])
 
 
+def test_worker_reuses_fetched_latents_for_unique_rows(storage):
+    data = read_training_batch().select_idxs([1, 0]).to_tensordict()
+    result = materialize_diffusion_trajectory(data, FIELDS)
+    torch.testing.assert_close(result["all_latents"], storage.payload["all_latents"][[1, 0]])
+    assert result["all_latents"].data_ptr() == storage.last_read["all_latents"].data_ptr()
+
+
 @pytest.mark.parametrize("method", ["infer_actor_batch", "infer_ref_batch", "update_actor"])
 def test_worker_entrypoints_keep_tensor_dict_rpc_contract(storage, method):
     data = read_training_batch().to_tensordict()
@@ -194,8 +202,17 @@ def ragged_storage(storage):
     return storage
 
 
-def test_ragged_embeds_match_full_read(ragged_storage):
-    order = [1, 0, 1]
+@pytest.mark.parametrize(
+    ("mask", "order"),
+    [
+        pytest.param(None, [1, 0, 1], id="nested"),
+        pytest.param([[1, 1, 0], [1, 1, 0]], [1, 0, 1], id="dense-subset"),
+        pytest.param([[1, 1, 0], [1, 1, 0]], [1], id="short-shard"),
+    ],
+)
+def test_ragged_embeds_match_full_read(ragged_storage, mask, order):
+    if mask is not None:
+        ragged_storage.payload["prompt_embeds_mask"] = torch.tensor(mask, dtype=torch.long)
     full = read_training_batch(projected=False).select_idxs(order)
     projected = read_training_batch().select_idxs(order)
     expected = embeds_padding_2_no_padding(full.to_tensordict())

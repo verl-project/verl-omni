@@ -32,10 +32,12 @@ run_qwen_image_edit_flowgrpo_e2e() {
         return 1
     fi
     env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" MODEL_PATH="${model_path}" \
-        bash tests/special_e2e/run_flowgrpo_qwen_image_edit.sh "${diffusion_trainer_args[@]}"
+        bash tests/special_e2e/run_flowgrpo_qwen_image_edit.sh "${diffusion_trainer_args[@]}" \
+        trainer.v1.worker_side_trajectory=true \
+        'actor_rollout_ref.model.trajectory_fields.required=[all_latents,condition_image_latents,prompt_embeds,prompt_embeds_mask,negative_prompt_embeds,negative_prompt_embeds_mask]'
 }
 
-run_test 0 "Qwen-Image-Edit FlowGRPO v1 sync trainer e2e" \
+run_test 0 "Qwen-Image-Edit FlowGRPO v1 sync with worker-side trajectories" \
     run_qwen_image_edit_flowgrpo_e2e
 
 run_test 1 "FlowGRPO v1 sync trainer e2e" \

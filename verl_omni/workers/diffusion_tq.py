@@ -24,6 +24,7 @@ from verl_omni.workers.utils.padding import diffusion_sequence_fields, embeds_pa
 def _dense_trajectory_fields(fetched: TensorDict) -> TensorDict:
     sequence_fields = diffusion_sequence_fields(fetched)
     dense_fields = {}
+    trimmed_masks = {}
     for field, value in fetched.items():
         if not isinstance(value, torch.Tensor):
             raise ValueError(f"Expected tensor in trajectory field {field!r}")
@@ -36,26 +37,34 @@ def _dense_trajectory_fields(fetched: TensorDict) -> TensorDict:
             if mask.is_nested:
                 valid = all(row.shape == (length,) for row, length in zip(mask.unbind(), lengths, strict=True))
             else:
-                columns = torch.arange(max(lengths), device=mask.device)
-                valid = torch.equal(mask.bool(), columns < mask.new_tensor(lengths, dtype=torch.long)[:, None])
+                width = max(lengths)
+                valid = mask.ndim == 2 and mask.shape[0] == len(lengths) and mask.shape[1] >= width
+                if valid:
+                    columns = torch.arange(mask.shape[1], device=mask.device)
+                    outside_row = columns >= mask.new_tensor(lengths, dtype=torch.long)[:, None]
+                    valid = not (mask.bool() & outside_row).any()
+                    # A shard can have a shorter maximum sequence than the stored dense mask.
+                    trimmed_masks[mask_field] = mask[:, :width]
             if not valid:
                 raise ValueError(f"Nested trajectory field {field!r} has an incompatible {mask_field!r}")
         dense_fields[field] = value.to_padded_tensor(padding=0.0) if value.is_nested else value
+    dense_fields.update(trimmed_masks)
     return TensorDict(dense_fields, batch_size=fetched.batch_size)
 
 
 def materialize_diffusion_trajectory(data: TensorDict, fields: DiffusionTrajectoryFieldsConfig) -> TensorDict:
     """Read the shard's configured training fields and keep driver-owned values."""
     keys = data.get(DIFFUSION_TQ_KEYS).tolist()
-    positions = {key: index for index, key in enumerate(dict.fromkeys(keys))}
-    fetched = tq.kv_batch_get(
-        keys=list(positions), partition_id="train", select_fields=fields.required + fields.optional
-    )
+    unique_keys = list(dict.fromkeys(keys))
+    fetched = tq.kv_batch_get(keys=unique_keys, partition_id="train", select_fields=fields.required + fields.optional)
     if missing := set(fields.required).difference(fetched.keys()):
         raise ValueError(f"Missing required diffusion trajectory fields: {sorted(missing)}")
     # TQ drops missing keys when other requested rows still exist.
-    if len(fetched) != len(positions):
-        raise ValueError(f"Diffusion trajectory row count mismatch: expected {len(positions)}, got {len(fetched)}")
-    indices = [positions[key] for key in keys]
-    trajectory = _dense_trajectory_fields(fetched.exclude(*data.keys()))[indices]
+    if len(fetched) != len(unique_keys):
+        raise ValueError(f"Diffusion trajectory row count mismatch: expected {len(unique_keys)}, got {len(fetched)}")
+    trajectory = _dense_trajectory_fields(fetched.exclude(*data.keys()))
+    # TQ returns rows in request order. Only padded shards with duplicate keys need a gather.
+    if len(keys) != len(unique_keys):
+        positions = {key: index for index, key in enumerate(unique_keys)}
+        trajectory = trajectory[[positions[key] for key in keys]]
     return embeds_padding_2_no_padding(data.exclude(DIFFUSION_TQ_KEYS).update(trajectory))

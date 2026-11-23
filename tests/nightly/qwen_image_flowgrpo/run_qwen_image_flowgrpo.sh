@@ -25,7 +25,8 @@ REWARD_ENGINE=vllm
 ATTN_BACKEND=${ATTN_BACKEND:-native}
 ROLLOUT_ATTN_BACKEND=${ROLLOUT_ATTN_BACKEND:-TORCH_SDPA}
 
-bash "${REPO_ROOT}/tests/nightly/run_l3_case.sh" \
+run_flowgrpo() {
+    bash "${REPO_ROOT}/tests/nightly/run_l3_case.sh" \
     algorithm.adv_estimator=flow_grpo \
     data.train_batch_size=${TRAIN_BATCH_SIZE} \
     data.max_prompt_length=${MAX_PROMPT_LENGTH} \
@@ -103,3 +104,41 @@ bash "${REPO_ROOT}/tests/nightly/run_l3_case.sh" \
     trainer.use_v1=true \
     trainer.v1.trainer_mode=sync \
     "$@"
+}
+
+if [[ "${L3_TRAJECTORY_AB_ONLY:-0}" != "1" ]]; then
+    run_flowgrpo "$@"
+fi
+if [[ "${L3_REFRESH_BASELINE:-0}" == "1" ]]; then
+    exit 0
+fi
+
+# Use the same rollout-side rule reward in both runs. The existing OCR
+# baseline uses driver-side reward and is kept separate from this comparison.
+ab_case="${L3_TEST_CASE}_trajectory"
+ab_steps="${L3_TRAJECTORY_AB_STEPS:-6}"
+output_root="${OUTPUT_ROOT:-${REPO_ROOT}/outputs/debug_dumps}"
+for projected in false true; do
+    (
+        export L3_TEST_CASE="${ab_case}_${projected}"
+        export L3_DATA_SOURCE=jpeg_compressibility
+        export CURRENT_DUMP_DIR="${output_root}/current/${L3_TEST_CASE}"
+        export LOG_DIR="${output_root}/logs/${L3_TEST_CASE}"
+        export TOTAL_TRAIN_STEPS="${ab_steps}" L3_METRICS_ONLY=1
+        export DEBUG_DUMP_STEPS="" DEBUG_DUMP_TQ_TRAINING_READ=1
+        run_flowgrpo \
+            reward.reward_model.enable=false \
+            reward.custom_reward_function.path=null \
+            reward.custom_reward_function.name=compute_score \
+            actor_rollout_ref.rollout.algo.noise_level=0.7 \
+            'actor_rollout_ref.model.trajectory_fields.required=[all_latents,prompt_embeds,prompt_embeds_mask]' \
+            'actor_rollout_ref.model.trajectory_fields.optional=[negative_prompt_embeds,negative_prompt_embeds_mask]' \
+            "trainer.v1.worker_side_trajectory=${projected}" \
+            "$@"
+    )
+done
+python3 "${REPO_ROOT}/tests/nightly/compare_trajectory_reads.py" \
+    "${output_root}/current/${ab_case}_false/metrics.json" \
+    "${output_root}/current/${ab_case}_true/metrics.json" \
+    "${output_root}/logs/${ab_case}/comparison.json" \
+    --steps "${ab_steps}"
