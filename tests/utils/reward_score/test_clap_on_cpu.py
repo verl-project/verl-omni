@@ -55,6 +55,23 @@ def test_get_audio_uses_canonical_channels_and_declared_rate():
     assert sample_rate == 48_000
 
 
+@pytest.mark.parametrize("named_audio", [False, True])
+def test_get_audio_rejects_channels_last_layout_for_both_inputs(named_audio):
+    info = {"audio_layout": "TC"}
+    if named_audio:
+        info["media_artifacts"] = {
+            "audio": MediaArtifact(MediaSpec("audio", "decoded", "CT", sample_rate=48000), torch.ones(2, 16)),
+        }
+        error, message = ArtifactContractError, "canonical CT audio"
+    else:
+        info["audio"] = torch.ones(2, 16)
+        error, message = ValueError, "channels-last audio is not supported"
+
+    with pytest.raises(error, match=message):
+        clap._get_audio(info)
+    assert info["audio_layout"] == "TC"
+
+
 class _FakeProcessor:
     def __init__(self):
         self.batches = []

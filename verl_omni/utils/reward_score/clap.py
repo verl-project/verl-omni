@@ -80,7 +80,7 @@ def _get_audio(extra_info: dict) -> tuple[torch.Tensor, int]:
         sample_rate = info.get("audio_sample_rate")
         if isinstance(sample_rate, np.ndarray) and sample_rate.size == 1:
             info["audio_sample_rate"] = sample_rate.item()
-    return get_audio(info)
+    return get_audio(info, audio_layout=info["audio_layout"])
 
 
 def _prepare_request(ground_truth, extra_info, batch, audio_layout, prompt_key) -> tuple[str, dict]:

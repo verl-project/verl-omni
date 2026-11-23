@@ -379,6 +379,19 @@ def test_named_artifact_ignores_invalid_legacy_numpy_sample_rate(fake_adapter):
     assert request["extra_info"]["audio_sample_rate"] is invalid_legacy_rate
 
 
+@pytest.mark.parametrize("audio_layout", ["T", "TC"])
+def test_named_artifact_rejects_configured_noncanonical_layout_per_request(fake_adapter, audio_layout):
+    scorer = CLAPScorer()
+    scorer.load("cpu")
+
+    invalid, valid = scorer.score_batch([_request(audio_layout=audio_layout), _request(audio_layout="CT")])
+
+    assert isinstance(invalid, ArtifactContractError)
+    assert "canonical CT audio" in str(invalid)
+    assert valid == {"score": pytest.approx(1.0), "source_sample_rate": 48_000}
+    assert fake_adapter[0].calls[0][1] == ["right"]
+
+
 def test_forward_uses_active_accelerator_device_context(fake_adapter, monkeypatch):
     events = []
 
