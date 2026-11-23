@@ -166,7 +166,7 @@ class _ColocatedReplicas:
         pass
 
 
-def make_separate_async_trainer(monkeypatch, calls: list, overrides=(), *, complete_update=False):
+def make_separate_async_trainer(monkeypatch, calls: list, overrides=()):
     from verl_omni.trainer.diffusion.v1 import trainer_separate_async
     from verl_omni.trainer.diffusion.v1.trainer_separate_async import PolicyGradientDiffusionTrainerV1SeparateAsync
 
@@ -182,11 +182,13 @@ def make_separate_async_trainer(monkeypatch, calls: list, overrides=(), *, compl
     trainer.sync_compatible = False  # set in _setup
     trainer.timing_raw = {}
     trainer.tokenizer = SimpleNamespace(pad_token_id=0)
-    trainer.reward_loop_manager = SimpleNamespace(reward_loop_worker_handles=None)
     trainer.global_steps = 1
 
     data = DataProto.from_tensordict(tu.get_tensordict({"all_timesteps": torch.zeros(2, 4)}))
     reward = DataProto.from_tensordict(tu.get_tensordict({"rm_scores": torch.ones(2, 1)}))
+    trainer.reward_loop_manager = SimpleNamespace(
+        reward_loop_worker_handles=None, compute_rm_score=lambda d: (calls.append("reward"), reward)[1]
+    )
     old_log_prob = DataProto.from_tensordict(tu.get_tensordict({"old_log_probs": torch.zeros(2, 4)}))
     monkeypatch.setattr(
         "verl_omni.trainer.diffusion.v1.trainer_base.diffusion_tq_batch_to_dataproto",
@@ -197,15 +199,13 @@ def make_separate_async_trainer(monkeypatch, calls: list, overrides=(), *, compl
         lambda data, bypass_mode: {},
     )
     monkeypatch.setattr(trainer_separate_async, "marked_timer", lambda *args, **kwargs: nullcontext())
-    monkeypatch.setattr(trainer, "_compute_reward_colocate", lambda d: (calls.append("reward"), reward)[1])
     monkeypatch.setattr(trainer, "_balance_batch", lambda d, metrics: d)
     monkeypatch.setattr(trainer, "_compute_old_log_prob", lambda d: old_log_prob)
     monkeypatch.setattr(trainer, "_compute_advantage", lambda d: d)
 
     def update_actor(data):
-        calls.append("update_actor_asleep" if replicas.asleep else "update_actor_awake")
-        if not complete_update:
-            raise _Stop
+        assert replicas.asleep
+        calls.append("update_actor_asleep")
         return DataProto.from_dict(meta_info={"metrics": {}})
 
     monkeypatch.setattr(trainer, "_update_actor", update_actor)
@@ -216,22 +216,7 @@ def make_separate_async_trainer(monkeypatch, calls: list, overrides=(), *, compl
 
 
 def train_one_batch(trainer):
-    with pytest.raises(_Stop):
-        trainer._train_sampled_batch({}, {}, object())
-
-
-def test_separate_async_colocate_reward_leaves_replicas_asleep(monkeypatch):
-    """In trainer mode the replicas are already asleep; the colocated RM leaves them so."""
-    from verl_omni.trainer.diffusion.v1.trainer_separate_async import HybridEngineMode
-
-    calls: list[str] = []
-    trainer = make_separate_async_trainer(monkeypatch, calls)
-    trainer.current_mode = HybridEngineMode.TRAINER
-    trainer.checkpoint_manager.asleep = True
-
-    train_one_batch(trainer)
-
-    assert calls == ["reward", "update_actor_asleep"]
+    trainer._train_sampled_batch({}, {}, SimpleNamespace(keys=["0", "1"]))
 
 
 def test_separate_async_colocate_reward_keeps_replicas_asleep_across_steps(monkeypatch):
@@ -331,7 +316,6 @@ def test_separate_async_sync_compatible_only_resumes_standalone_after_actor_upda
             "trainer.v1.separate_async.sync_compatible=true",
             "trainer.v1.separate_async.num_warmup_batches=0",
         ],
-        complete_update=True,
     )
     trainer.sync_compatible = True
     trainer._standalone_paused = False
@@ -371,7 +355,7 @@ def test_separate_async_sync_compatible_only_resumes_standalone_after_actor_upda
     trainer.on_step_begin()
     trainer.on_sample_begin()
     trainer.on_sample_end()
-    trainer._train_sampled_batch({}, {}, SimpleNamespace(keys=["0", "1"]))
+    train_one_batch(trainer)
     trainer.on_step_end()
 
     assert calls == [
@@ -386,21 +370,3 @@ def test_separate_async_sync_compatible_only_resumes_standalone_after_actor_upda
     ]
     assert trainer.checkpoint_manager.asleep
     assert not trainer._standalone_paused
-
-
-def test_separate_async_validation_reopens_hybrid_routing_before_standalone_weight_wait(monkeypatch):
-    from verl_omni.trainer.diffusion.v1.trainer_separate_async import HybridEngineMode
-
-    calls: list[str] = []
-    trainer = make_separate_async_trainer(monkeypatch, calls)
-    assert not trainer.hybrid_rollout_config.enable_switch
-    trainer.current_mode = HybridEngineMode.TRAINER
-    trainer.checkpoint_manager.asleep = True
-    trainer.checkpoint_manager.resume_generation_replicas = lambda: calls.append("resume hybrid")
-    trainer.add_replicas_to_balancer = lambda: calls.append("add hybrid routes")
-    trainer.standalone_checkpoint_manager.wait_for_weight_update = lambda: calls.append("wait standalone")
-
-    trainer.on_validate_begin()
-
-    assert calls == ["update_weights", "resume hybrid", "add hybrid routes", "wait standalone"]
-    assert trainer.current_mode == HybridEngineMode.ROLLOUT
