@@ -121,9 +121,9 @@ when needed. The test must complete training and exit 0.
 Entry 19 requires `qwen-vl-utils==0.0.14`; the e2e workflow installs it.
 Entry 23 reuses the tiny H3 checkpoint at `$HOME/models/tiny-random/minimax-h3`
 or builds it offline on CPU when missing. Set `H3_TINY_MODEL_DIR` to use a
-different directory. The test runs one H3 training step with a tiny ImageBind
-checkpoint and checks that the trainer receives the named reward. The checkpoint exercises the native
-executor and scoring path without downloading the full ImageBind weights.
+different cache. If the cache is incomplete, the test builds in the run directory.
+The H3 training step checks that the managed ImageBind scores distinguish
+rollouts in a prompt group and produce a finite, nonzero actor gradient.
 Grouped entries 18-23 choose their own fixtures. To reuse an existing
 image-edit checkpoint, invoke its launcher directly:
 

@@ -687,7 +687,7 @@ def _write_partition(
     return component_dir
 
 
-def _checkpoint_is_complete(output_dir: Path) -> bool:
+def _checkpoint_is_complete(output_dir: Path, *, offline: bool = False) -> bool:
     required = (
         output_dir / "tiny_checkpoint.json",
         output_dir / "FL2VA" / "model_index.json",
@@ -713,11 +713,26 @@ def _checkpoint_is_complete(output_dir: Path) -> bool:
     )
     if not all(path.is_file() for path in required):
         return False
+    if offline:
+        runtime_files = (
+            "tokenizer/tokenizer_config.json",
+            "tokenizer/chat_template.jinja",
+            "processor/config.json",
+            "processor/processor_config.json",
+            "processor/tokenizer_config.json",
+            "processor/chat_template.jinja",
+            "video_vae/tiny_h3_video_vae.py",
+            "video_vae/tiny_video_vae.pt",
+            "audio_vae/tiny_h3_audio_vae.py",
+            "audio_vae/tiny_audio_vae.pt",
+        )
+        if not all((output_dir / part / file).is_file() for part in ("FL2VA", "Ref2VA") for file in runtime_files):
+            return False
     try:
         metadata = json.loads((output_dir / "tiny_checkpoint.json").read_text())
     except (OSError, ValueError):
         return False
-    return metadata.get("format_version") == _CHECKPOINT_FORMAT_VERSION
+    return isinstance(metadata, dict) and metadata.get("format_version") == _CHECKPOINT_FORMAT_VERSION
 
 
 def ensure_tiny_minimax_h3_checkpoint(
@@ -735,7 +750,7 @@ def ensure_tiny_minimax_h3_checkpoint(
     """
     del source_fl2va
     output = Path(os.path.expanduser(output_dir))
-    if skip_if_exists and _checkpoint_is_complete(output):
+    if skip_if_exists and _checkpoint_is_complete(output, offline=offline):
         print(f"tiny MiniMax-H3 checkpoint already present at {output}", flush=True)
         return str(output)
 
@@ -750,7 +765,7 @@ def ensure_tiny_minimax_h3_checkpoint(
             try:
                 built.rename(output)
             except OSError:
-                if not _checkpoint_is_complete(output):
+                if not _checkpoint_is_complete(output, offline=True):
                     raise
     else:
         _assemble_checkpoint(output, _download_hf_tiny(hf_cache_dir))
@@ -817,13 +832,25 @@ def main() -> None:
     parser.add_argument("--hf-cache-dir", default=None)
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--offline", action="store_true", help="Initialize tiny weights locally without Hub access.")
+    mode.add_argument("--offline-cache", type=Path, help="Use this shared cache for an offline run-local output.")
     mode.add_argument("--force", action="store_true", help="Rebuild even if the checkpoint is complete.")
     args = parser.parse_args()
+    output = Path(args.output_dir).expanduser()
+    cache = args.offline_cache
+    if cache is not None:
+        cache = cache.expanduser()
+        # Use run-local storage if the shared path contains an incomplete checkpoint.
+        if _checkpoint_is_complete(cache, offline=True) or not (cache.exists() or cache.is_symlink()):
+            built = ensure_tiny_minimax_h3_checkpoint(str(cache), offline=True)
+            if output.resolve() != Path(built).resolve():
+                output.parent.mkdir(parents=True, exist_ok=True)
+                output.symlink_to(Path(built).resolve(), target_is_directory=True)
+            return
     ensure_tiny_minimax_h3_checkpoint(
-        args.output_dir,
+        str(output),
         hf_cache_dir=args.hf_cache_dir,
         skip_if_exists=not args.force,
-        offline=args.offline,
+        offline=args.offline or cache is not None,
     )
 
 

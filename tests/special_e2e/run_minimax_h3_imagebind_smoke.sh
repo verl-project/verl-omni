@@ -24,12 +24,14 @@ case "$IMAGEBIND_SMOKE_DEVICE" in
         device_args=("$@")
         ;;
     npu)
-        model_root="${H3_TINY_MODEL_DIR:-$model_root}"
-        python3 "$script_dir/build_minimax_h3_tiny_random.py" --output-dir "$model_root" --offline
+        cache="${H3_TINY_MODEL_DIR:-$model_root}"
+        model_root="$OUTPUT_DIR/minimax-h3"
+        python3 "$script_dir/build_minimax_h3_tiny_random.py" --output-dir "$model_root" --offline-cache "$cache"
         source "$script_dir/lib_npu_e2e.sh"
         export NUM_GPUS="$NUM_NPUS"
         launcher=examples/flowgrpo_trainer/minimax_h3/run_minimax_h3_t2va_lora_v1_npu.sh
-        device_args=("${NPU_RUNTIME_ARGS[@]}")
+        # Diffusers 0.41 implements Ulysses backward for native SDPA.
+        device_args=("${NPU_RUNTIME_ARGS[@]}" actor_rollout_ref.model.attn_backend=native)
         ;;
     *) echo "Expected cuda or npu" >&2; exit 2 ;;
 esac
@@ -77,5 +79,8 @@ score = metrics["critic/reward/imagebind/mean"]
 assert 0.70 < score < 0.90, score
 assert not metrics.get("critic/reward/imagebind/errors/count", 0)
 assert math.isclose(metrics["critic/rewards/mean"], score, abs_tol=1e-6)
+assert metrics["critic/rewards/zero_std_ratio"] < 1, "Every rollout group received identical rewards"
+grad_norm = metrics["actor/grad_norm"]
+assert math.isfinite(grad_norm) and grad_norm > 0, grad_norm
 print(f"Step 1: managed ImageBind mean = {score:.6f}")
 PY

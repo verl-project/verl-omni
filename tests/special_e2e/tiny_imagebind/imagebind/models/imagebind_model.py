@@ -37,11 +37,13 @@ class TinyImageBind(torch.nn.Module):
             raise ValueError("Expected both preprocessed modalities on the model device")
         if audio.device.type != os.environ["IMAGEBIND_SMOKE_DEVICE"]:
             raise ValueError(f"Unexpected ImageBind device {audio.device}")
-        # With checkpoint [3, 4], audio points along [2..4, 4] and vision
-        # points up. Their cosine must be between 0.707 and 0.895.
+        # Vary the embedding directions so cosine scoring distinguishes videos
+        # even when the tiny H3 audio decoder produces silence.
+        audio_x = self.direction[0] + 0.25 * audio.mean().tanh()
+        video_x = 0.08 * video.mean().tanh()
         return {
-            ModalityType.AUDIO: torch.stack((self.direction[0] + audio.mean().tanh(), self.direction[1])).unsqueeze(0),
-            ModalityType.VISION: torch.stack((video.new_zeros(()), 1 + video.mean().sigmoid())).unsqueeze(0),
+            ModalityType.AUDIO: torch.stack((audio_x, self.direction[1])).unsqueeze(0),
+            ModalityType.VISION: torch.stack((video_x, video.new_ones(()))).unsqueeze(0),
         }
 
 
