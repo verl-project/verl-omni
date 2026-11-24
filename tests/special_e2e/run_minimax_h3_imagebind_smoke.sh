@@ -12,9 +12,9 @@ OUTPUT_DIR=$(mktemp -d "${TMPDIR:-/tmp}/h3-imagebind.XXXXXX")
 export DATA_DIR="$OUTPUT_DIR/data" IMAGEBIND_MODEL_PATH="$OUTPUT_DIR/imagebind.pth"
 export VERL_FILE_LOGGER_PATH="$OUTPUT_DIR/metrics.jsonl"
 
-python3 "$script_dir/build_minimax_h3_tiny_random.py" --output-dir "$model_root"
 case "$IMAGEBIND_SMOKE_DEVICE" in
     cuda)
+        python3 "$script_dir/build_minimax_h3_tiny_random.py" --output-dir "$model_root"
         # Use the venv's cuDNN, as in the existing H3 tiny trainer smoke.
         cudnn_dir=$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"] + "/nvidia/cudnn/lib")')
         if [[ -d "$cudnn_dir" ]]; then
@@ -24,6 +24,8 @@ case "$IMAGEBIND_SMOKE_DEVICE" in
         device_args=("$@")
         ;;
     npu)
+        model_root="${H3_TINY_MODEL_DIR:-$model_root}"
+        python3 "$script_dir/build_minimax_h3_tiny_random.py" --output-dir "$model_root" --offline
         source "$script_dir/lib_npu_e2e.sh"
         export NUM_GPUS="$NUM_NPUS"
         launcher=examples/flowgrpo_trainer/minimax_h3/run_minimax_h3_t2va_lora_v1_npu.sh
