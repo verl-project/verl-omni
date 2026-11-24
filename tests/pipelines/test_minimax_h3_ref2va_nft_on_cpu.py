@@ -119,6 +119,33 @@ def test_reference_image_short_edge_environment_override_is_restored(monkeypatch
     assert h3_preprocessing.resolve_minimax_h3_reference_image_shape(image) == original_shape
 
 
+def test_reference_image_short_edge_override_matches_vllm_omni_call_contract():
+    """The override must accept every argument vLLM-Omni's Ref2VA encoder passes."""
+    import inspect
+
+    import vllm_omni.model_executor.models.minimax_h3.encoder_processing as h3_encoder_processing
+    import vllm_omni.model_executor.models.minimax_h3.preprocessing as h3_preprocessing
+
+    image = Image.new("RGB", (640, 400))
+    original = h3_preprocessing.resolve_minimax_h3_reference_image_shape
+    canvas_area = 160 * 288
+    capped_shape = original(image, max_area=canvas_area)
+
+    with ref2va_reference_image_short_edge(256):
+        override = h3_preprocessing.resolve_minimax_h3_reference_image_shape
+        assert h3_encoder_processing.resolve_minimax_h3_reference_image_shape is override
+        assert set(inspect.signature(original).parameters) <= set(inspect.signature(override).parameters)
+
+        # The real rollout call site: unguided requests pass max_area=None.
+        resized = h3_encoder_processing._prepare_encoder_images("ref2va", [image], height=160, width=288)
+        assert [min(item.size) for item in resized] == [256]
+
+        # Timeline-guided requests still cap the reference to the output canvas area.
+        assert override(image, max_area=canvas_area) == capped_shape
+        # A cap above the requested short edge leaves the override unchanged.
+        assert override(image, max_area=10_000_000) == override(image)
+
+
 def test_request_short_edge_overrides_environment_temporarily(monkeypatch):
     import vllm_omni.model_executor.models.minimax_h3.preprocessing as h3_preprocessing
     from vllm_omni.diffusion.models.minimax_h3.pipeline_minimax_h3 import MiniMaxH3Pipeline
