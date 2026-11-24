@@ -53,8 +53,12 @@ def launch(tmp_path):
         '#!/bin/bash\nprintf "%s\\n" "$@" > "$TEST_ROOT/argv"\n'
         'nsight_dir="$TMPDIR/ray/session_latest/logs/nsight"\n'
         'mkdir -p "$nsight_dir"\n'
-        'printf report > "$nsight_dir/worker.run-${PROFILE_RUN_ID}.rank0.host.pid123.1.nsys-rep"\n'
-        'printf raw > "$nsight_dir/gpu_metrics.run-${PROFILE_RUN_ID}.host.pid456.1.qdstrm"\n'
+        'if [[ "${TEST_WRITE_REPORT:-1}" == 1 ]]; then\n'
+        '    printf report > "$nsight_dir/worker.run-${PROFILE_RUN_ID}.rank0.host.pid123.1.nsys-rep"\n'
+        "fi\n"
+        'if [[ "${TEST_WRITE_RAW:-1}" == 1 ]]; then\n'
+        '    printf raw > "$nsight_dir/gpu_metrics.run-${PROFILE_RUN_ID}.host.pid456.1.qdstrm"\n'
+        "fi\n"
         'printf other > "$nsight_dir/worker.run-other.rank0.host.pid789.nsys-rep"\n'
         'exit "${TRAINING_STATUS:-0}"\n'
     )
@@ -160,6 +164,28 @@ def test_collector_keeps_runs_separate_in_shared_source_directory(launch, tmp_pa
             f"worker.run-{run_id}.rank0.host.pid123.1.nsys-rep",
             f"gpu_metrics.run-{run_id}.host.pid456.1.qdstrm",
         }
+
+
+@pytest.mark.parametrize(
+    "training_status, write_raw, expected_status",
+    [(0, False, 1), (0, True, 1), (7, True, 7)],
+    ids=["no-artifacts", "raw-only", "training-failure"],
+)
+def test_collector_fails_without_reports(launch, tmp_path, training_status, write_raw, expected_status):
+    result = launch(
+        [[], []],
+        training_status=training_status,
+        TEST_WRITE_REPORT="0",
+        TEST_WRITE_RAW=str(int(write_raw)),
+    )
+
+    assert result.returncode == expected_status
+    assert "no .nsys-rep reports" in result.stderr
+    assert "Copied 0 report(s)" in result.stdout
+    raw = tmp_path / "run/nsight/gpu_metrics.run-trial.host.pid456.1.qdstrm"
+    assert raw.exists() is write_raw
+    if write_raw:
+        assert raw.read_text() == "raw"
 
 
 def test_v1_metrics_defaults_preserve_caller_overrides(launch, tmp_path):

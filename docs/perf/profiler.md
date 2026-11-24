@@ -367,8 +367,10 @@ Set `PROFILE_FINALIZE_TIMEOUT_S` to change the 120-second report-wait budget.
 It is checked between session queries and does not interrupt a running query;
 a query can take more than ten seconds. Query exit codes and durations are
 logged with the original stderr. Available reports and raw streams are preserved
-on training or collection failure. Session completion does not verify report
-contents: check that the intended steady-state interval is present.
+on training or collection failure. Collection fails if no `.nsys-rep` is copied;
+retained raw streams do not count as completed reports. Session completion
+does not verify report contents: check that the intended steady-state interval
+is present.
 
 Collection reads from `session_latest`. Avoid starting another Ray cluster
 during collection, since it can redirect that link. Reusing a Ray cluster and

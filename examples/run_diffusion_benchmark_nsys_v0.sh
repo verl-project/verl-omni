@@ -256,6 +256,11 @@ for artifact in "${artifacts[@]}"; do
     esac
 done
 
+if (( report_count == 0 )); then
+    echo "ERROR: no .nsys-rep reports were copied." >&2
+    report_error=1
+fi
+
 echo "Copied $report_count report(s) and $raw_count raw stream(s) to $profile_dst"
 echo "Profile run ID: $profile_run_id"
 echo "Open all *.nsys-rep in one Nsight Systems multi-report view."
