@@ -25,7 +25,7 @@ from pathlib import Path
 import pytest
 import torch
 
-SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "check_diffusion_consistency.py"
+SCRIPT = Path(__file__).resolve().parents[2] / "tools" / "consistency_checking" / "check_diffusion_consistency.py"
 SPEC = importlib.util.spec_from_file_location("check_diffusion_consistency", SCRIPT)
 checker = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(checker)
@@ -467,3 +467,20 @@ def test_cli_success_and_numeric_failure(tmp_path):
     base[base.index("--output") + 1] = str(output)
     assert subprocess.run(base, check=False, capture_output=True).returncode != 0
     assert json.loads(output.read_text())["status"] == "numerical_mismatch"
+
+
+def test_checker_compatibility_command_keeps_cli(tmp_path):
+    """The existing script command forwards to the relocated deterministic checker."""
+    import subprocess
+    import sys
+
+    root = Path(__file__).resolve().parents[2]
+    current = subprocess.run([sys.executable, str(SCRIPT), "--help"], cwd=tmp_path, capture_output=True, text=True)
+    legacy = subprocess.run(
+        [sys.executable, str(root / "scripts/check_diffusion_consistency.py"), "--help"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+    )
+    assert current.returncode == legacy.returncode == 0
+    assert current.stdout == legacy.stdout

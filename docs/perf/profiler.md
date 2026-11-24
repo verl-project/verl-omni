@@ -1,6 +1,6 @@
 # Profiling FlowGRPO / diffusion training in VeRL-Omni
 
-Last updated: 11/07/2026.
+Last updated: 11/12/2026.
 
 VeRL-Omni reuses the profiler subsystem from upstream
 [verl](https://github.com/verl-project/verl) (`verl.utils.profiler`) and exposes
@@ -91,6 +91,12 @@ The same block exists under `actor_rollout_ref.ref.profiler` and
 `actor_rollout_ref.rollout.profiler`. Generation runs in separate vLLM-Omni
 server processes, not in the actor worker, so it has its own profiler driven
 by `actor_rollout_ref.rollout.profiler` (see recipe 5).
+
+In diffusion V1, distillation teachers participate in the training-worker
+profiling lifecycle. Standalone teachers (`distillation.nnodes > 0`) use
+`actor_rollout_ref.ref.profiler`; teachers colocated with the actor use the
+actor's profiler configuration. Shared worker groups are started and stopped
+once per profiling window.
 
 Global values for `save_path`, `relocate_results`, and `finish_hook_*` provide
 defaults for the per-role configs. Set a field under
@@ -577,22 +583,28 @@ recipe's own values, minding two couplings:
   The nested actor/reference training workers receive the typed per-role profiler
   config. Actor updates label and advance each mini-batch following the pinned
   `verl/workers/engine_workers.py`, so PyTorch schedules can sub-sample updates.
-* `global_profiler.profile_continuous_steps=True` keeps a single profiling
-  database open across consecutive steps in `global_profiler.steps`, which is
-  helpful for analysing inter-step behaviour. Diffusion V1 follows
-  `verl/trainer/ppo/v1/trainer_base.py`: use continuous windows for actor-only
-  collection, and non-continuous windows when collecting rollout traces.
+* `global_profiler.profile_continuous_steps=True` keeps one profiling window
+  open across consecutive steps in `global_profiler.steps`, which is helpful
+  for analysing inter-step behaviour. Diffusion V1 closes the window at the
+  final training step even if the configured range extends beyond the
+  training limit. Use continuous windows for training-worker collection with
+  rollout profiling disabled, and non-continuous windows when collecting
+  rollout traces.
 * In the legacy diffusion trainer, for the rollout servers, the trainer calls
   `llm_server_manager.start_profile()`/`stop_profile()` around the generation
   phase of profiled steps; the servers record through vLLM's built-in torch
   profiler (recipe 5). The reward-model servers are driven the same way
   through `verl_omni.reward_loop.OmniRewardLoopManager` (recipe 6).
 * `relocate_results` and `finish_hook_*` are forwarded to upstream workers.
-  Diffusion V1 follows upstream finish-hook scheduling: a closing training-worker
-  window runs the hook on the largest configured profile step, or on the final
-  training step if that step is profiled. Keep selected steps within the run's
-  step and epoch limits.
+  In diffusion V1, a training-worker finish command runs when closing the
+  window containing the last selected step within the training limit. For
+  example, `steps=[1,100]` with four training steps runs the command at step 1.
   Rollout-only collection does not run a training-worker finish hook.
+* If profiling startup or training fails, diffusion V1 attempts to stop all
+  active targets, including a target that raised during startup. Cleanup does
+  not run finish commands or replace the original exception. During normal
+  window closure, all remaining stop calls are attempted before the first
+  stop error is reported.
 
 ## Further reading
 

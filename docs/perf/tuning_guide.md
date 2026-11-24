@@ -1,7 +1,7 @@
 (tuning_guide)=
 # Performance Tuning Guide
 
-Last updated: 10/17/2026
+Last updated: 11/23/2026
 
 This page is the starting point for tuning a VeRL-Omni diffusion RL run. It
 does not repeat the detail already covered by the more specific pages —
@@ -107,6 +107,9 @@ Symptoms that show up regardless of which stage causes them:
   disabling it under offload tends to OOM during weight sync.
 
 **Step time dominated by data transfer between worker groups (video models)**
+- See [worker-side trajectory reads](../start/diffusion_v1.md#important-settings) to reduce driver traffic in V1 sync runs.
+- Measure driver-returned tensor bytes and read latency with a synthetic Wan payload:
+  `python scripts/benchmark_diffusion_tq_field_projection.py --read-mode training --batch-size 2 --steps 2 --storage-units 1 --warmup 1 --iterations 5`.
 - This shows up as idle GPU time between rollout and training rather than
   inside either stage's compute, and is more likely on video/audio
   generation where trajectories are larger than for image models. It's a V1
