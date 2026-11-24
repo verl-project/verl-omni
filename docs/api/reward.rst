@@ -107,6 +107,12 @@ PickScore Scorer (class-based)
 .. automodule:: verl_omni.utils.reward_score.scorers.pickscore
    :members: PickScoreScorer, compute_score_pickscore_batched
 
+CLAP Scorer (class-based)
+^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. automodule:: verl_omni.utils.reward_score.scorers.clap
+   :members: CLAPScorer, compute_score_clap_batched
+
 Reward Utilities
 ^^^^^^^^^^^^^^^^^^
 
