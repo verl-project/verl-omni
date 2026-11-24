@@ -160,6 +160,7 @@ class MiniCPMODuplexRolloutAdapter(MiniCPMORolloutAdapter):
         *,
         processor: Any,
         instructions: str | None = None,
+        model_path: str | None = None,
     ) -> DuplexReplay:
         """Build one episode's replay and re-derive its per-unit mel features.
 
@@ -168,12 +169,16 @@ class MiniCPMODuplexRolloutAdapter(MiniCPMORolloutAdapter):
             processor: The checkpoint's processor (streaming audio API).
             instructions: The session's system prompt; must equal the value
                 the rollout driver opened the session with.
+            model_path: The actor checkpoint path — the snapshot the engine
+                resolved the bundled reference audio (``assets/HT_ref_audio.wav``)
+                from, so live rollouts embed the same reference block; unset
+                defers to ``VERL_OMNI_DUPLEX_REF_AUDIO_MODEL_PATH``.
 
         Returns:
             The replay with ``unit_mels`` attached for the actor's media inputs.
         """
         vocabulary = resolve_duplex_vocabulary(processor)
-        replay = build_replay(trajectory, vocabulary, instructions=instructions)
+        replay = build_replay(trajectory, vocabulary, instructions=instructions, model_path=model_path)
         replay.unit_mels, replay.unit_mel_lens = extract_unit_mels(processor, replay)
         return replay
 
@@ -199,7 +204,12 @@ class MiniCPMODuplexRolloutAdapter(MiniCPMORolloutAdapter):
         output.prompt_ids = list(payload.prompt_ids)
         output.response_ids = list(payload.response_ids)
         output.response_mask = list(payload.response_mask)
-        output.response_logprobs = list(payload.response_logprobs)
+        # ``response_logprobs`` stays unexported: verl pops it into the
+        # ``rollout_log_probs`` column and engages rollout-correction /
+        # debug metrics against the trainer-recomputed ``old_log_probs`` —
+        # engine-captured and trainer-recomputed logprobs must never mix
+        # (a 0.1–0.5-nat systematic offset). The captured logprobs ride the
+        # replay payload for the M0 parity gate only.
         output.extra_fields[DUPLEX_REPLAY_KEY] = payload.to_extra_fields(include_pcm=False)
         del output.extra_fields["duplex_replay_payload"]
         return output

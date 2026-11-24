@@ -268,7 +268,8 @@ def _apply_duplex_media(data: dict[str, Any], replays: list[dict[str, Any]]) -> 
     batch (rmpad flattening) shifts every sample after the first by its
     predecessor's row length, so bounds are re-based on the packed offsets
     derived from the position-id resets before ``_merge_packed_media`` folds
-    the per-sample containers.
+    the per-sample containers. Degenerate rows (zero-unit payloads from the
+    failure-tolerance path) contribute empty containers.
     """
     import numpy as np
 
@@ -297,10 +298,22 @@ def _apply_duplex_media(data: dict[str, Any], replays: list[dict[str, Any]]) -> 
         mels = payload.get("unit_mels")
         mel_lens = payload.get("unit_mel_lens")
         bounds = payload.get("audio_bounds")
-        if mels is None or mel_lens is None or not bounds:
+        if mels is None or mel_lens is None:
+            if not bounds:
+                # Degenerate episode (the failure-tolerance path's zero-unit
+                # payload): no units to embed, so the row contributes empty
+                # media containers instead of failing the micro-batch.
+                audio_features.append([])
+                audio_feature_lens.append([])
+                audio_bounds.append([])
+                continue
             raise ValueError(
-                "a duplex replay payload is missing its mel features or audio bounds; "
-                "the rollout adapter must attach them before training"
+                "a duplex replay payload is missing its mel features but carries "
+                "audio bounds; the rollout adapter must attach them before training"
+            )
+        if not bounds:
+            raise ValueError(
+                "a duplex replay payload carries mel features but no audio bounds; the spans and the clips disagree"
             )
         offset = packed_offsets[sample]
         shifted = [[int(start) + offset, int(end) + offset] for start, end in bounds]

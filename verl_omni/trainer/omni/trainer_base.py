@@ -21,9 +21,16 @@ against the verl pin whenever the pin moves.
 from __future__ import annotations
 
 import logging
+import math
+import numbers
+from collections import defaultdict
+from collections.abc import Mapping
 from functools import partial
+from typing import Any
 
+import transfer_queue as tq
 from omegaconf import OmegaConf
+from transfer_queue import KVBatchMeta
 from verl.checkpoint_engine import CheckpointEngineManager
 from verl.experimental.reward_loop import RewardLoopManager
 from verl.experimental.teacher_loop import MultiTeacherModelManager
@@ -41,6 +48,41 @@ from verl_omni.utils.net_utils import worker_group_port_ranges
 __all__ = ["OmniPPOTrainer"]
 
 logger = logging.getLogger(__name__)
+
+
+def _reward_extra_step_metrics(reward_extra_infos: list[Mapping[str, Any] | None]) -> dict[str, float]:
+    """Per-step aggregation of every numeric reward-extra column.
+
+    Args:
+        reward_extra_infos: One scorer-returned metrics mapping per episode
+            (``extra_fields["reward_extra_info"]``), or ``None`` where a
+            sample carries none.
+
+    Returns:
+        ``reward/<key>``: the column's mean over its finite values (columns
+        are per-axis and sparse — a key exists only on the episodes that
+        measured it — so missing and non-finite entries are skipped), and
+        ``reward/<key>_never_share``: the non-finite share when any value is
+        NaN or inf, so an ``inf`` latency (never spoke / never yielded) or
+        an all-NaN column surfaces instead of silently averaging away.
+    """
+    columns: dict[str, list[float]] = defaultdict(list)
+    for info in reward_extra_infos:
+        if not isinstance(info, Mapping):
+            continue
+        for key, value in info.items():
+            if isinstance(value, bool) or not isinstance(value, numbers.Real):
+                continue
+            columns[str(key)].append(float(value))
+    metrics: dict[str, float] = {}
+    for key, values in sorted(columns.items()):
+        finite = [value for value in values if math.isfinite(value)]
+        non_finite = len(values) - len(finite)
+        if finite:
+            metrics[f"reward/{key}"] = sum(finite) / len(finite)
+        if non_finite:
+            metrics[f"reward/{key}_never_share"] = non_finite / len(values)
+    return metrics
 
 
 class OmniPPOTrainer(PPOTrainer):
@@ -222,3 +264,29 @@ class OmniPPOTrainer(PPOTrainer):
         self._load_checkpoint()
 
         logger.info("all initialize finished, ready to fit")
+
+    # ------------------------------ metrics ------------------------------
+
+    def _compute_metrics(self, batch: KVBatchMeta, metrics: dict, timing_raw: dict, global_steps: int, epoch) -> None:
+        """verl's per-step metrics plus the reward scorer's numeric extras."""
+        super()._compute_metrics(batch, metrics, timing_raw, global_steps=global_steps, epoch=epoch)
+        metrics.update(self._reward_extra_metrics(batch))
+
+    def _reward_extra_metrics(self, batch: KVBatchMeta) -> dict[str, float]:
+        """Aggregate every numeric reward-extra column of this step's batch.
+
+        verl's ``_compute_metrics`` reports only its fixed column set; the
+        reward scorer's numeric extras (model-agnostic — any scorer's
+        returned keys) ride each sample's ``extra_fields["reward_extra_info"]``
+        in the TransferQueue store and are folded into the step metrics here
+        (see :func:`_reward_extra_step_metrics` for the aggregation).
+        """
+        data = tq.kv_batch_get(keys=batch.keys, partition_id=batch.partition_id, select_fields=["extra_fields"])
+        extra_fields = data.pop("extra_fields").tolist()
+        non_padding = [not tag.get("is_padding", False) for tag in batch.tags]
+        reward_extra_infos = [
+            extra_field.get("reward_extra_info") if isinstance(extra_field, Mapping) else None
+            for extra_field, keep in zip(extra_fields, non_padding, strict=True)
+            if keep
+        ]
+        return _reward_extra_step_metrics(reward_extra_infos)

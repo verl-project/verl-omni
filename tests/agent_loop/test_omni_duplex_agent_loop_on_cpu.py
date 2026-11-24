@@ -31,6 +31,7 @@ from tests.utils.dataset.duplex._duplex_fixtures import listening_then_speaking_
 from tests.utils.dataset.duplex.test_replay_on_cpu import FakeStreamingProcessor, FakeTokenizer
 from verl_omni.agent_loop.omni_duplex_agent_loop import OmniDuplexAgentLoop
 from verl_omni.utils.dataset.duplex.replay import DUPLEX_REPLAY_KEY
+from verl_omni.workers.rollout.vllm_rollout.vllm_omni_duplex_strategy import DuplexEpisodeError
 
 
 @dataclass
@@ -62,14 +63,17 @@ class _Remote:
 
 
 class _FakeRolloutServer:
-    def __init__(self, result: dict[str, Any]):
+    def __init__(self, result: dict[str, Any], *, failures: int = 0):
         self._result = result
+        self._failures = failures
         self.episodes: list[dict[str, Any]] = []
         self.released = 0
         self.run_duplex_episode = _Remote(self._run_duplex_episode)
 
     async def _run_duplex_episode(self, run_spec):
         self.episodes.append(run_spec)
+        if len(self.episodes) <= self._failures:
+            raise DuplexEpisodeError("fake engine failure")
         return self._result
 
 
@@ -78,28 +82,36 @@ class _Client:
         self._load_balancer = router
 
 
-def _loop(server_result: dict[str, Any]) -> tuple[OmniDuplexAgentLoop, _FakeRolloutServer]:
-    server = _FakeRolloutServer(server_result)
+def _loop(
+    server_result: dict[str, Any],
+    *,
+    response_length: int = 256,
+    failures: int = 0,
+    model_path: str | None = None,
+) -> tuple[OmniDuplexAgentLoop, _FakeRolloutServer]:
+    server = _FakeRolloutServer(server_result, failures=failures)
     client = _Client(_Router(server))
-    config = SimpleNamespace(
-        config={
-            "actor_rollout_ref": {
-                "rollout": {
-                    "engine_kwargs": {"vllm_omni": {"pipeline_name": "minicpmo_4_5_duplex"}},
-                    "response_length": 256,
-                }
-            }
-        }
-    )
     loop = OmniDuplexAgentLoop.__new__(OmniDuplexAgentLoop)
     # Bypass AgentLoopBase.__init__ (its continuous-token builder needs a real
-    # tokenizer); bind only the attributes the duplex loop consumes.
-    loop.config = config.config
-    loop.rollout_config = SimpleNamespace(engine_kwargs={"vllm_omni": {"pipeline_name": "minicpmo_4_5_duplex"}})
+    # tokenizer); bind only the attributes the duplex loop consumes — the fake
+    # mirrors the real base, whose config is a DictConfig (attribute access)
+    # and which sets self.rollout_config with NO response_length attribute of
+    # its own.
+    loop.config = SimpleNamespace(
+        actor_rollout_ref=SimpleNamespace(
+            rollout=SimpleNamespace(
+                engine_kwargs={"vllm_omni": {"pipeline_name": "minicpmo_4_5_duplex"}},
+            ),
+            model=SimpleNamespace(path=model_path),
+        )
+    )
+    loop.rollout_config = SimpleNamespace(
+        engine_kwargs={"vllm_omni": {"pipeline_name": "minicpmo_4_5_duplex"}},
+        response_length=response_length,
+    )
     loop.server_manager = client
     loop.tokenizer = FakeTokenizer()
     loop.processor = FakeStreamingProcessor()
-    loop.response_length = 256
     loop.rollout_adapter = OmniDuplexAgentLoop._resolve_rollout_adapter(loop.rollout_config)
     return loop, server
 
@@ -129,21 +141,28 @@ def _episode(axis: str = "turn") -> dict[str, Any]:
 @pytest.mark.asyncio
 async def test_run_maps_one_episode_onto_the_policy_sequence():
     loop, server = _loop(_server_result())
-    output = await loop.run({"temperature": 0.7}, duplex_episode=_episode(), duplex_seed=11)
+    output = await loop.run({"temperature": 0.7}, duplex_episode=_episode(), duplex_seed=11, global_steps=4)
     assert output.prompt_ids  # the session context prefix
     assert len(output.response_ids) == 5 * 13
     assert len(output.response_mask) == len(output.response_ids)
     assert sum(output.response_mask) == 5  # five sampled decisions
-    assert output.response_logprobs is not None
-    assert len(output.response_logprobs) == len(output.response_ids)
+    # Engine-captured logprobs stay inside the replay payload — the output
+    # column stays unset so verl cannot mix them with old_log_probs.
+    assert output.response_logprobs is None
     payload = output.extra_fields[DUPLEX_REPLAY_KEY]
+    assert payload["response_logprobs"]  # the captured channel rides the payload (M0 gate)
     assert payload["unit_mels"] and len(payload["unit_mels"]) == 5
     assert "unit_pcm" not in payload
-    # The server saw the run spec with the seed and the chunks.
+    # Off-policy staleness tags verl's _compute_metrics int-casts.
+    assert output.extra_fields["min_global_steps"] == 4
+    assert output.extra_fields["max_global_steps"] == 4
+    # The server saw the run spec with the seed and the chunks, and without
+    # the instructions key (an explicit value silences the engine pipeline).
     (run_spec,) = server.episodes
     assert 0 <= run_spec["seed"] < 2**63  # uuid-mixed from the dataset seed (group diversity)
     assert len(run_spec["chunks"]) == 5
     assert run_spec["temperature"] == 0.7
+    assert "instructions" not in run_spec
     assert server._result is not None
     assert loop.server_manager._load_balancer.released_count == 1  # the lease returned
 
@@ -180,6 +199,75 @@ async def test_misaligned_trajectory_fails_the_episode():
     loop, _ = _loop(result)
     with pytest.raises(Exception, match="client chunks"):
         await loop.run({}, duplex_episode=_episode(), duplex_seed=7)
+
+
+@pytest.mark.asyncio
+async def test_overlong_episode_fails_loudly_not_with_attributeerror():
+    # AgentLoopBase has no response_length attribute; the overlong check must
+    # read the rollout config and raise the length error, not AttributeError.
+    loop, _ = _loop(_server_result(), response_length=5)
+    with pytest.raises(ValueError, match="exceeding response_length=5"):
+        await loop.run({}, duplex_episode=_episode(), duplex_seed=1, global_steps=2)
+
+
+@pytest.mark.asyncio
+async def test_episode_failure_is_re_driven_with_a_fresh_seed():
+    loop, server = _loop(_server_result(), failures=1)
+    output = await loop.run({}, duplex_episode=_episode(), duplex_seed=11)
+    assert output.prompt_ids  # the retry succeeded and mapped normally
+    assert len(server.episodes) == 2
+    first, second = server.episodes
+    assert first["seed"] != second["seed"]  # the re-drive mixes a fresh uuid
+    assert loop.server_manager._load_balancer.released_count == 1  # one lease, held across the retry
+
+
+@pytest.mark.asyncio
+async def test_double_failure_is_a_degenerate_mask_zero_episode():
+    loop, server = _loop(_server_result(), failures=2)
+    output = await loop.run({}, duplex_episode=_episode(), duplex_seed=5, global_steps=9)
+    # The rollout batch is not poisoned: a valid, empty, mask-0 episode.
+    assert output.response_ids == []
+    assert output.response_mask == []
+    assert output.reward_score == 0.0  # keeps the scorer off the broken payload
+    assert output.response_logprobs is None
+    payload = output.extra_fields[DUPLEX_REPLAY_KEY]
+    assert payload["unit_layouts"] == [] and payload["audio_bounds"] == []
+    assert payload["status"] == "failed"
+    assert output.extra_fields["reward_extra_info"] == {"duplex_episode_failed": 1.0}
+    assert output.extra_fields["min_global_steps"] == 9
+    assert output.extra_fields["max_global_steps"] == 9
+    assert len(server.episodes) == 2  # the original drive plus the retry
+    assert loop.server_manager._load_balancer.released_count == 1
+
+
+def test_global_steps_normalization():
+    import torch
+    from tensordict import NonTensorData
+
+    from verl_omni.agent_loop.omni_duplex_agent_loop import _episode_global_steps
+
+    assert _episode_global_steps({"global_steps": 4}) == 4
+    assert _episode_global_steps({"global_steps": torch.tensor(5)}) == 5
+    assert _episode_global_steps({"global_steps": NonTensorData(6)}) == 6
+    assert _episode_global_steps({}) is None
+
+
+@pytest.mark.asyncio
+async def test_actor_model_path_rides_into_the_replay(tmp_path):
+    # The engine embeds the snapshot's bundled assets/HT_ref_audio.wav in
+    # every session; the replay must resolve it from the actor config's path
+    # (70 context ids, first span the 60-row reference block).
+    import soundfile as sf
+
+    snapshot = tmp_path / "snapshot"
+    (snapshot / "assets").mkdir(parents=True)
+    sf.write(str(snapshot / "assets" / "HT_ref_audio.wav"), np.zeros(96256, dtype=np.float32), 16000)
+    loop, _ = _loop(_server_result(), model_path=str(snapshot))
+    output = await loop.run({}, duplex_episode=_episode(), duplex_seed=3)
+    payload = output.extra_fields[DUPLEX_REPLAY_KEY]
+    assert len(payload["prompt_ids"]) == 70
+    assert payload["ref_audio"]["num_audio_tokens"] == 60
+    assert payload["audio_bounds"][0] == [8, 68]
 
 
 def test_resolve_adapter_rejects_non_duplex_pipelines():

@@ -102,12 +102,51 @@ def test_packed_duplex_batch_shifts_bounds_by_packed_offsets():
 
 def test_missing_replay_mels_fail_closed():
     input_ids = _padded_ids(1, 2, [[(3, 5)]])
-    with pytest.raises(ValueError, match="mel features or audio bounds"):
+    with pytest.raises(ValueError, match="mel features but carries audio bounds"):
         MiniCPMThinkerAdapter.prepare_model_inputs(
             {"input_ids": input_ids, "position_ids": torch.arange(input_ids.shape[1])[None]},
             {DUPLEX_REPLAY_KEY: [{"audio_bounds": [[3, 5]]}]},
             model_config=None,
         )
+
+
+def test_missing_replay_bounds_fail_closed():
+    input_ids = _padded_ids(1, 2, [[(3, 5)]])
+    with pytest.raises(ValueError, match="mel features but no audio bounds"):
+        MiniCPMThinkerAdapter.prepare_model_inputs(
+            {"input_ids": input_ids, "position_ids": torch.arange(input_ids.shape[1])[None]},
+            {DUPLEX_REPLAY_KEY: [{"unit_mels": [np.zeros((80, 10), np.float32)], "unit_mel_lens": [10]}]},
+            model_config=None,
+        )
+
+
+def test_degenerate_zero_unit_payload_passes_through():
+    # The failure-tolerance path's zero-unit payload (no mels, no bounds)
+    # contributes empty media containers instead of failing the micro-batch.
+    input_ids = _padded_ids(1, 2, [[(3, 5)]])
+    result = MiniCPMThinkerAdapter.prepare_model_inputs(
+        {"input_ids": input_ids, "position_ids": torch.arange(input_ids.shape[1])[None]},
+        {DUPLEX_REPLAY_KEY: [{"audio_bounds": []}]},
+        model_config=None,
+    )
+    data = result["data"]
+    assert data["audio_features"] == [[]]
+    assert data["audio_feature_lens"] == [[]]
+    assert data["audio_bounds"] == [[]]
+
+
+def test_degenerate_row_keeps_the_good_rows_media():
+    input_ids = _padded_ids(2, 2, [[(3, 5)], [(3, 5)]])
+    payloads = [_payload([[3, 5]]), {"audio_bounds": []}]
+    result = MiniCPMThinkerAdapter.prepare_model_inputs(
+        {"input_ids": input_ids, "position_ids": torch.arange(input_ids.shape[1]).expand(2, -1).contiguous()},
+        {DUPLEX_REPLAY_KEY: payloads},
+        model_config=None,
+    )
+    data = result["data"]
+    assert data["audio_bounds"][0] == [[3, 5]]  # the good row keeps its bounds
+    assert data["audio_bounds"][1] == []  # the degenerate row is empty
+    assert len(data["audio_feature_lens"][0]) == 1
 
 
 def test_count_mismatch_fails_closed():

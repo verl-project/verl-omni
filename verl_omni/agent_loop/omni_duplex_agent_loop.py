@@ -28,8 +28,12 @@ replay key).
 
 from __future__ import annotations
 
+import json
 import logging
+import os
+from collections.abc import Mapping
 from dataclasses import replace
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -37,11 +41,23 @@ from verl.experimental.agent_loop.agent_loop import AgentLoopBase, AgentLoopOutp
 from verl.utils.profiler import simple_timer
 
 from verl_omni.pipelines.model_base import OmniRolloutPipelineBase
-from verl_omni.utils.dataset.duplex.replay import DEFAULT_SESSION_INSTRUCTIONS
+from verl_omni.utils.dataset.duplex.replay import (
+    DEFAULT_SESSION_INSTRUCTIONS,
+    DUPLEX_REPLAY_KEY,
+    DuplexReplay,
+)
 from verl_omni.utils.dataset.duplex.trajectory import DuplexTrajectory
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
+
+#: When set, the agent loop appends one JSON line per episode's replay payload
+#: (PCM and mel features stripped — the FDB input) to
+#: ``<dir>/duplex_replay.jsonl``; unset writes nothing.
+REPLAY_DUMP_DIR_ENV = "VERL_OMNI_DUPLEX_REPLAY_DUMP_DIR"
+_REPLAY_DUMP_FILENAME = "duplex_replay.jsonl"
+
+__all__ = ["OmniDuplexAgentLoop", "REPLAY_DUMP_DIR_ENV", "dump_duplex_replay"]
 
 
 @register("omni_duplex_agent")
@@ -78,7 +94,13 @@ class OmniDuplexAgentLoop(AgentLoopBase):
         return server_id, server, load_balancer
 
     def _run_spec(self, episode: dict[str, Any], *, seed: int, sampling_params: dict[str, Any]) -> dict[str, Any]:
-        """Lift one dataset episode into the server-side run spec."""
+        """Lift one dataset episode into the server-side run spec.
+
+        No ``instructions`` key: an explicit value at ``open_session``
+        silences the engine's native duplex pipeline, so the driver
+        opens without it and the engine's duplex policy substitutes the same
+        default system text. The text stays this loop's replay context only.
+        """
         chunks = episode.get("chunks") or []
         if not chunks:
             raise ValueError(f"duplex episode {episode.get('episode_id')!r} carries no audio chunks")
@@ -94,7 +116,6 @@ class OmniDuplexAgentLoop(AgentLoopBase):
             "seed": int(seed),
             "chunks": chunks,
             "event": dict(episode.get("event") or {}),
-            "instructions": episode.get("instructions") or DEFAULT_SESSION_INSTRUCTIONS,
             "temperature": float(sampling_params.get("temperature", 0.7)),
             "tail_horizon_s": float(episode.get("tail_horizon_s", 8.0)),
         }
@@ -107,6 +128,17 @@ class OmniDuplexAgentLoop(AgentLoopBase):
         if episode.get("commit"):
             run_spec["commit"] = True
         return run_spec
+
+    def _actor_model_path(self) -> str | None:
+        """The actor checkpoint path, as the rollout config knows it.
+
+        The engine resolves the bundled reference audio
+        (``assets/HT_ref_audio.wav``) from this snapshot, so the replay must
+        too — ``None`` (path unset) builds a reference-less replay.
+        """
+        model_config = getattr(self.config, "actor_rollout_ref", None)
+        path = getattr(getattr(model_config, "model", None), "path", None)
+        return str(path) if path else None
 
     async def run(self, sampling_params: dict[str, Any], **kwargs) -> AgentLoopOutput:
         """Drive one episode end to end and map it onto the policy sequence."""
@@ -123,14 +155,40 @@ class OmniDuplexAgentLoop(AgentLoopBase):
         # rides every sealed record set, so per-episode replay determinism
         # (same seed => same tokens) is preserved and auditable.
         seed = (int(kwargs.get("duplex_seed", 0) or 0) + uuid4().int) % (2**63)
+        instructions = episode.get("instructions") or DEFAULT_SESSION_INSTRUCTIONS
         run_spec = self._run_spec(episode, seed=seed, sampling_params=sampling_params)
+        step = _episode_global_steps(kwargs)
 
         metrics = {}
         with simple_timer("generate_sequences", metrics):
             request_id = f"duplex-{run_spec['episode_id']}-{uuid4().hex[:8]}"
             server_id, server, load_balancer = await self._episode_server(request_id)
             try:
-                result = await server.run_duplex_episode.remote(run_spec)
+                try:
+                    result = await server.run_duplex_episode.remote(run_spec)
+                except Exception as first_error:
+                    # Failure tolerance: one re-drive with a fresh seed. A
+                    # transient engine failure must not poison the GRPO
+                    # group; the second failure degrades to a mask-0 episode
+                    # below instead of failing the rollout batch.
+                    logger.warning(
+                        "duplex episode %s failed (%s: %s); re-driving with a fresh seed",
+                        run_spec["episode_id"],
+                        type(first_error).__name__,
+                        first_error,
+                    )
+                    seed = (int(kwargs.get("duplex_seed", 0) or 0) + uuid4().int) % (2**63)
+                    run_spec = self._run_spec(episode, seed=seed, sampling_params=sampling_params)
+                    result = await server.run_duplex_episode.remote(run_spec)
+            except Exception as error:
+                return self._degenerate_output(
+                    episode,
+                    seed=seed,
+                    instructions=instructions,
+                    step=step,
+                    metrics=metrics,
+                    error=error,
+                )
             finally:
                 await load_balancer.release_server.remote(server_id=server_id, request_id=request_id)
 
@@ -151,7 +209,8 @@ class OmniDuplexAgentLoop(AgentLoopBase):
         replay = self.rollout_adapter.build_duplex_replay(
             trajectory,
             processor=self.processor,
-            instructions=run_spec["instructions"],
+            instructions=instructions,
+            model_path=self._actor_model_path(),
         )
         output = AgentLoopOutput(
             prompt_ids=[0],
@@ -159,19 +218,16 @@ class OmniDuplexAgentLoop(AgentLoopBase):
             response_mask=[],
             num_turns=2,
             metrics=metrics,
-            extra_fields={"duplex_replay_payload": replay},
+            # verl's _compute_metrics reads these tags off every trajectory
+            # (off-policy staleness); None would crash the int cast.
+            extra_fields={"duplex_replay_payload": replay, "min_global_steps": step, "max_global_steps": step},
         )
-        output = self.rollout_adapter.postprocess_agent_loop_output(
-            output,
-            tokenizer=self.tokenizer,
-            response_length=self.response_length,
-        )
-        if not isinstance(output, AgentLoopOutput):
-            raise TypeError(f"duplex rollout adapter must return an AgentLoopOutput, got {type(output).__name__}.")
+        output = self._postprocess(output)
         policy_length = len(output.response_ids)
-        if policy_length > self.response_length:
+        if policy_length > self.rollout_config.response_length:
             raise ValueError(
-                f"Omni policy output has {policy_length} tokens, exceeding response_length={self.response_length}."
+                f"Omni policy output has {policy_length} tokens, exceeding "
+                f"response_length={self.rollout_config.response_length}."
             )
         if len(output.response_mask) != policy_length:
             raise ValueError(
@@ -183,7 +239,127 @@ class OmniDuplexAgentLoop(AgentLoopBase):
                 "Omni policy response_logprobs must align one-to-one with response_ids, "
                 f"got {len(output.response_logprobs)} and {policy_length}."
             )
+        dump_duplex_replay(output.extra_fields, episode_id=run_spec["episode_id"])
         return output
+
+    def _degenerate_output(
+        self,
+        episode: dict[str, Any],
+        *,
+        seed: int,
+        instructions: str,
+        step: Any,
+        metrics: dict[str, Any],
+        error: Exception,
+    ) -> AgentLoopOutput:
+        """The mask-0 episode for a twice-failed drive.
+
+        Bounded episodes must not poison the whole rollout group: the output
+        carries an empty (zero-unit) replay payload, a zero loss mask, a zero
+        reward score — which also keeps the scorer off the broken payload —
+        and a ``duplex_episode_failed`` reward extra so the trainer's
+        per-step aggregation surfaces the failure share.
+        """
+        logger.error(
+            "duplex episode %s failed twice (%s: %s); emitting a degenerate mask-0 episode",
+            episode.get("episode_id"),
+            type(error).__name__,
+            error,
+        )
+        replay = DuplexReplay(
+            session_id=f"failed-{episode.get('episode_id', 'unknown')}",
+            seed=seed,
+            prompt_ids=[],
+            response_ids=[],
+            response_mask=[],
+            audio_bounds=[],
+            unit_layouts=[],
+            unit_pcm=[],
+            response_logprobs=[],
+            event=dict(episode.get("event") or {}),
+            status="failed",
+            model_extension={},
+            sampling_params=(),
+            instructions=instructions,
+        )
+        output = AgentLoopOutput(
+            prompt_ids=[0],
+            response_ids=[],
+            response_mask=[],
+            num_turns=2,
+            metrics=metrics,
+            reward_score=0.0,
+            extra_fields={
+                "duplex_replay_payload": replay,
+                "min_global_steps": step,
+                "max_global_steps": step,
+                "reward_extra_info": {"duplex_episode_failed": 1.0},
+            },
+        )
+        return self._postprocess(output)
+
+    def _postprocess(self, output: AgentLoopOutput) -> AgentLoopOutput:
+        """Run the rollout adapter's boundary step and require an ``AgentLoopOutput`` back."""
+        output = self.rollout_adapter.postprocess_agent_loop_output(
+            output,
+            tokenizer=self.tokenizer,
+            response_length=self.rollout_config.response_length,
+        )
+        if not isinstance(output, AgentLoopOutput):
+            raise TypeError(f"duplex rollout adapter must return an AgentLoopOutput, got {type(output).__name__}.")
+        return output
+
+
+def _episode_global_steps(kwargs: Mapping[str, Any]) -> int | None:
+    """The trainer's global step for this episode, or ``None`` when absent.
+
+    The TransferQueue agent-loop worker forwards the batch's
+    ``global_steps`` column as a kwarg; it may arrive as a plain int, a 0-dim
+    tensor, or a ``NonTensorData``.
+    """
+    raw = kwargs.get("global_steps")
+    if raw is None:
+        return None
+    value = getattr(raw, "data", raw)
+    item = getattr(value, "item", None)
+    if callable(item):
+        value = item()
+    return int(value)
+
+
+def dump_duplex_replay(extra_fields: Mapping[str, Any], *, episode_id: str) -> bool:
+    """Append one episode's replay payload to the env-gated JSONL dump.
+
+    With ``VERL_OMNI_DUPLEX_REPLAY_DUMP_DIR`` set, the payload under
+    ``duplex_replay`` is appended as one line-buffered JSON line to
+    ``<dir>/duplex_replay.jsonl``, PCM- and mel-free (the FDB input). Unset,
+    nothing is written.
+
+    Returns:
+        Whether a line was written.
+    """
+    dump_dir = os.environ.get(REPLAY_DUMP_DIR_ENV)
+    if not dump_dir:
+        return False
+    payload = extra_fields.get(DUPLEX_REPLAY_KEY)
+    if not isinstance(payload, Mapping):
+        raise TypeError(
+            f"duplex replay dump needs the payload under {DUPLEX_REPLAY_KEY!r}, got {type(payload).__name__}"
+        )
+    line = {key: value for key, value in payload.items() if key not in ("unit_mels", "unit_mel_lens")}
+    dump_path = Path(dump_dir) / _REPLAY_DUMP_FILENAME
+    dump_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(dump_path, "a", buffering=1, encoding="utf-8") as handle:
+        handle.write(json.dumps({"episode_id": episode_id, **line}, default=_json_dump_value) + "\n")
+    return True
+
+
+def _json_dump_value(value: Any) -> Any:
+    """JSON encoding for the dump's non-native payload values (arrays, tensors)."""
+    tolist = getattr(value, "tolist", None)
+    if callable(tolist):
+        return tolist()
+    raise TypeError(f"duplex replay dump: {type(value).__name__} is not JSON-serializable")
 
 
 def _reanchor_interruption(trajectory: DuplexTrajectory, speech_chunk_end_index: Any, seed: int):

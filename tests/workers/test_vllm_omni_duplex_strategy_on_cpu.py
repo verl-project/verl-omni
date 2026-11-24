@@ -14,8 +14,9 @@
 """CPU tests for the duplex episode driver against a fake DuplexOmni.
 
 The fake mirrors the engine contract the driver consumes: open/close, paced
-appends, events, per-response ``collect_action_records`` draining, and the
-post-close terminal cache. No vLLM-Omni duplex symbols are imported, so the
+appends, events, the commit-affecting unit windows, and the post-close
+terminal cache (retention spills every sealed scope there; the driver makes
+no in-flight collects). No vLLM-Omni duplex symbols are imported, so the
 suite runs at the pin.
 """
 
@@ -23,12 +24,15 @@ from __future__ import annotations
 
 import asyncio
 import struct
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
+import numpy as np
 import pytest
 
 from tests.utils.dataset.duplex._duplex_fixtures import (
+    LISTEN_TOKEN_ID,
+    SPEAK_CONTENT_TOKEN_ID,
     record_set_wire,
 )
 from verl_omni.workers.rollout.vllm_rollout import vllm_omni_duplex_strategy as strategy_module
@@ -36,36 +40,6 @@ from verl_omni.workers.rollout.vllm_rollout.vllm_omni_duplex_strategy import (
     DuplexEpisodeError,
     DuplexStrategy,
 )
-
-
-@dataclass
-class _FakeLedger:
-    """Mirrors the engine ledger's collection semantics.
-
-    ``collect(None)`` prefers sealed sets and only drains the open scope as
-    an ``in_progress`` snapshot when nothing is sealed — the exact behavior
-    the driver's choreography depends on.
-    """
-
-    sealed: list[dict] = field(default_factory=list)
-    open_units: int = 2
-    #: Whether a speak onset seals a listening scope (an empty listening
-    #: scope closes silently engine-side — nothing to seal).
-    listen_units: int = 2
-    session_id: str = "duplex-0"
-
-    def seal(self, response_id, status="completed"):
-        self.sealed.append(record_set_wire(session_id=self.session_id, response_id=response_id, status=status))
-
-    def collect(self, response_id=None):
-        response_ids = [wire.get("response_id") for wire in self.sealed]
-        if self.sealed and (response_id is None or response_id in response_ids):
-            wire = self.sealed.pop() if response_id is None else self.sealed.pop(response_ids.index(response_id))
-            return _RecordSet(wire)
-        if not self.sealed and self.open_units:
-            wire = record_set_wire(session_id=self.session_id, response_id=response_id, status="in_progress")
-            return _RecordSet(wire)
-        raise _SessionError("action_capture_not_retained")
 
 
 class FakeHandle:
@@ -78,9 +52,13 @@ class FakeHandle:
         self._queue: asyncio.Queue = asyncio.Queue()
         self.closed = False
         self.appends: list[tuple[bytes, bool]] = []
-        self.collected = 0
+        self.append_times: list[float] = []
+        self.event_times: dict[str, float] = {}
         self.commits = 0
-        self.ledger = _FakeLedger(session_id=session_id)
+        #: Appends completed before each commit (commit ordering).
+        self.commit_log: list[int] = []
+        #: In-flight collection attempts — the driver must make none.
+        self.collect_calls = 0
         for event_type in self._script:
             self._queue.put_nowait(_Event(event_type))
 
@@ -90,13 +68,15 @@ class FakeHandle:
     async def append_audio(self, audio: bytes, *, format: str, sample_rate_hz: int, is_speech=None, **kwargs):
         assert format == "pcm_f32le" and sample_rate_hz == 16000
         self.appends.append((audio, bool(is_speech)))
+        self.append_times.append(asyncio.get_running_loop().time())
 
     async def commit(self, **kwargs):
-        self.commits = getattr(self, "commits", 0) + 1
+        self.commits += 1
+        self.commit_log.append(len(self.appends))
 
     async def collect_action_records(self, response_id=None, **kwargs):
-        self.collected += 1
-        return self.ledger.collect(response_id)
+        self.collect_calls += 1
+        raise _SessionError("action_capture_not_retained")
 
     async def close(self, *, reason: str = "client_close", **kwargs):
         if self.closed:
@@ -108,14 +88,7 @@ class FakeHandle:
     async def events(self):
         while True:
             event = await self._queue.get()
-            if event.type == "response.speak" and self.ledger.listen_units > 0:
-                # The engine's begin_response seals the listening scope before
-                # any payload of the new response can arrive.
-                self.ledger.seal(response_id=None)
-            if event.type in ("response.done", "response.completed"):
-                self.ledger.seal(response_id=f"resp-{self.collected + 1}")
-            if event.type == "audio.cancelled":
-                self.ledger.seal(response_id=None, status="truncated_interruption")
+            self.event_times[event.type] = asyncio.get_running_loop().time()
             yield event
             if event.type == "session.closed":
                 return
@@ -139,28 +112,51 @@ class _RecordSet:
 
 
 class FakeDuplexOmni:
-    """Engine fake: opens scripted sessions, drains one terminal record set."""
+    """Engine fake: opens scripted sessions; the terminal cache drains post-close.
 
-    def __init__(self, *, script: list[str], terminal_sets: int = 1, open_error: Exception | None = None):
+    ``terminal_wires`` holds the sealed scopes most-recent-first (the engine's
+    drain order); ``open_errors`` replays one error per ``open_session`` call
+    (``None`` entries open normally).
+    """
+
+    def __init__(
+        self,
+        *,
+        script: list[str],
+        terminal_wires: list[dict] | None = None,
+        open_errors: list[Exception | None] | None = None,
+    ):
         self.script = script
-        self.terminal_sets = terminal_sets
-        self.open_error = open_error
+        if terminal_wires is None:
+            # One sealed scope by default, like the engine's drain after close.
+            terminal_wires = [record_set_wire(session_id="duplex-0", response_id="resp-1")]
+        self.terminal_wires = list(terminal_wires)
+        self.open_errors = list(open_errors) if open_errors is not None else []
         self.handles: list[FakeHandle] = []
         self.open_configs: list[dict] = []
+        #: ``(session_id, session_closed_at_call)`` per terminal-cache collect.
+        self.terminal_collect_log: list[tuple[str, bool]] = []
 
     async def open_session(self, config, **kwargs):
-        if self.open_error is not None:
-            raise self.open_error
+        if self.open_errors:
+            error = self.open_errors.pop(0)
+            if error is not None:
+                raise error
         self.open_configs.append(dict(config))
         handle = FakeHandle(self, f"duplex-{len(self.handles)}", script=self.script)
         self.handles.append(handle)
         return handle
 
     def collect_action_records(self, session_id, response_id=None, **kwargs):
-        if self.terminal_sets <= 0:
+        handle = self.handles[-1] if self.handles else None
+        self.terminal_collect_log.append((session_id, bool(handle is not None and handle.closed)))
+        if handle is None or not handle.closed:
+            raise AssertionError("terminal-cache collect before the session closed")
+        if not self.terminal_wires:
             raise _SessionError("action_capture_not_retained")
-        self.terminal_sets -= 1
-        return _RecordSet(record_set_wire(session_id=session_id, response_id="terminal"))  # noqa: RET504
+        wire = dict(self.terminal_wires.pop(0))
+        wire["session_id"] = session_id
+        return _RecordSet(wire)
 
 
 class _SessionError(Exception):
@@ -208,7 +204,10 @@ def _run_spec(**overrides) -> dict:
 
 @pytest.mark.asyncio
 async def test_turn_episode_feeds_chunks_and_drains_records():
-    engine = FakeDuplexOmni(script=["response.done", "session.closed"])
+    engine = FakeDuplexOmni(
+        script=["response.done", "session.closed"],
+        terminal_wires=[record_set_wire(session_id="duplex-0", response_id="resp-1")],
+    )
     strategy = _strategy(engine)
     try:
         result = await strategy.run_duplex_episode(_run_spec())
@@ -216,11 +215,16 @@ async def test_turn_episode_feeds_chunks_and_drains_records():
         _restore(strategy)
     handle = engine.handles[0]
     assert len(handle.appends) == 3
-    # The session opened with capture on and the derived seed.
+    # The session opened with capture on and the derived seed, and without
+    # the ``instructions`` key (an explicit value silences the engine's
+    # native duplex pipeline).
     assert engine.open_configs[0]["action_capture"] is True
     assert engine.open_configs[0]["seed"] == 11
-    # One in-flight collection (response.done) + one terminal drain.
-    assert len(result["record_sets"]) == 2
+    assert "instructions" not in engine.open_configs[0]
+    # The scopes arrive through the post-close terminal drain only.
+    assert handle.collect_calls == 0
+    assert [closed for _, closed in engine.terminal_collect_log] == [True, True]
+    assert len(result["record_sets"]) == 1
     assert all(wire["session_id"] == handle.session_id for wire in result["record_sets"])
     # The fed chunks ride the result for trajectory assembly.
     assert len(result["client_chunks"]) == 3
@@ -257,10 +261,144 @@ async def test_interruption_injection_waits_for_the_speak_onset():
     finally:
         _restore(strategy)
     appends = engine.handles[0].appends
-    # Pre-onset silence + speech + tail silence, all fed after the onset event.
+    # Speech + tail silence, all fed after the onset event.
     assert len(appends) == 3 + 1
     assert [is_speech for _, is_speech in appends] == [True, True, True, False]
     assert result["client_chunks"]
+
+
+@pytest.mark.asyncio
+async def test_interruption_delay_reanchors_to_the_speak_onset():
+    # delay_s > 0: the driver feeds pre-onset silence on the session's input
+    # clock and injects the interrupting speech only after onset + delay.
+    # The onset rides absolute event-loop time — the same base the feed
+    # schedules run on; an episode-relative onset would skip the silence
+    # phase and inject immediately.
+    engine = FakeDuplexOmni(script=["response.speak", "session.closed"])
+    strategy = _strategy(engine, cadence=0.01)
+    spec = _run_spec(
+        axis="interruption",
+        event={"axis": "interruption", "interrupt_speech_end_s": 2.0},
+        chunks=_chunks(2, speech_from=0),
+        inject={"delay_s": 0.15, "tail_silence_chunks": 1},
+        speak_wait_horizon_s=2.0,
+    )
+    try:
+        result = await strategy.run_duplex_episode(spec)
+    finally:
+        _restore(strategy)
+    handle = engine.handles[0]
+    onset_time = handle.event_times["response.speak"]
+    silence_times = [
+        time for time, (_, is_speech) in zip(handle.append_times, handle.appends, strict=False) if not is_speech
+    ]
+    first_speech_time = next(
+        time for time, (_, is_speech) in zip(handle.append_times, handle.appends, strict=False) if is_speech
+    )
+    # ~delay/cadence pre-onset silences (zero would be the clock-base mixup;
+    # the onset wait itself polls at 50 ms, hence the wide band).
+    assert 5 <= len(silence_times) <= 16
+    # The interrupting speech starts no earlier than onset + delay.
+    assert first_speech_time - onset_time >= 0.1
+    assert result["speech_chunk_end_index"] == len(result["client_chunks"]) - 1  # the tail silence follows
+
+
+@pytest.mark.asyncio
+async def test_commit_rides_the_last_speech_chunk():
+    # E4: paced appends are each their own input unit, so a commit after the
+    # whole feed lands in the engine's silent-commit drop. It must fire while
+    # the last speech-carrying chunk's unit window is still open — never on
+    # the non-speech tail.
+    engine = FakeDuplexOmni(script=["session.closed"])
+    strategy = _strategy(engine)
+    chunks = _chunks(3, speech_from=0)
+    chunks[2]["is_speech"] = False  # a non-speech tail chunk after the speech
+    spec = _run_spec(chunks=chunks, commit=True)
+    try:
+        await strategy.run_duplex_episode(spec)
+    finally:
+        _restore(strategy)
+    handle = engine.handles[0]
+    assert handle.commit_log == [2]  # right after the last speech chunk, before the tail
+    assert len(handle.appends) == 3  # the tail silence is still fed
+
+
+@pytest.mark.asyncio
+async def test_commit_covers_the_whole_speech_tail_when_all_chunks_speak():
+    engine = FakeDuplexOmni(script=["session.closed"])
+    strategy = _strategy(engine)
+    spec = _run_spec(commit=True)
+    try:
+        await strategy.run_duplex_episode(spec)
+    finally:
+        _restore(strategy)
+    handle = engine.handles[0]
+    assert handle.commit_log == [3]
+    assert handle.appends  # commit fired after every fed chunk
+
+
+@pytest.mark.asyncio
+async def test_no_speech_episode_sends_no_commit():
+    engine = FakeDuplexOmni(script=["session.closed"])
+    strategy = _strategy(engine)
+    chunks = [{"pcm": [0.0] * 160, "is_speech": False} for _ in range(2)]
+    spec = _run_spec(chunks=chunks, commit=True)
+    try:
+        await strategy.run_duplex_episode(spec)
+    finally:
+        _restore(strategy)
+    assert engine.handles[0].commits == 0
+
+
+@pytest.mark.asyncio
+async def test_ndarray_chunks_feed_the_full_pcm_stream():
+    # The dataset emits ndarray chunks; truth-testing one raises, so the
+    # driver normalizes by identity and feeds the whole buffer as f32 bytes.
+    engine = FakeDuplexOmni(script=["session.closed"])
+    strategy = _strategy(engine)
+    chunks = [{"pcm": np.zeros(16000, dtype=np.float32), "is_speech": True} for _ in range(2)]
+    try:
+        result = await strategy.run_duplex_episode(_run_spec(chunks=chunks))
+    finally:
+        _restore(strategy)
+    handle = engine.handles[0]
+    assert all(len(audio) == 16000 * 4 for audio, _ in handle.appends)
+    assert len(result["client_chunks"]) == 2
+    assert len(result["client_chunks"][0]) == 16000
+
+
+@pytest.mark.asyncio
+async def test_open_session_retries_capacity_exhausted():
+    engine = FakeDuplexOmni(script=["session.closed"], open_errors=[_SessionError("capacity_exhausted")])
+    strategy_module_retry = strategy_module._DUPLEX_OPEN_RETRY_S
+    strategy_module._DUPLEX_OPEN_RETRY_S = 0.001
+    strategy = _strategy(engine)
+    try:
+        result = await strategy.run_duplex_episode(_run_spec())
+    finally:
+        strategy_module._DUPLEX_OPEN_RETRY_S = strategy_module_retry
+        _restore(strategy)
+    assert len(engine.handles) == 1  # the retried open succeeded
+    assert result["session_id"] == engine.handles[0].session_id
+
+
+@pytest.mark.asyncio
+async def test_open_session_deadline_raises():
+    engine = FakeDuplexOmni(
+        script=["session.closed"],
+        open_errors=[_SessionError("capacity_exhausted")] * 50,
+    )
+    retry_s, wait_s = strategy_module._DUPLEX_OPEN_RETRY_S, strategy_module._DUPLEX_OPEN_WAIT_S
+    strategy_module._DUPLEX_OPEN_RETRY_S = 0.001
+    strategy_module._DUPLEX_OPEN_WAIT_S = 0.05
+    strategy = _strategy(engine)
+    try:
+        with pytest.raises(DuplexEpisodeError, match="capacity_exhausted"):
+            await strategy.run_duplex_episode(_run_spec())
+    finally:
+        strategy_module._DUPLEX_OPEN_RETRY_S = retry_s
+        strategy_module._DUPLEX_OPEN_WAIT_S = wait_s
+        _restore(strategy)
 
 
 @pytest.mark.asyncio
@@ -277,21 +415,12 @@ async def test_engine_error_closes_the_session_and_fails_the_episode():
 
 @pytest.mark.asyncio
 async def test_no_records_is_a_rollout_failure():
-    engine = FakeDuplexOmni(script=["session.closed"], terminal_sets=0)
-    # Remove the in-flight collection too.
-    engine.handles = []
+    engine = FakeDuplexOmni(script=["session.closed"], terminal_wires=[])
     strategy = _strategy(engine)
-    original_collect = FakeHandle.collect_action_records
-
-    async def refusing(self, response_id=None, **kwargs):
-        raise _SessionError("action_capture_not_retained")
-
-    FakeHandle.collect_action_records = refusing
     try:
         with pytest.raises(DuplexEpisodeError, match="no action-record scopes"):
             await strategy.run_duplex_episode(_run_spec())
     finally:
-        FakeHandle.collect_action_records = original_collect
         _restore(strategy)
 
 
@@ -326,41 +455,80 @@ def test_strategy_selector_routes_duplex():
 
 
 @pytest.mark.asyncio
-async def test_collection_choreography_matches_the_ledger_seals():
-    # speak seals the listening scope (engine bind runs before any payload of
-    # the new response); done seals the response; cancelled seals the
-    # barge-in set. Each seal is collected before the next can overflow.
-    script = ["response.speak", "audio.cancelled", "session.closed"]
-    engine = FakeDuplexOmni(script=script, terminal_sets=0)
+async def test_collection_drains_after_close_and_in_chronological_order():
+    # speak/cancelled/done seal scopes engine-side; retention spills every
+    # sealed scope into the terminal cache before the next seal, so the
+    # driver collects nothing in-flight — everything drains post-close and
+    # re-sorts chronologically even though the cache hands scopes back
+    # most-recent-first.
+    script = ["response.speak", "audio.cancelled", "response.done", "session.closed"]
+    late = record_set_wire(
+        session_id="duplex-0",
+        response_id="resp-late",
+        epoch=1,
+        turn_id=2,
+        status="completed",
+        units=[{"action": (SPEAK_CONTENT_TOKEN_ID, "sampled", -1.0), "emission_ns": 9_000_000_000}],
+    )
+    early = record_set_wire(
+        session_id="duplex-0",
+        response_id=None,
+        epoch=1,
+        turn_id=1,
+        status="truncated_interruption",
+        units=[{"action": (LISTEN_TOKEN_ID, "sampled", -0.2), "emission_ns": 3_000_000_000}],
+    )
+    engine = FakeDuplexOmni(script=script, terminal_wires=[late, early])
     strategy = _strategy(engine)
     try:
         result = await strategy.run_duplex_episode(_run_spec())
     finally:
         _restore(strategy)
-    statuses = [wire["status"] for wire in result["record_sets"]]
-    # speak -> sealed listening set (response_id None); cancelled ->
-    # truncated_interruption set; the close sealed nothing more.
-    assert statuses == ["completed", "truncated_interruption"]
-    assert result["record_sets"][0]["response_id"] is None
+    handle = engine.handles[0]
+    assert handle.collect_calls == 0  # no in-flight collection
+    assert all(closed for _, closed in engine.terminal_collect_log)
+    assert [wire["response_id"] for wire in result["record_sets"]] == [None, "resp-late"]
+    assert [wire["status"] for wire in result["record_sets"]] == ["truncated_interruption", "completed"]
+    assert result["status"] == "completed"
 
 
 @pytest.mark.asyncio
-async def test_in_progress_drain_fails_the_episode_loudly():
-    # No sealed set and a non-empty open scope: collect(None) drains an
-    # in_progress snapshot — the driver must refuse to train on it.
-    engine = FakeDuplexOmni(script=["response.speak", "session.closed"])
+async def test_earlier_epoch_sorts_first_regardless_of_cache_order():
+    first = record_set_wire(
+        session_id="duplex-0",
+        response_id="resp-0",
+        epoch=0,
+        turn_id=0,
+        status="completed",
+        units=[{"action": (LISTEN_TOKEN_ID, "sampled", -0.1), "emission_ns": 1_000_000_000}],
+    )
+    second = record_set_wire(
+        session_id="duplex-0",
+        response_id="resp-1",
+        epoch=1,
+        turn_id=1,
+        status="completed",
+        units=[{"action": (SPEAK_CONTENT_TOKEN_ID, "sampled", -1.0), "emission_ns": 2_000_000_000}],
+    )
+    engine = FakeDuplexOmni(script=["session.closed"], terminal_wires=[second, first])
     strategy = _strategy(engine)
-    original_open = engine.open_session
-
-    async def _open_listenless(config, **kwargs):
-        handle = await original_open(config, **kwargs)
-        handle.ledger.listen_units = 0  # the session never listened: speak seals nothing
-        handle.ledger.open_units = 2
-        return handle
-
-    engine.open_session = _open_listenless
     try:
-        with pytest.raises(DuplexEpisodeError, match="in_progress"):
+        result = await strategy.run_duplex_episode(_run_spec())
+    finally:
+        _restore(strategy)
+    assert [wire["epoch"] for wire in result["record_sets"]] == [0, 1]
+
+
+@pytest.mark.asyncio
+async def test_unbounded_terminal_cache_fails_loudly():
+    # A cache that never answers action_capture_not_retained must not spin
+    # the drain forever; the episode fails instead of silently dropping or
+    # hanging.
+    wires = [record_set_wire(session_id="duplex-0", response_id=f"resp-{index}") for index in range(64)]
+    engine = FakeDuplexOmni(script=["session.closed"], terminal_wires=wires + [wires[0]] * 10)
+    strategy = _strategy(engine)
+    try:
+        with pytest.raises(DuplexEpisodeError, match="never answered"):
             await strategy.run_duplex_episode(_run_spec())
     finally:
         _restore(strategy)

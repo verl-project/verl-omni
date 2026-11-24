@@ -26,9 +26,11 @@ one engine-resident session per episode next to the engine process:
   or the runtime's silence-continuation clock injects unscheduled units);
 - watch ``response.speak`` to key interruption injection to the policy's own
   speak onset — the harness never cancels model output;
-- drain one sealed ``DuplexActionRecordSet`` per response while the episode
-  runs (upstream retention is the current response plus one sealed set, so
-  the collector must keep up) and the terminal cache after close;
+- make no in-flight collects (the post-fix engine spills every sealed scope
+  into a terminal cache before the next seal, so mid-episode collection is
+  structurally racy): after close, drain the terminal cache until the engine
+  answers ``action_capture_not_retained`` and re-sort the scopes
+  chronologically by ``(epoch, turn_id, emission_ns)``;
 - close every session before returning, so the engine's weight-sync fence
   (``weight_sync_sessions_open``) is never tripped by this driver.
 
@@ -41,8 +43,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import struct
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from typing import Any
+
+import numpy as np
 
 from verl_omni.workers.rollout.vllm_rollout.vllm_omni_ar_strategy import ARStrategy
 
@@ -57,18 +61,37 @@ _DUPLEX_CHUNK_SECONDS = 1.0
 _DEFAULT_TAIL_HORIZON_S = 8.0
 #: Bound on collect_action_records draining after close (terminal cache).
 _TERMINAL_DRAIN_TIMEOUT_S = 10.0
+#: Safety bound on the scopes one episode's terminal cache may hold; a longer
+#: drain means the engine ignores ``action_capture_not_retained``.
+_TERMINAL_DRAIN_MAX_SCOPES = 64
+#: ``open_session`` slot retry: batch waves transiently exceed one engine's
+#: session slots; retry ``capacity_exhausted`` opens instead of failing episodes.
+_DUPLEX_OPEN_RETRY_S = 2.0
+_DUPLEX_OPEN_WAIT_S = 180.0
 
 
 class DuplexEpisodeError(RuntimeError):
     """A duplex episode failed; the episode is a rollout failure, not data."""
 
 
-def _pcm_f32le_bytes(samples: Sequence[float]) -> bytes:
+def _pcm_f32le_bytes(samples: Any) -> bytes:
+    """Little-endian float32 PCM bytes of one chunk (list or ndarray)."""
     return struct.pack(f"<{len(samples)}f", *[float(value) for value in samples])
 
 
 def _silence_chunk(samples: int = _DUPLEX_SAMPLE_RATE) -> list[float]:
     return [0.0] * samples
+
+
+def _record_sort_key(wire: Mapping[str, Any]) -> tuple[int, int, int]:
+    """Chronological key of one record-set wire: ``(epoch, turn_id, emission_ns)``.
+
+    ``emission_ns`` is the scope's first stamped unit emission (scopes are
+    single-turn, so the first emission orders scopes within an epoch); a
+    scope with no stamps sorts first.
+    """
+    emissions = [int(value) for value in (wire.get("emission_ns") or ()) if value is not None]
+    return (int(wire.get("epoch") or 0), int(wire.get("turn_id") or 0), emissions[0] if emissions else -1)
 
 
 class DuplexStrategy(ARStrategy):
@@ -105,20 +128,23 @@ class DuplexStrategy(ARStrategy):
 
         Args:
             run_spec: One episode: ``episode_id``, ``axis``, ``seed``,
-                ``chunks`` (list of ``{"pcm": [floats], "is_speech": bool}``
-                in feed order), ``event`` (the episode-relative annotation),
-                ``instructions``, optional ``inject`` (``{"delay_s": float}`` —
-                interruption episodes inject their speech chunks relative to
-                the observed speak onset), and ``tail_horizon_s``.
+                ``chunks`` (list of ``{"pcm": [floats or ndarray],
+                "is_speech": bool}`` in feed order), ``event`` (the
+                episode-relative annotation), optional ``commit`` (ride the
+                commit on the last speech chunk's unit window), optional
+                ``inject`` (``{"delay_s": float}`` — interruption episodes
+                inject their speech chunks relative to the observed speak
+                onset), and ``tail_horizon_s``.
 
         Returns:
             ``{"episode_id", "session_id", "status", "record_sets": [wire],
             "event": {...}, "client_chunks": [[float], ...]}`` — the drained
-            scopes in collection order plus every chunk the driver fed.
+            scopes in chronological order plus every chunk the driver fed.
 
         Raises:
-            DuplexEpisodeError: On capture failures (``action_capture_*``) or
-                engine errors; the session is closed either way.
+            DuplexEpisodeError: On capture failures (``action_capture_*``),
+                slot-wait deadlines, or engine errors; the session is closed
+                either way.
         """
         duplex_omni = self._require_duplex_client()
         episode_id = str(run_spec["episode_id"])
@@ -129,25 +155,33 @@ class DuplexStrategy(ARStrategy):
         speech_chunk_end_index: int | None = None
         session = None
         try:
-            session = await duplex_omni.open_session(
+            # No ``instructions`` key: an explicit value silences the engine's
+            # native duplex pipeline (zero ``response.listen`` events, empty
+            # ledger). The engine's duplex policy substitutes the same default
+            # system text, which the trainer's replay context carries instead.
+            session = await self._open_session_with_slot_wait(
+                duplex_omni,
                 {
                     "modalities": ["audio", "text"],
-                    "instructions": run_spec.get("instructions") or "Streaming Omni Conversation.",
                     "action_capture": True,
                     "seed": int(run_spec["seed"]),
                     "temperature": float(run_spec.get("temperature", 0.7)),
-                }
+                },
             )
             speak_onset: dict[str, float] = {}
-            consumer = asyncio.create_task(self._consume_events(session, record_wires, speak_onset, episode_id))
+            consumer = asyncio.create_task(self._consume_events(session, speak_onset, episode_id))
             fed_chunks: list[list[float]] = []
             speech_chunk_end_index = await self._feed_episode(session, run_spec, speak_onset, fed_chunks)
             # Let the tail play out; the consumer stops at close.
             await asyncio.sleep(float(run_spec.get("tail_horizon_s", _DEFAULT_TAIL_HORIZON_S)))
             await session.close(reason="client_close")
             await asyncio.wait_for(consumer, timeout=_TERMINAL_DRAIN_TIMEOUT_S)
-            # Post-close drain: the terminal cache holds the last sealed set.
+            # Post-close drain: retention spills every sealed scope into the
+            # terminal cache before the next seal, so consumers collect
+            # nothing in-flight; the cache drains after close (most recent
+            # first) and the scopes re-sort chronologically.
             record_wires.extend(await asyncio.to_thread(self._drain_terminal, duplex_omni, session.session_id))
+            record_wires.sort(key=_record_sort_key)
         except Exception as error:
             if session is not None and not session.closed:
                 try:
@@ -179,42 +213,49 @@ class DuplexStrategy(ARStrategy):
             )
         return engine
 
+    async def _open_session_with_slot_wait(self, duplex_omni: Any, config: Mapping[str, Any]) -> Any:
+        """Open a session, retrying ``capacity_exhausted`` until the deadline.
+
+        Batch waves transiently exceed one engine's session slots; the open
+        is retried every :data:`_DUPLEX_OPEN_RETRY_S` up to
+        :data:`_DUPLEX_OPEN_WAIT_S` and any other error (or the deadline)
+        raises into the episode failure path.
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + _DUPLEX_OPEN_WAIT_S
+        while True:
+            try:
+                return await duplex_omni.open_session(dict(config))
+            except Exception as error:  # noqa: BLE001 - re-raised below
+                code = str(getattr(error, "code", "") or "")
+                if "capacity_exhausted" not in code and "capacity_exhausted" not in str(error):
+                    raise
+                if loop.time() >= deadline:
+                    raise
+                logger.info("duplex open: engine session slots exhausted; retrying in %.0fs", _DUPLEX_OPEN_RETRY_S)
+                await asyncio.sleep(_DUPLEX_OPEN_RETRY_S)
+
     async def _consume_events(
         self,
         session: Any,
-        record_wires: list[dict[str, Any]],
         speak_onset: dict[str, float],
         episode_id: str,
     ) -> None:
-        """Watch the session's events: speak onset + scope-transition collection.
+        """Watch the session's events: the speak onset + engine errors.
 
-        Collection is draining and retention holds one sealed set, so every
-        seal must be collected before the next one fires
-        (``action_capture_retention_overflow`` is session-fatal). The seals
-        and their events: ``response.speak`` — the engine opened the
-        response, which sealed the listening scope as completed (collection
-        with ``None`` prefers sealed sets, so the sealed listening set is
-        what returns; passing the *new* response's id here would instead
-        drain the open response scope mid-flight); ``response.done`` /
-        ``response.completed`` — the response boundary sealed the response
-        set; ``audio.cancelled`` — a barge-in sealed it as
-        ``truncated_interruption``. Whatever the close seals arrives through
-        the post-close terminal drain.
+        No collection happens here: retention spills every sealed scope into
+        the engine's terminal cache before the next seal, so any
+        in-flight collect is structurally racy and the driver drains
+        post-close instead (``run_duplex_episode``). The onset is stored in
+        absolute event-loop time — the same clock the ``_feed_episode``
+        schedules run on.
         """
         loop = asyncio.get_running_loop()
-        opened_at = loop.time()
         try:
             async for event in session.events():
                 event_type = getattr(event, "type", "") or ""
-                response_id = getattr(event, "response_id", None)
-                if event_type == "response.speak":
-                    if "at" not in speak_onset:
-                        speak_onset["at"] = loop.time() - opened_at
-                    await self._collect_sealed(session, record_wires, None)
-                if event_type in ("response.done", "response.completed"):
-                    await self._collect_sealed(session, record_wires, response_id)
-                if event_type == "audio.cancelled":
-                    await self._collect_sealed(session, record_wires, None)
+                if event_type == "response.speak" and "at" not in speak_onset:
+                    speak_onset["at"] = loop.time()
                 if event_type == "error":
                     raise DuplexEpisodeError(
                         f"duplex episode {episode_id} engine error: {getattr(event, 'code', event)}"
@@ -223,32 +264,6 @@ class DuplexStrategy(ARStrategy):
             raise
         except Exception as error:  # noqa: BLE001 - surfaced by the driver
             raise DuplexEpisodeError(f"duplex episode {episode_id} event stream failed: {error}") from error
-
-    async def _collect_sealed(
-        self,
-        session: Any,
-        record_wires: list[dict[str, Any]],
-        response_id: str | None,
-    ) -> None:
-        """Drain one sealed scope; an already-drained scope is not an error.
-
-        An ``in_progress`` snapshot means the open scope was drained mid-
-        flight — its units left the ledger and the eventual sealed set would
-        silently lose them, so the episode fails loudly instead of training
-        on corrupted records.
-        """
-        try:
-            record_set = await session.collect_action_records(response_id)
-        except Exception as error:  # noqa: BLE001 - drained or not retained yet
-            if "not_retained" in str(error) or getattr(error, "code", "") == "action_capture_not_retained":
-                return
-            raise
-        if record_set.status == "in_progress":
-            raise DuplexEpisodeError(
-                "collected an in_progress snapshot (the open scope drained mid-flight); "
-                "refusing to train on records whose sealed successor lost units"
-            )
-        record_wires.append(record_set.to_wire())
 
     async def _feed_episode(
         self,
@@ -277,10 +292,23 @@ class DuplexStrategy(ARStrategy):
         loop = asyncio.get_running_loop()
         schedule = loop.time() + _DUPLEX_CHUNK_SECONDS
         speech_chunk_end_index: int | None = None
-        if inject is None:
-            for chunk in chunks:
+        # Each paced append is its own input unit, so a commit sent after the
+        # whole feed is dropped as silence: it rides the last speech chunk.
+        commit = bool(run_spec.get("commit", False))
+        last_speech_index = max(
+            (index for index, chunk in enumerate(chunks) if bool(chunk.get("is_speech", True))), default=None
+        )
+
+        async def _feed_chunks(feed_chunks: list[dict[str, Any]]) -> None:
+            nonlocal schedule
+            for index, chunk in enumerate(feed_chunks):
                 await self._submit_at(session, chunk, schedule, run_spec, fed_chunks)
+                if commit and index == last_speech_index:
+                    await session.commit(final=True, create_response=True)
                 schedule += _DUPLEX_CHUNK_SECONDS
+
+        if inject is None:
+            await _feed_chunks(chunks)
         else:
             delay = float(inject.get("delay_s", 0.0))
             try:
@@ -300,17 +328,15 @@ class DuplexStrategy(ARStrategy):
                 schedule += _DUPLEX_CHUNK_SECONDS
                 schedule = max(schedule, loop.time())
             schedule = max(schedule, onset + delay)
-            for chunk in chunks:
-                await self._submit_at(session, chunk, schedule, run_spec, fed_chunks)
-                speech_chunk_end_index = len(fed_chunks)
-                schedule += _DUPLEX_CHUNK_SECONDS
+            await _feed_chunks(chunks)
+            # Everything fed so far is the interrupting speech; its last chunk
+            # closes the speech (the trainer re-anchors onto this unit).
+            speech_chunk_end_index = len(fed_chunks)
             for _ in range(int(inject.get("tail_silence_chunks", 2))):
                 await self._submit_at(
                     session, {"pcm": _silence_chunk(), "is_speech": False}, schedule, run_spec, fed_chunks
                 )
                 schedule += _DUPLEX_CHUNK_SECONDS
-        if run_spec.get("commit", False):
-            await session.commit(final=True, create_response=True)
         return speech_chunk_end_index
 
     async def _await_speak_onset(self, speak_onset: dict[str, float], run_spec: Mapping[str, Any]) -> float:
@@ -334,7 +360,11 @@ class DuplexStrategy(ARStrategy):
         run_spec: Mapping[str, Any],
         fed_chunks: list,
     ) -> None:
-        """Submit one chunk on the 1 s schedule, warning when a deadline slips."""
+        """Submit one chunk on the 1 s schedule, warning when a deadline slips.
+
+        ``pcm`` may be a numpy array (the dataset emits ndarray chunks);
+        truth-testing one is ambiguous, so it is normalized by identity.
+        """
         now = asyncio.get_running_loop().time()
         if schedule > now:
             await asyncio.sleep(schedule - now)
@@ -344,18 +374,26 @@ class DuplexStrategy(ARStrategy):
                 run_spec["episode_id"],
                 now - schedule,
             )
+        pcm = chunk.get("pcm")
+        samples = np.asarray([] if pcm is None else pcm, dtype=np.float32)
         await session.append_audio(
-            _pcm_f32le_bytes(chunk.get("pcm") or []),
+            _pcm_f32le_bytes(samples),
             format="pcm_f32le",
             sample_rate_hz=_DUPLEX_SAMPLE_RATE,
             is_speech=bool(chunk.get("is_speech", True)),
         )
-        fed_chunks.append(list(chunk.get("pcm") or []))
+        fed_chunks.append(samples.tolist())
 
     def _drain_terminal(self, duplex_omni: Any, session_id: str) -> list[dict[str, Any]]:
-        """Drain the post-close terminal cache (bounded by its own deadline)."""
+        """Drain the post-close terminal cache (bounded by its own deadline).
+
+        The cache hands scopes back most recent first and stops with the
+        ``action_capture_not_retained`` status once drained; a longer drain
+        means the engine never answers ``not_retained`` and the episode
+        fails loudly rather than silently dropping scopes.
+        """
         wires: list[dict[str, Any]] = []
-        for _ in range(4):  # one sealed scope per response; close seals at most a couple
+        for _ in range(_TERMINAL_DRAIN_MAX_SCOPES):
             try:
                 record_set = duplex_omni.collect_action_records(session_id, timeout=_TERMINAL_DRAIN_TIMEOUT_S)
             except Exception as error:  # noqa: BLE001 - drained or expired
@@ -363,6 +401,11 @@ class DuplexStrategy(ARStrategy):
                     break
                 raise
             wires.append(record_set.to_wire())
+        else:
+            raise DuplexEpisodeError(
+                f"duplex session {session_id}: the terminal cache never answered "
+                f"action_capture_not_retained within {_TERMINAL_DRAIN_MAX_SCOPES} collects"
+            )
         return wires
 
 
