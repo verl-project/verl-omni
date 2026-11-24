@@ -93,6 +93,8 @@ bash "${REPO_ROOT}/tests/nightly/run_l3_case.sh" \
     +reward.models.ocr.rollout.enforce_eager=True \
     +reward.models.ocr.rollout.do_sample=False \
     +reward.models.ocr.rollout.temperature=0.0 \
+    +reward.models.ocr.rollout.full_determinism=True \
+    +reward.models.ocr.rollout.seed=${NIGHTLY_DETERMINISTIC_SEED:-42} \
     +reward.models.ocr.rollout.prompt_length=${MAX_PROMPT_LENGTH} \
     +reward.models.ocr.rollout.response_length=32 \
     +reward.reward_functions.ocr.path=pkg://verl_omni.utils.reward_score.genrm_ocr \

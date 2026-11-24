@@ -17,6 +17,7 @@ import logging
 import math
 import os
 import time
+from collections.abc import Callable
 from contextlib import nullcontext
 from copy import deepcopy
 from dataclasses import replace
@@ -74,6 +75,7 @@ from verl_omni.workers.config import (
 )
 from verl_omni.workers.config.diffusion import DiffusionDistillationTeacherModelConfig
 from verl_omni.workers.config.omni.distillation import HIDDEN_STATE_LOSS_MODES
+from verl_omni.workers.diffusion_tq import materialize_diffusion_trajectory
 from verl_omni.workers.lora_sync import SyncExport, resolve_lora_sync_plan
 from verl_omni.workers.rollout.base import get_rollout_sequence_parallel_size
 from verl_omni.workers.rollout.vllm_rollout.zmq_utils import make_update_zmq_handle, make_update_zmq_id
@@ -128,6 +130,18 @@ def _iter_actor_lora_peft_models(engine, adapter_name: str = "default"):
     peft_model = get_peft_model_from_engine(engine)
     if peft_model is not None:
         yield peft_model
+
+
+def _with_materialized_trajectory(func):
+    """Run the worker's trajectory materializer before actor/ref computation."""
+
+    @functools.wraps(func)
+    def wrapper(self, data: TensorDict, *args, **kwargs):
+        if self._trajectory_materializer is not None:
+            data = self._trajectory_materializer(data)
+        return func(self, data, *args, **kwargs)
+
+    return wrapper
 
 
 def _with_routing_replay_flag(enabled: bool):
@@ -636,6 +650,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         self.ref: TrainingWorker = None
         self.teachers: dict[str, TrainingWorker] = {}
         self.rollout: BaseRollout = None
+        self._trajectory_materializer: Callable[[TensorDict], TensorDict] | None = None
         assert self.role in ["actor", "rollout", "ref", "teacher", "actor_rollout", "actor_rollout_ref"]
         self._is_actor = self.role in ["actor", "actor_rollout", "actor_rollout_ref"]
         self._is_rollout = self.role in ["rollout", "actor_rollout", "actor_rollout_ref"]
@@ -685,6 +700,11 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             "diffusion_composite_model",
             "diffusion_dpo_model",
             "diffusion_nft_model",
+        )
+        self._trajectory_materializer = (
+            partial(materialize_diffusion_trajectory, fields=model_config.get("trajectory_fields"))
+            if is_diffusion
+            else None
         )
 
         # 1. build reference model
@@ -932,6 +952,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="ref"))
     @DistProfiler.annotate(color="olive", role="infer_ref_batch")
+    @_with_materialized_trajectory
     @_with_routing_replay_flag(enabled=False)
     def infer_ref_batch(self, data: TensorDict) -> TensorDict:
         output = self.ref.infer_batch(data=data)
@@ -947,6 +968,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
     @DistProfiler.annotate(color="blue", role="infer_actor_batch")
+    @_with_materialized_trajectory
     @_with_routing_replay_flag(enabled=True)
     def infer_actor_batch(self, data: TensorDict) -> TensorDict:
         output = self.actor.infer_batch(data)
@@ -988,6 +1010,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
     @DistProfiler.annotate(color="red", role="actor_update", scheduled=True)
+    @_with_materialized_trajectory
     @_with_routing_replay_flag(enabled=True)
     def update_actor(self, data: TensorDict) -> TensorDict:
         tu.assign_non_tensor(data, enable_timestep_staging=self.config.actor.get("enable_timestep_staging", False))

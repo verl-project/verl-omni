@@ -49,6 +49,8 @@ python3 -m verl_omni.trainer.main_diffusion_v1 \
     data.max_prompt_length=1024 \
     data.seed=42 \
     actor_rollout_ref.model.path=$model_name \
+    'actor_rollout_ref.model.trajectory_fields.required=[all_latents,prompt_embeds]' \
+    'actor_rollout_ref.model.trajectory_fields.optional=[prompt_embeds_mask,negative_prompt_embeds,negative_prompt_embeds_mask]' \
     actor_rollout_ref.model.attn_backend=$ATTENTION_BACKEND \
     actor_rollout_ref.model.custom_chat_template='"{% if messages %}{% for message in messages %}{% if message[\"role\"] == \"user\" %}{{ message[\"content\"] }}{% endif %}{% endfor %}{% endif %}</s>"' \
     actor_rollout_ref.actor.optim.lr=1e-5 \

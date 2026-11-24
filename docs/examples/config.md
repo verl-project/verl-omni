@@ -553,7 +553,9 @@ actor_rollout_ref:
 The Qwen3-Omni AVQA recipe selects FlashAttention 2 for training by default.
 On an eight-device Ascend 950DT host, the recipe also defaults to eight devices,
 `ascend_grouped_mm` for training, and `FULL_AND_PIECEWISE` for rollout.
-The generated Thinker-only deployment uses the vLLM-Omni V1 model runner.
+The generated Thinker-only deployment uses the V1 model runner.
+The 950DT launcher sets `VLLM_USE_V2_MODEL_RUNNER=0` so vLLM-Ascend reads the V1
+capture context when registering attention tasks for FULL decode.
 The recipe uses capture sizes `[1,16,128,1536]`, a batched-token limit of `1536`,
 and rollout memory utilization of `0.45`. Actor parameter offload is enabled and optimizer
 offload is disabled. The eight-device configuration was benchmarked with CANN 9.3.0.

@@ -34,7 +34,7 @@ def build_test_prompt(caption: str) -> str:
 
 
 def _capture_chat_requests(monkeypatch):
-    from verl_omni.utils.reward_score import unified_reward
+    from verl_omni.utils.reward_score import vlm_as_a_judge
 
     requests = []
 
@@ -42,7 +42,7 @@ def _capture_chat_requests(monkeypatch):
         requests.append(chat_complete_request)
         return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=MODEL_OUTPUT))])
 
-    monkeypatch.setattr(unified_reward, "_chat_complete", chat_complete)
+    monkeypatch.setattr(vlm_as_a_judge, "_post_chat_completion", chat_complete)
     return requests
 
 

@@ -41,6 +41,8 @@ from verl_omni.workers.config.reward import (
     EngineRewardModelConfig,
     parse_reward_model_config,
     resolve_reward_model_name,
+    reward_is_enabled,
+    streaming_reward_enabled,
     validate_reward_model_terms,
     warn_deprecated_reward_config,
 )
@@ -97,6 +99,8 @@ class RecipeCase:
     prompt_length: int | None = None
     do_sample: bool | None = None
     temperature: float | None = None
+    full_determinism: bool = False
+    seed: int | None = None
     trainer_mode: str = "sync"
     reward_num_workers: int = 1
 
@@ -167,6 +171,8 @@ def _nightly_qwen_image(case_id: str, recipe: str) -> RecipeCase:
         prompt_length=256,
         do_sample=False,
         temperature=0.0,
+        full_determinism=True,
+        seed=42,
     )
 
 
@@ -321,9 +327,15 @@ RECIPES = (
 _PYTHON_CAPTURE_SHIM = (
     "python3() { "
     'if [[ "${1:-}" == "-m" && "${2:-}" == "verl_omni.trainer.main_diffusion_v1" ]]; then '
-    'shift 2; printf "%s\\0" "$@" > "${HYDRA_CAPTURE_FILE}"; '
+    "shift 2; "
     'elif [[ "${1:-}" == */tests/nightly/run.py ]]; then '
-    'shift 1; printf "%s\\0" "$@" > "${HYDRA_CAPTURE_FILE}"; '
+    "shift 1; "
+    "else return 0; fi; "
+    'if [[ -n "${HYDRA_CAPTURE_DIR:-}" ]]; then '
+    'idx=$(find "${HYDRA_CAPTURE_DIR}" -maxdepth 1 -name "*.overrides" | wc -l | tr -d " "); '
+    'printf "%s\\0" "$@" > "${HYDRA_CAPTURE_DIR}/${idx}.overrides"; '
+    "else "
+    'printf "%s\\0" "$@" > "${HYDRA_CAPTURE_FILE}"; '
     "fi; "
     "}; "
     "nvidia-smi() { return 0; }; "
@@ -332,20 +344,16 @@ _PYTHON_CAPTURE_SHIM = (
 )
 
 
-def _compose_recipe(
+def _run_capture_env(
     case: RecipeCase,
     tmp_path: Path,
     *,
     workspace: Path | None = None,
-    extra_overrides: tuple[str, ...] = ("trainer.logger=[console]",),
-):
-    """Run a recipe or harness with a ``python3`` stub and compose its Hydra config."""
-    recipe = ROOT / case.recipe
+    extra_env: dict[str, str] | None = None,
+) -> dict[str, str]:
     resolved_workspace = workspace if workspace is not None else tmp_path / "workspace"
-    capture_file = tmp_path / f"{case.case_id}.hydra_overrides"
     env = {
         **{k: v for k, v in os.environ.items() if k != "REWARD_MODEL_PATH"},
-        "HYDRA_CAPTURE_FILE": str(capture_file),
         "OCR_WORKSPACE": str(resolved_workspace),
         "FA3": "0",
         "ATTN_BACKEND": "native",
@@ -354,6 +362,8 @@ def _compose_recipe(
         "MODEL_PATH": "dummy/model",
         "DATA_DIR": str(tmp_path / "data"),
         "OUTPUT_ROOT": str(tmp_path / "debug_dumps"),
+        # Capture only the primary OCR run by default for nightly harnesses.
+        "L3_REFRESH_BASELINE": "1",
         # OPD recipes require explicit teacher checkpoints at shell level.
         "TEACHER_PATH": str(tmp_path / "teacher"),
         "OCR_TEACHER_PATH": str(tmp_path / "ocr-teacher"),
@@ -363,6 +373,28 @@ def _compose_recipe(
     }
     if case.model_path == TINY_REWARD_MODEL_PATH:
         env["REWARD_MODEL_PATH"] = TINY_REWARD_MODEL_PATH
+    if extra_env:
+        env.update(extra_env)
+    return env
+
+
+def _compose_recipe(
+    case: RecipeCase,
+    tmp_path: Path,
+    *,
+    workspace: Path | None = None,
+    extra_overrides: tuple[str, ...] = ("trainer.logger=[console]",),
+    extra_env: dict[str, str] | None = None,
+):
+    """Run a recipe or harness with a ``python3`` stub and compose its Hydra config."""
+    recipe = ROOT / case.recipe
+    capture_file = tmp_path / f"{case.case_id}.hydra_overrides"
+    env = _run_capture_env(
+        case,
+        tmp_path,
+        workspace=workspace,
+        extra_env={"HYDRA_CAPTURE_FILE": str(capture_file), **(extra_env or {})},
+    )
     subprocess.run(
         ["bash", "-c", _PYTHON_CAPTURE_SHIM, "bash", str(recipe), *extra_overrides],
         env=env,
@@ -445,11 +477,20 @@ def test_ocr_v1_recipe_keeps_legacy_reward_contract(case: RecipeCase, tmp_path: 
         assert prepared.rollout.do_sample is case.do_sample
     if case.temperature is not None:
         assert prepared.rollout.temperature == pytest.approx(case.temperature)
+    assert prepared.rollout.full_determinism is case.full_determinism
+    if case.seed is not None:
+        assert prepared.rollout.seed == case.seed
     assert prepared.rollout.free_cache_engine is case.offload
     assert prepared.rollout.enable_sleep_mode is case.offload
 
     effective_rollout = ChainMap(model.rollout, base.rollout)
-    assert _sampling_params_from_rollout(effective_rollout) == {"max_tokens": case.response_length}
+    expected_sampling_params: dict[str, object] = {"max_tokens": case.response_length}
+    if case.temperature is not None and case.temperature != 1.0:
+        expected_sampling_params["temperature"] = case.temperature
+        expected_sampling_params["top_p"] = 1.0
+    if case.full_determinism:
+        expected_sampling_params["seed"] = 42 if case.seed is None else case.seed
+    assert _sampling_params_from_rollout(effective_rollout) == expected_sampling_params
 
     assert set(config.reward.reward_functions) == {term.name for term in case.terms}
     total_weight = 0.0
@@ -537,6 +578,53 @@ def test_special_e2e_ocr_scripts_inherit_npu_weight_nz_guard(case: RecipeCase, t
     model = parse_reward_model_config(case.model_name, config.reward.models[case.model_name])
     prepared = _prepare_engine_config(model, config.reward.reward_model)
     assert prepared.rollout.engine_kwargs.vllm.additional_config.weight_nz_mode == 0
+
+
+def test_nightly_flowgrpo_trajectory_ab_uses_rollout_rule_reward(tmp_path: Path):
+    """Ensure #933's trajectory A/B sub-runs drop the OCR engine and stay rollout-side."""
+    case = next(c for c in RECIPES if c.case_id == "nightly_flowgrpo_qwen_image")
+    capture_dir = tmp_path / "ab_captures"
+    capture_dir.mkdir()
+    env = _run_capture_env(
+        case,
+        tmp_path,
+        extra_env={
+            "HYDRA_CAPTURE_DIR": str(capture_dir),
+            "L3_TRAJECTORY_AB_ONLY": "1",
+            "L3_REFRESH_BASELINE": "0",
+        },
+    )
+    subprocess.run(
+        ["bash", "-c", _PYTHON_CAPTURE_SHIM, "bash", str(ROOT / case.recipe)],
+        env=env,
+        check=True,
+        capture_output=True,
+    )
+    capture_files = sorted(capture_dir.glob("*.overrides"), key=lambda path: int(path.stem))
+    assert len(capture_files) == 2
+
+    configs = []
+    with initialize_config_dir(config_dir=str(CONFIG_DIR), version_base=None):
+        for capture_file in capture_files:
+            raw = capture_file.read_bytes()
+            overrides = [token.decode() for token in raw.rstrip(b"\0").split(b"\0") if token]
+            configs.append(compose(config_name="diffusion_trainer", overrides=overrides))
+
+    assert [cfg.trainer.v1.worker_side_trajectory for cfg in configs] == [False, True]
+    for cfg in configs:
+        assert cfg.reward.reward_model.enable is False
+        assert dict(cfg.reward.models) == {}
+        assert reward_is_enabled(cfg) is False
+        assert streaming_reward_enabled(cfg) is True
+        assert cfg.reward.reward_manager.name == "MultiVisualRewardManager"
+        assert list(cfg.reward.reward_functions) == ["jpeg"]
+        assert cfg.reward.reward_functions.jpeg.path == JPEG_SCORER_PATH
+        assert cfg.reward.reward_functions.jpeg.name == "compute_score"
+        assert cfg.reward.reward_functions.jpeg.weight == pytest.approx(1.0)
+        with warnings.catch_warnings(record=True) as recorded:
+            warnings.simplefilter("always")
+            warn_deprecated_reward_config(cfg)
+        assert [w for w in recorded if issubclass(w.category, DeprecationWarning)] == []
 
 
 def test_no_v1_ocr_recipe_uses_legacy_global_reward_model():
