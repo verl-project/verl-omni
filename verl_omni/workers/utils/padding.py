@@ -17,6 +17,13 @@ import torch
 from tensordict import TensorDict
 
 
+def diffusion_sequence_fields(data: TensorDict) -> set[str]:
+    """Find prompt embeddings and row tensors that use diffusion sequence masks."""
+    return {"prompt_embeds", "negative_prompt_embeds"} | {
+        key.removesuffix("_mask") for key in data.keys() if isinstance(key, str) and key.endswith("_rows_mask")
+    }
+
+
 def embeds_padding_2_no_padding(data: TensorDict) -> TensorDict:
     """
     Convert padded diffusion sequence fields to jagged nested tensors.
@@ -57,11 +64,7 @@ def embeds_padding_2_no_padding(data: TensorDict) -> TensorDict:
             torch.nested.as_nested_tensor(mask_list, layout=torch.jagged),
         )
 
-    padded_keys = {"prompt_embeds", "negative_prompt_embeds"}
-    padded_keys.update(
-        key.removesuffix("_mask") for key in data.keys() if isinstance(key, str) and key.endswith("_rows_mask")
-    )
-    for key in padded_keys:
+    for key in diffusion_sequence_fields(data):
         values = data.get(key, None)
         if not isinstance(values, torch.Tensor) or values.is_nested:
             continue
