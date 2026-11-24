@@ -2250,9 +2250,21 @@ class CompositePolicyGradientRayTrainer(PolicyGradientRayTrainer):
 
         self.validation_generations_logger.log(ar_logger, samples, self.global_steps)  # other loggers
 
-    def _dump_ar_generations(self, inputs, outputs, gts, scores, reward_extra_infos_dict, dump_path):
-        """Dump rollout/validation samples as JSONL."""
+    def _dump_ar_generations(self, inputs, outputs, gts, scores, reward_extra_infos_dict, dump_path, max_samples=None):
+        """Dump AR validation samples as JSONL under ``{dump_path}/ar``."""
         from verl.trainer.ppo.ray_trainer import RayPPOTrainer
+
+        n_full = len(inputs)
+        n = n_full if max_samples is None else min(max_samples, n_full)
+        if n != n_full:
+            inputs = list(inputs)[:n]
+            outputs = list(outputs)[:n]
+            gts = list(gts)[:n]
+            scores = list(scores)[:n]
+            reward_extra_infos_dict = {
+                key: list(values)[:n] if len(values) == n_full else values
+                for key, values in reward_extra_infos_dict.items()
+            }
 
         dump_path = os.path.join(dump_path, "ar")
         RayPPOTrainer._write_generations(
@@ -2451,6 +2463,7 @@ class CompositePolicyGradientRayTrainer(PolicyGradientRayTrainer):
                 scores=ar_sample_scores,
                 reward_extra_infos_dict=ar_reward_extra_infos_dict,
                 dump_path=val_data_dir,
+                max_samples=self.config.trainer.get("validation_data_max_samples", None),
             )
 
         for key_info, lst in reward_extra_infos_dict.items():
