@@ -53,7 +53,10 @@ def _dense_trajectory_fields(fetched: TensorDict) -> TensorDict:
 
 
 def materialize_diffusion_trajectory(data: TensorDict, fields: DiffusionTrajectoryFieldsConfig) -> TensorDict:
-    """Read the shard's configured training fields and keep driver-owned values."""
+    """Read deferred diffusion fields if present, preserving driver-owned values."""
+    if DIFFUSION_TQ_KEYS not in data.keys():
+        return data
+
     keys = data.get(DIFFUSION_TQ_KEYS).tolist()
     unique_keys = list(dict.fromkeys(keys))
     fetched = tq.kv_batch_get(keys=unique_keys, partition_id="train", select_fields=fields.required + fields.optional)

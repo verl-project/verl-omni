@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -168,8 +169,9 @@ def test_worker_reuses_fetched_latents_for_unique_rows(storage):
 
 
 @pytest.mark.parametrize("method", ["infer_actor_batch", "infer_ref_batch", "update_actor"])
-def test_worker_entrypoints_keep_tensor_dict_rpc_contract(storage, method):
-    data = read_training_batch().to_tensordict()
+@pytest.mark.parametrize("projected", [True, False])
+def test_worker_entrypoints_keep_tensor_dict_rpc_contract(storage, method, projected):
+    data = read_training_batch(projected=projected).to_tensordict()
     expected = TensorDict({"log_probs": torch.ones(2, 2)}, batch_size=[2])
 
     def compute(data):
@@ -182,13 +184,39 @@ def test_worker_entrypoints_keep_tensor_dict_rpc_contract(storage, method):
     worker = SimpleNamespace(
         actor=engine,
         ref=engine,
-        _trajectory_fields=FIELDS,
+        _trajectory_materializer=partial(materialize_diffusion_trajectory, fields=FIELDS),
         enable_routing_replay=True,
         config=SimpleNamespace(actor={}),
     )
     result = getattr(ActorRolloutRefWorker, method)(worker, data)
     torch.testing.assert_close(result["log_probs"], expected["log_probs"])
-    assert len(storage.reads) == 2
+    assert len(storage.reads) == (2 if projected else 1)
+
+
+@pytest.mark.parametrize("has_materializer", [False, True])
+def test_shared_actor_update_accepts_batches_without_diffusion_keys(storage, has_materializer):
+    batch = TensorDict({"input_ids": torch.ones(2, 3, dtype=torch.long)}, batch_size=[2])
+    materialized = batch.clone()
+    materialized["deferred_input"] = torch.zeros(2, 3)
+
+    def materialize(data):
+        assert data is batch
+        return materialized
+
+    def compute(data):
+        assert data is (materialized if has_materializer else batch)
+        return data
+
+    worker = SimpleNamespace(
+        actor=SimpleNamespace(train_mini_batch=compute),
+        _trajectory_materializer=materialize if has_materializer else None,
+        enable_routing_replay=False,
+        config=SimpleNamespace(actor={}),
+    )
+    result = ActorRolloutRefWorker.update_actor(worker, batch)
+    torch.testing.assert_close(result["input_ids"], batch["input_ids"])
+    assert ("deferred_input" in result.keys()) == has_materializer
+    assert not storage.reads
 
 
 @pytest.fixture

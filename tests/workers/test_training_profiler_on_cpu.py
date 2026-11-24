@@ -61,6 +61,7 @@ def test_update_trace_selects_mini_batches(tmp_path, discrete, scheduled):
     inner.train_batch = train_batch
     outer = SimpleNamespace(
         actor=inner,
+        _trajectory_materializer=None,
         config=OmegaConf.create({"actor": {}}),
         enable_routing_replay=False,
         profiler=DistProfiler(rank=0, config=config, tool_config=tool),
