@@ -96,6 +96,7 @@ GROUP_PATTERNS = {
         "tests/special_e2e/*image_edit*",
         "tests/special_e2e/*boogu*",
         "tests/special_e2e/*h3*",
+        "tests/special_e2e/tiny_imagebind/**",
         "tests/special_e2e/*qwen_image*",
         "tests/special_e2e/*bagel*",
         "tests/special_e2e/*pickscore*",
@@ -105,11 +106,13 @@ GROUP_PATTERNS = {
         "verl_omni/trainer/config/diffusion/**",
         "verl_omni/trainer/diffusion/**",
         "verl_omni/utils/reward_score/pickscore_reward.py",
+        "verl_omni/utils/reward_score/imagebind.py",
         "verl_omni/workers/config/diffusion/**",
         "verl_omni/workers/detach_actor_worker.py",
         "verl_omni/workers/engine/fsdp/diffusers_impl.py",
         "verl_omni/workers/engine/lora_adapter_mixin.py",
         "examples/flowgrpo_trainer/bagel/**",
+        "examples/flowgrpo_trainer/minimax_h3/run_minimax_h3_t2va_lora_v1.sh",
     ),
 }
 

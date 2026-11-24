@@ -18,7 +18,6 @@ import sys
 from pathlib import Path
 from types import ModuleType
 
-import numpy as np
 import pytest
 import torch
 
@@ -199,18 +198,12 @@ async def test_native_score_matches_legacy_and_close_preserves_cached_model(monk
     checkpoint = str(tmp_path / "imagebind.pth")
     torch.save({"audio": torch.tensor([[3.0, 4.0]]), "vision": torch.tensor([[0.0, 1.0]])}, checkpoint)
 
-    # Subsampled frames and audio from row 1 of the MiniMax-H3 example:
-    # https://github.com/user-attachments/assets/5fb70550-6c1e-428d-bd0c-dad21154745e
-    with np.load(Path(__file__).parent / "fixtures/imagebind_h3.npz") as clip:
-        media = {
-            "video_preview": MediaArtifact(
-                MediaSpec("video", "decoded", "TCHW", fps=float(clip["fps"])), torch.from_numpy(clip["video"])
-            ),
-            "audio": MediaArtifact(
-                MediaSpec("audio", "decoded", "CT", sample_rate=int(clip["sample_rate"])),
-                torch.from_numpy(clip["audio"]),
-            ),
-        }
+    media = {
+        "video_preview": MediaArtifact(
+            MediaSpec("video", "decoded", "TCHW", fps=24), torch.zeros(2, 3, 8, 8, dtype=torch.uint8)
+        ),
+        "audio": MediaArtifact(MediaSpec("audio", "decoded", "CT", sample_rate=16000), torch.zeros(1, 16000)),
+    }
     sample = {"ground_truth": "", "extra_info": {"media_artifacts": media}, "mode": "audio_video"}
 
     def legacy_score():
