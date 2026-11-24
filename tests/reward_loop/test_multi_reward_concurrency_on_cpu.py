@@ -57,6 +57,16 @@ class _EngineExecutor:
         return {"reward_router_address": "engine-router", "model_name": "engine"}
 
 
+class _EngineExecutorWithBrokenTokenizer(_EngineExecutor):
+    @property
+    def tokenizer(self):
+        raise OSError("no tokenizer files")
+
+
+async def _score_with_tokenizer(reward_model_tokenizer):
+    return 1.0
+
+
 class _NativeExecutor:
     def __init__(self, model, omit_model=False):
         self.model = model
@@ -161,6 +171,21 @@ def test_engine_term_opts_in_and_reserved_field_is_not_forwarded():
     manager.set_reward_executors({"engine": _EngineExecutor()}, None)
     result = manager.loop.run_until_complete(manager.run_single(_sample("engine-sample")))
     assert result["reward_score"] == 1.0
+
+
+@pytest.mark.parametrize("independent", [False, True])
+def test_optional_engine_term_survives_a_tokenizer_that_fails_to_load(independent):
+    manager = _manager(
+        {"one": _term("_score_with_tokenizer", independent=independent, model="engine", required=False)},
+        concurrency=2,
+        models={"engine": {"backend": "engine"}},
+    )
+    manager.set_reward_executors({"engine": _EngineExecutorWithBrokenTokenizer()}, None)
+
+    result = manager.loop.run_until_complete(manager.run_single(_sample("engine-sample")))
+
+    assert result["reward_score"] == 0.0
+    assert result["reward_extra_info"]["reward/one/errors"] == 1
 
 
 @pytest.mark.parametrize("independent", [False, True])
@@ -1054,3 +1079,34 @@ def test_cancelled_sync_barrier_returns_before_executor_thread_exits(concurrency
             await asyncio.gather(caller, return_exceptions=True)
 
     manager.loop.run_until_complete(scenario())
+
+
+def test_file_reward_function_and_registered_scorer_share_one_module(tmp_path):
+    from verl_omni.utils.reward_score.scorers.registry import get_scorer_cls, import_from_spec
+
+    path = tmp_path / "custom_reward.py"
+    name = f"file-scorer-{tmp_path.name}"
+    path.write_text(
+        "from verl_omni.utils.reward_score.scorers.base import RewardScorer\n"
+        "from verl_omni.utils.reward_score.scorers.registry import register_scorer\n"
+        f"@register_scorer({name!r})\n"
+        "class CustomScorer(RewardScorer):\n"
+        "    def score_batch(self, batch):\n"
+        "        return [{'score': 1} for _ in batch]\n"
+        "async def compute_score(**kwargs):\n"
+        "    return {'score': 1}\n"
+    )
+    manager = _manager({"one": {"path": str(path), "name": "compute_score"}})
+    scorer_cls = import_from_spec(f"file://{path}:CustomScorer")
+    assert get_scorer_cls(name) is scorer_cls
+    assert manager._sub_rewards[0]["fn"].__globals__["CustomScorer"] is scorer_cls
+    alias = str(path.parent) + "/./" + path.name
+    assert alias != str(path)
+    second = _manager({"one": {"path": alias, "name": "compute_score"}})
+    assert second._sub_rewards[0]["fn"] is manager._sub_rewards[0]["fn"]
+    duplicate = tmp_path / "different_reward.py"
+    duplicate.write_text(path.read_text())
+    with pytest.raises(RuntimeError, match="Error loading module") as caught:
+        import_from_spec(f"{duplicate}:CustomScorer")
+    assert isinstance(caught.value.__cause__, ValueError)
+    assert "already been registered" in str(caught.value.__cause__)

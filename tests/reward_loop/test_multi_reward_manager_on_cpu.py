@@ -86,6 +86,10 @@ async def reward_uses_named_engine_router(reward_router_address, model_name):
     return {"score": 0.6, "backend": "engine-function"}
 
 
+async def reward_captures_model_tokenizer(reward_model_tokenizer):
+    return {"score": 0.5, "tokens": reward_model_tokenizer.encode("one two", add_special_tokens=False)}
+
+
 async def reward_captures_ocr_request(
     data_source,
     solution_image,
@@ -139,8 +143,22 @@ class _NativeModelExecutor:
 
 
 class _EngineRouterClient:
+    tokenizer = SimpleNamespace(encode=lambda text, add_special_tokens: text.split())
+
     def reward_kwargs(self):
         return {"reward_router_address": "engine-router", "model_name": "ocr-model"}
+
+
+class _EngineRouterClientWithoutTokenizer(_EngineRouterClient):
+    @property
+    def tokenizer(self):
+        raise AssertionError("the tokenizer loads only for a scorer that declares it")
+
+
+class _EngineRouterClientWithBrokenTokenizer(_EngineRouterClient):
+    @property
+    def tokenizer(self):
+        raise OSError("no tokenizer files")
 
 
 # ---------------------------------------------------------------------------
@@ -372,7 +390,7 @@ class TestMultiRewardManagerRunSingle:
         )
         manager.loop.run_until_complete(manager.run_single(data))
         previous, current = requests
-        assert previous["max_tokens"] == 4096
+        assert previous["max_tokens"] == 256
         assert previous["seed"] == 777
         if not inherit:
             assert current == previous
@@ -731,6 +749,76 @@ class TestMultiRewardManagerRunSingle:
 
         assert result["reward_score"] == pytest.approx(0.6)
         assert result["reward_extra_info"]["reward/ocr/backend"] == "engine-function"
+
+    def test_engine_reward_function_receives_the_model_tokenizer_it_declares(self):
+        manager = _build_manager(
+            {
+                "ocr": {
+                    "model": "ocr_engine",
+                    "path": DUMMY_REWARDS_PATH,
+                    "name": "reward_captures_model_tokenizer",
+                    "weight": 1.0,
+                },
+            }
+        )
+        manager.set_reward_executors({"ocr_engine": _EngineRouterClient()}, None)
+
+        result = manager.loop.run_until_complete(manager.run_single(_make_single_data()))
+
+        assert result["reward_extra_info"]["reward/ocr/tokens"] == ["one", "two"]
+
+    def test_optional_engine_reward_survives_a_tokenizer_that_fails_to_load(self):
+        manager = _build_manager(
+            {
+                "ocr": {
+                    "model": "ocr_engine",
+                    "path": DUMMY_REWARDS_PATH,
+                    "name": "reward_captures_model_tokenizer",
+                    "weight": 1.0,
+                    "required": False,
+                },
+            }
+        )
+        manager.set_reward_executors({"ocr_engine": _EngineRouterClientWithBrokenTokenizer()}, None)
+
+        result = manager.loop.run_until_complete(manager.run_single(_make_single_data()))
+
+        assert result["reward_score"] == 0.0
+        assert result["reward_extra_info"]["reward/ocr/errors"] == 1
+
+    def test_required_engine_reward_fails_on_a_tokenizer_that_fails_to_load(self):
+        manager = _build_manager(
+            {
+                "ocr": {
+                    "model": "ocr_engine",
+                    "path": DUMMY_REWARDS_PATH,
+                    "name": "reward_captures_model_tokenizer",
+                    "weight": 1.0,
+                    "required": True,
+                },
+            }
+        )
+        manager.set_reward_executors({"ocr_engine": _EngineRouterClientWithBrokenTokenizer()}, None)
+
+        with pytest.raises(RuntimeError, match="Required sub-reward 'ocr' failed: no tokenizer files"):
+            manager.loop.run_until_complete(manager.run_single(_make_single_data()))
+
+    def test_engine_reward_function_without_a_tokenizer_argument_does_not_load_one(self):
+        manager = _build_manager(
+            {
+                "ocr": {
+                    "model": "ocr_engine",
+                    "path": DUMMY_REWARDS_PATH,
+                    "name": "reward_uses_named_engine_router",
+                    "weight": 1.0,
+                },
+            }
+        )
+        manager.set_reward_executors({"ocr_engine": _EngineRouterClientWithoutTokenizer()}, None)
+
+        result = manager.loop.run_until_complete(manager.run_single(_make_single_data()))
+
+        assert result["reward_score"] == pytest.approx(0.6)
 
     def test_jpeg_reward_via_file_path(self):
         """JPEG reward loaded via file path must not fail on relative imports."""

@@ -20,7 +20,7 @@ custom_reward_function:
   path: null
   # The name of the reward function within the specified file. Default is 'compute_score'.
   name: compute_score
-  # Deprecated alias; use reward.accelerator_workers.enabled instead.
+  # Deprecated since v0.4.0; use reward.accelerator_workers.enabled instead.
   use_accelerator: false
 
 # Bind legacy custom reward workers to bundles in the trainer-selected
@@ -53,6 +53,8 @@ aggregation: weighted_sum
 reward_manager:
   _target_: verl.workers.config.reward_model.RewardManagerConfig
   source: importlib
+  # VisualRewardManager (single-scorer path) is deprecated since v0.4.0;
+  # use MultiVisualRewardManager with reward.reward_functions instead.
   name: VisualRewardManager
   module:
     _target_: verl.trainer.config.config.ModuleConfig

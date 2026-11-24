@@ -57,7 +57,8 @@ def _apply_attention_backend(model: torch.nn.Module, attn_implementation: str) -
         return
     from diffusers.models.attention_dispatch import _AttentionBackendRegistry
 
-    # set_attention_backend also switches diffusers' process-wide default; keep it for other models.
+    # diffusers >= 0.43 removed the process-wide set_active_backend call from set_attention_backend,
+    # so the save/restore below is now a no-op but is kept for compatibility with older diffusers.
     active_backend = _AttentionBackendRegistry._active_backend
     model.set_attention_backend(backend)
     _AttentionBackendRegistry.set_active_backend(active_backend)

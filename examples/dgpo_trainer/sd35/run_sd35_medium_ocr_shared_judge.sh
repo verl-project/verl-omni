@@ -132,6 +132,7 @@ python3 -m verl_omni.trainer.main_diffusion_v1 \
     +reward.models.judge.n_gpus_per_node=$NUM_GPUS_REWARD \
     +reward.models.judge.nnodes=1 \
     +reward.models.judge.rollout.name=vllm \
+    +reward.models.judge.rollout.response_length=256 \
     +reward.models.judge.rollout.gpu_memory_utilization=0.85 \
     +reward.models.judge.rollout.tensor_model_parallel_size=1 \
     +reward.models.judge.rollout.enforce_eager=False \

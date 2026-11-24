@@ -1,6 +1,6 @@
 # Config Explanation
 
-Last updated: 10/25/2026
+Last updated: 11/19/2026
 
 VeRL-Omni builds on [verl](https://github.com/verl-project/verl) and reuses the
 same Hydra config surface for shared RL trainer fields (`data`, FSDP actor /
@@ -538,11 +538,38 @@ actor_rollout_ref:
 - `actor_rollout_ref.model.model_stage`: Which stage to train: `thinker`, `talker`, or `all`.
 - `actor_rollout_ref.model.hf_config_name`: Sub-config key for the trainable component (e.g. `thinker_config`, `talker_config`).
 - `actor_rollout_ref.model.override_config`: Dict merged into HF config load (e.g. `attn_implementation`).
+- Qwen3-Omni Thinker on Ascend can select verl's grouped expert matrix multiplication for BF16
+  FSDP/FSDP2 training with `+actor_rollout_ref.model.override_config.experts_implementation=ascend_grouped_mm`.
+  The same override enables the Thinker RMSNorm and RoPE fusions. It requires SiLU experts, applies to
+  training and the Thinker policy's log-probability forward, and is unsupported by the Megatron engine.
 - `actor_rollout_ref.model.enable_activation_offload` / `use_remove_padding`: Memory / packing flags for the FSDP actor.
 - `actor_rollout_ref.model.lora_*` / `target_modules` / `policy_state_adapters` / `fsdp_layer_prefixes`: Same LoRA roles as diffusion (defaults differ slightly, e.g. `lora_alpha: 16`).
 - `actor_rollout_ref.model.use_liger` / `use_fused_kernels`: Unsupported by omni FSDP/FSDP2 and must remain `false`; enabling either fails before model loading. The adjacent `fused_kernel_options` / `tiled_mlp` fields are backend-specific.
 - `actor_rollout_ref.model.max_image_tokens` / `max_audio_tokens` / `max_video_tokens`: Multimodal token budgets (`null` = unset).
 - `actor_rollout_ref.model.lora` / `mtp`: Megatron-style LoRA block and multi-token prediction (speculative decoding) configs; see the YAML comments in `omni/model/omni_model.yaml`.
+
+### AVQA performance defaults on Ascend 950DT
+
+The Qwen3-Omni AVQA recipe selects FlashAttention 2 for training by default.
+On an eight-device Ascend 950DT host, the recipe also defaults to eight devices,
+`ascend_grouped_mm` for training, and `FULL_AND_PIECEWISE` for rollout.
+The generated Thinker-only deployment uses the V1 model runner.
+The 950DT launcher sets `VLLM_USE_V2_MODEL_RUNNER=0` so vLLM-Ascend reads the V1
+capture context when registering attention tasks for FULL decode.
+The recipe uses capture sizes `[1,16,128,1536]`, a batched-token limit of `1536`,
+and rollout memory utilization of `0.45`. Actor parameter offload is enabled and optimizer
+offload is disabled. The eight-device configuration was benchmarked with CANN 9.3.0.
+GPU and other Ascend setups default to `PIECEWISE` rollout.
+
+Export `ASCEND_HOME_PATH`, `MODEL_PATH`, `TRAIN_FILE`, and `VAL_FILE` for your setup,
+then run the recipe from the repository root.
+
+```bash
+bash -o pipefail examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_avqa_v1.sh
+```
+
+Use `VLLM_OMNI_CUDAGRAPH_MODE=PIECEWISE` to select PIECEWISE rollout.
+Hydra arguments passed to the script can override the recipe defaults.
 
 ### `actor_rollout_ref.actor` — `OmniActorConfig` / `omni_loss`
 
