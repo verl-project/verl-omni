@@ -1,0 +1,73 @@
+# L4 convergence recipe: Qwen3-Omni Thinker GSPO + LoRA on MMK12.
+#
+# This is the second recipe #247 names for the first L4 set, and it is the
+# omni-modality counterpart of the diffusion recipe: real Qwen3-Omni Thinker
+# weights, real MMK12 data, GSPO policy loss, and validation reward as the
+# convergence signal.
+schema_version: 1
+layer: L4
+case_id: qwen3_omni_thinker_gspo
+title: "Qwen3-Omni Thinker GSPO LoRA MMK12 convergence"
+algorithm: gspo
+precision: bf16
+release_gate: true
+
+recipe:
+  launcher: examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_mmk12_v1.sh
+  overrides:
+    - data.train_files={dataset:train}
+    - data.val_files={dataset:val}
+    - data.seed=42
+    - actor_rollout_ref.model.path={model:policy}
+    - actor_rollout_ref.rollout.seed=42
+    - trainer.total_training_steps=100
+    - trainer.save_freq=-1
+    - trainer.test_freq=-1
+    - trainer.logger=console
+    - trainer.project_name=verl-l4
+    - trainer.experiment_name=qwen3-omni-thinker-gspo-l4
+
+models:
+  policy:
+    kind: real
+    source: Qwen/Qwen3-Omni-30B-A3B-Instruct
+    revision: main
+    local_path: /models/Qwen3-Omni-30B-A3B-Instruct
+    env_path: L4_QWEN3_OMNI_PATH
+
+dataset:
+  kind: real
+  train: mmk12/train.parquet
+  val: mmk12/test.parquet
+  env_root: L4_MMK12_DATA_ROOT
+
+hardware:
+  min_gpus: 8
+  min_gpu_memory_gb: 80
+  gpu_architectures: [sm90, sm100]
+  min_free_disk_gb: 600
+
+budget:
+  timeout_minutes: 1440
+  total_training_steps: 100
+
+metrics:
+  warmup_steps: 10
+  final_window: 10
+  min_points: 40
+  tracked:
+    - {name: "critic/rewards/mean", direction: higher, optional: false}
+    - {name: "actor/loss", direction: lower, optional: true}
+    - {name: "actor/grad_norm", direction: lower, optional: true}
+
+convergence:
+  # GSPO reward is a rule-based 0/1 correctness signal, so the absolute floor is
+  # expressed against a reward in [0, 1].
+  atol: 0.02
+  rtol: 0.05
+  min_improvement: 0.0
+  require_finite: true
+
+baseline:
+  artifact_name: l4-convergence-baseline
+  branch: main
