@@ -27,6 +27,52 @@ class _ConfigCheckError(ValueError):
     """A controlled, value-free diagnostic for the scoped configuration check."""
 
 
+def _model_schema_mapping(entry):
+    """Resolve only fields read by the named-model schemas, preserving attached context."""
+    from omegaconf import OmegaConf
+
+    if not OmegaConf.is_config(entry):
+        return entry
+
+    model = OmegaConf.to_container(entry, resolve=False)
+
+    def resolve_fields(source, target, fields):
+        for field in fields:
+            if field in source:
+                value = source[field]
+                target[field] = OmegaConf.to_container(value, resolve=True) if OmegaConf.is_config(value) else value
+
+    def materialize_mapping(source, target, section):
+        if section not in source or not isinstance(source[section], Mapping):
+            return None
+        value = source[section]
+        target[section] = OmegaConf.to_container(value, resolve=False) if OmegaConf.is_config(value) else dict(value)
+        return value
+
+    resolve_fields(entry, model, ("backend",))
+    backend = model.get("backend")
+    if backend == "engine":
+        resolve_fields(entry, model, ("offload", "model_path", "replicas", "n_gpus_per_node", "nnodes"))
+        materialize_mapping(entry, model, "rollout")
+    elif backend == "native":
+        resolve_fields(entry, model, ("offload", "model_path", "dispatch_batch_size"))
+        nested_fields = {
+            "placement": ("devices", "replica_groups", "resource", "cpus_per_worker", "num_replicas"),
+            "fsdp": ("timeout", "collective_timeout"),
+        }
+        for section, fields in nested_fields.items():
+            value = materialize_mapping(entry, model, section)
+            if value is not None:
+                resolve_fields(value, model[section], fields)
+        executor = materialize_mapping(entry, model, "executor")
+        if executor is not None:
+            resolve_fields(executor, model["executor"], ("model",))
+            kwargs = materialize_mapping(executor, model["executor"], "kwargs")
+            if kwargs is not None:
+                resolve_fields(kwargs, model["executor"]["kwargs"], ("device",))
+    return model
+
+
 def _inspect_named_rewards(config) -> dict:
     """Return a narrow, ordered report after existing reward validation."""
     from verl_omni.workers.config.reward import (
@@ -82,7 +128,8 @@ def _inspect_named_rewards(config) -> dict:
     parsed_models = []
     for name, entry in models.items():
         try:
-            parsed_models.append(parse_reward_model_config(name, entry))
+            model = _model_schema_mapping(entry)
+            parsed_models.append(parse_reward_model_config(name, model))
         except (ValueError, TypeError) as exc:
             raise _ConfigCheckError("reward.models: check backend, placement, executor, and supported fields") from exc
     try:
