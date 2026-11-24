@@ -21,10 +21,7 @@ from verl_omni.utils.dataset.duplex.calibration import audit_calibration
 from verl_omni.utils.dataset.duplex.fdb_metrics import fdb_rule_metrics
 from verl_omni.utils.dataset.duplex.mining import DuplexEpisodeSpec, WordTimestamp, mine_episodes
 from verl_omni.utils.dataset.duplex.telemetry import (
-    TRIP_WIRE_DEFAULTS,
-    aggregate_duplex_metrics,
     episode_rule_metrics,
-    evaluate_trip_wires,
 )
 from verl_omni.utils.dataset.duplex.trajectory import (
     AXIS_INTERRUPTION,
@@ -140,6 +137,16 @@ def test_telemetry_measures_each_axis():
     assert yield_now["yield_latency_s"] == pytest.approx(0.0)
 
 
+def test_turn_axis_latency_saturates_for_pre_turn_end_speech():
+    # Mirror of the reward's turn gate: speaking at t=0 with the user's turn
+    # ending at t=2 is a barge-in on the user, not a floor take.
+    early = episode_rule_metrics(_trajectory(AXIS_TURN, [True, False, False]), listen_token_id=LISTEN_TOKEN_ID)
+    assert early["turn_latency_s"] == float("inf")
+    # The boundary stays full credit: onset exactly at the turn end.
+    on_time = episode_rule_metrics(_trajectory(AXIS_TURN, [False, False, True, True]), listen_token_id=LISTEN_TOKEN_ID)
+    assert on_time["turn_latency_s"] == pytest.approx(0.0)
+
+
 def test_duplicate_ngram_share_flags_repetition():
     repeated = episode_rule_metrics(
         _trajectory(AXIS_PAUSE, [True] * 8, content_ids=[777] * 8), listen_token_id=LISTEN_TOKEN_ID
@@ -149,20 +156,6 @@ def test_duplicate_ngram_share_flags_repetition():
         _trajectory(AXIS_PAUSE, [True] * 8, content_ids=list(range(100, 108))), listen_token_id=LISTEN_TOKEN_ID
     )
     assert varied["duplicate_ngram_share"] == 0.0
-
-
-def test_trip_wires_fire_on_degenerate_aggregates():
-    episodes = [
-        {"num_units": 5.0, "speak_ratio": 0.0, "silence_share": 1.0, "duplicate_ngram_share": 0.0},
-    ] * 4
-    aggregated = aggregate_duplex_metrics(episodes)
-    violations = evaluate_trip_wires(aggregated, TRIP_WIRE_DEFAULTS)
-    assert any("silence share" in violation for violation in violations)
-    assert any("speak ratio" in violation for violation in violations)
-    healthy = aggregate_duplex_metrics(
-        [{"num_units": 5.0, "speak_ratio": 0.4, "silence_share": 0.6, "duplicate_ngram_share": 0.1}] * 4
-    )
-    assert evaluate_trip_wires(healthy, TRIP_WIRE_DEFAULTS) == []
 
 
 def test_calibration_gate_requires_mid_band_rewards():
@@ -175,6 +168,11 @@ def test_calibration_gate_requires_mid_band_rewards():
     assert good.passed is True
     too_few = audit_calibration({"pause": [0.0]})
     assert too_few.passed is False
+    # An empty rollout measures nothing; the gate must fail closed.
+    empty = audit_calibration({})
+    assert empty["overall_pass"] is False
+    assert empty.passed is False
+    assert "no axes measured" in empty["reason"]
 
 
 def _replay_payload(axis: str, speaking: list[bool], times: list[float] | None = None) -> dict:

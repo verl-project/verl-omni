@@ -36,6 +36,11 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
+from verl_omni.utils.dataset.duplex.deploy_config import (
+    stage_init_timeout_from_env,
+    write_deploy_config_for,
+)
+
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -45,27 +50,45 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--num-episodes", type=int, default=48, help="episodes to roll per run")
     parser.add_argument("--tensor-parallel-size", type=int, default=1)
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.6)
+    parser.add_argument(
+        "--stage-init-timeout",
+        type=int,
+        default=stage_init_timeout_from_env(),
+        help="per-stage init timeout in seconds (env VERL_OMNI_DUPLEX_STAGE_INIT_TIMEOUT)",
+    )
+    parser.add_argument(
+        "--deploy-config",
+        default=None,
+        help="path for the generated thinker-only duplex deploy config "
+        "(default: next to --output with a .deploy.yaml suffix)",
+    )
     return parser.parse_args(argv)
+
+
+def _duplex_deploy_config_path(args: argparse.Namespace) -> str:
+    """Generate the thinker-only duplex deploy config the engine client needs."""
+    return write_deploy_config_for(
+        output_path=args.output, deploy_config=args.deploy_config, tensor_parallel_size=args.tensor_parallel_size
+    )
 
 
 def roll_rewards(args: argparse.Namespace) -> dict[str, list[float]]:
     """Drive the base policy over the event set and collect per-axis rewards.
 
     Uses the same engine path as the rollout strategy: a ``DuplexOmni`` built
-    from engine args, sessions with capture on, the same chunk cadence. The
-    DuplexStrategy driver is reused directly so calibration measures exactly
-    what training would measure.
+    from engine args with the thinker-only duplex deploy config, sessions
+    with capture on, the same chunk cadence. The DuplexStrategy driver is
+    reused directly so calibration measures exactly what training would
+    measure.
     """
 
     from transformers import AutoProcessor
 
     from verl_omni.pipelines.minicpm.duplex_rollout_adapter import require_duplex_vllm_omni
     from verl_omni.utils.dataset.duplex.duplex_rl_dataset import DuplexEpisodeDataset
-    from verl_omni.utils.dataset.duplex.replay import resolve_duplex_vocabulary
     from verl_omni.utils.reward_score.duplex_turn_taking import compute_score_duplex_turn_taking
 
     processor = AutoProcessor.from_pretrained(args.model, trust_remote_code=True)
-    listen_token_id = resolve_duplex_vocabulary(processor).listen_token_id
     duplex_omni_cls = require_duplex_vllm_omni()
     engine = duplex_omni_cls(
         model=args.model,
@@ -73,6 +96,8 @@ def roll_rewards(args: argparse.Namespace) -> dict[str, list[float]]:
         tensor_parallel_size=args.tensor_parallel_size,
         gpu_memory_utilization=args.gpu_memory_utilization,
         enforce_eager=True,
+        deploy_config=_duplex_deploy_config_path(args),
+        stage_init_timeout=args.stage_init_timeout,
     )
     dataset = DuplexEpisodeDataset([args.episodes])
     rewards: dict[str, list[float]] = defaultdict(list)
@@ -86,7 +111,7 @@ def roll_rewards(args: argparse.Namespace) -> dict[str, list[float]]:
                 "seed": sample["duplex_seed"] + index,
                 "chunks": episode["chunks"],
                 "event": episode["event"],
-                "instructions": episode.get("instructions") or None,
+                "commit": bool(episode.get("commit")),
                 "tail_horizon_s": episode.get("tail_horizon_s", 8.0),
             }
             if episode["axis"] == "interruption":
@@ -102,7 +127,7 @@ def roll_rewards(args: argparse.Namespace) -> dict[str, list[float]]:
                 driver.server = type("S", (), {"engine": engine})()
                 result = asyncio.run(driver.run_duplex_episode(run_spec))
                 score = compute_score_duplex_turn_taking(
-                    "calibration", "", "", extra_info=_replay_info(result, listen_token_id)
+                    "calibration", "", "", extra_info=_replay_info(result, processor)
                 )
                 rewards[episode["axis"]].append(float(score["score"]))
             finally:
@@ -113,14 +138,19 @@ def roll_rewards(args: argparse.Namespace) -> dict[str, list[float]]:
     return dict(rewards)
 
 
-def _replay_info(result: dict, listen_token_id: int) -> dict:
+def _replay_info(result: dict, processor) -> dict:
     """Assemble the reward's extra_info from one episode result.
 
     Args:
         result: One run_duplex_episode result.
-        listen_token_id: The checkpoint's <|listen|> id, deciding which
-            units count as speaking on the decision timeline.
+        processor: The checkpoint's processor, resolving the framing
+            vocabulary for the replay build.
+
+    Returns:
+        The replay payload exactly as the training agent loop stamps it (the
+        scorer reads the trip-wire tokens at each layout's action_position).
     """
+    from verl_omni.utils.dataset.duplex.replay import DUPLEX_REPLAY_KEY, build_replay, resolve_duplex_vocabulary
     from verl_omni.utils.dataset.duplex.trajectory import DuplexEpisodeEvent, DuplexTrajectory
 
     event_payload = result.get("event") or {}
@@ -138,19 +168,10 @@ def _replay_info(result: dict, listen_token_id: int) -> dict:
         record_set_wires=result["record_sets"],
         client_audio_chunks=result.get("client_chunks") or [],
     )
-    # Timing-only scoring: the reward reads the unit timeline, so a minimal
-    # replay payload (event + layouts) is sufficient.
-    from verl_omni.utils.dataset.duplex.replay import DUPLEX_REPLAY_KEY
-
-    return {
-        DUPLEX_REPLAY_KEY: {
-            "event": event_payload,
-            "unit_layouts": [
-                {"time_s": decision.time_s, "speaking": decision.speaking}
-                for decision in trajectory.unit_decisions(listen_token_id=listen_token_id)
-            ],
-        }
-    }
+    # The session opened without explicit instructions (the driver defaults
+    # in the policy's own system text), so the replay context matches.
+    replay = build_replay(trajectory, resolve_duplex_vocabulary(processor), instructions=None)
+    return {DUPLEX_REPLAY_KEY: replay.to_extra_fields(include_pcm=False)}
 
 
 def main(argv: list[str] | None = None) -> int:

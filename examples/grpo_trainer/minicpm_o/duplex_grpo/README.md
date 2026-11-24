@@ -24,9 +24,12 @@ design; this README covers running it.
   actions and 0 on forced/re-emitted ones. KL on (small β) against the
   starting checkpoint; LoRA r=32 with frozen audio/vision towers.
 - **Rewards**: CPU rule rewards from timestamps
-  (`verl_omni/utils/reward_score/duplex_turn_taking.py`); telemetry
-  trip-wires (duplicate n-gram share, silence share, speak ratio) are part of
-  the run's validation.
+  (`verl_omni/utils/reward_score/duplex_turn_taking.py`). The scorer also
+  emits the trip-wire columns (`duplex_speak_ratio`, `duplex_silence_share`,
+  `duplex_duplicate_ngram_share`) and a per-episode `duplex_episode_failed`
+  flag whenever a pre-registered threshold (`telemetry.TRIP_WIRE_DEFAULTS`)
+  breaches; the trainer aggregates these columns per step, so silence
+  collapse or repetitive speech shows up in the logged metrics.
 
 ## Prerequisites
 
@@ -64,7 +67,9 @@ group.
 
 ## Evaluation
 
-- Rule telemetry in-loop; per-axis pass rates from the validation rollouts.
+- Per-axis reward means and the trip-wire columns from the scorer, aggregated
+  per training step by the trainer's reward-extra metrics (the
+  `duplex_episode_failed` share is the degeneracy alarm).
 - FDB-v1 rule metrics over the dumped replays:
 
   ```bash

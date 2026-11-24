@@ -1,6 +1,6 @@
 # Streaming duplex GRPO (MiniCPM-o 4.5)
 
-Last updated: 11/19/2026.
+Last updated: 11/23/2026.
 
 Streaming **full-duplex GRPO** over real duplex sessions — the trainer side of
 [RFC #905](https://github.com/verl-project/verl-omni/issues/905), consuming
@@ -55,8 +55,8 @@ dataset (mined episodes) ──▶ omni_duplex_agent ──▶ rollout server (D
 | Unit-window replay | `.../duplex/replay.py` | `<unit>` + 10 bare audio placeholders + action + `</unit>` per unit; engine silent units replay as 1 s of digital silence; mel via the processor's `process_audio_streaming` |
 | Exact-distribution recompute | `.../duplex/sampling_logprobs.py` | Ports the engine's truncation math; the M0 parity gate's core |
 | Event mining | `.../duplex/mining.py` | pause / turn / interruption from word-level timestamps |
-| Rule rewards | `verl_omni/utils/reward_score/duplex_turn_taking.py` | Per-axis, timestamp-only, tuned bands |
-| Telemetry + trip-wires | `.../duplex/telemetry.py` | duplicate n-gram share, silence share, speak ratio |
+| Rule rewards | `verl_omni/utils/reward_score/duplex_turn_taking.py` | Per-axis, timestamp-only, tuned bands; emits the trip-wire columns and the per-episode `duplex_episode_failed` flag |
+| Trip-wire definitions | `.../duplex/telemetry.py` | The shared threshold set (`TRIP_WIRE_DEFAULTS`) and metric definitions (`speak_ratio`, `silence_share`, `duplicate_ngram_share`); the scorer applies them per episode |
 | Calibration gate | `.../duplex/calibration.py` + `scripts/duplex_calibration_audit.py` | mid-band entry gate before any gradient |
 | FDB-v1 rule metrics | `.../duplex/fdb_metrics.py` | static-protocol timing metrics over dumped replays |
 | Rollout bridge | `verl_omni/pipelines/minicpm/duplex_rollout_adapter.py` | `pipeline_mode="duplex"`; `minicpmo_4_5_duplex` |
@@ -80,13 +80,28 @@ with mask 1 only at sampled action positions.
 
 ### Log-probability semantics
 
-Captured logprobs are of the sampled distribution, not a plain softmax. For
-MiniCPM-o 4.5's two-stage draw the joint is `log P(chunk_eos)` (raw softmax)
-for a boundary hit and `log(1 − P) + stage-2` (post-truncation renormalized)
-for a content token. Old log-probs ride the rollout capture (the in-tree
-processed-logprobs convention); the reference KL and the M0 parity gate
-recompute under the same transform from the recorded distribution inputs
-(`sampling_logprobs.py`).
+Two log-probability channels exist and are never mixed in one objective
+term:
+
+- **Captured logprobs** ride the replay payload (`extra_fields["duplex_replay"]`)
+  as the parity/audit channel: the M0 entry gate compares them against a
+  trainer-side recompute (`scripts/duplex_m0_parity_check.py`, the only
+  caller of `recompute_action_logprobs`). They are logprobs of the sampled
+  distribution, not a plain softmax — for MiniCPM-o 4.5's two-stage draw the
+  joint is `log P(chunk_eos)` (raw softmax) for a boundary hit and
+  `log(1 − P) + stage-2` (post-truncation renormalized) for a content token.
+- **Training logprobs** are trainer-recomputed: with `loss_mode=vanilla` and
+  no `rollout_correction.bypass_mode`, verl derives `old_log_probs` (the
+  ratio and the reference KL) from its own actor forward over the replayed
+  sequence — a plain per-token measure, not the captured two-stage joint,
+  which is why the two channels must never meet in one objective term. The
+  rollout never exports its captured values as
+  a log-probability column, so verl's `rollout_log_probs` channel stays
+  empty and rollout-correction has nothing to engage on.
+
+The separation is deliberate: the engine's streaming tower and the trainer's
+offline forward differ by a bf16 residual (observed ≤ 0.5 nats per row, most
+rows ≤ 0.02), so mixing the channels would bias every importance ratio.
 
 ### Weight-sync fencing
 
@@ -117,11 +132,20 @@ decisions, hence `rollout.n=16` groups.
    band before any gradient step.
 2. **M0 parity** (`scripts/duplex_m0_parity_check.py`): same-seed episodes
    replay deterministically; actor-recomputed logprobs match the captured
-   records within tolerance on all sampled tokens, including a
-   `truncated_interruption` episode; every forced class maps to mask 0.
-3. **In-loop trip-wires**: duplicate 3-gram share ≤ 0.4, silence share and
-   speak ratio inside pre-registered bands (rule-reward degeneracy is the
-   documented failure mode of duplex RL).
+   records within tolerance on every in-nucleus sampled token (a token the
+   replay's cut excludes is reported as documented loosening, not a
+   failure), including a `truncated_interruption` episode; every forced
+   class maps to mask 0.
+3. **In-loop trip-wires**: the rule scorer emits `duplex_speak_ratio`,
+   `duplex_silence_share`, and `duplex_duplicate_ngram_share` per episode
+   (the shared telemetry definitions) plus `duplex_episode_failed` = 1 when
+   any pre-registered threshold breaches (`telemetry.TRIP_WIRE_DEFAULTS`:
+   duplicate 3-gram share ≤ 0.4, silence share inside 0.2–0.9, speak ratio
+   inside 0.05–0.8; rule-reward degeneracy is the documented failure mode of
+   duplex RL). The trainer aggregates every numeric reward-extra column per
+   step — means with NaN-skip, and `inf` latencies surface as
+   `<key>_never_share` — so a breach is visible (and the failed-share
+   rises) instead of silently averaged away.
 4. **FDB-v1 rule metrics** over dumped replays
    (`python -m verl_omni.utils.dataset.duplex.fdb_metrics dump.jsonl`).
 

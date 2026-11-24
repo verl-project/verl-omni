@@ -11,19 +11,19 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""In-loop telemetry and degeneracy trip-wires for duplex GRPO.
+"""Duplex degeneracy trip-wire definitions (RFC verl-omni #905 §3.5).
 
 Rule-reward degeneracy — silence collapse, repetitive speech — is the
-documented failure mode of duplex RL (RFC verl-omni #905 §3.5), so the
-trip-wires are part of the training loop, not an afterthought: every episode
-contributes rule metrics, and pre-registered thresholds block a run on
-breach.
+documented failure mode of duplex RL, so the thresholds are defined once
+here and applied per episode by the turn-taking reward scorer (its
+``duplex_episode_failed`` column); the trainer aggregates the scorer's
+numeric columns per step.
 """
 
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -32,9 +32,8 @@ from verl_omni.utils.dataset.duplex.trajectory import DuplexTrajectory
 __all__ = [
     "TRIP_WIRE_DEFAULTS",
     "DuplexTripWires",
-    "aggregate_duplex_metrics",
+    "duplicate_ngram_share",
     "episode_rule_metrics",
-    "evaluate_trip_wires",
 ]
 
 
@@ -86,7 +85,7 @@ def episode_rule_metrics(
         raise ValueError(f"episode {trajectory.session_id} has no unit decisions to measure")
     speaking = sum(1 for decision in decisions if decision.speaking)
     content_stream = [decision.action_token_id for decision in decisions if decision.speaking]
-    duplicate_share = _duplicate_ngram_share(content_stream, ngram=ngram)
+    duplicate_share = duplicate_ngram_share(content_stream, ngram=ngram)
     metrics: dict[str, float] = {
         "num_units": float(num_units),
         "speak_ratio": speaking / num_units,
@@ -112,11 +111,12 @@ def _axis_latencies(trajectory: DuplexTrajectory, decisions: Sequence[Any]) -> d
             sum(1 for decision in decisions if decision.speaking and start <= decision.time_s < end)
         )
     elif event.axis == "turn" and event.user_turn_end_s is not None:
-        if first_speak is not None:
-            # Same semantics as the reward: speaking before the turn end is
-            # full credit, never a negative latency.
-            metrics["turn_latency_s"] = max(0.0, first_speak.time_s - event.user_turn_end_s)
+        if first_speak is not None and first_speak.time_s >= event.user_turn_end_s:
+            metrics["turn_latency_s"] = first_speak.time_s - event.user_turn_end_s
         else:
+            # Same semantics as the reward: speaking before the user's turn
+            # ends is a barge-in on the user, not a floor take — saturate like
+            # never speaking.
             metrics["turn_latency_s"] = float("inf")
     elif event.axis == "interruption" and event.interrupt_speech_end_s is not None:
         deadline = event.interrupt_speech_end_s
@@ -131,7 +131,7 @@ def _axis_latencies(trajectory: DuplexTrajectory, decisions: Sequence[Any]) -> d
     return metrics
 
 
-def _duplicate_ngram_share(token_ids: Sequence[int], *, ngram: int) -> float:
+def duplicate_ngram_share(token_ids: Sequence[int], *, ngram: int = 3) -> float:
     """Share of n-grams that repeat an earlier one (0 for short streams)."""
     if len(token_ids) < ngram:
         return 0.0
@@ -139,49 +139,3 @@ def _duplicate_ngram_share(token_ids: Sequence[int], *, ngram: int) -> float:
     counts = Counter(grams)
     repeated = sum(count for count in counts.values() if count > 1)
     return repeated / len(grams)
-
-
-def aggregate_duplex_metrics(episodes: Sequence[Mapping[str, float]]) -> dict[str, float]:
-    """Mean-aggregate per-episode metrics, ignoring unmeasured (nan) values."""
-    if not episodes:
-        return {}
-    keys = set().union(*(episode.keys() for episode in episodes))
-    aggregated: dict[str, float] = {}
-    for key in sorted(keys):
-        values = [float(episode[key]) for episode in episodes if key in episode]
-        finite = [value for value in values if value == value and value not in (float("inf"),)]
-        aggregated[f"duplex/{key}"] = sum(finite) / len(finite) if finite else float("nan")
-        if any(value == float("inf") for value in values):
-            aggregated[f"duplex/{key}_never"] = sum(1 for value in values if value == float("inf")) / len(values)
-    aggregated["duplex/num_episodes"] = float(len(episodes))
-    return aggregated
-
-
-def evaluate_trip_wires(
-    aggregated: Mapping[str, float],
-    wires: DuplexTripWires = TRIP_WIRE_DEFAULTS,
-) -> list[str]:
-    """Check the aggregated metrics against the pre-registered thresholds.
-
-    Args:
-        aggregated: Output of :func:`aggregate_duplex_metrics`.
-        wires: The thresholds to enforce.
-
-    Returns:
-        Human-readable violation messages; empty when every wire holds.
-    """
-    violations: list[str] = []
-    duplicate_share = aggregated.get("duplex/duplicate_ngram_share")
-    if duplicate_share is not None and duplicate_share == duplicate_share:
-        if duplicate_share > wires.duplicate_ngram_share_max:
-            violations.append(
-                f"duplicate 3-gram share {duplicate_share:.3f} exceeds {wires.duplicate_ngram_share_max:.3f}"
-            )
-    for name, key, band in (
-        ("silence share", "duplex/silence_share", wires.silence_share_band),
-        ("speak ratio", "duplex/speak_ratio", wires.speak_ratio_band),
-    ):
-        value = aggregated.get(key)
-        if value is not None and value == value and not (band[0] <= value <= band[1]):
-            violations.append(f"{name} {value:.3f} outside band {band}")
-    return violations

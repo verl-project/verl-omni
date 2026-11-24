@@ -41,8 +41,11 @@ export VERL_USE_EXTERNAL_MODULES=verl_omni
     "data.custom_cls.name=DuplexEpisodeDataset" \
     data.train_batch_size=16 \
     data.dataloader_num_workers=2 \
-    data.max_prompt_length=64 \
-    data.max_response_length=384 \
+    # The replay context is ~70 tokens (system prompt + bundled ref audio);
+    # 64 silently left-truncated it.
+    data.max_prompt_length=128 \
+    # Bounded episodes with tails and injected interruptions overflow 384.
+    data.max_response_length=1024 \
     data.val_max_samples=32 \
     data.validation_shuffle=false \
     "actor_rollout_ref.model.path=${MODEL_PATH}" \
@@ -54,7 +57,10 @@ export VERL_USE_EXTERNAL_MODULES=verl_omni
     actor_rollout_ref.model.lora_alpha=64 \
     actor_rollout_ref.model.lora_dtype=float32 \
     actor_rollout_ref.model.lora.merge=True \
-    actor_rollout_ref.actor.strategy=fsdp \
+    # LoRA the thinker only: the audio/vision towers (apm/vpm/resampler) stay frozen.
+    actor_rollout_ref.model.exclude_modules='(apm|vpm|resampler)\..*' \
+    # FSDP2: fully-sharded LoRA training on 4 GPUs.
+    actor_rollout_ref.actor.strategy=fsdp2 \
     actor_rollout_ref.actor.ppo_mini_batch_size=16 \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=2 \
     actor_rollout_ref.actor.use_dynamic_bsz=false \
@@ -95,7 +101,19 @@ export VERL_USE_EXTERNAL_MODULES=verl_omni
     actor_rollout_ref.rollout.tensor_model_parallel_size=2 \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.45 \
     actor_rollout_ref.rollout.max_num_seqs=16 \
-    actor_rollout_ref.rollout.max_num_batched_tokens=4096 \
+    # A duplex session's KV window is 8097 tokens (96-id prefix + 8000-id high
+    # watermark + the sample slot); the earlier 4096 batched-token budget could
+    # not carry it, and max_model_len binds the window geometry, not the
+    # model's 40960 context.
+    actor_rollout_ref.rollout.max_model_len=8192 \
+    actor_rollout_ref.rollout.max_num_batched_tokens=8192 \
+    # Duplex sessions own their KV lifecycle; block-level prefix reuse across
+    # sessions is not sound under paced appends.
+    actor_rollout_ref.rollout.enable_prefix_caching=false \
+    # Old log-probs come from the trainer's own actor forward; never build a
+    # captured-logprob channel (see docs/algo/duplex_grpo.md "Log-probability
+    # semantics").
+    actor_rollout_ref.rollout.calculate_log_probs=false \
     actor_rollout_ref.rollout.free_cache_engine=false \
     actor_rollout_ref.rollout.load_format=safetensors \
     actor_rollout_ref.rollout.layered_summon=true \
@@ -108,6 +126,10 @@ export VERL_USE_EXTERNAL_MODULES=verl_omni
     +actor_rollout_ref.rollout.engine_kwargs.vllm_omni.pipeline_name=minicpmo_4_5_duplex \
     +actor_rollout_ref.rollout.engine_kwargs.vllm_omni.pipeline_mode=duplex \
     +actor_rollout_ref.rollout.engine_kwargs.vllm_omni.async_chunk=false \
+    # A cold duplex stage needs far more than the engine's 300 s init default
+    # (the orchestrator forwards this to OmniConfig.stage_init_timeout and
+    # raises init_timeout to match).
+    +actor_rollout_ref.rollout.engine_kwargs.vllm_omni.stage_init_timeout=1800 \
     actor_rollout_ref.rollout.val_kwargs.n=1 \
     actor_rollout_ref.rollout.val_kwargs.do_sample=true \
     actor_rollout_ref.rollout.val_kwargs.temperature=0.7 \
@@ -124,6 +146,10 @@ export VERL_USE_EXTERNAL_MODULES=verl_omni
     algorithm.norm_adv_by_std_in_grpo=true \
     algorithm.use_kl_in_reward=false \
     reward.num_workers=1 \
+    # The default visual manager expects image-reward payloads;
+    # minicpm_naive feeds the rule scorer directly (and demotes MiniCPM-o's
+    # special answer tags so choice scores decode).
+    reward.reward_manager.name=minicpm_naive \
     reward.custom_reward_function.path=verl_omni/utils/reward_score/duplex_turn_taking.py \
     reward.custom_reward_function.name=compute_score_duplex_turn_taking \
     trainer.val_before_train=true \

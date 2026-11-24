@@ -72,12 +72,19 @@ def audit_calibration(
 
     Returns:
         A report with per-axis ``mean``, ``normalized_mean``, ``passed`` and a
-        global ``overall_pass``; axes with too few samples fail closed.
+        global ``overall_pass``; axes with too few samples fail closed, and an
+        empty ``axis_rewards`` mapping fails outright (nothing was measured).
     """
     axis_minima = axis_minima or {}
     axis_maxima = axis_maxima or {}
     report = CalibrationReport()
     overall = True
+    if not axis_rewards:
+        # Fail closed: no axes measured means the gate says nothing; passing
+        # would let an empty rollout skip calibration entirely.
+        report["reason"] = "no axes measured; the calibration rollout produced no rewards"
+        report["overall_pass"] = False
+        return report
     for axis, rewards in sorted(axis_rewards.items()):
         minimum = float(axis_minima.get(axis, DEFAULT_AXIS_MINIMUM))
         maximum = float(axis_maxima.get(axis, DEFAULT_AXIS_MAXIMUM))

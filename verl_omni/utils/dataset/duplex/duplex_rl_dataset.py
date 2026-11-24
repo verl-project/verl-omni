@@ -182,11 +182,21 @@ class DuplexEpisodeDataset(Dataset):
             "tail_silence_chunks": int(row.get("tail_silence_chunks", 2) or 2),
             "speak_wait_horizon_s": float(row.get("speak_wait_horizon_s", 30.0) or 30.0),
             "tail_horizon_s": float(row.get("tail_horizon_s", 8.0) or 8.0),
+            # stamp_commit marks auto-response episodes on the parquet row; the
+            # agent loop forwards it so the driver commits the last speech chunk.
+            "commit": bool(row.get("commit")),
         }
         return {
             "duplex_episode": episode,
             "duplex_seed": int(row.get("duplex_seed", 0) or 0),
-            "data_source": row.get("data_source", "dailytalk"),
+            # verl v1 mints per-sample uids off raw_prompt; the episode id keeps
+            # them stable across the parquet round-trip.
+            "raw_prompt": str(spec.episode_id),
+            # Reward managers read the per-sample ground truth before calling
+            # the scorer; the duplex rule rewards ignore it, so it stays empty.
+            "reward_model": {"ground_truth": ""},
+            # Per-axis source tag: validation metrics split per axis.
+            "data_source": f"dailytalk-duplex-{spec.axis}",
             "index": int(index),
             # TODO(data): drop once DataProto retires the non-empty-batch requirement.
             "dummy_tensor": torch.tensor([0], dtype=torch.uint8),

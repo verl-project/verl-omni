@@ -21,9 +21,12 @@ temperature / top-k / top-p truncation, two-stage Bernoulli joint), and
 compares against the engine-captured logprobs.
 
 Exit criteria (RFC §4, M0): fixed segments replay deterministically, the
-actor-recomputed logprobs match the captured record logprobs within tolerance
-on all sampled tokens — including a barge-in episode — and every forced class
-maps to mask 0.
+actor-recomputed logprobs match the captured record logprobs within
+tolerance on the in-nucleus sampled tokens — including a barge-in episode —
+and every forced class maps to mask 0. Rows whose drawn token fell outside
+the replay's nucleus cut (a legitimate top_p boundary flip under the engine
+vs offline bf16 residual) are reported under ``documented_loosening``
+instead of failing the gate.
 
 Usage (GPU host with the capture-capable vLLM-Omni installed)::
 
@@ -37,9 +40,11 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-import math
 import sys
+from collections.abc import Sequence
 from pathlib import Path
+
+from verl_omni.utils.dataset.duplex.deploy_config import stage_init_timeout_from_env, write_deploy_config_for
 
 _REL_TOL_DEFAULT = 1e-3
 _ABS_TOL_DEFAULT = 1e-4
@@ -55,10 +60,29 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--tensor-parallel-size", type=int, default=1)
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.6)
     parser.add_argument(
+        "--stage-init-timeout",
+        type=int,
+        default=stage_init_timeout_from_env(),
+        help="per-stage init timeout in seconds (env VERL_OMNI_DUPLEX_STAGE_INIT_TIMEOUT)",
+    )
+    parser.add_argument(
+        "--deploy-config",
+        default=None,
+        help="path for the generated thinker-only duplex deploy config "
+        "(default: next to --output with a .deploy.yaml suffix)",
+    )
+    parser.add_argument(
         "--require-barge-in", action="store_true", help="fail unless a truncated_interruption episode was checked"
     )
     parser.add_argument("--output", default="duplex_m0_parity.json")
     return parser.parse_args(argv)
+
+
+def _duplex_deploy_config_path(args: argparse.Namespace) -> str:
+    """Generate the thinker-only duplex deploy config the engine client needs."""
+    return write_deploy_config_for(
+        output_path=args.output, deploy_config=args.deploy_config, tensor_parallel_size=args.tensor_parallel_size
+    )
 
 
 def _roll_episodes(args: argparse.Namespace) -> list[dict]:
@@ -74,6 +98,8 @@ def _roll_episodes(args: argparse.Namespace) -> list[dict]:
         tensor_parallel_size=args.tensor_parallel_size,
         gpu_memory_utilization=args.gpu_memory_utilization,
         enforce_eager=True,
+        deploy_config=_duplex_deploy_config_path(args),
+        stage_init_timeout=args.stage_init_timeout,
     )
     dataset = DuplexEpisodeDataset([args.episodes])
     driver = DuplexStrategy.__new__(DuplexStrategy)
@@ -90,7 +116,7 @@ def _roll_episodes(args: argparse.Namespace) -> list[dict]:
                 "seed": sample["duplex_seed"] + index,
                 "chunks": episode["chunks"],
                 "event": episode["event"],
-                "instructions": episode.get("instructions") or None,
+                "commit": bool(episode.get("commit")),
                 "tail_horizon_s": episode.get("tail_horizon_s", 8.0),
             }
             if episode["axis"] == "interruption":
@@ -139,6 +165,34 @@ def _actor_logits(model, replay):
     return logits[[position - 1 for position in positions]]
 
 
+def _parity_verdict(
+    logits,
+    inputs,
+    context,
+    kinds: Sequence[str],
+    logprobs: Sequence[float | None],
+    *,
+    rel_tol: float,
+    abs_tol: float,
+):
+    """Recompute under the engine's exact transform and compare, nucleus-cut aware.
+
+    ``kinds`` / ``logprobs`` are the trajectory's flat action columns; only
+    sampled rows carry a captured log-probability into the comparison. The
+    recompute runs over the engine's own repetition history and the comparison
+    classifies each row by whether the drawn token survives the replay's cut.
+    """
+    from verl_omni.utils.dataset.duplex.sampling_logprobs import (
+        compare_action_logprobs,
+        engine_repetition_history,
+        recompute_action_logprobs,
+    )
+
+    values, valid = recompute_action_logprobs(logits, inputs, context, action_history=engine_repetition_history(inputs))
+    captured = [logprob if kind == "sampled" else None for logprob, kind in zip(logprobs, kinds, strict=True)]
+    return compare_action_logprobs(logits, inputs, context, values, valid, captured, rel_tol=rel_tol, abs_tol=abs_tol)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     from verl_omni.pipelines.minicpm.duplex_rollout_adapter import MiniCPMODuplexRolloutAdapter
@@ -146,7 +200,6 @@ def main(argv: list[str] | None = None) -> int:
     from verl_omni.utils.dataset.duplex.replay import resolve_duplex_vocabulary
     from verl_omni.utils.dataset.duplex.sampling_logprobs import (
         build_sampling_context,
-        recompute_action_logprobs,
         unit_inputs_from_trajectory,
     )
     from verl_omni.utils.dataset.duplex.trajectory import DuplexEpisodeEvent, DuplexTrajectory
@@ -201,26 +254,25 @@ def main(argv: list[str] | None = None) -> int:
         episode_report["mask_taxonomy_ok"] = all(
             bit == (kind == "sampled") for kind, bit in zip(kinds, mask, strict=True)
         )
-        # Parity: recomputed vs captured, sampled tokens only.
+        # Parity: recomputed vs captured on the sampled rows, split by the
+        # replay's nucleus cut. Rows whose drawn token fell outside the cut (a
+        # top_p boundary flip under the engine-vs-offline bf16 residual) are
+        # the documented loosening, not gate failures.
         inputs = unit_inputs_from_trajectory(trajectory)
         context = build_sampling_context(
             tokenizer, resolve_duplex_vocabulary(processor), trajectory.record_sets[-1].model
         )
         logits = _actor_logits(model, replay)
-        values, valid = recompute_action_logprobs(logits, inputs, context)
-        captured = [logprob for logprob, kind in zip(trajectory.logprobs, kinds, strict=True) if kind == "sampled"]
-        recomputed = [float(value) for value, is_valid in zip(values.tolist(), valid.tolist(), strict=True) if is_valid]
-        deltas = [
-            abs(a - b) for a, b in zip(recomputed, captured, strict=True) if math.isfinite(b) and math.isfinite(a)
-        ]
-        episode_report["num_sampled"] = len(captured)
-        episode_report["max_abs_delta"] = max(deltas) if deltas else float("nan")
-        episode_report["matches"] = bool(
-            deltas
-            and all(delta <= args.abs_tol + args.rel_tol * abs(b) for delta, b in zip(deltas, captured, strict=False))
+        parity = _parity_verdict(
+            logits, inputs, context, kinds, trajectory.logprobs, rel_tol=args.rel_tol, abs_tol=args.abs_tol
         )
+        episode_report["parity_by_class"] = parity.to_dict()
+        episode_report["matches"] = parity.matches
         all_match = all_match and episode_report["matches"] and episode_report["mask_taxonomy_ok"]
         report["episodes"].append(episode_report)
+        report.setdefault("documented_loosening", []).extend(
+            {"episode": first["episode_id"], **row} for row in parity.to_dict()["documented_loosening"]
+        )
 
     report["saw_barge_in"] = saw_barge_in
     report["overall_pass"] = bool(all_match and (saw_barge_in or not args.require_barge_in))
