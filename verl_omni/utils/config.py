@@ -256,7 +256,6 @@ _TRUE_ON_POLICY_CONTRACT = {
     "actor_rollout_ref.rollout.temperature": 1.0,
     "actor_rollout_ref.rollout.top_p": 1.0,
     "actor_rollout_ref.rollout.top_k": -1,
-    "actor_rollout_ref.rollout.tensor_model_parallel_size": 1,
     "actor_rollout_ref.rollout.calculate_log_probs": True,
     "actor_rollout_ref.rollout.enable_prefix_caching": False,
     "actor_rollout_ref.model.lora_adapter_path": None,
@@ -282,6 +281,15 @@ def _validate_true_on_policy(config: Any) -> None:
         for path, expected in contract.items()
         if _select(config, path) != expected
     ]
+    tp_size = _select(config, "actor_rollout_ref.rollout.tensor_model_parallel_size")
+    if tp_size not in (1, 2):
+        violations.append(f"actor_rollout_ref.rollout.tensor_model_parallel_size={tp_size!r} (requires 1 or 2)")
+    actor_tp_size = _select(config, "actor_rollout_ref.model.rollout_tensor_parallel_size")
+    if actor_tp_size != tp_size:
+        violations.append(
+            f"actor_rollout_ref.model.rollout_tensor_parallel_size={actor_tp_size!r} "
+            "(requires actor_rollout_ref.rollout.tensor_model_parallel_size)"
+        )
     strategy = _select(config, "actor_rollout_ref.actor.strategy")
     strategies = ("fsdp2",) if lora else ("fsdp", "fsdp2")
     if strategy not in strategies:

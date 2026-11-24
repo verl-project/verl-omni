@@ -82,10 +82,11 @@ adapt each implementation to your model's architecture:
   the default `AutoModelForMultimodalLM` loader does not own the architecture;
   the FSDP engine still owns `from_pretrained`.
 
-- **`register_true_on_policy_implementations()`** (optional): Register the
+- **`register_true_on_policy_implementations(model_config)`** (optional): Register the
   Transformers attention and experts functions used under
   `model.true_on_policy` and return their `attn_implementation` /
-  `experts_implementation` names. The model config builds the HF config with
+  `experts_implementation` names. `model_config.rollout_tensor_parallel_size`
+  is the tensor-parallel degree of the rollout. The model config builds the HF config with
   them; the base implementation raises, so the flag is refused for adapters
   that do not override it. See [True On-Policy](../algo/true_on_policy.md).
 

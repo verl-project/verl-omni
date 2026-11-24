@@ -36,7 +36,6 @@ from dataclasses import dataclass, field
 from typing import Callable, Iterator
 
 import torch
-import torch.nn.functional as F
 from torch.distributed.tensor import DTensor
 from verl.utils.device import get_device_id
 from verl.utils.fsdp_utils import (
@@ -118,8 +117,8 @@ def use_merged_lora_forward(module: torch.nn.Module) -> None:
     """Make every LoRA linear forward with the merged weight that ``merge_in_full_weight_dtype`` exports.
 
     PEFT computes ``base(x) + B(A(x)) * scaling``, while a rollout that received merged weights computes
-    ``(W + B @ A * scaling)(x)``. Forwarding with the merged weight makes both sides run the same linear on the
-    same weight, and the gradient still reaches ``A`` and ``B``.
+    ``(W + B @ A * scaling)(x)``. Running the base layer on the merged weight makes both sides run the same
+    linear on the same weight, and the gradient still reaches ``A`` and ``B``.
 
     Raises:
         NotImplementedError: If a LoRA layer is not a plain ``lora.Linear``.
@@ -141,7 +140,7 @@ def _merged_lora_forward(layer, peft_forward, x: torch.Tensor, *args, **kwargs) 
     for adapter in layer.active_adapters:
         if adapter in layer.lora_A:
             weight = weight + _lora_delta(layer, adapter, weight)
-    return F.linear(x, weight, base_layer.bias)
+    return torch.func.functional_call(base_layer, {"weight": weight}, (x,))
 
 
 @dataclass(eq=False)

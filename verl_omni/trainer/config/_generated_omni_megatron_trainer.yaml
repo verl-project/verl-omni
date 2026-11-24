@@ -503,6 +503,7 @@ actor_rollout_ref:
     model_stage: thinker
     hf_config_name: null
     true_on_policy: false
+    rollout_tensor_parallel_size: ${oc.select:actor_rollout_ref.rollout.tensor_model_parallel_size,1}
     lora_dtype: null
     lora_init_weights: gaussian
     target_parameters: null

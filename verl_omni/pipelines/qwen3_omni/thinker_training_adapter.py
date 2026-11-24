@@ -82,7 +82,7 @@ class Qwen3OmniThinkerAdapter(OmniModelBase):
         return qwen3_omni_forward_model_engine
 
     @classmethod
-    def register_true_on_policy_implementations(cls) -> dict[str, str]:
+    def register_true_on_policy_implementations(cls, model_config) -> dict[str, str]:
         from verl_omni.models.transformers.qwen3_omni import (
             register_hub_fa3_attention,
             register_vllm_fused_moe_experts,
@@ -90,12 +90,14 @@ class Qwen3OmniThinkerAdapter(OmniModelBase):
 
         return {
             "attn_implementation": register_hub_fa3_attention(),
-            "experts_implementation": register_vllm_fused_moe_experts(),
+            "experts_implementation": register_vllm_fused_moe_experts(model_config.rollout_tensor_parallel_size),
         }
 
     @classmethod
     def configure_model(cls, module, model_config):
-        """Strip non-training stages, redirect forward to thinker, and give the true on-policy actor exact M-RoPE.
+        """Strip non-training stages, redirect forward to thinker, and set up the true on-policy actor.
+
+        The true on-policy actor gets exact M-RoPE and, for a tensor-parallel rollout, row-parallel ``o_proj`` sums.
 
         Args:
             module: The loaded Qwen3-Omni model before FSDP wrapping.
@@ -116,9 +118,12 @@ class Qwen3OmniThinkerAdapter(OmniModelBase):
         module.set_input_embeddings = module.thinker.set_input_embeddings
         module._no_split_modules = ["Qwen3OmniMoeThinkerTextDecoderLayer"]
         if model_config.true_on_policy:
-            from verl_omni.models.transformers.qwen3_omni import ExactMRotaryEmbedding
+            from verl_omni.models.transformers.qwen3_omni import ExactMRotaryEmbedding, use_tensor_parallel_linear
 
             module.thinker.model.rotary_emb = ExactMRotaryEmbedding.from_hf(module.thinker.model.rotary_emb)
+            if model_config.rollout_tensor_parallel_size > 1:
+                for layer in module.thinker.model.layers:
+                    use_tensor_parallel_linear(layer.self_attn.o_proj, model_config.rollout_tensor_parallel_size)
         return module
 
     @classmethod

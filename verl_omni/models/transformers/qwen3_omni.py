@@ -18,6 +18,7 @@ import logging
 from copy import copy
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 from transformers import AttentionInterface
 from transformers.integrations.moe import ALL_EXPERTS_FUNCTIONS, ExpertsInterface, grouped_mm_experts_forward
@@ -40,6 +41,7 @@ __all__ = [
     "packed_cu_seqlens",
     "register_hub_fa3_attention",
     "register_vllm_fused_moe_experts",
+    "use_tensor_parallel_linear",
     "vllm_fused_moe_experts_forward",
 ]
 
@@ -226,6 +228,50 @@ def fused_experts(hidden_states, gate_up_proj, down_proj, top_k_index, top_k_wei
     )
 
 
+def _tensor_parallel_sum(partials: list[torch.Tensor]) -> torch.Tensor:
+    """Add per-rank partial results as vLLM's batch-invariant all-reduce does: in fp32, in rank order, rounded once."""
+    total = partials[0].float()
+    for partial in partials[1:]:
+        total = total + partial.float()
+    return total.to(partials[0].dtype)
+
+
+def use_tensor_parallel_linear(linear: nn.Linear, tp_size: int) -> None:
+    """Make a bias-free linear return what the row-parallel layer of a rollout with ``tp_size`` ranks returns.
+
+    Each rank multiplies its slice of the input features with its slice of the weight, and the partial outputs
+    are added by :func:`_tensor_parallel_sum`. A single matmul over all features rounds differently.
+    """
+    linear.forward = functools.partial(_tensor_parallel_linear_forward, linear, tp_size)
+
+
+def _tensor_parallel_linear_forward(linear: nn.Linear, tp_size: int, x: torch.Tensor) -> torch.Tensor:
+    per_rank = linear.in_features // tp_size
+    return _tensor_parallel_sum(
+        [
+            F.linear(
+                x[..., start : start + per_rank].contiguous(), linear.weight[:, start : start + per_rank].contiguous()
+            )
+            for start in range(0, linear.in_features, per_rank)
+        ]
+    )
+
+
+def _tensor_parallel_fused_experts(hidden_states, gate_up_proj, down_proj, top_k_index, top_k_weights, tp_size):
+    """:func:`fused_experts` as a rollout with ``tp_size`` ranks runs it: each rank on its slice of the intermediate
+    dimension, the partial outputs added by :func:`_tensor_parallel_sum`."""
+    intermediate = down_proj.shape[-1]
+    per_rank = intermediate // tp_size
+    gate_proj, up_proj = gate_up_proj[:, :intermediate], gate_up_proj[:, intermediate:]
+    partials = []
+    for start in range(0, intermediate, per_rank):
+        rank = slice(start, start + per_rank)
+        rank_gate_up_proj = torch.cat([gate_proj[:, rank], up_proj[:, rank]], dim=1)
+        rank_down_proj = down_proj[..., rank].contiguous()
+        partials.append(fused_experts(hidden_states, rank_gate_up_proj, rank_down_proj, top_k_index, top_k_weights))
+    return _tensor_parallel_sum(partials)
+
+
 class _ValueWithGradientOf(torch.autograd.Function):
     """Returns ``value`` and sends its gradient to ``reference``."""
 
@@ -238,21 +284,28 @@ class _ValueWithGradientOf(torch.autograd.Function):
         return grad_output, None
 
 
-def vllm_fused_moe_experts_forward(self, hidden_states, top_k_index, top_k_weights):
+def vllm_fused_moe_experts_forward(self, hidden_states, top_k_index, top_k_weights, tp_size: int = 1):
     """Experts forward for ``ExpertsInterface``: vLLM ``fused_experts`` output with the ``grouped_mm`` gradient.
 
     ``fused_experts`` is the kernel the vLLM-Omni rollout runs and has no backward, so the gradient is taken
-    from Transformers' ``grouped_mm`` experts evaluated on the same inputs.
+    from Transformers' ``grouped_mm`` experts evaluated on the same inputs. ``tp_size`` is the tensor-parallel
+    degree of that rollout.
     """
     with torch.no_grad():
-        output = fused_experts(hidden_states, self.gate_up_proj, self.down_proj, top_k_index, top_k_weights)
+        if tp_size == 1:
+            output = fused_experts(hidden_states, self.gate_up_proj, self.down_proj, top_k_index, top_k_weights)
+        else:
+            output = _tensor_parallel_fused_experts(
+                hidden_states, self.gate_up_proj, self.down_proj, top_k_index, top_k_weights, tp_size
+            )
     if not torch.is_grad_enabled():
         return output
     reference = grouped_mm_experts_forward(self, hidden_states, top_k_index, top_k_weights)
     return _ValueWithGradientOf.apply(reference, output)
 
 
-def register_vllm_fused_moe_experts() -> str:
-    """Register :func:`vllm_fused_moe_experts_forward` under ``vllm_fused_moe``."""
-    ExpertsInterface.register(VLLM_FUSED_MOE_EXPERTS, vllm_fused_moe_experts_forward)
+def register_vllm_fused_moe_experts(tp_size: int = 1) -> str:
+    """Register :func:`vllm_fused_moe_experts_forward` for a rollout with ``tp_size`` ranks under ``vllm_fused_moe``."""
+    forward = functools.partial(vllm_fused_moe_experts_forward, tp_size=tp_size)
+    ExpertsInterface.register(VLLM_FUSED_MOE_EXPERTS, forward)
     return VLLM_FUSED_MOE_EXPERTS

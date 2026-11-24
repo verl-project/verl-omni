@@ -3,7 +3,7 @@
 # the vLLM-Omni rollout and the FSDP2 actor compute bitwise-equal log-probs, so the PPO ratio is
 # exactly 1 at the start of every step. Text-only prompts (the mode does not support multimodal
 # inputs) and full-parameter training (run_qwen3_omni_thinker_gspo_lora_true_on_policy_v1.sh adds
-# LoRA), rollout TP=1 (required by the vLLM-Omni option; lower gpu_memory_utilization on 80 GB
+# LoRA), rollout TP=1 (TP=2 is also supported; with TP=1 lower gpu_memory_utilization on 80 GB
 # GPUs), temperature 1.0 / top_p 1.0 / top_k -1 and no rollout.full_determinism, which would seed
 # every request identically.
 # See docs/algo/true_on_policy.md.

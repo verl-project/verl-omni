@@ -248,7 +248,12 @@ def _true_on_policy_config(**overrides):
     config = _config(v1={"trainer_mode": "omni_sync"})
     config.algorithm = {"rollout_correction": {"bypass_mode": False}}
     config.actor_rollout_ref = {
-        "model": {"true_on_policy": True, "lora_rank": 0, "use_remove_padding": True},
+        "model": {
+            "true_on_policy": True,
+            "lora_rank": 0,
+            "use_remove_padding": True,
+            "rollout_tensor_parallel_size": 1,
+        },
         "actor": {"strategy": "fsdp2", "fsdp_config": {"batch_invariant": True, "ulysses_sequence_parallel_size": 1}},
         "rollout": {
             "temperature": 1.0,
@@ -281,7 +286,8 @@ def test_validate_config_does_not_require_rollout_full_determinism():
         ("actor_rollout_ref.rollout.temperature", 0.8),
         ("actor_rollout_ref.rollout.top_p", 0.9),
         ("actor_rollout_ref.rollout.top_k", 20),
-        ("actor_rollout_ref.rollout.tensor_model_parallel_size", 2),
+        ("actor_rollout_ref.rollout.tensor_model_parallel_size", 4),
+        ("actor_rollout_ref.model.rollout_tensor_parallel_size", 2),
         ("actor_rollout_ref.rollout.calculate_log_probs", False),
         ("actor_rollout_ref.rollout.enable_prefix_caching", True),
         ("actor_rollout_ref.model.lora_adapter_path", "/tmp/adapter"),
@@ -310,6 +316,17 @@ def test_validate_config_reports_all_true_on_policy_violations():
     )
     with pytest.raises(ValueError, match=r"temperature=0\.8.*enable_prefix_caching=True"):
         validate_config(config)
+
+
+def test_validate_config_accepts_true_on_policy_with_a_two_rank_rollout():
+    validate_config(
+        _true_on_policy_config(
+            **{
+                "actor_rollout_ref.rollout.tensor_model_parallel_size": 2,
+                "actor_rollout_ref.model.rollout_tensor_parallel_size": 2,
+            }
+        )
+    )
 
 
 _TRUE_ON_POLICY_LORA = {"actor_rollout_ref.model.lora_rank": 32, "actor_rollout_ref.model.lora": {"merge": True}}

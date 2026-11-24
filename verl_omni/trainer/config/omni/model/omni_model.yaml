@@ -55,6 +55,9 @@ use_remove_padding: True
 # Make the actor recompute the rollout log-probs bitwise; only for model adapters that support it
 true_on_policy: False
 
+# Tensor-parallel degree of the rollout; the true on-policy actor reproduces its row-parallel sums
+rollout_tensor_parallel_size: ${oc.select:actor_rollout_ref.rollout.tensor_model_parallel_size,1}
+
 # Set to positive value to enable LoRA (e.g., 32)
 lora_rank: 0
 

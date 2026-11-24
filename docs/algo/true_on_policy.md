@@ -40,7 +40,8 @@ The trainer refuses to start unless all of these hold, and lists every violation
 | `actor_rollout_ref.rollout.temperature` | `1.0` |
 | `actor_rollout_ref.rollout.top_p` | `1.0` |
 | `actor_rollout_ref.rollout.top_k` | `-1` |
-| `actor_rollout_ref.rollout.tensor_model_parallel_size` | `1` |
+| `actor_rollout_ref.rollout.tensor_model_parallel_size` | `1` or `2` |
+| `actor_rollout_ref.model.rollout_tensor_parallel_size` | the rollout's value (the default) |
 | `actor_rollout_ref.rollout.calculate_log_probs` | `true` |
 | `actor_rollout_ref.rollout.enable_prefix_caching` | `false` |
 | `actor_rollout_ref.model.lora_adapter_path` | `null` |
@@ -62,6 +63,8 @@ With LoRA (`actor_rollout_ref.model.lora_rank > 0`, as in `examples/gspo_trainer
 
 `actor_rollout_ref.model.override_config.attn_implementation` may be left unset or set to `hub_fa3`, and `override_config.experts_implementation` unset or set to `vllm_fused_moe`; anything else is an error. CUDA graphs on the rollout (`enforce_eager=false`) are supported.
 
+Rollout TP=2 needs a vLLM-Omni whose `hf_numerics` option accepts tensor parallelism. Do not set `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` with it: on our 2×H20 setup the rollout workers then exited in vLLM's custom all-reduce, which shares buffers through CUDA IPC.
+
 `actor_rollout_ref.actor.fsdp_config.batch_invariant=true` also exports `VLLM_BATCH_INVARIANT=1` to the rollout. Do not add `actor_rollout_ref.rollout.full_determinism=true` for this: it seeds every request identically, so the `n` samples of a prompt come out the same and group-relative advantages vanish.
 
 `algorithm.rollout_correction.bypass_mode=true` is allowed. It skips the actor recompute and uses the rollout log-probs as the old policy, which is equivalent once they are bitwise equal. The mismatch metric needs the recompute, so validate a setup with `bypass_mode=false` first.
@@ -77,6 +80,7 @@ Each source of difference is fixed on the side that owns it. The HF layers keep 
 | rope frequencies | verl-omni | the thinker's text rotary embedding is replaced with one that multiplies positions and fp32 inverse frequencies elementwise, as the rollout does. It keeps the frequencies in fp32 when `fsdp_config.model_dtype=bfloat16` casts the model, and avoids the fp32 matmul some Transformers releases use, which the batch-invariant kernels run at TF32 |
 | RMSNorm, residual add, rope, MoE routing | vLLM-Omni | thinker-stage option `additional_config: {hf_numerics: true}`: HF operation order and rounding inside torch custom ops, so torch.compile cannot re-fuse them and they are still captured into CUDA graphs. The experts stay on `fused_experts`. verl-omni writes the option into the thinker stage of the generated deploy config |
 | batch-invariant actor ops, log-prob formula | verl | `actor_rollout_ref.actor.fsdp_config.batch_invariant`: installs vLLM's batch-invariant kernels in the actor and computes log-probs with the vLLM sampler formula (fp32 `log_softmax` + gather); verl-omni's entrypoint exports `VLLM_BATCH_INVARIANT=1` to the rollout under the same flag |
+| rollout tensor parallelism | vLLM-Omni, verl-omni | with `tensor_model_parallel_size=2` the rollout's row-parallel layers, the attention `o_proj` and the MoE experts, compute one bf16 partial result per rank, and vLLM's batch-invariant all-reduce adds them in fp32 in rank order and rounds once. The actor splits the same two layers by rank and adds the partial results the same way; a single matmul over all features rounds differently. The column-parallel layers (q/k/v, embedding, `lm_head`) need no change. The actor reads the degree from `actor_rollout_ref.model.rollout_tensor_parallel_size`, which follows the rollout setting |
 | LoRA | verl-omni | with `lora.merge=true` the rollout runs merged weights `W + B @ A * scaling` and has no LoRA ops. The actor's LoRA linears forward with the same merged weight instead of PEFT's `base(x) + B(A(x)) * scaling`, and the gradient still reaches `A` and `B`. Export and forward share one merge: the whole base weight and adapter factors, in the forward dtype, multiplied on the training device. FSDP mixed precision hands the forward bf16 copies of fp32 adapters, and a bf16 matmul rounds differently on CPU than on GPU, so merging the fp32 factors, or shards that are offloaded to CPU, gives the rollout different weights |
 | gate metric | verl | `training/rollout_logprobs_mismatch_count` |
 
@@ -84,13 +88,13 @@ Dense GEMMs, the embedding, `lm_head` and synced weights need no change: they ca
 
 ## Scope
 
-Supported: Qwen3-Omni thinker, text-only prompts, full-parameter training or LoRA on linear layers merged on the actor side, rollout TP=1, FSDP/FSDP2 actor (FSDP2 with LoRA), the synchronous trainer, Hopper GPUs.
+Supported: Qwen3-Omni thinker, text-only prompts, full-parameter training or LoRA on linear layers merged on the actor side, rollout TP=1 or 2, FSDP/FSDP2 actor (FSDP2 with LoRA), the synchronous trainer, Hopper GPUs.
 
 Not supported:
 
 - LoRA that the rollout applies as an adapter (`lora.merge=false`), LoRA on the fused MoE experts (`target_parameters`), DoRA and other LoRA variants, and adapters loaded from `lora_adapter_path`.
 - Multimodal inputs and the vision/audio towers. The actor raises a `ValueError` on the first batch that carries image, video or audio features.
-- TP or EP > 1 on the rollout; the vLLM-Omni option refuses them.
+- Rollout TP above 2, and EP > 1, which the vLLM-Omni option refuses. With more than two ranks vLLM uses its fixed-order all-reduce only on fully connected GPUs.
 - The separate-async trainer (`omni_separate_async`): its rollout replicas can generate with weights the actor has already updated.
 - Run-to-run reproducibility of training: only the rollout-vs-actor log-probs within a run are covered.
 

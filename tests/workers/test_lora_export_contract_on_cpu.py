@@ -480,6 +480,19 @@ def test_merged_lora_forward_keeps_the_base_forward_with_adapters_disabled(monke
     assert torch.equal(output, F.linear(F.linear(hidden_states, up), down))
 
 
+def test_merged_lora_forward_runs_the_base_layer_forward_on_the_merged_weight(monkeypatch):
+    model = _bf16_base_fp32_adapter_model()
+    weights = _export_merged(monkeypatch, model, merge_in_full_weight_dtype=True)
+    hidden_states = torch.randn(3, 16, dtype=torch.bfloat16)
+    up = model.base_model.model.up.base_layer
+    up.forward = lambda x: F.linear(x, up.weight) * 2
+
+    lora_export.use_merged_lora_forward(model)
+    output = model.base_model.model.up(hidden_states)
+
+    assert torch.equal(output, F.linear(hidden_states, weights["up.weight"]) * 2)
+
+
 @pytest.mark.parametrize("lora_kwargs", [{"use_dora": True}, {"lora_bias": True}])
 def test_merged_lora_forward_refuses_unsupported_lora(lora_kwargs):
     with pytest.raises(NotImplementedError, match="plain LoRA linear layers"):

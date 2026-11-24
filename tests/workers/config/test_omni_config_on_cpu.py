@@ -245,9 +245,10 @@ class TestOmniModelConfigTrueOnPolicy:
         "override_config", [{}, {"attn_implementation": "hub_fa3"}, TRUE_ON_POLICY_IMPLEMENTATIONS]
     )
     def test_on_registers_and_selects_adapter_implementations(self, adapter, tmp_path, override_config):
-        self._config(tmp_path, true_on_policy=True, override_config=override_config)
+        cfg = self._config(tmp_path, true_on_policy=True, override_config=override_config)
 
-        adapter.register_true_on_policy_implementations.assert_called_once_with()
+        assert cfg.rollout_tensor_parallel_size == 1
+        adapter.register_true_on_policy_implementations.assert_called_once_with(cfg)
         assert adapter.requested == [TRUE_ON_POLICY_IMPLEMENTATIONS]
 
     @pytest.mark.parametrize(

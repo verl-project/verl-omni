@@ -47,7 +47,7 @@ def test_register_adds_experts_implementation():
     name = qwen3_omni.register_vllm_fused_moe_experts()
 
     assert name == "vllm_fused_moe"
-    assert ExpertsInterface()["vllm_fused_moe"] is qwen3_omni.vllm_fused_moe_experts_forward
+    assert ExpertsInterface()["vllm_fused_moe"].func is qwen3_omni.vllm_fused_moe_experts_forward
 
 
 def test_forward_runs_the_kernel_and_backward_differentiates_grouped_mm(monkeypatch):

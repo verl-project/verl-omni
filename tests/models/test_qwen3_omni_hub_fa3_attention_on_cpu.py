@@ -13,6 +13,8 @@
 # limitations under the License.
 """CPU tests for the registered hub FlashAttention-3 attention (no kernel load)."""
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 from transformers import AttentionInterface
@@ -72,13 +74,15 @@ def test_attention_calls_varlen_kernel_on_packed_layout(monkeypatch, position_sh
 
 
 def test_thinker_adapter_registers_hub_fa3_and_fused_moe_for_true_on_policy():
-    implementations = Qwen3OmniThinkerAdapter.register_true_on_policy_implementations()
+    implementations = Qwen3OmniThinkerAdapter.register_true_on_policy_implementations(
+        SimpleNamespace(rollout_tensor_parallel_size=1)
+    )
 
     assert implementations == {"attn_implementation": "hub_fa3", "experts_implementation": "vllm_fused_moe"}
     assert AttentionInterface()["hub_fa3"] is qwen3_omni.hub_fa3_attention
-    assert ExpertsInterface()["vllm_fused_moe"] is qwen3_omni.vllm_fused_moe_experts_forward
+    assert ExpertsInterface()["vllm_fused_moe"].func is qwen3_omni.vllm_fused_moe_experts_forward
 
 
 def test_base_adapter_refuses_true_on_policy():
     with pytest.raises(NotImplementedError, match="OmniModelBase does not support true_on_policy"):
-        OmniModelBase.register_true_on_policy_implementations()
+        OmniModelBase.register_true_on_policy_implementations(SimpleNamespace())

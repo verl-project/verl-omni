@@ -770,8 +770,11 @@ class OmniModelBase(ABC):
         return
 
     @classmethod
-    def register_true_on_policy_implementations(cls) -> dict[str, str]:
+    def register_true_on_policy_implementations(cls, model_config) -> dict[str, str]:
         """Register the Transformers kernels used under ``true_on_policy``.
+
+        Args:
+            model_config: The ``OmniModelConfig``.
 
         Returns:
             The ``*_implementation`` names to build the HF config with, e.g.

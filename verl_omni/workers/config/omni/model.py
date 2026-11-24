@@ -102,6 +102,8 @@ class OmniModelConfig(BaseConfig):
 
     # bitwise-equal actor and rollout log-probs; see verl_omni.utils.config for the required settings
     true_on_policy: bool = False
+    # tensor-parallel degree of the rollout; the true on-policy actor reproduces its row-parallel sums
+    rollout_tensor_parallel_size: int = 1
 
     # fsdp / megatron lora related
     lora_rank: int = 0
@@ -180,7 +182,7 @@ class OmniModelConfig(BaseConfig):
         if adapter_cls is not None:
             adapter_cls.register_auto_classes()
         if self.true_on_policy:
-            implementations = adapter_cls.register_true_on_policy_implementations()
+            implementations = adapter_cls.register_true_on_policy_implementations(self)
             for key, name in implementations.items():
                 requested = self.override_config.get(key, name)
                 if requested != name:

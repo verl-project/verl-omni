@@ -129,7 +129,9 @@ def test_configure_model_swaps_the_text_rotary_only_for_true_on_policy(true_on_p
     module = _Model()
     original = module.thinker.model.rotary_emb
 
-    module = Qwen3OmniThinkerAdapter.configure_model(module, SimpleNamespace(true_on_policy=true_on_policy))
+    module = Qwen3OmniThinkerAdapter.configure_model(
+        module, SimpleNamespace(true_on_policy=true_on_policy, rollout_tensor_parallel_size=1)
+    )
 
     rotary = module.thinker.model.rotary_emb
     assert not hasattr(module, "talker")
