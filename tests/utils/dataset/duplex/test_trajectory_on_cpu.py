@@ -173,16 +173,59 @@ def test_event_annotation_requires_its_axis_window(axis, kwargs):
         DuplexEpisodeEvent(axis=axis, **kwargs)
 
 
-def test_conflicting_seeds_across_scopes_are_rejected():
+def test_scopes_may_carry_different_seeds():
+    # One seed per scope (engine contract): the listening scope sealed at bind and the
+    # response scope derive their own; cross-scope equality must not be enforced.
     listening, speaking = listening_then_speaking_wires()
     speaking["effective_seed"] = 8
-    with pytest.raises(RecordSetError, match="effective seeds"):
+    trajectory = DuplexTrajectory.assemble(
+        session_id="duplex-abc",
+        seed=7,
+        event=_turn_event(),
+        record_set_wires=[listening, speaking],
+        client_audio_chunks=_chunks(5),
+    )
+    assert [record_set.effective_seed for record_set in trajectory.record_sets] == [7, 8]
+
+
+def _listening_only_wires(units: int) -> list[dict]:
+    return [
+        record_set_wire(
+            response_id=None,
+            status="truncated_close",
+            units=[
+                {"action": (LISTEN_TOKEN_ID, "sampled", -0.2), "emission_ns": 1_000_000_000 + unit * 1_000_000_000}
+                for unit in range(units)
+            ],
+        )
+    ]
+
+
+def test_last_window_close_flush_is_tolerated():
+    # The engine's 1035 ms first-chunk window makes the close flush of the final
+    # residual nondeterministic: 14 fed chunks may yield 13 client units.
+    trajectory = DuplexTrajectory.assemble(
+        session_id="duplex-abc",
+        seed=7,
+        event=_pause_event(),
+        record_set_wires=_listening_only_wires(13),
+        client_audio_chunks=_chunks(14),
+    )
+    assert len(trajectory.client_audio_chunks) == 14  # the tail chunk stays, unconsumed by any unit
+    assert len(trajectory.unit_decisions(listen_token_id=LISTEN_TOKEN_ID)) == 13
+
+
+@pytest.mark.parametrize(
+    "units,chunks,message", [(13, 15, "more than the final window"), (14, 13, "only 13 client chunks")]
+)
+def test_ingestion_mismatch_beyond_the_last_window_is_a_rollout_failure(units, chunks, message):
+    with pytest.raises(RecordSetError, match=message):
         DuplexTrajectory.assemble(
             session_id="duplex-abc",
             seed=7,
-            event=_turn_event(),
-            record_set_wires=[listening, speaking],
-            client_audio_chunks=_chunks(4),
+            event=_pause_event(),
+            record_set_wires=_listening_only_wires(units),
+            client_audio_chunks=_chunks(chunks),
         )
 
 

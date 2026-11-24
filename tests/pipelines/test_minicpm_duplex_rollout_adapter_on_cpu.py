@@ -118,11 +118,16 @@ def test_postprocess_rejects_missing_and_malformed_payloads():
 
 def test_build_duplex_replay_attaches_streaming_mels():
     from tests.utils.dataset.duplex.test_replay_on_cpu import FakeStreamingProcessor, FakeTokenizer, _trajectory
-    from verl_omni.utils.dataset.duplex.replay import resolve_duplex_vocabulary
+    from verl_omni.utils.dataset.duplex.replay import audio_tokens_for_mel_frames, resolve_duplex_vocabulary
 
     replay = MiniCPMODuplexRolloutAdapter.build_duplex_replay(_trajectory(), processor=FakeStreamingProcessor())
     assert replay.unit_mels is not None and len(replay.unit_mels) == len(replay.unit_layouts)
-    assert replay.unit_mel_lens == [10] * len(replay.unit_layouts)
+    # Mel frames per unit window: the 1035 ms pre-roll ingestion then 1000 ms chunks.
+    assert replay.unit_mel_lens == [104, 101, 101, 101, 101]
+    assert all(
+        audio_tokens_for_mel_frames(mel_frames) == layout.num_audio_tokens
+        for mel_frames, layout in zip(replay.unit_mel_lens, replay.unit_layouts, strict=True)
+    )
     payload = replay.to_extra_fields(include_pcm=False)
     assert payload["unit_mels"] == replay.unit_mels
     resolve_duplex_vocabulary(FakeTokenizer())  # vocabulary resolution stays cheap and cached-safe

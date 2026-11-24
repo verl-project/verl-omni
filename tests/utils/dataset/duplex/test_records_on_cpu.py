@@ -87,6 +87,7 @@ def test_records_view_splits_units_at_offsets():
         pytest.param(lambda w: w.update(unit_offsets=[0, 2]), id="offsets-past-end"),
         pytest.param(lambda w: w.update(unit_offsets=[1, 1]), id="offsets-not-from-zero"),
         pytest.param(lambda w: w.update(stage_ids=[0, 0]), id="unit-columns-mismatch"),
+        pytest.param(lambda w: w.update(terminators=[[], []]), id="terminators-units-mismatch"),
         pytest.param(lambda w: w.update(token_ids=[True]), id="bool-token-id"),
         pytest.param(lambda w: w.pop("session_id"), id="missing-session"),
         pytest.param(lambda w: w.update(effective_seed="seven"), id="bad-seed"),
@@ -138,6 +139,41 @@ def test_cross_set_validation_rejects_mixed_sessions_and_live_snapshots():
     live = record_set_wire(status=STATUS_IN_PROGRESS)
     with pytest.raises(RecordSetError, match="in_progress"):
         validate_record_sets([DuplexActionRecordSet.from_wire(live)], session_id="duplex-abc")
+
+
+def test_cross_set_validation_allows_one_seed_per_scope():
+    # The engine derives a seed per scope (listening scope sealed at bind, then the
+    # response scope); differing effective seeds across one episode's scopes are legit.
+    listening = record_set_wire(response_id=None, status="truncated_close", seed=7)
+    speaking = record_set_wire(response_id="resp-1", status="completed", seed=8)
+    record_sets = [DuplexActionRecordSet.from_wire(listening), DuplexActionRecordSet.from_wire(speaking)]
+    validate_record_sets(record_sets, session_id="duplex-abc")  # no raise
+    assert [record_set.effective_seed for record_set in record_sets] == [7, 8]
+    listening["epoch"], speaking["epoch"] = 2, 1
+    with pytest.raises(RecordSetError, match="non-monotonic epochs"):
+        validate_record_sets(
+            [DuplexActionRecordSet.from_wire(listening), DuplexActionRecordSet.from_wire(speaking)],
+            session_id="duplex-abc",
+        )
+
+
+def test_terminators_column_must_number_as_units():
+    # One per-unit terminator list; the engine's to_wire always emits one entry per unit.
+    wire = record_set_wire(
+        units=[
+            {"action": (LISTEN_TOKEN_ID, ACTION_SAMPLED, -0.1)},
+            {"action": (CHUNK_EOS_TOKEN_ID, ACTION_SAMPLED, -0.2)},
+        ]
+    )
+    wire["terminators"] = [[], [{"token_id": CHUNK_EOS_TOKEN_ID, "kind": "chunk_eos"}]]
+    record_set = DuplexActionRecordSet.from_wire(wire)
+    assert record_set.terminators[1] == ({"token_id": CHUNK_EOS_TOKEN_ID, "kind": "chunk_eos"},)
+    wire["terminators"] = [[]]
+    with pytest.raises(RecordSetError, match="'terminators' length 1 != units 2"):
+        DuplexActionRecordSet.from_wire(wire)
+    # An absent column pads to the unit default, as before.
+    wire.pop("terminators")
+    assert DuplexActionRecordSet.from_wire(wire).terminators == ((), ())
 
 
 def test_unit_row_helper_is_contract_shaped():

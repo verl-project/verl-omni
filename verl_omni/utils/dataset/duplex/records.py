@@ -288,10 +288,11 @@ class DuplexActionRecordSet:
 
         Raises:
             RecordSetError: On schema-version mismatch, missing or ill-typed
-                universal fields, non-parallel token columns, invalid kinds /
-                statuses / origins, or a non-finite logprob on a sampled row.
-                Unknown keys inside the namespaced ``model`` extension pass
-                through untouched, mirroring the engine.
+                universal fields, non-parallel token columns, unit columns that
+                do not number as the units (``terminators`` included), invalid
+                kinds / statuses / origins, or a non-finite logprob on a
+                sampled row. Unknown keys inside the namespaced ``model``
+                extension pass through untouched, mirroring the engine.
         """
         if not isinstance(payload, Mapping):
             raise RecordSetError(f"duplex action record payload must be a mapping, got {type(payload).__name__}")
@@ -385,9 +386,16 @@ class DuplexActionRecordSet:
             )
             or ({},) * num_units
         )
+        terminators = payload.get("terminators")
+        if terminators and len(terminators) != num_units:
+            # One per-unit terminator list (``{token_id, kind, reason?}`` entries).
+            raise RecordSetError(
+                f"duplex action record column 'terminators' length {len(terminators)} != units {num_units}"
+            )
         terminators = (
-            tuple(term for term in unit if isinstance(term, Mapping)) for unit in payload.get("terminators") or ()
-        ) or ((),) * num_units
+            tuple(tuple(term for term in unit if isinstance(term, Mapping)) for unit in terminators or ())
+            or ((),) * num_units
+        )
         streams = tuple(
             DuplexActionStream(
                 name=_require_str(stream["name"], "streams[].name"),
@@ -438,15 +446,16 @@ def validate_record_sets(record_sets: Sequence[DuplexActionRecordSet], *, sessio
         session_id: The episode's session id.
 
     Raises:
-        RecordSetError: When the scopes disagree on session or sampling seed,
-            an ``in_progress`` snapshot rides a final trajectory (the episode
-            driver must finish draining before assembly), or epochs regress.
+        RecordSetError: When the scopes disagree on session, an ``in_progress``
+            snapshot rides a final trajectory (the episode driver must finish
+            draining before assembly), or epochs regress.
+
+    ``effective_seed`` is deliberately not compared across scopes: the engine
+    derives one seed per scope — a listening scope sealed at ``bind_response``
+    and the response scope that follows legitimately carry different seeds.
     """
     if not record_sets:
         raise RecordSetError(f"duplex episode {session_id} produced no action-record scopes")
-    seeds = {record_set.effective_seed for record_set in record_sets if record_set.effective_seed is not None}
-    if len(seeds) > 1:
-        raise RecordSetError(f"duplex episode {session_id} carries conflicting effective seeds: {sorted(seeds)}")
     for record_set in record_sets:
         if record_set.session_id != session_id:
             raise RecordSetError(f"duplex episode {session_id} received records of session {record_set.session_id!r}")

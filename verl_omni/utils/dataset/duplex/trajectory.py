@@ -224,7 +224,9 @@ class DuplexTrajectory:
 
         Raises:
             RecordSetError: On any wire-contract or alignment violation — a
-                rollout failure to surface, never data to train on.
+                rollout failure to surface, never data to train on. One fed
+                chunk may go unaccounted at the tail (the engine's close
+                flush); it stays in ``client_audio_chunks`` unconsumed.
         """
         record_sets = tuple(DuplexActionRecordSet.from_wire(wire) for wire in record_set_wires)
         validate_record_sets(record_sets, session_id=session_id)
@@ -239,10 +241,21 @@ class DuplexTrajectory:
             if record.input_chunk.origin == ORIGIN_CLIENT
             and any(action.action_kind != ACTION_REEMIT for action in record.actions)
         )
-        if client_units != len(chunks):
+        # The engine ingests each complete 1 s processor chunk as its own unit,
+        # but the close flush of the final residual is nondeterministic (the
+        # first-chunk window is 1035 ms): the last fed chunk may never become
+        # a unit. Exactly one unaccounted chunk is that tail; anything wider is
+        # a real disagreement, as is any unit without fed audio behind it.
+        if client_units > len(chunks):
+            raise RecordSetError(
+                f"duplex episode {session_id}: the records carry {client_units} client-origin units but only "
+                f"{len(chunks)} client chunks were fed; the driver and the engine disagree on ingestion"
+            )
+        if client_units < len(chunks) - 1:
             raise RecordSetError(
                 f"duplex episode {session_id}: fed {len(chunks)} client chunks but the records carry "
-                f"{client_units} client-origin units; the driver and the engine disagree on ingestion"
+                f"{client_units} client-origin units; more than the final window is missing — the driver and "
+                "the engine disagree on ingestion"
             )
         for chunk in chunks:
             if chunk.ndim != 1 or chunk.size == 0:

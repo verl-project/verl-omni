@@ -30,11 +30,17 @@ from verl_omni.utils.dataset.duplex.records import (
 )
 from verl_omni.utils.dataset.duplex.replay import (
     DUPLEX_REPLAY_KEY,
+    DuplexRefAudio,
     DuplexReplay,
+    audio_tokens_for_mel_frames,
     build_replay,
+    resolve_default_ref_audio,
     resolve_duplex_vocabulary,
 )
 from verl_omni.utils.dataset.duplex.sampling_logprobs import (
+    ParityReport,
+    compare_action_logprobs,
+    engine_repetition_history,
     recompute_action_logprobs,
     unit_inputs_from_trajectory,
 )
@@ -58,11 +64,17 @@ __all__ = [
     "DuplexActionRecordSet",
     "DuplexEpisodeEvent",
     "DuplexReplay",
+    "DuplexRefAudio",
     "DuplexTrajectory",
+    "ParityReport",
     "RecordSetError",
+    "audio_tokens_for_mel_frames",
     "audit_calibration",
     "build_replay",
+    "compare_action_logprobs",
+    "engine_repetition_history",
     "recompute_action_logprobs",
+    "resolve_default_ref_audio",
     "resolve_duplex_vocabulary",
     "unit_inputs_from_trajectory",
 ]

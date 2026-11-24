@@ -18,6 +18,7 @@ reference (enumerate the ordered support, keep tokens whose preceding mass is
 within top_p, renormalize) rather than against itself.
 """
 
+import json
 import math
 
 import pytest
@@ -27,7 +28,10 @@ from verl_omni.utils.dataset.duplex.sampling_logprobs import (
     DuplexSamplingContext,
     DuplexUnitInputs,
     build_sampling_context,
+    compare_action_logprobs,
+    engine_repetition_history,
     recompute_action_logprobs,
+    token_in_nucleus,
     top_k_top_p_candidate_mass,
     top_k_top_p_filter,
     unit_inputs_from_trajectory,
@@ -250,8 +254,147 @@ def test_build_sampling_context_resolves_and_validates():
         {"minicpmo_duplex": {"forbidden_tokens": "tts_pad+bad_token_ids+chunk_eos", "repetition_penalty": 1.05}},
     )
     assert context.forbidden_token_ids() == (3, 7, 21, 22)
+    assert context.repetition_history_tokens == 512  # the engine stamps both; one alone defaults the other
     with pytest.raises(Exception, match="unknown forbidden-token identity"):
         build_sampling_context(_Tokenizer(), _Vocabulary(), {"minicpmo_duplex": {"forbidden_tokens": "custom"}})
+
+
+def test_build_sampling_context_reads_the_engine_key_names_only():
+    # The engine stamps ``repetition_penalty`` / ``repetition_history_tokens``; a drifted
+    # spelling must not be defaulted into a penalty the engine never applied.
+    stamped = build_sampling_context(
+        _Tokenizer(), _Vocabulary(), {"minicpmo_duplex": {"repetition_penalty": 1.2, "repetition_history_tokens": 256}}
+    )
+    assert (stamped.repetition_penalty, stamped.repetition_history_tokens) == (1.2, 256)
+    with pytest.raises(Exception, match="neither repetition_penalty nor repetition_history_tokens"):
+        build_sampling_context(
+            _Tokenizer(), _Vocabulary(), {"minicpmo_duplex": {"n_penalty": 1.05, "n_history_tokens": 512}}
+        )
+    empty = build_sampling_context(_Tokenizer(), _Vocabulary(), {"minicpmo_duplex": {}})
+    assert (empty.repetition_penalty, empty.repetition_history_tokens) == (1.05, 512)
+
+
+def _row(token_id, kind="sampled", stream="content", **kwargs):
+    params = {"temperature": 1.0, "top_k": VOCAB, "top_p": 1.0, **kwargs}
+    return DuplexUnitInputs(token_id=token_id, action_kind=kind, stream=stream, **params)
+
+
+def test_engine_repetition_history_tracks_every_stage_two_draw():
+    # In emission order: a content draw, a boundary-hit chunk_eos, a silence-forced listen,
+    # a content draw, the mid-turn listen rewrite (raw draw = <|listen|>), its re-emission, a draw.
+    inputs = [
+        _row(30),
+        _row(CHUNK_EOS, stream="boundary", stage0_prob_chunk_eos=0.3),
+        _row(5, kind="forced", stream="boundary"),
+        _row(31),
+        _row(40, kind="forced", sampled_token=5),
+        _row(CHUNK_EOS, kind="reemit", stream="boundary"),
+        _row(32),
+    ]
+    history = engine_repetition_history(inputs)
+    # The engine's state.generated_tokens after each row: [30], [30], [30, 31], [30, 31, 5], [30, 31, 5, 32].
+    assert history == [[], [30], [30], [30], [30, 31], [30, 31, 5], [30, 31, 5]]
+    # Empty history falls back to the prior recorded rows (the engine's ``recent``).
+    assert engine_repetition_history([_row(CHUNK_EOS, stream="boundary"), _row(9)])[1] == [CHUNK_EOS]
+    with pytest.raises(Exception, match="unknown action kind"):
+        engine_repetition_history(
+            [DuplexUnitInputs(token_id=1, action_kind="guessed", stream="content", temperature=1.0, top_k=0, top_p=1.0)]
+        )
+
+
+def test_recompute_penalizes_terminators_in_the_engine_history():
+    generator = torch.Generator().manual_seed(13)
+    row = torch.randn(2, VOCAB, generator=generator)
+    target = 12
+    row[0, target] = row[1, target] = 4.0  # the same terminator-class token drawn twice
+    inputs = [_row(target), _row(target)]
+    context = _context(penalty=1.05)
+    values, _ = recompute_action_logprobs(row, inputs, context, action_history=engine_repetition_history(inputs))
+    clean, _ = recompute_action_logprobs(row, inputs, context, action_history=[[], []])
+    assert values[0].item() == pytest.approx(clean[0].item(), rel=1e-5)  # the first draw sees no history
+    assert values[1].item() < clean[1].item() - 0.01  # the second is penalized over the first
+    # The raw draw behind a mid-turn listen rewrite enters the history; its rewrite does not.
+    rewrite = [_row(40, kind="forced", sampled_token=11), _row(11)]
+    penalized, _ = recompute_action_logprobs(row, rewrite, context, action_history=engine_repetition_history(rewrite))
+    assert penalized[1].item() < clean[1].item() - 0.01
+    # A boundary-hit chunk_eos resolves before stage 2: it never penalizes the next draw.
+    boundary = [_row(CHUNK_EOS, stream="boundary", stage0_prob_chunk_eos=0.3), _row(target)]
+    unpenalized, _ = recompute_action_logprobs(
+        row, boundary, context, action_history=engine_repetition_history(boundary)
+    )
+    assert unpenalized[1].item() == pytest.approx(clean[1].item(), rel=1e-5)
+
+
+def test_token_in_nucleus_classifies_by_the_recorded_cut():
+    logits = torch.log(torch.tensor([0.90, 0.08, 0.02] + [1e-9] * (VOCAB - 3)))
+    assert token_in_nucleus(logits, 0, top_k=0, top_p=0.9)
+    assert token_in_nucleus(logits, 1, top_k=0, top_p=0.9)
+    assert not token_in_nucleus(logits, 2, top_k=0, top_p=0.9)  # cumulative mass 0.98 > 0.9
+    assert token_in_nucleus(logits, 2, top_k=0, top_p=0.99)
+    assert not token_in_nucleus(logits, 2, top_k=2, top_p=1.0)  # the top-k cut, not the nucleus
+    assert not token_in_nucleus(logits, 3, top_k=0, top_p=0.9)
+    # The out-of-nucleus mass is the float32 floor the capture would never record.
+    mass = top_k_top_p_candidate_mass(logits, 2, top_k=0, top_p=0.9)
+    assert mass == pytest.approx(math.log(torch.finfo(torch.float32).tiny))
+
+
+def _parity_rows():
+    generator = torch.Generator().manual_seed(14)
+    row = torch.randn(3, VOCAB, generator=generator)
+    row[0, 30] = 6.0  # the drawn token dominates: in the nucleus
+    row[1, :] = torch.log(torch.tensor([0.5, 0.3, 0.2] + [1e-9] * (VOCAB - 3)))  # token 4 falls out at top_p=0.8
+    row[2, 44] = 6.0
+    inputs = [
+        _row(30, temperature=0.7, top_k=100, top_p=0.8),
+        _row(4, temperature=0.7, top_k=100, top_p=0.8),
+        _row(44, temperature=0.7, top_k=100, top_p=0.8),
+    ]
+    context = _context(penalty=1.0)
+    values, valid = recompute_action_logprobs(row, inputs, context, action_history=[[], [], []])
+    return row, inputs, context, values, valid
+
+
+def test_compare_action_logprobs_buckets_the_out_of_nucleus_family():
+    row, inputs, context, values, valid = _parity_rows()
+    assert token_in_nucleus(row[0] / 0.7, 30, top_k=100, top_p=0.8)
+    assert not token_in_nucleus(row[1] / 0.7, 4, top_k=100, top_p=0.8)
+    # The §5.1 outlier: the engine drew the token inside ITS nucleus (-3.18); the replay cut it out.
+    captured = [float(values[0]) + 1e-6, -3.18, float(values[2]) - 5.0]
+    report = compare_action_logprobs(row, inputs, context, values, valid, captured, rel_tol=1e-3, abs_tol=1e-4)
+    assert [parity_row.index for parity_row in report.rows] == [0, 1, 2]
+    assert [parity_row.index for parity_row in report.documented_loosening] == [1]
+    assert [parity_row.index for parity_row in report.breaches] == [2]
+    assert report.in_nucleus_max_abs_delta == pytest.approx(5.0, abs=1e-4)
+    assert report.out_of_nucleus_max_abs_delta > 80.0
+    assert not report.matches  # the in-nucleus breach fails the gate
+    # Only the out-of-nucleus family is left: the gate passes and the loosening is reported.
+    passing = compare_action_logprobs(
+        row, inputs, context, values, valid, captured[:2] + [float(values[2])], rel_tol=1e-3, abs_tol=1e-4
+    )
+    assert passing.matches and len(passing.documented_loosening) == 1
+    bounded = compare_action_logprobs(
+        row,
+        inputs,
+        context,
+        values,
+        valid,
+        captured[:2] + [float(values[2])],
+        rel_tol=1e-3,
+        abs_tol=1e-4,
+        max_out_of_nucleus=0,
+    )
+    assert not bounded.matches
+    summary = passing.to_dict()
+    json.dumps(summary)  # the parity report is JSON-safe
+    assert summary["num_sampled"] == 3 and summary["num_out_of_nucleus"] == 1
+    assert summary["documented_loosening"][0]["captured"] == pytest.approx(-3.18)
+    # Rows without a draw (forced / re-emitted, captured None) are not compared.
+    skipped = compare_action_logprobs(
+        row, inputs, context, values, valid, [None, None, None], rel_tol=1e-3, abs_tol=1e-4
+    )
+    assert skipped.rows == () and not skipped.matches
+    with pytest.raises(Exception, match="captured logprobs for 3 actions"):
+        compare_action_logprobs(row, inputs, context, values, valid, [None], rel_tol=1e-3, abs_tol=1e-4)
 
 
 def test_unit_inputs_from_trajectory_carries_stage_quantities():
