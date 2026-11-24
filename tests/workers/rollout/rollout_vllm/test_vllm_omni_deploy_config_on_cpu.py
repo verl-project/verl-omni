@@ -15,7 +15,6 @@
 
 """CPU checks for vLLM-Omni deploy configs, replica allocation and SP rank mapping."""
 
-import os
 import types
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -254,14 +253,31 @@ def test_http_profiler_uses_sp_footprint(monkeypatch):
         config=ProfilerConfig(tool="torch", ranks=[4]),
         tool_config=TorchProfilerToolConfig(),
     )
-    monkeypatch.setenv("VERL_ZMQ_BASE_VISIBLE_DEVICES", "")
-    monkeypatch.setenv(module.get_visible_devices_keyword(), "0,1,2,3")
     monkeypatch.setattr(module.vLLMHttpServer, "_post_init", lambda self: None)
     server._post_init()
     assert server.replica_world_size == 4
     assert server.profiler_controller.config.ranks == [1]
     assert server.config.profiler.ranks == [4]
-    assert os.environ["VERL_ZMQ_BASE_VISIBLE_DEVICES"] == "0,1,2,3"
+
+
+def test_replica_sets_zmq_base_devices_before_server_start(monkeypatch):
+    from verl_omni.workers.rollout.vllm_rollout import vllm_omni_async_server as module
+
+    replica = object.__new__(module.vLLMOmniReplica)
+    devices = "4,5,6,7"
+    visible_devices = get_visible_devices_keyword()
+    monkeypatch.setenv(visible_devices, "0,1,2,3,4,5,6,7")
+    build_env = Mock(return_value={"env_vars": {visible_devices: devices}, "nsight": {"o": "report"}})
+    monkeypatch.setattr(module.vLLMReplica, "_build_server_runtime_env", build_env)
+    node_ids = ["node-a", "node-b"]
+
+    runtime_env = replica._build_server_runtime_env(1, devices, node_ids)
+
+    build_env.assert_called_once_with(1, devices, node_ids)
+    assert runtime_env == {
+        "env_vars": {visible_devices: devices, "VERL_ZMQ_BASE_VISIBLE_DEVICES": devices},
+        "nsight": {"o": "report"},
+    }
 
 
 @pytest.mark.parametrize("standalone", [False, True])

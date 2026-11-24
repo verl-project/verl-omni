@@ -23,7 +23,6 @@ import ray
 import torch
 import vllm_omni.entrypoints.cli.serve
 from omegaconf import DictConfig, OmegaConf
-from verl.utils.device import get_visible_devices_keyword
 from verl.utils.profiler import build_rollout_dist_profiler
 from verl.utils.tracking import RLInsightLogger
 from verl.workers.config import RolloutConfig
@@ -225,7 +224,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         self._generate_strategy.validate_configs()
 
     def _post_init(self) -> None:
-        """Initialize backend state and preserve the replica device list."""
+        """Initialize backend state."""
         _normalize_rollout_logging_level()
         if get_rollout_sequence_parallel_size(self.config) > 1:
             self.replica_world_size = get_rollout_world_size(self.config)
@@ -243,9 +242,6 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             enable_full_determinism(seed=rollout_seed)
             os.environ["VERL_SEED"] = str(rollout_seed)
             os.environ["VLLM_BATCH_INVARIANT"] = "1"
-        # Set before vllm-omni narrows per-stage visible devices; stage workers
-        # remap their ZMQ ranks through this replica-level list.
-        os.environ["VERL_ZMQ_BASE_VISIBLE_DEVICES"] = os.environ[get_visible_devices_keyword()]
         self._lora_request_cache: LoRARequest | None | object = _LORA_REQUEST_CACHE_MISS
         self._lora_resolve_lock = asyncio.Lock()
         super()._post_init()
@@ -789,3 +785,9 @@ class vLLMOmniReplica(vLLMReplica):
 
     def _get_server_name_prefix(self) -> str:
         return "vllm_omni_"
+
+    def _build_server_runtime_env(self, node_rank: int, cuda_visible_devices: str, node_ids: list[str]) -> dict:
+        runtime_env = super()._build_server_runtime_env(node_rank, cuda_visible_devices, node_ids)
+        # Stage workers narrow visibility but need the full replica list for ZMQ rank mapping.
+        runtime_env["env_vars"]["VERL_ZMQ_BASE_VISIBLE_DEVICES"] = cuda_visible_devices
+        return runtime_env
