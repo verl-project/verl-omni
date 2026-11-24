@@ -52,7 +52,7 @@ The trainer refuses to start unless all of these hold, and lists every violation
 
 `actor_rollout_ref.rollout.engine_kwargs.vllm_omni.pipeline_name` must name a rollout pipeline that supports the mode (`qwen3_omni_moe`); the rollout server refuses to start without one, because nothing else would turn on `hf_numerics`. Prefix caching is required off because every validated run had it off.
 
-With LoRA (`actor_rollout_ref.model.lora_rank > 0`) three more settings are required:
+With LoRA (`actor_rollout_ref.model.lora_rank > 0`, as in `examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_true_on_policy_v1.sh`) three more settings are required:
 
 | Setting | Required |
 |---|---|
