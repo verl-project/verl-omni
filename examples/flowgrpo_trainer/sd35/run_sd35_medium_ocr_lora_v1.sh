@@ -52,6 +52,8 @@ python3 -m verl_omni.trainer.main_diffusion_v1 \
     actor_rollout_ref.model.algorithm=flow_grpo \
     actor_rollout_ref.actor.diffusion_loss.clip_ratio=1e-5 \
     actor_rollout_ref.model.path=$model_name \
+    'actor_rollout_ref.model.trajectory_fields.required=[all_latents,prompt_embeds,pooled_prompt_embeds]' \
+    'actor_rollout_ref.model.trajectory_fields.optional=[prompt_embeds_mask,negative_prompt_embeds,negative_prompt_embeds_mask,negative_pooled_prompt_embeds,latents_clean]' \
     actor_rollout_ref.model.custom_chat_template="\"$custom_chat_template\"" \
     'actor_rollout_ref.model.extra_tokenizers={clip: {path: tokenizer, max_length: 77}, t5: {path: tokenizer_3, max_length: 256}}' \
     actor_rollout_ref.model.attn_backend=$ATTN_BACKEND \

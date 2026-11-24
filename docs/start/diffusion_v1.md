@@ -475,6 +475,16 @@ setup and requires TransferQueue >= 0.1.11 for async checkpoint resume.
 - `trainer.use_v1` (default `true` since v0.3.0) selects the V1 trainer; setting
   it to `false` explicitly selects the deprecated legacy v0 trainer.
 - `trainer.v1.trainer_mode` selects `sync` or `separate_async`.
+- `trainer.v1.worker_side_trajectory` (default `false`) fetches trajectory
+  tensors on the actor/ref workers instead of on the driver. Use it with V1
+  `sync` policy-gradient training and rollout-side rewards, without teacher
+  scoring. The driver retains training metadata and timesteps; dump-only
+  media stays in TQ for the separate dump read. Validation keeps its full read.
+  The SD3.5 FlowGRPO and Wan2.2 DanceGRPO sync recipes set
+  `actor_rollout_ref.model.trajectory_fields.required` and `.optional`.
+  For custom recipes, declare the tensors the training pipeline consumes,
+  including embedding masks and any CFG inputs. Missing required fields
+  raise without reading the full row.
 - `trainer.v1.separate_async.parameter_sync_step` controls the number of local
   actor updates per rollout-weight synchronization cycle.
 - `trainer.v1.separate_async.hybrid_rollout.enable_switch` lends the colocated

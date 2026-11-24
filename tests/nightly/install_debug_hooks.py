@@ -37,6 +37,7 @@ _DEBUG_STEP_KEY = "_nightly_debug_global_step"
 _WRAPPED_ATTR = "__nightly_debug_wrapped__"
 _EVENT_COUNTER_LOCK = threading.Lock()
 _EVENT_COUNTER = 0
+_TQ_TRAINING_READ: tuple[int, dict[str, int | float]] | None = None
 
 
 def _enabled() -> bool:
@@ -280,11 +281,16 @@ def _install_tracking_hook() -> None:
         return
 
     def log_with_jsonl(self, data, step, *args, **kwargs):
+        global _TQ_TRAINING_READ
         metrics_path = os.environ.get("DEBUG_METRICS_JSONL")
         if metrics_path:
             path = Path(metrics_path).expanduser().resolve()
             path.parent.mkdir(parents=True, exist_ok=True)
-            record = {"step": int(step), "data": data}
+            metrics = data
+            if _TQ_TRAINING_READ is not None and _TQ_TRAINING_READ[0] == int(step):
+                metrics = {**data, **_TQ_TRAINING_READ[1]}
+                _TQ_TRAINING_READ = None
+            record = {"step": int(step), "data": metrics}
             with path.open("a", encoding="utf-8") as file:
                 file.write(json.dumps(record, sort_keys=True, default=_json_default) + "\n")
         return original_log(self, data, step, *args, **kwargs)
@@ -347,6 +353,29 @@ def _install_driver_hook() -> None:
         from verl_omni.trainer.diffusion.v1.trainer_base import PolicyGradientDiffusionTrainerV1
     except Exception:
         return
+
+    if os.environ.get("DEBUG_DUMP_TQ_TRAINING_READ") == "1":
+        original_read = PolicyGradientDiffusionTrainerV1._read_training_batch
+        if not getattr(original_read, _WRAPPED_ATTR, False):
+
+            def read_training_batch_with_metrics(self, batch_meta):
+                global _TQ_TRAINING_READ
+                started = time.perf_counter()
+                batch = original_read(self, batch_meta)
+                elapsed = time.perf_counter() - started
+                _TQ_TRAINING_READ = (
+                    self.global_steps,
+                    {
+                        "timing_s/tq_driver_read": elapsed,
+                        "training/tq_driver_tensor_bytes": sum(
+                            value.numel() * value.element_size() for value in batch.batch.values()
+                        ),
+                    },
+                )
+                return batch
+
+            setattr(read_training_batch_with_metrics, _WRAPPED_ATTR, True)
+            PolicyGradientDiffusionTrainerV1._read_training_batch = read_training_batch_with_metrics
 
     original_prepare_actor_batch = PolicyGradientDiffusionTrainerV1._prepare_actor_batch
     if not getattr(original_prepare_actor_batch, _WRAPPED_ATTR, False):

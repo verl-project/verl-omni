@@ -185,9 +185,8 @@ def diffusion_tq_batch_to_dataproto(
             full-payload behavior required by training and validation.
 
     Returns:
-        ``DataProto`` whose ``batch`` carries diffusion tensors (prompts,
-        responses, rollout_log_probs, rm_scores, embeds, ...) and whose
-        ``non_tensor_batch`` carries uid/reward_model/data_source/extra_fields.
+        ``DataProto`` whose ``batch`` carries the retrieved diffusion tensors and
+        whose ``non_tensor_batch`` carries row metadata and ``extra_fields``.
     """
     sort_idx = sort_diffusion_tq_keys(list(batch_meta.keys))
     keys = [batch_meta.keys[i] for i in sort_idx]
