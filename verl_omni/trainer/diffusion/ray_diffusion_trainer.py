@@ -898,7 +898,7 @@ class BaseRayDiffusionTrainer(ABC):
                     ):
                         metric_sec = f"{metric_prefix}-core"
                     else:
-                        metric_sec = "val-aux"
+                        metric_sec = f"{metric_prefix}-aux"
                     pfx = f"{metric_sec}/{data_source}/{var_name}/{metric_name}"
                     metric_dict[pfx] = metric_val
 
@@ -2110,11 +2110,9 @@ class CompositePolicyGradientRayTrainer(PolicyGradientRayTrainer):
         # step 2: convert from padding to nopadding
         batch_td = left_right_2_no_padding(batch_td)
         # step 3: add meta info
-        # calculate_sum_pi_squared = self.config.actor_rollout_ref.actor.get("calculate_sum_pi_squared", False)
         tu.assign_non_tensor(
             batch_td,
-            calculate_entropy=True,  # TODO: TBD (susan) seems useless
-            # calculate_sum_pi_squared=calculate_sum_pi_squared,
+            calculate_entropy=True,
             compute_loss=False,
             temperature=self.config.actor_rollout_ref.rollout.ar.temperature,
         )
@@ -2122,21 +2120,12 @@ class CompositePolicyGradientRayTrainer(PolicyGradientRayTrainer):
         # gather output
         entropy = tu.get(output, "entropy")
         log_probs = tu.get(output, "log_probs")
-        # routed_experts = tu.get(output, "routed_experts")
-        # sum_pi_squared = tu.get(output, "sum_pi_squared") if calculate_sum_pi_squared else None
-
         old_log_prob_mfu = tu.get(output, "metrics")["mfu"]
         # step 4. No padding to padding
         entropy = no_padding_2_padding(entropy, batch_td)
         log_probs = no_padding_2_padding(log_probs, batch_td)
-        # if sum_pi_squared is not None:
-        #     sum_pi_squared = no_padding_2_padding(sum_pi_squared, batch_td)
         # step 5: rebuild a tensordict and convert to dataproto
         result = {"old_log_probs": log_probs.float(), "entropys": entropy.float()}
-        # if routed_experts is not None:
-        #     result["routed_experts"] = routed_experts
-        # if sum_pi_squared is not None:
-        #     result["sum_pi_squared"] = sum_pi_squared.float()
         old_log_prob = tu.get_tensordict(result)
         old_log_prob = DataProto.from_tensordict(old_log_prob)
         return old_log_prob, old_log_prob_mfu
@@ -2156,7 +2145,6 @@ class CompositePolicyGradientRayTrainer(PolicyGradientRayTrainer):
             assert (reward_scores.ndim == 1) and (num_rewards * avg_size == reward_scores.shape[0]), (
                 f"reward_scores shape: {reward_scores.shape}, num_rewards: {num_rewards}, avg_size: {avg_size}"
             )
-            reward_mean = []
             reward_mean = reward_scores.reshape(num_rewards, avg_size, 1).mean(axis=1)
             reward_tensor = torch.from_numpy(reward_mean).float()
             ar_batch.batch["rm_scores"] = reward_tensor
@@ -2266,6 +2254,7 @@ class CompositePolicyGradientRayTrainer(PolicyGradientRayTrainer):
         """Dump rollout/validation samples as JSONL."""
         from verl.trainer.ppo.ray_trainer import RayPPOTrainer
 
+        dump_path = os.path.join(dump_path, "ar")
         RayPPOTrainer._write_generations(
             inputs,
             outputs,

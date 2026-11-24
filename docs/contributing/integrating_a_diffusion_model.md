@@ -458,8 +458,8 @@ Its contract, in brief:
 - `rollout.m` is the AR repeat count. The loop emits one AR output per input
   row; `CompositePolicyGradientRayTrainer` repeats each prompt
   (`batch.repeat(rollout.m)`) before `generate_sequences`.
-  `rollout.n` is the diffusion group size per AR sample. Validation repeats
-  with `rollout.val_kwargs.m` and `rollout.val_kwargs.n`.
+  `rollout.m × rollout.n` is the diffusion group size per raw prompt sample. 
+  Validation repeats with `rollout.val_kwargs.m` and `rollout.val_kwargs.n`.
 - AR sampling lives under `actor_rollout_ref.rollout.ar.*`.
 - The reward config must define a function named `ar` with `weight: 0` — AR
   reward is derived from the per-image `reward/ar` extras and the loop asserts
@@ -477,7 +477,7 @@ Its contract, in brief:
 unpacks that tuple and runs a policy-gradient update on each batch:
 `rollout.m` AR traces per prompt and `rollout.n` images per trace. Launch it
 with `python -m verl_omni.trainer.main_diffusion`,
-`algorithm.trainer_type=policy_gradient`, and `+trainer.train_ar=true`. [`_get_trainer_cls`](../../verl_omni/trainer/main_diffusion.py)
+`algorithm.trainer_type=policy_gradient`, and `trainer.train_ar=true`. [`_get_trainer_cls`](../../verl_omni/trainer/main_diffusion.py)
 selects the class through `use_composite_policy_gradient`. This trainer rejects a reference model
 or a teacher. The end-to-end smoke is
 [`tests/special_e2e/run_dual_grpo_qwen_image_async_reward.sh`](../../tests/special_e2e/run_dual_grpo_qwen_image_async_reward.sh).

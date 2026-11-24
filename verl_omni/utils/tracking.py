@@ -478,9 +478,9 @@ def log_val_samples(
 
 
 def log_ar_generations_to_wandb(logger_cls, samples, step):
+    """Log samples to wandb as a table.
+    Origin from verl's ValidationGenerationsLogger._log_generations_to_wandb."""
     import wandb
-
-    """Log samples to wandb as a table"""
 
     # Create column names for all samples
     columns = ["step"] + sum([[f"input_{i + 1}", f"output_{i + 1}", f"score_{i + 1}"] for i in range(len(samples))], [])
@@ -508,7 +508,8 @@ def log_ar_generations_to_wandb(logger_cls, samples, step):
 
 
 def log_ar_generations_to_swanlab(logger_cls, samples, step):
-    """Log samples to swanlab as text"""
+    """Log samples to swanlab as text.
+    Origin from verl's ValidationGenerationsLogger.log_generations_to_swanlab."""
     import swanlab
 
     swanlab_table = swanlab.echarts.Table()

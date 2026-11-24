@@ -47,7 +47,7 @@ ENGINE=vllm_omni
 REWARD_ENGINE=vllm
 max_prompt_length=256
 IMAGE_RESOLUTION=256
-VLLM_USE_FLASHINFER_SAMPLER=0
+export VLLM_USE_FLASHINFER_SAMPLER=0
 
 # Smoke: pin local FLASH_ATTN (product default remains FLASH_ATTN_3_HUB).
 # Use exit-code checks only — importing verl/vllm may print INFO lines on stdout.
@@ -158,7 +158,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     "+reward.reward_functions.dit.path=pkg://verl_omni.utils.reward_score.genrm_ocr" \
     '+reward.reward_functions.dit.name=compute_score_ocr' \
     '+reward.reward_functions.dit.weight=1.0' \
-    "+trainer.train_ar=True" \
+    trainer.train_ar=True \
     trainer.logger=console \
     trainer.project_name=verl-test \
     trainer.experiment_name=dualgrpo-qwen-image-async-reward-e2e \

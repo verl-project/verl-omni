@@ -709,6 +709,7 @@ trainer:
   ray_master_port_range: null
   device: cuda
   use_v1: true
+  train_ar: false
   v1:
     watchdog:
       enabled: false
