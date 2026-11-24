@@ -64,6 +64,7 @@ def _make_mock_model_config(**overrides):
     cfg.enable_gradient_checkpointing = False
     cfg.lora_rank = 0
     cfg.lora = {}
+    cfg.true_on_policy = False
 
     hf_config = MagicMock()
     thinker_config = types.SimpleNamespace(tie_word_embeddings=False)
@@ -350,6 +351,25 @@ def test_weight_sync_uses_actor_compute_dtype(mixed_precision, expected_dtype):
 
     assert export.call_args.kwargs["full_weight_dtype"] is expected_dtype
     assert export.call_args.kwargs["is_diffusers"] is False
+
+
+@pytest.mark.parametrize("true_on_policy", [False, True])
+def test_weight_sync_merges_lora_in_the_forward_dtype_only_for_true_on_policy(true_on_policy):
+    omni_impl = _get_omni_impl_module()
+    engine = object.__new__(omni_impl.OmniFSDPEngine)
+    engine.engine_config = types.SimpleNamespace(mixed_precision=None)
+    engine.module = MagicMock()
+    engine.model_config = _make_mock_model_config(true_on_policy=true_on_policy)
+    engine._uses_fsdp2_cpu_offload_policy = True
+    engine._is_offload_param = False
+
+    with (
+        patch.object(omni_impl, "log_gpu_memory_usage"),
+        patch.object(omni_impl, "export_lora_for_sync", return_value=(iter(()), None)) as export,
+    ):
+        engine.get_per_tensor_param(base_sync_done=True)
+
+    assert export.call_args.kwargs["merge_in_full_weight_dtype"] is true_on_policy
 
 
 # ---------------------------------------------------------------------------
@@ -680,6 +700,28 @@ def test_build_lora_module_skips_when_lora_dtype_none():
         engine = object.__new__(omni_impl.OmniFSDPEngine)
         engine.model_config = model_config
         assert engine._build_lora_module(fake_module) is fake_module
+
+
+@pytest.mark.parametrize("true_on_policy", [False, True])
+def test_build_lora_module_uses_the_merged_forward_only_for_true_on_policy(true_on_policy):
+    omni_impl = _get_omni_impl_module()
+    model_config = _make_mock_model_config(lora_dtype=None, lora_rank=8, true_on_policy=true_on_policy)
+    fake_module = MagicMock(spec=torch.nn.Module)
+    fake_module.named_parameters.return_value = []
+    fake_module.modules.return_value = [fake_module]
+
+    with (
+        patch.object(omni_impl.FSDPEngineWithLMHead, "_build_lora_module", return_value=fake_module),
+        patch.object(omni_impl, "use_merged_lora_forward") as use_merged_lora_forward,
+    ):
+        engine = object.__new__(omni_impl.OmniFSDPEngine)
+        engine.model_config = model_config
+        assert engine._build_lora_module(fake_module) is fake_module
+
+    if true_on_policy:
+        use_merged_lora_forward.assert_called_once_with(fake_module)
+    else:
+        use_merged_lora_forward.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

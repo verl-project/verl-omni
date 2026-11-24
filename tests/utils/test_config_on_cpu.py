@@ -284,7 +284,6 @@ def test_validate_config_does_not_require_rollout_full_determinism():
         ("actor_rollout_ref.rollout.tensor_model_parallel_size", 2),
         ("actor_rollout_ref.rollout.calculate_log_probs", False),
         ("actor_rollout_ref.rollout.enable_prefix_caching", True),
-        ("actor_rollout_ref.model.lora_rank", 32),
         ("actor_rollout_ref.model.lora_adapter_path", "/tmp/adapter"),
         ("actor_rollout_ref.model.use_remove_padding", False),
         ("actor_rollout_ref.actor.fsdp_config.batch_invariant", False),
@@ -307,10 +306,31 @@ def test_validate_config_rejects_missing_batch_invariant_option():
 
 def test_validate_config_reports_all_true_on_policy_violations():
     config = _true_on_policy_config(
-        **{"actor_rollout_ref.rollout.temperature": 0.8, "actor_rollout_ref.model.lora_rank": 32}
+        **{"actor_rollout_ref.rollout.temperature": 0.8, "actor_rollout_ref.rollout.enable_prefix_caching": True}
     )
-    with pytest.raises(ValueError, match=r"temperature=0\.8.*lora_rank=32"):
+    with pytest.raises(ValueError, match=r"temperature=0\.8.*enable_prefix_caching=True"):
         validate_config(config)
+
+
+_TRUE_ON_POLICY_LORA = {"actor_rollout_ref.model.lora_rank": 32, "actor_rollout_ref.model.lora": {"merge": True}}
+
+
+def test_validate_config_accepts_true_on_policy_with_merged_lora():
+    validate_config(_true_on_policy_config(**_TRUE_ON_POLICY_LORA))
+
+
+@pytest.mark.parametrize(
+    "path, value",
+    [
+        ("actor_rollout_ref.model.lora.merge", False),
+        ("actor_rollout_ref.model.target_parameters", ["gate_up_proj"]),
+        ("actor_rollout_ref.actor.strategy", "fsdp"),
+    ],
+)
+def test_validate_config_rejects_true_on_policy_lora_violations(path, value):
+    with pytest.raises(ValueError, match=path.replace(".", r"\.")):
+        validate_config(_true_on_policy_config(**_TRUE_ON_POLICY_LORA, **{path: value}))
+    validate_config(_true_on_policy_config(**{path: value}))
 
 
 def test_validate_config_ignores_true_on_policy_contract_when_disabled():

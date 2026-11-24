@@ -259,7 +259,6 @@ _TRUE_ON_POLICY_CONTRACT = {
     "actor_rollout_ref.rollout.tensor_model_parallel_size": 1,
     "actor_rollout_ref.rollout.calculate_log_probs": True,
     "actor_rollout_ref.rollout.enable_prefix_caching": False,
-    "actor_rollout_ref.model.lora_rank": 0,
     "actor_rollout_ref.model.lora_adapter_path": None,
     "actor_rollout_ref.model.use_remove_padding": True,
     "actor_rollout_ref.actor.fsdp_config.batch_invariant": True,
@@ -268,15 +267,26 @@ _TRUE_ON_POLICY_CONTRACT = {
 }
 
 
+# With LoRA the rollout receives merged weights and the actor forwards with the same merged weights.
+_TRUE_ON_POLICY_LORA_CONTRACT = {
+    "actor_rollout_ref.model.lora.merge": True,
+    "actor_rollout_ref.model.target_parameters": None,
+}
+
+
 def _validate_true_on_policy(config: Any) -> None:
+    lora = int(_select(config, "actor_rollout_ref.model.lora_rank", 0) or 0) > 0
+    contract = _TRUE_ON_POLICY_CONTRACT | (_TRUE_ON_POLICY_LORA_CONTRACT if lora else {})
     violations = [
         f"{path}={_select(config, path)!r} (requires {expected!r})"
-        for path, expected in _TRUE_ON_POLICY_CONTRACT.items()
+        for path, expected in contract.items()
         if _select(config, path) != expected
     ]
     strategy = _select(config, "actor_rollout_ref.actor.strategy")
-    if strategy not in ("fsdp", "fsdp2"):
-        violations.append(f"actor_rollout_ref.actor.strategy={strategy!r} (requires 'fsdp' or 'fsdp2')")
+    strategies = ("fsdp2",) if lora else ("fsdp", "fsdp2")
+    if strategy not in strategies:
+        requires = " or ".join(repr(name) for name in strategies)
+        violations.append(f"actor_rollout_ref.actor.strategy={strategy!r} (requires {requires})")
     if violations:
         raise ValueError("actor_rollout_ref.model.true_on_policy=true is not supported with: " + "; ".join(violations))
 

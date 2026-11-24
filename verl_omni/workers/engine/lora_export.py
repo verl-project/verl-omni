@@ -29,12 +29,14 @@ Wire contract returned to the sync orchestrator:
 
 from __future__ import annotations
 
+import functools
 from collections import Counter
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from typing import Callable, Iterator
 
 import torch
+import torch.nn.functional as F
 from torch.distributed.tensor import DTensor
 from verl.utils.device import get_device_id
 from verl.utils.fsdp_utils import (
@@ -67,21 +69,79 @@ def _merged_lora_stream(
     key_prefix: str = "",
     offload_fn: Callable[[], None] | None = None,
     full_weight_dtype: torch.dtype = torch.bfloat16,
+    merge_in_full_weight_dtype: bool = False,
 ):
     """Stream merged (base + LoRA) weights for rollout weight sync.
 
     FSDP2 modules whose LoRA layers are all vanilla ``lora.Linear`` compute each
     merged weight per tensor while streaming; everything else goes through
-    ``merged_lora_context``.
+    ``merged_lora_context``, which cannot merge in ``full_weight_dtype``.
     """
     lora_merges = _vanilla_lora_linears(module) if fsdp_version(module) == 2 else None
     if lora_merges is not None and lora_merges.keys() <= module.state_dict().keys():
         return _merged_lora_stream_per_tensor(
-            module, lora_merges, key_prefix=key_prefix, offload_fn=offload_fn, full_weight_dtype=full_weight_dtype
+            module,
+            lora_merges,
+            key_prefix=key_prefix,
+            offload_fn=offload_fn,
+            full_weight_dtype=full_weight_dtype,
+            merge_dtype=full_weight_dtype if merge_in_full_weight_dtype else None,
         )
+    if merge_in_full_weight_dtype:
+        raise NotImplementedError("Merging LoRA in the forward dtype needs FSDP2 and plain LoRA linear layers.")
     return _merged_lora_stream_in_place(
         module, key_prefix=key_prefix, offload_fn=offload_fn, full_weight_dtype=full_weight_dtype
     )
+
+
+def _full(tensor: torch.Tensor, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+    """``tensor`` gathered from its shards, on ``device`` in ``dtype``."""
+    if isinstance(tensor, DTensor):
+        tensor = tensor.to(device).full_tensor()
+    return tensor.to(device).to(dtype)
+
+
+def _lora_delta(layer, adapter: str, weight: torch.Tensor) -> torch.Tensor:
+    """LoRA delta as a forward on ``weight`` computes it: one matmul of the whole factors in its dtype, on its device.
+
+    A mixed-precision forward sees the factors in that dtype, and a bf16 matmul rounds differently on CPU, where
+    offloaded shards live, than on GPU, so the export gathers the factors onto the training device first.
+    """
+    from peft.utils import transpose
+
+    lora_a = _full(layer.lora_A[adapter].weight, weight.device, weight.dtype)
+    lora_b = _full(layer.lora_B[adapter].weight, weight.device, weight.dtype)
+    return transpose(lora_b @ lora_a, layer.fan_in_fan_out) * layer.scaling[adapter]
+
+
+def use_merged_lora_forward(module: torch.nn.Module) -> None:
+    """Make every LoRA linear forward with the merged weight that ``merge_in_full_weight_dtype`` exports.
+
+    PEFT computes ``base(x) + B(A(x)) * scaling``, while a rollout that received merged weights computes
+    ``(W + B @ A * scaling)(x)``. Forwarding with the merged weight makes both sides run the same linear on the
+    same weight, and the gradient still reaches ``A`` and ``B``.
+
+    Raises:
+        NotImplementedError: If a LoRA layer is not a plain ``lora.Linear``.
+    """
+    from peft.tuners.lora import LoraLayer
+
+    if _vanilla_lora_linears(module) is None:
+        raise NotImplementedError("The merged LoRA forward supports plain LoRA linear layers only.")
+    for layer in module.modules():
+        if isinstance(layer, LoraLayer):
+            layer.forward = functools.partial(_merged_lora_forward, layer, layer.forward)
+
+
+def _merged_lora_forward(layer, peft_forward, x: torch.Tensor, *args, **kwargs) -> torch.Tensor:
+    if layer.disable_adapters:
+        return peft_forward(x, *args, **kwargs)
+    base_layer = layer.get_base_layer()
+    weight = base_layer.weight
+    for adapter in layer.active_adapters:
+        if adapter in layer.lora_A:
+            weight = weight + _lora_delta(layer, adapter, weight)
+    return F.linear(x, weight, base_layer.bias)
 
 
 @dataclass(eq=False)
@@ -92,11 +152,14 @@ class _LoraMerge:
     weight: torch.nn.Parameter
     layers: list[tuple[torch.nn.Module, list[str]]] = field(default_factory=list)
 
-    def merge(self) -> torch.Tensor:
+    def merge(self, dtype: torch.dtype | None = None) -> torch.Tensor:
+        """Merged weight as PEFT merges it, or the whole weight merged in ``dtype`` as the forward does."""
         weight = self.weight.data.clone()
+        if dtype is not None:
+            weight = _full(weight, get_device_id(), dtype)
         for layer, adapters in self.layers:
             for adapter in adapters:
-                weight += layer.get_delta_weight(adapter)
+                weight += layer.get_delta_weight(adapter) if dtype is None else _lora_delta(layer, adapter, weight)
         return weight
 
 
@@ -136,6 +199,7 @@ def _merged_lora_stream_per_tensor(
     key_prefix: str = "",
     offload_fn: Callable[[], None] | None = None,
     full_weight_dtype: torch.dtype = torch.bfloat16,
+    merge_dtype: torch.dtype | None = None,
 ):
     """Merged weights without touching the module: no CPU backup of the base
     weights, no in-place merge and no restore. Each LoRA base weight is cloned
@@ -155,7 +219,7 @@ def _merged_lora_stream_per_tensor(
             for name, entry in params.items():
                 if isinstance(entry, _LoraMerge):
                     if entry not in merged:
-                        merged[entry] = entry.merge()
+                        merged[entry] = entry.merge(merge_dtype)
                     pending[entry] -= 1
                     weight = merged[entry] if pending[entry] else merged.pop(entry)
                     tensor = _cast_for_sync(weight, full_weight_dtype) if isinstance(weight, DTensor) else weight
@@ -217,6 +281,7 @@ def export_lora_for_sync(
     offload_fn: Callable[[], None] | None = None,
     stream_transform: Callable[[Iterator], Iterator] | None = None,
     full_weight_dtype: torch.dtype = torch.bfloat16,
+    merge_in_full_weight_dtype: bool = False,
 ) -> tuple[Iterator[tuple[str, torch.Tensor]], dict | None]:
     """Yield ``(name, tensor)`` for a rollout sync plus ``peft_config``-or-``None``.
 
@@ -242,6 +307,9 @@ def export_lora_for_sync(
             export stream; merged exports bypass it, matching upstream verl.
         full_weight_dtype: Floating dtype for gathered full-weight DTensors;
             adapter-only exports and plain tensors retain their dtypes.
+        merge_in_full_weight_dtype: Merge with the base weight and the adapters
+            cast to ``full_weight_dtype`` first, as :func:`use_merged_lora_forward`
+            does, so the merged weights equal the ones the actor forwards with.
 
     Returns:
         ``(iterator, peft_config_dict)`` where ``peft_config_dict`` is ``None``
@@ -266,7 +334,11 @@ def export_lora_for_sync(
                     f"got rollout_adapter={adapter_name!r}."
                 )
             return _merged_lora_stream(
-                module, key_prefix=key_prefix, offload_fn=offload_fn, full_weight_dtype=full_weight_dtype
+                module,
+                key_prefix=key_prefix,
+                offload_fn=offload_fn,
+                full_weight_dtype=full_weight_dtype,
+                merge_in_full_weight_dtype=merge_in_full_weight_dtype,
             ), None
         peft_config = peft_model.peft_config.get(adapter, None)
         adapter_ctx = adapter_context() if adapter_context is not None else nullcontext()

@@ -42,7 +42,7 @@ from verl.workers.engine.fsdp.utils import get_sharding_strategy
 from verl_omni.utils.fsdp_utils import apply_fsdp2
 from verl_omni.workers.config import OmniModelConfig
 from verl_omni.workers.engine.lora_adapter_mixin import apply_lora_dtype, cast_adapter_params_to_base
-from verl_omni.workers.engine.lora_export import export_lora_for_sync
+from verl_omni.workers.engine.lora_export import export_lora_for_sync, use_merged_lora_forward
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +93,7 @@ class OmniFSDPEngine(FSDPEngineWithLMHead):
             is_diffusers=False,
             offload_fn=_offload_to_cpu,
             full_weight_dtype=full_weight_dtype,
+            merge_in_full_weight_dtype=self.model_config.true_on_policy,
         )
 
     def get_per_tensor_param_shard(self, **kwargs):
@@ -219,6 +220,9 @@ class OmniFSDPEngine(FSDPEngineWithLMHead):
             from verl.utils.torch_dtypes import PrecisionType
 
             apply_lora_dtype(module, PrecisionType.to_dtype(lora_dtype))
+
+        if self.model_config.true_on_policy:
+            use_merged_lora_forward(module)
 
         return module
 

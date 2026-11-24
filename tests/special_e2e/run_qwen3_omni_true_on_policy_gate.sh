@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Qwen3-Omni Thinker true on-policy gate (tiny random model, full-parameter, 2 GPUs).
+# Qwen3-Omni Thinker true on-policy gate (tiny random model, full-parameter and LoRA, 2 GPUs).
 #
 # Phase 1: 2 steps with actor_rollout_ref.model.true_on_policy=True; rollout and recomputed
 # actor log-probs must be bitwise equal at both steps (the second after a real update and
@@ -9,6 +9,8 @@
 # log-probs as the old policy instead of recomputing them. The update forward must then match
 # the rollout log-probs token for token. Sampling is not seeded, so the two runs see different
 # batches and grad_norm is not compared across them.
+# Phase 3: 3 steps with merged LoRA on the attention projections; the same checks as phase 1 at
+# steps 2 and 3.
 #
 # GSPO with GRPO advantages and a bf16 actor, as the true on-policy recipe.
 # ppo_micro_batch_size_per_gpu equals the per-GPU batch, so there is no gradient accumulation.
@@ -22,7 +24,7 @@
 # which the actor matches through the hub kernel). On other GPUs the script exits with code 5,
 # which the GPU smoke runner reports as skipped.
 #
-# Override via env: MODEL_PATH, DATA_DIR, OUTPUT_DIR. Arguments are appended to both runs as Hydra overrides.
+# Override via env: MODEL_PATH, DATA_DIR, OUTPUT_DIR. Arguments are appended to every run as Hydra overrides.
 set -xeuo pipefail
 
 export NCCL_IB_DISABLE=1
@@ -119,8 +121,19 @@ run_train() {
 
 run_train recompute trainer.total_training_steps=2 "$@"
 run_train bypass trainer.total_training_steps=1 algorithm.rollout_correction.bypass_mode=true "$@"
+# LoRA B starts at zero, so only the steps after the first update run merged weights that differ from the base;
+# the learning rate is large enough to change them.
+run_train lora trainer.total_training_steps=3 \
+    actor_rollout_ref.model.lora_rank=32 \
+    actor_rollout_ref.model.lora_alpha=64 \
+    actor_rollout_ref.model.lora_dtype=float32 \
+    actor_rollout_ref.model.lora.merge=True \
+    "actor_rollout_ref.model.target_modules=[q_proj,k_proj,v_proj,o_proj]" \
+    actor_rollout_ref.actor.optim.lr=1e-3 \
+    ++actor_rollout_ref.actor.fsdp_config.offload_policy=True \
+    "$@"
 
-python3 - "${OUTPUT_DIR}/recompute.jsonl" "${OUTPUT_DIR}/bypass.jsonl" <<'PY'
+python3 - "${OUTPUT_DIR}/recompute.jsonl" "${OUTPUT_DIR}/bypass.jsonl" "${OUTPUT_DIR}/lora.jsonl" <<'PY'
 import json
 import math
 import sys
@@ -131,15 +144,17 @@ def load(path):
         return {row["step"]: row["data"] for row in map(json.loads, f)}
 
 
-recompute, bypass = load(sys.argv[1]), load(sys.argv[2])
-for step in (1, 2):
-    metrics = recompute[step]
-    assert metrics["training/rollout_logprobs_mismatch_count"] == 0, (step, metrics)
-    assert metrics["actor/old_logprobs_mismatch_count"] == 0, (step, metrics)
-    assert math.isfinite(metrics["actor/grad_norm"]) and metrics["actor/grad_norm"] > 0, (step, metrics["actor/grad_norm"])
+recompute, bypass, lora = load(sys.argv[1]), load(sys.argv[2]), load(sys.argv[3])
+for name, run, steps in (("recompute", recompute, (1, 2)), ("lora", lora, (2, 3))):
+    for step in steps:
+        metrics = run[step]
+        assert metrics["training/rollout_logprobs_mismatch_count"] == 0, (name, step, metrics)
+        assert metrics["actor/old_logprobs_mismatch_count"] == 0, (name, step, metrics)
+        assert math.isfinite(metrics["actor/grad_norm"]) and metrics["actor/grad_norm"] > 0, (name, step, metrics)
 assert bypass[1]["actor/old_logprobs_mismatch_count"] == 0, bypass[1]
 assert math.isfinite(bypass[1]["actor/grad_norm"]) and bypass[1]["actor/grad_norm"] > 0, bypass[1]["actor/grad_norm"]
 print("mismatch_count:", [recompute[step]["training/rollout_logprobs_mismatch_count"] for step in (1, 2)])
+print("lora mismatch_count:", [lora[step]["training/rollout_logprobs_mismatch_count"] for step in (2, 3)])
 print("update-forward mismatch_count recompute/bypass:", [recompute[step]["actor/old_logprobs_mismatch_count"] for step in (1, 2)], bypass[1]["actor/old_logprobs_mismatch_count"])
 print("grad_norm recompute/bypass:", recompute[1]["actor/grad_norm"], bypass[1]["actor/grad_norm"])
 PY

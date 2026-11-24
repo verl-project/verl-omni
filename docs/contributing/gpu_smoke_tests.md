@@ -1,6 +1,6 @@
 # GPU Smoke Tests
 
-Last updated: 11/15/2026.
+Last updated: 11/23/2026.
 
 GPU smoke tests validate GPU-only trainer, rollout, worker, reward, and
 agent-loop paths with small workloads. They are intentionally lightweight: use
@@ -15,7 +15,7 @@ The smoke suite is split by code-change coverage under `tests/gpu_smoke/`:
 
 | Group script | CI label | Default GPUs | What it covers |
 |---|---|---|---|
-| [`run_gpu_smoke_core.sh`](../../tests/gpu_smoke/run_gpu_smoke_core.sh) | `ci-core` | 2 | Rollout, engines, agent loop, reward loop, Ulysses SP, Qwen3-Omni fused MoE experts |
+| [`run_gpu_smoke_core.sh`](../../tests/gpu_smoke/run_gpu_smoke_core.sh) | `ci-core` | 2 | Rollout, engines, agent loop, reward loop, Ulysses SP, Qwen3-Omni fused MoE experts, true on-policy LoRA merge |
 | [`run_gpu_smoke_omni_e2e.sh`](../../tests/gpu_smoke/run_gpu_smoke_omni_e2e.sh) | `ci-e2e-omni` | 2 | Omni trainer end-to-end paths (Qwen3-Omni GSPO/DPO, Qwen3-TTS GRPO, MiniCPM-o 4.5 thinker GSPO) and the Qwen3-Omni true on-policy gate, which runs on Hopper GPUs and is reported as skipped elsewhere |
 | [`run_gpu_smoke_diffusion_e2e.sh`](../../tests/gpu_smoke/run_gpu_smoke_diffusion_e2e.sh) | `ci-e2e-diffusion` | 4 | Diffusion end-to-end training (Qwen-Image-Edit, FlowGRPO, online DPO, DiffusionNFT, MiniMax-H3 on the v1 sync trainer; v1 separate_async; v0 remains for Bagel and the v0 separate layout) |
 

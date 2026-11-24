@@ -43,7 +43,6 @@ The trainer refuses to start unless all of these hold, and lists every violation
 | `actor_rollout_ref.rollout.tensor_model_parallel_size` | `1` |
 | `actor_rollout_ref.rollout.calculate_log_probs` | `true` |
 | `actor_rollout_ref.rollout.enable_prefix_caching` | `false` |
-| `actor_rollout_ref.model.lora_rank` | `0` |
 | `actor_rollout_ref.model.lora_adapter_path` | `null` |
 | `actor_rollout_ref.model.use_remove_padding` | `true` |
 | `actor_rollout_ref.actor.strategy` | `fsdp` or `fsdp2` |
@@ -52,6 +51,14 @@ The trainer refuses to start unless all of these hold, and lists every violation
 | `trainer.v1.trainer_mode` | `omni_sync` |
 
 `actor_rollout_ref.rollout.engine_kwargs.vllm_omni.pipeline_name` must name a rollout pipeline that supports the mode (`qwen3_omni_moe`); the rollout server refuses to start without one, because nothing else would turn on `hf_numerics`. Prefix caching is required off because every validated run had it off.
+
+With LoRA (`actor_rollout_ref.model.lora_rank > 0`) three more settings are required:
+
+| Setting | Required |
+|---|---|
+| `actor_rollout_ref.model.lora.merge` | `true` |
+| `actor_rollout_ref.model.target_parameters` | `null` |
+| `actor_rollout_ref.actor.strategy` | `fsdp2` |
 
 `actor_rollout_ref.model.override_config.attn_implementation` may be left unset or set to `hub_fa3`, and `override_config.experts_implementation` unset or set to `vllm_fused_moe`; anything else is an error. CUDA graphs on the rollout (`enforce_eager=false`) are supported.
 
@@ -70,17 +77,18 @@ Each source of difference is fixed on the side that owns it. The HF layers keep 
 | rope frequencies | verl-omni | the thinker's text rotary embedding is replaced with one that multiplies positions and fp32 inverse frequencies elementwise, as the rollout does. It keeps the frequencies in fp32 when `fsdp_config.model_dtype=bfloat16` casts the model, and avoids the fp32 matmul some Transformers releases use, which the batch-invariant kernels run at TF32 |
 | RMSNorm, residual add, rope, MoE routing | vLLM-Omni | thinker-stage option `additional_config: {hf_numerics: true}`: HF operation order and rounding inside torch custom ops, so torch.compile cannot re-fuse them and they are still captured into CUDA graphs. The experts stay on `fused_experts`. verl-omni writes the option into the thinker stage of the generated deploy config |
 | batch-invariant actor ops, log-prob formula | verl | `actor_rollout_ref.actor.fsdp_config.batch_invariant`: installs vLLM's batch-invariant kernels in the actor and computes log-probs with the vLLM sampler formula (fp32 `log_softmax` + gather); verl-omni's entrypoint exports `VLLM_BATCH_INVARIANT=1` to the rollout under the same flag |
+| LoRA | verl-omni | with `lora.merge=true` the rollout runs merged weights `W + B @ A * scaling` and has no LoRA ops. The actor's LoRA linears forward with the same merged weight instead of PEFT's `base(x) + B(A(x)) * scaling`, and the gradient still reaches `A` and `B`. Export and forward share one merge: the whole base weight and adapter factors, in the forward dtype, multiplied on the training device. FSDP mixed precision hands the forward bf16 copies of fp32 adapters, and a bf16 matmul rounds differently on CPU than on GPU, so merging the fp32 factors, or shards that are offloaded to CPU, gives the rollout different weights |
 | gate metric | verl | `training/rollout_logprobs_mismatch_count` |
 
 Dense GEMMs, the embedding, `lm_head` and synced weights need no change: they came out bitwise equal on both sides in every gate and full-depth run. That is a measured result at the pinned versions, not something the kernels guarantee, so rerun the gate after a vLLM, CUDA or cuBLAS upgrade.
 
 ## Scope
 
-Supported: Qwen3-Omni thinker, text-only prompts, full-parameter training, rollout TP=1, FSDP/FSDP2 actor, the synchronous trainer, Hopper GPUs.
+Supported: Qwen3-Omni thinker, text-only prompts, full-parameter training or LoRA on linear layers merged on the actor side, rollout TP=1, FSDP/FSDP2 actor (FSDP2 with LoRA), the synchronous trainer, Hopper GPUs.
 
 Not supported:
 
-- LoRA: merged and unmerged weights differ by construction.
+- LoRA that the rollout applies as an adapter (`lora.merge=false`), LoRA on the fused MoE experts (`target_parameters`), DoRA and other LoRA variants, and adapters loaded from `lora_adapter_path`.
 - Multimodal inputs and the vision/audio towers. The actor raises a `ValueError` on the first batch that carries image, video or audio features.
 - TP or EP > 1 on the rollout; the vLLM-Omni option refuses them.
 - The separate-async trainer (`omni_separate_async`): its rollout replicas can generate with weights the actor has already updated.
@@ -92,6 +100,8 @@ Most of the cost is on the rollout, and most of that comes from vLLM's batch-inv
 
 The actor runs the experts twice per MoE layer when it needs gradients, once through `fused_experts` for the output and once through `grouped_mm` for the gradient.
 
+With LoRA the actor rebuilds the merged weight of every LoRA linear in each forward, and the rollout receives full merged weights at every sync, as `lora.merge=true` does without the mode.
+
 `algorithm.rollout_correction.bypass_mode=true` takes the old log-prob recompute out of every step. Keep the mode off for runs that do not need bitwise equality.
 
 ## Verify
@@ -100,7 +110,7 @@ The actor runs the experts twice per MoE layer when it needs gradients, once thr
 bash tests/special_e2e/run_qwen3_omni_true_on_policy_gate.sh
 ```
 
-Runs a tiny random Qwen3-Omni thinker on 2 Hopper GPUs, with a bf16 actor as in the recipe. It checks `training/rollout_logprobs_mismatch_count == 0` at steps 1 and 2 with a nonzero `actor/grad_norm`, and `actor/old_logprobs_mismatch_count == 0` (the update forward reproduces the recomputed log-probs token for token) with a finite, nonzero `actor/grad_norm`; then reruns step 1 with `bypass_mode=true`, where the same count compares the update forward with the rollout log-probs used as the old policy.
+Runs a tiny random Qwen3-Omni thinker on 2 Hopper GPUs, with a bf16 actor as in the recipe. It checks `training/rollout_logprobs_mismatch_count == 0` at steps 1 and 2 with a nonzero `actor/grad_norm`, and `actor/old_logprobs_mismatch_count == 0` (the update forward reproduces the recomputed log-probs token for token) with a finite, nonzero `actor/grad_norm`; then reruns step 1 with `bypass_mode=true`, where the same count compares the update forward with the rollout log-probs used as the old policy. A third run trains merged LoRA on the attention projections with fp32 adapters and CPU-offloaded parameters, and applies the first run's checks at steps 2 and 3; at step 1 the LoRA `B` factors are still zero. The tiny model does not show the CPU-versus-GPU rounding of the LoRA merge; `tests/workers/test_lora_export_merge_gpu.py` checks it at the size of a real projection.
 
 CPU tests:
 
@@ -113,8 +123,8 @@ pytest tests/utils/test_config_on_cpu.py tests/models/test_qwen3_omni_hub_fa3_at
 
 `test_qwen3_omni_true_on_policy_contract_on_cpu.py` holds the cross-repository contract on every CPU run: the vLLM-Omni RMSNorm, residual add, rope and MoE routing ops are compared bitwise with the Transformers modules of the actor, and the vLLM, vLLM-Omni and verl interfaces the mode calls are checked at the pinned versions. Rerun the gate above after a pin bump that touches any of them; the CPU job cannot see kernel-level differences.
 
-GPU test of the experts implementation against vLLM's kernel and the `grouped_mm` backward:
+GPU tests of the experts implementation against vLLM's kernel and the `grouped_mm` backward, and of the LoRA merge shared by export and forward:
 
 ```bash
-pytest tests/models/test_qwen3_omni_vllm_fused_moe_experts_gpu.py
+pytest tests/models/test_qwen3_omni_vllm_fused_moe_experts_gpu.py tests/workers/test_lora_export_merge_gpu.py
 ```
