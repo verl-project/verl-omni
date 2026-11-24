@@ -30,7 +30,8 @@ export CPATH=/usr/include${CPATH:+:$CPATH}
 export RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO=0
 export VERL_USE_EXTERNAL_MODULES=verl_omni
 
-if ! python3 -c "import torch; raise SystemExit(torch.cuda.get_device_capability() != (9, 0))"; then
+capability=$(python3 -c "import torch; print(torch.cuda.get_device_capability())")
+if [ "${capability}" != "(9, 0)" ]; then
     echo "The true on-policy gate needs Hopper GPUs; skipping."
     exit 5
 fi

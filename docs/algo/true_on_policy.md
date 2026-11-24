@@ -83,6 +83,7 @@ Not supported:
 - LoRA: merged and unmerged weights differ by construction.
 - Multimodal inputs and the vision/audio towers. The actor raises a `ValueError` on the first batch that carries image, video or audio features.
 - TP or EP > 1 on the rollout; the vLLM-Omni option refuses them.
+- Attention head sizes other than the checkpoint's 128. Only 128 is validated, and a tiny model with 32-dimensional heads had 1032 mismatching log-probs at the first step.
 - The separate-async trainer (`omni_separate_async`): its rollout replicas can generate with weights the actor has already updated.
 - Run-to-run reproducibility of training: only the rollout-vs-actor log-probs within a run are covered.
 
