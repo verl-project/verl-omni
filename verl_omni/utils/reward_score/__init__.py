@@ -42,7 +42,7 @@ def default_compute_score_image(
     if data_source == "jpeg_compressibility":
         from verl_omni.utils.reward_score import jpeg_compressibility
 
-        res = jpeg_compressibility.compute_score(solution_image)
+        res = jpeg_compressibility.compute_score(solution_image, extra_info=extra_info)
     else:
         raise NotImplementedError(f"Reward function is not implemented for {data_source=}")
 

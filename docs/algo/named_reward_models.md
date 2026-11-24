@@ -1,6 +1,6 @@
 # Named Reward Models
 
-Last updated: 10/08/2026
+Last updated: 11/19/2026
 
 This guide describes how to configure and extend named model-backed rewards
 under `reward.models` in `verl-omni`. For the general Reward Loop interface and
@@ -84,15 +84,31 @@ this option does not introduce a timeout or health-check policy.
 
 | Backend | Use it when | Reward-function arguments |
 | --- | --- | --- |
-| `engine` | The model is supported by the existing `verl.RewardModelManager` and should be served by vLLM | `reward_router_address` and `model_name` |
+| `engine` | The model is supported by the existing `verl.RewardModelManager` and should be served by vLLM | `reward_router_address` and `model_name`; `reward_model_tokenizer` when the function declares it |
 | `native` | The model can be loaded and called directly in a reward worker, including ordinary Transformers models | `reward_model`, an inference handle |
 
 The engine path documented here uses vLLM. vLLM-Omni reward serving is not
 implemented; vLLM-Omni can still be used independently for actor rollout.
 
 Existing jobs without `reward.models` continue to use the existing single-model
-reward path. Do not set `reward.reward_model.enable=true` together with
-`reward.models`.
+reward path; that path is deprecated since v0.4.0 (see
+[Deprecated legacy paths](#deprecated-legacy-paths)). Do not set
+`reward.reward_model.enable=true` together with `reward.models`.
+
+## Deprecated legacy paths
+
+Deprecated since v0.4.0, warning-only until removal in a future release:
+
+- `VisualRewardManager` with one `reward.custom_reward_function` — use
+  `MultiVisualRewardManager` with `reward.reward_functions`.
+- The single global reward model (`reward.reward_model.enable=true` serving one
+  `custom_reward_function`) — use a named `engine` model under `reward.models`;
+  see [Migrate an existing engine reward](#migrate-an-existing-engine-reward).
+- `reward.custom_reward_function.use_accelerator` — use
+  `reward.accelerator_workers.enabled`.
+
+`AudioRewardManager` and the upstream `naive`/text reward managers are not
+deprecated; shared-manager audio and text input contracts are follow-up work.
 
 ## Migrate an existing engine reward
 
@@ -193,9 +209,40 @@ Caller overrides remain last. This recipe opts into
 response length and optional deterministic seed from the model's rollout
 settings, falling back to `reward.reward_model.rollout`. Explicit scorer
 `sampling_params` take precedence. Existing named rewards without this opt-in
-keep their scorer defaults; OCR still defaults to 4096 output tokens and honors
-`GENRM_OCR_SEED`. The opt-in preserves the legacy visual manager's seed behavior:
-an environment seed is excluded unless rollout determinism supplies a seed.
+keep their scorer defaults; OCR defaults to 256 output tokens (or
+`GENRM_OCR_MAX_TOKENS`) and honors `GENRM_OCR_SEED`. The opt-in preserves the
+legacy visual manager's seed behavior: an environment seed is excluded unless
+rollout determinism supplies a seed.
+
+### Judge output budget
+
+`reward.models.<name>.rollout.response_length` is the output budget of a
+generative judge: with the opt-in above it is forwarded as the request's
+`max_tokens`, and the engine also uses it as the server-side default
+`max_new_tokens`. Its inherited default of 2048 comes from
+`reward.reward_model.rollout` and is sized for reasoning judges. OCR
+transcriptions are a few dozen tokens, and a small VLM judge occasionally falls
+into a repetition loop on an illegible image; without a budget that one request
+runs to the limit at single-sequence decode speed while the whole step waits.
+The OCR recipes therefore set `response_length=256`. The budget is resolved in
+this order:
+
+1. An explicit `reward.reward_functions.<term>.sampling_params` replaces the
+   rollout-derived parameters as a whole. Its `max_tokens` is the budget; a
+   mapping without `max_tokens` falls through to step 3, not to
+   `rollout.response_length`.
+2. Otherwise, with `use_rollout_sampling_params=true`, the model's
+   `rollout.response_length` when it is set.
+3. The scorer's environment override (`GENRM_OCR_MAX_TOKENS`), then the scorer
+   default (256).
+
+The OCR scorer counts the ground truth with the judge's tokenizer and raises
+before sending a request when it needs more tokens than the budget. A
+`required=true` term then stops the run; an optional term records
+`reward/<term>/errors` and contributes 0, so set `required=true` when an
+over-budget ground truth must stop training. The check needs the judge's
+tokenizer, which the engine backend passes to the scorer; a caller that does not
+supply one skips the check.
 
 ## Model-to-reward binding
 
@@ -229,6 +276,27 @@ reward_functions:
     name: compute_semantic_quality
 ```
 
+### VLM-as-a-judge
+
+One judge model can serve several reward terms, each with its own `user_prompt`
+(literal text, or a `pkg://` builder). For UnifiedReward, literal text may contain
+`{caption}`, and a custom builder receives the caption. Leaving `user_prompt`
+unset keeps the scorer's default request.
+
+```yaml
+reward_functions:
+  ocr:
+    model: judge
+    path: pkg://verl_omni.utils.reward_score.genrm_ocr
+    name: compute_score_ocr
+    user_prompt: "Transcribe all text in the image exactly."
+  semantics:
+    model: judge
+    path: pkg://verl_omni.utils.reward_score.unified_reward
+    name: compute_score_unified_reward
+    user_prompt: pkg://my_package.prompts.build_semantic_prompt
+```
+
 Every term uses the existing aggregation contract:
 
 ```text
@@ -237,7 +305,73 @@ final_reward = sum(term.weight * term.score)
 
 `required=true` makes a scoring failure fatal. An optional term records the
 error and contributes zero. Model setup and lifecycle failures are always
-fatal.
+fatal. `ArtifactContractError` is fatal for every term, including optional
+terms, so missing or invalid named media cannot silently contribute zero.
+
+## Concurrent independent reward terms
+
+By default, reward terms run in configuration order within each sample, while
+separate samples retain their existing concurrency. To overlap independent
+terms, set a worker-wide cap above one and opt in each term:
+
+```yaml
+reward:
+  multi_reward_concurrency: 2
+  reward_functions:
+    first:
+      path: pkg://my_package.rewards
+      name: score_first
+      independent: true
+    second:
+      path: pkg://my_package.rewards
+      name: score_second
+      independent: true
+```
+
+`independent` must be a boolean and defaults to `false`. Eligible terms use
+coroutine score functions with no named model (for example, an external HTTP
+scorer) or an `engine` named model. Native model terms and synchronous score
+functions cannot opt in. Opting in asserts that score functions treat sample
+inputs as read-only, do not share mutable state, and have no dependencies on
+other reward terms. The manager passes the same input objects to each scorer;
+it does not copy large image or other payloads.
+
+Adjacent independent terms execute in windows of at most
+`multi_reward_concurrency`; any other term is an ordering barrier for its
+sample. When the cap is above one, it bounds active independent scorer calls
+across all samples handled by one reward worker. Barriers do not use the cap
+and retain cross-sample concurrency, even while independent calls are active.
+Each window waits for all its terms to settle before admitting the next window
+for that sample, even if one term finishes and frees a semaphore permit while
+another is still running. This bounds the number of admitted tasks rather than
+enqueueing every term at once; a freed permit remains available to independent
+terms from other samples.
+Scores, diagnostics, and required/optional error handling remain in
+configuration order. The cap does not limit reward workers, barrier calls, or
+engine-side requests. Increasing it does not establish a throughput
+improvement by itself. Cancelling a serial synchronous scorer stops its caller
+without waiting for its executor thread; the thread may continue until the
+scorer returns.
+An admitted window settles all its terms before reporting a contract error.
+Independent async scorers must cooperate with cancellation. A scorer that
+swallows `CancelledError` can block window drain and permit release; the manager
+does not impose a timeout or preempt it.
+
+## Component rewards and consumer support
+
+`reward.aggregation` defaults to `weighted_sum`. Component mode requires
+`algorithm.trainer_type=direct_preference` and the registered `omni_nft` loss.
+The reward manager checks both at initialization, before reward workers start.
+The OmniNFT loss consumes the named components and applies modality routing.
+Online DPO, FlowGRPO, and ordinary DiffusionNFT do not support this layout.
+
+For a supporting consumer, component mode returns `rm_scores` with shape `[B, K]`.
+Columns follow the sorted reward-function names in `meta_info["reward_names"]`.
+Every term must have `required: true` and `weight: 1.0`; missing or non-finite
+components are rejected before actor update. Per-term `reward/<name>` metrics
+remain available. Summing the columns produces an unweighted diagnostic total,
+not a modality-weighted training objective. `routing_weights` is reserved for
+the companion OmniNFT consumer and is not forwarded to scorers.
 
 ## Use engine only
 
@@ -313,11 +447,121 @@ arguments are already present in `executor.kwargs`.
 
 Each native model entry is one deployment. Different checkpoints or lifecycle
 policies require different named deployments; multiple reward functions may
-share one deployment through their `model` field. In this PR, every
+share one deployment through their `model` field. For accelerator placement, every
 `placement.devices` entry creates one complete replica of that deployment.
-Future FSDP support will need an explicit replica-group schema because a flat
-device list cannot distinguish full replicas from ranks within one sharded
-replica.
+Experimental FSDP2 PickScore support uses `placement.replica_groups: [[0, 1]]`
+for one sharded replica across two GPUs. It requires a dedicated single-node
+reward pool and synchronous V1 diffusion training. See the
+[FSDP2 reward model design](../advanced/fsdp2_reward_models.md) for configuration,
+lifecycle guarantees and the supported scope.
+
+For native CLAP, AudioBox, and DeSync scorers, a single-sample `batch` supplies
+`audio`, `audio_sample_rate`, and optional `audio_layout` in preference to
+`extra_info`. Without `batch`, the scorers read `extra_info`.
+
+AudioBox and DeSync require an explicit positive integer source sample rate.
+Mono `(T,)` audio is accepted directly; two-dimensional audio requires
+`audio_layout: CT` in the scorer config or metadata and is interpreted as
+`(channels, samples)`. Channels-last `TC`, empty waveforms, and non-finite
+samples are rejected.
+
+CLAP preserves its existing defaults: an absent sample-rate key means 48 kHz,
+and two-dimensional audio is interpreted as `(channels, samples)` without a
+new config field. An explicit source sample rate still takes precedence, so
+24 kHz LTX and 32 kHz MiniMax audio are resampled from their actual rates.
+Existing CLAP recipes do not need an `audio_layout` setting. CLAP shares the
+empty/non-finite input checks, and accepts an explicit layout when supplied.
+
+HPSv3 and VideoAlign accept uint8 frames or finite floating-point frames in
+`[0, 1]`; values outside that range are rejected. HPSv3 applies the same pixel
+validation to interval and uniform sampling.
+
+### Configure native audio/video scorers
+
+Use `pkg://verl_omni.utils.reward_score.<module>` paths for the new AudioBox,
+DeSync, and VideoAlign scorers. Bind a native model through `model:` (or a
+matching model/term name) with `executor.model` set to `module:Class`:
+`audiobox:AudioBoxModel`, `desync:DeSyncModel`, or `videoalign:VideoAlignModel`,
+using the full `verl_omni.utils.reward_score` module prefix. DeSync additionally
+requires `source_root` in `executor.kwargs`; VideoAlign requires `base_model_path`.
+
+DeSync and VideoAlign require `fps` in each reward-function config. Set it to the
+actual generated frame rate, including fractional rates; there is no inferred
+or checkpoint-default FPS. For scorers that require a native `reward_model`,
+missing required arguments are configuration errors and fail before optional
+reward-error handling, even with `required: false`. If such a scorer also requires
+`fps`, the manager rejects null, boolean, non-numeric, non-finite, zero, and negative
+values before calling it. Positive fractional rates and numeric strings remain
+supported. Optional model inference failures still contribute zero and record an
+error; existing scorers retain their optional failure behavior.
+For example, with a configured native `desync` model:
+
+```yaml
+reward_functions:
+  desync:
+    path: pkg://verl_omni.utils.reward_score.desync
+    name: compute_score
+    model: desync
+    fps: 24.0  # Must match the generated video.
+    audio_layout: CT
+    required: true
+```
+
+VideoAlign requires a non-empty prompt from `ground_truth` or `prompt_key`.
+DeSync currently requires uint8 RGB `[T, C, H, W]` video. HPSv3 and VideoAlign
+also accept finite floating-point pixels in `[0, 1]`; this does not imply support
+for arbitrary layouts. Normalize decoded video to TCHW at the caller boundary.
+
+DeSync loads Python code from `source_root`, so use a **trusted checkout**. The
+reference OmniNFT revision is `fb9237f6e74edf0d0f2a683f4d975b79fde588fe`; record
+local modifications separately. Path checks do not authenticate source contents.
+The existing loader and AST compatibility lookup use the upstream package
+namespace; replacing only the entry-file import would not isolate that package.
+
+## Use native on CPU
+
+Small native reward executors can run as ordinary Ray CPU actors without
+allocating a trainer GPU pool. Set `placement.resource=cpu`, use
+`num_replicas` for the number of complete replicas, and reserve CPU capacity
+for each replica with `cpus_per_worker`:
+
+```yaml
+reward:
+  models:
+    quality:
+      backend: native
+      model_path: /models/quality
+      placement:
+        resource: cpu
+        num_replicas: 2
+        cpus_per_worker: 2
+      executor:
+        model: my_package.reward_model:CpuRewardModel
+  reward_functions:
+    quality:
+      path: pkg://my_package.reward_score
+      name: compute_quality_score
+```
+
+CPU native executors default to `torch.device("cpu")`. An explicit
+`executor.kwargs.device` must use CPU for CPU placement, or the current
+accelerator type for accelerator placement. A mismatch is rejected before
+workers are created. `placement.devices` is reserved for accelerator bundle
+indices; CPU placement requires a positive `num_replicas`. CPU deployments do not consume or split
+the trainer-selected accelerator reward pool, so they can be used alone or
+alongside engine and accelerator-native deployments.
+
+Each scoring phase wakes its worker-local models and, when `offload=true`,
+unloads them after all accepted scoring calls finish. A scoring failure or
+caller cancellation also waits for accepted calls before unloading. This wait
+has no timeout: a scoring RPC that never returns can block cleanup. CPU
+placement does not add forced worker termination or automatic retries.
+
+With `offload=false`, models remain resident. If a CPU deployment explicitly enables
+Ray actor restarts, the next scoring phase initializes a restarted actor again.
+Production worker creation does not enable automatic restarts. Accelerator
+deployments with `offload=false` skip repeated wake-ups and do not provide this
+restart recovery.
 
 ### Wrap a Transformers model for native mode
 
@@ -466,7 +710,7 @@ keeps `compute_rm_score()` as the synchronous compatibility entrypoint used by
 current trainers. Cleanup is attempted even when inference or scoring fails.
 
 Native PickScore can retain its existing weights on CPU while sleeping by setting
-`executor.kwargs.retain_weights_on_cpu: true`. This opt-in requires a CUDA worker;
+`executor.kwargs.retain_weights_on_cpu: true`. This opt-in requires a CUDA or Intel GPU worker;
 the default native lifecycle still closes and reconstructs the model. CPU
 retention keeps the same model and processor, and inference is rejected while
 asleep. Call `await multi_reward_model_manager.close_native_models()` for final
@@ -523,13 +767,15 @@ workload benefits.
 
 - Named-model aggregation currently uses the visual input contract implemented
   by `MultiVisualRewardManager`; the aggregation core itself is modality-neutral.
-- Native models are replicated; FSDP and tensor parallelism are not supported.
-- CPU-native placement is not supported.
+- Flat native placement creates full replicas. Experimental FSDP2 support is
+  limited to one frozen PickScore deployment with two GPU ranks; see the
+  [design document](../advanced/fsdp2_reward_models.md). Tensor parallelism is
+  not supported.
 - Native routing defaults to a static even split; optional microbatch dispatch
   balances available work, without preempting or stealing an active batch.
 - Named models do not participate in streaming reward computation.
 - vLLM-Omni reward serving is not implemented.
 
 Automatic migration of every existing reward implementation and a unified
-streaming/FSDP design remain follow-up work. The configuration migration and
+streaming integration remain follow-up work. The configuration migration and
 extension contracts supported by this change are documented above.

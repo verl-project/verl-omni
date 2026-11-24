@@ -1,6 +1,6 @@
 # How to Integrate a New Diffusion Model for FlowGRPO Training
 
-Last updated: 09/17/2026.
+Last updated: 11/10/2026.
 
 This guide walks you through everything required to integrate a new diffusion
 model into VeRL-Omni so it can be trained end-to-end with the **FlowGRPO**
@@ -28,14 +28,17 @@ code is the canonical reference.
 ## TL;DR
 
 A new model needs **three files in one new package** plus **two registry
-hooks**. The same adapters work with both the default diffusers + FSDP2
+hooks**. A run that also trains the text encoder adds
+`ar_training_adapter.py`; see
+[Composite AR training adapter](#composite-ar-training-adapter).  The same adapters work with both the default diffusers + FSDP2
 backend and the optional [VeOmni backend](#53-use-the-veomni-backend-optional) — backend selection is purely a configuration concern.
 
 ```
 verl_omni/pipelines/<model>_flow_grpo/
 ├── __init__.py                       # re-exports both adapters
 ├── diffusers_training_adapter.py     # subclass of DiffusionModelBase
-└── vllm_omni_rollout_adapter.py      # subclass of VllmOmniPipelineBase
+├── vllm_omni_rollout_adapter.py      # subclass of VllmOmniPipelineBase
+└── ar_training_adapter.py            # only when the text encoder is trained
 ```
 
 Both adapters are picked up by string-based registries that dispatch on
@@ -259,7 +262,8 @@ as a template:
 verl_omni/pipelines/<model>_flow_grpo/
 ├── __init__.py
 ├── diffusers_training_adapter.py
-└── vllm_omni_rollout_adapter.py
+├── vllm_omni_rollout_adapter.py
+└── ar_training_adapter.py            # only when AR is trained
 ```
 
 The `__init__.py` re-exports both adapters so the `@register(...)`
@@ -399,6 +403,90 @@ so the skip cannot desync the ranks. Ignored parameters must stay frozen
 
 ---
 
+## Composite AR training adapter
+
+Skip this file when only the DiT is trained. 
+Add `ar_training_adapter.py` when the same package trains the AR (e.g., text encoder) with the DiT (`model_type=diffusion_composite_model`). 
+Packages that do not train the AR must not register a subclass — `DiffusionModelARBase.peek_class` returns `None` and the engine skips AR setup.
+
+The AR backend is `CompositeARFSDPEngineWithLMHead`. After verl builds the
+language-model module it dispatches through `DiffusionModelARBase`, which is not `DiffusionModelBase`. AR setup stays in `ar_training_adapter.py`; the DiT adapter stays in `diffusers_training_adapter.py`. Both use the same
+`(architecture, algorithm)` key.
+
+```python
+from verl_omni.pipelines.model_base import DiffusionModelARBase
+
+@DiffusionModelARBase.register("MyModelPipeline", algorithm="flow_grpo")
+class MyModelAR(DiffusionModelARBase):
+    @classmethod
+    def configure_module(cls, module, model_config) -> None:
+        ...
+
+    @classmethod
+    def get_fsdp_ignored_module_names(cls, model_config) -> list[str]:
+        return []  # optional; frozen subtrees left unsharded under FSDP2
+```
+
+Import the class from the package `__init__.py` so the decorator runs:
+
+```python
+from .ar_training_adapter import MyModelAR  # noqa: F401
+```
+
+The worked example is
+[`qwen_image_dual_grpo/ar_training_adapter.py`](../../verl_omni/pipelines/qwen_image_dual_grpo/ar_training_adapter.py).
+
+- `configure_module` receives the Hugging Face module before FSDP wrap.
+  Strip an unused tower or patch `forward` here.
+- Do not call DiT adapter methods from this file, and do not put this
+  setup on `diffusers_training_adapter.py`.
+- Under FSDP2, `get_fsdp_ignored_module_names` feeds
+  `CompositeARFSDPEngineWithLMHead._build_fsdp_module`.
+
+### Composite rollout loop
+
+Training an AR adapter pairs with the `composite_single_turn_agent` loop,
+which runs AR and diffusion generation in one rollout: one AR sample per
+input row, each expanded into its diffusion group. Its contract, in brief:
+
+- Loop selection: `actor_rollout_ref.rollout.agent.default_agent_loop=composite_single_turn_agent`
+  (a per-sample `agent_name` override must select a loop that returns the
+  composite output contract — one AR result plus its diffusion samples per
+  row — or the worker's unpack fails).
+- `rollout.m` is the AR repeat count: callers repeat each prompt row themselves
+  (`batch.repeat(rollout.m)`, as the composite test does) to draw `m` AR
+  rollouts per prompt — the loop emits one AR output per row; `rollout.n` is
+  the diffusion group size per AR sample (`rollout.val_kwargs.n` replaces it
+  for validation batches).
+- AR sampling lives under `actor_rollout_ref.rollout.ar.*`.
+- The reward config must define a function named `ar` with `weight: 0` — AR
+  reward is derived from the per-image `reward/ar` extras and the loop asserts
+  the zero weight (`verl_omni/agent_loop/composite_agent_loop.py`).
+- AR `position_ids` dispatch to the registered pipeline's
+  `build_ar_position_ids` hook (`verl_omni/pipelines/model_base.py`).
+- The manager is `CompositeAgentLoopManager`
+  (`verl_omni.agent_loop.composite_agent_loop.CompositeAgentLoopManager`),
+  selected via `+actor_rollout_ref.rollout.agent.agent_loop_manager_class`
+  (the `+` prefix is needed — the key is absent from the shipped config).
+
+**Trainer status — read before wiring a run.** The manager's
+`generate_sequences` returns an `(ar_batch, diffusion_batch)` tuple, while the
+shipped trainers (both `main_diffusion` and the V1 path) consume a single
+`DataProto`. No in-tree trainer or example recipe consumes the composite
+manager today; the machinery is exercised by
+[`tests/agent_loop/test_composite_agent_loop.py`](../../tests/agent_loop/test_composite_agent_loop.py)
+at the worker/manager level. Integrating a composite model end-to-end needs
+trainer-side support for the tuple — raise it with the maintainers first.
+The AR training adapter half (above) and the `qwen_image_dual_grpo` package
+remain valid references.
+
+Models that are not composite stay on the default `diffusion_single_turn_agent`
+loop. Put model-specific rollout behavior in adapter hooks first — registering
+a new loop is a last resort (see "Select the rollout loop" in
+[`integrating_an_omni_model.md`](integrating_an_omni_model.md)).
+
+---
+
 ## Step 4 — Write `vllm_omni_rollout_adapter.py`
 
 Subclass the upstream `<Name>Pipeline` from `vllm_omni.diffusion.models`
@@ -410,7 +498,7 @@ class MyModelPipelineWithLogProb(MyModelPipeline):
     ...
 ```
 
-Your subclass must do four things:
+Your subclass must do five things:
 
 1. **Replace the upstream scheduler** (typically Euler-based) with
    `FlowMatchSDEDiscreteScheduler`.
@@ -429,79 +517,77 @@ Your subclass must do four things:
 4. **Override `forward(req, ...)`** so that:
    - Sampling parameters come from `req.sampling_params` (use
      `extra_args` for SDE-specific knobs).
-   - Trajectory and metadata fields are returned via `rollout_output(...)`
-     from [`verl_omni.pipelines.diffusion_rollout_output`](../../verl_omni/pipelines/diffusion_rollout_output.py).
+   - Build trajectory and algorithm metadata with `rollout_output(...)` or
+     `with_rollout_data(...)` from
+     [`diffusion_rollout_output`](../../verl_omni/pipelines/diffusion_rollout_output.py).
    - `prompt_embeds`, `prompt_embeds_mask`, `negative_prompt_embeds`,
      and `negative_prompt_embeds_mask` are placed in `prompt_embeddings`. The diffusion agent loop
      ([`diffusion_agent_loop.py`](../../verl_omni/agent_loop/diffusion_agent_loop.py))
      reads these field names verbatim — **do not rename them**.
+5. **Attach named media artifacts** with `with_visual_artifacts`,
+   `with_batched_media_artifacts` or `with_media_artifacts` from
+   [`diffusion_rollout_output`](../../verl_omni/pipelines/diffusion_rollout_output.py),
+   alongside `rollout_output` / `with_rollout_data`. Cover both `forward` and
+   `post_decode` when step execution is supported. Preserve the named envelope
+   through the engine postprocessor; do not return a bare legacy tensor or tuple
+   from the rollout boundary.
 
 ### 4.1 Rollout response contract
 
-The rollout server normalizes the representation transported in `responses`:
+The adapter declares representation, layout and media kind, then normalizes
+**decoded** outputs once. `responses` is a compatibility projection of the
+explicitly selected primary artifact, not an unlabelled media tensor:
 
-- Pixel-valued outputs are quantized once to `torch.uint8` in `[0, 255]`.
-  Images reach a single-sample reward scorer as `(C, H, W)` and videos as
-  `(T, C, H, W)`.
-- `output_type=latent` keeps `responses` in floating point. With
-  `output_type=both`, the pixel response is uint8 and the clean latent remains a
-  separate floating-point field in `extra_info`.
-- Generated audio is transported separately and is not quantized to uint8.
+- Decoded image/video is `torch.uint8` `[0,255]` in `CHW` / `TCHW` per sample.
+- Native/packed latents retain their layout and floating dtype. They coexist
+  with decoded previews rather than standing in for missing preview data.
+- Decoded audio is floating `CT`, with an explicit sample rate; it is never
+  quantized as pixels. Video artifacts carry their own FPS.
 
-Reward managers validate `responses` against the active training or validation
-`output_type` and then forward it without dtype conversion. A pixel scorer that
-needs normalized model input must convert locally with
-`solution_image.float() / 255.0`; this normalizes the quantized pixels but cannot
-restore precision discarded at the rollout boundary. Do not multiply uint8 pixels
-by 255 again before PIL, JPEG, or HTTP serialization.
+Both reward managers reconstruct named artifacts and validate the primary
+projection. Pixel scorers select the decoded preview; latent scoring selects
+`image_latent`. A scorer needing normalized pixels converts locally with
+`.float() / 255.0`, not a second multiplication by 255. See the full
+[named-artifact contract](../advanced/diffusion_media_artifacts.md) for selectors, requested
+outputs, batching, transport and fail-fast validation.
 
 (diffusion-io-spec)=
 ### 4.2 Declare the media output contract (`diffusion_io_spec`)
 
-Set a `diffusion_io_spec` class attribute on the registered pipeline so the
-shared `DiffusionStrategy` knows what media your `forward` emits. The strategy
-reads it (via `VllmOmniPipelineBase.get_class(architecture, algorithm)`) when it
-converts the raw pipeline output into the rollout response. The primary modality
-and default audio sample rate come from the adapter.
-The current transport supports a single primary output or a `(visual, audio)`
-tuple; it does not support arbitrary auxiliary streams.
+Set `diffusion_io_spec` to the named outputs your adapter can produce. The
+strategy resolves it by `(architecture, algorithm)` and checks returned names,
+modality, representation and layout against it. `DiffusionIOSpec` and `MediaSpec`
+retain their names and import location. The positional `primary` / `auxiliary`
+declaration is replaced by named artifacts, with `representation` and `layout`
+added to `MediaSpec`:
 
 ```python
 from verl_omni.pipelines.rollout_media import DiffusionIOSpec, MediaSpec
 
 @VllmOmniPipelineBase.register("MyModelPipeline", algorithm="flow_grpo")
 class MyModelPipelineWithLogProb(MyModelPipeline):
-    # Image-only pipeline:
-    diffusion_io_spec = DiffusionIOSpec(primary=MediaSpec("image"))
+    diffusion_io_spec = DiffusionIOSpec(artifacts={
+        "image_preview": MediaSpec("image", "decoded", "CHW"),
+        "image_latent": MediaSpec("image", "latent", "LC"),
+    })
 ```
 
-- **`primary`** — the main media stream (`MediaSpec("image")` or
-  `MediaSpec("video")`), carried in `responses`.
-- **`auxiliary`** — either empty or one audio stream at tuple position `1`
-  (position `0` is the primary visual output). Other auxiliary declarations and
-  extra tuple elements are rejected, not silently discarded. A `forward` that
-  returns `(video, audio)` declares:
+- Declare **canonical decoded axes** and the model's **native final latent
+  axes**, not guessed channel-size conventions. Verify actual VAE outputs
+  separately from the sampler's packed training representation.
+- Runtime selectors identify primary, optional decoded preview and optional
+  decoded audio by name. `preview=None` skips export; a missing non-null selector
+  fails rather than falling back to latents.
+- Runtime video FPS and audio sample rate are required. A fixed sample rate can
+  be constrained in the declaration; otherwise read the real decoder/vocoder
+  configuration. LTX BWE can produce 48000 Hz audio, not 24000 Hz.
+- `pipeline.requested_outputs` requires extra named artifacts, e.g.
+  `[image_preview]` with `output_type=latent`. It is also available in the model
+  and validation configs. See [named artifacts](../advanced/diffusion_media_artifacts.md)
+  for decoding behavior and batch-union semantics.
+- Subclasses inherit the declaration when they use the same output contract.
 
-```python
-    diffusion_io_spec = DiffusionIOSpec(
-        primary=MediaSpec("video"),
-        auxiliary=(MediaSpec("audio", sample_rate=32000),),
-    )
-```
-
-- **`MediaSpec.sample_rate`** is the *default* audio sample rate in Hz. If your
-  `forward` attaches a runtime rate through the `rl` rollout metadata, that value
-  takes precedence and the strategy only falls back to this default. Declare the
-  rate your model actually decodes (MiniMax H3 → `32000`, LTX-2 → `24000`).
-- `MediaSpec.fps` is an optional declaration; current exporters still use
-  `trainer.video_fps`, not this field. `Modality` is `image | video | audio`.
-- The strategy propagates the primary modality as `media_kind`. Runtime metadata
-  may repeat the same value, but a conflicting modality raises an error.
-- Subclasses inherit the attribute, so a pipeline that subclasses another adapter
-  (e.g. `qwen_image_dual_grpo` extends `qwen_image_flow_grpo`) reuses its
-  `diffusion_io_spec` unless it overrides it.
-
-Every registered diffusion adapter declares one; see
+Every registered diffusion adapter declares named artifacts; see
 [`rollout_media.py`](../../verl_omni/pipelines/rollout_media.py) and the
 `test_diffusion_io_spec_on_cpu.py` completeness test.
 
@@ -626,7 +712,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     ...  # everything else identical to your diffusers/FSDP2 recipe
 ```
 
-See [`examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_veomni.sh`](../../examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_veomni.sh) for a complete VeOmni recipe that mirrors [`run_qwen_image_ocr.sh`](../../examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr.sh) line-for-line — the diff is only the engine-selection fields. Install instructions for VeOmni alongside vLLM 0.30.0 are in [`docs/start/engine_backends.md`](../start/engine_backends.md).
+See [`examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_veomni.sh`](../../examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_veomni.sh) for a complete VeOmni recipe that mirrors [`run_qwen_image_ocr.sh`](../../examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr.sh) line-for-line — the diff is only the engine-selection fields. Install instructions for VeOmni alongside vLLM are in [`docs/start/engine_backends.md`](../start/engine_backends.md#installing-veomni-alongside-vllm).
 
 
 #### Mixing override schemas — don't
@@ -683,16 +769,19 @@ Before opening the PR, confirm every box:
       (no decode-and-re-encode in the pipeline).
 - [ ] `verl_omni/pipelines/<model>_flow_grpo/` contains `__init__.py`,
       `diffusers_training_adapter.py`, and `vllm_omni_rollout_adapter.py`.
+      A package that also trains the AR module adds
+      `ar_training_adapter.py` and imports it from `__init__.py`
+      ([Composite AR training adapter](#composite-ar-training-adapter)).
 - [ ] [`verl_omni/pipelines/__init__.py`](../../verl_omni/pipelines/__init__.py)
       imports the new package.
 - [ ] Architecture string on both `@register(...)` decorators matches
       `model_index.json::_class_name`; the `algorithm=` keyword matches
       the algorithm you are integrating against (e.g. `"flow_grpo"` for
       FlowGRPO).
-- [ ] The registered pipeline declares a `diffusion_io_spec`
-      ([`DiffusionIOSpec`](../../verl_omni/pipelines/rollout_media.py)) whose
-      `primary` modality matches what `forward` emits, plus an `auxiliary`
-      audio stream (with its `sample_rate`) for joint audio/video models.
+- [ ] The registered pipeline declares `diffusion_io_spec.artifacts`, verifies
+      real VAE/packed latent layouts, and emits named outputs from every supported
+      execution mode. Runtime FPS/sample rate and primary/preview/audio selectors
+      must be explicit; missing requested media must fail, never fall back.
 - [ ] Scheduler returns latents in fp32 (no `model_output.dtype` cast in `step()`),
       `diffuse()` casts to model dtype before transformer forward and casts
       noise_pred to float32 before `scheduler.step()`

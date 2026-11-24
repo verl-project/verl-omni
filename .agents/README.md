@@ -29,6 +29,7 @@ thing, the guide wins and the file links to it.
 | Rule                              | Applies to                                                    | Key point |
 | --------------------------------- | ------------------------------------------------------------- | --------- |
 | [code-style](rules/code-style.md) | everywhere                                                    | automated scope versus conventions; runtime boundaries, shell recipes, contextual reuse and performance |
+| [trainer](rules/trainer.md)     | `verl_omni/trainer/**`, `verl_omni/workers/**`, `verl_omni/agent_loop/**` | the shared core is model- and algorithm-agnostic; extend via registries, not trainer forks |
 | [pipelines](rules/pipelines.md)   | `verl_omni/pipelines/**`                                      | dispatch is by registry key and registration is an import side effect; training adapters are never instantiated |
 | [reward](rules/reward.md)         | `verl_omni/utils/reward_score/**`, `verl_omni/reward_loop/**` | scorers are selected by config, not by the `data_source` dispatcher; managers call by keyword |
 | [config](rules/config.md)         | `verl_omni/trainer/config/**`, `verl_omni/workers/config/**`  | inherit verl's `BaseConfig`, declare `_mutable_fields`, regenerate the YAMLs |
@@ -44,6 +45,7 @@ thing, the guide wins and the file links to it.
 | [run-cpu-tests](skills/run-cpu-tests/SKILL.md)       | what the CPU job does that `testing_guide.md`'s local commands don't |
 | [self-review](skills/code-review/SKILL.md)           | report-only review: purpose, code quality, goal completeness, and validation/accountability; severity separate from category |
 | [profile](skills/profile/SKILL.md)                  | select a profiler and capture the relevant processes/workload |
+| [perf-tuning](skills/perf-tuning/SKILL.md)          | measured, regression-safe workflow for speeding up a Python/PyTorch hot path |
 | [train-infer-consistency](skills/train-infer-consistency/SKILL.md) | rollout / actor consistency collection and analysis using MindStudio skills |
 
 `commit-and-pr` holds the authoritative module list; other files link to it rather

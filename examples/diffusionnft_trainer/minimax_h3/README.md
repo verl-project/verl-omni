@@ -265,6 +265,57 @@ TOTAL_TRAINING_STEPS=100 OUTPUT_DIR=/path/to/output \
 bash examples/diffusionnft_trainer/minimax_h3/run_minimax_h3_t2va_lora.sh
 ```
 
+### Ascend NPU: 16 devices with FSDP8
+
+The Ascend T2VA launcher reuses the DiffusionNFT recipe above and selects
+FSDP2 with CPU parameter offload, optimizer offload, gradient checkpointing,
+and a per-device micro-batch of one. On 16 NPUs, `fsdp_size=8` creates two
+replicas, each sharded across eight devices. Rollout DiT and text-encoder
+TP are both four. These are LoRA reinforcement-learning updates with an
+ImageBind reward, not supervised fine-tuning.
+
+Install the Ascend runtime and compatible `torch_npu`, vLLM-Ascend, and
+vLLM-Omni packages following the
+[installation guide](https://github.com/verl-project/verl-omni/blob/main/docs/start/install.md).
+Use the checkpoint layout and T2VA parquet preparation described above.
+`MODEL_PATH` is the parent directory containing both `FL2VA/` and `transformer/`.
+
+```bash
+MODEL_PATH=/path/to/MiniMax-H3 \
+DATA_DIR=/path/to/t2va/verl_omni \
+IMAGEBIND_MODEL_PATH=/path/to/imagebind_huge.pth \
+WANDB_MODE=offline \
+NUM_GPUS=16 FSDP_SIZE=8 \
+TOTAL_EPOCHS=30 TOTAL_TRAINING_STEPS=30 \
+bash examples/diffusionnft_trainer/minimax_h3/run_minimax_h3_t2va_lora_npu.sh
+```
+
+For a one-update smoke check, set both `TOTAL_EPOCHS=1` and
+`TOTAL_TRAINING_STEPS=1`. Training stops at whichever limit is reached first;
+30 epochs equal 30 updates only when the training dataloader has one batch.
+The example defaults to 32 prompts, eight rollouts per prompt, 10 inference
+steps, and `TIMESTEP_FRACTION=0.34`: three of the nine eligible training
+noise levels per sample. Set `TIMESTEP_FRACTION=1.0` to train all nine.
+
+The Ascend example uses ImageBind with text-video weight 0.8 and audio-video
+weight 0.2; CLAP is omitted. It therefore has a different reward from the
+GPU recipe's default. Training output is 256x384 with 121 frames. The
+launcher uses Actor `_native_npu` and rollout `TORCH_SDPA`, and sources CANN
+and ATB from `ASCEND_HOME_PATH` (default `/usr/local/Ascend/ascend-toolkit`).
+Set `OUTPUT_DIR` to choose a fresh checkpoint, log, and video directory.
+Profiling is not enabled by this launcher.
+
+The Ascend wrapper fixes `ACTOR_SP=1`, `ACTOR_ATTN_BACKEND=_native_npu`,
+and `ROLLOUT_ATTN_BACKEND=TORCH_SDPA`; exporting those environment variables
+before launching does not override them. These are the settings used in the
+validated NPU run.
+
+FSDP2's CPU-offload policy must manage parameter placement during old-policy
+adapter copy/EMA updates. Manually moving the module in that context can
+leave DTensor device metadata inconsistent with its local CPU shard and
+break subsequent adapter export. The adapter-state helper skips that move
+when the policy is active.
+
 ## FL2VA (image-conditioned) training
 
 This recipe trains the FL2VA checkpoint with online DiffusionNFT. The rollout

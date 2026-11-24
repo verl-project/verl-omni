@@ -17,6 +17,7 @@ import logging
 
 import numpy as np
 import ray
+import torch
 from omegaconf import open_dict
 from tensordict import TensorDict
 from verl.experimental.reward_loop import RewardLoopManager
@@ -24,9 +25,11 @@ from verl.experimental.reward_loop.reward_loop import RewardLoopWorker
 from verl.protocol import DataProto
 from verl.trainer.ppo.reward import resolve_reward_manager_cls
 
+from verl_omni.utils.asyncio_utils import await_owned
 from verl_omni.workers.config.reward import (
     accelerator_workers_enabled,
     get_reward_model_entries,
+    has_fsdp_reward_models,
     has_reward_models,
     parse_reward_model_config,
     resolve_reward_model_name,
@@ -39,7 +42,6 @@ from .reward_model import MultiRewardModelManager
 from .reward_model_executor import (
     EngineRewardExecutor,
     NativeRewardExecutor,
-    _await_owned,
     build_engine_reward_executors,
     build_native_reward_executors,
 )
@@ -109,7 +111,7 @@ class OmniRewardLoopWorker(RewardLoopWorker):
         await executor.sleep()
 
     async def close_reward_model(self, name: str | None = None) -> None:
-        await _await_owned(self._close_reward_model(name))
+        await await_owned(self._close_reward_model(name))
 
     async def _close_reward_model(self, name: str | None = None) -> None:
         if name is None:
@@ -125,6 +127,23 @@ class OmniRewardLoopWorker(RewardLoopWorker):
                 raise result
 
 
+class OmniFSDPRewardLoopWorker(OmniRewardLoopWorker):
+    """One CPU scoring facade represents one complete FSDP rank group."""
+
+    def __init__(self, config, specs, workers, processor_path, timeout):
+        from .native_fsdp import NativeFSDPExecutor, attach_replica
+
+        self._replica = attach_replica(workers, processor_path, timeout)
+        super().__init__(config, reward_model_specs=specs)
+        name = next(iter(specs))
+        self.native_reward_executors = {name: NativeFSDPExecutor(self._replica)}
+        self.reward_manager.set_reward_executors({}, self.native_reward_executors)
+
+    def ready(self):
+        """Acknowledge successful facade construction."""
+        return self._replica.worker_group.world_size
+
+
 class OmniRewardLoopManager(RewardLoopManager):
     """RewardLoopManager that can start/stop the profiler on the reward-model rollout servers.
 
@@ -138,6 +157,16 @@ class OmniRewardLoopManager(RewardLoopManager):
 
     def __init__(self, config, rm_resource_pool=None, accelerator_resource_pool=None):
         self._score_lock = asyncio.Lock()
+        self._preserve_reward_components = config.reward.get("aggregation") == "preserve_components"
+        if self._preserve_reward_components:
+            if not has_reward_models(config):
+                raise ValueError("preserve_components requires named reward.models.")
+            loss_mode = config.actor_rollout_ref.actor.diffusion_loss.loss_mode
+            if config.algorithm.get("trainer_type") != "direct_preference" or loss_mode != "omni_nft":
+                raise ValueError(
+                    "reward.aggregation=preserve_components requires the OmniNFT direct-preference trainer; "
+                    "use reward.aggregation=weighted_sum for this trainer."
+                )
         self.accelerator_resource_pool = accelerator_resource_pool
         named_reward_manager_cls = None
         if has_reward_models(config):
@@ -199,21 +228,33 @@ class OmniRewardLoopManager(RewardLoopManager):
                     "engine_reward_loop_worker",
                 )
                 self._register_worker_group("shared", workers, group_config)
+                if any(specs[name].device_type == "cpu" for name in terms_by_group):
+                    # Start shared actors before native replicas reserve the available CPUs.
+                    ray.get([worker.__ray_ready__.remote() for worker in workers])
 
             for model_name, terms in terms_by_group.items():
                 model_config = parse_reward_model_config(model_name, models[model_name])
                 if model_config.dispatch_batch_size is not None:
                     self._reward_dispatch_batch_sizes[model_name] = model_config.dispatch_batch_size
-                placement = self.multi_reward_model_manager.native_device_assignments[model_name]
+                placement = self.multi_reward_model_manager.models[model_name].placement
                 group_config = self._copy_reward_config(terms)
                 with open_dict(group_config.reward):
-                    group_config.reward.num_workers = len(placement)
-                workers = self._create_native_workers(
-                    group_config,
-                    {model_name: specs[model_name]},
-                    model_name,
-                    f"native_reward_loop_worker_{model_name}",
-                )
+                    group_config.reward.num_workers = (
+                        1
+                        if placement.replica_groups
+                        else placement.num_replicas
+                        if placement.is_cpu
+                        else len(placement.devices)
+                    )
+                if model_config.placement.replica_groups:
+                    workers = self._create_fsdp_worker(group_config, specs[model_name], model_config)
+                else:
+                    workers = self._create_native_workers(
+                        group_config,
+                        {model_name: specs[model_name]},
+                        model_name,
+                        f"native_reward_loop_worker_{model_name}",
+                    )
                 self._register_worker_group(model_name, workers, group_config)
                 self.multi_reward_model_manager.bind_native_workers(model_name, workers)
 
@@ -278,6 +319,17 @@ class OmniRewardLoopManager(RewardLoopManager):
         ]
 
     def _create_native_workers(self, config, specs, model_name, name_prefix):
+        model = self.multi_reward_model_manager.models[model_name]
+        if model.placement.is_cpu:
+            placement = model.placement
+            return [
+                self.reward_loop_workers_class.options(
+                    num_cpus=placement.cpus_per_worker,
+                    name=f"{name_prefix}_{index}",
+                ).remote(config, None, specs)
+                for index in range(placement.num_replicas)
+            ]
+
         from .accelerator_reward_workers import build_accelerator_reward_workers
 
         resource_pool = self.multi_reward_model_manager.native_resource_pools.get(model_name)
@@ -291,6 +343,36 @@ class OmniRewardLoopManager(RewardLoopManager):
             reward_model_specs=specs,
             worker_name_prefix=name_prefix,
         )
+
+    def _create_fsdp_worker(self, config, spec, model):
+        from .native_fsdp import build_replica, validate_executor_config
+
+        validate_executor_config(model.executor)
+        processor_path = model.executor.kwargs.get("processor_path")
+        replica = build_replica(
+            self.multi_reward_model_manager.resource_pool,
+            model.model_path,
+            processor_path,
+            timeout=model.fsdp.timeout,
+            collective_timeout=model.fsdp.collective_timeout,
+            bundle_indices=model.placement.bundle_indices,
+        )
+        owner = self.multi_reward_model_manager.models[model.name]
+        try:
+            owner.bind_rank_workers(replica.worker_group.workers)
+            worker = ray.remote(OmniFSDPRewardLoopWorker).remote(
+                config, {model.name: spec}, replica.worker_group.workers, processor_path, model.fsdp.timeout
+            )
+            owner.bind_workers([worker])
+            ray.get(worker.ready.remote(), timeout=model.fsdp.timeout)
+        except BaseException as exc:
+            errors = [exc]
+            try:
+                owner._terminate_owned()
+            except BaseException as cleanup:
+                errors.append(cleanup)
+            raise BaseExceptionGroup("FSDP scoring worker construction failed", errors) from None
+        return [worker]
 
     def compute_rm_score(self, data):
         """Synchronous compatibility entrypoint for current trainers."""
@@ -340,9 +422,21 @@ class OmniRewardLoopManager(RewardLoopManager):
                     logger.exception("Failed to sleep reward models after scoring failed")
 
     async def _compute_named_model_scores(self, data: DataProto) -> DataProto:
-        group_outputs = await dispatch_reward_groups(
-            data, self._reward_worker_groups, self._reward_dispatch_batch_sizes
-        )
+        if has_fsdp_reward_models(self.config):
+            group_outputs = await dispatch_reward_groups(
+                data,
+                self._reward_worker_groups,
+                self._reward_dispatch_batch_sizes,
+                rpc_owners={
+                    name: self.multi_reward_model_manager.models[name]
+                    for name, entry in get_reward_model_entries(self.config).items()
+                    if entry.get("placement", {}).get("replica_groups")
+                },
+            )
+        else:
+            group_outputs = await dispatch_reward_groups(
+                data, self._reward_worker_groups, self._reward_dispatch_batch_sizes
+            )
 
         merged_scores = []
         merged_infos = []
@@ -362,14 +456,30 @@ class OmniRewardLoopManager(RewardLoopManager):
             merged_scores.append(total)
             merged_infos.append(info)
 
-        rm_scores = self.reward_manager_cls.assemble_rm_scores(data, merged_scores)
+        meta_info = {}
+        if self._preserve_reward_components:
+            reward_names = sorted(self.config.reward.reward_functions)
+            if not reward_names or not merged_infos:
+                raise ValueError("Component rewards require non-empty reward functions and samples.")
+            try:
+                rm_scores = torch.tensor(
+                    [[info[f"reward/{name}"] for name in reward_names] for info in merged_infos],
+                    dtype=torch.float32,
+                )
+            except KeyError as exc:
+                raise ValueError(f"Missing required component reward: {exc}") from exc
+            if not torch.isfinite(rm_scores).all():
+                raise ValueError("Required component rewards must be finite before actor update.")
+            meta_info["reward_names"] = reward_names
+        else:
+            rm_scores = self.reward_manager_cls.assemble_rm_scores(data, merged_scores)
         batch = TensorDict({"rm_scores": rm_scores}, batch_size=len(data))
         reward_extra_keys = list(dict.fromkeys(key for info in merged_infos for key in info))
         non_tensor_batch = {key: np.array([info.get(key) for info in merged_infos]) for key in reward_extra_keys}
         return DataProto(
             batch=batch,
             non_tensor_batch=non_tensor_batch,
-            meta_info={"reward_extra_keys": reward_extra_keys},
+            meta_info={"reward_extra_keys": reward_extra_keys, **meta_info},
         )
 
     def start_profile(self, **kwargs) -> None:

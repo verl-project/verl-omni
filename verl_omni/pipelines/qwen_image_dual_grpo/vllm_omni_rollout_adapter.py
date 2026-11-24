@@ -27,7 +27,7 @@ from vllm_omni.diffusion.data import DiffusionOutput
 from vllm_omni.diffusion.request import OmniDiffusionRequest
 from vllm_omni.diffusion.worker.request_batch import DiffusionRequestBatch
 
-from verl_omni.pipelines.diffusion_rollout_output import rollout_output
+from verl_omni.pipelines.diffusion_rollout_output import rollout_output, with_visual_artifacts
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
 from verl_omni.pipelines.qwen_image_flow_grpo.common import build_img_shapes, coalesce_not_none
 from verl_omni.pipelines.qwen_image_flow_grpo.vllm_omni_rollout_adapter import QwenImagePipelineWithLogProb
@@ -37,6 +37,7 @@ from verl_omni.pipelines.request_batch import (
 from verl_omni.pipelines.request_batch import (
     collate_prompt_rows as _collate_prompt_rows,
 )
+from verl_omni.pipelines.request_batch import requested_outputs_for_batch
 from verl_omni.pipelines.request_batch import (
     sample_per_sample_sde_windows as _sample_per_sample_sde_windows,
 )
@@ -113,12 +114,26 @@ class QwenImagePipelineWithDualLogProb(QwenImagePipelineWithLogProb):
     tokens from the Qwen2.5-VL text encoder before image diffusion.
     The pipeline returns:
 
-    * DiT trajectory log-probabilities (``all_log_probs``) from the SDE window, and others.
-    * Text-encoder token log-probabilities (``ar_all_log_probs``) for the generated text, and others.
+    * DiT trajectory fields plus named ``image_preview`` / ``image_latent`` artifacts.
+    * AR token ids, masks, and log-probabilities in rollout ``rl`` metadata, with no media payload.
     * The decoded text (``text_encoder_responses``).
     """
 
     supports_request_batch = False
+
+    @staticmethod
+    def build_ar_position_ids(attention_mask: torch.Tensor) -> torch.Tensor:
+        """Text-only Qwen2.5-VL M-RoPE layout for composite AR postprocess.
+
+        Returns ``(1, 4, seq_len)`` so ``left_right_2_no_padding`` can unpad the
+        multi-channel positions used by the text encoder. Vision channels reuse
+        the 1D text index until multimodal AR inputs are wired.
+        """
+        valid_mask = attention_mask[0].bool()
+        text_position_ids = torch.ones((1, attention_mask.shape[-1]), dtype=torch.long)
+        text_position_ids[0, valid_mask] = torch.arange(valid_mask.sum().item())
+        # M-RoPE layout: B x 4 x seq_len.
+        return text_position_ids.unsqueeze(1).expand(-1, 4, -1)
 
     def _get_qwen_text_response(
         self,
@@ -235,8 +250,11 @@ class QwenImagePipelineWithDualLogProb(QwenImagePipelineWithLogProb):
             ar_all_log_probs = None
 
         # compute attention masks and position ids
+        eos_ids = getattr(self.text_encoder.generation_config, "eos_token_id", None)
+        if eos_ids is None:
+            eos_ids = self.tokenizer.eos_token_id
         response_mask = get_response_mask(
-            response_id=ar_response_ids, eos_token=self.tokenizer.eos_token_id, dtype=attention_mask.dtype
+            response_id=ar_response_ids, eos_token=eos_ids, dtype=attention_mask.dtype
         )  # B*num_responses_per_prompt x seq_len
         if ar_all_log_probs is not None:
             ar_all_log_probs = torch.where(response_mask.bool(), ar_all_log_probs, torch.zeros_like(ar_all_log_probs))
@@ -289,7 +307,8 @@ class QwenImagePipelineWithDualLogProb(QwenImagePipelineWithLogProb):
 
         AR text generation:
         Autoregressively samples tokens from the text encoder.
-        Returns the all generated token ids, per-token log-probabilities, and the decoded response text.
+        Returns token ids, per-token log-probabilities, and the decoded response text
+        in rollout metadata, with an empty media payload.
 
         Diffusion image generation:
         Encodes the prompt, prepares latents, runs the SDE diffusion loop via
@@ -364,15 +383,20 @@ class QwenImagePipelineWithDualLogProb(QwenImagePipelineWithLogProb):
                 for e in refined_prompts
             ]
 
-            image = torch.zeros((1, 3, 1, 1), device=self.device).float()  # dummy image
-            result = rollout_output(
-                media=image,
-                rl={
-                    "ar_response_ids": _token_rows_to_lists(response.ar_response_ids),
-                    "ar_response_mask": _token_rows_to_lists(response.ar_response_mask),
-                    "ar_all_log_probs": response.ar_log_probs,
-                    "refined_prompt": messages,  # formatted prompt
-                    "text_encoder_responses": response.text_encoder_responses,  # CoT + prompt
+            # Token stage only. An empty payload keeps the engine from treating this
+            # call as an image; ``rl`` carries the AR tensors for the strategy.
+            result = DiffusionOutput(
+                output={
+                    "payload": {},
+                    "metadata": {
+                        "rl": {
+                            "ar_response_ids": _token_rows_to_lists(response.ar_response_ids),
+                            "ar_response_mask": _token_rows_to_lists(response.ar_response_mask),
+                            "ar_all_log_probs": response.ar_log_probs,
+                            "refined_prompt": messages,  # formatted prompt
+                            "text_encoder_responses": response.text_encoder_responses,  # CoT + prompt
+                        }
+                    },
                 },
                 to_cpu=True,
             )
@@ -402,6 +426,7 @@ class QwenImagePipelineWithDualLogProb(QwenImagePipelineWithLogProb):
             target_seq_len=None if negative_prompt_ids is None else int(negative_prompt_ids.shape[1]),
         )
 
+        requested_outputs = requested_outputs_for_batch(request_batch)
         height = sampling_params.height or self.default_sample_size * self.vae_scale_factor
         width = sampling_params.width or self.default_sample_size * self.vae_scale_factor
         num_inference_steps = sampling_params.num_inference_steps or num_inference_steps
@@ -532,8 +557,9 @@ class QwenImagePipelineWithDualLogProb(QwenImagePipelineWithLogProb):
         )
 
         self._current_timestep = None
-        if output_type == "latent":
-            image = latents
+        native_latents = latents
+        if output_type == "latent" and "image_preview" not in requested_outputs:
+            image = None
         else:
             latents = self._unpack_latents(latents, height, width, self.vae_scale_factor)
             latents = latents.to(self.vae.dtype)
@@ -560,6 +586,15 @@ class QwenImagePipelineWithDualLogProb(QwenImagePipelineWithLogProb):
                 "negative_prompt_embeds_mask": negative_prompt_embeds_mask,
             },
             to_cpu=True,
+        )
+        result = with_visual_artifacts(
+            result,
+            decoded=image,
+            latents=native_latents,
+            latent_layout="LC",
+            output_type=output_type,
+            context=f"pipeline={type(self).__name__}, request_id={[r.request_id for r in request_batch.requests]}",
+            requested=requested_outputs,
         )
         outputs = _split_diffusion_output_by_request(
             result,

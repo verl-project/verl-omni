@@ -1,0 +1,1 @@
+../../../examples/omninft_trainer/ltx2/README.md

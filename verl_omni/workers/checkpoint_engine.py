@@ -22,9 +22,9 @@ from verl.utils.ray_utils import auto_await
 # dispatch arrives with verl#7227). verl-omni therefore registers a thin
 # subclass of verl's DeltaShardedCheckpointEngine under its own backend name:
 # the subclass re-declares the wire as named_tensors and flattens the flush
-# stream into sentinel-named pairs, so verl's unmodified worker AND verl's
-# unmodified vLLM ServerAdapter drive the whole sync -- no worker subclass, no
-# gate widening, no adapter subclass. Importing this module performs the
+# stream into sentinel-named pairs. verl's worker and the inherited vLLM
+# ServerAdapter weight sender drive the sync; the omni adapter adds checked
+# replies for IPC updates. Importing this module performs the
 # registration (see verl_omni/__init__.py).
 try:
     from verl.checkpoint_engine import DeltaShardedCheckpointEngine

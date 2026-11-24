@@ -444,8 +444,9 @@ class VeOmniDiffusionEngine(BaseEngine):
         if loss_function is not None:
             data = tu.get_tensordict(
                 {
-                    "old_log_probs": micro_batch["old_log_probs"][:, step],
-                    "advantages": micro_batch["advantages"][:, step],
+                    key: micro_batch[key][:, step]
+                    for key in ("old_log_probs", "advantages")
+                    if micro_batch.get(key, None) is not None
                 },
             )
             tu.assign_non_tensor(

@@ -13,8 +13,8 @@
 # limitations under the License.
 """CPU checks for the rollout side of ``omni_delta_sharded`` weight sync.
 
-The wire is verl's stock ``named_tensors`` bucketed channel end to end (verl's
-unmodified vLLM ServerAdapter drives it): the omni engine subclass flattens
+The wire is verl's stock ``named_tensors`` bucketed channel end to end (the
+omni adapter inherits verl's vLLM weight sender): the omni engine subclass flattens
 each delta flush's sentinel tensors (``__delta_spec__`` / ``__positions__`` /
 ``__values__``) into the stream with a ``#<flush>`` suffix, and the omni worker
 extension routes the stream by sniffing the first bucket. These tests drive
@@ -468,13 +468,14 @@ def test_delta_apply_rejects_npu_platform(monkeypatch):
 
 def test_registry_keeps_verl_server_adapter():
     """The delta wire rides verl's stock named_tensors bucketed channel; the omni
-    subclass only remaps SP ranks and inherits every transport method."""
+    subclass inherits the weight sender and server-handle setup."""
     from verl.workers.rollout.base import get_rollout_class
     from verl.workers.rollout.vllm_rollout.vllm_rollout import ServerAdapter
 
     adapter_class = get_rollout_class("vllm_omni", "async")
     assert issubclass(adapter_class, ServerAdapter)
-    assert {name for name, value in vars(adapter_class).items() if callable(value)} == {"__init__"}
+    assert adapter_class.update_weights is ServerAdapter.update_weights
+    assert adapter_class._ensure_server_handle is ServerAdapter._ensure_server_handle
 
 
 def _flattened_pairs(flushes):
@@ -492,9 +493,9 @@ def _assert_flattened(got, expected):
 def test_omni_delta_sharded_registers_flattening_engine(monkeypatch):
     """The omni backend is a thin subclass of verl's DeltaShardedCheckpointEngine
     that re-declares the wire as named_tensors and flattens flushes into
-    sentinel-suffixed pairs, so verl's unmodified worker and ServerAdapter drive
-    the whole sync. Without the transport deps (e.g. CPU envs without cupy) the
-    alias is absent and asking for it fails closed. The flatten itself still runs
+    sentinel-suffixed pairs, so verl's worker and the inherited ServerAdapter
+    weight sender drive the sync. Without the transport deps (e.g. CPU envs without
+    cupy) the alias is absent and asking for it fails closed. The flatten still runs
     here: the parent class is what needs cupy, not the suffix loop."""
     from verl.checkpoint_engine import CheckpointEngineRegistry, DeltaShardedCheckpointEngine
 

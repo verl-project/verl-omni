@@ -69,6 +69,7 @@ async def _run_retry_e2e():
         "server_url": server_url,
         "max_retries": 2,
         "retry_backoff": 0,
+        "extra_info": {"media_kind": "image"},
     }
     try:
         assert await client.compute_score(**kwargs) == {"score": 0.75}
@@ -88,3 +89,40 @@ async def _run_retry_e2e():
 def test_http_scorer_retry_e2e():
     """Verify recovery after two 503s and failure after retry exhaustion."""
     asyncio.run(_run_retry_e2e())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("metadata", ["absent", None, {}, {"media_kind": "latent"}])
+async def test_http_scorer_rejects_undeclared_media_before_http(monkeypatch, metadata):
+    from verl_omni.pipelines.rollout_media import ArtifactContractError
+
+    def no_http(*args, **kwargs):
+        pytest.fail("Invalid media reached HTTP session creation")
+
+    monkeypatch.setattr(client.aiohttp, "ClientSession", no_http)
+    monkeypatch.delattr(client.compute_score, "_session", raising=False)
+    kwargs = {} if metadata == "absent" else {"extra_info": metadata}
+    with pytest.raises(ArtifactContractError, match="media_kind"):
+        await client.compute_score(
+            torch.zeros(3, 2, 2, dtype=torch.uint8), "prompt", "http://localhost:19082", **kwargs
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("preview", [None, "latent"])
+async def test_http_scorer_rejects_named_latent_before_http(monkeypatch, preview):
+    from verl_omni.pipelines.rollout_media import ArtifactContractError, MediaArtifact, MediaSpec
+
+    latent = torch.zeros(3, 2, 2)
+    info = {
+        "media_artifacts": {"latent": MediaArtifact(MediaSpec("image", "latent", "CHW"), latent)},
+        "preview_artifact": preview,
+    }
+
+    def no_http(*args, **kwargs):
+        pytest.fail("Latent media reached HTTP session creation")
+
+    monkeypatch.setattr(client.aiohttp, "ClientSession", no_http)
+    message = "preview artifact" if preview is None else "canonical decoded media"
+    with pytest.raises(ArtifactContractError, match=message):
+        await client.compute_score(latent, "prompt", "http://localhost:19082", extra_info=info)

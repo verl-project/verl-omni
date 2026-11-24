@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import math
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -47,8 +48,19 @@ class DiffusionLossConfig(BaseConfig):
     dpo_beta: float = 2000.0
     kl_mask_threshold: float = 1e-5
     add_kl_coefficient: bool = True
+    # Scale of the CRD implicit reward (beta_old in the paper).
+    crd_beta: float = 1.0
+    # Minimum reward-adaptive coefficient for the pretrained-reference penalty.
+    crd_kl_min: float = 0.0
     dgpo_beta: float = 100.0
     dgpo_clip_range: float = 0.01
+    awm_clip_range: float = 1e-4
+    awm_kl_coef: float = 0.1
+    # OmniNFT-only modality weights and reference regularization coefficients.
+    video_weight: float = 1.0
+    audio_weight: float = 1.0
+    video_ref_kl_coef: float = 0.0
+    audio_ref_kl_coef: float = 0.0
 
     def __post_init__(self):
         """Validate diffusion loss configuration."""
@@ -57,7 +69,10 @@ class DiffusionLossConfig(BaseConfig):
             "flow_dppo",
             "grpo_guard",
             "diffusion_nft",
+            "omni_nft",
             "dgpo",
+            "crd",
+            "awm",
             "dpo",
             "dmd2",
             "dance_grpo",
@@ -75,10 +90,19 @@ class DiffusionLossConfig(BaseConfig):
             raise ValueError(f"adaptive_weight_min must be positive, got {self.adaptive_weight_min}.")
         if self.kl_mask_threshold <= 0:
             raise ValueError(f"kl_mask_threshold must be positive, got {self.kl_mask_threshold}.")
+        if self.loss_mode == "crd":
+            if not math.isfinite(self.crd_beta) or self.crd_beta <= 0:
+                raise ValueError("crd_beta must be finite and positive.")
+            if not 0 <= self.crd_kl_min <= self.ref_kl_coef or not math.isfinite(self.ref_kl_coef):
+                raise ValueError("CRD requires finite 0 <= crd_kl_min <= ref_kl_coef.")
         if self.dgpo_beta <= 0:
             raise ValueError(f"dgpo_beta must be positive, got {self.dgpo_beta}.")
         if self.dgpo_clip_range < 0:
             raise ValueError(f"dgpo_clip_range must be non-negative, got {self.dgpo_clip_range}.")
+        if self.awm_clip_range < 0:
+            raise ValueError(f"awm_clip_range must be non-negative, got {self.awm_clip_range}.")
+        if self.awm_kl_coef < 0:
+            raise ValueError(f"awm_kl_coef must be non-negative, got {self.awm_kl_coef}.")
 
 
 @dataclass
@@ -205,6 +229,7 @@ class DiffusionActorConfig(BaseConfig):
         assert self.rollout_n != MISSING
         valid_loss_agg_modes = [
             "token-mean",
+            "token-sum",
             "seq-mean-token-sum",
             "seq-mean-token-mean",
             "seq-mean-token-sum-norm",

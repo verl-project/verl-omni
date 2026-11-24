@@ -145,6 +145,8 @@ def test_lora_separate_fails_before_ray_initialization(monkeypatch, separate_con
         lambda: pytest.fail("Ray must not be inspected before separate LoRA validation"),
     )
 
+    # validate_separate_config re-raises any resolver error as its own message:
+    # the flat-key hint dead-ends where the flat key is refused too.
     with pytest.raises(ValueError, match="Separate mode currently supports full finetuning only"):
         main_diffusion.run_diffusion(config)
 

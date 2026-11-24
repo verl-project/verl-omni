@@ -1,6 +1,6 @@
 # Diffusion On-Policy Distillation
 
-Last updated: 08/31/2026.
+Last updated: 10/26/2026.
 
 ## Background
 
@@ -24,7 +24,9 @@ closed form, implemented by the `distill_kl` loss:
 = \frac{\lVert \mu_\theta - \mu_\text{teacher} \rVert^2}{2 \sigma_t^2},
 ```
 
-averaged over latent dimensions. This is the diffusion analog of matching
+averaged over latent dimensions. On deterministic (ODE) steps, where
+`noise_level = 0` gives `σ_t = 0`, the loss is the unit-variance surrogate
+`½‖μ_θ − μ_teacher‖²`. This is the diffusion analog of matching
 next-token log-probabilities in LLM OPD: the teacher scores the student's
 states, and the student moves its transition means toward the teacher's.
 
@@ -144,6 +146,17 @@ multiple teachers must set it explicitly so the sum matches the pool size.
 Each teacher's sub-pool is its own worker group, so teachers are scored
 concurrently.
 
+### `distillation.teacher_models.<name>.guidance_scale` (float, optional)
+
+Classifier-free guidance scale of this teacher's forward. Default: `null`,
+which inherits the student's `actor_rollout_ref.model.pipeline.guidance_scale`
+(by default the rollout's `pipeline.guidance_scale`). A teacher whose
+effective `guidance_scale > 1` needs the negative prompt embeds, which
+the rollout only stores when the student itself samples with
+`pipeline.guidance_scale > 1`; startup raises otherwise. Teachers with
+`guidance_scale <= 1` run a single conditional forward whatever the student
+uses.
+
 ### `distillation.scheduler` (str)
 
 When the teachers score a batch. Default: `"inline"`, which runs the scoring
@@ -181,6 +194,13 @@ The distillation losses and their switches live under
   distillation term on top of the main objective (e.g. `flow_grpo`), the same
   shape as `use_kl_loss`/`kl_loss_coef` for the reference-KL term.
 
+With `loss_mode=distill_kl` the actor update reads no log-probs, so the
+trainer skips the `old_log_prob` recompute stage and the batch carries no
+`old_log_probs` at all; `timing_s/old_log_prob` disappears from the step
+metrics, and a loss that does read log-probs fails input validation naming the
+missing key instead of training on stale values. The stage stays on whenever the loss reads log-probs or
+rollout correction is enabled.
+
 Enabling the teacher without an active distillation loss (or vice versa) is
 rejected at startup. The teacher runtime produces `teacher_prev_sample_mean`,
 which only `distill_kl` consumes; `distill_fm_mse` has no producer on the
@@ -211,6 +231,16 @@ A complete working recipe is
 SD3.5-Medium distills from an OCR-tuned teacher while the OCR reward is
 monitored only, showing the student reach the teacher's reward level through
 distillation alone.
+
+Distillation is not restricted to images. Any pipeline whose training adapter
+returns `prev_sample_mean` can be distilled, because the teacher runs the same
+forward the reference policy does.
+[`examples/diffusionopd_trainer/ltx2/run_ltx2_3_t2av_opd_npu.sh`](../examples/ltx2/diffusionopd_trainer_ltx2.md)
+distills LTX-2.3 on text-to-audio-video with CLAP and ImageBind monitored only.
+LTX-2.3 carries video and audio in one flat latent trajectory, so its
+`prev_sample_mean` covers both modalities and the KL averages over their
+concatenated rows — the two are weighted by row count, and there is no
+per-modality weighting.
 
 Pure distillation — the student imitates the teacher, task reward is only
 monitored:

@@ -21,6 +21,7 @@ import torch
 from transformers import AutoTokenizer, CLIPImageProcessor, CLIPModel
 
 from verl_omni.utils.reward_score import pickscore_reward as _pickscore
+from verl_omni.utils.reward_score.image_preference_utils import clip_feature_tensor
 
 _PICKSCORE_PATH = os.environ["PICKSCORE_PATH"]
 
@@ -53,9 +54,9 @@ class _TinyPickScoreInferencer:
             key: value.to(self.device) for key, value in text_inputs.items() if key in ("input_ids", "attention_mask")
         }
 
-        image_embeds = _pickscore._feature_tensor(self.model.get_image_features(**image_inputs))
+        image_embeds = clip_feature_tensor(self.model.get_image_features(**image_inputs))
         image_embeds = image_embeds / image_embeds.norm(p=2, dim=-1, keepdim=True)
-        text_embeds = _pickscore._feature_tensor(self.model.get_text_features(**text_inputs))
+        text_embeds = clip_feature_tensor(self.model.get_text_features(**text_inputs))
         text_embeds = text_embeds / text_embeds.norm(p=2, dim=-1, keepdim=True)
         text_embeds = text_embeds[prompt_indices]
 

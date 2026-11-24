@@ -46,7 +46,8 @@ from verl_omni.agent_loop.diffusion_agent_loop import (
     DiffusionAgentLoopWorker,
     _InternalDiffusionAgentLoopOutput,
 )
-from verl_omni.agent_loop.utils import maybe_per_rollout_seeds
+from verl_omni.agent_loop.utils import maybe_per_rollout_seeds, per_rollout_seeds_or_entropy
+from verl_omni.pipelines.model_base import VllmOmniPipelineBase
 
 AR_REWARD_KEY = "reward/ar"
 
@@ -96,7 +97,7 @@ class _InternalARAgentLoopOutput(ARAgentLoopOutput):
     input_ids: torch.Tensor
     """Padded input ids(prompt_ids + response_ids)."""
     position_ids: torch.Tensor
-    """Padded position ids."""
+    """Padded position ids; layout comes from the rollout adapter hook."""
     response_mask: torch.Tensor
     """Padded response mask."""
     attention_mask: torch.Tensor
@@ -150,9 +151,9 @@ class CompositeAgentLoopWorker(DiffusionAgentLoopWorker):
             - ``responses``: ``[ar_bsz, ar_response_length]`` padded generated AR tokens.
             - ``response_mask``: ``[ar_bsz, ar_response_length]`` attention mask for padded response tokens.
             - ``input_ids``: ``[ar_bsz, prompt_length + ar_response_length]`` padded full response tokens.
-            - ``attention_mask`: ``[ar_bsz, prompt_length + ar_response_length]`` attention mask for input_ids.
-            - ``position_ids``: ``[ar_bsz, 4, prompt_length + ar_response_length]``
-            M-RoPE 3D position ids for input_ids.
+            - ``attention_mask``: ``[ar_bsz, prompt_length + ar_response_length]`` attention mask for input_ids.
+            - ``position_ids``: AR position ids; shape is defined by the registered
+              rollout adapter's ``build_ar_position_ids`` hook (default ``[ar_bsz, seq_len]``).
             - ``rollout_ar_log_probs`` (optional): AR token log-probs.
             - ``rm_scores`` (optional): ``[ar_bsz, 1]`` AR reward scores.
 
@@ -200,7 +201,13 @@ class CompositeAgentLoopWorker(DiffusionAgentLoopWorker):
             if global_indices is not None:
                 ar_global_indices = np.asarray(global_indices, dtype=np.int64).reshape(-1)
                 dit_global_indices = (ar_global_indices[:, None] * diffusion_n + np.arange(diffusion_n)).reshape(-1)
-            per_rollout_seeds = maybe_per_rollout_seeds(batch.meta_info, len(batch) * diffusion_n, dit_global_indices)
+            # Unseeded DiT rows fall back to per-row entropy seeds so engine-side
+            # default seeding cannot collide across replicas; AR sampling keeps the
+            # trainer-seeded-or-unseeded behavior (AR rollout diversity does not go
+            # through vLLM-Omni's request seeding).
+            per_rollout_seeds = per_rollout_seeds_or_entropy(
+                batch.meta_info, len(batch) * diffusion_n, dit_global_indices
+            )
             ar_seeds = maybe_per_rollout_seeds(batch.meta_info, len(batch), ar_global_indices)
 
         if "agent_name" not in batch.non_tensor_batch:
@@ -318,7 +325,9 @@ class CompositeAgentLoopWorker(DiffusionAgentLoopWorker):
             return_attention_mask=True,
         )
 
-        response_length = self.rollout_config.ar.response_length
+        response_length = (
+            self.rollout_config.val_kwargs.ar.response_length if validate else self.rollout_config.ar.response_length
+        )
         response_output = self._pad_token_ids(
             output.response_ids,
             max_length=response_length,
@@ -329,30 +338,28 @@ class CompositeAgentLoopWorker(DiffusionAgentLoopWorker):
         # Zero-pad the 0/1 mask. tokenizer.pad would write pad_token_id into the tail.
         if len(output.response_mask) > response_length:
             raise ValueError(
-                f"AR response_mask length {len(output.response_mask)} exceeds ar.response_length={response_length}."
+                f"AR response_mask length {len(output.response_mask)} exceeds response_length={response_length}."
             )
         response_mask = torch.zeros((1, response_length), dtype=torch.long)
         if output.response_mask:
             response_mask[0, : len(output.response_mask)] = torch.tensor(output.response_mask, dtype=torch.long)
         response_mask = response_mask * response_output["attention_mask"]
 
-        # token ids and attention mask forprompt + response
+        # token ids and attention mask for prompt + response
         attention_mask = torch.cat([prompt_output["attention_mask"], response_output["attention_mask"]], dim=1)
         input_ids = torch.cat([prompt_output["input_ids"], response_output["input_ids"]], dim=1)
 
-        # Currently support text-only position ids as 3D position ids.
-        # TODO: (susan) extend to multi-modal 3D position ids for M-RoPE
-        valid_mask = attention_mask[0].bool()
-        text_position_ids = torch.ones((1, len(input_ids[0])), dtype=torch.long)
-        text_position_ids[0, valid_mask] = torch.arange(valid_mask.sum().item())
-        # M-RoPE layout expected by ``left_right_2_no_padding``: B x 4 x seq_len.
-        position_ids = text_position_ids.unsqueeze(1).expand(-1, 4, -1)
+        position_ids = VllmOmniPipelineBase.resolve_ar_position_ids(
+            self.model_config.architecture,
+            self.model_config.algorithm,
+            attention_mask,
+        )
 
         ar_response_logprobs = None
         if output.ar_response_logprobs is not None:
             ar_response_logprobs = output.ar_response_logprobs
             if isinstance(ar_response_logprobs, list):
-                pad_size = self.rollout_config.ar.response_length - len(output.ar_response_logprobs)
+                pad_size = response_length - len(output.ar_response_logprobs)
                 ar_response_logprobs = torch.tensor(ar_response_logprobs + [0.0] * pad_size).unsqueeze(0)
             elif ar_response_logprobs.dim() == 1:
                 # Unbatch of (B, response_length) leaves one row.

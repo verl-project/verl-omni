@@ -182,6 +182,7 @@ def test_engine_requires_prompt_boundaries(backend_setup):
     [
         ("model_config", "model_stage", "talker"),
         ("model_config", "lora_rank", 8),
+        # setup_backend re-raises resolver errors as the engine's NotImplementedError.
         ("model_config", "lora", {"rank": 8}),
         ("model_config", "lora_adapter_path", "existing-adapter"),
         ("model_config", "trainer_type", "direct_preference"),

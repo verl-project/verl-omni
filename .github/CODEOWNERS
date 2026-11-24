@@ -43,3 +43,15 @@
 
 # Pipeline and model adaptation
 /verl_omni/pipelines/ @chenyingshu @NancyFyong @ZihaoW123 @knlnguyen1802
+
+# Ascend NPU adaptation (overrides docker/, .github/, tests/, and docs/)
+/docker/*.npu @mengchengTang
+/.github/workflows/*npu* @mengchengTang
+/tests/*npu*/ @mengchengTang
+/docs/**/*npu*.md @mengchengTang
+
+# Profiling and observability (overrides docs/ and .agents/)
+/docs/perf/ @mengchengTang
+**/rl_insight.* @mengchengTang
+/.agents/skills/profile/ @mengchengTang
+/.agents/skills/train-infer-consistency/ @mengchengTang

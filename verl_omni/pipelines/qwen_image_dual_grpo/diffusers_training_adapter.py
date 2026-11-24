@@ -25,11 +25,8 @@ __all__ = ["QwenImageDualGRPO"]
 
 @DiffusionModelBase.register("QwenImagePipeline", algorithm="dual_grpo")
 class QwenImageDualGRPO(QwenImage):
-    """Training adapter for Qwen-Image with the DualGRPO algorithm.
+    """Training adapter for the Qwen-Image DiT under DualGRPO.
 
-    The composite AR text encoder is Qwen2.5-VL. Dual-GRPO uses text-only data, so
-    the vision tower is deleted before FSDP wrap (see
-    ``strip_qwen_image_vision_tower`` in ``verl_omni.workers.engine.utils``) — same as vLLM-Omni ``QwenImagePipeline``.
-    Do not list ``visual`` in ``get_fsdp_ignored_module_names``: ignored params
-    must be frozen, and leaving a trainable tower trips FSDP2's fail-closed check.
+    The composite AR text encoder is configured by ``QwenImageDualGRPOAR``.
+    This class is only the DiT adapter.
     """

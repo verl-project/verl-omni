@@ -27,7 +27,7 @@ import pytest
 import torch
 from diffusers import QwenImageTransformer2DModel
 from hydra import compose, initialize_config_dir
-from peft import LoraConfig, PeftModel
+from peft import LoraConfig, PeftModel, get_peft_model
 from safetensors.torch import load_file
 
 
@@ -159,6 +159,86 @@ def test_cli_auto_export_and_reload(api, case, monkeypatch, capsys, adapter_name
     assert json.loads(capsys.readouterr().out.splitlines()[-1])["integrity"] == "passed"
 
 
+def test_lora_only_causal_lm_export_and_reload(api, tmp_path, monkeypatch, capsys):
+    from transformers import Qwen2Config, Qwen2ForCausalLM
+
+    torch.manual_seed(12)
+    base = Qwen2ForCausalLM(
+        Qwen2Config(
+            vocab_size=64,
+            hidden_size=16,
+            intermediate_size=32,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            num_key_value_heads=1,
+        )
+    )
+    source, target = tmp_path / "actor", tmp_path / "export"
+    base.config.save_pretrained(source / "huggingface")
+    model = get_peft_model(deepcopy(base), LoraConfig(r=2, lora_alpha=4, target_modules=["q_proj", "v_proj"]))
+    with torch.no_grad():
+        for name, param in model.named_parameters():
+            if "lora_B" in name:
+                param.normal_()
+    (source / "fsdp_config.json").write_text(json.dumps({"FSDP_version": 2, "world_size": 1}))
+    (source / "lora_train_meta.json").write_text(json.dumps({"r": 2, "lora_alpha": 4, "task_type": "CAUSAL_LM"}))
+    torch.save(
+        {key: value.clone() for key, value in model.state_dict().items() if "lora_" in key},
+        source / "model_world_size_1_rank_0.pt",
+    )
+    run_cli(
+        monkeypatch,
+        [
+            "merge",
+            "--backend=fsdp",
+            f"--local_dir={source}",
+            f"--target_dir={target}",
+            "--base_model=original/base",
+            "--trust-checkpoint",
+        ],
+    )
+    adapter_dir = target / "lora_adapter"
+    config = json.loads((adapter_dir / "adapter_config.json").read_text())
+    assert config["task_type"] == "CAUSAL_LM"
+    assert set(config["target_modules"]) == {"q_proj", "v_proj"}
+    restored = PeftModel.from_pretrained(deepcopy(base), adapter_dir).eval()
+    input_ids = torch.randint(0, 64, (1, 5))
+    with torch.no_grad():
+        torch.testing.assert_close(restored(input_ids).logits, model.eval()(input_ids).logits)
+    run_cli(monkeypatch, ["test", "--backend=fsdp", f"--test_hf_dir={adapter_dir}"])
+    assert json.loads(capsys.readouterr().out.splitlines()[-1])["integrity"] == "passed"
+
+    # The adapter config and manifest must agree on the task type.
+    config["task_type"] = None
+    (adapter_dir / "adapter_config.json").write_text(json.dumps(config))
+    with pytest.raises(ValueError, match="conflicts with manifest"):
+        run_cli(monkeypatch, ["test", "--backend=fsdp", f"--test_hf_dir={adapter_dir}"])
+
+    # A malformed manifest task type is a validation error, not a TypeError.
+    manifest_path = adapter_dir / "merge_manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["task_type"] = ["CAUSAL_LM"]
+    manifest_path.write_text(json.dumps(manifest))
+    with pytest.raises(ValueError, match="causal LM PEFT LoRA"):
+        run_cli(monkeypatch, ["test", "--backend=fsdp", f"--test_hf_dir={adapter_dir}"])
+
+    # Without the actor HF config the adapter type cannot be determined, so export fails.
+    (source / "huggingface" / "config.json").unlink()
+    with pytest.raises(FileNotFoundError):
+        run_cli(
+            monkeypatch,
+            [
+                "merge",
+                "--backend=fsdp",
+                f"--local_dir={source}",
+                f"--target_dir={tmp_path / 'export_no_config'}",
+                "--base_model=original/base",
+                "--trust-checkpoint",
+            ],
+        )
+    assert not (tmp_path / "export_no_config").exists()
+
+
 @pytest.mark.parametrize("fault", ["missing_metadata", "unknown_adapter"])
 def test_invalid_adapter_export_leaves_no_output(api, case, monkeypatch, fault):
     if fault == "missing_metadata":
@@ -178,6 +258,16 @@ def test_lora_checkpoint_config_override(overrides, expected):
     config_dir = Path(__file__).parents[2] / "verl_omni/trainer/config"
     with initialize_config_dir(config_dir=str(config_dir), version_base=None):
         config = compose(config_name="diffusion_trainer", overrides=overrides)
+    assert config.actor_rollout_ref.actor.checkpoint.save_lora_only is expected
+
+
+@pytest.mark.parametrize("config_name", ["diffusion_trainer", "omni_trainer"])
+@pytest.mark.parametrize("override,expected", [(None, False), ("true", True)])
+def test_lora_only_checkpoint_config_per_family(config_name, override, expected):
+    config_dir = Path(__file__).parents[2] / "verl_omni/trainer/config"
+    overrides = [] if override is None else [f"actor_rollout_ref.actor.checkpoint.save_lora_only={override}"]
+    with initialize_config_dir(config_dir=str(config_dir), version_base=None):
+        config = compose(config_name=config_name, overrides=overrides)
     assert config.actor_rollout_ref.actor.checkpoint.save_lora_only is expected
 
 

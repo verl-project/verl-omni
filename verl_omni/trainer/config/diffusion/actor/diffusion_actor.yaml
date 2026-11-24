@@ -71,8 +71,32 @@ diffusion_loss:
   # DGPO inverse temperature of the group-level preference weight
   dgpo_beta: 100.0
 
+  # CRD implicit reward scale.
+  crd_beta: 1.0
+
+  # Minimum reward-adaptive pretrained-reference coefficient.
+  crd_kl_min: 0.0
+
   # DGPO clip range on the old-policy denoising-loss ratio; 0 disables clipping
   dgpo_clip_range: 0.01
+
+  # AWM PPO-style clip range on the old-policy flow-matching ratio exp(old_dsm - dsm); 0 disables clipping
+  awm_clip_range: 1e-4
+
+  # AWM coefficient of the velocity-space KL toward the EMA (old) adapter
+  awm_kl_coef: 0.1
+
+  # OmniNFT video loss weight
+  video_weight: 1.0
+
+  # OmniNFT audio loss weight
+  audio_weight: 1.0
+
+  # OmniNFT video prediction-space reference MSE coefficient
+  video_ref_kl_coef: 0.0
+
+  # OmniNFT audio prediction-space reference MSE coefficient
+  audio_ref_kl_coef: 0.0
 
 # Rollout Correction config.  Fields mirror RolloutCorrectionConfig.
 # rollout_is defaults to null (off); override for IS diagnostics.

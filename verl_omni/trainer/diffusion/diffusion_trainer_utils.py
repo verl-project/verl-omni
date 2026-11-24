@@ -14,59 +14,61 @@
 """Shared helpers for diffusion Ray trainers."""
 
 import math
-from collections.abc import Sequence
 from typing import Any, Optional
 
 from verl import DataProto
 from verl.trainer.distillation import is_distillation_enabled
 
+# ``rollout_media`` artifact field names, spelled literally to keep this core
+# trainer module free of the pipeline package's import graph.
+MEDIA_ARTIFACT_FIELD_PREFIX = "media_artifact__"
+MEDIA_ARTIFACT_METADATA_FIELDS = frozenset(
+    {"media_artifact_specs", "primary_artifact", "preview_artifact", "media_artifact_context"}
+)
+
 
 def _to_diffusion_worker_tensordict(batch: DataProto):
-    """Project a driver batch for actor/ref workers without copying tensor storage."""
+    """Project a driver batch for actor/ref workers without copying tensor storage.
+
+    Named media artifacts and their per-sample declarations are reward/dump-only
+    consumers' data; compute workers never read them, so shipping them would slice and
+    serialize decoded previews and per-sample non-tensor stacks on every worker hop.
+    """
     worker_batch = batch.to_tensordict()
     worker_batch.pop("responses", None)
+    for key in [
+        key
+        for key in worker_batch.keys()
+        if key.startswith(MEDIA_ARTIFACT_FIELD_PREFIX) or key in MEDIA_ARTIFACT_METADATA_FIELDS
+    ]:
+        worker_batch.pop(key)
     return worker_batch
 
 
 OLD_POLICY_DECAY_SCHEDULES = {
-    "copy": (0, 0.0, 0.0),
-    "linear_to_0_3": (0, 0.001, 0.3),
-    "linear_to_0_5": (0, 0.001, 0.5),
-    "delayed_linear_to_0_999": (75, 0.0075, 0.999),
+    "copy": (0, 0.0, 0.0, 0.0),
+    "linear_to_0_3": (0, 0.0, 0.001, 0.3),
+    "linear_to_0_5": (0, 0.0, 0.001, 0.5),
+    "linear_from_0_25_to_0_5": (0, 0.25, 0.001, 0.5),
+    "delayed_linear_to_0_999": (75, 0.0, 0.0075, 0.999),
 }
 
 
 def old_policy_decay(step: int, schedule: str) -> float:
-    """Return the old-policy LoRA EMA decay for a named DiffusionNFT schedule.
+    """Return the LoRA EMA decay for a named forward-process policy schedule.
 
     The decay is used as ``old <- decay * old + (1 - decay) * current`` when refreshing
     the rollout adapter. The schedules mirror the reference DiffusionNFT ``return_decay``
     helper: ``copy`` hard-copies the current adapter, ``linear_to_0_5`` ramps from 0 to
     0.5 (``linear_to_0_3``, the DGPO reference EMA, stops at 0.3), and
     ``delayed_linear_to_0_999`` waits 75 steps before ramping to 0.999.
+    CRD's ``linear_from_0_25_to_0_5`` starts at 0.25 and ramps by 0.001 per step.
     """
     if schedule in OLD_POLICY_DECAY_SCHEDULES:
-        warmup_steps, ramp_rate, max_decay = OLD_POLICY_DECAY_SCHEDULES[schedule]
+        warmup_steps, initial_decay, ramp_rate, max_decay = OLD_POLICY_DECAY_SCHEDULES[schedule]
     else:
         raise ValueError(f"Unsupported old_policy_decay_schedule: {schedule}")
-    return 0.0 if step < warmup_steps else min((step - warmup_steps) * ramp_rate, max_decay)
-
-
-def worker_group_port_ranges(master_port_range: Optional[Sequence[int]], num_groups: int) -> list[Optional[list[int]]]:
-    """Slice a rendezvous port range into one disjoint sub-range per worker group.
-
-    Ports are only bound at ``init_model``, after every group has been spawned, so groups
-    sharing a range would all pick its first free port.
-    """
-    if master_port_range is None:
-        return [None] * num_groups
-    lo, hi = (int(port) for port in master_port_range)
-    stride = (hi - lo) // num_groups
-    if stride < 1:
-        raise ValueError(
-            f"trainer.ray_master_port_range={master_port_range} has fewer ports than worker groups ({num_groups})."
-        )
-    return [[lo + i * stride, hi if i == num_groups - 1 else lo + (i + 1) * stride] for i in range(num_groups)]
+    return 0.0 if step < warmup_steps else min(initial_decay + (step - warmup_steps) * ramp_rate, max_decay)
 
 
 def track_nonfinite_grad_streak(streak: int, grad_norm: Optional[float]) -> int:
@@ -74,6 +76,20 @@ def track_nonfinite_grad_streak(streak: int, grad_norm: Optional[float]) -> int:
     if grad_norm is None or math.isfinite(grad_norm):
         return 0
     return streak + 1
+
+
+def skip_old_log_prob(config) -> bool:
+    """Whether the policy-gradient update reads none of the recomputed old log-probs, so the stage can be skipped."""
+    from verl_omni.trainer.diffusion.diffusion_algos import get_diffusion_loss_fn
+    from verl_omni.trainer.diffusion.rollout_correction import rollout_correction_enabled
+
+    if config.algorithm.get("trainer_type", "policy_gradient") != "policy_gradient":
+        return False
+    loss_fn = get_diffusion_loss_fn(config.actor_rollout_ref.actor.diffusion_loss.get("loss_mode", "flow_grpo"))
+    reads_log_probs = "log_probs" in loss_fn.required_model_output_keys or bool(
+        {"old_log_probs", "old_prev_sample_mean"} & set(loss_fn.required_data_keys)
+    )
+    return not reads_log_probs and not rollout_correction_enabled(config.algorithm.get("rollout_correction", None))
 
 
 def validate_distillation_config(config) -> None:
@@ -91,6 +107,20 @@ def validate_distillation_config(config) -> None:
             "A distillation loss is active but no teacher is configured; set distillation.enabled=true "
             "and distillation.teacher_models.teacher_model.model_path."
         )
+    if enabled:
+        student_guidance_scale = config.actor_rollout_ref.rollout.pipeline.get("guidance_scale") or 0.0
+        inherited_guidance_scale = config.actor_rollout_ref.model.pipeline.get("guidance_scale") or 0.0
+        for name, teacher in config.distillation.teacher_models.items():
+            teacher_guidance_scale = teacher.get("guidance_scale")
+            if teacher_guidance_scale is None:
+                teacher_guidance_scale = inherited_guidance_scale
+            if teacher_guidance_scale > 1.0 and student_guidance_scale <= 1.0:
+                raise ValueError(
+                    f"distillation.teacher_models.{name} runs with guidance_scale={teacher_guidance_scale} (its own "
+                    "value or the inherited actor_rollout_ref.model.pipeline.guidance_scale), which needs negative "
+                    "prompt embeds that the rollout only produces with "
+                    "actor_rollout_ref.rollout.pipeline.guidance_scale > 1."
+                )
     if enabled and actor.use_distill_loss and actor.distill_loss_mode != "distill_kl":
         raise NotImplementedError(
             f"The teacher runtime produces teacher_prev_sample_mean, which only distill_kl consumes, "

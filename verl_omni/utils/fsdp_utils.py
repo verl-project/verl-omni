@@ -18,7 +18,7 @@ FSDP utilities for verl-omni
 import json
 import logging
 from collections import OrderedDict
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from contextlib import ExitStack, contextmanager
 from functools import partial
 from pathlib import Path
@@ -83,6 +83,7 @@ def apply_fsdp2(model, fsdp_kwargs, config, ignored_names: Sequence[str] = ()):
     Adapted from verl's ``apply_fsdp2``; deltas are DIFF-marked.
     """
     from torch.distributed.fsdp import FSDPModule, fully_shard
+    from verl.utils.device import get_device_name
     from verl.utils.fsdp_utils import (
         CPUOffloadPolicy,
         _select_fsdp2_wrap_targets,
@@ -133,6 +134,14 @@ def apply_fsdp2(model, fsdp_kwargs, config, ignored_names: Sequence[str] = ()):
         # DIFF vs upstream: only the root call carries ignored_params
         # fsdp2 will not reshard_after_forward for root module
         fully_shard(model, ignored_params=ignored_params, **fsdp_kwargs)
+
+    # oneCCL (xccl) can abort on the ReduceOp.AVG that FSDP2 uses for fp32/bf16 gradient
+    # reduce-scatter; reduce with SUM and divide instead, as verl-hardware-plugin does for
+    # verl's own XPU engines.
+    if get_device_name() == "xpu":
+        for m in model.modules():
+            if isinstance(m, FSDPModule):
+                m.set_force_sum_reduction_for_comms(True)
 
     # Honor `forward_prefetch` config to match the FSDP1 path. Depth=1 mirrors
     # PyTorch FSDP1's hardcoded `forward_prefetch_limit=1`. Static-graph models
@@ -368,7 +377,9 @@ def export_fsdp_lora_adapter(
 def _peft_lora_params_to_cpu(peft_model, adapter_name: str) -> OrderedDict:
     # Nested FSDP leaf wrap: ``state_dict()`` can hit non-root FSDP hooks.
     # ``named_parameters()`` is the mapping verl's layered walker already uses.
-    state_dict = {name: param for name, param in peft_model.named_parameters()}
+    # Torch wrapper tokens are stripped: peft >= 0.22 derives tuner prefixes from
+    # wrapper-free module paths, so token-bearing keys would match nothing.
+    state_dict = {name.replace("_fsdp_wrapped_module.", ""): param for name, param in peft_model.named_parameters()}
     lora_params = get_peft_model_state_dict(peft_model, state_dict=state_dict, adapter_name=adapter_name)
     return OrderedDict((name, _param_to_cpu(param)) for name, param in lora_params.items())
 
@@ -437,32 +448,6 @@ def _collect_lora_params_non_layered(module, peft_model, adapter_name: str, base
     return lora_params
 
 
-def _collect_lora_params_with_adapter(
-    module,
-    layered_summon: bool,
-    base_sync_done: bool,
-    adapter_name: str,
-    layered_summon_fn: Callable,
-) -> OrderedDict:
-    """Verl-style LoRA collection with explicit ``adapter_name`` for PEFT state."""
-    peft_model = getattr(module, "_fsdp_wrapped_module", module)
-    if fsdp_version(module) > 0:
-        if layered_summon:
-            if not base_sync_done:
-                raise ValueError(
-                    "To use layered_summon, you must make sure base-model is preloaded in vllm, e.g. let "
-                    "rollout.load_format=safetensors"
-                )
-            if layered_summon_fn is _upstream_layered_summon_lora_params:
-                return layered_summon_fn(module)
-            return layered_summon_fn(module, adapter_name=adapter_name)
-        return _collect_lora_params_non_layered(module, peft_model, adapter_name, base_sync_done)
-
-    if base_sync_done:
-        return _peft_lora_params_to_cpu(peft_model, adapter_name)
-    return _collect_base_weights_to_cpu(peft_model)
-
-
 def _layered_summon_lora_params_diffusers(
     fsdp_module, adapter_name: str = "default", layer_prefixes: Sequence[str] = ("transformer_blocks.",)
 ) -> OrderedDict:
@@ -497,14 +482,23 @@ def _layered_summon_lora_params_diffusers(
                 continue
             if fsdp_version(submodule) > 0:
                 with FSDP.summon_full_params(submodule, writeback=False):
+                    # Key the block-local state dict the way peft >= 0.22 derives tuner
+                    # prefixes (wrapper-token-free); older peft falls to the prefixed fallback.
+                    state_dict = {
+                        f"{block_prefix}.{param_name.replace('_fsdp_wrapped_module.', '')}": param
+                        for param_name, param in submodule.state_dict().items()
+                    }
                     sub_lora_params = get_peft_model_state_dict(
-                        peft_model, state_dict=submodule.state_dict(), adapter_name=adapter_name
+                        peft_model, state_dict=state_dict, adapter_name=adapter_name
                     )
                     if not sub_lora_params:
-                        sub_lora_params = _lora_params_by_name(submodule, adapter_name)
+                        # Block-local names would collide across blocks once merged.
+                        sub_lora_params = {
+                            f"{block_prefix}.{name}": param
+                            for name, param in _lora_params_by_name(submodule, adapter_name).items()
+                        }
                     sub_lora_params = {
-                        f"{block_prefix}.{param_name}": _param_to_cpu(param)
-                        for param_name, param in sub_lora_params.items()
+                        param_name: _param_to_cpu(param) for param_name, param in sub_lora_params.items()
                     }
                     lora_params.update(sub_lora_params)
                     submodule._is_root = False
@@ -580,6 +574,12 @@ def collect_lora_params(
         adapter_name: LoRA adapter name (usually ``"default"``).
         layer_prefixes: FSDP layer name prefixes (``["transformer_blocks."]``
     """
+    # DIFF vs upstream (verl.utils.fsdp_utils.collect_lora_params): this wrapper
+    # adds an explicit ``adapter_name`` (named policy adapters), the diffusers
+    # layered walker with ``layer_prefixes``, and FSDP wrapper-token name
+    # cleaning. The upstream fast path survives only for the default adapter on
+    # non-diffusers-layered, non-FSDP2 modules; everything else flows through
+    # the adapter-aware implementation below.
     # A single-rank FSDP1 actor uses NO_SHARD. The upstream layered
     # collector's fallback summons with offload_to_cpu=True, which PyTorch
     # rejects for NO_SHARD. Materialize on device and copy the adapter tensors
@@ -608,13 +608,25 @@ def collect_lora_params(
         )
     else:
         layered_summon_fn = _upstream_layered_summon_lora_params
-    lora_params = _collect_lora_params_with_adapter(
-        module,
-        layered_summon=layered_summon,
-        base_sync_done=base_sync_done,
-        adapter_name=adapter_name,
-        layered_summon_fn=layered_summon_fn,
-    )
+
+    peft_model = getattr(module, "_fsdp_wrapped_module", module)
+    if fsdp_version(module) > 0:
+        if layered_summon:
+            if not base_sync_done:
+                raise ValueError(
+                    "To use layered_summon, you must make sure base-model is preloaded in vllm, e.g. let "
+                    "rollout.load_format=safetensors"
+                )
+            if layered_summon_fn is _upstream_layered_summon_lora_params:
+                lora_params = layered_summon_fn(module)
+            else:
+                lora_params = layered_summon_fn(module, adapter_name=adapter_name)
+        else:
+            lora_params = _collect_lora_params_non_layered(module, peft_model, adapter_name, base_sync_done)
+    elif base_sync_done:
+        lora_params = _peft_lora_params_to_cpu(peft_model, adapter_name)
+    else:
+        lora_params = _collect_base_weights_to_cpu(peft_model)
     # Prefix walker only visits ``transformer_blocks.<i>``. Same fallback as
     # verl (full summon + PEFT dump); name-scan if tuner prefixes still miss.
     if not lora_params and layered_summon and base_sync_done:

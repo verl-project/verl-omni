@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -36,11 +37,17 @@ def _make_diffusion_model_config(*, lora_rank: int = 0) -> object:
     object.__setattr__(model_cfg, "target_modules", "all-linear")
     object.__setattr__(model_cfg, "target_parameters", None)
     object.__setattr__(model_cfg, "exclude_modules", ".*visual.*")
+    object.__setattr__(model_cfg, "lora", {})
     return model_cfg
 
 
-def _make_composite_engine(enable_lora: bool = False) -> CompositeFSDPEngine:
-    # Apply or not lora for both AR and DiT
+def _make_composite_engine(
+    enable_lora: bool = False,
+    *,
+    dit_lora: bool | None = None,
+    ar_lora: bool | None = None,
+) -> CompositeFSDPEngine:
+    # Apply or not lora for both AR and DiT (or independently for mismatch tests).
     engine = CompositeFSDPEngine.__new__(CompositeFSDPEngine)
     engine.ar_engine = MagicMock(name="ar_engine")
     engine.dit_engine = MagicMock(name="dit_engine")
@@ -48,7 +55,9 @@ def _make_composite_engine(enable_lora: bool = False) -> CompositeFSDPEngine:
     engine.current_engine = engine.ar_engine
     engine.ar_engine.is_param_offload_enabled = False
     engine.dit_engine.is_param_offload_enabled = False
-    engine.model_config = _make_diffusion_model_config(lora_rank=8 if enable_lora else 0)
+    dit_enabled = enable_lora if dit_lora is None else dit_lora
+    ar_enabled = enable_lora if ar_lora is None else ar_lora
+    engine.model_config = _make_diffusion_model_config(lora_rank=8 if (dit_enabled or ar_enabled) else 0)
 
     def _attach_lora(sub_engine: MagicMock, enabled: bool):
         if not enabled:
@@ -59,14 +68,15 @@ def _make_composite_engine(enable_lora: bool = False) -> CompositeFSDPEngine:
             _fsdp_wrapped_module=SimpleNamespace(peft_config={"default": peft_cfg}),
         )
 
-    _attach_lora(engine.dit_engine, enable_lora)
-    _attach_lora(engine.ar_engine, enable_lora)
+    _attach_lora(engine.dit_engine, dit_enabled)
+    _attach_lora(engine.ar_engine, ar_enabled)
     return engine
 
 
 def _make_actor_rollout_worker(
     composite_engine: CompositeFSDPEngine,
     *,
+    enable_lora: bool = False,
     peft_merge: bool = False,
     base_sync_done: bool = False,
     free_cache_engine: bool = False,
@@ -74,7 +84,6 @@ def _make_actor_rollout_worker(
 ) -> ActorRolloutRefWorker:
     worker = ActorRolloutRefWorker.__new__(ActorRolloutRefWorker)
     worker.role = "actor_rollout"
-    worker.peft_merge = peft_merge
     worker.layered_summon = False
     worker._zmq_update_seq = 0
     # base_sync_done is derived from load_format in _init_weight_sync_knobs (dummy => False).
@@ -82,6 +91,10 @@ def _make_actor_rollout_worker(
         load_format = "dummy"
     worker.config = OmegaConf.create(
         {
+            # The sync plan resolver reads these the same way the real model
+            # config node does: flat lora_rank gates LoRA, nested lora.merge
+            # selects merged-full exports.
+            "lora_rank": 8 if enable_lora else 0,
             "rollout": {
                 "free_cache_engine": free_cache_engine,
                 "load_format": load_format,
@@ -102,6 +115,8 @@ def _make_actor_rollout_worker(
     worker.rollout.resume = AsyncMock()
     worker.rollout.use_shm = False
     worker.rollout.zmq_handle = "ipc://test"
+    worker.rollout.rollout_rank = 1
+    worker.rollout._ensure_server_handle.return_value = False
     worker.rollout._execute_method = AsyncMock(return_value=None)
     worker._init_weight_sync_knobs(worker.config)
     worker._rank = 0
@@ -110,12 +125,12 @@ def _make_actor_rollout_worker(
 
 
 class TestCompositeEngineLoraDetection:
-    def test_actor_has_lora_uses_composite_has_lora(self):
+    def test_actor_has_lora_uses_composite_lora_config(self):
         engine = _make_composite_engine(True)
-        assert engine.has_lora is True
+        assert engine_workers_module._get_engine_lora_config(engine) is not None
 
         engine = _make_composite_engine(False)
-        assert engine.has_lora is False
+        assert engine_workers_module._get_engine_lora_config(engine) is None
 
     def test_get_per_tensor_param_merges_shared_rollout_peft(self):
         engine = _make_composite_engine(True)
@@ -129,9 +144,49 @@ class TestCompositeEngineLoraDetection:
         assert cfg["exclude_modules"] == ".*visual.*"
 
 
+class TestCompositePeftContract:
+    def test_initialize_rejects_dit_lora_without_ar_peft(self):
+        engine = _make_composite_engine(dit_lora=True, ar_lora=False)
+        with pytest.raises(ValueError, match="both full weights or both LoRA"):
+            engine.initialize()
+
+    def test_initialize_rejects_ar_lora_without_dit_peft(self):
+        engine = _make_composite_engine(dit_lora=False, ar_lora=True)
+        with pytest.raises(ValueError, match="both full weights or both LoRA"):
+            engine.initialize()
+
+    def test_initialize_accepts_matched_full_and_lora(self):
+        for enable_lora in (False, True):
+            engine = _make_composite_engine(enable_lora)
+            engine.initialize()  # does not raise
+
+    def test_get_lora_peft_config_rejects_mismatch_instead_of_attribute_error(self):
+        # Previously DiT-LoRA + non-PEFT AR crashed on ar_peft_model.peft_config.
+        engine = _make_composite_engine(dit_lora=True, ar_lora=False)
+        with pytest.raises(ValueError, match="both full weights or both LoRA"):
+            engine.get_lora_peft_config()
+
+    def test_get_lora_peft_config_rejects_reverse_mismatch_instead_of_silent_none(self):
+        # Previously DiT-full + AR-LoRA returned None so update_weights took the full path.
+        engine = _make_composite_engine(dit_lora=False, ar_lora=True)
+        with pytest.raises(ValueError, match="both full weights or both LoRA"):
+            engine.get_lora_peft_config()
+
+    def test_disable_adapter_is_noop_without_peft(self):
+        engine = _make_composite_engine(False)
+        with engine.disable_adapter():
+            pass
+        engine.ar_engine.disable_adapter.assert_not_called()
+        engine.dit_engine.disable_adapter.assert_not_called()
+
+    def test_disable_adapter_rejects_mismatch(self):
+        engine = _make_composite_engine(dit_lora=True, ar_lora=False)
+        with pytest.raises(ValueError, match="both full weights or both LoRA"):
+            engine.disable_adapter()
+
+
 class TestCompositeUpdateWeightsNaive:
-    @pytest.mark.asyncio
-    async def test_full_weight_sync_merges_dit_and_ar_keys(self):
+    def test_full_weight_sync_merges_dit_and_ar_keys(self):
         engine = _make_composite_engine()
         dit_tensor = torch.tensor([1.0])
         ar_tensor = torch.tensor([2.0])
@@ -151,7 +206,7 @@ class TestCompositeUpdateWeightsNaive:
             patch.object(engine_workers_module, "aggressive_empty_cache"),
             patch.object(worker, "_offload_actor_and_empty_cache"),
         ):
-            await worker.update_weights(global_steps=1, mode="naive")
+            asyncio.run(worker.update_weights(global_steps=1, mode="naive"))
 
         worker.rollout.update_weights.assert_awaited_once()
         call_args = worker.rollout.update_weights.call_args
@@ -160,8 +215,7 @@ class TestCompositeUpdateWeightsNaive:
         assert synced["transformer.blocks.0.weight"] is dit_tensor
         assert synced["text_encoder.model.layers.0.weight"] is ar_tensor
 
-    @pytest.mark.asyncio
-    async def test_lora_first_base_sync_then_adapter(self):
+    def test_lora_first_base_sync_then_adapter(self):
         engine = _make_composite_engine(enable_lora=True)
         base_dit = torch.tensor([1.0])
         base_ar = torch.tensor([2.0])
@@ -192,7 +246,7 @@ class TestCompositeUpdateWeightsNaive:
             )
 
         engine.get_per_tensor_param = MagicMock(side_effect=fake_get_per_tensor)
-        worker = _make_actor_rollout_worker(engine, base_sync_done=False)
+        worker = _make_actor_rollout_worker(engine, enable_lora=True, base_sync_done=False)
 
         with (
             patch.object(engine_workers_module, "set_expandable_segments"),
@@ -200,7 +254,7 @@ class TestCompositeUpdateWeightsNaive:
             patch.object(engine_workers_module, "aggressive_empty_cache"),
             patch.object(worker, "_offload_actor_and_empty_cache"),
         ):
-            await worker.update_weights(global_steps=0, mode="naive")
+            asyncio.run(worker.update_weights(global_steps=0, mode="naive"))
 
         assert worker.rollout.update_weights.await_count == 2
         base_call, adapter_call = worker.rollout.update_weights.await_args_list
@@ -214,8 +268,7 @@ class TestCompositeUpdateWeightsNaive:
         assert "text_encoder.model.layers.0.lora_A.weight" in adapter_weights
         assert worker.base_sync_done is True
 
-    @pytest.mark.asyncio
-    async def test_lora_fast_path_after_base_sync(self):
+    def test_lora_fast_path_after_base_sync(self):
         # DiT only
         engine = _make_composite_engine(enable_lora=True)
         lora_tensor = torch.tensor([5.0])
@@ -226,7 +279,7 @@ class TestCompositeUpdateWeightsNaive:
                 peft_meta,
             )
         )
-        worker = _make_actor_rollout_worker(engine, base_sync_done=True, load_format="safetensors")
+        worker = _make_actor_rollout_worker(engine, enable_lora=True, base_sync_done=True, load_format="safetensors")
 
         sent: dict[str, torch.Tensor] = {}
 
@@ -234,14 +287,18 @@ class TestCompositeUpdateWeightsNaive:
             async def async_send_weights(self, items):
                 sent.update(dict(items))
 
+        async def run_in_event_loop(function, *args, **kwargs):
+            return function(*args, **kwargs)
+
         with (
             patch.object(engine_workers_module, "set_expandable_segments"),
             patch.object(engine_workers_module, "log_gpu_memory_usage"),
             patch.object(engine_workers_module, "aggressive_empty_cache"),
             patch.object(engine_workers_module, "BucketedWeightSender", return_value=_Sender()),
+            patch.object(engine_workers_module.asyncio, "to_thread", run_in_event_loop),
             patch.object(worker, "_offload_actor_and_empty_cache"),
         ):
-            await worker.update_weights(global_steps=2, mode="naive")
+            asyncio.run(worker.update_weights(global_steps=2, mode="naive"))
 
         worker.rollout._execute_method.assert_awaited_once()
         ipc_kwargs = worker.rollout._execute_method.await_args.kwargs["kwargs"]

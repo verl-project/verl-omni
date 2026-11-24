@@ -35,7 +35,9 @@ DEFAULT_GRM_PROMPT = (
     "Please output only the text content from the image without any additional descriptions or formatting."
 )
 DEFAULT_GRM_MODEL_PATH = "~/models/tiny-random/qwen3-vl"
-DEFAULT_SAMPLING_PARAMS = {"temperature": 0.7, "top_p": 0.8, "max_tokens": 4096}
+# OCR transcriptions are a few dozen tokens; the budget only bounds degenerate
+# repetition loops, which otherwise run to the limit at single-sequence decode speed.
+DEFAULT_SAMPLING_PARAMS = {"temperature": 0.7, "top_p": 0.8, "max_tokens": 256}
 
 
 async def _chat_complete(router_address: str, chat_complete_request: dict) -> ChatCompletion:
@@ -102,6 +104,8 @@ async def compute_score_ocr(
     reward_model_tokenizer: PreTrainedTokenizer = None,
     model_name: Optional[str] = None,
     sampling_params: dict = None,
+    *,
+    user_prompt: Optional[str] = None,
 ):
     """Compute an image OCR score via a generative reward model (GRM).
 
@@ -117,57 +121,50 @@ async def compute_score_ocr(
         extra_info: Additional information; ``frame_interval`` controls video
             frame subsampling.
         reward_router_address: ``host:port`` of the GRM router.
-        reward_model_tokenizer: Tokenizer for the reward model. Unused, kept
-            for interface consistency.
+        reward_model_tokenizer: Tokenizer for the reward model. When given,
+            a ground truth longer than the output budget is rejected.
         model_name: Name or path of the GRM. Defaults to
             ``DEFAULT_GRM_MODEL_PATH``.
         sampling_params: Override the defaults from :func:`_sampling_params`.
             An explicit ``seed`` opts in to reproducible sampling; without one
             any env-inherited seed is dropped.
+        user_prompt: User prompt for the GRM. Defaults to
+            ``DEFAULT_GRM_PROMPT``. A ``pkg://`` spec names a zero-argument
+            prompt builder.
 
     Returns:
         dict: ``{"score": float, "genrm_response": str}``.
+
+    Raises:
+        ValueError: If ``ground_truth`` needs more tokens than ``max_tokens``.
     """
     from verl.utils.ray_utils import get_event_loop
 
-    from verl_omni.utils.reward_score.reward_utils import pil_image_to_base64
+    from verl_omni.utils.reward_score.reward_utils import (
+        pil_image_to_base64,
+        resolve_prompt_builder,
+        visual_reward_frames,
+    )
 
-    # Normalize any input format to [N, C, H, W] (frames × channels × height × width).
-    # Detected formats:
-    #   3D:        [C, H, W]             — single image (QwenImage FlowGRPO)
-    #   4D:        [C, F, H, W]          — channels-first video (raw VAE)
-    #              [F, H, W, C]          — channels-last video (engine postprocess)
-    #   5D:        [B, C, F, H, W]       — batched channels-first
-    #              [B, F, H, W, C]       — batched channels-last (Wan22 DanceGRPO)
-    is_channels_last = solution_image.shape[-1] in (1, 3)
-
-    if solution_image.ndim == 3:
-        frame_interval = extra_info.get("frame_interval", 1)
-        # [C, H, W] → [1, C, H, W]
-        solution_image = solution_image.unsqueeze(0)
-
-    elif solution_image.ndim == 4:
-        frame_interval = extra_info.get("frame_interval", 4)
-        if is_channels_last:
-            # [F, H, W, C] → [C, F, H, W]
-            solution_image = solution_image.permute(3, 0, 1, 2)
-        # Now [C, F, H, W]: subsample frames, then frame-dim first
-        solution_image = solution_image[:, ::frame_interval]  # [C, F', H, W]
-        solution_image = solution_image.permute(1, 0, 2, 3)  # [F', C, H, W]
-
-    elif solution_image.ndim == 5:
-        frame_interval = extra_info.get(
-            "frame_interval",
-        )
-        if is_channels_last:
-            # [B, F, H, W, C] → [B, C, F, H, W]
-            solution_image = solution_image.permute(0, 4, 1, 2, 3)
-        # Now [B, C, F, H, W]: subsample frames, flatten batch + frames
-        solution_image = solution_image[:, :, ::frame_interval]  # [B, C, F', H, W]
-        solution_image = solution_image.permute(0, 2, 1, 3, 4)  # [B, F', C, H, W]
-        solution_image = solution_image.reshape(-1, *solution_image.shape[2:])  # [B*F', C, H, W]
+    solution_image = visual_reward_frames(solution_image, extra_info, extra_info.get("frame_interval", 4))
 
     model_name = model_name or os.path.expanduser(DEFAULT_GRM_MODEL_PATH)
+    if user_prompt is None:
+        user_prompt = DEFAULT_GRM_PROMPT
+    elif user_prompt.startswith("pkg://"):
+        user_prompt = resolve_prompt_builder(user_prompt)()
+    params = _sampling_params()
+    if sampling_params is not None:
+        params.update(sampling_params)
+        if "seed" not in sampling_params:
+            params.pop("seed", None)
+    if reward_model_tokenizer is not None:
+        num_tokens = len(reward_model_tokenizer.encode(ground_truth, add_special_tokens=False))
+        if num_tokens > params["max_tokens"]:
+            raise ValueError(
+                f"OCR ground truth needs {num_tokens} tokens but the judge output budget is "
+                f"max_tokens={params['max_tokens']}; raise the budget so a correct transcription is not truncated."
+            )
     loop = get_event_loop()
 
     grm_response = ""
@@ -182,15 +179,10 @@ async def compute_score_ocr(
                 "role": "user",
                 "content": [
                     {"type": "image_url", "image_url": {"url": image_base64}},
-                    {"type": "text", "text": DEFAULT_GRM_PROMPT},
+                    {"type": "text", "text": user_prompt},
                 ],
             },
         ]
-        params = _sampling_params()
-        if sampling_params is not None:
-            params.update(sampling_params)
-            if "seed" not in sampling_params:
-                params.pop("seed", None)
         chat_complete_request = {
             "messages": messages,
             "model": model_name,

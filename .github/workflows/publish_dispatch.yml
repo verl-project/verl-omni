@@ -1,0 +1,22 @@
+name: publish_dispatch
+
+on:
+  schedule:
+    # 08:00 Asia/Shanghai. Cron only fires from the default branch, so this
+    # dispatcher lives on main and triggers publish.yml on the dashboard branch.
+    - cron: "0 0 * * *"
+  workflow_dispatch:
+
+permissions:
+  actions: write
+
+jobs:
+  dispatch:
+    if: github.repository_owner == 'verl-project'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Trigger publish workflow on dashboard branch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh workflow run publish.yml --repo "${GITHUB_REPOSITORY}" --ref dashboard

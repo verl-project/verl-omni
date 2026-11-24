@@ -122,7 +122,8 @@ class _PickScoreReplica:
             generator = torch.Generator().manual_seed(912 + sample_id)
             array = torch.randint(0, 256, (height, 224, 3), dtype=torch.uint8, generator=generator).numpy()
             image = Image.fromarray(array, mode="RGB")
-            self.images[sample_id] = image
+            # The public scorer requires the declared canonical CHW tensor, not a cached PIL image.
+            self.images[sample_id] = torch.from_numpy(array).permute(2, 0, 1).contiguous()
             digest.update(sample_id.to_bytes(8, "little"))
             digest.update(image.tobytes())
         return {"count": sample_count, "sha256": digest.hexdigest()}
@@ -135,7 +136,7 @@ class _PickScoreReplica:
             data_source="replica-dispatch-benchmark",
             solution_image=self.images[sample_id],
             ground_truth=PROMPTS[sample_id % len(PROMPTS)],
-            extra_info={},
+            extra_info={"media_kind": "image"},
             reward_model=self.executor,
         )
         return {

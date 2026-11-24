@@ -54,6 +54,7 @@ def create_data_samples(tokenizer, data_source="ocr") -> DataProto:
         non_tensors={
             "data_source": data_source,
             "reward_model": reward_info,
+            "media_kind": ["image"] * len(responses),
             "extra_info": extra_info,
         },
     )

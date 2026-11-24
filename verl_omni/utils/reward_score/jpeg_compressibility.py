@@ -49,13 +49,18 @@ def jpeg_compressibility():
     return _fn
 
 
-def compute_score(solution_image):
+def compute_score(solution_image, extra_info=None):
     """The scoring function for JPEG compressibility.
 
     Args:
         solution_image: the solution image or video, in shape (C, H, W) or (N, C, H, W).
+        extra_info: artifact declarations or explicit ``media_kind``/``fps`` metadata.
+
+    Returns:
+        The first frame's score; video rewards do not average across frames.
     """
-    if isinstance(solution_image, torch.Tensor) and solution_image.ndim == 3:
-        solution_image = solution_image.unsqueeze(0)
-    score = jpeg_compressibility()(solution_image, None)[0]
-    return float(score[0])
+    from verl_omni.utils.reward_score.reward_utils import visual_reward_frames
+
+    frames = visual_reward_frames(solution_image, extra_info or {})
+    scores = jpeg_compressibility()(frames, None)[0]
+    return float(scores[0])

@@ -22,6 +22,7 @@ Patches dropped from the adapter:
 
 import importlib.metadata
 from types import SimpleNamespace
+from unittest.mock import Mock, call
 
 import pytest
 import torch
@@ -39,6 +40,85 @@ def _require_version(pkg_name: str, min_version: str):
 def _has_lora(module: nn.Module) -> bool:
     """Return True if *module* was wrapped with LoRA by PEFT."""
     return hasattr(module, "lora_A") and hasattr(module, "lora_B")
+
+
+def test_ascend_expert_dispatch_is_local_to_the_selected_thinker(monkeypatch):
+    from transformers.integrations.moe import ALL_EXPERTS_FUNCTIONS
+    from transformers.models.qwen3_omni_moe.configuration_qwen3_omni_moe import Qwen3OmniMoeTextConfig
+    from transformers.models.qwen3_omni_moe.modeling_qwen3_omni_moe import (
+        Qwen3OmniMoeThinkerTextExperts,
+        Qwen3OmniMoeThinkerTextModel,
+    )
+
+    from verl_omni.models.transformers import qwen3_omni
+
+    config = Qwen3OmniMoeTextConfig(
+        vocab_size=16,
+        hidden_size=32,
+        moe_intermediate_size=32,
+        num_hidden_layers=0,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        num_experts=4,
+        num_experts_per_tok=2,
+        hidden_act="silu",
+        experts_implementation="eager",
+    )
+    selected_model = Qwen3OmniMoeThinkerTextModel(config)
+    untouched = Qwen3OmniMoeThinkerTextExperts(config)
+    experts = Qwen3OmniMoeThinkerTextExperts(config)
+    selected_model.experts = experts
+    original_parameters = dict(experts.named_parameters())
+    original_class_forward = type(experts).forward
+
+    monkeypatch.setattr(qwen3_omni, "is_torch_npu_available", lambda: True)
+    monkeypatch.setattr(type(ALL_EXPERTS_FUNCTIONS), "_global_mapping", ALL_EXPERTS_FUNCTIONS._global_mapping.copy())
+    monkeypatch.setattr(qwen3_omni, "_ascend_grouped_mm", lambda *args: args[1])
+    qwen3_omni.enable_ascend_grouped_mm(selected_model)
+
+    assert selected_model.config._experts_implementation == "ascend_grouped_mm"
+    assert experts.config is selected_model.config
+    assert untouched.config is config
+    assert config._experts_implementation == "eager"
+    assert type(experts).forward is original_class_forward
+    assert dict(experts.named_parameters()).keys() == original_parameters.keys()
+    assert all(parameter is original_parameters[name] for name, parameter in experts.named_parameters())
+    hidden = torch.randn(1, config.hidden_size)
+    assert experts(hidden, torch.tensor([[0, 1]]), torch.tensor([[0.5, 0.5]])) is hidden
+
+
+@pytest.mark.parametrize("option,enabled", [(None, False), ("grouped_mm", False), ("ascend_grouped_mm", True)])
+def test_configure_model_enables_ascend_fusions_only_when_requested(monkeypatch, option, enabled):
+    from verl_omni.models.transformers import qwen3_omni
+
+    text_model = object()
+    thinker = SimpleNamespace(
+        model=text_model,
+        forward=lambda: None,
+        get_input_embeddings=lambda: None,
+        set_input_embeddings=lambda _: None,
+    )
+    module = SimpleNamespace(thinker=thinker, talker=object())
+    enable_experts = Mock()
+    enable_text_fusions = Mock()
+    monkeypatch.setattr(qwen3_omni, "enable_ascend_grouped_mm", enable_experts)
+    monkeypatch.setattr(qwen3_omni, "enable_ascend_rmsnorm_rope", enable_text_fusions)
+
+    result = Qwen3OmniThinkerAdapter.configure_model(
+        module, SimpleNamespace(override_config={"experts_implementation": option})
+    )
+    assert result is module
+    assert result.forward is thinker.forward
+    assert not hasattr(result, "talker")
+    assert enable_experts.call_args_list == ([call(text_model)] if enabled else [])
+    assert enable_text_fusions.call_args_list == ([call()] if enabled else [])
+
+
+def test_prepare_megatron_config_rejects_ascend_grouped_mm():
+    model_config = SimpleNamespace(override_config={"experts_implementation": "ascend_grouped_mm"})
+
+    with pytest.raises(ValueError, match="ascend_grouped_mm requires the FSDP or FSDP2 engine"):
+        Qwen3OmniThinkerAdapter.prepare_megatron_config(model_config, None)
 
 
 def test_configure_processor_binds_multimodal_pad_dedup(monkeypatch):

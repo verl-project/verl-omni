@@ -14,6 +14,7 @@
 """FSDP engines for diffusion models."""
 
 import gc
+import itertools
 import json
 import logging
 import os
@@ -24,6 +25,7 @@ from typing import Any, Callable, Iterator, Optional
 
 import torch
 import torch.distributed
+from accelerate import init_empty_weights
 from tensordict import TensorDict
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp.api import FullStateDictConfig, ShardedStateDictConfig, StateDictType
@@ -45,8 +47,6 @@ from verl.utils.fsdp_utils import (
     init_fn,
     load_fsdp_model_to_gpu,
     load_fsdp_optimizer,
-    merged_lora_context,
-    normalize_peft_param_name,
     offload_fsdp_model_to_cpu,
     offload_fsdp_optimizer,
 )
@@ -60,7 +60,7 @@ from verl.workers.engine.fsdp.utils import create_device_mesh, get_sharding_stra
 from verl.workers.engine.spec import ShardSpec
 from verl.workers.engine.utils import enable_full_determinism, prepare_micro_batches
 
-from verl_omni.pipelines.model_base import DiffusionModelBase
+from verl_omni.pipelines.model_base import DiffusionModelARBase, DiffusionModelBase
 from verl_omni.pipelines.utils import (
     build_scheduler,
     forward,
@@ -68,11 +68,12 @@ from verl_omni.pipelines.utils import (
     prepare_model_inputs,
     prepare_noisy_latents,
 )
+from verl_omni.utils.config import resolve_lora_config
 from verl_omni.utils.diffusion_compile import _maybe_compile_repeated_blocks
-from verl_omni.utils.fsdp_utils import apply_fsdp2, collect_lora_params
+from verl_omni.utils.fsdp_utils import apply_fsdp2
 from verl_omni.workers.config import DiffusionModelConfig
 from verl_omni.workers.engine.lora_adapter_mixin import LoRAAdapterMixin
-from verl_omni.workers.engine.utils import patch_composite_ar_engine_module_build, qwen2_vl_base_forward
+from verl_omni.workers.engine.lora_export import export_lora_for_sync
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -86,14 +87,26 @@ def _cast_loaded_diffusers_module(
     *,
     preserve_fp32_modules: bool = True,
 ) -> None:
-    """Cast ordinary models while preserving diffusers-declared fp32 islands."""
+    """Cast to ``torch_dtype`` while preserving diffusers-declared fp32 islands.
+
+    ``from_pretrained`` applies ``torch_dtype`` to every checkpoint tensor except
+    ``_keep_in_fp32_modules`` entries. Modules built via ``from_config`` start in
+    fp32, so they must land on the same mixed layout — otherwise FSDP2 shards
+    differ between rank 0 and meta-initialized ranks and collectives mismatch.
+    """
     keep_in_fp32 = getattr(module, "_keep_in_fp32_modules", None)
+    if isinstance(keep_in_fp32, str):
+        keep_in_fp32 = [keep_in_fp32]
     if preserve_fp32_modules and keep_in_fp32:
         logger.info(
-            "Preserving mixed precision declared by %s._keep_in_fp32_modules=%s",
+            "Casting to %s except fp32 islands declared by %s._keep_in_fp32_modules=%s",
+            torch_dtype,
             type(module).__name__,
             keep_in_fp32,
         )
+        for name, tensor in itertools.chain(module.named_parameters(), module.named_buffers()):
+            if tensor.is_floating_point() and not any(part in name.split(".") for part in keep_in_fp32):
+                tensor.data = tensor.data.to(torch_dtype)
         return
     module.to(torch_dtype)
 
@@ -257,7 +270,7 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
 
         if self.model_config.enable_gradient_checkpointing:
             try:
-                module.enable_gradient_checkpointing()
+                self._configure_gradient_checkpointing(module)
             except AttributeError:
                 raise NotImplementedError(
                     f"Gradient checkpointing is enabled in config, but {type(module).__name__} "
@@ -271,6 +284,9 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
 
         module.can_generate = lambda: False
         return module
+
+    def _configure_gradient_checkpointing(self, module):
+        module.enable_gradient_checkpointing()
 
     def _build_module(self):
         from diffusers import AutoModel
@@ -294,12 +310,23 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
         with init_context(), warnings.catch_warnings():
             warnings.simplefilter("ignore")
 
-            module = AutoModel.from_pretrained(
-                self.model_config.config_path or self.model_config.local_path,
-                torch_dtype=torch_dtype,
-                trust_remote_code=self.model_config.trust_remote_code,
-                subfolder="" if self.model_config.config_path else self.model_config.transformer_subfolder,
-            )
+            load_path = self.model_config.config_path or self.model_config.local_path
+            load_kwargs = {
+                "trust_remote_code": self.model_config.trust_remote_code,
+                "subfolder": "" if self.model_config.config_path else self.model_config.transformer_subfolder,
+            }
+            # Ranks on meta get their weights from rank 0 when FSDP wraps the module,
+            # but diffusers' from_pretrained still reads every checkpoint tensor
+            # under init_empty_weights. from_config reads only the config JSON.
+            model_cls = DiffusionModelBase.get_class(self.model_config)
+            loader = model_cls.diffusers_model_class(self.model_config) or AutoModel
+            if init_context is init_empty_weights:
+                if loader is AutoModel:
+                    module = loader.from_config(load_path, **load_kwargs)
+                else:
+                    module = loader.from_config(loader.load_config(load_path, subfolder=load_kwargs["subfolder"]))
+            else:
+                module = loader.from_pretrained(load_path, torch_dtype=torch_dtype, **load_kwargs)
             try:
                 module.set_attention_backend(self.model_config.attn_backend)
             except Exception as e:
@@ -311,7 +338,6 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
 
             # Keep architecture-declared fp32 islands unless the adapter marks
             # them as incompatible with its FSDP wrapping units.
-            model_cls = DiffusionModelBase.get_class(self.model_config)
             _cast_loaded_diffusers_module(
                 module,
                 torch_dtype,
@@ -319,7 +345,7 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
             )
 
             if self.model_config.enable_gradient_checkpointing:
-                module.enable_gradient_checkpointing()
+                self._configure_gradient_checkpointing(module)
 
             # patch for checkpoint saving
             def save_config(self, save_directory: str | os.PathLike):
@@ -815,72 +841,30 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
 
         # FSDP2 CPUOffloadPolicy owns CPU<->GPU placement; calling model.to(device) here
         # fails the _apply tensor swap on the CPU-resident params. The per-DTensor
-        # .to(device).full_tensor() below still produces GPU tensors for the sync.
+        # gather in lora_export still produces GPU tensors for the sync.
         if not self._uses_fsdp2_cpu_offload_policy:
             load_fsdp_model_to_gpu(self.module)
 
         log_gpu_memory_usage("After load_fsdp_model_to_gpu", logger=logger)
 
-        peft_config = None
-        merge_lora = getattr(self.model_config, "lora", {}).get("merge", False)
+        def _offload_to_cpu():
+            log_gpu_memory_usage("Before offload_fsdp_model_to_cpu", logger=logger)
+            if self._is_offload_param:
+                offload_fsdp_model_to_cpu(self.module)
+            log_gpu_memory_usage("After offload_fsdp_model_to_cpu", logger=logger)
 
-        peft_model = getattr(self.module, "_fsdp_wrapped_module", self.module)
-        if hasattr(peft_model, "peft_config"):  # LoRA
-            if not merge_lora:
-                peft_config = peft_model.peft_config.get("default", None)
-                adapter_ctx = self.use_adapter(adapter_name) if adapter_name is not None else nullcontext()
-                with adapter_ctx:
-                    params = collect_lora_params(
-                        module=self.module,
-                        layered_summon=layered_summon,
-                        base_sync_done=base_sync_done,
-                        is_diffusers=True,
-                        adapter_name=adapter_name or "default",
-                        layer_prefixes=self.model_config.fsdp_layer_prefixes,
-                    )
-            else:  # merge lora
-                if adapter_name not in (None, "default"):
-                    # merged_lora_context merges the active ("default") adapter only;
-                    # silently exporting it for a named rollout_adapter would sync the
-                    # wrong policy.
-                    raise ValueError(
-                        f"model.lora.merge=True exports the active 'default' adapter only; "
-                        f"got rollout_adapter={adapter_name!r}."
-                    )
-                # state_dict() aliases the live parameter storage and merged_lora_context
-                # restores the un-merged base weights on exit, so tensors must be
-                # materialized while the context is still open (inside the generator).
-                # Materializing after exit silently sends base weights without adapters.
-                return self._merged_lora_per_tensor_param(), None
-        else:
-            params = self.module.state_dict()
-
-        params = convert_weight_keys(params, getattr(self.module, "_fsdp_wrapped_module", self.module))
-
-        log_gpu_memory_usage("Before offload_fsdp_model_to_cpu", logger=logger)
-        if self._is_offload_param:
-            offload_fsdp_model_to_cpu(self.module)
-        log_gpu_memory_usage("After offload_fsdp_model_to_cpu", logger=logger)
-
-        if peft_config is not None and base_sync_done:
-            per_tensor_param = params.items()
-        else:
-            device = get_device_id()  # used when fsdp2 set cpu_offload_policy
-            # TODO: cast fp32 to bf16 to reduce weight sync overhead, need more fine-grained control, e.g MoE gate
-            per_tensor_param = (
-                (
-                    name,
-                    param.to(device, non_blocking=True).full_tensor().to(torch.bfloat16, non_blocking=True)
-                    if isinstance(param, DTensor)
-                    else param,
-                )
-                for name, param in params.items()
-            )
-
-        # we need to add the prefix to make it compatible with rollout engine
-        per_tensor_param = ((f"transformer.{name}", tensor) for name, tensor in per_tensor_param)
-        peft_config_dict = peft_config.to_dict() if peft_config is not None else None
-        return per_tensor_param, peft_config_dict
+        # "transformer." prefix keeps the names compatible with the rollout engine.
+        return export_lora_for_sync(
+            self.module,
+            model_config=self.model_config,
+            base_sync_done=base_sync_done,
+            adapter_name=adapter_name,
+            layered_summon=layered_summon,
+            is_diffusers=True,
+            key_prefix="transformer.",
+            adapter_context=lambda: self.use_adapter(adapter_name) if adapter_name is not None else nullcontext(),
+            offload_fn=_offload_to_cpu,
+        )
 
     def _prepare_timestep_staging(self, data: TensorDict, timesteps_key: str) -> tuple[dict[str, int], list[str]]:
         """Validate CPU inputs and describe the Qwen-Image fields consumed by each step."""
@@ -903,7 +887,7 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
             latents = data.get("all_latents", None)
             if not isinstance(latents, torch.Tensor) or latents.ndim != 4 or latents.shape[1] != num_steps + 1:
                 raise ValueError("Staged PPO all_latents must have shape (batch, timesteps + 1, tokens, channels).")
-            required = ("all_timesteps", "all_latents", "old_log_probs", "advantages", "prompt_embeds")
+            required = ("all_timesteps", "all_latents", "advantages", "prompt_embeds")
             step_fields = dict.fromkeys(
                 (
                     "all_timesteps",
@@ -947,39 +931,6 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
             if isinstance(value, torch.Tensor) and (value.device.type != "cpu" or value.requires_grad):
                 raise ValueError(f"Timestep staging requires CPU inputs without gradients, got {key!r}.")
         return step_fields, shared_keys
-
-    def _merged_lora_per_tensor_param(self):
-        """Stream merged (base + LoRA) weights for rollout weight sync.
-
-        ``state_dict()`` returns tensors that alias the live FSDP parameter
-        storage, and ``merged_lora_context`` restores the un-merged base
-        weights when it exits. The context therefore must stay open until the
-        consumer has materialized every tensor: ``DTensor.full_tensor()``
-        produces a copy, so yielded tensors remain valid after the restore.
-        Consuming a state_dict captured inside the context after the context
-        has exited would silently send base weights without the adapters.
-
-        Names carry the ``transformer.`` prefix, matching the non-merge export path above.
-        """
-        device = get_device_id()
-        try:
-            with merged_lora_context(self.module, backup_adapters=True):
-                params = normalize_peft_param_name(self.module.state_dict())
-                params = convert_weight_keys(params, getattr(self.module, "_fsdp_wrapped_module", self.module))
-                for name, param in params.items():
-                    yield (
-                        f"transformer.{name}",
-                        param.to(device, non_blocking=True).full_tensor().to(torch.bfloat16, non_blocking=True)
-                        if isinstance(param, DTensor)
-                        # clone: plain tensors also alias module storage, and bucketed
-                        # senders may flush after the restore has already run
-                        else param.detach().clone(),
-                    )
-        finally:
-            log_gpu_memory_usage("Before offload_fsdp_model_to_cpu", logger=logger)
-            if self._is_offload_param:
-                offload_fsdp_model_to_cpu(self.module)
-            log_gpu_memory_usage("After offload_fsdp_model_to_cpu", logger=logger)
 
     def get_per_tensor_param_shard(self, **kwargs):
         """Like :meth:`get_per_tensor_param`, but yields each rank's *local* shard
@@ -1125,7 +1076,7 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
         return self.postprocess_batch_func(output_lst=output_lst, indices=indices, data=data)
 
 
-@EngineRegistry.register(model_type="diffusion_model", backend=["fsdp", "fsdp2"], device=["cuda", "npu"])
+@EngineRegistry.register(model_type="diffusion_model", backend=["fsdp", "fsdp2"], device=["cuda", "npu", "xpu", "mlu"])
 class PPODiffusersFSDPEngine(DiffusersFSDPEngine):
     """Diffusers FSDP engine with PPO forward/backward and I/O preparation."""
 
@@ -1205,8 +1156,9 @@ class PPODiffusersFSDPEngine(DiffusersFSDPEngine):
         if loss_function is not None:
             data = tu.get_tensordict(
                 {
-                    "old_log_probs": micro_batch["old_log_probs"][:, step],
-                    "advantages": micro_batch["advantages"][:, step],
+                    key: micro_batch[key][:, step]
+                    for key in ("old_log_probs", "advantages")
+                    if micro_batch.get(key, None) is not None
                 },
             )
             tu.assign_non_tensor(
@@ -1248,7 +1200,9 @@ class PPODiffusersFSDPEngine(DiffusersFSDPEngine):
         return loss, output
 
 
-@EngineRegistry.register(model_type="diffusion_dpo_model", backend=["fsdp", "fsdp2"], device=["cuda", "npu"])
+@EngineRegistry.register(
+    model_type="diffusion_dpo_model", backend=["fsdp", "fsdp2"], device=["cuda", "npu", "xpu", "mlu"]
+)
 class DPODiffusersFSDPEngine(DiffusersFSDPEngine):
     """Diffusers FSDP engine variant for diffusion DPO."""
 
@@ -1434,9 +1388,24 @@ class DPODiffusersFSDPEngine(DiffusersFSDPEngine):
         return loss, output
 
 
-@EngineRegistry.register(model_type="diffusion_nft_model", backend=["fsdp", "fsdp2"], device=["cuda", "npu"])
+@EngineRegistry.register(
+    model_type="diffusion_nft_model", backend=["fsdp", "fsdp2"], device=["cuda", "npu", "xpu", "mlu"]
+)
 class NFTDiffusersFSDPEngine(DiffusersFSDPEngine):
     """Diffusers FSDP engine for direct-preference / forward-process objectives (e.g. DiffusionNFT)."""
+
+    def __init__(
+        self,
+        model_config: DiffusionModelConfig,
+        engine_config: FSDPEngineConfig,
+        optimizer_config: FSDPOptimizerConfig,
+        checkpoint_config: CheckpointConfig,
+    ):
+        DiffusionModelBase.get_class(model_config).validate_engine_config(engine_config)
+        super().__init__(model_config, engine_config, optimizer_config, checkpoint_config)
+
+    def _configure_gradient_checkpointing(self, module):
+        DiffusionModelBase.get_class(self.model_config).configure_gradient_checkpointing(module, self.engine_config)
 
     def forward_backward_batch(
         self, data: TensorDict, loss_function: Callable, forward_only: bool = False
@@ -1444,25 +1413,9 @@ class NFTDiffusersFSDPEngine(DiffusersFSDPEngine):
         return self._run_forward_backward_batch(data, loss_function, forward_only, timesteps_key="train_timesteps")
 
     def prepare_model_inputs(self, micro_batch: TensorDict, step: int):
-        x0 = micro_batch["latents_clean"]
-        timestep = micro_batch["train_timesteps"][:, step]
-        num_train_timesteps = getattr(self.scheduler.config, "num_train_timesteps", None)
-        if num_train_timesteps is None:
-            raise ValueError(
-                "Converting `train_timesteps` to flow time requires "
-                f"scheduler.config.num_train_timesteps, but {type(self.scheduler).__name__} "
-                "does not define it."
-            )
-        tu.assign_non_tensor(micro_batch, num_train_timesteps=int(num_train_timesteps))
-        t = timestep.float() / float(num_train_timesteps)
-        t_expanded = t.view(-1, *([1] * (x0.ndim - 1)))
-
-        if micro_batch.get("forward_noise", None) is not None:
-            forward_noise = micro_batch["forward_noise"]
-            noise = forward_noise[:, step] if forward_noise.ndim == x0.ndim + 1 else forward_noise
-        else:
-            noise = torch.randn_like(x0.float())
-        xt = (1.0 - t_expanded) * x0 + t_expanded * noise
+        latents, timesteps, loss_context = DiffusionModelBase.get_class(self.model_config).prepare_training_inputs(
+            micro_batch, step, self.scheduler
+        )
 
         prompt_embeds = micro_batch["prompt_embeds"]
         prompt_embeds_mask = micro_batch["prompt_embeds_mask"]
@@ -1490,8 +1443,8 @@ class NFTDiffusersFSDPEngine(DiffusersFSDPEngine):
         model_inputs, negative_model_inputs = prepare_model_inputs(
             module=self.module,
             model_config=self.model_config,
-            latents=xt,
-            timesteps=timestep,
+            latents=latents,
+            timesteps=timesteps,
             prompt_embeds=prompt_embeds,
             prompt_embeds_mask=prompt_embeds_mask,
             negative_prompt_embeds=negative_prompt_embeds,
@@ -1499,31 +1452,30 @@ class NFTDiffusersFSDPEngine(DiffusersFSDPEngine):
             micro_batch=micro_batch,
             step=step,
         )
-        return model_inputs, negative_model_inputs, x0, xt, t_expanded
+        return model_inputs, negative_model_inputs, loss_context
 
     def prepare_model_outputs(self, output, micro_batch: TensorDict):
-        old_prediction, forward_prediction, ref_forward_prediction, x0, xt, t_expanded = output
-        return {
-            "old_prediction": old_prediction,
-            "forward_prediction": forward_prediction,
-            "ref_forward_prediction": ref_forward_prediction,
-            "x0": x0,
-            "xt": xt,
-            "t_expanded": t_expanded,
-        }
+        predictions, loss_context = output
+        return DiffusionModelBase.get_class(self.model_config).prepare_model_outputs(predictions, loss_context)
 
     def forward_step(self, micro_batch: TensorDict, loss_function, forward_only, step):
-        model_inputs, negative_model_inputs, x0, xt, t_expanded = self.prepare_model_inputs(
+        model_inputs, negative_model_inputs, loss_context = self.prepare_model_inputs(
             micro_batch=micro_batch, step=step
         )
 
-        with self.use_adapter("old"), torch.no_grad():
+        adapter_class = DiffusionModelBase.get_class(self.model_config)
+        with self.use_adapter(adapter_class.old_policy_adapter), torch.no_grad():
             old_prediction = forward(
                 module=self.module,
                 model_config=self.model_config,
                 model_inputs=model_inputs,
                 negative_model_inputs=negative_model_inputs,
-            ).detach()
+            )
+            old_prediction = (
+                old_prediction.detach()
+                if isinstance(old_prediction, torch.Tensor)
+                else tuple(prediction.detach() for prediction in old_prediction)
+            )
 
         forward_prediction = forward(
             module=self.module,
@@ -1534,33 +1486,33 @@ class NFTDiffusersFSDPEngine(DiffusersFSDPEngine):
 
         with torch.no_grad():
             with self.disable_adapter():
-                ref_forward_prediction = forward(
+                ref_forward_prediction = adapter_class.forward_reference(
                     module=self.module,
                     model_config=self.model_config,
                     model_inputs=model_inputs,
                     negative_model_inputs=negative_model_inputs,
-                ).detach()
+                )
+                ref_forward_prediction = (
+                    ref_forward_prediction.detach()
+                    if isinstance(ref_forward_prediction, torch.Tensor)
+                    else tuple(prediction.detach() for prediction in ref_forward_prediction)
+                )
         self._set_adapter("default")
 
         model_output = self.prepare_model_outputs(
-            output=(old_prediction, forward_prediction, ref_forward_prediction, x0, xt, t_expanded),
+            output=(
+                {
+                    "old_prediction": old_prediction,
+                    "forward_prediction": forward_prediction,
+                    "ref_forward_prediction": ref_forward_prediction,
+                },
+                loss_context,
+            ),
             micro_batch=micro_batch,
         )
 
         if loss_function is not None:
-            # Per-timestep loss inputs are sliced to this step; per-sample group fields pass through.
-            loss_inputs = {
-                key: micro_batch[key][:, step]
-                for key in ("reward_prob", "advantages")
-                if micro_batch.get(key, None) is not None
-            }
-            loss_inputs.update(
-                {
-                    key: micro_batch[key]
-                    for key in ("group_index", "group_size")
-                    if micro_batch.get(key, None) is not None
-                }
-            )
+            loss_inputs = DiffusionModelBase.get_class(self.model_config).prepare_loss_inputs(micro_batch, step)
             data = tu.get_tensordict(loss_inputs)
             tu.assign_non_tensor(
                 data,
@@ -1572,7 +1524,8 @@ class NFTDiffusersFSDPEngine(DiffusersFSDPEngine):
             loss, metrics = loss_function(model_output=model_output, data=data, dp_group=self.get_data_parallel_group())
         else:
             assert forward_only, "forward_only must be True when loss_function is None"
-            loss = torch.tensor(1.0, device=x0.device)
+            prediction = forward_prediction if isinstance(forward_prediction, torch.Tensor) else forward_prediction[0]
+            loss = torch.tensor(1.0, device=prediction.device)
             metrics = {}
 
         output = {
@@ -1620,6 +1573,73 @@ class EngineTrainModeCtx(BaseEngineCtx):
         assert isinstance(self.engine, DiffusersFSDPEngine)
         self.engine.optimizer_zero_grad()
         super().__exit__(exc_type, exc_value, traceback)
+
+
+class CompositeARFSDPEngineWithLMHead(FSDPEngineWithLMHead):
+    """Autoregressive backend for composite training.
+
+    Pipeline-specific setup goes through ``DiffusionModelARBase`` after verl
+    builds the language-model module. Under FSDP2, ``super()._build_fsdp_module``
+    runs with verl-omni ``apply_fsdp2`` so adapter-declared frozen subtrees stay
+    unsharded. Packages that do not train the AR leave the registry empty and
+    both hooks become no-ops.
+    """
+
+    def __init__(
+        self,
+        model_config: HFModelConfig,
+        engine_config: FSDPEngineConfig,
+        optimizer_config: FSDPOptimizerConfig,
+        checkpoint_config: CheckpointConfig,
+        diffusion_model_config: DiffusionModelConfig,
+    ):
+        super().__init__(
+            model_config=model_config,
+            engine_config=engine_config,
+            optimizer_config=optimizer_config,
+            checkpoint_config=checkpoint_config,
+        )
+        self.diffusion_model_config = diffusion_model_config
+
+    def _build_module(self):
+        """Dispatch AR setup through ``DiffusionModelARBase`` when registered.
+
+        The DiT adapter is not consulted: this module is verl's language-model engine.
+        """
+        module = super()._build_module()
+        DiffusionModelARBase.maybe_configure_module(module, self.diffusion_model_config)
+        return module
+
+    def _build_fsdp_module(self, module):
+        """Reuse verl's FSDP wrap; under FSDP2 inject AR ``ignored_names``.
+
+        verl's ``FSDPEngine._build_fsdp_module`` calls upstream
+        ``verl.utils.fsdp_utils.apply_fsdp2`` without ``ignored_names``. For FSDP2
+        we temporarily point that call at ``verl_omni.utils.fsdp_utils.apply_fsdp2``
+        with names from ``DiffusionModelARBase.get_fsdp_ignored_module_names``.
+        FSDP1 keeps the parent path unchanged.
+        """
+        if self.engine_config.strategy != "fsdp2":
+            return super()._build_fsdp_module(module)
+
+        ar_cls = DiffusionModelARBase.peek_class(self.diffusion_model_config)
+        ignored_names = (
+            list(ar_cls.get_fsdp_ignored_module_names(self.diffusion_model_config)) if ar_cls is not None else []
+        )
+
+        import verl.workers.engine.fsdp.transformer_impl as transformer_impl
+
+        from verl_omni.utils.fsdp_utils import apply_fsdp2 as omni_apply_fsdp2
+
+        def apply_fsdp2_with_ignored(model, fsdp_kwargs, config):
+            return omni_apply_fsdp2(model, fsdp_kwargs, config, ignored_names=ignored_names)
+
+        original_apply_fsdp2 = transformer_impl.apply_fsdp2
+        transformer_impl.apply_fsdp2 = apply_fsdp2_with_ignored
+        try:
+            return super()._build_fsdp_module(module)
+        finally:
+            transformer_impl.apply_fsdp2 = original_apply_fsdp2
 
 
 @EngineRegistry.register(model_type="diffusion_composite_model", backend=["fsdp", "fsdp2"], device=["cuda", "npu"])
@@ -1681,13 +1701,13 @@ class CompositeFSDPEngine(BaseEngine):
         ar_model_config = self.build_ar_hf_model_config(model_config)
         ar_model_config.model_type = "language_model"
         ar_optimizer_config = self.build_ar_optimizer_config(optimizer_config, model_config)
-        self.ar_engine = FSDPEngineWithLMHead(
+        self.ar_engine = CompositeARFSDPEngineWithLMHead(
             model_config=ar_model_config,
             engine_config=engine_config,
             optimizer_config=ar_optimizer_config,
             checkpoint_config=checkpoint_config,
+            diffusion_model_config=model_config,
         )
-        patch_composite_ar_engine_module_build(self.ar_engine, model_config, engine_config.strategy)
         model_config.model_type = "diffusion_model"
         self.dit_engine = PPODiffusersFSDPEngine(
             model_config=model_config,
@@ -1707,15 +1727,31 @@ class CompositeFSDPEngine(BaseEngine):
     def initialize(self) -> None:
         self.ar_engine.initialize()
         self.dit_engine.initialize()
+        # Rollout sync and disable_adapter assume matched PEFT on both sides.
+        self._assert_matched_peft_contract()
 
-        # TODO: (susan) delete after fixing bug
-        if self.ar_engine._is_lora:
-            self.ar_engine.module.base_model.model.model.forward = qwen2_vl_base_forward.__get__(
-                self.ar_engine.module.base_model.model.model
-            )
-        else:
-            self.ar_engine.module.model.forward = qwen2_vl_base_forward.__get__(self.ar_engine.module.model)
-        print("Monkey patch verl.models.transformers.qwen2_vl._get_input_embeds")  # line 388-394
+    @staticmethod
+    def _unwrap_peft_model(engine) -> Any | None:
+        """Return the PEFT-wrapped module for ``engine``, or ``None`` if full-weight."""
+        module = getattr(engine, "module", None)
+        peft_model = getattr(module, "_fsdp_wrapped_module", module) if module is not None else None
+        if peft_model is None or not hasattr(peft_model, "peft_config"):
+            return None
+        return peft_model
+
+    def _assert_matched_peft_contract(self) -> None:
+        """Reject DiT/AR PEFT mismatches (both full weights or both LoRA only)."""
+        dit_peft = self._unwrap_peft_model(self.dit_engine)
+        ar_peft = self._unwrap_peft_model(self.ar_engine)
+        if (dit_peft is None) == (ar_peft is None):
+            return
+        dit_mode = "LoRA" if dit_peft is not None else "full weights"
+        ar_mode = "LoRA" if ar_peft is not None else "full weights"
+        raise ValueError(
+            "CompositeFSDPEngine requires both AR and DiT to use the same training mode "
+            f"(both full weights or both LoRA); got DiT={dit_mode}, AR={ar_mode}. "
+            "Mismatched PEFT breaks rollout weight sync and disable_adapter."
+        )
 
     def next_stage(self) -> None:
         """Switch stage and engine"""
@@ -1731,7 +1767,7 @@ class CompositeFSDPEngine(BaseEngine):
 
     @property
     def is_optimizer_offload_enabled(self) -> bool:
-        return self.current_engine.is_optimizer_offload_enabled()
+        return self.current_engine.is_optimizer_offload_enabled
 
     def train_mode(self, **kwargs):
         return _CompositeEngineCtx(self, mode="train", **kwargs)
@@ -1879,32 +1915,20 @@ class CompositeFSDPEngine(BaseEngine):
 
         return merged
 
-    # @property
-    # def has_lora(self) -> bool:
-    #     """Return True if either AR or DiT sub-engine carries a default LoRA adapter."""
-    #     for sub_engine in (self.ar_engine, self.dit_engine):
-    #         module = getattr(sub_engine, "module", None)
-    #         peft_model = getattr(module, "_fsdp_wrapped_module", module) if module is not None else None
-    #         if peft_model is not None and getattr(peft_model, "peft_config", None):
-    #             if peft_model.peft_config.get("default") is not None:
-    #                 return True
-    #     return False
-
     def get_lora_peft_config(self, adapter_name: str = "default") -> dict[str, Any] | None:
         """PEFT metadata for colocated diffusion rollout LoRA apply."""
-        dit_module = getattr(self.dit_engine, "module", None)
-        dit_peft_model = getattr(dit_module, "_fsdp_wrapped_module", dit_module) if dit_module is not None else None
-        # no lora peft config
-        if dit_peft_model is None or not hasattr(dit_peft_model, "peft_config"):
+        self._assert_matched_peft_contract()
+        dit_peft_model = self._unwrap_peft_model(self.dit_engine)
+        # no lora peft config (contract: AR is also full-weight)
+        if dit_peft_model is None:
             return None
 
-        dit_peft_config = dit_peft_model.peft_config.get("default", None)
-        ar_module = getattr(self.ar_engine, "module", None)
-        ar_peft_model = getattr(ar_module, "_fsdp_wrapped_module", ar_module) if ar_module is not None else None
-        ar_peft_config = ar_peft_model.peft_config.get("default", None)
+        dit_peft_config = dit_peft_model.peft_config.get(adapter_name, None)
+        ar_peft_model = self._unwrap_peft_model(self.ar_engine)
+        ar_peft_config = ar_peft_model.peft_config.get(adapter_name, None)
 
         # currently only support lora.merge=True
-        merge_lora = self.model_config.lora.get("merge", False)
+        merge_lora = resolve_lora_config(self.model_config).merge
         peft_config = None
         if not merge_lora:
             peft_config = self._merge_composite_peft_configs(dit_peft_config, ar_peft_config, self.model_config)
@@ -1913,6 +1937,7 @@ class CompositeFSDPEngine(BaseEngine):
     def get_per_tensor_param(
         self, layered_summon=False, base_sync_done=False, adapter_name: str | None = None, **kwargs
     ):
+        self._assert_matched_peft_contract()
         dit_params, dit_peft = self.dit_engine.get_per_tensor_param(
             layered_summon=layered_summon,
             base_sync_done=base_sync_done,
@@ -1926,7 +1951,7 @@ class CompositeFSDPEngine(BaseEngine):
             **kwargs,
         )
         # currently only support lora.merge=True
-        merge_lora = getattr(self.model_config, "lora", {}).get("merge", False)
+        merge_lora = resolve_lora_config(self.model_config).merge
 
         def merged() -> Iterator[tuple[str, torch.Tensor]]:
             yield from dit_params
@@ -1938,7 +1963,60 @@ class CompositeFSDPEngine(BaseEngine):
         )
         return merged(), merged_peft_config
 
+    def get_per_tensor_param_shard(self, **kwargs):
+        """Merge DiT + AR local shards for ``omni_delta_sharded`` (full-weight only).
+
+        DiT already yields ``transformer.*`` names; AR names from verl's FSDP engine
+        are unprefixed and get the same ``text_encoder.`` prefix as
+        :meth:`get_per_tensor_param`.
+        """
+        self._assert_matched_peft_contract()
+        if self._unwrap_peft_model(self.dit_engine) is not None:
+            raise NotImplementedError(
+                "omni_delta_sharded shard export supports full-weight training only; LoRA runs "
+                "keep the adapter (merge=false) or merged full-weight (merge=true) sync paths."
+            )
+
+        dit_gen, _ = self.dit_engine.get_per_tensor_param_shard(**kwargs)
+        ar_gen, _ = self.ar_engine.get_per_tensor_param_shard(**kwargs)
+
+        def merged():
+            yield from dit_gen
+            for name, local, spec in ar_gen:
+                yield f"text_encoder.{name}", local, spec
+
+        return merged(), None
+
+    def _hf_delta_entry(self, name, spec, place, lidx, lval):
+        """Identity HF delta entry for both DiT and AR composite weights."""
+        from verl.workers.engine.utils import _hf_entry_identity
+
+        if spec.to_hf_chunk is not None:
+            raise NotImplementedError(
+                f"{name}: CompositeFSDPEngine only handles identity params; "
+                "converter specs belong to the engine that declared them"
+            )
+        return _hf_entry_identity(name, spec, place, lidx, lval)
+
+    def get_per_tensor_param_delta_shard(self, **kwargs):
+        """Steady ``omni_delta_sharded`` payloads over the merged DiT+AR shard export.
+
+        Snapshot state lives on this composite (via :meth:`prime_delta_snapshots`),
+        not on the sub-engines, so deltas stay consistent with the merged names.
+        """
+        from verl.workers.engine.utils import hf_delta_export
+
+        self._delta_shard_snap = getattr(self, "_delta_shard_snap", {})
+        gen, _ = self.get_per_tensor_param_shard()
+        return hf_delta_export(gen, self._delta_shard_snap, self._hf_delta_entry), None
+
     def disable_adapter(self):
+        self._assert_matched_peft_contract()
+        # Full-weight composite: verl's AR ``disable_adapter`` and DiT PEFT helpers
+        # both assume a PEFT module; no-op when neither side injected LoRA.
+        if self._unwrap_peft_model(self.dit_engine) is None:
+            return nullcontext()
+
         ar_ctx = self.ar_engine.disable_adapter()
         dit_ctx = self.dit_engine.disable_adapter()
 

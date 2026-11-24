@@ -14,9 +14,11 @@
 """Per-task reward dispatch for the mixed OCR + PickScore distillation recipe.
 
 OCR rows go to the GenRM OCR scorer through the reward router; PickScore rows
-are scored locally with PickScore_v1 on ``PICKSCORE_DEVICE``. Both branches
-return the same key set: the reward loop merges per-sample dicts into one
-table and requires identical keys on every row.
+are scored locally with PickScore_v1 on ``PICKSCORE_DEVICE``. GenEval rows get a
+constant score of 0: the detector-based GenEval scorer is not ported, so GenEval
+has to be evaluated offline. All branches return the same key set: the reward
+loop merges per-sample dicts into one table and requires identical keys on
+every row.
 """
 
 import os
@@ -31,6 +33,8 @@ _PICKSCORE_DEVICE = os.environ.get("PICKSCORE_DEVICE", get_device_name())
 
 async def compute_score_mixed(data_source, solution_image, ground_truth, extra_info, **kwargs):
     """Route one sample to the scorer of its task, keyed on ``data_source``."""
+    if "geneval" in data_source:
+        return {"score": 0.0, "pickscore_raw": float("nan"), "genrm_response": ""}
     if "pickscore" in data_source:
         result = await compute_score_pickscore(
             data_source, solution_image, ground_truth, extra_info, device=_PICKSCORE_DEVICE

@@ -245,3 +245,19 @@ class TestComputeThroughputMetricsDiffusion:
         batch = _make_batch(batch_size=batch_size)
         metrics = compute_throughput_metrics_diffusion(batch, {"step": step_time}, n_gpus=n_gpus)
         assert metrics["perf/throughput"] == pytest.approx(batch_size / (step_time * n_gpus))
+
+
+def test_named_reward_means_are_logged_without_actor_metric_tensors():
+    batch = DataProto.from_dict(
+        tensors={"sample_level_rewards": torch.tensor([[1.0, 3.0], [3.0, 5.0]])},
+        non_tensors={
+            "reward/video": np.array([1.0, 3.0]),
+            "reward/audio": np.array([3.0, 5.0]),
+            "reward/combined": np.array([4.0, 8.0]),
+        },
+        meta_info={"reward_extra_keys": ["reward/video", "reward/audio", "reward/combined"]},
+    )
+    metrics = compute_data_metrics_diffusion(batch)
+    assert metrics["critic/reward/video/mean"] == pytest.approx(2.0)
+    assert metrics["critic/reward/audio/mean"] == pytest.approx(4.0)
+    assert metrics["critic/reward/combined/mean"] == pytest.approx(6.0)

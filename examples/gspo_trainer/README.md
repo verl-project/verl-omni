@@ -1,6 +1,6 @@
 # Qwen3-Omni Thinker GSPO Trainer
+Last updated: 11/12/2026
 
-Last updated: 10/06/2026
 
 This example shows how to post-train the **Qwen3-Omni-30B-A3B Thinker** with
 **GSPO** on multimodal reasoning tasks, using FSDP for the actor and `vllm-omni` as
@@ -15,7 +15,7 @@ Both **GPU** and **NPU** training platforms are supported:
   — **GPU**, **LoRA (r=32)** on a single node with **4 × H800 80GB**.
 - [`run_qwen3_omni_thinker_gspo_lora_avqa_v1.sh`](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_avqa_v1.sh)
   — **GPU**, **LoRA (r=32) V1** for text + image + audio AVQA training.
-- [`run_qwen3_omni_thinker_gspo_npu_avqa_v1.sh`](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_npu_avqa_v1.sh)
+- [`run_qwen3_omni_thinker_gspo_avqa_v1.sh`](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_avqa_v1.sh)
   — **NPU**, **full-parameter V1** for text + image + audio AVQA training.
 - [`run_qwen3_omni_thinker_gspo_npu_nextqa_v1.sh`](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_npu_nextqa_v1.sh)
   — **NPU**, **full-parameter V1** for video and soundtrack NExT-QA training.
@@ -54,7 +54,7 @@ monkey-patches through `external_lib`.
 
 The launchers colocate the FSDP actor and the `vllm-omni` rollout on the same
 devices. `run_qwen3_omni_thinker_gspo_lora_v1.sh` targets a single node with
-**4 × H800 80GB**; `run_qwen3_omni_thinker_gspo_npu_avqa_v1.sh` targets a single
+**4 × H800 80GB**; `run_qwen3_omni_thinker_gspo_avqa_v1.sh` targets a single
 **Atlas 800T A3** node with **16 × Ascend 910C 64GB**. It dynamically generates
 a thinker-only deploy config for each rollout replica from that replica's
 visible devices, avoiding cross-replica device-rank collisions.
@@ -93,7 +93,7 @@ Launch from the repository root — pick the flavor that matches your hardware:
 bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_v1.sh
 
 # NPU, AVQA, Atlas 800T A3 (16 × Ascend 910C 64GB) — V1 trainer
-bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_npu_avqa_v1.sh
+bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_avqa_v1.sh
 ```
 
 The V1 launchers use pure CLI overrides on `verl_omni.trainer.main_omni`
@@ -142,6 +142,90 @@ Healthy signals (gsm8k, 4×H800, LoRA r=32):
 - `actor/loss` ≈ 1e-5, `actor/grad_norm` ∈ [1e-3, 1e-2], no OOM
   (`actor/perf/max_memory_allocated_gb` < 45).
 - `val-core/openai/gsm8k/acc/mean@1` rising with steps.
+
+## Training with `math_dapo`
+
+Pure-text math data with the built-in `math_dapo` reward, `+1` correct / `-1`
+wrong. No reward model and no critic. Select it with
+`reward.reward_manager.name=dapo` — the name refers to the dataset reward, not to
+the policy loss; the launcher below trains with **GSPO**.
+
+The scorer is not `\boxed{}`-only. It reads the last 300 characters of the
+response and tries, in order:
+
+1. the last `Answer: <value>` line (case-insensitive); the value is normalized
+   (LaTeX wrappers, spacing, thousand separators) and compared with the
+   normalized ground truth;
+2. only if no `Answer:` line is present, the last `\boxed{...}` within the last
+   100 characters, compared with the ground truth as an exact string.
+
+A response with neither form scores `-1`, so the prompt must elicit one of them.
+The DAPO math prompts do: the training rows end with "The last line of your
+response should be of the form Answer: $Answer", and the AIME validation rows
+end with "output the final answer within \boxed{}".
+
+### Prepare the dataset
+
+Each parquet row needs `data_source="math_dapo"`, `reward_model.ground_truth`,
+and a chat-style `prompt` column. Point the launcher at the converted files:
+
+```bash
+TRAIN_FILE=~/data/dapo_math/train.parquet \
+VAL_FILE=~/data/dapo_math/val.parquet \
+bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_math_dapo_separate_async_npu_v1.sh
+```
+
+### Run training on Ascend NPU (separate-async)
+
+16 NPUs split into a 12-die rollout pool and a 4-die FSDP2 trainer. Rollout uses
+TP=2 (6 replicas) and generates one batch ahead of training;
+`parameter_sync_step=4` syncs weights every four trainer steps.
+
+```bash
+TOTAL_TRAINING_STEPS=100 \
+bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_math_dapo_separate_async_npu_v1.sh
+```
+
+`TOTAL_TRAINING_STEPS` is read from the environment before Python starts, so the
+assignment has to precede `bash`; anything after the script path is forwarded to
+the trainer as a Hydra override. The launcher already defaults to 100, so the
+assignment is optional.
+
+The launcher enforces the V1 constraint
+`train_batch_size == parameter_sync_step * ppo_mini_batch_size` (`64 == 4 * 16`)
+and exposes `TRAINER_DIES`, `ROLLOUT_DIES`, `ROLLOUT_TP`, and `PARAM_SYNC_STEP`
+for other topologies. Source the CANN `set_env.sh` on every Ray node before
+launching; the script itself does not touch the CANN environment.
+
+### Measured step time
+
+Same model, data, batch shape (64 prompts × 16 responses), LoRA r=32,
+`max_response_length=16384`, 100 steps on 16 Ascend 910C NPUs (CANN 9.1,
+vllm-omni 0.28.0rc1). Step 1 is excluded from the averages (warm-up).
+
+| topology | step (s) | gen (s) | old_log_prob (s) | update_actor (s) | update_weights (s) |
+| --- | --- | --- | --- | --- | --- |
+| async 12 rollout / 4 train | 2160 | 432 (residual wait) | 451 | 1243 | 30 |
+| sync 16 shared | 2508 | 2002 (full generation) | 126 | 360 | 18 |
+
+`timing_s/gen` is the training-side wait for the next batch in async mode (the
+rollout pool keeps generating during the step), and the full generation time in
+sync mode, where generation runs inline on the same 16 dies.
+
+In the async layout the trainer pool is the bottleneck: `old_log_prob +
+update_actor` is ~78% of the step, and the rollout pool stays busy enough that
+the training-side wait (`timing_s/gen`) is ~430 s. In sync mode generation takes
+~2000 s and the update ~500 s. Reported async `timing_s/gen` is the residual
+wait, not full generation time.
+
+Validation uses 30 AIME-2024 prompts with greedy decoding (`n=1`,
+`do_sample=false`, `temperature=0`): one problem is 3.3 accuracy points and the
+binomial standard error near p≈0.3 is ~8 points. Across ten evaluations both
+layouts scored 5-14 of 30 (async mean 9.0, sync mean 8.4); the difference is well
+inside that noise, while training reward rose from ~0.45 to ~0.68 on both.
+
+Set `trainer.save_freq` to a positive value: `0` disables checkpointing entirely
+in this trainer, including the final step.
 
 ## Training with `MMK12`
 
@@ -204,7 +288,8 @@ bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_mmk12_v1_
 Compared with the GPU script, the NPU variant includes two important Ascend
 settings:
 
-- `export VLLM_ASCEND_ENABLE_NZ=0` disables the NZ format in vLLM Ascend.
+- `++actor_rollout_ref.rollout.engine_kwargs.vllm_omni.additional_config.weight_nz_mode=0`
+  disables the NZ format in vLLM Ascend.
 - `actor_rollout_ref.rollout.cudagraph_capture_sizes` limits the graph shapes
   captured by the rollout engine. Capturing too many shapes can cause runtime
   errors, so keep this list sparse. The current script uses capture sizes
@@ -243,6 +328,45 @@ bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_mmk12_v1_
 The script sets `distillation.enabled=true` with a `vllm_omni` teacher
 (`loss_mode=kl`, `use_policy_gradient=true`). Teacher and student must share
 the same tokenizer (same model family).
+
+### MMK12 Full-Vocabulary On-Policy Distillation (nitrobrew)
+
+A variant of the OPD recipe replaces the sampled / top-k teacher signal with an
+**exact KL over the full vocabulary**. The teacher serves its Thinker last-layer
+hidden states instead of log-probs, and the actor reconstructs the teacher
+logits as `h @ W.T` from the teacher's `lm_head` in vocabulary chunks of 1024
+with a single online-softmax pass — peak extra memory is `O(N × 1024)` instead of
+`O(N × 151936)`. The loss is supervised (`use_policy_gradient=false`), so the
+whole-vocabulary signal is backpropagated directly instead of being folded into
+the policy-gradient reward.
+
+Same student (25% weight noise), same teacher (the un-noised model) and the same
+2 × Ascend 910C topology as the OPD recipe above:
+
+```bash
+# 1. On the master node (node 1): ray start --head
+# 2. On the slave node (node 2): ray start --address='<head_ip>:<port>'
+# 3. Run on the master node:
+bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_mmk12_v1_nitrobrew_opd_npu.sh
+```
+
+`STUDENT_MODEL`, `TEACHER_MODEL`, `TRAIN_FILE`, `VAL_FILE` and
+`REWARD_FUNCTION_PATH` are overridable the same way as in the other MMK12
+scripts. Beyond the teacher block shared with the OPD recipe, the script sets:
+
+- `distillation.distillation_loss.loss_mode=nitrobrew` with
+  `use_policy_gradient=false`. `nitrobrew_reverse_kl` selects `KL(p_S ‖ p_T)`
+  instead of the default forward `KL(p_T ‖ p_S)`.
+- `+actor_rollout_ref.rollout.agent.agent_loop_manager_class=verl_omni.experimental.nitrobrew_opd_agent_loop.NitrobrewOPDAgentLoopManagerTQ`
+  — the agent loop that asks the teacher for hidden states and lifts them onto
+  the batch as a first-class tensor field.
+- `+...rollout.engine_kwargs.vllm_omni.block_size=128`, and the teacher's
+  `enable_chunked_prefill=false`: hidden states are only emitted for the tokens
+  scheduled in the step that finishes prefill, so a chunked prefill would
+  return partial tensors.
+
+See [`docs/algo/omni_opd.md`](../../docs/algo/omni_opd.md#full-vocabulary-opd-nitrobrew)
+for the mechanism and the additional config keys.
 
 ## Training with `AVQA-R1-6K`
 
@@ -307,7 +431,7 @@ existing generic NPU script.
 TRAIN_FILE=$HOME/data/avqa_r1_6k/train.parquet \
 VAL_FILE=$HOME/data/avqa_r1_6k/validation.parquet \
 MODEL_PATH=/path/to/Qwen3-Omni-30B-A3B-Instruct \
-bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_npu_avqa_v1.sh
+bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_avqa_v1.sh
 ```
 
 The launcher uses a 4096-token multimodal prompt budget, a 12288-token response
@@ -477,27 +601,6 @@ Follow the [NPU installation guide](../../docs/start/install_npu.md), source
 CANN/ATB, and ensure FFmpeg and the media dependencies are available on every
 Ray worker.
 
-This recipe requires verl with
-[`use_no_sync_for_gradient_accumulation` support (#7458)](https://github.com/verl-project/verl/pull/7458).
-Commit `a0feb78fe8229fde644aec3bbec20b5dc4583509` (`0.10.0.dev`) includes
-that change. The repository's current verl pin `fefb080` and the v0.9.0
-release do not include the option. This recipe therefore requires a separate
-verl update after the standard environment installation; the repository-wide
-dependency pin is unchanged. The development version string alone is not
-sufficient to identify a compatible installation.
-
-To update verl in an existing NPU training environment without replacing its
-installed PyTorch or other runtime dependencies, run:
-
-```bash
-python -m pip install --no-deps --force-reinstall \
-    "verl @ git+https://github.com/verl-project/verl.git@a0feb78fe8229fde644aec3bbec20b5dc4583509"
-```
-
-Restart the training processes and Ray workers after updating. Reinstalling
-the repository (`uv pip install -e .`) may restore the repository's older pin;
-apply the recipe-specific verl update after that installation.
-
 Launch with the original full model checkpoint:
 
 ```bash
@@ -517,7 +620,7 @@ at the cost of additional gradient communication. Gradient accumulation and
 the optimizer-step boundary are preserved. This uses the upstream verl option;
 no local gradient-synchronization override is needed.
 
-The revision installed above defaults this option to `false` in its FSDP YAML, while its
+The pinned verl defaults this option to `false` in its FSDP YAML, while its
 `FSDPEngineConfig` dataclass defaults to `true`. The launcher sets it explicitly
 so this recipe does not depend on how the configuration was constructed.
 For a deferred-synchronization comparison, explicitly override it to `true`;
@@ -709,8 +812,12 @@ examples/gspo_trainer/
 │   ├── run_qwen3_omni_thinker_gspo_lora_v1.sh       ← V1 launch script (GPU, LoRA r=32, text)
 │   ├── run_qwen3_omni_thinker_gspo_lora_mmk12_v1.sh  ← V1 launch script (GPU, LoRA r=32, image)
 │   ├── run_qwen3_omni_thinker_gspo_lora_avqa_v1.sh   ← V1 launch script (GPU, LoRA r=32, audio + image)
-│   ├── run_qwen3_omni_thinker_gspo_npu_avqa_v1.sh    ← V1 launch script (NPU, AVQA)
+│   ├── run_qwen3_omni_thinker_gspo_lora_mmk12_v1_npu.sh        ← V1 launch script (NPU, MMK12)
+│   ├── run_qwen3_omni_thinker_gspo_lora_mmk12_v1_opd_npu.sh    ← V1 OPD script (NPU, MMK12, top-k teacher)
+│   ├── run_qwen3_omni_thinker_gspo_lora_mmk12_v1_nitrobrew_opd_npu.sh  ← V1 OPD script (NPU, MMK12, full-vocabulary)
+│   ├── run_qwen3_omni_thinker_gspo_avqa_v1.sh    ← V1 launch script (NPU, AVQA)
 │   ├── run_qwen3_omni_thinker_gspo_npu_nextqa_v1.sh  ← V1 launch script (NPU, NExT-QA)
+│   ├── run_qwen3_omni_thinker_gspo_lora_math_dapo_separate_async_npu_v1.sh  ← V1 launch script (NPU, separate-async, math_dapo)
 ├── data_process/
 │   ├── mmk12.py                                      ← MMK12 → verl RL parquet converter
 │   ├── avqa.py                                       ← AVQA → verl RL parquet converter

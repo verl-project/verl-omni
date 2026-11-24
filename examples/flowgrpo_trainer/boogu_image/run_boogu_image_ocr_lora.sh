@@ -50,8 +50,15 @@ WORKSPACE=${WORKSPACE:-$HOME}
 ocr_train_path=$WORKSPACE/data/ocr/boogu_image/train.parquet
 ocr_test_path=$WORKSPACE/data/ocr/boogu_image/test.parquet
 
-model_name=Boogu/Boogu-Image-0.1-Base
-reward_model_name=Qwen/Qwen3-VL-8B-Instruct
+# The tokenizer lives in the checkpoint's processor/ subdirectory. Resolve the
+# Hub ID to a local snapshot before appending that subdirectory; hf download
+# reuses the configured Hugging Face cache when the snapshot is already there.
+if [[ -n "${MODEL_PATH:-}" ]]; then
+    model_name=$MODEL_PATH
+else
+    model_name=$(hf download --quiet Boogu/Boogu-Image-0.1-Base)
+fi
+reward_model_name=${REWARD_MODEL_PATH:-Qwen/Qwen3-VL-8B-Instruct}
 reward_function_path=verl_omni/utils/reward_score/genrm_ocr.py
 
 NUM_GPUS_ACTOR_ROLLOUT_REWARD=4

@@ -13,26 +13,59 @@
 # limitations under the License.
 
 import inspect
+import warnings
 
 import torch
 from verl import DataProto
 from verl.experimental.reward_loop.reward_manager.base import RewardManagerBase
 from verl.utils.reward_score import default_compute_score as _upstream_default_compute_score
 
+from verl_omni.pipelines.rollout_media import PRIMARY_ARTIFACT, ArtifactContractError
 from verl_omni.utils.reward_score import default_compute_score_image
+from verl_omni.workers.config.reward import DEPRECATED_VISUAL_MANAGER_MESSAGE
 
 from .media import _reward_extra_info
 
 
 def _sampling_params_from_rollout(rollout_config) -> dict:
     """Build the OCR-compatible generation overrides from a rollout config."""
-    params = {"max_tokens": rollout_config.get("response_length") or 4096}
+    params = {}
+    response_length = rollout_config.get("response_length")
+    if response_length:
+        params["max_tokens"] = response_length
     if rollout_config.get("full_determinism", False):
         params["seed"] = rollout_config.get("seed", 42)
     return params
 
 
-def _validate_visual_response(response_visual, config, *, is_validate: bool) -> None:
+def _validate_visual_response(response_visual, config, *, is_validate: bool, extra_info=None) -> None:
+    if extra_info is not None and "media_artifacts" in extra_info:
+        artifacts = extra_info["media_artifacts"]
+        primary = extra_info.get(PRIMARY_ARTIFACT)
+        if primary not in artifacts:
+            raise ArtifactContractError(f"Reward entry requires an explicit primary artifact, got {primary!r}")
+        artifact = artifacts[primary]
+        if not isinstance(response_visual, torch.Tensor) or (
+            response_visual.dtype != artifact.data.dtype or response_visual.shape != artifact.data.shape
+        ):
+            raise ArtifactContractError(
+                f"{artifact.context}, artifact={primary!r}: responses projection does not match declared primary"
+            )
+        try:
+            # Exact values, but NaN positions match and the device is not part of the contract.
+            torch.testing.assert_close(
+                response_visual,
+                artifact.data,
+                rtol=0,
+                atol=0,
+                equal_nan=True,
+                check_device=False,
+            )
+        except AssertionError as error:
+            raise ArtifactContractError(
+                f"{artifact.context}, artifact={primary!r}: responses projection does not match declared primary"
+            ) from error
+        return
     rollout_config = config.actor_rollout_ref.rollout
     pipeline_config = rollout_config.val_kwargs.pipeline if is_validate else rollout_config.pipeline
     output_type = pipeline_config.get("output_type", "image")
@@ -47,9 +80,14 @@ def _validate_visual_response(response_visual, config, *, is_validate: bool) -> 
 
 
 class VisualRewardManager(RewardManagerBase):
-    """The reward manager for visual response."""
+    """The reward manager for visual response.
+
+    Deprecated since v0.4.0 and replaced by :class:`MultiVisualRewardManager`
+    with ``reward.reward_functions``; it will be removed in a future release.
+    """
 
     def __init__(self, config, tokenizer, compute_score, reward_router_address=None, reward_model_tokenizer=None):
+        warnings.warn(DEPRECATED_VISUAL_MANAGER_MESSAGE, DeprecationWarning, stacklevel=2)
         super().__init__(config, tokenizer, compute_score)
 
         if compute_score is None or compute_score is _upstream_default_compute_score:
@@ -70,10 +108,15 @@ class VisualRewardManager(RewardManagerBase):
         assert len(data) == 1, "Only support single data item"
         data_item = data[0]
         response_visual = data_item.batch["responses"]
-        _validate_visual_response(response_visual, self.config, is_validate=data_item.meta_info.get("validate", False))
         data_source = data_item.non_tensor_batch["data_source"]
         ground_truth = data_item.non_tensor_batch["reward_model"]["ground_truth"]
         extra_info = _reward_extra_info(data_item)
+        _validate_visual_response(
+            response_visual,
+            self.config,
+            is_validate=data_item.meta_info.get("validate", False),
+            extra_info=extra_info,
+        )
 
         num_turns = data_item.non_tensor_batch.get("__num_turns__", None)
         rollout_reward_scores = data_item.non_tensor_batch.get("reward_scores", {})

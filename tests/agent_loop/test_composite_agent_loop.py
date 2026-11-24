@@ -17,8 +17,9 @@ Smoke-test ``CompositeAgentLoopWorker`` end-to-end on Qwen-Image.
 
 ``generate_sequences`` returns two ``DataProto`` objects:
 
-- AR part: ``n`` rows with ``responses``, ``rollout_ar_log_probs``, etc.
-- Diffusion part: ``n * m`` rows with image ``responses`` and DiT trajectory fields.
+- AR part: ``m`` rows of token ``responses`` and ``rollout_ar_log_probs``, with no named media fields.
+- Diffusion part: ``n * m`` rows of image ``responses`` and DiT trajectory fields,
+  using named image artifacts. ``responses`` is the decoded ``image_preview``.
 """
 
 import gc
@@ -36,7 +37,7 @@ from verl.workers.rollout.llm_server import LLMServerManager
 
 from verl_omni.agent_loop.composite_agent_loop import CompositeAgentLoopManager
 
-from ..utils.gpu_test_topology import resolve_diffusion_agent_loop_gpu_topology
+from ..utils.gpu_test_topology import empty_gpu_cache, resolve_diffusion_agent_loop_gpu_topology
 
 
 class _FakeRemoteComputeScore:
@@ -94,12 +95,19 @@ def _assert_ar_outputs(result: DataProto, *, batch_size: int, prompt_len: int, m
     assert ar_response_mask.dtype == torch.long
     assert ar_response_mask.min() >= 0 and ar_response_mask.max() <= 1
     assert len(text_encoder_responses) == batch_size
+    assert not any(str(key).startswith("media_artifact__") for key in result.batch.keys())
+    for key in ("primary_artifact", "preview_artifact", "media_artifact_specs", "media_artifact_context"):
+        assert key not in result.non_tensor_batch, f"AR batch should not carry {key}"
 
 
 def _assert_diffusion_outputs(result: DataProto, *, batch_size: int, height: int, width: int) -> None:
-    """Validate Qwen-Image diffusion output is a batched RGB image tensor."""
+    """Validate Qwen-Image diffusion output is the named decoded preview."""
     responses = result.batch["responses"]
+    preview = result.batch["media_artifact__image_preview"]
+    latent = result.batch["media_artifact__image_latent"]
     _assert_non_empty_tensor(responses, "responses")
+    _assert_non_empty_tensor(preview, "media_artifact__image_preview")
+    _assert_non_empty_tensor(latent, "media_artifact__image_latent")
     assert responses.shape == (batch_size, 3, height, width), (
         f"Expected responses shape {(batch_size, 3, height, width)}, got {tuple(responses.shape)}"
     )
@@ -107,6 +115,12 @@ def _assert_diffusion_outputs(result: DataProto, *, batch_size: int, height: int
     assert responses.min() >= 0 and responses.max() <= 255, (
         f"Generated image pixels should be in [0, 255], got [{responses.min()}, {responses.max()}]"
     )
+    torch.testing.assert_close(responses, preview)
+    assert latent.shape[0] == batch_size
+    assert latent.dtype.is_floating_point
+    assert list(result.non_tensor_batch["primary_artifact"]) == ["image_preview"] * batch_size
+    assert list(result.non_tensor_batch["preview_artifact"]) == ["image_preview"] * batch_size
+    assert len(result.non_tensor_batch["media_artifact_specs"]) == batch_size
 
 
 def _create_tp_compatible_model(parent_dir, src_model_path, num_attention_heads=2):
@@ -284,6 +298,8 @@ def test_single_turn(init_config, agent_reward_loop: bool):
         ar_expected_non_tensor_batch_keys = ["text_encoder_responses"]
         diffusion_expected_batch_keys = [
             "responses",
+            "media_artifact__image_preview",
+            "media_artifact__image_latent",
             "all_latents",
             "all_timesteps",
             "prompt_embeds",
@@ -292,7 +308,12 @@ def test_single_turn(init_config, agent_reward_loop: bool):
             "negative_prompt_embeds_mask",
             "rollout_log_probs",
         ]
-        diffusion_expected_non_tensor_batch_keys = []
+        diffusion_expected_non_tensor_batch_keys = [
+            "primary_artifact",
+            "preview_artifact",
+            "media_artifact_specs",
+            "media_artifact_context",
+        ]
         if agent_reward_loop:
             ar_expected_batch_keys += ["rm_scores"]
             ar_expected_non_tensor_batch_keys += ["reward/ar", "reward/ar/ar_msg"]
@@ -365,5 +386,4 @@ def test_single_turn(init_config, agent_reward_loop: bool):
     finally:
         ray.shutdown()
         gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        empty_gpu_cache()

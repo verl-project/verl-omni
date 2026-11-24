@@ -11,6 +11,7 @@ hydra:
 defaults:
   - ppo_trainer
   - omni/model@actor_rollout_ref.model: omni_model
+  - agentic/image_gen_tools@agentic_image_gen
   - _self_
 
 # Config for actor, rollout and reference model.
@@ -58,8 +59,18 @@ actor_rollout_ref:
     # Shuffle training data across PPO epochs.
     shuffle: false
 
+    # Checkpoint config.
+    checkpoint:
+
+      # Save only LoRA model weights with the FSDP checkpoint saver.
+      save_lora_only: false
+
 # Trainer configuration.
 trainer:
+
+  # Port range for torch distributed rendezvous, sliced per worker group. Leave null for ephemeral
+  # ports; set it only to isolate concurrent training jobs on one machine.
+  ray_master_port_range: null
 
   # V1 trainer settings.
   v1:
@@ -97,6 +108,14 @@ algorithm:
 # accepted by _validate_topk_logprobs; all other defaults are inherited from
 # verl's distillation group.
 distillation:
+
+  distillation_loss:
+
+    # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+    _target_: verl_omni.workers.config.omni.distillation.OmniDistillationLossConfig
+
+    # Temperature for the hidden-state (nitrobrew) distillation loss modes.
+    kd_temperature: 1.0
 
   teacher_models:
 

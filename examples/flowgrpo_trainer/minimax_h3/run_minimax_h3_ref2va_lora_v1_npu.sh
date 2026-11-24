@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # MiniMax H3 REF2VA LoRA FlowGRPO on Ascend NPU (V1 sync trainer).
 # Task settings follow the GPU recipe; NPU settings follow the T2VA NPU recipe.
+# Defaults below are 16 NPUs with ROLLOUT_TP=4. On Atlas A5, N_GPUS=8 and
+# ROLLOUT_TP=2 is enough; TEXT_ENCODER_TP follows ROLLOUT_TP.
 export VERL_DATAPROTO_SERIALIZATION_METHOD=numpy
 ASCEND_HOME_PATH=${ASCEND_HOME_PATH:-/usr/local/Ascend/ascend-toolkit}
 

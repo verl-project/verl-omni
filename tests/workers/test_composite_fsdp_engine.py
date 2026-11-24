@@ -181,7 +181,7 @@ def create_ar_infer_batch(batch_size: int, *, micro_batch_size_per_gpu: int) -> 
         calculate_entropy=True,
         temperature=1.0,
         micro_batch_size_per_gpu=micro_batch_size_per_gpu,
-        use_dynamic_bsz=False,  # default is True, to test True
+        use_dynamic_bsz=False,  # default is True
     )
     return batch
 
@@ -200,7 +200,7 @@ def create_ar_train_batch(batch_size: int, *, micro_batch_size_per_gpu: int) -> 
         seed=42,
         dataloader_kwargs={"shuffle": False},
         micro_batch_size_per_gpu=micro_batch_size_per_gpu,
-        use_dynamic_bsz=False,  # default is True, to test True
+        use_dynamic_bsz=False,  # default is True
     )
     return batch
 

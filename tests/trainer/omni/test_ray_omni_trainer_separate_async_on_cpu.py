@@ -22,7 +22,9 @@ from hydra import compose, initialize_config_dir
 from verl.trainer.ppo.v1.trainer_base import PPOTrainer, get_trainer_cls
 from verl.trainer.ppo.v1.trainer_separate_async import PPOTrainerSeparateAsync
 
+from verl_omni.trainer.omni import ray_omni_trainer_separate_async
 from verl_omni.trainer.omni.ray_omni_trainer_separate_async import OmniPPOTrainerSeparateAsync
+from verl_omni.trainer.omni.trainer_base import OmniPPOTrainer
 
 _CONFIG_DIR = str((Path(__file__).parents[3] / "verl_omni" / "trainer" / "config").resolve())
 
@@ -45,6 +47,7 @@ def _compose_config(extra_overrides=()):
 
 def test_registered_and_subclasses_separate_async():
     assert get_trainer_cls("omni_separate_async") is OmniPPOTrainerSeparateAsync
+    assert issubclass(OmniPPOTrainerSeparateAsync, OmniPPOTrainer)
     assert issubclass(OmniPPOTrainerSeparateAsync, PPOTrainerSeparateAsync)
 
 
@@ -106,16 +109,41 @@ def test_init_tokenizer_wires_omni_model_config():
 
 class TestLoraAwareWiring:
     def test_actor_worker_is_omni_detach_worker(self):
+        # With hybrid replicas disabled (the default), the parent lays out
+        # Role.Actor, not Role.ActorRolloutRef; every actor-ish role present in
+        # the mapping must resolve to the omni worker, or the actor silently
+        # runs the upstream DetachActorWorker (full PEFT dump, no
+        # get_lora_peft_config) and LoRA syncs misroute into the dense path.
         from verl.trainer.ppo.utils import Role
 
         from verl_omni.workers.omni_engine_workers import OmniDetachActorWorker
 
-        trainer = OmniPPOTrainerSeparateAsync(_compose_config())
-        trainer._init_resource_pool_mgr()
-        role = Role.ActorRolloutRef if Role.ActorRolloutRef in trainer.role_worker_mapping else Role.ActorRollout
-        modified = trainer.role_worker_mapping[role].__ray_metadata__.modified_class
-        assert modified.__name__ == OmniDetachActorWorker.__name__
-        assert modified.__module__.startswith("verl_omni"), modified.__module__
+        # (overrides, expected actor-ish roles) over the parent's four layouts:
+        # hybrid off/on x reference policy separate/fused.
+        layouts = [
+            ([], {Role.Actor}),
+            (["actor_rollout_ref.actor.use_kl_loss=true"], {Role.Actor, Role.RefPolicy}),
+            (["trainer.v1.separate_async.hybrid_rollout.enable_switch=True"], {Role.ActorRollout}),
+            (
+                [
+                    "actor_rollout_ref.actor.use_kl_loss=true",
+                    "trainer.v1.separate_async.hybrid_rollout.enable_switch=True",
+                ],
+                {Role.ActorRolloutRef},
+            ),
+        ]
+        for overrides, expected_roles in layouts:
+            trainer = OmniPPOTrainerSeparateAsync(_compose_config(overrides))
+            trainer._init_resource_pool_mgr()
+            actor_roles = {
+                role
+                for role in (Role.Actor, Role.RefPolicy, Role.ActorRolloutRef, Role.ActorRollout)
+                if role in trainer.role_worker_mapping
+            }
+            assert actor_roles == expected_roles, (overrides, actor_roles)
+            for role in actor_roles:
+                modified = trainer.role_worker_mapping[role].__ray_metadata__.modified_class
+                assert issubclass(modified, OmniDetachActorWorker), (overrides, role, modified)
 
     def test_detach_worker_mro_keeps_omni_lora_methods(self):
         # The omni worker must win the MRO: its update_weights carries the
@@ -154,49 +182,92 @@ class TestLoraAwareWiring:
         assert OmniDetachActorWorker.init_model is ActorRolloutRefWorker.init_model
 
     def test_save_restore_round_trip_routes_through_strategy_handlers(self):
-        # RFC #320: DetachActorWorker's CPU save/restore must work on the omni
-        # worker. Real handlers need GPU DTensors, so they are faked; the test
-        # pins the wiring — save stores the copy handler's output keyed by n,
-        # restore feeds it back to the engine module under the fsdp2 tuple
-        # protocol, clear drops it.
+        # Save stores the copy handler's output keyed by n, restore feeds it back
+        # to the engine module under the fsdp2 tuple protocol, clear drops it.
+        # The omni worker wraps the fsdp2 save handler so snapshots own their
+        # storage: verl's helper returns views of CPU-resident (param_offload)
+        # parameters, and the decoupled-PPO dance keeps several slots live at once.
         from types import SimpleNamespace
+
+        import torch
+        from verl.utils import fsdp_utils
 
         from verl_omni.workers.omni_engine_workers import OmniDetachActorWorker
 
         worker = object.__new__(OmniDetachActorWorker)
         worker._strategy_handlers = None
         module = object()
+        live_shard = torch.zeros(2)
         worker.actor = SimpleNamespace(engine=SimpleNamespace(module=module))
         worker.config = SimpleNamespace(actor=SimpleNamespace(strategy="fsdp2"))
 
-        saved = ("sharded_state", "global_spec")
         restored = []
-        with patch.object(
-            OmniDetachActorWorker,
-            "_get_strategy_handlers",
-            return_value=(lambda m: saved, lambda m, state, spec: restored.append((m, state, spec))),
-        ):
-            worker.save_model_to_cpu("step0")
-            assert worker.cpu_saved_models["step0"] is saved
-            worker.restore_model_from_cpu("step0")
-            worker.clear_cpu_model("step0")
 
-        assert restored == [(module, "sharded_state", "global_spec")]
-        assert "step0" not in worker.cpu_saved_models
+        def restore(m, state, spec):
+            restored.append((m, {name: tensor.clone() for name, tensor in state.items()}, spec))
+
+        with (
+            patch.object(fsdp_utils, "fsdp2_sharded_save_to_cpu", lambda m: ({"adapter": live_shard}, "global_spec")),
+            patch.object(fsdp_utils, "fsdp2_sharded_load_from_cpu", restore),
+        ):
+            worker.save_model_to_cpu(0)
+            live_shard.add_(1.0)  # a later local update must not rewrite the snapshot through the alias
+            worker.restore_model_from_cpu(0)
+            worker.clear_cpu_model(0)
+
+        assert len(restored) == 1
+        assert restored[0][0] is module
+        assert torch.equal(restored[0][1]["adapter"], torch.zeros(2))
+        assert restored[0][2] == "global_spec"
+        assert 0 not in worker.cpu_saved_models
+
+    def test_strategy_handlers_wrap_only_the_aliasing_save(self):
+        # fsdp1/megatron save helpers already copy; wrapping them would double
+        # the CPU footprint of every snapshot.
+        from types import SimpleNamespace
+
+        from verl.utils import fsdp_utils
+
+        from verl_omni.workers.omni_engine_workers import OmniDetachActorWorker
+
+        worker = object.__new__(OmniDetachActorWorker)
+        worker._strategy_handlers = None
+        worker.actor = SimpleNamespace(engine=SimpleNamespace(module=object()))
+        worker.config = SimpleNamespace(actor=SimpleNamespace(strategy="fsdp"))
+
+        copy_handler, restore_handler = worker._get_strategy_handlers()
+        assert copy_handler is fsdp_utils.fsdp1_sharded_save_to_cpu
+        assert restore_handler is fsdp_utils.fsdp1_sharded_load_from_cpu
+
+        worker = object.__new__(OmniDetachActorWorker)
+        worker._strategy_handlers = None
+        worker.actor = SimpleNamespace(engine=SimpleNamespace(module=object()))
+        worker.config = SimpleNamespace(actor=SimpleNamespace(strategy="fsdp2"))
+
+        copy_handler, restore_handler = worker._get_strategy_handlers()
+        assert copy_handler is not fsdp_utils.fsdp2_sharded_save_to_cpu
+        assert copy_handler.__wrapped__ is fsdp_utils.fsdp2_sharded_save_to_cpu
+        assert restore_handler is fsdp_utils.fsdp2_sharded_load_from_cpu
 
     def test_setup_installs_lora_aware_checkpoint_manager(self):
         from verl.checkpoint_engine import CheckpointEngineRegistry
 
+        from verl_omni.trainer.omni.trainer_base import OmniPPOTrainer
         from verl_omni.workers.checkpoint_engine import OmniCheckpointEngineManager
 
         trainer = OmniPPOTrainerSeparateAsync(_compose_config())
         with (
-            patch.object(PPOTrainerSeparateAsync, "_setup"),
+            # The base setup copy is mocked out; only the standalone tail is under test.
+            patch.object(OmniPPOTrainer, "_setup"),
+            patch.object(ray_omni_trainer_separate_async, "LLMServerManager"),
             # The nccl backend registers via GPU-only import side effects.
             patch.object(CheckpointEngineRegistry, "get", return_value=MagicMock()),
         ):
+            trainer.llm_server_manager = MagicMock()
+            trainer.llm_server_manager.rollout_replicas = []
             trainer.actor_rollout_wg = MagicMock()
             trainer.standalone_server_manager = MagicMock()
             trainer.standalone_server_manager.get_replicas.return_value = []
+            trainer.add_replicas_to_balancer = MagicMock()
             trainer._setup()
         assert isinstance(trainer.standalone_checkpoint_manager, OmniCheckpointEngineManager)

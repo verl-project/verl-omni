@@ -92,19 +92,27 @@ def compute_data_metrics_diffusion(batch: DataProto) -> dict[str, Any]:
         metrics["critic/rewards/std_mean"] = float(np.mean(per_prompt_stds))
         metrics["critic/rewards/group_size"] = float(len(rewards_np) / len(unique_uids))
 
+    reward_extra_info = {
+        key: batch.non_tensor_batch[key]
+        for key in batch.meta_info.get("reward_extra_keys", [])
+        if key in batch.non_tensor_batch
+    }
+    metrics.update(compute_reward_extra_metrics_diffusion(reward_extra_info))
     return metrics
 
 
 def compute_old_policy_metrics(
     update_result: tuple[bool, float, Literal["none", "copy", "ema"]],
+    *,
+    prefix: str = "old_policy",
 ) -> dict[str, Any]:
-    """Build metrics for old-policy adapter refreshes."""
+    """Build adapter-refresh metrics under the given policy prefix."""
     update_applied, decay, update_type = update_result
     return {
-        "old_policy/update_applied": float(update_applied),
-        "old_policy/copy_update": float(update_type == "copy"),
-        "old_policy/ema_update": float(update_type == "ema"),
-        "old_policy/decay": float(decay),
+        f"{prefix}/update_applied": float(update_applied),
+        f"{prefix}/copy_update": float(update_type == "copy"),
+        f"{prefix}/ema_update": float(update_type == "ema"),
+        f"{prefix}/decay": float(decay),
     }
 
 

@@ -38,7 +38,11 @@ from verl_omni.workers.config.diffusion.model import (
     DiffusionModelAROptimizerConfig,
     DiffusionModelConfig,
 )
-from verl_omni.workers.engine.fsdp.diffusers_impl import CompositeFSDPEngine, _CompositeEngineCtx
+from verl_omni.workers.engine.fsdp.diffusers_impl import (
+    CompositeARFSDPEngineWithLMHead,
+    CompositeFSDPEngine,
+    _CompositeEngineCtx,
+)
 
 from .test_composite_fsdp_engine import create_ar_infer_batch, create_ar_train_batch
 
@@ -419,6 +423,61 @@ class TestCompositeEngineDelegation:
         assert peft["lora_alpha"] == 16
         assert peft["exclude_modules"] == ".*visual.*"
 
+    def test_get_per_tensor_param_shard_prefixes_ar_weights(self):
+        from verl.workers.engine.spec import ShardSpec
+
+        engine = _make_composite_engine()
+        from verl_omni.workers.config.diffusion.model import DiffusionModelConfig
+
+        model_cfg = object.__new__(DiffusionModelConfig)
+        object.__setattr__(model_cfg, "lora_rank", 0)
+        object.__setattr__(model_cfg, "lora", {})
+        engine.model_config = model_cfg
+        # Full-weight modules: no peft_config on either side.
+        engine.dit_engine.module = MagicMock(spec=[])
+        engine.ar_engine.module = MagicMock(spec=[])
+
+        dit_local = torch.tensor([1.0, 2.0])
+        ar_local = torch.tensor([3.0, 4.0, 5.0])
+        dit_spec = ShardSpec(full_shape=(2,))
+        ar_spec = ShardSpec(full_shape=(3,))
+        engine.dit_engine.get_per_tensor_param_shard.return_value = (
+            iter([("transformer.blocks.0.weight", dit_local, dit_spec)]),
+            None,
+        )
+        engine.ar_engine.get_per_tensor_param_shard.return_value = (
+            iter([("lm_head.weight", ar_local, ar_spec)]),
+            None,
+        )
+
+        shards = list(engine.get_per_tensor_param_shard()[0])
+        assert [name for name, _, _ in shards] == [
+            "transformer.blocks.0.weight",
+            "text_encoder.lm_head.weight",
+        ]
+        assert torch.equal(shards[0][1], dit_local)
+        assert torch.equal(shards[1][1], ar_local)
+        assert shards[0][2] is dit_spec and shards[1][2] is ar_spec
+
+    def test_get_per_tensor_param_shard_rejects_lora(self):
+        from types import SimpleNamespace
+
+        engine = _make_composite_engine()
+        from verl_omni.workers.config.diffusion.model import DiffusionModelConfig
+
+        model_cfg = object.__new__(DiffusionModelConfig)
+        object.__setattr__(model_cfg, "lora_rank", 8)
+        object.__setattr__(model_cfg, "lora", {})
+        engine.model_config = model_cfg
+        peft_module = SimpleNamespace(
+            _fsdp_wrapped_module=SimpleNamespace(peft_config={"default": object()}),
+        )
+        engine.dit_engine.module = peft_module
+        engine.ar_engine.module = peft_module
+
+        with pytest.raises(NotImplementedError, match="full-weight"):
+            engine.get_per_tensor_param_shard()
+
     def test_to_offloads_both_sub_engines(self):
         engine = _make_composite_engine()
         engine.to("cpu", model=True, optimizer=False, grad=False)
@@ -468,52 +527,147 @@ class TestCompositeEngineCtx:
         dit_ctx.__exit__.assert_called_once()
 
 
-class TestStripQwenVlVisionTower:
-    def test_strips_only_qwen_image_pipeline_architecture(self):
-        from verl_omni.workers.engine.utils import should_strip_qwen_image_vision_tower
-
-        snapshot = "/cache/models--Qwen--Qwen-Image/snapshots/abc123"
-        assert should_strip_qwen_image_vision_tower(SimpleNamespace(path=snapshot, architecture="QwenImagePipeline"))
-        assert not should_strip_qwen_image_vision_tower(
-            SimpleNamespace(path="Qwen/Qwen-Image-Edit", architecture="QwenImageEditPlusPipeline")
-        )
-        assert not should_strip_qwen_image_vision_tower(SimpleNamespace(path="Qwen/Qwen-Image", architecture=None))
-
-    def test_strips_nested_model_visual(self):
-        from verl_omni.workers.engine.utils import strip_qwen_image_vision_tower
-
-        module = torch.nn.Module()
-        module.device = torch.device("cpu")
+def _ar_module_with_visual(*, nested: bool) -> torch.nn.Module:
+    module = torch.nn.Module()
+    module.device = torch.device("cpu")
+    if nested:
         module.model = torch.nn.Module()
         module.model.visual = torch.nn.Linear(4, 4)
-        assert strip_qwen_image_vision_tower(module) is True
+    else:
+        module.visual = torch.nn.Linear(4, 4)
+        module.model = torch.nn.Module()
+    return module
+
+
+class TestConfigureArModuleDispatch:
+    def test_build_module_dispatches_registered_adapter(self):
+        from verl.workers.engine.fsdp.transformer_impl import FSDPEngineWithLMHead
+
+        base = _ar_module_with_visual(nested=True)
+
+        def build_lora_module(module):
+            wrapped = torch.nn.Module()
+            wrapped.model = module
+            return wrapped
+
+        engine = CompositeARFSDPEngineWithLMHead.__new__(CompositeARFSDPEngineWithLMHead)
+        engine.diffusion_model_config = SimpleNamespace(
+            architecture="QwenImagePipeline", algorithm="dual_grpo", external_lib=None
+        )
+        assert CompositeARFSDPEngineWithLMHead._build_lora_module is FSDPEngineWithLMHead._build_lora_module
+
+        with patch.object(FSDPEngineWithLMHead, "_build_module", return_value=base):
+            module = engine._build_module()
+        assert module is base
+        assert module.model.forward.__func__ is torch.nn.Module.forward
         assert callable(module.model.visual)
         assert not isinstance(module.model.visual, torch.nn.Module)
-        out = module.model.visual(torch.zeros(2, 3), grid_thw=torch.zeros(1, 3))
+
+        lora_module = build_lora_module(module)
+        assert lora_module.model.model.visual is module.model.visual
+        out = lora_module.model.model.visual(torch.zeros(2, 3), grid_thw=torch.zeros(1, 3))
         torch.testing.assert_close(out, torch.tensor([0.0]))
         assert out.device == module.device
 
-    def test_strips_lora_module_visual(self):
-        from verl_omni.workers.engine.utils import strip_qwen_image_vision_tower
+    def test_build_module_leaves_other_adapters_unchanged(self):
+        from verl.workers.engine.fsdp.transformer_impl import FSDPEngineWithLMHead
 
-        module = torch.nn.Module()
-        module.device = torch.device("cpu")
-        module.model = torch.nn.Module()
-        module.model.model = torch.nn.Module()
-        module.model.model.visual = torch.nn.Linear(4, 4)
-        assert strip_qwen_image_vision_tower(module) is True
-        assert callable(module.model.model.visual)
-        assert not isinstance(module.model.model.visual, torch.nn.Module)
-        out = module.model.model.visual(torch.zeros(2, 3), grid_thw=torch.zeros(1, 3))
-        torch.testing.assert_close(out, torch.tensor([0.0]))
-        assert out.device == module.device
+        base = _ar_module_with_visual(nested=True)
+        visual = base.model.visual
+        engine = CompositeARFSDPEngineWithLMHead.__new__(CompositeARFSDPEngineWithLMHead)
+        engine.diffusion_model_config = SimpleNamespace(
+            architecture="QwenImageEditPlusPipeline", algorithm="flow_grpo", external_lib=None
+        )
+        with patch.object(FSDPEngineWithLMHead, "_build_module", return_value=base):
+            module = engine._build_module()
+        assert module.model.visual is visual
+        assert module.model.forward.__func__ is torch.nn.Module.forward
 
-    def test_returns_false_when_missing(self):
-        from verl_omni.workers.engine.utils import strip_qwen_image_vision_tower
+    def test_fsdp2_build_fsdp_module_injects_ar_ignored_names(self):
+        from verl.workers.engine.fsdp.transformer_impl import FSDPEngineWithLMHead
 
-        assert strip_qwen_image_vision_tower(torch.nn.Module()) is False
+        from verl_omni.pipelines.model_base import DiffusionModelARBase
 
-    def test_dual_grpo_no_longer_ignores_visual_under_fsdp2(self):
+        diffusion_config = SimpleNamespace(architecture="QwenImagePipeline", algorithm="dual_grpo")
+        engine = CompositeARFSDPEngineWithLMHead.__new__(CompositeARFSDPEngineWithLMHead)
+        engine.diffusion_model_config = diffusion_config
+        engine.engine_config = SimpleNamespace(strategy="fsdp2")
+        module = torch.nn.Linear(2, 2)
+        captured = {}
+
+        ar_cls = MagicMock()
+        ar_cls.get_fsdp_ignored_module_names.return_value = ["tower"]
+
+        def fake_super_build(self, loaded):
+            import verl.workers.engine.fsdp.transformer_impl as transformer_impl
+
+            transformer_impl.apply_fsdp2(loaded, {}, self.engine_config)
+            return loaded
+
+        def fake_apply(model, fsdp_kwargs, config, ignored_names=()):
+            captured["ignored_names"] = list(ignored_names)
+            return model
+
+        with (
+            patch.object(DiffusionModelARBase, "peek_class", return_value=ar_cls),
+            patch.object(FSDPEngineWithLMHead, "_build_fsdp_module", fake_super_build),
+            patch("verl_omni.utils.fsdp_utils.apply_fsdp2", fake_apply),
+        ):
+            out = engine._build_fsdp_module(module)
+
+        assert out is module
+        assert captured["ignored_names"] == ["tower"]
+        ar_cls.get_fsdp_ignored_module_names.assert_called_once_with(diffusion_config)
+
+    def test_fsdp2_build_fsdp_module_skips_ignored_names_when_ar_unregistered(self):
+        from verl.workers.engine.fsdp.transformer_impl import FSDPEngineWithLMHead
+
+        from verl_omni.pipelines.model_base import DiffusionModelARBase
+
+        engine = CompositeARFSDPEngineWithLMHead.__new__(CompositeARFSDPEngineWithLMHead)
+        engine.diffusion_model_config = SimpleNamespace(
+            architecture="QwenImagePipeline", algorithm="flow_grpo", external_lib=None
+        )
+        engine.engine_config = SimpleNamespace(strategy="fsdp2")
+        module = torch.nn.Linear(2, 2)
+        captured = {}
+
+        def fake_super_build(self, loaded):
+            import verl.workers.engine.fsdp.transformer_impl as transformer_impl
+
+            transformer_impl.apply_fsdp2(loaded, {}, self.engine_config)
+            return loaded
+
+        def fake_apply(model, fsdp_kwargs, config, ignored_names=()):
+            captured["ignored_names"] = list(ignored_names)
+            return model
+
+        with (
+            patch.object(DiffusionModelARBase, "peek_class", return_value=None),
+            patch.object(FSDPEngineWithLMHead, "_build_fsdp_module", fake_super_build),
+            patch("verl_omni.utils.fsdp_utils.apply_fsdp2", fake_apply),
+        ):
+            out = engine._build_fsdp_module(module)
+
+        assert out is module
+        assert captured["ignored_names"] == []
+
+    def test_fsdp1_build_fsdp_module_uses_lm_head_engine(self):
+        from verl.workers.engine.fsdp.transformer_impl import FSDPEngineWithLMHead
+
+        engine = CompositeARFSDPEngineWithLMHead.__new__(CompositeARFSDPEngineWithLMHead)
+        engine.engine_config = SimpleNamespace(strategy="fsdp")
+        module = torch.nn.Linear(2, 2)
+
+        with patch.object(FSDPEngineWithLMHead, "_build_fsdp_module", return_value=module) as lm_build:
+            out = engine._build_fsdp_module(module)
+
+        assert out is module
+        lm_build.assert_called_once_with(module)
+
+    def test_dual_grpo_ar_and_dit_do_not_ignore_visual_under_fsdp2(self):
+        from verl_omni.pipelines.qwen_image_dual_grpo.ar_training_adapter import QwenImageDualGRPOAR
         from verl_omni.pipelines.qwen_image_dual_grpo.diffusers_training_adapter import QwenImageDualGRPO
 
         assert QwenImageDualGRPO.get_fsdp_ignored_module_names(SimpleNamespace()) == []
+        assert QwenImageDualGRPOAR.get_fsdp_ignored_module_names(SimpleNamespace()) == []
