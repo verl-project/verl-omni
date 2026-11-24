@@ -1,6 +1,6 @@
 # Offline diffusion model publishing
 
-Last updated: 09/30/2026
+Last updated: 11/16/2026
 
 `verl_omni.model_merger` converts an existing FSDP actor checkpoint into a local
 transformer or self-contained inference pipeline. It follows verl's
@@ -42,6 +42,12 @@ releases carry Python assets, so copying those local assets requires
 
 BAGEL is deliberately excluded: its training class derives from
 `NonDiffusersModelBase` and needs a different native publishing contract.
+MiniMax-H3-Image (`MiniMaxH3ImagePipeline`) is also excluded from complete
+pipeline publishing here because its native PDD release uses an audio-free
+`MiniMaxH3DiTModel` plus `pdd_fused_heads.safetensors` / `MiniMaxH3ImageVAE`
+(handled by `verl_omni.pipelines.minimax_h3_image_diffusion_nft.checkpoint`);
+LoRA-only adapter export (`save_lora_only=True`) and standalone
+`MiniMaxH3Transformer3DModel` publishing remain supported.
 
 Supported checkpoint representations:
 

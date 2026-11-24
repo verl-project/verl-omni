@@ -23,9 +23,9 @@ from collections import ChainMap
 import torch
 from verl import DataProto
 from verl.experimental.reward_loop.reward_manager.base import RewardManagerBase
-from verl.utils.import_utils import load_extern_object
 
 from verl_omni.pipelines.rollout_media import ArtifactContractError
+from verl_omni.utils.reward_score.scorers.registry import load_reward_object as load_extern_object
 from verl_omni.workers.config.reward import get_reward_model_entries, resolve_reward_model_name
 
 from .media import _reward_extra_info
@@ -244,6 +244,10 @@ class MultiRewardManager(RewardManagerBase, ABC):
 
         async def run_term(sub, filtered_kwargs):
             fn = sub["fn"]
+            executor = self._engine_reward_executors.get(sub["model"])
+            if executor is not None and "reward_model_tokenizer" in sub["sig"].parameters:
+                # Loaded here so a failure is handled like any other failure of this term.
+                filtered_kwargs = {**filtered_kwargs, "reward_model_tokenizer": executor.tokenizer}
 
             async def invoke():
                 if sub["is_async"]:

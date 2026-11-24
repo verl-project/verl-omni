@@ -2,8 +2,9 @@
 # Shared L3 nightly runner. Case scripts export L3_* / TRAIN_BATCH_SIZE and
 # pass the v1 trainer Hydra overrides as arguments.
 #
-# Training always goes through tests/nightly/run.py, which starts
-# verl_omni.trainer.main_diffusion_v1. Do not point a case at the v0 trainer.
+# Training always goes through tests/nightly/run.py. NIGHTLY_TRAINER_MODULE
+# selects the v1 entrypoint:: ``main_diffusion_v1``(default) or ``main_omni``.
+# Do not point a case at the v0 trainer.
 set -xeuo pipefail
 
 NIGHTLY_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -15,12 +16,13 @@ REPO_ROOT=$(cd -- "${NIGHTLY_DIR}/../.." && pwd)
 : "${TRAIN_BATCH_SIZE:?set TRAIN_BATCH_SIZE}"
 
 L3_MODEL=${L3_MODEL:-qwen-image}
+L3_DATA_KIND=${L3_DATA_KIND:-ocr}
 L3_DATA_SOURCE=${L3_DATA_SOURCE:-${L3_TEST_CASE}}
 MODEL_PATH=${MODEL_PATH:-${HOME}/models/tiny-random/Qwen-Image}
 TOKENIZER_PATH=${TOKENIZER_PATH:-${MODEL_PATH}/tokenizer}
 REWARD_MODEL_PATH=${REWARD_MODEL_PATH:-${HOME}/models/tiny-random/qwen3-vl}
 TOTAL_TRAIN_STEPS=${TOTAL_TRAIN_STEPS:-20}
-DEBUG_DUMP_STEPS=${DEBUG_DUMP_STEPS:-1,2}
+DEBUG_DUMP_STEPS=${DEBUG_DUMP_STEPS-1,2}
 PERF_SKIP_STEPS=${PERF_SKIP_STEPS:-2}
 PERF_THRESHOLD=${PERF_THRESHOLD:-0.15}
 PRECISION_ATOL=${PRECISION_ATOL:-1e-3}
@@ -59,22 +61,22 @@ export NIGHTLY_DETERMINISTIC_SEED
 export PYTHONHASHSEED=${PYTHONHASHSEED:-${NIGHTLY_DETERMINISTIC_SEED}}
 export CUBLAS_WORKSPACE_CONFIG=${CUBLAS_WORKSPACE_CONFIG:-:4096:8}
 export TOKENIZERS_PARALLELISM=${TOKENIZERS_PARALLELISM:-false}
-export GENRM_OCR_TEMPERATURE=${GENRM_OCR_TEMPERATURE:-0.0}
-export GENRM_OCR_TOP_P=${GENRM_OCR_TOP_P:-1.0}
-export GENRM_OCR_MAX_TOKENS=${GENRM_OCR_MAX_TOKENS:-32}
-export GENRM_OCR_SEED=${GENRM_OCR_SEED:-${NIGHTLY_DETERMINISTIC_SEED}}
 export MODEL_PATH TOKENIZER_PATH REWARD_MODEL_PATH
 export TRAIN_FILES VAL_FILES ATTN_BACKEND ROLLOUT_ATTN_BACKEND
 
 rm -rf "${CURRENT_DUMP_DIR}"
-mkdir -p "${CURRENT_DUMP_DIR}" "${BASELINE_DUMP_DIR}" "${LOG_DIR}"
+mkdir -p "${CURRENT_DUMP_DIR}" "${LOG_DIR}"
+if [[ "${L3_METRICS_ONLY:-0}" != "1" ]]; then
+    mkdir -p "${BASELINE_DUMP_DIR}"
+fi
 
 python3 "${NIGHTLY_DIR}/env_metadata.py" \
     --output "${ENV_METADATA_JSON}" \
     --attn-backend "${ATTN_BACKEND}" \
     --rollout-attn-backend "${ROLLOUT_ATTN_BACKEND}"
 
-python3 "${NIGHTLY_DIR}/create_single_sample_data.py" \
+python3 "${NIGHTLY_DIR}/create_sample_data.py" \
+    --kind "${L3_DATA_KIND}" \
     --local_save_dir "${DATA_DIR}" \
     --train_size "${TRAIN_BATCH_SIZE}" \
     --val_size 4 \
@@ -89,6 +91,20 @@ python3 "${NIGHTLY_DIR}/run.py" \
     data.train_files="${TRAIN_FILES}" \
     data.val_files="${VAL_FILES}" \
     "$@" 2>&1 | tee "${CONSOLE_LOG}"
+
+metrics_args=(
+    --metrics-jsonl "${DEBUG_METRICS_JSONL}"
+    --log-file "${CONSOLE_LOG}"
+    --output "${CURRENT_METRICS_JSON}"
+    --model "${L3_MODEL}"
+    --algorithm "${L3_ALGORITHM}"
+    --perf-skip-steps "${PERF_SKIP_STEPS}"
+    --threshold "${PERF_THRESHOLD}"
+)
+if [[ "${L3_METRICS_ONLY:-0}" == "1" ]]; then
+    python3 "${NIGHTLY_DIR}/collect_metrics.py" "${metrics_args[@]}"
+    exit
+fi
 
 # Replace only this case's baseline after a successful run. Sibling case
 # directories under OUTPUT_ROOT/baseline stay in place.
@@ -105,14 +121,8 @@ fi
 
 METRICS_STATUS=0
 python3 "${NIGHTLY_DIR}/collect_metrics.py" \
-    --metrics-jsonl "${DEBUG_METRICS_JSONL}" \
-    --log-file "${CONSOLE_LOG}" \
+    "${metrics_args[@]}" \
     --baseline "${BASELINE_METRICS_JSON}" \
-    --output "${CURRENT_METRICS_JSON}" \
-    --model "${L3_MODEL}" \
-    --algorithm "${L3_ALGORITHM}" \
-    --perf-skip-steps "${PERF_SKIP_STEPS}" \
-    --threshold "${PERF_THRESHOLD}" \
     "${BOOTSTRAP_ARGS[@]}" || METRICS_STATUS=$?
 
 DUMP_STATUS=0

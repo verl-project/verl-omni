@@ -204,11 +204,16 @@ ppo_micro_batch_size_per_gpu       = 16
 
 #### Reward
 
-- `reward.reward_manager.name`: Selects the reward manager.
+- `reward.reward_manager.name`: Selects the reward manager; `MultiVisualRewardManager`
+  is the supported choice.
 
-- `reward.custom_reward_function.path` and
-  `reward.custom_reward_function.name`: Register the task-specific reward
-  post-processing function such as `compute_score_ocr`.
+- `reward.reward_functions.<term>.path` and `.name`: Register each task-specific
+  reward scorer such as `compute_score_ocr`, with optional `.weight` and a named
+  model under `reward.models`; see `docs/algo/named_reward_models.md`.
+
+The legacy single-scorer keys — `reward.custom_reward_function.path`/`.name`
+under the default `VisualRewardManager`, optionally with one global
+`reward.reward_model.enable` engine — are deprecated since v0.4.0.
 
 For an end-to-end OCR training walkthrough, including dataset preparation and
 the full runnable command, see `docs/start/flowgrpo_quickstart.md`.

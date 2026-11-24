@@ -15,6 +15,8 @@
 
 from __future__ import annotations
 
+import math
+import warnings
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
@@ -24,9 +26,23 @@ from omegaconf import OmegaConf
 from verl.base_config import BaseConfig
 from verl.utils.device import get_device_name
 
+# Shared verbatim so the launch notices and the manager-level warning cannot drift.
+DEPRECATED_USE_ACCELERATOR_MESSAGE = (
+    "reward.custom_reward_function.use_accelerator is deprecated since v0.4.0 and will be removed "
+    "in a future release. Set reward.accelerator_workers.enabled instead."
+)
+DEPRECATED_VISUAL_MANAGER_MESSAGE = (
+    "VisualRewardManager is deprecated since v0.4.0 and will be removed in a future release. "
+    "Set reward.reward_manager.name=MultiVisualRewardManager and configure scorers under "
+    "reward.reward_functions; see docs/algo/named_reward_models.md."
+)
+
 __all__ = [
+    "DEPRECATED_USE_ACCELERATOR_MESSAGE",
+    "DEPRECATED_VISUAL_MANAGER_MESSAGE",
     "EngineRewardModelConfig",
     "NativeRewardModelConfig",
+    "NativeRewardFSDPConfig",
     "NativeRewardModelExecutorConfig",
     "RewardModelConfig",
     "RewardModelPlacementConfig",
@@ -35,6 +51,7 @@ __all__ = [
     "get_reward_model_entries",
     "has_engine_reward_models",
     "has_native_reward_models",
+    "has_fsdp_reward_models",
     "has_reward_models",
     "is_engine_backend",
     "parse_reward_model_placement",
@@ -46,6 +63,7 @@ __all__ = [
     "streaming_reward_enabled",
     "to_mapping",
     "validate_reward_model_terms",
+    "warn_deprecated_reward_config",
 ]
 
 _ENGINE_BACKENDS = {"engine"}
@@ -63,6 +81,8 @@ class RewardModelPlacementConfig(BaseConfig):
 
     # Global accelerator bundle indices in the trainer-selected parent pool.
     devices: list[int] = field(default_factory=list)
+    # Explicit accelerator rank groups; flat devices retain complete-replica semantics.
+    replica_groups: list[list[int]] = field(default_factory=list)
     # Ray resource kind used to place complete native replicas.
     resource: str = "accelerator"
     # CPU capacity reserved for each CPU replica actor.
@@ -74,16 +94,27 @@ class RewardModelPlacementConfig(BaseConfig):
         if self.resource not in ("accelerator", "cpu"):
             raise ValueError("Native reward model placement.resource must be 'accelerator' or 'cpu'")
         if self.is_cpu:
-            if self.devices:
-                raise ValueError("CPU placement uses placement.num_replicas; remove placement.devices")
+            if self.devices or self.replica_groups:
+                raise ValueError("CPU placement uses placement.num_replicas; remove placement.devices/replica_groups")
             _validate_positive_int(self.num_replicas, "Native reward model placement.num_replicas")
         elif self.num_replicas is not None:
             raise ValueError("placement.num_replicas is only supported for resource='cpu'")
-        if not isinstance(self.devices, list) or (not self.is_cpu and not self.devices):
+        if self.replica_groups:
+            if self.devices:
+                raise ValueError("placement.devices and placement.replica_groups are mutually exclusive")
+            if (
+                not isinstance(self.replica_groups, list)
+                or len(self.replica_groups) != 1
+                or not isinstance(self.replica_groups[0], list)
+                or len(self.replica_groups[0]) != 2
+            ):
+                raise ValueError("FSDP placement.replica_groups requires one two-rank group")
+        elif not isinstance(self.devices, list) or (not self.is_cpu and not self.devices):
             raise ValueError("Native reward model placement.devices must be a non-empty list")
-        if any(isinstance(device, bool) or not isinstance(device, int) or device < 0 for device in self.devices):
+        devices = self.bundle_indices
+        if any(isinstance(device, bool) or not isinstance(device, int) or device < 0 for device in devices):
             raise ValueError("Native reward model placement.devices must contain non-negative integers")
-        if len(set(self.devices)) != len(self.devices):
+        if len(set(devices)) != len(devices):
             raise ValueError("Native reward model placement.devices must not contain duplicates")
         _validate_positive_int(self.cpus_per_worker, "Native reward model placement.cpus_per_worker")
         if self.resource == "accelerator" and self.cpus_per_worker != 1:
@@ -94,16 +125,26 @@ class RewardModelPlacementConfig(BaseConfig):
         """Whether the deployment uses ordinary Ray CPU resources."""
         return self.resource == "cpu"
 
+    @property
+    def bundle_indices(self) -> list[int]:
+        """All claimed parent-pool bundles, preserving declared rank order."""
+        return self.replica_groups[0] if self.replica_groups else self.devices
+
     @classmethod
     def from_mapping(cls, name: str, value) -> RewardModelPlacementConfig:
         placement = to_mapping(value)
-        allowed = {"devices", "resource", "cpus_per_worker", "num_replicas"}
+        allowed = {"devices", "replica_groups", "resource", "cpus_per_worker", "num_replicas"}
         _reject_unknown_fields(name, placement, allowed, prefix="placement.")
-        if placement.get("resource", "accelerator") == "accelerator" and "devices" not in placement:
+        if "devices" in placement and "replica_groups" in placement:
+            raise ValueError("placement.devices and placement.replica_groups are mutually exclusive")
+        if placement.get("resource", "accelerator") == "accelerator" and not (
+            {"devices", "replica_groups"} & placement.keys()
+        ):
             raise ValueError(f"Native reward model {name!r} requires placement.devices")
         try:
             return cls(
                 devices=placement.get("devices", []),
+                replica_groups=placement.get("replica_groups", []),
                 resource=placement.get("resource", "accelerator"),
                 cpus_per_worker=placement.get("cpus_per_worker", 1),
                 num_replicas=placement.get("num_replicas"),
@@ -247,6 +288,20 @@ class EngineRewardModelConfig(RewardModelConfig):
 
 
 @dataclass
+class NativeRewardFSDPConfig(BaseConfig):
+    """Deadlines for an opt-in, synchronous two-rank native deployment."""
+
+    timeout: float = 120
+    collective_timeout: float = 30
+
+    def __post_init__(self):
+        for name in ("timeout", "collective_timeout"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int | float) or not math.isfinite(value) or value <= 0:
+                raise ValueError(f"FSDP {name} must be a finite positive number")
+
+
+@dataclass
 class NativeRewardModelConfig(RewardModelConfig):
     """Complete user-facing schema for one worker-local native reward model."""
 
@@ -254,6 +309,8 @@ class NativeRewardModelConfig(RewardModelConfig):
     executor: NativeRewardModelExecutorConfig | None = None
     # Null preserves static splitting; a positive size enables completion-driven dispatch.
     dispatch_batch_size: int | None = None
+    # Only replica_groups opts into FSDP; deadlines never change flat placement.
+    fsdp: NativeRewardFSDPConfig | None = None
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -265,6 +322,15 @@ class NativeRewardModelConfig(RewardModelConfig):
             raise ValueError(f"Native reward model {self.name!r} requires executor.model")
         if self.dispatch_batch_size is not None:
             _validate_positive_int(self.dispatch_batch_size, f"Native reward model {self.name!r} dispatch_batch_size")
+        if self.placement.replica_groups:
+            if not self.model_path:
+                raise ValueError("Native FSDP requires an explicit immutable model_path")
+            if self.fsdp is None:
+                object.__setattr__(self, "fsdp", NativeRewardFSDPConfig())
+            elif not isinstance(self.fsdp, NativeRewardFSDPConfig):
+                raise ValueError("fsdp must be a NativeRewardFSDPConfig")
+        elif self.fsdp is not None:
+            raise ValueError("fsdp requires placement.replica_groups")
 
         if "device" in self.executor.kwargs:
             configured_device = self.executor.kwargs["device"]
@@ -286,16 +352,20 @@ class NativeRewardModelConfig(RewardModelConfig):
     @classmethod
     def from_mapping(cls, name: str, value) -> NativeRewardModelConfig:
         model = to_mapping(value)
-        allowed = {"backend", "offload", "model_path", "placement", "executor", "dispatch_batch_size"}
+        allowed = {"backend", "offload", "model_path", "placement", "executor", "dispatch_batch_size", "fsdp"}
         _reject_unknown_fields(name, model, allowed)
+        placement = RewardModelPlacementConfig.from_mapping(name, model.get("placement"))
+        fsdp_values = to_mapping(model.get("fsdp"))
+        _reject_unknown_fields(name, fsdp_values, {"timeout", "collective_timeout"}, prefix="fsdp.")
         return cls(
             name=name,
             backend=model.get("backend", ""),
             offload=model.get("offload"),
             model_path=model.get("model_path"),
-            placement=RewardModelPlacementConfig.from_mapping(name, model.get("placement")),
+            placement=placement,
             executor=NativeRewardModelExecutorConfig.from_mapping(name, model.get("executor")),
             dispatch_batch_size=model.get("dispatch_batch_size"),
+            fsdp=NativeRewardFSDPConfig(**fsdp_values) if model.get("fsdp") is not None else None,
         )
 
 
@@ -352,6 +422,14 @@ def has_native_reward_models(config) -> bool:
     return any(model.get("backend") in _NATIVE_BACKENDS for model in get_reward_model_entries(config).values())
 
 
+def has_fsdp_reward_models(config) -> bool:
+    """Whether explicit rank-group placement opts into native FSDP."""
+    return any(
+        model.get("backend") == "native" and model.get("placement", {}).get("replica_groups")
+        for model in (config.get("reward", {}).get("models", {}) or {}).values()
+    )
+
+
 def resolve_reward_model_name(term_name: str, term, models) -> str | None:
     """Resolve an explicit model reference or the same-name shorthand."""
     model_name = term.get("model")
@@ -363,12 +441,29 @@ def resolve_reward_model_name(term_name: str, term, models) -> str | None:
 def validate_reward_model_terms(config) -> None:
     """Validate named-model references before allocating model resources."""
     models = get_reward_model_entries(config)
+    fsdp_models = {
+        name
+        for name, entry in models.items()
+        if entry.get("backend") == "native" and entry.get("placement", {}).get("replica_groups")
+    }
+    if fsdp_models:
+        if len(models) != 1:
+            raise ValueError("The initial native FSDP path supports one named deployment")
+        if not reward_pool_is_separate(config) or config.reward.reward_model.get("nnodes", 1) != 1:
+            raise ValueError("Native FSDP requires a dedicated single-node reward pool")
+        trainer = config.get("trainer", {})
+        if not trainer.get("use_v1", False) or trainer.get("v1", {}).get("trainer_mode", "sync") != "sync":
+            raise ValueError("Native FSDP requires synchronous V1 diffusion training")
+        if config.reward.get("streaming", {}).get("enabled", False):
+            raise ValueError("Native FSDP does not support streaming rewards")
     for term_name, term in (config.reward.get("reward_functions", {}) or {}).items():
         model_name = resolve_reward_model_name(term_name, term, models)
         if model_name is None:
             continue
         if model_name not in models:
             raise ValueError(f"Reward term {term_name!r} references unknown model {model_name!r}")
+        if model_name in fsdp_models and term.get("required") is not True:
+            raise ValueError(f"Native FSDP term {term_name!r} requires required=true so group loss is fatal")
         has_function = term.get("path") is not None and term.get("name") is not None
         if not has_function:
             raise ValueError(
@@ -416,7 +511,31 @@ def accelerator_workers_enabled(config) -> bool:
     reward = config.reward
     accelerator_workers = reward.get("accelerator_workers", {}) or {}
     custom_reward = reward.get("custom_reward_function", {}) or {}
+    if custom_reward.get("use_accelerator", False):
+        warnings.warn(DEPRECATED_USE_ACCELERATOR_MESSAGE, DeprecationWarning, stacklevel=2)
     return bool(accelerator_workers.get("enabled", False) or custom_reward.get("use_accelerator", False))
+
+
+def warn_deprecated_reward_config(config) -> None:
+    """Emit the trainer-launch deprecation notices for legacy reward paths."""
+    reward = config.get("reward", {}) or {}
+    custom_reward = reward.get("custom_reward_function", {}) or {}
+    reward_manager = reward.get("reward_manager", {}) or {}
+    reward_model = reward.get("reward_model", {}) or {}
+    if custom_reward.get("use_accelerator", False):
+        warnings.warn(DEPRECATED_USE_ACCELERATOR_MESSAGE, DeprecationWarning, stacklevel=3)
+    visual_manager = reward_manager.get("name") == "VisualRewardManager"
+    if visual_manager:
+        warnings.warn(DEPRECATED_VISUAL_MANAGER_MESSAGE, DeprecationWarning, stacklevel=3)
+    if visual_manager and reward_model.get("enable", False) and not reward.get("reward_functions"):
+        warnings.warn(
+            "The single global reward model (reward.reward_model.enable=true with one "
+            "reward.custom_reward_function) is deprecated since v0.4.0 and will be removed in a future "
+            "release. Configure a named engine model under reward.models and bind it from "
+            "reward.reward_functions; see docs/algo/named_reward_models.md.",
+            DeprecationWarning,
+            stacklevel=3,
+        )
 
 
 def parse_reward_model_placement(name: str, value) -> RewardModelPlacementConfig:

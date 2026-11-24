@@ -40,6 +40,7 @@ def _make_worker(role="actor"):
     w.role = role
     w.actor = _FakeTrainingWorker()
     w.actor.train_mini_batch = w.actor.train_mini_batch  # noqa
+    w._trajectory_materializer = None
     # _with_routing_replay_flag requires this worker attribute.
     w.enable_routing_replay = True
     # update_actor reads actor.enable_timestep_staging off the worker config.

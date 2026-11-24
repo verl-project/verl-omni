@@ -414,7 +414,7 @@ dataloader (`global_step_N/transfer_queue/`). Resume with
 `trainer.resume_mode=auto` (or `resume_path`) restores queued prompt groups,
 re-issues pending and running groups, and tops warmup up to
 `num_warmup_batches * train_batch_size` instead of enqueueing that many new
-batches. Requires TransferQueue 0.1.9. Sync mode does not write a queue
+batches. Requires TransferQueue 0.1.11. Sync mode does not write a queue
 snapshot. Old checkpoints without `transfer_queue/` warn and start the queue
 empty.
 
@@ -463,17 +463,28 @@ Every V1 diffusion run depends on it:
 4. **Tuning.** `transfer_queue.backend.SimpleStorage.total_storage_size` caps
    how many experience samples the default backend holds;
    `num_data_storage_units` sets the in-memory storage units; metrics can be
-   exposed via `transfer_queue.metrics.*`. See [Important settings](#important-settings).
+   exposed via `++transfer_queue.metrics.*` (the block is not listed in the
+   config tree; see [RL-Insight](rl_insight.md)). See [Important settings](#important-settings).
 
 Omni models get the same support through verl's `TaskRunnerV1`
 (`python -m verl_omni.trainer.main_omni`); omni inherits verl's TransferQueue
-setup and requires TransferQueue >= 0.1.9 for async checkpoint resume.
+setup and requires TransferQueue >= 0.1.11 for async checkpoint resume.
 
 ## Important settings
 
 - `trainer.use_v1` (default `true` since v0.3.0) selects the V1 trainer; setting
   it to `false` explicitly selects the deprecated legacy v0 trainer.
 - `trainer.v1.trainer_mode` selects `sync` or `separate_async`.
+- `trainer.v1.worker_side_trajectory` (default `false`) fetches trajectory
+  tensors on the actor/ref workers instead of on the driver. Use it with V1
+  `sync` policy-gradient training and rollout-side rewards, without teacher
+  scoring. The driver retains training metadata and timesteps; dump-only
+  media stays in TQ for the separate dump read. Validation keeps its full read.
+  The SD3.5 FlowGRPO and Wan2.2 DanceGRPO sync recipes set
+  `actor_rollout_ref.model.trajectory_fields.required` and `.optional`.
+  For custom recipes, declare the tensors the training pipeline consumes,
+  including embedding masks and any CFG inputs. Missing required fields
+  raise without reading the full row.
 - `trainer.v1.separate_async.parameter_sync_step` controls the number of local
   actor updates per rollout-weight synchronization cycle.
 - `trainer.v1.separate_async.hybrid_rollout.enable_switch` lends the colocated

@@ -19,6 +19,7 @@ delivers tokens; diffusion sleep/wake ACKs are not engine-checked.
 """
 
 import asyncio
+import logging
 from types import SimpleNamespace
 
 import pytest
@@ -144,6 +145,69 @@ async def test_abort_with_no_in_flight_requests_still_pauses():
     assert engine.abort_calls == [[]]
     assert engine.calls == ["abort", "pause"]
     assert result == {"aborted_count": 0, "request_ids": []}
+
+
+async def test_abort_only_aborts_without_pausing():
+    states = {"ext-1-abc": _FakeRequestState("ext-1-abc", "ext-1")}
+    engine = _FakeAsyncOmni(states=states)
+    server = _make_server(engine)
+
+    result = await server.abort_all_requests(abort_only=True)
+
+    # abort_only cancels current engine requests and keeps admission open: no pause.
+    assert engine.calls == ["abort"]
+    assert engine.pause_calls == []
+    assert result == {"aborted_count": 1, "request_ids": ["ext-1"]}
+
+
+async def test_abort_only_failure_unblocks_generators_without_pausing():
+    states = {
+        "ext-1-abc": _FakeRequestState("ext-1-abc", "ext-1"),
+        "ext-2-xyz": _FakeRequestState("ext-2-xyz", "ext-2"),
+    }
+    engine = _FakeAsyncOmni(states=states, fail_abort=True)
+    server = _make_server(engine)
+
+    with pytest.raises(RuntimeError, match="abort rpc failed"):
+        await server.abort_all_requests(abort_only=True)
+
+    assert engine.pause_calls == []
+    for state in states.values():
+        terminal = state.queue.get_nowait()
+        assert terminal.finished is True
+        assert terminal.engine_outputs.outputs[0].finish_reason == "abort"
+
+
+async def test_reject_request_is_accepted_and_still_pauses(caplog):
+    states = {"ext-1-abc": _FakeRequestState("ext-1-abc", "ext-1")}
+    engine = _FakeAsyncOmni(states=states)
+    server = _make_server(engine)
+
+    with caplog.at_level(logging.WARNING, logger=server_module.logger.name):
+        await server.abort_all_requests(reject_request=True)
+
+    # The AsyncOmni engine has no reject knob; arrivals behind the pause park.
+    assert engine.calls == ["abort", "pause"]
+    assert "park until resume" in caplog.text
+
+
+async def test_generate_accepts_session_id_without_forwarding():
+    engine = _FakeAsyncOmni()
+    server = _make_server(engine)
+    forwarded: dict = {}
+
+    async def _record_generate(**kwargs):
+        forwarded.update(kwargs)
+        return SimpleNamespace()
+
+    server._generate_strategy = SimpleNamespace(generate=_record_generate)
+
+    await server.generate(prompt_ids=[1], sampling_params={"top_p": 1.0}, request_id="req-1", session_id="sess-1")
+
+    # Cross-request server affinity has no AsyncOmni counterpart; routing
+    # stickiness stays owned by the load balancer.
+    assert forwarded["request_id"] == "req-1"
+    assert "session_id" not in forwarded
 
 
 # ---------------------------------------------------------------------------

@@ -59,18 +59,10 @@ def _check_skip_conflicts(config: DictConfig) -> None:
     if not enabled:
         return
 
-    use_v1 = bool(OmegaConf.select(config, "trainer.use_v1", default=False))
-    if "weight_sync" in enabled and (
-        not use_v1 or OmegaConf.select(config, "trainer.v1.trainer_mode", default="sync") == "sync"
-    ):
+    if "reward" in enabled and streaming_reward_enabled(config):
         raise ValueError(
-            "omni_skip.weight_sync is inert here: only the V1 async modes have a mid-cycle sync. "
-            "Set trainer.use_v1=true with a non-sync trainer.v1.trainer_mode, or disable the role."
-        )
-    if enabled & {"reward", "weight_sync"} and streaming_reward_enabled(config):
-        raise ValueError(
-            "omni_skip.reward / omni_skip.weight_sync are inert without a colocated reward model: streaming "
-            "rewards are scored inside rollout, so freeze them with skip.rollout_tq / skip.rollout instead."
+            "omni_skip.reward is inert without a colocated reward model: streaming rewards are scored inside "
+            "rollout, so freeze them with skip.rollout_tq / skip.rollout instead."
         )
     if "ref_log_prob" in enabled:
         loss_mode = OmegaConf.select(config, "actor_rollout_ref.actor.diffusion_loss.loss_mode")
@@ -83,7 +75,7 @@ def _check_skip_conflicts(config: DictConfig) -> None:
             f"omni_skip.old_log_prob / omni_skip.advantage are inert with algorithm.trainer_type={trainer_type}: "
             "direct-preference trainers never recompute old log probs or advantages."
         )
-    if "advantage" in enabled and not use_v1:
+    if "advantage" in enabled and not bool(OmegaConf.select(config, "trainer.use_v1", default=False)):
         raise ValueError(
             "omni_skip.advantage is inert on the V0 policy-gradient trainer: it computes advantages inline "
             "with no annotated stage hook. Enable it only with trainer.use_v1=true."
