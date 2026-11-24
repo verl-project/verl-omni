@@ -13,7 +13,9 @@
 # limitations under the License.
 """Create genuine serialized two-rank CPU DTensors in an isolated Gloo process group."""
 
+import os
 import sys
+import uuid
 from pathlib import Path
 
 import torch
@@ -23,9 +25,9 @@ from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import Replicate, Shard, distribute_tensor
 
 
-def save_rank(rank: int, roots: list[str]) -> None:
+def save_rank(rank: int, roots: list[str], rendezvous: str) -> None:
     """Save genuine rank shards for tiny state dictionaries, sharing one Gloo startup."""
-    dist.init_process_group("gloo", init_method=f"file://{Path(roots[0]) / 'rendezvous'}", rank=rank, world_size=2)
+    dist.init_process_group("gloo", init_method=rendezvous, rank=rank, world_size=2)
     try:
         mesh = init_device_mesh("cpu", (2,), mesh_dim_names=("fsdp",))
         for directory in roots:
@@ -38,7 +40,16 @@ def save_rank(rank: int, roots: list[str]) -> None:
             torch.save(result, root / f"model_world_size_2_rank_{rank}.pt")
     finally:
         dist.destroy_process_group()
+    # TODO (torch): drop the forced exit once spawned Gloo children stop aborting at interpreter teardown.
+    # Exit without interpreter teardown: that teardown can abort a fault-free child with SIGABRT
+    # ("terminate called without an active exception").
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)
 
 
 if __name__ == "__main__":
-    mp.spawn(save_rank, args=(sys.argv[1:],), nprocs=2, join=True)
+    # One rendezvous file per invocation, minted in the parent so both ranks
+    # agree; reusing a leftover file deadlocks the new world's store init.
+    rendezvous = f"file://{Path(sys.argv[1]) / f'rendezvous-{uuid.uuid4().hex}'}"
+    mp.spawn(save_rank, args=(sys.argv[1:], rendezvous), nprocs=2, join=True)
