@@ -1,6 +1,6 @@
 # Profiling FlowGRPO / diffusion training in VeRL-Omni
 
-Last updated: 11/16/2026.
+Last updated: 11/24/2026.
 
 VeRL-Omni reuses the profiler subsystem from upstream
 [verl](https://github.com/verl-project/verl) (`verl.utils.profiler`) and exposes
@@ -340,7 +340,7 @@ In each role-local report:
 
 The controller normally has no GPU kernels of its own; actor, rollout, and
 reward kernels appear in their corresponding role-local reports. GPU busy and
-idle intervals for the selected devices appear in `gpu_metrics_*.nsys-rep`; GPU
+idle intervals for the selected devices appear in `gpu_metrics.*.nsys-rep`; GPU
 metrics are device-level and do not attribute activity to an individual role.
 
 > [!WARNING]
@@ -361,7 +361,7 @@ new sessions to finish report generation and copy reports into
 `$RUN_DIR/nsight`. Nsight assigns session names automatically so actors that
 inherit profiling options can start without name conflicts. Do not run another
 Nsight experiment as the same user on this node during collection. Keep the
-output filename IDs when overriding Nsight launch options.
+`.run-<id>.` field in output names when overriding Nsight launch options.
 
 Set `PROFILE_FINALIZE_TIMEOUT_S` to change the 120-second report-wait budget.
 It is checked between session queries and does not interrupt a running query;
@@ -374,9 +374,15 @@ Collection reads from `session_latest`. Avoid starting another Ray cluster
 during collection, since it can redirect that link. Reusing a Ray cluster and
 capture ID may include reports from an earlier run.
 
-Report names identify the process role and capture ID. Open the controller,
-actor, rollout-server, reward-loop, and GPU metrics reports together with
-Nsight Systems' multi-report view. For reports collected on one host, prefer
+Report names use dots between fields, for example
+`worker.run-trial.rank0.host.pid123.1.nsys-rep`. The `.run-trial.` field
+identifies the capture independently of role/rank prefixes added by verl or
+window numbers added by Nsight. Run IDs cannot contain dots. Collection
+selects this complete field in both `.nsys-rep` files and `.qdstrm` files
+retained by Nsight when automatic import cannot complete. Use a distinct
+run ID for each experiment that shares a Ray session directory. Open the
+controller, actor, rollout-server, reward-loop, and GPU metrics reports together
+with Nsight Systems' multi-report view. For reports collected on one host, prefer
 `TSC` alignment and verify the alignment source in **Analysis Summary**. `UTC`
 is suitable for coarse phase analysis but not millisecond-scale cross-process
 latency comparisons.

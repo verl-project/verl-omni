@@ -164,7 +164,7 @@ bash "$base_recipe" \
     +global_profiler.global_tool_config.nsys.controller_nsight_options.python-sampling='"true"' \
     +global_profiler.global_tool_config.nsys.controller_nsight_options.python-sampling-frequency=20 \
     +global_profiler.global_tool_config.nsys.controller_nsight_options.wait=primary \
-    +global_profiler.global_tool_config.nsys.controller_nsight_options.o="\"controller_${profile_run_id}_%h_pid%p\"" \
+    +global_profiler.global_tool_config.nsys.controller_nsight_options.o="\"controller.run-${profile_run_id}.%h.pid%p\"" \
     global_profiler.global_tool_config.nsys.worker_nsight_options.trace='"nvtx,cuda-sw,osrt"' \
     global_profiler.global_tool_config.nsys.worker_nsight_options.cuda-memory-usage='"false"' \
     global_profiler.global_tool_config.nsys.worker_nsight_options.capture-range=cudaProfilerApi \
@@ -180,7 +180,7 @@ bash "$base_recipe" \
     +global_profiler.global_tool_config.nsys.worker_nsight_options.python-sampling='"true"' \
     +global_profiler.global_tool_config.nsys.worker_nsight_options.python-sampling-frequency=20 \
     +global_profiler.global_tool_config.nsys.worker_nsight_options.wait=primary \
-    +global_profiler.global_tool_config.nsys.worker_nsight_options.o="\"worker_${profile_run_id}_rank_%q{RANK}_%h_pid%p\"" \
+    +global_profiler.global_tool_config.nsys.worker_nsight_options.o="\"worker.run-${profile_run_id}.rank%q{RANK}.%h.pid%p\"" \
     "$@" || training_status=$?
 
 # Ray fixes nsys output below its current session. Copy only files created by
@@ -190,7 +190,9 @@ bash "$base_recipe" \
 # Assume session_latest still points to this run's cluster. Starting another
 # cluster can redirect it; reusing a cluster and run ID can include old reports.
 nsight_src="${TMPDIR:-/tmp}/ray/session_latest/logs/nsight"
-artifact_pattern="*${profile_run_id}*"
+# Independent actors may prepend role/rank fields. Match the complete run field.
+# Custom output templates must preserve .run-<id>. for this collector.
+artifact_pattern="*.run-${profile_run_id}.*"
 
 # Training has returned, so no further captures should start. Nsight keeps
 # asynchronous report generation visible in its session state, even before a

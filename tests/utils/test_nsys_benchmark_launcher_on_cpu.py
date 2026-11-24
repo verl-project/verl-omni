@@ -51,10 +51,11 @@ def launch(tmp_path):
     recipe = tmp_path / "recipe.sh"
     recipe.write_text(
         '#!/bin/bash\nprintf "%s\\n" "$@" > "$TEST_ROOT/argv"\n'
-        'mkdir -p "$TMPDIR/ray/session_latest/logs/nsight"\n'
-        'printf report > "$TMPDIR/ray/session_latest/logs/nsight/worker_trial_pid123.nsys-rep"\n'
-        'printf raw > "$TMPDIR/ray/session_latest/logs/nsight/metrics_trial_pid456.qdstrm"\n'
-        'printf other > "$TMPDIR/ray/session_latest/logs/nsight/worker_other_pid789.nsys-rep"\n'
+        'nsight_dir="$TMPDIR/ray/session_latest/logs/nsight"\n'
+        'mkdir -p "$nsight_dir"\n'
+        'printf report > "$nsight_dir/worker.run-${PROFILE_RUN_ID}.rank0.host.pid123.1.nsys-rep"\n'
+        'printf raw > "$nsight_dir/gpu_metrics.run-${PROFILE_RUN_ID}.host.pid456.1.qdstrm"\n'
+        'printf other > "$nsight_dir/worker.run-other.rank0.host.pid789.nsys-rep"\n'
         'exit "${TRAINING_STATUS:-0}"\n'
     )
 
@@ -104,13 +105,61 @@ def test_collector_waits_for_new_sessions_and_ignores_existing_sessions(launch, 
     assert (tmp_path / "calls").read_text() == "3"
     argv = (tmp_path / "argv").read_text().splitlines()
     assert not any("session-new" in arg for arg in argv)
+    assert (
+        '+global_profiler.global_tool_config.nsys.controller_nsight_options.o="controller.run-trial.%h.pid%p"' in argv
+    )
+    assert (
+        '+global_profiler.global_tool_config.nsys.worker_nsight_options.o="worker.run-trial.rank%q{RANK}.%h.pid%p"'
+        in argv
+    )
     if version == "v1":
         assert '++global_profiler.global_tool_config.nsys.gpu_metrics_nsight_options.gpu-metrics-devices="0"' in argv
         assert "++global_profiler.global_tool_config.nsys.gpu_metrics_nsight_options.gpu-metrics-frequency=10" in argv
+        assert (
+            '++global_profiler.global_tool_config.nsys.gpu_metrics_nsight_options.o="gpu_metrics.run-trial.%h.pid%p"'
+            in argv
+        )
     assert {p.name: p.read_text() for p in (tmp_path / "run/nsight").iterdir()} == {
-        "worker_trial_pid123.nsys-rep": "report",
-        "metrics_trial_pid456.qdstrm": "raw",
+        "worker.run-trial.rank0.host.pid123.1.nsys-rep": "report",
+        "gpu_metrics.run-trial.host.pid456.1.qdstrm": "raw",
     }
+
+
+def test_collector_matches_complete_run_field_with_role_prefixes(launch, tmp_path):
+    source = tmp_path / "ray/session_latest/logs/nsight"
+    source.mkdir(parents=True)
+    selected = {
+        "controller.run-1.host.pid8.1.nsys-rep",
+        "reward_loop.rank2.worker.run-1.rank2.host.pid9.2.qdstrm",
+        "rollout_server_node_0.rank0.worker.run-1.rank0.host.pid10.1.nsys-rep",
+    }
+    unrelated = {
+        "worker.run-other.rank0.host.pid123.nsys-rep",
+        "worker.run-other.rank0.host.pid123.1.nsys-rep",
+        "worker.run-12.rank0.host.pid8.nsys-rep",
+        "controller.run-1-extra.host.pid9.qdstrm",
+    }
+    for name in selected | unrelated:
+        (source / name).write_text(name)
+
+    result = launch([[], []], PROFILE_RUN_ID="1")
+
+    assert result.returncode == 0, result.stderr
+    expected = selected | {"worker.run-1.rank0.host.pid123.1.nsys-rep", "gpu_metrics.run-1.host.pid456.1.qdstrm"}
+    assert {p.name for p in (tmp_path / "run/nsight").iterdir()} == expected
+    assert all((source / name).read_text() == name for name in selected | unrelated)
+
+
+def test_collector_keeps_runs_separate_in_shared_source_directory(launch, tmp_path):
+    first = launch([[], []], RUN_DIR=str(tmp_path / "first"))
+    second = launch([[], []], PROFILE_RUN_ID="trial-next", RUN_DIR=str(tmp_path / "second"))
+
+    assert first.returncode == second.returncode == 0
+    for directory, run_id in [("first", "trial"), ("second", "trial-next")]:
+        assert {p.name for p in (tmp_path / directory / "nsight").iterdir()} == {
+            f"worker.run-{run_id}.rank0.host.pid123.1.nsys-rep",
+            f"gpu_metrics.run-{run_id}.host.pid456.1.qdstrm",
+        }
 
 
 def test_v1_metrics_defaults_preserve_caller_overrides(launch, tmp_path):
@@ -139,8 +188,8 @@ def test_collector_reports_failures_and_preserves_training_status(
     assert "still pending" not in result.stderr
     assert (tmp_path / "argv").exists() is not before_training
     if not before_training:
-        assert (tmp_path / "run/nsight/worker_trial_pid123.nsys-rep").read_text() == "report"
-        assert (tmp_path / "run/nsight/metrics_trial_pid456.qdstrm").read_text() == "raw"
+        assert (tmp_path / "run/nsight/worker.run-trial.rank0.host.pid123.1.nsys-rep").read_text() == "report"
+        assert (tmp_path / "run/nsight/gpu_metrics.run-trial.host.pid456.1.qdstrm").read_text() == "raw"
 
 
 def test_collector_accepts_slow_query_that_finishes_after_wait_budget(launch):
@@ -160,5 +209,5 @@ def test_collector_reports_wait_budget_expiry_and_preserves_artifacts(launch, tm
     assert result.returncode == 1
     assert "still pending after 1s waiting budget" in result.stderr
     assert "profile-2 Generating" in result.stderr
-    assert (tmp_path / "run/nsight/worker_trial_pid123.nsys-rep").read_text() == "report"
-    assert (tmp_path / "run/nsight/metrics_trial_pid456.qdstrm").read_text() == "raw"
+    assert (tmp_path / "run/nsight/worker.run-trial.rank0.host.pid123.1.nsys-rep").read_text() == "report"
+    assert (tmp_path / "run/nsight/gpu_metrics.run-trial.host.pid456.1.qdstrm").read_text() == "raw"
