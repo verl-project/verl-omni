@@ -36,7 +36,22 @@ from verl import DataProto
 
 from verl_omni.reward_loop.reward_loop import OmniRewardLoopManager, OmniRewardLoopWorker
 from verl_omni.reward_loop.reward_model_executor import NativeRewardExecutor
+from verl_omni.utils.reward_score.scorers.base import RewardScorer
 from verl_omni.workers.config.reward import RewardModelSpec, parse_reward_model_config
+
+
+class _StatsScorer(RewardScorer):
+    max_batch_size = 4
+
+    def load(self, device):
+        self.device = device
+
+    def score_batch(self, batch):
+        return [{"score": request["i"]} for request in batch]
+
+
+async def reward_stats_cpu(reward_model, solution_image, **kwargs):
+    return await reward_model.score({"i": int(solution_image.flatten()[0])})
 
 
 @pytest.fixture(autouse=True)
@@ -302,6 +317,33 @@ def _full_data():
             "extra_info": [{}] * 3,
         },
     )
+
+
+def test_real_ray_native_scorer_stats_follow_reward_without_mixing_workers(tmp_path):
+    ray.init(num_cpus=4, num_gpus=0, include_dashboard=False, object_store_memory=128 * 1024**2)
+    try:
+        config = _full_config(tmp_path, offload=True)
+        config.reward.models["quality"]["executor"]["model"] = f"{__name__}:_StatsScorer"
+        config.reward.reward_functions["quality"]["name"] = "reward_stats_cpu"
+        manager = OmniRewardLoopManager(config)
+        before = manager.get_native_scorer_stats()
+        assert before["quality"] == [{}, {}], "stats reads must not load a scorer before its first wake"
+
+        result = manager.compute_rm_score(_full_data())
+        torch.testing.assert_close(result.batch["rm_scores"], torch.tensor([[0.75], [1.25], [1.75]]))
+        after = manager.get_native_scorer_stats()
+        snapshots = after["quality"]
+        assert len(snapshots) == 2
+        assert all(set(snapshot) == {"quality"} for snapshot in snapshots)
+        # Static dispatch pads three input rows to four scorer requests across
+        # two replicas; counters measure actual work, while outputs stay unpadded.
+        assert sum(snapshot["quality"]["enqueued_requests"] for snapshot in snapshots) == 4
+        assert sum(snapshot["quality"]["accepted_requests"] for snapshot in snapshots) == 4
+        assert sum(snapshot["quality"]["batch_requests"] for snapshot in snapshots) == 4
+        assert all(snapshot["quality"]["failed_requests"] == 0 for snapshot in snapshots)
+        assert "reward/quality/enqueued_requests" not in result.non_tensor_batch
+    finally:
+        ray.shutdown()
 
 
 @ray.remote

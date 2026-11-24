@@ -35,7 +35,12 @@ Reward Loop Manager
 ~~~~~~~~~~~~~~~~~~~~
 
 .. autoclass:: verl_omni.reward_loop.reward_loop.OmniRewardLoopManager
-   :members: start_profile, stop_profile
+   :members: start_profile, stop_profile, get_native_scorer_stats
+
+``get_native_scorer_stats()`` explicitly reads cumulative class-based scorer
+snapshots, grouped by worker group, replica index and model name. See
+:ref:`native-scorer-runtime-statistics` for a scoring-phase example and the
+counter lifetimes and timing units.
 
 Reward Manager
 ~~~~~~~~~~~~~~~~~
