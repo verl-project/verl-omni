@@ -94,8 +94,8 @@ body:
 
         Questions on core components:
         - FSDP engine: @zhtmike
-        - Rollout or trainer: @zhtmike @knlnguyen1802 @ZihaoW123
-        - Reward: @chenyingshu @ruihanglix
+        - Rollout or trainer: @zhtmike @knlnguyen1802 @ZihaoW123 @@WEIXILIN0307
+        - Reward: @chenyingshu @ruihanglix @WEIXILIN0307
 
         Questions on pipelines:
         - Pipelines and model adaptation: @chenyingshu @NancyFyong
