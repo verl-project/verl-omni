@@ -15,7 +15,7 @@
 
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 import torch
@@ -29,8 +29,35 @@ from verl_omni.trainer.diffusion.v1.trainer_sync import PolicyGradientDiffusionT
 from verl_omni.workers.config.reward import reward_role_required
 
 
+def _validation_batch(*, validate=True):
+    return DataProto.from_dict(
+        tensors={"prompts": torch.tensor([[2], [1]]), "responses": torch.ones(2, 3, 2, 2, dtype=torch.uint8)},
+        meta_info={"validate": validate},
+    )
+
+
+def _run_validation(trainer, calls, monkeypatch, *, batches=1):
+    trainer._gen_batch_seq = 0
+    trainer.tokenizer = SimpleNamespace(pad_token_id=0, decode=lambda ids, **kwargs: str(ids.item()))
+    trainer.val_dataloader = [{"raw_prompt": ["second", "first"]} for _ in range(batches)]
+    trainer.agent_loop_manager = SimpleNamespace(generate_sequences=lambda _: calls.append("generate"))
+    meta = SimpleNamespace(keys=["0", "1"], partition_id="val")
+    trainer.replay_buffer = SimpleNamespace(sample=lambda **kwargs: (meta, {}))
+    trainer._maybe_log_val_generations = Mock()
+    trainer._val_metrics_update = Mock(return_value={})
+    monkeypatch.setattr(trainer_base.tq, "kv_batch_put", Mock())
+    monkeypatch.setattr(trainer_base.tq, "kv_clear", Mock())
+    monkeypatch.setattr(trainer_base, "canonicalize_diffusion_tq_meta", lambda meta: meta)
+    monkeypatch.setattr(
+        trainer_base, "diffusion_tq_batch_to_dataproto", lambda *args, **kwargs: _validation_batch(validate=False)
+    )
+    trainer._validate()
+
+
 @pytest.fixture
 def validation(monkeypatch):
+    monkeypatch.setattr(trainer_base.PolicyGradientDiffusionTrainerV1, "_init_online_rollout_stack", lambda *_: None)
+
     def setup(*, options=(), shared=True, named=True):
         config = compose_cfg(
             (
@@ -53,12 +80,6 @@ def validation(monkeypatch):
         )
         trainer.resource_pool_manager = SimpleNamespace(get_resource_pool=lambda role: reward_pool)
 
-        async def wake():
-            calls.append("reward wake")
-
-        async def sleep():
-            calls.append("reward sleep")
-
         async def score(batch, *, preserve_scoring_error_on_cancel=False):
             calls.append("score")
             return DataProto.from_dict(tensors={"rm_scores": batch.batch["prompts"].float()})
@@ -67,60 +88,32 @@ def validation(monkeypatch):
         reward_manager.config = config
         reward_manager._score_lock = asyncio.Lock()
         reward_manager.multi_reward_model_manager = SimpleNamespace(
-            models={"quality": object()}, wake_up=wake, sleep=sleep
+            models={"quality": object()},
+            wake_up=AsyncMock(side_effect=lambda: calls.append("reward wake")),
+            sleep=AsyncMock(side_effect=lambda: calls.append("reward sleep")),
         )
         reward_manager._compute_named_model_scores = score
-        reward_manager.reward_loop_workers = [object()]
-        monkeypatch.setattr("verl_omni.reward_loop.OmniRewardLoopManager", lambda **kwargs: reward_manager)
-        checkpoint = SimpleNamespace(
+        trainer.reward_loop_manager = reward_manager
+        trainer.checkpoint_manager = SimpleNamespace(
             sleep_replicas=lambda: calls.append("rollout sleep"),
             update_weights=lambda step: calls.append(("restore", step)),
             wait_for_weight_update=lambda: calls.append("commit"),
         )
-        monkeypatch.setattr(trainer_base, "CheckpointEngineManager", lambda **kwargs: checkpoint)
-        monkeypatch.setattr(
-            trainer_base.LLMServerManager,
-            "create",
-            lambda **kwargs: SimpleNamespace(get_replicas=lambda: [object()]),
-        )
-        trainer.actor_rollout_wg = object()
         trainer._init_online_rollout_stack(actor_pool)
         trainer.global_steps = 4
-        trainer._gen_batch_seq = 0
-        trainer.tokenizer = SimpleNamespace(pad_token_id=0, decode=lambda ids, **kwargs: str(ids.item()))
-        trainer.val_dataloader = [{"raw_prompt": ["second", "first"]}]
-        trainer.agent_loop_manager = SimpleNamespace(generate_sequences=lambda batch: calls.append("generate"))
-        meta = SimpleNamespace(keys=["0", "1"], partition_id="val")
-        trainer.replay_buffer = SimpleNamespace(sample=lambda **kwargs: (meta, {}))
-        trainer._maybe_log_val_generations = Mock()
-        trainer._val_metrics_update = Mock(return_value={})
-        monkeypatch.setattr(trainer_base.tq, "kv_batch_put", Mock())
-        monkeypatch.setattr(trainer_base.tq, "kv_clear", Mock())
-        monkeypatch.setattr(trainer_base, "canonicalize_diffusion_tq_meta", lambda meta: meta)
-        monkeypatch.setattr(
-            trainer_base,
-            "diffusion_tq_batch_to_dataproto",
-            lambda *args, **kwargs: DataProto.from_dict(
-                tensors={"prompts": torch.tensor([[2], [1]]), "responses": torch.ones(2, 3, 2, 2, dtype=torch.uint8)}
-            ),
-        )
         return trainer, reward_manager, calls
 
     return setup
 
 
 def test_validation_restores_after_scoring_cancellation(validation):
-    trainer, reward_manager, calls = validation()
+    trainer, manager, calls = validation()
     cancellation = asyncio.CancelledError("scoring cancelled")
-
-    async def cancel(batch, *, preserve_scoring_error_on_cancel=False):
-        raise cancellation
-
-    reward_manager._compute_named_model_scores = cancel
+    manager._compute_named_model_scores = AsyncMock(side_effect=cancellation)
     with pytest.raises(asyncio.CancelledError) as caught:
-        trainer._validate()
+        trainer._score_validation_batch(_validation_batch())
     assert caught.value is cancellation
-    assert calls == ["generate", "rollout sleep", "reward wake", "reward sleep", ("restore", 4), "commit"]
+    assert calls == ["rollout sleep", "reward wake", "reward sleep", ("restore", 4), "commit"]
 
 
 def test_validation_commits_weights_before_merging_each_batch(validation, monkeypatch):
@@ -132,8 +125,7 @@ def test_validation_commits_weights_before_merging_each_batch(validation, monkey
         return original_union(data, reward)
 
     monkeypatch.setattr(DataProto, "union", record_union)
-    trainer.val_dataloader *= 2
-    trainer._validate()
+    _run_validation(trainer, calls, monkeypatch, batches=2)
     batch_calls = [
         "generate",
         "rollout sleep",
@@ -167,15 +159,15 @@ def test_validation_commits_weights_before_merging_each_batch(validation, monkey
     ids=["cpu", "dedicated", "legacy"],
 )
 def test_other_topologies_keep_existing_validation_order(validation, monkeypatch, shared, named, options):
-    trainer, _, calls = validation(shared=shared, named=named, options=options)
+    trainer, manager, calls = validation(shared=shared, named=named, options=options)
 
     # A positional-only stub rejects any attempt to invoke release-aware scoring.
     def score(data, /):
         calls.append("score")
         return DataProto.from_dict(tensors={"rm_scores": data.batch["prompts"].float()})
 
-    monkeypatch.setattr(trainer, "_compute_reward_colocate", score)
-    trainer._validate()
+    monkeypatch.setattr(manager, "compute_rm_score", score)
+    _run_validation(trainer, calls, monkeypatch)
     assert calls == ["generate", "rollout sleep", "score", ("restore", 4)]
 
 
@@ -201,9 +193,9 @@ def test_validation_stops_when_rollout_sleep_fails(validation):
 
     trainer.checkpoint_manager.sleep_replicas = fail
     with pytest.raises(RuntimeError) as caught:
-        trainer._validate()
+        trainer._score_validation_batch(_validation_batch())
     assert caught.value is failure
-    assert calls == ["generate", "rollout sleep failed"]
+    assert calls == ["rollout sleep failed"]
 
 
 @pytest.mark.parametrize(
@@ -215,15 +207,12 @@ def test_validation_does_not_restore_after_reward_lifecycle_failure(validation, 
     trainer, manager, calls = validation()
     failure = RuntimeError(f"Reward {method} failed")
 
-    async def fail():
-        raise failure
-
-    setattr(manager.multi_reward_model_manager, method, fail)
+    setattr(manager.multi_reward_model_manager, method, AsyncMock(side_effect=failure))
     with pytest.raises(RuntimeError) as caught:
-        trainer._validate()
+        trainer._score_validation_batch(_validation_batch())
     assert caught.value is failure
     assert "Validation reward release unconfirmed" in failure.__notes__
-    assert calls == ["generate", "rollout sleep", *reward_calls]
+    assert calls == ["rollout sleep", *reward_calls]
 
 
 def test_validation_preserves_scoring_and_weight_commit_failures(validation):
@@ -242,11 +231,10 @@ def test_validation_preserves_scoring_and_weight_commit_failures(validation):
     manager._compute_named_model_scores = fail
     trainer.checkpoint_manager.wait_for_weight_update = fail_restore
     with pytest.raises(BaseExceptionGroup) as caught:
-        trainer._validate()
+        trainer._score_validation_batch(_validation_batch())
     assert caught.value.exceptions == (scoring, restore)
     assert "Validation rollout weight restore failed" in restore.__notes__
     assert calls == [
-        "generate",
         "rollout sleep",
         "reward wake",
         "score",
@@ -278,8 +266,9 @@ async def test_manager_cancellation_waits_for_cleanup_and_retains_errors(validat
 
     manager._compute_named_model_scores = fail_score
     manager.multi_reward_model_manager.sleep = delayed_sleep
-    data = DataProto.from_dict(tensors={"prompts": torch.arange(2).view(2, 1)})
-    scoring = asyncio.create_task(manager.async_compute_rm_score(data, on_release=lambda: calls.append("released")))
+    scoring = asyncio.create_task(
+        manager.async_compute_rm_score(_validation_batch(), on_release=lambda: calls.append("released"))
+    )
     try:
         await asyncio.wait_for(entered.wait(), timeout=5)
         for message in ("first cancellation", "second cancellation"):
