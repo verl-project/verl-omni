@@ -60,6 +60,7 @@ def shell_runtime(tmp_path):
         for key, value in os.environ.items()
         if not key.startswith(("NPU_SMOKE_", "ASCEND_", "RAY_", "MODEL_", "TOKENIZER_", "DATA_", "TRAIN_", "VAL_"))
     }
+    env.pop("TORCHNPU_PRECOMPILE_THREADS", None)
     env.update(
         PATH=f"{bins}:{os.environ['PATH']}",
         LD_PRELOAD="/fixture/libjemalloc.so",
@@ -115,6 +116,7 @@ def test_parallel_groups_overlap_and_preserve_failures(shell_runtime, core_exit,
         assert value["RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES"] == ""
         assert value["RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO"] == "0"
         assert value["NPU_SMOKE_SKIP_GLOBAL_CLEANUP"] == "1"
+        assert value["TORCHNPU_PRECOMPILE_THREADS"] == "2"
         assert "VERL_ZMQ_DIR" not in value
         assert "RAY_ADDRESS" not in value
     assert all(line.endswith(", [])") for line in (evidence / "cleanup.jsonl").read_text().splitlines())
@@ -296,6 +298,43 @@ def test_two_shards_execute_every_registered_case_exactly_once(shell_runtime, gr
         selections.append({int(case_id) for case_id, _ in rows})
     assert not selections[0] & selections[1]
     assert selections[0] | selections[1] == registered
+    expected_first = {
+        "core": {0, 3, 4, 5, 6, 12, 28, 30},
+        "e2e": {20, 22, 23, 24, 26, 34},
+    }
+    assert selections[0] == expected_first[group]
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "bad", "1.5"])
+def test_invalid_compiler_pool_fails_before_cleanup(shell_runtime, value):
+    """Malformed compiler limits cannot start or stop a device workload."""
+    _, scripts, evidence, env = shell_runtime
+    env["TORCHNPU_PRECOMPILE_THREADS"] = value
+    result = subprocess.run(["bash", str(scripts / "run_npu_smoke_core.sh")], env=env, capture_output=True, timeout=10)
+    assert result.returncode == 2
+    assert b"TORCHNPU_PRECOMPILE_THREADS" in result.stdout
+    assert not (evidence / "cleanup.jsonl").exists()
+
+
+def test_explicit_compiler_pool_is_preserved(shell_runtime):
+    """Operators may raise the bound without changing the launcher."""
+    _, scripts, _, env = shell_runtime
+    env.update(NPU_SMOKE_GROUP="fixture", TORCHNPU_PRECOMPILE_THREADS="4")
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            'lib=$1; set --; source "$lib"; trap - EXIT; printf "threads=%s\\n" "$TORCHNPU_PRECOMPILE_THREADS"',
+            "fixture",
+            str(scripts / "lib_npu_smoke.sh"),
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines()[-1] == "threads=4"
 
 
 @pytest.mark.parametrize("shard", ["-1", "2", "bad", "00"])

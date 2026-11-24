@@ -26,6 +26,7 @@ from tests.reward_loop.build_qwen25_vl_reward_tiny_random import ensure_tiny_qwe
 
 ensure_tiny_qwen25_vl_reward_checkpoint(sys.argv[1])
 PY
+    npu_e2e_add_tiny_reward_defaults "$@"
 fi
 
 exec bash "${SCRIPT_DIR}/run_flowgrpo_qwen_image.sh" \
