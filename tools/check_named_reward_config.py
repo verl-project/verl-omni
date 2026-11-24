@@ -43,9 +43,12 @@ def _model_schema_mapping(entry):
                 target[field] = OmegaConf.to_container(value, resolve=True) if OmegaConf.is_config(value) else value
 
     def materialize_mapping(source, target, section):
-        if section not in source or not isinstance(source[section], Mapping):
+        if section not in source:
             return None
         value = source[section]
+        if not isinstance(value, Mapping):
+            target[section] = value
+            return None
         target[section] = OmegaConf.to_container(value, resolve=False) if OmegaConf.is_config(value) else dict(value)
         return value
 

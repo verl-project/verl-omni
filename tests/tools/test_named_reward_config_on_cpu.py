@@ -223,6 +223,148 @@ def test_broken_named_model_interpolation_fails_without_echoing_value(capsys):
     assert "reward.models" in captured.err
 
 
+def _optional_section_overrides(section: str, value: str) -> list[str]:
+    if section == "engine.rollout":
+        return [*_engine("m"), f"++reward.models.m.rollout={value}"]
+    if section == "native.fsdp":
+        return [*_native("m"), f"++reward.models.m.fsdp={value}"]
+    if section == "native.executor.kwargs":
+        return [*_native("m"), f"++reward.models.m.executor.kwargs={value}"]
+    raise AssertionError(f"Unsupported optional section: {section}")
+
+
+def _required_section_overrides(section: str, value: str) -> list[str]:
+    if section == "native.placement":
+        return [
+            "++reward.models.m.backend=native",
+            f"++reward.models.m.placement={value}",
+            f"++reward.models.m.executor.model={EXECUTOR}",
+        ]
+    if section == "native.executor":
+        return [
+            "++reward.models.m.backend=native",
+            "++reward.models.m.placement.resource=cpu",
+            "++reward.models.m.placement.num_replicas=1",
+            f"++reward.models.m.executor={value}",
+        ]
+    raise AssertionError(f"Unsupported required section: {section}")
+
+
+def _null_parent_overrides(value: str) -> list[str]:
+    if value == "${reward.optional_section_value}":
+        return ["++reward.optional_section_value=null"]
+    return []
+
+
+def _scalar_parent_overrides(value: str) -> list[str]:
+    if value == "${reward.invalid_section_value}":
+        return ["++reward.invalid_section_value=not_a_mapping"]
+    return []
+
+
+@pytest.mark.parametrize(
+    ("section", "value"),
+    [
+        pytest.param("engine.rollout", "null", id="engine-rollout-literal-null"),
+        pytest.param("native.fsdp", "null", id="native-fsdp-literal-null"),
+        pytest.param("native.executor.kwargs", "null", id="native-executor-kwargs-literal-null"),
+        pytest.param("engine.rollout", "${reward.optional_section_value}", id="engine-rollout-parent-null"),
+        pytest.param("native.fsdp", "${reward.optional_section_value}", id="native-fsdp-parent-null"),
+        pytest.param(
+            "native.executor.kwargs",
+            "${reward.optional_section_value}",
+            id="native-executor-kwargs-parent-null",
+        ),
+    ],
+)
+def test_optional_null_sections_preserve_schema_nullability_without_mutating_composed_config(
+    section, value, monkeypatch
+):
+    overrides = [
+        *_null_parent_overrides(value),
+        *_optional_section_overrides(section, value),
+        *_term("m"),
+    ]
+    with initialize_config_dir(config_dir=str(CONFIG_DIR), version_base=None):
+        config = compose(config_name="diffusion_trainer", overrides=overrides)
+    before = OmegaConf.to_container(config, resolve=False)
+    parsed = []
+    original_parse = reward_config.parse_reward_model_config
+
+    def capture_parse(name, model):
+        parsed_model = original_parse(name, model)
+        parsed.append(parsed_model)
+        return parsed_model
+
+    monkeypatch.setattr(reward_config, "parse_reward_model_config", capture_parse)
+    assert _inspect_named_rewards(config)["models"] == [{"name": "m", "backend": section.split(".")[0]}]
+    assert OmegaConf.to_container(config, resolve=False) == before
+    if section == "engine.rollout":
+        assert parsed[0].rollout == {}
+    elif section == "native.fsdp":
+        assert parsed[0].fsdp is None
+    else:
+        assert parsed[0].executor.kwargs == {}
+
+
+@pytest.mark.parametrize(
+    ("section", "value"),
+    [
+        pytest.param("engine.rollout", "not_a_mapping", id="engine-rollout-literal-scalar"),
+        pytest.param("native.fsdp", "not_a_mapping", id="native-fsdp-literal-scalar"),
+        pytest.param("native.executor.kwargs", "not_a_mapping", id="native-executor-kwargs-literal-scalar"),
+        pytest.param("engine.rollout", "${reward.invalid_section_value}", id="engine-rollout-parent-scalar"),
+        pytest.param("native.fsdp", "${reward.invalid_section_value}", id="native-fsdp-parent-scalar"),
+        pytest.param(
+            "native.executor.kwargs",
+            "${reward.invalid_section_value}",
+            id="native-executor-kwargs-parent-scalar",
+        ),
+    ],
+)
+def test_optional_sections_reject_literal_and_parent_referenced_scalars(section, value, capsys):
+    assert (
+        main(
+            _argv(
+                "diffusion_trainer",
+                *_scalar_parent_overrides(value),
+                *_optional_section_overrides(section, value),
+                *_term("m"),
+            )
+        )
+        == 2
+    )
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "reward.models" in captured.err
+
+
+@pytest.mark.parametrize(
+    ("section", "value"),
+    [
+        pytest.param("native.placement", "null", id="native-placement-literal-null"),
+        pytest.param("native.executor", "null", id="native-executor-literal-null"),
+        pytest.param("native.placement", "${reward.optional_section_value}", id="native-placement-parent-null"),
+        pytest.param("native.executor", "${reward.optional_section_value}", id="native-executor-parent-null"),
+    ],
+)
+def test_required_native_sections_reject_literal_and_parent_referenced_nulls(section, value, capsys):
+    assert (
+        main(
+            _argv(
+                "diffusion_trainer",
+                *_null_parent_overrides(value),
+                *_required_section_overrides(section, value),
+                *_term("m"),
+            )
+        )
+        == 2
+    )
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "reward.models" in captured.err
+
+
 def test_model_and_term_names_preserve_case(capsys):
     overrides = [*_native("Quality"), *_native("quality"), *_term("Quality"), *_term("lower", "quality")]
     assert main(_argv("diffusion_trainer", *overrides)) == 0
@@ -324,6 +466,11 @@ def test_real_script_invocation_prints_only_json_and_exits_two_on_bad_reference(
                 "++reward.models.m.replicas=${reward.reward_model.nnodes}",
                 "++reward.models.m.rollout=${reward.base_rollout}",
                 *_term("m"),
+                "++reward.optional_rollout=null",
+                "++reward.models.nullable.backend=engine",
+                "++reward.models.nullable.replicas=2",
+                "++reward.models.nullable.rollout=${reward.optional_rollout}",
+                *_term("nullable"),
             ),
         ],
         capture_output=True,
@@ -331,7 +478,10 @@ def test_real_script_invocation_prints_only_json_and_exits_two_on_bad_reference(
         check=False,
     )
     assert good.returncode == 0, good.stderr
-    assert json.loads(good.stdout)["models"] == [{"name": "m", "backend": "engine"}]
+    assert json.loads(good.stdout)["models"] == [
+        {"name": "m", "backend": "engine"},
+        {"name": "nullable", "backend": "engine"},
+    ]
     assert good.stdout.count("\n") == 1
     assert "WORKER_ONLY_TOKEN_7321" not in good.stdout
     bad = subprocess.run(
