@@ -267,7 +267,11 @@ class ARStrategy(OmniStrategyBase):
             else None
         )
         stage_extras = {
-            stage.stage_id: dict(adapter_cls.get_stage_engine_extras(stage.stage_id, pipeline_mode=pipeline_mode))
+            stage.stage_id: dict(
+                adapter_cls.get_stage_engine_extras(
+                    stage.stage_id, pipeline_mode=pipeline_mode, model_config=self.server.model_config
+                )
+            )
             for stage in stages
         }
         # vLLM LoRA is per LLM stage: the policy stage owns the rollout's LoRA
@@ -275,9 +279,6 @@ class ARStrategy(OmniStrategyBase):
         lora_extras = lora_engine_extras(self.server.model_config)
         stage_extras[policy_stage_id].update(lora_extras)
         self.lora_stage_ids = [policy_stage_id] if lora_extras else None
-        if self.server.model_config.true_on_policy:
-            for stage_id, extras in stage_extras.items():
-                extras.update(adapter_cls.get_true_on_policy_engine_extras(stage_id))
         capacity_fields = ("max_model_len", "max_num_batched_tokens")
         if any(field in extras for extras in stage_extras.values() for field in capacity_fields):
             for extras in stage_extras.values():

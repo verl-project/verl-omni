@@ -1095,29 +1095,18 @@ class OmniRolloutPipelineBase:
         return {}
 
     @classmethod
-    def get_stage_engine_extras(cls, stage_id: int, pipeline_mode: str = "thinker_only") -> dict:
+    def get_stage_engine_extras(cls, stage_id: int, pipeline_mode: str = "thinker_only", *, model_config) -> dict:
         """Return per-stage ``engine_extras`` to inject into the deploy config.
 
         Args:
             stage_id: The pipeline stage ID.
             pipeline_mode: The mode used to build the stages.
+            model_config: The ``OmniModelConfig``.
 
         Returns:
             dict: Extra key-value pairs merged into the stage's engine args.
         """
         return {}
-
-    @classmethod
-    def get_true_on_policy_engine_extras(cls, stage_id: int) -> dict:
-        """Return ``engine_extras`` merged into a stage when ``model.true_on_policy`` is on.
-
-        Args:
-            stage_id: The pipeline stage ID.
-
-        Returns:
-            dict: Extra key-value pairs merged over :meth:`get_stage_engine_extras`.
-        """
-        raise NotImplementedError(f"{cls.__name__} does not support true_on_policy.")
 
     @classmethod
     def prepare_engine_prompt(

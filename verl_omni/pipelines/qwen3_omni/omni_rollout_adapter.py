@@ -127,11 +127,20 @@ class Qwen3OmniRolloutAdapter(OmniRolloutPipelineBase):
         return {}
 
     @classmethod
-    def get_stage_engine_extras(cls, stage_id: int, pipeline_mode: str = "thinker_only") -> dict:
-        """Override model_arch to the thinker-only class when in thinker_only mode."""
-        if pipeline_mode == "thinker_only" and stage_id == 0:
-            return {"model_arch": "Qwen3OmniMoeThinkerForConditionalGeneration"}
-        return {}
+    def get_stage_engine_extras(cls, stage_id: int, pipeline_mode: str = "thinker_only", *, model_config) -> dict:
+        """Override model_arch to the thinker-only class when in thinker_only mode.
+
+        Under ``model.true_on_policy`` the thinker stage also runs with HF numerics, so its log-probs match
+        the HF actor bitwise.
+        """
+        if stage_id != 0:
+            return {}
+        extras: dict = {}
+        if pipeline_mode == "thinker_only":
+            extras["model_arch"] = "Qwen3OmniMoeThinkerForConditionalGeneration"
+        if model_config.true_on_policy:
+            extras["additional_config"] = {"hf_numerics": True}
+        return extras
 
     @classmethod
     def expert_parallel_stage_ids(cls, pipeline_mode: str = "thinker_only") -> frozenset[int]:
@@ -152,8 +161,3 @@ class Qwen3OmniRolloutAdapter(OmniRolloutPipelineBase):
                 f"Unknown pipeline_mode={pipeline_mode!r}. Expected one of: 'thinker_only', 'thinker_talker', 'full'."
             )
         return frozenset({cls.policy_stage_id(pipeline_mode=pipeline_mode)})
-
-    @classmethod
-    def get_true_on_policy_engine_extras(cls, stage_id: int) -> dict:
-        """Run the thinker stage with HF numerics so its log-probs match the HF actor bitwise."""
-        return {"additional_config": {"hf_numerics": True}} if stage_id == 0 else {}

@@ -20,6 +20,7 @@ by tests/special_e2e/run_qwen3_omni_true_on_policy_gate.sh.
 
 import dataclasses
 import inspect
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -141,7 +142,8 @@ def test_vllm_fused_experts_takes_the_arguments_the_actor_passes():
 
 
 def test_vllm_omni_thinker_reads_the_option_the_rollout_adapter_sets():
-    (option,) = Qwen3OmniRolloutAdapter.get_true_on_policy_engine_extras(0)["additional_config"]
+    model_config = SimpleNamespace(true_on_policy=True)
+    (option,) = Qwen3OmniRolloutAdapter.get_stage_engine_extras(0, model_config=model_config)["additional_config"]
 
     assert f'additional_config.get("{option}"' in inspect.getsource(qwen3_omni_moe_thinker)
 

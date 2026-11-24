@@ -1,6 +1,6 @@
 # True On-Policy for the Qwen3-Omni Thinker
 
-Last updated: 11/23/2026.
+Last updated: 11/24/2026.
 
 With `actor_rollout_ref.model.true_on_policy=true`, the log-probs the vLLM-Omni rollout reports for the Qwen3-Omni thinker are bitwise equal to the log-probs the FSDP actor recomputes for the same tokens with the same weights. PPO's old policy and the sampling policy are then the same distribution, with no numerical gap to correct for.
 
@@ -51,7 +51,7 @@ The trainer refuses to start unless all of these hold, and lists every violation
 | `actor_rollout_ref.actor.fsdp_config.ulysses_sequence_parallel_size` | `1` |
 | `trainer.v1.trainer_mode` | `omni_sync` |
 
-`actor_rollout_ref.rollout.engine_kwargs.vllm_omni.pipeline_name` must name a rollout pipeline that supports the mode (`qwen3_omni_moe`); the rollout server refuses to start without one, because nothing else would turn on `hf_numerics`. Prefix caching is required off because every validated run had it off.
+`actor_rollout_ref.rollout.engine_kwargs.vllm_omni.pipeline_name` must be `qwen3_omni_moe`: its rollout adapter is what turns on `hf_numerics`. The rollout server refuses to start when the name is unset or not registered. Prefix caching is required off because every validated run had it off.
 
 `actor_rollout_ref.model.override_config.attn_implementation` may be left unset or set to `hub_fa3`, and `override_config.experts_implementation` unset or set to `vllm_fused_moe`; anything else is an error. CUDA graphs on the rollout (`enforce_eager=false`) are supported.
 

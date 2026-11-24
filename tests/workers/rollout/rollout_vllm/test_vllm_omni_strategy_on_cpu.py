@@ -29,7 +29,6 @@ from vllm_omni.model_executor.models.qwen3_omni.pipeline import QWEN3_OMNI_PIPEL
 
 from verl_omni.pipelines.model_base import OmniRolloutPipelineBase
 from verl_omni.pipelines.qwen3_omni.omni_rollout_adapter import Qwen3OmniRolloutAdapter
-from verl_omni.pipelines.qwen3_tts.omni_rollout_adapter import Qwen3TTSRolloutAdapter
 from verl_omni.pipelines.rollout_media import DiffusionIOSpec, MediaSpec
 from verl_omni.pipelines.rollout_request import OmniRolloutRequest
 from verl_omni.workers.config import DiffusionRolloutConfig
@@ -364,7 +363,7 @@ def test_ar_strategy_moves_capacity_overrides_to_each_stage(monkeypatch):
             return "test_pipeline"
 
         @classmethod
-        def get_stage_engine_extras(cls, stage_id, pipeline_mode="thinker_only"):
+        def get_stage_engine_extras(cls, stage_id, pipeline_mode="thinker_only", *, model_config):
             return {"max_model_len": 65536} if stage_id == 1 else {}
 
     monkeypatch.setattr(ar_strategy_module.OmniRolloutPipelineBase, "get_class", lambda pipeline_name: Adapter)
@@ -1127,14 +1126,17 @@ def test_ar_strategy_writes_qwen3_omni_thinker_only_deploy_config(monkeypatch):
     server._temp_deploy_ctx.cleanup()
 
 
-def test_true_on_policy_engine_extras_enable_hf_numerics_on_the_qwen3_omni_thinker_only():
-    assert Qwen3OmniRolloutAdapter.get_true_on_policy_engine_extras(0) == {"additional_config": {"hf_numerics": True}}
-    assert Qwen3OmniRolloutAdapter.get_true_on_policy_engine_extras(1) == {}
+def test_qwen3_omni_stage_engine_extras_enable_hf_numerics_on_the_thinker_only_under_true_on_policy():
+    model_config = SimpleNamespace(true_on_policy=True)
 
-
-def test_rollout_adapters_refuse_true_on_policy_by_default():
-    with pytest.raises(NotImplementedError, match="Qwen3TTSRolloutAdapter does not support true_on_policy"):
-        Qwen3TTSRolloutAdapter.get_true_on_policy_engine_extras(0)
+    assert Qwen3OmniRolloutAdapter.get_stage_engine_extras(0, "full", model_config=model_config) == {
+        "additional_config": {"hf_numerics": True}
+    }
+    assert Qwen3OmniRolloutAdapter.get_stage_engine_extras(1, "full", model_config=model_config) == {}
+    assert (
+        Qwen3OmniRolloutAdapter.get_stage_engine_extras(0, "full", model_config=SimpleNamespace(true_on_policy=False))
+        == {}
+    )
 
 
 @pytest.mark.parametrize("pipeline_name", [None, "not_registered"])
@@ -1642,7 +1644,7 @@ def test_ar_deploy_config_omits_text_encoder_tp_size_on_ar_stages(tmp_path, monk
             return "test-pipeline"
 
         @staticmethod
-        def get_stage_engine_extras(stage_id, pipeline_mode=None):
+        def get_stage_engine_extras(stage_id, pipeline_mode=None, *, model_config):
             return {}
 
     server = SimpleNamespace(
