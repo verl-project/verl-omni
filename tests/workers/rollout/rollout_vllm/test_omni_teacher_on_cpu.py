@@ -117,6 +117,65 @@ async def test_student_rollout_does_not_check_engine_prompt_ids():
     assert server.engine.generate_kwargs["prompt"] == {"prompt_token_ids": [5, 6, 7]}
 
 
+def _text_only_server():
+    return SimpleNamespace(
+        config=SimpleNamespace(max_model_len=64, prompt_length=32, response_length=8),
+        model_config=SimpleNamespace(processor=None),
+        engine=_engine_reporting([5, 6, 7]),
+    )
+
+
+@pytest.mark.parametrize("transport", ["native", "legacy"])
+def test_teacher_hidden_states_request_sets_the_opt_in_flag(monkeypatch, transport):
+    import verl_omni.workers.rollout.vllm_rollout.vllm_omni_ar_strategy as module
+    from verl_omni.pipelines.rollout_request import OmniRolloutRequest
+
+    monkeypatch.setattr(module, "hidden_states_transport", lambda: transport)
+    strategy = ARStrategy(_text_only_server())
+
+    prompt, params = strategy.preprocess_input(
+        OmniRolloutRequest.from_generate_kwargs(prompt_ids=[5, 6, 7]),
+        {"max_tokens": 1, "temperature": 1.0, "return_hidden_states": True},
+        None,
+    )
+
+    assert prompt == {"prompt_token_ids": [5, 6, 7]}
+    assert params.extra_args == {"return_hidden_states": True}
+
+
+def test_teacher_hidden_states_request_fails_fast_without_a_transport(monkeypatch):
+    # A vllm-omni with neither the native opt-in nor the V1 runners used to pass
+    # the request through and fail later with "Teacher returned no
+    # teacher_hidden_states", which blames the patch instead of the engine.
+    import verl_omni.workers.rollout.vllm_rollout.vllm_omni_ar_strategy as module
+    from verl_omni.pipelines.rollout_request import OmniRolloutRequest
+
+    monkeypatch.setattr(module, "hidden_states_transport", lambda: None)
+    strategy = ARStrategy(_text_only_server())
+
+    with pytest.raises(RuntimeError, match="cannot return teacher hidden states"):
+        strategy.preprocess_input(
+            OmniRolloutRequest.from_generate_kwargs(prompt_ids=[5, 6, 7]),
+            {"max_tokens": 1, "return_hidden_states": True},
+            None,
+        )
+
+
+def test_rollout_without_the_opt_in_never_consults_the_transport(monkeypatch):
+    import verl_omni.workers.rollout.vllm_rollout.vllm_omni_ar_strategy as module
+    from verl_omni.pipelines.rollout_request import OmniRolloutRequest
+
+    monkeypatch.setattr(module, "hidden_states_transport", lambda: None)
+    strategy = ARStrategy(_text_only_server())
+
+    prompt, params = strategy.preprocess_input(
+        OmniRolloutRequest.from_generate_kwargs(prompt_ids=[5, 6, 7]), {"max_tokens": 2}, None
+    )
+
+    assert prompt == {"prompt_token_ids": [5, 6, 7]}
+    assert not (params.extra_args or {}).get("return_hidden_states")
+
+
 def test_student_keeps_sampled_logprobs_without_teacher_fields():
     strategy = ARStrategy(SimpleNamespace(global_steps=0))
     result = strategy.process_output(_output(), SamplingParams(logprobs=0), {})

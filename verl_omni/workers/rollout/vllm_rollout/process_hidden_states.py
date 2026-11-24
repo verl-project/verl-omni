@@ -28,9 +28,18 @@ raises). With the omni prefix cache enabled, requests resuming from a cached
 prefix get their full-prompt hidden states rebuilt from the cache. Graph-mode
 and sequence-parallel tail padding is stripped before the hidden states are
 validated and sliced.
+
+These patches are the *legacy* transport, for the vLLM-Omni pin that still has
+its V1 AR runners. vLLM-Omni builds with the typed per-request
+``return_hidden_states`` field serve the channel natively on the worker-v2 AR
+runner, with the same ``SamplingParams.extra_args`` opt-in and the same
+``multimodal_output`` key, so nothing is patched and
+:func:`extract_hidden_states` is unchanged. :func:`hidden_states_transport`
+tells the two apart; a build with neither cannot serve the teacher channel.
 """
 
 import logging
+from importlib.util import find_spec
 
 import torch
 
@@ -42,6 +51,32 @@ TEACHER_HIDDEN_STATES_KEY = "teacher_hidden_states"
 RETURN_FLAG_KEY = "return_hidden_states"
 
 _applied = False
+
+
+def hidden_states_transport() -> str | None:
+    """How the installed vLLM-Omni can return teacher hidden states.
+
+    Returns ``"native"`` when it has the typed per-request opt-in, ``"legacy"``
+    when the V1 AR runners these patches target exist, and ``None`` when it has
+    neither. Checks module presence only, so it is safe to call in the server
+    process; the patches themselves are installed in the worker process.
+    """
+    try:
+        from vllm_omni.engine import OmniEngineCoreRequest
+
+        if "return_hidden_states" in getattr(OmniEngineCoreRequest, "__struct_fields__", ()):
+            return "native"
+    except ImportError:
+        pass
+    if any(
+        find_spec(module) is not None
+        for module in (
+            "vllm_omni.worker.gpu_ar_model_runner",
+            "vllm_omni.platforms.npu.worker.npu_ar_model_runner",
+        )
+    ):
+        return "legacy"
+    return None
 
 
 def request_wants_hidden_states(runner, req_id: str) -> bool:

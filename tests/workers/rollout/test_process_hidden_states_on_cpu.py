@@ -203,3 +203,36 @@ class TestPatchInstallIsolation:
         monkeypatch.setattr(phs, "_patch_npu_runner", lambda: None)
         with pytest.raises(AttributeError):
             phs.apply_hidden_states_patches()
+
+
+class TestHiddenStatesTransport:
+    """The server-side probe that tells native, legacy and unsupported builds apart."""
+
+    @staticmethod
+    def _engine_module(with_field: bool) -> ModuleType:
+        mod = ModuleType("vllm_omni.engine")
+
+        class _Request:
+            __struct_fields__ = ("request_id", "return_hidden_states") if with_field else ("request_id",)
+
+        mod.OmniEngineCoreRequest = _Request
+        return mod
+
+    def test_native_build_wins_over_legacy_runners(self, monkeypatch):
+        monkeypatch.setitem(sys.modules, "vllm_omni.engine", self._engine_module(with_field=True))
+        monkeypatch.setattr(phs, "find_spec", lambda name: object())
+        assert phs.hidden_states_transport() == "native"
+
+    @pytest.mark.parametrize(
+        "runner_module",
+        ["vllm_omni.worker.gpu_ar_model_runner", "vllm_omni.platforms.npu.worker.npu_ar_model_runner"],
+    )
+    def test_legacy_build_without_the_typed_field(self, monkeypatch, runner_module):
+        monkeypatch.setitem(sys.modules, "vllm_omni.engine", self._engine_module(with_field=False))
+        monkeypatch.setattr(phs, "find_spec", lambda name: object() if name == runner_module else None)
+        assert phs.hidden_states_transport() == "legacy"
+
+    def test_build_with_neither_surface_is_unsupported(self, monkeypatch):
+        monkeypatch.setitem(sys.modules, "vllm_omni.engine", self._engine_module(with_field=False))
+        monkeypatch.setattr(phs, "find_spec", lambda name: None)
+        assert phs.hidden_states_transport() is None
