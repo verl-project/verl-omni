@@ -30,6 +30,7 @@ from unittest.mock import MagicMock
 
 import pytest
 import torch
+import torch.nn.functional as F
 from torch.distributed.tensor import DTensor
 
 import verl_omni.workers.engine.lora_export as lora_export
@@ -414,6 +415,105 @@ def test_fsdp2_merged_stream_falls_back_for_unsupported_lora(monkeypatch, lora_k
     dict(params)
 
     merged_context.assert_called_once()
+
+
+def _bf16_base_fp32_adapter_model(**lora_kwargs):
+    model = _lora_model(**lora_kwargs)
+    for name, param in model.named_parameters():
+        if "lora_" not in name:
+            param.data = param.data.to(torch.bfloat16)
+    return model
+
+
+def _export_merged(monkeypatch, model, **export_kwargs):
+    monkeypatch.setattr(lora_export, "fsdp_version", lambda module: 2)
+    monkeypatch.setattr(lora_export, "merged_lora_context", _fail_merged_context)
+    _patch_export_machinery(monkeypatch)
+    params, _ = export_lora_for_sync(
+        model, model_config=_model_config(merge=True), base_sync_done=True, is_diffusers=False, **export_kwargs
+    )
+    return dict(params)
+
+
+def test_base_dtype_merge_uses_adapters_cast_to_the_base_dtype(monkeypatch):
+    model = _bf16_base_fp32_adapter_model()
+    layer = model.base_model.model.up
+    base_weight = layer.base_layer.weight.detach().clone()
+    lora_a = layer.lora_A["default"].weight.detach().to(torch.bfloat16)
+    lora_b = layer.lora_B["default"].weight.detach().to(torch.bfloat16)
+    expected = base_weight + (lora_b @ lora_a) * layer.scaling["default"]
+
+    weights = _export_merged(monkeypatch, model, merge_in_full_weight_dtype=True)
+    default_weights = _export_merged(monkeypatch, model)
+
+    assert weights["up.weight"].dtype == torch.bfloat16
+    assert torch.equal(weights["up.weight"], expected)
+    assert not torch.equal(weights["up.weight"], default_weights["up.weight"])
+    assert torch.equal(layer.base_layer.weight, base_weight)
+
+
+def test_merged_lora_forward_matches_the_base_dtype_export_bitwise(monkeypatch):
+    model = _bf16_base_fp32_adapter_model()
+    weights = _export_merged(monkeypatch, model, merge_in_full_weight_dtype=True)
+    hidden_states = torch.randn(3, 16, dtype=torch.bfloat16)
+
+    lora_export.use_merged_lora_forward(model)
+    output = model(hidden_states)
+
+    expected = F.linear(F.linear(hidden_states, weights["up.weight"]), weights["down.weight"])
+    assert torch.equal(output, expected)
+    output.float().sum().backward()
+    for name, param in model.named_parameters():
+        if "lora_" in name:
+            assert param.grad is not None and param.grad.abs().sum() > 0, name
+
+
+def test_merged_lora_forward_keeps_the_base_forward_with_adapters_disabled(monkeypatch):
+    model = _bf16_base_fp32_adapter_model()
+    hidden_states = torch.randn(3, 16, dtype=torch.bfloat16)
+    up, down = model.base_model.model.up.base_layer.weight, model.base_model.model.down.base_layer.weight
+
+    lora_export.use_merged_lora_forward(model)
+    with model.disable_adapter():
+        output = model(hidden_states)
+
+    assert torch.equal(output, F.linear(F.linear(hidden_states, up), down))
+
+
+def test_merged_lora_forward_runs_the_base_layer_forward_on_the_merged_weight(monkeypatch):
+    model = _bf16_base_fp32_adapter_model()
+    weights = _export_merged(monkeypatch, model, merge_in_full_weight_dtype=True)
+    hidden_states = torch.randn(3, 16, dtype=torch.bfloat16)
+    up = model.base_model.model.up.base_layer
+    up.forward = lambda x: F.linear(x, up.weight) * 2
+
+    lora_export.use_merged_lora_forward(model)
+    output = model.base_model.model.up(hidden_states)
+
+    assert torch.equal(output, F.linear(hidden_states, weights["up.weight"]) * 2)
+
+
+@pytest.mark.parametrize("lora_kwargs", [{"use_dora": True}, {"lora_bias": True}])
+def test_merged_lora_forward_refuses_unsupported_lora(lora_kwargs):
+    with pytest.raises(NotImplementedError, match="plain LoRA linear layers"):
+        lora_export.use_merged_lora_forward(_lora_model(**lora_kwargs))
+
+
+@pytest.mark.parametrize("fsdp", [1, 2])
+def test_base_dtype_merge_refuses_the_in_place_merge(monkeypatch, fsdp):
+    model = _lora_model(use_dora=True) if fsdp == 2 else _lora_model()
+    monkeypatch.setattr(lora_export, "fsdp_version", lambda module: fsdp)
+    monkeypatch.setattr(lora_export, "merged_lora_context", _fail_merged_context)
+    _patch_export_machinery(monkeypatch)
+
+    with pytest.raises(NotImplementedError, match="FSDP2 and plain LoRA linear layers"):
+        export_lora_for_sync(
+            model,
+            model_config=_model_config(merge=True),
+            base_sync_done=True,
+            is_diffusers=False,
+            merge_in_full_weight_dtype=True,
+        )
 
 
 @pytest.mark.parametrize("target_modules", [["up", "mid"], ["up"]], ids=["lora_lora", "lora_plain"])

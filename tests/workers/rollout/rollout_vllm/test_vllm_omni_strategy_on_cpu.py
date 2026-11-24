@@ -29,6 +29,7 @@ from vllm_omni.model_executor.models.qwen3_omni.pipeline import QWEN3_OMNI_PIPEL
 
 from verl_omni.pipelines.model_base import OmniRolloutPipelineBase
 from verl_omni.pipelines.qwen3_omni.omni_rollout_adapter import Qwen3OmniRolloutAdapter
+from verl_omni.pipelines.qwen3_tts.omni_rollout_adapter import Qwen3TTSRolloutAdapter
 from verl_omni.pipelines.rollout_media import DiffusionIOSpec, MediaSpec
 from verl_omni.pipelines.rollout_request import OmniRolloutRequest
 from verl_omni.workers.config import DiffusionRolloutConfig
@@ -224,7 +225,7 @@ def test_ar_strategy_preserves_output_conversion():
 
 def test_ar_strategy_preserves_engine_kwarg_normalization(monkeypatch):
     monkeypatch.setattr(ar_strategy_module.OmniRolloutPipelineBase, "get_class", lambda pipeline_name: None)
-    strategy = ARStrategy(SimpleNamespace())
+    strategy = ARStrategy(SimpleNamespace(model_config=SimpleNamespace(true_on_policy=False)))
     engine_kwargs = {
         "output_mode": "ar",
         "custom_pipeline": "unused",
@@ -254,7 +255,7 @@ def test_ar_strategy_preserves_engine_kwarg_normalization(monkeypatch):
 )
 def test_ar_strategy_preserves_hyphenated_timeout_kwargs(monkeypatch, timeout_kwargs, expected):
     monkeypatch.setattr(ar_strategy_module.OmniRolloutPipelineBase, "get_class", lambda pipeline_name: None)
-    strategy = ARStrategy(SimpleNamespace())
+    strategy = ARStrategy(SimpleNamespace(model_config=SimpleNamespace(true_on_policy=False)))
     engine_kwargs = {"pipeline_name": "missing", **timeout_kwargs}
 
     strategy.preprocess_engine_kwargs(engine_kwargs)
@@ -333,7 +334,7 @@ def test_ar_strategy_resolves_nonzero_policy_and_weight_sync_stages(monkeypatch)
             max_model_len=64,
             max_num_batched_tokens=64,
         ),
-        model_config=SimpleNamespace(lora={}, lora_rank=0),
+        model_config=SimpleNamespace(lora={}, lora_rank=0, true_on_policy=False),
         _rollout_flags={},
     )
     strategy = ARStrategy(server)
@@ -376,7 +377,7 @@ def test_ar_strategy_moves_capacity_overrides_to_each_stage(monkeypatch):
             max_model_len=4096,
             max_num_batched_tokens=8192,
         ),
-        model_config=SimpleNamespace(lora={}, lora_rank=0),
+        model_config=SimpleNamespace(lora={}, lora_rank=0, true_on_policy=False),
         _rollout_flags={},
     )
     strategy = ARStrategy(server)
@@ -1003,7 +1004,7 @@ def test_ar_deploy_config_scopes_lora_to_the_policy_stage(monkeypatch):
             max_model_len=8,
             max_num_batched_tokens=8,
         ),
-        model_config=SimpleNamespace(lora={"rank": 66}, lora_rank=0),
+        model_config=SimpleNamespace(lora={"rank": 66}, lora_rank=0, true_on_policy=False),
         _rollout_flags={},
     )
     strategy = ARStrategy(server)
@@ -1107,7 +1108,7 @@ def test_ar_strategy_writes_qwen3_omni_thinker_only_deploy_config(monkeypatch):
             max_model_len=8,
             max_num_batched_tokens=8,
         ),
-        model_config=SimpleNamespace(lora={}, lora_rank=0),
+        model_config=SimpleNamespace(lora={}, lora_rank=0, true_on_policy=False),
         _rollout_flags={},
     )
     strategy = ARStrategy(server)
@@ -1126,6 +1127,55 @@ def test_ar_strategy_writes_qwen3_omni_thinker_only_deploy_config(monkeypatch):
     server._temp_deploy_ctx.cleanup()
 
 
+def test_true_on_policy_engine_extras_enable_hf_numerics_on_the_qwen3_omni_thinker_only():
+    assert Qwen3OmniRolloutAdapter.get_true_on_policy_engine_extras(0) == {"additional_config": {"hf_numerics": True}}
+    assert Qwen3OmniRolloutAdapter.get_true_on_policy_engine_extras(1) == {}
+
+
+def test_rollout_adapters_refuse_true_on_policy_by_default():
+    with pytest.raises(NotImplementedError, match="Qwen3TTSRolloutAdapter does not support true_on_policy"):
+        Qwen3TTSRolloutAdapter.get_true_on_policy_engine_extras(0)
+
+
+@pytest.mark.parametrize("pipeline_name", [None, "not_registered"])
+def test_ar_strategy_refuses_true_on_policy_without_a_rollout_adapter(pipeline_name):
+    server = SimpleNamespace(
+        config=SimpleNamespace(tensor_model_parallel_size=1),
+        model_config=SimpleNamespace(lora={}, lora_rank=0, true_on_policy=True),
+    )
+    engine_kwargs = {} if pipeline_name is None else {"pipeline_name": pipeline_name}
+
+    with pytest.raises(ValueError, match=f"pipeline_name={pipeline_name!r}"):
+        ARStrategy(server).preprocess_engine_kwargs(engine_kwargs)
+
+
+@pytest.mark.parametrize("true_on_policy", [False, True])
+def test_ar_strategy_merges_true_on_policy_extras_only_when_enabled(monkeypatch, true_on_policy):
+    monkeypatch.setattr(ar_strategy_module, "get_visible_devices_keyword", lambda: "CUDA_VISIBLE_DEVICES")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0")
+    server = SimpleNamespace(
+        config=SimpleNamespace(
+            tensor_model_parallel_size=1,
+            text_encoder_tp_size=1,
+            max_model_len=8,
+            max_num_batched_tokens=8,
+        ),
+        model_config=SimpleNamespace(lora={}, lora_rank=0, true_on_policy=true_on_policy),
+        _rollout_flags={},
+    )
+    strategy = ARStrategy(server)
+    engine_kwargs = {"pipeline_name": "qwen3_omni_moe", "pipeline_mode": "thinker_only"}
+
+    strategy.preprocess_engine_kwargs(engine_kwargs)
+
+    deploy = yaml.safe_load(Path(engine_kwargs["deploy-config"]).read_text(encoding="utf-8"))
+    expected = {"model_arch": "Qwen3OmniMoeThinkerForConditionalGeneration"}
+    if true_on_policy:
+        expected["additional_config"] = {"hf_numerics": True}
+    assert deploy["stages"][0]["engine_extras"] == expected
+    server._temp_deploy_ctx.cleanup()
+
+
 def test_ar_strategy_preserves_qwen3_omni_full_without_combiner(monkeypatch):
     monkeypatch.setattr(ar_strategy_module, "get_visible_devices_keyword", lambda: "CUDA_VISIBLE_DEVICES")
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
@@ -1136,7 +1186,7 @@ def test_ar_strategy_preserves_qwen3_omni_full_without_combiner(monkeypatch):
             max_model_len=8,
             max_num_batched_tokens=8,
         ),
-        model_config=SimpleNamespace(lora={}, lora_rank=0),
+        model_config=SimpleNamespace(lora={}, lora_rank=0, true_on_policy=False),
         _rollout_flags={},
     )
     strategy = ARStrategy(server)
@@ -1597,7 +1647,7 @@ def test_ar_deploy_config_omits_text_encoder_tp_size_on_ar_stages(tmp_path, monk
 
     server = SimpleNamespace(
         config=SimpleNamespace(tensor_model_parallel_size=2, text_encoder_tp_size=1),
-        model_config=SimpleNamespace(lora={}, lora_rank=0),
+        model_config=SimpleNamespace(lora={}, lora_rank=0, true_on_policy=False),
     )
     strategy = ARStrategy(server)
     engine_kwargs: dict = {}

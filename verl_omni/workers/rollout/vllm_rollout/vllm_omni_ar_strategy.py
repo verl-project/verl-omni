@@ -181,6 +181,11 @@ class ARStrategy(OmniStrategyBase):
         pipeline_mode = engine_kwargs.pop("pipeline_mode", "thinker_only")
 
         adapter_cls = OmniRolloutPipelineBase.get_class(pipeline_name)
+        if adapter_cls is None and self.server.model_config.true_on_policy:
+            raise ValueError(
+                "actor_rollout_ref.model.true_on_policy=true requires a registered rollout pipeline, got "
+                f"actor_rollout_ref.rollout.engine_kwargs.vllm_omni.pipeline_name={pipeline_name!r}."
+            )
         if adapter_cls is not None:
             async_chunk = engine_kwargs.get("async_chunk", engine_kwargs.get("async-chunk", True))
             if not isinstance(async_chunk, bool):
@@ -270,6 +275,9 @@ class ARStrategy(OmniStrategyBase):
         lora_extras = lora_engine_extras(self.server.model_config)
         stage_extras[policy_stage_id].update(lora_extras)
         self.lora_stage_ids = [policy_stage_id] if lora_extras else None
+        if self.server.model_config.true_on_policy:
+            for stage_id, extras in stage_extras.items():
+                extras.update(adapter_cls.get_true_on_policy_engine_extras(stage_id))
         capacity_fields = ("max_model_len", "max_num_batched_tokens")
         if any(field in extras for extras in stage_extras.values() for field in capacity_fields):
             for extras in stage_extras.values():

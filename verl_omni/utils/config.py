@@ -251,6 +251,54 @@ def _validate_expert_parallel(config: Any) -> None:
         )
 
 
+# Settings under which rollout and actor log-probs are bitwise equal.
+_TRUE_ON_POLICY_CONTRACT = {
+    "actor_rollout_ref.rollout.temperature": 1.0,
+    "actor_rollout_ref.rollout.top_p": 1.0,
+    "actor_rollout_ref.rollout.top_k": -1,
+    "actor_rollout_ref.rollout.calculate_log_probs": True,
+    "actor_rollout_ref.rollout.enable_prefix_caching": False,
+    "actor_rollout_ref.model.lora_adapter_path": None,
+    "actor_rollout_ref.model.use_remove_padding": True,
+    "actor_rollout_ref.actor.fsdp_config.batch_invariant": True,
+    "actor_rollout_ref.actor.fsdp_config.ulysses_sequence_parallel_size": 1,
+    "trainer.v1.trainer_mode": "omni_sync",
+}
+
+
+# With LoRA the rollout receives merged weights and the actor forwards with the same merged weights.
+_TRUE_ON_POLICY_LORA_CONTRACT = {
+    "actor_rollout_ref.model.lora.merge": True,
+    "actor_rollout_ref.model.target_parameters": None,
+}
+
+
+def _validate_true_on_policy(config: Any) -> None:
+    lora = int(_select(config, "actor_rollout_ref.model.lora_rank", 0) or 0) > 0
+    contract = _TRUE_ON_POLICY_CONTRACT | (_TRUE_ON_POLICY_LORA_CONTRACT if lora else {})
+    violations = [
+        f"{path}={_select(config, path)!r} (requires {expected!r})"
+        for path, expected in contract.items()
+        if _select(config, path) != expected
+    ]
+    tp_size = _select(config, "actor_rollout_ref.rollout.tensor_model_parallel_size")
+    if tp_size not in (1, 2):
+        violations.append(f"actor_rollout_ref.rollout.tensor_model_parallel_size={tp_size!r} (requires 1 or 2)")
+    actor_tp_size = _select(config, "actor_rollout_ref.model.rollout_tensor_parallel_size")
+    if actor_tp_size != tp_size:
+        violations.append(
+            f"actor_rollout_ref.model.rollout_tensor_parallel_size={actor_tp_size!r} "
+            "(requires actor_rollout_ref.rollout.tensor_model_parallel_size)"
+        )
+    strategy = _select(config, "actor_rollout_ref.actor.strategy")
+    strategies = ("fsdp2",) if lora else ("fsdp", "fsdp2")
+    if strategy not in strategies:
+        requires = " or ".join(repr(name) for name in strategies)
+        violations.append(f"actor_rollout_ref.actor.strategy={strategy!r} (requires {requires})")
+    if violations:
+        raise ValueError("actor_rollout_ref.model.true_on_policy=true is not supported with: " + "; ".join(violations))
+
+
 def validate_config(config: Any) -> None:
     """Validate configuration values that otherwise trigger silent fallbacks."""
     if _select(config, "actor_rollout_ref.actor.enable_timestep_staging", False):
@@ -269,6 +317,9 @@ def validate_config(config: Any) -> None:
                 "actor.use_no_sync_for_gradient_accumulation=true requires actor.strategy "
                 f"fsdp or fsdp2, got {strategy!r}."
             )
+
+    if _select(config, "actor_rollout_ref.model.true_on_policy", False):
+        _validate_true_on_policy(config)
 
     resume_mode = _select(config, "trainer.resume_mode")
     valid_resume_modes = ("disable", "auto", "resume_path")

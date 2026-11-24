@@ -82,8 +82,22 @@ class Qwen3OmniThinkerAdapter(OmniModelBase):
         return qwen3_omni_forward_model_engine
 
     @classmethod
+    def register_true_on_policy_implementations(cls, model_config) -> dict[str, str]:
+        from verl_omni.models.transformers.qwen3_omni import (
+            register_hub_fa3_attention,
+            register_vllm_fused_moe_experts,
+        )
+
+        return {
+            "attn_implementation": register_hub_fa3_attention(),
+            "experts_implementation": register_vllm_fused_moe_experts(model_config.rollout_tensor_parallel_size),
+        }
+
+    @classmethod
     def configure_model(cls, module, model_config):
-        """Strip non-training stages and redirect forward to thinker.
+        """Strip non-training stages, redirect forward to thinker, and set up the true on-policy actor.
+
+        The true on-policy actor gets exact M-RoPE and, for a tensor-parallel rollout, row-parallel ``o_proj`` sums.
 
         Args:
             module: The loaded Qwen3-Omni model before FSDP wrapping.
@@ -103,7 +117,27 @@ class Qwen3OmniThinkerAdapter(OmniModelBase):
         module.get_input_embeddings = module.thinker.get_input_embeddings
         module.set_input_embeddings = module.thinker.set_input_embeddings
         module._no_split_modules = ["Qwen3OmniMoeThinkerTextDecoderLayer"]
+        if model_config.true_on_policy:
+            from verl_omni.models.transformers.qwen3_omni import ExactMRotaryEmbedding, use_tensor_parallel_linear
+
+            module.thinker.model.rotary_emb = ExactMRotaryEmbedding.from_hf(module.thinker.model.rotary_emb)
+            if model_config.rollout_tensor_parallel_size > 1:
+                for layer in module.thinker.model.layers:
+                    use_tensor_parallel_linear(layer.self_attn.o_proj, model_config.rollout_tensor_parallel_size)
         return module
+
+    @classmethod
+    def prepare_model_inputs(cls, model_inputs: dict[str, Any], micro_batch, model_config) -> dict[str, Any]:
+        """Reject multimodal batches under true on-policy, which covers text-only prompts.
+
+        Raises:
+            ValueError: If ``true_on_policy`` is on and the batch carries image, video or audio features.
+        """
+        if model_config.true_on_policy:
+            media_keys = sorted(model_inputs.keys() & {"pixel_values", "pixel_values_videos", "input_features"})
+            if media_keys:
+                raise ValueError(f"true_on_policy supports text-only prompts, got multimodal inputs {media_keys}.")
+        return model_inputs
 
     @classmethod
     def configure_processor(cls, model_path: str, model_config) -> Any:

@@ -1,6 +1,6 @@
 # How to Add a New Omni Model
 
-Last updated: 11/10/2026.
+Last updated: 11/23/2026.
 
 This guide walks through adding a new omni (multimodal autoregressive) model to
 the verl-omni training framework. It uses the Qwen3-Omni Thinker adapter as a
@@ -81,6 +81,14 @@ adapt each implementation to your model's architecture:
   the base implementation is a no-op. Set the adapter's `auto_model_class` when
   the default `AutoModelForMultimodalLM` loader does not own the architecture;
   the FSDP engine still owns `from_pretrained`.
+
+- **`register_true_on_policy_implementations(model_config)`** (optional): Register the
+  Transformers attention and experts functions used under
+  `model.true_on_policy` and return their `attn_implementation` /
+  `experts_implementation` names. `model_config.rollout_tensor_parallel_size`
+  is the tensor-parallel degree of the rollout. The model config builds the HF config with
+  them; the base implementation raises, so the flag is refused for adapters
+  that do not override it. See [True On-Policy](../algo/true_on_policy.md).
 
 - **`prepare_model_inputs(model_inputs, micro_batch, model_config)`**
   (optional): Validate model-native trajectory or conditioning data retained by
@@ -180,8 +188,12 @@ and implement:
 
 Optional overrides fall into four groups:
 
-- Pipeline setup: `ensure_pipeline_registered`, `get_engine_hf_overrides`, and
-  `get_stage_engine_extras`.
+- Pipeline setup: `ensure_pipeline_registered`, `get_engine_hf_overrides`,
+  `get_stage_engine_extras`, and `get_true_on_policy_engine_extras(stage_id)`.
+  The strategy merges the last one over a stage's extras only when
+  `model.true_on_policy` is on; the base implementation raises, so the flag is
+  refused for adapters that do not override it. See
+  [True On-Policy](../algo/true_on_policy.md).
 - Policy and resource behavior: `policy_stage_id` identifies the stage whose
   sampling parameters and logprobs define the trained policy;
   `weight_sync_stage_ids` identifies the stages that receive actor weights.
