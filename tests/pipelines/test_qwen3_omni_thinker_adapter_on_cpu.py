@@ -105,7 +105,7 @@ def test_configure_model_enables_ascend_fusions_only_when_requested(monkeypatch,
     monkeypatch.setattr(qwen3_omni, "enable_ascend_rmsnorm_rope", enable_text_fusions)
 
     result = Qwen3OmniThinkerAdapter.configure_model(
-        module, SimpleNamespace(override_config={"experts_implementation": option})
+        module, SimpleNamespace(override_config={"experts_implementation": option}, true_on_policy=False)
     )
     assert result is module
     assert result.forward is thinker.forward
@@ -506,3 +506,25 @@ def test_omni_model_base_fsdp_ignore_hook_defaults_to_empty_list():
     assert OmniModelBase.get_fsdp_ignored_module_names(SimpleNamespace()) == []
     # The Qwen3-Omni thinker shards every subtree: it must not opt in.
     assert Qwen3OmniThinkerAdapter.get_fsdp_ignored_module_names(SimpleNamespace()) == []
+
+
+@pytest.mark.parametrize("media_key", ["pixel_values", "pixel_values_videos", "input_features"])
+def test_true_on_policy_rejects_multimodal_model_inputs(media_key):
+    model_inputs = {"input_ids": torch.ones(1, 4, dtype=torch.long), media_key: torch.zeros(1, 3)}
+
+    with pytest.raises(ValueError, match=f"text-only prompts.*{media_key}"):
+        Qwen3OmniThinkerAdapter.prepare_model_inputs(model_inputs, None, SimpleNamespace(true_on_policy=True))
+
+    assert (
+        Qwen3OmniThinkerAdapter.prepare_model_inputs(model_inputs, None, SimpleNamespace(true_on_policy=False))
+        is model_inputs
+    )
+
+
+def test_true_on_policy_keeps_text_only_model_inputs():
+    model_inputs = {"input_ids": torch.ones(1, 4, dtype=torch.long)}
+
+    assert (
+        Qwen3OmniThinkerAdapter.prepare_model_inputs(model_inputs, None, SimpleNamespace(true_on_policy=True))
+        is model_inputs
+    )

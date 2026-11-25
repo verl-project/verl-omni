@@ -118,6 +118,7 @@ def _engine(architecture="Qwen3OmniMoeForConditionalGeneration"):
         model_stage="thinker",
         trainer_type="policy_gradient",
         use_remove_padding=True,
+        true_on_policy=False,
         lora_rank=0,
         lora={},
         lora_adapter_path=None,

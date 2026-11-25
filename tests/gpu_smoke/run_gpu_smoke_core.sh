@@ -51,4 +51,8 @@ run_test 9 "trainable FSDP2 snapshot restore" \
     env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" REQUIRE_TRAINABLE_SNAPSHOT_GPU=1 \
     python3 -m pytest -s tests/workers/test_trainable_snapshot_gpu.py
 
+run_test 10 "Qwen3-Omni vLLM fused MoE experts" \
+    env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" \
+    python3 -m pytest -s tests/models/test_qwen3_omni_vllm_fused_moe_experts_gpu.py
+
 gpu_smoke_summary

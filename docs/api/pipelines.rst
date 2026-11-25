@@ -42,7 +42,7 @@ Model Base
 
 .. autoclass:: verl_omni.pipelines.model_base.OmniModelBase
    :members: register, get_class, get_class_by_name,
-             register_auto_classes,
+             register_auto_classes, register_true_on_policy_implementations,
              get_strip_modules, configure_processor, configure_tokenizer,
              configure_model, get_fsdp_ignored_module_names,
              prepare_megatron_config, get_megatron_forward,
