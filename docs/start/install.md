@@ -1,6 +1,6 @@
 # Installation
 
-Last updated: 11/10/2026
+Last updated: 11/16/2026
 
 For Ascend NPU, see the {doc}`NPU installation guide <install_npu>`. For AMD GPU, see the {doc}`ROCm installation guide <install_rocm>`. For Intel GPU, see the {doc}`Intel GPU installation guide <install_xpu>`. For Cambricon MLU, see the {doc}`MLU installation guide <install_mlu>`.
 
@@ -98,10 +98,22 @@ actor_rollout_ref.rollout.rollout_attn_backend=FLASH_ATTN_HUB
 
 ### Flash Attention 2 (omni trainer)
 
-The omni trainer's actor is a transformers LLM; following verl's practice for LLM training, it defaults to `flash_attention_2`, which requires the local `flash-attn` package:
+The omni trainer's actor is a transformers LLM; following verl's practice for LLM training, it defaults to `flash_attention_2`, which requires the local `flash-attn` package. The VeOmni Thinker recipes and the legacy `FLASH_ATTN` rollout backend also load it.
+
+The pinned stack is torch 2.14.0+cu130, and no prebuilt flash-attn wheel matches it: the 2.8.x line stops at torch 2.8 on CUDA 12 (PyPI carries the source tarball only), and upstream verl's [wheelhouse](https://verl-project.github.io/verl-wheelhouse/simple/flash-attn/) builds for torch 2.13/CUDA 13.2 — its wheel fails on torch 2.14 with `undefined symbol` at import. A plain `uv pip install -e ".[fa2]"` fails as well: the sdist's `setup.py` imports `torch`, which build isolation does not provide. FA2 therefore installs from source, against the installed stack:
 
 ```bash
-uv pip install -e ".[fa2]"
+uv pip freeze --exclude-editable > /tmp/verl-omni-fa2-constraints.txt
+uv pip install -c /tmp/verl-omni-fa2-constraints.txt ninja packaging wheel
+MAX_JOBS=4 FLASH_ATTENTION_FORCE_BUILD=TRUE \
+uv pip install -c /tmp/verl-omni-fa2-constraints.txt \
+    --no-build-isolation --no-binary flash-attn --reinstall-package flash-attn 'flash-attn>=2.8.3'
+```
+
+A CUDA 13 development toolkit (`nvcc` reachable via `CUDA_HOME`) is required. The constraints file keeps the added packages from moving the pinned torch/vLLM stack — an incompatibility should fail resolution rather than change torch. `MAX_JOBS` caps compiler parallelism; each compilation job peaks around 9 GB of RAM, so lower it on smaller hosts. Check the extension loads:
+
+```bash
+python -c "from flash_attn import flash_attn_func, flash_attn_varlen_func; print('flash-attn OK')"
 ```
 
 ### Optional engine backends

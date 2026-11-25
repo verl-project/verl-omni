@@ -47,9 +47,11 @@ if [[ "${1:-}" != --check-only ]]; then
     python3 - <<'PY'
 from huggingface_hub import snapshot_download
 
+# The smoke builder initializes fresh weights from these configs.
 snapshot_download(
     "optimum-intel-internal-testing/tiny-random-qwen3-tts",
     revision="6374d605b31381cac6f9577f5e742af2f76ba79c",
+    allow_patterns=["*.json", "merges.txt"],
 )
 PY
 fi

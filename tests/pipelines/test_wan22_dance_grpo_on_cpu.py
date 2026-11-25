@@ -23,11 +23,28 @@ from vllm_omni.diffusion.worker.request_batch import DiffusionRequestBatch
 from vllm_omni.inputs.data import OmniDiffusionSamplingParams
 
 import verl_omni.pipelines.wan22_dance_grpo.vllm_omni_rollout_adapter as wan22_adapter
+from verl_omni.pipelines.wan22_dance_grpo.diffusers_training_adapter import Wan22DanceGRPO
 from verl_omni.pipelines.wan22_dance_grpo.vllm_omni_rollout_adapter import (
     Wan22DanceGRPOPipelineWithLogProb,
     _unwrap_single_request,
     _validate_wan_rollout_inputs,
 )
+
+
+def test_wan22_training_true_cfg_requires_negative_embeds() -> None:
+    with pytest.raises(ValueError, match="requires negative prompt embeds"):
+        Wan22DanceGRPO.prepare_model_inputs(
+            module=None,
+            model_config=SimpleNamespace(pipeline={"true_cfg_scale": 2.0}),
+            latents=torch.zeros(1, 2, 1, 1, 1, 1),
+            timesteps=torch.ones(1, 1),
+            prompt_embeds=torch.ones(1, 1, 1),
+            prompt_embeds_mask=None,
+            negative_prompt_embeds=None,
+            negative_prompt_embeds_mask=None,
+            micro_batch=None,
+            step=0,
+        )
 
 
 def test_wan22_dance_grpo_unwraps_vllm_omni_request_batch() -> None:

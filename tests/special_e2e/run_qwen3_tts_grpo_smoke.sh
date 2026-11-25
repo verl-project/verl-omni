@@ -31,7 +31,10 @@ mkdir -p "${WORK_DIR}" "${OUTPUT_DIR}"
 MODEL_PATH="${MODEL_PATH:-}"
 if [[ -z "${MODEL_PATH}" ]]; then
     SOURCE_MODEL_PATH="$("${PYTHON_BIN}" -c \
-        'import sys; from huggingface_hub import snapshot_download; print(snapshot_download(sys.argv[1], revision=sys.argv[2]))' \
+        'import sys
+from huggingface_hub import snapshot_download
+
+print(snapshot_download(sys.argv[1], revision=sys.argv[2], allow_patterns=["*.json", "merges.txt"]))' \
         "${MODEL_REPO}" "${MODEL_REVISION}")"
     # The published tiny checkpoint has four codebooks; the production actor
     # contract has 16, so rebuild its small architecture with random 16-codebook weights.

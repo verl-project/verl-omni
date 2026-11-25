@@ -28,14 +28,18 @@ from uuid import uuid4
 import pytest
 import ray
 import torch
+import transfer_queue as tq
 from hydra import compose, initialize_config_dir
 from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
 from transformers import PreTrainedTokenizerFast
 from verl import DataProto
+from verl.utils import tensordict_utils as tu
 
 from verl_omni.reward_loop.reward_loop import OmniRewardLoopManager, OmniRewardLoopWorker
 from verl_omni.reward_loop.reward_model_executor import NativeRewardExecutor
+from verl_omni.trainer.diffusion.diffusion_metric_utils import compute_reward_extra_metrics_diffusion
+from verl_omni.trainer.diffusion.v1 import tq_utils
 from verl_omni.workers.config.reward import RewardModelSpec, parse_reward_model_config
 
 
@@ -52,6 +56,39 @@ def _clean_ray_state():
     yield
     if ray.is_initialized():
         ray.shutdown()
+
+
+def test_reward_extra_info_survives_tq_metric_read():
+    """Persist sparse reward columns and recover them in trajectory order on CPU."""
+    scores = [0.10880385339260101, 0.44096022844314575]
+    keys = ["reward/imagebind", "reward/clap/errors"]
+    data = DataProto.from_dict(
+        tensors={"sample_level_scores": torch.tensor(scores)},
+        non_tensors={keys[0]: scores, keys[1]: [None, 1]},
+        meta_info={"reward_extra_keys": keys},
+    )
+    ray.init(address="local", num_cpus=4, num_gpus=0, include_dashboard=False)
+    try:
+        tq.init()
+        meta = tq.kv_batch_put(
+            keys=["b_0_0", "a_0_0"],
+            partition_id="reward-diagnostics",
+            fields=tu.get_tensordict({"uid": ["b", "a"]}),
+        )
+        tq_utils.put_dataproto_fields_to_tq(meta, data, tq_utils.diffusion_persisted_tq_fields("policy_gradient"))
+        for algorithm in ("policy_gradient", "direct_preference"):
+            result = tq_utils.diffusion_tq_batch_to_dataproto(meta, 0, tq_utils.diffusion_metric_tq_fields(algorithm))
+            assert result.non_tensor_batch["uid"].tolist() == ["a", "b"]
+            rows = result.non_tensor_batch["reward_extra_info"].tolist()
+            assert rows == [
+                {"reward/imagebind": scores[0], "reward/clap/errors": None},
+                {"reward/imagebind": scores[1], "reward/clap/errors": 1},
+            ]
+            metrics = compute_reward_extra_metrics_diffusion({key: [row[key] for row in rows] for key in keys})
+            assert metrics["critic/reward/clap/errors/count"] == 1
+            assert metrics["critic/reward/clap/errors/mean"] == 0.5
+    finally:
+        tq.close()
 
 
 class _CpuModel:
@@ -411,6 +448,11 @@ def test_cpu_phase_failure_drains_accepted_samples_before_sleep(tmp_path, monkey
     ray.init(num_cpus=4, num_gpus=0, include_dashboard=False, object_store_memory=128 * 1024**2)
     try:
         manager = OmniRewardLoopManager(_full_config(tmp_path, True))
+        # Match the actor-restart startup budget before timing scoring-control signals.
+        ray.get(
+            [worker.__ray_ready__.remote() for workers in manager._reward_worker_groups.values() for worker in workers],
+            timeout=120,
+        )
         data = DataProto.concat([_full_data(), _full_data()[2:]])
         data.non_tensor_batch["reward_model"][0] = {"ground_truth": "controlled-fail"}
         data.non_tensor_batch["reward_model"][2 if separate_replica else 1] = {"ground_truth": "delay"}
@@ -422,11 +464,18 @@ def test_cpu_phase_failure_drains_accepted_samples_before_sleep(tmp_path, monkey
             try:
                 await asyncio.wait_for(delayed_worker.wait_for_delayed_sample.remote(), timeout=30)
                 await failing_worker.release_failure.remote()
-                await failing_worker.wait_for_failure.remote()
+                await asyncio.wait_for(failing_worker.wait_for_failure.remote(), timeout=30)
                 completed, _ = await asyncio.wait({scoring}, timeout=0.2)
             finally:
-                await delayed_worker.release_delay.remote()
+                releases = await asyncio.gather(
+                    failing_worker.release_failure.remote(),
+                    delayed_worker.release_delay.remote(),
+                    return_exceptions=True,
+                )
                 result = (await asyncio.gather(scoring, return_exceptions=True))[0]
+            for release in releases:
+                if isinstance(release, BaseException):
+                    raise release
             state = await delayed_worker.delayed_sample_state.remote()
             assert not completed, "The phase returned while an accepted sample was still waiting to infer"
             assert isinstance(result, ray.exceptions.RayTaskError)
@@ -445,6 +494,11 @@ def test_cpu_phase_cancellation_drains_accepted_samples_before_sleep(tmp_path, m
     ray.init(num_cpus=4, num_gpus=0, include_dashboard=False, object_store_memory=128 * 1024**2)
     try:
         manager = OmniRewardLoopManager(_full_config(tmp_path, True))
+        # Match the actor-restart startup budget before timing scoring-control signals.
+        ray.get(
+            [worker.__ray_ready__.remote() for workers in manager._reward_worker_groups.values() for worker in workers],
+            timeout=120,
+        )
         data = _full_data()
         data.non_tensor_batch["reward_model"][1] = {"ground_truth": "delay"}
         worker = manager._reward_worker_groups["quality"][0]

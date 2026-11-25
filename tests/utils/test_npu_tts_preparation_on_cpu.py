@@ -76,7 +76,10 @@ def test_preparation_checks_without_installing_packages(preparation_runtime, che
     if not check_only:
         data = json.loads(capture.read_text())
         assert data["args"] == ["optimum-intel-internal-testing/tiny-random-qwen3-tts"]
-        assert data["kwargs"] == {"revision": "6374d605b31381cac6f9577f5e742af2f76ba79c"}
+        assert data["kwargs"] == {
+            "revision": "6374d605b31381cac6f9577f5e742af2f76ba79c",
+            "allow_patterns": ["*.json", "merges.txt"],
+        }
 
 
 @pytest.mark.parametrize("requirement", ["librosa>=0.12.0", "librosa<0.11"])

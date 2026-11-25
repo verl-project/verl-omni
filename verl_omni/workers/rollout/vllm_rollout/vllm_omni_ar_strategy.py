@@ -24,7 +24,7 @@ import yaml
 from verl.utils.device import get_visible_devices_keyword
 from verl.workers.config import RolloutConfig
 from verl.workers.rollout.replica import TokenOutput
-from verl.workers.rollout.vllm_rollout.utils import extract_prompt_logprobs
+from verl.workers.rollout.vllm_rollout.utils import extract_prompt_logprobs, get_vllm_max_lora_rank
 from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMHttpServer
 from vllm import SamplingParams
 from vllm_omni.config.stage_config import StageExecutionType
@@ -45,6 +45,30 @@ logger.setLevel(logging.INFO)
 
 _WORKER_EXTENSION = "verl_omni.workers.rollout.vllm_rollout.utils.vLLMOmniColocateWorkerExtension"
 _SCORED_PROMPT_IDS_KEY = "_verl_omni_scored_prompt_ids"  # popped before the engine call
+
+
+def lora_engine_extras(model_config: OmniModelConfig) -> dict[str, Any]:
+    """Per-stage vLLM LoRA engine args for the policy stage of an AR pipeline.
+
+    Mirrors verl's rollout LoRA predicate (``vllm_async_server.py``): rank from
+    ``lora["rank"]`` with the ``lora_rank`` fallback; ``lora.merge`` configs
+    keep the rollout engine LoRA-free. Returns ``{}`` without trainable LoRA.
+    """
+    lora_rank = model_config.lora.get("rank", 0)
+    if lora_rank <= 0:
+        lora_rank = model_config.lora_rank
+    if model_config.lora.get("merge", False):
+        lora_rank = 0
+    if lora_rank <= 0:
+        return {}
+    extras: dict[str, Any] = {
+        "enable_lora": True,
+        "max_loras": 1,
+        "max_lora_rank": get_vllm_max_lora_rank(lora_rank),
+    }
+    if model_config.lora.get("fully_sharded_loras", False):
+        extras["fully_sharded_loras"] = True
+    return extras
 
 
 def _drop_none_mapping_values(value: Any) -> Any:
@@ -140,7 +164,7 @@ class ARStrategy(OmniStrategyBase):
             f"pipeline ({supported_pipelines}), or leave expert_parallel_size=1."
         )
 
-    def apply_quantization(self) -> tuple[str | None, dict[str, Any]]:
+    def apply_quantization(self) -> dict[str, Any]:
         return vLLMHttpServer._apply_quantization(self.server)
 
     def override_generation_config(self) -> dict[str, Any]:
@@ -157,6 +181,11 @@ class ARStrategy(OmniStrategyBase):
         pipeline_mode = engine_kwargs.pop("pipeline_mode", "thinker_only")
 
         adapter_cls = OmniRolloutPipelineBase.get_class(pipeline_name)
+        if adapter_cls is None and self.server.model_config.true_on_policy:
+            raise ValueError(
+                "actor_rollout_ref.model.true_on_policy=true requires a registered rollout pipeline, got "
+                f"actor_rollout_ref.rollout.engine_kwargs.vllm_omni.pipeline_name={pipeline_name!r}."
+            )
         if adapter_cls is not None:
             async_chunk = engine_kwargs.get("async_chunk", engine_kwargs.get("async-chunk", True))
             if not isinstance(async_chunk, bool):
@@ -238,9 +267,18 @@ class ARStrategy(OmniStrategyBase):
             else None
         )
         stage_extras = {
-            stage.stage_id: dict(adapter_cls.get_stage_engine_extras(stage.stage_id, pipeline_mode=pipeline_mode))
+            stage.stage_id: dict(
+                adapter_cls.get_stage_engine_extras(
+                    stage.stage_id, pipeline_mode=pipeline_mode, model_config=self.server.model_config
+                )
+            )
             for stage in stages
         }
+        # vLLM LoRA is per LLM stage: the policy stage owns the rollout's LoRA
+        # engine args, and adapter-delta syncs follow it (collective_rpc routing).
+        lora_extras = lora_engine_extras(self.server.model_config)
+        stage_extras[policy_stage_id].update(lora_extras)
+        self.lora_stage_ids = [policy_stage_id] if lora_extras else None
         capacity_fields = ("max_model_len", "max_num_batched_tokens")
         if any(field in extras for extras in stage_extras.values() for field in capacity_fields):
             for extras in stage_extras.values():
@@ -302,16 +340,18 @@ class ARStrategy(OmniStrategyBase):
     def prepare_engine_args(self, engine_args: dict[str, Any], args: Namespace) -> None:
         """Apply mode-specific engine arguments before the engine is created.
 
-        Expert parallelism is owned by the generated per-stage deploy config, so
-        the global ``enable_expert_parallel`` engine arg is dropped here: applied
-        globally it would reach every stage that owns the field, including
-        non-MoE stages that cannot shard experts.
+        ``enable_expert_parallel`` is dropped: the generated deploy config owns
+        expert parallelism, and the global would reach non-MoE stages that
+        cannot shard experts. The global LoRA flags are dropped only once that
+        config re-routed them to the policy stage; without one the globals are
+        the only carrier, and upstream accepts them on single-stage pipelines.
         """
         engine_args.pop("enable_expert_parallel", None)
-        if engine_args.get("enable_lora"):
-            from verl_omni.utils.vllm_omni.patch import patch_vllm_omni_lora_config
-
-            patch_vllm_omni_lora_config()
+        if self.lora_stage_ids is not None:
+            # vLLM LoRA is per LLM stage; upstream rejects these as global
+            # engine args on multi-stage pipelines.
+            for lora_key in ("enable_lora", "max_loras", "max_lora_rank", "fully_sharded_loras"):
+                engine_args.pop(lora_key, None)
         if self._rollout_output_modalities is not None:
             # The generated per-stage deploy config owns model_stage for
             # multi-output pipelines.

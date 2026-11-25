@@ -15,7 +15,7 @@
 
 from contextlib import nullcontext
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, call
 
 import pytest
 from omegaconf import OmegaConf
@@ -46,7 +46,11 @@ def make_trainer(monkeypatch, *, mode="sync", continuous=False, fail_at=None, re
         }
     )
     trainer.use_reference_policy = False
-    trainer.use_critic = False
+    trainer._init_profile_state()
+    trainer.use_teacher_policy = False
+    trainer.ref_policy_wg = None
+    trainer.reward_loop_manager = None
+    trainer.gpu_metrics_profiler = None
     trainer.sync_compatible = False
     trainer._training_watchdog = None
     trainer.global_steps = resumed_step
@@ -73,13 +77,17 @@ def make_trainer(monkeypatch, *, mode="sync", continuous=False, fail_at=None, re
     trainer.on_train_begin = lambda: events.append(("warmup", trainer.global_steps))
     trainer.on_step_begin = lambda: None
     trainer.checkpoint_manager.update_weights = Mock(return_value={})
-    trainer.standalone_checkpoint_manager = SimpleNamespace(update_weights=Mock(return_value={}))
+    trainer.standalone_checkpoint_manager = SimpleNamespace(
+        update_weights=Mock(return_value={}),
+        wait_for_weight_update=lambda: trainer.lifecycle.append(("wait_weight_update", trainer.global_steps)),
+    )
     trainer.on_validate_begin = lambda: None
     trainer.on_validate_end = lambda: None
     trainer._validate = lambda: {"validation": 1}
     trainer._compute_metrics = lambda *args: None
-    trainer._shutdown_dump_executor = lambda: None
-    trainer._shutdown_dataloaders = lambda: None
+    trainer.lifecycle = []
+    trainer._shutdown_dump_executor = lambda: trainer.lifecycle.append(("shutdown_dump", trainer.global_steps))
+    trainer._shutdown_dataloaders = lambda: trainer.lifecycle.append(("shutdown_dataloaders", trainer.global_steps))
 
     def step(metrics, timing):
         events.append(("feed", trainer.global_steps))
@@ -121,6 +129,30 @@ def test_fit_selected_steps_and_mode_hooks(monkeypatch, mode):
     ]
 
 
+def test_fit_profiles_each_distinct_worker_group(monkeypatch):
+    trainer, _ = make_trainer(monkeypatch)
+    actor = trainer.actor_rollout_wg = Mock(wraps=trainer.actor_rollout_wg)
+    ref = trainer.ref_policy_wg = Mock()
+    teacher = Mock()
+    trainer.use_reference_policy = True
+    trainer.use_teacher_policy = True
+    trainer.teacher_model_manager = SimpleNamespace(
+        teacher_wg={"actor_alias": actor, "ref_alias": ref, "teacher1": teacher, "teacher2": teacher}
+    )
+
+    trainer.fit(Mock())
+
+    for worker, role in ((actor, "train"), (ref, "ref"), (teacher, "teacher")):
+        assert worker.mock_calls == [
+            call.start_profile(role=role, profile_step=1),
+            call.stop_profile(run_command=False),
+            call.start_profile(role=role, profile_step=2),
+            call.stop_profile(run_command=False),
+            call.start_profile(role=role, profile_step=4),
+            call.stop_profile(run_command=True),
+        ]
+
+
 @pytest.mark.parametrize("mode", ["sync", "separate_async"])
 def test_fit_resumes_selected_step(monkeypatch, mode):
     trainer, events = make_trainer(monkeypatch, mode=mode, resumed_step=1)
@@ -139,3 +171,139 @@ def test_async_without_hybrid_only_profiles_standalone(monkeypatch):
     trainer.fit(Mock())
     assert not any(e[0] == "rollout" for e in events)
     assert events.count(("standalone", "start", {})) == 3
+
+
+@pytest.mark.parametrize("mode", ["sync", "separate_async"])
+def test_continuous_rollout_windows(monkeypatch, mode):
+    """Check window scheduling independently of the mocked profiler backend."""
+    trainer, events = make_trainer(monkeypatch, mode=mode, continuous=True)
+    trainer.fit(Mock())
+    role = "rollout" if mode == "sync" else "standalone"
+    assert events.count((role, "start", {})) == 2
+    assert events.count((role, "stop")) == 2
+    first_start = events.index((role, "start", {}))
+    first_stop = events.index((role, "stop"))
+    assert first_start < events.index(("feed", 1)) < events.index(("feed", 2)) < first_stop
+    assert first_stop < events.index(("feed", 3))
+    assert [kwargs["run_command"] for name, kwargs in trainer.profile_stop_calls if name == "actor"] == [False, True]
+
+
+@pytest.mark.parametrize("continuous", [False, True])
+def test_failed_step_closes_all_started_targets(monkeypatch, continuous):
+    trainer, events = make_trainer(monkeypatch, continuous=continuous, fail_at=1)
+    with pytest.raises(RuntimeError, match="compute failed"):
+        trainer.fit(Mock())
+    assert events.count(("rollout", "start", {})) == events.count(("rollout", "stop")) == 1
+    assert events.count(("actor", "stop")) == 1
+    assert not trainer._active_profile_targets
+    assert not trainer._active_rollout_profile_targets
+    assert not trainer._profile_window_active
+
+
+def test_cleanup_failure_preserves_training_error(monkeypatch):
+    trainer, events = make_trainer(monkeypatch, continuous=True)
+    training_error = ValueError("compute failed")
+    trainer.step = Mock(side_effect=training_error)
+    trainer.actor_rollout_wg.stop_profile = Mock(side_effect=RuntimeError("cleanup failed"))
+
+    with pytest.raises(ValueError) as exc:
+        trainer.fit(Mock())
+
+    assert exc.value is training_error
+    trainer.actor_rollout_wg.stop_profile.assert_called_once_with(run_command=False)
+    assert events.count(("rollout", "stop")) == 1
+
+
+@pytest.mark.parametrize(("failing_target", "stop_kwargs"), [("ref", {"run_command": False}), ("rollout", {})])
+def test_start_failure_cleans_up_started_and_failing_targets(monkeypatch, failing_target, stop_kwargs):
+    trainer, events = make_trainer(monkeypatch)
+    trainer.use_reference_policy = True
+    ref = trainer.ref_policy_wg = Mock()
+    trainer.global_steps = 1
+    trainer.prev_step_profile = False
+    trainer.curr_step_profile = True
+    target = {"ref": ref, "rollout": trainer.llm_server_manager}[failing_target]
+    start_error = RuntimeError("start failed")
+    target.start_profile = Mock(side_effect=start_error)
+    target.stop_profile = Mock()
+
+    with pytest.raises(RuntimeError) as exc:
+        trainer._on_profiling_step_start()
+
+    assert exc.value is start_error
+    assert events.count(("actor", "stop")) == 1
+    ref.stop_profile.assert_called_once_with(run_command=False)
+    target.stop_profile.assert_called_once_with(**stop_kwargs)
+    assert not trainer._active_profile_targets
+    assert not trainer._active_rollout_profile_targets
+    assert not trainer._profile_window_active
+
+
+def test_stop_failure_still_closes_remaining_targets(monkeypatch):
+    trainer, events = make_trainer(monkeypatch, continuous=True)
+    trainer.config.global_profiler.steps = [1]
+    trainer.use_reference_policy = True
+    stop_error = RuntimeError("stop failed")
+    trainer.ref_policy_wg = Mock()
+    trainer.ref_policy_wg.stop_profile.side_effect = stop_error
+    trainer.global_steps = 1
+    trainer.prev_step_profile = False
+    trainer.curr_step_profile = True
+    trainer._on_profiling_step_start()
+
+    with pytest.raises(RuntimeError) as exc:
+        trainer._on_profiling_step_end()
+
+    assert exc.value is stop_error
+    trainer.ref_policy_wg.stop_profile.assert_called_once_with(run_command=True)
+    assert events.count(("actor", "stop")) == 1
+    assert events.count(("rollout", "stop")) == 1
+    assert not trainer._active_profile_targets
+    assert not trainer._active_rollout_profile_targets
+    assert not trainer._profile_window_active
+
+
+def test_failed_step_end_closes_continuous_window(monkeypatch):
+    trainer, events = make_trainer(monkeypatch, continuous=True)
+    trainer.on_step_end = Mock(side_effect=RuntimeError("weight sync failed"))
+    with pytest.raises(RuntimeError, match="weight sync failed"):
+        trainer.fit(Mock())
+    assert events.count(("rollout", "start", {})) == events.count(("rollout", "stop")) == 1
+    assert events.count(("actor", "stop")) == 1
+    assert not trainer._profile_window_active
+
+
+@pytest.mark.parametrize("total_training_steps", [4, 100], ids=["step-limit", "epoch-limit"])
+def test_finish_hook_runs_at_last_reachable_selected_step(monkeypatch, total_training_steps):
+    trainer, _ = make_trainer(monkeypatch)
+    trainer.config.global_profiler.steps = [1, 100]
+    trainer.total_training_steps = total_training_steps
+    trainer.fit(Mock())
+    assert [kwargs["run_command"] for name, kwargs in trainer.profile_stop_calls if name == "actor"] == [True]
+
+
+@pytest.mark.parametrize("total_training_steps, expected_steps", [(2, 2), (100, 4)], ids=["step-limit", "epoch-limit"])
+def test_training_limit_closes_continuous_window(monkeypatch, total_training_steps, expected_steps):
+    trainer, events = make_trainer(monkeypatch, continuous=True)
+    trainer.config.global_profiler.steps = [1, 2, 3, 4, 5]
+    trainer.total_training_steps = total_training_steps
+
+    trainer.fit(Mock())
+
+    assert [e[1] for e in events if e[0] == "feed"] == list(range(1, expected_steps + 1))
+    assert [e[2]["profile_step"] for e in events if e[:2] == ("actor", "start")] == [1]
+    assert [kwargs for name, kwargs in trainer.profile_stop_calls if name == "actor"] == [{"run_command": True}]
+    assert events.count(("rollout", "start", {})) == events.count(("rollout", "stop")) == 1
+    assert not trainer._profile_window_active
+    assert trainer.total_training_steps == total_training_steps
+
+
+@pytest.mark.parametrize("mode", ["sync", "separate_async"])
+@pytest.mark.parametrize("resumed_step", [0, 3])
+def test_fit_ends_through_on_train_end(monkeypatch, mode, resumed_step):
+    trainer, _ = make_trainer(monkeypatch, mode=mode, resumed_step=resumed_step)
+    if mode == "sync":
+        trainer.on_train_end = lambda: trainer.lifecycle.append(("train_end", trainer.global_steps))
+    trainer.fit(Mock())
+    end_event = ("train_end", 5) if mode == "sync" else ("wait_weight_update", 5)
+    assert trainer.lifecycle == [end_event, ("shutdown_dump", 5), ("shutdown_dataloaders", 5)]

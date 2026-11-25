@@ -3,6 +3,7 @@
 # Modalities: text + image + audio -> text.
 # Hardware: A5 (8 × Ascend 950 96GB).
 set -x
+set -o pipefail
 
 export CPATH=/usr/include${CPATH:+:$CPATH}
 export VERL_USE_EXTERNAL_MODULES=verl_omni
@@ -14,21 +15,60 @@ if [[ "${DEVICE}" != "npu" && "${DEVICE}" != "gpu" ]]; then
     exit 2
 fi
 
+default_num_devices=16
+default_graph_mode=PIECEWISE
+ascend_performance_args=()
+
 if [[ "${DEVICE}" == "npu" ]]; then
-    ASCEND_HOME_PATH=${ASCEND_HOME_PATH:-/usr/local/Ascend/cann-9.1.0}
+    default_ascend_home=/usr/local/Ascend/cann-9.1.0
+    if npu-smi info 2>/dev/null | awk -F'|' '
+        $2 ~ /^[[:space:]]*[0-9]+[[:space:]]*$/ && $3 ~ /^[[:space:]]*Ascend/ {
+            devices++
+            if ($3 ~ /^[[:space:]]*Ascend950DT[[:space:]]*$/) ascend950dt++
+        }
+        END { exit !(devices == 8 && ascend950dt == 8) }
+    '; then
+        if [[ -r /usr/local/Ascend/cann-9.3.0/set_env.sh ]]; then
+            default_ascend_home=/usr/local/Ascend/cann-9.3.0
+        fi
+        default_num_devices=8
+        default_graph_mode=FULL_AND_PIECEWISE
+        export VLLM_USE_V2_MODEL_RUNNER=0
+        ascend_performance_args=(
+            actor_rollout_ref.actor.freeze_vision_tower=false
+            actor_rollout_ref.actor.fsdp_config.optimizer_offload=false
+            actor_rollout_ref.ref.fsdp_config.model_dtype=fp32
+            actor_rollout_ref.rollout.gpu_memory_utilization=0.45
+            actor_rollout_ref.rollout.enable_chunked_prefill=true
+            actor_rollout_ref.rollout.max_num_batched_tokens=1536
+        )
+        added_defaults=(
+            '++actor_rollout_ref.model.override_config.experts_implementation=ascend_grouped_mm'
+            '++actor_rollout_ref.rollout.engine_kwargs.vllm_omni.compilation_config.cudagraph_capture_sizes=[1,16,128,1536]'
+            '++actor_rollout_ref.rollout.engine_kwargs.vllm_omni.compilation_config.max_cudagraph_capture_size=1536'
+        )
+        for default_arg in "${added_defaults[@]}"; do
+            default_key=${default_arg%%=*}
+            for arg in "$@"; do
+                if [[ "${arg}" == "${default_key#+}="* ]]; then
+                    continue 2
+                fi
+            done
+            ascend_performance_args+=("${default_arg}")
+        done
+    fi
+    ASCEND_HOME_PATH=${ASCEND_HOME_PATH:-${default_ascend_home}}
     source "${ASCEND_HOME_PATH}/set_env.sh"
     source "${ASCEND_HOME_PATH}/../nnal/atb/set_env.sh"
 fi
-
-# Setting actor_rollout_ref.actor.fsdp_config.use_no_sync_for_gradient_accumulation=false
-# requires verl commit a0feb78fe8229fde644aec3bbec20b5dc4583509 or later.
 
 MODEL_PATH=${MODEL_PATH:-"Qwen/Qwen3-Omni-30B-A3B-Instruct"}
 TRAIN_FILE=${TRAIN_FILE:-"$HOME/data/avqa_r1_6k/train.parquet"}
 VAL_FILE=${VAL_FILE:-"$HOME/data/avqa_r1_6k/validation.parquet"}
 
-NUM_GPUS_ACTOR_ROLLOUT_REWARD=${NUM_GPUS_ACTOR_ROLLOUT_REWARD:-16}
+NUM_GPUS_ACTOR_ROLLOUT_REWARD=${NUM_GPUS_ACTOR_ROLLOUT_REWARD:-${default_num_devices}}
 ROLLOUT_TP=${ROLLOUT_TP:-2}
+VLLM_OMNI_CUDAGRAPH_MODE=${VLLM_OMNI_CUDAGRAPH_MODE:-${default_graph_mode}}
 
 python3 -m verl_omni.trainer.main_omni \
     data.train_files="${TRAIN_FILE}" \
@@ -47,7 +87,7 @@ python3 -m verl_omni.trainer.main_omni \
     data.custom_cls.name=QwenOmniRLHFDataset \
     ++data.mm_processor_kwargs.sampling_rate=16000 \
     actor_rollout_ref.model.path="${MODEL_PATH}" \
-    +actor_rollout_ref.model.override_config.attn_implementation=sdpa \
+    ++actor_rollout_ref.model.override_config.attn_implementation=flash_attention_2 \
     actor_rollout_ref.model.lora_rank=0 \
     actor_rollout_ref.model.enable_gradient_checkpointing=true \
     actor_rollout_ref.model.use_remove_padding=true \
@@ -90,7 +130,7 @@ python3 -m verl_omni.trainer.main_omni \
     +actor_rollout_ref.rollout.engine_kwargs.vllm_omni.output_mode=ar \
     +actor_rollout_ref.rollout.engine_kwargs.vllm_omni.pipeline_name=qwen3_omni_moe \
     ++actor_rollout_ref.rollout.engine_kwargs.vllm_omni.additional_config.weight_nz_mode=0 \
-    ++actor_rollout_ref.rollout.engine_kwargs.vllm_omni.compilation_config.cudagraph_mode=PIECEWISE \
+    ++actor_rollout_ref.rollout.engine_kwargs.vllm_omni.compilation_config.cudagraph_mode="${VLLM_OMNI_CUDAGRAPH_MODE}" \
     actor_rollout_ref.rollout.val_kwargs.n=1 \
     actor_rollout_ref.rollout.val_kwargs.temperature=0 \
     actor_rollout_ref.rollout.val_kwargs.top_p=1.0 \
@@ -116,5 +156,6 @@ python3 -m verl_omni.trainer.main_omni \
     trainer.save_freq=50 \
     trainer.test_freq=10 \
     trainer.total_epochs=10 \
+    "${ascend_performance_args[@]}" \
     "$@" \
     2>&1 | tee run_qwen3omni_npu_avqa_v1.log
