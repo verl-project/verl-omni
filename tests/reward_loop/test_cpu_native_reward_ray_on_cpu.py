@@ -40,7 +40,22 @@ from verl_omni.reward_loop.reward_loop import OmniRewardLoopManager, OmniRewardL
 from verl_omni.reward_loop.reward_model_executor import NativeRewardExecutor
 from verl_omni.trainer.diffusion.diffusion_metric_utils import compute_reward_extra_metrics_diffusion
 from verl_omni.trainer.diffusion.v1 import tq_utils
+from verl_omni.utils.reward_score.scorers.base import RewardScorer
 from verl_omni.workers.config.reward import RewardModelSpec, parse_reward_model_config
+
+
+class _StatsScorer(RewardScorer):
+    max_batch_size = 4
+
+    def load(self, device):
+        self.device = device
+
+    def score_batch(self, batch):
+        return [{"score": request["i"]} for request in batch]
+
+
+async def reward_stats_cpu(reward_model, solution_image, **kwargs):
+    return await reward_model.score({"i": int(solution_image.flatten()[0])})
 
 
 @pytest.fixture(autouse=True)
@@ -339,6 +354,49 @@ def _full_data():
             "extra_info": [{}] * 3,
         },
     )
+
+
+def test_real_ray_native_scorer_stats_follow_reward_without_mixing_workers(tmp_path):
+    ray.init(num_cpus=4, num_gpus=0, include_dashboard=False, object_store_memory=128 * 1024**2)
+    try:
+        config = _full_config(tmp_path, offload=True)
+        config.reward.models["quality"]["executor"]["model"] = f"{__name__}:_StatsScorer"
+        config.reward.reward_functions["quality"]["name"] = "reward_stats_cpu"
+        manager = OmniRewardLoopManager(config)
+        before = manager.get_native_scorer_stats()
+        assert before["quality"] == [{}, {}], "stats reads must not load a scorer before its first wake"
+
+        result = manager.compute_rm_score(_full_data())
+        torch.testing.assert_close(result.batch["rm_scores"], torch.tensor([[0.75], [1.25], [1.75]]))
+        after = manager.get_native_scorer_stats()
+        snapshots = after["quality"]
+        assert len(snapshots) == 2
+        assert all(set(snapshot) == {"quality"} for snapshot in snapshots)
+        # Static dispatch pads three input rows to four scorer requests across
+        # two replicas; counters measure actual work, while outputs stay unpadded.
+        counters = ("enqueued_requests", "accepted_requests", "batch_requests")
+        for counter in counters:
+            assert [snapshot["quality"][counter] for snapshot in snapshots] == [2, 2]
+        assert all(snapshot["quality"]["failed_requests"] == 0 for snapshot in snapshots)
+        assert "reward/quality/enqueued_requests" not in result.non_tensor_batch
+
+        # offload=True sleeps the scorers after each call. The next phase wakes
+        # them on the same manager while retaining each executor's counters.
+        second_result = manager.compute_rm_score(_full_data())
+        torch.testing.assert_close(second_result.batch["rm_scores"], result.batch["rm_scores"])
+        second_snapshots = manager.get_native_scorer_stats()["quality"]
+        assert len(second_snapshots) == 2
+        assert all(set(snapshot) == {"quality"} for snapshot in second_snapshots)
+        for counter in counters:
+            assert [snapshot["quality"][counter] for snapshot in second_snapshots] == [4, 4]
+            assert [
+                current["quality"][counter] - previous["quality"][counter]
+                for previous, current in zip(snapshots, second_snapshots, strict=True)
+            ] == [2, 2]
+        assert all(snapshot["quality"]["failed_requests"] == 0 for snapshot in second_snapshots)
+        assert "reward/quality/enqueued_requests" not in second_result.non_tensor_batch
+    finally:
+        ray.shutdown()
 
 
 @ray.remote

@@ -22,6 +22,7 @@ import inspect
 import logging
 from collections import deque
 from functools import cached_property
+from time import perf_counter
 from typing import Any, Callable
 
 import torch
@@ -43,6 +44,29 @@ __all__ = [
 ]
 
 logger = logging.getLogger(__name__)
+
+
+class _ScorerRuntimeStats:
+    """Lifetime counters updated only by the owning microbatcher's event loop."""
+
+    def __init__(self):
+        self.enqueued_requests = 0
+        self.accepted_requests = 0
+        self.withdrawn_requests = 0
+        self.discarded_requests = 0
+        self.capacity_wait_requests = 0
+        self.batches = 0
+        self.batch_requests = 0
+        self.failed_batches = 0
+        self.failed_requests = 0
+        self.peak_queue_size = 0
+        self.peak_batch_size = 0
+        self.capacity_wait_seconds = 0.0
+        self.queue_wait_seconds = 0.0
+        self.forward_seconds = 0.0
+
+    def snapshot(self) -> dict[str, int | float]:
+        return vars(self).copy()
 
 
 def _future_error(error: Exception) -> Exception:
@@ -156,7 +180,12 @@ class NativeRewardExecutor:
         self._model_cls: Any = None
         self._is_scorer = False
         self._microbatcher: ScorerMicrobatcher | None = None
+        self._stats = _ScorerRuntimeStats()
         self._loop: asyncio.AbstractEventLoop | None = None
+
+    def get_runtime_stats(self) -> dict[str, int | float]:
+        """Return this executor's cumulative scorer counters without waking it."""
+        return self._stats.snapshot() if self._is_scorer else {}
 
     def _bind_loop(self) -> None:
         loop = asyncio.get_running_loop()
@@ -248,6 +277,7 @@ class NativeRewardExecutor:
                 self._model.score_batch,
                 max_batch_size=self._model.max_batch_size,
                 name=self.spec.name,
+                _stats=self._stats,
             )
         await self._microbatcher.start()
         async with self._lock:
@@ -464,6 +494,7 @@ class ScorerMicrobatcher:
         max_batch_size: int | None = None,
         max_inflight: int = 64,
         name: str = "",
+        _stats: _ScorerRuntimeStats | None = None,
     ):
         if max_batch_size is not None and (
             isinstance(max_batch_size, bool) or not isinstance(max_batch_size, int) or max_batch_size < 1
@@ -475,6 +506,8 @@ class ScorerMicrobatcher:
         self._pack = max_batch_size or 1
         self._max_inflight = max_inflight
         self._name = name
+        self._stats = _stats if _stats is not None else _ScorerRuntimeStats()
+        self._enqueued_at: dict[asyncio.Future, float] = {}
         self._is_async = inspect.iscoroutinefunction(score_batch)
         self._cond = asyncio.Condition()
         self._queue: deque[tuple[dict[str, Any], asyncio.Future]] = deque()
@@ -482,6 +515,10 @@ class ScorerMicrobatcher:
         self._consumer: asyncio.Task | None = None
         self._lifecycle_lock = asyncio.Lock()
         self._loop: asyncio.AbstractEventLoop | None = None
+
+    def get_runtime_stats(self) -> dict[str, int | float]:
+        """Return a detached cumulative snapshot, including after close."""
+        return self._stats.snapshot()
 
     def _bind_loop(self) -> None:
         loop = asyncio.get_running_loop()
@@ -536,8 +573,16 @@ class ScorerMicrobatcher:
                         if not done.done():
                             done.set_exception(RuntimeError(f"Reward scorer {self._name!r} consumer was cancelled"))
                     raise RuntimeError(f"Reward scorer {self._name!r} consumer was cancelled")
-                while self._state == "running" and len(self._queue) >= self._max_inflight:
-                    await self._cond.wait()
+                capacity_wait_started = None
+                try:
+                    while self._state == "running" and len(self._queue) >= self._max_inflight:
+                        if capacity_wait_started is None:
+                            capacity_wait_started = perf_counter()
+                            self._stats.capacity_wait_requests += 1
+                        await self._cond.wait()
+                finally:
+                    if capacity_wait_started is not None:
+                        self._stats.capacity_wait_seconds += perf_counter() - capacity_wait_started
                 if self._state == "paused":
                     raise RuntimeError(f"Reward scorer {self._name!r} is asleep; retry after wake_up")
                 if self._state == "closed":
@@ -550,6 +595,9 @@ class ScorerMicrobatcher:
                 future.add_done_callback(lambda f: f.cancelled() or f.exception())
                 entry = (request, future)
                 self._queue.append(entry)
+                self._enqueued_at[future] = perf_counter()
+                self._stats.enqueued_requests += 1
+                self._stats.peak_queue_size = max(self._stats.peak_queue_size, len(self._queue))
                 self._cond.notify_all()
             # Shielded: a caller cancel must not cancel the future itself — it
             # is the settlement signal an accepted request waits on.
@@ -579,6 +627,8 @@ class ScorerMicrobatcher:
             for index, queued_entry in enumerate(self._queue):
                 if queued_entry is entry:
                     del self._queue[index]
+                    self._enqueued_at.pop(entry[1])
+                    self._stats.withdrawn_requests += 1
                     self._cond.notify_all()
                     return True
             return False
@@ -603,6 +653,9 @@ class ScorerMicrobatcher:
                 self._state = "closed" if closed else "paused"
                 queued = list(self._queue)
                 self._queue.clear()
+                self._stats.discarded_requests += len(queued)
+                for _, future in queued:
+                    self._enqueued_at.pop(future)
                 consumer = self._consumer
                 self._cond.notify_all()
             message = (
@@ -635,11 +688,11 @@ class ScorerMicrobatcher:
                         await self._cond.wait()
                     if not self._queue:
                         return
-                    batch = [self._queue.popleft()]
+                    batch = [self._accept_one()]
                 await asyncio.sleep(0)
                 async with self._cond:
                     while self._state == "running" and self._queue and len(batch) < self._pack:
-                        batch.append(self._queue.popleft())
+                        batch.append(self._accept_one())
                     self._cond.notify_all()
                 await self._run_batch(batch)
                 batch = []
@@ -669,14 +722,31 @@ class ScorerMicrobatcher:
         """Close admission and collect every unsettled request; the caller holds ``_cond``."""
         self._state = "closed"
         pending = list(batch) + list(self._queue)
+        self._stats.failed_requests += sum(not future.done() for _, future in batch)
+        self._stats.discarded_requests += len(self._queue)
+        for _, future in self._queue:
+            self._enqueued_at.pop(future)
         self._queue.clear()
         self._consumer = None
         self._cond.notify_all()
         return pending
 
+    def _accept_one(self) -> tuple[dict[str, Any], asyncio.Future]:
+        entry = self._queue.popleft()
+        self._stats.accepted_requests += 1
+        self._stats.queue_wait_seconds += perf_counter() - self._enqueued_at.pop(entry[1])
+        return entry
+
     async def _run_batch(self, batch: list[tuple[dict[str, Any], asyncio.Future]]) -> None:
+        self._stats.batches += 1
+        self._stats.batch_requests += len(batch)
+        self._stats.peak_batch_size = max(self._stats.peak_batch_size, len(batch))
         try:
-            results = await self._forward([request for request, _ in batch])
+            forward_started = perf_counter()
+            try:
+                results = await self._forward([request for request, _ in batch])
+            finally:
+                self._stats.forward_seconds += perf_counter() - forward_started
             if asyncio.current_task().cancelling():
                 raise asyncio.CancelledError
             if not isinstance(results, list | tuple) or len(results) != len(batch):
@@ -686,6 +756,7 @@ class ScorerMicrobatcher:
                     f"for {len(batch)} requests"
                 )
         except BaseException as error:
+            self._stats.failed_batches += 1
             # A scorer may translate or suppress cancellation while cleaning up.
             # The consumer still owns its requested cancellation after it settles.
             if asyncio.current_task().cancelling():
@@ -697,13 +768,18 @@ class ScorerMicrobatcher:
             logger.error("Reward scorer %r microbatch failed", self._name, exc_info=error)
             for _, future in batch:
                 if not future.done():
+                    self._stats.failed_requests += 1
                     future.set_exception(error)
             return
+        failed_slot = any(isinstance(result, Exception) for result in results)
         for (_, future), result in zip(batch, results, strict=True):
             if isinstance(result, Exception) and not future.done():
+                self._stats.failed_requests += 1
                 future.set_exception(_future_error(result))
             elif not future.done():
                 future.set_result(result)
+        if failed_slot:
+            self._stats.failed_batches += 1
 
     async def _forward(self, requests: list[dict[str, Any]]) -> list[Any]:
         # Only the single consumer task calls this, so forwards never overlap.
