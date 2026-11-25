@@ -16,11 +16,15 @@
 import re
 from typing import Any
 
-_ANSWER_TAG_RE = re.compile(r"<answer>\s*(.*?)\s*</answer>", re.DOTALL)
+_ANSWER_TAG_RE = re.compile(r"<answer>\s*(.*?)\s*</answer>", re.DOTALL | re.IGNORECASE)
 
 
 def extract_answer(text: Any) -> str:
-    """Return the first answer-tag payload, matching Relax's AVQA reward."""
+    """Return the first answer-tag payload, matching Relax's AVQA reward.
+
+    Tag matching is case-insensitive: the AVQA converter preserves
+    upper-case ``<ANSWER>`` ground truths alongside lower-case ones.
+    """
     match = _ANSWER_TAG_RE.search(str(text or ""))
     return match.group(1).strip() if match else ""
 

@@ -78,3 +78,19 @@ class TestEdgeCases:
 
     def test_both_untagged_matching(self):
         assert compute_score("B", "B")["score"] == 0.0
+
+
+class TestUppercaseTagGroundTruths:
+    """AVQA-converter ground truths preserve upper-case tags (review #950)."""
+
+    def test_uppercase_tag_gt_matches_lowercase_response(self):
+        assert compute_score("<answer>B</answer>", "<ANSWER>B</ANSWER>")["score"] == 1.0
+
+    def test_uppercase_tag_response_matches_untagged_gt(self):
+        assert compute_score("<ANSWER>B</ANSWER>", "B")["score"] == 1.0
+
+    def test_uppercase_tag_gt_mismatch(self):
+        assert compute_score("<answer>A</answer>", "<ANSWER>B</ANSWER>")["score"] == 0.0
+
+    def test_empty_response_against_uppercase_tag_gt(self):
+        assert compute_score("", "<ANSWER>B</ANSWER>")["score"] == 0.0
