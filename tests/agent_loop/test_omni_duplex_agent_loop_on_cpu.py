@@ -27,7 +27,7 @@ from typing import Any
 import numpy as np
 import pytest
 
-from tests.utils.dataset.duplex._duplex_fixtures import listening_then_speaking_wires
+from tests.utils.dataset.duplex._duplex_fixtures import interruption_event, listening_then_speaking_wires
 from tests.utils.dataset.duplex.test_replay_on_cpu import FakeStreamingProcessor, FakeTokenizer
 from verl_omni.agent_loop.omni_duplex_agent_loop import OmniDuplexAgentLoop
 from verl_omni.utils.dataset.duplex.replay import DUPLEX_REPLAY_KEY
@@ -116,8 +116,8 @@ def _loop(
     return loop, server
 
 
-def _server_result(session_id: str = "duplex-abc") -> dict[str, Any]:
-    wires = listening_then_speaking_wires()
+def _server_result(session_id: str = "duplex-abc", *, engine_silence_units: int = 0) -> dict[str, Any]:
+    wires = listening_then_speaking_wires(engine_silence_units=engine_silence_units)
     return {
         "episode_id": "ep-1",
         "session_id": session_id,
@@ -156,6 +156,8 @@ async def test_run_maps_one_episode_onto_the_policy_sequence():
     # Off-policy staleness tags verl's _compute_metrics int-casts.
     assert output.extra_fields["min_global_steps"] == 4
     assert output.extra_fields["max_global_steps"] == 4
+    # A clean episode enters the drop-rate column at 0.
+    assert output.extra_fields["reward_extra_info"] == {"duplex_pacing_corrupted": 0.0}
     # The server saw the run spec with the seed and the chunks, and without
     # the instructions key (an explicit value silences the engine pipeline).
     (run_spec,) = server.episodes
@@ -287,29 +289,70 @@ def test_loop_is_registered_under_its_agent_name():
 
 
 @pytest.mark.asyncio
-async def test_interruption_anchor_is_rewritten_onto_the_unit_clock():
-    # speech_chunk_end_index=2: the second fed chunk closed the interrupting
-    # speech; the yield deadline must anchor to that client unit's decision
-    # time, not the corpus-relative mining value.
+async def test_interruption_anchors_are_rewritten_onto_the_unit_clock():
+    # speech_chunk_start_index=2 / end_index=3: the second fed chunk opened the
+    # interrupting speech and the third closed it; both anchors must follow
+    # those client units' decision times, not the corpus-relative mining values.
     result = _server_result()
-    result["event"] = {"axis": "interruption", "interrupt_speech_end_s": 99.0}
-    result["speech_chunk_end_index"] = 2
+    result["event"] = interruption_event(onset_s=99.0, end_s=99.0)
+    result["speech_chunk_start_index"] = 2
+    result["speech_chunk_end_index"] = 3
     loop, _ = _loop(result)
     output = await loop.run({}, duplex_episode=_episode("interruption"), duplex_seed=3)
     event = output.extra_fields["duplex_replay"]["event"]
     # The listening scope's units are at t=0,1 and the response speaks from
-    # t=2; the second client unit's decision time is 1.0 s.
-    assert event["interrupt_speech_end_s"] == pytest.approx(1.0)
+    # t=2; the second and third client units decided at 1.0 s and 2.0 s.
+    assert event["interrupt_speech_onset_s"] == pytest.approx(1.0)
+    assert event["interrupt_speech_end_s"] == pytest.approx(2.0)
 
 
 @pytest.mark.asyncio
 async def test_out_of_range_interruption_anchor_fails():
     result = _server_result()
-    result["event"] = {"axis": "interruption", "interrupt_speech_end_s": 1.0}
+    result["event"] = interruption_event(onset_s=1.0, end_s=1.0)
+    result["speech_chunk_start_index"] = 1
     result["speech_chunk_end_index"] = 99
     loop, _ = _loop(result)
     with pytest.raises(ValueError, match="fed chunks"):
         await loop.run({}, duplex_episode=_episode("interruption"), duplex_seed=3)
+    result["speech_chunk_start_index"] = 0
+    result["speech_chunk_end_index"] = 1
+    loop, _ = _loop(result)
+    with pytest.raises(ValueError, match="fed chunks"):
+        await loop.run({}, duplex_episode=_episode("interruption"), duplex_seed=3)
+
+
+@pytest.mark.asyncio
+async def test_engine_silence_inside_the_scored_window_drops_the_episode():
+    # The runtime injected a silent unit at t=2.0, inside the turn window
+    # [2.0, 5.0): its timing is the runtime's, so the episode degrades to the
+    # mask-0 output flagged as pacing-corrupted — the trainer's per-step mean
+    # of the column is the drop rate.
+    loop, _ = _loop(_server_result(engine_silence_units=1))
+    output = await loop.run({}, duplex_episode=_episode(), duplex_seed=3, global_steps=9)
+    assert output.response_ids == []
+    assert output.response_mask == []
+    assert output.reward_score == 0.0
+    assert output.extra_fields["reward_extra_info"] == {"duplex_episode_failed": 1.0, "duplex_pacing_corrupted": 1.0}
+    payload = output.extra_fields[DUPLEX_REPLAY_KEY]
+    assert payload["unit_layouts"] == [] and payload["status"] == "failed"
+    assert output.extra_fields["min_global_steps"] == 9
+
+
+@pytest.mark.asyncio
+async def test_engine_silence_outside_the_scored_window_keeps_the_episode():
+    # The same injected unit at t=2.0 with the turn ending at 4.0 (window
+    # [4.0, 7.0)) leaves the episode scoreable: it replays, flagged 0.
+    result = _server_result(engine_silence_units=1)
+    result["event"] = {"axis": "turn", "user_turn_end_s": 4.0}
+    loop, _ = _loop(result)
+    output = await loop.run({}, duplex_episode=_episode(), duplex_seed=3)
+    assert output.response_ids and output.reward_score is None
+    assert output.extra_fields["reward_extra_info"] == {"duplex_pacing_corrupted": 0.0}
+    engine_layouts = [
+        layout for layout in output.extra_fields[DUPLEX_REPLAY_KEY]["unit_layouts"] if layout["origin"] == "engine"
+    ]
+    assert [layout["time_s"] for layout in engine_layouts] == [pytest.approx(2.0)]
 
 
 @pytest.mark.asyncio

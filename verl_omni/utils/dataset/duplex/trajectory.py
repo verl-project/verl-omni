@@ -29,7 +29,7 @@ trainer did not feed them, and only the engine knows they happened.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import numpy as np
@@ -51,6 +51,7 @@ __all__ = [
     "DuplexEpisodeEvent",
     "DuplexTrajectory",
     "DuplexUnitDecision",
+    "reanchor_interruption",
 ]
 
 #: Event axes of the replayed two-track corpus (RFC #905 §3.1).
@@ -73,8 +74,10 @@ class DuplexEpisodeEvent:
     pause_window_s: tuple[float, float] | None = None
     #: Turn axis: when the user's utterance ends (the model should take the floor).
     user_turn_end_s: float | None = None
-    #: Interruption axis: when the interrupting speech ends (the model should
-    #: return to silence promptly after this).
+    #: Interruption axis: when the interrupting speech starts (the model
+    #: should fall silent promptly after this; the yield latency's anchor) and
+    #: when it ends.
+    interrupt_speech_onset_s: float | None = None
     interrupt_speech_end_s: float | None = None
     #: Free-form provenance (corpus id, dialogue index, mining parameters).
     provenance: Mapping[str, Any] = field(default_factory=dict)
@@ -86,8 +89,48 @@ class DuplexEpisodeEvent:
             raise ValueError("pause episodes require pause_window_s")
         if self.axis == AXIS_TURN and self.user_turn_end_s is None:
             raise ValueError("turn episodes require user_turn_end_s")
+        if self.axis == AXIS_INTERRUPTION and self.interrupt_speech_onset_s is None:
+            raise ValueError("interruption episodes require interrupt_speech_onset_s")
         if self.axis == AXIS_INTERRUPTION and self.interrupt_speech_end_s is None:
             raise ValueError("interruption episodes require interrupt_speech_end_s")
+
+    @classmethod
+    def from_mapping(cls, event: Mapping[str, Any]) -> DuplexEpisodeEvent:
+        """Rebuild the annotation from its stored / wire mapping.
+
+        Accepts the episode spec's parquet ``event`` struct and the replay
+        payload's ``event`` dict alike (numpy scalars included); a malformed
+        annotation raises the same ``ValueError`` the constructor does.
+
+        Args:
+            event: ``{"axis", "pause_window_s", "user_turn_end_s",
+            "interrupt_speech_onset_s", "interrupt_speech_end_s"}`` — the
+            axis-specific anchors may be absent or ``None`` off their axis.
+
+        Returns:
+            The validated event.
+        """
+        pause_window = event.get("pause_window_s")
+        return cls(
+            axis=str(event["axis"]),
+            pause_window_s=_optional_pair(pause_window),
+            user_turn_end_s=_optional_float(event.get("user_turn_end_s")),
+            interrupt_speech_onset_s=_optional_float(event.get("interrupt_speech_onset_s")),
+            interrupt_speech_end_s=_optional_float(event.get("interrupt_speech_end_s")),
+        )
+
+
+def _optional_float(value: Any) -> float | None:
+    return None if value is None else float(value)
+
+
+def _optional_pair(value: Any) -> tuple[float, float] | None:
+    if value is None:
+        return None
+    values = [float(item) for item in value]
+    if len(values) != 2:
+        raise ValueError(f"a time window must be a [start, end] pair, got {value!r}")
+    return (values[0], values[1])
 
 
 @dataclass(frozen=True, slots=True)
@@ -291,3 +334,50 @@ class DuplexTrajectory:
             token_scope_indices=tuple(scope_indices),
             token_unit_indices=tuple(unit_indices),
         )
+
+
+def reanchor_interruption(
+    trajectory: DuplexTrajectory,
+    *,
+    speech_chunk_start_index: Any,
+    speech_chunk_end_index: Any,
+    seed: int,
+) -> DuplexTrajectory:
+    """Rewrite an interruption episode's speech anchors onto the unit clock.
+
+    Mining writes the corpus-relative onset and end of the interrupting
+    speech, but the driver injects that speech relative to the policy's own
+    speak onset. The driver reports the 1-based fed-chunk indices of the
+    clip's first speech-carrying chunk and of its last chunk; the i-th fed
+    chunk maps one-to-one onto the i-th client-origin unit decision, so each
+    anchor becomes that decision's engine emission time. Non-interruption
+    episodes and missing indices pass through unchanged.
+
+    Raises:
+        ValueError: When an index falls outside the fed chunks — the driver
+            and the records disagree.
+    """
+    if trajectory.event.axis != AXIS_INTERRUPTION or speech_chunk_start_index is None or speech_chunk_end_index is None:
+        return trajectory
+    client_decisions = [
+        decision for decision in trajectory.unit_decisions(listen_token_id=-1) if decision.origin == ORIGIN_CLIENT
+    ]
+    start_index, end_index = int(speech_chunk_start_index), int(speech_chunk_end_index)
+    for index in (start_index, end_index):
+        if not 1 <= index <= len(client_decisions):
+            raise ValueError(
+                f"duplex episode {trajectory.session_id}: speech chunk index {index} outside the "
+                f"{len(client_decisions)} fed chunks; the driver and the records disagree"
+            )
+    anchored = replace(
+        trajectory.event,
+        interrupt_speech_onset_s=client_decisions[start_index - 1].time_s,
+        interrupt_speech_end_s=client_decisions[end_index - 1].time_s,
+    )
+    return DuplexTrajectory.assemble(
+        session_id=trajectory.session_id,
+        seed=seed,
+        event=anchored,
+        record_set_wires=[record_set.to_wire() for record_set in trajectory.record_sets],
+        client_audio_chunks=list(trajectory.client_audio_chunks),
+    )

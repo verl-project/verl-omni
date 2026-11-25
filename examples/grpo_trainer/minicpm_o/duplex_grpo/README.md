@@ -16,20 +16,29 @@ design; this README covers running it.
   sampling-distribution log-probability of every action.
 - **Axes**: `pause` (stay silent through the user's intra-utterance silence),
   `turn` (take the floor promptly after the user's utterance ends), and
-  `interruption` (yield promptly after the user's interrupting speech ends —
-  injected relative to the policy's own speak onset; the harness never cancels
-  model output).
+  `interruption` (yield promptly after the user's interrupting speech
+  *begins* — the clip is injected relative to the policy's own speak onset,
+  and a policy that was not speaking when it begins, or never spoke, takes
+  the floor score; the harness never cancels model output).
 - **Loss**: GRPO (`adv_estimator=grpo`, group = `rollout.n=16` episodes per
-  segment), text/control-token actions only, validity mask 1 on sampled
-  actions and 0 on forced/re-emitted ones. KL on (small β) against the
-  starting checkpoint; LoRA r=32 with frozen audio/vision towers.
+  segment) in its Dr.GRPO form: group advantage `R − mean(R)` without std
+  division (`algorithm.norm_adv_by_std_in_grpo=false`) and a constant token
+  denominator (`loss_agg_mode=seq-mean-token-sum-norm`,
+  `loss_scale_factor=1024`), so 15-tie + 1-outlier groups on the near-binary
+  1 Hz rewards are not amplified by √G. Text/control-token actions only,
+  validity mask 1 on sampled actions and 0 on forced/re-emitted ones. KL on
+  (β 0.05, `low_var_kl`) against the starting checkpoint; LoRA r=32 with
+  frozen audio/vision towers.
 - **Rewards**: CPU rule rewards from timestamps
   (`verl_omni/utils/reward_score/duplex_turn_taking.py`). The scorer also
   emits the trip-wire columns (`duplex_speak_ratio`, `duplex_silence_share`,
   `duplex_duplicate_ngram_share`) and a per-episode `duplex_episode_failed`
   flag whenever a pre-registered threshold (`telemetry.TRIP_WIRE_DEFAULTS`)
-  breaches; the trainer aggregates these columns per step, so silence
-  collapse or repetitive speech shows up in the logged metrics.
+  breaches, plus `duplex_pacing_corrupted` whenever an engine-injected silent
+  unit landed inside the scored window; the trainer aggregates these columns
+  per step, so silence collapse, repetitive speech, or a rising drop rate
+  shows up in the logged metrics. The agent loop drops a pacing-corrupted
+  episode (mask 0, flagged the same way).
 
 ## Prerequisites
 
@@ -45,11 +54,23 @@ design; this README covers running it.
    The rollout fails loudly (`requires a vLLM-Omni build with the duplex
    action-capture surface`) when the installed revision predates it.
 2. **Mined episode parquet** from `kyutai/DailyTalkContiguous` — see the
-   [mining section of the doc](../../../docs/algo/duplex_grpo.md#data) and the
-   M0 entry gate below.
+   [mining section of the doc](../../../docs/algo/duplex_grpo.md#data). Build
+   it on CPU before any training:
+
+   ```bash
+   python scripts/duplex_build_episodes.py --manifest manifest.jsonl \
+       --output duplex_episodes.parquet
+   ```
+
+   Defaults: 5 % of dialogues held out by `crc32(dialogue_id)` (a stable,
+   per-dialogue split), axes balanced to ≈1:1:1 inside each split
+   (`--per-axis-cap auto`), pauses mined from 0.6–1.8 s same-speaker
+   silences, interrupting clips ≥ 1.5 s.
 3. **The M0 entry gate** — before any gradient step, run the calibration
    audit (`scripts/duplex_calibration_audit.py`) and the parity check
-   (`scripts/duplex_m0_parity_check.py`) on the unmodified checkpoint.
+   (`scripts/duplex_m0_parity_check.py`) on the unmodified checkpoint. The
+   calibration gate is two-sided: every axis's normalized mean reward must
+   land in [0.30, 0.80] of the axis band.
 
 ## Run
 
@@ -69,7 +90,8 @@ group.
 
 - Per-axis reward means and the trip-wire columns from the scorer, aggregated
   per training step by the trainer's reward-extra metrics (the
-  `duplex_episode_failed` share is the degeneracy alarm).
+  `duplex_episode_failed` share is the degeneracy alarm;
+  `reward/duplex_pacing_corrupted` is the pacing drop rate).
 - FDB-v1 rule metrics over the dumped replays:
 
   ```bash

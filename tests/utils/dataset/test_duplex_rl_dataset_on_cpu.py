@@ -20,7 +20,7 @@ import soundfile as sf
 
 from verl_omni.utils.dataset.duplex.duplex_rl_dataset import DuplexEpisodeDataset, build_episode_chunks
 from verl_omni.utils.dataset.duplex.mining import DuplexEpisodeSpec
-from verl_omni.utils.dataset.duplex.trajectory import AXIS_PAUSE, AXIS_TURN, DuplexEpisodeEvent
+from verl_omni.utils.dataset.duplex.trajectory import AXIS_INTERRUPTION, AXIS_PAUSE, AXIS_TURN, DuplexEpisodeEvent
 
 
 @pytest.fixture(scope="module")
@@ -67,14 +67,19 @@ def test_build_episode_chunks_pads_the_final_chunk_and_rejects_bad_windows(user_
     assert len(clipped) == 10
 
 
-def _row(spec: DuplexEpisodeSpec, words: list[dict], *, commit: bool = False) -> dict:
-    return {
+def _row(
+    spec: DuplexEpisodeSpec, words: list[dict], *, commit: bool = False, dialogue_id: str | None = "dd-0001"
+) -> dict:
+    row = {
         "episode": spec.to_dict(),
         "user_words": words,
         "duplex_seed": 5,
         "data_source": "dailytalk",
         "commit": commit,
     }
+    if dialogue_id is not None:
+        row["dialogue_id"] = dialogue_id
+    return row
 
 
 def _spec(user_track, axis: str) -> DuplexEpisodeSpec:
@@ -88,6 +93,8 @@ def _spec(user_track, axis: str) -> DuplexEpisodeSpec:
             axis=axis,
             pause_window_s=(1.5, 2.5) if axis == AXIS_PAUSE else None,
             user_turn_end_s=2.5 if axis == AXIS_TURN else None,
+            interrupt_speech_onset_s=0.5 if axis == AXIS_INTERRUPTION else None,
+            interrupt_speech_end_s=2.0 if axis == AXIS_INTERRUPTION else None,
         ),
     )
 
@@ -96,17 +103,19 @@ def test_dataset_emits_episode_columns(user_track, tmp_path):
     rows = [
         _row(_spec(user_track, AXIS_TURN), [{"start_s": 1.0, "end_s": 3.0}], commit=True),
         _row(_spec(user_track, AXIS_PAUSE), []),
+        _row(_spec(user_track, AXIS_INTERRUPTION), [], dialogue_id=None),  # a row built before the column existed
     ]
     parquet = tmp_path / "episodes.parquet"
     pd.DataFrame(rows).to_parquet(parquet)
     dataset = DuplexEpisodeDataset([str(parquet)])
-    assert len(dataset) == 2
+    assert len(dataset) == 3
     sample = dataset[0]
     episode = sample["duplex_episode"]
     assert episode["axis"] == AXIS_TURN
     assert episode["event"]["user_turn_end_s"] == pytest.approx(2.5)  # episode-relative (3.0 s - 0.5 s window)
     assert len(episode["chunks"]) == 3
     assert sample["duplex_seed"] == 5
+    assert sample["dialogue_id"] == "dd-0001"  # the build's source dialogue rides the sample
     # verl v1 mints uids off raw_prompt; it stays the stable episode id.
     assert sample["raw_prompt"] == "dd-turn-0001"
     # Rule-reward managers read ground_truth before the scorer runs.
@@ -120,6 +129,12 @@ def test_dataset_emits_episode_columns(user_track, tmp_path):
     assert "dummy_tensor" in sample
     # The chunks carry real PCM from the track (speech span is non-zero).
     assert np.abs(episode["chunks"][1]["pcm"]).max() == pytest.approx(0.5)
+    # Both interruption anchors survive the parquet round-trip; a missing
+    # dialogue column reads as none instead of failing.
+    interruption = dataset[2]
+    assert interruption["duplex_episode"]["event"]["interrupt_speech_onset_s"] == pytest.approx(0.5)
+    assert interruption["duplex_episode"]["event"]["interrupt_speech_end_s"] == pytest.approx(2.0)
+    assert interruption["dialogue_id"] is None
 
 
 def test_dataset_rejects_rows_without_the_mining_columns(tmp_path):

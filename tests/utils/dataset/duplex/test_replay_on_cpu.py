@@ -41,7 +41,7 @@ from verl_omni.utils.dataset.duplex.replay import (
     resolve_default_ref_audio,
     resolve_duplex_vocabulary,
 )
-from verl_omni.utils.dataset.duplex.trajectory import AXIS_TURN, DuplexEpisodeEvent, DuplexTrajectory
+from verl_omni.utils.dataset.duplex.trajectory import AXIS_INTERRUPTION, AXIS_TURN, DuplexEpisodeEvent, DuplexTrajectory
 
 # A deterministic id table: every framing token is one id, none equal to unk.
 _TOKEN_TABLE = {
@@ -399,6 +399,21 @@ def test_extra_fields_roundtrip():
     assert restored.status == "completed"
     assert restored.event["axis"] == AXIS_TURN
     assert restored.ref_audio is None
+
+
+def test_replay_event_carries_both_interruption_anchors():
+    trajectory = DuplexTrajectory.assemble(
+        session_id="duplex-abc",
+        seed=7,
+        event=DuplexEpisodeEvent(axis=AXIS_INTERRUPTION, interrupt_speech_onset_s=1.0, interrupt_speech_end_s=4.0),
+        record_set_wires=listening_then_speaking_wires(),
+        client_audio_chunks=[np.zeros(16000, dtype=np.float32) for _ in range(5)],
+    )
+    replay = build_replay(trajectory, _vocabulary())
+    # The payload's event rebuilds into the same annotation: the yield
+    # reward reads the onset, the FDB dump reads both.
+    assert DuplexEpisodeEvent.from_mapping(replay.to_extra_fields()["event"]) == trajectory.event
+    assert replay.event["interrupt_speech_onset_s"] == 1.0
 
 
 def test_extra_fields_carry_the_reference_block():

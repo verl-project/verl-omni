@@ -54,13 +54,13 @@ dataset (mined episodes) ──▶ omni_duplex_agent ──▶ rollout server (D
 | Trajectory assembly | `.../duplex/trajectory.py` | Scopes in order; validity mask (`sampled`→1, `forced`/`reemit`→0); unit decision timeline |
 | Unit-window replay | `.../duplex/replay.py` | `<unit>` + 10 bare audio placeholders + action + `</unit>` per unit; engine silent units replay as 1 s of digital silence; mel via the processor's `process_audio_streaming` |
 | Event mining | `.../duplex/mining.py` | pause / turn / interruption from word-level timestamps |
-| Rule rewards | `verl_omni/utils/reward_score/duplex_turn_taking.py` | Per-axis, timestamp-only, tuned bands; emits the trip-wire columns and the per-episode `duplex_episode_failed` flag |
-| Trip-wire definitions | `.../duplex/telemetry.py` | The shared threshold set (`TRIP_WIRE_DEFAULTS`) and metric definitions (`speak_ratio`, `silence_share`, `duplicate_ngram_share`); the scorer applies them per episode |
-| Calibration gate | `.../duplex/calibration.py` + `scripts/duplex_calibration_audit.py` | mid-band entry gate before any gradient |
+| Rule rewards | `verl_omni/utils/reward_score/duplex_turn_taking.py` | Per-axis, timestamp-only, tuned bands: the turn axis measures from the user's turn end; the interruption axis measures from the interrupting speech *onset* (full credit within 1 s, −1 past 3 s) with a silence floor — a policy that was not speaking at the onset, or never spoke, takes −1. Emits the trip-wire columns, `duplex_pacing_corrupted`, and the per-episode `duplex_episode_failed` flag |
+| Trip-wire definitions | `.../duplex/telemetry.py` | The shared threshold set (`TRIP_WIRE_DEFAULTS`), the reward bands, and the timing definitions every consumer calls — `speak_ratio`, `silence_share`, `duplicate_ngram_share`, the onset-anchored `interruption_yield_latency`, and the pacing predicate `pacing_corrupted` (an engine-injected silent unit inside the scored window); the scorer, the FDB metrics and the agent loop share them |
+| Calibration gate | `.../duplex/calibration.py` + `scripts/duplex_calibration_audit.py` | Two-sided mid-band entry gate before any gradient: each axis's normalized mean must land in [0.30, 0.80] of the axis band |
 | FDB-v1 rule metrics | `.../duplex/fdb_metrics.py` | static-protocol timing metrics over dumped replays |
 | Rollout bridge | `verl_omni/pipelines/minicpm/duplex_rollout_adapter.py` | `pipeline_mode="duplex"`; `minicpmo_4_5_duplex` |
-| Session driver | `verl_omni/workers/rollout/vllm_rollout/vllm_omni_duplex_strategy.py` | 1 s-cadence submits next to the engine; per-response draining; close before weight sync |
-| Agent loop | `verl_omni/agent_loop/omni_duplex_agent_loop.py` | `omni_duplex_agent`; one Ray call per episode |
+| Session driver | `verl_omni/workers/rollout/vllm_rollout/vllm_omni_duplex_strategy.py` | 1 s-cadence submits next to the engine; per-response draining; close before weight sync; reports the fed-chunk indices bracketing the interrupting speech |
+| Agent loop | `verl_omni/agent_loop/omni_duplex_agent_loop.py` | `omni_duplex_agent`; one Ray call per episode; re-anchors interruption episodes onto the unit clock and drops pacing-corrupted episodes (mask 0) |
 | Recipe | `examples/grpo_trainer/minicpm_o/duplex_grpo/` | GRPO LoRA, 4×H800 colocated |
 
 ### The replay layout
@@ -110,6 +110,15 @@ One measure on both sides — the two-stage policy's pre-truncation joint:
   verl's `rollout_log_probs` channel stays empty and rollout-correction has
   nothing to engage on.
 
+The objective is Dr.GRPO-style: the group advantage is `R − mean(R)` over the
+`rollout.n=16` episodes of a segment without the std division (binary,
+1 Hz-quantized rewards produce 15-tie + 1-outlier groups whose std-normalized
+advantages are amplified by √G), the per-token losses aggregate under
+a constant denominator (`loss_agg_mode=seq-mean-token-sum-norm` with
+`loss_scale_factor` pinned to the rollout horizon), and the KL term
+(`low_var_kl`, β 0.05) rides the full response mask against the starting
+checkpoint.
+
 ### Weight-sync fencing
 
 Every session the driver opens is closed before the episode returns, so the
@@ -122,9 +131,9 @@ mechanism. Pre-warmed sessions may stay open (open performs no forward).
 Single PoC corpus: `kyutai/DailyTalkContiguous` (stereo two-track,
 word-level timestamps). Mining (pure timestamp arithmetic, CPU):
 
-- **pause** — user intra-utterance silences ≥ 0.8 s (window: 2 s lead + tail);
+- **pause** — same-speaker silences of 0.6–1.8 s (window: 2 s lead + tail);
 - **turn** — the tail of each user utterance ≥ 1 s (3 s lead, 2 s tail);
-- **interruption** — user utterances that overlap a model utterance in
+- **interruption** — user utterances ≥ 1.5 s that overlap a model utterance in
   the corpus; the *live* injection point is the policy's own speak onset plus a
   delay, so group members may see slightly different overlaps (accepted).
 
@@ -132,11 +141,31 @@ Episodes are bounded (≤ 8 s mined windows; the session horizon caps the
 tail). At the model's 1 Hz decision cadence a 3–5 s segment holds ~3–5
 decisions, hence `rollout.n=16` groups.
 
+Build the parquet on CPU, before any training:
+
+```bash
+python scripts/duplex_build_episodes.py --manifest manifest.jsonl \
+    --output duplex_episodes.parquet
+```
+
+The manifest is one JSON line per dialogue (`dialogue_id`, the user track's
+mono `user_audio`, `user_words`, `model_words`). Defaults: the val split
+holds 5 % of dialogues by `crc32(dialogue_id)` — stable across processes,
+by dialogue so none straddles the split — and `--per-axis-cap auto` then
+caps every axis to the smallest one inside each split, so train and val are
+both ≈1:1:1 across pause / turn / interruption (`0` keeps the natural,
+turn-heavy mix; an integer caps during mining). The pause band is
+`--min-pause-s 0.6` to `--max-pause-s 1.8`, the interrupting clip at least
+`--min-interrupt-s 1.5`, and every row carries its `dialogue_id`.
+
 ## Entry gates and validation
 
 1. **Calibration** (`scripts/duplex_calibration_audit.py`): the unmodified
-   checkpoint's per-axis normalized mean reward must be ≥ 0.4 of the axis
-   band before any gradient step.
+   checkpoint's per-axis normalized mean reward must land inside the mid band
+   — at least 0.30 and at most 0.80 of the axis band (`--max-mean-ratio` for
+   the ceiling) — before any gradient step. A floored axis means the event
+   construction or reward band is misaligned with the checkpoint; a
+   saturated one leaves its groups almost no variance to learn from.
 2. **M0 parity** (`scripts/duplex_m0_parity_check.py`): same-seed episodes
    replay deterministically; the captured pre-truncation joint matches the
    same joint evaluated on the actor logits — per-row |delta| ≤ 0.05 nats and
@@ -151,7 +180,14 @@ decisions, hence `rollout.n=16` groups.
    duplex RL). The trainer aggregates every numeric reward-extra column per
    step — means with NaN-skip, and `inf` latencies surface as
    `<key>_never_share` — so a breach is visible (and the failed-share
-   rises) instead of silently averaged away.
+   rises) instead of silently averaged away. The same loop drops an episode
+   whose scored window an engine-injected silent unit landed in (pacing
+   corrupted: the driver missed the 1 s deadline and the runtime's silence
+   clock injected a unit) onto a mask-0 output flagged
+   `duplex_pacing_corrupted` = 1, while clean episodes report 0, so the
+   trainer's per-step mean `reward/duplex_pacing_corrupted` is the drop
+   rate. A dropped episode's scalar reward (0) still enters its group's
+   mean: verl computes group scores before any mask.
 4. **FDB-v1 rule metrics** over dumped replays
    (`python -m verl_omni.utils.dataset.duplex.fdb_metrics dump.jsonl`).
 

@@ -316,13 +316,7 @@ def main(argv: list[str] | None = None) -> int:
 
     for first, second in pairs:
         event_payload = first.get("event") or {}
-        pause_window = event_payload.get("pause_window_s")
-        event = DuplexEpisodeEvent(
-            axis=event_payload["axis"],
-            pause_window_s=tuple(pause_window) if pause_window else None,
-            user_turn_end_s=event_payload.get("user_turn_end_s"),
-            interrupt_speech_end_s=event_payload.get("interrupt_speech_end_s"),
-        )
+        event = DuplexEpisodeEvent.from_mapping(event_payload)
         trajectory = DuplexTrajectory.assemble(
             session_id=first["session_id"],
             seed=0,

@@ -17,7 +17,10 @@ Rule-reward degeneracy — silence collapse, repetitive speech — is the
 documented failure mode of duplex RL, so the thresholds are defined once
 here and applied per episode by the turn-taking reward scorer (its
 ``duplex_episode_failed`` column); the trainer aggregates the scorer's
-numeric columns per step.
+numeric columns per step. The module also owns the reward bands and the two
+timing definitions every consumer shares — the interruption yield latency
+and the pacing-corruption predicate — so the scorer, the telemetry, the FDB
+metrics and the agent loop cannot drift apart.
 """
 
 from __future__ import annotations
@@ -27,14 +30,36 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from verl_omni.utils.dataset.duplex.trajectory import DuplexTrajectory
+from verl_omni.utils.dataset.duplex.trajectory import (
+    AXIS_INTERRUPTION,
+    AXIS_PAUSE,
+    AXIS_TURN,
+    DuplexEpisodeEvent,
+    DuplexTrajectory,
+)
 
 __all__ = [
     "TRIP_WIRE_DEFAULTS",
+    "TURN_DEADLINE_S",
+    "TURN_FULL_CREDIT_BAND_S",
     "DuplexTripWires",
+    "YIELD_DEADLINE_S",
+    "YIELD_FULL_CREDIT_BAND_S",
     "duplicate_ngram_share",
     "episode_rule_metrics",
+    "interruption_yield_latency",
+    "pacing_corrupted",
 ]
+
+#: Latency within this band earns full credit (seconds); beyond the deadline
+#: the penalty saturates at -1 past the deadline.
+TURN_FULL_CREDIT_BAND_S = 1.0
+TURN_DEADLINE_S = 3.0
+#: The yield latency anchors to the interrupting speech *onset*. At the 1 Hz
+#: decision cadence the first unit after the anchor decides a second later,
+#: so a shorter band would be unreachable.
+YIELD_FULL_CREDIT_BAND_S = 1.0
+YIELD_DEADLINE_S = 3.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,7 +102,8 @@ def episode_rule_metrics(
         Flat metrics: ``num_units``, ``speak_ratio``, ``silence_share``,
         ``duplicate_ngram_share``, and the per-axis latency family the rewards
         share (``pause_violations``, ``turn_latency_s``, ``yield_latency_s``;
-        ``nan`` when the episode's axis does not measure one).
+        ``nan`` when the episode's axis does not measure one, ``inf`` for a
+        saturated latency).
     """
     decisions = trajectory.unit_decisions(listen_token_id=listen_token_id)
     num_units = len(decisions)
@@ -105,12 +131,12 @@ def _axis_latencies(trajectory: DuplexTrajectory, decisions: Sequence[Any]) -> d
         "turn_latency_s": float("nan"),
         "yield_latency_s": float("nan"),
     }
-    if event.axis == "pause" and event.pause_window_s is not None:
+    if event.axis == AXIS_PAUSE and event.pause_window_s is not None:
         start, end = event.pause_window_s
         metrics["pause_violations"] = float(
             sum(1 for decision in decisions if decision.speaking and start <= decision.time_s < end)
         )
-    elif event.axis == "turn" and event.user_turn_end_s is not None:
+    elif event.axis == AXIS_TURN and event.user_turn_end_s is not None:
         if first_speak is not None and first_speak.time_s >= event.user_turn_end_s:
             metrics["turn_latency_s"] = first_speak.time_s - event.user_turn_end_s
         else:
@@ -118,17 +144,92 @@ def _axis_latencies(trajectory: DuplexTrajectory, decisions: Sequence[Any]) -> d
             # ends is a barge-in on the user, not a floor take — saturate like
             # never speaking.
             metrics["turn_latency_s"] = float("inf")
-    elif event.axis == "interruption" and event.interrupt_speech_end_s is not None:
-        deadline = event.interrupt_speech_end_s
-        after = [decision for decision in decisions if decision.time_s >= deadline]
-        silent = next((decision for decision in after if not decision.speaking), None)
-        if silent is not None:
-            metrics["yield_latency_s"] = silent.time_s - deadline
-        elif not any(decision.speaking for decision in decisions):
-            metrics["yield_latency_s"] = 0.0  # never spoke: nothing to yield
-        else:
-            metrics["yield_latency_s"] = float("inf")
+    elif event.axis == AXIS_INTERRUPTION:
+        latency = interruption_yield_latency(
+            event,
+            speaking_times=[decision.time_s for decision in decisions if decision.speaking],
+            silent_times=[decision.time_s for decision in decisions if not decision.speaking],
+        )
+        metrics["yield_latency_s"] = float("inf") if latency is None else latency
     return metrics
+
+
+def interruption_yield_latency(
+    event: DuplexEpisodeEvent,
+    *,
+    speaking_times: Sequence[float],
+    silent_times: Sequence[float],
+) -> float | None:
+    """The yield latency from the interrupting speech onset, or ``None``.
+
+    The policy was interrupted only if it was speaking when the user's speech
+    started: a policy whose first speak decision falls at or after the onset,
+    or that never spoke, fails the axis's silence floor and takes the floor
+    score whatever it does afterwards — ``None``. Otherwise the latency runs
+    from the onset to the first silent decision at or after it; ``inf`` when
+    the policy talks on through the rest of the episode.
+
+    Args:
+        event: The interruption episode's annotation (anchors on the unit
+            clock — the live re-anchored one, not the corpus-relative mining
+            value).
+        speaking_times: ``time_s`` of the speaking units, in unit order.
+        silent_times: ``time_s`` of the non-speaking units, in unit order.
+
+    Returns:
+        The latency in seconds, ``inf`` for no yield, or ``None`` when the
+        silence floor failed.
+    """
+    onset = event.interrupt_speech_onset_s
+    if not speaking_times or speaking_times[0] >= onset:
+        return None
+    yield_at = next((time_s for time_s in silent_times if time_s >= onset), None)
+    return float("inf") if yield_at is None else yield_at - onset
+
+
+def pacing_corrupted(
+    event: DuplexEpisodeEvent,
+    engine_unit_times: Sequence[float],
+    *,
+    turn_deadline_s: float = TURN_DEADLINE_S,
+    yield_deadline_s: float = YIELD_DEADLINE_S,
+) -> bool:
+    """Whether an engine-injected silent unit landed inside the scored window.
+
+    The driver submits one chunk per unit on the native 1 s cadence; when it
+    misses the deadline the runtime's silence-continuation clock injects a
+    unit of its own (``origin=engine``). The unit replays faithfully, but its
+    timing is the runtime's, so a window it falls inside cannot be scored:
+    the agent loop drops the episode (``duplex_pacing_corrupted`` = 1.0 on its
+    reward extras — the trainer's per-step mean of that column,
+    ``reward/duplex_pacing_corrupted``, is the drop rate) and the scorer
+    classifies a replay the same way. An engine unit strictly outside the
+    window leaves the episode scoreable.
+
+    Args:
+        event: The episode's annotation (anchors on the unit clock).
+        engine_unit_times: ``time_s`` of the engine-origin units, seconds
+            from the episode's first unit.
+        turn_deadline_s: The turn window's end, offset from
+            ``user_turn_end_s``.
+        yield_deadline_s: The interruption window's end, offset from the
+            interrupting speech onset.
+
+    Returns:
+        True when any engine unit's time lies in the scored window
+        (``[pause_start, pause_end)``, ``[user_turn_end_s, +turn_deadline_s)``
+        or ``[interrupt_speech_onset_s, +yield_deadline_s)``).
+    """
+    if event.axis == AXIS_PAUSE:
+        window = event.pause_window_s
+    elif event.axis == AXIS_TURN:
+        window = (event.user_turn_end_s, event.user_turn_end_s + turn_deadline_s)
+    elif event.axis == AXIS_INTERRUPTION:
+        window = (event.interrupt_speech_onset_s, event.interrupt_speech_onset_s + yield_deadline_s)
+    else:
+        raise ValueError(f"unknown duplex event axis {event.axis!r}")
+    start, end = window
+    return any(start <= time_s < end for time_s in engine_unit_times)
 
 
 def duplicate_ngram_share(token_ids: Sequence[int], *, ngram: int = 3) -> float:

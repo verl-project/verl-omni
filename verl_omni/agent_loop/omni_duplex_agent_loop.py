@@ -24,6 +24,12 @@ a :class:`DuplexTrajectory`, and hands it to the adapter for the
 model-specific replay build and the standard ``AgentLoopOutput`` mapping
 (the validated qwen3_tts transport pattern: one namespaced ``extra_fields``
 replay key).
+
+An episode whose scored window an engine-injected silent unit landed in
+(pacing corrupted — the driver missed the 1 s deadline and the runtime's
+silence clock took the unit) is dropped onto the degenerate mask-0 output:
+its window is corpus-time and cannot be scored. The drop rate is the
+trainer's per-step mean of ``reward/duplex_pacing_corrupted``.
 """
 
 from __future__ import annotations
@@ -32,7 +38,6 @@ import json
 import logging
 import os
 from collections.abc import Mapping
-from dataclasses import replace
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -41,12 +46,18 @@ from verl.experimental.agent_loop.agent_loop import AgentLoopBase, AgentLoopOutp
 from verl.utils.profiler import simple_timer
 
 from verl_omni.pipelines.model_base import OmniRolloutPipelineBase
+from verl_omni.utils.dataset.duplex.records import ORIGIN_ENGINE
 from verl_omni.utils.dataset.duplex.replay import (
     DEFAULT_SESSION_INSTRUCTIONS,
     DUPLEX_REPLAY_KEY,
     DuplexReplay,
 )
-from verl_omni.utils.dataset.duplex.trajectory import DuplexTrajectory
+from verl_omni.utils.dataset.duplex.telemetry import pacing_corrupted
+from verl_omni.utils.dataset.duplex.trajectory import (
+    DuplexEpisodeEvent,
+    DuplexTrajectory,
+    reanchor_interruption,
+)
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -181,13 +192,19 @@ class OmniDuplexAgentLoop(AgentLoopBase):
                     run_spec = self._run_spec(episode, seed=seed, sampling_params=sampling_params)
                     result = await server.run_duplex_episode.remote(run_spec)
             except Exception as error:
+                logger.error(
+                    "duplex episode %s failed twice (%s: %s); emitting a degenerate mask-0 episode",
+                    run_spec["episode_id"],
+                    type(error).__name__,
+                    error,
+                )
                 return self._degenerate_output(
                     episode,
                     seed=seed,
                     instructions=instructions,
                     step=step,
                     metrics=metrics,
-                    error=error,
+                    reward_extra_info={"duplex_episode_failed": 1.0},
                 )
             finally:
                 await load_balancer.release_server.remote(server_id=server_id, request_id=request_id)
@@ -201,17 +218,38 @@ class OmniDuplexAgentLoop(AgentLoopBase):
         trajectory = DuplexTrajectory.assemble(
             session_id=result["session_id"],
             seed=seed,
-            event=_episode_event(result["event"] or episode.get("event") or {}),
+            event=DuplexEpisodeEvent.from_mapping(result["event"] or episode.get("event") or {}),
             record_set_wires=result["record_sets"],
             client_audio_chunks=client_chunks,
         )
-        trajectory = _reanchor_interruption(trajectory, result.get("speech_chunk_end_index"), seed)
+        trajectory = reanchor_interruption(
+            trajectory,
+            speech_chunk_start_index=result.get("speech_chunk_start_index"),
+            speech_chunk_end_index=result.get("speech_chunk_end_index"),
+            seed=seed,
+        )
         replay = self.rollout_adapter.build_duplex_replay(
             trajectory,
             processor=self.processor,
             instructions=instructions,
             model_path=self._actor_model_path(),
         )
+        engine_unit_times = [layout.time_s for layout in replay.unit_layouts if layout.origin == ORIGIN_ENGINE]
+        # Default deadlines: the reward's deadline overrides are the scorer's, not the loop's.
+        if pacing_corrupted(trajectory.event, engine_unit_times):
+            logger.warning(
+                "duplex episode %s: an engine-injected silent unit fell inside the scored window; "
+                "dropping it as a degenerate mask-0 episode",
+                run_spec["episode_id"],
+            )
+            return self._degenerate_output(
+                episode,
+                seed=seed,
+                instructions=instructions,
+                step=step,
+                metrics=metrics,
+                reward_extra_info={"duplex_episode_failed": 1.0, "duplex_pacing_corrupted": 1.0},
+            )
         output = AgentLoopOutput(
             prompt_ids=[0],
             response_ids=[],
@@ -220,7 +258,14 @@ class OmniDuplexAgentLoop(AgentLoopBase):
             metrics=metrics,
             # verl's _compute_metrics reads these tags off every trajectory
             # (off-policy staleness); None would crash the int cast.
-            extra_fields={"duplex_replay_payload": replay, "min_global_steps": step, "max_global_steps": step},
+            extra_fields={
+                "duplex_replay_payload": replay,
+                "min_global_steps": step,
+                "max_global_steps": step,
+                # The clean episode's entry of the drop-rate column; the scorer
+                # reports the same flag from the replay it scores.
+                "reward_extra_info": {"duplex_pacing_corrupted": 0.0},
+            },
         )
         output = self._postprocess(output)
         policy_length = len(output.response_ids)
@@ -250,22 +295,25 @@ class OmniDuplexAgentLoop(AgentLoopBase):
         instructions: str,
         step: Any,
         metrics: dict[str, Any],
-        error: Exception,
+        reward_extra_info: dict[str, float],
     ) -> AgentLoopOutput:
-        """The mask-0 episode for a twice-failed drive.
+        """The mask-0 episode the loop emits instead of a trainable one.
 
         Bounded episodes must not poison the whole rollout group: the output
         carries an empty (zero-unit) replay payload, a zero loss mask, a zero
-        reward score — which also keeps the scorer off the broken payload —
-        and a ``duplex_episode_failed`` reward extra so the trainer's
-        per-step aggregation surfaces the failure share.
+        reward score — which also keeps the scorer off the empty payload — and
+        ``reward_extra_info``, whose ``duplex_episode_failed`` = 1.0 marks the
+        episode as dropped (the trainer's per-step mean is the dropped share)
+        alongside the cause's own column.
+
+        Args:
+            episode: The dataset episode the drive failed on.
+            seed: The seed of the failed drive.
+            instructions: The session's system text (the replay context).
+            step: The trainer's global step tag.
+            metrics: The drive's timing metrics.
+            reward_extra_info: The dropped episode's reward-extra columns.
         """
-        logger.error(
-            "duplex episode %s failed twice (%s: %s); emitting a degenerate mask-0 episode",
-            episode.get("episode_id"),
-            type(error).__name__,
-            error,
-        )
         replay = DuplexReplay(
             session_id=f"failed-{episode.get('episode_id', 'unknown')}",
             seed=seed,
@@ -293,7 +341,7 @@ class OmniDuplexAgentLoop(AgentLoopBase):
                 "duplex_replay_payload": replay,
                 "min_global_steps": step,
                 "max_global_steps": step,
-                "reward_extra_info": {"duplex_episode_failed": 1.0},
+                "reward_extra_info": dict(reward_extra_info),
             },
         )
         return self._postprocess(output)
@@ -360,47 +408,3 @@ def _json_dump_value(value: Any) -> Any:
     if callable(tolist):
         return tolist()
     raise TypeError(f"duplex replay dump: {type(value).__name__} is not JSON-serializable")
-
-
-def _reanchor_interruption(trajectory: DuplexTrajectory, speech_chunk_end_index: Any, seed: int):
-    """Rewrite an interruption episode's yield deadline onto the unit clock.
-
-    Mining writes the corpus-relative end of the interrupting speech, but the
-    driver injects that speech relative to the policy's own speak onset — the
-    driver reports which fed chunk closed the speech, and the i-th fed chunk
-    maps one-to-one onto the i-th client-origin unit decision, so the anchor
-    becomes that decision's engine emission time. Non-interruption episodes
-    and missing indices pass through unchanged.
-    """
-    if trajectory.event.axis != "interruption" or speech_chunk_end_index is None:
-        return trajectory
-    index = int(speech_chunk_end_index)
-    client_decisions = [
-        decision for decision in trajectory.unit_decisions(listen_token_id=-1) if decision.origin == "client"
-    ]
-    if not 1 <= index <= len(client_decisions):
-        raise ValueError(
-            f"duplex episode {trajectory.session_id}: speech-end chunk index {index} outside the "
-            f"{len(client_decisions)} fed chunks; the driver and the records disagree"
-        )
-    anchored = replace(trajectory.event, interrupt_speech_end_s=client_decisions[index - 1].time_s)
-    return DuplexTrajectory.assemble(
-        session_id=trajectory.session_id,
-        seed=seed,
-        event=anchored,
-        record_set_wires=[record_set.to_wire() for record_set in trajectory.record_sets],
-        client_audio_chunks=list(trajectory.client_audio_chunks),
-    )
-
-
-def _episode_event(event: dict[str, Any]) -> Any:
-    """Rebuild the episode annotation from the server-echoed mapping."""
-    from verl_omni.utils.dataset.duplex.trajectory import DuplexEpisodeEvent
-
-    pause_window = event.get("pause_window_s")
-    return DuplexEpisodeEvent(
-        axis=str(event["axis"]),
-        pause_window_s=tuple(pause_window) if pause_window else None,
-        user_turn_end_s=event.get("user_turn_end_s"),
-        interrupt_speech_end_s=event.get("interrupt_speech_end_s"),
-    )

@@ -25,7 +25,9 @@ one engine-resident session per episode next to the engine process:
   paced — every concurrent session's next submit must beat the unit deadline
   or the runtime's silence-continuation clock injects unscheduled units);
 - watch ``response.speak`` to key interruption injection to the policy's own
-  speak onset — the harness never cancels model output;
+  speak onset — the harness never cancels model output — and report the
+  fed-chunk indices bracketing the interrupting speech (the trainer anchors
+  the yield reward's onset and end onto them);
 - make no in-flight collects (the post-fix engine spills every sealed scope
   into a terminal cache before the next seal, so mid-episode collection is
   structurally racy): after close, drain the terminal cache until the engine
@@ -138,8 +140,12 @@ class DuplexStrategy(ARStrategy):
 
         Returns:
             ``{"episode_id", "session_id", "status", "record_sets": [wire],
-            "event": {...}, "client_chunks": [[float], ...]}`` — the drained
-            scopes in chronological order plus every chunk the driver fed.
+            "event": {...}, "client_chunks": [[float], ...],
+            "speech_chunk_start_index", "speech_chunk_end_index"}`` — the drained
+            scopes in chronological order plus every chunk the driver fed; the
+            two indices are 1-based in fed order (interruption episodes only,
+            else ``None``): the interrupting clip's first speech-carrying chunk
+            and its last chunk.
 
         Raises:
             DuplexEpisodeError: On capture failures (``action_capture_*``),
@@ -149,10 +155,7 @@ class DuplexStrategy(ARStrategy):
         duplex_omni = self._require_duplex_client()
         episode_id = str(run_spec["episode_id"])
         record_wires: list[dict[str, Any]] = []
-        # 1-based index of the last fed chunk carrying the interrupting
-        # speech (interruption episodes); the trainer maps it onto the unit
-        # clock, because the injection point keys to the policy's own onset.
-        speech_chunk_end_index: int | None = None
+        speech_chunk_span: tuple[int, int] | None = None
         session = None
         try:
             # No ``instructions`` key: an explicit value silences the engine's
@@ -171,7 +174,7 @@ class DuplexStrategy(ARStrategy):
             speak_onset: dict[str, float] = {}
             consumer = asyncio.create_task(self._consume_events(session, speak_onset, episode_id))
             fed_chunks: list[list[float]] = []
-            speech_chunk_end_index = await self._feed_episode(session, run_spec, speak_onset, fed_chunks)
+            speech_chunk_span = await self._feed_episode(session, run_spec, speak_onset, fed_chunks)
             # Let the tail play out; the consumer stops at close.
             await asyncio.sleep(float(run_spec.get("tail_horizon_s", _DEFAULT_TAIL_HORIZON_S)))
             await session.close(reason="client_close")
@@ -200,7 +203,8 @@ class DuplexStrategy(ARStrategy):
             "record_sets": record_wires,
             "event": dict(run_spec.get("event") or {}),
             "client_chunks": fed_chunks,
-            "speech_chunk_end_index": speech_chunk_end_index,
+            "speech_chunk_start_index": speech_chunk_span[0] if speech_chunk_span else None,
+            "speech_chunk_end_index": speech_chunk_span[1] if speech_chunk_span else None,
         }
 
     def _require_duplex_client(self) -> Any:
@@ -271,7 +275,7 @@ class DuplexStrategy(ARStrategy):
         run_spec: Mapping[str, Any],
         speak_onset: dict[str, float],
         fed_chunks: list[list[float]],
-    ) -> int | None:
+    ) -> tuple[int, int] | None:
         """Feed the episode's chunks at the native 1 s cadence.
 
         Pause/turn episodes feed their user-track window straight through.
@@ -280,24 +284,25 @@ class DuplexStrategy(ARStrategy):
         interrupting speech, then ``inject.tail_silence_chunks`` of silence —
         the harness never cancels model output, so yielding stays the model's
         own decision. A model that never speaks within the horizon still gets
-        the speech fed (the reward scores never-spoke as nothing-to-yield).
+        the speech fed (the reward's silence floor takes care of it).
 
         Returns:
-            For interruption episodes, the 1-based index (in fed order) of
-            the last chunk carrying the interrupting speech; ``None``
-            otherwise.
+            For interruption episodes, ``(start, end)``: the 1-based indices,
+            in fed order, of the interrupting clip's first speech-carrying
+            chunk and of its last chunk — the i-th index maps onto the i-th
+            client-origin unit decision, where the trainer re-anchors the
+            yield reward's onset and end. ``None`` otherwise.
         """
         chunks = list(run_spec.get("chunks") or [])
         inject = run_spec.get("inject")
         loop = asyncio.get_running_loop()
         schedule = loop.time() + _DUPLEX_CHUNK_SECONDS
-        speech_chunk_end_index: int | None = None
+        speech_chunk_span: tuple[int, int] | None = None
         # Each paced append is its own input unit, so a commit sent after the
         # whole feed is dropped as silence: it rides the last speech chunk.
         commit = bool(run_spec.get("commit", False))
-        last_speech_index = max(
-            (index for index, chunk in enumerate(chunks) if bool(chunk.get("is_speech", True))), default=None
-        )
+        speech_indices = [index for index, chunk in enumerate(chunks) if bool(chunk.get("is_speech", True))]
+        last_speech_index = speech_indices[-1] if speech_indices else None
 
         async def _feed_chunks(feed_chunks: list[dict[str, Any]]) -> None:
             nonlocal schedule
@@ -310,6 +315,11 @@ class DuplexStrategy(ARStrategy):
         if inject is None:
             await _feed_chunks(chunks)
         else:
+            if last_speech_index is None:
+                raise DuplexEpisodeError(
+                    f"duplex episode {run_spec['episode_id']}: the interrupting clip carries no "
+                    "is_speech chunk; the mined window must overlap the user's words"
+                )
             delay = float(inject.get("delay_s", 0.0))
             try:
                 onset = await self._await_speak_onset(speak_onset, run_spec)
@@ -328,16 +338,16 @@ class DuplexStrategy(ARStrategy):
                 schedule += _DUPLEX_CHUNK_SECONDS
                 schedule = max(schedule, loop.time())
             schedule = max(schedule, onset + delay)
+            # Both anchors ride the fed-chunk index: the clip's first and last
+            # speech-carrying chunks open and close the speech (the tail is silence).
+            speech_chunk_span = (len(fed_chunks) + speech_indices[0] + 1, len(fed_chunks) + last_speech_index + 1)
             await _feed_chunks(chunks)
-            # Everything fed so far is the interrupting speech; its last chunk
-            # closes the speech (the trainer re-anchors onto this unit).
-            speech_chunk_end_index = len(fed_chunks)
             for _ in range(int(inject.get("tail_silence_chunks", 2))):
                 await self._submit_at(
                     session, {"pcm": _silence_chunk(), "is_speech": False}, schedule, run_spec, fed_chunks
                 )
                 schedule += _DUPLEX_CHUNK_SECONDS
-        return speech_chunk_end_index
+        return speech_chunk_span
 
     async def _await_speak_onset(self, speak_onset: dict[str, float], run_spec: Mapping[str, Any]) -> float:
         """Wait for the policy's first speak decision, bounded by the horizon."""

@@ -17,9 +17,11 @@ CPU rule rewards computed from timestamps only — no VAD model, no judge: the
 pause axis penalizes speaking inside the tagged pause window; the turn axis
 penalizes the delay from the user's turn end to the model's speech onset with
 a tuned full-credit band; the interruption axis penalizes the delay from the
-end of the interrupting speech to the model's return to silence with a tuned
-deadline. Each episode carries exactly one axis; the score is that axis's
-reward, and the raw measurements ride the returned dict as metrics.
+onset of the interrupting speech to the model's return to silence with a
+tuned deadline, and floors a policy that was not speaking when the
+interruption began (it was never interrupted — the axis's silence floor).
+Each episode carries exactly one axis; the score is that axis's reward, and
+the raw measurements ride the returned dict as metrics.
 
 Selected from the run config (see the reward rules):
 
@@ -33,17 +35,21 @@ import math
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from verl_omni.utils.dataset.duplex.records import ORIGIN_ENGINE
 from verl_omni.utils.dataset.duplex.replay import DUPLEX_REPLAY_KEY
-from verl_omni.utils.dataset.duplex.telemetry import TRIP_WIRE_DEFAULTS, duplicate_ngram_share
+from verl_omni.utils.dataset.duplex.telemetry import (
+    TRIP_WIRE_DEFAULTS,
+    TURN_DEADLINE_S,
+    TURN_FULL_CREDIT_BAND_S,
+    YIELD_DEADLINE_S,
+    YIELD_FULL_CREDIT_BAND_S,
+    duplicate_ngram_share,
+    interruption_yield_latency,
+    pacing_corrupted,
+)
+from verl_omni.utils.dataset.duplex.trajectory import DuplexEpisodeEvent
 
 __all__ = ["compute_score_duplex_turn_taking"]
-
-#: Latency within this band earns full credit (seconds); beyond the deadline
-#: the penalty saturates at -1 (RFC #905 §3.5, "tuned full-credit band").
-TURN_FULL_CREDIT_BAND_S = 1.0
-TURN_DEADLINE_S = 3.0
-YIELD_FULL_CREDIT_BAND_S = 0.5
-YIELD_DEADLINE_S = 2.0
 
 
 def _linear_penalty(latency_s: float, full_credit_band_s: float, deadline_s: float) -> float:
@@ -81,10 +87,14 @@ def compute_score_duplex_turn_taking(
         metrics verbatim. Alongside the per-axis measurements it always
         carries the trip-wire columns (``duplex_speak_ratio``,
         ``duplex_silence_share``, ``duplex_duplicate_ngram_share``; the
-        telemetry definitions) and ``duplex_episode_failed`` (1.0 when any
+        telemetry definitions), ``duplex_episode_failed`` (1.0 when any
         pre-registered threshold in ``telemetry.TRIP_WIRE_DEFAULTS`` is
         breached — the per-episode degeneracy trip-wire the trainer
-        aggregates per step).
+        aggregates per step) and ``duplex_pacing_corrupted`` (1.0 when an
+        engine-injected silent unit fell inside the scored window, evaluated
+        with these deadline overrides; the agent loop drops an episode on the
+        same predicate at the default deadlines, so a lengthened deadline
+        can flag here an episode the loop kept).
     """
     replay = extra_info.get(DUPLEX_REPLAY_KEY) if isinstance(extra_info, dict) else None
     if not isinstance(replay, dict):
@@ -92,49 +102,47 @@ def compute_score_duplex_turn_taking(
             "duplex turn-taking rewards require the episode replay under "
             f"extra_info[{DUPLEX_REPLAY_KEY!r}]; the duplex agent loop must stamp it"
         )
-    event = replay.get("event") or {}
-    axis = str(event.get("axis", ""))
+    event_payload = replay.get("event") or {}
     layouts = replay.get("unit_layouts") or []
     if not layouts:
         raise ValueError(f"{DUPLEX_REPLAY_KEY!r} carries no unit timeline; refusing to score a broken episode")
+    event = DuplexEpisodeEvent.from_mapping(event_payload)
     turn_band = float(kwargs.get("turn_full_credit_band_s", TURN_FULL_CREDIT_BAND_S))
     turn_deadline = float(kwargs.get("turn_deadline_s", TURN_DEADLINE_S))
     yield_band = float(kwargs.get("yield_full_credit_band_s", YIELD_FULL_CREDIT_BAND_S))
     yield_deadline = float(kwargs.get("yield_deadline_s", YIELD_DEADLINE_S))
 
-    metrics: dict[str, Any] = {"duplex_axis": axis, "duplex_num_units": len(layouts)}
-    if axis == "pause":
-        start, end = event["pause_window_s"]
-        violated = any(layout["speaking"] and start <= layout["time_s"] < end for layout in layouts)
+    metrics: dict[str, Any] = {"duplex_axis": event.axis, "duplex_num_units": len(layouts)}
+    speaking_times = [layout["time_s"] for layout in layouts if layout["speaking"]]
+    silent_times = [layout["time_s"] for layout in layouts if not layout["speaking"]]
+    if event.axis == "pause":
+        start, end = event.pause_window_s
+        violated = any(start <= time_s < end for time_s in speaking_times)
         metrics["duplex_pause_violation"] = float(violated)
         score = -1.0 if violated else 0.0
-    elif axis == "turn":
-        turn_end = float(event["user_turn_end_s"])
-        onset = next((layout["time_s"] for layout in layouts if layout["speaking"]), None)
-        if onset is None or onset < turn_end:
+    elif event.axis == "turn":
+        turn_end = event.user_turn_end_s
+        first_speak = speaking_times[0] if speaking_times else None
+        if first_speak is None or first_speak < turn_end:
             # Speaking before the user's utterance ends is a barge-in on the
             # user, not a floor take: saturate like never speaking (the axis's
             # worst score, -1 past the deadline).
             latency = float("inf")
         else:
-            latency = onset - turn_end
+            latency = first_speak - turn_end
         score = _linear_penalty(latency, turn_band, turn_deadline)
         metrics["duplex_turn_latency_s"] = latency
-        metrics["duplex_turn_took_floor"] = float(onset is not None)
-    elif axis == "interruption":
-        speech_end = float(event["interrupt_speech_end_s"])
-        silent_after = [layout for layout in layouts if not layout["speaking"] and layout["time_s"] >= speech_end]
-        ever_spoke = any(layout["speaking"] for layout in layouts)
-        if not ever_spoke:
-            latency = 0.0  # nothing to yield
-        elif silent_after:
-            latency = max(0.0, silent_after[0]["time_s"] - speech_end)
-        else:
-            latency = float("inf")
-        score = _linear_penalty(latency, yield_band, yield_deadline)
-        metrics["duplex_yield_latency_s"] = latency
+        metrics["duplex_turn_took_floor"] = float(first_speak is not None)
+    elif event.axis == "interruption":
+        latency = interruption_yield_latency(event, speaking_times=speaking_times, silent_times=silent_times)
+        score = -1.0 if latency is None else _linear_penalty(latency, yield_band, yield_deadline)
+        metrics["duplex_yield_latency_s"] = float("inf") if latency is None else latency
     else:
-        raise ValueError(f"duplex replay carries unknown axis {axis!r}")
+        raise ValueError(f"duplex replay carries unknown axis {event.axis!r}")
+    engine_unit_times = [layout["time_s"] for layout in layouts if layout.get("origin") == ORIGIN_ENGINE]
+    metrics["duplex_pacing_corrupted"] = float(
+        pacing_corrupted(event, engine_unit_times, turn_deadline_s=turn_deadline, yield_deadline_s=yield_deadline)
+    )
     metrics.update(_trip_wire_metrics(replay, layouts))
     return {"score": score, **metrics}
 

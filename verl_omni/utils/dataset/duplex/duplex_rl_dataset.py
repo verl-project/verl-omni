@@ -14,7 +14,9 @@
 """The duplex episode dataset: parquet episode specs → fed PCM chunks.
 
 Rows are mined episode specs (see :mod:`verl_omni.utils.dataset.duplex.mining`)
-plus the user track's word timestamps inside the window. ``__getitem__`` loads
+plus the user track's word timestamps inside the window and the source
+``dialogue_id`` (both written by ``scripts/duplex_build_episodes.py``; rows
+built before the column existed carry none). ``__getitem__`` loads
 the user track once, cuts the episode window, and emits the native-cadence
 1 s chunks with speech hints — everything ``omni_duplex_agent`` needs to drive
 one real duplex session. The user track's content never reacts to the policy
@@ -155,6 +157,7 @@ class DuplexEpisodeDataset(Dataset):
         # ambiguous, so normalize explicitly.
         words = row.get("user_words")
         words = [] if words is None else list(words)
+        dialogue_id = row.get("dialogue_id")
         window_words = [
             {"start_s": float(word["start_s"]), "end_s": float(word["end_s"])}
             for word in words
@@ -174,6 +177,7 @@ class DuplexEpisodeDataset(Dataset):
                 "axis": spec.event.axis,
                 "pause_window_s": list(spec.event.pause_window_s) if spec.event.pause_window_s else None,
                 "user_turn_end_s": spec.event.user_turn_end_s,
+                "interrupt_speech_onset_s": spec.event.interrupt_speech_onset_s,
                 "interrupt_speech_end_s": spec.event.interrupt_speech_end_s,
             },
             "chunks": [{"pcm": chunk["pcm"], "is_speech": chunk["is_speech"]} for chunk in chunks],
@@ -197,6 +201,9 @@ class DuplexEpisodeDataset(Dataset):
             "reward_model": {"ground_truth": ""},
             # Per-axis source tag: validation metrics split per axis.
             "data_source": f"dailytalk-duplex-{spec.axis}",
+            # The mined dialogue (``dialogue_id`` on the parquet); rows built
+            # before the column existed carry none.
+            "dialogue_id": None if pd.isna(dialogue_id) else str(dialogue_id),
             "index": int(index),
             # TODO(data): drop once DataProto retires the non-empty-batch requirement.
             "dummy_tensor": torch.tensor([0], dtype=torch.uint8),

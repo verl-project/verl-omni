@@ -111,6 +111,7 @@ class DuplexEpisodeSpec:
                 "axis": self.event.axis,
                 "pause_window_s": self.event.pause_window_s,
                 "user_turn_end_s": self.event.user_turn_end_s,
+                "interrupt_speech_onset_s": self.event.interrupt_speech_onset_s,
                 "interrupt_speech_end_s": self.event.interrupt_speech_end_s,
             },
             "provenance": dict(self.provenance),
@@ -133,24 +134,15 @@ class DuplexEpisodeSpec:
             values = list(value)
             return (float(values[0]), float(values[1])) if len(values) == 2 else None
 
-        def _optional_float(value: Any) -> float | None:
-            return None if value is None else float(value)
-
-        event = payload["event"]
         return cls(
             episode_id=str(payload["episode_id"]),
             axis=str(payload["axis"]),
             user_audio_ref=str(payload["user_audio_ref"]),
             start_s=float(payload["start_s"]),
             end_s=float(payload["end_s"]),
-            event=DuplexEpisodeEvent(
-                axis=str(event["axis"]),
-                pause_window_s=_pair(event.get("pause_window_s")),
-                user_turn_end_s=_optional_float(event.get("user_turn_end_s")),
-                interrupt_speech_end_s=_optional_float(event.get("interrupt_speech_end_s")),
-            ),
+            event=DuplexEpisodeEvent.from_mapping(payload["event"]),
             interrupt_speech_s=_pair(payload.get("interrupt_speech_s")),
-            inject_delay_s=_optional_float(payload.get("inject_delay_s")),
+            inject_delay_s=(None if payload.get("inject_delay_s") is None else float(payload["inject_delay_s"])),
             provenance=dict(payload.get("provenance") or {}),
         )
 
@@ -169,17 +161,26 @@ def _utterances(words: Sequence[WordTimestamp], *, gap_s: float) -> list[list[Wo
 def mine_pause_candidates(
     user_words: Sequence[WordTimestamp],
     *,
-    min_pause_s: float = 0.8,
+    min_pause_s: float = 0.6,
+    max_pause_s: float = 1.8,
     lead_s: float = 2.0,
     tail_s: float = 1.5,
     utterance_gap_s: float = 1.0,
 ) -> list[_SegmentCandidate]:
-    """Pause windows: intra-utterance silences of at least ``min_pause_s``."""
+    """Pause windows: same-speaker silences of ``min_pause_s`` to ``max_pause_s``.
+
+    Words are grouped into utterances at silences longer than
+    ``max(utterance_gap_s, max_pause_s)``, so a pause always has the same
+    speaker resuming after it; a longer silence is an utterance boundary
+    instead, which the turn miner (splitting at ``utterance_gap_s``) labels a
+    turn. A silence between ``utterance_gap_s`` and ``max_pause_s`` therefore
+    mines both a pause (the speaker resumes) and a turn (the utterance ended).
+    """
     candidates: list[_SegmentCandidate] = []
-    for utterance in _utterances(user_words, gap_s=utterance_gap_s):
+    for utterance in _utterances(user_words, gap_s=max(utterance_gap_s, max_pause_s)):
         for left, right in zip(utterance, utterance[1:], strict=False):
             silence = right.start_s - left.end_s
-            if silence < min_pause_s:
+            if silence < min_pause_s or silence > max_pause_s:
                 continue
             candidates.append(
                 _SegmentCandidate(
@@ -223,18 +224,20 @@ def mine_interruption_candidates(
     user_words: Sequence[WordTimestamp],
     model_words: Sequence[WordTimestamp],
     *,
-    min_interrupt_s: float = 0.8,
+    min_interrupt_s: float = 1.5,
     inject_delay_s: float = 0.6,
     tail_s: float = 3.0,
     utterance_gap_s: float = 1.0,
 ) -> list[_SegmentCandidate]:
-    """Interruption windows: user speech timed against a model utterance.
+    """Interruption windows: user speech of at least ``min_interrupt_s`` timed
+    against a model utterance.
 
     The corpus's model-track timing only decides *which* user utterance is a
     plausible interrupt (it overlaps a model utterance in the corpus); the
     live injection point is the policy's own speak onset plus
     ``inject_delay_s``, so the constructed overlap lands wherever the policy
-    actually speaks.
+    actually speaks. The clip must span ``min_interrupt_s`` so the policy has
+    a measurable span to yield during.
     """
     candidates: list[_SegmentCandidate] = []
     model_utterances = _utterances(model_words, gap_s=utterance_gap_s)
@@ -282,7 +285,8 @@ def episode_spec(
     else:
         event = DuplexEpisodeEvent(
             axis=AXIS_INTERRUPTION,
-            interrupt_speech_end_s=(candidate.interrupt_end_s - offset) if candidate.interrupt_end_s else None,
+            interrupt_speech_onset_s=_episode_relative(candidate.interrupt_start_s, offset),
+            interrupt_speech_end_s=_episode_relative(candidate.interrupt_end_s, offset),
         )
     return DuplexEpisodeSpec(
         episode_id=episode_id,
@@ -301,6 +305,10 @@ def episode_spec(
     )
 
 
+def _episode_relative(anchor_s: float | None, offset_s: float) -> float | None:
+    return None if anchor_s is None else anchor_s - offset_s
+
+
 def mine_episodes(
     user_words: Sequence[WordTimestamp],
     model_words: Sequence[WordTimestamp],
@@ -309,6 +317,9 @@ def mine_episodes(
     dialogue_id: str,
     axes: Sequence[str] = (AXIS_PAUSE, AXIS_TURN, AXIS_INTERRUPTION),
     max_window_s: float = 8.0,
+    min_pause_s: float = 0.6,
+    max_pause_s: float = 1.8,
+    min_interrupt_s: float = 1.5,
 ) -> list[DuplexEpisodeSpec]:
     """Mine one dialogue's transcript into bounded episode specs.
 
@@ -321,17 +332,20 @@ def mine_episodes(
         max_window_s: Upper bound on an episode window — the RFC's bounded
             episodes (segment + up to 30 s context) are enforced at session
             admission; mining keeps the fed span itself short.
+        min_pause_s: Shortest same-speaker silence mined as a pause.
+        max_pause_s: Longest same-speaker silence mined as a pause.
+        min_interrupt_s: Shortest user utterance mined as an interrupting clip.
 
     Returns:
         The dialogue's episode specs, ordered by start time.
     """
     candidates: list[_SegmentCandidate] = []
     if AXIS_PAUSE in axes:
-        candidates.extend(mine_pause_candidates(user_words))
+        candidates.extend(mine_pause_candidates(user_words, min_pause_s=min_pause_s, max_pause_s=max_pause_s))
     if AXIS_TURN in axes:
         candidates.extend(mine_turn_candidates(user_words))
     if AXIS_INTERRUPTION in axes:
-        candidates.extend(mine_interruption_candidates(user_words, model_words))
+        candidates.extend(mine_interruption_candidates(user_words, model_words, min_interrupt_s=min_interrupt_s))
     specs: list[DuplexEpisodeSpec] = []
     for index, candidate in enumerate(sorted(candidates, key=lambda item: item.start_s)):
         if candidate.end_s - candidate.start_s > max_window_s:

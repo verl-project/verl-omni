@@ -222,3 +222,8 @@ def listening_then_speaking_wires(
         seed=seed,
     )
     return [listening, speaking]
+
+
+def interruption_event(*, onset_s: float = 2.0, end_s: float = 5.0) -> dict[str, Any]:
+    """An interruption episode's event mapping: the interrupting speech's onset and end."""
+    return {"axis": "interruption", "interrupt_speech_onset_s": onset_s, "interrupt_speech_end_s": end_s}

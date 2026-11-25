@@ -610,6 +610,7 @@ def build_replay(
             "axis": trajectory.event.axis,
             "pause_window_s": trajectory.event.pause_window_s,
             "user_turn_end_s": trajectory.event.user_turn_end_s,
+            "interrupt_speech_onset_s": trajectory.event.interrupt_speech_onset_s,
             "interrupt_speech_end_s": trajectory.event.interrupt_speech_end_s,
         },
         status=trajectory.status,

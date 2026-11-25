@@ -48,7 +48,7 @@ def _turn_event() -> DuplexEpisodeEvent:
 
 
 def _interruption_event() -> DuplexEpisodeEvent:
-    return DuplexEpisodeEvent(axis=AXIS_INTERRUPTION, interrupt_speech_end_s=4.0)
+    return DuplexEpisodeEvent(axis=AXIS_INTERRUPTION, interrupt_speech_onset_s=1.0, interrupt_speech_end_s=4.0)
 
 
 def test_assemble_flattens_scopes_in_order_and_masks_forced_tokens():
@@ -171,6 +171,40 @@ def test_multi_action_units_are_rejected_loudly():
 def test_event_annotation_requires_its_axis_window(axis, kwargs):
     with pytest.raises(ValueError, match="require"):
         DuplexEpisodeEvent(axis=axis, **kwargs)
+
+
+def test_interruption_annotation_requires_the_onset_and_the_end():
+    # The yield latency anchors to the onset; the end alone no longer suffices.
+    with pytest.raises(ValueError, match="require interrupt_speech_onset_s"):
+        DuplexEpisodeEvent(axis=AXIS_INTERRUPTION, interrupt_speech_end_s=4.0)
+    with pytest.raises(ValueError, match="require interrupt_speech_end_s"):
+        DuplexEpisodeEvent(axis=AXIS_INTERRUPTION, interrupt_speech_onset_s=1.0)
+
+
+def test_event_annotation_rebuilds_from_its_stored_mapping():
+    # The parquet struct and the replay payload carry the same keys; numpy
+    # scalars and arrays round-trip like plain floats.
+    interruption = DuplexEpisodeEvent.from_mapping(
+        {
+            "axis": "interruption",
+            "pause_window_s": None,
+            "user_turn_end_s": None,
+            "interrupt_speech_onset_s": np.float32(1.0),
+            "interrupt_speech_end_s": np.float64(4.5),
+        }
+    )
+    assert interruption == DuplexEpisodeEvent(
+        axis=AXIS_INTERRUPTION, interrupt_speech_onset_s=1.0, interrupt_speech_end_s=4.5
+    )
+    pause = DuplexEpisodeEvent.from_mapping({"axis": "pause", "pause_window_s": np.array([1.0, 3.0])})
+    assert pause == DuplexEpisodeEvent(axis=AXIS_PAUSE, pause_window_s=(1.0, 3.0))
+    assert DuplexEpisodeEvent.from_mapping({"axis": "turn", "user_turn_end_s": 2}) == _turn_event()
+    with pytest.raises(ValueError, match="require user_turn_end_s"):
+        DuplexEpisodeEvent.from_mapping({"axis": "turn"})
+    with pytest.raises(ValueError, match=r"\[start, end\] pair"):
+        DuplexEpisodeEvent.from_mapping({"axis": "pause", "pause_window_s": [1.0, 2.0, 3.0]})
+    with pytest.raises(KeyError):
+        DuplexEpisodeEvent.from_mapping({})
 
 
 def test_scopes_may_carry_different_seeds():

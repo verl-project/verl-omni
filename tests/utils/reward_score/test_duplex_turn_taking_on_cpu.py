@@ -15,18 +15,22 @@
 
 import pytest
 
+from tests.utils.dataset.duplex._duplex_fixtures import interruption_event
 from verl_omni.utils.reward_score.duplex_turn_taking import compute_score_duplex_turn_taking
 
 LISTEN_TOKEN_ID = 0
 
 
-def _replay(axis: str, speaking, times=None, content_ids=None):
+def _replay(axis: str, speaking, times=None, content_ids=None, origins=None, event=None):
     times = times or [float(index) for index in range(len(speaking))]
-    event = {
-        "pause": {"axis": "pause", "pause_window_s": [1.0, 3.0]},
-        "turn": {"axis": "turn", "user_turn_end_s": 2.0},
-        "interruption": {"axis": "interruption", "interrupt_speech_end_s": 2.0},
-    }[axis]
+    event = (
+        event
+        or {
+            "pause": {"axis": "pause", "pause_window_s": [1.0, 3.0]},
+            "turn": {"axis": "turn", "user_turn_end_s": 2.0},
+            "interruption": interruption_event(onset_s=2.0, end_s=5.0),
+        }[axis]
+    )
     # Mirror the real replay payload: every unit's action token rides
     # response_ids at the layout's action_position.
     tokens = [
@@ -37,10 +41,20 @@ def _replay(axis: str, speaking, times=None, content_ids=None):
         "event": event,
         "response_ids": tokens,
         "unit_layouts": [
-            {"time_s": time_s, "speaking": speaks, "action_position": index}
+            {
+                "time_s": time_s,
+                "speaking": speaks,
+                "action_position": index,
+                "origin": origins[index] if origins else "client",
+            }
             for index, (time_s, speaks) in enumerate(zip(times, speaking, strict=True))
         ],
     }
+
+
+def _score(axis: str, speaking, times=None, event=None, origins=None, **kwargs):
+    replay = _replay(axis, speaking, times, event=event, origins=origins)
+    return compute_score_duplex_turn_taking("dailytalk", "", "", extra_info={"duplex_replay": replay}, **kwargs)
 
 
 def test_pause_axis_penalizes_speaking_in_the_window():
@@ -83,19 +97,47 @@ def test_turn_axis_penalizes_speaking_before_the_turn_ends():
     assert early["duplex_turn_took_floor"] == 1.0  # it did speak; the timing is what fails
 
 
-def test_interruption_axis_rewards_prompt_yielding():
-    prompt = compute_score_duplex_turn_taking(
-        "dailytalk", "", "", extra_info={"duplex_replay": _replay("interruption", [True, True, False])}
-    )
-    assert prompt["score"] == 0.0  # yielded 1 s after speech end -> inside the band
-    slow = compute_score_duplex_turn_taking(
-        "dailytalk", "", "", extra_info={"duplex_replay": _replay("interruption", [True] * 5)}
-    )
-    assert slow["score"] == -1.0
-    silent = compute_score_duplex_turn_taking(
-        "dailytalk", "", "", extra_info={"duplex_replay": _replay("interruption", [False, False])}
-    )
-    assert silent["score"] == 0.0  # never spoke: nothing to yield
+def test_interruption_axis_anchors_the_yield_latency_to_the_speech_onset():
+    # The interrupting speech starts at 2.0 s; the policy speaks from t=0
+    # (it is the one being interrupted).
+    prompt = _score("interruption", [True, True, True, False])  # silent at 3.0: onset + 1.0
+    assert prompt["score"] == 0.0  # inside the 1 s full-credit band
+    assert prompt["duplex_yield_latency_s"] == pytest.approx(1.0)
+    slow = _score("interruption", [True, True, True, True, False])  # silent at 4.0: onset + 2.0
+    assert slow["score"] == pytest.approx(-0.5)  # halfway from the band to the 3 s deadline
+    assert slow["duplex_yield_latency_s"] == pytest.approx(2.0)
+    never = _score("interruption", [True] * 5)
+    assert never["score"] == -1.0
+    assert never["duplex_yield_latency_s"] == float("inf")
+    # Talking the user down until their speech ends (4.5 s) and falling silent
+    # right after: the onset anchor charges the whole 3.5 s overlap, past the
+    # deadline.
+    talks_over = _score("interruption", [True] * 5 + [False], event=interruption_event(onset_s=1.5, end_s=4.5))
+    assert talks_over["score"] == -1.0
+    assert talks_over["duplex_yield_latency_s"] == pytest.approx(3.5)
+
+
+def test_interruption_axis_floors_a_policy_that_was_not_speaking_at_the_onset():
+    # The silence floor: a policy that never spoke, or whose first speak
+    # decision falls at or after the onset, was never interrupted — -1.0
+    # whatever it does afterwards, the latency saturating like a missed yield.
+    silent = _score("interruption", [False, False, False, False])
+    assert silent["score"] == -1.0
+    assert silent["duplex_yield_latency_s"] == float("inf")
+    late = _score("interruption", [False, False, True, False])  # first speaks at 2.0 == the onset
+    assert late["score"] == -1.0
+    assert late["duplex_yield_latency_s"] == float("inf")
+
+
+def test_pacing_corrupted_column_follows_the_engine_units():
+    # The turn window is [2.0, 5.0): an engine-injected unit at t=2 corrupts
+    # the episode, one at t=1 does not; the flag reports, the score stands.
+    inside = _score("turn", [False, False, False, True], origins=["client", "client", "engine", "client"])
+    assert inside["duplex_pacing_corrupted"] == 1.0
+    assert inside["score"] == 0.0
+    outside = _score("turn", [False, False, False, True], origins=["client", "engine", "client", "client"])
+    assert outside["duplex_pacing_corrupted"] == 0.0
+    assert outside["score"] == 0.0
 
 
 def test_deadlines_forwarded_as_kwargs():
@@ -108,6 +150,8 @@ def test_deadlines_forwarded_as_kwargs():
         turn_deadline_s=2.0,
     )
     assert result["score"] == pytest.approx(-0.5)
+    result = _score("interruption", [True, True, True, True, False], yield_full_credit_band_s=0.0, yield_deadline_s=4.0)
+    assert result["score"] == pytest.approx(-0.5)  # a 2 s latency over a 4 s deadline
 
 
 def test_missing_replay_is_a_contract_error():
@@ -115,6 +159,14 @@ def test_missing_replay_is_a_contract_error():
         compute_score_duplex_turn_taking("dailytalk", "", "", extra_info={})
     with pytest.raises(ValueError, match="no unit timeline"):
         compute_score_duplex_turn_taking("dailytalk", "", "", extra_info={"duplex_replay": {"event": {"axis": "turn"}}})
+    # An interruption replay without its onset anchor cannot be scored.
+    with pytest.raises(ValueError, match="require interrupt_speech_onset_s"):
+        compute_score_duplex_turn_taking(
+            "dailytalk",
+            "",
+            "",
+            extra_info={"duplex_replay": _replay("interruption", [True, False], event={"axis": "interruption"})},
+        )
 
 
 def test_trip_wire_columns_and_episode_failed_flag():
@@ -147,3 +199,21 @@ def test_speaking_unit_without_a_resolvable_action_position_is_a_contract_error(
     }
     with pytest.raises(ValueError, match="response_ids"):
         compute_score_duplex_turn_taking("dailytalk", "", "", extra_info={"duplex_replay": broken})
+
+
+def test_unknown_axis_is_refused_not_scored():
+    replay = _replay("turn", [False, False, True], event={"axis": "sideways"})
+    with pytest.raises(ValueError, match="axis"):
+        compute_score_duplex_turn_taking("dailytalk", "", "", extra_info={"duplex_replay": replay})
+
+
+def test_pacing_window_follows_the_overridden_deadlines():
+    # An engine unit 2.5 s past the turn end (2.0 s) sits inside the default
+    # 3 s window but outside an overridden 1 s one.
+    late = _replay("turn", [False, False, True], times=[0.0, 4.5, 4.6], origins=["client", "engine", "client"])
+    default = compute_score_duplex_turn_taking("dailytalk", "", "", extra_info={"duplex_replay": late})
+    shortened = compute_score_duplex_turn_taking(
+        "dailytalk", "", "", extra_info={"duplex_replay": late}, turn_deadline_s=1.0
+    )
+    assert default["duplex_pacing_corrupted"] == 1.0
+    assert shortened["duplex_pacing_corrupted"] == 0.0

@@ -105,13 +105,14 @@ def test_sparse_columns_average_over_the_samples_that_carry_them():
     from verl_omni.trainer.omni.trainer_base import _reward_extra_step_metrics
 
     infos = _infos(
-        {"duplex_pause_violation": 1.0},  # pause-axis episode
-        {"duplex_yield_latency_s": float("inf")},  # interruption-axis episode
-        {},
+        {"duplex_pause_violation": 1.0, "duplex_pacing_corrupted": 0.0},  # pause-axis episode
+        {"duplex_yield_latency_s": float("inf"), "duplex_pacing_corrupted": 0.0},  # interruption-axis episode
+        {"duplex_episode_failed": 1.0, "duplex_pacing_corrupted": 1.0},  # dropped (pacing corrupted)
     )
     metrics = _reward_extra_step_metrics(infos)
     assert metrics["reward/duplex_pause_violation"] == pytest.approx(1.0)
     assert metrics["reward/duplex_yield_latency_s_never_share"] == 1.0
+    assert metrics["reward/duplex_pacing_corrupted"] == pytest.approx(1 / 3)  # the drop rate
 
 
 def test_reward_extra_metrics_reads_the_batch(monkeypatch):
@@ -124,8 +125,20 @@ def test_reward_extra_metrics_reads_the_batch(monkeypatch):
         captured["partition_id"] = partition_id
         captured["select_fields"] = select_fields
         extra_fields = [
-            {"reward_extra_info": {"duplex_speak_ratio": 0.4, "duplex_episode_failed": 1.0}},
-            {"reward_extra_info": {"duplex_speak_ratio": 0.9, "duplex_episode_failed": 0.0}},  # padding row
+            {
+                "reward_extra_info": {
+                    "duplex_speak_ratio": 0.4,
+                    "duplex_episode_failed": 1.0,
+                    "duplex_pacing_corrupted": 1.0,
+                }
+            },
+            {
+                "reward_extra_info": {
+                    "duplex_speak_ratio": 0.9,
+                    "duplex_episode_failed": 0.0,
+                    "duplex_pacing_corrupted": 0.0,
+                }
+            },  # padding row
             {"reward_extra_info": {}},
         ]
         return SimpleNamespace(pop=lambda key: SimpleNamespace(tolist=lambda: extra_fields))
@@ -144,6 +157,8 @@ def test_reward_extra_metrics_reads_the_batch(monkeypatch):
     assert captured["select_fields"] == ["extra_fields"]
     assert metrics["reward/duplex_speak_ratio"] == pytest.approx(0.4)  # the padding row is excluded
     assert metrics["reward/duplex_episode_failed"] == pytest.approx(1.0)
+    # The pacing-corruption drop rate: one dropped episode among the non-padding rows.
+    assert metrics["reward/duplex_pacing_corrupted"] == pytest.approx(1.0)
 
 
 def test_compute_metrics_folds_reward_extras_around_verl(monkeypatch):

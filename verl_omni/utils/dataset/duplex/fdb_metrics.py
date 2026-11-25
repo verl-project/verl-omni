@@ -14,7 +14,8 @@
 """Minimal Full-Duplex-Bench v1 rule-metric harness (RFC #905 §3.7).
 
 Restricted to FDB-v1's rule-based timing metrics — pause-violation rate, turn
-latency distribution, and barge-in yield latency — computed over dumped
+latency distribution, and barge-in yield latency (from the interrupting
+speech onset) — computed over dumped
 duplex replays rather than a live interactive judge: the static protocol the
 RFC pins for the PoC. Consumes the JSONL dump the recipe writes (one
 ``DuplexReplay.to_extra_fields()`` payload per line) so evaluation runs after
@@ -29,35 +30,35 @@ from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from verl_omni.utils.dataset.duplex.trajectory import AXIS_INTERRUPTION, AXIS_PAUSE, AXIS_TURN
+from verl_omni.utils.dataset.duplex.telemetry import interruption_yield_latency
+from verl_omni.utils.dataset.duplex.trajectory import AXIS_INTERRUPTION, AXIS_PAUSE, AXIS_TURN, DuplexEpisodeEvent
 
 __all__ = ["fdb_rule_metrics", "main"]
 
 
 def _episode_measurements(payload: Mapping[str, Any]) -> dict[str, float] | None:
     """Episode-relative timing measurements from one replay dump line."""
-    event = payload.get("event") or {}
-    axis = event.get("axis")
+    event_payload = payload.get("event") or {}
+    axis = event_payload.get("axis")
     layouts = payload.get("unit_layouts") or []
     if axis not in (AXIS_PAUSE, AXIS_TURN, AXIS_INTERRUPTION) or not layouts:
         return None
+    event = DuplexEpisodeEvent.from_mapping(event_payload)
     speaking_times = [layout["time_s"] for layout in layouts if layout["speaking"]]
     silent_times = [layout["time_s"] for layout in layouts if not layout["speaking"]]
     measurements: dict[str, float] = {"num_units": float(len(layouts))}
     if axis == AXIS_PAUSE:
-        start, end = event["pause_window_s"]
+        start, end = event.pause_window_s
         measurements["pause_violation"] = float(any(start <= time_s < end for time_s in speaking_times))
     elif axis == AXIS_TURN:
-        turn_end = float(event["user_turn_end_s"])
+        turn_end = event.user_turn_end_s
         onset = next((time_s for time_s in speaking_times if time_s >= turn_end), None)
         measurements["took_turn"] = float(onset is not None)
         measurements["turn_latency_s"] = onset - turn_end if onset is not None else float("inf")
     else:
-        speech_end = float(event["interrupt_speech_end_s"])
-        yield_at = next((time_s for time_s in silent_times if time_s >= speech_end), None)
-        measurements["yield_latency_s"] = (
-            yield_at - speech_end if yield_at is not None else (0.0 if not speaking_times else float("inf"))
-        )
+        latency = interruption_yield_latency(event, speaking_times=speaking_times, silent_times=silent_times)
+        # The silence floor (None) saturates like talking on through the episode.
+        measurements["yield_latency_s"] = float("inf") if latency is None else latency
     return measurements
 
 
@@ -96,7 +97,7 @@ def fdb_rule_metrics(payloads: Iterable[Mapping[str, Any]]) -> dict[str, float]:
                 yielded.append(1.0)
                 yield_latencies.append(measurements["yield_latency_s"])
             else:
-                yielded.append(0.0)
+                yielded.append(0.0)  # talked on through the episode, or never spoke before the onset
     metrics: dict[str, float] = {
         "fdb/pause_episodes": float(counts["pause"]),
         "fdb/turn_episodes": float(counts["turn"]),

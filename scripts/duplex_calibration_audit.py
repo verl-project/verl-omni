@@ -16,9 +16,9 @@
 Rolls the *unmodified* starting checkpoint over a mined event set (via the
 same session driver the trainer uses), scores every episode with the rule
 reward, and audits each axis's normalized mean against the mid-band gate: an
-axis that floors the base model means the event construction or the reward
-band is misaligned with the checkpoint's actual behavior and must be fixed
-before training. Exits non-zero on a failed gate.
+axis that floors or saturates the base model means the event construction or
+the reward band is misaligned with the checkpoint's actual behavior and must
+be fixed before training. Exits non-zero on a failed gate.
 
 Usage (GPU host with the capture-capable vLLM-Omni installed)::
 
@@ -36,6 +36,7 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
+from verl_omni.utils.dataset.duplex.calibration import CALIBRATION_MAX_MEAN_RATIO
 from verl_omni.utils.dataset.duplex.deploy_config import (
     stage_init_timeout_from_env,
     write_deploy_config_for,
@@ -48,6 +49,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--episodes", required=True, help="mined duplex episode parquet")
     parser.add_argument("--output", default="duplex_calibration.json", help="audit report path")
     parser.add_argument("--num-episodes", type=int, default=48, help="episodes to roll per run")
+    parser.add_argument(
+        "--max-mean-ratio",
+        type=float,
+        default=CALIBRATION_MAX_MEAN_RATIO,
+        help="ceiling on each axis's normalized mean reward (the floor is CALIBRATION_MIN_MEAN_RATIO)",
+    )
     parser.add_argument("--tensor-parallel-size", type=int, default=1)
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.6)
     parser.add_argument(
@@ -148,25 +155,25 @@ def _replay_info(result: dict, processor) -> dict:
 
     Returns:
         The replay payload exactly as the training agent loop stamps it (the
-        scorer reads the trip-wire tokens at each layout's action_position).
+        scorer reads the trip-wire tokens at each layout's action_position):
+        the same interruption re-anchoring, so the yield reward measures the
+        live injection the driver actually made.
     """
     from verl_omni.utils.dataset.duplex.replay import DUPLEX_REPLAY_KEY, build_replay, resolve_duplex_vocabulary
-    from verl_omni.utils.dataset.duplex.trajectory import DuplexEpisodeEvent, DuplexTrajectory
+    from verl_omni.utils.dataset.duplex.trajectory import DuplexEpisodeEvent, DuplexTrajectory, reanchor_interruption
 
-    event_payload = result.get("event") or {}
-    pause_window = event_payload.get("pause_window_s")
-    event = DuplexEpisodeEvent(
-        axis=event_payload["axis"],
-        pause_window_s=tuple(pause_window) if pause_window else None,
-        user_turn_end_s=event_payload.get("user_turn_end_s"),
-        interrupt_speech_end_s=event_payload.get("interrupt_speech_end_s"),
-    )
     trajectory = DuplexTrajectory.assemble(
         session_id=result["session_id"],
         seed=0,
-        event=event,
+        event=DuplexEpisodeEvent.from_mapping(result.get("event") or {}),
         record_set_wires=result["record_sets"],
         client_audio_chunks=result.get("client_chunks") or [],
+    )
+    trajectory = reanchor_interruption(
+        trajectory,
+        speech_chunk_start_index=result.get("speech_chunk_start_index"),
+        speech_chunk_end_index=result.get("speech_chunk_end_index"),
+        seed=0,
     )
     # The session opened without explicit instructions (the driver defaults
     # in the policy's own system text), so the replay context matches.
@@ -179,7 +186,7 @@ def main(argv: list[str] | None = None) -> int:
     rewards = roll_rewards(args)
     from verl_omni.utils.dataset.duplex.calibration import audit_calibration
 
-    report = audit_calibration(rewards)
+    report = audit_calibration(rewards, max_mean_ratio=args.max_mean_ratio)
     Path(args.output).write_text(json.dumps(dict(report), indent=2, default=str), encoding="utf-8")
     print(json.dumps(dict(report), indent=2, default=str))
     if not report.passed:

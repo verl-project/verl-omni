@@ -33,6 +33,7 @@ import pytest
 from tests.utils.dataset.duplex._duplex_fixtures import (
     LISTEN_TOKEN_ID,
     SPEAK_CONTENT_TOKEN_ID,
+    interruption_event,
     record_set_wire,
 )
 from verl_omni.workers.rollout.vllm_rollout import vllm_omni_duplex_strategy as strategy_module
@@ -183,9 +184,11 @@ def _restore(strategy: DuplexStrategy) -> None:
     strategy_module._DUPLEX_CHUNK_SECONDS = strategy._restore_cadence
 
 
-def _chunks(count: int, *, speech_from: int | None = None) -> list[dict]:
+def _chunks(count: int, *, speech_from: int | None = None, speech_to: int | None = None) -> list[dict]:
+    """``speech_from``/``speech_to`` bracket the speech-carrying chunks (half-open), as a mined clip does."""
     return [
-        {"pcm": [0.01] * 160, "is_speech": speech_from is not None and index >= speech_from} for index in range(count)
+        {"pcm": [0.01] * 160, "is_speech": speech_from is not None and speech_from <= index < (speech_to or count)}
+        for index in range(count)
     ]
 
 
@@ -252,7 +255,8 @@ async def test_interruption_injection_waits_for_the_speak_onset():
     strategy = _strategy(engine)
     spec = _run_spec(
         axis="interruption",
-        event={"axis": "interruption", "interrupt_speech_end_s": 2.0},
+        event=interruption_event(),
+        chunks=_chunks(3, speech_from=1),  # a non-speech lead chunk ahead of the speech
         inject={"delay_s": 0.0, "tail_silence_chunks": 1},
         speak_wait_horizon_s=2.0,
     )
@@ -263,8 +267,30 @@ async def test_interruption_injection_waits_for_the_speak_onset():
     appends = engine.handles[0].appends
     # Speech + tail silence, all fed after the onset event.
     assert len(appends) == 3 + 1
-    assert [is_speech for _, is_speech in appends] == [True, True, True, False]
+    assert [is_speech for _, is_speech in appends] == [False, True, True, False]
     assert result["client_chunks"]
+    # 1-based fed-chunk indices: the clip's first speech-carrying chunk and
+    # its last chunk (the tail silence is not part of the clip).
+    assert (result["speech_chunk_start_index"], result["speech_chunk_end_index"]) == (2, 3)
+
+
+@pytest.mark.asyncio
+async def test_interruption_without_a_speech_chunk_fails_the_episode():
+    engine = FakeDuplexOmni(script=["response.speak", "session.closed"])
+    strategy = _strategy(engine)
+    spec = _run_spec(
+        axis="interruption",
+        event=interruption_event(),
+        chunks=[{"pcm": [0.0] * 160, "is_speech": False} for _ in range(2)],
+        inject={"delay_s": 0.0},
+        speak_wait_horizon_s=2.0,
+    )
+    try:
+        with pytest.raises(DuplexEpisodeError, match="no is_speech chunk"):
+            await strategy.run_duplex_episode(spec)
+    finally:
+        _restore(strategy)
+    assert engine.handles[0].appends == []  # nothing fed before the failure
 
 
 @pytest.mark.asyncio
@@ -278,8 +304,8 @@ async def test_interruption_delay_reanchors_to_the_speak_onset():
     strategy = _strategy(engine, cadence=0.01)
     spec = _run_spec(
         axis="interruption",
-        event={"axis": "interruption", "interrupt_speech_end_s": 2.0},
-        chunks=_chunks(2, speech_from=0),
+        event=interruption_event(),
+        chunks=_chunks(3, speech_from=0, speech_to=2),  # a trailing silence chunk inside the clip
         inject={"delay_s": 0.15, "tail_silence_chunks": 1},
         speak_wait_horizon_s=2.0,
     )
@@ -289,18 +315,35 @@ async def test_interruption_delay_reanchors_to_the_speak_onset():
         _restore(strategy)
     handle = engine.handles[0]
     onset_time = handle.event_times["response.speak"]
-    silence_times = [
-        time for time, (_, is_speech) in zip(handle.append_times, handle.appends, strict=False) if not is_speech
-    ]
     first_speech_time = next(
         time for time, (_, is_speech) in zip(handle.append_times, handle.appends, strict=False) if is_speech
     )
+    # Only the silences before the first speech append are the pre-onset feed.
+    silence_times = [
+        time
+        for time, (_, is_speech) in zip(handle.append_times, handle.appends, strict=False)
+        if not is_speech and time < first_speech_time
+    ]
     # ~delay/cadence pre-onset silences (zero would be the clock-base mixup;
     # the onset wait itself polls at 50 ms, hence the wide band).
     assert 5 <= len(silence_times) <= 16
     # The interrupting speech starts no earlier than onset + delay.
     assert first_speech_time - onset_time >= 0.1
-    assert result["speech_chunk_end_index"] == len(result["client_chunks"]) - 1  # the tail silence follows
+    # The end index is the clip's last speech-carrying chunk: the clip's own
+    # trailing silence chunk and the injected tail both follow it.
+    assert result["speech_chunk_end_index"] == len(result["client_chunks"]) - 2
+    assert result["speech_chunk_start_index"] == result["speech_chunk_end_index"] - 1
+
+
+@pytest.mark.asyncio
+async def test_non_interruption_episodes_report_no_speech_indices():
+    engine = FakeDuplexOmni(script=["session.closed"])
+    strategy = _strategy(engine)
+    try:
+        result = await strategy.run_duplex_episode(_run_spec())
+    finally:
+        _restore(strategy)
+    assert result["speech_chunk_start_index"] is None and result["speech_chunk_end_index"] is None
 
 
 @pytest.mark.asyncio

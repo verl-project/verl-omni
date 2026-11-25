@@ -14,8 +14,9 @@
 """CPU tests for the duplex entry-gate scripts' shared plumbing.
 
 Covers the deploy-config writer (the scripts hand the standalone engine
-client its thinker-only duplex deploy config) and the parity check's
-two-stage pre-truncation comparison (the measure
+client its thinker-only duplex deploy config), the calibration gate's
+ceiling argument, the episode build's stable dialogue split and per-split
+axis balancing, and the parity check's two-stage pre-truncation comparison (the measure
 itself lives in ``verl_omni.utils.dataset.duplex.policy_measure``).
 The scripts load via importlib so ``--help`` stays import-pure.
 """
@@ -24,8 +25,11 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import zlib
+from collections import defaultdict
 from pathlib import Path
 
+import pandas as pd
 import pytest
 import yaml
 
@@ -84,6 +88,115 @@ def test_script_deploy_config_path_defaults_next_to_the_output(script_name, tmp_
     assert path == str(tmp_path / "out.deploy.yaml")
     deploy = yaml.safe_load(Path(path).read_text())
     assert deploy["session_mode"] == "duplex"
+
+
+# ---------------------------------------------------------------------------
+# Episode build (scripts/duplex_build_episodes.py)
+# ---------------------------------------------------------------------------
+
+_VAL_DIALOGUES = {"dd-0007", "dd-0012", "dd-0019"}  # crc32 buckets 44, 42, 26: held out at 5%
+_TRAIN_DIALOGUES = {f"dd-{index:04d}" for index in range(6)}  # buckets >= 50
+
+
+def _manifest(path: Path) -> Path:
+    """Nine dialogues mining two pauses and two turns each, plus one interruption
+    for the five with model speech overlapping the first user utterance."""
+    dialogues = []
+    for dialogue_id in sorted(_TRAIN_DIALOGUES | _VAL_DIALOGUES):
+        with_model_speech = dialogue_id in {"dd-0000", "dd-0002", "dd-0004", "dd-0007", "dd-0019"}
+        dialogues.append(
+            {
+                "dialogue_id": dialogue_id,
+                "user_audio": f"/data/user/{dialogue_id}.wav",
+                "user_words": [
+                    {"text": "a", "start_s": start, "end_s": end}
+                    for start, end in [(1.0, 2.0), (2.6, 3.0), (6.0, 7.0), (7.7, 8.0)]
+                ],
+                "model_words": [{"text": "m", "start_s": 1.5, "end_s": 2.5}] if with_model_speech else [],
+            }
+        )
+    manifest = path / "manifest.jsonl"
+    manifest.write_text("".join(json.dumps(dialogue) + "\n" for dialogue in dialogues), encoding="utf-8")
+    return manifest
+
+
+def _axes(frame: pd.DataFrame) -> dict[str, int]:
+    return frame["episode"].map(lambda spec: spec["axis"]).value_counts().to_dict()
+
+
+def test_build_split_is_stable_per_dialogue_id():
+    script = _load_script("duplex_build_episodes")
+    # The split is a pure function of the dialogue id — crc32 against the
+    # fraction — so every process agrees regardless of PYTHONHASHSEED.
+    for dialogue_id in ["dd-0000", "dd-0007", "dt-9999"]:
+        expected = zlib.crc32(dialogue_id.encode("utf-8")) % 1000 < 50
+        assert script._is_val(dialogue_id, 0.05) is expected
+    assert script._is_val("dd-0007", 0.0) is False
+    val_share = sum(script._is_val(f"dd-{index:04d}", 0.05) for index in range(2000)) / 2000
+    assert 0.03 < val_share < 0.08
+
+
+def test_build_rows_split_by_dialogue_and_carry_the_dialogue_id(tmp_path):
+    script = _load_script("duplex_build_episodes")
+    args = script._parse_args(["--manifest", "unused", "--output", "unused"])
+    rows = script.build_rows(_manifest(tmp_path), args)
+    flags_by_dialogue: dict[str, set[bool]] = defaultdict(set)
+    for row in rows:
+        flags_by_dialogue[row["dialogue_id"]].add(row["is_val"])
+    assert all(len(flags) == 1 for flags in flags_by_dialogue.values())  # no dialogue straddles the split
+    assert {row["dialogue_id"] for row in rows if row["is_val"]} == _VAL_DIALOGUES
+    # Miner defaults thread through: the 0.6 s and 0.7 s pauses, the 2 s clips.
+    assert script._parse_args(["--manifest", "x", "--output", "y"]).per_axis_cap is None  # auto
+    assert script._parse_args(["--manifest", "x", "--output", "y", "--per-axis-cap", "0"]).per_axis_cap == 0
+    assert script._parse_args(["--manifest", "x", "--output", "y", "--per-axis-cap", "7"]).per_axis_cap == 7
+    assert (args.min_pause_s, args.max_pause_s, args.min_interrupt_s) == (0.6, 1.8, 1.5)
+
+
+def test_build_auto_cap_balances_the_axes_inside_each_split(tmp_path):
+    script = _load_script("duplex_build_episodes")
+    manifest = _manifest(tmp_path)
+    output = tmp_path / "episodes.parquet"
+    argv = ["--manifest", str(manifest), "--output", str(output)]
+    assert script.main(argv) == 0
+    train, val = (pd.read_parquet(output.with_name(f"episodes_{split}.parquet")) for split in ("train", "val"))
+    # Train mines 12 pauses / 12 turns / 3 interruptions and val 6 / 6 / 2;
+    # auto caps every axis to the split's smallest, so both are 1:1:1.
+    assert _axes(train) == {"pause": 3, "turn": 3, "interruption": 3}
+    assert _axes(val) == {"pause": 2, "turn": 2, "interruption": 2}
+    assert set(train["dialogue_id"]).isdisjoint(_VAL_DIALOGUES)
+    assert set(val["dialogue_id"]) <= _VAL_DIALOGUES
+    assert "is_val" not in train.columns and "dialogue_id" in train.columns
+    # 0 = no cap keeps the imbalanced mix; an integer caps each axis during
+    # mining (3 interruptions exist, so that axis stays below its cap).
+    uncapped = tmp_path / "uncapped.parquet"
+    script.main([*argv[:-1], str(uncapped), "--per-axis-cap", "0"])
+    assert _axes(pd.read_parquet(uncapped.with_name("uncapped_train.parquet"))) == {
+        "pause": 12,
+        "turn": 12,
+        "interruption": 3,
+    }
+    capped = tmp_path / "capped.parquet"
+    script.main([*argv[:-1], str(capped), "--per-axis-cap", "4"])
+    assert _axes(pd.read_parquet(capped.with_name("capped_train.parquet"))) == {
+        "pause": 4,
+        "turn": 4,
+        "interruption": 3,
+    }
+
+
+def test_build_rejects_a_pause_band_that_is_inverted_or_a_non_numeric_cap():
+    script = _load_script("duplex_build_episodes")
+    with pytest.raises(SystemExit):
+        script._parse_args(["--manifest", "x", "--output", "y", "--min-pause-s", "2.0", "--max-pause-s", "1.0"])
+    with pytest.raises(SystemExit):
+        script._parse_args(["--manifest", "x", "--output", "y", "--per-axis-cap", "many"])
+
+
+def test_calibration_script_exposes_the_two_sided_gate():
+    script = _load_script("duplex_calibration_audit")
+    argv = ["--model", "unused", "--episodes", "unused", "--output", "unused"]
+    assert script._parse_args(argv).max_mean_ratio == pytest.approx(0.80)
+    assert script._parse_args([*argv, "--max-mean-ratio", "0.9"]).max_mean_ratio == pytest.approx(0.9)
 
 
 # ---------------------------------------------------------------------------
