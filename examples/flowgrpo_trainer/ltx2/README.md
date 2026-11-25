@@ -1,6 +1,6 @@
 # LTX-2.3 audio-video FlowGRPO
 
-Last updated: 09/06/2026
+Last updated: 11/20/2026
 
 These recipes train `dg845/LTX-2.3-Diffusers` LoRA adapters for text-to-audio-video
 (T2AV) or single-first-frame text-and-image-to-audio-video (TI2VA) generation with
@@ -97,9 +97,10 @@ bash examples/flowgrpo_trainer/ltx2/run_ltx2_3_t2av_lora.sh
 bash examples/flowgrpo_trainer/ltx2/run_ltx2_3_ti2va_lora.sh
 ```
 
-Both GPU recipes default to 8 GPUs and one reward worker. The rollout tensor
-parallel size defaults to 2 for T2AV and 1 for TI2VA. CLAP and ImageBind run on
-`cuda:0` and `cuda:1`, respectively.
+Both GPU recipes default to 8 GPUs. The rollout tensor parallel size defaults
+to 2 for T2AV and 1 for TI2VA. CLAP uses `cuda:0` in the shared reward worker.
+The separate native ImageBind worker uses bundle 1
+of the trainer-selected reward pool and keeps its weights resident between steps.
 The TI2VA recipe supports exactly one first-frame image and does not train the
 fixed condition frame as part of the stochastic policy transition.
 

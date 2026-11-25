@@ -41,9 +41,9 @@ def diffusion_persisted_tq_fields(
     the [batch, num_timesteps] tensor back would be dead TQ traffic.
     """
     if algorithm == "policy_gradient":
-        return ["advantages", "returns", "sample_level_scores", "sample_level_rewards"]
+        return ["advantages", "returns", "sample_level_scores", "sample_level_rewards", "reward_extra_info"]
     if algorithm == "direct_preference":
-        return ["sample_level_scores", "sample_level_rewards"]
+        return ["sample_level_scores", "sample_level_rewards", "reward_extra_info"]
     raise ValueError(f"Unsupported diffusion trainer algorithm: {algorithm}")
 
 
@@ -97,9 +97,17 @@ def diffusion_metric_tq_fields(
 ) -> list[str]:
     """Return fields persisted and consumed by diffusion metric computation."""
     if algorithm == "policy_gradient":
-        return ["sample_level_rewards", "sample_level_scores", "advantages", "returns", "uid", "extra_fields"]
+        return [
+            "sample_level_rewards",
+            "sample_level_scores",
+            "advantages",
+            "returns",
+            "uid",
+            "extra_fields",
+            "reward_extra_info",
+        ]
     if algorithm == "direct_preference":
-        return ["sample_level_rewards", "sample_level_scores", "uid", "extra_fields"]
+        return ["sample_level_rewards", "sample_level_scores", "uid", "extra_fields", "reward_extra_info"]
     raise ValueError(f"Unsupported diffusion trainer algorithm: {algorithm}")
 
 
@@ -227,19 +235,34 @@ def put_dataproto_fields_to_tq(
     data: DataProto,
     fields: list[str],
 ) -> None:
-    """Write selected ``DataProto`` batch fields back to TransferQueue.
+    """Write selected tensors and trainer-computed reward diagnostics back to TransferQueue.
 
     Args:
         batch_meta: ``KVBatchMeta`` whose ``keys`` and ``partition_id`` target
             the rows to update.
         data: ``DataProto`` containing the computed tensor fields.
-        fields: Batch field names to persist; missing fields are skipped.
+        fields: Fields to persist. Absent fields are skipped unless
+            ``reward_extra_info`` is requested and ``reward_extra_keys`` declares
+            diagnostic columns. Each declared column must have one entry per batch key.
+
+    Raises:
+        ValueError: A declared diagnostic column is missing or has the wrong length.
     """
     output: dict[str, Any] = {}
     for field in fields:
-        if field not in data.batch:
-            continue
-        output[field] = data.batch[field]
+        if field in data.batch:
+            output[field] = data.batch[field]
+        elif field == "reward_extra_info" and (keys := data.meta_info.get("reward_extra_keys")):
+            columns = []
+            expected = len(batch_meta.keys)
+            for key in keys:
+                if key not in data.non_tensor_batch:
+                    raise ValueError(f"reward_extra_info: missing non_tensor_batch column {key!r}")
+                column = data.non_tensor_batch[key]
+                if len(column) != expected:
+                    raise ValueError(f"reward_extra_info column {key!r}: expected {expected} rows, got {len(column)}")
+                columns.append(column.tolist())
+            output[field] = [dict(zip(keys, row, strict=True)) for row in zip(*columns, strict=True)]
     if not output:
         return
     sort_idx = sort_diffusion_tq_keys(list(batch_meta.keys))
