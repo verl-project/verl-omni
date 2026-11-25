@@ -14,10 +14,10 @@
 """Duplex trajectory contract for streaming duplex GRPO (RFC verl-omni #905).
 
 The package owns the trainer side of the duplex data path: the wire mirror of
-the engine's action records, trajectory assembly, unit-window replay, the
-exact-distribution logprob recomputation, event mining, telemetry /
-calibration / FDB-v1 metrics, and the replay dataset. Engine symbols are
-imported lazily by the rollout bridge only.
+the engine's action records, trajectory assembly, unit-window replay, event
+mining, telemetry / calibration / FDB-v1 metrics, the two-stage policy's
+log-probability measure, and the replay dataset. Engine symbols are imported
+lazily by the rollout bridge only.
 """
 
 from verl_omni.utils.dataset.duplex.calibration import CalibrationReport, audit_calibration
@@ -36,13 +36,6 @@ from verl_omni.utils.dataset.duplex.replay import (
     build_replay,
     resolve_default_ref_audio,
     resolve_duplex_vocabulary,
-)
-from verl_omni.utils.dataset.duplex.sampling_logprobs import (
-    ParityReport,
-    compare_action_logprobs,
-    engine_repetition_history,
-    recompute_action_logprobs,
-    unit_inputs_from_trajectory,
 )
 from verl_omni.utils.dataset.duplex.trajectory import (
     AXIS_INTERRUPTION,
@@ -66,15 +59,10 @@ __all__ = [
     "DuplexReplay",
     "DuplexRefAudio",
     "DuplexTrajectory",
-    "ParityReport",
     "RecordSetError",
     "audio_tokens_for_mel_frames",
     "audit_calibration",
     "build_replay",
-    "compare_action_logprobs",
-    "engine_repetition_history",
-    "recompute_action_logprobs",
     "resolve_default_ref_audio",
     "resolve_duplex_vocabulary",
-    "unit_inputs_from_trajectory",
 ]

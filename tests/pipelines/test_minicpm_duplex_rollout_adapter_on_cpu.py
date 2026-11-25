@@ -190,14 +190,15 @@ def test_replay_dump_is_env_gated_and_mel_free(tmp_path, monkeypatch):
     assert entry["unit_layouts"] and entry["event"]["axis"] == "turn"
 
 
-def test_require_duplex_vllm_omni_is_loud_without_the_capture_surface():
+def test_require_duplex_vllm_omni_is_loud_without_the_capture_surface(monkeypatch):
     import vllm_omni.entrypoints.duplex_omni as entry
 
     from verl_omni.pipelines.minicpm.duplex_rollout_adapter import require_duplex_vllm_omni
 
-    capable = callable(getattr(entry.DuplexSessionHandle, "collect_action_records", None))
-    if capable:
-        pytest.skip("capture-capable vLLM-Omni installed; the loud-failure path is not reachable")
+    # The probe reads the post-close surface the strategy drains
+    # (DuplexOmni.collect_action_records); a build without it fails loudly.
+    incapable = type("IncapableOmni", (), {})
+    monkeypatch.setattr(entry, "DuplexOmni", incapable, raising=True)
     with pytest.raises(RuntimeError, match="action-capture"):
         require_duplex_vllm_omni()
 
@@ -205,8 +206,8 @@ def test_require_duplex_vllm_omni_is_loud_without_the_capture_surface():
 def test_capture_surface_probe_accepts_a_capable_build(monkeypatch):
     import vllm_omni.entrypoints.duplex_omni as entry
 
-    capable = type("CapableHandle", (), {"collect_action_records": staticmethod(lambda *args, **kwargs: None)})
-    monkeypatch.setattr(entry, "DuplexSessionHandle", capable, raising=True)
+    capable = type("CapableOmni", (), {"collect_action_records": staticmethod(lambda *args, **kwargs: None)})
+    monkeypatch.setattr(entry, "DuplexOmni", capable, raising=True)
     from verl_omni.pipelines.minicpm.duplex_rollout_adapter import require_duplex_vllm_omni
 
     assert require_duplex_vllm_omni() is entry.DuplexOmni

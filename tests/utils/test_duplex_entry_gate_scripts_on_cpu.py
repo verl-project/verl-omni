@@ -15,20 +15,22 @@
 
 Covers the deploy-config writer (the scripts hand the standalone engine
 client its thinker-only duplex deploy config) and the parity check's
-nucleus-cut classification. The scripts load via importlib so ``--help``
-stays import-pure.
+two-stage pre-truncation comparison (the measure
+itself lives in ``verl_omni.utils.dataset.duplex.policy_measure``).
+The scripts load via importlib so ``--help`` stays import-pure.
 """
 
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 
 import pytest
 import yaml
 
 from verl_omni.utils.dataset.duplex.deploy_config import write_duplex_deploy_config
-from verl_omni.utils.dataset.duplex.sampling_logprobs import DuplexSamplingContext, DuplexUnitInputs
+from verl_omni.utils.dataset.duplex.policy_measure import two_stage_logprob
 
 _ROOT = Path(__file__).resolve().parents[2]
 
@@ -85,85 +87,186 @@ def test_script_deploy_config_path_defaults_next_to_the_output(script_name, tmp_
 
 
 # ---------------------------------------------------------------------------
-# Parity: nucleus-cut classification (scripts/duplex_m0_parity_check.py)
+# Parity: the two-stage pre-truncation measure (verl_omni/utils/dataset/duplex/policy_measure.py,
+# compared against the capture by scripts/duplex_m0_parity_check.py)
 # ---------------------------------------------------------------------------
+
+# Vocab of 8 ids: 0 = chunk_eos, 1 = tts_pad, 2 = bad, 3-7 = content.
+_CHUNK_EOS_ID = 0
+_FORBIDDEN = [1, 2, 0]  # the resolver's composition order: tts_pad, bad_token_ids, chunk_eos
 
 
 def _parity_script():
     return _load_script("duplex_m0_parity_check")
 
 
-def _context() -> DuplexSamplingContext:
-    return DuplexSamplingContext(
-        chunk_eos_token_id=10,
-        tts_pad_token_id=11,
-        bad_token_ids=(),
-        repetition_penalty=1.0,
-        repetition_history_tokens=8,
+def _logits_row():
+    import torch
+
+    return torch.tensor([2.0, -5.0, -5.0, 0.5, 0.2, 0.0, -0.5, -1.0])
+
+
+def test_two_stage_logprob_boundary_hits_take_the_raw_softmax_branch():
+    import torch
+    from torch.nn.functional import softmax
+
+    row = _logits_row()
+    value = two_stage_logprob(
+        row, _CHUNK_EOS_ID, chunk_eos_id=_CHUNK_EOS_ID, forbidden_index=torch.tensor(_FORBIDDEN), temperature=0.7
     )
+    assert value == pytest.approx(float(torch.log(softmax(row.float(), dim=-1)[_CHUNK_EOS_ID])))
 
 
-def _unit(token_id: int, **overrides) -> DuplexUnitInputs:
-    fields = {
-        "token_id": token_id,
-        "action_kind": "sampled",
-        "stream": "content",
-        "temperature": 1.0,
-        "top_k": 0,
-        "top_p": 0.8,
-    }
-    fields.update(overrides)
-    return DuplexUnitInputs(**fields)
+def test_two_stage_logprob_content_rows_use_the_masked_stage2_joint():
+    import math
+
+    import torch
+    from torch.nn.functional import log_softmax, softmax
+
+    row = _logits_row()
+    temperature = 0.7
+    value = two_stage_logprob(
+        row, 4, chunk_eos_id=_CHUNK_EOS_ID, forbidden_index=torch.tensor(_FORBIDDEN), temperature=temperature
+    )
+    p0 = float(softmax(row.float(), dim=-1)[_CHUNK_EOS_ID])
+    masked = row.clone()
+    masked[_FORBIDDEN] = float("-inf")
+    expected = math.log1p(-p0) + float(log_softmax(masked / temperature, dim=-1)[4])
+    assert value == pytest.approx(expected)
+    # A forbidden token drawn through stage 2 is masked out: its mass is -inf.
+    assert two_stage_logprob(
+        row, 1, chunk_eos_id=_CHUNK_EOS_ID, forbidden_index=torch.tensor(_FORBIDDEN), temperature=temperature
+    ) == float("-inf")
 
 
-def test_parity_verdict_aligns_captured_with_sampled_rows_and_uses_the_engine_history(monkeypatch):
-    """The script's parity wiring: forced rows bring no captured value, nucleus
+def test_two_stage_logprob_greedy_rows_compare_at_temperature_one():
+    import torch
 
-    membership comes from the shared classifier, and the recompute runs over the
-    engine's own repetition history.
-    """
+    row = _logits_row()
+    forbidden_index = torch.tensor(_FORBIDDEN)
+    greedy = two_stage_logprob(row, 5, chunk_eos_id=_CHUNK_EOS_ID, forbidden_index=forbidden_index, temperature=0.0)
+    at_one = two_stage_logprob(row, 5, chunk_eos_id=_CHUNK_EOS_ID, forbidden_index=forbidden_index, temperature=1.0)
+    assert greedy == pytest.approx(at_one)
+
+
+def test_two_stage_logprob_log1m_stays_finite_near_saturation():
     import math
 
     import torch
 
-    from verl_omni.utils.dataset.duplex import sampling_logprobs
-    from verl_omni.utils.dataset.duplex.sampling_logprobs import engine_repetition_history
+    # chunk_eos dominates by 14 nats: p0 = 1 - 8e-7, the last fp32 steps below 1.
+    row = torch.tensor([30.0, -100.0, -100.0, 16.0, -100.0, -100.0, -100.0, -100.0])
+    value = two_stage_logprob(
+        row, 3, chunk_eos_id=_CHUNK_EOS_ID, forbidden_index=torch.tensor(_FORBIDDEN), temperature=0.7
+    )
+    assert math.isfinite(value)
+    assert value < -10
+
+
+def test_parity_rows_compares_captured_values_and_skips_forced_or_reemit():
+    """The gate's wiring: captured values replayed through the same measure give
+
+    a zero delta, one perturbed captured value breaches the band, and rows
+    without a draw (forced / reemit) are skipped, not compared.
+    """
+    import torch
 
     script = _parity_script()
-    context = _context()
-    # softmax mass: token 1 ≈ .55, token 2 ≈ .45 (cumulative crosses top_p=0.8
-    # at token 2, kept), every other token ≈ 1e-9 (outside the cut).
-    logits = torch.full((3, 16), -10.0)
-    logits[:, 1] = 10.0
-    logits[:, 2] = math.log(0.43 / 0.53) + 10.0
-    inputs = [
-        _unit(2),
-        _unit(1, action_kind="forced", stream="boundary"),
-        _unit(5),
+    row = _logits_row()
+    logits = torch.stack([row, row, row, row])
+    forbidden_index = torch.tensor(_FORBIDDEN)
+
+    def captured(token_id, temperature=0.7):
+        return two_stage_logprob(
+            row, token_id, chunk_eos_id=_CHUNK_EOS_ID, forbidden_index=forbidden_index, temperature=temperature
+        )
+
+    actions = [
+        (4, "sampled", 0.7, captured(4)),
+        (5, "forced", 0.7, None),
+        (6, "sampled", 0.7, captured(6)),
+        (7, "reemit", 0.7, None),
     ]
-    recompute_calls: list = []
-    real_recompute = sampling_logprobs.recompute_action_logprobs
-
-    def recording_recompute(logits_, inputs_, context_, *, action_history=None):
-        recompute_calls.append(action_history)
-        return real_recompute(logits_, inputs_, context_, action_history=action_history)
-
-    monkeypatch.setattr(sampling_logprobs, "recompute_action_logprobs", recording_recompute)
-    values, _ = real_recompute(logits, inputs, context, action_history=engine_repetition_history(inputs))
-    # Captured equals recomputed on the sampled rows; the forced row carries none.
-    logprobs = [float(values[0]), None, float(values[2])]
-    parity = script._parity_verdict(
-        logits, inputs, context, [u.action_kind for u in inputs], logprobs, rel_tol=1e-3, abs_tol=1e-4
+    parity = script._parity_rows(
+        logits,
+        actions,
+        chunk_eos_id=_CHUNK_EOS_ID,
+        forbidden_index=forbidden_index,
+        max_abs_nats=0.05,
+        mean_abs_nats=0.01,
     )
-    assert recompute_calls == [engine_repetition_history(inputs)]
-    assert parity.to_dict()["num_sampled"] == 2
-    assert parity.to_dict()["num_out_of_nucleus"] == 1
-    assert [row.index for row in parity.documented_loosening] == [2]
-    assert parity.matches is True
-    # An in-nucleus residual beyond tolerance is a gate failure, not a loosening.
-    shifted = [float(values[0]) - 0.5, None, float(values[2])]
-    parity = script._parity_verdict(
-        logits, inputs, context, [u.action_kind for u in inputs], shifted, rel_tol=1e-3, abs_tol=1e-4
+    assert parity["num_compared"] == 2
+    assert parity["num_skipped_forced_or_reemit"] == 2
+    assert parity["max_abs_delta"] == 0.0
+    assert parity["mean_abs_delta"] == 0.0
+
+    # One perturbed captured value breaches the max band.
+    actions[0] = (4, "sampled", 0.7, captured(4) + 0.2)
+    parity = script._parity_rows(
+        logits,
+        actions,
+        chunk_eos_id=_CHUNK_EOS_ID,
+        forbidden_index=forbidden_index,
+        max_abs_nats=0.05,
+        mean_abs_nats=0.01,
     )
-    assert [row.index for row in parity.breaches] == [0]
-    assert parity.matches is False
+    assert parity["max_abs_delta"] == pytest.approx(0.2)
+    assert parity["max_abs_delta"] > 0.05
+
+
+def test_audio_embedding_parity_reports_per_unit_streaming_vs_offline_gaps():
+    """The diagnostic reads every clip twice through the patched audio path —
+
+    streamed with ``audio_clip_kinds`` present, offline without — and reports
+    one gap per streaming unit, the reference clip excluded.
+    """
+    import numpy as np
+    import torch
+
+    script = _parity_script()
+
+    class _AudioModel:
+        """Patched-shaped get_audio_embedding: streamed units carry a known gap."""
+
+        def __init__(self):
+            self.streamed = []  # per call: whether the data carried audio_clip_kinds
+
+        def get_audio_embedding(self, data):
+            self.streamed.append("audio_clip_kinds" in data)
+            embeddings = []
+            for index, frames in enumerate(torch.hstack(data["audio_feature_lens"]).tolist()):
+                rows = (((frames - 1) // 2 + 1) - 5) // 5 + 1
+                gap = (0.0, 0.25, 0.75)[index] if self.streamed[-1] else 0.0
+                embeddings.append(torch.full((rows, 4), gap))
+            return [embeddings]
+
+    model = _AudioModel()
+    # One episode: a 130-frame reference block, then two 104-frame units.
+    model_inputs = {
+        "data": {
+            "input_ids": torch.ones(1, 40, dtype=torch.long),
+            "position_ids": torch.arange(40)[None],
+            "audio_features": [[np.zeros((80, frames), dtype=np.float32) for frames in (130, 102, 104)]],
+            "audio_feature_lens": [[130, 102, 104]],
+            "audio_bounds": [[[3, 16], [18, 28], [30, 40]]],
+            "audio_clip_kinds": ["reference", "unit", "unit"],
+        }
+    }
+
+    parity = script._audio_embedding_parity(model, model_inputs, has_reference=True)
+
+    assert model.streamed == [True, False]
+    assert parity == {"unit0_max_abs": 0.25, "units_ge1_max_abs": 0.75, "per_unit": [0.25, 0.75]}
+    assert json.loads(json.dumps(parity)) == parity
+
+    # Without a reference block every clip is a unit, the first one included.
+    model_inputs["data"]["audio_clip_kinds"] = ["unit", "unit", "unit"]
+    parity = script._audio_embedding_parity(model, model_inputs, has_reference=False)
+    assert parity["per_unit"] == [0.0, 0.25, 0.75]
+    assert parity["unit0_max_abs"] == 0.0 and parity["units_ge1_max_abs"] == 0.75
+
+    # A single-unit episode has no units >= 1 to summarize.
+    model_inputs["data"].update(audio_feature_lens=[[130, 102]], audio_clip_kinds=["reference", "unit"])
+    model_inputs["data"]["audio_features"] = [[np.zeros((80, frames), dtype=np.float32) for frames in (130, 102)]]
+    parity = script._audio_embedding_parity(model, model_inputs, has_reference=True)
+    assert parity == {"unit0_max_abs": 0.25, "units_ge1_max_abs": None, "per_unit": [0.25]}

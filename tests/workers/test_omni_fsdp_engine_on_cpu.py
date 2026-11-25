@@ -688,10 +688,11 @@ def test_build_lora_module_skips_when_lora_dtype_none():
 
 
 def test_direct_preference_prepare_model_outputs_for_training():
-    """Training output preparation reuses verl's language-model path."""
+    """Training output preparation reuses verl's language-model path (adapter without the hook: identity)."""
     omni_impl = _get_omni_impl_module()
     engine = object.__new__(omni_impl.OmniFSDPEngine)
     engine.model_config = _make_mock_model_config(trainer_type="direct_preference")
+    engine.model_adapter_cls = types.SimpleNamespace()
     engine._trainer_type = "direct_preference"
 
     micro_batch = TensorDict({"input_ids": torch.ones(2, 3, dtype=torch.long)}, batch_size=[])
@@ -715,10 +716,11 @@ def test_direct_preference_prepare_model_outputs_for_training():
 
 
 def test_direct_preference_prepare_model_outputs_for_inference():
-    """Reference inference output preparation reuses verl's language-model path."""
+    """Reference inference output preparation reuses verl's language-model path (adapter without the hook)."""
     omni_impl = _get_omni_impl_module()
     engine = object.__new__(omni_impl.OmniFSDPEngine)
     engine.model_config = _make_mock_model_config(trainer_type="direct_preference")
+    engine.model_adapter_cls = types.SimpleNamespace()
     engine._trainer_type = "direct_preference"
 
     micro_batch = TensorDict({"input_ids": torch.ones(2, 3, dtype=torch.long)}, batch_size=[])
@@ -739,6 +741,44 @@ def test_direct_preference_prepare_model_outputs_for_inference():
     mock_prepare.assert_called_once()
     assert set(model_output) == {"log_probs"}
     torch.testing.assert_close(model_output["log_probs"], torch.ones(2, 3))
+
+
+def test_prepare_model_outputs_applies_registered_adapter_hook():
+    """The adapter hook sees verl's prepared output, the raw output, and the engine's model config."""
+    omni_impl = _get_omni_impl_module()
+    engine = object.__new__(omni_impl.OmniFSDPEngine)
+    engine.model_config = _make_mock_model_config(trainer_type="policy_gradient")
+    micro_batch = TensorDict({"input_ids": torch.ones(2, 3, dtype=torch.long)}, batch_size=[])
+    raw_output = types.SimpleNamespace(logits=torch.zeros(4, 3, 8))
+    verl_output = {"log_probs": torch.ones(2, 3)}
+    calls = []
+
+    class Adapter:
+        @classmethod
+        def prepare_model_outputs(cls, model_output, output, output_args, micro_batch, model_config):
+            calls.append((model_output, output, output_args, micro_batch, model_config))
+            return {**model_output, "log_probs": model_output["log_probs"] * 2}
+
+    engine.model_adapter_cls = Adapter
+    with patch.object(omni_impl.FSDPEngineWithLMHead, "prepare_model_outputs", return_value=verl_output) as mock_base:
+        model_output = engine.prepare_model_outputs(
+            output=raw_output,
+            output_args={"temperature": torch.tensor([0.7, 0.7])},
+            micro_batch=micro_batch,
+            logits_processor_func=None,
+        )
+
+    # verl's preparation runs first, with every argument forwarded verbatim.
+    assert mock_base.call_count == 1 and mock_base.call_args.kwargs == {}
+    base_output, base_args, base_batch, base_loss_fn = mock_base.call_args.args
+    ((seen_output, seen_raw, seen_args, seen_batch, seen_config),) = calls
+    assert seen_output is verl_output and seen_raw is raw_output and seen_batch is micro_batch
+    assert seen_config is engine.model_config
+    assert base_output is raw_output and base_args is seen_args and base_batch is micro_batch and base_loss_fn is None
+    assert set(seen_args) == {"temperature"}
+    torch.testing.assert_close(seen_args["temperature"], torch.tensor([0.7, 0.7]))
+    assert set(model_output) == {"log_probs"}
+    torch.testing.assert_close(model_output["log_probs"], torch.ones(2, 3) * 2)
 
 
 def test_postprocess_batch_func_converts_preference_outputs_to_nested_tensor():

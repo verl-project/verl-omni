@@ -69,10 +69,11 @@ def require_duplex_vllm_omni() -> Any:
     """Import the duplex capture surface, failing loudly at the pin.
 
     The verl-omni pin ships the duplex runtime (``DuplexOmni``) but predates
-    the action-capture surface (``collect_action_records`` /
+    the action-capture surface (``DuplexOmni.collect_action_records`` /
     ``vllm_omni.protocol.duplex.action_records``); a duplex rollout configured
     against the pin must fail with the requirement, not with an opaque error
-    deep inside the engine.
+    deep inside the engine. The probe checks the post-close surface the
+    strategy drains (``_drain_terminal``).
 
     Returns:
         The ``DuplexOmni`` engine-client class.
@@ -81,14 +82,14 @@ def require_duplex_vllm_omni() -> Any:
         RuntimeError: When the installed vLLM-Omni lacks either half.
     """
     try:
-        from vllm_omni.entrypoints.duplex_omni import DuplexOmni, DuplexSessionHandle
+        from vllm_omni.entrypoints.duplex_omni import DuplexOmni
     except ImportError as error:
         raise RuntimeError(
             f"duplex rollout requires a vLLM-Omni build with the duplex runtime "
             f"({REQUIRED_DUPLEX_UPSTREAM}); the installed revision does not provide "
             f"it ({error})."
         ) from error
-    if not callable(getattr(DuplexSessionHandle, "collect_action_records", None)):
+    if not callable(getattr(DuplexOmni, "collect_action_records", None)):
         raise RuntimeError(
             "duplex rollout requires a vLLM-Omni build with the duplex action-capture "
             f"surface ({REQUIRED_DUPLEX_UPSTREAM}); the installed revision's duplex "

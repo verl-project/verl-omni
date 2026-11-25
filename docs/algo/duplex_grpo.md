@@ -1,6 +1,6 @@
 # Streaming duplex GRPO (MiniCPM-o 4.5)
 
-Last updated: 11/23/2026.
+Last updated: 11/24/2026.
 
 Streaming **full-duplex GRPO** over real duplex sessions — the trainer side of
 [RFC #905](https://github.com/verl-project/verl-omni/issues/905), consuming
@@ -53,7 +53,6 @@ dataset (mined episodes) ──▶ omni_duplex_agent ──▶ rollout server (D
 | Wire mirror of `DuplexActionRecordSet` | `verl_omni/utils/dataset/duplex/records.py` | Strict validation; contract-tested against upstream when the capture surface is installed |
 | Trajectory assembly | `.../duplex/trajectory.py` | Scopes in order; validity mask (`sampled`→1, `forced`/`reemit`→0); unit decision timeline |
 | Unit-window replay | `.../duplex/replay.py` | `<unit>` + 10 bare audio placeholders + action + `</unit>` per unit; engine silent units replay as 1 s of digital silence; mel via the processor's `process_audio_streaming` |
-| Exact-distribution recompute | `.../duplex/sampling_logprobs.py` | Ports the engine's truncation math; the M0 parity gate's core |
 | Event mining | `.../duplex/mining.py` | pause / turn / interruption from word-level timestamps |
 | Rule rewards | `verl_omni/utils/reward_score/duplex_turn_taking.py` | Per-axis, timestamp-only, tuned bands; emits the trip-wire columns and the per-episode `duplex_episode_failed` flag |
 | Trip-wire definitions | `.../duplex/telemetry.py` | The shared threshold set (`TRIP_WIRE_DEFAULTS`) and metric definitions (`speak_ratio`, `silence_share`, `duplicate_ngram_share`); the scorer applies them per episode |
@@ -76,32 +75,40 @@ ones (`MiniCPMThinkerAdapter.prepare_model_inputs` takes the duplex branch
 when the batch carries `extra_fields["duplex_replay"]`; packed batches re-base
 the bounds on the position-id resets). The prompt is the session's
 system-context prefix; the response is the interleaved unit-window sequence
-with mask 1 only at sampled action positions.
+with mask 1 only at sampled action positions. Unit mels are re-derived through
+the streaming processor and encoded through the streaming Whisper encoder
+with the KV history carried across the episode's units, exactly as the engine
+does; the reference block goes through the offline encoder on both sides.
 
 ### Log-probability semantics
 
-Two log-probability channels exist and are never mixed in one objective
-term:
+One measure on both sides — the two-stage policy's pre-truncation joint:
 
 - **Captured logprobs** ride the replay payload (`extra_fields["duplex_replay"]`)
-  as the parity/audit channel: the M0 entry gate compares them against a
-  trainer-side recompute (`scripts/duplex_m0_parity_check.py`, the only
-  caller of `recompute_action_logprobs`). They are logprobs of the sampled
-  distribution, not a plain softmax — for MiniCPM-o 4.5's two-stage draw the
-  joint is `log P(chunk_eos)` (raw softmax) for a boundary hit and
-  `log(1 − P) + stage-2` (post-truncation renormalized) for a content token.
-- **Training logprobs** are trainer-recomputed: with `loss_mode=vanilla` and
-  no `rollout_correction.bypass_mode`, verl derives `old_log_probs` (the
-  ratio and the reference KL) from its own actor forward over the replayed
-  sequence — a plain per-token measure, not the captured two-stage joint,
-  which is why the two channels must never meet in one objective term. The
-  rollout never exports its captured values as
-  a log-probability column, so verl's `rollout_log_probs` channel stays
-  empty and rollout-correction has nothing to engage on.
-
-The separation is deliberate: the engine's streaming tower and the trainer's
-offline forward differ by a bf16 residual (observed ≤ 0.5 nats per row, most
-rows ≤ 0.02), so mixing the channels would bias every importance ratio.
+  as the parity/audit channel: the M0 entry gate compares them against the
+  same joint evaluated on the actor logits (`scripts/duplex_m0_parity_check.py`).
+  They are the two-stage policy's pre-truncation joint, not a plain softmax:
+  `log P(chunk_eos)` on the raw softmax for a boundary hit, and
+  `log(1 − P) + log_softmax(mask(z) / T)[a]` for a content token, with the
+  forbidden set `tts_pad + bad_token_ids + chunk_eos` masked out of stage 2.
+- **Training logprobs** — `old_log_probs` (the ratio and the reference KL),
+  the update forward's `log_probs`, and `ref_log_prob` — are recomputed by
+  verl's actor forwards over the replayed sequence (`loss_mode=vanilla`, no
+  `rollout_correction.bypass_mode`) under that same joint
+  (`verl_omni/utils/dataset/duplex/policy_measure.py`), at every response
+  position the mask keeps: forbidden set masked out of stage 2, boundary rows
+  `log P(chunk_eos)` on the raw softmax, content rows
+  `log(1 − P) + log_softmax(mask(z) / T)[a]`, greedy rows at `T = 1`. Positions
+  with mask 0 keep verl's full-vocabulary value. The gradient follows the
+  measure: the stage-2 term has exactly zero gradient on the forbidden logits,
+  the stage-0 term depends on every logit (it is a raw softmax) and moves the
+  content logits only through their aggregate mass `1 − P` — the relative
+  log-odds among content tokens come from stage 2 alone. The dispatch is the
+  `prepare_model_outputs` hook on `OmniFSDPEngine`; this pipeline is its only
+  exerciser, and every other adapter takes verl's output unchanged. The
+  rollout never exports its captured values as a log-probability column, so
+  verl's `rollout_log_probs` channel stays empty and rollout-correction has
+  nothing to engage on.
 
 ### Weight-sync fencing
 
@@ -117,8 +124,8 @@ word-level timestamps). Mining (pure timestamp arithmetic, CPU):
 
 - **pause** — user intra-utterance silences ≥ 0.8 s (window: 2 s lead + tail);
 - **turn** — the tail of each user utterance ≥ 1 s (3 s lead, 2 s tail);
-- **interruption** — user utterances that overlap a model utterance in the
-  corpus; the *live* injection point is the policy's own speak onset plus a
+- **interruption** — user utterances that overlap a model utterance in
+  the corpus; the *live* injection point is the policy's own speak onset plus a
   delay, so group members may see slightly different overlaps (accepted).
 
 Episodes are bounded (≤ 8 s mined windows; the session horizon caps the
@@ -131,11 +138,10 @@ decisions, hence `rollout.n=16` groups.
    checkpoint's per-axis normalized mean reward must be ≥ 0.4 of the axis
    band before any gradient step.
 2. **M0 parity** (`scripts/duplex_m0_parity_check.py`): same-seed episodes
-   replay deterministically; actor-recomputed logprobs match the captured
-   records within tolerance on every in-nucleus sampled token (a token the
-   replay's cut excludes is reported as documented loosening, not a
-   failure), including a `truncated_interruption` episode; every forced
-   class maps to mask 0.
+   replay deterministically; the captured pre-truncation joint matches the
+   same joint evaluated on the actor logits — per-row |delta| ≤ 0.05 nats and
+   mean |delta| ≤ 0.01 nats over every sampled row — including a
+   `truncated_interruption` episode; every forced class maps to mask 0.
 3. **In-loop trip-wires**: the rule scorer emits `duplex_speak_ratio`,
    `duplex_silence_share`, and `duplex_duplicate_ngram_share` per episode
    (the shared telemetry definitions) plus `duplex_episode_failed` = 1 when

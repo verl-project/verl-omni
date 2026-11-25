@@ -26,8 +26,10 @@ from typing import Any
 
 import numpy as np
 import torch
+from torch.utils.checkpoint import checkpoint
 
 from verl_omni.pipelines.model_base import OmniModelBase
+from verl_omni.utils.dataset.duplex.policy_measure import resolve_forbidden_token_ids, two_stage_logprobs
 
 # Keys routed into MiniCPMO's ``data`` dict instead of ``self.llm(**kwargs)``.
 _MINICPM_DATA_KEYS = (
@@ -43,6 +45,8 @@ _MINICPM_DATA_KEYS = (
     "spk_bounds",
     "vision_hidden_states",
 )
+# Response rows per chunk of the two-stage measure: each chunk holds four (rows, V) fp32 copies at peak.
+_DUPLEX_LOGPROB_CHUNK_ROWS = 512
 
 
 class MiniCPMO:
@@ -232,6 +236,109 @@ class MiniCPMThinkerAdapter(OmniModelBase):
             llm_kwargs.pop("attention_mask", None)
         return {"data": data, **llm_kwargs}
 
+    @classmethod
+    def prepare_model_outputs(cls, model_output, output, output_args, micro_batch, model_config):
+        """Score a duplex batch's masked response tokens under the engine's two-stage joint.
+
+        Runs after verl's own ``prepare_model_outputs`` on every actor forward
+        (``old_log_probs``, the update forward's ``log_probs``, ``ref_log_prob``):
+        each masked response position's full-vocabulary log-probability gives
+        way to ``two_stage_logprobs`` on the same predicting logits, so the
+        training measure equals the engine's recorded one. Mask-0 positions
+        keep verl's value and ``entropy`` stays as verl computed it. A
+        non-duplex batch comes back unchanged.
+
+        Args:
+            model_output: verl's prepared output; ``log_probs`` is nested
+                ``(bsz,)`` with one entry per ``prompt + response`` position
+                of each sample.
+            output: The module's raw output; ``.logits`` is
+                ``(bsz, max_seq_len, V)``.
+            output_args: verl's dense-branch arguments:
+                ``input_ids_rmpad_rolled`` ``(total_nnz,)`` and ``temperature``
+                ``(bsz,)``.
+            micro_batch: The micro-batch: nested ``input_ids`` and
+                ``response_mask``, plus the ``duplex_replay`` payloads.
+            model_config: The ``OmniModelConfig`` carrying the processor.
+
+        Returns:
+            ``model_output`` with ``log_probs`` replaced at masked response
+            positions, re-nested to verl's layout.
+
+        Raises:
+            NotImplementedError: On a packed (``use_remove_padding``) batch —
+                the layout sequence parallelism requires in verl; the recipe
+                ships the dense one.
+            RuntimeError: When ``model_config`` carries no processor/tokenizer.
+            ValueError: When the tokenizer carries no ``bad_token_ids``.
+            RecordSetError: When the tokenizer cannot resolve the forbidden set.
+        """
+        from verl.utils import tensordict_utils as tu
+
+        if _duplex_replay_payloads(micro_batch) is None:
+            return model_output
+        if tu.get_non_tensor_data(data=micro_batch, key="use_remove_padding", default=True):
+            raise NotImplementedError(
+                "MiniCPM-o duplex log-probabilities are implemented for the dense layout only "
+                "(use_remove_padding=false, ulysses_sequence_parallel_size=1); a packed batch reached "
+                "prepare_model_outputs."
+            )
+        logits = output.logits
+        chunk_eos_id, forbidden_index = cls._resolve_duplex_forbidden_ids(model_config, logits.device)
+        cu_seqlens = micro_batch["input_ids"].offsets().to(logits.device)
+        response_lengths = micro_batch["response_mask"].offsets().diff().to(logits.device)
+        # Response position r of sample i is predicted by the logit one token earlier: packed row
+        # off_i + seq_len_i − resp_len_i − 1 + r (response_from_nested's shift), padded column
+        # seq_len_i − resp_len_i − 1 + r.
+        packed_starts = cu_seqlens[1:] - response_lengths - 1
+        padded_starts = cu_seqlens.diff() - response_lengths - 1
+        in_response = torch.arange(int(response_lengths.max()), device=logits.device) < response_lengths[:, None]
+        samples, response_index = in_response.nonzero(as_tuple=True)
+        response_logits = logits[samples, padded_starts[samples] + response_index]
+        packed_rows = packed_starts[samples] + response_index
+        action_ids = output_args["input_ids_rmpad_rolled"][packed_rows]
+        temperature = torch.as_tensor(output_args["temperature"], device=logits.device)
+        if temperature.ndim == 1 and temperature.numel() == response_lengths.shape[0]:
+            temperature = temperature[samples]
+        apply = micro_batch["response_mask"].values() != 0
+        joint = torch.cat(
+            [
+                checkpoint(
+                    _two_stage_chunk,
+                    response_logits[start : start + _DUPLEX_LOGPROB_CHUNK_ROWS],
+                    action_ids[start : start + _DUPLEX_LOGPROB_CHUNK_ROWS],
+                    chunk_eos_id=chunk_eos_id,
+                    forbidden_index=forbidden_index,
+                    temperature=temperature[start : start + _DUPLEX_LOGPROB_CHUNK_ROWS],
+                    use_reentrant=False,
+                )
+                for start in range(0, apply.shape[0], _DUPLEX_LOGPROB_CHUNK_ROWS)
+            ]
+        )
+        verl_log_probs = model_output["log_probs"].values()
+        model_output["log_probs"] = torch.nested.nested_tensor_from_jagged(
+            verl_log_probs.index_copy(0, packed_rows, torch.where(apply, joint, verl_log_probs[packed_rows])),
+            micro_batch["input_ids"].offsets(),
+        )
+        return model_output
+
+    @staticmethod
+    def _resolve_duplex_forbidden_ids(model_config, device) -> tuple[int, torch.Tensor]:
+        """``(chunk_eos_id, forbidden_index)`` for ``two_stage_logprobs``, from the run's tokenizer."""
+        tokenizer = getattr(getattr(model_config, "processor", None), "tokenizer", None)
+        if tokenizer is None:
+            raise RuntimeError(
+                "MiniCPM-o duplex log-probabilities need model_config.processor.tokenizer to resolve "
+                "the engine's forbidden set; the model config did not load a processor."
+            )
+        if getattr(tokenizer, "bad_token_ids", None) is None:
+            raise ValueError(
+                "the checkpoint tokenizer carries no bad_token_ids; the engine's forbidden set "
+                "(tts_pad + bad_token_ids + chunk_eos) cannot be resolved"
+            )
+        forbidden_ids = resolve_forbidden_token_ids(tokenizer)
+        return forbidden_ids[-1], torch.tensor(forbidden_ids, dtype=torch.long, device=device)
+
 
 def _duplex_replay_payloads(micro_batch: Any) -> list[dict[str, Any]] | None:
     """The micro-batch's duplex replay payloads, or ``None`` when not duplex.
@@ -261,6 +368,13 @@ def _duplex_replay_payloads(micro_batch: Any) -> list[dict[str, Any]] | None:
     return entries
 
 
+def _two_stage_chunk(logits, token_ids, *, chunk_eos_id, forbidden_index, temperature):
+    """One row-chunk of the two-stage joint on fp32 logits; the caller checkpoints it."""
+    return two_stage_logprobs(
+        logits.float(), token_ids, chunk_eos_id=chunk_eos_id, forbidden_index=forbidden_index, temperature=temperature
+    )
+
+
 def _apply_duplex_media(data: dict[str, Any], replays: list[dict[str, Any]]) -> None:
     """Merge per-sample duplex media (features + explicit bounds) into ``data``.
 
@@ -270,6 +384,11 @@ def _apply_duplex_media(data: dict[str, Any], replays: list[dict[str, Any]]) -> 
     derived from the position-id resets before ``_merge_packed_media`` folds
     the per-sample containers. Degenerate rows (zero-unit payloads from the
     failure-tolerance path) contribute empty containers.
+
+    ``audio_clip_kinds`` is the duplex-only marker the audio patch routes on:
+    one entry per stacked clip in row order — ``"reference"`` for the
+    offline-encoded reference block a replay carries (``ref_audio``),
+    ``"unit"`` for the streaming-encoded unit clips in feed order.
     """
     import numpy as np
 
@@ -294,6 +413,7 @@ def _apply_duplex_media(data: dict[str, Any], replays: list[dict[str, Any]]) -> 
     audio_features: list[list] = []
     audio_feature_lens: list[list] = []
     audio_bounds: list[list] = []
+    audio_clip_kinds: list[str] = []
     for sample, payload in enumerate(replays):
         mels = payload.get("unit_mels")
         mel_lens = payload.get("unit_mel_lens")
@@ -320,6 +440,10 @@ def _apply_duplex_media(data: dict[str, Any], replays: list[dict[str, Any]]) -> 
         audio_features.append([np.asarray(mel) for mel in mels])
         audio_feature_lens.append([int(value) for value in mel_lens])
         audio_bounds.append(shifted)
+        kinds = ["unit"] * len(mels)
+        if payload.get("ref_audio") is not None and kinds:
+            kinds[0] = "reference"
+        audio_clip_kinds.extend(kinds)
     _require_span_count(
         [span for spans in audio_bounds for span in spans],
         sum(len(sample) for sample in audio_feature_lens),
@@ -328,6 +452,7 @@ def _apply_duplex_media(data: dict[str, Any], replays: list[dict[str, Any]]) -> 
     data["audio_features"] = audio_features
     data["audio_feature_lens"] = audio_feature_lens
     data["audio_bounds"] = audio_bounds
+    data["audio_clip_kinds"] = audio_clip_kinds
     data.setdefault("pixel_values", [[] for _ in range(batch_size)])
     data.setdefault("tgt_sizes", [[] for _ in range(batch_size)])
     data.setdefault("image_bound", [[] for _ in range(batch_size)])
@@ -587,9 +712,10 @@ def _require_span_count(spans: list[list[int]], expected: int, kind: str) -> Non
 
 def _merge_packed_media(data: dict[str, Any]) -> None:
     """Fold the per-sample media into one pseudo-row, sample-major to match the id scan."""
-    # Per-example slice counts for the patched vision tower's re-split;
-    # must be taken before the fold flattens the structure away.
+    # Per-example slice/clip counts for the patched towers' re-split (vision runs
+    # per example; audio resets its streaming history per example); taken before the fold.
     data["packed_vision_slices"] = [len(sample) for sample in data["pixel_values"]]
+    data["packed_audio_clips"] = [len(sample) for sample in data["audio_feature_lens"]]
     data["pixel_values"] = [[slice_ for sample in data["pixel_values"] for slice_ in sample]]
     tgt_sizes = [sample for sample in data["tgt_sizes"] if int(sample.numel()) > 0]
     data["tgt_sizes"] = [torch.cat(tgt_sizes, dim=0)] if tgt_sizes else [torch.zeros(0, 2, dtype=torch.int32)]

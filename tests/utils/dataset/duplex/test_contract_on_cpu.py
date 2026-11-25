@@ -23,6 +23,7 @@ capture path's own validation semantics.
 import pytest
 
 from verl_omni.utils.dataset.duplex import records as mirror
+from verl_omni.utils.dataset.duplex.policy_measure import resolve_forbidden_token_ids
 
 pytest.importorskip(
     "vllm_omni.protocol.duplex.action_records",
@@ -104,3 +105,31 @@ def test_duplex_engine_client_guard_accepts_this_build():
     from verl_omni.pipelines.minicpm.duplex_rollout_adapter import require_duplex_vllm_omni
 
     assert require_duplex_vllm_omni() is DuplexOmni
+
+
+class _ForbiddenStubTokenizer:
+    """Stub tokenizer carrying the duplex special tokens and ``bad_token_ids``."""
+
+    unk_token_id = 0
+    bad_token_ids = [12, 13]
+
+    def convert_tokens_to_ids(self, token: str) -> int:
+        return {"<|tts_pad|>": 11, "<|chunk_eos|>": 10}.get(token, self.unk_token_id)
+
+
+def test_forbidden_set_resolver_matches_the_engine_composition():
+    """The trainer-side resolver composes the engine's native forbidden set
+    from the tokenizer alone: ``[tts_pad, *bad_token_ids, chunk_eos]``, equal to
+    ``MiniCPMO45DuplexPolicy.native_forbidden_token_ids`` on the same stub.
+    """
+    stub = _ForbiddenStubTokenizer()
+    assert resolve_forbidden_token_ids(stub) == [11, 12, 13, 10]
+
+    # Equality with the engine's own composition on the same stub.
+    policy = pytest.importorskip(
+        "vllm_omni.model_executor.models.minicpmo_4_5.duplex.policy",
+        reason="the engine's duplex policy module is not importable",
+    )
+    token_ids = policy.MiniCPMO45DuplexPolicy.token_ids_from_tokenizer(stub)
+    engine_set = policy.MiniCPMO45DuplexPolicy.native_forbidden_token_ids(token_ids, bad_token_ids=stub.bad_token_ids)
+    assert resolve_forbidden_token_ids(stub) == engine_set

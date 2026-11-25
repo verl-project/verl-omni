@@ -13,11 +13,14 @@
 # limitations under the License.
 """CPU tests for MiniCPM-o transformers remote-code compatibility shims."""
 
+import os
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 import torch
 import torch.nn as nn
+from transformers.cache_utils import DynamicCache, EncoderDecoderCache
 
 from verl_omni.models.transformers import minicpm_o
 
@@ -542,3 +545,244 @@ def test_patch_get_audio_embedding_rejects_clip_len_disagreement():
             {"audio_features": torch.zeros(2, 80, 10), "audio_feature_lens": [torch.tensor([10])]},
             chunk_length=1.0,
         )
+
+
+def _pooled_rows(mel_frames: int) -> int:
+    """Tower rows a clip pools to, by the checkpoint's ``_get_feat_extract_output_lengths``."""
+    return (((mel_frames - 1) // 2 + 1) - 5) // 5 + 1
+
+
+class _DuplexAudioModule(torch.nn.Module):
+    """Remote-shaped audio module recording both encoders' calls.
+
+    The streaming spy reads its KV history the way the remote method does
+    (layer 0's key length) and leaves an ``EncoderDecoderCache`` behind, as the
+    remote encoder does; it returns one row per pooled frame, filled with the
+    history's frame count, so a streamed embedding carries both its shape and
+    the history it was encoded with.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.apm = torch.nn.Module()
+        self.apm.conv1 = torch.nn.Linear(4, 4)
+        self.llm = torch.nn.Module()
+        self.llm.config = SimpleNamespace(hidden_size=8)
+        self.audio_past_key_values = None
+        self.offline_calls = []
+        self.streaming_calls = []
+
+    def get_audio_embedding(self, data, chunk_length=-1, dummy=True):
+        lengths = torch.hstack(data["audio_feature_lens"]).tolist()
+        self.offline_calls.append((tuple(data["audio_features"].shape), lengths))
+        return [[torch.full((_pooled_rows(length), 8), -1.0) for length in lengths]]
+
+    def get_audio_embedding_streaming(
+        self, data, use_extra_context=False, prefix_extra_frames=1, suffix_extra_frames=1, cnn_min_length=None
+    ):
+        history_frames = 0 if self.audio_past_key_values is None else self.audio_past_key_values[0][0].shape[2]
+        length = int(torch.hstack(data["audio_feature_lens"]).item())
+        self.streaming_calls.append(
+            SimpleNamespace(
+                clip=tuple(data["audio_features"].shape),
+                contiguous=data["audio_features"].is_contiguous(),
+                use_extra_context=use_extra_context,
+                prefix_extra_frames=prefix_extra_frames,
+                suffix_extra_frames=suffix_extra_frames,
+                cnn_min_length=cnn_min_length,
+                history_frames=history_frames,
+                length=length,
+            )
+        )
+        grown = torch.zeros(1, 1, history_frames + 50, 1)
+        self_attention = DynamicCache()
+        self_attention.update(grown, grown, 0)
+        self.audio_past_key_values = EncoderDecoderCache(self_attention, DynamicCache())
+        return [[torch.full((_pooled_rows(length), 8), float(history_frames))]]
+
+
+def _duplex_audio_batch(rows: int = 2, units: int = 3) -> dict:
+    """``rows`` episodes of one 130-frame reference clip and ``units`` unit clips, padded layout."""
+    # Unit 0's mel carries no prefix context (102 frames); later units carry 2+2 (104).
+    row_lengths = [130, 102, *([104] * (units - 1))]
+    lengths = row_lengths * rows
+    features = torch.zeros(len(lengths), 80, max(lengths))
+    bounds, start = [], 0
+    for length in lengths:
+        bounds.append([start, start + _pooled_rows(length)])
+        start += _pooled_rows(length) + 1
+    return {
+        "audio_features": features,
+        "audio_feature_lens": [torch.tensor(row_lengths) for _ in range(rows)],
+        "audio_bounds": [
+            bounds[index : index + len(row_lengths)] for index in range(0, len(lengths), len(row_lengths))
+        ],
+        "audio_clip_kinds": ["reference", "unit", *(["unit"] * (units - 1))] * rows,
+    }
+
+
+def _streamed_call(history_frames: int, length: int, prefix_extra_frames: int) -> dict:
+    """The streaming call the engine makes for one unit clip."""
+    return dict(
+        clip=(1, 80, length),
+        contiguous=True,
+        use_extra_context=True,
+        prefix_extra_frames=prefix_extra_frames,
+        suffix_extra_frames=2,
+        cnn_min_length=None,
+        history_frames=history_frames,
+        length=length,
+    )
+
+
+def test_patch_get_audio_embedding_streams_duplex_units_with_the_engines_call_convention():
+    from verl_omni.models.transformers import minicpm_o
+
+    module = _DuplexAudioModule()
+    minicpm_o.patch_minicpm_get_audio_embedding(module)
+    data = _duplex_audio_batch(rows=2, units=3)
+
+    result = module.get_audio_embedding(data)
+
+    # Feed order per row: the reference clip stays offline, every unit streams
+    # with the engine's kwargs; the history is None before each row's unit 0
+    # and grows 0 -> 50 -> 100 across the row's units.
+    assert module.offline_calls == [((1, 80, 130), [130])] * 2
+    assert [vars(call) for call in module.streaming_calls] == (
+        [_streamed_call(0, 102, 0), _streamed_call(50, 104, 2), _streamed_call(100, 104, 2)] * 2
+    )
+
+    # Regrouped per row in clip order, each embedding as long as its span.
+    assert len(result) == 2
+    for embeddings, bounds in zip(result, data["audio_bounds"], strict=True):
+        assert [tuple(emb.shape) for emb in embeddings] == [(bound[1] - bound[0], 8) for bound in bounds]
+        assert embeddings[0][0, 0].item() == -1.0  # the offline reference
+        assert [emb[0, 0].item() for emb in embeddings[1:]] == [0.0, 50.0, 100.0]
+    # The last row's history is per-forward scratch: the module is left as found.
+    assert module.audio_past_key_values is None
+
+
+def test_patch_get_audio_embedding_streams_packed_episodes_independently():
+    from verl_omni.models.transformers import minicpm_o
+
+    module = _DuplexAudioModule()
+    minicpm_o.patch_minicpm_get_audio_embedding(module)
+    unpacked = _duplex_audio_batch(rows=2, units=2)
+    packed = dict(unpacked)
+    packed["audio_feature_lens"] = [torch.cat(unpacked["audio_feature_lens"])]
+    packed["audio_bounds"] = [[span for spans in unpacked["audio_bounds"] for span in spans]]
+    packed["packed_audio_clips"] = [3, 3]
+
+    result = module.get_audio_embedding(packed)
+
+    assert [call.history_frames for call in module.streaming_calls] == [0, 50, 0, 50]  # episode 1 restarts from None
+    assert [vars(call) for call in module.streaming_calls[2:]] == [
+        _streamed_call(0, 102, 0),
+        _streamed_call(50, 104, 2),
+    ]
+    assert len(result) == 1 and len(result[0]) == 6  # one pseudo-row, clips in order
+
+
+def test_patch_get_audio_embedding_without_clip_kinds_stays_offline():
+    from verl_omni.models.transformers import minicpm_o
+
+    module = _DuplexAudioModule()
+    minicpm_o.patch_minicpm_get_audio_embedding(module)
+    data = _duplex_audio_batch(rows=1, units=2)
+    del data["audio_clip_kinds"]
+
+    result = module.get_audio_embedding(data)
+
+    assert module.streaming_calls == []
+    assert [call[1] for call in module.offline_calls] == [[130], [102], [104]]
+    assert [tuple(emb.shape) for emb in result[0]] == [(13, 8), (10, 8), (10, 8)]
+
+
+@pytest.mark.parametrize(
+    "kinds, match",
+    [
+        (["reference", "unit"], "disagree"),  # two kinds over three clips
+        (["reference", "unit", "clip"], "expected only 'reference' or 'unit'"),
+    ],
+)
+def test_patch_get_audio_embedding_rejects_malformed_clip_kinds(kinds, match):
+    from verl_omni.models.transformers import minicpm_o
+
+    module = _DuplexAudioModule()
+    minicpm_o.patch_minicpm_get_audio_embedding(module)
+    data = _duplex_audio_batch(rows=1, units=2)
+    data["audio_clip_kinds"] = kinds
+    with pytest.raises(ValueError, match=match):
+        module.get_audio_embedding(data)
+    assert module.streaming_calls == [] and module.offline_calls == []  # rejected before any tower call
+
+
+def _minicpm_snapshot() -> Path | None:
+    """The local MiniCPM-o 4.5 snapshot's directory, or ``None`` without one (no download)."""
+    override = os.environ.get("VERL_OMNI_DUPLEX_REF_AUDIO_MODEL_PATH")
+    if override:
+        return Path(override) if (Path(override) / "modeling_minicpmo.py").exists() else None
+    hub = Path(os.environ.get("HF_HOME", Path.home() / ".cache/huggingface")) / "hub"
+    remote_code = next(iter(sorted(hub.glob("models--openbmb--MiniCPM-o-4_5/snapshots/*/modeling_minicpmo.py"))), None)
+    return remote_code.parent if remote_code is not None else None
+
+
+@pytest.mark.skipif(_minicpm_snapshot() is None, reason="needs the local MiniCPM-o 4.5 snapshot's remote code")
+def test_patched_audio_embedding_streams_units_through_the_real_remote_encoder():
+    # The checkpoint's remote code on a tiny config: the streaming path runs
+    # under the installed transformers, and units >= 1 (encoded with the KV
+    # history the offline encoder lacks) come out different from offline.
+    from transformers.models.auto.auto_factory import get_class_from_dynamic_module
+
+    from verl_omni.models.transformers import minicpm_o
+
+    snapshot = str(_minicpm_snapshot())
+    config_cls = get_class_from_dynamic_module(
+        "configuration_minicpmo.MiniCPMOConfig", snapshot, trust_remote_code=True
+    )
+    model_cls = get_class_from_dynamic_module("modeling_minicpmo.MiniCPMO", snapshot, trust_remote_code=True)
+    config = config_cls(
+        init_vision=False,
+        init_tts=False,
+        init_audio=True,
+        audio_config=dict(
+            encoder_layers=2,
+            d_model=32,
+            encoder_ffn_dim=128,
+            encoder_attention_heads=4,
+            num_mel_bins=80,
+            _attn_implementation="eager",
+        ),
+        hidden_size=32,
+        intermediate_size=64,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        vocab_size=100,
+        head_dim=8,
+        use_cache=False,
+        stream_input=False,
+        _attn_implementation="eager",
+    )
+    torch.manual_seed(0)
+    module = model_cls(config).eval()
+    minicpm_o.patch_minicpm_whisper_self_attn(module)
+    minicpm_o.patch_minicpm_get_audio_embedding(module)
+    lengths = [102, 104, 104]
+    features = torch.randn(3, 80, 104)
+    data = {
+        "audio_features": features,
+        "audio_feature_lens": [torch.tensor(lengths)],
+        "audio_clip_kinds": ["unit"] * 3,
+    }
+
+    with torch.no_grad():
+        streamed = module.get_audio_embedding(data)[0]
+        offline = module.get_audio_embedding({key: value for key, value in data.items() if key != "audio_clip_kinds"})[
+            0
+        ]
+
+    assert [tuple(emb.shape) for emb in streamed] == [(10, 32)] * 3 == [tuple(emb.shape) for emb in offline]
+    gaps = [(stream - encode).abs().max().item() for stream, encode in zip(streamed, offline, strict=True)]
+    assert gaps[1] > 0 and gaps[2] > 0
+    assert module.audio_past_key_values is None

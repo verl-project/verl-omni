@@ -15,24 +15,26 @@
 
 Runs a handful of fixed duplex episodes under a per-episode seed, replays
 each captured trajectory through the trainer-side model forward with the
-engine's exact unit layout, recomputes every sampled action's log-probability
-under the recorded sampling distribution (forbidden mask, repetition penalty,
-temperature / top-k / top-p truncation, two-stage Bernoulli joint), and
-compares against the engine-captured logprobs.
+engine's exact unit layout, and compares every sampled action's captured
+log-probability against the two-stage policy's pre-truncation joint
+evaluated on the actor logits: ``log P(chunk_eos)`` on the raw softmax for
+a boundary hit, ``log(1 - P) + log_softmax(mask(z) / T)[a]`` for a content
+token, with the forbidden set ``tts_pad + bad_token_ids + chunk_eos``
+masked out of stage 2. The engine captures the same joint, so the
+comparison is direct — no truncation replay, no exemptions.
 
 Exit criteria (RFC §4, M0): fixed segments replay deterministically, the
-actor-recomputed logprobs match the captured record logprobs within
-tolerance on the in-nucleus sampled tokens — including a barge-in episode —
-and every forced class maps to mask 0. Rows whose drawn token fell outside
-the replay's nucleus cut (a legitimate top_p boundary flip under the engine
-vs offline bf16 residual) are reported under ``documented_loosening``
-instead of failing the gate.
+per-row |delta| stays within ``--max-abs-nats`` and its mean within
+``--mean-abs-nats`` on every sampled row — including a barge-in episode —
+and every forced class maps to mask 0. Each episode also reports
+``audio_embedding_parity``, the streaming-vs-offline audio embedding gap per
+unit, as a diagnostic that does not gate.
 
 Usage (GPU host with the capture-capable vLLM-Omni installed)::
 
     python scripts/duplex_m0_parity_check.py \
         --model /path/to/MiniCPM-o-4_5 --episodes /path/to/episodes.parquet \
-        --rel-tol 1e-3 --abs-tol 1e-4
+        --max-abs-nats 0.05 --mean-abs-nats 0.01
 """
 
 from __future__ import annotations
@@ -40,14 +42,16 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import math
 import sys
-from collections.abc import Sequence
 from pathlib import Path
 
 from verl_omni.utils.dataset.duplex.deploy_config import stage_init_timeout_from_env, write_deploy_config_for
+from verl_omni.utils.dataset.duplex.policy_measure import resolve_forbidden_token_ids, two_stage_logprob
+from verl_omni.utils.dataset.duplex.records import ACTION_FORCED, ACTION_REEMIT, ACTION_SAMPLED, RecordSetError
 
-_REL_TOL_DEFAULT = 1e-3
-_ABS_TOL_DEFAULT = 1e-4
+_MAX_ABS_NATS_DEFAULT = 0.05
+_MEAN_ABS_NATS_DEFAULT = 0.01
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -55,8 +59,8 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--model", required=True, help="MiniCPM-o 4.5 checkpoint directory")
     parser.add_argument("--episodes", required=True, help="mined duplex episode parquet")
     parser.add_argument("--num-episodes", type=int, default=8)
-    parser.add_argument("--rel-tol", type=float, default=_REL_TOL_DEFAULT)
-    parser.add_argument("--abs-tol", type=float, default=_ABS_TOL_DEFAULT)
+    parser.add_argument("--max-abs-nats", type=float, default=_MAX_ABS_NATS_DEFAULT)
+    parser.add_argument("--mean-abs-nats", type=float, default=_MEAN_ABS_NATS_DEFAULT)
     parser.add_argument("--tensor-parallel-size", type=int, default=1)
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.6)
     parser.add_argument(
@@ -134,14 +138,12 @@ def _roll_episodes(args: argparse.Namespace) -> list[dict]:
     return list(zip(first, second, strict=True))
 
 
-def _actor_logits(model, replay):
-    """One forward over the replayed sequence; returns per-decision logits.
+def _actor_model_data(replay) -> dict:
+    """The actor model call for one replayed episode, as ``prepare_model_inputs`` builds it.
 
     The batch goes through the thinker adapter's duplex media branch (explicit
     bounds from the replay payload, so no marker scan or model config is
-    involved), and each decision token's logits are read at its predicting
-    position: one before the action, offset by the prompt length because
-    ``action_position`` is response-relative.
+    involved).
     """
     import torch
 
@@ -150,13 +152,31 @@ def _actor_logits(model, replay):
 
     input_ids = torch.tensor([replay.prompt_ids + replay.response_ids], dtype=torch.long)
     position_ids = torch.arange(input_ids.shape[1])[None]
-    data = MiniCPMThinkerAdapter.prepare_model_inputs(
+    return MiniCPMThinkerAdapter.prepare_model_inputs(
         {"input_ids": input_ids, "position_ids": position_ids},
         micro_batch={DUPLEX_REPLAY_KEY: [replay.to_extra_fields(include_pcm=False)]},
         model_config=None,
     )
+
+
+def _actor_logits(model, model_inputs: dict, replay):
+    """One forward over the replayed sequence; returns per-decision logits.
+
+    Args:
+        model: The trainer-side MiniCPM-o.
+        model_inputs: The episode's prepared call (``_actor_model_data``), built
+            once per episode and shared with the embedding-parity diagnostic.
+        replay: The replayed episode, for the decision positions.
+
+    Returns:
+        ``[num_decisions, V]`` logits: each decision token's logits are read at
+        its predicting position — one before the action, offset by the prompt
+        length because ``action_position`` is response-relative.
+    """
+    import torch
+
     with torch.no_grad():
-        output = model(**data)
+        output = model(**model_inputs)
     logits = output.logits[0].float()
     prompt_length = len(replay.prompt_ids)
     positions = [
@@ -165,47 +185,110 @@ def _actor_logits(model, replay):
     return logits[[position - 1 for position in positions]]
 
 
-def _parity_verdict(
-    logits,
-    inputs,
-    context,
-    kinds: Sequence[str],
-    logprobs: Sequence[float | None],
-    *,
-    rel_tol: float,
-    abs_tol: float,
-):
-    """Recompute under the engine's exact transform and compare, nucleus-cut aware.
+def _audio_embedding_parity(model, model_inputs: dict, *, has_reference: bool) -> dict:
+    """Per streaming unit, ``max|emb_streaming − emb_offline|`` over the same mel clip.
 
-    ``kinds`` / ``logprobs`` are the trajectory's flat action columns; only
-    sampled rows carry a captured log-probability into the comparison. The
-    recompute runs over the engine's own repetition history and the comparison
-    classifies each row by whether the drawn token survives the replay's cut.
+    The patched ``get_audio_embedding`` streams the unit clips of a ``data``
+    dict carrying ``audio_clip_kinds`` and encodes every clip offline once the
+    key is dropped, so both readings come from the same clips. Unit 0 encodes
+    without history on either side and should sit near bf16 noise; units ≥ 1
+    carry the engine's cross-unit KV history the offline encoder lacks, so
+    their gap is the encoder mismatch a residual log-probability delta traces
+    to. Diagnostic only: the gate does not read it.
+
+    Args:
+        model: The trainer-side MiniCPM-o with the audio patches installed.
+        model_inputs: ``_actor_model_data`` for the episode.
+        has_reference: Whether clip 0 is the episode's offline reference block.
+
+    Returns:
+        ``unit0_max_abs``, ``units_ge1_max_abs`` (``None`` without such a unit)
+        and ``per_unit`` — one value per streaming unit in feed order.
     """
-    from verl_omni.utils.dataset.duplex.sampling_logprobs import (
-        compare_action_logprobs,
-        engine_repetition_history,
-        recompute_action_logprobs,
-    )
+    import torch
 
-    values, valid = recompute_action_logprobs(logits, inputs, context, action_history=engine_repetition_history(inputs))
-    captured = [logprob if kind == "sampled" else None for logprob, kind in zip(logprobs, kinds, strict=True)]
-    return compare_action_logprobs(logits, inputs, context, values, valid, captured, rel_tol=rel_tol, abs_tol=abs_tol)
+    from verl_omni.pipelines.minicpm.thinker_training_adapter import split_minicpm_forward_kwargs
+
+    model_data, _ = split_minicpm_forward_kwargs(model_inputs)
+    offline_data = {key: value for key, value in model_data.items() if key != "audio_clip_kinds"}
+    with torch.no_grad():
+        streaming = model.get_audio_embedding(model_data)[0]
+        offline = model.get_audio_embedding(offline_data)[0]
+    units = slice(1, None) if has_reference else slice(None)
+    per_unit = [
+        float((streamed.float() - encoded.float()).abs().max())
+        for streamed, encoded in zip(streaming[units], offline[units], strict=True)
+    ]
+    return {
+        "unit0_max_abs": per_unit[0] if per_unit else None,
+        "units_ge1_max_abs": max(per_unit[1:]) if len(per_unit) > 1 else None,
+        "per_unit": per_unit,
+    }
+
+
+def _parity_rows(
+    logits, actions, *, chunk_eos_id: int, forbidden_index, max_abs_nats: float, mean_abs_nats: float
+) -> dict:
+    """Compare actor logits against the captured pre-truncation joint logprobs.
+
+    Args:
+        logits: ``[num_actions, V]`` actor logits at the actions' predicting
+            positions (``_actor_logits``), in action order.
+        actions: Per action, ``(token_id, action_kind, temperature,
+            captured_logprob)`` in action order; ``captured_logprob`` is
+            ``None`` where no draw happened (forced / reemit rows).
+
+    Returns:
+        The episode's parity fields: per-row ``delta`` (with the row's
+        ``index`` / ``token_id`` / ``captured`` / ``recomputed`` values),
+        ``max_abs_delta``, ``mean_abs_delta``, ``num_compared``,
+        ``num_skipped_forced_or_reemit``.
+
+    Raises:
+        RecordSetError: On a column misalignment, an unknown action kind, or a
+            non-finite comparison value.
+    """
+    if logits.shape[0] != len(actions):
+        raise RecordSetError(f"parity comparison got {logits.shape[0]} logit rows for {len(actions)} actions")
+    rows: list[dict] = []
+    deltas: list[float] = []
+    skipped = 0
+    for index, (logits_row, (token_id, kind, temperature, captured)) in enumerate(zip(logits, actions, strict=True)):
+        if kind in (ACTION_FORCED, ACTION_REEMIT):
+            skipped += 1
+            continue
+        if kind != ACTION_SAMPLED:
+            raise RecordSetError(f"unknown duplex action kind {kind!r} at action {index}")
+        recomputed = two_stage_logprob(
+            logits_row, token_id, chunk_eos_id=chunk_eos_id, forbidden_index=forbidden_index, temperature=temperature
+        )
+        if captured is None or not math.isfinite(recomputed) or not math.isfinite(captured):
+            raise RecordSetError(
+                f"duplex action {index} (token {token_id}) compares non-finite: "
+                f"recomputed={recomputed!r}, captured={captured!r}"
+            )
+        delta = recomputed - captured
+        deltas.append(abs(delta))
+        rows.append(
+            {"index": index, "token_id": token_id, "captured": captured, "recomputed": recomputed, "delta": delta}
+        )
+    return {
+        "num_compared": len(deltas),
+        "num_skipped_forced_or_reemit": skipped,
+        "max_abs_delta": max(deltas, default=0.0),
+        "mean_abs_delta": sum(deltas) / len(deltas) if deltas else 0.0,
+        "rows": rows,
+    }
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     from verl_omni.pipelines.minicpm.duplex_rollout_adapter import MiniCPMODuplexRolloutAdapter
     from verl_omni.pipelines.minicpm.thinker_training_adapter import MiniCPMO
-    from verl_omni.utils.dataset.duplex.replay import resolve_duplex_vocabulary
-    from verl_omni.utils.dataset.duplex.sampling_logprobs import (
-        build_sampling_context,
-        unit_inputs_from_trajectory,
-    )
     from verl_omni.utils.dataset.duplex.trajectory import DuplexEpisodeEvent, DuplexTrajectory
 
     pairs = _roll_episodes(args)
-    report: dict = {"episodes": [], "rel_tol": args.rel_tol, "abs_tol": args.abs_tol}
+    report: dict = {"episodes": [], "max_abs_nats": args.max_abs_nats, "mean_abs_nats": args.mean_abs_nats}
     saw_barge_in = False
     all_match = True
 
@@ -223,6 +306,13 @@ def main(argv: list[str] | None = None) -> int:
 
     processor = processor or AutoProcessor.from_pretrained(args.model, trust_remote_code=True)
     tokenizer = getattr(processor, "tokenizer", processor)
+    # The engine composes the same set (MiniCPMO45DuplexPolicy.native_forbidden_token_ids);
+    # chunk_eos is its last element by construction.
+    forbidden_ids = resolve_forbidden_token_ids(tokenizer)
+    chunk_eos_id = forbidden_ids[-1]
+    import torch
+
+    forbidden_index = torch.tensor(forbidden_ids, dtype=torch.long)
 
     for first, second in pairs:
         event_payload = first.get("event") or {}
@@ -254,25 +344,37 @@ def main(argv: list[str] | None = None) -> int:
         episode_report["mask_taxonomy_ok"] = all(
             bit == (kind == "sampled") for kind, bit in zip(kinds, mask, strict=True)
         )
-        # Parity: recomputed vs captured on the sampled rows, split by the
-        # replay's nucleus cut. Rows whose drawn token fell outside the cut (a
-        # top_p boundary flip under the engine-vs-offline bf16 residual) are
-        # the documented loosening, not gate failures.
-        inputs = unit_inputs_from_trajectory(trajectory)
-        context = build_sampling_context(
-            tokenizer, resolve_duplex_vocabulary(processor), trajectory.record_sets[-1].model
+        # Parity: the captured pre-truncation joint vs the actor logits under
+        # the same measure, on every sampled row.
+        actions: list[tuple[int, str, float, float | None]] = []
+        for record_set in trajectory.record_sets:
+            for record in record_set.records():
+                temperature = float(record.sampling.get("temperature", 0.7) or 0.0)
+                for action in record.actions:
+                    actions.append((action.token_id, action.action_kind, temperature, action.logprob))
+        model_inputs = _actor_model_data(replay)
+        logits = _actor_logits(model, model_inputs, replay)
+        parity = _parity_rows(
+            logits,
+            actions,
+            chunk_eos_id=chunk_eos_id,
+            forbidden_index=forbidden_index,
+            max_abs_nats=args.max_abs_nats,
+            mean_abs_nats=args.mean_abs_nats,
         )
-        logits = _actor_logits(model, replay)
-        parity = _parity_verdict(
-            logits, inputs, context, kinds, trajectory.logprobs, rel_tol=args.rel_tol, abs_tol=args.abs_tol
+        episode_report["parity"] = parity
+        episode_report["audio_embedding_parity"] = _audio_embedding_parity(
+            model, model_inputs, has_reference=replay.ref_audio is not None
         )
-        episode_report["parity_by_class"] = parity.to_dict()
-        episode_report["matches"] = parity.matches
-        all_match = all_match and episode_report["matches"] and episode_report["mask_taxonomy_ok"]
+        # The gate needs every sampled row compared: zero compared rows is no
+        # evidence, not a pass.
+        gate = (
+            parity["num_compared"] > 0
+            and parity["max_abs_delta"] <= args.max_abs_nats
+            and parity["mean_abs_delta"] <= args.mean_abs_nats
+        )
+        all_match = all_match and gate and episode_report["mask_taxonomy_ok"]
         report["episodes"].append(episode_report)
-        report.setdefault("documented_loosening", []).extend(
-            {"episode": first["episode_id"], **row} for row in parity.to_dict()["documented_loosening"]
-        )
 
     report["saw_barge_in"] = saw_barge_in
     report["overall_pass"] = bool(all_match and (saw_barge_in or not args.require_barge_in))
