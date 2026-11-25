@@ -127,7 +127,7 @@ def test_build_duplex_replay_attaches_streaming_mels():
     replay = MiniCPMODuplexRolloutAdapter.build_duplex_replay(_trajectory(), processor=FakeStreamingProcessor())
     assert replay.unit_mels is not None and len(replay.unit_mels) == len(replay.unit_layouts)
     # Mel frames per unit window: the 1035 ms pre-roll ingestion then 1000 ms chunks.
-    assert replay.unit_mel_lens == [104, 101, 101, 101, 101]
+    assert replay.unit_mel_lens == [104, 101, 101, 101]
     assert all(
         audio_tokens_for_mel_frames(mel_frames) == layout.num_audio_tokens
         for mel_frames, layout in zip(replay.unit_mel_lens, replay.unit_layouts, strict=True)
@@ -159,7 +159,7 @@ def test_build_duplex_replay_resolves_the_bundled_ref_audio_from_the_model_path(
     assert len(replay.prompt_ids) == 70
     assert replay.ref_audio is not None and replay.ref_audio.num_audio_tokens == 60
     assert replay.audio_bounds[0] == [8, 68]
-    assert replay.unit_mels is not None and len(replay.unit_mels) == 6  # reference clip + five units
+    assert replay.unit_mels is not None and len(replay.unit_mels) == 5  # reference clip + four units
     assert replay.unit_mel_lens[0] == 602  # the offline-tower frames of the bundled clip
 
 

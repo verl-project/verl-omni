@@ -20,11 +20,13 @@ from tests.utils.dataset.duplex._duplex_fixtures import (
     CHUNK_EOS_TOKEN_ID,
     LISTEN_TOKEN_ID,
     SPEAK_CONTENT_TOKEN_ID,
+    listen_unit,
     listening_then_speaking_wires,
     record_set_wire,
     reemit_variant_wires,
+    spoken_unit,
 )
-from verl_omni.utils.dataset.duplex.records import RecordSetError
+from verl_omni.utils.dataset.duplex.records import ACTION_REEMIT, RecordSetError
 from verl_omni.utils.dataset.duplex.trajectory import (
     AXIS_INTERRUPTION,
     AXIS_PAUSE,
@@ -58,22 +60,33 @@ def test_assemble_flattens_scopes_in_order_and_masks_forced_tokens():
         seed=7,
         event=_pause_event(),
         record_set_wires=wires,
-        client_audio_chunks=_chunks(5),  # 2 listen + 2 speak + terminator are client-fed; the engine unit is not
+        client_audio_chunks=_chunks(4),  # 2 listen + 2 spoken units are client-fed; the engine unit is not
     )
-    # Listening scope: listen, listen, forced engine listen; response: speak, speak, chunk_eos.
+    # Listening scope: listen, listen, forced engine listen, each with its
+    # re-emitted terminator; response: two spoken units, each two content
+    # tokens, the boundary chunk_eos and its re-emission.
     assert trajectory.token_ids == (
+        LISTEN_TOKEN_ID,
+        LISTEN_TOKEN_ID,
+        LISTEN_TOKEN_ID,
         LISTEN_TOKEN_ID,
         LISTEN_TOKEN_ID,
         LISTEN_TOKEN_ID,
         SPEAK_CONTENT_TOKEN_ID,
         SPEAK_CONTENT_TOKEN_ID,
         CHUNK_EOS_TOKEN_ID,
+        CHUNK_EOS_TOKEN_ID,
+        SPEAK_CONTENT_TOKEN_ID,
+        SPEAK_CONTENT_TOKEN_ID,
+        CHUNK_EOS_TOKEN_ID,
+        CHUNK_EOS_TOKEN_ID,
     )
-    assert trajectory.action_mask == (1, 1, 0, 1, 1, 1)
+    assert trajectory.action_mask == (1, 0, 1, 0, 0, 0, 1, 1, 1, 0, 1, 1, 1, 0)
     assert trajectory.action_kinds.count("forced") == 1
-    assert trajectory.token_scope_indices == (0, 0, 0, 1, 1, 1)
+    assert trajectory.action_kinds.count("reemit") == 5
+    assert trajectory.token_scope_indices == (0,) * 6 + (1,) * 8
     # Cumulative unit indices continue across the scope boundary.
-    assert trajectory.token_unit_indices == (0, 1, 2, 3, 4, 5)
+    assert trajectory.token_unit_indices == (0, 0, 1, 1, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4)
     assert trajectory.record_sets[0].num_units() == 3
     assert trajectory.status == "completed"
     assert not trajectory.barge_in
@@ -86,14 +99,21 @@ def test_unit_decisions_timeline_uses_emission_clock():
         seed=7,
         event=_turn_event(),
         record_set_wires=wires,
-        client_audio_chunks=_chunks(5),
+        client_audio_chunks=_chunks(4),
     )
     decisions = trajectory.unit_decisions(listen_token_id=LISTEN_TOKEN_ID)
-    assert [decision.speaking for decision in decisions] == [False, False, True, True, True]
-    assert [decision.origin for decision in decisions] == ["client"] * 5
+    assert [decision.speaking for decision in decisions] == [False, False, True, True]
+    assert [decision.origin for decision in decisions] == ["client"] * 4
     # Emission timestamps start at the first unit and advance at the unit cadence.
     assert decisions[0].time_s == pytest.approx(0.0)
     assert decisions[3].time_s == pytest.approx(3.0)
+    # One decision per record, carrying the unit's non-reemit actions; the
+    # first is the unit's decision.
+    assert decisions[2].action_token_id == SPEAK_CONTENT_TOKEN_ID
+    assert decisions[2].action_token_ids == (SPEAK_CONTENT_TOKEN_ID, SPEAK_CONTENT_TOKEN_ID, CHUNK_EOS_TOKEN_ID)
+    assert decisions[2].action_kinds == ("sampled", "sampled", "sampled")
+    assert decisions[2].logprobs == (pytest.approx(-1.3), pytest.approx(-1.2), pytest.approx(-0.4))
+    assert decisions[2].logprob == pytest.approx(-1.3)
     # The speech onset the turn-latency reward measures.
     first_speak = next(decision for decision in decisions if decision.speaking)
     assert first_speak.time_s == pytest.approx(2.0)
@@ -106,7 +126,7 @@ def test_barge_in_episode_flags_truncated_interruption():
         seed=7,
         event=_interruption_event(),
         record_set_wires=wires,
-        client_audio_chunks=_chunks(5),
+        client_audio_chunks=_chunks(4),
     )
     assert trajectory.barge_in
     assert trajectory.status == "truncated_interruption"
@@ -131,7 +151,7 @@ def test_engine_silent_units_replay_but_do_not_consume_client_chunks():
         seed=7,
         event=_pause_event(),
         record_set_wires=wires,
-        client_audio_chunks=_chunks(5),
+        client_audio_chunks=_chunks(4),
     )
     decisions = trajectory.unit_decisions(listen_token_id=LISTEN_TOKEN_ID)
     engine_units = [decision for decision in decisions if decision.origin == "engine"]
@@ -139,16 +159,16 @@ def test_engine_silent_units_replay_but_do_not_consume_client_chunks():
     assert all(not decision.speaking for decision in engine_units)
 
 
-def test_multi_action_units_are_rejected_loudly():
+def test_a_unit_speaking_through_several_decode_steps_is_one_decision():
+    # The ledger folds a unit's decode steps into one record: a spoken unit's
+    # content tokens and its boundary chunk_eos are one unit's actions.
     wire = record_set_wire(
-        units=[{"action": (LISTEN_TOKEN_ID, "sampled", -0.1)}],
+        units=[
+            spoken_unit(token_ids=[SPEAK_CONTENT_TOKEN_ID, SPEAK_CONTENT_TOKEN_ID]),
+            listen_unit(emission_ns=2_000_000_000),
+        ]
     )
-    wire["token_ids"] = [LISTEN_TOKEN_ID, SPEAK_CONTENT_TOKEN_ID]
-    wire["logprobs"] = [-0.1, -0.2]
-    wire["action_kinds"] = ["sampled", "sampled"]
-    wire["reason_codes"] = ["", ""]
-    wire["stream_names"] = ["content", "content"]
-    wire["unit_offsets"] = [0, 2]
+    wire["input_origins"] = ["client", "engine"]
     trajectory = DuplexTrajectory.assemble(
         session_id="duplex-abc",
         seed=7,
@@ -156,8 +176,14 @@ def test_multi_action_units_are_rejected_loudly():
         record_set_wires=[wire],
         client_audio_chunks=_chunks(1),
     )
-    with pytest.raises(RecordSetError, match="one-decision-per-unit"):
-        trajectory.unit_decisions(listen_token_id=LISTEN_TOKEN_ID)
+    decisions = trajectory.unit_decisions(listen_token_id=LISTEN_TOKEN_ID)
+    assert [(decision.unit_index, decision.action_token_ids) for decision in decisions] == [
+        (0, (SPEAK_CONTENT_TOKEN_ID, SPEAK_CONTENT_TOKEN_ID, CHUNK_EOS_TOKEN_ID)),
+        (1, (LISTEN_TOKEN_ID,)),
+    ]
+    assert [decision.speaking for decision in decisions] == [True, False]
+    # The re-emitted terminators are restatements: never part of a decision.
+    assert all(ACTION_REEMIT not in decision.action_kinds for decision in decisions)
 
 
 @pytest.mark.parametrize(
@@ -217,7 +243,7 @@ def test_scopes_may_carry_different_seeds():
         seed=7,
         event=_turn_event(),
         record_set_wires=[listening, speaking],
-        client_audio_chunks=_chunks(5),
+        client_audio_chunks=_chunks(4),
     )
     assert [record_set.effective_seed for record_set in trajectory.record_sets] == [7, 8]
 

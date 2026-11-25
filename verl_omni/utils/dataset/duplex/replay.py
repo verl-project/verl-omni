@@ -17,8 +17,10 @@ The engine's MiniCPM-o 4.5 duplex data plane opens every audio session with
 the system prompt and the model-bundled default reference audio (E15:
 ``assets/HT_ref_audio.wav`` between ``<|audio_start|>`` and ``<|audio_end|>``,
 one ``<unit>`` placeholder per tower row), then feeds, per 1 s unit,
-``<unit>`` + ten bare audio-embedding placeholders, samples one action token,
-and closes the unit (``terminator`` + ``</unit>``) when the next unit opens.
+``<unit>`` + ten bare audio-embedding placeholders, samples the unit's action
+tokens (one per decode step: a spoken unit carries its content tokens and the
+boundary ``<|chunk_eos|>``), and closes the unit (``</unit>``) when the next
+unit opens.
 The trainer's actor must see that sequence token-for-token — the standard
 processor rendering (``<|audio_start|> … <|audio_end|>`` marker spans around
 the units) is a *different* layout, so this module builds the engine layout
@@ -46,6 +48,7 @@ from typing import Any
 import numpy as np
 
 from verl_omni.utils.dataset.duplex.records import (
+    ACTION_REEMIT,
     ORIGIN_ENGINE,
     RecordSetError,
 )
@@ -315,12 +318,17 @@ class DuplexUnitLayout:
     origin: str
     #: Audio placeholder span as ``[start, end)`` over the full sequence row.
     audio_span: tuple[int, int]
-    #: Absolute position of the unit's action token inside ``response_ids``
-    #: (-1 for action-less units); audio spans stay in full-row coordinates.
+    #: Response-relative position of the unit's decision token (the first
+    #: action) inside ``response_ids`` (-1 for action-less units); audio spans
+    #: stay in full-row coordinates.
     action_position: int
     num_audio_tokens: int
     speaking: bool
     time_s: float
+    #: Response-relative positions and ids of the unit's non-``reemit`` action
+    #: tokens in order.
+    action_positions: tuple[int, ...]
+    action_token_ids: tuple[int, ...]
 
 
 @dataclass(slots=True)
@@ -362,12 +370,8 @@ class DuplexReplay:
     ref_audio: DuplexRefAudio | None = None
 
     def action_token_ids(self) -> list[int]:
-        return [
-            layout_action
-            for layout_action in (
-                self.response_ids[layout.action_position] for layout in self.unit_layouts if layout.action_position >= 0
-            )
-        ]
+        """Every unit's non-``reemit`` action tokens, in unit then token order."""
+        return [token_id for layout in self.unit_layouts for token_id in layout.action_token_ids]
 
     def to_extra_fields(self, *, include_pcm: bool = True) -> dict[str, Any]:
         """The agent-loop ``extra_fields`` payload for this replay.
@@ -394,6 +398,8 @@ class DuplexReplay:
                     "num_audio_tokens": layout.num_audio_tokens,
                     "speaking": layout.speaking,
                     "time_s": layout.time_s,
+                    "action_positions": list(layout.action_positions),
+                    "action_token_ids": list(layout.action_token_ids),
                 }
                 for layout in self.unit_layouts
             ],
@@ -440,6 +446,8 @@ class DuplexReplay:
                     num_audio_tokens=int(layout["num_audio_tokens"]),
                     speaking=bool(layout["speaking"]),
                     time_s=float(layout["time_s"]),
+                    action_positions=tuple(int(position) for position in layout["action_positions"]),
+                    action_token_ids=tuple(int(token_id) for token_id in layout["action_token_ids"]),
                 )
                 for layout in payload["unit_layouts"]
             ],
@@ -530,8 +538,8 @@ def build_replay(
     unit_pcm: list[np.ndarray] = []
     decisions = trajectory.unit_decisions(listen_token_id=vocabulary.listen_token_id)
     client_chunks = iter(trajectory.client_audio_chunks)
-    # The flat stream interleaves re-emitted restatements; decisions consume
-    # only the non-reemitted actions, in order.
+    # The flat stream interleaves re-emitted restatements; the unit windows
+    # consume only the non-reemitted actions, in order.
     flat_actions = iter(
         [
             (token_id, mask, logprob)
@@ -542,7 +550,7 @@ def build_replay(
                 trajectory.action_kinds,
                 strict=True,
             )
-            if kind != "reemit"
+            if kind != ACTION_REEMIT
         ]
     )
 
@@ -561,21 +569,22 @@ def build_replay(
         response_ids.extend([vocabulary.audio_placeholder_token_id] * num_audio_tokens)
         audio_bounds.append([audio_start, audio_start + num_audio_tokens])
         action_position = len(response_ids)
-        flat_token_id, action_mask_value, action_logprob = next(flat_actions)
-        if flat_token_id != decision.action_token_id:
-            raise RecordSetError(
-                f"duplex episode {trajectory.session_id}: unit {decision.unit_index}'s decision token "
-                f"{decision.action_token_id} disagrees with the flat stream token {flat_token_id}"
-            )
-        response_ids.append(decision.action_token_id)
-        response_ids.append(vocabulary.unit_end_token_id)
-        # Only the action-token position can carry mask 1; framing and media
-        # positions are structural context, never loss positions.
+        # <unit> and its audio placeholders are structural context, never loss positions.
         response_mask.extend([0] * (1 + num_audio_tokens))
-        response_mask.append(action_mask_value)
-        response_mask.append(0)
         response_logprobs.extend([0.0] * (1 + num_audio_tokens))
-        response_logprobs.append(action_logprob or 0.0)
+        # One <unit> block per record, holding all of its action tokens.
+        for token_id in decision.action_token_ids:
+            flat_token_id, action_mask_value, action_logprob = next(flat_actions)
+            if flat_token_id != token_id:
+                raise RecordSetError(
+                    f"duplex episode {trajectory.session_id}: unit {decision.unit_index}'s action token "
+                    f"{token_id} disagrees with the flat stream token {flat_token_id}"
+                )
+            response_ids.append(token_id)
+            response_mask.append(action_mask_value)
+            response_logprobs.append(action_logprob if action_mask_value else 0.0)
+        response_ids.append(vocabulary.unit_end_token_id)
+        response_mask.append(0)
         response_logprobs.append(0.0)
         unit_pcm.append(pcm)
         unit_layouts.append(
@@ -587,11 +596,13 @@ def build_replay(
                 num_audio_tokens=num_audio_tokens,
                 speaking=decision.speaking,
                 time_s=decision.time_s,
+                action_positions=tuple(range(action_position, action_position + len(decision.action_token_ids))),
+                action_token_ids=decision.action_token_ids,
             )
         )
     if any(True for _ in flat_actions):
         raise RecordSetError(
-            f"duplex episode {trajectory.session_id}: the flat action stream carries more decisions than "
+            f"duplex episode {trajectory.session_id}: the flat action stream carries more action tokens than "
             "the unit windows; the trajectory columns disagree"
         )
     sampling_params = tuple(params for record_set in trajectory.record_sets for params in record_set.sampling_params)

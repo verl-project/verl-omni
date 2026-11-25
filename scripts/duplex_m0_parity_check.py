@@ -160,18 +160,20 @@ def _actor_model_data(replay) -> dict:
 
 
 def _actor_logits(model, model_inputs: dict, replay):
-    """One forward over the replayed sequence; returns per-decision logits.
+    """One forward over the replayed sequence; returns per-action-token logits.
 
     Args:
         model: The trainer-side MiniCPM-o.
         model_inputs: The episode's prepared call (``_actor_model_data``), built
             once per episode and shared with the embedding-parity diagnostic.
-        replay: The replayed episode, for the decision positions.
+        replay: The replayed episode, for the action positions.
 
     Returns:
-        ``[num_decisions, V]`` logits: each decision token's logits are read at
-        its predicting position — one before the action, offset by the prompt
-        length because ``action_position`` is response-relative.
+        ``[num_action_tokens, V]`` logits: every unit's action tokens in unit
+        order, token order — each read at its predicting position, one before
+        the token, offset by the prompt length because ``action_positions``
+        are response-relative. Forced tokens ride along (mask 0);
+        ``_parity_rows`` skips them.
     """
     import torch
 
@@ -179,9 +181,7 @@ def _actor_logits(model, model_inputs: dict, replay):
         output = model(**model_inputs)
     logits = output.logits[0].float()
     prompt_length = len(replay.prompt_ids)
-    positions = [
-        prompt_length + layout.action_position for layout in replay.unit_layouts if layout.action_position >= 0
-    ]
+    positions = [prompt_length + position for layout in replay.unit_layouts for position in layout.action_positions]
     return logits[[position - 1 for position in positions]]
 
 
@@ -236,7 +236,8 @@ def _parity_rows(
             positions (``_actor_logits``), in action order.
         actions: Per action, ``(token_id, action_kind, temperature,
             captured_logprob)`` in action order; ``captured_logprob`` is
-            ``None`` where no draw happened (forced / reemit rows).
+            ``None`` where no draw happened (forced rows; reemit rows are
+            filtered out before this function).
 
     Returns:
         The episode's parity fields: per-row ``delta`` (with the row's
@@ -339,13 +340,14 @@ def main(argv: list[str] | None = None) -> int:
             bit == (kind == "sampled") for kind, bit in zip(kinds, mask, strict=True)
         )
         # Parity: the captured pre-truncation joint vs the actor logits under
-        # the same measure, on every sampled row.
+        # the same measure, on every sampled action token (unit order, token order).
         actions: list[tuple[int, str, float, float | None]] = []
         for record_set in trajectory.record_sets:
             for record in record_set.records():
                 temperature = float(record.sampling.get("temperature", 0.7) or 0.0)
                 for action in record.actions:
-                    actions.append((action.token_id, action.action_kind, temperature, action.logprob))
+                    if action.action_kind != ACTION_REEMIT:
+                        actions.append((action.token_id, action.action_kind, temperature, action.logprob))
         model_inputs = _actor_model_data(replay)
         logits = _actor_logits(model, model_inputs, replay)
         parity = _parity_rows(

@@ -17,13 +17,16 @@ Runs only when the installed vLLM-Omni provides the duplex action-capture
 surface (vllm-project/vllm-omni#10627); at the verl-omni pin it skips, and
 the pin-compat story is issue #919's third PR. When it runs, it pins the
 mirror to the real implementation: vocabulary, wire round-trip, and the
-capture path's own validation semantics.
+capture path's own validation semantics, and the engine ledger's unit folding
+against the trainer's trajectory view.
 """
 
+import numpy as np
 import pytest
 
 from verl_omni.utils.dataset.duplex import records as mirror
 from verl_omni.utils.dataset.duplex.policy_measure import resolve_forbidden_token_ids
+from verl_omni.utils.dataset.duplex.trajectory import AXIS_TURN, DuplexEpisodeEvent, DuplexTrajectory
 
 pytest.importorskip(
     "vllm_omni.protocol.duplex.action_records",
@@ -133,3 +136,105 @@ def test_forbidden_set_resolver_matches_the_engine_composition():
     token_ids = policy.MiniCPMO45DuplexPolicy.token_ids_from_tokenizer(stub)
     engine_set = policy.MiniCPMO45DuplexPolicy.native_forbidden_token_ids(token_ids, bad_token_ids=stub.bad_token_ids)
     assert resolve_forbidden_token_ids(stub) == engine_set
+
+
+def _unit_payload(unit_index: int, seq: int, token_id: int, kind: str, logprob, *, stream: str = "content", **extra):
+    from vllm_omni.protocol.duplex.action_records import build_unit_payload
+
+    return build_unit_payload(
+        session_id="duplex-fold",
+        stage_id=0,
+        unit_index=unit_index,
+        seq=seq,
+        epoch=0,
+        token_ids=[token_id],
+        logprobs=[logprob],
+        action_kinds=[kind],
+        stream_names=[stream],
+        sampling_params={"temperature": 0.7},
+        effective_seed=11,
+        **extra,
+    )
+
+
+def _engine_ledger_folds_unit_steps() -> bool:
+    """Whether the installed ledger folds same-``unit_index`` payloads into one record."""
+    from vllm_omni.engine.duplex.session.action_ledger import SessionActionLedger
+
+    ledger = SessionActionLedger(session_id="duplex-fold")
+    ledger.bind_response("resp-1", epoch=0, turn_id=0)
+    for seq in (100, 101):
+        ledger.ingest(_unit_payload(0, seq, 88, "sampled", -1.0), epoch=0, turn_id=0, response_id="resp-1", stage_id=0)
+    ledger.seal_active_response("resp-1")
+    return ledger.take_terminal_sets()[0].num_units() == 1
+
+
+ENGINE_LEDGER_FOLDS_UNIT_STEPS = _engine_ledger_folds_unit_steps()
+
+
+@pytest.mark.xfail(
+    not ENGINE_LEDGER_FOLDS_UNIT_STEPS,
+    strict=False,
+    reason="the installed vLLM-Omni ledger appends one record per decode-step payload; "
+    "one record per model unit (unit_index folding) ships with the engine's capture change",
+)
+def test_engine_ledger_folds_a_units_decode_steps_into_one_record():
+    """A spoken unit's decode steps — its restated terminator included — are one record the trainer replays once."""
+    from vllm_omni.engine.duplex.session.action_ledger import SessionActionLedger
+
+    ledger = SessionActionLedger(session_id="duplex-fold")
+    ledger.bind_response("resp-1", epoch=0, turn_id=1)
+    ledger.note_input_unit(0, 100, modality="audio", origin="client")
+    # Unit 0: two content steps, the boundary chunk_eos, then the terminator the
+    # next unit's open re-emits under the unit it closes. Unit 1: a listen decision.
+    deliveries = [
+        _unit_payload(0, 100, 88, "sampled", -1.3),
+        _unit_payload(0, 101, 88, "sampled", -1.2),
+        _unit_payload(
+            0, 102, 5, "sampled", -0.4, stream="boundary", terminators=[{"token_id": 5, "kind": "chunk_eos"}]
+        ),
+        _unit_payload(
+            0,
+            103,
+            5,
+            "reemit",
+            None,
+            stream="boundary",
+            reason_codes=["terminator_reemit"],
+            terminators=[{"token_id": 5, "kind": "chunk_eos"}],
+        ),
+        _unit_payload(1, 104, 6, "sampled", -0.2),
+    ]
+    for payload in deliveries:
+        ledger.ingest(payload, epoch=0, turn_id=1, response_id="resp-1", stage_id=0)
+    ledger.seal_active_response("resp-1")
+    engine_set = ledger.take_terminal_sets()[0]
+    wire = engine_set.to_wire()
+
+    decoded = mirror.DuplexActionRecordSet.from_wire(wire)
+    assert decoded.num_units() == 2
+    assert decoded.unit_offsets == (0, 4, 5) == tuple(engine_set.unit_offsets)
+    first, second = decoded.records()
+    assert [(action.token_id, action.action_kind) for action in first.actions] == [
+        (88, "sampled"),
+        (88, "sampled"),
+        (5, "sampled"),
+        (5, "reemit"),
+    ]
+    assert first.input_chunk.origin == "client"  # the unit's first step keeps the append's annotation
+    assert decoded.terminators[0][-1] == {"token_id": 5, "kind": "chunk_eos"}
+    assert [action.token_id for action in second.actions] == [6]
+
+    trajectory = DuplexTrajectory.assemble(
+        session_id="duplex-fold",
+        seed=11,
+        event=DuplexEpisodeEvent(axis=AXIS_TURN, user_turn_end_s=0.0),
+        record_set_wires=[wire],
+        client_audio_chunks=[np.zeros(16000, dtype=np.float32), np.zeros(16000, dtype=np.float32)],
+    )
+    decisions = trajectory.unit_decisions(listen_token_id=6)
+    assert [(decision.unit_index, decision.action_token_ids) for decision in decisions] == [
+        (0, (88, 88, 5)),
+        (1, (6,)),
+    ]
+    assert decisions[0].action_kinds == ("sampled", "sampled", "sampled")  # the reemit restatement is no decision

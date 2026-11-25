@@ -135,7 +135,12 @@ def _optional_pair(value: Any) -> tuple[float, float] | None:
 
 @dataclass(frozen=True, slots=True)
 class DuplexUnitDecision:
-    """One unit's policy decision on the episode timeline."""
+    """One unit's policy decision on the episode timeline.
+
+    A record is one 1 s unit and may carry several decode steps' actions
+    (``action_token_ids``); ``action_token_id`` / ``action_kind`` /
+    ``logprob`` are the first action's values — the unit's decision.
+    """
 
     unit_index: int
     action_token_id: int
@@ -144,10 +149,14 @@ class DuplexUnitDecision:
     time_s: float
     #: The input chunk's origin (``client`` / ``engine``-injected silence).
     origin: str
-    #: True when the unit's action is a speak decision (any non-listen action).
+    #: True when the unit's decision action is a speak decision (any non-listen action).
     speaking: bool
     scope_index: int
     logprob: float | None
+    #: The unit's non-``reemit`` actions in order.
+    action_token_ids: tuple[int, ...]
+    action_kinds: tuple[str, ...]
+    logprobs: tuple[float | None, ...]
 
 
 @dataclass(slots=True)
@@ -199,11 +208,9 @@ class DuplexTrajectory:
             listen_token_id: The tokenizer's ``<|listen|>`` id; a unit whose
                 decision action is this token decided to stay silent.
 
-        Raises:
-            RecordSetError: If any unit carries more than one non-reemitted
-                action token — the MiniCPM-o 4.5 duplex runtime emits one
-                decision per unit, and a wider record means an engine
-                contract change this replay does not yet implement.
+        Returns:
+            One decision per record carrying at least one non-``reemit``
+            action; a record of only ``reemit`` rows opens none.
         """
         decisions: list[DuplexUnitDecision] = []
         t0 = self._first_unit_time_ns()
@@ -212,12 +219,6 @@ class DuplexTrajectory:
                 actions = [action for action in record.actions if action.action_kind != ACTION_REEMIT]
                 if not actions:
                     continue
-                if len(actions) != 1:
-                    raise RecordSetError(
-                        f"duplex unit {record.unit_index} of session {self.session_id} carries "
-                        f"{len(actions)} decision actions; this replay implements the MiniCPM-o 4.5 "
-                        "one-decision-per-unit contract only"
-                    )
                 action = actions[0]
                 emission = record.emission_ns
                 time_s = (emission - t0) / 1e9 if emission is not None and t0 is not None else float(record.unit_index)
@@ -231,6 +232,9 @@ class DuplexTrajectory:
                         speaking=action.token_id != listen_token_id,
                         scope_index=scope_index,
                         logprob=action.logprob,
+                        action_token_ids=tuple(item.token_id for item in actions),
+                        action_kinds=tuple(item.action_kind for item in actions),
+                        logprobs=tuple(item.logprob for item in actions),
                     )
                 )
         return decisions

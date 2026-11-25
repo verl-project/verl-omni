@@ -168,7 +168,7 @@ class FakeStreamingProcessor:
 def _trajectory(engine_silence_units: int = 0) -> DuplexTrajectory:
     wires = listening_then_speaking_wires(engine_silence_units=engine_silence_units)
     rng = np.random.default_rng(1)
-    client_units = 5
+    client_units = 4
     return DuplexTrajectory.assemble(
         session_id="duplex-abc",
         seed=7,
@@ -223,29 +223,36 @@ def test_replay_rebuilds_the_engine_unit_layout():
         _TOKEN_TABLE["<|im_end|>"],
     ]
     prompt_length = len(replay.prompt_ids)
-    # First unit: <unit> + 10 placeholders + action; later units close with </unit> first.
-    assert replay.response_ids[:12] == [
+    # A listen unit is <unit> + 10 placeholders + its action + </unit>: 13 tokens.
+    assert replay.response_ids[:13] == [
         vocabulary.unit_token_id,
         *[vocabulary.audio_placeholder_token_id] * 10,
         LISTEN_TOKEN_ID,
+        vocabulary.unit_end_token_id,
     ]
-    # Every unit is 13 tokens: <unit>, 10 audio, action, </unit>.
-    assert len(replay.response_ids) == 5 * 13
+    # Each spoken unit holds its two content tokens and the boundary chunk_eos:
+    # 15 tokens. Four units, two of each.
+    assert len(replay.response_ids) == 2 * 13 + 2 * 15
     assert len(replay.response_mask) == len(replay.response_ids)
     assert len(replay.response_logprobs) == len(replay.response_ids)
-    # Actions sit at unit-relative offset 11 of each 13-token unit window.
-    action_ids = replay.action_token_ids()
-    assert action_ids == [
+    # Every unit's action tokens follow its placeholders, in unit then token order.
+    assert replay.action_token_ids() == [
         LISTEN_TOKEN_ID,
         LISTEN_TOKEN_ID,
         SPEAK_CONTENT_TOKEN_ID,
         SPEAK_CONTENT_TOKEN_ID,
         CHUNK_EOS_TOKEN_ID,
+        SPEAK_CONTENT_TOKEN_ID,
+        SPEAK_CONTENT_TOKEN_ID,
+        CHUNK_EOS_TOKEN_ID,
     ]
-    assert sum(replay.response_mask) == 5
+    assert sum(replay.response_mask) == 8
+    assert replay.unit_layouts[2].action_position == 2 * 13 + 11
+    assert replay.unit_layouts[2].action_positions == (2 * 13 + 11, 2 * 13 + 12, 2 * 13 + 13)
     # Audio bounds cover exactly the bare placeholder runs, in full-row coordinates.
     assert replay.audio_bounds[0] == [prompt_length + 1, prompt_length + 11]
-    assert replay.audio_bounds[4] == [prompt_length + 4 * 13 + 1, prompt_length + 4 * 13 + 11]
+    assert replay.audio_bounds[2] == [prompt_length + 2 * 13 + 1, prompt_length + 2 * 13 + 11]
+    assert replay.audio_bounds[3] == [prompt_length + 2 * 13 + 15 + 1, prompt_length + 2 * 13 + 15 + 11]
     assert all(
         replay.response_ids[start - prompt_length : end - prompt_length]
         == [vocabulary.audio_placeholder_token_id] * (end - start)
@@ -262,8 +269,8 @@ def test_replay_masks_forced_engine_units_and_replays_silence():
     assert engine_layout.num_audio_tokens == 10
     assert np.all(replay.unit_pcm[engine_layout.unit_index] == 0.0)
     assert replay.response_mask[engine_layout.action_position] == 0
-    # Five sampled decisions of six; the forced engine listen unit is masked out.
-    assert sum(replay.response_mask) == 5
+    # Eight sampled action tokens; the forced engine listen unit is masked out.
+    assert sum(replay.response_mask) == 8
     # The reference block leads the bounds; the engine unit's span shifts with the rest.
     assert replay.audio_bounds[0] == [8, 68]
     bare = build_replay(_trajectory(engine_silence_units=1), _vocabulary())
@@ -309,7 +316,7 @@ def test_reference_audio_mel_rides_the_offline_front_end_as_the_first_clip():
     replay = build_replay(_trajectory(), _vocabulary(), ref_audio=_ref_audio())
     processor = FakeStreamingProcessor()
     features, lens = extract_unit_mels(processor, replay)
-    assert lens == [602, 104, 101, 101, 101, 101]
+    assert lens == [602, 104, 101, 101, 101]
     assert len(processor.process_audio_calls) == 1
     np.testing.assert_array_equal(processor.process_audio_calls[0], replay.ref_audio.pcm)
     assert features[0].shape == (80, 602) and features[0].dtype == np.float32
@@ -319,7 +326,7 @@ def test_reference_audio_mel_rides_the_offline_front_end_as_the_first_clip():
     assert media["audio_bounds"][0][0] == [8, 68]
     assert media["audio_feature_lens"][0][0] == 602  # mel frames; the tower pools them to the 60-row span
     assert audio_tokens_for_mel_frames(media["audio_feature_lens"][0][0]) == 60
-    assert len(media["audio_features"][0]) == len(replay.audio_bounds) == 6
+    assert len(media["audio_features"][0]) == len(replay.audio_bounds) == 5  # reference clip + four units
 
 
 def test_resolve_default_ref_audio_mirrors_the_engine_asset_rule(tmp_path):
@@ -392,9 +399,7 @@ def test_extra_fields_roundtrip():
     assert restored.response_ids == replay.response_ids
     assert restored.response_mask == replay.response_mask
     assert restored.audio_bounds == replay.audio_bounds
-    assert [layout.action_position for layout in restored.unit_layouts] == [
-        layout.action_position for layout in replay.unit_layouts
-    ]
+    assert restored.unit_layouts == replay.unit_layouts
     assert all(np.array_equal(left, right) for left, right in zip(restored.unit_pcm, replay.unit_pcm, strict=True))
     assert restored.status == "completed"
     assert restored.event["axis"] == AXIS_TURN
@@ -407,7 +412,7 @@ def test_replay_event_carries_both_interruption_anchors():
         seed=7,
         event=DuplexEpisodeEvent(axis=AXIS_INTERRUPTION, interrupt_speech_onset_s=1.0, interrupt_speech_end_s=4.0),
         record_set_wires=listening_then_speaking_wires(),
-        client_audio_chunks=[np.zeros(16000, dtype=np.float32) for _ in range(5)],
+        client_audio_chunks=[np.zeros(16000, dtype=np.float32) for _ in range(4)],
     )
     replay = build_replay(trajectory, _vocabulary())
     # The payload's event rebuilds into the same annotation: the yield
@@ -435,12 +440,12 @@ def test_streaming_mel_extraction_and_actor_media():
     features, lens = extract_unit_mels(processor, replay)
     assert len(features) == len(replay.unit_layouts)
     # Mel frames per clip: the first unit's chunk is 16480 samples, later ones 16000.
-    assert lens == [104, 101, 101, 101, 101]
+    assert lens == [104, 101, 101, 101]
     assert all(clip.shape == (80, frames) for clip, frames in zip(features, lens, strict=True))
     media = build_actor_media(replay, features, lens)
     assert media["audio_feature_lens"] == [lens]
     assert media["audio_bounds"] == [[list(span) for span in replay.audio_bounds]]
-    assert len(media["audio_features"][0]) == 5
+    assert len(media["audio_features"][0]) == 4
     assert all(audio_tokens_for_mel_frames(frames) == 10 for frames in lens)
 
 
@@ -464,10 +469,10 @@ def test_streaming_call_sequence_mirrors_the_engine_session():
     ]
     assert shared.reset_streaming_calls == [0]  # once, before any chunk
     # Every chunk: reset=False, return_batch_feature=True — the reset is the session's, never a unit's.
-    assert [call[1:] for call in shared.streaming_calls] == [(False, True)] * 5
+    assert [call[1:] for call in shared.streaming_calls] == [(False, True)] * 4
     # Ingestion geometry: the 1035 ms first chunk (hop-aligned 16480 samples, zero pre-roll),
     # then one 16000-sample chunk per unit off the concatenated stream.
-    assert [call[0] for call in shared.streaming_calls] == [16480, 16000, 16000, 16000, 16000]
+    assert [call[0] for call in shared.streaming_calls] == [16480, 16000, 16000, 16000]
     first_unit = replay.unit_pcm[0]
     first_chunk = shared.processed_chunks[0]
     assert np.all(first_chunk[:560] == 0.0)

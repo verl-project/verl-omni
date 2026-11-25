@@ -327,6 +327,41 @@ def test_parity_rows_compares_captured_values_and_skips_forced_or_reemit():
     assert parity["max_abs_delta"] > 0.05
 
 
+def test_actor_logits_reads_every_action_token_of_each_unit():
+    """One logit row per action token, each read at its predicting position.
+
+    The fake forward's row ``t`` carries the token after position ``t``: the
+    rows the gate reads back must name the replayed action tokens, in unit
+    then token order — a spoken unit's content tokens and boundary included.
+    """
+    from types import SimpleNamespace
+
+    import numpy as np
+    import torch
+
+    from tests.utils.dataset.duplex._duplex_fixtures import listening_then_speaking_wires
+    from tests.utils.dataset.duplex.test_replay_on_cpu import _vocabulary
+    from verl_omni.utils.dataset.duplex.replay import build_replay
+    from verl_omni.utils.dataset.duplex.trajectory import AXIS_TURN, DuplexEpisodeEvent, DuplexTrajectory
+
+    trajectory = DuplexTrajectory.assemble(
+        session_id="duplex-abc",
+        seed=7,
+        event=DuplexEpisodeEvent(axis=AXIS_TURN, user_turn_end_s=2.0),
+        record_set_wires=listening_then_speaking_wires(),
+        client_audio_chunks=[np.zeros(16000, dtype=np.float32) for _ in range(4)],
+    )
+    replay = build_replay(trajectory, _vocabulary())
+    sequence = np.asarray(replay.prompt_ids + replay.response_ids)
+    next_token = np.concatenate([sequence[1:], [-1]])  # the token row t predicts
+    logits = torch.from_numpy(next_token).float().reshape(1, -1, 1)
+    forward = lambda **model_inputs: SimpleNamespace(logits=logits)  # noqa: E731
+
+    rows = _parity_script()._actor_logits(forward, {}, replay)
+    assert rows[:, 0].tolist() == [float(token_id) for token_id in replay.action_token_ids()]
+    assert rows.shape[0] == 8  # 1 + 1 listen tokens, 3 + 3 tokens of the two spoken units
+
+
 def test_audio_embedding_parity_reports_per_unit_streaming_vs_offline_gaps():
     """The diagnostic reads every clip twice through the patched audio path —
 

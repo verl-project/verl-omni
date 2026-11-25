@@ -1,6 +1,6 @@
 # Streaming duplex GRPO (MiniCPM-o 4.5)
 
-Last updated: 11/24/2026.
+Last updated: 11/25/2026.
 
 Streaming **full-duplex GRPO** over real duplex sessions — the trainer side of
 [RFC #905](https://github.com/verl-project/verl-omni/issues/905), consuming
@@ -16,9 +16,9 @@ between duplex rollout batches.
 A full-duplex model listens and speaks concurrently; turn-taking, pause
 retention, and barge-in yielding are the model's own per-second decisions. A
 duplex episode therefore cannot be a prompt/response pair: it is a **session**
-whose input track is fed at the native 1 s cadence while the policy emits one
-action token per unit (`<|listen|>` to stay silent, content/boundary tokens
-to speak). Training on those decisions needs three things the turn-based
+whose input track is fed at the native 1 s cadence while the policy decides
+per 1 s unit (`<|listen|>` to stay silent; a spoken unit emits its content
+tokens and the boundary `<|chunk_eos|>`). Training on those decisions needs three things the turn-based
 paths do not have:
 
 1. **Capture** — the engine records every action with the log-probability of
@@ -52,7 +52,7 @@ dataset (mined episodes) ──▶ omni_duplex_agent ──▶ rollout server (D
 | --- | --- | --- |
 | Wire mirror of `DuplexActionRecordSet` | `verl_omni/utils/dataset/duplex/records.py` | Strict validation; contract-tested against upstream when the capture surface is installed |
 | Trajectory assembly | `.../duplex/trajectory.py` | Scopes in order; validity mask (`sampled`→1, `forced`/`reemit`→0); unit decision timeline |
-| Unit-window replay | `.../duplex/replay.py` | `<unit>` + 10 bare audio placeholders + action + `</unit>` per unit; engine silent units replay as 1 s of digital silence; mel via the processor's `process_audio_streaming` |
+| Unit-window replay | `.../duplex/replay.py` | `<unit>` + 10 bare audio placeholders + the unit's action tokens + `</unit>` per record (one record per 1 s unit); engine silent units replay as 1 s of digital silence; mel via the processor's `process_audio_streaming` |
 | Event mining | `.../duplex/mining.py` | pause / turn / interruption from word-level timestamps |
 | Rule rewards | `verl_omni/utils/reward_score/duplex_turn_taking.py` | Per-axis, timestamp-only, tuned bands: the turn axis measures from the user's turn end; the interruption axis measures from the interrupting speech *onset* (full credit within 1 s, −1 past 3 s) with a silence floor — a policy that was not speaking at the onset, or never spoke, takes −1. Emits the trip-wire columns, `duplex_pacing_corrupted`, and the per-episode `duplex_episode_failed` flag |
 | Trip-wire definitions | `.../duplex/telemetry.py` | The shared threshold set (`TRIP_WIRE_DEFAULTS`), the reward bands, and the timing definitions every consumer calls — `speak_ratio`, `silence_share`, `duplicate_ngram_share`, the onset-anchored `interruption_yield_latency`, and the pacing predicate `pacing_corrupted` (an engine-injected silent unit inside the scored window); the scorer, the FDB metrics and the agent loop share them |
@@ -66,8 +66,13 @@ dataset (mined episodes) ──▶ omni_duplex_agent ──▶ rollout server (D
 ### The replay layout
 
 The engine's duplex data plane feeds, per unit, `<unit>` + ten bare
-audio-embedding placeholders, samples one action token, and closes the unit
-with `terminator + </unit>` when the next opens. The trainer replay mirrors
+audio-embedding placeholders, samples the unit's action tokens (one per
+decode step — a spoken unit carries its content tokens and the boundary
+`<|chunk_eos|>`), and closes the unit with `</unit>` when the next opens.
+The capture ledger folds a unit's decode steps into one record, so the
+replay builds exactly one `<unit>` block per ingested 1 s unit
+(engine-injected silence included) — intra-unit tokens and the re-emitted
+terminator never add one. The trainer replay mirrors
 that layout exactly — the standard processor rendering (`<|audio_start|> …
 <|audio_end|>` marker spans) is a *different* sequence, so duplex batches
 carry **explicit `audio_bounds`** from the replay instead of marker-derived

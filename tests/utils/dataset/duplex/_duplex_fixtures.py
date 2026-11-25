@@ -15,7 +15,11 @@
 
 The payloads mirror what the engine's capture ledger hands the trainer
 (``DuplexActionRecordSet.to_wire()``); keeping one builder lets every duplex
-CPU test speak the same fixture dialect.
+CPU test speak the same fixture dialect. A record is one 1 s unit: the ledger
+folds a unit's decode steps into it, so a spoken unit carries its content
+tokens, the boundary ``<|chunk_eos|>`` that closes it, and that terminator's
+``reemit`` — the lookahead restates it at the next unit's open, under the
+unit it closes. A listen unit is the listen decision plus its re-emission.
 """
 
 from __future__ import annotations
@@ -27,6 +31,10 @@ SPEAK_CONTENT_TOKEN_ID = 88
 CHUNK_EOS_TOKEN_ID = 151665
 TURN_EOS_TOKEN_ID = 151666
 
+_UNIT_NS = 1_000_000_000
+#: A terminator's lookahead restatement: no draw, boundary stream.
+_REEMIT_SUFFIX = ("boundary", "terminator_reemit")
+
 
 def unit_row(
     *,
@@ -37,6 +45,60 @@ def unit_row(
 ) -> dict[str, Any]:
     """One unit's input-side annotation."""
     return {"modality": modality, "origin": origin, "commit_ns": commit_ns, "emission_ns": emission_ns}
+
+
+def listen_unit(
+    *, origin: str = "client", kind: str = "sampled", emission_ns: int | None = _UNIT_NS, reason: str = ""
+) -> dict[str, Any]:
+    """A silent 1 s unit: its listen decision, then the terminator's re-emission.
+
+    ``kind="forced"`` with ``reason="force_listen"`` is an engine-injected
+    silence unit (``origin="engine"``): an override, no draw.
+    """
+    sampled = kind == "sampled"
+    return {
+        "actions": [
+            (LISTEN_TOKEN_ID, kind, -0.2 if sampled else None, "content", reason),
+            (LISTEN_TOKEN_ID, "reemit", None, *_REEMIT_SUFFIX),
+        ],
+        "origin": origin,
+        "emission_ns": emission_ns,
+        "terminators": [{"token_id": LISTEN_TOKEN_ID, "kind": "listen"}],
+    }
+
+
+def spoken_unit(
+    content_tokens: int = 2,
+    *,
+    token_ids: list[int] | None = None,
+    emission_ns: int | None = _UNIT_NS,
+) -> dict[str, Any]:
+    """A spoken 1 s unit: ``content_tokens`` content draws, the boundary ``<|chunk_eos|>``, its re-emission.
+
+    ``token_ids`` replaces the content draws (e.g. a ``<|turn_eos|>`` step).
+    """
+    tokens = token_ids if token_ids is not None else [SPEAK_CONTENT_TOKEN_ID] * content_tokens
+    actions = [(token_id, "sampled", -1.3 + 0.1 * index, "content") for index, token_id in enumerate(tokens)]
+    actions.append((CHUNK_EOS_TOKEN_ID, "sampled", -0.4, "boundary"))
+    actions.append((CHUNK_EOS_TOKEN_ID, "reemit", None, *_REEMIT_SUFFIX))
+    return {
+        "actions": actions,
+        "emission_ns": emission_ns,
+        "terminators": [{"token_id": CHUNK_EOS_TOKEN_ID, "kind": "chunk_eos"}],
+    }
+
+
+def _unit_actions(unit: dict[str, Any]) -> list[tuple[int, str, float | None, str, str]]:
+    """One unit's actions as ``(token_id, kind, logprob, stream, reason)`` rows."""
+    declared: list[tuple] = unit.get("actions") or [unit["action"]]
+    default_stream = "content" if declared[0][1] == "sampled" else "boundary"
+    rows = []
+    for action in declared:
+        token_id, kind, logprob = action[:3]
+        stream = action[3] if len(action) > 3 else unit.get("stream", default_stream)
+        reason = action[4] if len(action) > 4 else unit.get("reason", "")
+        rows.append((token_id, kind, logprob, stream, reason))
+    return rows
 
 
 def record_set_wire(
@@ -52,8 +114,12 @@ def record_set_wire(
 ) -> dict[str, Any]:
     """Build one sealed scope's wire mapping from per-unit action descriptions.
 
-    Each entry of ``units`` is ``{"action": (token_id, kind, logprob), "origin": ...,
-    "emission_ns": ...}``; the builder flattens them into the columnar form.
+    Each entry of ``units`` is one 1 s unit: ``{"action": (token_id, kind,
+    logprob), "origin": ..., "emission_ns": ..., "stream": ..., "reason": ...}``
+    for a one-action unit, or ``"actions": [(token_id, kind, logprob[, stream[,
+    reason]]), ...]`` for a multi-step one (``listen_unit`` / ``spoken_unit``
+    build both shapes); ``terminators`` is the unit's terminator list. The
+    builder flattens the actions into the columnar form and ``unit_offsets``.
     """
     units = units if units is not None else []
     token_ids: list[int] = []
@@ -68,13 +134,12 @@ def record_set_wire(
     commits: list[int | None] = []
     terminators: list[list[dict[str, Any]]] = []
     for unit in units:
-        token_id, kind, logprob = unit["action"]
-        reason = unit.get("reason", "")
-        token_ids.append(token_id)
-        logprobs.append(logprob)
-        kinds.append(kind)
-        reasons.append(reason)
-        streams.append(unit.get("stream", "content" if kind == "sampled" else "boundary"))
+        for token_id, kind, logprob, stream, reason in _unit_actions(unit):
+            token_ids.append(token_id)
+            logprobs.append(logprob)
+            kinds.append(kind)
+            reasons.append(reason)
+            streams.append(stream)
         unit_offsets.append(len(token_ids))
         origins.append(unit.get("origin", "client"))
         modalities.append(unit.get("modality", "audio"))
@@ -111,13 +176,13 @@ def record_set_wire(
 
 
 def reemit_variant_wires(*, session_id: str = "duplex-abc", seed: int = 7) -> list[dict]:
-    """A response scope whose terminator lookahead re-emits.
+    """A response scope whose re-emitted terminators arrive as their own records.
 
-    Mirrors the engine's capture shape: the chunk-terminator lookahead re-
-    emits the previous unit's terminator as its own record row (origin
-    defaults to client in the engine's ledger). The reemit rows are separate
-    units here — restatements that open no unit window and consume no fed
-    chunk on the trainer side.
+    Before the ledger folded a unit's decode steps, each per-step payload —
+    the terminator lookahead's restatement included — became a record row of
+    its own (origin defaults to client in the engine's ledger). The trainer
+    still skips such rows: they open no unit window and consume no fed chunk.
+    The folded shape is what ``speaking_wires`` carries.
     """
     speaking = record_set_wire(
         session_id=session_id,
@@ -166,6 +231,28 @@ def reemit_variant_wires(*, session_id: str = "duplex-abc", seed: int = 7) -> li
     return [speaking]
 
 
+def speaking_wires(
+    *,
+    session_id: str = "duplex-abc",
+    seed: int = 7,
+    speak_units: int = 2,
+    barge_in: bool = False,
+) -> list[dict[str, Any]]:
+    """One response scope of ``speak_units`` spoken units, decided from t = 2 s.
+
+    ``barge_in`` seals the scope as ``truncated_interruption``.
+    """
+    return [
+        record_set_wire(
+            session_id=session_id,
+            response_id="resp-1",
+            status="truncated_interruption" if barge_in else "completed",
+            units=[spoken_unit(emission_ns=3_000_000_000 + unit * _UNIT_NS) for unit in range(speak_units)],
+            seed=seed,
+        )
+    ]
+
+
 def listening_then_speaking_wires(
     *,
     session_id: str = "duplex-abc",
@@ -177,22 +264,21 @@ def listening_then_speaking_wires(
 ) -> list[dict[str, Any]]:
     """A canonical episode: one listening scope, then one response scope.
 
-    The listening units are ``<|listen|>`` draws; the response speaks content
-    tokens and closes with ``<|chunk_eos|>``. ``barge_in`` seals the response
-    scope as ``truncated_interruption``; ``engine_silence_units`` appends
-    engine-injected silent units to the listening scope.
+    The listening units are ``<|listen|>`` decisions; each spoken unit carries
+    two content tokens and its boundary ``<|chunk_eos|>``. ``barge_in`` seals
+    the response scope as ``truncated_interruption``; ``engine_silence_units``
+    appends engine-injected silent units to the listening scope.
     """
     listening_units: list[dict[str, Any]] = [
-        {"action": (LISTEN_TOKEN_ID, "sampled", -0.2), "emission_ns": 1_000_000_000 + unit * 1_000_000_000}
-        for unit in range(listen_units)
+        listen_unit(emission_ns=(unit + 1) * _UNIT_NS) for unit in range(listen_units)
     ]
     listening_units.extend(
-        {
-            "action": (LISTEN_TOKEN_ID, "forced", None),
-            "reason": "silent_unit_listen",
-            "origin": "engine",
-            "emission_ns": 1_000_000_000 + (listen_units + unit) * 1_000_000_000,
-        }
+        listen_unit(
+            origin="engine",
+            kind="forced",
+            reason="force_listen",
+            emission_ns=(listen_units + unit + 1) * _UNIT_NS,
+        )
         for unit in range(engine_silence_units)
     )
     listening = record_set_wire(
@@ -202,26 +288,10 @@ def listening_then_speaking_wires(
         units=listening_units,
         seed=seed,
     )
-    speaking_units: list[dict[str, Any]] = [
-        {"action": (SPEAK_CONTENT_TOKEN_ID, "sampled", -1.3), "emission_ns": 3_000_000_000 + unit * 1_000_000_000}
-        for unit in range(speak_units)
+    return [
+        listening,
+        *speaking_wires(session_id=session_id, seed=seed, speak_units=speak_units, barge_in=barge_in),
     ]
-    speaking_units.append(
-        {
-            "action": (CHUNK_EOS_TOKEN_ID, "sampled", -0.4),
-            "stream": "boundary",
-            "emission_ns": 3_000_000_000 + speak_units * 1_000_000_000,
-            "terminators": [{"token_id": CHUNK_EOS_TOKEN_ID, "kind": "chunk_eos"}],
-        }
-    )
-    speaking = record_set_wire(
-        session_id=session_id,
-        response_id="resp-1",
-        status="truncated_interruption" if barge_in else "completed",
-        units=speaking_units,
-        seed=seed,
-    )
-    return [listening, speaking]
 
 
 def interruption_event(*, onset_s: float = 2.0, end_s: float = 5.0) -> dict[str, Any]:

@@ -124,7 +124,7 @@ def _server_result(session_id: str = "duplex-abc", *, engine_silence_units: int 
         "status": "completed",
         "record_sets": wires,
         "event": {"axis": "turn", "user_turn_end_s": 2.0},
-        "client_chunks": [np.zeros(16000, dtype=np.float32) for _ in range(5)],
+        "client_chunks": [np.zeros(16000, dtype=np.float32) for _ in range(4)],
     }
 
 
@@ -133,7 +133,7 @@ def _episode(axis: str = "turn") -> dict[str, Any]:
         "episode_id": "ep-1",
         "axis": axis,
         "event": {"axis": axis, "user_turn_end_s": 2.0},
-        "chunks": [{"pcm": np.zeros(16000, dtype=np.float32), "is_speech": True} for _ in range(5)],
+        "chunks": [{"pcm": np.zeros(16000, dtype=np.float32), "is_speech": True} for _ in range(4)],
         "instructions": None,
     }
 
@@ -143,15 +143,17 @@ async def test_run_maps_one_episode_onto_the_policy_sequence():
     loop, server = _loop(_server_result())
     output = await loop.run({"temperature": 0.7}, duplex_episode=_episode(), duplex_seed=11, global_steps=4)
     assert output.prompt_ids  # the session context prefix
-    assert len(output.response_ids) == 5 * 13
+    # Two 13-token listen windows, two 15-token spoken windows (two content
+    # tokens and the boundary chunk_eos each): one <unit> block per record.
+    assert len(output.response_ids) == 2 * 13 + 2 * 15
     assert len(output.response_mask) == len(output.response_ids)
-    assert sum(output.response_mask) == 5  # five sampled decisions
+    assert sum(output.response_mask) == 8  # every sampled action token
     # Engine-captured logprobs stay inside the replay payload — the output
     # column stays unset so verl cannot mix them with old_log_probs.
     assert output.response_logprobs is None
     payload = output.extra_fields[DUPLEX_REPLAY_KEY]
     assert payload["response_logprobs"]  # the captured channel rides the payload (M0 gate)
-    assert payload["unit_mels"] and len(payload["unit_mels"]) == 5
+    assert payload["unit_mels"] and len(payload["unit_mels"]) == 4
     assert "unit_pcm" not in payload
     # Off-policy staleness tags verl's _compute_metrics int-casts.
     assert output.extra_fields["min_global_steps"] == 4
@@ -162,7 +164,7 @@ async def test_run_maps_one_episode_onto_the_policy_sequence():
     # the instructions key (an explicit value silences the engine pipeline).
     (run_spec,) = server.episodes
     assert 0 <= run_spec["seed"] < 2**63  # uuid-mixed from the dataset seed (group diversity)
-    assert len(run_spec["chunks"]) == 5
+    assert len(run_spec["chunks"]) == 4
     assert run_spec["temperature"] == 0.7
     assert "instructions" not in run_spec
     assert server._result is not None
@@ -197,7 +199,7 @@ async def test_run_rejects_samples_without_the_episode_column():
 @pytest.mark.asyncio
 async def test_misaligned_trajectory_fails_the_episode():
     result = _server_result()
-    result["client_chunks"] = [np.zeros(16000, dtype=np.float32) for _ in range(4)]  # one short
+    result["client_chunks"] = [np.zeros(16000, dtype=np.float32) for _ in range(3)]  # one short
     loop, _ = _loop(result)
     with pytest.raises(Exception, match="client chunks"):
         await loop.run({}, duplex_episode=_episode(), duplex_seed=7)
