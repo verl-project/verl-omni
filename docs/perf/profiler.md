@@ -1,6 +1,6 @@
 # Profiling FlowGRPO / diffusion training in VeRL-Omni
 
-Last updated: 11/25/2026.
+Last updated: 11/26/2026.
 
 VeRL-Omni reuses the profiler subsystem from upstream
 [verl](https://github.com/verl-project/verl) (`verl.utils.profiler`) and exposes
@@ -467,6 +467,9 @@ reward.profiler.enable=True \
 reward.profiler.ranks=[0] \
 global_profiler.global_tool_config.nsys.discrete=False
 ```
+
+CPU-native reward-model workers also support profiling on nodes with a visible
+CUDA device. Their models run on CPU; capture control uses the CUDA profiler API.
 
 Nsight profiling for these roles requires `tool_config.nsys.discrete=False`.
 Set `enable=False` to disable a role or `all_ranks=True` to select all its

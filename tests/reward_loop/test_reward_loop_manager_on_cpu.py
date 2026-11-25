@@ -166,3 +166,50 @@ def test_profiler_fanout_includes_legacy_and_named_engine_models(monkeypatch, me
     monkeypatch.setattr(RewardLoopManager, method, Mock())
     getattr(manager, method)(**kwargs)
     assert events == [("legacy", kwargs), ("engine", kwargs)]
+
+
+@pytest.mark.parametrize(
+    "profiler,profiled_indices",
+    [
+        (None, []),
+        (
+            {
+                "tool": "nsys",
+                "enable": True,
+                "ranks": [3],
+                "ray_actor_nsight_options": {"trace": "cuda", "o": "{role}_rank_{rank}"},
+            },
+            [1],
+        ),
+    ],
+    ids=["disabled", "selected-cpu-native-rank"],
+)
+def test_cpu_native_workers_receive_ranked_nsight_options(monkeypatch, reward_worker_class, profiler, profiled_indices):
+    config = OmegaConf.create({"reward": {"profiler": profiler}})
+    specs = {"cpu": "model-spec"}
+    manager = object.__new__(OmniRewardLoopManager)
+    manager._reward_worker_groups = {"shared": [object(), object()]}
+    manager.reward_loop_workers_class = reward_worker_class
+    manager.multi_reward_model_manager = SimpleNamespace(
+        models={"cpu": SimpleNamespace(placement=SimpleNamespace(is_cpu=True, num_replicas=2, cpus_per_worker=4))}
+    )
+    monkeypatch.setattr(
+        omni_module,
+        "get_platform",
+        lambda: SimpleNamespace(ray_noset_envvars=lambda: ["RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES"]),
+    )
+
+    workers = manager._create_native_workers(config, specs, "cpu", "native_cpu")
+
+    assert len(workers) == 2
+    for index, worker in enumerate(workers):
+        assert worker.options["num_cpus"] == 4
+        assert worker.options["name"] == f"native_cpu_{index}"
+        assert worker.args == (config, None, specs)
+        if index in profiled_indices:
+            assert worker.options["runtime_env"] == {
+                "nsight": {"trace": "cuda", "o": "reward_loop_rank_3"},
+                "env_vars": {"RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1"},
+            }
+        else:
+            assert "runtime_env" not in worker.options

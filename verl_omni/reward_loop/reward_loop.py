@@ -314,13 +314,22 @@ class OmniRewardLoopManager(RewardLoopManager):
         model = self.multi_reward_model_manager.models[model_name]
         if model.placement.is_cpu:
             placement = model.placement
-            return [
-                self.reward_loop_workers_class.options(
-                    num_cpus=placement.cpus_per_worker,
-                    name=f"{name_prefix}_{index}",
-                ).remote(config, None, specs)
-                for index in range(placement.num_replicas)
-            ]
+            workers = []
+            rank_offset = len(self._flatten_worker_groups())
+            profiler_config = resolve_ray_actor_profiler_config(config.reward.profiler, config)
+            for index in range(placement.num_replicas):
+                options = {"num_cpus": placement.cpus_per_worker, "name": f"{name_prefix}_{index}"}
+                nsight_options = build_ray_actor_nsight_launch_options(
+                    profiler_config, rank=rank_offset + index, role="reward_loop"
+                )
+                if nsight_options is not None:
+                    # CUDA capture control needs device visibility even for CPU models.
+                    options["runtime_env"] = {
+                        "nsight": nsight_options,
+                        "env_vars": {name: "1" for name in get_platform().ray_noset_envvars()},
+                    }
+                workers.append(self.reward_loop_workers_class.options(**options).remote(config, None, specs))
+            return workers
 
         from .accelerator_reward_workers import build_accelerator_reward_workers
 
