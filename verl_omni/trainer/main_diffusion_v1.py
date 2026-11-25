@@ -21,12 +21,12 @@ import ray
 import torch
 from omegaconf import DictConfig, OmegaConf
 from verl.trainer.constants_ppo import available_physical_cores, get_ppo_ray_runtime_env
-from verl.utils.device import auto_set_device, is_cuda_available
+from verl.utils.device import auto_set_device
 from verl.utils.import_utils import load_class_from_fqn
-from verl.utils.profiler import build_controller_nsight_launch_options
 
 from verl_omni.utils.config import validate_config
 from verl_omni.utils.diffusion_attention import validate_attention_consistency
+from verl_omni.utils.profiler import build_controller_runner_options
 from verl_omni.utils.rl_insight import enable_rl_insight
 
 logger = logging.getLogger(__name__)
@@ -64,19 +64,8 @@ def run_diffusion_v1(config, task_runner_class=None) -> None:
     if task_runner_class is None:
         task_runner_class = DiffusionTaskRunnerV1
 
-    if (
-        is_cuda_available
-        and OmegaConf.select(config, "global_profiler.tool") == "nsys"
-        and OmegaConf.select(config, "global_profiler.steps") is not None
-        and len(OmegaConf.select(config, "global_profiler.steps")) > 0
-    ):
-        from verl.utils.import_utils import is_nvtx_available
-
-        assert is_nvtx_available(), "nvtx is not available in CUDA platform. Please 'pip3 install nvtx'"
-        nsight_options = build_controller_nsight_launch_options(config)
-        runner = task_runner_class.options(runtime_env={"nsight": nsight_options}).remote()
-    else:
-        runner = task_runner_class.remote()
+    runner_options = build_controller_runner_options(config)
+    runner = task_runner_class.options(**runner_options).remote() if runner_options else task_runner_class.remote()
     ray.get(runner.run.remote(config))
 
     timeline_json_file = config.ray_kwargs.get("timeline_json_file", None)

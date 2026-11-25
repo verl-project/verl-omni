@@ -37,7 +37,6 @@ from transfer_queue import KVBatchMeta
 from verl import DataProto
 from verl.checkpoint_engine import CheckpointEngineManager
 from verl.experimental.agent_loop import AgentLoopManager
-from verl.plugin.platform import get_platform
 from verl.protocol import pad_dataproto_to_divisor
 from verl.single_controller.ray import (
     RayClassWithInitArgs,
@@ -115,6 +114,7 @@ from verl_omni.trainer.diffusion.v1.tq_utils import (
 )
 from verl_omni.utils.config import resolve_lora_config
 from verl_omni.utils.net_utils import worker_group_port_ranges
+from verl_omni.utils.profiler import ControllerNsightProfiler
 from verl_omni.utils.skip import init_skip_manager, log_skip_summary
 from verl_omni.utils.tracking import batch_items, validate_audio_batch
 from verl_omni.workers.config.reward import (
@@ -297,8 +297,9 @@ class PolicyGradientDiffusionTrainerV1(ABC):
 
     def _init_profile_state(self) -> None:
         """Initialize profiling targets without changing installed auxiliary managers."""
-        self._controller_nsys_api_control_enabled = is_controller_nsys_api_control_enabled(self.config)
-        self._controller_nsys_profile_active = False
+        self._controller_profiler = ControllerNsightProfiler(
+            enabled=is_controller_nsys_api_control_enabled(self.config)
+        )
         self._profile_window_active = False
         self._active_profile_targets: list[object] = []
         self._active_rollout_profile_targets: list[object] = []
@@ -360,9 +361,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             raise RuntimeError("Profiling window is already active")
 
         try:
-            if self._controller_nsys_api_control_enabled:
-                get_platform().profiler_start()
-                self._controller_nsys_profile_active = True
+            self._controller_profiler.start()
 
             for worker_group, kwargs in self._profile_worker_groups():
                 self._start_profile_target(worker_group, **kwargs)
@@ -396,13 +395,11 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             except BaseException as exc:
                 first_error = first_error or exc
 
-        if self._controller_nsys_profile_active:
-            try:
-                get_platform().profiler_stop()
-            except BaseException as exc:
-                first_error = first_error or exc
+        try:
+            self._controller_profiler.stop()
+        except BaseException as exc:
+            first_error = first_error or exc
 
-        self._controller_nsys_profile_active = False
         self._profile_window_active = False
 
         if first_error is not None:

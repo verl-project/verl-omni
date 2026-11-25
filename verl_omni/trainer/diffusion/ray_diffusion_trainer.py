@@ -36,7 +36,6 @@ from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm import tqdm
 from verl import DataProto
 from verl.checkpoint_engine import CheckpointEngineManager
-from verl.plugin.platform import get_platform
 from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup, ResourcePoolManager
 from verl.single_controller.ray.base import create_colocated_worker_cls, split_resource_pool
@@ -95,6 +94,7 @@ from verl_omni.trainer.diffusion.rollout_correction import (
 from verl_omni.trainer.diffusion.teacher_manager import DiffusionTeacherManager
 from verl_omni.utils.config import resolve_lora_config
 from verl_omni.utils.net_utils import worker_group_port_ranges
+from verl_omni.utils.profiler import ControllerNsightProfiler
 from verl_omni.utils.skip import init_skip_manager, log_skip_summary
 from verl_omni.utils.tracking import (
     _export_video,
@@ -480,8 +480,9 @@ class BaseRayDiffusionTrainer(ABC):
         self._create_dataloader(train_dataset, val_dataset, collate_fn, train_sampler)
 
         self.checkpoint_manager = None
-        self._controller_nsys_api_control_enabled = is_controller_nsys_api_control_enabled(self.config)
-        self._controller_nsys_profile_active = False
+        self._controller_profiler = ControllerNsightProfiler(
+            enabled=is_controller_nsys_api_control_enabled(self.config)
+        )
 
         # initialize SkipManager (verl rollout skip + verl-omni stage skip; no-op until configured).
         init_skip_manager(self.config)
@@ -1220,12 +1221,7 @@ class BaseRayDiffusionTrainer(ABC):
 
         controller_profile_started = False
         try:
-            if self._controller_nsys_api_control_enabled:
-                if self._controller_nsys_profile_active:
-                    raise RuntimeError("Controller Nsight profiling is already active")
-                get_platform().profiler_start()
-                self._controller_nsys_profile_active = True
-                controller_profile_started = True
+            controller_profile_started = self._controller_profiler.start()
 
             self.actor_rollout_wg.start_profile(role="e2e", profile_step=self.global_steps)
             if self.use_reference_policy and not self.ref_in_actor:
@@ -1235,10 +1231,7 @@ class BaseRayDiffusionTrainer(ABC):
                     wg.start_profile(profile_step=self.global_steps)
         except Exception:
             if controller_profile_started:
-                try:
-                    get_platform().profiler_stop()
-                finally:
-                    self._controller_nsys_profile_active = False
+                self._controller_profiler.stop()
             raise
 
     def _stop_profiling(self, do_profile: bool) -> None:
@@ -1254,11 +1247,7 @@ class BaseRayDiffusionTrainer(ABC):
                 for wg in self.teacher_model_manager.teacher_wg.values():
                     wg.stop_profile()
         finally:
-            if self._controller_nsys_profile_active:
-                try:
-                    get_platform().profiler_stop()
-                finally:
-                    self._controller_nsys_profile_active = False
+            self._controller_profiler.stop()
 
     @abstractmethod
     def fit(self):

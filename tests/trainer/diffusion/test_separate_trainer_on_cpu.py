@@ -284,9 +284,9 @@ def test_separate_task_runner_forwards_controller_nsight_options(monkeypatch, se
     options = {"trace": "nvtx", "o": "resolved-controller-profile"}
     build_options = Mock(return_value=options)
     runner_class = Mock()
-    monkeypatch.setattr(main_diffusion, "build_controller_nsight_launch_options", build_options)
+    monkeypatch.setattr("verl_omni.utils.profiler.build_controller_nsight_launch_options", build_options)
     monkeypatch.setattr(main_diffusion, "enable_rl_insight", Mock())
-    monkeypatch.setattr(main_diffusion, "is_cuda_available", True)
+    monkeypatch.setattr("verl_omni.utils.profiler.is_cuda_available", True)
     monkeypatch.setattr(main_diffusion.ray, "is_initialized", lambda: True)
     monkeypatch.setattr(main_diffusion.ray, "get", Mock())
     monkeypatch.setattr("verl.utils.import_utils.is_nvtx_available", lambda: True)

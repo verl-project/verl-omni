@@ -160,7 +160,7 @@ def _make_trainer(monkeypatch, *, steps=(1,), continuous=True, controller_enable
         profiler_start=lambda: events.append("controller_start"),
         profiler_stop=lambda: events.append("controller_stop"),
     )
-    monkeypatch.setattr("verl_omni.trainer.diffusion.v1.trainer_base.get_platform", lambda: platform)
+    monkeypatch.setattr("verl_omni.utils.profiler.get_platform", lambda: platform)
     trainer._init_profile_state()
     return trainer, events
 
@@ -232,7 +232,7 @@ def test_cleanup_closes_added_roles_without_running_finish_commands(monkeypatch)
         ("rollout_stop", {}),
         "controller_stop",
     ]
-    assert not trainer._controller_nsys_profile_active
+    assert not trainer._controller_profiler.active
 
 
 @pytest.mark.parametrize("role", ["actor", "reward", "metrics"])
@@ -257,7 +257,7 @@ def test_target_failure_still_closes_controller_and_started_roles(monkeypatch, r
         started_roles = started_roles[: started_roles.index(role) + 1]
     for started_role in started_roles:
         targets[started_role].stop_profile.assert_called_once_with(run_command=action == "stop")
-    assert not trainer._controller_nsys_profile_active
+    assert not trainer._controller_profiler.active
     assert not trainer._profile_window_active
     assert not trainer._active_profile_targets
     assert not trainer._active_rollout_profile_targets

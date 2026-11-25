@@ -222,8 +222,8 @@ def test_omni_entrypoint_forwards_controller_launch_options(monkeypatch):
     options = {"trace": "nvtx", "o": "controller-test"}
     build_options = MagicMock(return_value=options)
     runner = MagicMock()
-    monkeypatch.setattr(main_omni, "build_controller_nsight_launch_options", build_options)
-    monkeypatch.setattr(main_omni, "is_cuda_available", True)
+    monkeypatch.setattr("verl_omni.utils.profiler.build_controller_nsight_launch_options", build_options)
+    monkeypatch.setattr("verl_omni.utils.profiler.is_cuda_available", True)
     monkeypatch.setattr(main_omni.ray, "is_initialized", lambda: True)
     monkeypatch.setattr(main_omni.ray, "get", lambda ref: None)
     monkeypatch.setattr("verl.utils.import_utils.is_nvtx_available", lambda: True)

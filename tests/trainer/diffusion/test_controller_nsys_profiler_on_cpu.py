@@ -16,6 +16,7 @@
 import pytest
 
 from verl_omni.trainer.diffusion.ray_diffusion_trainer import PolicyGradientRayTrainer
+from verl_omni.utils.profiler import ControllerNsightProfiler
 
 
 class _RecordingPlatform:
@@ -55,8 +56,7 @@ def _make_trainer(events, *, controller_enabled=True, use_reference_policy=True)
     trainer.use_reference_policy = use_reference_policy
     trainer.ref_in_actor = False
     trainer.use_teacher_policy = False
-    trainer._controller_nsys_api_control_enabled = controller_enabled
-    trainer._controller_nsys_profile_active = False
+    trainer._controller_profiler = ControllerNsightProfiler(enabled=controller_enabled)
     return trainer
 
 
@@ -64,7 +64,7 @@ def test_controller_wraps_worker_profile_calls(monkeypatch):
     events = []
     trainer = _make_trainer(events)
     monkeypatch.setattr(
-        "verl_omni.trainer.diffusion.ray_diffusion_trainer.get_platform",
+        "verl_omni.utils.profiler.get_platform",
         lambda: _RecordingPlatform(events),
     )
 
@@ -72,14 +72,14 @@ def test_controller_wraps_worker_profile_calls(monkeypatch):
     trainer._stop_profiling(True)
 
     assert events == ["controller_start", "actor_start", "ref_start", "actor_stop", "ref_stop", "controller_stop"]
-    assert not trainer._controller_nsys_profile_active
+    assert not trainer._controller_profiler.active
 
 
 def test_controller_profile_control_can_be_disabled(monkeypatch):
     events = []
     trainer = _make_trainer(events, controller_enabled=False, use_reference_policy=False)
     monkeypatch.setattr(
-        "verl_omni.trainer.diffusion.ray_diffusion_trainer.get_platform",
+        "verl_omni.utils.profiler.get_platform",
         lambda: _RecordingPlatform(events),
     )
 
@@ -94,7 +94,7 @@ def test_worker_start_failure_stops_controller(monkeypatch):
     trainer = _make_trainer(events, use_reference_policy=False)
     trainer.actor_rollout_wg = _FailingStartWorkerGroup(events, "actor")
     monkeypatch.setattr(
-        "verl_omni.trainer.diffusion.ray_diffusion_trainer.get_platform",
+        "verl_omni.utils.profiler.get_platform",
         lambda: _RecordingPlatform(events),
     )
 
@@ -102,14 +102,14 @@ def test_worker_start_failure_stops_controller(monkeypatch):
         trainer._start_profiling(True)
 
     assert events == ["controller_start", "actor_start", "controller_stop"]
-    assert not trainer._controller_nsys_profile_active
+    assert not trainer._controller_profiler.active
 
 
 def test_disabled_step_does_not_start_any_profiler(monkeypatch):
     events = []
     trainer = _make_trainer(events)
     monkeypatch.setattr(
-        "verl_omni.trainer.diffusion.ray_diffusion_trainer.get_platform",
+        "verl_omni.utils.profiler.get_platform",
         lambda: _RecordingPlatform(events),
     )
 
@@ -117,3 +117,32 @@ def test_disabled_step_does_not_start_any_profiler(monkeypatch):
     trainer._stop_profiling(False)
 
     assert events == []
+
+
+@pytest.mark.parametrize("action", ["start", "stop"])
+def test_controller_capture_failure_keeps_state_consistent(monkeypatch, action):
+    profiler = ControllerNsightProfiler(enabled=True)
+    platform = _RecordingPlatform([])
+    monkeypatch.setattr("verl_omni.utils.profiler.get_platform", lambda: platform)
+    if action == "stop":
+        profiler.start()
+
+    def fail():
+        raise RuntimeError("capture failed")
+
+    monkeypatch.setattr(platform, f"profiler_{action}", fail)
+    with pytest.raises(RuntimeError, match="capture failed"):
+        getattr(profiler, action)()
+    assert not profiler.active
+
+
+def test_controller_rejects_starting_an_active_capture(monkeypatch):
+    events = []
+    monkeypatch.setattr("verl_omni.utils.profiler.get_platform", lambda: _RecordingPlatform(events))
+    profiler = ControllerNsightProfiler(enabled=True)
+    profiler.start()
+    with pytest.raises(RuntimeError, match="already active"):
+        profiler.start()
+    profiler.stop()
+    profiler.stop()
+    assert events == ["controller_start", "controller_stop"]

@@ -142,10 +142,11 @@ def launch(monkeypatch):
     monkeypatch.setattr(entrypoint, "enable_rl_insight", Mock())
     monkeypatch.setattr(entrypoint.ray, "is_initialized", lambda: True)
     monkeypatch.setattr(entrypoint.ray, "get", lambda ref: ref)
-    monkeypatch.setattr(entrypoint, "is_cuda_available", True)
+    monkeypatch.setattr("verl_omni.utils.profiler.is_cuda_available", True)
     monkeypatch.setattr(entrypoint, "DiffusionTaskRunnerV1", actor)
     monkeypatch.setattr("verl.utils.import_utils.is_nvtx_available", lambda: True)
-    monkeypatch.setattr(entrypoint, "build_controller_nsight_launch_options", Mock(return_value={"trace": "nvtx"}))
+    actor.build_options = Mock(return_value={"trace": "nvtx"})
+    monkeypatch.setattr("verl_omni.utils.profiler.build_controller_nsight_launch_options", actor.build_options)
     return actor
 
 
@@ -162,12 +163,20 @@ def test_default_runner_reserves_one_cpu_on_the_class():
 def test_nsys_runner_adds_only_the_nsight_runtime_env(launch):
     cfg = _launch_config("nsys")
     entrypoint.run_diffusion_v1(cfg)
-    entrypoint.build_controller_nsight_launch_options.assert_called_once_with(cfg)
+    launch.build_options.assert_called_once_with(cfg)
     assert launch.calls == [{"runtime_env": {"nsight": {"trace": "nvtx"}}}]
 
 
-def test_non_nsys_runner_is_launched_directly(launch):
-    entrypoint.run_diffusion_v1(_launch_config("torch"))
+@pytest.mark.parametrize(
+    "cuda_available,tool,steps",
+    [(True, "torch", [1]), (False, "nsys", [1]), (True, "nsys", []), (True, "nsys", None)],
+    ids=["other-tool", "no-cuda", "empty-steps", "unset-steps"],
+)
+def test_runner_without_nsys_capture_is_launched_directly(launch, monkeypatch, cuda_available, tool, steps):
+    monkeypatch.setattr("verl_omni.utils.profiler.is_cuda_available", cuda_available)
+    cfg = _launch_config(tool)
+    cfg.global_profiler.steps = steps
+    entrypoint.run_diffusion_v1(cfg)
     assert launch.calls == [None]
 
 
