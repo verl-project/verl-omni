@@ -68,17 +68,6 @@ run_test 7 "MiniMax-H3 FlowGRPO T2VA FSDP-SP with managed ImageBind v1 sync trai
     env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" ACTOR_SP=2 ROLLOUT_TP=2 \
     bash tests/special_e2e/run_minimax_h3_imagebind_smoke.sh cuda "${diffusion_trainer_args[@]}"
 
-# FL2VA and Ref2VA use the tiny FlowGRPO runner with its stub reward, on the same
-# GPU, SP and TP settings as the T2VA test above; they cover the image-conditioned
-# and reference-conditioned rollout paths, which T2VA does not exercise.
-run_test 13 "MiniMax-H3 FlowGRPO FL2VA FSDP-SP v1 sync trainer e2e" \
-    env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" ACTOR_SP=2 ROLLOUT_TP=2 \
-    TOTAL_TRAINING_STEPS=1 python3 tests/special_e2e/run_flowgrpo_minimax_h3_tiny.py --task fl2va
-
-run_test 14 "MiniMax-H3 FlowGRPO Ref2VA FSDP-SP v1 sync trainer e2e" \
-    env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" ACTOR_SP=2 ROLLOUT_TP=2 \
-    TOTAL_TRAINING_STEPS=1 python3 tests/special_e2e/run_flowgrpo_minimax_h3_tiny.py --task ref2va
-
 run_test 8 "Diffusion OPD v1 sync colocated teachers e2e" \
     env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" SMOKE=sync \
     bash tests/special_e2e/run_diffusion_teacher_smoke.sh
@@ -98,5 +87,13 @@ run_test 11 "Named image previews and MiniMax-H3 offload placeholders" \
 run_test 12 "CRD SD3 v1 sync trainer and checkpoint e2e" \
     env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" \
     bash tests/special_e2e/run_crd_sd35.sh "${diffusion_trainer_args[@]}"
+
+run_test 13 "MiniMax-H3 FlowGRPO FL2VA FSDP-SP v1 sync trainer e2e" \
+    env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" ACTOR_SP=2 ROLLOUT_TP=2 \
+    TOTAL_TRAINING_STEPS=1 python3 tests/special_e2e/run_flowgrpo_minimax_h3_tiny.py --task fl2va
+
+run_test 14 "MiniMax-H3 FlowGRPO Ref2VA FSDP-SP v1 sync trainer e2e" \
+    env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" ACTOR_SP=2 ROLLOUT_TP=2 \
+    TOTAL_TRAINING_STEPS=1 python3 tests/special_e2e/run_flowgrpo_minimax_h3_tiny.py --task ref2va
 
 gpu_smoke_summary
