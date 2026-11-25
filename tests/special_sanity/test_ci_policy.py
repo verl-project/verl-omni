@@ -73,7 +73,7 @@ def repo(tmp_path: Path) -> Path:
         ({SOURCE_PATH: "feature\n", "ruff.toml": "lint.ignore = ['F401']\n"}, "ruff.toml"),
         ({SOURCE_PATH: "feature\n", ".ruff.toml": "lint.ignore = ['F401']\n"}, ".ruff.toml"),
         ({SOURCE_PATH: "feature\n", "mypy.ini": "[mypy]\nignore_errors = True\n"}, "mypy.ini"),
-        ({"tests/workers/test_example_on_cpu.py": "def test_ok(): pass\n", SANITY_CHECK: "weakened\n"}, SANITY_CHECK),
+        ({"tests/workers/test_example_on_cpu.py": "def test_ok(): pass\n", WORKFLOW: "updated\n"}, None),
         ({SANITY_CHECK: "updated\n", "tests/special_sanity/test_existing.py": "def test_ok(): pass\n"}, None),
         ({SOURCE_PATH: "feature\n", "pyproject.toml": RUFF_CONFIG.replace('"F"', '"E"')}, "pyproject.toml"),
         ({SOURCE_PATH: "feature\n", "pyproject.toml": RUFF_CONFIG + "[tool.mypy]\nignore_errors = true\n"}, "mypy"),

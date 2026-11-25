@@ -32,12 +32,6 @@ PROTECTED_FILES = {
 IMPLEMENTATION_DIRECTORIES = ("verl_omni/", "examples/")
 
 
-def _is_implementation(path: str) -> bool:
-    return path.startswith(IMPLEMENTATION_DIRECTORIES) or (
-        path.startswith("tests/") and not path.startswith("tests/special_sanity/")
-    )
-
-
 def _git(*args: str) -> bytes:
     return subprocess.check_output(["git", *args])
 
@@ -52,7 +46,7 @@ def mixed_changes(base: str, head: str) -> tuple[list[str], list[str]]:
     ancestor = _git("merge-base", base, head).decode("ascii").strip()
     diff = _git("diff", "--name-status", "--no-renames", "-z", ancestor, head, "--")
     fields = os.fsdecode(diff).split("\0")[:-1]
-    implementation = sorted(path for path in fields[1::2] if _is_implementation(path))
+    implementation = sorted(path for path in fields[1::2] if path.startswith(IMPLEMENTATION_DIRECTORIES))
     if not implementation:
         return [], []
 

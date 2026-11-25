@@ -12,7 +12,7 @@
 set -euo pipefail
 
 # Override via env: NUM_GPUS, MODEL_PATH, REWARD_MODEL_PATH, DATA_DIR, TOTAL_TRAIN_STEPS,
-#                   TRAIN_FILES, VAL_FILES
+#                   TRAIN_FILES, VAL_FILES, STEP1_RATIO_TOL, STEP1_KL_TOL
 NUM_GPUS=${NUM_GPUS:-4}
 MODEL_PATH=${MODEL_PATH:-${HOME}/models/tiny-random/Qwen-Image}
 TOKENIZER_PATH=${TOKENIZER_PATH:-${MODEL_PATH}/tokenizer}
@@ -22,6 +22,8 @@ DATA_DIR=${DATA_DIR:-${HOME}/data/dummy_diffusion}
 dummy_train_path=${TRAIN_FILES:-${DATA_DIR}/train.parquet}
 dummy_test_path=${VAL_FILES:-${DATA_DIR}/test.parquet}
 TOTAL_TRAIN_STEPS=${TOTAL_TRAIN_STEPS:-2}
+STEP1_RATIO_TOL=${STEP1_RATIO_TOL:-0.05}
+STEP1_KL_TOL=${STEP1_KL_TOL:-0.05}
 
 ENGINE=vllm_omni
 max_prompt_length=256
@@ -41,10 +43,12 @@ fi
 # This helper runs nvidia-smi in a background loop during training and
 # fails if any vLLMOmniHttpServer process appears.
 _LEAK_FILE=$(mktemp)
+_METRICS_FILE=$(mktemp)
+_SMOKE_LOG=$(mktemp)
 _LEAK_PID=""
 cleanup_leak_monitor() {
     [[ -n "${_LEAK_PID}" ]] && kill "${_LEAK_PID}" 2>/dev/null || true
-    rm -f "${_LEAK_FILE}"
+    rm -f "${_LEAK_FILE}" "${_METRICS_FILE}" "${_SMOKE_LOG}"
 }
 trap cleanup_leak_monitor EXIT
 
@@ -82,7 +86,7 @@ python3 tests/special_e2e/create_dummy_diffusion_data.py \
     --val_size 4
 
 start_leak_monitor
-python3 -m verl_omni.trainer.main_diffusion_v1 \
+VERL_FILE_LOGGER_PATH="${_METRICS_FILE}" python3 -m verl_omni.trainer.main_diffusion_v1 \
     data.train_files="${dummy_train_path}" \
     data.val_files="${dummy_test_path}" \
     data.train_batch_size=${train_batch_size} \
@@ -143,7 +147,7 @@ python3 -m verl_omni.trainer.main_diffusion_v1 \
     '+reward.reward_functions.ocr.name=compute_score_ocr' \
     '+reward.reward_functions.ocr.weight=0.5' \
     reward.aggregation=weighted_sum \
-    trainer.logger=console \
+    trainer.logger='["console","file"]' \
     trainer.project_name=verl-test \
     trainer.experiment_name=flowgrpo-diffusion-v1-sync-e2e \
     trainer.log_val_generations=0 \
@@ -156,7 +160,19 @@ python3 -m verl_omni.trainer.main_diffusion_v1 \
     trainer.total_training_steps=${TOTAL_TRAIN_STEPS} \
     trainer.use_v1=true \
     trainer.v1.trainer_mode=sync \
-    "$@"
+    "$@" 2>&1 | tee "${_SMOKE_LOG}"
 check_leak_monitor
 
-echo "FlowGRPO diffusion e2e test passed (training completed successfully)."
+expected_steps=()
+for ((step = 1; step <= TOTAL_TRAIN_STEPS; step++)); do
+    expected_steps+=("${step}")
+done
+python3 tests/special_e2e/check_diffusion_numerical_health.py \
+    --jsonl "${_METRICS_FILE}" \
+    --log "${_SMOKE_LOG}" \
+    --steps "${expected_steps[@]}" \
+    --step1-ratio-tol "${STEP1_RATIO_TOL}" \
+    --step1-kl-tol "${STEP1_KL_TOL}" \
+    --require-positive-grad-norm
+
+echo "FlowGRPO diffusion e2e test passed (training and numerical health checks succeeded)."
