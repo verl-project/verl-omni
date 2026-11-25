@@ -447,7 +447,7 @@ class PolicyGradientDiffusionTrainerV1SeparateAsync(PolicyGradientDiffusionTrain
         )
 
     def on_step_end(self):
-        # _stop_profiling() already moved this step's flag to prev_step_profile.
+        # _on_profiling_step_end() already moved this step's flag to prev_step_profile.
         if self.prev_step_profile:
             self._stop_rollout_profiling()
 

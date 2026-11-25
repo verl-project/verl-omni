@@ -15,6 +15,7 @@
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -69,7 +70,8 @@ def shell_runtime(tmp_path):
 
 
 @pytest.mark.parametrize("core_exit,e2e_exit", [(0, 0), (134, 0), (0, 134), (7, 9)])
-def test_parallel_groups_overlap_and_preserve_failures(shell_runtime, core_exit, e2e_exit):
+@pytest.mark.parametrize("shard", [None, "0", "1"])
+def test_parallel_groups_overlap_and_preserve_failures(shell_runtime, core_exit, e2e_exit, shard):
     """Both groups start together and a failed child cannot become a suite pass."""
     _, scripts, evidence, env = shell_runtime
     for group, rc in (("core", core_exit), ("e2e", e2e_exit)):
@@ -89,6 +91,8 @@ def test_parallel_groups_overlap_and_preserve_failures(shell_runtime, core_exit,
             f"raise SystemExit({rc})\nPY\n"
         )
     env["NPU_SMOKE_PARALLEL"] = "1"
+    if shard is not None:
+        env["NPU_SMOKE_SHARD_INDEX"] = shard
     env["RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES"] = "1"
     env["RAY_ADDRESS"] = "ray://unrelated-cluster:10001"
     result = subprocess.run(
@@ -106,6 +110,7 @@ def test_parallel_groups_overlap_and_preserve_failures(shell_runtime, core_exit,
     assert values["core"]["RAY_TMPDIR"] != values["e2e"]["RAY_TMPDIR"]
     assert values["core"]["RAY_MASTER_PORT_RANGE"] != values["e2e"]["RAY_MASTER_PORT_RANGE"]
     for value in values.values():
+        assert value.get("NPU_SMOKE_SHARD_INDEX") == shard
         assert value["RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES"] == ""
         assert value["RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES"] == ""
         assert value["RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO"] == "0"
@@ -263,3 +268,97 @@ def test_trainer_launchers_preserve_device_policy_paths_and_exit(shell_runtime, 
     assert captured["noset"] == ("1" if value is None else value)
     assert f"actor_rollout_ref.model.path={env['MODEL_PATH']}" in captured["argv"]
     assert f"data.train_files={data}/train.parquet" in captured["argv"]
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Real group runners require Linux Bash 4+")
+@pytest.mark.parametrize("group", ["core", "e2e"])
+def test_two_shards_execute_every_registered_case_exactly_once(shell_runtime, group):
+    """Real group dispatch partitions IDs without losing or duplicating a workload."""
+    _, scripts, _, env = shell_runtime
+    bins = Path(env["PATH"].split(os.pathsep)[0])
+    shell = shutil.which("bash")
+    for name in ("bash", "pytest", "python3"):
+        stub = bins / name
+        stub.write_text("#!/bin/sh\necho 'stub workload completed'\n")
+        stub.chmod(0o755)
+    script = scripts / f"run_npu_smoke_{group}.sh"
+    registered = {int(value) for value in re.findall(r"^run_test (\d+) ", script.read_text(), re.M)}
+    selections = []
+    for index in (0, 1):
+        log_dir = scripts.parent / f"shard-{index}"
+        env.update(NPU_SMOKE_SHARD_INDEX=str(index), LOG_DIR=str(log_dir))
+        result = subprocess.run(
+            [shell, str(script), "--num-npus", "8"], env=env, capture_output=True, text=True, timeout=20
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        rows = re.findall(r"^(\d+)\s+(PASS|FAIL)\s+", (log_dir / "summary.log").read_text(), re.M)
+        assert rows and all(status == "PASS" for _, status in rows)
+        selections.append({int(case_id) for case_id, _ in rows})
+    assert not selections[0] & selections[1]
+    assert selections[0] | selections[1] == registered
+
+
+@pytest.mark.parametrize("shard", ["-1", "2", "bad", "00"])
+def test_invalid_shard_never_cleans_or_launches_devices(shell_runtime, shard):
+    """Reject malformed selection before any process cleanup can run."""
+    _, scripts, evidence, env = shell_runtime
+    env["NPU_SMOKE_SHARD_INDEX"] = shard
+    result = subprocess.run(["bash", str(scripts / "run_npu_smoke_core.sh")], env=env, capture_output=True, timeout=10)
+    assert result.returncode == 2
+    assert not (evidence / "cleanup.jsonl").exists()
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Real group runners require Linux Bash 4+")
+def test_empty_shard_is_not_reported_as_a_pass(shell_runtime):
+    """A selection with no executed tests must fail closed."""
+    _, scripts, _, env = shell_runtime
+    env.update(NPU_SMOKE_GROUP="fixture", NPU_SMOKE_SHARD_INDEX="0", NPU_SMOKE_SKIP_GLOBAL_CLEANUP="1")
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            'lib=$1; set --; source "$lib"; run_test 1 unselected false; print_summary',
+            "fixture",
+            str(scripts / "lib_npu_smoke.sh"),
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode != 0
+    assert "Passed: 0" in result.stdout
+
+
+@pytest.mark.parametrize(
+    "event,labels,groups,jobs",
+    [
+        ("push", [], ["core", "e2e"], ["shard-0", "shard-1"]),
+        ("pull_request", ["ci-npu"], ["core", "e2e"], ["shard-0", "shard-1"]),
+        ("pull_request", ["ready-for-ci"], ["core", "e2e"], ["shard-0", "shard-1"]),
+        ("pull_request", ["ci-npu-core"], ["core"], ["core"]),
+        ("pull_request", ["ci-npu-e2e"], ["e2e"], ["e2e"]),
+        ("pull_request", ["ci-npu-core", "ci-npu-e2e"], ["core", "e2e"], ["shard-0", "shard-1"]),
+        ("pull_request", ["unrelated"], [], []),
+    ],
+)
+def test_workflow_label_resolution_retains_single_group_runs(tmp_path, event, labels, groups, jobs):
+    """Execute the workflow's actual resolver, including label unions and rejected inputs."""
+    import yaml
+
+    workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/npu_smoke.yml").read_text())
+    # Companion model-preparation steps use the stable matrix.group interface.
+    assert workflow["jobs"]["npu_smoke"]["strategy"]["matrix"] == {
+        "group": "${{ fromJSON(needs.resolve_groups.outputs.jobs) }}"
+    }
+    step = workflow["jobs"]["resolve_groups"]["steps"][0]
+    output = tmp_path / "github-output"
+    env = dict(os.environ, EVENT_NAME=event, PR_LABELS=json.dumps(labels), GITHUB_OUTPUT=str(output))
+    result = subprocess.run(
+        ["bash", "-euo", "pipefail", "-c", step["run"]], env=env, capture_output=True, text=True, timeout=10
+    )
+    assert result.returncode == (0 if groups else 1), result.stderr
+    if groups:
+        values = dict(line.split("=", 1) for line in output.read_text().splitlines())
+        assert json.loads(values["groups"]) == groups
+        assert json.loads(values["jobs"]) == jobs

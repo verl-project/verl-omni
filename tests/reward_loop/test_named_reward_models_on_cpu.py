@@ -896,6 +896,23 @@ def test_engine_executor_exposes_only_router_arguments():
     }
 
 
+def test_engine_executor_loads_the_model_tokenizer_on_first_use(monkeypatch):
+    loaded = []
+
+    def load_tokenizer(name_or_path, **kwargs):
+        loaded.append(name_or_path)
+        return object()
+
+    monkeypatch.setattr(executor_module, "hf_tokenizer", load_tokenizer)
+    spec = RewardModelSpec(name="ocr", backend="engine", model_path="/models/judge", router_address="router:8000")
+    executor = build_engine_reward_executors({"ocr": spec})["ocr"]
+
+    executor.reward_kwargs()
+    assert loaded == []
+    assert executor.tokenizer is executor.tokenizer
+    assert loaded == ["/models/judge"]
+
+
 @pytest.mark.parametrize(
     ("models", "term", "message"),
     [
@@ -917,6 +934,30 @@ def test_reward_model_terms_fail_fast(models, term, message):
     config.reward.reward_functions = OmegaConf.create({"term": term})
 
     with pytest.raises(ValueError, match=message):
+        validate_reward_model_terms(config)
+
+
+def test_named_reward_weight_sum_is_checked_before_worker_split():
+    model = {"backend": "native", "executor": {"model": "verl_omni.utils.reward_score.imagebind:ImageBindModel"}}
+    config = _config({"imagebind": model})
+    config.reward.reward_functions = {
+        "clap": {"path": "pkg://verl_omni.utils.reward_score.clap", "name": "compute_score", "weight": 1.0},
+        "imagebind": {
+            "model": "imagebind",
+            "path": "pkg://verl_omni.utils.reward_score.imagebind",
+            "name": "compute_score_native",
+            "weight": -0.5,
+        },
+    }
+    validate_reward_model_terms(config)
+
+    worker_config = config.copy()
+    worker_config.reward.reward_functions = OmegaConf.masked_copy(config.reward.reward_functions, ["imagebind"])
+    manager = MultiVisualRewardManager(worker_config, tokenizer=None, compute_score=None)
+    assert [(term["key"], term["weight"]) for term in manager._sub_rewards] == [("imagebind", -0.5)]
+
+    config.reward.reward_functions.clap.weight = -1.0
+    with pytest.raises(ValueError, match=r"Total weight of reward functions must be > 0, got -1\.5"):
         validate_reward_model_terms(config)
 
 
@@ -986,7 +1027,7 @@ async def test_native_executor_wakes_infers_and_sleeps(monkeypatch):
     )
     executor = NativeRewardExecutor(spec)
     _FakeModel.instances.clear()
-    monkeypatch.setattr(executor_module, "_load_native_model", lambda _: _FakeModel)
+    monkeypatch.setattr(executor_module, "import_from_spec", lambda _: _FakeModel)
     monkeypatch.setattr(executor_module, "get_device_name", lambda: "cpu")
     monkeypatch.setattr(executor_module, "get_device_id", lambda: 0)
 
@@ -1047,7 +1088,7 @@ async def test_native_executor_waits_for_inflight_score_before_sleep(monkeypatch
     )
     executor = NativeRewardExecutor(spec)
     _BlockingModel.release = False
-    monkeypatch.setattr(executor_module, "_load_native_model", lambda _: _BlockingModel)
+    monkeypatch.setattr(executor_module, "import_from_spec", lambda _: _BlockingModel)
     monkeypatch.setattr(executor_module, "get_device_name", lambda: "cpu")
     monkeypatch.setattr(executor_module, "get_device_id", lambda: 0)
 
@@ -1095,7 +1136,7 @@ async def test_native_executor_does_not_serialize_async_model_calls(monkeypatch)
     )
     executor = NativeRewardExecutor(spec)
     _BatchingModel.instances.clear()
-    monkeypatch.setattr(executor_module, "_load_native_model", lambda _: _BatchingModel)
+    monkeypatch.setattr(executor_module, "import_from_spec", lambda _: _BatchingModel)
     monkeypatch.setattr(executor_module, "get_device_name", lambda: "cpu")
     monkeypatch.setattr(executor_module, "get_device_id", lambda: 0)
 

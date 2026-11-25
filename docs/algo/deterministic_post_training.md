@@ -52,7 +52,7 @@ python -m verl_omni.trainer.main_diffusion \
   [other config overrides...]
 ```
 
-Sampling params (`temperature`, `top_k`, `top_p`) remain user-configured under `reward.reward_model.rollout`; the flag does not override them. Greedy decoding uses `temperature=0`; controlled pseudorandom sampling uses `temperature>0` plus the per-request `seed`. The scorer's own tuned defaults (e.g. genrm_ocr's `temperature=0.7`, `top_p=0.8`) apply unless overridden.
+Sampling params (`temperature`, `top_k`, `top_p`) remain user-configured under `reward.reward_model.rollout`; the flag does not override them. Greedy decoding uses `temperature=0`; controlled pseudorandom sampling uses `temperature>0` plus the per-request `seed`. When `temperature` or `top_p` is tuned away from the upstream rollout defaults (`1.0`), both are forwarded with the request, and a non-default `top_k` is forwarded when set; otherwise the scorer's own tuned defaults (e.g. genrm_ocr's `temperature=0.7`, `top_p=0.8`) apply.
 
 ## Configuration Reference
 

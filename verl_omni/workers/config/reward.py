@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import math
+import warnings
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
@@ -25,7 +26,20 @@ from omegaconf import OmegaConf
 from verl.base_config import BaseConfig
 from verl.utils.device import get_device_name
 
+# Shared verbatim so the launch notices and the manager-level warning cannot drift.
+DEPRECATED_USE_ACCELERATOR_MESSAGE = (
+    "reward.custom_reward_function.use_accelerator is deprecated since v0.4.0 and will be removed "
+    "in a future release. Set reward.accelerator_workers.enabled instead."
+)
+DEPRECATED_VISUAL_MANAGER_MESSAGE = (
+    "VisualRewardManager is deprecated since v0.4.0 and will be removed in a future release. "
+    "Set reward.reward_manager.name=MultiVisualRewardManager and configure scorers under "
+    "reward.reward_functions; see docs/algo/named_reward_models.md."
+)
+
 __all__ = [
+    "DEPRECATED_USE_ACCELERATOR_MESSAGE",
+    "DEPRECATED_VISUAL_MANAGER_MESSAGE",
     "EngineRewardModelConfig",
     "NativeRewardModelConfig",
     "NativeRewardFSDPConfig",
@@ -49,6 +63,8 @@ __all__ = [
     "streaming_reward_enabled",
     "to_mapping",
     "validate_reward_model_terms",
+    "validate_reward_weight_sum",
+    "warn_deprecated_reward_config",
 ]
 
 _ENGINE_BACKENDS = {"engine"}
@@ -423,6 +439,15 @@ def resolve_reward_model_name(term_name: str, term, models) -> str | None:
     return model_name
 
 
+def validate_reward_weight_sum(terms) -> None:
+    """Check the weight sum of a complete recipe before splitting its terms across workers."""
+    total_weight = sum(float(term.get("weight", 1.0)) for term in terms.values())
+    if total_weight <= 0:
+        raise ValueError(
+            f"Total weight of reward functions must be > 0, got {total_weight}. Check reward.reward_functions config."
+        )
+
+
 def validate_reward_model_terms(config) -> None:
     """Validate named-model references before allocating model resources."""
     models = get_reward_model_entries(config)
@@ -441,7 +466,10 @@ def validate_reward_model_terms(config) -> None:
             raise ValueError("Native FSDP requires synchronous V1 diffusion training")
         if config.reward.get("streaming", {}).get("enabled", False):
             raise ValueError("Native FSDP does not support streaming rewards")
-    for term_name, term in (config.reward.get("reward_functions", {}) or {}).items():
+    terms = config.reward.get("reward_functions", {}) or {}
+    if terms:
+        validate_reward_weight_sum(terms)
+    for term_name, term in terms.items():
         model_name = resolve_reward_model_name(term_name, term, models)
         if model_name is None:
             continue
@@ -496,7 +524,31 @@ def accelerator_workers_enabled(config) -> bool:
     reward = config.reward
     accelerator_workers = reward.get("accelerator_workers", {}) or {}
     custom_reward = reward.get("custom_reward_function", {}) or {}
+    if custom_reward.get("use_accelerator", False):
+        warnings.warn(DEPRECATED_USE_ACCELERATOR_MESSAGE, DeprecationWarning, stacklevel=2)
     return bool(accelerator_workers.get("enabled", False) or custom_reward.get("use_accelerator", False))
+
+
+def warn_deprecated_reward_config(config) -> None:
+    """Emit the trainer-launch deprecation notices for legacy reward paths."""
+    reward = config.get("reward", {}) or {}
+    custom_reward = reward.get("custom_reward_function", {}) or {}
+    reward_manager = reward.get("reward_manager", {}) or {}
+    reward_model = reward.get("reward_model", {}) or {}
+    if custom_reward.get("use_accelerator", False):
+        warnings.warn(DEPRECATED_USE_ACCELERATOR_MESSAGE, DeprecationWarning, stacklevel=3)
+    visual_manager = reward_manager.get("name") == "VisualRewardManager"
+    if visual_manager:
+        warnings.warn(DEPRECATED_VISUAL_MANAGER_MESSAGE, DeprecationWarning, stacklevel=3)
+    if visual_manager and reward_model.get("enable", False) and not reward.get("reward_functions"):
+        warnings.warn(
+            "The single global reward model (reward.reward_model.enable=true with one "
+            "reward.custom_reward_function) is deprecated since v0.4.0 and will be removed in a future "
+            "release. Configure a named engine model under reward.models and bind it from "
+            "reward.reward_functions; see docs/algo/named_reward_models.md.",
+            DeprecationWarning,
+            stacklevel=3,
+        )
 
 
 def parse_reward_model_placement(name: str, value) -> RewardModelPlacementConfig:

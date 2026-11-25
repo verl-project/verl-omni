@@ -1,6 +1,6 @@
 # Profiling FlowGRPO / diffusion training in VeRL-Omni
 
-Last updated: 11/03/2026.
+Last updated: 11/12/2026.
 
 VeRL-Omni reuses the profiler subsystem from upstream
 [verl](https://github.com/verl-project/verl) (`verl.utils.profiler`) and exposes
@@ -92,6 +92,12 @@ The same block exists under `actor_rollout_ref.ref.profiler` and
 server processes, not in the actor worker, so it has its own profiler driven
 by `actor_rollout_ref.rollout.profiler` (see recipe 5).
 
+In diffusion V1, distillation teachers participate in the training-worker
+profiling lifecycle. Standalone teachers (`distillation.nnodes > 0`) use
+`actor_rollout_ref.ref.profiler`; teachers colocated with the actor use the
+actor's profiler configuration. Shared worker groups are started and stopped
+once per profiling window.
+
 Global values for `save_path`, `relocate_results`, and `finish_hook_*` provide
 defaults for the per-role configs. Set a field under
 `actor_rollout_ref.actor.profiler.<field>` to override it for the actor.
@@ -165,8 +171,11 @@ actor_rollout_ref.actor.profiler.tool=torch_memory
 
 ### 4. NVIDIA Nsight Systems (`nsys`)
 
-Nsight requires `nsys` to be installed on every node and the `nvtx` Python
-package available in the training environment (`pip install nvtx`).
+Nsight requires `nsys` to be installed on every node and the `nvtx` and
+`matplotlib` Python packages available in the training environment
+(`pip install nvtx matplotlib`). The trainer's timing ranges use named colors
+such as `brown`, which `nvtx` can only resolve through `matplotlib`; without it
+the first profiled step fails with `Invalid color brown`.
 
 ```bash
 global_profiler.tool=nsys \
@@ -197,10 +206,13 @@ discrete profiled steps or contiguous step groups before Ray starts the
 TaskRunner.
 
 Diffusion V1 profiling has been validated with the NPU and PyTorch
-(`tool=torch`) backends. Nsight (`tool=nsys`) is unverified for V1. V1 does
-not implement controller capture start/stop calls, so controller
-`capture-range=cudaProfilerApi` is rejected when Nsight profiling steps are
-configured. This restriction does not apply to worker-side capture settings.
+(`tool=torch`) backends. Nsight (`tool=nsys`) has been validated on V1 for
+worker-side capture only: the actor ranks record the configured steps and
+write one report each. V1 does not implement controller capture start/stop
+calls, so controller `capture-range=cudaProfilerApi` is rejected when Nsight
+profiling steps are configured; the controller report covers the whole
+TaskRunner lifetime. This restriction does not apply to worker-side capture
+settings.
 
 `*.nsys-rep` files are written by Ray under
 `/tmp/ray/session_latest/logs/nsight/` on each node (this path is fixed by
@@ -571,22 +583,28 @@ recipe's own values, minding two couplings:
   The nested actor/reference training workers receive the typed per-role profiler
   config. Actor updates label and advance each mini-batch following the pinned
   `verl/workers/engine_workers.py`, so PyTorch schedules can sub-sample updates.
-* `global_profiler.profile_continuous_steps=True` keeps a single profiling
-  database open across consecutive steps in `global_profiler.steps`, which is
-  helpful for analysing inter-step behaviour. Diffusion V1 follows
-  `verl/trainer/ppo/v1/trainer_base.py`: use continuous windows for actor-only
-  collection, and non-continuous windows when collecting rollout traces.
+* `global_profiler.profile_continuous_steps=True` keeps one profiling window
+  open across consecutive steps in `global_profiler.steps`, which is helpful
+  for analysing inter-step behaviour. Diffusion V1 closes the window at the
+  final training step even if the configured range extends beyond the
+  training limit. Use continuous windows for training-worker collection with
+  rollout profiling disabled, and non-continuous windows when collecting
+  rollout traces.
 * In the legacy diffusion trainer, for the rollout servers, the trainer calls
   `llm_server_manager.start_profile()`/`stop_profile()` around the generation
   phase of profiled steps; the servers record through vLLM's built-in torch
   profiler (recipe 5). The reward-model servers are driven the same way
   through `verl_omni.reward_loop.OmniRewardLoopManager` (recipe 6).
 * `relocate_results` and `finish_hook_*` are forwarded to upstream workers.
-  Diffusion V1 follows upstream finish-hook scheduling: a closing training-worker
-  window runs the hook on the largest configured profile step, or on the final
-  training step if that step is profiled. Keep selected steps within the run's
-  step and epoch limits.
+  In diffusion V1, a training-worker finish command runs when closing the
+  window containing the last selected step within the training limit. For
+  example, `steps=[1,100]` with four training steps runs the command at step 1.
   Rollout-only collection does not run a training-worker finish hook.
+* If profiling startup or training fails, diffusion V1 attempts to stop all
+  active targets, including a target that raised during startup. Cleanup does
+  not run finish commands or replace the original exception. During normal
+  window closure, all remaining stop calls are attempted before the first
+  stop error is reported.
 
 ## Further reading
 

@@ -33,6 +33,7 @@ from verl_omni.workers.config.reward import (
     has_fsdp_reward_models,
     parse_reward_model_config,
     validate_reward_model_terms,
+    warn_deprecated_reward_config,
 )
 
 logger = logging.getLogger(__name__)
@@ -48,6 +49,7 @@ def run_diffusion_v1(config, task_runner_class=None) -> None:
                 settings, model paths, and training hyperparameters.
         task_runner_class: For recipe to change TaskRunner.
     """
+    warn_deprecated_reward_config(config)
     # Reject unsupported profiling combinations before starting Ray or workers.
     if OmegaConf.select(config, "global_profiler.steps"):
         if (
@@ -90,7 +92,7 @@ def run_diffusion_v1(config, task_runner_class=None) -> None:
         ray.init(**OmegaConf.to_container(ray_init_kwargs))
 
     if task_runner_class is None:
-        task_runner_class = DiffusionTaskRunnerV1.options(num_cpus=1)
+        task_runner_class = DiffusionTaskRunnerV1
 
     if (
         is_cuda_available
@@ -134,7 +136,7 @@ def finish_training_resources(trainer, config, close_queue, primary_error=None):
         raise BaseExceptionGroup("Training and resource cleanup failed", errors)
 
 
-@ray.remote
+@ray.remote(num_cpus=1)  # keep the controller off the head node, as the v0 entrypoint does
 class DiffusionTaskRunnerV1:
     def __init__(self):
         self.config = None

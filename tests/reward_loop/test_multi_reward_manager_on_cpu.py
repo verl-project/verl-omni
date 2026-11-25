@@ -86,6 +86,10 @@ async def reward_uses_named_engine_router(reward_router_address, model_name):
     return {"score": 0.6, "backend": "engine-function"}
 
 
+async def reward_captures_model_tokenizer(reward_model_tokenizer):
+    return {"score": 0.5, "tokens": reward_model_tokenizer.encode("one two", add_special_tokens=False)}
+
+
 async def reward_captures_ocr_request(
     data_source,
     solution_image,
@@ -123,6 +127,19 @@ async def reward_uses_legacy_router(reward_router_address, model_name, sampling_
     return 0.65
 
 
+async def reward_uses_tuned_legacy_router(reward_router_address, model_name, sampling_params):
+    assert reward_router_address == "legacy-router"
+    assert model_name == "legacy-model"
+    assert sampling_params == {
+        "max_tokens": 321,
+        "top_k": 5,
+        "temperature": 0.0,
+        "top_p": 1.0,
+        "seed": 17,
+    }
+    return 0.65
+
+
 async def reward_uses_native_model(reward_model, ground_truth, solution_image):
     output = await reward_model.infer(prompt=ground_truth, image=solution_image)
     return {"score": output["value"], "backend": "native-function"}
@@ -139,8 +156,22 @@ class _NativeModelExecutor:
 
 
 class _EngineRouterClient:
+    tokenizer = SimpleNamespace(encode=lambda text, add_special_tokens: text.split())
+
     def reward_kwargs(self):
         return {"reward_router_address": "engine-router", "model_name": "ocr-model"}
+
+
+class _EngineRouterClientWithoutTokenizer(_EngineRouterClient):
+    @property
+    def tokenizer(self):
+        raise AssertionError("the tokenizer loads only for a scorer that declares it")
+
+
+class _EngineRouterClientWithBrokenTokenizer(_EngineRouterClient):
+    @property
+    def tokenizer(self):
+        raise OSError("no tokenizer files")
 
 
 # ---------------------------------------------------------------------------
@@ -273,18 +304,16 @@ class TestMultiRewardManagerRunSingle:
     def test_fallback_ocr_preserves_upstream_sampling_and_explicit_overrides(
         self, monkeypatch, deterministic, explicit_sampling
     ):
-        from verl_omni.utils.reward_score import genrm_ocr
+        from verl_omni.utils.reward_score import genrm_ocr, vlm_as_a_judge
 
         requests = []
 
-        async def chat_complete(router_address, chat_complete_request):
+        async def chat_complete(router_address, chat_complete_request, session=None):
             assert router_address == "engine-router"
             requests.append(chat_complete_request)
             return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="hello"))])
 
-        monkeypatch.setenv("GENRM_OCR_SEED", "777")
-        monkeypatch.delenv("GENRM_OCR_MAX_TOKENS", raising=False)
-        monkeypatch.setattr(genrm_ocr, "_chat_complete", chat_complete)
+        monkeypatch.setattr(vlm_as_a_judge, "_post_chat_completion", chat_complete)
         entry = {"path": "pkg://verl_omni.utils.reward_score.genrm_ocr", "name": "compute_score_ocr"}
         if explicit_sampling is not None:
             entry["sampling_params"] = explicit_sampling
@@ -335,17 +364,15 @@ class TestMultiRewardManagerRunSingle:
     def test_existing_named_ocr_preserves_scorer_defaults_unless_recipe_opts_in(
         self, monkeypatch, deterministic, inherit
     ):
-        from verl_omni.utils.reward_score import genrm_ocr
+        from verl_omni.utils.reward_score import genrm_ocr, vlm_as_a_judge
 
         requests = []
 
-        async def chat_complete(router_address, chat_complete_request):
+        async def chat_complete(router_address, chat_complete_request, session=None):
             requests.append(chat_complete_request)
             return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="test"))])
 
-        monkeypatch.setenv("GENRM_OCR_SEED", "777")
-        monkeypatch.delenv("GENRM_OCR_MAX_TOKENS", raising=False)
-        monkeypatch.setattr(genrm_ocr, "_chat_complete", chat_complete)
+        monkeypatch.setattr(vlm_as_a_judge, "_post_chat_completion", chat_complete)
         entry = {"path": "pkg://verl_omni.utils.reward_score.genrm_ocr", "name": "compute_score_ocr"}
         if inherit:
             entry["use_rollout_sampling_params"] = True
@@ -372,8 +399,7 @@ class TestMultiRewardManagerRunSingle:
         )
         manager.loop.run_until_complete(manager.run_single(data))
         previous, current = requests
-        assert previous["max_tokens"] == 4096
-        assert previous["seed"] == 777
+        assert previous["max_tokens"] == 256
         if not inherit:
             assert current == previous
         else:
@@ -384,15 +410,15 @@ class TestMultiRewardManagerRunSingle:
                 assert "seed" not in current
 
     def test_genrm_ocr_user_prompt_is_per_reward_term(self, monkeypatch):
-        from verl_omni.utils.reward_score import genrm_ocr
+        from verl_omni.utils.reward_score import genrm_ocr, vlm_as_a_judge
 
         requests = []
 
-        async def chat_complete(router_address, chat_complete_request):
+        async def chat_complete(router_address, chat_complete_request, session=None):
             requests.append(chat_complete_request)
             return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="hello"))])
 
-        monkeypatch.setattr(genrm_ocr, "_chat_complete", chat_complete)
+        monkeypatch.setattr(vlm_as_a_judge, "_post_chat_completion", chat_complete)
         scorer_path = "pkg://verl_omni.utils.reward_score.genrm_ocr"
         config = _make_config(
             {
@@ -732,6 +758,76 @@ class TestMultiRewardManagerRunSingle:
         assert result["reward_score"] == pytest.approx(0.6)
         assert result["reward_extra_info"]["reward/ocr/backend"] == "engine-function"
 
+    def test_engine_reward_function_receives_the_model_tokenizer_it_declares(self):
+        manager = _build_manager(
+            {
+                "ocr": {
+                    "model": "ocr_engine",
+                    "path": DUMMY_REWARDS_PATH,
+                    "name": "reward_captures_model_tokenizer",
+                    "weight": 1.0,
+                },
+            }
+        )
+        manager.set_reward_executors({"ocr_engine": _EngineRouterClient()}, None)
+
+        result = manager.loop.run_until_complete(manager.run_single(_make_single_data()))
+
+        assert result["reward_extra_info"]["reward/ocr/tokens"] == ["one", "two"]
+
+    def test_optional_engine_reward_survives_a_tokenizer_that_fails_to_load(self):
+        manager = _build_manager(
+            {
+                "ocr": {
+                    "model": "ocr_engine",
+                    "path": DUMMY_REWARDS_PATH,
+                    "name": "reward_captures_model_tokenizer",
+                    "weight": 1.0,
+                    "required": False,
+                },
+            }
+        )
+        manager.set_reward_executors({"ocr_engine": _EngineRouterClientWithBrokenTokenizer()}, None)
+
+        result = manager.loop.run_until_complete(manager.run_single(_make_single_data()))
+
+        assert result["reward_score"] == 0.0
+        assert result["reward_extra_info"]["reward/ocr/errors"] == 1
+
+    def test_required_engine_reward_fails_on_a_tokenizer_that_fails_to_load(self):
+        manager = _build_manager(
+            {
+                "ocr": {
+                    "model": "ocr_engine",
+                    "path": DUMMY_REWARDS_PATH,
+                    "name": "reward_captures_model_tokenizer",
+                    "weight": 1.0,
+                    "required": True,
+                },
+            }
+        )
+        manager.set_reward_executors({"ocr_engine": _EngineRouterClientWithBrokenTokenizer()}, None)
+
+        with pytest.raises(RuntimeError, match="Required sub-reward 'ocr' failed: no tokenizer files"):
+            manager.loop.run_until_complete(manager.run_single(_make_single_data()))
+
+    def test_engine_reward_function_without_a_tokenizer_argument_does_not_load_one(self):
+        manager = _build_manager(
+            {
+                "ocr": {
+                    "model": "ocr_engine",
+                    "path": DUMMY_REWARDS_PATH,
+                    "name": "reward_uses_named_engine_router",
+                    "weight": 1.0,
+                },
+            }
+        )
+        manager.set_reward_executors({"ocr_engine": _EngineRouterClientWithoutTokenizer()}, None)
+
+        result = manager.loop.run_until_complete(manager.run_single(_make_single_data()))
+
+        assert result["reward_score"] == pytest.approx(0.6)
+
     def test_jpeg_reward_via_file_path(self):
         """JPEG reward loaded via file path must not fail on relative imports."""
         reward_fns = {
@@ -788,6 +884,61 @@ class TestMultiRewardManagerRunSingle:
         result = manager.loop.run_until_complete(manager.run_single(_make_single_data()))
 
         assert result["reward_score"] == pytest.approx(0.65)
+
+    def test_legacy_visual_router_forwards_tuned_rollout_sampling(self):
+        config = _make_config(
+            {"legacy": {"path": DUMMY_REWARDS_PATH, "name": "reward_uses_tuned_legacy_router", "weight": 1.0}}
+        )
+        config.reward.reward_model.model_path = "legacy-model"
+        config.reward.reward_model.rollout.response_length = 321
+        config.reward.reward_model.rollout.temperature = 0.0
+        config.reward.reward_model.rollout.top_p = 1.0
+        config.reward.reward_model.rollout.top_k = 5
+        config.reward.reward_model.rollout.full_determinism = True
+        config.reward.reward_model.rollout.seed = 17
+        manager = MultiVisualRewardManager(
+            config,
+            MagicMock(),
+            compute_score=None,
+            reward_router_address="legacy-router",
+            reward_model_tokenizer=MagicMock(),
+        )
+
+        result = manager.loop.run_until_complete(manager.run_single(_make_single_data()))
+
+        assert result["reward_score"] == pytest.approx(0.65)
+
+    def test_rollout_sampling_keeps_scorer_defaults_unless_tuned(self):
+        from verl_omni.reward_loop.reward_manager.visual import _sampling_params_from_rollout
+
+        defaults = OmegaConf.create(
+            {
+                "response_length": 32,
+                "temperature": 1.0,
+                "top_p": 1.0,
+                "top_k": -1,
+                "full_determinism": False,
+            }
+        )
+        assert _sampling_params_from_rollout(defaults) == {"max_tokens": 32}
+
+        tuned = OmegaConf.create(
+            {
+                "response_length": 32,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "top_k": 5,
+                "full_determinism": True,
+                "seed": 7,
+            }
+        )
+        assert _sampling_params_from_rollout(tuned) == {
+            "max_tokens": 32,
+            "top_k": 5,
+            "temperature": 0.0,
+            "top_p": 1.0,
+            "seed": 7,
+        }
 
 
 class TestMultiRewardManagerInit:

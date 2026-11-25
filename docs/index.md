@@ -78,6 +78,7 @@ algo/mixgrpo.md
 algo/diffusion_opd.md
 algo/omni_opd.md
 algo/deterministic_post_training.md
+algo/true_on_policy.md
 algo/performance.md
 ```
 
@@ -111,7 +112,9 @@ examples/ltx2/flowgrpo_trainer_ltx2.md
 examples/ltx2/omninft_trainer_ltx2.md
 examples/ltx2/diffusionopd_trainer_ltx2.md
 examples/minimax_h3/flowgrpo_trainer_minimax_h3.md
+examples/minimax_h3_image/flowgrpo_trainer_minimax_h3_image.md
 examples/minimax_h3/diffusionnft_trainer_minimax_h3.md
+examples/minimax_h3_image/diffusionnft_trainer_minimax_h3_image.md
 examples/boogu_image/flowgrpo_trainer_boogu_image.md
 examples/boogu_image/diffusionnft_trainer_boogu_image.md
 examples/bagel/flowgrpo_trainer_bagel.md
@@ -168,6 +171,7 @@ contributing/integrating_a_non_diffusers_model.md
 contributing/integrating_a_stepwise_continuous_batching_model.md
 contributing/integrating_a_new_policy_gradient_algorithm_for_diffusion_model.md
 contributing/integrating_a_new_direct_preference_algorithm_for_diffusion_model.md
+contributing/integrating_a_reward_scorer.md
 contributing/gpu_smoke_tests.md
 contributing/npu_smoke_tests.md
 contributing/common_pitfalls.md

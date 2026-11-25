@@ -175,17 +175,26 @@ def compute_throughput_metrics_diffusion(batch: DataProto, timing_raw: dict[str,
 
 
 def compute_reward_extra_metrics_diffusion(reward_extra_infos_dict: dict) -> dict[str, Any]:
-    """Computes per-sub-reward mean metrics for multi-reward tracking."""
+    """Average observed diagnostics and report optional-term failure counts and rates over the whole batch."""
     metrics = {}
-    if not reward_extra_infos_dict:
-        return metrics
     for key, values in reward_extra_infos_dict.items():
-        if isinstance(values, np.ndarray):
-            if not np.issubdtype(values.dtype, np.number):
+        error_flag = key.startswith("reward/") and key.endswith("/errors")
+        if isinstance(values, np.ndarray) and values.dtype == object:
+            values = values.tolist()
+        if isinstance(values, list):
+            if error_flag:
+                values = [0 if value is None else value for value in values]
+            else:
+                values = [value for value in values if value is not None]
+            if not values or not all(
+                isinstance(value, int | float) or (isinstance(value, np.generic) and value.dtype.kind in "iuf")
+                for value in values
+            ):
                 continue
-            metrics[f"critic/{key}/mean"] = float(values.mean())
-        elif isinstance(values, list) and len(values) > 0:
-            if not isinstance(values[0], int | float):
-                continue
-            metrics[f"critic/{key}/mean"] = float(np.mean(values))
+        elif not isinstance(values, np.ndarray) or not values.size or not np.issubdtype(values.dtype, np.number):
+            continue
+
+        if error_flag:
+            metrics[f"critic/{key}/count"] = int(np.sum(values))
+        metrics[f"critic/{key}/mean"] = float(np.mean(values))
     return metrics

@@ -32,10 +32,12 @@ run_qwen_image_edit_flowgrpo_e2e() {
         return 1
     fi
     env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" MODEL_PATH="${model_path}" \
-        bash tests/special_e2e/run_flowgrpo_qwen_image_edit.sh "${diffusion_trainer_args[@]}"
+        bash tests/special_e2e/run_flowgrpo_qwen_image_edit.sh "${diffusion_trainer_args[@]}" \
+        trainer.v1.worker_side_trajectory=true \
+        'actor_rollout_ref.model.trajectory_fields.required=[all_latents,condition_image_latents,prompt_embeds,prompt_embeds_mask,negative_prompt_embeds,negative_prompt_embeds_mask]'
 }
 
-run_test 0 "Qwen-Image-Edit FlowGRPO v1 sync trainer e2e" \
+run_test 0 "Qwen-Image-Edit FlowGRPO v1 sync with worker-side trajectories" \
     run_qwen_image_edit_flowgrpo_e2e
 
 run_test 1 "FlowGRPO v1 sync trainer e2e" \
@@ -62,9 +64,9 @@ run_test 6 "FlowGRPO synchronous separate trainer e2e" \
     env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" \
     bash tests/special_e2e/run_flowgrpo_qwen_image_separate.sh "${diffusion_trainer_args[@]}"
 
-run_test 7 "MiniMax-H3 FlowGRPO T2VA FSDP-SP v1 sync trainer e2e" \
+run_test 7 "MiniMax-H3 FlowGRPO T2VA FSDP-SP with managed ImageBind v1 sync trainer e2e" \
     env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" ACTOR_SP=2 ROLLOUT_TP=2 \
-    TOTAL_TRAINING_STEPS=1 python3 tests/special_e2e/run_flowgrpo_minimax_h3_tiny.py --task t2va
+    bash tests/special_e2e/run_minimax_h3_imagebind_smoke.sh cuda "${diffusion_trainer_args[@]}"
 
 run_test 8 "Diffusion OPD v1 sync colocated teachers e2e" \
     env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" SMOKE=sync \
