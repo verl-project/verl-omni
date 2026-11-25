@@ -104,6 +104,26 @@ class MiniCPMORolloutAdapter(OmniRolloutPipelineBase):
             )
 
     @classmethod
+    def validate_async_chunk(cls, pipeline_mode: str, async_chunk: bool | None) -> bool:
+        """Resolve async_chunk per pipeline mode.
+
+        thinker_only keeps the engine default (absent → True is valid).
+        thinker_talker requires serial execution: an absent value defaults
+        to False (the engine's async-chunk prewarm submits unconditioned
+        placeholder requests to the talker stage), and an explicit True
+        is rejected.
+        """
+        if pipeline_mode != "thinker_talker":
+            return async_chunk if async_chunk is not None else True
+        if async_chunk is True:
+            raise ValueError(
+                "MiniCPMORolloutAdapter thinker_talker mode requires async_chunk=false: "
+                "the engine's async-chunk prewarm submits unconditioned placeholder requests "
+                "to the talker stage (its preprocess requires the thinker bridge tensors)."
+            )
+        return False
+
+    @classmethod
     def build_stage_configs(cls, pipeline_mode="thinker_only"):
         """Return the pipeline stages for *pipeline_mode*.
 
@@ -285,9 +305,9 @@ class MiniCPMORolloutAdapter(OmniRolloutPipelineBase):
         tts_bos = tokenizer.convert_tokens_to_ids("<|tts_bos|>")
         tts_eos = tokenizer.convert_tokens_to_ids("<|tts_eos|>")
         bos_positions = [i for i, token in enumerate(full_text_ids) if token == tts_bos]
-        eos_positions = [i for i, token in enumerate(full_text_ids) if token == tts_eos]
         span_start = (bos_positions[-1] + 1) if bos_positions else len(prompt_ids)
-        span_end = eos_positions[-1] if eos_positions else len(full_text_ids)
+        eos_after_start = [i for i in range(span_start, len(full_text_ids)) if full_text_ids[i] == tts_eos]
+        span_end = eos_after_start[0] if eos_after_start else len(full_text_ids)
         if not 0 < span_start < span_end <= len(full_text_ids):
             raise RuntimeError(
                 f"MiniCPM-o talker replay span is invalid: [{span_start}, {span_end}) "

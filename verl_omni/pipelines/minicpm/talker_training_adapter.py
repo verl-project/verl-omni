@@ -107,6 +107,7 @@ class MiniCPMOWithTTS:
 def _minicpm_talker_forward(
     self,
     tts_policy_ids=None,
+    tts_policy_attention_mask=None,
     attention_mask=None,
     data=None,
     tts_text_ids=None,
@@ -172,7 +173,7 @@ def _minicpm_talker_forward(
     logits = minicpm_talker_actor_logits(
         self,
         input_ids=tts_policy_ids,
-        attention_mask=attention_mask,
+        attention_mask=tts_policy_attention_mask if tts_policy_attention_mask is not None else attention_mask,
         text_ids=text_rows,
         hidden_states=hidden_rows,
         audio_codes=code_rows,
@@ -363,9 +364,10 @@ class MiniCPMTalkerAdapter(OmniModelBase):
                 )
 
         # Keep the engine's mixed policy ids ([dummy prompt, codec frames])
-        # for the actor-side alignment check; the text sequence replaces the
-        # ids the thinker forward consumes.
+        # and attention mask for the actor-side alignment check; the text
+        # sequence and its mask replace what the thinker forward consumes.
         policy_ids = model_inputs.get("input_ids")
+        policy_attention_mask = model_inputs.get("attention_mask")
 
         # ---- rebuild the thinker input from the replay text ----
         batch_size = len(texts)
@@ -395,6 +397,7 @@ class MiniCPMTalkerAdapter(OmniModelBase):
         return {
             "data": data,
             "tts_policy_ids": policy_ids,
+            "tts_policy_attention_mask": policy_attention_mask,
             "tts_text_ids": text_buffer,
             "tts_text_lens": text_lens,
             "tts_response_starts": torch.tensor(starts, dtype=torch.long, device=device),

@@ -175,6 +175,9 @@ class ARStrategy(OmniStrategyBase):
 
     def preprocess_engine_kwargs(self, engine_kwargs: dict[str, Any]) -> None:
         super().preprocess_engine_kwargs(engine_kwargs)
+        # Default for requests without a registered rollout adapter.
+        self._num_stages = getattr(self, "_num_stages", 1)
+
         engine_kwargs.pop("custom_pipeline", None)
         # TODO (mike): drop this later. It should be inferred from the model config.
         pipeline_name = engine_kwargs.pop("pipeline_name", None)
@@ -263,7 +266,9 @@ class ARStrategy(OmniStrategyBase):
             else None
         )
         stage_extras = {
-            stage.stage_id: dict(adapter_cls.get_stage_engine_extras(stage.stage_id, pipeline_mode=pipeline_mode))
+            stage.stage_id: dict(
+                adapter_cls.get_stage_engine_extras(stage.stage_id, pipeline_mode=pipeline_mode, model_config=self.server.model_config)
+            )
             for stage in stages
         }
         # vLLM LoRA is per LLM stage: the policy stage owns the rollout's LoRA

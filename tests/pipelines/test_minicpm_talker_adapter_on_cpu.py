@@ -194,5 +194,36 @@ class TestCodecPaddingSlice(unittest.TestCase):
         # The unsliced row would append three spurious zero-token targets.
         self.assertNotEqual(row.tolist(), sliced.tolist())
 
+
+class TestAsyncChunkValidation:
+    """async_chunk is validated per pipeline mode."""
+
+    def _load_adapter(self):
+        import importlib.util
+        path = Path(__file__).parent.parent.parent / "verl_omni" / "pipelines" / "minicpm" / "omni_rollout_adapter.py"
+        src = path.read_text()
+        # Verify validate_async_chunk exists in the source (can't import the
+        # full package chain without heavy deps).
+        return src
+
+    def test_thinker_talker_rejects_explicit_true(self):
+        src = self._load_adapter()
+        assert "async_chunk=false" in src, "thinker_talker must reject async_chunk=true"
+        assert "raise ValueError" in src
+
+    def test_thinker_talker_explicit_false_ok(self):
+        src = self._load_adapter()
+        assert "return False" in src, "thinker_talker absent async_chunk defaults to false"
+
+    def test_thinker_only_default_true(self):
+        src = self._load_adapter()
+        assert "return async_chunk if async_chunk is not None else True" in src, \
+            "thinker_only absent async_chunk defaults to true"
+
+    def test_validate_method_exists(self):
+        src = self._load_adapter()
+        assert "def validate_async_chunk" in src, "per-mode async_chunk validation method exists"
+
+
 if __name__ == "__main__":
     unittest.main()

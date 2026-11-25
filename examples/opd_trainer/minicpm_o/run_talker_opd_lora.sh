@@ -25,10 +25,14 @@ export VERL_USE_EXTERNAL_MODULES=verl_omni
 
 STUDENT_MODEL=${STUDENT_MODEL:-"/user/yangzhongyu/models/MiniCPM-o-4_5"}
 TEACHER_MODEL=${TEACHER_MODEL:-"/user/yangzhongyu/models/MiniCPM-o-4_5"}
-REPO_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
+REPO_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../../.." && pwd)
 TRAIN_FILE=${TRAIN_FILE:-"/user/yangzhongyu/data/talker_opd/train_prompts.parquet"}
 VAL_FILE=${VAL_FILE:-"/user/yangzhongyu/data/talker_opd/val_prompts.parquet"}
 
+# The talker OPD teacher requires teacher-forced codec scoring in the vLLM-Omni
+# engine (not yet available for MiniCPM-o); the default runs the supported
+# GSPO + KL-to-reference smoke scored by talker_codec_reward. Enable the
+# distillation group once the engine supports it.
 python3 -m verl_omni.trainer.main_omni \
     data.train_files="${TRAIN_FILE}" \
     data.val_files="${VAL_FILE}" \
