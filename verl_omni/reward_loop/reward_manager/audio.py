@@ -16,6 +16,7 @@
 import asyncio
 import inspect
 import math
+import warnings
 from functools import partial
 
 import numpy as np
@@ -25,6 +26,7 @@ from verl.experimental.reward_loop.reward_manager.base import RewardManagerBase
 from verl.utils.reward_score import default_compute_score as _upstream_default_compute_score
 
 from verl_omni.reward_loop.reward_manager.media import _reward_extra_info
+from verl_omni.workers.config.reward import DEPRECATED_AUDIO_MANAGER_MESSAGE
 
 
 def _audio_reward_kwargs(item) -> dict:
@@ -80,7 +82,11 @@ def _extract_legacy_mono_audio(extra_info: dict) -> tuple[np.ndarray, int]:
 
 
 class AudioRewardManager(RewardManagerBase):
-    """Route one validated waveform per rollout to a custom reward function."""
+    """Route one validated waveform per rollout to a custom reward function.
+
+    Deprecated since v0.4.0. Use :class:`MultiAudioRewardManager` with
+    ``reward.reward_functions``.
+    """
 
     def __init__(self, config, tokenizer, compute_score, reward_router_address=None, reward_model_tokenizer=None):
         if (
@@ -89,6 +95,7 @@ class AudioRewardManager(RewardManagerBase):
             or (isinstance(compute_score, partial) and compute_score.func is _upstream_default_compute_score)
         ):
             raise ValueError("AudioRewardManager requires reward.custom_reward_function.")
+        warnings.warn(DEPRECATED_AUDIO_MANAGER_MESSAGE, DeprecationWarning, stacklevel=2)
         super().__init__(config, tokenizer, compute_score)
         self.is_async_reward_score = inspect.iscoroutinefunction(compute_score)
         self.reward_router_address = reward_router_address

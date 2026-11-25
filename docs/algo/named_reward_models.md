@@ -1,6 +1,6 @@
 # Named Reward Models
 
-Last updated: 11/19/2026
+Last updated: 11/24/2026
 
 This guide describes how to configure and extend named model-backed rewards
 under `reward.models` in `verl-omni`. For the general Reward Loop interface and
@@ -70,7 +70,7 @@ reward.reward_manager.name=MultiAudioRewardManager \
 
 The combined reward is placed on the last valid response token. The
 single-scorer `AudioRewardManager` with `reward.custom_reward_function`
-continues to support existing recipes.
+continues to work for existing recipes during the deprecation period.
 
 ## Native replica scheduling
 
@@ -137,16 +137,17 @@ Deprecated since v0.4.0, warning-only until removal in a future release:
 
 - `VisualRewardManager` with one `reward.custom_reward_function` — use
   `MultiVisualRewardManager` with `reward.reward_functions`.
+- `AudioRewardManager` with one `reward.custom_reward_function` — use
+  `MultiAudioRewardManager` with `reward.reward_functions`. See
+  [the audio migration example](#audio-and-visual-scorer-inputs).
 - The single global reward model (`reward.reward_model.enable=true` serving one
   `custom_reward_function`) — use a named `engine` model under `reward.models`;
   see [Migrate an existing engine reward](#migrate-an-existing-engine-reward).
 - `reward.custom_reward_function.use_accelerator` — use
   `reward.accelerator_workers.enabled`.
 
-`AudioRewardManager` and the upstream `naive`/text reward managers remain
-supported. Audio rollouts can also use the
-[shared reward manager](#audio-and-visual-scorer-inputs). Shared text input
-remains follow-up work.
+The upstream `naive` and other text reward managers remain supported.
+Shared text input remains follow-up work.
 
 ## Migrate an existing engine reward
 
