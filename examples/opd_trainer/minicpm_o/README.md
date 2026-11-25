@@ -12,7 +12,7 @@ It is the [MiniCPM-o GSPO recipe](https://github.com/verl-project/verl-omni/blob
 - Text, images, and at most one audio clip per prompt.
 - A separate frozen `vllm_omni` teacher pool from the same model family; teacher and student must share the tokenizer and special-token IDs; this is not checked automatically.
 
-Video, multiple audio clips per prompt, talker/codec-policy training, and streaming duplex are not supported. Speech-policy OPD is a separate RFC milestone; streaming duplex is tracked by [#566](https://github.com/verl-project/verl-omni/issues/566).
+Video, multiple audio clips per prompt, talker/codec-policy training, and streaming duplex are not supported. Speech-policy OPD is a separate RFC milestone; streaming duplex is tracked by [#566](https://github.com/verl-project/verl-omni/issues/566). The talker (codec-policy) milestone is implemented by the recipe below.
 
 ## Weights and dependencies
 
@@ -106,3 +106,52 @@ TORCH_COMPILE_DISABLE=1 TORCHINDUCTOR_DISABLE=1 python -m pytest -q --asyncio-mo
 ```
 
 GSM8K runs are text-only: the first batch is worth a glance to confirm requests carry no media streams and the teacher scores them normally.
+
+## Talker-stage training (codec policy)
+
+`run_talker_opd_lora.sh` trains the Talker (MiniCPMTTS) over speech codec
+tokens while the thinker stays frozen. The rollout runs the two-stage pipeline
+(`pipeline_mode="thinker_talker"`): the frozen thinker writes the text response
+on-policy, the talker speaks it, and the batch's response tokens are the codec
+frames themselves — the real prompt travels in the per-sample replay payload
+(`minicpm_talker_replay`), the same contract as the Qwen3-TTS adapter.
+
+The training forward chains two stages inside one call, mirroring
+`MiniCPMO._generate_speech_non_streaming` exactly:
+
+1. thinker forward under `torch.no_grad`, capturing the hidden states at
+   `tts_config.tts_proj_layer`;
+2. `hidden_text_merge` conditioning — `emb_text(text[span]) +
+   projector_semantic(hidden[span])`, optionally L2-normalized — followed by
+   the official prefix `[conditioning, text_eos, audio_bos, codec[:-1]]`;
+3. per-codebook `head_code` logits, codec-aligned back onto the response
+   positions so the standard logprob machinery needs no shifting.
+
+The conditioning span is the text between the last `<|tts_bos|>` and the last
+`<|tts_eos|>` marker (or the sequence end), the official chat semantics.
+
+### Verification evidence
+
+- GPU unit checks (real weights, H100): model load with TTS, thinker frozen /
+  talker trainable, the official conditioning math, the teacher-forced
+  forward through `head_code`, gradient flow to `tts.*` only, codec logprob
+  sanity (7/7).
+- Precision alignment against the official inference path: the rebuilt
+  conditioning matches `_generate_speech_non_streaming`'s `inputs_embeds`
+  with zero difference, and the model assigns its own sampled codec frames a
+  mean logprob of -0.295 (uniform baseline -8.789, 94%+ of frames above 0.5).
+- E2E smoke (8xH100): rollout → replay → adapter → LoRA update on `tts.*`
+  with `distillation.enabled=false` (GRPO + KL to reference), driven by
+  `verl_omni/utils/reward_score/talker_codec_reward.py`.
+
+### Notes and limits
+
+- `use_remove_padding` must stay false: rmpad flattening invalidates the
+  replay span coordinates.
+- MiniCPM-o 4.5 ships a single-codebook talker (`num_vq=1`,
+  `num_audio_tokens=6562`); the multi-codebook layout is rejected explicitly.
+- The OPD teacher pool scores a request by prefilling its prompt-plus-response
+  ids; MiniCPM-o's talker needs teacher-forced codec scoring in the vLLM-Omni
+  engine (present for other model families, not yet for MiniCPM-o). With
+  `distillation.enabled=false` the same loop runs under GRPO + KL-to-reference
+  while that lands.

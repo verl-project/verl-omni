@@ -181,11 +181,6 @@ class ARStrategy(OmniStrategyBase):
         pipeline_mode = engine_kwargs.pop("pipeline_mode", "thinker_only")
 
         adapter_cls = OmniRolloutPipelineBase.get_class(pipeline_name)
-        if adapter_cls is None and self.server.model_config.true_on_policy:
-            raise ValueError(
-                "actor_rollout_ref.model.true_on_policy=true requires a registered rollout pipeline, got "
-                f"actor_rollout_ref.rollout.engine_kwargs.vllm_omni.pipeline_name={pipeline_name!r}."
-            )
         if adapter_cls is not None:
             async_chunk = engine_kwargs.get("async_chunk", engine_kwargs.get("async-chunk", True))
             if not isinstance(async_chunk, bool):
@@ -241,6 +236,7 @@ class ARStrategy(OmniStrategyBase):
                 f"available stages are {stage_ids}."
             )
         self._policy_stage_index = stage_ids.index(policy_stage_id)
+        self._num_stages = len(stages)
         self._policy_sampling_constraints = dict(stages[self._policy_stage_index].sampling_constraints)
 
         weight_sync_stage_ids = adapter_cls.weight_sync_stage_ids(pipeline_mode=pipeline_mode)
@@ -267,11 +263,7 @@ class ARStrategy(OmniStrategyBase):
             else None
         )
         stage_extras = {
-            stage.stage_id: dict(
-                adapter_cls.get_stage_engine_extras(
-                    stage.stage_id, pipeline_mode=pipeline_mode, model_config=self.server.model_config
-                )
-            )
+            stage.stage_id: dict(adapter_cls.get_stage_engine_extras(stage.stage_id, pipeline_mode=pipeline_mode))
             for stage in stages
         }
         # vLLM LoRA is per LLM stage: the policy stage owns the rollout's LoRA
@@ -292,9 +284,16 @@ class ARStrategy(OmniStrategyBase):
         tp_size = self.server.config.tensor_model_parallel_size
 
         deploy_dict: dict[str, object] = {"pipeline": pipeline_id}
+        # RL rollouts drive the pipeline serially (turn mode). The engine
+        # defaults multi-stage pipelines with async-chunk connectors to
+        # async_chunk=True, whose orchestrator prewarm submits placeholder
+        # requests to downstream LLM stages BEFORE their bridge conditioning
+        # arrives -- stages whose preprocess requires those tensors (e.g.
+        # MiniCPM-o's talker: tts_token_ids/tts_hidden_states) crash on the
+        # unconditioned placeholder. Disable async chunk unless explicitly
+        # requested.
         async_chunk = engine_kwargs.get("async_chunk", engine_kwargs.get("async-chunk"))
-        if async_chunk is not None:
-            deploy_dict["async_chunk"] = async_chunk
+        deploy_dict["async_chunk"] = bool(async_chunk) if async_chunk is not None else False
 
         if visible_devices:
             device_count = len([device for device in visible_devices.split(",") if device.strip()])
@@ -449,7 +448,10 @@ class ARStrategy(OmniStrategyBase):
             sampling_params.setdefault("seed", getattr(self.server.config, "seed", 42))
         return_hidden = bool(sampling_params.pop("return_hidden_states", False))
         policy_params = SamplingParams(max_tokens=max_tokens, **sampling_params)
-        if self._rollout_output_modalities is not None:
+        if self._rollout_output_modalities is not None or self._num_stages > 1:
+            # A multi-stage engine requires one sampling-params entry per stage,
+            # even when only the last stage is final (e.g. the MiniCPM-o
+            # thinker->talker bridge): the engine errors on a single object.
             default_stage_sampling_params = self.server.engine.default_sampling_params_list
             if len(default_stage_sampling_params) <= 1 or self._policy_stage_index >= len(
                 default_stage_sampling_params
