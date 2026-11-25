@@ -33,7 +33,7 @@ import sys
 ENGINES_IMPORTED_FIRST = "verl_omni.workers.engine" in sys.modules
 """
 
-_PROBE = "import verl, fake_verl_plugin; print(fake_verl_plugin.ENGINES_IMPORTED_FIRST)"
+_PROBE = "import verl, verl_omni, fake_verl_plugin; print(fake_verl_plugin.ENGINES_IMPORTED_FIRST)"
 
 
 def _install_fake_plugin(site_dir) -> None:
