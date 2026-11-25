@@ -63,10 +63,12 @@ def validate_rollout_routing_replay(config) -> None:
         )
     mode = OmegaConf.select(actor_cfg, f"{strategy}.router_replay.mode", default=None)
     if mode != "R3":
+        hint = f"set actor_rollout_ref.actor.{strategy}.router_replay.mode='R3'"
+        if strategy == "veomni":
+            hint += " under model_engine=veomni, which defines the actor.veomni group"
         raise ValueError(
             "actor_rollout_ref.rollout.enable_rollout_routing_replay captures R3 rollout routes; "
-            f"set actor_rollout_ref.actor.{strategy}.router_replay.mode='R3' "
-            f"(got {mode!r}) so the actor engine replays them."
+            f"{hint} (got {mode!r}) so the actor engine replays them."
         )
 
 
