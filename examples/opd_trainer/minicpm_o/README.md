@@ -152,6 +152,7 @@ The conditioning span is the text between the last `<|tts_bos|>` and the last
   `num_audio_tokens=6562`); the multi-codebook layout is rejected explicitly.
 - The OPD teacher pool scores a request by prefilling its prompt-plus-response
   ids; MiniCPM-o's talker needs teacher-forced codec scoring in the vLLM-Omni
-  engine (present for other model families, not yet for MiniCPM-o). With
-  `distillation.enabled=false` the same loop runs under GRPO + KL-to-reference
-  while that lands.
+  engine (present for other model families, not yet for MiniCPM-o). The
+  default recipe therefore ships with `distillation.enabled=false` and
+  `actor_rollout_ref.actor.use_kl_loss=true` (KL to the frozen reference
+  policy), scored by `talker_codec_reward.compute_score`.

@@ -25,6 +25,7 @@ export VERL_USE_EXTERNAL_MODULES=verl_omni
 
 STUDENT_MODEL=${STUDENT_MODEL:-"/user/yangzhongyu/models/MiniCPM-o-4_5"}
 TEACHER_MODEL=${TEACHER_MODEL:-"/user/yangzhongyu/models/MiniCPM-o-4_5"}
+REPO_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
 TRAIN_FILE=${TRAIN_FILE:-"/user/yangzhongyu/data/talker_opd/train_prompts.parquet"}
 VAL_FILE=${VAL_FILE:-"/user/yangzhongyu/data/talker_opd/val_prompts.parquet"}
 
@@ -88,17 +89,17 @@ python3 -m verl_omni.trainer.main_omni \
     actor_rollout_ref.ref.fsdp_config.model_dtype=bfloat16 \
     algorithm.adv_estimator=grpo \
     algorithm.use_kl_in_reward=False \
-    ++distillation.enabled=true \
-    ++distillation.distillation_loss.loss_mode=kl \
-    ++distillation.distillation_loss.use_policy_gradient=true \
-    ++distillation.distillation_loss.use_task_rewards=false \
-    ++distillation.teacher.model.path="${TEACHER_MODEL}" \
-    ++distillation.teacher.model.trust_remote_code=True \
-    ++distillation.teacher.strategy=fsdp2 \
-    ++distillation.teacher.fsdp_config.param_offload=true \
-    ++distillation.teacher.fsdp_config.model_dtype=bfloat16 \
+    # The talker OPD teacher requires teacher-forced codec scoring in the
+    # vLLM-Omni engine (not yet available for MiniCPM-o); the default runs
+    # the supported GSPO + KL-to-reference smoke. Set the teacher group
+    # below to enable distillation once the engine supports it.
+    ++distillation.enabled=false \
+    actor_rollout_ref.actor.use_kl_loss=true \
+    actor_rollout_ref.actor.kl_loss_coef=0.001 \
     reward.reward_manager.source=register \
     reward.reward_manager.name=minicpm_naive \
+    reward.custom_reward_function.path="${REPO_ROOT}/verl_omni/utils/reward_score/talker_codec_reward.py" \
+    reward.custom_reward_function.name=compute_score \
     trainer.val_before_train=false \
     trainer.balance_batch=True \
     trainer.critic_warmup=0 \

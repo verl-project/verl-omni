@@ -81,11 +81,11 @@ MINICPMO_4_5_TALKER_PIPELINE = PipelineConfig(
 
 @OmniRolloutPipelineBase.register("minicpmo_4_5")
 class MiniCPMORolloutAdapter(OmniRolloutPipelineBase):
-    # Chunked stage outputs cannot be replayed by the talker training adapter,
-    # and the engine's async-chunk prewarm submits unconditioned placeholder
-    # requests to the talker stage (its preprocess requires the thinker bridge
-    # tensors), so RL rollouts must run the pipeline serially.
-    supports_async_chunk = False
+    # thinker_talker rejects async_chunk: the engine's prewarm submits
+    # unconditioned placeholder requests to the talker stage (its preprocess
+    # requires the thinker bridge tensors). thinker_only keeps the default
+    # behavior; the thinker_talker recipe sets async_chunk=false explicitly.
+    supports_async_chunk = True
     """Rollout pipeline topology adapter for MiniCPM-o 4.5.
 
     Registered under ``model_type="minicpmo_4_5"``. Stage topology comes from
