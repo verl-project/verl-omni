@@ -101,7 +101,7 @@ jobs:
       max-parallel: 2
       matrix:
         group: ${{ fromJSON(needs.resolve_groups.outputs.jobs) }}
-    runs-on: linux-aarch64-a2b4-8
+    runs-on: linux-aarch64-a2b4-omni-fed-8
     timeout-minutes: 120
     container:
       # Previous-generation image that exists in the registry; the pinned
