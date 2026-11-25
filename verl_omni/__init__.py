@@ -20,6 +20,37 @@ with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "version/vers
     __version__ = f.read().strip()
 
 
+def _load_verl_plugins() -> None:
+    """Load verl's ``verl.plugins`` entry points before the imports below.
+
+    verl imports the modules in ``VERL_USE_EXTERNAL_MODULES`` before it loads its
+    plugin entry points, and the engine modules imported below read the device at
+    import time. With ``VERL_USE_EXTERNAL_MODULES=verl_omni`` a hardware plugin
+    would therefore register its platform too late. Loading the entry points here,
+    with verl's ``VERL_USE_EXTERNAL_PLUGINS`` policy, keeps the order right; verl's
+    own pass afterwards finds the plugins already imported.
+    """
+    import verl  # noqa: F401 -- when verl is imported first, its own pass has already run
+
+    policy = os.getenv("VERL_USE_EXTERNAL_PLUGINS", "auto").strip().lower()
+    if policy == "none":
+        return
+    allowed = None if policy == "auto" else {name.strip() for name in policy.split(",") if name.strip()}
+
+    from importlib.metadata import entry_points
+
+    for ep in entry_points(group="verl.plugins"):
+        if allowed is not None and ep.name not in allowed:
+            continue
+        try:
+            ep.load()
+        except Exception as e:
+            logger.debug("Failed to load plugin '%s': %s", ep.name, e)
+
+
+_load_verl_plugins()
+
+
 # Apply model patches and auto-register agent loops / pipelines / rollout / reward loop / engines
 import verl_omni.agent_loop  # noqa: E402, F401
 import verl_omni.models  # noqa: E402, F401

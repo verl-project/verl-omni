@@ -1,6 +1,6 @@
 # Installation (Intel GPU)
 
-Last updated: 11/09/2026
+Last updated: 11/25/2026
 
 For NVIDIA GPU, see the {doc}`GPU installation guide <install>`. For Ascend NPU, see the {doc}`NPU installation guide <install_npu>`. For AMD GPU, see the {doc}`ROCm installation guide <install_rocm>`. For Cambricon MLU, see the {doc}`MLU installation guide <install_mlu>`.
 
@@ -170,10 +170,14 @@ which registers under both `nccl` and `xccl`, so recipes keep the default
 importing the CUDA engine, so on Intel GPU run them with `CKPT_BACKEND=xccl`,
 which selects the XCCL engine and pre-checks it instead.
 
+Omni-modality training (`main_omni`) on Arc Pro B60: the Qwen3-Omni thinker GSPO
+smoke tests (colocated and separate async), the Qwen3-Omni offline DPO smoke test
+and the MiniCPM-o thinker GSPO smoke test.
+
 Not yet supported on Intel GPU:
 
 * The VeOmni engine backend.
-* Omni-modality training (`main_omni`, for example Qwen3-Omni and Qwen3-TTS).
+* Qwen3-TTS GRPO with the default eager attention.
 
 ## Build Your Own Docker Image
 
