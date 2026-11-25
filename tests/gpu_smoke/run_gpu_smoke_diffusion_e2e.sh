@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ci-e2e-diffusion GPU smoke tests (4-GPU): end-to-end diffusion training paths.
 # Models with a landed v1 recipe run on the V1 sync trainer (Qwen-Image-Edit,
-# FlowGRPO, online DPO, DiffusionNFT, MiniMax-H3 T2VA) and the async V1
+# FlowGRPO, online DPO, DiffusionNFT, MiniMax-H3 T2VA/FL2VA/Ref2VA) and the async V1
 # trainers keep their dedicated tests (FlowGRPO separate_async, two-teacher
 # OPD). Bagel PickScore stays on v0 until its v1 recipe lands (#511); the
 # sync-separate smoke keeps the deprecated v0 distributed path covered
@@ -67,6 +67,17 @@ run_test 6 "FlowGRPO synchronous separate trainer e2e" \
 run_test 7 "MiniMax-H3 FlowGRPO T2VA FSDP-SP with managed ImageBind v1 sync trainer e2e" \
     env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" ACTOR_SP=2 ROLLOUT_TP=2 \
     bash tests/special_e2e/run_minimax_h3_imagebind_smoke.sh cuda "${diffusion_trainer_args[@]}"
+
+# FL2VA and Ref2VA use the tiny FlowGRPO runner with its stub reward, on the same
+# GPU, SP and TP settings as the T2VA test above; they cover the image-conditioned
+# and reference-conditioned rollout paths, which T2VA does not exercise.
+run_test 13 "MiniMax-H3 FlowGRPO FL2VA FSDP-SP v1 sync trainer e2e" \
+    env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" ACTOR_SP=2 ROLLOUT_TP=2 \
+    TOTAL_TRAINING_STEPS=1 python3 tests/special_e2e/run_flowgrpo_minimax_h3_tiny.py --task fl2va
+
+run_test 14 "MiniMax-H3 FlowGRPO Ref2VA FSDP-SP v1 sync trainer e2e" \
+    env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" ACTOR_SP=2 ROLLOUT_TP=2 \
+    TOTAL_TRAINING_STEPS=1 python3 tests/special_e2e/run_flowgrpo_minimax_h3_tiny.py --task ref2va
 
 run_test 8 "Diffusion OPD v1 sync colocated teachers e2e" \
     env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" SMOKE=sync \
