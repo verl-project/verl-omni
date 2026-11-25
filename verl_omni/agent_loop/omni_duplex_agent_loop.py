@@ -30,6 +30,13 @@ An episode whose scored window an engine-injected silent unit landed in
 silence clock took the unit) is dropped onto the degenerate mask-0 output:
 its window is corpus-time and cannot be scored. The drop rate is the
 trainer's per-step mean of ``reward/duplex_pacing_corrupted``.
+
+Two generic ``extra_fields`` columns are the trainer's advantage-gate
+contract (``OmniPPOTrainer._compute_advantage`` → ``apply_advantage_gates``):
+``advantage_mask`` gates policy-gradient credit per response position (the
+replay's ``pg_mask``: the action tokens a pause or interruption episode
+decided before its scored event), and ``advantage_exclude`` drops the episode
+from its GRPO group's baseline, which every degenerate output sets.
 """
 
 from __future__ import annotations
@@ -265,6 +272,8 @@ class OmniDuplexAgentLoop(AgentLoopBase):
                 # The clean episode's entry of the drop-rate column; the scorer
                 # reports the same flag from the replay it scores.
                 "reward_extra_info": {"duplex_pacing_corrupted": 0.0},
+                "advantage_mask": list(replay.pg_mask),
+                "advantage_exclude": False,
             },
         )
         output = self._postprocess(output)
@@ -283,6 +292,11 @@ class OmniDuplexAgentLoop(AgentLoopBase):
             raise ValueError(
                 "Omni policy response_logprobs must align one-to-one with response_ids, "
                 f"got {len(output.response_logprobs)} and {policy_length}."
+            )
+        if len(output.extra_fields["advantage_mask"]) != policy_length:
+            raise ValueError(
+                "Omni policy advantage_mask must align one-to-one with response_ids, "
+                f"got {len(output.extra_fields['advantage_mask'])} and {policy_length}."
             )
         dump_duplex_replay(output.extra_fields, episode_id=run_spec["episode_id"])
         return output
@@ -304,7 +318,9 @@ class OmniDuplexAgentLoop(AgentLoopBase):
         reward score — which also keeps the scorer off the empty payload — and
         ``reward_extra_info``, whose ``duplex_episode_failed`` = 1.0 marks the
         episode as dropped (the trainer's per-step mean is the dropped share)
-        alongside the cause's own column.
+        alongside the cause's own column. The advantage-gate columns mark it
+        excluded from its group's baseline (``advantage_exclude``) under an
+        all-zero ``advantage_mask``.
 
         Args:
             episode: The dataset episode the drive failed on.
@@ -320,6 +336,7 @@ class OmniDuplexAgentLoop(AgentLoopBase):
             prompt_ids=[],
             response_ids=[],
             response_mask=[],
+            pg_mask=[],
             audio_bounds=[],
             unit_layouts=[],
             unit_pcm=[],
@@ -342,6 +359,8 @@ class OmniDuplexAgentLoop(AgentLoopBase):
                 "min_global_steps": step,
                 "max_global_steps": step,
                 "reward_extra_info": dict(reward_extra_info),
+                "advantage_mask": [0] * len(replay.response_mask),
+                "advantage_exclude": True,
             },
         )
         return self._postprocess(output)

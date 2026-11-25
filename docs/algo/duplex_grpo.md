@@ -60,7 +60,8 @@ dataset (mined episodes) ──▶ omni_duplex_agent ──▶ rollout server (D
 | FDB-v1 rule metrics | `.../duplex/fdb_metrics.py` | static-protocol timing metrics over dumped replays |
 | Rollout bridge | `verl_omni/pipelines/minicpm/duplex_rollout_adapter.py` | `pipeline_mode="duplex"`; `minicpmo_4_5_duplex` |
 | Session driver | `verl_omni/workers/rollout/vllm_rollout/vllm_omni_duplex_strategy.py` | 1 s-cadence submits next to the engine; per-response draining; close before weight sync; reports the fed-chunk indices bracketing the interrupting speech |
-| Agent loop | `verl_omni/agent_loop/omni_duplex_agent_loop.py` | `omni_duplex_agent`; one Ray call per episode; re-anchors interruption episodes onto the unit clock and drops pacing-corrupted episodes (mask 0) |
+| Agent loop | `verl_omni/agent_loop/omni_duplex_agent_loop.py` | `omni_duplex_agent`; one Ray call per episode; re-anchors interruption episodes onto the unit clock and drops pacing-corrupted episodes (mask 0, out of the group baseline) |
+| Advantage gates | `verl_omni/trainer/omni/advantage_gates.py` | `OmniPPOTrainer._compute_advantage` applies two generic agent-loop columns after verl's scoring: `advantage_mask` (per-token policy-gradient gate, the replay's `pg_mask`) and `advantage_exclude` (a dropped episode leaves its GRPO group's baseline and takes advantage 0); reports `advantage/gated_token_share` and `advantage/excluded_sample_share` |
 | Recipe | `examples/grpo_trainer/minicpm_o/duplex_grpo/` | GRPO LoRA, 4×H800 colocated |
 
 ### The replay layout
@@ -80,7 +81,14 @@ ones (`MiniCPMThinkerAdapter.prepare_model_inputs` takes the duplex branch
 when the batch carries `extra_fields["duplex_replay"]`; packed batches re-base
 the bounds on the position-id resets). The prompt is the session's
 system-context prefix; the response is the interleaved unit-window sequence
-with mask 1 only at sampled action positions. Unit mels are re-derived through
+with mask 1 only at sampled action positions. The payload also carries
+**`pg_mask`**, the policy-gradient gate over the response: on pause and
+interruption episodes the action tokens of units that decided strictly before
+the scored event's start (`pause_window_s[0]` / `interrupt_speech_onset_s`)
+are 0, so a yield failure does not penalize what the policy said beforehand.
+Turn episodes are not gated — the premature-barge-in decision the −1 scores
+precedes the turn end. Only the advantage takes the gate; the KL term rides
+the full `response_mask`. Unit mels are re-derived through
 the streaming processor and encoded through the streaming Whisper encoder
 with the KV history carried across the episode's units, exactly as the engine
 does; the reference block goes through the offline encoder on both sides.
@@ -122,7 +130,10 @@ advantages are amplified by √G), the per-token losses aggregate under
 a constant denominator (`loss_agg_mode=seq-mean-token-sum-norm` with
 `loss_scale_factor` pinned to the rollout horizon), and the KL term
 (`low_var_kl`, β 0.05) rides the full response mask against the starting
-checkpoint.
+checkpoint. A pacing-corrupted (dropped) episode leaves the baseline: each
+group's mean runs over its clean episodes only (the clean rows are rescored
+through verl's GRPO estimator on that sub-batch) and the dropped episode's
+advantage is 0. The per-token `pg_mask` gate scales the advantage after that.
 
 ### Weight-sync fencing
 
@@ -191,10 +202,20 @@ turn-heavy mix; an integer caps during mining). The pause band is
    clock injected a unit) onto a mask-0 output flagged
    `duplex_pacing_corrupted` = 1, while clean episodes report 0, so the
    trainer's per-step mean `reward/duplex_pacing_corrupted` is the drop
-   rate. A dropped episode's scalar reward (0) still enters its group's
-   mean: verl computes group scores before any mask.
+   rate; the dropped episode leaves its group's baseline and takes advantage
+   0 (`advantage/excluded_sample_share` reports the excluded share,
+   `advantage/gated_token_share` the share of response-masked positions the
+   pause/interruption gate zeroed).
 4. **FDB-v1 rule metrics** over dumped replays
    (`python -m verl_omni.utils.dataset.duplex.fdb_metrics dump.jsonl`).
+5. **Exit criteria** (English duplex non-regression against the base
+   checkpoint): every axis's validation normalized mean reward (`R_norm`, the
+   calibration audit's `normalized_mean` on the val episodes) moves by
+   `Δ R_norm ≥ −0.03` with at least one axis improving; the trip-wire columns
+   stay inside their bands; the per-step policy KL on the action tokens
+   (verl's `actor/kl_loss`) stays bounded; and a 10–20-episode transcript
+   spot-check of dumped replays after the run finds no silence collapse or
+   repetitive speech.
 
 CPU tests cover the whole contract surface
 (`tests/utils/dataset/duplex/`, the strategy / agent-loop / adapter suites);

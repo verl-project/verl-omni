@@ -52,7 +52,12 @@ from verl_omni.utils.dataset.duplex.records import (
     ORIGIN_ENGINE,
     RecordSetError,
 )
-from verl_omni.utils.dataset.duplex.trajectory import DuplexTrajectory
+from verl_omni.utils.dataset.duplex.trajectory import (
+    AXIS_INTERRUPTION,
+    AXIS_PAUSE,
+    DuplexEpisodeEvent,
+    DuplexTrajectory,
+)
 
 __all__ = [
     "DEFAULT_REF_AUDIO_MODEL_PATH_ENV",
@@ -349,6 +354,11 @@ class DuplexReplay:
     prompt_ids: list[int]
     response_ids: list[int]
     response_mask: list[int]
+    #: Policy-gradient gate, a subset of ``response_mask``: on pause and
+    #: interruption episodes the action tokens of units that decided strictly
+    #: before the scored event's start are 0. Turn episodes keep the full mask
+    #: (the premature-barge-in decision the reward scores precedes the turn end).
+    pg_mask: list[int]
     audio_bounds: list[list[int]]
     unit_layouts: list[DuplexUnitLayout]
     #: Per-unit PCM in unit order (client chunks and engine-injected silence).
@@ -388,6 +398,7 @@ class DuplexReplay:
             "prompt_ids": list(self.prompt_ids),
             "response_ids": list(self.response_ids),
             "response_mask": list(self.response_mask),
+            "pg_mask": list(self.pg_mask),
             "audio_bounds": [list(span) for span in self.audio_bounds],
             "unit_layouts": [
                 {
@@ -436,6 +447,7 @@ class DuplexReplay:
             prompt_ids=list(payload["prompt_ids"]),
             response_ids=list(payload["response_ids"]),
             response_mask=list(payload["response_mask"]),
+            pg_mask=list(payload["pg_mask"]),
             audio_bounds=[list(span) for span in payload["audio_bounds"]],
             unit_layouts=[
                 DuplexUnitLayout(
@@ -501,7 +513,9 @@ def build_replay(
 
     Returns:
         The replay with prompt/response ids, the validity mask over the
-        response, explicit audio bounds, and the per-unit PCM stream.
+        response, the policy-gradient gate ``pg_mask`` (pre-event action tokens
+        of pause and interruption episodes zeroed), explicit audio bounds, and
+        the per-unit PCM stream.
 
     Raises:
         RecordSetError: On any layout disagreement between the trajectory's
@@ -529,8 +543,10 @@ def build_replay(
     prompt_length = len(prompt_ids)
     response_ids: list[int] = []
     response_mask: list[int] = []
+    pg_mask: list[int] = []
     response_logprobs: list[float] = []
     audio_bounds: list[list[int]] = []
+    event_start_s = _policy_gradient_event_start_s(trajectory.event)
     if reference_ids:
         # The reference block's placeholder run is the first span the tower splices into.
         audio_bounds.append([len(prefix_ids), len(prefix_ids) + len(reference_ids)])
@@ -569,8 +585,10 @@ def build_replay(
         response_ids.extend([vocabulary.audio_placeholder_token_id] * num_audio_tokens)
         audio_bounds.append([audio_start, audio_start + num_audio_tokens])
         action_position = len(response_ids)
+        gated = event_start_s is not None and decision.time_s < event_start_s
         # <unit> and its audio placeholders are structural context, never loss positions.
         response_mask.extend([0] * (1 + num_audio_tokens))
+        pg_mask.extend([0] * (1 + num_audio_tokens))
         response_logprobs.extend([0.0] * (1 + num_audio_tokens))
         # One <unit> block per record, holding all of its action tokens.
         for token_id in decision.action_token_ids:
@@ -582,9 +600,11 @@ def build_replay(
                 )
             response_ids.append(token_id)
             response_mask.append(action_mask_value)
+            pg_mask.append(0 if gated else action_mask_value)
             response_logprobs.append(action_logprob if action_mask_value else 0.0)
         response_ids.append(vocabulary.unit_end_token_id)
         response_mask.append(0)
+        pg_mask.append(0)
         response_logprobs.append(0.0)
         unit_pcm.append(pcm)
         unit_layouts.append(
@@ -613,6 +633,7 @@ def build_replay(
         prompt_ids=prompt_ids,
         response_ids=response_ids,
         response_mask=response_mask,
+        pg_mask=pg_mask,
         audio_bounds=audio_bounds,
         unit_layouts=unit_layouts,
         unit_pcm=unit_pcm,
@@ -630,6 +651,15 @@ def build_replay(
         instructions=instructions or DEFAULT_SESSION_INSTRUCTIONS,
         ref_audio=ref_audio,
     )
+
+
+def _policy_gradient_event_start_s(event: DuplexEpisodeEvent) -> float | None:
+    """The scored event's start on the axes that gate pre-event action tokens, else ``None``."""
+    if event.axis == AXIS_PAUSE:
+        return float(event.pause_window_s[0])
+    if event.axis == AXIS_INTERRUPTION:
+        return float(event.interrupt_speech_onset_s)
+    return None
 
 
 def _episode_streaming_processor(processor: Any) -> Any:

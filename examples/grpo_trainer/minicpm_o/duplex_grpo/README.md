@@ -38,7 +38,9 @@ design; this README covers running it.
   unit landed inside the scored window; the trainer aggregates these columns
   per step, so silence collapse, repetitive speech, or a rising drop rate
   shows up in the logged metrics. The agent loop drops a pacing-corrupted
-  episode (mask 0, flagged the same way).
+  episode (mask 0, flagged the same way) and keeps it out of its group's
+  baseline; the advantage is gated per token to the scored event's units on
+  pause and interruption episodes.
 
 ## Prerequisites
 
@@ -97,6 +99,11 @@ group.
   ```bash
   python -m verl_omni.utils.dataset.duplex.fdb_metrics "${OUTPUT_DIR}/rollout/*.jsonl"
   ```
+- Exit criteria (English duplex non-regression): every axis's val `R_norm`
+  moves by at least −0.03 with one axis improving, the trip-wire columns stay
+  inside their bands, `actor/kl_loss` stays bounded per step, and a 10–20
+  episode transcript spot-check of the dumped replays finds no silence
+  collapse or repetitive speech.
 
 ## Validation status
 

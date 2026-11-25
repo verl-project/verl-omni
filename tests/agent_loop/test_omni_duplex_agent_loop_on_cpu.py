@@ -160,6 +160,10 @@ async def test_run_maps_one_episode_onto_the_policy_sequence():
     assert output.extra_fields["max_global_steps"] == 4
     # A clean episode enters the drop-rate column at 0.
     assert output.extra_fields["reward_extra_info"] == {"duplex_pacing_corrupted": 0.0}
+    # The trainer's advantage-gate columns: the replay's pg_mask (a turn
+    # episode is ungated, so it equals the response mask) and no exclusion.
+    assert output.extra_fields["advantage_mask"] == payload["pg_mask"] == output.response_mask
+    assert output.extra_fields["advantage_exclude"] is False
     # The server saw the run spec with the seed and the chunks, and without
     # the instructions key (an explicit value silences the engine pipeline).
     (run_spec,) = server.episodes
@@ -240,6 +244,9 @@ async def test_double_failure_is_a_degenerate_mask_zero_episode():
     assert output.extra_fields["reward_extra_info"] == {"duplex_episode_failed": 1.0}
     assert output.extra_fields["min_global_steps"] == 9
     assert output.extra_fields["max_global_steps"] == 9
+    # Dropped episodes leave their group's baseline under an all-zero gate.
+    assert output.extra_fields["advantage_mask"] == [0] * len(output.response_mask) == []
+    assert output.extra_fields["advantage_exclude"] is True
     assert len(server.episodes) == 2  # the original drive plus the retry
     assert loop.server_manager._load_balancer.released_count == 1
 
@@ -339,6 +346,9 @@ async def test_engine_silence_inside_the_scored_window_drops_the_episode():
     payload = output.extra_fields[DUPLEX_REPLAY_KEY]
     assert payload["unit_layouts"] == [] and payload["status"] == "failed"
     assert output.extra_fields["min_global_steps"] == 9
+    # The dropped episode leaves its peers' baseline: all-zero gate, excluded.
+    assert output.extra_fields["advantage_mask"] == [0] * len(output.response_mask) == []
+    assert output.extra_fields["advantage_exclude"] is True
 
 
 @pytest.mark.asyncio
