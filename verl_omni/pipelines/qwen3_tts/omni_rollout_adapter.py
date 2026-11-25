@@ -144,7 +144,7 @@ class Qwen3TTSRolloutAdapter(OmniRolloutPipelineBase):
         return [0]
 
     @classmethod
-    def get_stage_engine_extras(cls, stage_id, pipeline_mode="full"):
+    def get_stage_engine_extras(cls, stage_id, pipeline_mode="full", *, model_config):
         cls._check_mode(pipeline_mode)
         if stage_id == 0:
             return {}

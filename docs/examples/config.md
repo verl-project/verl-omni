@@ -464,6 +464,9 @@ These sit on the diffusion trainer YAML (in addition to shared verl trainer fiel
   v0 diffusion trainer for every model. Wan2.2 DanceGRPO on CUDA defaults to V1
   via `run_wan22_5b_t2v_hpsv3_v1.sh`; the v0 auto-detect launcher is deprecated
   for CUDA.
+- `trainer.train_ar`: Jointly train an AR text encoder with the DiT.
+  Defaults to `false`; `true` selects `CompositePolicyGradientRayTrainer` on the
+  v0 `main_diffusion` path.
 - `trainer.v1.*`: V1 mode / sampler / async placeholders (`trainer_mode`, `max_off_policy_threshold`, …). See {doc}`../start/diffusion_v1`.
 
 ### `reward` — visual reward manager

@@ -98,8 +98,8 @@ def _build_tiny_chatml_tokenizer(*, vocab_size: int = 2048) -> Qwen2TokenizerFas
     )
 
 
-def _build_tiny_config(vocab_size: int, *, head_dim: int = 32):
-    """Default Qwen3OmniMoeConfig shrunk to a 2-layer Thinker (no Hub access)."""
+def _build_tiny_config(vocab_size: int, *, head_dim: int = 32, num_hidden_layers: int = 2):
+    """Default Qwen3OmniMoeConfig shrunk to a tiny Thinker (no Hub access)."""
     from transformers.models.qwen3_omni_moe import Qwen3OmniMoeConfig
 
     if head_dim not in (32, 128):
@@ -112,7 +112,7 @@ def _build_tiny_config(vocab_size: int, *, head_dim: int = 32):
 
     text = config.thinker_config.text_config
     text.tie_word_embeddings = False
-    text.num_hidden_layers = 2
+    text.num_hidden_layers = num_hidden_layers
     text.hidden_size = 128
     text.intermediate_size = 256
     text.num_attention_heads = 4
@@ -210,12 +210,21 @@ def _build_tiny_processor(tokenizer):
     )
 
 
-def build(output_dir: str, *, seed: int = 42, dtype: torch.dtype = torch.bfloat16, head_dim: int = 32) -> str:
+def build(
+    output_dir: str,
+    *,
+    seed: int = 42,
+    dtype: torch.dtype = torch.bfloat16,
+    head_dim: int = 32,
+    num_hidden_layers: int = 2,
+    vocab_size_multiple: int = 1,
+) -> str:
     """Construct and save a tiny random-weight Qwen3-Omni Thinker checkpoint."""
     torch.manual_seed(seed)
 
     tokenizer = _build_tiny_chatml_tokenizer()
-    config = _build_tiny_config(vocab_size=len(tokenizer), head_dim=head_dim)
+    vocab_size = -(-len(tokenizer) // vocab_size_multiple) * vocab_size_multiple
+    config = _build_tiny_config(vocab_size=vocab_size, head_dim=head_dim, num_hidden_layers=num_hidden_layers)
 
     # Keep generation/special-token ids consistent between model and tokenizer.
     text = config.thinker_config.text_config
@@ -266,6 +275,8 @@ def ensure_tiny_qwen3_omni_checkpoint(
     seed: int = 42,
     dtype: torch.dtype = torch.bfloat16,
     head_dim: int = 32,
+    num_hidden_layers: int = 2,
+    vocab_size_multiple: int = 1,
     skip_if_exists: bool = True,
 ) -> str:
     """Reuse a compatible tiny checkpoint; reject incompatible contents unless forced."""
@@ -275,23 +286,36 @@ def ensure_tiny_qwen3_omni_checkpoint(
         if output.is_symlink() or (output.exists() and not output.is_dir()):
             raise ValueError(f"Refusing to rebuild a symlink or non-directory checkpoint path: {output}")
         if output.exists() and any(output.iterdir()):
-            if _checkpoint_is_compatible(output, head_dim=head_dim):
+            if _checkpoint_is_compatible(
+                output,
+                head_dim=head_dim,
+                num_hidden_layers=num_hidden_layers,
+                vocab_size_multiple=vocab_size_multiple,
+            ):
                 return output_dir
             raise ValueError(
-                f"Existing checkpoint at {output} is incomplete or incompatible with head_dim={head_dim}. "
+                f"Existing checkpoint at {output} is incomplete or incompatible with head_dim={head_dim}, "
+                f"num_hidden_layers={num_hidden_layers}, vocab_size_multiple={vocab_size_multiple}. "
                 "Choose a separate output directory, or use --force to rebuild it explicitly."
             )
-    return build(output_dir, seed=seed, dtype=dtype, head_dim=head_dim)
+    return build(
+        output_dir,
+        seed=seed,
+        dtype=dtype,
+        head_dim=head_dim,
+        num_hidden_layers=num_hidden_layers,
+        vocab_size_multiple=vocab_size_multiple,
+    )
 
 
-def _checkpoint_is_compatible(output: Path, *, head_dim: int) -> bool:
+def _checkpoint_is_compatible(output: Path, *, head_dim: int, num_hidden_layers: int, vocab_size_multiple: int) -> bool:
     """Check tiny attention geometry and the required local checkpoint components."""
     try:
         config = json.loads((output / "config.json").read_text())
         text = config["thinker_config"]["text_config"]
         expected = {
             "model_type": "qwen3_omni_moe_text",
-            "num_hidden_layers": 2,
+            "num_hidden_layers": num_hidden_layers,
             "hidden_size": 128,
             "num_attention_heads": 4,
             "num_key_value_heads": 2,
@@ -300,6 +324,8 @@ def _checkpoint_is_compatible(output: Path, *, head_dim: int) -> bool:
         if config.get("model_type") != "qwen3_omni_moe" or any(
             text.get(key) != value for key, value in expected.items()
         ):
+            return False
+        if text["vocab_size"] % vocab_size_multiple:
             return False
         required = ("model.safetensors", "tokenizer.json", "tokenizer_config.json", "chat_template.json")
         if not all((output / name).is_file() and (output / name).stat().st_size for name in required):
@@ -325,6 +351,18 @@ def main() -> None:
         help="Use 128 for the Ascend vLLM attention kernel; the GPU tiny model defaults to 32.",
     )
     parser.add_argument(
+        "--num-hidden-layers",
+        type=int,
+        default=2,
+        help="Thinker text decoder depth; vLLM-Omni's hf_numerics mode needs more layers than deepstack levels (3).",
+    )
+    parser.add_argument(
+        "--vocab-size-multiple",
+        type=int,
+        default=1,
+        help="Pad the model vocabulary up to a multiple of this; the real checkpoint's is a multiple of 64.",
+    )
+    parser.add_argument(
         "--force",
         action="store_true",
         help=(
@@ -340,6 +378,8 @@ def main() -> None:
         seed=args.seed,
         dtype=dtype,
         head_dim=args.head_dim,
+        num_hidden_layers=args.num_hidden_layers,
+        vocab_size_multiple=args.vocab_size_multiple,
         skip_if_exists=not args.force,
     )
     print(f"Tiny Qwen3-Omni checkpoint ready at {output_dir}")
