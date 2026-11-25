@@ -14,6 +14,14 @@ repos:
 
   - repo: local
     hooks:
+      - id: check-code
+        name: Check new Python, example and comment findings
+        entry: python tests/special_sanity/check_code.py
+        language: python
+        additional_dependencies: [ruff==0.12.2]
+        pass_filenames: false
+        always_run: true
+
       - id: autogen-trainer-cfg
         name: Generate and verify verl_omni/trainer/config/_generated_*.yaml
         entry: scripts/generate_trainer_config.sh

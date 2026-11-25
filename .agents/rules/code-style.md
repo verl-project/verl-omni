@@ -5,9 +5,8 @@ paths:
 
 # Code Style Rules
 
-Rules beyond the automated pre-commit hooks (`ruff --fix`, `ruff-format`, `mypy`).
-Formatting is handled by the tools below; this file covers conventions they do
-**not** enforce.
+Code conventions and the automated pre-commit checks that enforce their
+mechanically detectable parts. Formatting is handled by the tools below.
 
 ## Automated gates (run before every commit)
 
@@ -17,6 +16,7 @@ Formatting is handled by the tools below; this file covers conventions they do
 | Hook                       | What it actually enforces                                                  |
 | -------------------------- | -------------------------------------------------------------------------- |
 | `ruff` / `ruff-format`     | Lint + format, `line-length = 120` (scope below)                           |
+| `check-code`              | Incremental Python contracts, example hygiene and recognizable comment noise; see `check_code.py` and `check_*.py` |
 | `mypy`                     | Errors enabled only in configured module overrides; global `ignore_errors = true` |
 | `check-license`            | Accepted copyright text in tracked `.py` files; does not validate the full license header |
 | `autogen-trainer-cfg`      | `_generated_*.yaml` matches flattened Hydra source configs |
@@ -74,9 +74,12 @@ It does **not** check docstring style, and does **not** cover the rest of the
 repo. The following are therefore **conventions** (follow them; they are what
 reviewers ask for), not automated gates:
 
-- Public functions/classes get a docstring. A `_` prefix marks module-private
-  scope; do not add one just to exempt a function from the gate.
-- Google-style `Args:` / `Returns:` / `Raises:` sections.
+- Preserve docstrings required by the existing gate. Elsewhere, document public
+  API contracts when callers need information the signature cannot express;
+  do not add boilerplate to trivial internal helpers or forwarding methods.
+  A `_` prefix marks module-private scope; never add it just to bypass the gate.
+- Use concise Google-style `Args:` / `Returns:` / `Raises:` sections only when
+  they convey necessary contracts; omit empty or repetitive template sections.
 - Document tensor shapes and dtypes explicitly, e.g. `(C, H, W)` or `(N, C, H, W)`.
 - Credit upstream in the module docstring when code is adapted
   (e.g. `It is adapted from https://github.com/kvablack/ddpo-pytorch.`).
@@ -85,44 +88,21 @@ reviewers ask for), not automated gates:
 
 ## Comments
 
-Keep comments brief and explain what the code cannot. Comment density is not a
-quality threshold: a subtle tensor layout or synchronization contract can need
-more explanation than ordinary plumbing.
+Default to no implementation comments. Put necessary caller-facing API contracts
+in concise docstrings. Keep an inline comment only for information the code
+cannot express: an algorithm's source or invariant, tensor layout, concurrency
+ordering, or a verified upstream workaround with its removal condition.
 
-Useful comments:
+Do not generate line-by-line narration, numbered step commentary, edit history
+(`Added`, `Updated`, `Changed`), decorative section banners, or commented-out
+code. Rename or simplify code that needs a comment merely to restate what it does.
+Long explanations belong in `docs/`; do not move noise into a docstring instead.
 
-- **Explain why**, where the code cannot — `# Free cached GPU memory so colocated
-  vLLM processes can see it via cudaMemGetInfo`, `# to spare GPU memory for reward
-  model`, `# Fallback for CPU-only environments where vLLM-Omni
-  current_omni_platform.device_type is empty.`
-- **Label a step** in a long procedure, in three or four words — `# dump
-  generations`, `# gather output`, `# Encode through T5 text encoder`.
-- **Annotate one line, at the end of that line** — a tensor shape
-  (`sequence_reward = sample_level_rewards.mean(dim=1)  # [B]`), what a default
-  accepts (`target_modules: Optional[Any] = "all-linear"  # allow both "all-linear"
-  and ["q_proj", "k_proj"]`), a caveat on a call
-  (`find_latest_ckpt_path(...)  # None if no latest`), or why one entry of a literal
-  is there. Two spaces before the `#`.
-- **Flag known debt** — `# TODO: <what>` or `# TODO (name): <what>`, both forms in
-  use. Name the condition for removal when there is one:
-  `# TODO (mike): drop this once it is fixed in upstream diffusers.`
-
-What to delete before sending a patch:
-
-- Comments that restate the line below (`# increment the counter`) or the adjacent
-  docstring. If the code already says it, the comment is noise.
-- Group comments that obscure which entries they describe. Annotate individual
-  entries where needed. Source YAML has a different, enforced comment format;
-  follow [config.md](config.md#hand-written-yaml-has-an-enforced-doc-format).
-- Narration of your own edit (`# Added handling for the new config field`,
-  `# Changed to use the batched path`). Git records that; the file should read as
-  if it always looked this way.
-- Section banners around every few lines. The `# ---------` rule appears only where
-  it separates top-level groups in the tree's longest modules; that is the ceiling,
-  not a template.
-
-Long-form explanation belongs in the docstring or in `docs/`, not in a comment
-block above the function.
+`check_comments.py` rejects recognizable edit/step narration and banners;
+isolated Ruff `ERA001` rejects recognizable commented-out code in production.
+These checks classify syntax, not whether an author used AI. Review still judges
+necessity. Preserve license and attribution text, tooling directives and required
+config documentation ([config.md](config.md)).
 
 ## Imports and lint scope
 
@@ -170,8 +150,8 @@ are the ones already imported across this tree (upstream verl, not a local modul
 substring grep on file contents, so it also flags docstrings, comments, and
 `EngineRegistry.register(device=["cuda", "npu"])` declarations. Those are exempted
 per file in `tests/special_sanity/check_device_api_usage.py`; a handful of genuinely
-hardcoded sites are exempted there too, with a `# TODO`. Prefer fixing the call over
-adding an entry, and give a reason when you do add one.
+hardcoded sites are exempted there too, with a `# TODO`. Fix the call; adding an
+entry changes the check (see `AGENTS.md`, *Protected surfaces*).
 
 ## Reuse over duplication
 

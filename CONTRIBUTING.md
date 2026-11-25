@@ -39,6 +39,86 @@ pre-commit run --all-files
 pre-commit run --all-files --show-diff-on-failure --color=always ruff
 ```
 
+The lightweight `lint` job runs on every pull request, without a CI label. It
+runs Ruff lint and format over the checkout and the `check-code` hook for
+new AST and Ruff findings relative to the PR merge base. To run just the new
+checker locally, stage your changes and run `uvx pre-commit run check-code`.
+Labeled GPU and NPU PR runs check lint before using accelerator runners.
+
+The AST rules follow module responsibilities rather than treating all Python
+files alike ([RFC #942](https://github.com/verl-project/verl-omni/issues/942)):
+
+- Shared trainers, workers, agent loops, and pipeline contracts use the registry
+  or shared interfaces, not concrete pipeline imports.
+- Rollout adapters and workers use shared contracts instead of training engine internals.
+- Reuse public APIs across directories and sibling reward scorers. Keep private
+  helpers within their owning package; `reward_utils` remains a shared scorer helper (`VO003`).
+- Use an explicit sampling seed, not a request ID hash, when seeding pipeline RNGs.
+- For Qwen-Image RoPE lengths, use `txt_seq_lens_from_embeds()` rather than summing the attention mask.
+- Do not silently discard broad exceptions with `pass` or `continue` in production code ([RFC #388](https://github.com/verl-project/verl-omni/issues/388)).
+- Test scripts that call `pytest.main()` must check or propagate its exit status ([PR #814](https://github.com/verl-project/verl-omni/pull/814#discussion_r4452763469)). Name L1 CPU tests `test_*_on_cpu.py`, not `test_*_cpu.py` ([PR #409](https://github.com/verl-project/verl-omni/pull/409#discussion_r3965752859)).
+- CPU-marked tests also need the `_on_cpu.py` suffix (`VO007`). GPU tests use
+  topology helpers instead of bare `torch.cuda.is_available()` skip conditions (`VO013`).
+- Shared trainers, workers and agent loops must not dispatch on known concrete
+  model-name literals (`VO008`). Training adapters keep stateless class/static
+  hooks (`VO009`); pipeline packages must be imported at the pipeline entrypoint (`VO010`).
+- Config dataclasses need a parent config, must not use `frozen=True`, and must
+  appear in a literal `__all__` when provided (`VO011`). Reward managers leave
+  HTTP client imports to scorers (`VO012`); `urllib.parse` remains allowed.
+- Pass personal model/data paths through configuration or temporary fixtures
+  instead of `/home/`, `/Users/`, `/nfs/`, `/mnt/` or `/root/` literals (`VO014`).
+
+The scripts use the `check_<subject>.py` naming convention also used by
+[SGLang-Omni's checks](https://github.com/sgl-project/sglang-omni/tree/main/scripts):
+`check_code.py` handles Git snapshots, incremental findings and Ruff;
+`check_python.py` holds Python AST contracts; `check_examples.py` holds path and
+recipe checks; `check_comments.py` checks comment tokens. Each rule module has
+its own `test_check_<subject>.py` regression suite. Production Ruff additionally
+checks mutable defaults, duplicate fields and invalid exports, bare exceptions,
+control flow that suppresses exceptions, missing subprocess `check=`, discarded
+async tasks, resource handling, debugging calls, `eval` and `shell=True`.
+New `global` statements are rejected outside reward scorers, whose existing
+contract permits module-level caches. Tests run only the additional `T100` and
+`PT015` rules (use `pytest.fail()` for an intentional test failure), alongside the
+repository's existing full Ruff checks. These rules run with isolated settings
+and ignore `noqa`; PR-local lint configuration cannot disable them.
+
+Keep necessary public API contracts in concise docstrings. Default to no
+implementation comments; retain only non-obvious algorithm/layout/concurrency
+constraints or verified upstream workarounds. Do not add line-by-line narration,
+edit history, numbered steps, decorative banners or commented-out code.
+`CM001` rejects recognizable edit/step narration, `CM002` rejects decorative
+banners, and isolated production Ruff `ERA001` rejects recognizable commented-out
+code. License/attribution, tooling directives, and required config documentation
+remain intact. These are syntax checks, not AI-authorship detection; reviewers
+still judge whether a comment conveys necessary information.
+
+Example shell changes are parsed with `bash -n` (`EX001`). `run_*.sh` scripts must
+contain double-quoted caller argument forwarding (`EX002`); comments, printed
+text and heredocs do not count. This checks syntax and forwarding shape, not
+whether an actual trainer receives every argument. Example media belongs in PR
+evidence (`EX003`), and example pages use `README.md` instead of `README_*.md`
+so documentation discovery includes them (`EX004`).
+
+The checker reads staged Git objects or the PR snapshots without importing
+candidate Python or executing recipes. Historical findings are compared by
+diagnostic and enclosing function/class; new violations still fail. Known model
+names and literal patterns are heuristic checks: dynamic dispatch, cross-module
+inheritance and runtime field consumption still require tests and review.
+Run the checker regressions with:
+
+```bash
+uv run --no-project --python 3.12 --with pytest --with pyyaml --with ruff==0.12.2 pytest -q \
+  tests/special_sanity/test_ci_policy.py tests/special_sanity/test_check_*.py
+```
+
+Use static checks for known code patterns. For behavior changes, establish the
+contract at the owning boundary and test the contract across its consumers.
+For example, L1 should exercise a registered adapter with a new TQ field through
+the real projection path, and compare serial and packed rollouts for seed or
+padding changes. Use diff-selected L2 GPU smoke for numerical parity between the
+actor and rollout, not just a successful launch.
+
 ## Testing
 
 Our test suites run on GitHub Actions. Check these [workflows](https://github.com/verl-project/verl-omni/tree/main/.github/workflows) for details.
