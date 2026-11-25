@@ -24,15 +24,6 @@ from verl_omni.reward_loop import reward_loop as omni_module
 from verl_omni.reward_loop.reward_loop import OmniRewardLoopManager
 
 
-class _FakeActorClass:
-    def options(self, **options):
-        class _ConfiguredActor:
-            def remote(self, *args):
-                return SimpleNamespace(options=options, args=args)
-
-        return _ConfiguredActor()
-
-
 def test_accelerator_manager_initializes_profilers_after_workers(monkeypatch):
     config = OmegaConf.create({"reward": {"reward_model": {"enable": False}}})
     workers = [object()]
@@ -90,7 +81,7 @@ def test_replica_stop_failure_still_stops_workers(monkeypatch):
     stop.assert_called_once_with(run_command=False)
 
 
-def test_serving_profiler_ranks_use_flattened_group_offset(monkeypatch):
+def test_serving_profiler_ranks_use_flattened_group_offset(monkeypatch, reward_worker_class):
     from omegaconf import OmegaConf
 
     from verl_omni.reward_loop import reward_loop as reward_module
@@ -110,7 +101,7 @@ def test_serving_profiler_ranks_use_flattened_group_offset(monkeypatch):
     )
     manager = object.__new__(reward_module.OmniRewardLoopManager)
     manager._reward_worker_groups = {"shared": [object(), object()]}
-    manager.reward_loop_workers_class = _FakeActorClass()
+    manager.reward_loop_workers_class = reward_worker_class
     manager.reward_router_address = None
     monkeypatch.setattr(
         reward_module.ray, "nodes", lambda: [{"NodeID": "01" * 28, "Alive": True, "Resources": {"CPU": 1}}]

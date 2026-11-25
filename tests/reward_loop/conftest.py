@@ -11,4 +11,22 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from types import SimpleNamespace
+
+import pytest
+
 import verl_omni  # noqa: F401
+
+
+class _FakeActorClass:
+    def options(self, **options):
+        class _ConfiguredActor:
+            def remote(self, *args):
+                return SimpleNamespace(options=options, args=args)
+
+        return _ConfiguredActor()
+
+
+@pytest.fixture
+def reward_worker_class():
+    return _FakeActorClass()
