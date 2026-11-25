@@ -153,11 +153,13 @@ class _Completion:
 
 
 async def _score_with_response(monkeypatch, content: str, **kwargs) -> dict:
-    async def fake_chat(**chat_kwargs):
-        del chat_kwargs
+    from verl_omni.utils.reward_score import vlm_as_a_judge
+
+    async def fake_chat(router_address, chat_complete_request, session=None):
+        del router_address, chat_complete_request, session
         return _Completion(content)
 
-    monkeypatch.setattr(unified_reward, "_chat_complete", fake_chat)
+    monkeypatch.setattr(vlm_as_a_judge, "_post_chat_completion", fake_chat)
     image = torch.randint(0, 256, (3, 8, 8), dtype=torch.uint8)
     return await unified_reward.compute_score_unified_reward(
         data_source="test",
