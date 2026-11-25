@@ -59,7 +59,11 @@ def test_manager_delegates_to_workers_and_rollout_replicas(monkeypatch, action):
     monkeypatch.setattr(RewardLoopManager, method, base)
     manager._run_on_replicas = Mock(side_effect=lambda *args, **kwargs: events.append(("replicas", kwargs)))
 
-    kwargs = {"profile_step": 2} if action == "start" else {"run_command": False}
+    kwargs = (
+        {"profile_step": 2, "role": "reward", "profile_prefix": "reward"}
+        if action == "start"
+        else {"run_command": False}
+    )
     getattr(manager, method)(**kwargs)
 
     if action == "start":
@@ -119,8 +123,26 @@ def test_serving_profiler_ranks_use_flattened_group_offset(monkeypatch, reward_w
     assert workers[1].options["runtime_env"]["env_vars"] == {"RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1"}
 
 
-@pytest.mark.parametrize("method,kwargs", [("start_profile", {"profile_step": 2}), ("stop_profile", {})])
-def test_profiler_fanout_includes_legacy_and_named_engine_models(method, kwargs):
+@pytest.mark.parametrize(
+    "method,kwargs",
+    [
+        ("start_profile", {"profile_step": 2}),
+        (
+            "start_profile",
+            {
+                "profile_step": 2,
+                "role": "reward",
+                "profile_prefix": "reward",
+                "delay_iterations": 1,
+                "max_iterations": 4,
+                "profiler_kwargs": {"record_shapes": True},
+            },
+        ),
+        ("stop_profile", {}),
+    ],
+    ids=["start-with-step", "start-with-step-and-engine-options", "stop"],
+)
+def test_profiler_fanout_includes_legacy_and_named_engine_models(monkeypatch, method, kwargs):
     manager = object.__new__(OmniRewardLoopManager)
     events = []
 
@@ -131,8 +153,8 @@ def test_profiler_fanout_includes_legacy_and_named_engine_models(method, kwargs)
         async def start_profile(self, **kwargs):
             events.append((self.name, kwargs))
 
-        async def stop_profile(self, **kwargs):
-            events.append((self.name, kwargs))
+        async def stop_profile(self):
+            events.append((self.name, {}))
 
     manager.reward_model_manager = SimpleNamespace(rollout_replicas=[Replica("legacy")])
     manager.multi_reward_model_manager = SimpleNamespace(
@@ -141,5 +163,6 @@ def test_profiler_fanout_includes_legacy_and_named_engine_models(method, kwargs)
             "native": SimpleNamespace(),
         }
     )
-    manager._run_on_replicas(method, **kwargs)
+    monkeypatch.setattr(RewardLoopManager, method, Mock())
+    getattr(manager, method)(**kwargs)
     assert events == [("legacy", kwargs), ("engine", kwargs)]
