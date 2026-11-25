@@ -1,9 +1,23 @@
 # Qwen-Image FlowGRPO
 
-Last updated: 11/09/2026
+Last updated: 11/25/2026
 
 See the [FlowGRPO trainer guide](../../../docs/examples/flowgrpo_trainer.md) for installation, OCR data and
 reward-model setup.
+
+## Engine-side LoRA merge
+
+To keep the adapter-sized sync wire while running unwrapped dense rollout
+forwards, pass `actor_rollout_ref.model.lora.merge=Engine` to the V1 launcher
+(requires vLLM-Omni commit `95513b53` or newer on vLLM 0.34):
+
+```bash
+bash examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora_v1.sh \
+    actor_rollout_ref.model.lora.merge=Engine
+```
+
+See [LoRA rollout merge modes](../../../docs/examples/config.md#lora-rollout-merge-modes)
+for requirements and the pipeline support matrix.
 
 ## VeOmni LoRA
 

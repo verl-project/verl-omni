@@ -205,7 +205,15 @@ gating unifies (#693). Resolution rules:
   `lora_rank`"): the engine rank gates read the flat spelling, so a nested-only
   value would silently run full-parameter training where LoRA was intended.
   Setting both spellings to different positive values also raises.
-- `merge` is read only from the nested `actor_rollout_ref.model.lora.merge`.
+- `merge` is read only from the nested `actor_rollout_ref.model.lora.merge`. It
+  accepts `True` (actor-side merge), `False` (runtime adapters, the default),
+  and the string `"engine"` (engine-side merge); see
+  [LoRA rollout merge modes](#lora-rollout-merge-modes). Among string spellings
+  only `"true"` and `"engine"` coerce (case-insensitively); the string
+  `"false"` is rejected because it stays truthy in the raw config tree, where
+  the rollout-side merge gates would read merge-on while the actor runs
+  adapters, so adapter mode is selected with the boolean `False` only. Any
+  other string raises a `ValueError`.
 - The adapter path is the flat `actor_rollout_ref.model.lora_adapter_path`,
   same rule as rank: a nested-only `lora.adapter_path` raises; setting both
   spellings to different paths raises a `ValueError`. The FSDP wrap gate keys
@@ -225,6 +233,47 @@ gating unifies (#693). Resolution rules:
   composed configs carry is tolerated; a set value raises.
 - `actor_rollout_ref.model.policy_state_adapters` accepts only `default`, `old`,
   and `reference`; `default` is always forced first because it is the trained policy.
+
+### LoRA rollout merge modes
+
+`actor_rollout_ref.model.lora.merge` selects where adapter math happens at the
+rollout:
+
+| mode | sync wire per step | rollout forward |
+| --- | --- | --- |
+| `merge=False` (default) | LoRA tensors (~MB) | dense + per-layer LoRA ops + per-request adapter plumbing |
+| `merge=True` | full merged weights (~GB) | dense |
+| `merge="engine"` | LoRA tensors (~MB) | dense (the engine folds the adapter into its weights at the sync barrier) |
+
+Engine-side merge keeps the adapter-sized wire of `merge=False` while every
+rollout forward executes the dense graph: the actor drives vLLM-Omni's
+`omni_lora_ipc` trainer engine (`MergedLoRAIPCTrainerWeightTransferEngine`)
+over the four-phase weight-transfer lifecycle (`init_weight_transfer_engine`,
+`start_weight_update`, `update_weights`, `finish_weight_update`, plus
+`update_id`-scoped `abort_weight_update` on error). The rollout worker merges
+`W_base + (B @ A) * scale` in fp32 from a host-resident pristine base bank and
+copies the result in place into live parameter storage, leaving the previous
+policy live if a session fails or aborts. Mode selection is automatic on both
+diffusion (`lora_application="merged"`, `weight_transfer_config={"backend": "omni_lora_ipc"}`)
+and AR stages (`weight_transfer_config` scoped to the policy stage in generated
+deploy configs, with runtime `enable_lora` disabled).
+
+Requirements and refusals (all fail fast at config resolution, worker init, or engine startup):
+
+- vLLM-Omni with phase-2 merged LoRA support (`vllm-omni#10998`, commit `95513b53` or newer on vLLM 0.34).
+- CUDA and colocated sync training (`checkpoint_engine.backend=naive`); separate-async backends are refused.
+- A base-loading `rollout.load_format` (such as `safetensors`); dummy load formats are refused because engine-side merge has no dense bootstrap.
+- Unquantized rollouts without HSDP or inference weight offloading (validated by the engine at construction).
+- No named `policy_state_adapters`; engine-side merge serves one global dense policy.
+- Model support is declared on the engine via `SupportsMergedLoRA` (`vllm_omni.lora.capability`); unsupported pipelines raise `MergedLoRACapabilityError` at engine startup rather than failing mid-sync.
+
+| pipeline family | engine-side merge (`vllm-omni#10998`) |
+| --- | --- |
+| Qwen-Image (`QwenImagePipeline`, `QwenImageDMD2Pipeline`) | supported (`SupportsMergedLoRA`) |
+| Qwen3-Omni Thinker (`Qwen3OmniMoeForConditionalGeneration`, `Qwen3OmniMoeThinkerForConditionalGeneration`) | supported (`SupportsMergedLoRA`) |
+| HunyuanImage-3 (`HunyuanImage3ForCausalMM`, diffusion) | supported (`SupportsMergedLoRA`) |
+| SD3.5, Boogu-Image, Qwen-Image-Edit (diffusion) | pending upstream `supports_weight_reload` and `SupportsMergedLoRA` migration |
+| MiniCPM-o 4.5 (AR) | pending upstream `packed_modules_mapping` / `SupportsMergedLoRA` declaration |
 
 ### `actor_rollout_ref.actor` — diffusion actor / loss
 

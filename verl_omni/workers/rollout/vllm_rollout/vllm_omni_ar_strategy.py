@@ -95,6 +95,7 @@ class ARStrategy(OmniStrategyBase):
         self._rollout_adapter: type[OmniRolloutPipelineBase] | None = None
         self._rollout_output_modalities: list[str] | None = None
         self._weight_sync_stage_ids: list[int] | None = None
+        self._weight_transfer_stage_ids: list[int] | None = None
         self._rollout_fields_by_request_id: dict[str, dict[str, Any]] = {}
         self._policy_stage_index = 0
         self._policy_sampling_constraints: dict[str, Any] = {}
@@ -279,6 +280,14 @@ class ARStrategy(OmniStrategyBase):
         lora_extras = lora_engine_extras(self.server.model_config)
         stage_extras[policy_stage_id].update(lora_extras)
         self.lora_stage_ids = [policy_stage_id] if lora_extras else None
+        if self._is_engine_merge():
+            # Scope omni_lora_ipc to the policy stage so non-policy stages
+            # (e.g. talker, code2wav) are not required to satisfy SupportsMergedLoRA.
+            self._validate_engine_merge_overrides(stage_extras[policy_stage_id], diffusion=False)
+            stage_extras[policy_stage_id]["weight_transfer_config"] = {"backend": "omni_lora_ipc"}
+            self._weight_transfer_stage_ids = [policy_stage_id]
+        else:
+            self._weight_transfer_stage_ids = None
         capacity_fields = ("max_model_len", "max_num_batched_tokens")
         if any(field in extras for extras in stage_extras.values() for field in capacity_fields):
             for extras in stage_extras.values():
@@ -347,9 +356,12 @@ class ARStrategy(OmniStrategyBase):
         the only carrier, and upstream accepts them on single-stage pipelines.
         """
         engine_args.pop("enable_expert_parallel", None)
-        if self.lora_stage_ids is not None:
-            # vLLM LoRA is per LLM stage; upstream rejects these as global
-            # engine args on multi-stage pipelines.
+        if self._weight_transfer_stage_ids is None:
+            self._apply_engine_merge_engine_args(engine_args, diffusion=False)
+        if self.lora_stage_ids is not None or self._is_engine_merge():
+            # vLLM LoRA is per LLM stage (and disabled in engine-merge mode);
+            # upstream rejects these as global engine args on multi-stage
+            # pipelines or alongside omni_lora_ipc.
             for lora_key in ("enable_lora", "max_loras", "max_lora_rank", "fully_sharded_loras"):
                 engine_args.pop(lora_key, None)
         if self._rollout_output_modalities is not None:
@@ -365,11 +377,22 @@ class ARStrategy(OmniStrategyBase):
         for key, value in omni_kwargs.items():
             if key in engine_args and value is not None:
                 engine_args[key] = value
+        if self._is_engine_merge():
+            self._validate_engine_merge_overrides(engine_args, diffusion=False)
+            if self._weight_transfer_stage_ids is None:
+                engine_args["weight_transfer_config"] = {"backend": "omni_lora_ipc"}
+            else:
+                # The generated deploy config already scopes omni_lora_ipc to the
+                # policy stage; drop any matching global override so non-policy
+                # stages do not inherit it.
+                engine_args.pop("weight_transfer_config", None)
 
         if isinstance(engine_args.get("compilation_config"), dict):
             engine_args["compilation_config"] = _drop_none_mapping_values(engine_args["compilation_config"])
 
     def collective_rpc_stage_ids(self, method: Any) -> list[int] | None:
+        if method == "abort_weight_update" and self._weight_transfer_stage_ids is not None:
+            return self._weight_transfer_stage_ids
         if method in {"set_pending_lora_peft_config", "update_weights_from_ipc", "monkey_patch_model"}:
             return self._weight_sync_stage_ids
         return None
