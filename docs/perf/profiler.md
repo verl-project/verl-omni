@@ -1,6 +1,6 @@
 # Profiling FlowGRPO / diffusion training in VeRL-Omni
 
-Last updated: 11/24/2026.
+Last updated: 11/25/2026.
 
 VeRL-Omni reuses the profiler subsystem from upstream
 [verl](https://github.com/verl-project/verl) (`verl.utils.profiler`) and exposes
@@ -277,8 +277,12 @@ append force overrides such as these to the command:
 ++global_profiler.global_tool_config.nsys.worker_nsight_options.cudabacktrace='"sync:100000,memory:100000"'
 ```
 
+GPU metrics collection is disabled by default: the shared
+`global_profiler.global_tool_config.nsys.gpu_metrics_nsight_options`
+configuration is `{}`, which creates no metrics process.
+
 Role-local CUDA traces use the `cuda-sw` backend so independent sessions can
-share a GPU. The V1 recipe also collects device-level GPU metrics for device 0
+share a GPU. The V1 recipe script enables device-level GPU metrics for device 0
 at 10 Hz in a dedicated process, over the same profiling window. This default
 limits data volume and describes only the selected device. It does not guarantee
 successful collection or represent all GPUs on the node. Check the selected
