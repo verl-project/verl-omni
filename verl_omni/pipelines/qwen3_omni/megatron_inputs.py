@@ -32,8 +32,8 @@ def prepare_qwen3_omni_megatron_config(model_config, engine_config):
         raise ValueError("Qwen3-Omni Megatron BSHD forward currently requires PP=CP=1.")
     if getattr(engine_config, "dynamic_context_parallel", False):
         raise ValueError("Qwen3-Omni Megatron BSHD forward does not support dynamic CP.")
-    if getattr(getattr(engine_config, "router_replay", None), "mode", "disabled") != "disabled":
-        raise ValueError("Qwen3-Omni Megatron BSHD forward does not support router replay.")
+    if getattr(getattr(engine_config, "router_replay", None), "mode", "disabled") not in ("disabled", "R3"):
+        raise ValueError("Qwen3-Omni Megatron BSHD forward supports router_replay.mode in ('disabled', 'R3').")
     # Upstream module construction reads text_config.hidden_size even for
     # policy models. Keep this compatibility view private to the engine;
     # the worker/rollout retain the original nested Omni configuration.

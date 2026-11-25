@@ -26,7 +26,7 @@ from typing import Optional
 
 import torch
 from codetiming import Timer
-from omegaconf import DictConfig, open_dict
+from omegaconf import DictConfig, OmegaConf, open_dict
 from tensordict import NonTensorData, TensorDict
 from torch.distributed.device_mesh import init_device_mesh
 from verl.checkpoint_engine import CheckpointEngineRegistry
@@ -658,9 +658,15 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         else:
             tool_config = None
 
-        self.enable_routing_replay = (
-            self.config.actor.strategy == "megatron" and self.config.actor.megatron.router_replay.mode != "disabled"
+        # Router replay lives on the per-engine config; omni's Megatron and
+        # VeOmni engines both replay R3 rollout routes (mirrors verl).
+        actor_strategy = self.config.actor.get("strategy", "")
+        rr_mode = (
+            OmegaConf.select(self.config.actor, f"{actor_strategy}.router_replay.mode", default="disabled")
+            if actor_strategy in ("megatron", "veomni")
+            else "disabled"
         )
+        self.enable_routing_replay = rr_mode != "disabled"
 
         DistProfilerExtension.__init__(
             self, DistProfiler(rank=self.rank, config=profiler_config, tool_config=tool_config)

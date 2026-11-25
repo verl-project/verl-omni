@@ -131,7 +131,7 @@ def test_validate_rejects_adapters_that_remap_policy_tokens(monkeypatch):
     strategy = ARStrategy(
         _validation_server(engine_kwargs={"vllm_omni": {"pipeline_name": "r3_remap_test"}}),
     )
-    with pytest.raises(NotImplementedError, match="remaps the policy token sequence"):
+    with pytest.raises(NotImplementedError, match="overrides postprocess_agent_loop_output"):
         strategy.validate_configs()
 
 

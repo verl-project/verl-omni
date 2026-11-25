@@ -140,7 +140,9 @@ Reference implementations:
 and [shared engine](../../verl_omni/workers/engine/megatron/omni_impl.py).
 
 For this Qwen3 path, keep `use_remove_padding=false`, `use_fused_kernels=false`,
-PP=CP=1, MTP disabled and router replay disabled. Dynamic CP is unsupported;
+PP=CP=1 and MTP disabled. Router replay supports `mode=R3` only (R2 records
+routes inside this forward, which the BSHD path does not implement). Dynamic CP
+is unsupported;
 the recipe also disables dynamic micro-batching. Other execution modes require
 their own implementation and validation. Select the shared
 `omni_megatron_trainer.yaml` with `--config-name omni_megatron_trainer`, adding

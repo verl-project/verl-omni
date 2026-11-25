@@ -13,6 +13,7 @@ from verl.workers.engine.base import EngineRegistry
 from verl.workers.engine.megatron.transformer_impl import MegatronEngineWithLMHead
 
 from verl_omni.pipelines.model_base import OmniModelBase
+from verl_omni.workers.engine.megatron.router_replay import build_bshd_router_replay_targets
 
 
 @EngineRegistry.register(model_type="omni_model", backend="megatron")
@@ -68,6 +69,8 @@ class OmniMegatronEngine(MegatronEngineWithLMHead):
         response_attention_mask = None
         if attention_mask is not None and not loss_mask.is_nested:
             response_attention_mask = attention_mask[:, -loss_mask.shape[-1] :]
+        unwrapped_model = unwrap_model(model)
+        router_replay_active = self._prepare_router_replay(unwrapped_model, batch, model_inputs)
         output = self.model_forward(
             model,
             input_ids,
@@ -83,4 +86,85 @@ class OmniMegatronEngine(MegatronEngineWithLMHead):
             pad_token_id=self.model_config.tokenizer.pad_token_id,
             forced_max_seqlen=tu.get_non_tensor_data(batch, key="forced_max_seqlen", default=None),
         )
+        self._finish_router_replay(unwrapped_model, router_replay_active)
         return output, partial(postprocess_micro_batch_func, data=batch, local_cp_size=None)
+
+    def _prepare_router_replay(self, model, batch, model_inputs) -> bool:
+        """Point the model's routers at this micro-batch's rollout routes.
+
+        Returns whether the forward runs with replayed routes.
+        """
+        if not self.enable_routing_replay:
+            return False
+        import megatron.core.parallel_state as mpu
+        from megatron.core.tensor_parallel import scatter_to_sequence_parallel_region
+        from verl.utils.megatron.router_replay_patch import RouterReplayAction
+        from verl.utils.megatron.router_replay_utils import (
+            RouterReplayHelper,
+            is_moe_layer,
+            iter_model_routers,
+            set_model_router_replay_action,
+        )
+
+        vp_rank = getattr(model, "vp_stage", 0)
+        if RouterReplayHelper.is_replay_backward_action(self.tf_config, vp_rank):
+            # The previous micro-batch's backward recompute ran; back to forward replay.
+            for router in RouterReplayHelper.get_micro_batch_router_list(self.tf_config, vp_rank):
+                router.set_router_replay_action(RouterReplayAction.REPLAY_FORWARD)
+            set_model_router_replay_action(model, RouterReplayAction.REPLAY_FORWARD)
+        if not RouterReplayHelper.is_replay_forward_action(self.tf_config, vp_rank):
+            return False
+        if self.engine_config.router_replay.mode != "R3":
+            raise NotImplementedError("Omni Megatron router replay supports mode='R3' only.")
+
+        targets, replay_mask = build_bshd_router_replay_targets(
+            model_inputs["routed_experts"],
+            model_inputs["input_ids"],
+            model_inputs["loss_mask"],
+            self._bshd_padded_len(model, batch, model_inputs["input_ids"]),
+        )
+        if mpu.get_tensor_model_parallel_world_size() > 1 and getattr(self.tf_config, "sequence_parallel", False):
+            targets = scatter_to_sequence_parallel_region(targets).contiguous()
+            replay_mask = scatter_to_sequence_parallel_region(replay_mask).contiguous()
+
+        index_by_layer = targets.shape[1] == self.tf_config.num_layers
+        for layer_number, router in iter_model_routers(model):
+            idx = layer_number - 1
+            if not index_by_layer:
+                idx = sum(1 for i in range(idx) if is_moe_layer(self.tf_config, i))
+            if 0 <= idx < targets.shape[1]:
+                router.set_target_indices(targets[:, idx].contiguous().to(torch.int64), replay_mask=replay_mask)
+        return True
+
+    def _finish_router_replay(self, model, active: bool) -> None:
+        """Switch to replay-backward so activation recompute pops its own routes."""
+        if not active:
+            return
+        from verl.utils.megatron.router_replay_patch import RouterReplayAction
+        from verl.utils.megatron.router_replay_utils import RouterReplayHelper, set_model_router_replay_action
+
+        vp_rank = getattr(model, "vp_stage", 0)
+        for router in RouterReplayHelper.get_micro_batch_router_list(self.tf_config, vp_rank):
+            router.set_router_replay_action(RouterReplayAction.REPLAY_BACKWARD)
+        set_model_router_replay_action(model, RouterReplayAction.REPLAY_BACKWARD)
+
+    def _bshd_padded_len(self, model, batch, input_ids) -> int:
+        """Sequence length the adapter's BSHD forward pads ``input_ids`` to."""
+        from verl.models.mcore.util import build_vlm_attn_mask_bshd, preprocess_bshd_engine
+
+        forced_max_seqlen = tu.get_non_tensor_data(batch, key="forced_max_seqlen", default=None)
+        if hasattr(self.model_config.hf_config, "vision_config"):
+            _, attention_mask = build_vlm_attn_mask_bshd(
+                input_ids,
+                input_ids.shape[0],
+                self.model_config.tokenizer.pad_token_id,
+                forced_max_seqlen=forced_max_seqlen,
+            )
+        else:
+            _, attention_mask, _ = preprocess_bshd_engine(
+                input_ids,
+                pre_process=model.pre_process,
+                use_fp8_padding=model.config.fp8 in ("e4m3", "hybrid"),
+                forced_max_seqlen=forced_max_seqlen,
+            )
+        return attention_mask.shape[-1]

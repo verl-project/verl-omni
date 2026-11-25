@@ -158,9 +158,9 @@ class ARStrategy(OmniStrategyBase):
         )
         if adapter_hook is not base_hook:
             raise NotImplementedError(
-                f"{adapter_cls.__name__} remaps the policy token sequence in "
-                "postprocess_agent_loop_output, so its rollout routed_experts would not align "
-                "with the replayed tokens; disable enable_rollout_routing_replay for this pipeline."
+                f"{adapter_cls.__name__} overrides postprocess_agent_loop_output, which may remap the "
+                "policy token sequence its rollout routed_experts are keyed to; disable "
+                "enable_rollout_routing_replay for this pipeline."
             )
 
     def _pipeline_selection(self) -> tuple[Any, str]:
@@ -381,8 +381,9 @@ class ARStrategy(OmniStrategyBase):
                     # world dimension, so only opted-in stages get the flag.
                     **({"enable_expert_parallel": True} if stage.stage_id in expert_parallel_stage_ids else {}),
                     # Routed-experts capture (R3) lives on the vLLM Model Runner V2
-                    # aux-output connector; only the policy stage needs it.
-                    **({"model_runner": "v2"} if routing_replay and stage.stage_id == policy_stage_id else {}),
+                    # aux-output connector; routing replay is single-stage, so the
+                    # only stage is the policy stage.
+                    **({"model_runner": "v2"} if routing_replay else {}),
                     "engine_extras": stage_extras[stage.stage_id],
                 }
                 for stage in stages
