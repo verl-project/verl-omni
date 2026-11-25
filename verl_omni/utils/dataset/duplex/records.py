@@ -112,7 +112,7 @@ class DuplexActionStream:
 
 @dataclass(frozen=True, slots=True)
 class DuplexAction:
-    """One action token with its exact-distribution log-probability and kind."""
+    """One action token with its pre-truncation joint log-probability and kind."""
 
     token_id: int
     logprob: float | None

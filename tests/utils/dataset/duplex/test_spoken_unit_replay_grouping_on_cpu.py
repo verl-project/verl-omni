@@ -117,6 +117,17 @@ def test_spoken_unit_replay_grouping():
             int(kind == "sampled") for kind in kinds
         ] + [0]
         cursor += window_length
+    # Across a spoken unit -> reemit -> next unit the restated terminator adds
+    # nothing between </unit> and the next <unit>: the engine's scheduler drops a
+    # segment's final sampled token and re-injects it at the next prefill, so its
+    # KV holds the terminator once, and the replayed input holds it once too.
+    spoken_end = sum(1 + _PLACEHOLDERS + len(tokens) + 1 for tokens, _ in _UNIT_TOKENS[:3])
+    assert response_ids[spoken_end - 2 : spoken_end + 1 + _PLACEHOLDERS] == [
+        _CHUNK_EOS,
+        vocabulary.unit_end_token_id,
+        vocabulary.unit_token_id,
+        *[vocabulary.audio_placeholder_token_id] * _PLACEHOLDERS,
+    ]
     assert cursor == len(response_ids) == len(response_mask) == len(replay.response_logprobs)
 
     # A forced token inside a spoken unit is masked while its sampled siblings are not.
