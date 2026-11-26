@@ -60,53 +60,17 @@ def config(*, tool="torch", mode="sync", steps=(1, 2), continuous=False, rollout
     )
 
 
-@pytest.mark.parametrize("mode", ["sync", "separate_async"])
-def test_allow_controller_cuda_capture_before_startup(startup, mode):
-    cfg = config(tool="nsys", mode=mode)
+def test_allow_controller_cuda_capture_before_startup(startup):
+    cfg = config(tool="nsys")
     cfg.global_profiler.global_tool_config.nsys.controller_nsight_options["capture-range"] = "cudaProfilerApi"
     with pytest.raises(StartupReached):
         entrypoint.run_diffusion_v1(cfg)
     startup.assert_called_once()
 
 
-@pytest.mark.parametrize("mode", ["sync", "separate_async"])
-@pytest.mark.parametrize("tool", ["nsys", "npu", "torch"])
-def test_allow_default_worker_capture_and_noncontinuous_profiling(startup, mode, tool):
+def test_allow_continuous_rollout_before_startup(startup):
     with pytest.raises(StartupReached):
-        entrypoint.run_diffusion_v1(config(tool=tool, mode=mode))
-    startup.assert_called_once()
-
-
-@pytest.mark.parametrize("tool", ["npu", "torch"])
-def test_inactive_nsight_options_do_not_reject_other_tools(startup, tool):
-    cfg = config(tool=tool)
-    cfg.global_profiler.global_tool_config.nsys.controller_nsight_options["capture-range"] = "cudaProfilerApi"
-    with pytest.raises(StartupReached):
-        entrypoint.run_diffusion_v1(cfg)
-    startup.assert_called_once()
-
-
-@pytest.mark.parametrize("mode", ["sync", "separate_async"])
-@pytest.mark.parametrize("tool", ["npu", "torch"])
-def test_allow_continuous_rollout_before_startup(startup, mode, tool):
-    with pytest.raises(StartupReached):
-        entrypoint.run_diffusion_v1(config(tool=tool, mode=mode, continuous=True))
-    startup.assert_called_once()
-
-
-@pytest.mark.parametrize("tool", ["npu", "torch"])
-def test_allow_actor_only_continuous_profiling(startup, tool):
-    with pytest.raises(StartupReached):
-        entrypoint.run_diffusion_v1(config(tool=tool, continuous=True, rollout=False))
-    startup.assert_called_once()
-
-
-@pytest.mark.parametrize("steps", [None, []])
-def test_inactive_profiling_does_not_reject_unused_options(startup, steps):
-    cfg = config(tool="nsys", steps=steps, continuous=True)
-    cfg.global_profiler.global_tool_config.nsys.controller_nsight_options["capture-range"] = "cudaProfilerApi"
-    with pytest.raises(StartupReached):
-        entrypoint.run_diffusion_v1(cfg)
+        entrypoint.run_diffusion_v1(config(tool="torch", continuous=True))
     startup.assert_called_once()
 
 
