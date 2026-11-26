@@ -17,7 +17,7 @@
 from pathlib import Path
 
 import pytest
-from check_example_recipes import findings
+from check_example_recipes import delegates_to_base_script, findings
 
 VALID_HEADER = "#!/usr/bin/env bash\nset -euo pipefail\n"
 
@@ -229,6 +229,36 @@ def test_shell_hydra_launcher_integrity(source: str, expected: list[str]) -> Non
             f'{VALID_HEADER}export ASCEND_RT_VISIBLE_DEVICES="0,1"\npython3 t.py "$@"\n',
             ["EX008"],
         ),
+        ("examples/model/run_train.sh", f'{VALID_HEADER}MLU_VISIBLE_DEVICES=0,1\npython3 t.py "$@"\n', ["EX008"]),
+        ("examples/model/run_train.sh", f'{VALID_HEADER}HIP_VISIBLE_DEVICES=0,1\npython3 t.py "$@"\n', ["EX008"]),
+        ("examples/model/run_train.sh", f'{VALID_HEADER}ROCR_VISIBLE_DEVICES="0,1"\npython3 t.py "$@"\n', ["EX008"]),
+        (
+            "examples/model/run_train.sh",
+            f'{VALID_HEADER}source /usr/local/Ascend/ascend-toolkit/set_env.sh\npython3 t.py "$@"\n',
+            ["EX008"],
+        ),
+        (
+            "examples/model/run_train.sh",
+            f'{VALID_HEADER}. /usr/local/Ascend/cann-9.0.0/set_env.sh\npython3 t.py "$@"\n',
+            ["EX008"],
+        ),
+        (
+            "examples/model/run_train.sh",
+            f'{VALID_HEADER}MLU_VISIBLE_DEVICES=${{MLU_VISIBLE_DEVICES:-0,1}}\npython3 t.py "$@"\n',
+            [],
+        ),
+        (
+            "examples/model/run_train.sh",
+            f'{VALID_HEADER}HIP_VISIBLE_DEVICES=${{HIP_VISIBLE_DEVICES:-0,1}}\npython3 t.py "$@"\n',
+            [],
+        ),
+        (
+            "examples/model/run_train.sh",
+            f"{VALID_HEADER}source "
+            '"${ASCEND_HOME_PATH:-/usr/local/Ascend/ascend-toolkit}/set_env.sh"\n'
+            'python3 t.py "$@"\n',
+            [],
+        ),
         (
             "examples/model/run_train.sh",
             f'{VALID_HEADER}ENDPOINT="http://10.12.34.56:8000"\npython3 t.py "$@"\n',
@@ -259,3 +289,17 @@ def test_shell_hydra_launcher_integrity(source: str, expected: list[str]) -> Non
 )
 def test_shell_safety_and_portability_guards(path: str, source: str, expected: list[str]) -> None:
     assert [code for _line, code, _message in findings(path, source.encode())] == expected
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        ('exec bash "$SCRIPT_DIR/run_foo.sh" trainer.device=npu "$@"\n', True),
+        ('base_recipe="$SCRIPT_DIR/run_foo.sh"\nbash "$base_recipe" "$@"\n', True),
+        ('python3 -m verl_omni.trainer.main_diffusion trainer.device=npu "$@"\n', False),
+        ('# exec bash "$SCRIPT_DIR/run_foo.sh" "$@"\npython3 -m verl_omni.trainer.main_diffusion "$@"\n', False),
+        ('cat <<EOF\nbash "$SCRIPT_DIR/run_foo.sh"\nEOF\npython3 -m verl_omni.trainer.main_diffusion "$@"\n', False),
+    ],
+)
+def test_delegates_to_base_script_ignores_comments_and_heredocs(source: str, expected: bool) -> None:
+    assert delegates_to_base_script(source.encode(), "run_foo.sh") is expected

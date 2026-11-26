@@ -28,6 +28,7 @@ from typing import NamedTuple
 from check_ast_rules import SHARED_PIPELINE_MODULES
 from check_ast_rules import findings as python_findings
 from check_comments import findings as comment_findings
+from check_example_recipes import ACCEL_VARIANT_SCRIPT, delegates_to_base_script
 from check_example_recipes import findings as example_findings
 
 RUFF_RULES = (
@@ -160,6 +161,31 @@ def _pipeline_findings(snapshot: str) -> Iterator[tuple[str, Finding]]:
             )
 
 
+def _example_variant_findings(snapshot: str) -> Iterator[tuple[str, Finding]]:
+    raw = _git("ls-tree", "-r", "--name-only", "-z", snapshot, "--", "examples/")
+    names = set(os.fsdecode(raw).split("\0")[:-1])
+    for path in sorted(names):
+        path_obj = PurePosixPath(path)
+        match = ACCEL_VARIANT_SCRIPT.match(path_obj.name)
+        if not match:
+            continue
+        base_name = match.group(1) + (match.group(2) or "") + ".sh"
+        base_path = str(path_obj.parent / base_name)
+        if base_path not in names:
+            continue
+        source = _git("show", f"{snapshot}:{path}")
+        if not delegates_to_base_script(source, base_name):
+            yield (
+                path,
+                Finding(
+                    1,
+                    "EX009",
+                    f"Reuse sibling GPU recipe '{base_name}' via 'exec bash \"$SCRIPT_DIR/{base_name}\" ... \"$@\"' "
+                    "instead of duplicating it.",
+                ),
+            )
+
+
 def _new_findings(ancestor: str, head: str) -> Iterator[tuple[str, Finding]]:
     for previous, path in _changed_files(ancestor, head):
         source = _git("show", f"{head}:{path}")
@@ -179,6 +205,10 @@ def _new_findings(ancestor: str, head: str) -> Iterator[tuple[str, Finding]]:
     legacy_pipelines = set(_pipeline_findings(ancestor))
     for diagnostic in _pipeline_findings(head):
         if diagnostic not in legacy_pipelines:
+            yield diagnostic
+    legacy_variants = set(_example_variant_findings(ancestor))
+    for diagnostic in _example_variant_findings(head):
+        if diagnostic not in legacy_variants:
             yield diagnostic
 
 

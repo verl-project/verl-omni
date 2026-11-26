@@ -104,10 +104,13 @@ after `\` continuations (`EX001`). `run_*.sh` scripts must use
 `#!/usr/bin/env bash` with `set -e` and `set -o pipefail` (`EX005`) and forward
 caller overrides with trailing double-quoted `"$@"` (`EX002`; comments, printed
 text and heredocs do not count). Shell recipes also catch orphaned or duplicate
-Hydra overrides (`EX007`), hardcoded tokens/device lists/private IPs/host-wide
-`pkill` or `pip install` (`EX008`), and disallow committed example media (`EX003`),
+Hydra overrides (`EX007`), hardcoded tokens/device lists (`CUDA`/`ASCEND_RT`/
+`MLU`/`HIP`/`ROCR`)/Ascend `source` paths/private IPs/`cd /...`/host-wide `pkill`
+or `pip install` (`EX008`), disallow committed example media (`EX003`),
 `README_*.md` (`EX004`), or `dataprocess/`, duplicate folders, and
-`.venv/bin/python` (`EX006`).
+`.venv/bin/python` (`EX006`), and require new `_npu`/`_mlu`/`_amd`/`_rocm`
+variants with an existing GPU sibling recipe to delegate via `exec bash`
+instead of duplicating it (`EX009`).
 
 The checker reads staged Git objects or the PR snapshots without importing
 candidate Python or executing recipes. Historical findings are compared by

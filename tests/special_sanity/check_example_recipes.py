@@ -39,7 +39,14 @@ SECRET_ENV_NAMES = {
     "ANTHROPIC_API_KEY",
     "DASHSCOPE_API_KEY",
 }
-DEVICE_ENV_NAMES = {"CUDA_VISIBLE_DEVICES", "ASCEND_RT_VISIBLE_DEVICES"}
+DEVICE_ENV_NAMES = {
+    "CUDA_VISIBLE_DEVICES",
+    "ASCEND_RT_VISIBLE_DEVICES",
+    "MLU_VISIBLE_DEVICES",
+    "HIP_VISIBLE_DEVICES",
+    "ROCR_VISIBLE_DEVICES",
+}
+ACCEL_VARIANT_SCRIPT = re.compile(r"^(run_.+?)(?:_(?:npu|mlu|amd|rocm))(_v1)?\.sh$")
 SECRET_VALUE = re.compile(r"^[A-Za-z0-9_\-\.]{8,}$")
 DEVICE_LIST_VALUE = re.compile(r"^[0-9]+(?:,[0-9]+)*$")
 PRIVATE_IPV4 = re.compile(
@@ -233,6 +240,12 @@ def _shell_findings(source_path: PurePosixPath, source: bytes, text: str) -> Ite
             continue
         if head_tok == "cd" and len(work) >= 2 and work[1][1].strip("\"'").startswith("/"):
             yield head_line, "EX008", "Avoid hardcoded absolute 'cd /...' paths; resolve relative to SCRIPT_DIR."
+        if head_tok in {"source", "."} and len(work) >= 2 and work[1][1].strip("\"'").startswith("/usr/local/Ascend/"):
+            yield (
+                head_line,
+                "EX008",
+                "Use ${ASCEND_HOME_PATH:-/usr/local/Ascend/ascend-toolkit} instead of hardcoding /usr/local/Ascend/.",
+            )
         if is_run:
             if head_tok in {"pkill", "killall"} or (head_tok == "ray" and len(work) >= 2 and work[1][1] == "stop"):
                 yield head_line, "EX008", "Do not kill host-wide processes (pkill/killall/ray stop) inside run_*.sh."
@@ -275,6 +288,33 @@ def _shell_findings(source_path: PurePosixPath, source: bytes, text: str) -> Ite
             )
         if not _forwards_args(tokens):
             yield 1, "EX002", 'Forward caller overrides as a double-quoted "$@" command argument.'
+
+
+def delegates_to_base_script(source: bytes, base_name: str) -> bool:
+    """Return whether a shell wrapper executes the sibling base recipe via bash/sh."""
+    try:
+        text = source.decode("utf-8")
+    except UnicodeDecodeError:
+        return True
+    tokens = _shell_tokens(text)
+    base_vars: set[str] = set()
+    for _line, token in tokens:
+        if "=" in token and not HYDRA_DOTTED_KEY.match(token.strip("\"'")):
+            var, raw_val = token.split("=", 1)
+            val = raw_val.strip("\"'")
+            if re.fullmatch(r"[a-zA-Z_][a-zA-Z_0-9]*", var) and (val == base_name or val.endswith(f"/{base_name}")):
+                base_vars.add(var)
+    for command, _delimiter in _iter_commands(tokens):
+        work = _strip_command_prefixes(command)
+        if not work or work[0][1] not in {"bash", "sh"}:
+            continue
+        for _ln, arg in work[1:]:
+            stripped = arg.strip("\"'")
+            if stripped == base_name or stripped.endswith(f"/{base_name}"):
+                return True
+            if any(stripped in {f"${var}", f"${{{var}}}"} for var in base_vars):
+                return True
+    return False
 
 
 def findings(path: str, source: bytes) -> Iterator[tuple[int, str, str]]:

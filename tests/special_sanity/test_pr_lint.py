@@ -25,6 +25,7 @@ from pathlib import Path
 import pytest
 from check_ast_rules import findings as ast_findings
 from check_comments import findings as comment_findings
+from check_example_recipes import ACCEL_VARIANT_SCRIPT, delegates_to_base_script
 from check_example_recipes import findings as example_findings
 from check_pr_lint import _ruff_findings
 
@@ -447,6 +448,18 @@ def test_live_repo_baseline_respects_precision_bounds() -> None:
     assert counts["EX006"] <= 5
     assert counts["EX008"] <= 1
     assert counts["EX007"] == 0
+    tracked_set = set(tracked)
+    variant_copies = 0
+    for rel in tracked:
+        rel_path = Path(rel)
+        match = ACCEL_VARIANT_SCRIPT.match(rel_path.name)
+        if not match:
+            continue
+        base_name = match.group(1) + (match.group(2) or "") + ".sh"
+        base_rel = (rel_path.parent / base_name).as_posix()
+        if base_rel in tracked_set and not delegates_to_base_script((root / rel).read_bytes(), base_name):
+            variant_copies += 1
+    assert variant_copies <= 17
 
 
 RULE_MATRIX: dict[str, tuple[str, bytes, str, bytes]] = {
@@ -599,6 +612,13 @@ RULE_MATRIX: dict[str, tuple[str, bytes, str, bytes]] = {
         "examples/demo/run_train.sh",
         b'#!/usr/bin/env bash\nset -euo pipefail\npython train.py "$@"\n',
     ),
+    "EX009": (
+        "examples/demo/run_train_npu.sh",
+        b"#!/usr/bin/env bash\nset -euo pipefail\n"
+        b'python3 -m verl_omni.trainer.main_diffusion trainer.device=npu "$@"\n',
+        "examples/demo/run_train.sh",
+        b'#!/usr/bin/env bash\nset -euo pipefail\npython3 -m verl_omni.trainer.main_diffusion "$@"\n',
+    ),
 }
 
 
@@ -639,6 +659,31 @@ def test_every_declared_rule_code_triggers_and_clears_on_minimal_fix(tmp_path: P
         )
         assert good_run.returncode == 0, good_run.stdout + good_run.stderr
         return
+    if code == "EX009":
+        _git(tmp_path, "init", "-q")
+        base_file = tmp_path / good_path
+        base_file.parent.mkdir(parents=True, exist_ok=True)
+        base_file.write_bytes(good_bytes)
+        base = _commit(tmp_path)
+        variant = tmp_path / bad_path
+        variant.write_bytes(bad_bytes)
+        head = _commit(tmp_path)
+        bad_run = subprocess.run(
+            [sys.executable, str(CHECKER), base, head], cwd=tmp_path, capture_output=True, text=True
+        )
+        assert bad_run.returncode == 1
+        assert "EX009" in bad_run.stdout
+        variant.write_text(
+            '#!/usr/bin/env bash\nset -euo pipefail\nSCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd)"\n'
+            'exec bash "$SCRIPT_DIR/run_train.sh" trainer.device=npu "$@"\n',
+            encoding="utf-8",
+        )
+        head = _commit(tmp_path)
+        good_run = subprocess.run(
+            [sys.executable, str(CHECKER), base, head], cwd=tmp_path, capture_output=True, text=True
+        )
+        assert good_run.returncode == 0, good_run.stdout + good_run.stderr
+        return
 
     def collect(path: str, source: bytes) -> list[str]:
         found = [item_code for _ln, item_code, _msg in example_findings(path, source)]
@@ -650,3 +695,41 @@ def test_every_declared_rule_code_triggers_and_clears_on_minimal_fix(tmp_path: P
 
     assert code in collect(bad_path, bad_bytes)
     assert code not in collect(good_path, good_bytes)
+
+
+def test_accelerator_variant_recipes_must_wrap_existing_gpu_base(tmp_path: Path) -> None:
+    _git(tmp_path, "init", "-q")
+    demo = tmp_path / "examples/demo"
+    demo.mkdir(parents=True)
+    gpu_base = demo / "run_demo.sh"
+    gpu_base.write_text('#!/usr/bin/env bash\nset -euo pipefail\npython3 -m verl_omni.trainer.main_diffusion "$@"\n')
+    legacy_gpu = demo / "run_legacy.sh"
+    legacy_gpu.write_text('#!/usr/bin/env bash\nset -euo pipefail\npython3 -m verl_omni.trainer.main_diffusion "$@"\n')
+    legacy_npu = demo / "run_legacy_npu.sh"
+    legacy_npu.write_text('#!/usr/bin/env bash\nset -euo pipefail\npython3 -m verl_omni.trainer.main_diffusion "$@"\n')
+    base = _commit(tmp_path)
+
+    for suffix in ("npu", "mlu", "amd", "rocm"):
+        (demo / f"run_demo_{suffix}.sh").write_text(
+            '#!/usr/bin/env bash\nset -euo pipefail\npython3 -m verl_omni.trainer.main_diffusion "$@"\n',
+            encoding="utf-8",
+        )
+    head = _commit(tmp_path)
+    bad = subprocess.run([sys.executable, str(CHECKER), base, head], cwd=tmp_path, capture_output=True, text=True)
+    assert bad.returncode == 1, bad.stdout + bad.stderr
+    assert bad.stdout.count("EX009") == 4
+    assert "run_legacy_npu.sh" not in bad.stdout
+
+    for suffix in ("npu", "mlu", "amd", "rocm"):
+        (demo / f"run_demo_{suffix}.sh").write_text(
+            "#!/usr/bin/env bash\nset -euo pipefail\n"
+            f'exec bash "$SCRIPT_DIR/run_demo.sh" trainer.device={suffix} "$@"\n',
+            encoding="utf-8",
+        )
+    (demo / "run_solo_npu.sh").write_text(
+        '#!/usr/bin/env bash\nset -euo pipefail\npython3 -m verl_omni.trainer.main_diffusion trainer.device=npu "$@"\n',
+        encoding="utf-8",
+    )
+    head = _commit(tmp_path)
+    good = subprocess.run([sys.executable, str(CHECKER), base, head], cwd=tmp_path, capture_output=True, text=True)
+    assert good.returncode == 0, good.stdout + good.stderr
