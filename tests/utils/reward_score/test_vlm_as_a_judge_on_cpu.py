@@ -220,7 +220,9 @@ async def test_unified_default_request_matches_main_bytes(monkeypatch, scorer):
     assert hashlib.sha256(encoded).hexdigest() == UNIFIED_EXPECTED_SHA256
     assert result["score"] == pytest.approx(0.75)
     assert result["raw_score"] == pytest.approx(4.0)
-    assert result["reward_extra_info"] == {}
+    assert result["response"] == UNIFIED_MODEL_OUTPUT
+    assert result["malformed_frames"] == 0
+    assert set(result) == {"score", "raw_score", "response", "malformed_frames"}
 
 
 @pytest.mark.asyncio
@@ -310,7 +312,10 @@ def test_public_signatures_are_unchanged():
         ("sampling_params", inspect.Parameter.POSITIONAL_OR_KEYWORD, None),
         ("user_prompt", inspect.Parameter.KEYWORD_ONLY, None),
     ]
-    unified_parameters = list(ocr_parameters)
+    unified_parameters = [
+        *ocr_parameters,
+        ("on_malformed", inspect.Parameter.KEYWORD_ONLY, "raise"),
+    ]
 
     for function in (vlm_as_a_judge.compute_score_ocr, genrm_ocr.compute_score_ocr):
         signature = inspect.signature(function)
