@@ -61,7 +61,7 @@ If possible, please add CI test(s) for your new feature:
 
 ## Building the Docs
 
-The doc CI job is [`.github/workflows/doc.yml`](.github/workflows/doc.yml). Locally:
+The doc CI job is [`.github/workflows/doc.yml`](.github/workflows/doc.yml). Locally, with [`uv`](docs/start/install.md) already installed:
 
 ```bash
 uv pip install --python "$(command -v python)" --constraint .github/triton_cpu_pin.txt -e .
