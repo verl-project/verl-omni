@@ -41,5 +41,8 @@ run_test 22 "FlowGRPO V1 separate-async trainer e2e" \
     env -u MODEL_PATH -u TOKENIZER_PATH -u TRAIN_FILES -u VAL_FILES \
         DATA_DIR="${LOG_DIR}/test22_data" \
     bash tests/special_e2e/run_flowgrpo_qwen_image_v1_separate_async_npu.sh
+run_test 23 "MiniMax-H3 FlowGRPO T2VA with managed ImageBind v1 sync trainer e2e" \
+    env -u MODEL_PATH NUM_NPUS="${NUM_NPUS}" ACTOR_SP=2 ROLLOUT_TP=2 \
+    bash tests/special_e2e/run_minimax_h3_imagebind_smoke.sh npu
 cleanup_runtime
 print_summary

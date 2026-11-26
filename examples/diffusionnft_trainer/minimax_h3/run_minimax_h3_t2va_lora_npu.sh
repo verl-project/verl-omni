@@ -39,8 +39,7 @@ bash "$SCRIPT_DIR/run_minimax_h3_t2va_lora.sh" \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1 \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=1 \
     '~reward.reward_functions.clap' \
-    ++reward.reward_functions.imagebind.device=npu:1 \
-    ++reward.reward_functions.imagebind.model_name_or_path="$IMAGEBIND_MODEL_PATH" \
+    reward.models.imagebind.model_path="$IMAGEBIND_MODEL_PATH" \
     ++reward.reward_functions.imagebind.required=true \
     ++reward.reward_functions.imagebind.mode=all \
     '++reward.reward_functions.imagebind.weights={audio_video:0.2,text_audio:0.0,text_video:0.8}' \

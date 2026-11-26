@@ -4,12 +4,11 @@
 # Exercises:
 #   dummy parquet -> composite_single_turn_agent (AR rewrite + DiT images) ->
 #   streaming MultiVisualRewardManager on a dedicated reward pool ->
-#   AR reward/ar aggregation inside the composite loop -> FlowGRPO LoRA update.
+#   AR reward/ar aggregation inside the agent loop -> FlowGRPO LoRA update.
 #
 # GPU layout (async reward needs a reward pool separate from actor/rollout):
 #   - NUM_GPUS_ACTOR:  colocated actor + rollout
 #   - NUM_GPUS_REWARD: UnifiedReward stand-in (tiny Qwen3-VL) via vLLM
-#   Defaults split NUM_GPUS as (NUM_GPUS - 1) + 1. At least 2 visible GPUs.
 #
 # Requires: vllm-omni, diffusers>=0.37,
 #   tiny Qwen-Image at ~/models/tiny-random/Qwen-Image
@@ -17,6 +16,11 @@
 #
 # Override via env: NUM_GPUS, NUM_GPUS_ACTOR, NUM_GPUS_REWARD, MODEL_PATH,
 #                   REWARD_MODEL_PATH, DATA_DIR, TOTAL_TRAIN_STEPS, ...
+# Usage:
+#     CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" \
+#     bash tests/special_e2e/run_dual_grpo_qwen_image_async_reward.sh
+# Note: it is not added into GPU CI list since FA2 is not supported.
+
 set -euo pipefail
 
 NUM_GPUS=${NUM_GPUS:-4}
@@ -43,7 +47,7 @@ ENGINE=vllm_omni
 REWARD_ENGINE=vllm
 max_prompt_length=256
 IMAGE_RESOLUTION=256
-VLLM_USE_FLASHINFER_SAMPLER=0
+export VLLM_USE_FLASHINFER_SAMPLER=0
 
 # Smoke: pin local FLASH_ATTN (product default remains FLASH_ATTN_3_HUB).
 # Use exit-code checks only — importing verl/vllm may print INFO lines on stdout.
@@ -62,7 +66,8 @@ fi
 rollout_m=2
 rollout_n=2
 micro_bsz_per_gpu=1
-train_batch_size=4 #${NUM_GPUS_ACTOR}
+train_batch_size=$((NUM_GPUS_ACTOR * 2))
+# must set a larger batch size to avoid wrong nested tensor when using 4D M-RoPE
 mini_bsz=${train_batch_size}
 synthetic_train_size=$((train_batch_size * TOTAL_TRAIN_STEPS))
 if [[ "${synthetic_train_size}" -lt 2 ]]; then
@@ -75,6 +80,7 @@ python3 tests/special_e2e/create_dummy_diffusion_data.py \
     --val_size 4
 
 python3 -m verl_omni.trainer.main_diffusion \
+    trainer.use_v1=false \
     algorithm.adv_estimator=flow_grpo \
     data.train_files="${dummy_train_path}" \
     data.val_files="${dummy_test_path}" \
@@ -110,6 +116,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.rollout.m=${rollout_m} \
     actor_rollout_ref.rollout.n=${rollout_n} \
     actor_rollout_ref.rollout.agent.num_workers=1 \
+    +actor_rollout_ref.rollout.agent.agent_loop_manager_class=verl_omni.agent_loop.composite_agent_loop.CompositeAgentLoopManager \
     actor_rollout_ref.rollout.agent.default_agent_loop=composite_single_turn_agent \
     actor_rollout_ref.rollout.ar.response_length=32 \
     actor_rollout_ref.rollout.load_format=safetensors \
@@ -148,10 +155,10 @@ python3 -m verl_omni.trainer.main_diffusion \
     "+reward.reward_functions.ar.path=pkg://verl_omni.utils.reward_score.jpeg_compressibility" \
     '+reward.reward_functions.ar.name=compute_score' \
     '+reward.reward_functions.ar.weight=0.0' \
-    "+reward.reward_functions.dit.path=verl_omni/utils/reward_score/genrm_ocr.py" \
+    "+reward.reward_functions.dit.path=pkg://verl_omni.utils.reward_score.genrm_ocr" \
     '+reward.reward_functions.dit.name=compute_score_ocr' \
     '+reward.reward_functions.dit.weight=1.0' \
-    "+trainer.train_ar=True" \
+    trainer.train_ar=True \
     trainer.logger=console \
     trainer.project_name=verl-test \
     trainer.experiment_name=dualgrpo-qwen-image-async-reward-e2e \

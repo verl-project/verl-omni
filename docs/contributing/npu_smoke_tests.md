@@ -37,6 +37,7 @@ into these runners:
 | 20 | e2e | Qwen-Image online DPO V1 sync | tests/special_e2e/run_online_dpo_qwen_image_npu.sh | 8 |
 | 21 | e2e | Qwen-Image DiffusionNFT V1 sync | tests/special_e2e/run_diffusionnft_qwen_image_npu.sh | 8 |
 | 22 | e2e | Qwen-Image FlowGRPO V1 separate-async | tests/special_e2e/run_flowgrpo_qwen_image_v1_separate_async_npu.sh | 8 |
+| 23 | e2e | MiniMax-H3 T2VA with managed ImageBind | tests/special_e2e/run_minimax_h3_imagebind_smoke.sh npu | 8 |
 
 Test IDs stay stable across companion PRs, so gaps are intentional. Core
 entries collect pytest cases; e2e entries run trainer workloads. These are
@@ -118,7 +119,12 @@ when needed. The test must complete training and exit 0.
 ### Qwen-Image V1 trainer variants
 
 Entry 19 requires `qwen-vl-utils==0.0.14`; the e2e workflow installs it.
-Grouped entries 18-22 choose their own local fixtures. To reuse an existing
+Entry 23 reuses the tiny H3 checkpoint at `$HOME/models/tiny-random/minimax-h3`
+or builds it offline on CPU when missing. Set `H3_TINY_MODEL_DIR` to use a
+different cache. If the cache is incomplete, the test builds in the run directory.
+The H3 training step checks that the managed ImageBind scores distinguish
+rollouts in a prompt group and produce a finite, nonzero actor gradient.
+Grouped entries 18-23 choose their own fixtures. To reuse an existing
 image-edit checkpoint, invoke its launcher directly:
 
 ```bash

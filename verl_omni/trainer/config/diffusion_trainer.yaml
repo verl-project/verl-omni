@@ -243,8 +243,16 @@ trainer:
   # diffusion trainer (offline DPO stays on v0 by design).
   use_v1: true
 
+  # Jointly train an AR text encoder with the diffusion DiT. When true,
+  # main_diffusion selects CompositePolicyGradientRayTrainer; keep false for
+  # diffusion-only runs.
+  train_ar: false
+
   # V1 trainer mode configs (mirrors verl/trainer/config/ppo_trainer.yaml `trainer.v1`).
   v1:
+
+    # Fetch declared trajectory tensors on workers; requires sync mode, a supporting pipeline and rollout-side rewards.
+    worker_side_trajectory: false
 
     # Reporting-only diagnostics; no tuning, stopping, recovery or checkpoint actions.
     watchdog:

@@ -1,6 +1,6 @@
 # Named Reward Models
 
-Last updated: 11/19/2026
+Last updated: 11/20/2026
 
 This guide describes how to configure and extend named model-backed rewards
 under `reward.models` in `verl-omni`. For the general Reward Loop interface and
@@ -206,13 +206,15 @@ OCR_WORKSPACE=/path/to/workspace bash examples/flowgrpo_trainer/sd35/run_sd35_me
 
 Caller overrides remain last. This recipe opts into
 `reward.reward_functions.ocr.use_rollout_sampling_params=true` to forward the
-response length and optional deterministic seed from the model's rollout
-settings, falling back to `reward.reward_model.rollout`. Explicit scorer
-`sampling_params` take precedence. Existing named rewards without this opt-in
-keep their scorer defaults; OCR defaults to 256 output tokens (or
-`GENRM_OCR_MAX_TOKENS`) and honors `GENRM_OCR_SEED`. The opt-in preserves the
-legacy visual manager's seed behavior: an environment seed is excluded unless
-rollout determinism supplies a seed.
+response length (when set), tuned temperature/top-p/top-k and optional
+deterministic seed from the model's rollout settings, falling back to
+`reward.reward_model.rollout`. Temperature and top-p are forwarded together once
+either is tuned away from the upstream rollout defaults, top-k is forwarded when
+set, and otherwise the scorer's own sampling defaults apply.
+Explicit scorer `sampling_params` take precedence, and a deterministic seed is
+supplied only when `rollout.full_determinism=true`. Existing named rewards
+without this opt-in keep their scorer defaults (OCR defaults to 256 output
+tokens).
 
 ### Judge output budget
 
@@ -233,8 +235,7 @@ this order:
    `rollout.response_length`.
 2. Otherwise, with `use_rollout_sampling_params=true`, the model's
    `rollout.response_length` when it is set.
-3. The scorer's environment override (`GENRM_OCR_MAX_TOKENS`), then the scorer
-   default (256).
+3. The scorer default (256).
 
 The OCR scorer counts the ground truth with the judge's tokenizer and raises
 before sending a request when it needs more tokens than the budget. A
@@ -282,17 +283,19 @@ One judge model can serve several reward terms, each with its own `user_prompt`
 (literal text, or a `pkg://` builder). For UnifiedReward, literal text may contain
 `{caption}`, and a custom builder receives the caption. Leaving `user_prompt`
 unset keeps the scorer's default request.
+Both scorers live in `verl_omni.utils.reward_score.vlm_as_a_judge`; the older
+`genrm_ocr` and `unified_reward` paths still work.
 
 ```yaml
 reward_functions:
   ocr:
     model: judge
-    path: pkg://verl_omni.utils.reward_score.genrm_ocr
+    path: pkg://verl_omni.utils.reward_score.vlm_as_a_judge
     name: compute_score_ocr
     user_prompt: "Transcribe all text in the image exactly."
   semantics:
     model: judge
-    path: pkg://verl_omni.utils.reward_score.unified_reward
+    path: pkg://verl_omni.utils.reward_score.vlm_as_a_judge
     name: compute_score_unified_reward
     user_prompt: pkg://my_package.prompts.build_semantic_prompt
 ```
@@ -454,6 +457,17 @@ for one sharded replica across two GPUs. It requires a dedicated single-node
 reward pool and synchronous V1 diffusion training. See the
 [FSDP2 reward model design](../advanced/fsdp2_reward_models.md) for configuration,
 lifecycle guarantees and the supported scope.
+
+The LTX2 and MiniMax-H3 launchers configure the native ImageBind model under
+`reward.models.imagebind`. Set `reward.models.imagebind.model_path` to the
+ImageBind checkpoint. The launchers use bundle 1 of the trainer-selected pool,
+which requires at least two bundles. For a one-bundle pool, pass
+`'reward.models.imagebind.placement.devices=[0]'` to the launcher. The scorer
+`compute_score_native` uses decoded `video_preview` and/or `audio` artifacts
+and the sample's ground-truth text according to `mode`. For `all`, the
+`weights` on the reward term combine the three similarities before the
+manager applies the term's overall `weight`. The deployment defaults to
+`offload=false` so its worker reuses the loaded checkpoint across steps.
 
 For native CLAP, AudioBox, and DeSync scorers, a single-sample `batch` supplies
 `audio`, `audio_sample_rate`, and optional `audio_layout` in preference to

@@ -3,6 +3,7 @@
 # Modalities: text + image + audio -> text.
 # Hardware: A5 (8 × Ascend 950 96GB).
 set -x
+set -o pipefail
 
 export CPATH=/usr/include${CPATH:+:$CPATH}
 export VERL_USE_EXTERNAL_MODULES=verl_omni
@@ -32,6 +33,7 @@ if [[ "${DEVICE}" == "npu" ]]; then
         fi
         default_num_devices=8
         default_graph_mode=FULL_AND_PIECEWISE
+        export VLLM_USE_V2_MODEL_RUNNER=0
         ascend_performance_args=(
             actor_rollout_ref.actor.freeze_vision_tower=false
             actor_rollout_ref.actor.fsdp_config.optimizer_offload=false
