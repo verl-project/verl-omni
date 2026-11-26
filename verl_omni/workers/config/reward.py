@@ -69,6 +69,7 @@ __all__ = [
     "streaming_reward_enabled",
     "to_mapping",
     "validate_reward_model_terms",
+    "validate_reward_weight_sum",
     "warn_deprecated_reward_config",
 ]
 
@@ -444,6 +445,15 @@ def resolve_reward_model_name(term_name: str, term, models) -> str | None:
     return model_name
 
 
+def validate_reward_weight_sum(terms) -> None:
+    """Check the weight sum of a complete recipe before splitting its terms across workers."""
+    total_weight = sum(float(term.get("weight", 1.0)) for term in terms.values())
+    if total_weight <= 0:
+        raise ValueError(
+            f"Total weight of reward functions must be > 0, got {total_weight}. Check reward.reward_functions config."
+        )
+
+
 def validate_reward_model_terms(config) -> None:
     """Validate named-model references before allocating model resources."""
     models = get_reward_model_entries(config)
@@ -462,7 +472,10 @@ def validate_reward_model_terms(config) -> None:
             raise ValueError("Native FSDP requires synchronous V1 diffusion training")
         if config.reward.get("streaming", {}).get("enabled", False):
             raise ValueError("Native FSDP does not support streaming rewards")
-    for term_name, term in (config.reward.get("reward_functions", {}) or {}).items():
+    terms = config.reward.get("reward_functions", {}) or {}
+    if terms:
+        validate_reward_weight_sum(terms)
+    for term_name, term in terms.items():
         model_name = resolve_reward_model_name(term_name, term, models)
         if model_name is None:
             continue

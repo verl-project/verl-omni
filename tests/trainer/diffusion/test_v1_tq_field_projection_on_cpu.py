@@ -229,6 +229,24 @@ def test_metric_projection_is_subset_of_persisted_and_rollout_fields(algorithm):
     assert set(tq_utils.diffusion_metric_tq_fields(algorithm)).issubset(available_fields)
 
 
+@pytest.mark.parametrize(
+    ("columns", "error"),
+    [
+        ({}, "missing non_tensor_batch column 'reward/clap/errors'"),
+        ({"reward/clap/errors": [None]}, "column 'reward/clap/errors': expected 2 rows, got 1"),
+    ],
+)
+def test_put_reward_extra_info_names_invalid_column(columns, error):
+    key = "reward/clap/errors"
+    meta = KVBatchMeta(keys=["a_0_0", "b_0_0"], tags=[{}, {}], partition_id="train")
+    data = DataProto.from_dict(tensors={"rm_scores": torch.tensor([0.0, 1.0])}, meta_info={"reward_extra_keys": [key]})
+    for name, values in columns.items():
+        data.non_tensor_batch[name] = np.array(values, dtype=object)
+
+    with pytest.raises(ValueError, match=error):
+        tq_utils.put_dataproto_fields_to_tq(meta, data, ["reward_extra_info"])
+
+
 def test_rollout_dump_fetches_only_dump_fields(monkeypatch):
     """The dump re-read must project fields instead of re-pulling latents/embeds.
 
@@ -355,6 +373,7 @@ def test_metrics_fetches_only_metric_fields_and_preserves_outputs(monkeypatch, c
         "sample_level_scores",
         "uid",
         "extra_fields",
+        "reward_extra_info",
     }
     if policy_gradient:
         expected_fields.update({"advantages", "returns"})

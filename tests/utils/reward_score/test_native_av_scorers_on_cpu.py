@@ -21,6 +21,7 @@ from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock
 
+import numpy as np
 import pytest
 import torch
 
@@ -295,6 +296,26 @@ def test_audiobox_windows_preserve_tail_and_mask_padding():
 
 
 @pytest.mark.asyncio
+async def test_audiobox_native_accepts_streamed_numeric_object_audio_and_numpy_rate():
+    async def infer(windows, masks):
+        assert windows.shape == (1, 1, 160000)
+        assert masks.sum().item() == 1600
+        return {
+            "predictions": {axis: torch.tensor([1.0]) for axis in audiobox._AXES},
+            "target_transform": {axis: (0.0, 1.0) for axis in audiobox._AXES},
+        }
+
+    model = SimpleNamespace(infer=AsyncMock(side_effect=infer))
+    waveform = np.array([[1.0] * 1600], dtype=object)
+    rate = np.array([16000])
+    result = await audiobox.compute_score(reward_model=model, batch=_batch(audio=waveform, sample_rate=rate))
+
+    assert result["score"] == pytest.approx(0.05)
+    model.infer.assert_awaited_once()
+    assert waveform.dtype == object and rate.tolist() == [16000]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("named", [False, True])
 async def test_videoalign_native_sampling_prompt_and_calibration(named):
     model = SimpleNamespace(infer=AsyncMock(return_value=torch.tensor([[3.0, 5.0, 7.0]])))
@@ -364,6 +385,25 @@ async def test_desync_native_preparation_and_offset_score(named):
         fps=25,
     )
     assert result["score"] == pytest.approx(2 / 3)
+
+
+@pytest.mark.asyncio
+async def test_desync_native_accepts_streamed_numeric_object_audio_and_numpy_rate():
+    logits = torch.zeros(2, 1, 21)
+    logits[:, 0, 10] = 1
+    model = SimpleNamespace(infer=AsyncMock(return_value=logits))
+    waveform = np.array([[1.0] * 1600], dtype=object)
+    rate = np.array([16000])
+
+    result = await desync.compute_score(
+        reward_model=model,
+        batch=_batch(video=_video([0, 255]), audio=waveform, sample_rate=rate, fps=25),
+        fps=25,
+    )
+
+    assert result["score"] == pytest.approx(1.0)
+    model.infer.assert_awaited_once()
+    assert waveform.dtype == object and rate.tolist() == [16000]
 
 
 @pytest.mark.asyncio

@@ -73,7 +73,7 @@ def _get_audio(extra_info: dict) -> tuple[torch.Tensor, int]:
     info = dict(extra_info)
     info.setdefault("audio_sample_rate", _CLAP_SAMPLE_RATE)
     info.setdefault("audio_layout", "CT")
-    return get_audio(info)
+    return get_audio(info, audio_layout=info["audio_layout"])
 
 
 def _load_clap(model_name_or_path: str, device: str):

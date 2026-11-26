@@ -597,7 +597,7 @@ def test_rollout_adapter_registers_thinker_only_text_pipeline():
     # text-only RFC design did.
     assert stages[0].requires_multimodal_data is True
     assert MiniCPMORolloutAdapter.get_pipeline_id("thinker_only") == "minicpmo_4_5_thinker_only"
-    assert MiniCPMORolloutAdapter.get_stage_engine_extras(0, "thinker_only") == {
+    assert MiniCPMORolloutAdapter.get_stage_engine_extras(0, "thinker_only", model_config=SimpleNamespace()) == {
         "model_arch": "MiniCPMO45OmniLLMForConditionalGeneration",
         # Mirrors the upstream MiniCPM-o deploy profiles: the AR async
         # scheduler's placeholder accounting underflows under KV-cache

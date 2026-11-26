@@ -28,7 +28,11 @@ from verl.experimental.reward_loop.reward_manager.base import RewardManagerBase
 from verl_omni.pipelines.rollout_media import PRIMARY_ARTIFACT, ArtifactContractError
 from verl_omni.utils.reward_score.reward_utils import get_audio
 from verl_omni.utils.reward_score.scorers.registry import load_reward_object as load_extern_object
-from verl_omni.workers.config.reward import get_reward_model_entries, resolve_reward_model_name
+from verl_omni.workers.config.reward import (
+    get_reward_model_entries,
+    resolve_reward_model_name,
+    validate_reward_weight_sum,
+)
 
 from .audio import _audio_reward_kwargs, _extract_legacy_mono_audio
 from .media import _reward_extra_info
@@ -72,14 +76,8 @@ def _extract_solution_audio(extra_info: dict, *, use_named_audio: bool) -> tuple
         if media_kind not in ("image", "video"):
             return _extract_legacy_mono_audio(extra_info)
 
-        audio = extra_info.get("audio")
-        if isinstance(audio, np.ndarray) and audio.dtype == object:
-            audio = np.asarray(audio, dtype=np.float32)
-        sample_rate = extra_info.get("audio_sample_rate")
-        if isinstance(sample_rate, np.ndarray) and sample_rate.size == 1:
-            sample_rate = sample_rate.item()
         waveform, sample_rate = get_audio(
-            {"audio": audio, "audio_sample_rate": sample_rate},
+            {"audio": extra_info.get("audio"), "audio_sample_rate": extra_info.get("audio_sample_rate")},
             audio_layout=extra_info.get("audio_layout", "CT"),
         )
     except (KeyError, TypeError, ValueError, RuntimeError, OverflowError) as exc:
@@ -118,7 +116,9 @@ class MultiRewardManager(RewardManagerBase, ABC):
             raise ValueError("MultiRewardManager requires non-empty reward.reward_functions config")
 
         self._sub_rewards = []
-        total_weight = 0.0
+        # Named deployments validate the complete recipe before dispatching worker-local subsets.
+        if not reward_models_cfg:
+            validate_reward_weight_sum(reward_functions_cfg)
         _reserved_keys = {
             "path",
             "name",
@@ -164,7 +164,6 @@ class MultiRewardManager(RewardManagerBase, ABC):
                 raise TypeError(f"Reward function {key!r} independent must be a boolean")
             if config.reward.get("aggregation") == "preserve_components" and (not required or weight != 1.0):
                 raise ValueError("Component rewards require required=true and weight=1.0; use routing_weights instead.")
-            total_weight += weight
 
             # Collect non-manager fields to pass to compute_score.
             extra_args = {k: v for k, v in entry.items() if k not in _reserved_keys}
@@ -209,12 +208,6 @@ class MultiRewardManager(RewardManagerBase, ABC):
                 weight,
                 required,
                 is_async,
-            )
-
-        if total_weight <= 0:
-            raise ValueError(
-                f"Total weight of reward functions must be > 0, got {total_weight}. "
-                f"Check reward.reward_functions config."
             )
 
     def set_reward_executors(self, engine_reward_executors: dict | None, native_reward_executors: dict | None) -> None:
