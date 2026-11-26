@@ -207,7 +207,7 @@ class MiniCPMORolloutAdapter(OmniRolloutPipelineBase):
         return {}
 
     @classmethod
-    def get_stage_engine_extras(cls, stage_id: int, pipeline_mode="thinker_only") -> dict:
+    def get_stage_engine_extras(cls, stage_id: int, pipeline_mode="thinker_only", model_config=None) -> dict:
         """Return per-stage engine overrides for *pipeline_mode*.
 
         Args:
