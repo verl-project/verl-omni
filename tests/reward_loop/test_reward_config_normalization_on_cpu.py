@@ -23,7 +23,7 @@ from omegaconf import OmegaConf
 from verl import DataProto
 
 from verl_omni.reward_loop.reward_manager.multi import MultiVisualRewardManager
-from verl_omni.workers.config.reward import normalize_reward_config
+from verl_omni.workers.config.reward import REWARD_TERM_METADATA_KEYS, normalize_reward_config
 
 CONFIG_DIR = str(Path(__file__).resolve().parents[2] / "verl_omni" / "trainer" / "config")
 SCORER_PATH = "tests/reward_loop/test_reward_config_normalization_on_cpu.py"
@@ -35,6 +35,24 @@ def reward_config_probe(solution_image, gain, bias, extra_info):
     assert solution_image.dtype == torch.uint8
     assert isinstance(extra_info, dict)
     return {"score": gain + bias}
+
+
+def reward_config_kwargs_probe(solution_image, kwargs):
+    """Consume a legacy scorer argument whose name matches the new wrapper."""
+    assert solution_image.dtype == torch.uint8
+    return {"score": kwargs["gain"]}
+
+
+def _image_data():
+    return DataProto.from_dict(
+        tensors={"responses": torch.zeros((1, 3, 16, 16), dtype=torch.uint8)},
+        non_tensors={
+            "data_source": ["test"],
+            "reward_model": [{"ground_truth": "test"}],
+            "media_kind": ["image"],
+            "extra_info": [{}],
+        },
+    )
 
 
 def _compose(name="diffusion_trainer"):
@@ -145,6 +163,72 @@ def test_term_order_metadata_and_null_kwargs_are_preserved():
         "use_rollout_sampling_params": False,
     }
     assert normalized.reward.reward_functions.second.options == [1, 2]
+
+
+def test_manager_consumes_metadata_without_forwarding_it_to_scorer():
+    config = OmegaConf.merge(
+        _compose(),
+        {
+            "reward": {
+                "scorers": {
+                    "probe": _scorer(
+                        model=None,
+                        weight=1.0,
+                        required=True,
+                        independent=False,
+                        routing_weights={"image": 1.0},
+                        use_rollout_sampling_params=False,
+                        kwargs={"gain": 3, "bias": 4},
+                    )
+                },
+                "reward_functions": {},
+                "reward_manager": _manager(),
+            }
+        },
+    )
+    manager = MultiVisualRewardManager(normalize_reward_config(config), MagicMock(), compute_score=None)
+    assert manager._sub_rewards[0]["extra_args"] == {"gain": 3, "bias": 4}
+    assert manager._sub_rewards[0]["required"] is True
+    result = manager.loop.run_until_complete(manager.run_single(_image_data()))
+    assert result["reward_score"] == pytest.approx(7.0)
+
+
+def test_legacy_kwargs_is_still_a_scorer_argument():
+    config = OmegaConf.merge(
+        _compose(),
+        {
+            "reward": {
+                "scorers": None,
+                "reward_manager": _manager(),
+            }
+        },
+    )
+    OmegaConf.update(
+        config,
+        "reward.reward_functions.probe",
+        _scorer(name="reward_config_kwargs_probe", kwargs={"gain": 3}),
+        force_add=True,
+    )
+    assert normalize_reward_config(config) is config
+    manager = MultiVisualRewardManager(config, MagicMock(), compute_score=None)
+    assert manager._sub_rewards[0]["extra_args"] == {"kwargs": {"gain": 3}}
+    result = manager.loop.run_until_complete(manager.run_single(_image_data()))
+    assert result["reward_score"] == pytest.approx(3.0)
+
+
+@pytest.mark.parametrize("key", sorted(REWARD_TERM_METADATA_KEYS | {"kwargs"}))
+def test_scorer_kwargs_cannot_shadow_metadata_or_itself(key):
+    config = OmegaConf.create(
+        {
+            "reward": {
+                "scorers": {"probe": _scorer(kwargs={key: "shadow"})},
+                "reward_functions": {},
+                "reward_manager": _manager(),
+            }
+        }
+    )
+    with pytest.raises(ValueError, match="kwargs contains reserved fields"):
+        normalize_reward_config(config)
 
 
 def test_external_reference_and_matching_dual_projection():

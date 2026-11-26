@@ -41,6 +41,7 @@ DEPRECATED_VISUAL_MANAGER_MESSAGE = (
 __all__ = [
     "DEPRECATED_USE_ACCELERATOR_MESSAGE",
     "DEPRECATED_VISUAL_MANAGER_MESSAGE",
+    "REWARD_TERM_METADATA_KEYS",
     "EngineRewardModelConfig",
     "NativeRewardModelConfig",
     "NativeRewardFSDPConfig",
@@ -71,17 +72,19 @@ __all__ = [
 
 _ENGINE_BACKENDS = {"engine"}
 _NATIVE_BACKENDS = {"native"}
-_SCORER_FIELDS = {
-    "path",
-    "name",
-    "model",
-    "weight",
-    "required",
-    "independent",
-    "routing_weights",
-    "use_rollout_sampling_params",
-    "kwargs",
-}
+REWARD_TERM_METADATA_KEYS = frozenset(
+    {
+        "path",
+        "name",
+        "model",
+        "weight",
+        "required",
+        "independent",
+        "routing_weights",
+        "use_rollout_sampling_params",
+    }
+)
+_SCORER_FIELDS = REWARD_TERM_METADATA_KEYS | {"kwargs"}
 
 
 def normalize_reward_config(config: DictConfig | dict[str, Any]) -> DictConfig | dict[str, Any]:
