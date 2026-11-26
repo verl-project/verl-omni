@@ -50,29 +50,6 @@ def test_accelerator_manager_initializes_profilers_after_workers(monkeypatch):
     assert events == ["workers", "profilers"]
 
 
-@pytest.mark.parametrize("action", ["start", "stop"])
-def test_manager_delegates_to_workers_and_rollout_replicas(monkeypatch, action):
-    manager = object.__new__(OmniRewardLoopManager)
-    events = []
-    method = f"{action}_profile"
-    base = Mock(side_effect=lambda **kwargs: events.append(("workers", kwargs)))
-    monkeypatch.setattr(RewardLoopManager, method, base)
-    manager._run_on_replicas = Mock(side_effect=lambda *args, **kwargs: events.append(("replicas", kwargs)))
-
-    kwargs = (
-        {"profile_step": 2, "role": "reward", "profile_prefix": "reward"}
-        if action == "start"
-        else {"run_command": False}
-    )
-    getattr(manager, method)(**kwargs)
-
-    if action == "start":
-        assert events == [("workers", kwargs), ("replicas", kwargs)]
-    else:
-        assert events == [("replicas", {}), ("workers", kwargs)]
-    manager._run_on_replicas.assert_called_once_with(method, **(kwargs if action == "start" else {}))
-
-
 def test_replica_stop_failure_still_stops_workers(monkeypatch):
     manager = object.__new__(OmniRewardLoopManager)
     stop = Mock()
@@ -138,11 +115,11 @@ def test_serving_profiler_ranks_use_flattened_group_offset(monkeypatch, reward_w
                 "profiler_kwargs": {"record_shapes": True},
             },
         ),
-        ("stop_profile", {}),
+        ("stop_profile", {"run_command": False}),
     ],
     ids=["start-with-step", "start-with-step-and-engine-options", "stop"],
 )
-def test_profiler_fanout_includes_legacy_and_named_engine_models(monkeypatch, method, kwargs):
+def test_manager_delegates_to_workers_and_rollout_replicas(monkeypatch, method, kwargs):
     manager = object.__new__(OmniRewardLoopManager)
     events = []
 
@@ -163,9 +140,15 @@ def test_profiler_fanout_includes_legacy_and_named_engine_models(monkeypatch, me
             "native": SimpleNamespace(),
         }
     )
-    monkeypatch.setattr(RewardLoopManager, method, Mock())
+    workers = Mock(side_effect=lambda **kwargs: events.append(("workers", kwargs)))
+    monkeypatch.setattr(RewardLoopManager, method, workers)
+
     getattr(manager, method)(**kwargs)
-    assert events == [("legacy", kwargs), ("engine", kwargs)]
+
+    if method == "start_profile":
+        assert events == [("workers", kwargs), ("legacy", kwargs), ("engine", kwargs)]
+    else:
+        assert events == [("legacy", {}), ("engine", {}), ("workers", kwargs)]
 
 
 @pytest.mark.parametrize(
