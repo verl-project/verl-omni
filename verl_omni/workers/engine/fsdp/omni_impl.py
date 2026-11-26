@@ -63,6 +63,38 @@ class OmniFSDPEngine(FSDPEngineWithLMHead):
             )
         return model_inputs, output_args
 
+    def prepare_model_outputs(self, output, output_args, micro_batch, logits_processor_func):
+        """Compute LM-head outputs; under vLLM parity use the rollout sampler math.
+
+        When ``VERL_OMNI_VLLM_PARITY=1``, temporarily route verl's imported
+        ``logprobs_from_logits`` through ``verl_omni.utils.vllm_parity`` and force
+        the unscaled-logits + temperature path (same contract as verl's
+        ``batch_invariant`` sampler path) without patching the verl pin.
+        """
+        from verl_omni.utils.vllm_parity import logprobs_from_logits as parity_logprobs
+        from verl_omni.utils.vllm_parity import parity_enabled
+
+        if not parity_enabled():
+            return super().prepare_model_outputs(output, output_args, micro_batch, logits_processor_func)
+
+        import verl.workers.engine.fsdp.transformer_impl as transformer_impl
+
+        original_logprobs = transformer_impl.logprobs_from_logits
+        previous_batch_invariant = self.engine_config.batch_invariant
+
+        def _parity_logprobs(logits, labels, inplace_backward=True, batch_invariant=False, temperature=None):
+            del inplace_backward, batch_invariant
+            return parity_logprobs(logits, labels, temperature)
+
+        transformer_impl.logprobs_from_logits = _parity_logprobs
+        # Parent selects unscaled logits + temperature when batch_invariant is set.
+        self.engine_config.batch_invariant = True
+        try:
+            return super().prepare_model_outputs(output, output_args, micro_batch, logits_processor_func)
+        finally:
+            transformer_impl.logprobs_from_logits = original_logprobs
+            self.engine_config.batch_invariant = previous_batch_invariant
+
     def get_per_tensor_param(self, layered_summon=False, base_sync_done=False, **kwargs):
         from verl.utils.torch_dtypes import PrecisionType
 

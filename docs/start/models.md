@@ -399,6 +399,7 @@ only the model-specific lines differ. See
 |---------|---------------|------------|
 | GSPO (AVQA LoRA, V1) | `examples/gspo_trainer/minicpm/run_minicpmo_4_5_thinker_gspo_lora_avqa_v1.sh` | 4×GPU |
 | GSPO (AVQA LoRA, V1, separate-async) | `examples/gspo_trainer/minicpm/run_minicpmo_4_5_thinker_gspo_lora_avqa_separate_async_v1.sh` | 4×GPU |
+| GSPO (GSM8K LoRA, experimental vLLM kernel parity) | `examples/gspo_trainer/minicpm/run_minicpmo_4_5_thinker_gspo_lora_gsm8k_vllm_parity_v1.sh` | 1×GPU (eager, TP=1) |
 | Offline DPO (LoRA, Omni-Preference) | `examples/dpo_trainer/minicpm/run_minicpm_omni_preference_lora.sh` | 4×GPU |
 | [Simplex OPD](../algo/omni_opd.md) (GSPO + teacher pool) | `examples/opd_trainer/minicpm_o/run_simplex_opd_lora.sh` | 8×GPU (4 student + 4 teacher) |
 
