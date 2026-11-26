@@ -311,7 +311,6 @@ def _generate_concurrent(
     server,
     prompts: list[str],
     *,
-    logprobs_first_only: bool = True,
     sampling_overrides: dict[str, Any] | None = None,
 ) -> list[DiffusionOutput]:
     sampling_overrides = sampling_overrides or {}
@@ -323,7 +322,7 @@ def _generate_concurrent(
             "true_cfg_scale": 1.0,
             "height": _SMOKE_SIZE,
             "width": _SMOKE_SIZE,
-            "logprobs": (i == 0) if logprobs_first_only else True,
+            "logprobs": True,
             **sampling_overrides,
         }
         refs.append(
@@ -373,24 +372,12 @@ def _assert_valid_diffusion_output(output: DiffusionOutput, *, index: int, expec
             assert len(lp) > 0
 
 
-@pytest.mark.skip(reason="Mixed-logprobs request batching is not critical for now; rollout always disables it.")
-def test_generate(init_server):
-    """Concurrent generate() covering basic output, logprobs, and multi-request correctness."""
-    results = _generate_concurrent(init_server, _PROMPTS, logprobs_first_only=True)
-
-    for i, output in enumerate(results):
-        _assert_valid_diffusion_output(output, index=i, expect_logprobs=(i == 0))
-
-    print(f"All {len(_PROMPTS)} concurrent requests returned valid DiffusionOutput")
-
-
 @pytest.mark.parametrize("output_type", ["image", "latent"])
 def test_generate_request_level_batch(init_server, output_type):
     """Concurrent generate under request-level batching (max_num_seqs>1 + wait_ms)."""
     results = _generate_concurrent(
         init_server,
         _PROMPTS,
-        logprobs_first_only=False,
         sampling_overrides={"output_type": output_type, "requested_outputs": ["image_preview", "image_latent"]},
     )
 

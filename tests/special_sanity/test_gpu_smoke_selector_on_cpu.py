@@ -155,6 +155,6 @@ def test_diffusion_e2e_support_files_select_diffusion_group():
         "tests/special_e2e/build_boogu_image_tiny_random.py",
         "tests/special_e2e/build_minimax_h3_tiny_random.py",
         "tests/special_e2e/create_dummy_h3_data.py",
-        "tests/special_e2e/minimax_h3_tiny_patch/patch.py",
+        "tests/special_e2e/minimax_h3_tiny_patch/sitecustomize.py",
     ):
         assert "ci-e2e-diffusion" in selector.select_group_names([path]), path

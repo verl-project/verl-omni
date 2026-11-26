@@ -13,12 +13,11 @@
 # limitations under the License.
 """Ascend ports of the GPU rollout request-batch and step-execution contracts.
 
-Ports the remaining cases of ``test_vllm_omni_generate.py`` (GPU core ID 1)
-that ``test_vllm_omni_generate_npu.py`` (NPU Test 0) does not cover: the
-GPU-side ``test_generate`` stays skipped upstream and sleep/wake remains an
-NPU-specific addition. The contract assertions are imported verbatim from
-the GPU module; only server launch, model path, and attention backends are
-adapted to the pinned Ascend stack.
+Ports the live cases of ``test_vllm_omni_generate.py`` (GPU core ID 1)
+that ``test_vllm_omni_generate_npu.py`` (NPU Test 0) does not cover.
+Sleep/wake remains an NPU-specific addition. The contract assertions are
+imported verbatim from the GPU module; only server launch, model path, and
+attention backends are adapted to the pinned Ascend stack.
 """
 
 import gc
@@ -230,7 +229,6 @@ def _generate_concurrent(
     server,
     prompts: list[str],
     *,
-    logprobs_first_only: bool = True,
     sampling_overrides: dict[str, Any] | None = None,
 ) -> list[DiffusionOutput]:
     """Submit distinct request IDs concurrently and retain request-specific sampling."""
@@ -243,7 +241,7 @@ def _generate_concurrent(
             "true_cfg_scale": 1.0,
             "height": _SMOKE_SIZE,
             "width": _SMOKE_SIZE,
-            "logprobs": (i == 0) if logprobs_first_only else True,
+            "logprobs": True,
             **sampling_overrides,
         }
         refs.append(
@@ -262,7 +260,6 @@ def test_generate_request_level_batch(init_server, output_type):
     results = _generate_concurrent(
         init_server,
         _PROMPTS,
-        logprobs_first_only=False,
         sampling_overrides={"output_type": output_type, "requested_outputs": ["image_preview", "image_latent"]},
     )
 
