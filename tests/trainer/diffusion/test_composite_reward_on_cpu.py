@@ -33,14 +33,14 @@ import pytest
 import torch
 from verl import DataProto
 
-from verl_omni.trainer.diffusion.ray_diffusion_trainer import PolicyGradientRayTrainer
+from verl_omni.trainer.diffusion.ray_diffusion_trainer import CompositePolicyGradientRayTrainer
 
 AR_REWARD_KEY = "reward/ar"
 
 
 class DummyTrainer:
     def _extract_ar_reward_tensor(self, batch_reward, ar_batch, avg_size):
-        return PolicyGradientRayTrainer._extract_ar_reward_tensor(self, batch_reward, ar_batch, avg_size)
+        return CompositePolicyGradientRayTrainer._extract_ar_reward_tensor(self, batch_reward, ar_batch, avg_size)
 
 
 class TestExtractARRewardsFromColocateBatch:
@@ -88,7 +88,9 @@ class TestExtractARRewardsFromColocateBatch:
             assert key not in batch_reward.non_tensor_batch.keys()
             assert key not in batch_reward.meta_info["reward_extra_keys"]
         assert ar_batch.non_tensor_batch[f"{AR_REWARD_KEY}/semantic"][1] == pytest.approx(1.15)
-        assert ar_batch.non_tensor_batch[f"{AR_REWARD_KEY}/semantic/detail"][1] == "ar detail 1"
+        detail = ar_batch.non_tensor_batch[f"{AR_REWARD_KEY}/semantic/detail"]
+        assert detail.shape == (num_ar,)
+        assert detail.tolist() == ["ar detail 0", "ar detail 1", "ar detail 2"]
 
     def test_extract_ar_rewards_raises_when_row_count_mismatches(self):
         batch_reward = DataProto.from_dict(
