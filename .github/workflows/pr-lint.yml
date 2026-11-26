@@ -28,16 +28,18 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          uv run --no-project --python 3.12 python tests/special_sanity/check_ci_policy.py "$BASE_SHA" "$HEAD_SHA"
-          uvx --python 3.12 pre-commit run check-pr-lint --from-ref "$BASE_SHA" --to-ref "$HEAD_SHA"
-          uvx --python 3.12 pre-commit run ruff --all-files --show-diff-on-failure
-          uvx --python 3.12 pre-commit run ruff-format --all-files --show-diff-on-failure
-          uvx --python 3.12 pre-commit run check-license --all-files
-          uvx --python 3.12 pre-commit run validate-structure --all-files
-          uvx --python 3.12 pre-commit run check-device-api-usage --all-files
-          uvx --python 3.12 pre-commit run check-dataproto-usage --all-files
-          uvx --python 3.12 pre-commit run check-naming-conventions --all-files
-          uvx --python 3.12 pre-commit run compileall --all-files
+          status=0
+          uv run --no-project --python 3.12 python tests/special_sanity/check_ci_policy.py "$BASE_SHA" "$HEAD_SHA" || status=1
+          uvx --python 3.12 pre-commit run check-pr-lint --from-ref "$BASE_SHA" --to-ref "$HEAD_SHA" || status=1
+          uvx --python 3.12 pre-commit run ruff --all-files --show-diff-on-failure || status=1
+          uvx --python 3.12 pre-commit run ruff-format --all-files --show-diff-on-failure || status=1
+          uvx --python 3.12 pre-commit run check-license --all-files || status=1
+          uvx --python 3.12 pre-commit run validate-structure --all-files || status=1
+          uvx --python 3.12 pre-commit run check-device-api-usage --all-files || status=1
+          uvx --python 3.12 pre-commit run check-dataproto-usage --all-files || status=1
+          uvx --python 3.12 pre-commit run check-naming-conventions --all-files || status=1
+          uvx --python 3.12 pre-commit run compileall --all-files || status=1
+          exit "$status"
       - name: Exercise checker regressions
         run: >-
           uv run --no-project --python 3.12 --with pytest --with pyyaml --with ruff==0.12.2 pytest -q

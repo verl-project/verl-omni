@@ -27,6 +27,10 @@ VALID_HEADER = "#!/usr/bin/env bash\nset -euo pipefail\n"
     [
         ('model = "/home/alice/weights"', ["VO014"]),
         ('model = "/Users/alice/weights"', ["VO014"]),
+        ('model = "/user/alice/weights"', ["VO014"]),
+        ('model = "/users/alice/weights"', ["VO014"]),
+        ('model = "/user"', []),
+        ('model = "/user_data/weights"', []),
         ('model = "/nfs/alice/weights"', ["VO014"]),
         ('model = "/mnt/weights"', ["VO014"]),
         ('model = "/root/weights"', ["VO014"]),
@@ -54,6 +58,9 @@ def test_python_path_literals(source: str, expected: list[str]) -> None:
     ("source", "expected"),
     [
         ('MODEL="/home/alice/weights"\npython trainer.py "$@"', ["VO014"]),
+        ('MODEL="/user/alice/weights"\npython trainer.py "$@"', ["VO014"]),
+        ('MODEL="/users/alice/weights"\npython trainer.py "$@"', ["VO014"]),
+        ('MODEL="/user_data/weights"\npython trainer.py "$@"', []),
         ('MODEL=/mnt/weights\npython trainer.py "$@"', ["VO014"]),
         ('MODEL=${MODEL:-/nfs/alice/weights}\npython trainer.py "$@"', ["VO014"]),
         ('python trainer.py "model.path=/root/weights" "$@"', ["VO014"]),
@@ -112,6 +119,9 @@ def test_shell_recipe_checks(source: str, expected: list[str]) -> None:
     ("source", "expected"),
     [
         ('model_path: "/home/alice/weights"', ["VO014"]),
+        ('model_path: "/user/alice/weights"', ["VO014"]),
+        ('model_path: "/users/alice/weights"', ["VO014"]),
+        ('model_path: "/user_data/weights"', []),
         ("model_path: /nfs/alice/weights", ["VO014"]),
         ("paths:\n  - /root/weights", ["VO014"]),
         ("model_path: /homegrown/weights", []),
@@ -385,3 +395,19 @@ def test_shell_safety_and_portability_guards(path: str, source: str, expected: l
 )
 def test_delegates_to_base_script_ignores_comments_and_heredocs(source: str, expected: bool) -> None:
     assert delegates_to_base_script(source.encode(), "run_foo.sh") is expected
+
+
+def test_multiline_shell_findings_report_exact_line_numbers() -> None:
+    source = (
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        'MODEL="/home/alice/weights"\n'
+        "python3 -m verl_omni.trainer.main_omni \\\n"
+        "    data.train_batch_size=8 \\\n"
+        "    actor.use_kl_loss=false \\\n"
+        '    data.val_file="/user/alice/val.parquet" \\\n'
+        "    actor.use_kl_loss=true \\\n"
+        '    "$@"\n'
+    )
+    hits = [(line, code) for line, code, _msg in findings("examples/model/run_train.sh", source.encode())]
+    assert hits == [(3, "VO014"), (7, "VO014"), (8, "EX007")]

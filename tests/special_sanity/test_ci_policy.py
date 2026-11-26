@@ -206,11 +206,21 @@ def test_lint_workflow_runs_fast_native_sanity_hooks() -> None:
 
 
 def test_ci_workflow_safety_and_coverage_guards() -> None:
+    lint = _workflow(LINT_WORKFLOW)
+    lint_hooks = next(
+        step["run"] for step in lint["jobs"]["lint"]["steps"] if step.get("name") == "Run pre-commit lint hooks"
+    )
+    assert "status=0" in lint_hooks
+    assert 'exit "$status"' in lint_hooks
+
     protect = _workflow("protect-ci-checks.yml")
     assert "concurrency" in protect
     assert "edited" in protect["on"]["pull_request_target"]["types"]
     checkout = protect["jobs"]["protect-ci-checks"]["steps"][0]
     assert checkout["with"]["ref"] == "${{ github.sha }}"
+    protect_run = protect["jobs"]["protect-ci-checks"]["steps"][2]["run"]
+    assert "status=0" in protect_run
+    assert 'exit "$status"' in protect_run
 
     gpu_smoke = _workflow("gpu_smoke.yml")
     gpu_pr_lint_if = gpu_smoke["jobs"]["pr_lint"]["if"]

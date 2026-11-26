@@ -38,5 +38,7 @@ jobs:
           if ! git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
             BASE_SHA="HEAD"
           fi
-          uv run --no-project --python 3.12 python tests/special_sanity/check_ci_policy.py "$BASE_SHA" "$HEAD_SHA"
-          uv run --no-project --python 3.12 --with ruff==0.12.2 python tests/special_sanity/check_pr_lint.py "$BASE_SHA" "$HEAD_SHA"
+          status=0
+          uv run --no-project --python 3.12 python tests/special_sanity/check_ci_policy.py "$BASE_SHA" "$HEAD_SHA" || status=1
+          uv run --no-project --python 3.12 --with ruff==0.12.2 python tests/special_sanity/check_pr_lint.py "$BASE_SHA" "$HEAD_SHA" || status=1
+          exit "$status"

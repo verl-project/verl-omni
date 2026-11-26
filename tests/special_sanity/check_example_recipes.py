@@ -23,11 +23,10 @@ from collections.abc import Iterator
 from pathlib import PurePosixPath
 
 MEDIA_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".mp4", ".wav", ".mov", ".webm", ".mp3", ".flac"}
-LOCAL_PATH = re.compile(r"^/(?:Users|home|nfs|mnt|root)(?:/|$)")
-SHELL_LOCAL_PATH = re.compile(r"(?:^|=|:-|:=|-|:\+|:(?=/))[\"']?(/(?:Users|home|nfs|mnt|root)(?:/|$))")
-YAML_LOCAL_PATH = re.compile(
-    r"^(?:\s*-\s*|[A-Za-z0-9_.-]+\s*:\s*(?:\[[^\]]*,\s*)?)[\"']?(/(?:Users|home|nfs|mnt|root)(?:/|$))"
-)
+_LOCAL_PATH_BODY = r"/(?:(?:Users|home|nfs|mnt|root)(?:/|$)|users?/)"
+LOCAL_PATH = re.compile(rf"^{_LOCAL_PATH_BODY}")
+SHELL_LOCAL_PATH = re.compile(rf"(?:^|=|:-|:=|-|:\+|:(?=/))[\"']?({_LOCAL_PATH_BODY})")
+YAML_LOCAL_PATH = re.compile(rf"^(?:\s*-\s*|[A-Za-z0-9_.-]+\s*:\s*(?:\[[^\]]*,\s*)?)[\"']?({_LOCAL_PATH_BODY})")
 HARDCODED_VENV_PYTHON = re.compile(r"(?:^|[=:/\-])\.venv/bin/python")
 TRAILING_BACKSLASH_SPACE = re.compile(r"\\[ \t]+$")
 _HYDRA_SET_KEY = re.compile(r"^(?:\+\+?)?([a-zA-Z_][a-zA-Z0-9_]*(?:\.[a-zA-Z_][a-zA-Z0-9_]*)+)=")
@@ -173,6 +172,7 @@ def _consume_heredoc_tokens(line_tokens: list[str], heredocs: list[tuple[str, bo
 def _shell_tokens(source: str) -> list[tuple[int, str]]:
     tokens: list[tuple[int, str]] = []
     heredocs: list[tuple[str, bool]] = []
+    logical_line_tokens: list[str] = []
     continued = ""
     start_line = 1
     quote: str | None = None
@@ -189,10 +189,8 @@ def _shell_tokens(source: str) -> list[tuple[int, str]]:
         if quote is not None:
             continued += line[:-1] if has_cont else line + "\n"
             continue
-        if has_cont:
-            continued += line[:-1] + " "
-            continue
-        full_line = continued + line
+        segment = line[:-1] if has_cont else line
+        full_line = continued + segment
         continued = ""
         lexer = shlex.shlex(full_line, posix=False, punctuation_chars=";&|()<>")
         lexer.whitespace_split = True
@@ -200,10 +198,17 @@ def _shell_tokens(source: str) -> list[tuple[int, str]]:
         try:
             line_tokens = list(lexer)
         except ValueError:
+            if not has_cont:
+                _consume_heredoc_tokens(logical_line_tokens, heredocs)
+                logical_line_tokens.clear()
+                tokens.append((line_number, "\n"))
             continue
-        _consume_heredoc_tokens(line_tokens, heredocs)
         tokens.extend((start_line, token) for token in line_tokens)
-        tokens.append((line_number, "\n"))
+        logical_line_tokens.extend(line_tokens)
+        if not has_cont:
+            _consume_heredoc_tokens(logical_line_tokens, heredocs)
+            logical_line_tokens.clear()
+            tokens.append((line_number, "\n"))
     return tokens
 
 

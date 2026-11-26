@@ -69,7 +69,7 @@ files alike ([RFC #942](https://github.com/verl-project/verl-omni/issues/942)):
 - Public API contracts (`__all__` exports, shared pipeline contract modules,
   and `compute_score*` entrypoints) require concise docstrings (`VO015`).
 - Pass personal model/data paths through configuration or temporary fixtures
-  instead of `/home/`, `/Users/`, `/nfs/`, `/mnt/` or `/root/` literals (`VO014`).
+  instead of `/home/`, `/Users/`, `/user/`, `/nfs/`, `/mnt/` or `/root/` literals (`VO014`).
 
 The scripts use the `check_<subject>.py` naming convention also used by
 [SGLang-Omni's checks](https://github.com/sgl-project/sglang-omni/tree/main/scripts):
