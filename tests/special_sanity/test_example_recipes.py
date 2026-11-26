@@ -19,6 +19,8 @@ from pathlib import Path
 import pytest
 from check_example_recipes import findings
 
+VALID_HEADER = "#!/usr/bin/env bash\nset -euo pipefail\n"
+
 
 @pytest.mark.parametrize(
     ("source", "expected"),
@@ -86,7 +88,9 @@ def test_python_path_literals(source: str, expected: list[str]) -> None:
     ],
 )
 def test_shell_recipe_checks(source: str, expected: list[str]) -> None:
-    assert [code for _line, code, _message in findings("examples/model/run_train.sh", source.encode())] == expected
+    assert [
+        code for _line, code, _message in findings("examples/model/run_train.sh", (VALID_HEADER + source).encode())
+    ] == expected
 
 
 @pytest.mark.parametrize(
@@ -142,6 +146,43 @@ def test_shell_syntax_inspection_never_executes_commands(tmp_path: Path, monkeyp
     startup.write_text(f'touch "{sentinel}"\n', encoding="utf-8")
     monkeypatch.setenv("BASH_ENV", str(startup))
     monkeypatch.setenv("ENV", str(startup))
-    source = f'touch "{sentinel}"\nRESULT=$(touch "{sentinel}")\npython trainer.py "$@"\n'
+    source = f'{VALID_HEADER}touch "{sentinel}"\nRESULT=$(touch "{sentinel}")\npython trainer.py "$@"\n'
     assert not list(findings("examples/model/run_train.sh", source.encode()))
     assert not sentinel.exists()
+
+
+@pytest.mark.parametrize(
+    ("path", "source", "expected"),
+    [
+        ("examples/model/run_train.sh", 'set -euo pipefail\npython trainer.py "$@"\n', ["EX005"]),
+        ("examples/model/run_train.sh", '#!/bin/bash\nset -euo pipefail\npython trainer.py "$@"\n', ["EX005"]),
+        ("examples/model/run_train.sh", '#!/usr/bin/env bash\nset -x\npython trainer.py "$@"\n', ["EX005"]),
+        ("examples/model/run_train.sh", '#!/usr/bin/env bash\nset -euo pipefail\npython trainer.py "$@"\n', []),
+        ("examples/model/run_train.sh", '#!/usr/bin/env bash\nset -xeuo pipefail\npython trainer.py "$@"\n', []),
+        ("examples/model/run_train.sh", '#!/usr/bin/env bash\nset -ex\npython trainer.py "$@"\n', []),
+        ("examples/model/run_train.sh", '#!/usr/bin/env bash\nset -o errexit\npython trainer.py "$@"\n', []),
+        ("examples/model/setup.sh", "echo ok\n", []),
+    ],
+)
+def test_run_shell_recipes_require_bash_shebang_and_errexit(path: str, source: str, expected: list[str]) -> None:
+    assert [code for _line, code, _message in findings(path, source.encode())] == expected
+
+
+@pytest.mark.parametrize(
+    ("path", "source", "expected"),
+    [
+        ("examples/dancegrpo_trainer/flux1/dataprocess/prepare_prompts.py", "x = 1\n", ["EX006"]),
+        (
+            "examples/dpo_trainer/qwen3_omni/qwen3_omni/run_demo.sh",
+            f'{VALID_HEADER}python trainer.py "$@"\n',
+            ["EX006"],
+        ),
+        ("examples/dpo_trainer/qwen3_omni/eval.sh", ".venv/bin/python eval.py\n", ["EX006"]),
+        ("examples/dancegrpo_trainer/data_process/prepare_prompts.py", "x = 1\n", []),
+        ("examples/dpo_trainer/qwen3_omni/run_demo.sh", f'{VALID_HEADER}python trainer.py "$@"\n', []),
+        ("examples/dpo_trainer/qwen3_omni/eval.sh", "# .venv/bin/python\npython3 eval.py\n", []),
+        ("examples/dpo_trainer/qwen3_omni/eval.sh", "cat <<EOF\n.venv/bin/python\nEOF\npython3 eval.py\n", []),
+    ],
+)
+def test_example_layout_and_portable_python_hygiene(path: str, source: str, expected: list[str]) -> None:
+    assert [code for _line, code, _message in findings(path, source.encode())] == expected

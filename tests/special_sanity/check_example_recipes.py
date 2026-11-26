@@ -26,6 +26,8 @@ MEDIA_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".mp4", ".wav"}
 LOCAL_PATH = re.compile(r"^/(?:Users|home|nfs|mnt|root)(?:/|$)")
 SHELL_LOCAL_PATH = re.compile(r"(?:^|=|:-|:=)[\"']?(/(?:Users|home|nfs|mnt|root)(?:/|$))")
 YAML_LOCAL_PATH = re.compile(r"(?:^|:\s+|-\s+|[,\[{]\s*)[\"']?(/(?:Users|home|nfs|mnt|root)(?:/|$))")
+SET_ERREXIT = re.compile(r"^\s*set\s+(?:-[a-zA-Z]*e[a-zA-Z]*\b|-o\s+errexit\b)", re.MULTILINE)
+HARDCODED_VENV_PYTHON = re.compile(r"(?:^|/)\.venv/bin/python")
 
 
 def _python_paths(source: bytes) -> Iterator[int]:
@@ -126,9 +128,15 @@ def _forwards_args(tokens: list[tuple[int, str]]) -> bool:
 
 
 def findings(path: str, source: bytes) -> Iterator[tuple[int, str, str]]:
-    """Check local path literals, example names, and basic shell recipe hygiene."""
+    """Check local path literals, example names, layout, and shell recipe hygiene."""
     source_path = PurePosixPath(path)
     in_examples = path.startswith("examples/")
+    if in_examples:
+        dirs = source_path.parts[1:-1]
+        if "dataprocess" in dirs:
+            yield 1, "EX006", "Use data_process/ instead of dataprocess/ under examples/."
+        if any(parent == child for parent, child in zip(dirs, dirs[1:], strict=False)):
+            yield 1, "EX006", "Remove duplicate nested directory segment under examples/."
     if in_examples and source_path.suffix.lower() in MEDIA_SUFFIXES:
         yield 1, "EX003", "Keep generated example media in PR evidence instead of committing it."
         return
@@ -173,7 +181,19 @@ def findings(path: str, source: bytes) -> Iterator[tuple[int, str, str]]:
         return
     tokens = _shell_tokens(text)
     for line, token in tokens:
-        if SHELL_LOCAL_PATH.search(token.strip("\"'")):
+        stripped = token.strip("\"'")
+        if SHELL_LOCAL_PATH.search(stripped):
             yield line, "VO014", "Pass local model and data paths through configuration."
-    if source_path.name.startswith("run_") and not _forwards_args(tokens):
-        yield 1, "EX002", 'Forward caller overrides as a double-quoted "$@" command argument.'
+        if HARDCODED_VENV_PYTHON.search(stripped):
+            yield line, "EX006", "Use python3 or ${PYTHON_BIN:-python3} instead of a hardcoded .venv/bin/python path."
+    if source_path.name.startswith("run_"):
+        lines = text.splitlines()
+        has_shebang = bool(lines) and lines[0].strip() == "#!/usr/bin/env bash"
+        if not (has_shebang and SET_ERREXIT.search(text)):
+            yield (
+                1,
+                "EX005",
+                "Start run_*.sh recipes with #!/usr/bin/env bash and enable set -e (e.g. set -euo pipefail).",
+            )
+        if not _forwards_args(tokens):
+            yield 1, "EX002", 'Forward caller overrides as a double-quoted "$@" command argument.'

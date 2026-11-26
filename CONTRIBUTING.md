@@ -100,11 +100,12 @@ remain intact. In addition, the PR `Lint` workflow runs Ruff plus
 `check-dataproto-usage`, `check-naming-conventions`, and `compileall`.
 
 Example shell changes are parsed with `bash -n` (`EX001`). `run_*.sh` scripts must
-contain double-quoted caller argument forwarding (`EX002`); comments, printed
-text and heredocs do not count. This checks syntax and forwarding shape, not
-whether an actual trainer receives every argument. Example media belongs in PR
-evidence (`EX003`), and example pages use `README.md` instead of `README_*.md`
-so documentation discovery includes them (`EX004`).
+use `#!/usr/bin/env bash` with `set -e` (`EX005`) and double-quoted caller
+argument forwarding (`EX002`; comments, printed text and heredocs do not count).
+This checks syntax and recipe shape, not whether an actual trainer receives
+every argument. Example media belongs in PR evidence (`EX003`), example pages
+use `README.md` instead of `README_*.md` (`EX004`), and `examples/` rejects
+`dataprocess/`, duplicate nested folders, and `.venv/bin/python` (`EX006`).
 
 The checker reads staged Git objects or the PR snapshots without importing
 candidate Python or executing recipes. Historical findings are compared by

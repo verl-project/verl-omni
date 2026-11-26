@@ -332,7 +332,11 @@ def test_one_pr_reports_all_layers_and_turns_green_after_fixes(tmp_path: Path) -
             'import pytest\npytestmark = pytest.mark.skipif(enabled_gpu_count() < 2, reason="two GPUs")\n',
         ),
         "examples/model/config.yaml": ('model: "/home/alice/weights"\n', "model: org/model\n"),
-        "examples/model/run_train.sh": ("python trainer.py\n", 'python trainer.py "$@"\n'),
+        "examples/model/run_train.sh": (
+            "python trainer.py\n",
+            '#!/usr/bin/env bash\nset -euo pipefail\npython trainer.py "$@"\n',
+        ),
+        "examples/model/eval.sh": (".venv/bin/python eval.py\n", "python3 eval.py\n"),
         "examples/model/setup.sh": ("if true; then\n", "true\n"),
         "examples/model/README_training.md": ("documentation", None),
         "examples/model/reward.png": ("image", None),
@@ -343,7 +347,7 @@ def test_one_pr_reports_all_layers_and_turns_green_after_fixes(tmp_path: Path) -
         target.write_text(source, encoding="utf-8")
     head = _commit(tmp_path)
     expected_codes = {"VO003", "VO008", "VO009", "VO010", "VO011", "VO012", "VO013", "VO014"}
-    expected_codes.update({"EX001", "EX002", "EX003", "EX004"})
+    expected_codes.update({"EX001", "EX002", "EX003", "EX004", "EX005", "EX006"})
     result = subprocess.run([sys.executable, str(CHECKER), base, head], cwd=tmp_path, capture_output=True, text=True)
     assert result.returncode == 1, result.stdout + result.stderr
     assert {line.split()[1] for line in result.stdout.splitlines()} == expected_codes
@@ -438,6 +442,8 @@ def test_live_repo_baseline_respects_precision_bounds() -> None:
     assert counts["VO015"] <= 4
     assert counts["CM001"] <= 7
     assert counts["CM003"] <= 15
+    assert counts["EX005"] <= 81
+    assert counts["EX006"] <= 5
 
 
 RULE_MATRIX: dict[str, tuple[str, bytes, str, bytes]] = {
@@ -552,15 +558,32 @@ RULE_MATRIX: dict[str, tuple[str, bytes, str, bytes]] = {
         CORE_PATH,
         b"# Workaround for issue #942\nvalue = 1\n",
     ),
-    "EX001": ("examples/demo/run_train.sh", b"if [\n", "examples/demo/run_train.sh", b'exec python train.py "$@"\n'),
+    "EX001": (
+        "examples/demo/run_train.sh",
+        b"if [\n",
+        "examples/demo/run_train.sh",
+        b'#!/usr/bin/env bash\nset -euo pipefail\nexec python train.py "$@"\n',
+    ),
     "EX002": (
         "examples/demo/run_train.sh",
-        b"python train.py\n",
+        b"#!/usr/bin/env bash\nset -euo pipefail\npython train.py\n",
         "examples/demo/run_train.sh",
-        b'exec python train.py "$@"\n',
+        b'#!/usr/bin/env bash\nset -euo pipefail\nexec python train.py "$@"\n',
     ),
     "EX003": ("examples/demo/sample.png", b"\x89PNG\r\n", "examples/demo/train.py", b"x = 1\n"),
     "EX004": ("examples/demo/README_en.md", b"# Demo\n", "examples/demo/README.md", b"# Demo\n"),
+    "EX005": (
+        "examples/demo/run_train.sh",
+        b'python train.py "$@"\n',
+        "examples/demo/run_train.sh",
+        b'#!/usr/bin/env bash\nset -euo pipefail\npython train.py "$@"\n',
+    ),
+    "EX006": (
+        "examples/demo/dataprocess/prepare.py",
+        b"x = 1\n",
+        "examples/demo/data_process/prepare.py",
+        b"x = 1\n",
+    ),
 }
 
 
