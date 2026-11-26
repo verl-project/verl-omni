@@ -1,6 +1,6 @@
 # How to Add a New Omni Model
 
-Last updated: 11/24/2026.
+Last updated: 11/25/2026.
 
 This guide walks through adding a new omni (multimodal autoregressive) model to
 the verl-omni training framework. It uses the Qwen3-Omni Thinker adapter as a
@@ -255,6 +255,10 @@ no recipe-specific YAML files or `--config-path/--config-name`. The Megatron
 recipe instead selects the shared config described in §2.1.
 
 ```bash
+# On a platform registered by a hardware plugin, replace the export below with
+# the plugin module listed first, so the plugin registers the platform before
+# verl_omni is imported:
+# export VERL_USE_EXTERNAL_MODULES=verl_hardware_plugin,verl_omni
 export VERL_USE_EXTERNAL_MODULES=verl_omni
 
 python3 -m verl_omni.trainer.main_omni \
