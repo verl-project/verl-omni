@@ -15,24 +15,18 @@
 The output of this script can be a very good hint to issue/problem.
 """
 
+import argparse
+import importlib.metadata
 import os
 import platform
 import socket
 import subprocess
 import sys
 import time
+from urllib.parse import urlparse
+from urllib.request import urlopen
 
 import psutil
-
-try:
-    from urllib.parse import urlparse
-    from urllib.request import urlopen
-except ImportError:
-    from urllib2 import urlopen
-    from urlparse import urlparse
-import argparse
-import importlib.metadata
-
 import torch
 
 URLS = {
