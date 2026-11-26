@@ -200,8 +200,6 @@ Lint setup and the commands to run it are in [CONTRIBUTING.md](https://github.co
 
 If possible, please add CI test(s) for your new feature. See {doc}`contributing/testing_guide` for the L1-L4 test taxonomy, placement rules, and coverage policy. Add the test as described in [CONTRIBUTING.md](https://github.com/verl-project/verl-omni/blob/main/CONTRIBUTING.md#adding-ci-tests). Do not edit workflow YAML.
 
-Pick the most relevant workflow from [`.github/workflows/`](https://github.com/verl-project/verl-omni/tree/main/.github/workflows):
-
 | Workflow | When to use |
 |---|---|
 | `cpu_unit_tests.yml` | New tests that run without a GPU (file name must end with `_on_cpu.py`) |
