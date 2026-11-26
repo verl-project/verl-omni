@@ -74,10 +74,10 @@ It does **not** check docstring style, and does **not** cover the rest of the
 repo. The following are therefore **conventions** (follow them; they are what
 reviewers ask for), not automated gates:
 
-- Preserve docstrings required by the existing gate. Elsewhere, document public
-  API contracts when callers need information the signature cannot express;
-  do not add boilerplate to trivial internal helpers or forwarding methods.
-  A `_` prefix marks module-private scope; never add it just to bypass the gate.
+- Preserve docstrings required by the existing gate. Document `__all__` exports,
+  shared pipeline contracts, and `compute_score*` scorers with concise
+  docstrings (`VO015`). Elsewhere, keep internal helpers brief (`<= 5` non-empty
+  docstring lines) and never add a `_` prefix just to bypass a gate.
 - Use concise Google-style `Args:` / `Returns:` / `Raises:` sections only when
   they convey necessary contracts; omit empty or repetitive template sections.
 - Document tensor shapes and dtypes explicitly, e.g. `(C, H, W)` or `(N, C, H, W)`.
@@ -98,11 +98,12 @@ Do not generate line-by-line narration, numbered step commentary, edit history
 code. Rename or simplify code that needs a comment merely to restate what it does.
 Long explanations belong in `docs/`; do not move noise into a docstring instead.
 
-`check_comments.py` rejects recognizable edit/step narration and banners;
-isolated Ruff `ERA001` rejects recognizable commented-out code in production.
-These checks classify syntax, not whether an author used AI. Review still judges
-necessity. Preserve license and attribution text, tooling directives and required
-config documentation ([config.md](config.md)).
+`check_comments.py` rejects edit/step/chatty narration (`CM001`), banners
+(`CM002`), echo comments (`CM003`), 4+ line function comment blocks (`CM004`),
+`Necessity:`/`Motivation:` headers and bloated private docstrings (`CM005`), and
+`PR #...` comments (`CM006`); isolated Ruff `ERA001` rejects commented-out code.
+These checks classify syntax, not authorship. Preserve license headers, tooling
+directives, and required config documentation ([config.md](config.md)).
 
 ## Imports and lint scope
 

@@ -365,6 +365,8 @@ def test_comment_checks_preserve_history_and_reject_new_noise_in_a_pr(tmp_path: 
     noise = (
         "\ndef added():\n"
         "    # Added handling for the new field\n"
+        "    # Here we compute latents\n"
+        "    # See PR #942\n"
         "    # ======\n"
         "    # value = old_compute()\n"
         "    return 2\n"
@@ -373,8 +375,8 @@ def test_comment_checks_preserve_history_and_reject_new_noise_in_a_pr(tmp_path: 
     head = _commit(tmp_path)
     result = subprocess.run([sys.executable, str(CHECKER), base, head], cwd=tmp_path, capture_output=True, text=True)
     assert result.returncode == 1, result.stdout + result.stderr
-    assert {line.split()[1] for line in result.stdout.splitlines()} == {"CM001", "CM002", "ERA001"}
-    assert len(result.stdout.splitlines()) == 3
+    assert {line.split()[1] for line in result.stdout.splitlines()} == {"CM001", "CM002", "CM006", "ERA001"}
+    assert len(result.stdout.splitlines()) == 5
 
     clean = (
         '\ndef added():\n    """Return a scalar score; missing input raises ValueError."""\n'

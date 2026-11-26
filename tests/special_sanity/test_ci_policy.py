@@ -143,3 +143,20 @@ def test_accelerator_jobs_wait_for_lint(workflow: str, accelerator_job: str) -> 
     assert jobs["pr_lint"]["uses"] == f"./.github/workflows/{LINT_WORKFLOW}"
     assert "pr_lint" in jobs[accelerator_job]["needs"]
     assert "needs.pr_lint.result == 'success'" in jobs[accelerator_job]["if"]
+
+
+def test_lint_workflow_runs_fast_native_sanity_hooks() -> None:
+    steps = _workflow(LINT_WORKFLOW)["jobs"]["lint"]["steps"]
+    lint_run = next(step["run"] for step in steps if step.get("name") == "Run pre-commit lint hooks")
+    for hook in (
+        "check-code",
+        "ruff",
+        "ruff-format",
+        "check-license",
+        "validate-structure",
+        "check-device-api-usage",
+        "check-dataproto-usage",
+        "check-naming-conventions",
+        "compileall",
+    ):
+        assert hook in lint_run

@@ -32,6 +32,24 @@ SHARED_PIPELINE_MODULES = {
     "utils",
 }
 TRAINING_BASES = {"DiffusionModelBase", "DiffusionModelARBase", "DiffusionI2IModelBase", "OmniModelBase"}
+SHARED_CONTRACT_FILES = {
+    "verl_omni/pipelines/model_base.py",
+    "verl_omni/pipelines/non_diffusers_model_base.py",
+    "verl_omni/pipelines/rollout_request.py",
+    "verl_omni/pipelines/rollout_media.py",
+    "verl_omni/pipelines/request_batch.py",
+    "verl_omni/pipelines/diffusion_rollout_output.py",
+}
+LITERAL_TYPES = {"Literal", "typing.Literal", "typing_extensions.Literal"}
+CLASSVAR_TYPES = {"ClassVar", "typing.ClassVar", "typing_extensions.ClassVar"}
+ROOT_CONFIG_BASES = {"BaseConfig", "object", "builtins.object"}
+DOCSTRING_SKIP_DECORATORS = {
+    "property",
+    "builtins.property",
+    "overload",
+    "typing.overload",
+    "typing_extensions.overload",
+}
 MODEL_NAME = re.compile(
     r"(?<![a-z0-9])(?:qwen[-_]?image|qwen3[-_]?(?:omni|tts)|minimax[-_]?h3|h3[-_]?image|"
     r"boogu|bagel|wan22|wanpipeline|ltx[-_]?2|minicpm|stable[-_]?diffusion|sd3(?:5|(?=[_\-]|$))|"
@@ -302,7 +320,7 @@ def _training_adapters(tree: ast.AST, aliases: dict[str, str]) -> Iterator[tuple
                 )
 
 
-def _config_dataclasses(tree: ast.AST, aliases: dict[str, str]) -> Iterator[tuple[int, str, str]]:
+def _static_exports(tree: ast.AST) -> set[str] | None:
     exported = None
     for node in tree.body:
         if isinstance(node, ast.Assign) and any(
@@ -317,6 +335,50 @@ def _config_dataclasses(tree: ast.AST, aliases: dict[str, str]) -> Iterator[tupl
                 exported.update(additions)
             else:
                 exported = None
+    return exported
+
+
+def _is_classvar(annotation: ast.AST, aliases: dict[str, str]) -> bool:
+    target = annotation.value if isinstance(annotation, ast.Subscript) else annotation
+    return _qualified(target, aliases) in CLASSVAR_TYPES
+
+
+def _uses_literal(annotation: ast.AST, aliases: dict[str, str]) -> bool:
+    for sub in ast.walk(annotation):
+        target = sub.value if isinstance(sub, ast.Subscript) else sub
+        if _qualified(target, aliases) in LITERAL_TYPES:
+            return True
+    return False
+
+
+def _has_default_value(stmt: ast.AnnAssign, aliases: dict[str, str]) -> bool:
+    if stmt.value is None:
+        return False
+    if _qualified(stmt.value, aliases) in {"MISSING", "dataclasses.MISSING"}:
+        return False
+    if isinstance(stmt.value, ast.Call) and _qualified(stmt.value.func, aliases) in {"field", "dataclasses.field"}:
+        has_default = any(
+            keyword.arg == "default" and _qualified(keyword.value, aliases) not in {"MISSING", "dataclasses.MISSING"}
+            for keyword in stmt.value.keywords
+        )
+        has_factory = any(keyword.arg == "default_factory" for keyword in stmt.value.keywords)
+        return has_default or has_factory
+    return True
+
+
+def _calls_super_post_init(method: ast.FunctionDef, aliases: dict[str, str]) -> bool:
+    return any(
+        isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Attribute)
+        and call.func.attr == "__post_init__"
+        and isinstance(call.func.value, ast.Call)
+        and _qualified(call.func.value.func, aliases) in {"super", "builtins.super"}
+        for call in ast.walk(method)
+    )
+
+
+def _config_dataclasses(tree: ast.AST, aliases: dict[str, str]) -> Iterator[tuple[int, str, str]]:
+    exported = _static_exports(tree)
     for node in tree.body:
         if not isinstance(node, ast.ClassDef):
             continue
@@ -329,7 +391,8 @@ def _config_dataclasses(tree: ast.AST, aliases: dict[str, str]) -> Iterator[tupl
         if not dataclasses:
             continue
         reasons = []
-        if not node.bases or all(_qualified(base, aliases) in {"object", "builtins.object"} for base in node.bases):
+        base_names = [_qualified(base, aliases) for base in node.bases]
+        if not base_names or all(name in {"object", "builtins.object"} for name in base_names):
             reasons.append("inherit BaseConfig or an existing config subclass")
         if any(
             isinstance(decorator, ast.Call)
@@ -342,8 +405,109 @@ def _config_dataclasses(tree: ast.AST, aliases: dict[str, str]) -> Iterator[tupl
             reasons.append("use BaseConfig mutability instead of frozen=True")
         if exported is not None and not node.name.startswith("_") and node.name not in exported:
             reasons.append("export the public config in __all__")
+        missing_defaults = [
+            stmt.target.id
+            for stmt in node.body
+            if isinstance(stmt, ast.AnnAssign)
+            and isinstance(stmt.target, ast.Name)
+            and not _is_classvar(stmt.annotation, aliases)
+            and not _has_default_value(stmt, aliases)
+        ]
+        if missing_defaults:
+            reasons.append(f"give every field a default or default_factory ({', '.join(missing_defaults)})")
+        if any(isinstance(stmt, ast.AnnAssign) and _uses_literal(stmt.annotation, aliases) for stmt in node.body):
+            reasons.append("use str with valid_* validation instead of typing.Literal")
+        if any(name and name not in ROOT_CONFIG_BASES and not name.endswith(".BaseConfig") for name in base_names):
+            for stmt in node.body:
+                if (
+                    isinstance(stmt, ast.FunctionDef)
+                    and stmt.name == "__post_init__"
+                    and not _calls_super_post_init(stmt, aliases)
+                ):
+                    reasons.append("call super().__post_init__() in subclass __post_init__")
+                    break
         if reasons:
             yield node.lineno, "VO011", f"{node.name}: {'; '.join(reasons)}."
+
+
+def _has_docstring(node: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef) -> bool:
+    return bool(ast.get_docstring(node))
+
+
+def _skip_method_docstring(node: ast.FunctionDef | ast.AsyncFunctionDef, aliases: dict[str, str]) -> bool:
+    if node.name.startswith("_"):
+        return True
+    return any(_qualified(decorator, aliases) in DOCSTRING_SKIP_DECORATORS for decorator in node.decorator_list)
+
+
+def _public_api_docstrings(path: str, tree: ast.AST, aliases: dict[str, str]) -> Iterator[tuple[int, str, str]]:
+    in_config = path.startswith(("verl_omni/trainer/config/", "verl_omni/workers/config/"))
+    exported = None if in_config else _static_exports(tree)
+    in_contract = path in SHARED_CONTRACT_FILES
+    in_reward_score = path.startswith("verl_omni/utils/reward_score/")
+    for node in tree.body:
+        if not isinstance(node, ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef):
+            continue
+        is_exported = exported is not None and not node.name.startswith("_") and node.name in exported
+        is_contract_symbol = in_contract and not node.name.startswith("_")
+        is_scorer = (
+            in_reward_score
+            and isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+            and (node.name == "compute_score" or node.name.startswith("compute_score_"))
+        )
+        if (is_exported or is_contract_symbol or is_scorer) and not _has_docstring(node):
+            yield node.lineno, "VO015", f"Document public API '{node.name}' with a concise contract docstring."
+        if in_contract and isinstance(node, ast.ClassDef) and not node.name.startswith("_"):
+            for member in node.body:
+                if (
+                    isinstance(member, ast.FunctionDef | ast.AsyncFunctionDef)
+                    and not _skip_method_docstring(member, aliases)
+                    and not _has_docstring(member)
+                ):
+                    yield (
+                        member.lineno,
+                        "VO015",
+                        f"Document shared contract method '{node.name}.{member.name}' with a concise docstring.",
+                    )
+
+
+def _caught_exception_names(exc_type: ast.AST, aliases: dict[str, str]) -> list[str]:
+    if isinstance(exc_type, ast.Tuple):
+        names: list[str] = []
+        for element in exc_type.elts:
+            names.extend(_caught_exception_names(element, aliases))
+        return names
+    qualified = _qualified(exc_type, aliases)
+    return [qualified] if qualified else []
+
+
+def _artifact_contract_errors(tree: ast.AST, aliases: dict[str, str]) -> Iterator[tuple[int, str, str]]:
+    try_nodes = [node for node in ast.walk(tree) if isinstance(node, ast.Try | ast.TryStar)]
+    for try_node in try_nodes:
+        handled_contract = False
+        for handler in try_node.handlers:
+            has_raise = any(
+                isinstance(sub, ast.Raise) for sub in ast.walk(ast.Module(body=handler.body, type_ignores=[]))
+            )
+            if handler.type is None:
+                if not handled_contract and not has_raise:
+                    yield handler.lineno, "VO016", "Propagate ArtifactContractError before bare except fallback."
+                continue
+            caught = _caught_exception_names(handler.type, aliases)
+            if any(name.split(".")[-1] == "ArtifactContractError" for name in caught):
+                if has_raise:
+                    handled_contract = True
+                else:
+                    yield handler.lineno, "VO016", "Propagate ArtifactContractError instead of swallowing it."
+            elif (
+                any(
+                    name in {"Exception", "BaseException", "builtins.Exception", "builtins.BaseException"}
+                    for name in caught
+                )
+                and not handled_contract
+                and not has_raise
+            ):
+                yield handler.lineno, "VO016", "Propagate ArtifactContractError before fallback exception handling."
 
 
 def _literal_exports(node: ast.AST) -> set[str] | None:
@@ -396,6 +560,9 @@ def findings(path: str, tree: ast.AST) -> Iterator[tuple[int, str, str]]:
         yield from _config_dataclasses(tree, aliases)
     if path.startswith("verl_omni/reward_loop/reward_manager/"):
         yield from _network_imports(tree)
+    if path.startswith(("verl_omni/utils/reward_score/", "verl_omni/reward_loop/")):
+        yield from _artifact_contract_errors(tree, aliases)
     if path.startswith("verl_omni/pipelines/"):
         yield from _rollout_findings(path, tree)
+    yield from _public_api_docstrings(path, tree, aliases)
     yield from _import_boundaries(path, tree)

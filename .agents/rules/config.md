@@ -58,8 +58,10 @@ def __post_init__(self):
         raise ValueError(f"Invalid adv_mode: {self.adv_mode}. Must be one of {sorted(valid_adv_modes)}")
 ```
 
-Don't reach for `Literal[...]` — it appears nowhere in these directories; plain
-`str` plus a `valid_*` set is the established pattern.
+Don't reach for `Literal[...]` — it appears nowhere in these directories (`VO011`
+rejects it, missing field defaults / `MISSING`, and subclass `__post_init__`
+omitting `super().__post_init__()` alongside parent-config and `frozen=True` rules);
+plain `str` plus a `valid_*` set is the established pattern.
 
 `__post_init__` also does real I/O in places (tokenizer loading, path resolution,
 `import kernels` in `workers/config/diffusion/model.py`), so it is not free to call.

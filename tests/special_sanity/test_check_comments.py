@@ -36,6 +36,10 @@ COMMENT_PATH = "verl_omni/trainer/diffusion/example.py"
         "# Implemented support for images",
         "# We added the missing check",
         "# I updated the implementation",
+        "# Here we normalize the prompt embeddings",
+        "# Now we compute the step weights",
+        "# Let's validate the shape before decoding",
+        "# This function converts latents to pixels",
         "# New helper for parsing input",
         "# New function: normalize",
         "# New class for parsing input",
@@ -138,6 +142,13 @@ def test_decorative_comment_banners_are_rejected(comment: str) -> None:
         'source = """# ======\n# Added handling for input\n"""\n',
         'message = f"# Step 1: {model}"\n',
         "value = 1  # ---\n",
+        "# Here the scheduler lets the stage advance by one step.\n",
+        "# Avoid PR numbers while keeping rationale comments concise.\n",
+        "# Normalize latents before scaling\nlatents = latents / scale\n",
+        "# Keep fp32 here\nlatents = latents.float()\n",
+        "# Copyright 2026 Bytedance\n# Encode prompts\n",
+        "def compute():\n    # Line 1 why\n    # Line 2 why\n    # Line 3 why\n    pass\n",
+        'def _helper():\n    """Short contract.\n\n    Line 2.\n    """\n    pass\n',
     ],
 )
 def test_necessary_comments_docstrings_and_literals_are_preserved(source: str) -> None:
@@ -172,3 +183,38 @@ def test_comment_rule_checks_inline_narration_and_real_line_numbers() -> None:
 def test_checker_preserves_its_own_license_and_source_literals() -> None:
     checker = Path(__file__).with_name("check_comments.py")
     assert not list(findings("tests/special_sanity/check_comments.py", checker.read_bytes()))
+
+
+@pytest.mark.parametrize(
+    ("path", "source", "expected"),
+    [
+        (COMMENT_PATH, "# Encode prompts\nprompt_embeds = encode_prompts(prompts)\n", [(1, "CM003")]),
+        (COMMENT_PATH, "# Return log probs\nreturn log_probs\n", [(1, "CM003")]),
+        ("verl_omni/trainer/config/example.py", "# Encode prompts\nprompt_embeds = encode_prompts(prompts)\n", []),
+        (
+            COMMENT_PATH,
+            "def f():\n    # Line one\n    # Line two\n    # Line three\n    # Line four\n    return 1\n",
+            [(2, "CM004")],
+        ),
+        (
+            "verl_omni/trainer/config/example.py",
+            "def f():\n    # Line one\n    # Line two\n    # Line three\n    # Line four\n    return 1\n",
+            [],
+        ),
+        (
+            COMMENT_PATH,
+            'def _private():\n    """Line 1\n    Line 2\n    Line 3\n'
+            '    Line 4\n    Line 5\n    Line 6\n    """\n    pass\n',
+            [(2, "CM005")],
+        ),
+        (
+            "tests/utils/test_example.py",
+            'def test_case():\n    """Necessity: keep this test."""\n    pass\n',
+            [(2, "CM005")],
+        ),
+        (COMMENT_PATH, "# Keep workaround from PR #942 until upstream fix\nvalue = 1\n", [(1, "CM006")]),
+        (COMMENT_PATH, "# TODO: remove after upstream issue #942 is fixed\nvalue = 1\n", []),
+    ],
+)
+def test_ai_comment_and_docstring_bloat_guards(path: str, source: str, expected: list[tuple[int, str]]) -> None:
+    assert [(line, code) for line, code, _msg in findings(path, source.encode())] == expected

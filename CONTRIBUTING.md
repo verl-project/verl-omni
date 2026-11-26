@@ -62,9 +62,12 @@ files alike ([RFC #942](https://github.com/verl-project/verl-omni/issues/942)):
 - Shared trainers, workers and agent loops must not dispatch on known concrete
   model-name literals (`VO008`). Training adapters keep stateless class/static
   hooks (`VO009`); pipeline packages must be imported at the pipeline entrypoint (`VO010`).
-- Config dataclasses need a parent config, must not use `frozen=True`, and must
-  appear in a literal `__all__` when provided (`VO011`). Reward managers leave
-  HTTP client imports to scorers (`VO012`); `urllib.parse` remains allowed.
+- Config dataclasses need a parent config, non-frozen mutability, field defaults,
+  no `Literal[...]`, subclass `super().__post_init__()`, and `__all__` export
+  (`VO011`). Reward managers leave HTTP client imports to scorers (`VO012`) and
+  propagate `ArtifactContractError` (`VO016`).
+- Public API contracts (`__all__` exports, shared pipeline contract modules,
+  and `compute_score*` entrypoints) require concise docstrings (`VO015`).
 - Pass personal model/data paths through configuration or temporary fixtures
   instead of `/home/`, `/Users/`, `/nfs/`, `/mnt/` or `/root/` literals (`VO014`).
 
@@ -87,11 +90,14 @@ Keep necessary public API contracts in concise docstrings. Default to no
 implementation comments; retain only non-obvious algorithm/layout/concurrency
 constraints or verified upstream workarounds. Do not add line-by-line narration,
 edit history, numbered steps, decorative banners or commented-out code.
-`CM001` rejects recognizable edit/step narration, `CM002` rejects decorative
-banners, and isolated production Ruff `ERA001` rejects recognizable commented-out
-code. License/attribution, tooling directives, and required config documentation
-remain intact. These are syntax checks, not AI-authorship detection; reviewers
-still judge whether a comment conveys necessary information.
+`CM001`–`CM006` reject recognizable edit/step/chatty narration, decorative
+banners, echo comments, 4+ line function comment blocks, PR-template headers
+or bloated private docstrings, and `PR #...` comments; isolated production Ruff
+`ERA001` rejects commented-out code. License/attribution, tooling directives,
+and required config documentation remain intact. In addition, the PR `Lint`
+workflow runs Ruff plus `check-license`, `validate-structure`,
+`check-device-api-usage`, `check-dataproto-usage`, `check-naming-conventions`,
+and `compileall`.
 
 Example shell changes are parsed with `bash -n` (`EX001`). `run_*.sh` scripts must
 contain double-quoted caller argument forwarding (`EX002`); comments, printed

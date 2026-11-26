@@ -283,7 +283,7 @@ def test_training_adapters_remain_stateless(source: str, expected: list[str]) ->
 )
 def test_config_dataclass_contract_has_precise_scope(source: str, expected: list[str]) -> None:
     assert [code for _line, code, _message in findings(CONFIG, ast.parse(source))] == expected
-    assert not list(findings("verl_omni/utils/example.py", ast.parse(source)))
+    assert "VO011" not in [code for _line, code, _message in findings("verl_omni/utils/example.py", ast.parse(source))]
 
 
 @pytest.mark.parametrize(
@@ -332,3 +332,88 @@ def test_reward_network_io_belongs_to_scorers(source: str, expected: list[str]) 
 def test_cuda_skips_use_topology_helpers(source: str, expected: list[str]) -> None:
     assert [code for _line, code, _message in findings(TEST, ast.parse(source))] == expected
     assert not list(findings("verl_omni/utils/example.py", ast.parse(source)))
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        ("@dataclass\nclass ExampleConfig(BaseConfig):\n    steps: int\n", ["VO011"]),
+        ("@dataclass\nclass ExampleConfig(BaseConfig):\n    steps: int = field(metadata={'a': 1})\n", ["VO011"]),
+        ("@dataclass\nclass ExampleConfig(BaseConfig):\n    steps: int = field(default=MISSING)\n", ["VO011"]),
+        ("@dataclass\nclass ExampleConfig(BaseConfig):\n    mode: Literal['a', 'b'] = 'a'\n", ["VO011"]),
+        ("@dataclass\nclass ExampleConfig(BaseConfig):\n    TAG: ClassVar[str]\n", []),
+        (
+            "@dataclass\nclass ExampleConfig(BaseConfig):\n    steps: int = 1\n"
+            "    def __post_init__(self):\n        pass\n",
+            [],
+        ),
+        ("@dataclass\nclass SubConfig(ParentConfig):\n    def __post_init__(self):\n        self.x = 1\n", ["VO011"]),
+        (
+            "@dataclass\nclass SubConfig(ParentConfig):\n"
+            "    def __post_init__(self):\n        super().__post_init__()\n",
+            [],
+        ),
+    ],
+)
+def test_config_dataclass_rules_cover_defaults_literal_and_super(source: str, expected: list[str]) -> None:
+    assert [code for _line, code, _message in findings(CONFIG, ast.parse(source))] == expected
+
+
+@pytest.mark.parametrize(
+    ("path", "source", "expected"),
+    [
+        ("verl_omni/pipelines/rollout_request.py", "def build_request():\n    return None\n", ["VO015"]),
+        (
+            "verl_omni/pipelines/rollout_request.py",
+            "class Request:\n    @property\n    def size(self):\n        return 1\n",
+            ["VO015"],
+        ),
+        (
+            "verl_omni/pipelines/rollout_request.py",
+            'class Request:\n    """Contract."""\n    def run(self):\n        pass\n'
+            "    @property\n    def size(self):\n        return 1\n",
+            ["VO015"],
+        ),
+        (
+            "verl_omni/pipelines/rollout_request.py",
+            'class Request:\n    """Contract."""\n    def run(self):\n        """Run request."""\n        pass\n',
+            [],
+        ),
+        ("verl_omni/utils/reward_score/custom.py", "def compute_score_custom():\n    return 0.0\n", ["VO015"]),
+        (
+            "verl_omni/utils/reward_score/custom.py",
+            'def compute_score_custom():\n    """Score one sample."""\n    return 0.0\n',
+            [],
+        ),
+        (
+            "verl_omni/utils/custom.py",
+            '__all__ = ["PublicFn"]\ndef PublicFn():\n    pass\ndef internal_unlisted():\n    pass\n',
+            ["VO015"],
+        ),
+        ("verl_omni/utils/custom.py", "def _private_helper():\n    pass\n", []),
+    ],
+)
+def test_public_api_docstrings_have_zero_private_noise(path: str, source: str, expected: list[str]) -> None:
+    assert [code for _line, code, _message in findings(path, ast.parse(source))] == expected
+
+
+@pytest.mark.parametrize(
+    ("path", "source", "expected"),
+    [
+        ("verl_omni/utils/reward_score/ex.py", "try:\n    run()\nexcept Exception:\n    return 0.0\n", ["VO016"]),
+        (
+            "verl_omni/reward_loop/reward_manager/ex.py",
+            "try:\n    run()\nexcept ArtifactContractError:\n    return 0.0\n",
+            ["VO016"],
+        ),
+        (
+            "verl_omni/utils/reward_score/ex.py",
+            "try:\n    run()\nexcept ArtifactContractError:\n    raise\nexcept Exception:\n    return 0.0\n",
+            [],
+        ),
+        ("verl_omni/utils/reward_score/ex.py", "try:\n    run()\nexcept ValueError:\n    return 0.0\n", []),
+        ("verl_omni/utils/other.py", "try:\n    run()\nexcept Exception:\n    return 0.0\n", []),
+    ],
+)
+def test_artifact_contract_error_must_propagate_in_rewards(path: str, source: str, expected: list[str]) -> None:
+    assert [code for _line, code, _message in findings(path, ast.parse(source))] == expected

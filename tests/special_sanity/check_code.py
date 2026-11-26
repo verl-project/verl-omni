@@ -119,7 +119,7 @@ def _findings(path: str, source: bytes) -> list[Finding]:
         return [Finding(error.lineno or 1, "E999", error.msg)]
 
     findings = hygiene + [Finding(*finding) for finding in python_findings(path, tree)]
-    findings.extend(Finding(*finding) for finding in comment_findings(path, source))
+    findings.extend(Finding(*finding) for finding in comment_findings(path, source, tree=tree))
     if path.startswith(("verl_omni/", "tests/")):
         findings.extend(_ruff_findings(path, source))
     if not findings:
