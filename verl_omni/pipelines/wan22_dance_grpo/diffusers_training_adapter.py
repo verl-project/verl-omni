@@ -148,6 +148,8 @@ class Wan22DanceGRPO(DiffusionModelBase):
         """
         true_cfg_scale = model_config.pipeline.get("true_cfg_scale", 1.0)
         do_true_cfg = true_cfg_scale > 1.0
+        if do_true_cfg and negative_prompt_embeds is None:
+            raise ValueError("Wan true CFG requires negative prompt embeds when true_cfg_scale > 1.")
 
         # Slice to current denoising step
         hidden_states = latents[:, step]  # (B, C, F, H, W)

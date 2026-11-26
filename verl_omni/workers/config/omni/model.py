@@ -100,6 +100,9 @@ class OmniModelConfig(BaseConfig):
     enable_activation_offload: bool = False
     use_remove_padding: bool = True
 
+    # bitwise-equal actor and rollout log-probs; see verl_omni.utils.config for the required settings
+    true_on_policy: bool = False
+
     # fsdp / megatron lora related
     lora_rank: int = 0
     lora_alpha: int = 16
@@ -167,7 +170,7 @@ class OmniModelConfig(BaseConfig):
 
         # Build hf_config so the FSDP engine can load and wrap the model.
         self.local_hf_config_path = copy_to_local(self.hf_config_path, use_shm=self.use_shm)
-        attn_implementation = self.override_config.get("attn_implementation", "flash_attention_2")
+        implementations = {"attn_implementation": self.override_config.get("attn_implementation", "flash_attention_2")}
         from verl_omni.pipelines.model_base import OmniModelBase
 
         if self.load_tokenizer:
@@ -176,10 +179,16 @@ class OmniModelConfig(BaseConfig):
             adapter_cls = OmniModelBase.peek_class(self.architecture, self.model_stage)
         if adapter_cls is not None:
             adapter_cls.register_auto_classes()
+        if self.true_on_policy:
+            implementations = adapter_cls.register_true_on_policy_implementations()
+            for key, name in implementations.items():
+                requested = self.override_config.get(key, name)
+                if requested != name:
+                    raise ValueError(f"true_on_policy requires {key}={name!r}, got {requested!r}.")
         self.hf_config = AutoConfig.from_pretrained(
             self.local_hf_config_path,
             trust_remote_code=self.trust_remote_code,
-            attn_implementation=attn_implementation,
+            **implementations,
         )
 
         self.share_embeddings_and_output_weights = getattr(self.hf_config, "tie_word_embeddings", False)

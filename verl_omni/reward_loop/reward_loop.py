@@ -97,6 +97,14 @@ class OmniRewardLoopWorker(RewardLoopWorker):
                 raise result
         return results
 
+    def get_native_scorer_stats(self) -> dict[str, dict[str, int | float]]:
+        """Read local class-based scorer counters without changing model residency."""
+        return {
+            name: executor.get_runtime_stats()
+            for name, executor in self.native_reward_executors.items()
+            if isinstance(executor, NativeRewardExecutor) and executor._is_scorer
+        }
+
     async def wake_up_reward_model(self, model_name: str) -> None:
         try:
             executor = self.native_reward_executors[model_name]
@@ -200,6 +208,20 @@ class OmniRewardLoopManager(RewardLoopManager):
         if not streaming_reward_enabled(self.config):
             return None
         return super().reward_loop_worker_handles
+
+    def get_native_scorer_stats(self) -> dict[str, list[dict[str, dict[str, int | float]]]]:
+        """Query every reward worker explicitly, preserving group and worker identity."""
+        groups = getattr(self, "_reward_worker_groups", {})
+        if not groups:
+            return {}
+        calls = [
+            (name, worker.get_native_scorer_stats.remote()) for name, workers in groups.items() for worker in workers
+        ]
+        snapshots = ray.get([ref for _, ref in calls])
+        result = {name: [] for name in groups}
+        for (name, _), snapshot in zip(calls, snapshots, strict=True):
+            result[name].append(snapshot)
+        return result
 
     def _init_reward_loop_workers(self):
         self.reward_loop_workers_class = ray.remote(OmniRewardLoopWorker)

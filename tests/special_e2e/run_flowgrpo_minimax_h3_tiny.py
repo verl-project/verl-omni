@@ -31,8 +31,9 @@ Usage:
     python tests/special_e2e/run_flowgrpo_minimax_h3_tiny.py \
         --task all --num-gpus 2 --actor-sp 2 --total-steps 2
 
-The GPU-smoke harness passes ``--task t2va`` explicitly to keep CI within its
-time budget; FL2VA and Ref2VA remain available for targeted manual validation.
+The GPU-smoke harness runs FL2VA and Ref2VA through this runner, each as its
+own test (``--task fl2va`` and ``--task ref2va``) so a failure names the broken
+task; its T2VA test uses ``run_minimax_h3_imagebind_smoke.sh`` instead.
 
 Env overrides:
     MODEL_PATH  Tiny H3 checkpoint (default ``~/models/tiny-random/minimax-h3``)

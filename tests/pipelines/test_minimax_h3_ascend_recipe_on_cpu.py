@@ -78,7 +78,8 @@ def test_minimax_h3_ascend_recipe(tmp_path):
     assert config.actor_rollout_ref.rollout.rollout_adapter == "old"
     assert config.algorithm.timestep_fraction == 0.34
     assert "clap" not in config.reward.reward_functions
-    assert config.reward.reward_functions.imagebind.device == "npu:1"
+    assert config.reward.reward_functions.imagebind.model == "imagebind"
+    assert config.reward.models.imagebind.placement.devices == [1]
     assert config.reward.reward_functions.imagebind.weights.text_video == 0.8
 
     invalid = subprocess.run(

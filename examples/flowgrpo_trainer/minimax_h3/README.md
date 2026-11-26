@@ -1,6 +1,6 @@
 # MiniMax H3 T2VA, FL2VA, and Ref2VA FlowGRPO
 
-Last updated: 10/29/2026
+Last updated: 11/20/2026
 
 These recipes train `MiniMaxAI/MiniMax-H3` LoRA adapters with FlowGRPO for
 text-to-audio-video (T2VA), first-frame image-to-audio-video (FL2VA), and
@@ -149,10 +149,9 @@ Download `imagebind_huge.pth` and set its location:
 export IMAGEBIND_MODEL_PATH=/path/to/imagebind_huge.pth
 ```
 
-By default, CLAP runs on `$REWARD_DEVICE:0` and ImageBind on
-`$REWARD_DEVICE:1`, where `REWARD_DEVICE` is `cuda` for the GPU launcher,
-`npu` for the NPU launcher, and `mlu` for the MLU launcher. Both devices must
-be visible to the reward worker.
+CLAP uses `$REWARD_DEVICE:0` in its reward worker. ImageBind runs in a
+native reward worker on bundle 1 of the trainer-selected reward pool.
+Its weights stay resident between steps (`reward.models.imagebind.offload=false`).
 These rewards validate generated audio/video alignment but do not directly
 measure fidelity to the supplied references.
 

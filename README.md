@@ -243,7 +243,7 @@ Visit our [documentation](https://verl-omni.readthedocs.io/en/latest/index.html)
     <td>✅</td>
   </tr>
     <tr>
-    <td>GSPO</td>
+    <td>GSPO (optional <a href="docs/algo/true_on_policy.md">true on-policy</a> log-probs, text-only)</td>
     <td>✅</td>
   </tr>
   <tr>

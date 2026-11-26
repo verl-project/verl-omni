@@ -22,7 +22,7 @@ MODEL_PATH=${MODEL_PATH:-${HOME}/models/tiny-random/Qwen-Image}
 TOKENIZER_PATH=${TOKENIZER_PATH:-${MODEL_PATH}/tokenizer}
 REWARD_MODEL_PATH=${REWARD_MODEL_PATH:-${HOME}/models/tiny-random/qwen3-vl}
 TOTAL_TRAIN_STEPS=${TOTAL_TRAIN_STEPS:-20}
-DEBUG_DUMP_STEPS=${DEBUG_DUMP_STEPS:-1,2}
+DEBUG_DUMP_STEPS=${DEBUG_DUMP_STEPS-1,2}
 PERF_SKIP_STEPS=${PERF_SKIP_STEPS:-2}
 PERF_THRESHOLD=${PERF_THRESHOLD:-0.15}
 PRECISION_ATOL=${PRECISION_ATOL:-1e-3}
@@ -61,15 +61,14 @@ export NIGHTLY_DETERMINISTIC_SEED
 export PYTHONHASHSEED=${PYTHONHASHSEED:-${NIGHTLY_DETERMINISTIC_SEED}}
 export CUBLAS_WORKSPACE_CONFIG=${CUBLAS_WORKSPACE_CONFIG:-:4096:8}
 export TOKENIZERS_PARALLELISM=${TOKENIZERS_PARALLELISM:-false}
-export GENRM_OCR_TEMPERATURE=${GENRM_OCR_TEMPERATURE:-0.0}
-export GENRM_OCR_TOP_P=${GENRM_OCR_TOP_P:-1.0}
-export GENRM_OCR_MAX_TOKENS=${GENRM_OCR_MAX_TOKENS:-32}
-export GENRM_OCR_SEED=${GENRM_OCR_SEED:-${NIGHTLY_DETERMINISTIC_SEED}}
 export MODEL_PATH TOKENIZER_PATH REWARD_MODEL_PATH
 export TRAIN_FILES VAL_FILES ATTN_BACKEND ROLLOUT_ATTN_BACKEND
 
 rm -rf "${CURRENT_DUMP_DIR}"
-mkdir -p "${CURRENT_DUMP_DIR}" "${BASELINE_DUMP_DIR}" "${LOG_DIR}"
+mkdir -p "${CURRENT_DUMP_DIR}" "${LOG_DIR}"
+if [[ "${L3_METRICS_ONLY:-0}" != "1" ]]; then
+    mkdir -p "${BASELINE_DUMP_DIR}"
+fi
 
 python3 "${NIGHTLY_DIR}/env_metadata.py" \
     --output "${ENV_METADATA_JSON}" \
@@ -93,6 +92,20 @@ python3 "${NIGHTLY_DIR}/run.py" \
     data.val_files="${VAL_FILES}" \
     "$@" 2>&1 | tee "${CONSOLE_LOG}"
 
+metrics_args=(
+    --metrics-jsonl "${DEBUG_METRICS_JSONL}"
+    --log-file "${CONSOLE_LOG}"
+    --output "${CURRENT_METRICS_JSON}"
+    --model "${L3_MODEL}"
+    --algorithm "${L3_ALGORITHM}"
+    --perf-skip-steps "${PERF_SKIP_STEPS}"
+    --threshold "${PERF_THRESHOLD}"
+)
+if [[ "${L3_METRICS_ONLY:-0}" == "1" ]]; then
+    python3 "${NIGHTLY_DIR}/collect_metrics.py" "${metrics_args[@]}"
+    exit
+fi
+
 # Replace only this case's baseline after a successful run. Sibling case
 # directories under OUTPUT_ROOT/baseline stay in place.
 if [ "${L3_REFRESH_BASELINE}" = "1" ]; then
@@ -108,14 +121,8 @@ fi
 
 METRICS_STATUS=0
 python3 "${NIGHTLY_DIR}/collect_metrics.py" \
-    --metrics-jsonl "${DEBUG_METRICS_JSONL}" \
-    --log-file "${CONSOLE_LOG}" \
+    "${metrics_args[@]}" \
     --baseline "${BASELINE_METRICS_JSON}" \
-    --output "${CURRENT_METRICS_JSON}" \
-    --model "${L3_MODEL}" \
-    --algorithm "${L3_ALGORITHM}" \
-    --perf-skip-steps "${PERF_SKIP_STEPS}" \
-    --threshold "${PERF_THRESHOLD}" \
     "${BOOTSTRAP_ARGS[@]}" || METRICS_STATUS=$?
 
 DUMP_STATUS=0
