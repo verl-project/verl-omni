@@ -492,6 +492,20 @@ class GRPOGuardLoss(DiffusionLossFn):
     required_model_output_keys = ("log_probs", "prev_sample_mean", "std_dev_t", "sqrt_dt")
     required_data_keys = ("old_log_probs", "advantages", "old_prev_sample_mean")
 
+    @staticmethod
+    def _reduce_per_sample(tensor: torch.Tensor, batch_size: int, name: str) -> torch.Tensor:
+        """Reduce a scalar or per-sample tensor ``(B, ...)`` to shape ``(B,)``."""
+        if tensor.ndim == 0:
+            return tensor.expand(batch_size)
+        if tensor.shape[0] == 1 and batch_size > 1:
+            reduced = tensor if tensor.ndim == 1 else tensor.reshape(1, -1).mean(dim=1)
+            return reduced.expand(batch_size)
+        if tensor.shape[0] != batch_size:
+            raise ValueError(f"{name} batch size mismatch: expected {batch_size} or 1, got {tensor.shape[0]}.")
+        if tensor.ndim == 1:
+            return tensor
+        return tensor.reshape(batch_size, -1).mean(dim=1)
+
     @classmethod
     def compute_loss(
         cls,
@@ -546,15 +560,16 @@ class GRPOGuardLoss(DiffusionLossFn):
             loss_cfg.adv_clip_max,
         )
 
-        sigma_t = std_dev_t.mean()
-        sqrt_dt_mean = sqrt_dt.mean()
-        scale = sqrt_dt_mean * sigma_t  # shared per-step scalar
+        batch_size = log_prob.shape[0]
+        sigma_t = cls._reduce_per_sample(std_dev_t, batch_size, "std_dev_t")
+        sqrt_dt_per_sample = cls._reduce_per_sample(sqrt_dt, batch_size, "sqrt_dt")
+        scale = sqrt_dt_per_sample * sigma_t  # per-sample (B,)
 
         # mean over all non-batch dimensions: (B, ...) -> (B,)
         mean_diff_sq = (prev_sample_mean - old_prev_sample_mean).pow(2)
         if mean_diff_sq.ndim > 1:
             mean_diff_sq = mean_diff_sq.mean(dim=tuple(range(1, mean_diff_sq.ndim)))
-        ratio_mean_bias = mean_diff_sq / (2 * scale**2)
+        ratio_mean_bias = mean_diff_sq / (2 * scale.pow(2))
 
         log_ratio = log_prob - old_log_prob
         ratio = torch.exp((log_ratio + ratio_mean_bias) * scale)
@@ -568,7 +583,7 @@ class GRPOGuardLoss(DiffusionLossFn):
         per_elem_loss = torch.maximum(unclipped_loss, clipped_loss)
         if rollout_is_weights is not None:
             per_elem_loss = per_elem_loss * rollout_is_weights.detach()
-        pg_loss = torch.mean(per_elem_loss) / (sqrt_dt_mean**2)
+        pg_loss = torch.mean(per_elem_loss / sqrt_dt_per_sample.pow(2))
 
         with torch.no_grad():
             ppo_kl = torch.mean(-log_ratio)

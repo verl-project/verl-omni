@@ -1006,6 +1006,239 @@ def test_compute_policy_loss_grpo_guard() -> None:
         assert key in pg_metrics, key
 
 
+def test_grpo_guard_per_sample_scale_and_dt_rescaling() -> None:
+    """Heterogeneous per-sample timesteps must use per-sample scale and 1/sqrt_dt**2."""
+    config = SimpleNamespace(diffusion_loss=SimpleNamespace(adv_clip_max=5.0, clip_ratio=1e-2))
+    old_log_prob = torch.tensor([-0.10, -0.25, -0.05, -0.30], dtype=torch.float32)
+    log_prob = torch.tensor([-0.12, -0.21, -0.09, -0.24], dtype=torch.float32)
+    advantages = torch.tensor([1.5, -0.8, 0.4, -1.2], dtype=torch.float32)
+    old_mean = torch.zeros((4, 2, 4, 4), dtype=torch.float32)
+    drift = torch.tensor([0.05, 0.12, 0.08, 0.15], dtype=torch.float32).view(4, 1, 1, 1)
+    prev_mean = old_mean + drift
+    std_dev_t = torch.tensor([5.0, 3.2, 2.5, 1.8], dtype=torch.float32).view(4, 1, 1, 1)
+    sqrt_dt = torch.tensor([0.23, 0.26, 0.28, 0.31], dtype=torch.float32)
+
+    loss, metrics = diffusion_algos.GRPOGuardLoss.compute_loss(
+        old_log_prob=old_log_prob,
+        log_prob=log_prob,
+        advantages=advantages,
+        config=config,
+        old_prev_sample_mean=old_mean,
+        prev_sample_mean=prev_mean,
+        std_dev_t=std_dev_t,
+        sqrt_dt=sqrt_dt,
+    )
+
+    sigma_ref = std_dev_t.reshape(4)
+    scale_ref = sigma_ref * sqrt_dt
+    mean_diff_sq = (prev_mean - old_mean).pow(2).mean(dim=(1, 2, 3))
+    ratio_ref = torch.exp(((log_prob - old_log_prob) + mean_diff_sq / (2 * scale_ref.pow(2))) * scale_ref)
+    unclipped = -advantages * ratio_ref
+    clipped = -advantages * torch.clamp(ratio_ref, 1.0 - 1e-2, 1.0 + 1e-2)
+    expected_loss = torch.mean(torch.maximum(unclipped, clipped) / sqrt_dt.pow(2))
+
+    torch.testing.assert_close(loss, expected_loss)
+    assert metrics["actor/ratio_mean"] == pytest.approx(ratio_ref.mean().item(), rel=1e-6, abs=1e-7)
+    assert metrics["actor/ratio_std"] == pytest.approx(ratio_ref.std(unbiased=False).item(), rel=1e-6, abs=1e-7)
+    assert metrics["actor/pg_clipfrac_higher"] == pytest.approx(
+        (ratio_ref - 1.0 > 1e-2).float().mean().item(), abs=1e-7
+    )
+    assert metrics["actor/pg_clipfrac_lower"] == pytest.approx((1.0 - ratio_ref > 1e-2).float().mean().item(), abs=1e-7)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("use_is_weights", [False, True])
+def test_grpo_guard_micro_batch_size_invariance(dtype: torch.dtype, use_is_weights: bool) -> None:
+    """Loss and gradients must be invariant to splitting a mixed-timestep batch across micro-batches."""
+    torch.manual_seed(0)
+    batch_size = 6
+    config = SimpleNamespace(diffusion_loss=SimpleNamespace(adv_clip_max=5.0, clip_ratio=1e-2))
+    old_log_prob = torch.randn(batch_size, dtype=torch.float32).to(dtype)
+    log_prob_base = (old_log_prob.float() + 0.02 * torch.randn(batch_size)).to(dtype)
+    advantages = torch.tensor([1.2, -0.7, 0.5, -1.5, 0.9, -0.3], dtype=dtype)
+    old_mean = torch.randn((batch_size, 4, 4, 4), dtype=torch.float32).to(dtype)
+    prev_mean_base = (old_mean.float() + 0.05 * torch.randn_like(old_mean.float())).to(dtype)
+    std_dev_t = torch.tensor([5.1, 4.9, 3.3, 2.5, 2.0, 1.6], dtype=dtype).view(batch_size, 1, 1, 1)
+    sqrt_dt = torch.tensor([0.23, 0.25, 0.26, 0.28, 0.29, 0.32], dtype=dtype)
+    weights = torch.linspace(0.5, 1.3, batch_size, dtype=dtype) if use_is_weights else None
+
+    lp_full = log_prob_base.clone().requires_grad_()
+    pm_full = prev_mean_base.clone().requires_grad_()
+    loss_full, _ = diffusion_algos.GRPOGuardLoss.compute_loss(
+        old_log_prob=old_log_prob,
+        log_prob=lp_full,
+        advantages=advantages,
+        config=config,
+        old_prev_sample_mean=old_mean,
+        prev_sample_mean=pm_full,
+        std_dev_t=std_dev_t,
+        sqrt_dt=sqrt_dt,
+        rollout_is_weights=weights,
+    )
+    grad_lp_full, grad_pm_full = torch.autograd.grad(loss_full, (lp_full, pm_full))
+
+    loss_accum = torch.zeros((), dtype=loss_full.dtype)
+    grad_lp_parts = []
+    grad_pm_parts = []
+    for i in range(batch_size):
+        lp_i = log_prob_base[i : i + 1].clone().requires_grad_()
+        pm_i = prev_mean_base[i : i + 1].clone().requires_grad_()
+        w_i = weights[i : i + 1] if weights is not None else None
+        loss_i, _ = diffusion_algos.GRPOGuardLoss.compute_loss(
+            old_log_prob=old_log_prob[i : i + 1],
+            log_prob=lp_i,
+            advantages=advantages[i : i + 1],
+            config=config,
+            old_prev_sample_mean=old_mean[i : i + 1],
+            prev_sample_mean=pm_i,
+            std_dev_t=std_dev_t[i : i + 1],
+            sqrt_dt=sqrt_dt[i : i + 1],
+            rollout_is_weights=w_i,
+        )
+        g_lp_i, g_pm_i = torch.autograd.grad(loss_i / batch_size, (lp_i, pm_i))
+        loss_accum = loss_accum + loss_i.detach() / batch_size
+        grad_lp_parts.append(g_lp_i)
+        grad_pm_parts.append(g_pm_i)
+
+    rtol, atol = (1e-5, 1e-6) if dtype == torch.float32 else (2e-2, 2e-2)
+    torch.testing.assert_close(loss_full.detach(), loss_accum, rtol=rtol, atol=atol)
+    torch.testing.assert_close(grad_lp_full, torch.cat(grad_lp_parts, dim=0), rtol=rtol, atol=atol)
+    torch.testing.assert_close(grad_pm_full, torch.cat(grad_pm_parts, dim=0), rtol=rtol, atol=atol)
+
+
+def test_grpo_guard_exact_bias_cancellation_with_sde_scheduler() -> None:
+    """With zero SDE noise realization across mixed timesteps, ratio_mean_bias cancels log_ratio exactly."""
+    from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
+
+    scheduler = FlowMatchSDEDiscreteScheduler(num_train_timesteps=1000, shift=3.0)
+    scheduler.set_timesteps(10, device="cpu")
+
+    step_indices = torch.tensor([0, 1, 2, 3, 4], dtype=torch.long)
+    timesteps = scheduler.timesteps[step_indices]
+    batch_size = len(step_indices)
+    torch.manual_seed(7)
+    sample = torch.randn((batch_size, 4, 8, 8), dtype=torch.float32)
+    v_old = torch.randn_like(sample)
+    v_new = v_old + 0.05 * torch.randn_like(sample)
+
+    # First obtain the exact old reverse-SDE mean, then evaluate both policies at prev_sample = old_mean (eps = 0).
+    _, _, old_mean, _, _ = scheduler.sample_previous_step(
+        model_output=v_old,
+        timestep=timesteps,
+        sample=sample,
+        noise_level=1.2,
+        sde_type="sde",
+        return_logprobs=True,
+        return_sqrt_dt=True,
+    )
+    _, old_lp, old_mean, _, _ = scheduler.sample_previous_step(
+        model_output=v_old,
+        timestep=timesteps,
+        sample=sample,
+        prev_sample=old_mean,
+        noise_level=1.2,
+        sde_type="sde",
+        return_logprobs=True,
+        return_sqrt_dt=True,
+    )
+    _, new_lp, new_mean, std_dev_t, sqrt_dt = scheduler.sample_previous_step(
+        model_output=v_new,
+        timestep=timesteps,
+        sample=sample,
+        prev_sample=old_mean,
+        noise_level=1.2,
+        sde_type="sde",
+        return_logprobs=True,
+        return_sqrt_dt=True,
+    )
+
+    config = SimpleNamespace(diffusion_loss=SimpleNamespace(adv_clip_max=5.0, clip_ratio=2e-6))
+    _, metrics = diffusion_algos.GRPOGuardLoss.compute_loss(
+        old_log_prob=old_lp,
+        log_prob=new_lp,
+        advantages=torch.ones(batch_size, dtype=torch.float32),
+        config=config,
+        old_prev_sample_mean=old_mean,
+        prev_sample_mean=new_mean,
+        std_dev_t=std_dev_t,
+        sqrt_dt=sqrt_dt,
+    )
+
+    assert metrics["actor/ratio_mean"] == pytest.approx(1.0, abs=1e-6)
+    assert metrics["actor/ratio_std"] == pytest.approx(0.0, abs=1e-6)
+    assert metrics["actor/pg_clipfrac"] == 0.0
+
+
+@pytest.mark.parametrize(
+    ("std_shape", "sqrt_dt_shape"),
+    [
+        ((), ()),
+        ((1,), (1,)),
+        ((1, 1, 1, 1), (1,)),
+        ((4,), (4,)),
+        ((4, 1, 1), (4,)),
+        ((4, 1, 1, 1), (4, 1)),
+        ((4, 1, 1, 1, 1), (4,)),
+    ],
+)
+def test_grpo_guard_supported_scale_shapes(std_shape: tuple[int, ...], sqrt_dt_shape: tuple[int, ...]) -> None:
+    """Scalar, singleton-batch, and per-sample (3D/4D/5D) scale tensors are all handled consistently."""
+    batch_size = 4
+    config = SimpleNamespace(diffusion_loss=SimpleNamespace(adv_clip_max=5.0, clip_ratio=1e-2))
+    old_lp = torch.zeros(batch_size, dtype=torch.float32)
+    lp = torch.tensor([0.01, -0.02, 0.03, -0.01], dtype=torch.float32)
+    adv = torch.tensor([1.0, -1.0, 0.5, -0.5], dtype=torch.float32)
+    old_mean = torch.zeros((batch_size, 2, 2, 2), dtype=torch.float32)
+    prev_mean = torch.full_like(old_mean, 0.05)
+
+    loss, metrics = diffusion_algos.GRPOGuardLoss.compute_loss(
+        old_log_prob=old_lp,
+        log_prob=lp,
+        advantages=adv,
+        config=config,
+        old_prev_sample_mean=old_mean,
+        prev_sample_mean=prev_mean,
+        std_dev_t=torch.full(std_shape, 0.5, dtype=torch.float32),
+        sqrt_dt=torch.full(sqrt_dt_shape, 0.4, dtype=torch.float32),
+    )
+    ref_loss, ref_metrics = diffusion_algos.GRPOGuardLoss.compute_loss(
+        old_log_prob=old_lp,
+        log_prob=lp,
+        advantages=adv,
+        config=config,
+        old_prev_sample_mean=old_mean,
+        prev_sample_mean=prev_mean,
+        std_dev_t=torch.full((batch_size, 1, 1, 1), 0.5, dtype=torch.float32),
+        sqrt_dt=torch.full((batch_size,), 0.4, dtype=torch.float32),
+    )
+    torch.testing.assert_close(loss, ref_loss)
+    assert metrics["actor/ratio_mean"] == pytest.approx(ref_metrics["actor/ratio_mean"], rel=1e-6)
+
+
+def test_grpo_guard_mismatched_scale_batch_size_raises() -> None:
+    config = SimpleNamespace(diffusion_loss=SimpleNamespace(adv_clip_max=5.0, clip_ratio=1e-2))
+    kwargs = dict(
+        old_log_prob=torch.zeros(4),
+        log_prob=torch.zeros(4),
+        advantages=torch.ones(4),
+        config=config,
+        old_prev_sample_mean=torch.zeros(4, 2, 2),
+        prev_sample_mean=torch.zeros(4, 2, 2),
+    )
+    with pytest.raises(ValueError, match="std_dev_t batch size mismatch"):
+        diffusion_algos.GRPOGuardLoss.compute_loss(
+            **kwargs,
+            std_dev_t=torch.full((3, 1, 1), 0.5),
+            sqrt_dt=torch.full((4,), 0.4),
+        )
+    with pytest.raises(ValueError, match="sqrt_dt batch size mismatch"):
+        diffusion_algos.GRPOGuardLoss.compute_loss(
+            **kwargs,
+            std_dev_t=torch.full((4, 1, 1), 0.5),
+            sqrt_dt=torch.full((3,), 0.4),
+        )
+
+
 @pytest.mark.parametrize("norm_adv_by_std_in_grpo", [True, False])
 @pytest.mark.parametrize("global_std", [True, False])
 def test_dance_grpo_advantage_return(norm_adv_by_std_in_grpo: bool, global_std: bool) -> None:
