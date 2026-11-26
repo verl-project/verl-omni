@@ -196,8 +196,8 @@ def test_telemetry_measures_each_axis():
 
 def test_interruption_latency_floors_a_policy_silent_through_the_onset():
     # The yield latency shares the reward's silence floor: a policy that never
-    # spoke, or whose first speak decision falls at or after the onset, has
-    # no yield to measure.
+    # spoke, or whose first speak falls strictly after the onset, has no yield
+    # to measure.
     never = episode_rule_metrics(_trajectory(AXIS_INTERRUPTION, [False] * 4), listen_token_id=LISTEN_TOKEN_ID)
     assert never["yield_latency_s"] == float("inf")
     late = episode_rule_metrics(
@@ -216,9 +216,13 @@ def test_interruption_yield_latency_is_onset_anchored_with_a_silence_floor():
     )
     # Talking on through the episode.
     assert interruption_yield_latency(event, speaking_times=[0.0, 1.0, 2.0, 3.0, 4.0], silent_times=[]) == float("inf")
-    # Never spoke, or first spoke at the onset: the silence floor (None).
+    # Never spoke, or first spoke strictly after the onset: the silence floor.
     assert interruption_yield_latency(event, speaking_times=[], silent_times=[0.0, 1.0]) is None
-    assert interruption_yield_latency(event, speaking_times=[2.0, 3.0], silent_times=[0.0, 1.0, 4.0]) is None
+    assert interruption_yield_latency(event, speaking_times=[2.1, 3.0], silent_times=[0.0, 1.0, 4.0]) is None
+    # Speaking on the onset itself is interrupted; silence at 4.0 s is a 2 s yield.
+    assert interruption_yield_latency(event, speaking_times=[2.0, 3.0], silent_times=[0.0, 1.0, 4.0]) == pytest.approx(
+        2.0
+    )
 
 
 @pytest.mark.parametrize(
@@ -253,11 +257,10 @@ def test_pacing_corrupted_window_follows_the_deadline_kwargs():
     assert pacing_corrupted(_event(AXIS_INTERRUPTION), [3.5], yield_deadline_s=2.0) is False  # window [1.0, 3.0)
 
 
-def test_turn_axis_latency_saturates_for_pre_turn_end_speech():
-    # Mirror of the reward's turn gate: speaking at t=0 with the user's turn
-    # ending at t=2 is a barge-in on the user, not a floor take.
+def test_turn_axis_latency_is_negative_for_pre_turn_end_speech():
+    # Speaking at t=0 with the user's turn ending at t=2 is two seconds early.
     early = episode_rule_metrics(_trajectory(AXIS_TURN, [True, False, False]), listen_token_id=LISTEN_TOKEN_ID)
-    assert early["turn_latency_s"] == float("inf")
+    assert early["turn_latency_s"] == pytest.approx(-2.0)
     # The boundary stays full credit: onset exactly at the turn end.
     on_time = episode_rule_metrics(_trajectory(AXIS_TURN, [False, False, True, True]), listen_token_id=LISTEN_TOKEN_ID)
     assert on_time["turn_latency_s"] == pytest.approx(0.0)

@@ -156,11 +156,12 @@ class MiniCPMODuplexRolloutAdapter(MiniCPMORolloutAdapter):
 
     @classmethod
     def deploy_config_overrides(cls, pipeline_mode: str = "duplex") -> dict:
-        """Serve duplex on MRv2, with one session slot per agent worker.
+        """Serve duplex on MRv2 and set the standalone session cap.
 
-        Capture publishes only on model runner v2. The session cap is the
-        engine's admission limit; ``DUPLEX_MAX_SESSIONS_ENV`` is how the recipe
-        passes ``rollout.agent.num_workers``, which this call cannot see.
+        Capture publishes only on model runner v2. ``DUPLEX_MAX_SESSIONS_ENV``
+        is the admission cap when no rollout config is in scope. The AR
+        strategy overwrites ``duplex_session.max_sessions`` from
+        ``rollout.agent.num_workers`` when it writes the training deploy.
         """
         cls.build_stage_configs(pipeline_mode)
         raw = os.environ.get(DUPLEX_MAX_SESSIONS_ENV, str(DUPLEX_MAX_SESSIONS_DEFAULT))

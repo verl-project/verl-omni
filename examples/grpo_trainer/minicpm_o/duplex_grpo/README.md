@@ -84,7 +84,7 @@ bash run_minicpmo_4_5_duplex_grpo_lora_v1.sh
 ```
 
 Defaults: 4×H800, colocated sync trainer, rollout TP=2, batch 16 segments ×
-16 episodes, 200 steps. Sizing note (RFC §3.8): a 3–5 s segment contains only
+16 episodes, 100 steps. Sizing note (RFC §3.8): a 3–5 s segment contains only
 ~3–5 listen/speak decisions at the model's 1 Hz cadence, hence the larger
 group.
 
@@ -108,9 +108,7 @@ group.
 ## Validation status
 
 CPU-tested at contract level (`tests/utils/dataset/duplex/`, the strategy and
-agent-loop suites). A 4×H800 run completed steps (about 6 min/step; see
-`docs/algo/duplex_grpo.md`). Pause calibration passed (0.367 on 146
-balanced val episodes); turn (0.098) and interruption (0.000) sit on the
-reward floors and are an open geometry choice, not a loop failure. M0
-tolerances stay 0.05 / 0.01 nats and are the next measurement. This is
-PoC scope: capability verification, not SOTA.
+agent-loop suites). A 4×H800 run completed steps (about 6 min/step; the
+recipe default is 100 steps). Early floor-takes and speech on the
+interruption's onset unit are scored with a gradient. M0 tolerances stay
+0.05 / 0.01 nats. This is PoC scope: capability verification, not SOTA.

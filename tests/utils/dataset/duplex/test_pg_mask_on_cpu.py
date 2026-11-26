@@ -105,8 +105,7 @@ def test_interruption_episode_gates_units_before_the_speech_onset():
 
 def test_turn_episode_keeps_the_full_mask():
     replay = _replay(DuplexEpisodeEvent(axis=AXIS_TURN, user_turn_end_s=3.0))
-    # The premature-barge-in decision the -1 scores precedes the turn end:
-    # gating pre-turn-end units would remove the only signal for the violation.
+    # An early floor-take is scored on this axis and sits before the turn end, so those units stay in the mask.
     assert replay.pg_mask == replay.response_mask
 
 

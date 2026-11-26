@@ -15,11 +15,11 @@
 
 CPU rule rewards computed from timestamps only — no VAD model, no judge: the
 pause axis penalizes speaking inside the tagged pause window; the turn axis
-penalizes the delay from the user's turn end to the model's speech onset with
-a tuned full-credit band; the interruption axis penalizes the delay from the
-onset of the interrupting speech to the model's return to silence with a
-tuned deadline, and floors a policy that was not speaking when the
-interruption began (it was never interrupted — the axis's silence floor).
+scores the signed delay from the user's turn end (early speech is penalized
+by its earliness on the deadline; late speech keeps the full-credit band);
+the interruption axis penalizes the delay from the interrupting speech onset
+to the return to silence. Speech on the onset unit counts as interrupted. A
+policy that never spoke, or first speaks after that unit, takes the floor.
 Each episode carries exactly one axis; the score is that axis's reward, and
 the raw measurements ride the returned dict as metrics.
 
@@ -46,6 +46,7 @@ from verl_omni.utils.dataset.duplex.telemetry import (
     duplicate_ngram_share,
     interruption_yield_latency,
     pacing_corrupted,
+    turn_take_latency,
 )
 from verl_omni.utils.dataset.duplex.trajectory import DuplexEpisodeEvent
 
@@ -123,14 +124,12 @@ def compute_score_duplex_turn_taking(
     elif event.axis == "turn":
         turn_end = event.user_turn_end_s
         first_speak = speaking_times[0] if speaking_times else None
-        if first_speak is None or first_speak < turn_end:
-            # Speaking before the user's utterance ends is a barge-in on the
-            # user, not a floor take: saturate like never speaking (the axis's
-            # worst score, -1 past the deadline).
-            latency = float("inf")
+        latency = turn_take_latency(first_speak, turn_end)
+        # Earliness uses the deadline with no credit band, so waiting longer scores higher.
+        if latency < 0:
+            score = _linear_penalty(-latency, 0.0, turn_deadline)
         else:
-            latency = first_speak - turn_end
-        score = _linear_penalty(latency, turn_band, turn_deadline)
+            score = _linear_penalty(latency, turn_band, turn_deadline)
         metrics["duplex_turn_latency_s"] = latency
         metrics["duplex_turn_took_floor"] = float(first_speak is not None)
     elif event.axis == "interruption":

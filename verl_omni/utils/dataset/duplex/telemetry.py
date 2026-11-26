@@ -49,6 +49,7 @@ __all__ = [
     "episode_rule_metrics",
     "interruption_yield_latency",
     "pacing_corrupted",
+    "turn_take_latency",
 ]
 
 #: Latency within this band earns full credit (seconds); beyond the deadline
@@ -137,13 +138,9 @@ def _axis_latencies(trajectory: DuplexTrajectory, decisions: Sequence[Any]) -> d
             sum(1 for decision in decisions if decision.speaking and start <= decision.time_s < end)
         )
     elif event.axis == AXIS_TURN and event.user_turn_end_s is not None:
-        if first_speak is not None and first_speak.time_s >= event.user_turn_end_s:
-            metrics["turn_latency_s"] = first_speak.time_s - event.user_turn_end_s
-        else:
-            # Same semantics as the reward: speaking before the user's turn
-            # ends is a barge-in on the user, not a floor take — saturate like
-            # never speaking.
-            metrics["turn_latency_s"] = float("inf")
+        metrics["turn_latency_s"] = turn_take_latency(
+            None if first_speak is None else first_speak.time_s, event.user_turn_end_s
+        )
     elif event.axis == AXIS_INTERRUPTION:
         latency = interruption_yield_latency(
             event,
@@ -154,6 +151,17 @@ def _axis_latencies(trajectory: DuplexTrajectory, decisions: Sequence[Any]) -> d
     return metrics
 
 
+def turn_take_latency(first_speak_s: float | None, turn_end_s: float) -> float:
+    """Signed delay from the user's turn end to the first speak decision.
+
+    Negative when the policy speaks before the turn ends. ``inf`` when it
+    never speaks.
+    """
+    if first_speak_s is None:
+        return float("inf")
+    return first_speak_s - turn_end_s
+
+
 def interruption_yield_latency(
     event: DuplexEpisodeEvent,
     *,
@@ -162,12 +170,12 @@ def interruption_yield_latency(
 ) -> float | None:
     """The yield latency from the interrupting speech onset, or ``None``.
 
-    The policy was interrupted only if it was speaking when the user's speech
-    started: a policy whose first speak decision falls at or after the onset,
-    or that never spoke, fails the axis's silence floor and takes the floor
-    score whatever it does afterwards — ``None``. Otherwise the latency runs
-    from the onset to the first silent decision at or after it; ``inf`` when
-    the policy talks on through the rest of the episode.
+    The policy was interrupted when its first speak is at or before the onset,
+    including the onset unit the driver uses as the injection point. A policy
+    that never spoke, or whose first speak falls strictly after the onset,
+    was not speaking when the interruption began: ``None``. Otherwise the
+    latency runs from the onset to the first silent decision at or after it;
+    ``inf`` when the policy talks on through the rest of the episode.
 
     Args:
         event: The interruption episode's annotation (anchors on the unit
@@ -181,7 +189,7 @@ def interruption_yield_latency(
         silence floor failed.
     """
     onset = event.interrupt_speech_onset_s
-    if not speaking_times or speaking_times[0] >= onset:
+    if not speaking_times or speaking_times[0] > onset:
         return None
     yield_at = next((time_s for time_s in silent_times if time_s >= onset), None)
     return float("inf") if yield_at is None else yield_at - onset

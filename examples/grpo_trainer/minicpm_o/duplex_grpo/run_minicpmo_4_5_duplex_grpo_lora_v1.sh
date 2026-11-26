@@ -19,7 +19,7 @@ VAL_FILE="${VAL_FILE:?Set VAL_FILE to the fixed validation episode parquet}"
 OUTPUT_DIR="${OUTPUT_DIR:-outputs/minicpmo_4_5_duplex_grpo}"
 NUM_GPUS="${NUM_GPUS:-4}"
 SEED="${SEED:-2026}"
-TOTAL_TRAINING_STEPS="${TOTAL_TRAINING_STEPS:-200}"
+TOTAL_TRAINING_STEPS="${TOTAL_TRAINING_STEPS:-100}"
 TEST_FREQ="${TEST_FREQ:-10}"
 SAVE_FREQ="${SAVE_FREQ:-20}"
 RESUME_MODE="${RESUME_MODE:-auto}"
@@ -64,14 +64,13 @@ export VERL_OMNI_DUPLEX_MAX_SESSIONS="${VERL_OMNI_DUPLEX_MAX_SESSIONS:-${NUM_AGE
 #   a cold duplex stage needs far more than the engine's 300 s init default
 #   (the orchestrator forwards this to OmniConfig.stage_init_timeout and
 #   raises init_timeout to match).
-# - reward.reward_manager.source=register and name=minicpm_naive: the default
-#   source is importlib, which looks the name up as a module attribute and
-#   misses the registered manager. minicpm_naive is NaiveRewardManager plus
-#   the checkpoint's answer-tag demotion; the duplex scorer does not decode
-#   those tags, and a separate manager would only duplicate naive.
-# - VERL_OMNI_DUPLEX_MAX_SESSIONS: the engine admits this many duplex sessions.
-#   The adapter cannot see rollout.agent.num_workers, so the recipe exports
-#   the same count. A larger worker pool exhausts admission again.
+# - reward.reward_manager.source=register and name=naive: the default source
+#   is importlib, which looks the name up as a module attribute. naive is
+#   verl's registered rule-reward manager. The duplex scorer reads timestamps
+#   from the replay.
+# - The rollout strategy sets duplex_session.max_sessions from
+#   rollout.agent.num_workers. VERL_OMNI_DUPLEX_MAX_SESSIONS is the fallback
+#   the standalone deploy writer uses when no rollout config is in scope.
 
 "${PYTHON_BIN}" -m verl_omni.trainer.main_omni \
     "data.train_files=${TRAIN_FILE}" \
@@ -170,7 +169,7 @@ export VERL_OMNI_DUPLEX_MAX_SESSIONS="${VERL_OMNI_DUPLEX_MAX_SESSIONS:-${NUM_AGE
     algorithm.use_kl_in_reward=false \
     reward.num_workers=1 \
     reward.reward_manager.source=register \
-    reward.reward_manager.name=minicpm_naive \
+    reward.reward_manager.name=naive \
     reward.custom_reward_function.path=verl_omni/utils/reward_score/duplex_turn_taking.py \
     reward.custom_reward_function.name=compute_score_duplex_turn_taking \
     trainer.val_before_train=true \

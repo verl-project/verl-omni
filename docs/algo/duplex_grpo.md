@@ -54,7 +54,7 @@ dataset (mined episodes) ──▶ omni_duplex_agent ──▶ rollout server (D
 | Trajectory assembly | `.../duplex/trajectory.py` | Scopes in order; validity mask (`sampled`→1, `forced`/`reemit`→0); unit decision timeline |
 | Unit-window replay | `.../duplex/replay.py` | `<unit>` + 10 bare audio placeholders + the unit's action tokens + `</unit>` per record (one record per 1 s unit); engine silent units replay as 1 s of digital silence; mel via the processor's `process_audio_streaming` |
 | Event mining | `.../duplex/mining.py` | pause / turn / interruption from word-level timestamps |
-| Rule rewards | `verl_omni/utils/reward_score/duplex_turn_taking.py` | Per-axis, timestamp-only, tuned bands: the turn axis measures from the user's turn end; the interruption axis measures from the interrupting speech *onset* (full credit within 1 s, −1 past 3 s) with a silence floor — a policy that was not speaking at the onset, or never spoke, takes −1. Emits the trip-wire columns, `duplex_pacing_corrupted`, and the per-episode `duplex_episode_failed` flag |
+| Rule rewards | `verl_omni/utils/reward_score/duplex_turn_taking.py` | Per-axis, timestamp-only, tuned bands: the turn axis measures the signed delay from the user's turn end (early speech is penalized by how early it is, on the 3 s deadline with no credit band; late speech keeps the 1 s full-credit band). The interruption axis measures from the interrupting speech onset (full credit within 1 s, −1 past 3 s). Speaking on the onset unit counts as interrupted; a policy that never spoke, or first speaks strictly after the onset, takes −1. Emits the trip-wire columns, `duplex_pacing_corrupted`, and the per-episode `duplex_episode_failed` flag |
 | Trip-wire definitions | `.../duplex/telemetry.py` | The shared threshold set (`TRIP_WIRE_DEFAULTS`), the reward bands, and the timing definitions every consumer calls — `speak_ratio`, `silence_share`, `duplicate_ngram_share`, the onset-anchored `interruption_yield_latency`, and the pacing predicate `pacing_corrupted` (an engine-injected silent unit inside the scored window); the scorer, the FDB metrics and the agent loop share them |
 | Calibration gate | `.../duplex/calibration.py` + `scripts/duplex_calibration_audit.py` | Two-sided mid-band entry gate before any gradient: each axis's normalized mean must land in [0.30, 0.80] of the axis band |
 | FDB-v1 rule metrics | `.../duplex/fdb_metrics.py` | static-protocol timing metrics over dumped replays |
@@ -86,8 +86,8 @@ with mask 1 only at sampled action positions. The payload also carries
 interruption episodes the action tokens of units that decided strictly before
 the scored event's start (`pause_window_s[0]` / `interrupt_speech_onset_s`)
 are 0, so a yield failure does not penalize what the policy said beforehand.
-Turn episodes are not gated — the premature-barge-in decision the −1 scores
-precedes the turn end. Only the advantage takes the gate; the KL term rides
+Turn episodes are not gated — an early floor-take is scored on that axis and
+sits before the turn end. Only the advantage takes the gate; the KL term rides
 the full `response_mask`. Unit mels are re-derived through
 the streaming processor and encoded through the streaming Whisper encoder
 with the KV history carried across the episode's units, exactly as the engine
@@ -226,32 +226,25 @@ capture branch) measured cold start ≈ 10 min and step time 324 s then
 350 s (`gen` 210/272 s, `ref` 12 s, `update_actor` 27/32 s). Rewards sat
 at mean −0.668 (min −1, max 0); `actor/kl_loss` 0; advantages mean
 +0.0014; `response_length/mean` 85.1; old-logprob mismatch count 0.
-Budget about 6 min/step, so 100 steps is about 10–11 h on that node,
-plus about 0.5–1 min per eval. The script default remains
-`TOTAL_TRAINING_STEPS=200`; override it per launch. Use the balanced
-parquet (`--per-axis-cap auto`), not the 94 % turn-skewed full mine.
+Budget about 6 min/step, so the recipe default is 100 steps, about
+10–11 h on that node plus about 0.5–1 min per eval. Override
+`TOTAL_TRAINING_STEPS` per launch. Use the balanced parquet
+(`--per-axis-cap auto`).
 
-Calibration on 146 balanced val episodes: pause `normalized_mean` 0.367
-(inside [0.30, 0.80]), turn 0.098, interruption 0.000. Turn was 46/51
-exactly −1 and interruption 46/46 exactly −1. Under per-unit
-auto-response the base policy speaks through the user's utterance, so
-the turn floor (speech before the user's turn ends) and the interruption
-floor (not speaking at the onset) both fire. The bands stay as specified.
-The axes are not a learning signal until one of these lands: grade an
-early barge-in instead of flooring it; keep today's bands as a yield
-axis and add a speak-through axis; or mine turn episodes whose user
-utterance is followed by silence. The M0 tolerances stay max |Δ| ≤ 0.05
-nats and mean ≤ 0.01. The gate scripts now build an engine with
-`enable_prefix_caching=false` and score through the same media
-normalization as training. A uniform residual, if one remains, is the
-bf16 engine tower versus the fp32 training tower, and that chooses
-whether the tolerance or the cast changes.
+The same run's calibration (pause 0.367, turn 0.098, interruption 0.000
+on 146 balanced val episodes) used a turn score that saturated at −1 for
+any speech before the turn end, and an interruption score that saturated
+when the first speak fell on the onset unit. Both now keep a gradient:
+early floor-takes are penalized by their earliness, and speech on the
+onset unit is an interruption whose yield latency is scored. The M0
+tolerances stay max |Δ| ≤ 0.05 nats and mean ≤ 0.01. The gate scripts
+build an engine with `enable_prefix_caching=false` and score through the
+same media normalization as training.
 
-`VERL_OMNI_DUPLEX_MAX_SESSIONS` is the engine admission cap. The rollout
-adapter cannot see `rollout.agent.num_workers`, so the recipe exports the
-same count (default 16). The reward manager is the registered
-`minicpm_naive` (`reward.reward_manager.source=register`); the importlib
-default looks the name up as a module attribute and misses it.
+The rollout strategy sets `duplex_session.max_sessions` from
+`rollout.agent.num_workers`. `VERL_OMNI_DUPLEX_MAX_SESSIONS` remains the
+cap the standalone deploy writer uses. The reward manager is verl's
+registered `naive` (`reward.reward_manager.source=register`).
 
 CPU tests cover the whole contract surface
 (`tests/utils/dataset/duplex/`, the strategy / agent-loop / adapter suites);

@@ -86,15 +86,15 @@ def test_turn_axis_full_credit_band_and_deadline():
     assert never["duplex_turn_latency_s"] == float("inf")
 
 
-def test_turn_axis_penalizes_speaking_before_the_turn_ends():
-    # Onset at 1.0 s while the user's utterance ends at 2.0 s: a barge-in on
-    # the user, not a floor take — saturates like never speaking.
+def test_turn_axis_grades_speaking_before_the_turn_ends():
+    # Onset at 1.0 s while the user's utterance ends at 2.0 s: one second early
+    # on the 3 s deadline, not a saturated miss.
     early = compute_score_duplex_turn_taking(
         "dailytalk", "", "", extra_info={"duplex_replay": _replay("turn", [False, True, False, True])}
     )
-    assert early["score"] == -1.0
-    assert early["duplex_turn_latency_s"] == float("inf")
-    assert early["duplex_turn_took_floor"] == 1.0  # it did speak; the timing is what fails
+    assert early["score"] == pytest.approx(-1.0 / 3.0)
+    assert early["duplex_turn_latency_s"] == pytest.approx(-1.0)
+    assert early["duplex_turn_took_floor"] == 1.0
 
 
 def test_interruption_axis_anchors_the_yield_latency_to_the_speech_onset():
@@ -118,15 +118,17 @@ def test_interruption_axis_anchors_the_yield_latency_to_the_speech_onset():
 
 
 def test_interruption_axis_floors_a_policy_that_was_not_speaking_at_the_onset():
-    # The silence floor: a policy that never spoke, or whose first speak
-    # decision falls at or after the onset, was never interrupted — -1.0
-    # whatever it does afterwards, the latency saturating like a missed yield.
+    # Never spoke, or first speaks strictly after the onset: not interrupted.
     silent = _score("interruption", [False, False, False, False])
     assert silent["score"] == -1.0
     assert silent["duplex_yield_latency_s"] == float("inf")
-    late = _score("interruption", [False, False, True, False])  # first speaks at 2.0 == the onset
+    late = _score("interruption", [False, False, False, True])  # first speaks at 3.0, onset is 2.0
     assert late["score"] == -1.0
     assert late["duplex_yield_latency_s"] == float("inf")
+    # The onset unit itself is the injection point: speaking there is interrupted.
+    on_onset = _score("interruption", [False, False, True, False])
+    assert on_onset["score"] == 0.0
+    assert on_onset["duplex_yield_latency_s"] == pytest.approx(1.0)
 
 
 def test_pacing_corrupted_column_follows_the_engine_units():
