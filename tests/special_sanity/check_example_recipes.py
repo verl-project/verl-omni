@@ -25,7 +25,7 @@ from pathlib import PurePosixPath
 MEDIA_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".mp4", ".wav", ".mov", ".webm", ".mp3", ".flac"}
 _LOCAL_PATH_BODY = r"/(?:(?:Users|home|nfs|mnt|root)(?:/|$)|users?/)"
 LOCAL_PATH = re.compile(rf"^{_LOCAL_PATH_BODY}")
-SHELL_LOCAL_PATH = re.compile(rf"(?:^|=|:-|:=|-|:\+|:(?=/))[\"']?({_LOCAL_PATH_BODY})")
+SHELL_LOCAL_PATH = re.compile(rf"(?:^|=|:-|:=|-|:\+|:(?=/)|\[|,)\s*[\"']?({_LOCAL_PATH_BODY})")
 YAML_LOCAL_PATH = re.compile(rf"^(?:\s*-\s*|[A-Za-z0-9_.-]+\s*:\s*(?:\[[^\]]*,\s*)?)[\"']?({_LOCAL_PATH_BODY})")
 HARDCODED_VENV_PYTHON = re.compile(r"(?:^|[=:/\-])\.venv/bin/python")
 TRAILING_BACKSLASH_SPACE = re.compile(r"\\[ \t]+$")
@@ -219,6 +219,32 @@ def _is_array_start(command: list[tuple[int, str]]) -> str | None:
         if prefix_tok not in _ARRAY_DECL_PREFIXES and not prefix_tok.startswith("-"):
             return None
     return command[-1][1].rstrip("+=")
+
+
+def _iter_arrays(tokens: list[tuple[int, str]]) -> Iterator[list[tuple[int, str]]]:
+    command: list[tuple[int, str]] = []
+    array_depth = 0
+    array_items: list[tuple[int, str]] = []
+    for line, token in [*tokens, (0, "\n")]:
+        if array_depth > 0:
+            if token in {"(", "(("}:
+                array_depth += 1 if token == "(" else 2
+            elif token in {")", "))"}:
+                array_depth = max(0, array_depth - (1 if token == ")" else 2))
+                if array_depth == 0:
+                    yield array_items
+                    array_items = []
+            elif token != "\n":
+                array_items.append((line, token))
+            continue
+        if token == "(" and _is_array_start(command) is not None:
+            array_depth = 1
+            command = []
+            continue
+        if token in {"\n", ";", ";;", "&&", "||", "|", "&", "(", ")"}:
+            command = []
+        else:
+            command.append((line, token))
 
 
 def _iter_commands(tokens: list[tuple[int, str]]) -> Iterator[tuple[list[tuple[int, str]], str]]:
@@ -430,6 +456,16 @@ def _shell_findings(source_path: PurePosixPath, source: bytes, text: str) -> Ite
     tokens = _shell_tokens(parse_text)
     is_run = source_path.name.lower().startswith("run_")
     yield from _token_findings(tokens)
+
+    for items in _iter_arrays(tokens):
+        seen_array_keys: set[str] = set()
+        for ln, tok in items:
+            if SHELL_LOCAL_PATH.search(tok.strip("\"'")):
+                yield ln, "VO014", "Pass local model and data paths through configuration."
+            if (key := _hydra_key(tok)) is not None:
+                if key in seen_array_keys:
+                    yield ln, "EX007", f"Duplicate Hydra override '{key}' in the same array."
+                seen_array_keys.add(key)
 
     for command, delimiter in _iter_commands(tokens):
         work = _strip_command_prefixes(command)

@@ -148,6 +148,8 @@ def _ruff_findings(path: str, source: bytes) -> Iterator[Finding]:
 def _findings(path: str, source: bytes) -> list[Finding]:
     hygiene = [Finding(*finding) for finding in example_findings(path, source)]
     if not path.endswith(".py"):
+        if path.startswith("examples/") and path.endswith(".sh"):
+            hygiene.extend(Finding(*finding) for finding in comment_findings(path, source))
         return hygiene
     try:
         tree = ast.parse(source, filename=path)
@@ -174,17 +176,35 @@ def _ls_tree_blobs(snapshot: str, directory: str, root: str | None = None) -> se
     return paths
 
 
-def _collect_module_imports(statements: list[ast.stmt], imports: set[str]) -> None:
+def _collect_module_imports(
+    statements: list[ast.stmt], imports: set[str], package: str = "verl_omni.pipelines"
+) -> None:
+    max_level = len(package.split("."))
     for node in statements:
         if isinstance(node, ast.Import):
             imports.update(alias.name for alias in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.level <= 1:
-            parent = resolve_name("." * node.level + (node.module or ""), "verl_omni.pipelines")
+        elif isinstance(node, ast.ImportFrom) and node.level <= max_level:
+            parent = resolve_name("." * node.level + (node.module or ""), package)
             imports.add(parent)
             imports.update(f"{parent}.{alias.name}" for alias in node.names)
         elif isinstance(node, ast.Try | ast.TryStar):
-            _collect_module_imports(node.body, imports)
-            _collect_module_imports(node.orelse, imports)
+            _collect_module_imports(node.body, imports, package=package)
+            _collect_module_imports(node.orelse, imports, package=package)
+
+
+def _defines_registered_adapter(source: bytes) -> bool:
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return False
+    return any(
+        isinstance(node, ast.ClassDef)
+        and any(
+            isinstance(dec, ast.Call) and isinstance(dec.func, ast.Attribute) and dec.func.attr == "register"
+            for dec in node.decorator_list
+        )
+        for node in tree.body
+    )
 
 
 def _pipeline_findings(snapshot: str, root: str | None = None) -> Iterator[tuple[str, Finding]]:
@@ -218,6 +238,40 @@ def _pipeline_findings(snapshot: str, root: str | None = None) -> Iterator[tuple
                     f"Import and re-export {module} (e.g. via __all__) in {entrypoint} so its adapters can register.",
                 ),
             )
+        pkg_prefix = f"verl_omni/pipelines/{package}/"
+        pkg_init = f"{pkg_prefix}__init__.py"
+        adapter_mods = [
+            path
+            for path in sorted(names)
+            if path.startswith(pkg_prefix)
+            and path != pkg_init
+            and path.endswith(".py")
+            and _defines_registered_adapter(_git("show", f"{snapshot}:{path}", root=root))
+        ]
+        if not adapter_mods:
+            continue
+        try:
+            pkg_tree = (
+                ast.parse(_git("show", f"{snapshot}:{pkg_init}", root=root))
+                if pkg_init in names
+                else ast.Module(body=[])
+            )
+        except SyntaxError:
+            continue
+        pkg_imports: set[str] = set()
+        _collect_module_imports(pkg_tree.body, pkg_imports, package=module)
+        for mod_path in adapter_mods:
+            mod_fqn = ".".join(PurePosixPath(mod_path).with_suffix("").parts)
+            if not any(imp == mod_fqn or imp.startswith(mod_fqn + ".") for imp in pkg_imports):
+                yield (
+                    mod_path,
+                    Finding(
+                        1,
+                        "VO010",
+                        f"Import {PurePosixPath(mod_path).stem} in {pkg_init} "
+                        "so its registered adapter loads at pipeline import time.",
+                    ),
+                )
 
 
 def _example_variant_findings(snapshot: str, root: str | None = None) -> Iterator[tuple[str, Finding]]:

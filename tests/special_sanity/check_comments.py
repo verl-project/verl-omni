@@ -203,10 +203,136 @@ def _docstring_findings(path: str, tree: ast.AST) -> Iterator[tuple[int, str, st
             and _is_trivial_private_docstring(node, doc)
         ):
             yield first.lineno, "CM004", "Omit trivial private docstring that only repeats the function signature."
+        elif not path.startswith("tests/special_") and PR_REF.search(doc):
+            yield first.lineno, "CM005", "Remove PR references from docstrings; cite issues or explain the rationale."
+
+
+_HEREDOC_DELIM_RE = re.compile(r"(-?)\s*\\?(?:'([A-Za-z0-9_]+)'|\"([A-Za-z0-9_]+)\"|([A-Za-z0-9_]+))")
+
+
+def _shell_comment_findings(source: bytes) -> Iterator[tuple[int, str, str]]:
+    try:
+        text = source.decode("utf-8")
+    except UnicodeDecodeError:
+        return
+    heredocs: list[tuple[str, bool]] = []
+    quote: str | None = None
+    ansi_single = False
+    license_active = False
+    license_done = False
+    last_license_line = 0
+    for line_no, raw_line in enumerate(text.splitlines(), 1):
+        if heredocs:
+            marker, strip_tabs = heredocs[0]
+            if (raw_line.lstrip("\t") if strip_tabs else raw_line) == marker:
+                heredocs.pop(0)
+            continue
+        has_code = quote is not None
+        comment_text: str | None = None
+        arith_depth = 0
+        i = 0
+        length = len(raw_line)
+        while i < length:
+            ch = raw_line[i]
+            if quote == "'":
+                if ansi_single and ch == "\\":
+                    i += 2
+                    continue
+                if ch == "'":
+                    quote = None
+                    ansi_single = False
+                i += 1
+                continue
+            if quote == '"':
+                if ch == "\\":
+                    i += 2
+                    continue
+                if ch == '"':
+                    quote = None
+                i += 1
+                continue
+            if ch == "#" and (i == 0 or raw_line[i - 1].isspace()):
+                comment_text = raw_line[i + 1 :].strip()
+                break
+            if ch == "\\":
+                has_code = True
+                i += 2
+                continue
+            if ch == "$" and i + 1 < length and raw_line[i + 1] == "'":
+                has_code = True
+                quote = "'"
+                ansi_single = True
+                i += 2
+                continue
+            if ch in {"'", '"'}:
+                has_code = True
+                quote = ch
+                i += 1
+                continue
+            if raw_line[i : i + 2] == "((":
+                has_code = True
+                arith_depth += 2
+                i += 2
+                continue
+            if raw_line[i : i + 2] == "))" and arith_depth:
+                has_code = True
+                arith_depth = max(0, arith_depth - 2)
+                i += 2
+                continue
+            if ch == "(" and arith_depth:
+                has_code = True
+                arith_depth += 1
+                i += 1
+                continue
+            if ch == ")" and arith_depth:
+                has_code = True
+                arith_depth -= 1
+                i += 1
+                continue
+            if raw_line[i : i + 3] == "<<<":
+                has_code = True
+                i += 3
+                continue
+            if raw_line[i : i + 2] == "<<" and arith_depth == 0:
+                if match := _HEREDOC_DELIM_RE.match(raw_line, i + 2):
+                    strip_tabs = bool(match.group(1))
+                    marker = match.group(2) or match.group(3) or match.group(4)
+                    heredocs.append((marker, strip_tabs))
+                    has_code = True
+                    i = match.end()
+                    continue
+            if not ch.isspace():
+                has_code = True
+            i += 1
+
+        if comment_text is None:
+            continue
+        if line_no == 1 and raw_line.startswith("#!"):
+            continue
+        lower = comment_text.lower()
+        if not has_code and not license_done:
+            if not license_active:
+                if any(key in lower for key in ("copyright", "spdx-", "licensed under")):
+                    license_active = True
+                    last_license_line = line_no
+                    continue
+                license_done = True
+            elif line_no <= last_license_line + 1:
+                last_license_line = line_no
+                continue
+            else:
+                license_done = True
+        if lower.startswith(TOOLING_DIRECTIVE_PREFIXES):
+            continue
+        if PR_REF.search(comment_text):
+            yield line_no, "CM005", "Remove PR references from code comments; cite issues or explain the rationale."
 
 
 def findings(path: str, source: bytes, tree: ast.AST | None = None) -> Iterator[tuple[int, str, str]]:
     """Yield comment-shape and docstring-boilerplate violations without inferring authorship."""
+    if path.startswith("examples/") and path.endswith(".sh"):
+        yield from _shell_comment_findings(source)
+        return
     if not path.startswith(("verl_omni/", "tests/", "examples/")) or not path.endswith(".py"):
         return
     try:

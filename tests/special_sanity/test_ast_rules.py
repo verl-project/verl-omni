@@ -250,8 +250,24 @@ def test_shared_model_dispatch_uses_known_literal_names(path: str, source: str, 
         ),
         (
             '@DiffusionModelBase.register("Example", algorithm="grpo")\n'
-            "class Child(ImportedParent):\n    def forward(self):\n        pass",
+            'class Child(ImportedParent):\n    """Adapter."""\n    def forward(self):\n        pass',
             ["VO009"],
+        ),
+        (
+            '@OmniRolloutPipelineBase.register("example")\n'
+            'class RolloutAdapter(OmniRolloutPipelineBase):\n    """Rollout adapter."""\n'
+            "    def __init__(self):\n        pass",
+            ["VO009"],
+        ),
+        (
+            "from verl_omni.pipelines.non_diffusers_model_base import VllmOmniPipelineBase\n"
+            "class RolloutAdapter(VllmOmniPipelineBase):\n    def __call__(self):\n        pass",
+            [],
+        ),
+        (
+            "class RolloutAdapter(OmniRolloutPipelineBase):\n"
+            '    """Rollout adapter."""\n    @classmethod\n    def build(cls):\n        pass',
+            [],
         ),
         (
             "class Model(DiffusionModelBase):\n    @staticmethod\n    def __init__():\n        pass",
@@ -468,6 +484,23 @@ def test_config_dataclass_rules_cover_defaults_literal_and_super(source: str, ex
             '__all__ = ["PublicFn"]\ndef PublicFn():\n    pass\ndef internal_unlisted():\n    pass\n',
             ["VO015"],
         ),
+        (
+            "verl_omni/pipelines/demo/omni_rollout_adapter.py",
+            '@OmniRolloutPipelineBase.register("demo")\nclass DemoRolloutAdapter(OmniRolloutPipelineBase):\n'
+            '    supports_async_chunk = True\n    """Misplaced docstring after attribute."""\n    pass\n',
+            ["VO015"],
+        ),
+        (
+            "verl_omni/pipelines/demo/omni_rollout_adapter.py",
+            '@OmniRolloutPipelineBase.register("demo")\nclass DemoRolloutAdapter(OmniRolloutPipelineBase):\n'
+            '    """Rollout adapter."""\n    supports_async_chunk = True\n',
+            [],
+        ),
+        (
+            "verl_omni/reward_loop/reward_manager/custom.py",
+            '@register_reward_manager("custom")\nclass CustomRewardManager:\n    pass\n',
+            ["VO015"],
+        ),
         ("verl_omni/utils/custom.py", "def _private_helper():\n    pass\n", []),
     ],
 )
@@ -589,4 +622,70 @@ def test_public_api_docstrings_have_zero_private_noise(path: str, source: str, e
     ],
 )
 def test_artifact_contract_error_must_propagate_in_rewards(path: str, source: str, expected: list[str]) -> None:
+    assert [code for _line, code, _message in findings(path, ast.parse(source))] == expected
+
+
+@pytest.mark.parametrize(
+    ("path", "source", "expected"),
+    [
+        (
+            TEST,
+            "from pathlib import Path\nADAPTER = Path('verl_omni/pipelines/demo/adapter.py')\n"
+            "def test_flag():\n    src = ADAPTER.read_text()\n    assert 'foo' in src\n",
+            ["VO017"],
+        ),
+        (
+            TEST,
+            "import unittest\nfrom pathlib import Path\nPKG = Path('verl_omni/pipelines/demo')\n"
+            "class T(unittest.TestCase):\n    def test_flag(self):\n"
+            "        src = (PKG / 'adapter.py').read_text()\n        self.assertIn('foo', src)\n",
+            ["VO017"],
+        ),
+        (
+            TEST,
+            "class T:\n    def _load(self):\n        return Path('verl_omni/pipelines/demo/a.py').read_text()\n"
+            "    def test_flag(self):\n        src = self._load()\n        assert 'foo' in src\n",
+            ["VO017"],
+        ),
+        (
+            TEST,
+            "def test_open():\n    with open('verl_omni/pipelines/demo/a.py') as f:\n        src = f.read()\n"
+            "    assert 'foo' in src\n",
+            ["VO017"],
+        ),
+        (
+            TEST,
+            "import re\nfrom pathlib import Path\n"
+            "def test_regex():\n    src = Path('verl_omni/pipelines/demo/a.py').read_text()\n"
+            "    assert re.search('def foo', src)\n",
+            ["VO017"],
+        ),
+        (
+            TEST,
+            "import ast\nfrom pathlib import Path\n"
+            "def test_ast():\n    src = Path('verl_omni/pipelines/demo/a.py').read_text()\n"
+            "    assert 'foo' in ast.unparse(ast.parse(src))\n",
+            [],
+        ),
+        (
+            TEST,
+            "from pathlib import Path\nSCRIPT = Path('examples/demo/run.sh')\n"
+            "def test_recipe():\n    src = SCRIPT.read_text()\n"
+            "    assert 'verl_omni/utils/reward_score/foo.py' in src\n",
+            [],
+        ),
+        (
+            TEST,
+            "def test_fixture(tmp_path):\n    p = tmp_path / 'sample.py'\n"
+            "    p.write_text('x = 1')\n    assert 'x = 1' in p.read_text()\n",
+            [],
+        ),
+        (
+            "tests/special_sanity/test_demo.py",
+            "from pathlib import Path\ndef test_ok():\n    assert 'x' in Path('verl_omni/x.py').read_text()\n",
+            [],
+        ),
+    ],
+)
+def test_tests_do_not_grep_production_source_as_unit_tests(path: str, source: str, expected: list[str]) -> None:
     assert [code for _line, code, _message in findings(path, ast.parse(source))] == expected

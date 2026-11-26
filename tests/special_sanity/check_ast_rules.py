@@ -31,7 +31,13 @@ SHARED_PIPELINE_MODULES = {
     "schedulers",
     "utils",
 }
-TRAINING_BASES = {"DiffusionModelBase", "DiffusionModelARBase", "DiffusionI2IModelBase", "OmniModelBase"}
+TRAINING_BASES = {
+    "DiffusionModelBase",
+    "DiffusionModelARBase",
+    "DiffusionI2IModelBase",
+    "OmniModelBase",
+    "OmniRolloutPipelineBase",
+}
 SHARED_CONTRACT_FILES = {
     "verl_omni/pipelines/model_base.py",
     "verl_omni/pipelines/non_diffusers_model_base.py",
@@ -321,7 +327,11 @@ def _model_dispatch(tree: ast.AST) -> Iterator[tuple[int, str, str]]:
 
 
 def _training_adapters(tree: ast.AST, aliases: dict[str, str]) -> Iterator[tuple[int, str, str]]:
-    known_bases = TRAINING_BASES | {f"verl_omni.pipelines.model_base.{name}" for name in TRAINING_BASES}
+    known_bases = TRAINING_BASES | {
+        f"{mod}.{name}"
+        for mod in ("verl_omni.pipelines.model_base", "verl_omni.pipelines.non_diffusers_model_base")
+        for name in TRAINING_BASES
+    }
     classes = [node for node in tree.body if isinstance(node, ast.ClassDef)]
     for node in classes:
         registered = any(
@@ -353,7 +363,7 @@ def _training_adapters(tree: ast.AST, aliases: dict[str, str]) -> Iterator[tuple
                 yield (
                     method.lineno,
                     "VO009",
-                    "Training adapters are stateless: use classmethod/staticmethod hooks and no __init__.",
+                    "Pipeline adapters are stateless: use classmethod/staticmethod hooks and no __init__.",
                 )
 
 
@@ -538,6 +548,18 @@ def _skip_method_docstring(node: ast.FunctionDef | ast.AsyncFunctionDef, aliases
     )
 
 
+def _is_registered_class(node: ast.ClassDef) -> bool:
+    for decorator in node.decorator_list:
+        if not isinstance(decorator, ast.Call):
+            continue
+        func = decorator.func
+        if isinstance(func, ast.Attribute) and (func.attr == "register" or func.attr.startswith("register_")):
+            return True
+        if isinstance(func, ast.Name) and func.id.startswith("register_"):
+            return True
+    return False
+
+
 def _public_api_docstrings(path: str, tree: ast.AST, aliases: dict[str, str]) -> Iterator[tuple[int, str, str]]:
     in_config = path.startswith(("verl_omni/trainer/config/", "verl_omni/workers/config/"))
     exported = None if in_config else _static_exports(tree)
@@ -556,7 +578,9 @@ def _public_api_docstrings(path: str, tree: ast.AST, aliases: dict[str, str]) ->
             and isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
             and (node.name == "compute_score" or node.name.startswith("compute_score_"))
         )
-        if not is_overload and (is_exported or is_contract_symbol or is_scorer) and not _has_docstring(node):
+        is_registered = isinstance(node, ast.ClassDef) and not node.name.startswith("_") and _is_registered_class(node)
+        needs_doc = is_exported or is_contract_symbol or is_scorer or is_registered
+        if not is_overload and needs_doc and not _has_docstring(node):
             yield node.lineno, "VO015", f"Document public API '{node.name}' with a concise contract docstring."
         if in_contract and isinstance(node, ast.ClassDef) and not node.name.startswith("_"):
             for member in node.body:
@@ -761,6 +785,229 @@ def _cuda_skips(tree: ast.AST, aliases: dict[str, str]) -> Iterator[tuple[int, s
             yield node.lineno, "VO013", "Use the GPU topology test helpers instead of bare CUDA availability skips."
 
 
+def _path_strings(node: ast.AST) -> list[str]:
+    return [sub.value for sub in ast.walk(node) if isinstance(sub, ast.Constant) and isinstance(sub.value, str)]
+
+
+def _path_var_names(node: ast.AST) -> set[str]:
+    return {sub.id for sub in ast.walk(node) if isinstance(sub, ast.Name)}
+
+
+def _has_examples_string(strings: list[str]) -> bool:
+    return any(item == "examples" or "examples/" in item for item in strings)
+
+
+def _has_verl_omni_ref(node: ast.AST, strings: list[str], dir_vars: set[str]) -> bool:
+    has_direct = any(item == "verl_omni" or "verl_omni/" in item or item.startswith("verl_omni") for item in strings)
+    return has_direct or bool(_path_var_names(node) & dir_vars)
+
+
+def _expr_is_verl_omni_dir(node: ast.AST, dir_vars: set[str]) -> bool:
+    if isinstance(node, ast.Name) and node.id in dir_vars:
+        return True
+    strings = _path_strings(node)
+    if not strings or _has_examples_string(strings) or any(item.endswith(".py") for item in strings):
+        return False
+    return _has_verl_omni_ref(node, strings, dir_vars)
+
+
+def _expr_is_verl_omni_py(node: ast.AST, py_path_vars: set[str], dir_vars: set[str]) -> bool:
+    if isinstance(node, ast.Name) and node.id in py_path_vars:
+        return True
+    strings = _path_strings(node)
+    if not strings or _has_examples_string(strings):
+        return False
+    if not any(item.endswith(".py") for item in strings):
+        return False
+    return _has_verl_omni_ref(node, strings, dir_vars)
+
+
+def _bound_open_path(call: ast.Call, py_path_vars: set[str], dir_vars: set[str], aliases: dict[str, str]) -> bool:
+    if _qualified(call.func, aliases) in {"open", "builtins.open"} and call.args:
+        return _expr_is_verl_omni_py(call.args[0], py_path_vars, dir_vars)
+    if isinstance(call.func, ast.Attribute) and call.func.attr == "open":
+        return _expr_is_verl_omni_py(call.func.value, py_path_vars, dir_vars)
+    return False
+
+
+def _is_source_read_call(
+    node: ast.AST,
+    py_path_vars: set[str],
+    dir_vars: set[str],
+    file_vars: set[str],
+    helper_names: set[str],
+    aliases: dict[str, str],
+) -> bool:
+    if not isinstance(node, ast.Call):
+        return False
+    if isinstance(node.func, ast.Attribute) and node.func.attr == "read_text":
+        return _expr_is_verl_omni_py(node.func.value, py_path_vars, dir_vars)
+    if isinstance(node.func, ast.Attribute) and node.func.attr == "read":
+        target = node.func.value
+        if isinstance(target, ast.Name) and target.id in file_vars:
+            return True
+        if isinstance(target, ast.Call):
+            return _bound_open_path(target, py_path_vars, dir_vars, aliases)
+    if isinstance(node.func, ast.Name) and node.func.id in helper_names:
+        return True
+    return isinstance(node.func, ast.Attribute) and node.func.attr in helper_names
+
+
+def _expr_references_source(
+    expr: ast.AST,
+    local_py: set[str],
+    local_dirs: set[str],
+    file_vars: set[str],
+    src_vars: set[str],
+    helper_names: set[str],
+    aliases: dict[str, str],
+) -> bool:
+    if isinstance(expr, ast.Name) and expr.id in src_vars:
+        return True
+    if _is_source_read_call(expr, local_py, local_dirs, file_vars, helper_names, aliases):
+        return True
+    if isinstance(expr, ast.Subscript):
+        return _expr_references_source(expr.value, local_py, local_dirs, file_vars, src_vars, helper_names, aliases)
+    if isinstance(expr, ast.Call) and isinstance(expr.func, ast.Attribute):
+        return _expr_references_source(
+            expr.func.value, local_py, local_dirs, file_vars, src_vars, helper_names, aliases
+        )
+    return False
+
+
+def _collect_fn_source_state(
+    fn: ast.FunctionDef | ast.AsyncFunctionDef,
+    base_py_vars: set[str],
+    base_dir_vars: set[str],
+    helper_names: set[str],
+    aliases: dict[str, str],
+) -> tuple[set[str], set[str], set[str], set[str]]:
+    local_py = set(base_py_vars)
+    local_dirs = set(base_dir_vars)
+    file_vars: set[str] = set()
+    src_vars: set[str] = set()
+
+    for stmt in ast.walk(fn):
+        if isinstance(stmt, ast.With | ast.AsyncWith):
+            for item in stmt.items:
+                if (
+                    isinstance(item.context_expr, ast.Call)
+                    and isinstance(item.optional_vars, ast.Name)
+                    and _bound_open_path(item.context_expr, local_py, local_dirs, aliases)
+                ):
+                    file_vars.add(item.optional_vars.id)
+        elif isinstance(stmt, ast.Assign):
+            target_names = [target.id for target in stmt.targets if isinstance(target, ast.Name)]
+            if _expr_is_verl_omni_py(stmt.value, local_py, local_dirs):
+                local_py.update(target_names)
+            elif _expr_is_verl_omni_dir(stmt.value, local_dirs):
+                local_dirs.update(target_names)
+            if _expr_references_source(stmt.value, local_py, local_dirs, file_vars, src_vars, helper_names, aliases):
+                src_vars.update(target_names)
+    return local_py, local_dirs, file_vars, src_vars
+
+
+def _test_has_source_grep(
+    fn: ast.FunctionDef | ast.AsyncFunctionDef,
+    local_py: set[str],
+    local_dirs: set[str],
+    file_vars: set[str],
+    src_vars: set[str],
+    helper_names: set[str],
+    aliases: dict[str, str],
+) -> bool:
+    def _matches(expr: ast.AST | None) -> bool:
+        return expr is not None and _expr_references_source(
+            expr, local_py, local_dirs, file_vars, src_vars, helper_names, aliases
+        )
+
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Assert):
+            for sub in ast.walk(node.test):
+                if isinstance(sub, ast.Compare) and any(isinstance(op, ast.In | ast.NotIn) for op in sub.ops):
+                    if any(_matches(comp) for comp in sub.comparators):
+                        return True
+                elif (
+                    isinstance(sub, ast.Call)
+                    and _qualified(sub.func, aliases) in {"re.search", "re.match", "re.fullmatch", "re.findall"}
+                    and (
+                        any(_matches(arg) for arg in sub.args[1:2])
+                        or any(kw.arg == "string" and _matches(kw.value) for kw in sub.keywords)
+                    )
+                ):
+                    return True
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in {"assertIn", "assertNotIn"}
+        ):
+            container = (
+                node.args[1]
+                if len(node.args) >= 2
+                else next((kw.value for kw in node.keywords if kw.arg == "container"), None)
+            )
+            if _matches(container):
+                return True
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in {"assertRegex", "assertNotRegex"}
+        ):
+            text_arg = node.args[0] if node.args else next((kw.value for kw in node.keywords if kw.arg == "text"), None)
+            if _matches(text_arg):
+                return True
+    return False
+
+
+def _source_grep_tests(path: str, tree: ast.AST, aliases: dict[str, str]) -> Iterator[tuple[int, str, str]]:
+    if path.startswith("tests/special_sanity/"):
+        return
+    if any(isinstance(node, ast.Call) and _qualified(node.func, aliases) == "ast.parse" for node in ast.walk(tree)):
+        return
+    py_path_vars: set[str] = set()
+    dir_vars: set[str] = set()
+    for stmt in tree.body if isinstance(tree, ast.Module) else ():
+        if isinstance(stmt, ast.Assign):
+            targets = [target.id for target in stmt.targets if isinstance(target, ast.Name)]
+            if _expr_is_verl_omni_py(stmt.value, py_path_vars, dir_vars):
+                py_path_vars.update(targets)
+            elif _expr_is_verl_omni_dir(stmt.value, dir_vars):
+                dir_vars.update(targets)
+
+    all_funcs = [node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)]
+    helper_names: set[str] = set()
+    for fn in all_funcs:
+        if fn.name.startswith("test_"):
+            continue
+        local_py, local_dirs, file_vars, src_vars = _collect_fn_source_state(
+            fn, py_path_vars, dir_vars, helper_names, aliases
+        )
+        if any(
+            isinstance(ret, ast.Return)
+            and ret.value is not None
+            and _expr_references_source(ret.value, local_py, local_dirs, file_vars, src_vars, helper_names, aliases)
+            for ret in ast.walk(fn)
+        ):
+            helper_names.add(fn.name)
+
+    for fn in all_funcs:
+        if not fn.name.startswith("test_"):
+            continue
+        local_py, local_dirs, file_vars, src_vars = _collect_fn_source_state(
+            fn, py_path_vars, dir_vars, helper_names, aliases
+        )
+        if not src_vars and not any(
+            _is_source_read_call(sub, local_py, local_dirs, file_vars, helper_names, aliases) for sub in ast.walk(fn)
+        ):
+            continue
+        if _test_has_source_grep(fn, local_py, local_dirs, file_vars, src_vars, helper_names, aliases):
+            yield (
+                fn.lineno,
+                "VO017",
+                "Test behavior directly instead of asserting substrings on verl_omni source text.",
+            )
+
+
 def findings(path: str, tree: ast.AST) -> Iterator[tuple[int, str, str]]:
     """Yield explicit import, dispatch and class-contract violations for one file."""
     aliases = _aliases(tree, PurePosixPath(path).parent.parts)
@@ -768,6 +1015,7 @@ def findings(path: str, tree: ast.AST) -> Iterator[tuple[int, str, str]]:
         yield from _cuda_skips(tree, aliases)
         yield from _cpu_test_names(path, tree)
         yield from _smoke_exit_status(tree)
+        yield from _source_grep_tests(path, tree, aliases)
         return
     if not path.startswith("verl_omni/"):
         return

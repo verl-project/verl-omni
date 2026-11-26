@@ -107,6 +107,14 @@ def test_python_path_literals(source: str, expected: list[str]) -> None:
         ('X=${X-/home/alice/weights}\npython trainer.py "$@"', ["VO014"]),
         ('X=${X:+/home/alice/weights}\npython trainer.py "$@"', ["VO014"]),
         ('PYTHONPATH="/opt:/home/alice/lib"\npython trainer.py "$@"', ["VO014"]),
+        ('python trainer.py data.train_files=\'["/home/alice/a.parquet"]\' "$@"', ["VO014"]),
+        ('python trainer.py data.train_files=\'["a","/user/bob/b.parquet"]\' "$@"', ["VO014"]),
+        (
+            'ARGS=(\n    MODEL="/user/alice/weights"\n    trainer.epochs=1\n    trainer.epochs=2\n)\n'
+            'python trainer.py "$@"',
+            ["VO014", "EX007"],
+        ),
+        ('ARGS=(\n    data.dir=$(pwd)/out\n    "$@"\n)\npython trainer.py "${ARGS[@]}"', []),
     ],
 )
 def test_shell_recipe_checks(source: str, expected: list[str]) -> None:

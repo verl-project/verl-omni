@@ -416,6 +416,8 @@ def test_live_repo_baseline_respects_precision_bounds() -> None:
         raw = (root / rel).read_bytes()
         if rel.startswith("examples/") or rel.endswith((".py", ".sh", ".yaml", ".yml")):
             counts.update(code for _ln, code, _msg in example_findings(rel, raw))
+        if rel.startswith("examples/") and rel.endswith(".sh"):
+            counts.update(code for _ln, code, _msg in comment_findings(rel, raw))
         if not rel.endswith(".py"):
             continue
         tree = ast.parse(raw)
@@ -445,7 +447,7 @@ def test_live_repo_baseline_respects_precision_bounds() -> None:
     assert not unexpected, f"Unexpected live-repo hits: {unexpected}"
     assert counts["VO001"] <= 2
     assert counts["VO011"] <= 2
-    assert counts["VO015"] <= 4
+    assert counts["VO015"] <= 6
     assert counts["CM001"] <= 7
     assert counts["CM003"] <= 15
     assert counts["EX005"] <= 84
@@ -475,7 +477,9 @@ def test_live_repo_baseline_respects_precision_bounds() -> None:
         test_counts.update(code for _ln, code, _msg in ast_findings(rel, tree))
         test_counts.update(code for _ln, code, _msg in comment_findings(rel, raw, tree=tree))
     assert not {
-        code: test_counts[code] for code in ("VO006", "VO007", "VO013", "VO014", "CM001", "CM005") if test_counts[code]
+        code: test_counts[code]
+        for code in ("VO006", "VO007", "VO013", "VO014", "VO017", "CM001", "CM005")
+        if test_counts[code]
     }
     assert test_counts["CM004"] <= 7
     assert test_counts["CM002"] <= 170
@@ -567,6 +571,13 @@ RULE_MATRIX: dict[str, tuple[str, bytes, str, bytes]] = {
         b"try:\n    run()\nexcept Exception:\n    return 0.0\n",
         "verl_omni/utils/reward_score/custom.py",
         b"try:\n    run()\nexcept ArtifactContractError:\n    raise\nexcept Exception:\n    return 0.0\n",
+    ),
+    "VO017": (
+        SMOKE_PATH,
+        b"from pathlib import Path\nADAPTER = Path('verl_omni/pipelines/ex/a.py')\n"
+        b"def test_flag():\n    assert 'foo' in ADAPTER.read_text()\n",
+        SMOKE_PATH,
+        b"def test_flag():\n    assert build_flag() == 'foo'\n",
     ),
     "CM001": (
         CORE_PATH,
@@ -831,3 +842,38 @@ def test_moved_decorated_skipif_is_not_masked_by_baseline(tmp_path: Path) -> Non
     res = subprocess.run([sys.executable, str(CHECKER), base, head], cwd=tmp_path, capture_output=True, text=True)
     assert res.returncode == 1
     assert "VO013" in res.stdout
+
+
+@pytest.mark.skipif(shutil.which("ruff") is None, reason="The CI workflow supplies pinned Ruff.")
+def test_package_init_adapter_import_and_shell_pr_ref_caught_end_to_end(tmp_path: Path) -> None:
+    _git(tmp_path, "init", "-q")
+    pipelines = tmp_path / "verl_omni/pipelines"
+    demo = pipelines / "demo"
+    demo.mkdir(parents=True)
+    (pipelines / "__init__.py").write_text("from . import demo as demo\n", encoding="utf-8")
+    (demo / "__init__.py").write_text("", encoding="utf-8")
+    base = _commit(tmp_path)
+
+    adapter = demo / "talker_adapter.py"
+    adapter.write_text(
+        '@OmniModelBase.register("Demo", stage="talker")\n'
+        'class DemoTalkerAdapter(OmniModelBase):\n    """Talker adapter."""\n    pass\n',
+        encoding="utf-8",
+    )
+    recipe = tmp_path / "examples/demo/run_train.sh"
+    recipe.parent.mkdir(parents=True)
+    recipe.write_text(
+        '#!/usr/bin/env bash\nset -euo pipefail\n# Reused from PR #858\npython3 t.py "$@"\n',
+        encoding="utf-8",
+    )
+    head = _commit(tmp_path)
+    bad = subprocess.run([sys.executable, str(CHECKER), base, head], cwd=tmp_path, capture_output=True, text=True)
+    assert bad.returncode == 1, bad.stdout + bad.stderr
+    assert "VO010" in bad.stdout and "talker_adapter.py" in bad.stdout
+    assert "CM005" in bad.stdout and "run_train.sh" in bad.stdout
+
+    (demo / "__init__.py").write_text("from .talker_adapter import DemoTalkerAdapter as DemoTalkerAdapter\n")
+    recipe.write_text('#!/usr/bin/env bash\nset -euo pipefail\npython3 t.py "$@"\n', encoding="utf-8")
+    head = _commit(tmp_path)
+    good = subprocess.run([sys.executable, str(CHECKER), base, head], cwd=tmp_path, capture_output=True, text=True)
+    assert good.returncode == 0, good.stdout + good.stderr

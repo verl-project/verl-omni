@@ -254,6 +254,32 @@ def test_checker_preserves_its_own_license_and_source_literals() -> None:
         (COMMENT_PATH, "# TODO: remove workaround from PR #942\nvalue = 1\n", [(1, "CM005")]),
         (COMMENT_PATH, "# NOTE: added in PR #942\nvalue = 1\n", [(1, "CM005")]),
         (COMMENT_PATH, "# TODO: remove after upstream issue #942 is fixed\nvalue = 1\n", []),
+        (
+            "verl_omni/pipelines/demo.py",
+            'def fn():\n    """Implemented in PR #942."""\n    return 1\n',
+            [(2, "CM005")],
+        ),
+        (
+            "tests/special_e2e/demo.py",
+            '"""Added for PR #942 verification."""\nx = 1\n',
+            [],
+        ),
+        (
+            "examples/demo/run_train.sh",
+            "#!/usr/bin/env bash\n# Reused from PR #858\necho ok\n",
+            [(2, "CM005")],
+        ),
+        (
+            "examples/demo/run_train.sh",
+            '#!/usr/bin/env bash\n# Copyright 2026 Bytedance\n# Adapted from PR #123\necho "PR #858"\n'
+            "cat <<'EOF'\n# PR #858\nEOF\n",
+            [],
+        ),
+        (
+            "examples/demo/run_train.sh",
+            '#!/usr/bin/env bash\necho "<<EOF"\ncat <<< "PR #858"\n# Reused from PR #858\n',
+            [(4, "CM005")],
+        ),
     ],
 )
 def test_ai_comment_and_docstring_bloat_guards(path: str, source: str, expected: list[tuple[int, str]]) -> None:

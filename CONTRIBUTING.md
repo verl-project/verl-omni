@@ -60,14 +60,16 @@ files alike ([RFC #942](https://github.com/verl-project/verl-omni/issues/942)):
 - CPU-marked tests also need the `_on_cpu.py` suffix (`VO007`). GPU tests use
   topology helpers instead of bare `torch.cuda.is_available()` skip conditions (`VO013`).
 - Shared trainers, workers and agent loops must not dispatch on known concrete
-  model-name literals (`VO008`). Training adapters keep stateless class/static
-  hooks (`VO009`); pipeline packages must be imported at the pipeline entrypoint (`VO010`).
+  model-name literals (`VO008`). Training and omni rollout adapters keep stateless class/static
+  hooks (`VO009`); pipeline packages and registered adapter modules must be imported at their pipeline entrypoint `__init__.py` (`VO010`).
 - Config dataclasses need a parent config, non-frozen mutability, field defaults
   (or `omegaconf.MISSING`, never `dataclasses.MISSING`), no `Literal[...]`, subclass
   `super().__post_init__()`, and `__all__` export (`VO011`). Reward managers leave
   HTTP client imports to scorers (`VO012`) and propagate `ArtifactContractError` (`VO016`).
-- Public API contracts (`__all__` exports, shared pipeline contract modules,
-  and `compute_score*` entrypoints) require concise docstrings (`VO015`).
+- Public API contracts (`__all__` exports, `@*.register(...)` / `@register_*` classes,
+  shared pipeline contract modules, and `compute_score*` entrypoints) require concise docstrings (`VO015`).
+- Unit tests under `tests/` should exercise behavior directly rather than reading
+  `verl_omni/` Python source text and asserting substrings (`VO017`).
 - Pass personal model/data paths through configuration or temporary fixtures
   instead of `/home/`, `/Users/`, `/user/`, `/nfs/`, `/mnt/` or `/root/` literals (`VO014`).
 
@@ -93,7 +95,7 @@ constraints or verified upstream workarounds. Do not add line-by-line narration,
 edit history, numbered steps, decorative banners or commented-out code.
 `CM001`–`CM005` reject recognizable edit/step/chatty narration, decorative
 banners, echo comments, PR-template/filler/signature-echo docstrings, and
-`PR #...` comments; isolated production Ruff `ERA001` rejects commented-out
+`PR #...` comments or docstrings (including `examples/**/*.sh`); isolated production Ruff `ERA001` rejects commented-out
 code. License/attribution, tooling directives, and required config documentation
 remain intact. In addition, the PR `Lint` workflow runs Ruff plus
 `check-license`, `validate-structure`, `check-device-api-usage`,

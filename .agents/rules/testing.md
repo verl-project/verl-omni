@@ -23,8 +23,9 @@ fails — three legacy root files are explicitly allowlisted.
 
 Nested directories are fine (`tests/utils/reward_score/`). `check-pr-lint` additionally
 enforces `test_*_on_cpu.py` naming for CPU tests (`VO007`), topology helpers instead of
-bare `torch.cuda.is_available()` skips (`VO013`), and exit-status propagation for
-`pytest.main()` (`VO006`).
+bare `torch.cuda.is_available()` skips (`VO013`), exit-status propagation for
+`pytest.main()` (`VO006`), and behavioral assertions instead of asserting substrings on
+`verl_omni/` source text (`VO017`).
 
 ## GPU tests are gated by scripts, not by `skipif`
 
