@@ -112,10 +112,11 @@ check without launching training:
 bash examples/diffusionnft_trainer/qwen_image/run_qwen_image_ocr_lora_v1.sh --cfg job --resolve
 ```
 
-The legacy v0 script is **deprecated**. Keep it for matched comparisons. The
-performance table below reports the existing V0 measurements; it does not
-establish V1 convergence or throughput. A tiny-checkpoint smoke also does not
-reproduce the full OCR setup.
+The legacy v0 script is **deprecated**. Keep it for matched comparisons with
+the Qwen-Image OCR v0 rows in the performance table below. Those measurements
+do not establish V1 convergence or throughput. The Boogu Pick-a-Pic row
+launches `main_diffusion_v1` and is a separate measurement, not V1 convergence
+evidence. A tiny-checkpoint smoke also does not reproduce the full OCR setup.
 
 ```bash
 bash examples/diffusionnft_trainer/qwen_image/run_qwen_image_ocr_lora.sh
