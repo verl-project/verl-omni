@@ -1052,13 +1052,21 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             if not self._ema_teacher_state.shadow:
                 self._ema_teacher_state.initialize(actor_module)
             backups: dict[str, torch.Tensor] = {}
-            with torch.no_grad():
-                for name, param in actor_module.named_parameters():
-                    if name in self._ema_teacher_state.shadow:
-                        backups[name] = param.data.detach().to(device="cpu").clone()
-                        param.data.copy_(
-                            self._ema_teacher_state.shadow[name].to(device=param.device, dtype=param.dtype)
-                        )
+            named_params = dict(actor_module.named_parameters())
+            try:
+                with torch.no_grad():
+                    for name, param in named_params.items():
+                        if name in self._ema_teacher_state.shadow:
+                            backups[name] = param.data.detach().to(device="cpu").clone()
+                            param.data.copy_(
+                                self._ema_teacher_state.shadow[name].to(device=param.device, dtype=param.dtype)
+                            )
+            except Exception:
+                with torch.no_grad():
+                    for name, backup in backups.items():
+                        param = named_params[name]
+                        param.data.copy_(backup.to(device=param.device, dtype=param.dtype))
+                raise
             self._ema_live_backups = backups
             return True
 
@@ -1086,10 +1094,11 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             data["teacher_unembeds"] = NonTensorData(self._teacher_unembeds)
             data["teacher_key_to_id"] = NonTensorData({key: i for i, key in enumerate(self._teacher_key_vocab)})
         output = self.actor.train_mini_batch(data=data)
-        if self._ema_teacher_state is not None:
+        ema_state = getattr(self, "_ema_teacher_state", None)
+        if ema_state is not None:
             actor_module = self._get_actor_ema_module()
             if actor_module is not None:
-                self._ema_teacher_state.update(actor_module)
+                ema_state.update(actor_module)
         return output.cpu() if output is not None else None
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
@@ -1214,15 +1223,37 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             timings["get_per_tensor_param"] = time.perf_counter() - gather_start
         return lora_weights, peft_config
 
+    def _ema_checkpoint_path(self, local_path: str) -> str:
+        rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+        return os.path.join(local_path, f"ema_teacher_state_rank_{rank}.pt")
+
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def load_checkpoint(self, local_path, hdfs_path=None, del_local_after_load=False):
         assert "actor" in self.role, "load_checkpoint only support actor role"
         self.actor.load_checkpoint(local_path, hdfs_path, del_local_after_load)
+        ema_state = getattr(self, "_ema_teacher_state", None)
+        if ema_state is not None:
+            ema_path = self._ema_checkpoint_path(local_path)
+            if os.path.isfile(ema_path):
+                saved = torch.load(ema_path, map_location="cpu", weights_only=True)
+                ema_state.shadow = dict(saved.get("shadow", {}))
+                ema_state.num_updates = int(saved.get("num_updates", 0))
+            else:
+                actor_module = self._get_actor_ema_module()
+                if actor_module is not None:
+                    ema_state.initialize(actor_module)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def save_checkpoint(self, local_path, hdfs_path=None, global_step=0, max_ckpt_to_keep=None):
         assert "actor" in self.role, "save_checkpoint only support actor role"
         self.actor.save_checkpoint(local_path, hdfs_path, global_step, max_ckpt_to_keep)
+        ema_state = getattr(self, "_ema_teacher_state", None)
+        if ema_state is not None and ema_state.shadow:
+            os.makedirs(local_path, exist_ok=True)
+            torch.save(
+                {"shadow": ema_state.shadow, "num_updates": ema_state.num_updates},
+                self._ema_checkpoint_path(local_path),
+            )
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     async def update_weights(self, global_steps: int = None, mode: str = "auto"):

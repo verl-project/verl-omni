@@ -153,7 +153,7 @@ def _differentiable_zero(model_output: dict, fallback_device: torch.device) -> t
         tensor = model_output.get(key)
         if isinstance(tensor, torch.Tensor):
             vals = tensor.values() if tensor.is_nested else tensor
-            return vals.sum().to(dtype=torch.float32) * 0.0
+            return vals.reshape(-1)[:0].sum(dtype=torch.float32)
     return torch.zeros((), dtype=torch.float32, device=fallback_device)
 
 
@@ -242,6 +242,7 @@ def omni_distillation_ppo_loss(
     dp_group=None,
     student_logits: torch.Tensor | None = None,
     data_format: str = "thd",
+    **kwargs,
 ):
     """Same entry as verl's ``distillation_ppo_loss``: logits processor + final
     policy loss, with hidden modes dispatched to the chunked nitrobrew kernel
@@ -275,4 +276,5 @@ def omni_distillation_ppo_loss(
         dp_group,
         student_logits,
         data_format,
+        **kwargs,
     )

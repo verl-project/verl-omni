@@ -92,6 +92,7 @@ class RepromptedTeacherSample:
     multi_modal_inputs: dict[str, Any] = field(default_factory=dict)
     added_prompt_tokens: int = 0
     trimmed_context: bool = False
+    context_retained: bool = True
 
 
 def _unwrap_scalar(value: Any) -> Any:
@@ -493,6 +494,30 @@ def _tokenize_teacher_prompt(
     return prompt_ids, {}
 
 
+_MEDIA_BLOCK_TYPES = frozenset({"image", "image_url", "video", "video_url", "audio", "audio_url"})
+
+
+def _strip_media_blocks(raw_prompt: Any) -> Any:
+    """Remove multimodal content blocks from structured messages while preserving text."""
+    if not isinstance(raw_prompt, Sequence) or isinstance(raw_prompt, str | bytes | bytearray):
+        return raw_prompt
+    stripped: list[dict[str, Any]] = []
+    for msg in raw_prompt:
+        if not isinstance(msg, Mapping):
+            continue
+        new_msg = dict(msg)
+        content = new_msg.get("content")
+        if isinstance(content, list):
+            kept = [
+                dict(block) if isinstance(block, Mapping) else block
+                for block in content
+                if not (isinstance(block, Mapping) and block.get("type") in _MEDIA_BLOCK_TYPES)
+            ]
+            new_msg["content"] = kept
+        stripped.append(new_msg)
+    return stripped
+
+
 def build_multimodal_teacher_prompt(
     *,
     raw_prompt: Any,
@@ -504,25 +529,40 @@ def build_multimodal_teacher_prompt(
     mm_processor_kwargs: Optional[Mapping[str, Any]] = None,
     existing_multi_modal_inputs: Optional[Mapping[str, Any]] = None,
     config: Optional[SelfDistillationConfig] = None,
+    max_prompt_tokens: Optional[int] = None,
 ) -> RepromptedTeacherSample:
     """Build a tokenized multimodal teacher prompt while preserving media blocks and tensors.
 
-    When ``config.max_reprompt_tokens`` is set and the reprompted sequence
-    exceeds the budget, only the injected ``privileged_text`` is progressively
-    trimmed — original user media tokens are never dropped or truncated.
+    When ``config.max_reprompt_tokens`` or ``max_prompt_tokens`` is set and the
+    reprompted sequence exceeds the effective budget, only the injected
+    ``privileged_text`` is progressively trimmed — original user media tokens
+    are never dropped or truncated. If no nonempty prefix of ``privileged_text``
+    fits within the budget, ``context_retained`` is set to ``False`` so the
+    caller can route the sample to fallback.
     """
     cfg = config or SelfDistillationConfig(enabled=True)
-    mm_data = dict(multi_modal_data or {}) if cfg.preserve_multimodal_inputs else {}
-    proc_kwargs = dict(mm_processor_kwargs or {}) if cfg.preserve_multimodal_inputs else {}
-    preserved_mm_inputs = dict(existing_multi_modal_inputs or {}) if cfg.preserve_multimodal_inputs else {}
+    if cfg.preserve_multimodal_inputs:
+        effective_raw_prompt = raw_prompt
+        mm_data = dict(multi_modal_data or {})
+        proc_kwargs = dict(mm_processor_kwargs or {})
+        preserved_mm_inputs = dict(existing_multi_modal_inputs or {})
+    else:
+        effective_raw_prompt = _strip_media_blocks(raw_prompt)
+        mm_data = {}
+        proc_kwargs = {}
+        preserved_mm_inputs = {}
+
+    budget_candidates = [b for b in (cfg.max_reprompt_tokens, max_prompt_tokens) if b is not None]
+    effective_budget: Optional[int] = min(budget_candidates) if budget_candidates else None
 
     media_token_ids = _collect_media_token_ids(tokenizer, processor)
     expected_media_counts = _count_media_tokens(student_prompt_ids, media_token_ids)
 
     current_text = privileged_text
     trimmed = False
+    context_retained = bool(current_text.strip())
     teacher_messages = reprompt_multimodal_messages(
-        raw_prompt,
+        effective_raw_prompt,
         current_text,
         reprompt_template=cfg.reprompt_template,
     )
@@ -534,35 +574,46 @@ def build_multimodal_teacher_prompt(
         mm_processor_kwargs=proc_kwargs,
     )
 
-    if cfg.max_reprompt_tokens is not None and len(teacher_prompt_ids) > cfg.max_reprompt_tokens and current_text:
-        # Binary-search the longest prefix of privileged_text that fits within max_reprompt_tokens.
-        lo, hi = 0, len(current_text)
-        best_result: Optional[tuple[Any, list[int], dict[str, Any]]] = None
-        while lo <= hi:
-            mid = (lo + hi) // 2
-            candidate_text = current_text[:mid].rstrip()
-            cand_messages = reprompt_multimodal_messages(
-                raw_prompt,
-                candidate_text,
-                reprompt_template=cfg.reprompt_template,
-            )
-            cand_ids, cand_mm = _tokenize_teacher_prompt(
-                cand_messages,
-                tokenizer=tokenizer,
-                processor=processor,
-                multi_modal_data=mm_data,
-                mm_processor_kwargs=proc_kwargs,
-            )
-            if len(cand_ids) <= cfg.max_reprompt_tokens:
-                best_result = (cand_messages, cand_ids, cand_mm)
-                lo = mid + 1
+    if effective_budget is not None and len(teacher_prompt_ids) > effective_budget:
+        if effective_budget <= 0 or not current_text:
+            context_retained = False
+            trimmed = bool(current_text)
+        else:
+            # Binary-search the longest nonempty prefix of privileged_text that fits.
+            lo, hi = 1, len(current_text)
+            best_result: Optional[tuple[Any, list[int], dict[str, Any]]] = None
+            while lo <= hi:
+                mid = (lo + hi) // 2
+                candidate_text = current_text[:mid].rstrip()
+                if not candidate_text:
+                    lo = mid + 1
+                    continue
+                cand_messages = reprompt_multimodal_messages(
+                    effective_raw_prompt,
+                    candidate_text,
+                    reprompt_template=cfg.reprompt_template,
+                )
+                cand_ids, cand_mm = _tokenize_teacher_prompt(
+                    cand_messages,
+                    tokenizer=tokenizer,
+                    processor=processor,
+                    multi_modal_data=mm_data,
+                    mm_processor_kwargs=proc_kwargs,
+                )
+                if len(cand_ids) <= effective_budget:
+                    best_result = (cand_messages, cand_ids, cand_mm)
+                    lo = mid + 1
+                else:
+                    hi = mid - 1
+            if best_result is not None:
+                teacher_messages, teacher_prompt_ids, computed_mm_inputs = best_result
+                trimmed = True
+                context_retained = True
             else:
-                hi = mid - 1
-        if best_result is not None:
-            teacher_messages, teacher_prompt_ids, computed_mm_inputs = best_result
-            trimmed = True
+                context_retained = False
+                trimmed = True
 
-    if cfg.preserve_multimodal_inputs and media_token_ids:
+    if context_retained and cfg.preserve_multimodal_inputs and media_token_ids:
         actual_media_counts = _count_media_tokens(teacher_prompt_ids, media_token_ids)
         if actual_media_counts != expected_media_counts:
             raise ValueError(
@@ -579,6 +630,7 @@ def build_multimodal_teacher_prompt(
         multi_modal_inputs=final_mm_inputs,
         added_prompt_tokens=len(teacher_prompt_ids) - len(student_prompt_ids),
         trimmed_context=trimmed,
+        context_retained=context_retained,
     )
 
 

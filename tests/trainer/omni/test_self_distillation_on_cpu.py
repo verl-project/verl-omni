@@ -1025,3 +1025,232 @@ class TestSelfDistillationTrainerWiring:
 
     def test_summarize_metrics_empty_batch(self):
         assert summarize_self_distillation_metrics([]) == {}
+
+
+class TestCodeRabbitReviewFixes:
+    def test_empty_branch_loss_stays_finite_with_masked_neg_inf(self):
+        from verl_omni.trainer.distillation.losses import _differentiable_zero
+
+        log_probs = torch.tensor([[-1.0, float("-inf")]], requires_grad=True)
+        zero = _differentiable_zero({"log_probs": log_probs}, fallback_device=torch.device("cpu"))
+        assert torch.isfinite(zero)
+        assert zero.item() == 0.0
+        assert zero.requires_grad is True
+        zero.backward()
+        assert torch.isfinite(log_probs.grad).all()
+        assert torch.equal(log_probs.grad, torch.zeros_like(log_probs))
+
+    def test_omni_distillation_ppo_loss_forwards_megatron_packing_kwargs(self):
+        captured: dict[str, object] = {}
+
+        def _fake_distill(*args, **kwargs):
+            captured["kwargs"] = kwargs
+            return torch.tensor(0.0), {}
+
+        distill_cfg = OmniDistillationConfig(
+            enabled=True,
+            nnodes=0,
+            n_gpus_per_node=0,
+            distillation_loss=OmniDistillationLossConfig(loss_mode="forward_kl_topk", topk=4),
+            self_teacher=SelfDistillationConfig(enabled=True, mode="sdpo"),
+        )
+        with patch("verl_omni.trainer.distillation.losses.distillation_ppo_loss", side_effect=_fake_distill):
+            omni_distillation_ppo_loss(
+                config=SimpleNamespace(),
+                distillation_config=distill_cfg,
+                student_logits=torch.zeros(2, 4),
+                data={},
+                quant_align_size=16,
+                cp_layout="thd",
+                local_cp_size=2,
+            )
+        assert captured["kwargs"] == {"quant_align_size": 16, "cp_layout": "thd", "local_cp_size": 2}
+
+    def test_preserve_multimodal_inputs_false_strips_media_blocks(self):
+        tok = _DummyTokenizer()
+        raw = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "audio", "audio_url": "file:///tmp/a.wav"},
+                    {"type": "image", "image": "img_obj"},
+                    {"type": "text", "text": "transcribe"},
+                ],
+            }
+        ]
+        res = build_multimodal_teacher_prompt(
+            raw_prompt=raw,
+            student_prompt_ids=tok.encode("<user> <audio> <image> transcribe <assistant>"),
+            privileged_text="Correct answer: hello",
+            tokenizer=tok,
+            multi_modal_data={"audios": ["wav"], "images": ["img"]},
+            config=SelfDistillationConfig(enabled=True, preserve_multimodal_inputs=False),
+        )
+        assert res.multi_modal_data == {}
+        user_blocks = res.teacher_messages[0]["content"]
+        assert all(b.get("type") == "text" for b in user_blocks)
+        assert res.context_retained is True
+
+    def test_trimming_removes_all_context_sets_context_retained_false(self):
+        tok = _DummyTokenizer()
+        student_ids = tok.encode("<user> question here <assistant>")
+        res = build_multimodal_teacher_prompt(
+            raw_prompt=[{"role": "user", "content": "question here"}],
+            student_prompt_ids=student_ids,
+            privileged_text="very long privileged context that cannot fit",
+            tokenizer=tok,
+            config=SelfDistillationConfig(enabled=True, max_reprompt_tokens=len(student_ids)),
+        )
+        assert res.context_retained is False
+        assert res.trimmed_context is True
+
+    def test_extract_inline_multimodal_preserves_audio_url(self):
+        from verl_omni.trainer.omni.trainer_base import _extract_inline_multimodal_data
+
+        raw = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "audio", "audio_url": "https://example.com/a.wav"},
+                    {"type": "image_url", "image_url": {"url": "https://example.com/b.png"}},
+                ],
+            }
+        ]
+        extracted = _extract_inline_multimodal_data(raw)
+        assert extracted == {
+            "audios": ["https://example.com/a.wav"],
+            "images": ["https://example.com/b.png"],
+        }
+
+    def test_extra_fields_reward_feedback_and_response_budget_reservation(self):
+        tok = _DummyTokenizer()
+        trainer = OmniPPOTrainerSync.__new__(OmniPPOTrainerSync)
+        trainer.tokenizer = tok
+        trainer.processor = None
+        # Effective rollout limit = 40 tokens: sample 0 has response_len=2 (room for reprompt),
+        # sample 1 has response_len=39 (no room -> must route to fallback without calling server).
+        trainer.config = OmegaConf.create(
+            {
+                "data": {"mm_processor_kwargs": {}, "max_prompt_length": 20, "max_response_length": 20},
+                "actor_rollout_ref": {"rollout": {"max_model_len": 40}},
+            }
+        )
+        trainer.distillation_config = OmniDistillationConfig(
+            enabled=True,
+            nnodes=0,
+            n_gpus_per_node=0,
+            distillation_loss=OmniDistillationLossConfig(loss_mode="forward_kl_topk", topk=2),
+            self_teacher=SelfDistillationConfig(enabled=True, mode="sdpo", fallback_to_pg=True),
+        )
+
+        p0 = torch.tensor(tok.encode("<user> q0 <assistant>"), dtype=torch.long)
+        r0 = torch.tensor(tok.encode("a b"), dtype=torch.long)
+        p1 = torch.tensor(tok.encode("<user> q1 <assistant>"), dtype=torch.long)
+        r1 = torch.tensor([1] * 39, dtype=torch.long)
+        tq_data = TensorDict(
+            {
+                "prompts": torch.nested.as_nested_tensor([p0, p1], layout=torch.jagged),
+                "responses": torch.nested.as_nested_tensor([r0, r1], layout=torch.jagged),
+                "response_mask": torch.nested.as_nested_tensor(
+                    [torch.ones_like(r0), torch.ones_like(r1)], layout=torch.jagged
+                ),
+                "rm_scores": torch.nested.as_nested_tensor(
+                    [torch.tensor([0.0]), torch.tensor([0.0])], layout=torch.jagged
+                ),
+                "uid": NonTensorStack("u0", "u1"),
+                "raw_prompt": NonTensorStack(
+                    [{"role": "user", "content": "q0"}],
+                    [{"role": "user", "content": "q1"}],
+                ),
+                "extra_fields": NonTensorStack(
+                    {"reward_extra_info": {"feedback": "fix"}},
+                    {"reward_extra_info": {"feedback": "fix"}},
+                ),
+            },
+            batch_size=[2],
+        )
+
+        seen_prompts: list[int] = []
+
+        class _FakeLLMClient:
+            async def generate(self, **kwargs):
+                seen_prompts.append(len(kwargs["prompt_ids"]))
+                seq_len = len(kwargs["prompt_ids"])
+                ids = [[0, 1] for _ in range(seq_len)]
+                lps = [[-0.5, -0.5] for _ in range(seq_len)]
+                return SimpleNamespace(extra_fields={"prompt_ids": ids, "prompt_logprobs": lps})
+
+        trainer.get_llm_client = lambda: _FakeLLMClient()
+        captured: dict[str, object] = {}
+
+        def _fake_put(keys, partition_id, fields):
+            captured["fields"] = fields
+            return KVBatchMeta(keys=keys, tags=[{}, {}], partition_id=partition_id, fields=list(fields.keys()))
+
+        batch = KVBatchMeta(keys=["k0", "k1"], tags=[{}, {}], partition_id="train", fields=list(tq_data.keys()))
+        metrics: dict[str, float] = {}
+        with (
+            patch("verl_omni.trainer.omni.trainer_base.tq.kv_batch_get", return_value=tq_data),
+            patch("verl_omni.trainer.omni.trainer_base.tq.kv_batch_put", side_effect=_fake_put),
+        ):
+            trainer._compute_self_teacher_log_probs(batch, metrics)
+
+        # Sample 0 received feedback from extra_fields and was scored; sample 1 routed to fallback.
+        assert len(seen_prompts) == 1
+        assert seen_prompts[0] < 40
+        assert captured["fields"]["self_distill_mask"].tolist() == [True, False]
+        assert metrics["self_distillation/valid_ratio"] == pytest.approx(0.5)
+        assert metrics["self_distillation/fallback_ratio"] == pytest.approx(0.5)
+
+    def test_ema_swap_rolls_back_on_partial_copy_failure_and_checkpoint_round_trip(self, tmp_path):
+        from verl_omni.workers.engine_workers import ActorRolloutRefWorker
+
+        model = torch.nn.Sequential(torch.nn.Linear(2, 2, bias=False), torch.nn.Linear(2, 2, bias=False))
+        with torch.no_grad():
+            model[0].weight.fill_(1.0)
+            model[1].weight.fill_(2.0)
+
+        worker = ActorRolloutRefWorker.__new__(ActorRolloutRefWorker)
+        worker.role = "actor"
+        worker.actor = SimpleNamespace(
+            engine=SimpleNamespace(module=model),
+            save_checkpoint=lambda *a, **kw: None,
+            load_checkpoint=lambda *a, **kw: None,
+        )
+        worker._ema_teacher_state = EMATeacherState(decay=0.5)
+        worker._ema_teacher_state.initialize(model)
+        worker._ema_live_backups = None
+
+        with torch.no_grad():
+            model[0].weight.fill_(3.0)
+            model[1].weight.fill_(4.0)
+        worker._ema_teacher_state.update(model)
+
+        # Save EMA state alongside checkpoint, mutate EMA, then restore via load_checkpoint.
+        ckpt_dir = str(tmp_path / "ckpt_1")
+        worker.save_checkpoint(ckpt_dir)
+        saved_shadow_0 = worker._ema_teacher_state.shadow["0.weight"].clone()
+        worker._ema_teacher_state.shadow["0.weight"].fill_(999.0)
+        worker.load_checkpoint(ckpt_dir)
+        assert torch.allclose(worker._ema_teacher_state.shadow["0.weight"], saved_shadow_0)
+
+        # Inject a shape mismatch on the second param to force a copy failure mid-swap.
+        worker._ema_teacher_state.shadow["1.weight"] = torch.zeros(3, 3)
+        with pytest.raises(RuntimeError):
+            worker.swap_ema_weights(use_ema=True)
+        # First parameter must be rolled back to 3.0 and backup must stay None.
+        assert torch.allclose(model[0].weight, torch.full_like(model[0].weight, 3.0))
+        assert worker._ema_live_backups is None
+
+    def test_update_actor_tolerates_missing_ema_attribute(self):
+        from verl_omni.workers.engine_workers import ActorRolloutRefWorker
+
+        worker = ActorRolloutRefWorker.__new__(ActorRolloutRefWorker)
+        worker.config = OmegaConf.create({"actor": {}})
+        worker._trajectory_materializer = None
+        worker.enable_routing_replay = False
+        worker.actor = SimpleNamespace(
+            train_mini_batch=lambda data: TensorDict({"metrics": torch.tensor([1.0])}, batch_size=[])
+        )
+        out = worker.update_actor(TensorDict({}, batch_size=[]))
+        assert out is not None

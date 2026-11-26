@@ -48,6 +48,7 @@ from verl.workers.rollout.llm_server import LLMServerManager
 from verl.workers.utils.losses import value_loss
 
 from verl_omni.trainer.distillation.self_distillation import (
+    TeacherContextDecision,
     align_teacher_sequence_outputs,
     build_multimodal_teacher_prompt,
     build_neutral_teacher_outputs,
@@ -100,8 +101,18 @@ def _extract_sequence_rows(tensor: torch.Tensor) -> list[torch.Tensor]:
     return [tensor[i] for i in range(tensor.size(0))]
 
 
+def _extract_media_payload(item: dict[str, Any], primary_key: str, url_key: str) -> Any:
+    """Extract an inline media object or URL/path from a chat content block."""
+    value = item.get(primary_key)
+    if value is None:
+        value = item.get(url_key)
+    if isinstance(value, dict) and "url" in value:
+        return value["url"]
+    return value
+
+
 def _extract_inline_multimodal_data(raw_prompt: Any) -> dict[str, list[Any]]:
-    """Collect already-decoded media payloads directly from structured chat messages."""
+    """Collect already-decoded media payloads or URLs directly from structured chat messages."""
     if not isinstance(raw_prompt, list):
         return {}
     images: list[Any] = []
@@ -117,12 +128,18 @@ def _extract_inline_multimodal_data(raw_prompt: Any) -> dict[str, list[Any]]:
             if not isinstance(item, dict):
                 continue
             item_type = item.get("type")
-            if item_type == "image" and item.get("image") is not None:
-                images.append(item["image"])
-            elif item_type == "video" and item.get("video") is not None:
-                videos.append(item["video"])
-            elif item_type == "audio" and item.get("audio") is not None:
-                audios.append(item["audio"])
+            if item_type in ("image", "image_url"):
+                payload = _extract_media_payload(item, "image", "image_url")
+                if payload is not None:
+                    images.append(payload)
+            elif item_type in ("video", "video_url"):
+                payload = _extract_media_payload(item, "video", "video_url")
+                if payload is not None:
+                    videos.append(payload)
+            elif item_type in ("audio", "audio_url"):
+                payload = _extract_media_payload(item, "audio", "audio_url")
+                if payload is not None:
+                    audios.append(payload)
     result: dict[str, list[Any]] = {}
     if images:
         result["images"] = images
@@ -131,6 +148,29 @@ def _extract_inline_multimodal_data(raw_prompt: Any) -> dict[str, list[Any]]:
     if audios:
         result["audios"] = audios
     return result
+
+
+def _raw_prompt_has_media_blocks(raw_prompt: Any) -> bool:
+    """Return True if a structured message list contains any image, video, or audio block."""
+    if not isinstance(raw_prompt, list):
+        return False
+    for msg in raw_prompt:
+        if not isinstance(msg, dict):
+            continue
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        for item in content:
+            if isinstance(item, dict) and item.get("type") in (
+                "image",
+                "image_url",
+                "video",
+                "video_url",
+                "audio",
+                "audio_url",
+            ):
+                return True
+    return False
 
 
 class OmniPPOTrainer(PPOTrainer):
@@ -372,7 +412,10 @@ class OmniPPOTrainer(PPOTrainer):
         if not isinstance(raw_prompt, list):
             return {}
         inline_mm = _extract_inline_multimodal_data(raw_prompt)
-        needs_loading = any(isinstance(val, str) for bucket in inline_mm.values() for val in bucket)
+        has_media_blocks = _raw_prompt_has_media_blocks(raw_prompt)
+        needs_loading = has_media_blocks and (
+            not inline_mm or any(isinstance(val, str) for bucket in inline_mm.values() for val in bucket)
+        )
         if needs_loading and getattr(self, "processor", None) is not None:
             try:
                 from verl.utils.dataset.rl_dataset import get_dataset_class
@@ -423,6 +466,7 @@ class OmniPPOTrainer(PPOTrainer):
             "rm_scores",
             "raw_prompt",
             "extra_info",
+            "extra_fields",
             "reward_model",
             "reward_extra_info",
             "multi_modal_data",
@@ -462,7 +506,23 @@ class OmniPPOTrainer(PPOTrainer):
 
         raw_prompts = _extract_non_tensor_list(data, "raw_prompt", batch_size)
         extra_infos = _extract_non_tensor_list(data, "extra_info", batch_size)
-        reward_extra_infos = _extract_non_tensor_list(data, "reward_extra_info", batch_size)
+        extra_fields_list = _extract_non_tensor_list(data, "extra_fields", batch_size)
+        top_reward_extra_infos = _extract_non_tensor_list(data, "reward_extra_info", batch_size)
+        reward_extra_infos: list[Any] | None = None
+        if top_reward_extra_infos is not None or extra_fields_list is not None:
+            merged_reward_extra: list[Any] = []
+            for i in range(batch_size):
+                merged_entry: dict[str, Any] = {}
+                if extra_fields_list is not None and isinstance(extra_fields_list[i], dict):
+                    nested_rei = extra_fields_list[i].get("reward_extra_info")
+                    if isinstance(nested_rei, dict):
+                        merged_entry.update(nested_rei)
+                if top_reward_extra_infos is not None and isinstance(top_reward_extra_infos[i], dict):
+                    merged_entry.update(top_reward_extra_infos[i])
+                merged_reward_extra.append(merged_entry if merged_entry else None)
+            if any(entry is not None for entry in merged_reward_extra):
+                reward_extra_infos = merged_reward_extra
+
         reward_models = _extract_non_tensor_list(data, "reward_model", batch_size)
         multi_modal_datas = _extract_non_tensor_list(data, "multi_modal_data", batch_size)
         mm_processor_kwargs_list = _extract_non_tensor_list(data, "mm_processor_kwargs", batch_size)
@@ -491,6 +551,23 @@ class OmniPPOTrainer(PPOTrainer):
             "detokenize": False,
         }
         default_mm_kwargs = dict(self.config.data.get("mm_processor_kwargs", {}) or {})
+        rollout_cfg = OmegaConf.select(self.config, "actor_rollout_ref.rollout", default=None)
+        effective_rollout_limit: int | None = None
+        if rollout_cfg is not None:
+            max_model_len = OmegaConf.select(rollout_cfg, "max_model_len", default=None)
+            if max_model_len is not None:
+                effective_rollout_limit = int(max_model_len)
+            else:
+                r_prompt = OmegaConf.select(rollout_cfg, "prompt_length", default=None)
+                r_resp = OmegaConf.select(rollout_cfg, "response_length", default=None)
+                if r_prompt is not None and r_resp is not None:
+                    effective_rollout_limit = int(r_prompt) + int(r_resp)
+        if effective_rollout_limit is None:
+            d_prompt = OmegaConf.select(self.config, "data.max_prompt_length", default=None)
+            d_resp = OmegaConf.select(self.config, "data.max_response_length", default=None)
+            if d_prompt is not None and d_resp is not None:
+                effective_rollout_limit = int(d_prompt) + int(d_resp)
+
         llm_client = self.get_llm_client()
         has_any_teacher_query = any(d.has_context for d in decisions)
 
@@ -508,13 +585,51 @@ class OmniPPOTrainer(PPOTrainer):
                         topk=width,
                         pad_token_id=pad_token_id,
                     )
-                    return neutral_ids, neutral_lps, None
+                    return neutral_ids, neutral_lps, None, False
 
-                sample_raw_prompt = (
-                    raw_prompts[i]
-                    if raw_prompts is not None
-                    else self.tokenizer.decode(student_prompt_ids, skip_special_tokens=False)
+                per_sample_max_prompt = (
+                    effective_rollout_limit - response_len - 1 if effective_rollout_limit is not None else None
                 )
+                if per_sample_max_prompt is not None and per_sample_max_prompt <= 0:
+                    neutral_ids, neutral_lps = build_neutral_teacher_outputs(
+                        student_prompt_len=student_prompt_len,
+                        response_len=response_len,
+                        topk=width,
+                        pad_token_id=pad_token_id,
+                    )
+                    return neutral_ids, neutral_lps, None, False
+
+                sample_extra_fields = (
+                    extra_fields_list[i]
+                    if extra_fields_list is not None and isinstance(extra_fields_list[i], dict)
+                    else {}
+                )
+                turn_messages = sample_extra_fields.get("messages") or sample_extra_fields.get("turn_messages")
+                turn_index = sample_extra_fields.get("turn_idx", sample_extra_fields.get("turn_index", 0))
+                if turn_messages is not None:
+                    sample_raw_prompt = turn_messages
+                elif raw_prompts is not None:
+                    if isinstance(turn_index, int) and turn_index > 0:
+                        # Subsequent multi-turn step without turn-specific messages: keep the actual
+                        # decoded student prefix for text-only turns, or fall back when media is present.
+                        existing_mm = multi_modal_datas[i] if multi_modal_datas is not None else None
+                        if _raw_prompt_has_media_blocks(raw_prompts[i]) or (
+                            isinstance(existing_mm, dict)
+                            and any(existing_mm.get(k) for k in ("images", "videos", "audios"))
+                        ):
+                            neutral_ids, neutral_lps = build_neutral_teacher_outputs(
+                                student_prompt_len=student_prompt_len,
+                                response_len=response_len,
+                                topk=width,
+                                pad_token_id=pad_token_id,
+                            )
+                            return neutral_ids, neutral_lps, None, False
+                        sample_raw_prompt = self.tokenizer.decode(student_prompt_ids, skip_special_tokens=False)
+                    else:
+                        sample_raw_prompt = raw_prompts[i]
+                else:
+                    sample_raw_prompt = self.tokenizer.decode(student_prompt_ids, skip_special_tokens=False)
+
                 sample_mm_data = await self._resolve_self_teacher_multimodal_data(
                     sample_raw_prompt,
                     multi_modal_datas[i] if multi_modal_datas is not None else None,
@@ -536,7 +651,17 @@ class OmniPPOTrainer(PPOTrainer):
                     mm_processor_kwargs=sample_mm_kwargs,
                     existing_multi_modal_inputs=sample_mm_inputs,
                     config=self_cfg,
+                    max_prompt_tokens=per_sample_max_prompt,
                 )
+                if not reprompted.context_retained:
+                    neutral_ids, neutral_lps = build_neutral_teacher_outputs(
+                        student_prompt_len=student_prompt_len,
+                        response_len=response_len,
+                        topk=width,
+                        pad_token_id=pad_token_id,
+                    )
+                    return neutral_ids, neutral_lps, None, False
+
                 teacher_seq_ids = reprompted.teacher_prompt_ids + response_ids
                 teacher_output = await llm_client.generate(
                     request_id=uuid.uuid4().hex,
@@ -557,7 +682,7 @@ class OmniPPOTrainer(PPOTrainer):
                     response_len=response_len,
                     pad_token_id=pad_token_id,
                 )
-                return aligned_ids, aligned_lps, reprompted.added_prompt_tokens
+                return aligned_ids, aligned_lps, reprompted.added_prompt_tokens, True
 
             return await asyncio.gather(*[_score_one(i) for i in range(batch_size)])
 
@@ -580,19 +705,24 @@ class OmniPPOTrainer(PPOTrainer):
         teacher_ids_list = [row[0] for row in results]
         teacher_logprobs_list = [row[1] for row in results]
         added_prompt_tokens = [row[2] for row in results if row[2] is not None]
+        effective_mask = [bool(row[3]) for row in results]
+        effective_decisions = [
+            decisions[i] if effective_mask[i] else TeacherContextDecision(has_context=False, source="none")
+            for i in range(batch_size)
+        ]
 
         write_back = TensorDict(
             {
                 "teacher_ids": torch.nested.as_nested_tensor(teacher_ids_list, layout=torch.jagged),
                 "teacher_logprobs": torch.nested.as_nested_tensor(teacher_logprobs_list, layout=torch.jagged),
-                "self_distill_mask": torch.tensor([d.has_context for d in decisions], dtype=torch.bool),
+                "self_distill_mask": torch.tensor(effective_mask, dtype=torch.bool),
             },
             batch_size=batch_size,
         )
         batch = tq.kv_batch_put(keys=batch.keys, partition_id=batch.partition_id, fields=write_back)
         metrics.update(
             summarize_self_distillation_metrics(
-                decisions,
+                effective_decisions,
                 added_prompt_tokens=added_prompt_tokens,
                 fallback_to_pg=self_cfg.fallback_to_pg,
             )
@@ -685,31 +815,34 @@ class OmniPPOTrainer(PPOTrainer):
         flag False but still need the full ``student_logits`` tensor in the
         processor, so expand the trigger to ``use_topk or use_hidden_states``.
         """
+        if not is_distillation_enabled(self.config.get("distillation")):
+            return super()._update_actor(batch, metrics)
+
         calculate_entropy = self.config.actor_rollout_ref.actor.calculate_entropy or (
             self.config.actor_rollout_ref.actor.entropy_coeff != 0.0
         )
-        distillation_use_topk = False
-        distillation_only = False
-        if is_distillation_enabled(self.config.get("distillation")):
-            loss_settings = self.distillation_config.distillation_loss.loss_settings
-            distillation_use_topk = bool(loss_settings.use_topk or getattr(loss_settings, "use_hidden_states", False))
-            distillation_loss_cfg = self.distillation_config.distillation_loss
-            needs_pg_fallback = bool(
-                is_self_distillation_enabled(self.distillation_config)
-                and self.distillation_config.self_teacher.fallback_to_pg
-            )
-            distillation_only = (
-                distillation_use_topk
-                and not distillation_loss_cfg.use_task_rewards
-                and not distillation_loss_cfg.use_policy_gradient
-                and not needs_pg_fallback
-            )
+        loss_settings = self.distillation_config.distillation_loss.loss_settings
+        distillation_use_topk = bool(loss_settings.use_topk or getattr(loss_settings, "use_hidden_states", False))
+        distillation_loss_cfg = self.distillation_config.distillation_loss
+        needs_pg_fallback = bool(
+            is_self_distillation_enabled(self.distillation_config)
+            and self.distillation_config.self_teacher.fallback_to_pg
+        )
+        distillation_only = (
+            distillation_use_topk
+            and not distillation_loss_cfg.use_task_rewards
+            and not distillation_loss_cfg.use_policy_gradient
+            and not needs_pg_fallback
+        )
 
-            if distillation_loss_cfg.loss_mode in ("nitrobrew", "nitrobrew_reverse_kl"):
-                self._ensure_teacher_unembeds()
+        if distillation_loss_cfg.loss_mode in ("nitrobrew", "nitrobrew_reverse_kl"):
+            self._ensure_teacher_unembeds()
 
         ppo_mini_batch_size = self.config.actor_rollout_ref.actor.ppo_mini_batch_size
         ppo_mini_batch_size = ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n
+        score_centering = OmegaConf.select(
+            self.config, "actor_rollout_ref.actor.policy_loss.score_centering", default=None
+        )
         extra_info = {
             "calculate_entropy": calculate_entropy,
             "distillation_use_topk": distillation_use_topk,
@@ -721,6 +854,8 @@ class OmniPPOTrainer(PPOTrainer):
             "dataloader_kwargs": {"shuffle": self.config.actor_rollout_ref.actor.shuffle},
             "temperature": self.config.actor_rollout_ref.rollout.temperature,
         }
+        if score_centering is not None:
+            extra_info["score_centering"] = bool(score_centering)
         batch.extra_info.update(extra_info)
 
         output = self.actor_rollout_wg.update_actor(batch)
