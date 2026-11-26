@@ -13,11 +13,11 @@
 # limitations under the License.
 """CPU tests for the opt-in pixel-lean train rows of the diffusion TQ worker.
 
-Covers ``_write_trajectories_to_tq`` under ``VERL_OMNI_TQ_STRIP_TRAIN_MEDIA``:
-decoded visual media (``responses`` + the decoded video artifact) leaves train
-rows only when no dump / colocated-reward consumer is configured, and never
-leaves validation or audio rows. The TransferQueue put is mocked, so the tests
-run without a TransferQueue deployment.
+Covers ``_write_trajectories_to_tq`` under ``trainer.strip_train_media``:
+decoded visual media (``responses`` + the decoded artifact copy) leaves train
+rows only when no dump / reward-model consumer is configured, and never leaves
+validation or audio rows. The TransferQueue put is mocked, so the tests run
+without a TransferQueue deployment.
 """
 
 from __future__ import annotations
@@ -34,18 +34,21 @@ from verl_omni.agent_loop.diffusion_agent_loop_tq import DiffusionAgentLoopWorke
 from verl_omni.pipelines.rollout_media import (
     ARTIFACT_PREFIX,
     ARTIFACT_SPECS,
-    PRIMARY_ARTIFACT,
     PREVIEW_ARTIFACT,
+    PRIMARY_ARTIFACT,
 )
 
 _WorkerBase = DiffusionAgentLoopWorkerTQ.__ray_metadata__.modified_class
 
 
-def _config(rollout_data_dir=None, reward_enable=False):
+def _config(strip_train_media=False, rollout_data_dir=None, reward_enable=False, reward_models=None):
+    reward: dict = {"reward_model": {"enable": reward_enable}}
+    if reward_models is not None:
+        reward["models"] = reward_models
     return OmegaConf.create(
         {
-            "trainer": {"rollout_data_dir": rollout_data_dir},
-            "reward": {"reward_model": {"enable": reward_enable}},
+            "trainer": {"rollout_data_dir": rollout_data_dir, "strip_train_media": strip_train_media},
+            "reward": reward,
         }
     )
 
@@ -56,20 +59,32 @@ def _make_worker(config) -> _WorkerBase:
     return worker
 
 
-def _internal_output() -> _InternalDiffusionAgentLoopOutput:
-    extra_fields = {
-        "media_kind": "video",
-        "all_latents": torch.zeros(1, 3, 4, 5, 6),
-        "prompt_embeds": torch.zeros(1, 8),
-        ARTIFACT_PREFIX + "video_latent": torch.zeros(1, 4),
-        ARTIFACT_PREFIX + "video_preview": torch.zeros(1, 9, 3, 4, 4, dtype=torch.uint8),
-        ARTIFACT_SPECS: {
+def _internal_output(media_kind: str | None = "video") -> _InternalDiffusionAgentLoopOutput:
+    if media_kind == "image":
+        specs = {
+            "image_latent": {"modality": "image", "representation": "latent", "layout": "LWC"},
+            "image_preview": {"modality": "image", "representation": "decoded", "layout": "HWC"},
+        }
+        latent_name = "image_latent"
+        primary = preview = "image_preview"
+    else:
+        specs = {
             "video_latent": {"modality": "video", "representation": "latent", "layout": "LWC"},
             "video_preview": {"modality": "video", "representation": "decoded", "layout": "TCHW", "fps": 16.0},
-        },
-        PRIMARY_ARTIFACT: "video_preview",
-        PREVIEW_ARTIFACT: "video_preview",
+        }
+        latent_name = "video_latent"
+        primary = preview = "video_preview"
+    extra_fields = {
+        "all_latents": torch.zeros(1, 3, 4, 5, 6),
+        "prompt_embeds": torch.zeros(1, 8),
+        ARTIFACT_PREFIX + latent_name: torch.zeros(1, 4),
+        ARTIFACT_PREFIX + primary: torch.zeros(1, 9, 3, 4, 4, dtype=torch.uint8),
+        ARTIFACT_SPECS: specs,
+        PRIMARY_ARTIFACT: primary,
+        PREVIEW_ARTIFACT: preview,
     }
+    if media_kind is not None:
+        extra_fields["media_kind"] = media_kind
     return _InternalDiffusionAgentLoopOutput(
         prompt_ids=torch.ones(1, 6, dtype=torch.long),
         response_diffusion_output=torch.full((1, 9, 3, 4, 4), 7, dtype=torch.uint8),
@@ -81,7 +96,7 @@ def _internal_output() -> _InternalDiffusionAgentLoopOutput:
     )
 
 
-def _run_write(worker, validate: bool = False, media_kind: str | None = "video"):
+def _run_write(worker, monkeypatch, validate: bool = False, media_kind: str | None = "video") -> dict:
     captured: dict = {}
 
     async def _fake_put(keys, fields, tags, partition_id):
@@ -92,12 +107,8 @@ def _run_write(worker, validate: bool = False, media_kind: str | None = "video")
 
     import verl_omni.agent_loop.diffusion_agent_loop_tq as dalt
 
-    dalt.tq.async_kv_batch_put = _fake_put
-    output = _internal_output()
-    if media_kind is None:
-        output.extra_fields.pop("media_kind")
-    else:
-        output.extra_fields["media_kind"] = media_kind
+    monkeypatch.setattr(dalt.tq, "async_kv_batch_put", _fake_put)
+    output = _internal_output(media_kind)
     kwargs = {"index": 0, "reward_model": {"style": "rule"}, "data_source": "x"}
     asyncio.run(
         worker._write_trajectories_to_tq(
@@ -117,17 +128,15 @@ def _row_field_names(captured):
     return set(captured["fields"].keys())
 
 
-def test_gate_off_keeps_upstream_row_fields(monkeypatch):
-    monkeypatch.delenv("VERL_OMNI_TQ_STRIP_TRAIN_MEDIA", raising=False)
-    captured = _run_write(_make_worker(_config()))
+def test_strip_off_keeps_upstream_row_fields(monkeypatch):
+    captured = _run_write(_make_worker(_config()), monkeypatch)
     names = _row_field_names(captured)
     assert "responses" in names
     assert ARTIFACT_PREFIX + "video_preview" in names
 
 
-def test_gate_on_drops_decoded_media_from_train_rows(monkeypatch):
-    monkeypatch.setenv("VERL_OMNI_TQ_STRIP_TRAIN_MEDIA", "1")
-    captured = _run_write(_make_worker(_config()))
+def test_strip_on_drops_decoded_media_from_train_rows(monkeypatch):
+    captured = _run_write(_make_worker(_config(strip_train_media=True)), monkeypatch)
     names = _row_field_names(captured)
     assert "responses" not in names
     assert ARTIFACT_PREFIX + "video_preview" not in names
@@ -138,28 +147,50 @@ def test_gate_on_drops_decoded_media_from_train_rows(monkeypatch):
     assert captured["tags"][0]["response_shape"] == (9, 3, 4, 4)  # telemetry kept
 
 
-def test_gate_on_keeps_validation_rows(monkeypatch):
-    monkeypatch.setenv("VERL_OMNI_TQ_STRIP_TRAIN_MEDIA", "1")
-    captured = _run_write(_make_worker(_config()), validate=True)
+def test_strip_on_keeps_validation_rows(monkeypatch):
+    captured = _run_write(_make_worker(_config(strip_train_media=True)), monkeypatch, validate=True)
     names = _row_field_names(captured)
     assert "responses" in names
     assert ARTIFACT_PREFIX + "video_preview" in names
     assert captured["partition_id"] == "val"
 
 
-def test_gate_on_keeps_rows_when_rollout_dump_configured(monkeypatch):
-    monkeypatch.setenv("VERL_OMNI_TQ_STRIP_TRAIN_MEDIA", "1")
-    captured = _run_write(_make_worker(_config(rollout_data_dir="/tmp/dump")))
+def test_strip_on_keeps_rows_when_rollout_dump_configured(monkeypatch):
+    captured = _run_write(_make_worker(_config(strip_train_media=True, rollout_data_dir="/tmp/dump")), monkeypatch)
     assert "responses" in _row_field_names(captured)
 
 
-def test_gate_on_keeps_rows_when_colocated_reward_model_enabled(monkeypatch):
-    monkeypatch.setenv("VERL_OMNI_TQ_STRIP_TRAIN_MEDIA", "1")
-    captured = _run_write(_make_worker(_config(reward_enable=True)))
+def test_strip_on_keeps_rows_when_colocated_reward_model_enabled(monkeypatch):
+    captured = _run_write(_make_worker(_config(strip_train_media=True, reward_enable=True)), monkeypatch)
     assert "responses" in _row_field_names(captured)
 
 
-def test_gate_on_keeps_audio_responses(monkeypatch):
-    monkeypatch.setenv("VERL_OMNI_TQ_STRIP_TRAIN_MEDIA", "1")
-    captured = _run_write(_make_worker(_config()), media_kind="audio")
+def test_strip_on_keeps_rows_when_named_reward_models_configured(monkeypatch):
+    models = {"hpsv3": {"backend": "engine"}}
+    captured = _run_write(_make_worker(_config(strip_train_media=True, reward_models=models)), monkeypatch)
+    assert "responses" in _row_field_names(captured)
+
+
+def test_strip_on_drops_decoded_media_from_image_rows(monkeypatch):
+    captured = _run_write(_make_worker(_config(strip_train_media=True)), monkeypatch, media_kind="image")
+    names = _row_field_names(captured)
+    assert "responses" not in names
+    assert ARTIFACT_PREFIX + "image_preview" not in names
+    assert ARTIFACT_PREFIX + "image_latent" in names
+
+
+def test_strip_on_keeps_audio_rows_intact(monkeypatch):
+    captured = _run_write(_make_worker(_config(strip_train_media=True)), monkeypatch, media_kind="audio")
+    names = _row_field_names(captured)
+    # ``responses`` is the audio waveform payload and the decoded preview is
+    # its only visual companion — neither is dropped.
+    assert "responses" in names
+    assert ARTIFACT_PREFIX + "video_preview" in names
+
+
+@pytest.mark.parametrize("config_attr", ["trainer", "reward"])
+def test_strip_stays_off_when_config_block_missing(config_attr, monkeypatch):
+    config = _config(strip_train_media=True)
+    del config[config_attr]
+    captured = _run_write(_make_worker(config), monkeypatch)
     assert "responses" in _row_field_names(captured)

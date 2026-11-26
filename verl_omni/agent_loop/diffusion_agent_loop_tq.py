@@ -39,11 +39,10 @@ from verl_omni.pipelines.rollout_media import (
     PREVIEW_ARTIFACT,
     PRIMARY_ARTIFACT,
 )
+from verl_omni.workers.config.reward import reward_is_enabled
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
-
-_STRIP_TRAIN_MEDIA_ENV = "VERL_OMNI_TQ_STRIP_TRAIN_MEDIA"
 
 
 def _tensor_bytes(tensor: Any) -> int:
@@ -54,23 +53,23 @@ def _strip_train_media_requested(config: Any) -> bool:
     """Opt-in decoded-media strip for train rows; off unless every consumer is absent.
 
     The decoded media of a train row (``responses`` and the decoded artifact
-    copy) only feeds the rollout dump and the colocated reward model — the
-    training legs read trajectory tensors, prompt embeds and scores, and reward
-    scoring with a custom function runs inside this worker before the put. Keep
-    the media whenever either consumer is configured; validation rows always
-    keep it. This is the diffusion V1 counterpart of the transfer waste
-    diagnosed in verl-omni issue #714 (read-side: #933).
+    copy) only feeds the rollout dump and the reward manager — the training
+    legs read trajectory tensors, prompt embeds and scores, and reward scoring
+    with a custom function runs inside this worker before the put. Keep the
+    media whenever either consumer is configured; validation rows always keep
+    it. ``trainer.strip_train_media`` (default false) opts in, so the default
+    row schema is unchanged.
     """
-    if os.environ.get(_STRIP_TRAIN_MEDIA_ENV, "0") != "1":
+    trainer_cfg = getattr(config, "trainer", None)
+    if trainer_cfg is None or not trainer_cfg.get("strip_train_media", False):
         return False
     try:
-        trainer_cfg = config.trainer
-        if trainer_cfg is not None and trainer_cfg.get("rollout_data_dir", None):
+        if trainer_cfg.get("rollout_data_dir", None):
             return False
-        reward_cfg = config.reward
-        if reward_cfg is not None and reward_cfg.reward_model.get("enable", False):
+        if reward_is_enabled(config):
             return False
     except (AttributeError, KeyError):
+        # Reward config unreadable → consumers can't be ruled out; keep media.
         return False
     return True
 
@@ -263,7 +262,7 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
     ) -> None:
         """Write the finished sessions of one prompt as batched TransferQueue rows."""
         partition_id = "val" if validate else "train"
-        strip_train_media = not validate and _strip_train_media_requested(self.config)
+        strip_train_media = not validate and _strip_train_media_requested(getattr(self, "config", None))
         dropped_bytes = 0
         # Track the rollout model version this trajectory was generated against.
         step = trajectory["step"] if trajectory else global_steps
@@ -347,23 +346,24 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
                 tag["gen_batch_seq"] = int(gen_batch_seq)
             if strip_train_media:
                 # ``responses`` and the decoded artifact are two copies of the
-                # same uint8 media; drop both for visual media (the tag keeps
-                # response_shape for telemetry). Audio rows keep their waveform:
-                # it is the media payload that media-kind-aware consumers read.
+                # same visual media (image and video alike — the decoded test
+                # matches is_decoded_visual); drop both, the tag keeps
+                # response_shape for telemetry. Non-visual rows keep everything:
+                # their ``responses`` is the media payload (audio waveform), and
+                # a decoded preview may be its only visual companion.
                 media_kind = extra.get("media_kind")
-                visual_media = media_kind in (None, "image", "video")
-                specs = extra.get(ARTIFACT_SPECS) or {}
-                decoded_artifacts = [
-                    ARTIFACT_PREFIX + name
-                    for name, spec in specs.items()
-                    if isinstance(spec, dict)
-                    and spec.get("representation") == "decoded"
-                    and spec.get("modality") == "video"
-                ]
-                media_keys = ("responses", *decoded_artifacts) if visual_media else decoded_artifacts
-                for media_key in media_keys:
-                    media_value = field.pop(media_key, None)
-                    dropped_bytes += _tensor_bytes(media_value)
+                if media_kind in (None, "image", "video"):
+                    specs = extra.get(ARTIFACT_SPECS) or {}
+                    decoded_artifacts = [
+                        ARTIFACT_PREFIX + name
+                        for name, spec in specs.items()
+                        if isinstance(spec, dict)
+                        and spec.get("representation") == "decoded"
+                        and spec.get("modality") in ("image", "video")
+                    ]
+                    for media_key in ("responses", *decoded_artifacts):
+                        media_value = field.pop(media_key, None)
+                        dropped_bytes += _tensor_bytes(media_value)
             rows.setdefault(tuple(field.keys()), []).append((key, field, tag))
 
         for group_rows in rows.values():

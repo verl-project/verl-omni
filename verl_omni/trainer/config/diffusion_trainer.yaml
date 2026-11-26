@@ -165,6 +165,11 @@ trainer:
   # Directory for logging rollout data; no dump if null
   rollout_data_dir: null
 
+  # Drop decoded media (``responses`` and decoded artifacts) from TransferQueue
+  # train rows to cut transfer size; automatically off when rollout_data_dir or
+  # a reward model is configured. Validation rows and audio media keep theirs.
+  strip_train_media: false
+
   # Directory for logging validation data; no dump if null
   validation_data_dir: null
 

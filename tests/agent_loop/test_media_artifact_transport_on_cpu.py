@@ -17,6 +17,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from omegaconf import OmegaConf
 
 from verl_omni.agent_loop.diffusion_agent_loop import DiffusionAgentLoopWorker
 from verl_omni.agent_loop.diffusion_agent_loop_tq import DiffusionAgentLoopWorkerTQ
@@ -60,6 +61,12 @@ async def test_named_media_survives_to_preview_and_reward_consumers(monkeypatch,
         data = worker._postprocess(internals)
     else:
         worker = object.__new__(DiffusionAgentLoopWorkerTQ.__ray_metadata__.modified_class)
+        worker.config = OmegaConf.create(
+            {
+                "trainer": {"rollout_data_dir": None, "strip_train_media": False},
+                "reward": {"reward_model": {"enable": False}},
+            }
+        )
         stored = {}
 
         async def put(*, keys, fields, **kwargs):

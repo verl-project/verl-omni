@@ -19,6 +19,7 @@ from unittest.mock import AsyncMock
 import numpy as np
 import pytest
 import torch
+from omegaconf import OmegaConf
 from tensordict import NonTensorData, NonTensorStack, TensorDict
 from verl.experimental.agent_loop.agent_loop import AgentLoopMetrics
 from verl.protocol import DataProto
@@ -40,6 +41,16 @@ from verl_omni.trainer.diffusion.v1 import tq_utils
 class _FakeRemoteComputeScore:
     def __init__(self):
         self.received_data: DataProto | None = None
+
+
+def _writer_config() -> OmegaConf:
+    """Minimal worker config with the pixel-lean strip off (upstream row schema)."""
+    return OmegaConf.create(
+        {
+            "trainer": {"rollout_data_dir": None, "strip_train_media": False},
+            "reward": {"reward_model": {"enable": False}},
+        }
+    )
 
     async def remote(self, data: DataProto) -> dict:
         self.received_data = data
@@ -245,6 +256,7 @@ def test_reference_row_padding_rejects_invalid_inputs(value, count, target_lengt
 async def test_tq_writer_preserves_allowlisted_non_tensor_trajectory_metadata(monkeypatch):
     worker_cls = DiffusionAgentLoopWorkerTQ.__ray_metadata__.modified_class
     worker = object.__new__(worker_cls)
+    worker.config = _writer_config()
     captured = {}
     img_shapes = [(1, 32, 32), (1, 64, 64)]
     internal = SimpleNamespace(
@@ -296,6 +308,7 @@ async def test_run_prompt_batches_prompt_group_into_one_put(monkeypatch):
     """All of a prompt's session rows must land in a single batched TQ put."""
     worker_cls = DiffusionAgentLoopWorkerTQ.__ray_metadata__.modified_class
     worker = object.__new__(worker_cls)
+    worker.config = _writer_config()
     worker.rollout_config = SimpleNamespace(n=2, val_kwargs=SimpleNamespace(n=2))
 
     def make_output(*, with_log_probs: bool):
@@ -345,6 +358,7 @@ async def test_run_prompt_batches_prompt_group_into_one_put(monkeypatch):
 async def test_tq_writer_batches_group_sessions_and_partitions_field_sets(monkeypatch):
     worker_cls = DiffusionAgentLoopWorkerTQ.__ray_metadata__.modified_class
     worker = object.__new__(worker_cls)
+    worker.config = _writer_config()
     puts = []
 
     def make_internal(with_reward: bool):
