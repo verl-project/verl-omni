@@ -207,6 +207,7 @@ def main(config):
     # Automatically set `config.trainer.device = npu` when running on Ascend NPU.
     auto_set_device(config)
     OmegaConf.resolve(config)
+    config = normalize_reward_config(config)
     validate_config(config)
     validate_attention_consistency(config)
 

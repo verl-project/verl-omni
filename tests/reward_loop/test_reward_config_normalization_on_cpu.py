@@ -332,3 +332,85 @@ def test_entrypoints_project_before_warning_or_ray(monkeypatch, module_name, run
     monkeypatch.setattr(module.ray, "is_initialized", lambda: pytest.fail("Ray reached before warning"))
     with pytest.raises(WarningReached):
         getattr(module, run_name)(config)
+
+
+def _fsdp_scorer_launch_config(required, *, model="pickscore"):
+    term = _scorer(
+        path="pkg://verl_omni.utils.reward_score.pickscore_reward",
+        name="compute_score_pickscore_native",
+        model=model,
+        kwargs={"score_divisor": 13.0},
+    )
+    if required is not None:
+        term["required"] = required
+    return OmegaConf.create(
+        {
+            "trainer": {"use_v1": True, "v1": {"trainer_mode": "sync"}},
+            "reward": {
+                "reward_manager": _manager(),
+                "custom_reward_function": {"path": None},
+                "reward_functions": {},
+                "scorers": {"probe": term},
+                "reward_model": {"enable_resource_pool": True, "nnodes": 1, "n_gpus_per_node": 2},
+                "models": {
+                    "pickscore": {
+                        "backend": "native",
+                        "model_path": "immutable-checkpoint",
+                        "placement": {"replica_groups": [[0, 1]]},
+                        "executor": {"model": "verl_omni.utils.reward_score.pickscore_reward:PickScoreNativeModel"},
+                    }
+                },
+            },
+        }
+    )
+
+
+def _stub_fsdp_cli_runtime(monkeypatch):
+    from verl_omni.trainer import main_diffusion_v1
+
+    monkeypatch.setattr(main_diffusion_v1, "auto_set_device", lambda config: None)
+    monkeypatch.setattr(main_diffusion_v1, "validate_config", lambda config: None)
+    monkeypatch.setattr(main_diffusion_v1, "validate_attention_consistency", lambda config: None)
+    monkeypatch.setattr(main_diffusion_v1, "is_cuda_available", True)
+    monkeypatch.setattr(main_diffusion_v1.ray, "init", lambda **kwargs: pytest.fail("Ray allocated"))
+    monkeypatch.setattr(main_diffusion_v1, "run_diffusion_v1", lambda config: pytest.fail("trainer selected"))
+    return main_diffusion_v1
+
+
+@pytest.mark.parametrize("required", [None, False], ids=["omitted", "false"])
+def test_fsdp_cli_rejects_optional_explicit_scorer_before_launch(monkeypatch, required):
+    config = _fsdp_scorer_launch_config(required)
+    module = _stub_fsdp_cli_runtime(monkeypatch)
+    with pytest.raises(ValueError, match="Native FSDP term 'probe' requires required=true"):
+        module.main.__wrapped__(config)
+    assert not config.reward.reward_functions
+
+
+def test_fsdp_cli_rejects_unknown_explicit_model_before_launch(monkeypatch):
+    config = _fsdp_scorer_launch_config(True, model="missing")
+    module = _stub_fsdp_cli_runtime(monkeypatch)
+    with pytest.raises(ValueError, match="references unknown model 'missing'"):
+        module.main.__wrapped__(config)
+    assert not config.reward.reward_functions
+
+
+def test_fsdp_cli_validates_projection_and_dispatches_required_scorer(monkeypatch):
+    config = _fsdp_scorer_launch_config(True)
+    module = _stub_fsdp_cli_runtime(monkeypatch)
+    checked = []
+
+    def inspect_config(received):
+        assert received.reward.reward_functions.probe.model == "pickscore"
+        assert received.reward.reward_functions.probe.required is True
+        checked.append(received)
+
+    def inspect_launch(received):
+        assert received is checked[0]
+        assert normalize_reward_config(received) is received
+        assert received.reward.reward_functions.probe.score_divisor == 13.0
+
+    monkeypatch.setattr(module, "validate_config", inspect_config)
+    monkeypatch.setattr(module, "run_diffusion_v1", inspect_launch)
+    module.main.__wrapped__(config)
+    assert len(checked) == 1
+    assert not config.reward.reward_functions
