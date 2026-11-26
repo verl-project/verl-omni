@@ -93,10 +93,6 @@ python3 -m verl_omni.trainer.main_omni \
     actor_rollout_ref.ref.fsdp_config.model_dtype=bfloat16 \
     algorithm.adv_estimator=grpo \
     algorithm.use_kl_in_reward=False \
-    # The talker OPD teacher requires teacher-forced codec scoring in the
-    # vLLM-Omni engine (not yet available for MiniCPM-o); the default runs
-    # the supported GSPO + KL-to-reference smoke. Set the teacher group
-    # below to enable distillation once the engine supports it.
     ++distillation.enabled=false \
     actor_rollout_ref.actor.use_kl_loss=true \
     actor_rollout_ref.actor.kl_loss_coef=0.001 \
