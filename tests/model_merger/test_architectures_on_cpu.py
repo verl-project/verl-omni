@@ -537,4 +537,7 @@ def test_registry_covers_repository_diffusers_training_architectures():
                 if isinstance(node.func.value, ast.Name) and node.func.value.id == "DiffusionModelBase":
                     found.add(ast.literal_eval(node.args[0]))
     # BAGEL builds NonDiffusersModelBase and requires native publishing, not ModelMixin.save_pretrained.
-    assert found - {"OmniBagelForConditionalGeneration"} == set(_TRANSFORMERS)
+    # MiniMaxH3ImagePipeline uses an audio-free PDD native package (pdd_fused_heads + MiniMaxH3ImageVAE)
+    # handled by minimax_h3_image_diffusion_nft.checkpoint; LoRA-only adapter export and standalone
+    # MiniMaxH3Transformer3DModel publishing already reuse the registered MiniMaxH3Transformer3DModel layout.
+    assert found - {"OmniBagelForConditionalGeneration", "MiniMaxH3ImagePipeline"} == set(_TRANSFORMERS)

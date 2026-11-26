@@ -67,6 +67,9 @@ class Qwen3OmniThinkerAdapter(OmniModelBase):
     @classmethod
     def prepare_megatron_config(cls, model_config, engine_config):
         """Validate the Thinker BSHD path and expose its nested text config."""
+        if getattr(model_config, "override_config", {}).get("experts_implementation") == "ascend_grouped_mm":
+            raise ValueError("ascend_grouped_mm requires the FSDP or FSDP2 engine for Qwen3-Omni Thinker.")
+
         from .megatron_inputs import prepare_qwen3_omni_megatron_config
 
         return prepare_qwen3_omni_megatron_config(model_config, engine_config)
@@ -79,8 +82,20 @@ class Qwen3OmniThinkerAdapter(OmniModelBase):
         return qwen3_omni_forward_model_engine
 
     @classmethod
+    def register_true_on_policy_implementations(cls) -> dict[str, str]:
+        from verl_omni.models.transformers.qwen3_omni import (
+            register_hub_fa3_attention,
+            register_vllm_fused_moe_experts,
+        )
+
+        return {
+            "attn_implementation": register_hub_fa3_attention(),
+            "experts_implementation": register_vllm_fused_moe_experts(),
+        }
+
+    @classmethod
     def configure_model(cls, module, model_config):
-        """Strip non-training stages and redirect forward to thinker.
+        """Strip non-training stages, redirect forward to thinker, and give the true on-policy actor exact M-RoPE.
 
         Args:
             module: The loaded Qwen3-Omni model before FSDP wrapping.
@@ -91,11 +106,33 @@ class Qwen3OmniThinkerAdapter(OmniModelBase):
             forward/embedding accessors redirected to thinker.
         """
         module = super().configure_model(module, model_config)
+        if getattr(model_config, "override_config", {}).get("experts_implementation") == "ascend_grouped_mm":
+            from verl_omni.models.transformers.qwen3_omni import enable_ascend_grouped_mm, enable_ascend_rmsnorm_rope
+
+            enable_ascend_grouped_mm(module.thinker.model)
+            enable_ascend_rmsnorm_rope()
         module.forward = module.thinker.forward
         module.get_input_embeddings = module.thinker.get_input_embeddings
         module.set_input_embeddings = module.thinker.set_input_embeddings
         module._no_split_modules = ["Qwen3OmniMoeThinkerTextDecoderLayer"]
+        if model_config.true_on_policy:
+            from verl_omni.models.transformers.qwen3_omni import ExactMRotaryEmbedding
+
+            module.thinker.model.rotary_emb = ExactMRotaryEmbedding.from_hf(module.thinker.model.rotary_emb)
         return module
+
+    @classmethod
+    def prepare_model_inputs(cls, model_inputs: dict[str, Any], micro_batch, model_config) -> dict[str, Any]:
+        """Reject multimodal batches under true on-policy, which covers text-only prompts.
+
+        Raises:
+            ValueError: If ``true_on_policy`` is on and the batch carries image, video or audio features.
+        """
+        if model_config.true_on_policy:
+            media_keys = sorted(model_inputs.keys() & {"pixel_values", "pixel_values_videos", "input_features"})
+            if media_keys:
+                raise ValueError(f"true_on_policy supports text-only prompts, got multimodal inputs {media_keys}.")
+        return model_inputs
 
     @classmethod
     def configure_processor(cls, model_path: str, model_config) -> Any:

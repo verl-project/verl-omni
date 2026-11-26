@@ -111,6 +111,11 @@ from verl_omni.utils.config import resolve_lora_config
 from verl_omni.utils.net_utils import worker_group_port_ranges
 from verl_omni.utils.skip import init_skip_manager, log_skip_summary
 from verl_omni.utils.tracking import batch_items, validate_audio_batch
+from verl_omni.workers.config.diffusion.model import (
+    DIFFUSION_TQ_DRIVER_FIELDS,
+    DIFFUSION_TQ_DRIVER_REQUIRED,
+    DIFFUSION_TQ_KEYS,
+)
 from verl_omni.workers.config.reward import (
     reward_is_enabled,
     reward_pool_is_separate,
@@ -206,6 +211,22 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         self.use_reference_policy = need_reference_policy(config) or (loss_mode == "dpo")
         self.use_rm = reward_is_enabled(config)
         self.use_teacher_policy = is_distillation_enabled(config.get("distillation"))
+        self.worker_side_trajectory = config.trainer.v1.get("worker_side_trajectory", False)
+        if not isinstance(self.worker_side_trajectory, bool):
+            raise ValueError("trainer.v1.worker_side_trajectory must be a boolean")
+        if self.worker_side_trajectory and self.trainer_mode != "sync":
+            raise ValueError("worker_side_trajectory currently requires trainer.v1.trainer_mode=sync")
+        if self.worker_side_trajectory and (
+            self._is_direct_preference or self.use_teacher_policy or not streaming_reward_enabled(config)
+        ):
+            raise ValueError(
+                "worker_side_trajectory currently requires policy-gradient training with rollout-side rewards "
+                "and no teacher; direct-preference and driver-side reward consumers require full trajectories."
+            )
+        if self.worker_side_trajectory:
+            fields = omega_conf_to_dataclass(config.actor_rollout_ref.model.trajectory_fields)
+            if not fields.required:
+                raise ValueError("worker_side_trajectory requires actor_rollout_ref.model.trajectory_fields.required")
         self.distillation_config = omega_conf_to_dataclass(config.distillation) if self.use_teacher_policy else None
         validate_distillation_config(config)
         self.skip_old_log_prob = skip_old_log_prob(config)
@@ -275,6 +296,11 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         """Initialize snapshots before checkpoint restoration can replace them."""
         for target, _ in self._policy_adapter_specs():
             self.actor_rollout_wg.copy_adapter(source="default", target=target)
+
+    @property
+    def _training_step_limit(self) -> int:
+        """Last step allowed by both the epoch and configured step limits."""
+        return min(self.total_training_steps, self.steps_per_epoch * self.config.trainer.total_epochs)
 
     def _rollout_server_managers(self) -> list:
         """LLM server managers whose inference engines take part in rollout profiling.
@@ -407,7 +433,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             if self.config.global_profiler.steps is not None
             else False
         )
-        is_last_step = self.global_steps >= self.total_training_steps
+        is_last_step = self.global_steps >= self._training_step_limit
         do_profile = (
             this_step_profile and (not self.next_step_profile or is_last_step)
             if self.config.global_profiler.profile_continuous_steps
@@ -418,7 +444,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
 
         if do_profile:
             profiled_steps = [
-                step for step in (self.config.global_profiler.steps or []) if step <= self.total_training_steps
+                step for step in (self.config.global_profiler.steps or []) if step <= self._training_step_limit
             ]
             run_command = bool(
                 this_step_profile and profiled_steps and (self.global_steps == max(profiled_steps) or is_last_step)
@@ -474,8 +500,9 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         try:
             self.on_train_begin()
             last_val_metrics = None
-            while current_epoch < self.config.trainer.total_epochs and self.global_steps <= self.total_training_steps:
-                is_last_step = self.global_steps >= self.total_training_steps
+            while self.global_steps <= self._training_step_limit:
+                # Final checkpoint/validation use the configured step cap.
+                is_step_limit_reached = self.global_steps >= self.total_training_steps
                 metrics: dict = {}
                 self.timing_raw: dict = {}
                 with marked_timer("step", self.timing_raw):
@@ -484,7 +511,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
                     batch = self.step(metrics, self.timing_raw)
                     self._on_profiling_step_end()
                     if self.config.trainer.save_freq > 0 and (
-                        is_last_step or self.global_steps % self.config.trainer.save_freq == 0
+                        is_step_limit_reached or self.global_steps % self.config.trainer.save_freq == 0
                     ):
                         with marked_timer("save_checkpoint", self.timing_raw, color="green"):
                             self._save_checkpoint()
@@ -492,13 +519,13 @@ class PolicyGradientDiffusionTrainerV1(ABC):
                     metrics.update(self._consume_sync_metrics())
 
                 if self.config.trainer.test_freq > 0 and (
-                    is_last_step or self.global_steps % self.config.trainer.test_freq == 0
+                    is_step_limit_reached or self.global_steps % self.config.trainer.test_freq == 0
                 ):
                     with marked_timer("testing", self.timing_raw, color="green"):
                         self.on_validate_begin()
                         val_metrics = self._validate()
                         self.on_validate_end()
-                        if is_last_step:
+                        if is_step_limit_reached:
                             last_val_metrics = val_metrics
                     metrics.update(val_metrics)
 
@@ -518,13 +545,10 @@ class PolicyGradientDiffusionTrainerV1(ABC):
                 self.global_steps += 1
                 SkipManager.set_step(self.global_steps)
                 current_epoch = (self.global_steps - 1) // self.steps_per_epoch
-                if is_last_step:
-                    log_skip_summary(self.logger, self.global_steps)
-                    self._shutdown_dump_executor()
+                if is_step_limit_reached:
                     pprint(f"Final validation metrics: {last_val_metrics}")
                     progress_bar.close()
-                    self._shutdown_dataloaders()
-                    return
+                    break
 
             self.on_train_end()
             log_skip_summary(self.logger, self.global_steps)
@@ -635,9 +659,28 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             self.on_sample_end()
         return batch_meta
 
+    def _read_training_batch(self, batch_meta: KVBatchMeta) -> DataProto:
+        """Read training data; projected batches carry row keys, not KVBatchMeta, to workers."""
+        pad_token_id = self.tokenizer.pad_token_id or 0
+        if not self.worker_side_trajectory:
+            return diffusion_tq_batch_to_dataproto(batch_meta, pad_token_id=pad_token_id)
+
+        batch = diffusion_tq_batch_to_dataproto(
+            batch_meta, pad_token_id=pad_token_id, select_fields=list(DIFFUSION_TQ_DRIVER_FIELDS)
+        )
+        available = set(batch.batch.keys())
+        if "uid" in batch.non_tensor_batch:
+            available.add("uid")
+        if missing := DIFFUSION_TQ_DRIVER_REQUIRED - available:
+            raise ValueError(f"Projected training read is missing required driver fields: {sorted(missing)}")
+        # The converter uses the same order; the keys then follow DataProto slicing and padding.
+        order = sort_diffusion_tq_keys(list(batch_meta.keys))
+        batch.non_tensor_batch[DIFFUSION_TQ_KEYS] = np.array([batch_meta.keys[i] for i in order], dtype=object)
+        return batch
+
     def _convert_and_dispatch(self, batch_meta: KVBatchMeta):
         """Convert a sampled batch and start teacher scoring without waiting on it."""
-        data = diffusion_tq_batch_to_dataproto(batch_meta, pad_token_id=self.tokenizer.pad_token_id or 0)
+        data = self._read_training_batch(batch_meta)
         return batch_meta, data, self.teacher_model_manager.dispatch_prev_sample_mean(data)
 
     def _train_sampled_batch(
@@ -649,33 +692,18 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         teacher_handle=None,
     ) -> KVBatchMeta:
         """Run one diffusion policy-gradient update on an already sampled mini-batch."""
-        # Convert TQ rows to diffusion DataProto; from here on the driver owns the
-        # DataProto compute contract (no KVBatchMeta passed to diffusion workers).
         if data is None:
-            data = diffusion_tq_batch_to_dataproto(batch_meta, pad_token_id=self.tokenizer.pad_token_id or 0)
+            data = self._read_training_batch(batch_meta)
 
         # [OPTIONAL] colocated reward model
         if self.reward_loop_manager.reward_loop_worker_handles is None and self.use_rm:
             with marked_timer("reward", timing_raw, color="yellow"):
-                # Sync sampling hooks already put colocated rollout replicas to
-                # sleep. Sleeping them again can unmap the same accelerator
-                # memory twice. Async modes still need the explicit mid-cycle
-                # sleep because they do not share the sync hook guarantee.
-                if self.trainer_mode != "sync":
-                    self.checkpoint_manager.sleep_replicas()
+                # The mode hooks (sync on_sample_end, separate_async switch_to_trainer)
+                # already put the colocated replicas to sleep; they stay asleep through
+                # training (~55GB of Qwen-Image weights at rollout TP=1 would OOM next to
+                # the actor update), and the hook that next hands them to generation
+                # wakes and weight-syncs them.
                 data = data.union(self._compute_reward_colocate(data))
-                if self.trainer_mode != "sync":
-                    # Async modes have no guaranteed per-step wake of the
-                    # colocated replicas (separate_async's on_step_end only
-                    # syncs the standalone rollout, and switch_to_rollout is
-                    # not guaranteed to fire), so keep the mid-cycle wake+sync
-                    # or colocated generation stalls on stale weights.
-                    self._update_rollout_weights_mid_cycle()
-                # In sync mode the replicas must stay asleep through the
-                # training phases below: update_weights resumes their weights
-                # (~55GB for Qwen-Image at rollout TP=1) and the actor update
-                # would OOM next to them. on_step_end wakes and weight-syncs
-                # for the next rollout.
 
         if self._is_direct_preference:
             return self._train_direct_preference_batch(metrics, timing_raw, batch_meta, data)
@@ -985,11 +1013,12 @@ class PolicyGradientDiffusionTrainerV1(ABC):
 
         from verl_omni.pipelines.model_base import DiffusionModelBase
 
-        prepared_processor_path = DiffusionModelBase.get_class_by_name(
+        model_adapter = DiffusionModelBase.get_class_by_name(
             architecture,
             model_config.algorithm,
             model_config.get("external_lib"),
-        ).prepare_processor_files(local_path)
+        )
+        prepared_processor_path = model_adapter.prepare_processor_files(local_path)
         processor_path = os.path.join(local_path, "processor")
         if prepared_processor_path is not None:
             processor_path = prepared_processor_path
@@ -1467,15 +1496,6 @@ class PolicyGradientDiffusionTrainerV1(ABC):
     def _add_batch_to_generate(self):
         batch = self._next_train_batch()
         self._submit_batch_to_rollout(batch)
-
-    @SkipManager.annotate(role="weight_sync")
-    def _update_rollout_weights_mid_cycle(self) -> None:
-        """Wake colocated replicas after the reward phase and refresh their weights (async modes).
-
-        Lifecycle syncs (init, step end, validation) always run; skipping this
-        refresh still wakes the replicas, on pre-update weights.
-        """
-        self.checkpoint_manager.update_weights(self.global_steps)
 
     @SkipManager.annotate(role="reward")
     def _compute_reward_colocate(self, data: DataProto) -> DataProto:
@@ -2032,8 +2052,8 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         metrics.update(compute_throughput_metrics_diffusion(batch=data, timing_raw=timing_raw, n_gpus=n_gpus))
         reward_extra_infos_dict = {}
         if "reward_extra_info" in data.non_tensor_batch:
-            infos = data.non_tensor_batch["reward_extra_info"].tolist()
-            keys = infos[0].keys() if infos and isinstance(infos[0], dict) else []
+            infos = [info if isinstance(info, dict) else {} for info in data.non_tensor_batch["reward_extra_info"]]
+            keys = dict.fromkeys(key for info in infos for key in info)
             for key in keys:
                 reward_extra_infos_dict[key] = [info.get(key) for info in infos]
         metrics.update(compute_reward_extra_metrics_diffusion(reward_extra_infos_dict))

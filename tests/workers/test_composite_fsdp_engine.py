@@ -14,7 +14,7 @@
 
 """Unit tests for ``CompositeFSDPEngine`` (Dual-GRPO AR + DiT FSDP backends).
 
-Mirrors the trainer flow in ``PolicyGradientRayTrainer.fit``:
+Mirrors the trainer flow in ``CompositePolicyGradientRayTrainer.fit``:
 
 1. ``infer_batch`` on the AR batch (``num_prompts * rollout.n`` rows), then ``next_stage``.
 2. ``infer_batch`` on the DiT batch (``num_prompts * rollout.n * rollout.m`` rows), then ``next_stage``.

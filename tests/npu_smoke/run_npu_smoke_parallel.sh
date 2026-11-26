@@ -60,8 +60,8 @@ start_group() {
     names+=("${group}")
 }
 
-start_group core 0,1 2 10000,20000
-start_group e2e 2,3,4,5,6,7 6 26000,27000
+start_group core 0,1,2,3 4 10000,20000
+start_group e2e 4,5,6,7 4 26000,27000
 failed=0
 for i in "${!pids[@]}"; do
     rc=0

@@ -55,6 +55,7 @@ def _make_engine(**overrides):
 
 def _build_default_path(engine, *, init_context, loaded_module):
     adapter_cls = MagicMock()
+    adapter_cls.diffusers_model_class.return_value = None
     adapter_cls.preserve_fp32_modules.return_value = False
 
     with (

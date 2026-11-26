@@ -502,6 +502,7 @@ actor_rollout_ref:
     architecture: null
     model_stage: thinker
     hf_config_name: null
+    true_on_policy: false
     lora_dtype: null
     lora_init_weights: gaussian
     target_parameters: null

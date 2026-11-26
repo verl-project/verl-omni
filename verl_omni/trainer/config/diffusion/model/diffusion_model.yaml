@@ -118,6 +118,18 @@ mtp:
   # Whether to enable MTP
   enable: False
 
+# TransferQueue fields read by the V1 actor/ref workers when worker_side_trajectory is enabled
+trajectory_fields:
+
+  # Config dataclass for the worker read projection
+  _target_: verl_omni.workers.config.diffusion.DiffusionTrajectoryFieldsConfig
+
+  # Pipeline tensors that must be present on every sampled row
+  required: []
+
+  # Pipeline tensors read when present on all sampled rows
+  optional: []
+
 # Pipeline configuration for diffusion model generation
 pipeline:
 

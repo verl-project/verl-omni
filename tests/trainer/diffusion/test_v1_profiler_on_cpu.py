@@ -94,7 +94,8 @@ def test_training_windows_and_shared_reference_group(continuous, expected):
             "global_profiler": {
                 "steps": [1, 2, 4],
                 "profile_continuous_steps": continuous,
-            }
+            },
+            "trainer": {"total_epochs": 1},
         }
     )
     trainer.actor_rollout_wg = Mock()
@@ -105,6 +106,7 @@ def test_training_windows_and_shared_reference_group(continuous, expected):
     trainer.gpu_metrics_profiler = None
     trainer._init_profile_state()
     trainer.total_training_steps = 4
+    trainer.steps_per_epoch = 4
     trainer.prev_step_profile = False
     trainer.curr_step_profile = True
     for step in range(1, 5):

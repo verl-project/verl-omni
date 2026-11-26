@@ -1,0 +1,1 @@
+../../../examples/diffusionnft_trainer/minimax_h3_image/README.md

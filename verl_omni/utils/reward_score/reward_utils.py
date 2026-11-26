@@ -21,6 +21,7 @@ from functools import lru_cache
 from io import BytesIO
 from numbers import Real
 
+import numpy as np
 import torch
 from PIL import Image
 
@@ -77,6 +78,8 @@ def get_audio(extra_info: dict, *, audio_layout: str | None = None) -> tuple[tor
     audio = extra_info.get("audio")
     if audio is None:
         raise KeyError("Audio reward requires decoded audio in extra_info['audio'].")
+    if isinstance(audio, np.ndarray) and audio.dtype == object:
+        audio = np.asarray(audio, dtype=np.float32)
     audio = torch.as_tensor(audio).detach().float().cpu()
     if audio.numel() == 0 or not torch.isfinite(audio).all():
         raise ValueError("Audio reward requires non-empty audio containing only finite samples.")
@@ -98,6 +101,8 @@ def get_audio(extra_info: dict, *, audio_layout: str | None = None) -> tuple[tor
     if isinstance(sample_rate, torch.Tensor):
         if sample_rate.numel() != 1:
             raise ValueError("Audio sample rate must be a scalar positive integer.")
+        sample_rate = sample_rate.item()
+    if isinstance(sample_rate, np.ndarray) and sample_rate.size == 1:
         sample_rate = sample_rate.item()
     if sample_rate is None:
         raise KeyError("Audio reward requires extra_info['audio_sample_rate'].")

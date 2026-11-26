@@ -377,7 +377,9 @@ def export_fsdp_lora_adapter(
 def _peft_lora_params_to_cpu(peft_model, adapter_name: str) -> OrderedDict:
     # Nested FSDP leaf wrap: ``state_dict()`` can hit non-root FSDP hooks.
     # ``named_parameters()`` is the mapping verl's layered walker already uses.
-    state_dict = {name: param for name, param in peft_model.named_parameters()}
+    # Torch wrapper tokens are stripped: peft >= 0.22 derives tuner prefixes from
+    # wrapper-free module paths, so token-bearing keys would match nothing.
+    state_dict = {name.replace("_fsdp_wrapped_module.", ""): param for name, param in peft_model.named_parameters()}
     lora_params = get_peft_model_state_dict(peft_model, state_dict=state_dict, adapter_name=adapter_name)
     return OrderedDict((name, _param_to_cpu(param)) for name, param in lora_params.items())
 
@@ -480,22 +482,23 @@ def _layered_summon_lora_params_diffusers(
                 continue
             if fsdp_version(submodule) > 0:
                 with FSDP.summon_full_params(submodule, writeback=False):
-                    # PEFT filters against root-model paths, while a nested FSDP
-                    # unit's state dict contains only block-local paths.
-                    state_prefix = block_prefix
-                    if fsdp_version(submodule) == 1:
-                        state_prefix = f"{state_prefix}._fsdp_wrapped_module"
+                    # Key the block-local state dict the way peft >= 0.22 derives tuner
+                    # prefixes (wrapper-token-free); older peft falls to the prefixed fallback.
                     state_dict = {
-                        f"{state_prefix}.{param_name}": param for param_name, param in submodule.state_dict().items()
+                        f"{block_prefix}.{param_name.replace('_fsdp_wrapped_module.', '')}": param
+                        for param_name, param in submodule.state_dict().items()
                     }
                     sub_lora_params = get_peft_model_state_dict(
                         peft_model, state_dict=state_dict, adapter_name=adapter_name
                     )
                     if not sub_lora_params:
-                        sub_lora_params = _lora_params_by_name(submodule, adapter_name)
+                        # Block-local names would collide across blocks once merged.
+                        sub_lora_params = {
+                            f"{block_prefix}.{name}": param
+                            for name, param in _lora_params_by_name(submodule, adapter_name).items()
+                        }
                     sub_lora_params = {
-                        param_name.replace("_fsdp_wrapped_module.", ""): _param_to_cpu(param)
-                        for param_name, param in sub_lora_params.items()
+                        param_name: _param_to_cpu(param) for param_name, param in sub_lora_params.items()
                     }
                     lora_params.update(sub_lora_params)
                     submodule._is_root = False

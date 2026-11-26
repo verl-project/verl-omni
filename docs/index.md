@@ -1,6 +1,6 @@
 # Welcome to VeRL-Omni's documentation!
 
-Last updated: 11/10/2026
+Last updated: 11/13/2026
 
 [VeRL-Omni](https://github.com/verl-project/verl-omni) is a general RL training framework focused on multimodal generative models, built on top of [verl](https://github.com/verl-project/verl). It originated from the multi-modal generation RL effort in `verl`, and now has a dedicated home so it can evolve in a more focused way.
 
@@ -55,6 +55,7 @@ advanced/diffusion_media_artifacts.md
 advanced/multi_turn_image_agents.md
 algo/async_reward.md
 algo/named_reward_models.md
+advanced/fsdp2_reward_models.md
 algo/rollout_correction.md
 algo/separate_async_omni.md
 start/rollout_batching.md
@@ -77,6 +78,7 @@ algo/mixgrpo.md
 algo/diffusion_opd.md
 algo/omni_opd.md
 algo/deterministic_post_training.md
+algo/true_on_policy.md
 algo/performance.md
 ```
 
@@ -110,7 +112,9 @@ examples/ltx2/flowgrpo_trainer_ltx2.md
 examples/ltx2/omninft_trainer_ltx2.md
 examples/ltx2/diffusionopd_trainer_ltx2.md
 examples/minimax_h3/flowgrpo_trainer_minimax_h3.md
+examples/minimax_h3_image/flowgrpo_trainer_minimax_h3_image.md
 examples/minimax_h3/diffusionnft_trainer_minimax_h3.md
+examples/minimax_h3_image/diffusionnft_trainer_minimax_h3_image.md
 examples/boogu_image/flowgrpo_trainer_boogu_image.md
 examples/boogu_image/diffusionnft_trainer_boogu_image.md
 examples/bagel/flowgrpo_trainer_bagel.md
@@ -167,6 +171,7 @@ contributing/integrating_a_non_diffusers_model.md
 contributing/integrating_a_stepwise_continuous_batching_model.md
 contributing/integrating_a_new_policy_gradient_algorithm_for_diffusion_model.md
 contributing/integrating_a_new_direct_preference_algorithm_for_diffusion_model.md
+contributing/integrating_a_reward_scorer.md
 contributing/gpu_smoke_tests.md
 contributing/npu_smoke_tests.md
 contributing/common_pitfalls.md

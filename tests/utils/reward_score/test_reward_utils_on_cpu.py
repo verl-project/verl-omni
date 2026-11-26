@@ -99,6 +99,40 @@ def test_audio_requires_explicit_rate_and_normalizes_declared_channels(rate):
     assert sample_rate == 24000
 
 
+def test_audio_normalizes_numeric_object_waveform_without_mutation():
+    waveform = np.array([[1.0, 0.0], [0.0, 1.0]], dtype=object)
+    info = {"audio": waveform, "audio_sample_rate": 24000, "audio_layout": "CT"}
+
+    audio, sample_rate = _MODULE.get_audio(info)
+
+    torch.testing.assert_close(audio, torch.full((2,), 0.5))
+    assert sample_rate == 24000
+    assert info["audio"] is waveform
+    assert waveform.dtype == object
+
+
+@pytest.mark.parametrize("rate", [np.array(24000), np.array([24000]), np.array([[24000]])])
+def test_audio_accepts_singleton_numpy_rate_without_mutation(rate):
+    info = {"audio": torch.ones(8), "audio_sample_rate": rate}
+
+    audio, sample_rate = _MODULE.get_audio(info)
+
+    torch.testing.assert_close(audio, torch.ones(8))
+    assert sample_rate == 24000
+    assert info["audio_sample_rate"] is rate
+
+
+@pytest.mark.parametrize("rate", [np.array([]), np.array([24000, 24000]), np.array([True]), np.array([0])])
+def test_audio_rejects_invalid_numpy_rates(rate):
+    with pytest.raises(ValueError, match="sample rate"):
+        _MODULE.get_audio({"audio": torch.ones(8), "audio_sample_rate": rate})
+
+
+def test_audio_rejects_non_numeric_object_waveform():
+    with pytest.raises(ValueError, match="could not convert string to float"):
+        _MODULE.get_audio({"audio": np.array(["invalid"], dtype=object), "audio_sample_rate": 24000})
+
+
 def test_audio_rejects_missing_sample_rate():
     with pytest.raises(KeyError, match="audio_sample_rate"):
         _MODULE.get_audio({"audio": torch.ones(8)})

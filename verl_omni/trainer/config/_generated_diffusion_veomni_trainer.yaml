@@ -455,6 +455,10 @@ actor_rollout_ref:
     mtp:
       _target_: verl.workers.config.MtpConfig
       enable: false
+    trajectory_fields:
+      _target_: verl_omni.workers.config.diffusion.DiffusionTrajectoryFieldsConfig
+      required: []
+      optional: []
     pipeline:
       _target_: verl_omni.workers.config.diffusion.DiffusionPipelineConfig
       height: ${oc.select:actor_rollout_ref.rollout.pipeline.height,512}
@@ -754,7 +758,9 @@ trainer:
   ray_master_port_range: null
   device: cuda
   use_v1: true
+  train_ar: false
   v1:
+    worker_side_trajectory: false
     watchdog:
       enabled: false
       window_size: 3
@@ -889,9 +895,3 @@ omni_skip:
     dump_dir: ~/.verl/stage_dump
     steps: []
     action: empty
-  weight_sync:
-    enable: false
-    dump_dir: ~/.verl/stage_dump
-    steps: []
-    action: empty
-    ack_stale_weights: false
