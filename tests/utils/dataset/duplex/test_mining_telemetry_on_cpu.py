@@ -257,10 +257,10 @@ def test_pacing_corrupted_window_follows_the_deadline_kwargs():
     assert pacing_corrupted(_event(AXIS_INTERRUPTION), [3.5], yield_deadline_s=2.0) is False  # window [1.0, 3.0)
 
 
-def test_turn_axis_latency_is_negative_for_pre_turn_end_speech():
-    # Speaking at t=0 with the user's turn ending at t=2 is two seconds early.
+def test_turn_axis_latency_saturates_for_pre_turn_end_speech():
+    # Speaking before the turn end is a barge-in, the same miss as never speaking.
     early = episode_rule_metrics(_trajectory(AXIS_TURN, [True, False, False]), listen_token_id=LISTEN_TOKEN_ID)
-    assert early["turn_latency_s"] == pytest.approx(-2.0)
+    assert early["turn_latency_s"] == float("inf")
     # The boundary stays full credit: onset exactly at the turn end.
     on_time = episode_rule_metrics(_trajectory(AXIS_TURN, [False, False, True, True]), listen_token_id=LISTEN_TOKEN_ID)
     assert on_time["turn_latency_s"] == pytest.approx(0.0)

@@ -138,9 +138,8 @@ def _axis_latencies(trajectory: DuplexTrajectory, decisions: Sequence[Any]) -> d
             sum(1 for decision in decisions if decision.speaking and start <= decision.time_s < end)
         )
     elif event.axis == AXIS_TURN and event.user_turn_end_s is not None:
-        metrics["turn_latency_s"] = turn_take_latency(
-            None if first_speak is None else first_speak.time_s, event.user_turn_end_s
-        )
+        latency = turn_take_latency(None if first_speak is None else first_speak.time_s, event.user_turn_end_s)
+        metrics["turn_latency_s"] = float("inf") if latency < 0 else latency
     elif event.axis == AXIS_INTERRUPTION:
         latency = interruption_yield_latency(
             event,
