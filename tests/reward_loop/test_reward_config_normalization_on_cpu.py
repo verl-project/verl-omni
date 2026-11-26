@@ -13,6 +13,9 @@
 # limitations under the License.
 """CPU coverage for explicit scorer config at launch and manager consumption."""
 
+from collections import OrderedDict
+from copy import deepcopy
+from enum import StrEnum
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -27,7 +30,7 @@ from verl_omni.workers.config.reward import REWARD_TERM_METADATA_KEYS, normalize
 
 CONFIG_DIR = str(Path(__file__).resolve().parents[2] / "verl_omni" / "trainer" / "config")
 SCORER_PATH = "tests/reward_loop/test_reward_config_normalization_on_cpu.py"
-EXAMPLE_PATH = Path(__file__).resolve().parents[2] / "examples" / "flowgrpo_trainer" / "sd35" / "sd3_jpeg_scorers.yaml"
+GUIDE_PATH = Path(__file__).resolve().parents[2] / "docs" / "algo" / "named_reward_models.md"
 
 
 def reward_config_probe(solution_image, gain, bias, extra_info):
@@ -72,12 +75,35 @@ def _manager():
     }
 
 
-def test_example_fragment_composes_with_hydra_base():
-    config = OmegaConf.merge(_compose(), OmegaConf.load(EXAMPLE_PATH))
+def _dual_projection(scorer_payload, legacy_payload, *, use_omega=False):
+    config = {
+        "reward": {
+            "scorers": {"probe": _scorer(kwargs={"payload": scorer_payload})},
+            "reward_functions": {"probe": _scorer(payload=legacy_payload)},
+            "reward_manager": _manager(),
+        }
+    }
+    return OmegaConf.create(config) if use_omega else config
+
+
+class _Term(StrEnum):
+    PROBE = "probe"
+
+
+def test_documented_scorer_fragment_composes_with_hydra_base():
+    section = GUIDE_PATH.read_text().split("## Explicit scorer entries\n", 1)[1].split("\n## ", 1)[0]
+    fragment = section.split("```yaml\n", 1)[1].split("```", 1)[0]
+    config = OmegaConf.merge(_compose(), OmegaConf.create(fragment))
     normalized = normalize_reward_config(config)
     assert normalized.reward.reward_manager.name == "MultiVisualRewardManager"
-    assert normalized.reward.reward_functions.jpeg.path == ("verl_omni/utils/reward_score/jpeg_compressibility.py")
-    assert normalized.reward.reward_functions.jpeg.name == "compute_score"
+    expected_entry = {
+        "path": "verl_omni/utils/reward_score/jpeg_compressibility.py",
+        "name": "compute_score",
+        "weight": 1.0,
+        "required": True,
+    }
+    assert OmegaConf.to_container(normalized.reward.reward_functions) == {"jpeg": expected_entry}
+    assert OmegaConf.to_container(normalized.reward.scorers) == {"jpeg": {**expected_entry, "kwargs": {}}}
 
 
 @pytest.mark.parametrize("name", ["diffusion_trainer", "omni_trainer"])
@@ -266,6 +292,103 @@ def test_matching_terms_in_different_order_conflict():
     )
     with pytest.raises(ValueError, match="conflicts"):
         normalize_reward_config(config)
+
+
+@pytest.mark.parametrize(
+    "scorer_term,legacy_term",
+    [(_Term.PROBE, "probe"), ("probe", _Term.PROBE)],
+    ids=["scorer-enum", "legacy-enum"],
+)
+def test_dual_projection_rejects_equal_valued_term_key_types(scorer_term, legacy_term):
+    config = {
+        "reward": {
+            "scorers": {scorer_term: _scorer()},
+            "reward_functions": {legacy_term: _scorer()},
+            "reward_manager": _manager(),
+        }
+    }
+    with pytest.raises(ValueError, match="conflicts"):
+        normalize_reward_config(config)
+
+
+@pytest.mark.parametrize("use_omega", [False, True], ids=["dict", "omegaconf"])
+@pytest.mark.parametrize(
+    ("scorer_payload", "legacy_payload"),
+    [
+        (True, 1),
+        (False, 0),
+        (1, 1.0),
+        ({"nested": [True, {"value": 1}]}, {"nested": [1, {"value": 1}]}),
+        ({"nested": [1, {"value": 1}]}, {"nested": [1, {"value": 1.0}]}),
+    ],
+    ids=["true-vs-one", "false-vs-zero", "int-vs-float", "nested-list-bool", "nested-mapping-float"],
+)
+def test_dual_projection_rejects_numeric_type_conflicts(scorer_payload, legacy_payload, use_omega):
+    config = _dual_projection(scorer_payload, legacy_payload, use_omega=use_omega)
+    original = deepcopy(config)
+    with pytest.raises(ValueError, match="reward.scorers conflicts with reward.reward_functions"):
+        normalize_reward_config(config)
+    assert config == original
+
+
+@pytest.mark.parametrize(
+    "scorer_payload,legacy_payload",
+    [({True: "value"}, {1: "value"}), ({1: "value"}, {1.0: "value"})],
+)
+def test_dual_projection_rejects_nested_mapping_key_type_conflicts(scorer_payload, legacy_payload):
+    config = _dual_projection(scorer_payload, legacy_payload)
+    with pytest.raises(ValueError, match="conflicts"):
+        normalize_reward_config(config)
+
+
+@pytest.mark.parametrize(
+    "scorer_payload,legacy_payload",
+    [
+        ((1, False), [1, False]),
+        ((1, False), (1.0, False)),
+        ({"nested": OrderedDict([("a", 1)])}, {"nested": {"a": 1}}),
+        (OrderedDict([("first", 1), ("second", 2)]), OrderedDict([("second", 2), ("first", 1)])),
+    ],
+    ids=["tuple-vs-list", "tuple-numeric-type", "nested-ordered-dict-vs-dict", "ordered-dict-order"],
+)
+def test_dual_projection_rejects_nested_container_type_conflicts(scorer_payload, legacy_payload):
+    config = _dual_projection(scorer_payload, legacy_payload)
+    with pytest.raises(ValueError, match="conflicts"):
+        normalize_reward_config(config)
+
+
+@pytest.mark.parametrize("use_omega", [False, True], ids=["dict", "omegaconf"])
+def test_dual_projection_accepts_typed_nested_payload_with_reordered_mapping(use_omega):
+    config = _dual_projection(
+        {"first": [True, {"count": 1}], "second": 1.0},
+        {"second": 1.0, "first": [True, {"count": 1}]},
+        use_omega=use_omega,
+    )
+    original = deepcopy(config)
+    assert normalize_reward_config(config) is config
+    assert config == original
+
+
+def test_dual_projection_accepts_legacy_outer_and_entry_ordered_dict():
+    config = _dual_projection({"count": 1}, {"count": 1})
+    config["reward"]["reward_functions"] = OrderedDict(
+        [("probe", OrderedDict(config["reward"]["reward_functions"]["probe"].items()))]
+    )
+    assert normalize_reward_config(config) is config
+
+
+def test_dual_projection_accepts_matching_nested_tuple_and_ordered_dict():
+    config = _dual_projection(
+        {"ordered": OrderedDict([("first", (True, 1.0)), ("second", 2)])},
+        {"ordered": OrderedDict([("first", (True, 1.0)), ("second", 2)])},
+    )
+    assert normalize_reward_config(config) is config
+
+
+def test_dual_projection_accepts_shared_nan_identity():
+    shared_nan = float("nan")
+    config = _dual_projection(shared_nan, shared_nan)
+    assert normalize_reward_config(config) is config
 
 
 @pytest.mark.parametrize("manager_name", ["VisualRewardManager", "naive", None])

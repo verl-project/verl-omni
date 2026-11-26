@@ -87,6 +87,34 @@ REWARD_TERM_METADATA_KEYS = frozenset(
 _SCORER_FIELDS = REWARD_TERM_METADATA_KEYS | {"kwargs"}
 
 
+def _same_typed_value(left: Any, right: Any) -> bool:
+    if type(left) is not type(right):
+        return False
+    if left is right:
+        return True
+    if not left == right:
+        return False
+    if isinstance(left, Mapping):
+        if len(left) != len(right):
+            return False
+        remaining = list(right.items())
+        for key, value in left.items():
+            for index, (other_key, other_value) in enumerate(remaining):
+                if _same_typed_value(key, other_key):
+                    if not _same_typed_value(value, other_value):
+                        return False
+                    remaining.pop(index)
+                    break
+            else:
+                return False
+        return True
+    if isinstance(left, list | tuple):
+        return len(left) == len(right) and all(
+            _same_typed_value(left_value, right_value) for left_value, right_value in zip(left, right, strict=True)
+        )
+    return True
+
+
 def normalize_reward_config(config: DictConfig | dict[str, Any]) -> DictConfig | dict[str, Any]:
     """Project explicit scorer entries onto the existing multi-reward manager config.
 
@@ -155,8 +183,12 @@ def normalize_reward_config(config: DictConfig | dict[str, Any]) -> DictConfig |
         )
         if (
             not isinstance(existing_entries, Mapping)
-            or list(existing_entries) != list(projected)
-            or existing_entries != projected
+            or not _same_typed_value(list(existing_entries), list(projected))
+            or any(
+                not isinstance(existing_entry, Mapping)
+                or not _same_typed_value(dict(existing_entry), dict(projected_entry))
+                for existing_entry, projected_entry in zip(existing_entries.values(), projected.values(), strict=True)
+            )
         ):
             raise ValueError("reward.scorers conflicts with reward.reward_functions")
         return config
