@@ -74,7 +74,7 @@ from verl_omni.workers.config import (
     OmniModelConfig,
 )
 from verl_omni.workers.config.diffusion import DiffusionDistillationTeacherModelConfig
-from verl_omni.workers.config.omni.distillation import HIDDEN_STATE_LOSS_MODES
+from verl_omni.workers.config.omni.distillation import HIDDEN_STATE_LOSS_MODES, is_self_distillation_enabled
 from verl_omni.workers.diffusion_tq import materialize_diffusion_trajectory
 from verl_omni.workers.lora_sync import SyncExport, resolve_lora_sync_plan
 from verl_omni.workers.rollout.base import get_rollout_sequence_parallel_size
@@ -832,7 +832,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 self.loss_fn = partial(omni_loss, config=actor_config)
             elif self.distillation_enabled:
                 loss_mode = distillation_config.distillation_loss.loss_mode
-                if loss_mode in HIDDEN_STATE_LOSS_MODES:
+                if loss_mode in HIDDEN_STATE_LOSS_MODES or is_self_distillation_enabled(distillation_config):
                     from verl_omni.trainer.distillation.losses import omni_distillation_ppo_loss
 
                     self.loss_fn = partial(

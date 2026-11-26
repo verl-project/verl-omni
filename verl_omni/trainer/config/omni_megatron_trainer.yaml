@@ -155,13 +155,69 @@ algorithm:
     bypass_mode: true
 
 
-# Distillation config. Overrides only the teacher _target_ so vllm_omni is
-# accepted by _validate_topk_logprobs; all other defaults are inherited from
-# verl's distillation group.
+# Distillation config. Overrides the top-level and teacher _target_ so
+# vllm_omni and multimodal self-distillation (SDPO/OPSD) are supported while
+# inheriting all other defaults from verl's distillation group.
 distillation:
 
+  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+  _target_: verl_omni.workers.config.omni.distillation.OmniDistillationConfig
+
+  # On-policy self-distillation (SDPO / OPSD) settings.
+  self_teacher:
+
+    # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+    _target_: verl_omni.workers.config.omni.distillation.SelfDistillationConfig
+
+    # Enable multimodal on-policy self-distillation reusing the student rollout server.
+    enabled: false
+
+    # Privileged context mode: sdpo, opsd, or auto.
+    mode: sdpo
+
+    # Weight source for self-teacher scoring: policy or ema.
+    teacher_source: policy
+
+    # Exponential moving average decay used when teacher_source is ema.
+    ema_decay: 0.99
+
+    # Fall back to GSPO/GRPO policy gradient on groups without teacher context.
+    fallback_to_pg: true
+
+    # Minimum scalar reward required for a sibling rollout to count as a winning demonstration.
+    reward_threshold: 0.5
+
+    # Include verifier or environment feedback text when reprompting the self-teacher.
+    include_environment_feedback: true
+
+    # Key holding environment or verifier feedback in reward_extra_info or extra_info.
+    environment_feedback_key: feedback
+
+    # Key holding reference solutions for OPSD in reward_model or extra_info.
+    reference_solution_key: ground_truth
+
+    # Exclude a sample's own winning rollout when selecting a sibling demonstration.
+    dont_reprompt_on_self_success: true
+
+    # Preserve multimodal attachments and media placeholder counts during reprompting.
+    preserve_multimodal_inputs: true
+
+    # Maximum characters kept from a winning sibling demonstration or reference solution.
+    max_demonstration_chars: 4096
+
+    # Maximum characters kept from verifier or environment feedback.
+    max_feedback_chars: 2048
+
+    # Optional token budget for the reprompted teacher prompt before trimming privileged text.
+    max_reprompt_tokens: null
+
+    # Prompt suffix template appended to the user turn with a {context} placeholder.
+    reprompt_template: "\n\nUse the following additional information to guide your reasoning and produce a correct response:\n{context}\n\nProvide a clear, accurate response directly without mentioning the hint."
+
+  # External teacher model configurations (unused when self_teacher.enabled is true).
   teacher_models:
 
+    # Default external teacher model entry.
     teacher_model:
 
       # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs

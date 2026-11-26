@@ -51,6 +51,7 @@ from verl_omni.utils.config import (
 )
 from verl_omni.utils.fs import resolve_model_local_dir
 from verl_omni.utils.rl_insight import enable_rl_insight
+from verl_omni.workers.config.omni.distillation import is_self_distillation_enabled
 from verl_omni.workers.config.reward import (
     reward_pool_is_separate,
     reward_role_required,
@@ -350,6 +351,29 @@ def uses_v1_trainer(config) -> bool:
     return not (sample_source == "offline" and trainer_type == "direct_preference")
 
 
+def _build_self_distillation_task_runner_v1(base_task_runner_cls):
+    """Build a ``TaskRunnerV1`` actor class that skips external teacher lookup in agent loops."""
+    base_cls = getattr(getattr(base_task_runner_cls, "__ray_metadata__", None), "modified_class", base_task_runner_cls)
+
+    class OmniSelfDistillationTaskRunnerV1(base_cls):
+        """``TaskRunnerV1`` subclass that keeps agent loops teacher-free for self-distillation."""
+
+        def init_agent_loop_manager(self):
+            if is_self_distillation_enabled(self.config.get("distillation")):
+                agent_config = OmegaConf.create(OmegaConf.to_container(self.config, resolve=False))
+                with open_dict(agent_config):
+                    agent_config.distillation.enabled = False
+                orig_config = self.config
+                self.config = agent_config
+                try:
+                    return super().init_agent_loop_manager()
+                finally:
+                    self.config = orig_config
+            return super().init_agent_loop_manager()
+
+    return ray.remote(num_cpus=1)(OmniSelfDistillationTaskRunnerV1)
+
+
 def run_omni(config, task_runner_class=None) -> None:
     """Initialize Ray and run distributed Omni training."""
     warn_deprecated_reward_config(config)
@@ -360,7 +384,10 @@ def run_omni(config, task_runner_class=None) -> None:
 
         config.trainer.use_v1 = True
         if task_runner_class is None:
-            task_runner_class = TaskRunnerV1
+            if is_self_distillation_enabled(config.get("distillation")):
+                task_runner_class = _build_self_distillation_task_runner_v1(TaskRunnerV1)
+            else:
+                task_runner_class = TaskRunnerV1
         run_ppo(config, task_runner_class=task_runner_class)
         return
 

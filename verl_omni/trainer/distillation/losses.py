@@ -19,9 +19,12 @@ import os
 import torch
 from tensordict import NonTensorData, NonTensorStack
 from verl.trainer.distillation import (
+    distillation_loss,
     distillation_ppo_loss,
     register_distillation_loss,
 )
+from verl.utils.metric import AggregationType, Metric
+from verl.workers.utils.losses import ppo_loss
 from verl.workers.utils.padding import no_padding_2_padding
 
 from verl_omni.trainer.distillation.nitrobrew_loss import (
@@ -29,7 +32,11 @@ from verl_omni.trainer.distillation.nitrobrew_loss import (
     compute_nitrobrew_multi_reverse_kl,
     hidden_token_count,
 )
-from verl_omni.workers.config.omni.distillation import HIDDEN_STATE_LOSS_MODES, OmniDistillationLossSettings
+from verl_omni.workers.config.omni.distillation import (
+    HIDDEN_STATE_LOSS_MODES,
+    OmniDistillationLossSettings,
+    is_self_distillation_enabled,
+)
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -129,6 +136,104 @@ def _per_token_teacher_key_ids(data, teacher_hidden_states, key_to_id):
     return per_seq_ids.repeat_interleave(teacher_hidden_states.shape[1])
 
 
+def _mask_like_response_mask(raw_response_mask: torch.Tensor, padded_bool_mask: torch.Tensor) -> torch.Tensor:
+    """Convert a padded boolean mask back to the layout and dtype of ``raw_response_mask``."""
+    if raw_response_mask.is_nested:
+        pieces = [
+            padded_bool_mask[i, : piece.size(0)].to(dtype=raw_response_mask.dtype)
+            for i, piece in enumerate(raw_response_mask.unbind())
+        ]
+        return torch.nested.as_nested_tensor(pieces, layout=torch.jagged)
+    return padded_bool_mask.to(dtype=raw_response_mask.dtype)
+
+
+def _differentiable_zero(model_output: dict, fallback_device: torch.device) -> torch.Tensor:
+    """Return a scalar zero anchored to the autograd graph when model outputs require grad."""
+    for key in ("log_probs", "distillation_losses"):
+        tensor = model_output.get(key)
+        if isinstance(tensor, torch.Tensor):
+            vals = tensor.values() if tensor.is_nested else tensor
+            return vals.sum().to(dtype=torch.float32) * 0.0
+    return torch.zeros((), dtype=torch.float32, device=fallback_device)
+
+
+def _clone_data_with_response_mask(data, new_mask: torch.Tensor):
+    """Return a shallow dict/TensorDict view of ``data`` with ``response_mask`` replaced."""
+    if hasattr(data, "clone"):
+        cloned = data.clone(recurse=False)
+        cloned["response_mask"] = new_mask
+        return cloned
+    cloned = dict(data)
+    cloned["response_mask"] = new_mask
+    return cloned
+
+
+def _compute_self_distillation_ppo_loss(
+    config,
+    distillation_config,
+    model_output: dict,
+    data,
+    dp_group=None,
+):
+    """Combine per-sample self-distillation with optional GSPO/GRPO fallback on groups lacking context."""
+    raw_response_mask = data["response_mask"]
+    if raw_response_mask.is_nested:
+        response_mask = raw_response_mask.bool().to_padded_tensor(False)
+    else:
+        response_mask = raw_response_mask.bool()
+
+    sample_mask = data["self_distill_mask"]
+    if sample_mask.is_nested:
+        sample_mask = sample_mask.bool().to_padded_tensor(False)
+    else:
+        sample_mask = sample_mask.bool()
+    sample_mask = sample_mask.to(device=response_mask.device)
+    if sample_mask.ndim == 1:
+        sample_mask_2d = sample_mask.unsqueeze(1).expand_as(response_mask)
+    else:
+        sample_mask_2d = sample_mask
+
+    distill_mask = response_mask & sample_mask_2d
+    loss_cfg = distillation_config.distillation_loss
+    fallback_to_pg = bool(distillation_config.self_teacher.fallback_to_pg)
+    if loss_cfg.use_task_rewards:
+        pg_mask = response_mask
+    elif fallback_to_pg:
+        pg_mask = response_mask & ~sample_mask_2d
+    else:
+        pg_mask = torch.zeros_like(response_mask)
+
+    zero_scalar = _differentiable_zero(model_output, response_mask.device)
+    zero_metric = torch.zeros((), dtype=torch.float32, device=response_mask.device)
+
+    metrics: dict = {}
+    if distill_mask.any():
+        distill_data = _clone_data_with_response_mask(data, _mask_like_response_mask(raw_response_mask, distill_mask))
+        distill_loss, distill_metrics = distillation_loss(config, distillation_config, model_output, distill_data)
+        metrics.update(distill_metrics)
+    else:
+        distill_loss = zero_scalar
+
+    if pg_mask.any():
+        pg_data = _clone_data_with_response_mask(data, _mask_like_response_mask(raw_response_mask, pg_mask))
+        policy_loss, policy_metrics = ppo_loss(config, model_output, pg_data, dp_group)
+        metrics.update(policy_metrics)
+    else:
+        policy_loss = zero_scalar
+
+    distill_coef = loss_cfg.distillation_loss_coef if loss_cfg.use_task_rewards else 1.0
+    total_loss = policy_loss + distill_loss * distill_coef
+    metrics["distillation/loss"] = Metric(value=distill_loss.detach(), aggregation=AggregationType.SUM)
+    metrics["self_distillation/distilled_tokens"] = Metric(
+        value=distill_mask.sum().to(dtype=torch.float32), aggregation=AggregationType.SUM
+    )
+    metrics["self_distillation/fallback_tokens"] = Metric(
+        value=(response_mask & ~sample_mask_2d).sum().to(dtype=torch.float32) if fallback_to_pg else zero_metric,
+        aggregation=AggregationType.SUM,
+    )
+    return total_loss, metrics
+
+
 def omni_distillation_ppo_loss(
     config,
     distillation_config,
@@ -139,12 +244,28 @@ def omni_distillation_ppo_loss(
     data_format: str = "thd",
 ):
     """Same entry as verl's ``distillation_ppo_loss``: logits processor + final
-    policy loss, with hidden modes dispatched to the chunked nitrobrew kernel."""
+    policy loss, with hidden modes dispatched to the chunked nitrobrew kernel
+    and self-distillation fallback masking handled when ``self_distill_mask``
+    is present."""
     loss_mode = distillation_config.distillation_loss.loss_mode
     use_hidden = loss_mode in HIDDEN_STATE_LOSS_MODES
 
     if student_logits is not None and use_hidden:
         return _compute_nitrobrew_in_logits_processor(distillation_config, data, student_logits, data_format)
+
+    if (
+        student_logits is None
+        and data is not None
+        and is_self_distillation_enabled(distillation_config)
+        and "self_distill_mask" in data
+    ):
+        return _compute_self_distillation_ppo_loss(
+            config=config,
+            distillation_config=distillation_config,
+            model_output=model_output,
+            data=data,
+            dp_group=dp_group,
+        )
 
     return distillation_ppo_loss(
         config,

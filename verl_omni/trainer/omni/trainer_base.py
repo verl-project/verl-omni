@@ -23,7 +23,7 @@ from __future__ import annotations
 import logging
 from functools import partial
 
-from omegaconf import OmegaConf
+from omegaconf import OmegaConf, open_dict
 from verl.checkpoint_engine import CheckpointEngineManager
 from verl.experimental.reward_loop import RewardLoopManager
 from verl.experimental.teacher_loop import MultiTeacherModelManager
@@ -37,6 +37,10 @@ from verl.workers.utils.losses import value_loss
 
 from verl_omni.utils.config import resolve_lora_config
 from verl_omni.utils.net_utils import worker_group_port_ranges
+from verl_omni.workers.config.omni.distillation import (
+    is_self_distillation_enabled,
+    validate_self_teacher_rollout_topk,
+)
 
 __all__ = ["OmniPPOTrainer"]
 
@@ -48,6 +52,28 @@ class OmniPPOTrainer(PPOTrainer):
 
     Must be the first base so this ``_setup`` precedes ``PPOTrainer._setup`` in the MRO.
     """
+
+    def _init_resource_pool_mgr(self) -> None:
+        """Initialize resource pools, skipping external ``Role.TeacherModel`` for self-distillation."""
+        distillation_cfg = self.config.get("distillation")
+        if is_self_distillation_enabled(distillation_cfg):
+            # Self-distillation reuses the student's own rollout servers, so no
+            # separate teacher pool is allocated and nnodes=0 / n_gpus_per_node=0 is valid.
+            with open_dict(self.config):
+                self.config.distillation.enabled = False
+            try:
+                super()._init_resource_pool_mgr()
+            finally:
+                with open_dict(self.config):
+                    self.config.distillation.enabled = True
+        else:
+            super()._init_resource_pool_mgr()
+
+    def get_teacher_client(self):
+        """Return external teacher server clients, or ``None`` for self-distillation."""
+        if getattr(self, "teacher_model_manager", None) is None:
+            return None
+        return super().get_teacher_client()
 
     def _setup(self):
         # Faithful copy of verl's PPOTrainer._setup; deltas are DIFF-marked.
@@ -181,7 +207,17 @@ class OmniPPOTrainer(PPOTrainer):
         logger.info("reward loop manager initialized")
 
         # 8. initialize teacher loop manager
-        if self.use_teacher_policy:
+        # DIFF vs upstream: self-distillation (SDPO/OPSD) scores against the student's
+        # own rollout servers rather than launching an external MultiTeacherModelManager.
+        if is_self_distillation_enabled(self.config.get("distillation")):
+            self.use_teacher_policy = False
+            self.teacher_model_manager = None
+            self.distillation_config = omega_conf_to_dataclass(self.config.distillation)
+            validate_self_teacher_rollout_topk(
+                self.config.actor_rollout_ref.rollout,
+                self.distillation_config,
+            )
+        elif self.use_teacher_policy:
             teacher_resource_pool = self.resource_pool_manager.get_resource_pool(Role.TeacherModel)
             self.teacher_model_manager = MultiTeacherModelManager(
                 config=self.config,
