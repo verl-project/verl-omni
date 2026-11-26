@@ -25,7 +25,7 @@ import yaml
 
 CHECKER = Path(__file__).with_name("check_ci_policy.py").resolve()
 WORKFLOWS = CHECKER.parents[2] / ".github" / "workflows"
-LINT_WORKFLOW = "ci-check-policy.yml"
+LINT_WORKFLOW = "pr-lint.yml"
 SANITY_CHECK = "tests/special_sanity/check_existing.py"
 WORKFLOW = ".github/workflows/sanity.yml"
 RUFF_CONFIG = '[project]\nname = "example"\n[tool.ruff.lint]\nselect = ["F"]\n'
@@ -114,18 +114,28 @@ def test_lint_workflow_collects_every_checker_regression_module() -> None:
     steps = _workflow(LINT_WORKFLOW)["jobs"]["lint"]["steps"]
     regression = next(step["run"] for step in steps if step.get("name") == "Exercise checker regressions")
     patterns = [argument for argument in split(regression) if argument.startswith("tests/")]
-    suites = set(CHECKER.parent.glob("test_check_*.py")) | {CHECKER.with_name("test_ci_policy.py")}
+    suites = {
+        CHECKER.with_name(name)
+        for name in (
+            "test_ci_policy.py",
+            "test_pr_lint.py",
+            "test_ast_rules.py",
+            "test_comments.py",
+            "test_example_recipes.py",
+        )
+    }
     for suite in suites:
+        assert suite.is_file(), suite
         relative = suite.relative_to(CHECKER.parents[2]).as_posix()
         assert any(fnmatch(relative, pattern) for pattern in patterns), relative
 
 
-def test_renamed_checker_is_wired_into_local_and_trusted_ci_entries() -> None:
+def test_pr_lint_checker_is_wired_into_local_and_trusted_ci_entries() -> None:
     root = CHECKER.parents[2]
     config = yaml.load((root / ".pre-commit-config.yaml").read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
-    hook = next(hook for repo in config["repos"] for hook in repo["hooks"] if hook["id"] == "check-code")
+    hook = next(hook for repo in config["repos"] for hook in repo["hooks"] if hook["id"] == "check-pr-lint")
     entry = split(hook["entry"])
-    assert entry == ["python", "tests/special_sanity/check_code.py"]
+    assert entry == ["python", "tests/special_sanity/check_pr_lint.py"]
     assert (root / entry[-1]).is_file()
     trusted_steps = _workflow("protect-ci-checks.yml")["jobs"]["protect-ci-checks"]["steps"]
     trusted_step = next(step for step in trusted_steps if "run" in step)
@@ -149,7 +159,7 @@ def test_lint_workflow_runs_fast_native_sanity_hooks() -> None:
     steps = _workflow(LINT_WORKFLOW)["jobs"]["lint"]["steps"]
     lint_run = next(step["run"] for step in steps if step.get("name") == "Run pre-commit lint hooks")
     for hook in (
-        "check-code",
+        "check-pr-lint",
         "ruff",
         "ruff-format",
         "check-license",

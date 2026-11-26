@@ -17,7 +17,7 @@
 import ast
 
 import pytest
-from check_python import findings
+from check_ast_rules import findings
 
 CORE = "verl_omni/trainer/diffusion/example.py"
 ADAPTER = "verl_omni/pipelines/example/training_adapter.py"

@@ -96,7 +96,7 @@ jobs:
   pr_lint:
     needs: resolve_groups
     if: github.event_name == 'pull_request'
-    uses: ./.github/workflows/ci-check-policy.yml
+    uses: ./.github/workflows/pr-lint.yml
 
   npu_smoke:
     needs: [resolve_groups, pr_lint]

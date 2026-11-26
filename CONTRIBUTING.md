@@ -40,9 +40,9 @@ pre-commit run --all-files --show-diff-on-failure --color=always ruff
 ```
 
 The lightweight `lint` job runs on every pull request, without a CI label. It
-runs Ruff lint and format over the checkout and the `check-code` hook for
+runs Ruff lint and format over the checkout and the `check-pr-lint` hook for
 new AST and Ruff findings relative to the PR merge base. To run just the new
-checker locally, stage your changes and run `uvx pre-commit run check-code`.
+checker locally, stage your changes and run `uvx pre-commit run check-pr-lint`.
 Labeled GPU and NPU PR runs check lint before using accelerator runners.
 
 The AST rules follow module responsibilities rather than treating all Python
@@ -73,10 +73,11 @@ files alike ([RFC #942](https://github.com/verl-project/verl-omni/issues/942)):
 
 The scripts use the `check_<subject>.py` naming convention also used by
 [SGLang-Omni's checks](https://github.com/sgl-project/sglang-omni/tree/main/scripts):
-`check_code.py` handles Git snapshots, incremental findings and Ruff;
-`check_python.py` holds Python AST contracts; `check_examples.py` holds path and
-recipe checks; `check_comments.py` checks comment tokens. Each rule module has
-its own `test_check_<subject>.py` regression suite. Production Ruff additionally
+`check_pr_lint.py` handles Git snapshots, incremental findings and Ruff;
+`check_ast_rules.py` holds Python AST contracts; `check_example_recipes.py`
+holds path and recipe checks; `check_comments.py` checks comment tokens. Each
+rule module has its own `test_<subject>.py` regression suite under
+`tests/special_sanity/`. Production Ruff additionally
 checks mutable defaults, duplicate fields and invalid exports, bare exceptions,
 control flow that suppresses exceptions, missing subprocess `check=`, discarded
 async tasks, resource handling, debugging calls, `eval` and `shell=True`.
@@ -115,7 +116,9 @@ Run the checker regressions with:
 
 ```bash
 uv run --no-project --python 3.12 --with pytest --with pyyaml --with ruff==0.12.2 pytest -q \
-  tests/special_sanity/test_ci_policy.py tests/special_sanity/test_check_*.py
+  tests/special_sanity/test_ci_policy.py tests/special_sanity/test_pr_lint.py \
+  tests/special_sanity/test_ast_rules.py tests/special_sanity/test_comments.py \
+  tests/special_sanity/test_example_recipes.py
 ```
 
 Use static checks for known code patterns. For behavior changes, establish the

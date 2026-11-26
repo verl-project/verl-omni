@@ -25,7 +25,7 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           uv run --no-project --python 3.12 python tests/special_sanity/check_ci_policy.py "$BASE_SHA" "$HEAD_SHA"
-          uvx --python 3.12 pre-commit run check-code --from-ref "$BASE_SHA" --to-ref "$HEAD_SHA"
+          uvx --python 3.12 pre-commit run check-pr-lint --from-ref "$BASE_SHA" --to-ref "$HEAD_SHA"
           uvx --python 3.12 pre-commit run ruff --all-files --show-diff-on-failure
           uvx --python 3.12 pre-commit run ruff-format --all-files --show-diff-on-failure
           uvx --python 3.12 pre-commit run check-license --all-files
@@ -37,4 +37,6 @@ jobs:
       - name: Exercise checker regressions
         run: >-
           uv run --no-project --python 3.12 --with pytest --with pyyaml --with ruff==0.12.2 pytest -q
-          tests/special_sanity/test_ci_policy.py tests/special_sanity/test_check_*.py
+          tests/special_sanity/test_ci_policy.py tests/special_sanity/test_pr_lint.py
+          tests/special_sanity/test_ast_rules.py tests/special_sanity/test_comments.py
+          tests/special_sanity/test_example_recipes.py

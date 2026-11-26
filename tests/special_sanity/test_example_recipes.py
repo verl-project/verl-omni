@@ -17,7 +17,7 @@
 from pathlib import Path
 
 import pytest
-from check_examples import findings
+from check_example_recipes import findings
 
 
 @pytest.mark.parametrize(

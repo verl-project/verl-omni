@@ -58,7 +58,7 @@ env:
 jobs:
   pr_lint:
     if: github.repository_owner == 'verl-project' && github.event_name == 'pull_request'
-    uses: ./.github/workflows/ci-check-policy.yml
+    uses: ./.github/workflows/pr-lint.yml
 
   setup_runner:
     # Pull request label mapping:

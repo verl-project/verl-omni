@@ -16,7 +16,7 @@ mechanically detectable parts. Formatting is handled by the tools below.
 | Hook                       | What it actually enforces                                                  |
 | -------------------------- | -------------------------------------------------------------------------- |
 | `ruff` / `ruff-format`     | Lint + format, `line-length = 120` (scope below)                           |
-| `check-code`              | Incremental Python contracts, example hygiene and recognizable comment noise; see `check_code.py` and `check_*.py` |
+| `check-pr-lint`            | Incremental AST contracts, example recipes, comments, and Ruff; see `check_pr_lint.py` |
 | `mypy`                     | Errors enabled only in configured module overrides; global `ignore_errors = true` |
 | `check-license`            | Accepted copyright text in tracked `.py` files; does not validate the full license header |
 | `autogen-trainer-cfg`      | `_generated_*.yaml` matches flattened Hydra source configs |

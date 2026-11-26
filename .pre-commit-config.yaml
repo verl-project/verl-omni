@@ -14,9 +14,9 @@ repos:
 
   - repo: local
     hooks:
-      - id: check-code
-        name: Check new Python, example and comment findings
-        entry: python tests/special_sanity/check_code.py
+      - id: check-pr-lint
+        name: Check PR lint rules (Ruff, AST contracts, comments, examples)
+        entry: python tests/special_sanity/check_pr_lint.py
         language: python
         additional_dependencies: [ruff==0.12.2]
         pass_filenames: false

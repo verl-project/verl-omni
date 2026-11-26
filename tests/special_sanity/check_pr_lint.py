@@ -25,10 +25,10 @@ from importlib.util import resolve_name
 from pathlib import PurePosixPath
 from typing import NamedTuple
 
+from check_ast_rules import SHARED_PIPELINE_MODULES
+from check_ast_rules import findings as python_findings
 from check_comments import findings as comment_findings
-from check_examples import findings as example_findings
-from check_python import SHARED_PIPELINE_MODULES
-from check_python import findings as python_findings
+from check_example_recipes import findings as example_findings
 
 RUFF_RULES = (
     "F401,F811,F841,F822,RET505,RET506,SIM114,C901,S110,S112,E722,B006,B012,B018,B023,"

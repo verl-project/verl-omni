@@ -31,4 +31,4 @@ jobs:
             git fetch --no-tags origin "$HEAD_SHA"
           fi
           uv run --no-project --python 3.12 python tests/special_sanity/check_ci_policy.py "$BASE_SHA" "$HEAD_SHA"
-          uv run --no-project --python 3.12 --with ruff==0.12.2 python tests/special_sanity/check_code.py "$BASE_SHA" "$HEAD_SHA"
+          uv run --no-project --python 3.12 --with ruff==0.12.2 python tests/special_sanity/check_pr_lint.py "$BASE_SHA" "$HEAD_SHA"

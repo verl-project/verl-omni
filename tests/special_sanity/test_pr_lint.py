@@ -20,9 +20,9 @@ import sys
 from pathlib import Path
 
 import pytest
-from check_code import _ruff_findings
+from check_pr_lint import _ruff_findings
 
-CHECKER = Path(__file__).with_name("check_code.py").resolve()
+CHECKER = Path(__file__).with_name("check_pr_lint.py").resolve()
 CORE_PATH = "verl_omni/trainer/diffusion/example.py"
 SHARED_IMPORT = "from verl_omni.pipelines.model_base import DiffusionModelBase"
 ADAPTER_IMPORT = "from verl_omni.pipelines.qwen_image_flow_grpo import QwenImage"
