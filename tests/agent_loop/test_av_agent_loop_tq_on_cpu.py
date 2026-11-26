@@ -29,6 +29,7 @@ from collections import OrderedDict
 import numpy as np
 import pytest
 import torch
+from verl.experimental.agent_loop.agent_loop import AgentLoopMetrics, AgentLoopOutput
 
 from verl_omni.agent_loop.av_agent_loop_tq import _AgentLoopWorkerTQBase, _AVLeanAgentLoopWorkerTQ
 
@@ -114,6 +115,17 @@ def test_postprocess_keeps_kwargs_intact_when_disabled(monkeypatch):
     assert captured["kwargs"] == kwargs  # no field dropped or rewritten when the gate is off
 
 
+def _real_output(prompt_ids: list[int], media: dict) -> AgentLoopOutput:
+    """Real producer output: separate media dicts, as the single-turn loop builds."""
+    return AgentLoopOutput(
+        prompt_ids=prompt_ids,
+        response_ids=[7, 8],
+        response_mask=[1, 1],
+        metrics=AgentLoopMetrics(),
+        multi_modal_data=media,
+    )
+
+
 def test_mmi_cache_reuses_processor_output_across_sessions(monkeypatch):
     calls = []
 
@@ -124,11 +136,14 @@ def test_mmi_cache_reuses_processor_output_across_sessions(monkeypatch):
     monkeypatch.setattr(_AgentLoopWorkerTQBase, "_compute_multi_modal_inputs", _parent, raising=False)
     monkeypatch.setenv("VERL_OMNI_TQ_CACHE_MMI", "1")
     worker = _make_worker()
-    # Sessions of one prompt share the same media payload object, as the agent
-    # loop passes the prompt kwargs by reference.
-    shared_media = {"videos": ["frames"]}
-    first = worker._compute_multi_modal_inputs(_FakeOutput([1, 2, 3], media=shared_media), torch.tensor([1, 2, 3, 4]))
-    second = worker._compute_multi_modal_inputs(_FakeOutput([1, 2, 3], media=shared_media), torch.tensor([1, 2, 3, 9]))
+    # Each session builds its own media dict, with equal content like the
+    # real single-turn loop (same prompt payload re-encoded per session).
+    first = worker._compute_multi_modal_inputs(
+        _real_output([1, 2, 3], {"audio": np.zeros(16000, dtype=np.float32)}), torch.tensor([1, 2, 3, 4])
+    )
+    second = worker._compute_multi_modal_inputs(
+        _real_output([1, 2, 3], {"audio": np.zeros(16000, dtype=np.float32)}), torch.tensor([1, 2, 3, 9])
+    )
 
     assert calls == [(1, 2, 3)]  # one processor run shared across session rows
     # Downstream pops (mm_token_type_ids) must not leak into the cached value.
@@ -149,8 +164,12 @@ def test_mmi_cache_does_not_share_across_different_media_with_same_prompt(monkey
     monkeypatch.setenv("VERL_OMNI_TQ_CACHE_MMI", "1")
     worker = _make_worker()
 
-    worker._compute_multi_modal_inputs(_FakeOutput([1, 2, 3], media={"videos": ["frames-a"]}), torch.tensor([1]))
-    worker._compute_multi_modal_inputs(_FakeOutput([1, 2, 3], media={"videos": ["frames-b"]}), torch.tensor([1]))
+    worker._compute_multi_modal_inputs(
+        _real_output([1, 2, 3], {"audio": np.zeros(16000, dtype=np.float32)}), torch.tensor([1])
+    )
+    worker._compute_multi_modal_inputs(
+        _real_output([1, 2, 3], {"audio": np.ones(16000, dtype=np.float32)}), torch.tensor([1])
+    )
 
     assert len(calls) == 2  # distinct media: both prompts run the processor
 
@@ -166,8 +185,12 @@ def test_mmi_cache_disabled_by_default(monkeypatch):
     monkeypatch.delenv("VERL_OMNI_TQ_CACHE_MMI", raising=False)
     worker = _make_worker()
 
-    worker._compute_multi_modal_inputs(_FakeOutput([1, 2, 3]), torch.tensor([1]))
-    worker._compute_multi_modal_inputs(_FakeOutput([1, 2, 3]), torch.tensor([1]))
+    worker._compute_multi_modal_inputs(
+        _real_output([1, 2, 3], {"audio": np.zeros(8, dtype=np.float32)}), torch.tensor([1])
+    )
+    worker._compute_multi_modal_inputs(
+        _real_output([1, 2, 3], {"audio": np.zeros(8, dtype=np.float32)}), torch.tensor([1])
+    )
 
     assert len(calls) == 2
 

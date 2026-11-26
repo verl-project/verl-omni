@@ -40,6 +40,7 @@ Environment gates (all default off, i.e. bit-identical upstream behavior):
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 from collections import OrderedDict
@@ -75,6 +76,32 @@ def _mmi_cache_enabled() -> bool:
 _MMI_CACHE_MAX_ENTRIES = int(os.environ.get("VERL_OMNI_TQ_CACHE_MMI_ENTRIES", "32"))
 
 
+def _media_digest(multi_modal_data: dict) -> bytes:
+    """Stable digest of a media payload: equal content hashes equal.
+
+    The agent loop constructs a separate media dict per session, so object
+    identity would never hit across siblings; the content digest is the
+    identity they share. Digesting the payload costs orders of magnitude
+    less than the HF processor run it lets sessions skip.
+    """
+    digest = hashlib.md5()
+    for name, value in sorted(multi_modal_data.items()):
+        digest.update(name.encode())
+        if isinstance(value, np.ndarray):
+            digest.update(value.dtype.str.encode())
+            digest.update(str(value.shape).encode())
+            digest.update(value.tobytes())
+        elif isinstance(value, torch.Tensor):
+            digest.update(str(value.dtype).encode())
+            digest.update(str(tuple(value.shape)).encode())
+            digest.update(value.detach().cpu().contiguous().numpy().tobytes())
+        elif isinstance(value, str | bytes):
+            digest.update(value.encode() if isinstance(value, str) else value)
+        else:
+            digest.update(repr(value).encode())
+    return digest.digest()
+
+
 def _estimate_payload_bytes(value) -> int:
     """Rough serialized-size estimate for one kwarg value (for A/B logging)."""
     if isinstance(value, dict):
@@ -95,7 +122,7 @@ class _AVLeanAgentLoopWorkerTQ(_AgentLoopWorkerTQBase):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        # (prompt ids, media identity) -> processor output; sessions of one
+        # (prompt ids, media digest) -> processor output; sessions of one
         # prompt share it.
         self._mmi_cache: OrderedDict[tuple, dict] = OrderedDict()
 
@@ -106,26 +133,25 @@ class _AVLeanAgentLoopWorkerTQ(_AgentLoopWorkerTQBase):
         session with identical media; only the trailing response tokens differ,
         and the processor output carries media-derived tensors only (text-side
         ``input_ids``/``attention_mask`` are popped upstream), so keying on the
-        prompt ids plus the media object identity makes sessions of one prompt
-        share one processor run. The call is synchronous on the worker's event
-        loop, so without the cache one prompt costs ``n`` serialized processor
-        runs.
+        prompt ids plus the media digest makes sessions of one prompt share one
+        processor run. The call is synchronous on the worker's event loop, so
+        without the cache one prompt costs ``n`` serialized processor runs.
         """
         if not _mmi_cache_enabled() or output.multi_modal_data is None or not len(output.prompt_ids):
             return super()._compute_multi_modal_inputs(output, input_ids)
-        # The media object completes the key: prompt tokens alone collide
-        # across prompts that embed different (same-sized) media. Pinning the
-        # media object inside the cached value keeps its id() unique for as
-        # long as the entry lives, so a recycled id can never hit a stale one.
-        key = (tuple(output.prompt_ids), id(output.multi_modal_data))
+        # The media digest completes the key: prompt tokens alone collide
+        # across prompts that embed different (same-sized) media, while the
+        # digest stays equal across the per-session media copies the agent
+        # loop constructs.
+        key = (tuple(output.prompt_ids), _media_digest(output.multi_modal_data))
         cached = self._mmi_cache.get(key)
         if cached is not None:
             self._mmi_cache.move_to_end(key)
             # Downstream pops keys (e.g. mm_token_type_ids) from the dict, so
             # every consumer gets its own shallow copy; tensors stay shared.
-            return dict(cached["mmi"])
+            return dict(cached)
         computed = super()._compute_multi_modal_inputs(output, input_ids)
-        self._mmi_cache[key] = {"mmi": dict(computed), "media": output.multi_modal_data}
+        self._mmi_cache[key] = dict(computed)
         while len(self._mmi_cache) > _MMI_CACHE_MAX_ENTRIES:
             self._mmi_cache.popitem(last=False)
         return computed
