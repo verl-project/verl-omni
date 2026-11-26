@@ -43,11 +43,13 @@ from verl_omni.trainer.distillation.self_distillation import (
 )
 from verl_omni.trainer.main_omni import _build_self_distillation_task_runner_v1
 from verl_omni.trainer.omni.ray_omni_trainer import OmniPPOTrainerSync
+from verl_omni.trainer.omni.ray_omni_trainer_separate_async import OmniPPOTrainerSeparateAsync
 from verl_omni.workers.config.omni.distillation import (
     OmniDistillationConfig,
     OmniDistillationLossConfig,
     SelfDistillationConfig,
 )
+from verl_omni.workers.engine_workers import ActorRolloutRefWorker
 
 
 class _DummyTokenizer:
@@ -745,8 +747,8 @@ class TestSelfDistillationTrainerWiring:
         metrics: dict[str, float] = {}
 
         with (
-            patch("verl_omni.trainer.omni.ray_omni_trainer.tq.kv_batch_get", return_value=tq_data),
-            patch("verl_omni.trainer.omni.ray_omni_trainer.tq.kv_batch_put", side_effect=_fake_kv_batch_put),
+            patch("verl_omni.trainer.omni.trainer_base.tq.kv_batch_get", return_value=tq_data),
+            patch("verl_omni.trainer.omni.trainer_base.tq.kv_batch_put", side_effect=_fake_kv_batch_put),
         ):
             out_batch = trainer._compute_self_teacher_log_probs(batch, metrics)
 
@@ -780,8 +782,106 @@ class TestSelfDistillationTrainerWiring:
         assert metrics["self_distillation/mean_reprompt_delta_tokens"] > 0.0
         assert "self_distill_mask" in out_batch.fields
 
-    def test_ema_teacher_source_raises_explicit_not_implemented_on_rollout_server_path(self):
+    def test_ema_teacher_source_swaps_syncs_and_restores_in_omni_sync(self):
+        tok = _DummyTokenizer()
         trainer = OmniPPOTrainerSync.__new__(OmniPPOTrainerSync)
+        trainer.tokenizer = tok
+        trainer.processor = None
+        trainer.global_steps = 3
+        trainer.config = OmegaConf.create({"data": {"mm_processor_kwargs": {}}})
+        trainer.distillation_config = OmniDistillationConfig(
+            enabled=True,
+            nnodes=0,
+            n_gpus_per_node=0,
+            distillation_loss=OmniDistillationLossConfig(
+                loss_mode="forward_kl_topk",
+                topk=2,
+                use_policy_gradient=False,
+            ),
+            self_teacher=SelfDistillationConfig(
+                enabled=True,
+                mode="opsd",
+                teacher_source="ema",
+                ema_decay=0.9,
+            ),
+        )
+
+        p0 = torch.tensor(tok.encode("<user> q1 <assistant>"), dtype=torch.long)
+        r0 = torch.tensor(tok.encode("ans"), dtype=torch.long)
+        tq_data = TensorDict(
+            {
+                "prompts": torch.nested.as_nested_tensor([p0], layout=torch.jagged),
+                "responses": torch.nested.as_nested_tensor([r0], layout=torch.jagged),
+                "response_mask": torch.nested.as_nested_tensor([torch.ones_like(r0)], layout=torch.jagged),
+                "rm_scores": torch.nested.as_nested_tensor([torch.tensor([0.0])], layout=torch.jagged),
+                "uid": NonTensorStack("u1"),
+                "raw_prompt": NonTensorStack([{"role": "user", "content": "q1"}]),
+                "reward_model": NonTensorStack({"ground_truth": "42"}),
+            },
+            batch_size=[1],
+        )
+
+        events: list[str] = []
+
+        class _FakeActorWG:
+            def swap_ema_weights(self, use_ema: bool) -> bool:
+                events.append(f"swap:{use_ema}")
+                return True
+
+        class _FakeCheckpointMgr:
+            def update_weights(self, step: int) -> None:
+                events.append(f"sync:{step}")
+
+            def resume_generation_replicas(self) -> None:
+                events.append("resume")
+
+        class _FakeLLMClient:
+            async def generate(self, **kwargs):
+                events.append("generate")
+                seq_len = len(kwargs["prompt_ids"])
+                topk = kwargs["sampling_params"]["prompt_logprobs"]
+                ids = [[pos * 10 + k for k in range(topk)] for pos in range(seq_len)]
+                lps = [[-0.5 for _ in range(topk)] for _ in range(seq_len)]
+                return SimpleNamespace(extra_fields={"prompt_ids": ids, "prompt_logprobs": lps})
+
+        trainer.actor_rollout_wg = _FakeActorWG()
+        trainer.checkpoint_manager = _FakeCheckpointMgr()
+        trainer.get_llm_client = lambda: _FakeLLMClient()
+
+        batch = KVBatchMeta(keys=["k0"], tags=[{}], partition_id="train", fields=list(tq_data.keys()))
+        with (
+            patch("verl_omni.trainer.omni.trainer_base.tq.kv_batch_get", return_value=tq_data),
+            patch("verl_omni.trainer.omni.trainer_base.tq.kv_batch_put", return_value=batch),
+        ):
+            trainer._compute_self_teacher_log_probs(batch, {})
+
+        assert events == ["swap:True", "sync:3", "resume", "generate", "swap:False"]
+
+        # Verify live weights are still restored even when scoring raises.
+        events.clear()
+
+        class _FailingLLMClient:
+            async def generate(self, **kwargs):
+                events.append("generate_fail")
+                raise RuntimeError("server error")
+
+        trainer.get_llm_client = lambda: _FailingLLMClient()
+        with (
+            patch("verl_omni.trainer.omni.trainer_base.tq.kv_batch_get", return_value=tq_data),
+            pytest.raises(RuntimeError, match="server error"),
+        ):
+            trainer._compute_self_teacher_log_probs(batch, {})
+        assert events == ["swap:True", "sync:3", "resume", "generate_fail", "swap:False"]
+
+    def test_separate_async_supports_policy_and_rejects_ema_teacher_source(self):
+        tok = _DummyTokenizer()
+        trainer = OmniPPOTrainerSeparateAsync.__new__(OmniPPOTrainerSeparateAsync)
+        trainer.tokenizer = tok
+        trainer.processor = None
+        trainer.standalone_server_manager = object()
+        trainer.config = OmegaConf.create({"data": {"mm_processor_kwargs": {}}})
+
+        # EMA must raise clearly on separate_async to avoid overwriting concurrent rollout replicas.
         trainer.distillation_config = OmniDistillationConfig(
             enabled=True,
             nnodes=0,
@@ -789,8 +889,80 @@ class TestSelfDistillationTrainerWiring:
             self_teacher=SelfDistillationConfig(enabled=True, mode="sdpo", teacher_source="ema"),
         )
         batch = KVBatchMeta(keys=["k0"], tags=[{}], partition_id="train")
-        with pytest.raises(NotImplementedError, match="teacher_source='ema'"):
+        with pytest.raises(NotImplementedError, match="omni_separate_async"):
             trainer._compute_self_teacher_log_probs(batch, {})
+
+        # Policy self-distillation works on separate_async via standalone get_llm_client().
+        trainer.distillation_config = OmniDistillationConfig(
+            enabled=True,
+            nnodes=0,
+            n_gpus_per_node=0,
+            distillation_loss=OmniDistillationLossConfig(
+                loss_mode="forward_kl_topk",
+                topk=2,
+                use_policy_gradient=False,
+            ),
+            self_teacher=SelfDistillationConfig(enabled=True, mode="opsd", teacher_source="policy"),
+        )
+        p0 = torch.tensor(tok.encode("<user> q1 <assistant>"), dtype=torch.long)
+        r0 = torch.tensor(tok.encode("ans"), dtype=torch.long)
+        tq_data = TensorDict(
+            {
+                "prompts": torch.nested.as_nested_tensor([p0], layout=torch.jagged),
+                "responses": torch.nested.as_nested_tensor([r0], layout=torch.jagged),
+                "response_mask": torch.nested.as_nested_tensor([torch.ones_like(r0)], layout=torch.jagged),
+                "rm_scores": torch.nested.as_nested_tensor([torch.tensor([0.0])], layout=torch.jagged),
+                "uid": NonTensorStack("u1"),
+                "raw_prompt": NonTensorStack([{"role": "user", "content": "q1"}]),
+                "reward_model": NonTensorStack({"ground_truth": "42"}),
+            },
+            batch_size=[1],
+        )
+
+        class _FakeStandaloneClient:
+            async def generate(self, **kwargs):
+                seq_len = len(kwargs["prompt_ids"])
+                topk = kwargs["sampling_params"]["prompt_logprobs"]
+                ids = [[pos * 10 + k for k in range(topk)] for pos in range(seq_len)]
+                lps = [[-0.25 for _ in range(topk)] for _ in range(seq_len)]
+                return SimpleNamespace(extra_fields={"prompt_ids": ids, "prompt_logprobs": lps})
+
+        trainer.get_llm_client = lambda: _FakeStandaloneClient()
+        metrics: dict[str, float] = {}
+        with (
+            patch("verl_omni.trainer.omni.trainer_base.tq.kv_batch_get", return_value=tq_data),
+            patch("verl_omni.trainer.omni.trainer_base.tq.kv_batch_put", return_value=batch),
+        ):
+            trainer._compute_self_teacher_log_probs(batch, metrics)
+        assert metrics["self_distillation/valid_ratio"] == pytest.approx(1.0)
+        assert metrics["self_distillation/source_reference_ratio"] == pytest.approx(1.0)
+
+    def test_actor_worker_swap_ema_weights_and_update(self):
+        model = torch.nn.Linear(3, 2, bias=False)
+        with torch.no_grad():
+            model.weight.fill_(1.0)
+
+        worker = ActorRolloutRefWorker.__new__(ActorRolloutRefWorker)
+        worker.role = "actor_rollout"
+        worker._ema_teacher_state = EMATeacherState(decay=0.8)
+        worker._ema_teacher_state.initialize(model)
+        worker._ema_live_backups = None
+        worker.actor = SimpleNamespace(engine=SimpleNamespace(module=model))
+
+        # Live weights advance to 2.0, EMA moves to 0.8*1.0 + 0.2*2.0 = 1.2.
+        with torch.no_grad():
+            model.weight.fill_(2.0)
+        worker._ema_teacher_state.update(model)
+
+        # Swap EMA in (idempotent on double-call), then restore live weights.
+        assert worker.swap_ema_weights(use_ema=True) is True
+        torch.testing.assert_close(model.weight, torch.full((2, 3), 1.2))
+        assert worker.swap_ema_weights(use_ema=True) is True
+        torch.testing.assert_close(model.weight, torch.full((2, 3), 1.2))
+
+        assert worker.swap_ema_weights(use_ema=False) is True
+        torch.testing.assert_close(model.weight, torch.full((2, 3), 2.0))
+        assert worker.swap_ema_weights(use_ema=False) is False
 
     def test_update_actor_disables_distillation_only_when_fallback_to_pg_enabled(self):
         def _run_update(fallback_to_pg: bool) -> dict:
