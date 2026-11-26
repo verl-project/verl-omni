@@ -401,14 +401,66 @@ def test_public_api_docstrings_have_zero_private_noise(path: str, source: str, e
     ("path", "source", "expected"),
     [
         ("verl_omni/utils/reward_score/ex.py", "try:\n    run()\nexcept Exception:\n    return 0.0\n", ["VO016"]),
+        ("verl_omni/utils/reward_score/ex.py", "try:\n    run()\nexcept Exception:\n    return -1.0\n", ["VO016"]),
+        (
+            "verl_omni/utils/reward_score/ex.py",
+            'try:\n    run()\nexcept Exception:\n    return {"score": 0.0, "raw": 0.0}\n',
+            ["VO016"],
+        ),
         (
             "verl_omni/reward_loop/reward_manager/ex.py",
-            "try:\n    run()\nexcept ArtifactContractError:\n    return 0.0\n",
+            "try:\n    run()\nexcept Exception:\n    score = 0.0\n",
+            ["VO016"],
+        ),
+        ("verl_omni/utils/reward_score/ex.py", "try:\n    run()\nexcept:\n    return 0.0\n", ["VO016"]),
+        (
+            "verl_omni/reward_loop/reward_manager/ex.py",
+            "try:\n    run()\nexcept ArtifactContractError:\n    logger.warning('bad')\n",
+            ["VO016"],
+        ),
+        (
+            "verl_omni/reward_loop/reward_manager/ex.py",
+            "try:\n    run()\nexcept Exception as exc:\n    if required:\n        raise RuntimeError('bad') from exc\n"
+            "    score = 0.0\n",
             ["VO016"],
         ),
         (
             "verl_omni/utils/reward_score/ex.py",
             "try:\n    run()\nexcept ArtifactContractError:\n    raise\nexcept Exception:\n    return 0.0\n",
+            [],
+        ),
+        (
+            "verl_omni/reward_loop/reward_manager/ex.py",
+            "try:\n    run()\nexcept ArtifactContractError:\n    raise\n"
+            "except Exception as exc:\n    if required:\n        raise RuntimeError('bad') from exc\n"
+            "    score = 0.0\n",
+            [],
+        ),
+        (
+            "verl_omni/utils/reward_score/ex.py",
+            "try:\n    run()\nexcept Exception as exc:\n    if isinstance(exc, ArtifactContractError):\n"
+            '        raise\n    return {"score": 0.0}\n',
+            [],
+        ),
+        (
+            "verl_omni/utils/reward_score/clap.py",
+            "for i, item in enumerate(items):\n    try:\n        out = score(item)\n"
+            "    except Exception as error:\n        results[i] = error\n",
+            [],
+        ),
+        (
+            "verl_omni/reward_loop/native_fsdp.py",
+            "try:\n    terminate()\nexcept BaseException as exc:\n    errors.append(exc)\n",
+            [],
+        ),
+        (
+            "verl_omni/utils/reward_score/pickscore_reward.py",
+            "try:\n    batch_score()\nexcept BaseException as error:\n    future.set_exception(error)\n",
+            [],
+        ),
+        (
+            "verl_omni/reward_loop/reward_model_executor.py",
+            "try:\n    teardown()\nexcept BaseException:\n    logger.exception('cleanup failed')\n",
             [],
         ),
         ("verl_omni/utils/reward_score/ex.py", "try:\n    run()\nexcept ValueError:\n    return 0.0\n", []),

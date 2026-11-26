@@ -148,6 +148,25 @@ def test_decorative_comment_banners_are_rejected(comment: str) -> None:
         "# Keep fp32 here\nlatents = latents.float()\n",
         "# Copyright 2026 Bytedance\n# Encode prompts\n",
         "def compute():\n    # Line 1 why\n    # Line 2 why\n    # Line 3 why\n    pass\n",
+        (
+            "def step():\n    # DanceGRPO SDE step from https://github.com/XueZeyue/DanceGRPO\n"
+            "    # Numerically stable even when sigma is close to 1.\n"
+            "    # score_estimate = -(x_t - x_0 * (1 - sigma)) / sigma^2\n"
+            "    # prev_sample_mean += log_term * dsigma\n    pass\n"
+        ),
+        (
+            "def collect():\n    # DIFF vs upstream: this wrapper exports LoRA params directly\n"
+            "    # without backing up base weights to CPU, keeping peak memory\n"
+            "    # flat while synchronizing multi-GPU training ranks.\n"
+            "    # Remove once upstream supports streaming exports.\n    pass\n"
+        ),
+        (
+            'def _pad_prompt_tokens(micro_batch, device):\n    """Pad BAGEL prompt_token_ids.\n\n'
+            "    Args:\n        micro_batch: Batch containing prompt_token_ids.\n"
+            "        device: Target device for padded tensors.\n\n"
+            '    Returns:\n        (text_token_ids, mask) with shape (B, max_len).\n    """\n    pass\n'
+        ),
+        ('def _resolve_sleep_level():\n    """Use sleep level 1 so CUDA buffers free cleanly."""\n    return 1\n'),
         'def _helper():\n    """Short contract.\n\n    Line 2.\n    """\n    pass\n',
     ],
 )
@@ -188,31 +207,36 @@ def test_checker_preserves_its_own_license_and_source_literals() -> None:
 @pytest.mark.parametrize(
     ("path", "source", "expected"),
     [
-        (COMMENT_PATH, "# Encode prompts\nprompt_embeds = encode_prompts(prompts)\n", [(1, "CM003")]),
+        (COMMENT_PATH, "# Encode prompts\nprompt_embeds = encode_prompt(prompt)\n", [(1, "CM003")]),
+        (COMMENT_PATH, '# model outputs\nmodel_output = output.pop("model_output", {})\n', [(1, "CM003")]),
         (COMMENT_PATH, "# Return log probs\nreturn log_probs\n", [(1, "CM003")]),
-        ("verl_omni/trainer/config/example.py", "# Encode prompts\nprompt_embeds = encode_prompts(prompts)\n", []),
-        (
-            COMMENT_PATH,
-            "def f():\n    # Line one\n    # Line two\n    # Line three\n    # Line four\n    return 1\n",
-            [(2, "CM004")],
-        ),
-        (
-            "verl_omni/trainer/config/example.py",
-            "def f():\n    # Line one\n    # Line two\n    # Line three\n    # Line four\n    return 1\n",
-            [],
-        ),
-        (
-            COMMENT_PATH,
-            'def _private():\n    """Line 1\n    Line 2\n    Line 3\n'
-            '    Line 4\n    Line 5\n    Line 6\n    """\n    pass\n',
-            [(2, "CM005")],
-        ),
+        ("verl_omni/trainer/config/example.py", "# Encode prompts\nprompt_embeds = encode_prompt(prompt)\n", []),
         (
             "tests/utils/test_example.py",
             'def test_case():\n    """Necessity: keep this test."""\n    pass\n',
-            [(2, "CM005")],
+            [(2, "CM004")],
         ),
-        (COMMENT_PATH, "# Keep workaround from PR #942 until upstream fix\nvalue = 1\n", [(1, "CM006")]),
+        (
+            COMMENT_PATH,
+            'def helper():\n    """Motivation: we needed this."""\n    pass\n',
+            [(2, "CM004")],
+        ),
+        (
+            COMMENT_PATH,
+            'def normalize():\n    """Helper function to normalize latents."""\n    pass\n',
+            [(2, "CM004")],
+        ),
+        (
+            COMMENT_PATH,
+            'def parse():\n    """This function is used to parse configs."""\n    pass\n',
+            [(2, "CM004")],
+        ),
+        (
+            COMMENT_PATH,
+            'def _encode_prompts(prompts):\n    """Encode the prompts."""\n    return prompts\n',
+            [(2, "CM004")],
+        ),
+        (COMMENT_PATH, "# Keep workaround from PR #942 until upstream fix\nvalue = 1\n", [(1, "CM005")]),
         (COMMENT_PATH, "# TODO: remove after upstream issue #942 is fixed\nvalue = 1\n", []),
     ],
 )

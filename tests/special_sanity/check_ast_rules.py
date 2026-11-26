@@ -481,21 +481,71 @@ def _caught_exception_names(exc_type: ast.AST, aliases: dict[str, str]) -> list[
     return [qualified] if qualified else []
 
 
+def _is_numeric_literal(node: ast.AST) -> bool:
+    if isinstance(node, ast.Constant) and isinstance(node.value, int | float) and not isinstance(node.value, bool):
+        return True
+    return (
+        isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub | ast.UAdd) and _is_numeric_literal(node.operand)
+    )
+
+
+def _returns_or_sets_fallback_score(body: list[ast.stmt]) -> bool:
+    module = ast.Module(body=body, type_ignores=[])
+    for sub in ast.walk(module):
+        if isinstance(sub, ast.Return) and sub.value is not None:
+            if _is_numeric_literal(sub.value):
+                return True
+            if isinstance(sub.value, ast.Dict) and any(
+                isinstance(key, ast.Constant) and key.value == "score" for key in sub.value.keys
+            ):
+                return True
+        elif isinstance(sub, ast.Assign) and _is_numeric_literal(sub.value):
+            if any(isinstance(target, ast.Name) and target.id == "score" for target in sub.targets):
+                return True
+    return False
+
+
+def _reraises_contract_in_body(handler: ast.ExceptHandler, aliases: dict[str, str]) -> bool:
+    if not handler.name:
+        return False
+    module = ast.Module(body=handler.body, type_ignores=[])
+    for sub in ast.walk(module):
+        if not isinstance(sub, ast.If):
+            continue
+        checks_contract = any(
+            isinstance(call, ast.Call)
+            and _qualified(call.func, aliases) in {"isinstance", "builtins.isinstance"}
+            and len(call.args) >= 2
+            and isinstance(call.args[0], ast.Name)
+            and call.args[0].id == handler.name
+            and any(
+                name.split(".")[-1] == "ArtifactContractError"
+                for name in _caught_exception_names(call.args[1], aliases)
+            )
+            for call in ast.walk(sub.test)
+        )
+        if checks_contract and any(
+            isinstance(node, ast.Raise) for node in ast.walk(ast.Module(body=sub.body, type_ignores=[]))
+        ):
+            return True
+    return False
+
+
 def _artifact_contract_errors(tree: ast.AST, aliases: dict[str, str]) -> Iterator[tuple[int, str, str]]:
     try_nodes = [node for node in ast.walk(tree) if isinstance(node, ast.Try | ast.TryStar)]
     for try_node in try_nodes:
         handled_contract = False
         for handler in try_node.handlers:
-            has_raise = any(
-                isinstance(sub, ast.Raise) for sub in ast.walk(ast.Module(body=handler.body, type_ignores=[]))
-            )
+            module = ast.Module(body=handler.body, type_ignores=[])
+            has_unconditional_raise = any(isinstance(stmt, ast.Raise) for stmt in handler.body)
+            has_any_raise = any(isinstance(sub, ast.Raise) for sub in ast.walk(module))
             if handler.type is None:
-                if not handled_contract and not has_raise:
-                    yield handler.lineno, "VO016", "Propagate ArtifactContractError before bare except fallback."
+                if not handled_contract and not has_any_raise and _returns_or_sets_fallback_score(handler.body):
+                    yield handler.lineno, "VO016", "Propagate ArtifactContractError before bare except score fallback."
                 continue
             caught = _caught_exception_names(handler.type, aliases)
             if any(name.split(".")[-1] == "ArtifactContractError" for name in caught):
-                if has_raise:
+                if has_any_raise:
                     handled_contract = True
                 else:
                     yield handler.lineno, "VO016", "Propagate ArtifactContractError instead of swallowing it."
@@ -505,9 +555,11 @@ def _artifact_contract_errors(tree: ast.AST, aliases: dict[str, str]) -> Iterato
                     for name in caught
                 )
                 and not handled_contract
-                and not has_raise
+                and not has_unconditional_raise
+                and not _reraises_contract_in_body(handler, aliases)
+                and _returns_or_sets_fallback_score(handler.body)
             ):
-                yield handler.lineno, "VO016", "Propagate ArtifactContractError before fallback exception handling."
+                yield handler.lineno, "VO016", "Propagate ArtifactContractError before fallback score handling."
 
 
 def _literal_exports(node: ast.AST) -> set[str] | None:

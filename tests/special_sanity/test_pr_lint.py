@@ -14,12 +14,18 @@
 
 """Verify Ruff rules and the combined checker on real PR diffs."""
 
+import ast
+import re
 import shutil
 import subprocess
 import sys
+from collections import Counter
 from pathlib import Path
 
 import pytest
+from check_ast_rules import findings as ast_findings
+from check_comments import findings as comment_findings
+from check_example_recipes import findings as example_findings
 from check_pr_lint import _ruff_findings
 
 CHECKER = Path(__file__).with_name("check_pr_lint.py").resolve()
@@ -375,7 +381,7 @@ def test_comment_checks_preserve_history_and_reject_new_noise_in_a_pr(tmp_path: 
     head = _commit(tmp_path)
     result = subprocess.run([sys.executable, str(CHECKER), base, head], cwd=tmp_path, capture_output=True, text=True)
     assert result.returncode == 1, result.stdout + result.stderr
-    assert {line.split()[1] for line in result.stdout.splitlines()} == {"CM001", "CM002", "CM006", "ERA001"}
+    assert {line.split()[1] for line in result.stdout.splitlines()} == {"CM001", "CM002", "CM005", "ERA001"}
     assert len(result.stdout.splitlines()) == 5
 
     clean = (
@@ -388,3 +394,221 @@ def test_comment_checks_preserve_history_and_reject_new_noise_in_a_pr(tmp_path: 
     result = subprocess.run([sys.executable, str(CHECKER), base, head], cwd=tmp_path, capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr
     assert "No new code findings." in result.stdout
+
+
+def test_live_repo_baseline_respects_precision_bounds() -> None:
+    root = CHECKER.parents[2]
+    tracked = subprocess.check_output(
+        ["git", "-C", str(root), "ls-files", "verl_omni", "examples"],
+        text=True,
+    ).splitlines()
+    counts: Counter[str] = Counter()
+    for rel in tracked:
+        raw = (root / rel).read_bytes()
+        if rel.startswith("examples/") or rel.endswith((".py", ".sh", ".yaml", ".yml")):
+            counts.update(code for _ln, code, _msg in example_findings(rel, raw))
+        if not rel.endswith(".py"):
+            continue
+        tree = ast.parse(raw)
+        counts.update(code for _ln, code, _msg in ast_findings(rel, tree))
+        counts.update(code for _ln, code, _msg in comment_findings(rel, raw, tree=tree))
+
+    zero_false_positive_rules = {
+        "VO002",
+        "VO004",
+        "VO006",
+        "VO007",
+        "VO008",
+        "VO009",
+        "VO012",
+        "VO013",
+        "VO014",
+        "VO016",
+        "CM004",
+        "CM005",
+        "EX001",
+        "EX002",
+        "EX003",
+        "EX004",
+    }
+    unexpected = {code: counts[code] for code in sorted(zero_false_positive_rules) if counts[code]}
+    assert not unexpected, f"Unexpected live-repo hits: {unexpected}"
+    assert counts["VO001"] <= 2
+    assert counts["VO011"] <= 2
+    assert counts["VO015"] <= 4
+    assert counts["CM001"] <= 7
+    assert counts["CM003"] <= 15
+
+
+RULE_MATRIX: dict[str, tuple[str, bytes, str, bytes]] = {
+    "VO001": (CORE_PATH, ADAPTER_IMPORT.encode(), CORE_PATH, SHARED_IMPORT.encode()),
+    "VO002": (
+        "verl_omni/workers/rollout/ex.py",
+        b"from verl_omni.workers.engine.fsdp import Engine\n",
+        "verl_omni/workers/rollout/ex.py",
+        b"from verl_omni.pipelines.diffusion_rollout_output import DiffusionRolloutOutput\n",
+    ),
+    "VO003": (
+        "verl_omni/workers/ex.py",
+        b"from verl_omni.trainer.diffusion import _helper\n",
+        "verl_omni/workers/ex.py",
+        b"from verl_omni.trainer.diffusion import helper\n",
+    ),
+    "VO004": (
+        "verl_omni/pipelines/ex/rollout.py",
+        REQUEST_SEED.encode(),
+        "verl_omni/pipelines/ex/rollout.py",
+        b"generator.manual_seed(seed)\n",
+    ),
+    "VO005": (
+        QWEN_ROLLOUT,
+        MASK_LENGTH.encode(),
+        QWEN_ROLLOUT,
+        b"txt_seq_lens = txt_seq_lens_from_embeds(prompt_embeds)\n",
+    ),
+    "VO006": (
+        SMOKE_PATH,
+        b"import pytest\npytest.main([__file__])\n",
+        SMOKE_PATH,
+        b"import pytest\nraise SystemExit(pytest.main([__file__]))\n",
+    ),
+    "VO007": (
+        SMOKE_PATH,
+        b"import pytest\npytestmark = pytest.mark.cpu\n",
+        "tests/workers/test_example_on_cpu.py",
+        b"import pytest\npytestmark = pytest.mark.cpu\n",
+    ),
+    "VO008": (CORE_PATH, b'if model == "qwen_image":\n    run()\n', CORE_PATH, b'if mode == "video":\n    run()\n'),
+    "VO009": (
+        "verl_omni/pipelines/ex/training_adapter.py",
+        b"class Adapter(DiffusionModelBase):\n    def __init__(self):\n        pass\n",
+        "verl_omni/pipelines/ex/training_adapter.py",
+        b"class Adapter(DiffusionModelBase):\n    @classmethod\n    def step(cls):\n        pass\n",
+    ),
+    "VO010": (
+        "verl_omni/pipelines/demo_pipe/__init__.py",
+        b"value = 1\n",
+        "verl_omni/pipelines/__init__.py",
+        b"from . import demo_pipe as demo_pipe\n",
+    ),
+    "VO011": (
+        "verl_omni/workers/config/diffusion/ex.py",
+        b"@dataclass\nclass Cfg:\n    pass\n",
+        "verl_omni/workers/config/diffusion/ex.py",
+        b"@dataclass\nclass Cfg(BaseConfig):\n    steps: int = 1\n",
+    ),
+    "VO012": (
+        "verl_omni/reward_loop/reward_manager/ex.py",
+        b"import aiohttp\n",
+        "verl_omni/reward_loop/reward_manager/ex.py",
+        b"from urllib.parse import urlparse\n",
+    ),
+    "VO013": (
+        "tests/workers/test_example_on_cpu.py",
+        b'import pytest, torch\npytest.mark.skipif(not torch.cuda.is_available(), reason="gpu")\n',
+        "tests/workers/test_example_on_cpu.py",
+        b'import pytest\npytest.mark.skipif(enabled_gpu_count() < 1, reason="gpu")\n',
+    ),
+    "VO014": (
+        "examples/demo/train.py",
+        b'path = "/Users/alice/weights"\n',
+        "examples/demo/train.py",
+        b'path = "weights"\n',
+    ),
+    "VO015": (
+        "verl_omni/utils/reward_score/custom.py",
+        b"def compute_score_demo():\n    return 0.0\n",
+        "verl_omni/utils/reward_score/custom.py",
+        b'def compute_score_demo():\n    """Score demo sample."""\n    return 0.0\n',
+    ),
+    "VO016": (
+        "verl_omni/utils/reward_score/custom.py",
+        b"try:\n    run()\nexcept Exception:\n    return 0.0\n",
+        "verl_omni/utils/reward_score/custom.py",
+        b"try:\n    run()\nexcept ArtifactContractError:\n    raise\nexcept Exception:\n    return 0.0\n",
+    ),
+    "CM001": (
+        CORE_PATH,
+        b"# Added handling for input\nvalue = 1\n",
+        CORE_PATH,
+        b"# Keep fp32 for scheduler parity.\nvalue = 1\n",
+    ),
+    "CM002": (CORE_PATH, b"# ======\nvalue = 1\n", CORE_PATH, b"value = 1\n"),
+    "CM003": (
+        CORE_PATH,
+        b"# Encode prompts\nprompt_embeds = encode_prompt(prompt)\n",
+        CORE_PATH,
+        b"prompt_embeds = encode_prompt(prompt)\n",
+    ),
+    "CM004": (
+        CORE_PATH,
+        b'def fn():\n    """Helper function to compute value."""\n    return 1\n',
+        CORE_PATH,
+        b'def fn():\n    """Return computed value."""\n    return 1\n',
+    ),
+    "CM005": (
+        CORE_PATH,
+        b"# Workaround for PR #942\nvalue = 1\n",
+        CORE_PATH,
+        b"# Workaround for issue #942\nvalue = 1\n",
+    ),
+    "EX001": ("examples/demo/run_train.sh", b"if [\n", "examples/demo/run_train.sh", b'exec python train.py "$@"\n'),
+    "EX002": (
+        "examples/demo/run_train.sh",
+        b"python train.py\n",
+        "examples/demo/run_train.sh",
+        b'exec python train.py "$@"\n',
+    ),
+    "EX003": ("examples/demo/sample.png", b"\x89PNG\r\n", "examples/demo/train.py", b"x = 1\n"),
+    "EX004": ("examples/demo/README_en.md", b"# Demo\n", "examples/demo/README.md", b"# Demo\n"),
+}
+
+
+def _declared_rule_codes() -> set[str]:
+    codes: set[str] = set()
+    for name in ("check_pr_lint.py", "check_ast_rules.py", "check_comments.py", "check_example_recipes.py"):
+        text = CHECKER.with_name(name).read_text(encoding="utf-8")
+        codes.update(re.findall(r'"((?:VO|CM|EX)\d{3})"', text))
+    return codes
+
+
+def test_rule_matrix_covers_every_declared_code() -> None:
+    assert set(RULE_MATRIX) == _declared_rule_codes()
+
+
+@pytest.mark.parametrize("code", sorted(RULE_MATRIX))
+def test_every_declared_rule_code_triggers_and_clears_on_minimal_fix(tmp_path: Path, code: str) -> None:
+    bad_path, bad_bytes, good_path, good_bytes = RULE_MATRIX[code]
+    if code == "VO010":
+        _git(tmp_path, "init", "-q")
+        init_file = tmp_path / good_path
+        init_file.parent.mkdir(parents=True, exist_ok=True)
+        init_file.write_text("", encoding="utf-8")
+        base = _commit(tmp_path)
+        adapter = tmp_path / bad_path
+        adapter.parent.mkdir(parents=True, exist_ok=True)
+        adapter.write_bytes(bad_bytes)
+        head = _commit(tmp_path)
+        bad_run = subprocess.run(
+            [sys.executable, str(CHECKER), base, head], cwd=tmp_path, capture_output=True, text=True
+        )
+        assert bad_run.returncode == 1
+        assert "VO010" in bad_run.stdout
+        init_file.write_bytes(good_bytes)
+        head = _commit(tmp_path)
+        good_run = subprocess.run(
+            [sys.executable, str(CHECKER), base, head], cwd=tmp_path, capture_output=True, text=True
+        )
+        assert good_run.returncode == 0, good_run.stdout + good_run.stderr
+        return
+
+    def collect(path: str, source: bytes) -> list[str]:
+        found = [item_code for _ln, item_code, _msg in example_findings(path, source)]
+        if path.endswith(".py"):
+            tree = ast.parse(source)
+            found.extend(item_code for _ln, item_code, _msg in ast_findings(path, tree))
+            found.extend(item_code for _ln, item_code, _msg in comment_findings(path, source, tree=tree))
+        return found
+
+    assert code in collect(bad_path, bad_bytes)
+    assert code not in collect(good_path, good_bytes)

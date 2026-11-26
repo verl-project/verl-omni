@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Detect recognizable comment noise and docstring bloat in Python files."""
+"""Detect recognizable comment noise and docstring boilerplate in Python files."""
 
 import ast
 import inspect
@@ -48,6 +48,12 @@ BANNER = re.compile(
 )
 PR_REF = re.compile(r"\bPR\s*#\d+\b", re.IGNORECASE)
 DOCSTRING_TEMPLATE = re.compile(r"^\s*(?:Necessity|Motivation)\s*:", re.MULTILINE | re.IGNORECASE)
+AI_DOC_FILLER = re.compile(
+    r"^(?:(?:a\s+|an\s+)?(?:helper|utility|convenience|internal|private)\s+"
+    r"(?:function|method|helper|routine|wrapper)\s+(?:to|for|that|which)\b|"
+    r"this\s+(?:function|method|helper|class)\s+(?:is\s+used\s+to|is\s+a\s+helper|simply|just)\b)",
+    re.IGNORECASE,
+)
 ENCODING = re.compile(r"coding[:=]\s*[-\w.]+")
 DIRECTIVE_PREFIXES = (
     "noqa",
@@ -100,11 +106,18 @@ ECHO_STOPWORDS = {
     "to",
     "with",
 }
+DOC_ECHO_STOPWORDS = ECHO_STOPWORDS | {"compute", "computes", "get", "gets", "return", "returns"}
+
+
+def _norm_word(word: str) -> str:
+    if len(word) >= 5 and word.endswith("s") and not word.endswith(("ss", "us", "is")):
+        return word[:-1]
+    return word
 
 
 def _identifier_words(text: str) -> set[str]:
     snake = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", text)
-    return {word for word in re.findall(r"[a-z0-9]+", snake.lower()) if len(word) > 1 or word.isdigit()}
+    return {_norm_word(word) for word in re.findall(r"[a-z0-9]+", snake.lower()) if len(word) > 1 or word.isdigit()}
 
 
 def _is_echo_comment(text: str, code_line: str) -> bool:
@@ -113,7 +126,7 @@ def _is_echo_comment(text: str, code_line: str) -> bool:
     words = re.findall(r"[a-z0-9]+", text.lower())
     if not 2 <= len(words) <= 6:
         return False
-    content = {word for word in words if word not in ECHO_STOPWORDS}
+    content = {_norm_word(word) for word in words if word not in ECHO_STOPWORDS}
     if not content or len(content) > 5:
         return False
     code_words = _identifier_words(code_line)
@@ -136,6 +149,20 @@ def _license_lines(tokens: list[tokenize.TokenInfo]) -> set[int]:
     return lines
 
 
+def _is_trivial_private_docstring(node: ast.FunctionDef | ast.AsyncFunctionDef, doc: str) -> bool:
+    stripped = doc.strip()
+    if "\n" in stripped or any(marker in stripped for marker in (":", "`", "(", "[", "->")):
+        return False
+    words = {_norm_word(word) for word in re.findall(r"[a-z0-9]+", stripped.lower()) if word not in DOC_ECHO_STOPWORDS}
+    if not words or len(words) > 5:
+        return False
+    sig_args = node.args.posonlyargs + node.args.args + node.args.kwonlyargs
+    sig_words = _identifier_words(node.name)
+    for arg in sig_args:
+        sig_words.update(_identifier_words(arg.arg))
+    return words <= sig_words
+
+
 def _docstring_findings(path: str, tree: ast.AST) -> Iterator[tuple[int, str, str]]:
     doc_nodes = [tree] + [
         node for node in ast.walk(tree) if isinstance(node, ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef)
@@ -148,19 +175,21 @@ def _docstring_findings(path: str, tree: ast.AST) -> Iterator[tuple[int, str, st
             continue
         doc = inspect.cleandoc(first.value.value)
         if DOCSTRING_TEMPLATE.search(doc):
-            yield first.lineno, "CM005", "Remove PR-template headers (Necessity/Motivation) from docstrings."
+            yield first.lineno, "CM004", "Remove PR-template headers (Necessity/Motivation) from docstrings."
+        elif AI_DOC_FILLER.match(doc.strip()):
+            yield first.lineno, "CM004", "Use imperative contract docstrings instead of helper/filler phrasing."
         elif (
             path.startswith("verl_omni/")
             and isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
             and node.name.startswith("_")
             and not (node.name.startswith("__") and node.name.endswith("__"))
-            and sum(1 for line in doc.splitlines() if line.strip()) > 5
+            and _is_trivial_private_docstring(node, doc)
         ):
-            yield first.lineno, "CM005", "Keep private helper docstrings concise (<= 5 non-empty lines)."
+            yield first.lineno, "CM004", "Omit trivial private docstring that only repeats the function signature."
 
 
 def findings(path: str, source: bytes, tree: ast.AST | None = None) -> Iterator[tuple[int, str, str]]:
-    """Yield comment-shape and docstring-bloat violations without inferring authorship."""
+    """Yield comment-shape and docstring-boilerplate violations without inferring authorship."""
     if not path.startswith(("verl_omni/", "tests/", "examples/")) or not path.endswith(".py"):
         return
     try:
@@ -187,12 +216,11 @@ def findings(path: str, source: bytes, tree: ast.AST | None = None) -> Iterator[
         lower = text.lower()
         is_directive = lower.startswith(DIRECTIVE_PREFIXES)
         if line_no not in license_lines and not is_directive and PR_REF.search(text):
-            yield line_no, "CM006", "Remove PR references from code comments; cite issues or explain the rationale."
+            yield line_no, "CM005", "Remove PR references from code comments; cite issues or explain the rationale."
         if standalone and line_no not in license_lines and not is_directive:
             standalone_lines[line_no] = text
 
-    is_prod_non_config = path.startswith("verl_omni/") and "/config/" not in path
-    if is_prod_non_config and standalone_lines:
+    if path.startswith("verl_omni/") and "/config/" not in path and standalone_lines:
         raw_lines = source.decode("utf-8", errors="replace").splitlines()
         for line_no, text in standalone_lines.items():
             if (line_no - 1) in standalone_lines or (line_no + 1) in standalone_lines:
@@ -205,27 +233,10 @@ def findings(path: str, source: bytes, tree: ast.AST | None = None) -> Iterator[
                     "Remove redundant comment repeating the next line; only keep non-obvious rationale.",
                 )
 
-    if tree is None:
-        try:
-            tree = ast.parse(source)
-        except (SyntaxError, ValueError):
-            return
-
-    if is_prod_non_config and standalone_lines:
-        fn_ranges = [
-            (node.lineno, node.end_lineno)
-            for node in ast.walk(tree)
-            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and node.end_lineno is not None
-        ]
-        ordered = sorted(standalone_lines)
-        start = prev = ordered[0]
-        for line_no in ordered[1:] + [-1]:
-            if line_no == prev + 1:
-                prev = line_no
-                continue
-            if prev - start + 1 >= 4 and any(fn_start <= start <= fn_end for fn_start, fn_end in fn_ranges):
-                yield start, "CM004", "Compress 4+ line function comment block into concise why-comment or docs/."
-            start = prev = line_no
-
     if path.startswith(("verl_omni/", "tests/")):
+        if tree is None:
+            try:
+                tree = ast.parse(source)
+            except (SyntaxError, ValueError):
+                return
         yield from _docstring_findings(path, tree)

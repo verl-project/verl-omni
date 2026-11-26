@@ -76,8 +76,8 @@ reviewers ask for), not automated gates:
 
 - Preserve docstrings required by the existing gate. Document `__all__` exports,
   shared pipeline contracts, and `compute_score*` scorers with concise
-  docstrings (`VO015`). Elsewhere, keep internal helpers brief (`<= 5` non-empty
-  docstring lines) and never add a `_` prefix just to bypass a gate.
+  docstrings (`VO015`). Omit trivial internal docstrings that only echo a
+  signature (`CM004`), and never add a `_` prefix just to bypass a gate.
 - Use concise Google-style `Args:` / `Returns:` / `Raises:` sections only when
   they convey necessary contracts; omit empty or repetitive template sections.
 - Document tensor shapes and dtypes explicitly, e.g. `(C, H, W)` or `(N, C, H, W)`.
@@ -99,11 +99,11 @@ code. Rename or simplify code that needs a comment merely to restate what it doe
 Long explanations belong in `docs/`; do not move noise into a docstring instead.
 
 `check_comments.py` rejects edit/step/chatty narration (`CM001`), banners
-(`CM002`), echo comments (`CM003`), 4+ line function comment blocks (`CM004`),
-`Necessity:`/`Motivation:` headers and bloated private docstrings (`CM005`), and
-`PR #...` comments (`CM006`); isolated Ruff `ERA001` rejects commented-out code.
-These checks classify syntax, not authorship. Preserve license headers, tooling
-directives, and required config documentation ([config.md](config.md)).
+(`CM002`), echo comments (`CM003`), `Necessity:`/`Motivation:` headers, helper
+filler, or signature-echo private docstrings (`CM004`), and `PR #...` comments
+(`CM005`); isolated Ruff `ERA001` rejects commented-out code. These checks
+classify syntax, not authorship. Preserve license headers, tooling directives,
+and required config documentation ([config.md](config.md)).
 
 ## Imports and lint scope
 

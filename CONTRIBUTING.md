@@ -91,14 +91,13 @@ Keep necessary public API contracts in concise docstrings. Default to no
 implementation comments; retain only non-obvious algorithm/layout/concurrency
 constraints or verified upstream workarounds. Do not add line-by-line narration,
 edit history, numbered steps, decorative banners or commented-out code.
-`CM001`–`CM006` reject recognizable edit/step/chatty narration, decorative
-banners, echo comments, 4+ line function comment blocks, PR-template headers
-or bloated private docstrings, and `PR #...` comments; isolated production Ruff
-`ERA001` rejects commented-out code. License/attribution, tooling directives,
-and required config documentation remain intact. In addition, the PR `Lint`
-workflow runs Ruff plus `check-license`, `validate-structure`,
-`check-device-api-usage`, `check-dataproto-usage`, `check-naming-conventions`,
-and `compileall`.
+`CM001`–`CM005` reject recognizable edit/step/chatty narration, decorative
+banners, echo comments, PR-template/filler/signature-echo docstrings, and
+`PR #...` comments; isolated production Ruff `ERA001` rejects commented-out
+code. License/attribution, tooling directives, and required config documentation
+remain intact. In addition, the PR `Lint` workflow runs Ruff plus
+`check-license`, `validate-structure`, `check-device-api-usage`,
+`check-dataproto-usage`, `check-naming-conventions`, and `compileall`.
 
 Example shell changes are parsed with `bash -n` (`EX001`). `run_*.sh` scripts must
 contain double-quoted caller argument forwarding (`EX002`); comments, printed
