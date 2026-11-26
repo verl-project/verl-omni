@@ -212,24 +212,32 @@ class TestQwenImageDPOPrepareModelInputs:
             )
 
 
-class TestQwenImageDPOForwardAndSamplePreviousStep:
+class TestQwenImageDPOForward:
     def test_no_true_cfg_returns_positive_noise_pred(self):
         pos_pred = torch.randn(2, 1024, 64)
         module = MagicMock(return_value=(pos_pred,))
         model_inputs = {"hidden_states": pos_pred}
+        model_config = _make_model_config(true_cfg_scale=1.0)
 
-        result = QwenImageDPO.forward_and_sample_previous_step(
+        result = QwenImageDPO.forward(
+            module=module,
+            model_config=model_config,
+            model_inputs=model_inputs,
+            negative_model_inputs=None,
+        )
+
+        module.assert_called_once_with(**model_inputs)
+        torch.testing.assert_close(result, pos_pred)
+        delegated = QwenImageDPO.forward_and_sample_previous_step(
             module=module,
             scheduler=MagicMock(),
-            model_config=_make_model_config(true_cfg_scale=1.0),
+            model_config=model_config,
             model_inputs=model_inputs,
             negative_model_inputs=None,
             scheduler_inputs=None,
             step=0,
         )
-
-        module.assert_called_once_with(**model_inputs)
-        torch.testing.assert_close(result, pos_pred)
+        torch.testing.assert_close(delegated, pos_pred)
 
     def test_true_cfg_combines_and_renormalizes_predictions(self):
         pos_pred = torch.ones(2, 1024, 64) * 2.0
@@ -239,14 +247,11 @@ class TestQwenImageDPOForwardAndSamplePreviousStep:
         model_inputs = {"hidden_states": pos_pred}
         negative_model_inputs = {"hidden_states": neg_pred}
 
-        result = QwenImageDPO.forward_and_sample_previous_step(
+        result = QwenImageDPO.forward(
             module=module,
-            scheduler=MagicMock(),
             model_config=_make_model_config(true_cfg_scale=true_cfg_scale),
             model_inputs=model_inputs,
             negative_model_inputs=negative_model_inputs,
-            scheduler_inputs=None,
-            step=0,
         )
 
         assert module.call_count == 2
@@ -258,12 +263,9 @@ class TestQwenImageDPOForwardAndSamplePreviousStep:
 
     def test_true_cfg_requires_negative_inputs_when_guidance_enabled(self):
         with pytest.raises(ValueError, match="True-CFG requires negative prompt inputs"):
-            QwenImageDPO.forward_and_sample_previous_step(
+            QwenImageDPO.forward(
                 module=MagicMock(),
-                scheduler=MagicMock(),
                 model_config=_make_model_config(true_cfg_scale=4.0),
                 model_inputs={"hidden_states": torch.randn(2, 1024, 64)},
                 negative_model_inputs=None,
-                scheduler_inputs=None,
-                step=0,
             )
