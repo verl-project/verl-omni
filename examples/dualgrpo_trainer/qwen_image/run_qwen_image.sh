@@ -19,7 +19,7 @@ data_test_path=$WORKSPACE/data/r2i_bench/qwen_image/test.parquet
 model_name=$WORKSPACE/models/Qwen/Qwen-Image
 DIT_REWARD_MODEL_NAME=$WORKSPACE/models/CodeGoat24/UnifiedReward-2.0-qwen3vl-2b
 
-NUM_GPUS_ACTOR_ROLLOUT_REWARD=${NUM_GPUS:-2}
+NUM_GPUS_ACTOR_ROLLOUT_REWARD=${NUM_GPUS:-4}
 NUM_NODES=${NUM_NODES:-1}
 ACTOR_SP=$NUM_GPUS_ACTOR_ROLLOUT_REWARD
 ROLLOUT_TP=2
@@ -83,6 +83,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.rollout.m=4 \
     actor_rollout_ref.rollout.n=4 \
     actor_rollout_ref.rollout.agent.num_workers=$((NUM_GPUS_ACTOR_ROLLOUT_REWARD / ROLLOUT_TP)) \
+    +actor_rollout_ref.rollout.agent.agent_loop_manager_class=verl_omni.agent_loop.composite_agent_loop.CompositeAgentLoopManager \
     actor_rollout_ref.rollout.agent.default_agent_loop=composite_single_turn_agent \
     actor_rollout_ref.rollout.load_format=safetensors \
     actor_rollout_ref.rollout.layered_summon=True \
@@ -117,11 +118,12 @@ python3 -m verl_omni.trainer.main_diffusion \
     '+reward.reward_functions.ar.name=compute_score_pickscore' \
     '+reward.reward_functions.ar.weight=0.0' \
     '+reward.reward_functions.ar.device=cuda:0' \
-    "+reward.reward_functions.dit.path=pkg://verl_omni.utils.reward_score.unified_reward" \
+    "+reward.reward_functions.dit.path=pkg://verl_omni.utils.reward_score.vlm_as_a_judge" \
     '+reward.reward_functions.dit.name=compute_score_unified_reward' \
     '+reward.reward_functions.dit.weight=1.0' \
-    "+trainer.train_ar=True" \
-    trainer.logger='["console", "tensorboard", "wandb"]' \
+    '+reward.reward_functions.dit.on_malformed=zero' \
+    trainer.train_ar=True \
+    trainer.logger='["console", "tensorboard", "swanlab"]' \
     trainer.project_name=dual_grpo \
     trainer.experiment_name=qwen_image_dualgrpo \
     trainer.validation_data_dir=validation_data \

@@ -92,6 +92,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.rollout.m=4 \
     actor_rollout_ref.rollout.n=4 \
     actor_rollout_ref.rollout.agent.num_workers=$((NUM_GPUS_ACTOR_ROLLOUT / ROLLOUT_TP)) \
+    +actor_rollout_ref.rollout.agent.agent_loop_manager_class=verl_omni.agent_loop.composite_agent_loop.CompositeAgentLoopManager \
     actor_rollout_ref.rollout.agent.default_agent_loop=composite_single_turn_agent \
     actor_rollout_ref.rollout.load_format=safetensors \
     actor_rollout_ref.rollout.layered_summon=True \
@@ -126,11 +127,12 @@ python3 -m verl_omni.trainer.main_diffusion \
     '+reward.reward_functions.ar.name=compute_score_pickscore' \
     '+reward.reward_functions.ar.weight=0.0' \
     '+reward.reward_functions.ar.device=cuda:4' \
-    "+reward.reward_functions.dit.path=pkg://verl_omni.utils.reward_score.unified_reward" \
+    "+reward.reward_functions.dit.path=pkg://verl_omni.utils.reward_score.vlm_as_a_judge" \
     '+reward.reward_functions.dit.name=compute_score_unified_reward' \
     '+reward.reward_functions.dit.weight=1.0' \
-    "+trainer.train_ar=True" \
-    trainer.logger='["console", "tensorboard", "wandb"]' \
+    '+reward.reward_functions.dit.on_malformed=zero' \
+    trainer.train_ar=True \
+    trainer.logger='["console", "tensorboard", "swanlab"]' \
     trainer.project_name=dual_grpo \
     trainer.experiment_name=qwen_image_dualgrpo_async_reward_${CURRENT_TIMESTAMP} \
     trainer.validation_data_dir=validation_data_async_reward_${CURRENT_TIMESTAMP} \
