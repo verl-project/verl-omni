@@ -6,7 +6,7 @@ set -x
 set -o pipefail
 
 export CPATH=/usr/include${CPATH:+:$CPATH}
-export VERL_USE_EXTERNAL_MODULES=verl_omni
+export VERL_USE_EXTERNAL_MODULES=${VERL_USE_EXTERNAL_MODULES:+${VERL_USE_EXTERNAL_MODULES},}verl_omni
 
 # DEVICE is auto-detected by querying npu-smi; override only for special cases.
 DEVICE=${DEVICE:-$(command -v npu-smi >/dev/null 2>&1 && npu-smi info >/dev/null 2>&1 && echo npu || echo gpu)}

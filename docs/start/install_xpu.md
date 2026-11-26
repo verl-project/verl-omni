@@ -1,6 +1,6 @@
 # Installation (Intel GPU)
 
-Last updated: 11/09/2026
+Last updated: 11/26/2026
 
 For NVIDIA GPU, see the {doc}`GPU installation guide <install>`. For Ascend NPU, see the {doc}`NPU installation guide <install_npu>`. For AMD GPU, see the {doc}`ROCm installation guide <install_rocm>`. For Cambricon MLU, see the {doc}`MLU installation guide <install_mlu>`.
 
@@ -132,6 +132,24 @@ SDPA on Intel GPU can use FlashAttention-2 kernels (for bf16 and fp16 inputs).
 FlashAttention-2 from the Kernel Hub (`kernels-community/flash-attn2`) also has an
 Intel GPU build.
 
+### Omni trainer: external modules
+
+verl imports the modules in `VERL_USE_EXTERNAL_MODULES` before it loads the
+`verl.plugins` entry points. With the default `verl_omni`, the omni trainer's
+workers detect the platform before verl-hardware-plugin registers Intel GPU and
+fail with `Distributed package doesn't have NCCL built in`. List the plugin
+module first:
+
+```bash
+export VERL_USE_EXTERNAL_MODULES=verl_hardware_plugin,verl_omni
+```
+
+The omni scripts keep a value that is already set and add `verl_omni` after it.
+The same value works for `python -m verl_omni.trainer.main_omni`. If the trainer
+attaches to a Ray cluster started earlier with `ray start`, also export it in the
+shell that starts the cluster, because the workers take their environment from
+it.
+
 ## Current status
 
 Validated with the tiny-random GPU smoke tests on Arc Pro B60 and B70: FlowGRPO
@@ -170,10 +188,16 @@ which registers under both `nccl` and `xccl`, so recipes keep the default
 importing the CUDA engine, so on Intel GPU run them with `CKPT_BACKEND=xccl`,
 which selects the XCCL engine and pre-checks it instead.
 
+Omni-modality training (`main_omni`) on Arc Pro B70, with
+`VERL_USE_EXTERNAL_MODULES=verl_hardware_plugin,verl_omni` (see
+[Omni trainer: external modules](#omni-trainer-external-modules)): the
+Qwen3-Omni thinker GSPO smoke tests (colocated and separate async), the
+MiniCPM-o thinker GSPO smoke test and the Qwen3-Omni offline DPO smoke test.
+
 Not yet supported on Intel GPU:
 
 * The VeOmni engine backend.
-* Omni-modality training (`main_omni`, for example Qwen3-Omni and Qwen3-TTS).
+* Qwen3-TTS GRPO with the default eager attention.
 
 ## Build Your Own Docker Image
 

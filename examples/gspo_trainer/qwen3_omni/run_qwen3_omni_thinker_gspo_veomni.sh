@@ -4,7 +4,7 @@
 # examples/gspo_trainer/README.md. All Ray nodes need the same environment.
 set -euo pipefail
 
-export VERL_USE_EXTERNAL_MODULES=verl_omni
+export VERL_USE_EXTERNAL_MODULES=${VERL_USE_EXTERNAL_MODULES:+${VERL_USE_EXTERNAL_MODULES},}verl_omni
 export RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO=0
 
 MODEL_PATH=${MODEL_PATH:-Qwen/Qwen3-Omni-30B-A3B-Instruct}
@@ -101,5 +101,5 @@ python3 -m verl_omni.trainer.main_omni \
     trainer.logger='["console","tensorboard"]' \
     trainer.project_name=gspo \
     trainer.experiment_name=qwen3_omni_thinker_veomni_mmk12 \
-    +ray_kwargs.ray_init.runtime_env.env_vars.VERL_USE_EXTERNAL_MODULES=verl_omni \
+    '+ray_kwargs.ray_init.runtime_env.env_vars.VERL_USE_EXTERNAL_MODULES=${oc.env:VERL_USE_EXTERNAL_MODULES,verl_omni}' \
     "$@"

@@ -88,7 +88,8 @@ def _compose_launcher(tmp_path, extra=(), script=SCRIPT):
         return compose(config_name="omni_trainer", overrides=argv[2:])
 
 
-def test_launcher_composes_actor_and_reference_as_veomni(tmp_path, actor_module):
+def test_launcher_composes_actor_and_reference_as_veomni(tmp_path, actor_module, monkeypatch):
+    monkeypatch.delenv("VERL_USE_EXTERNAL_MODULES", raising=False)
     config = _compose_launcher(tmp_path)
     actor = omega_conf_to_dataclass(config.actor_rollout_ref.actor)
     assert isinstance(actor, actor_module.OmniVeOmniActorConfig)
