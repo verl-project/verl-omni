@@ -24,11 +24,7 @@ except ImportError as e:
 
 @hydra.main(config_path="../verl_omni/trainer/config", config_name="diffusion_trainer", version_base=None)
 def main(config):
-    """Main entry point for printing the resolved diffusion trainer config.
-
-    Args:
-        config_dict: Hydra configuration dictionary containing training parameters.
-    """
+    """Main entry point for printing the resolved diffusion trainer config."""
     import verl_omni
 
     config_name = HydraConfig.get().job.config_name

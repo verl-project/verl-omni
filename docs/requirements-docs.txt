@@ -1,3 +1,2 @@
 myst_parser
-sphinx-markdown-tables
 sphinx-rtd-theme

@@ -103,7 +103,6 @@ ocr = [
 # Note: While the formatter will attempt to format lines such that they remain within the line-length,
 # it isn't a hard upper bound, and formatted lines may exceed the line-length.
 line-length = 120
-exclude = ["scripts/legacy_model_merger.py"]
 
 [tool.ruff.lint]
 isort = {known-first-party = ["verl_omni"]}
