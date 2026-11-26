@@ -50,10 +50,10 @@ def _media_kwargs() -> dict:
 
 
 class _FakeOutput:
-    def __init__(self, prompt_ids: list[int], mm_processor_output=None):
+    def __init__(self, prompt_ids: list[int], mm_processor_output=None, media=None):
         self.prompt_ids = prompt_ids
         self.response_ids = [7, 8]
-        self.multi_modal_data = {"videos": ["frames"]}
+        self.multi_modal_data = {"videos": ["frames"]} if media is None else media
         self.mm_processor_output = mm_processor_output
 
 
@@ -74,6 +74,27 @@ def test_postprocess_strips_dead_media_fields_when_enabled(monkeypatch):
     assert "raw_prompt" not in captured["kwargs"]
     assert captured["mm_processor_output"] is None  # dropped before AgentLoopOutput.as_dict()
     assert captured["kwargs"]["uid"] == "uid-1"  # live kwargs still flow to the TQ put
+    # Upstream feeds _compute_score from these same kwargs, so the async-reward
+    # shipment is covered by this one strip too.
+
+
+def test_postprocess_clears_mm_processor_output_on_list_outputs(monkeypatch):
+    captured: dict = {}
+
+    async def _parent(self, output, validate, **kwargs):
+        captured["outputs"] = output
+
+    monkeypatch.setattr(_AgentLoopWorkerTQBase, "_agent_loop_postprocess", _parent, raising=False)
+    monkeypatch.setenv("VERL_OMNI_TQ_STRIP_RAW_PROMPT", "1")
+    worker = _make_worker()
+    outputs = [
+        _FakeOutput([1, 2, 3], mm_processor_output=[{"pixel_values": np.zeros(4, dtype=np.float32)}]),
+        _FakeOutput([1, 2, 3], mm_processor_output=[{"pixel_values": np.zeros(6, dtype=np.float32)}]),
+    ]
+
+    asyncio.run(worker._agent_loop_postprocess(outputs, validate=False, **_media_kwargs()))
+
+    assert all(element.mm_processor_output is None for element in captured["outputs"])
 
 
 def test_postprocess_keeps_kwargs_intact_when_disabled(monkeypatch):
@@ -93,22 +114,6 @@ def test_postprocess_keeps_kwargs_intact_when_disabled(monkeypatch):
     assert captured["kwargs"] == kwargs  # no field dropped or rewritten when the gate is off
 
 
-def test_compute_score_drops_raw_prompt_from_reward_shipment_when_enabled(monkeypatch):
-    captured: dict = {}
-
-    async def _parent(self, outputs, kwargs):
-        captured["kwargs"] = kwargs
-
-    monkeypatch.setattr(_AgentLoopWorkerTQBase, "_compute_score", _parent, raising=False)
-    monkeypatch.setenv("VERL_OMNI_TQ_STRIP_RAW_PROMPT", "1")
-    worker = _make_worker()
-
-    asyncio.run(worker._compute_score([object()], kwargs=_media_kwargs()))
-
-    assert "raw_prompt" not in captured["kwargs"]
-    assert captured["kwargs"]["data_source"] == "nextqa"
-
-
 def test_mmi_cache_reuses_processor_output_across_sessions(monkeypatch):
     calls = []
 
@@ -119,16 +124,35 @@ def test_mmi_cache_reuses_processor_output_across_sessions(monkeypatch):
     monkeypatch.setattr(_AgentLoopWorkerTQBase, "_compute_multi_modal_inputs", _parent, raising=False)
     monkeypatch.setenv("VERL_OMNI_TQ_CACHE_MMI", "1")
     worker = _make_worker()
-    output = _FakeOutput([1, 2, 3])
-
-    first = worker._compute_multi_modal_inputs(output, torch.tensor([1, 2, 3, 4]))
-    second = worker._compute_multi_modal_inputs(_FakeOutput([1, 2, 3]), torch.tensor([1, 2, 3, 9]))
+    # Sessions of one prompt share the same media payload object, as the agent
+    # loop passes the prompt kwargs by reference.
+    shared_media = {"videos": ["frames"]}
+    first = worker._compute_multi_modal_inputs(_FakeOutput([1, 2, 3], media=shared_media), torch.tensor([1, 2, 3, 4]))
+    second = worker._compute_multi_modal_inputs(_FakeOutput([1, 2, 3], media=shared_media), torch.tensor([1, 2, 3, 9]))
 
     assert calls == [(1, 2, 3)]  # one processor run shared across session rows
     # Downstream pops (mm_token_type_ids) must not leak into the cached value.
     first.pop("mm_token_type_ids")
     assert "mm_token_type_ids" in second
     assert first["pixel_values_videos"] is not None
+
+
+def test_mmi_cache_does_not_share_across_different_media_with_same_prompt(monkeypatch):
+    """Same prompt tokens but distinct media payloads must not hit one cache entry."""
+    calls = []
+
+    def _parent(self, output, input_ids):
+        calls.append(tuple(output.prompt_ids))
+        return {"pixel_values_videos": np.ones(8, dtype=np.float32)}
+
+    monkeypatch.setattr(_AgentLoopWorkerTQBase, "_compute_multi_modal_inputs", _parent, raising=False)
+    monkeypatch.setenv("VERL_OMNI_TQ_CACHE_MMI", "1")
+    worker = _make_worker()
+
+    worker._compute_multi_modal_inputs(_FakeOutput([1, 2, 3], media={"videos": ["frames-a"]}), torch.tensor([1]))
+    worker._compute_multi_modal_inputs(_FakeOutput([1, 2, 3], media={"videos": ["frames-b"]}), torch.tensor([1]))
+
+    assert len(calls) == 2  # distinct media: both prompts run the processor
 
 
 def test_mmi_cache_disabled_by_default(monkeypatch):

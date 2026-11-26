@@ -20,8 +20,7 @@ every TransferQueue row — once per ``rollout.n`` session — and ships them ag
 to the async reward worker, so megabytes of waveform per sample ride each of the
 ~3 storage round-trips per step even though nothing downstream of the rollout
 reads them (rule-based scoring runs from live kwargs before the TQ put, and the
-training legs only need the token/multimodal-input fields). This is the omni-AR
-analogue of the payload-transfer waste described in verl-omni issue #714.
+training legs only need the token/multimodal-input fields).
 
 Select with::
 
@@ -34,6 +33,9 @@ Environment gates (all default off, i.e. bit-identical upstream behavior):
   reward-model path (``_compute_reward_colocate`` re-reads ``raw_prompt`` from
   the queue) and with any registered reward manager that consumes
   ``raw_prompt``; the ``naive`` manager does not.
+- ``VERL_OMNI_TQ_CACHE_MMI=1`` (cap: ``VERL_OMNI_TQ_CACHE_MMI_ENTRIES``,
+  default 32) — share one HF processor run across the ``rollout.n`` sessions
+  of a prompt, keyed by prompt ids plus the media payload identity.
 """
 
 from __future__ import annotations
@@ -59,11 +61,11 @@ def _strip_enabled() -> bool:
     return os.environ.get("VERL_OMNI_TQ_STRIP_RAW_PROMPT", "0") == "1"
 
 
-# Fields whose only consumers run before the TransferQueue put (reward scoring
-# from live kwargs; the rollout engine consumes mm_processor_output at generate
-# time via llm_server), so storing them per session row only inflates every
-# later worker fetch. ``multi_modal_data`` is already popped upstream.
-_DEAD_ROW_FIELDS = ("raw_prompt", "mm_processor_output")
+# The one kwarg whose only consumers run before the TransferQueue put (reward
+# scoring from live kwargs; the rollout engine consumes mm_processor_output at
+# generate time via llm_server), so storing it per session row only inflates
+# every later worker fetch. ``multi_modal_data`` is already popped upstream.
+_DEAD_ROW_FIELDS = ("raw_prompt",)
 
 
 def _mmi_cache_enabled() -> bool:
@@ -77,13 +79,13 @@ def _estimate_payload_bytes(value) -> int:
     """Rough serialized-size estimate for one kwarg value (for A/B logging)."""
     if isinstance(value, dict):
         return sum(_estimate_payload_bytes(v) for v in value.values())
-    if isinstance(value, (list, tuple)):
+    if isinstance(value, list | tuple):
         return sum(_estimate_payload_bytes(v) for v in value)
     if isinstance(value, np.ndarray):
         return int(value.nbytes)
     if isinstance(value, torch.Tensor):
         return int(value.numel() * value.element_size())
-    if isinstance(value, (str, bytes)):
+    if isinstance(value, str | bytes):
         return len(value)
     return 0
 
@@ -93,7 +95,8 @@ class _AVLeanAgentLoopWorkerTQ(_AgentLoopWorkerTQBase):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        # prompt-token-ids -> processor output; sessions of one prompt share it.
+        # (prompt ids, media identity) -> processor output; sessions of one
+        # prompt share it.
         self._mmi_cache: OrderedDict[tuple, dict] = OrderedDict()
 
     def _compute_multi_modal_inputs(self, output, input_ids) -> dict:
@@ -103,51 +106,57 @@ class _AVLeanAgentLoopWorkerTQ(_AgentLoopWorkerTQBase):
         session with identical media; only the trailing response tokens differ,
         and the processor output carries media-derived tensors only (text-side
         ``input_ids``/``attention_mask`` are popped upstream), so keying on the
-        prompt ids makes sessions of one prompt share one processor run. The
-        call is synchronous on the worker's event loop, so without the cache
-        one prompt costs ``n`` serialized processor runs.
+        prompt ids plus the media object identity makes sessions of one prompt
+        share one processor run. The call is synchronous on the worker's event
+        loop, so without the cache one prompt costs ``n`` serialized processor
+        runs.
         """
         if not _mmi_cache_enabled() or output.multi_modal_data is None or not len(output.prompt_ids):
             return super()._compute_multi_modal_inputs(output, input_ids)
-        key = (tuple(output.prompt_ids),)
+        # The media object completes the key: prompt tokens alone collide
+        # across prompts that embed different (same-sized) media. Pinning the
+        # media object inside the cached value keeps its id() unique for as
+        # long as the entry lives, so a recycled id can never hit a stale one.
+        key = (tuple(output.prompt_ids), id(output.multi_modal_data))
         cached = self._mmi_cache.get(key)
         if cached is not None:
             self._mmi_cache.move_to_end(key)
             # Downstream pops keys (e.g. mm_token_type_ids) from the dict, so
             # every consumer gets its own shallow copy; tensors stay shared.
-            return dict(cached)
+            return dict(cached["mmi"])
         computed = super()._compute_multi_modal_inputs(output, input_ids)
-        self._mmi_cache[key] = dict(computed)
+        self._mmi_cache[key] = {"mmi": dict(computed), "media": output.multi_modal_data}
         while len(self._mmi_cache) > _MMI_CACHE_MAX_ENTRIES:
             self._mmi_cache.popitem(last=False)
         return computed
 
-    async def _compute_score(self, outputs, kwargs: dict) -> None:
-        # The async-reward shipment duplicates every kwarg n times per sample;
-        # drop the media-carrying one when enabled (rule rewards never read it).
-        if _strip_enabled() and "raw_prompt" in kwargs:
-            saved = _estimate_payload_bytes(kwargs["raw_prompt"]) * len(outputs)
-            kwargs = {k: v for k, v in kwargs.items() if k != "raw_prompt"}
-            logger.info("[AVLean] reward shipment: dropped raw_prompt, ~%.1f MB saved", saved / 1e6)
-        await super()._compute_score(outputs, kwargs=kwargs)
-
     async def _agent_loop_postprocess(self, output, validate, **kwargs) -> None:
+        # Single interception point: upstream passes these kwargs both to the
+        # async-reward shipment (_compute_score) and into every TQ session row.
         if _strip_enabled():
-            dead = {name: kwargs[name] for name in _DEAD_ROW_FIELDS if name in kwargs}
-            if getattr(output, "mm_processor_output", None) is not None:
-                dead["mm_processor_output(as_dict)"] = output.mm_processor_output
-                # rides into the row via AgentLoopOutput.as_dict(); consumed
-                # only by the rollout engine at generate time.
-                output.mm_processor_output = None
-            if dead:
-                saved = sum(_estimate_payload_bytes(v) for v in dead.values())
+            outputs = output if isinstance(output, list) else [output]
+            # ``raw_prompt`` rides the kwargs into every row; each element's
+            # ``mm_processor_output`` rides its as_dict() — consumed only by
+            # the rollout engine at generate time.
+            dropped_labels = []
+            saved = 0
+            if "raw_prompt" in kwargs:
+                dropped_labels.append("raw_prompt")
+                saved += _estimate_payload_bytes(kwargs["raw_prompt"]) * len(outputs)
+            for element in outputs:
+                mm_output = getattr(element, "mm_processor_output", None)
+                if mm_output is not None:
+                    dropped_labels.append("mm_processor_output(as_dict)")
+                    saved += _estimate_payload_bytes(mm_output)
+                    element.mm_processor_output = None
+            if dropped_labels:
                 logger.info(
-                    "[AVLean] TQ rows for %s: dropping %s, ~%.1f MB not stored per session row",
+                    "[AVLean] TQ rows for %s: dropping %s, ~%.1f MB not stored",
                     kwargs.get("uid", "?"),
-                    sorted(dead),
+                    sorted(set(dropped_labels)),
                     saved / 1e6,
                 )
-                kwargs = {k: v for k, v in kwargs.items() if k in set(kwargs) - set(_DEAD_ROW_FIELDS)}
+                kwargs = {k: v for k, v in kwargs.items() if k not in _DEAD_ROW_FIELDS}
         await super()._agent_loop_postprocess(output, validate, **kwargs)
 
 
