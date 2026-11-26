@@ -15,8 +15,8 @@
 
 CPU rule rewards computed from timestamps only — no VAD model, no judge: the
 pause axis penalizes speaking inside the tagged pause window; the turn axis
-scores the signed delay from the user's turn end (early speech is penalized
-by its earliness on the deadline; late speech keeps the full-credit band);
+scores the absolute delay from the user's turn end on the 1 s full-credit
+band and the 3 s deadline, whether the first speak is early or late;
 the interruption axis penalizes the delay from the interrupting speech onset
 to the return to silence. Speech on the onset unit counts as interrupted. A
 policy that never spoke, or first speaks after that unit, takes the floor.
@@ -125,11 +125,7 @@ def compute_score_duplex_turn_taking(
         turn_end = event.user_turn_end_s
         first_speak = speaking_times[0] if speaking_times else None
         latency = turn_take_latency(first_speak, turn_end)
-        # Earliness uses the deadline with no credit band, so waiting longer scores higher.
-        if latency < 0:
-            score = _linear_penalty(-latency, 0.0, turn_deadline)
-        else:
-            score = _linear_penalty(latency, turn_band, turn_deadline)
+        score = _linear_penalty(abs(latency), turn_band, turn_deadline)
         metrics["duplex_turn_latency_s"] = latency
         metrics["duplex_turn_took_floor"] = float(first_speak is not None)
     elif event.axis == "interruption":

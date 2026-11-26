@@ -54,7 +54,7 @@ dataset (mined episodes) ──▶ omni_duplex_agent ──▶ rollout server (D
 | Trajectory assembly | `.../duplex/trajectory.py` | Scopes in order; validity mask (`sampled`→1, `forced`/`reemit`→0); unit decision timeline |
 | Unit-window replay | `.../duplex/replay.py` | `<unit>` + 10 bare audio placeholders + the unit's action tokens + `</unit>` per record (one record per 1 s unit); engine silent units replay as 1 s of digital silence; mel via the processor's `process_audio_streaming` |
 | Event mining | `.../duplex/mining.py` | pause / turn / interruption from word-level timestamps |
-| Rule rewards | `verl_omni/utils/reward_score/duplex_turn_taking.py` | Per-axis, timestamp-only, tuned bands: the turn axis measures the signed delay from the user's turn end (early speech is penalized by how early it is, on the 3 s deadline with no credit band; late speech keeps the 1 s full-credit band). The interruption axis measures from the interrupting speech onset (full credit within 1 s, −1 past 3 s). Speaking on the onset unit counts as interrupted; a policy that never spoke, or first speaks strictly after the onset, takes −1. Emits the trip-wire columns, `duplex_pacing_corrupted`, and the per-episode `duplex_episode_failed` flag |
+| Rule rewards | `verl_omni/utils/reward_score/duplex_turn_taking.py` | Per-axis, timestamp-only, tuned bands: the turn axis measures the absolute delay from the user's turn end on the 1 s full-credit band and the 3 s deadline, early or late. The interruption axis measures from the interrupting speech onset (full credit within 1 s, −1 past 3 s). Speaking on the onset unit counts as interrupted; a policy that never spoke, or first speaks strictly after the onset, takes −1. Emits the trip-wire columns, `duplex_pacing_corrupted`, and the per-episode `duplex_episode_failed` flag |
 | Trip-wire definitions | `.../duplex/telemetry.py` | The shared threshold set (`TRIP_WIRE_DEFAULTS`), the reward bands, and the timing definitions every consumer calls — `speak_ratio`, `silence_share`, `duplicate_ngram_share`, the onset-anchored `interruption_yield_latency`, and the pacing predicate `pacing_corrupted` (an engine-injected silent unit inside the scored window); the scorer, the FDB metrics and the agent loop share them |
 | Calibration gate | `.../duplex/calibration.py` + `scripts/duplex_calibration_audit.py` | Two-sided mid-band entry gate before any gradient: each axis's normalized mean must land in [0.30, 0.80] of the axis band |
 | FDB-v1 rule metrics | `.../duplex/fdb_metrics.py` | static-protocol timing metrics over dumped replays |
@@ -234,9 +234,9 @@ Budget about 6 min/step, so the recipe default is 100 steps, about
 The same run's calibration (pause 0.367, turn 0.098, interruption 0.000
 on 146 balanced val episodes) used a turn score that saturated at −1 for
 any speech before the turn end, and an interruption score that saturated
-when the first speak fell on the onset unit. Both now keep a gradient:
-early floor-takes are penalized by their earliness, and speech on the
-onset unit is an interruption whose yield latency is scored. The M0
+when the first speak fell on the onset unit. Early floor-takes are scored
+on the 1 s full-credit band and the 3 s deadline. Speech on the onset
+unit is an interruption whose yield latency is scored. The M0
 tolerances stay max |Δ| ≤ 0.05 nats and mean ≤ 0.01. The gate scripts
 build an engine with `enable_prefix_caching=false` and score through the
 same media normalization as training.

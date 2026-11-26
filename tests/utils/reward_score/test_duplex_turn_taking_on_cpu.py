@@ -87,14 +87,19 @@ def test_turn_axis_full_credit_band_and_deadline():
 
 
 def test_turn_axis_grades_speaking_before_the_turn_ends():
-    # Onset at 1.0 s while the user's utterance ends at 2.0 s: one second early
-    # on the 3 s deadline, not a saturated miss.
+    # One second early uses the same 1 s band as a one-second-late take.
     early = compute_score_duplex_turn_taking(
         "dailytalk", "", "", extra_info={"duplex_replay": _replay("turn", [False, True, False, True])}
     )
-    assert early["score"] == pytest.approx(-1.0 / 3.0)
+    assert early["score"] == 0.0
     assert early["duplex_turn_latency_s"] == pytest.approx(-1.0)
     assert early["duplex_turn_took_floor"] == 1.0
+    # Two seconds early is halfway from the band to the 3 s deadline.
+    earlier = compute_score_duplex_turn_taking(
+        "dailytalk", "", "", extra_info={"duplex_replay": _replay("turn", [True, False, False])}
+    )
+    assert earlier["score"] == pytest.approx(-0.5)
+    assert earlier["duplex_turn_latency_s"] == pytest.approx(-2.0)
 
 
 def test_interruption_axis_anchors_the_yield_latency_to_the_speech_onset():

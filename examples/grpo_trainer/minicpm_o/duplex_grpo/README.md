@@ -109,6 +109,6 @@ group.
 
 CPU-tested at contract level (`tests/utils/dataset/duplex/`, the strategy and
 agent-loop suites). A 4×H800 run completed steps (about 6 min/step; the
-recipe default is 100 steps). Early floor-takes and speech on the
-interruption's onset unit are scored with a gradient. M0 tolerances stay
+recipe default is 100 steps). An early floor-take uses the turn axis's
+1 s band, and speech on the interruption's onset unit is scored as a yield. M0 tolerances stay
 0.05 / 0.01 nats. This is PoC scope: capability verification, not SOTA.
