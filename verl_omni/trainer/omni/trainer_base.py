@@ -412,11 +412,7 @@ class OmniPPOTrainer(PPOTrainer):
         if not isinstance(raw_prompt, list):
             return {}
         inline_mm = _extract_inline_multimodal_data(raw_prompt)
-        has_media_blocks = _raw_prompt_has_media_blocks(raw_prompt)
-        needs_loading = has_media_blocks and (
-            not inline_mm or any(isinstance(val, str) for bucket in inline_mm.values() for val in bucket)
-        )
-        if needs_loading and getattr(self, "processor", None) is not None:
+        if _raw_prompt_has_media_blocks(raw_prompt) and getattr(self, "processor", None) is not None:
             try:
                 from verl.utils.dataset.rl_dataset import get_dataset_class
 

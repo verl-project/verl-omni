@@ -1254,3 +1254,25 @@ class TestCodeRabbitReviewFixes:
         )
         out = worker.update_actor(TensorDict({}, batch_size=[]))
         assert out is not None
+
+    def test_resolve_multimodal_runs_dataset_processor_for_inline_pil_images(self):
+        import asyncio
+
+        trainer = OmniPPOTrainerSync.__new__(OmniPPOTrainerSync)
+        trainer.config = OmegaConf.create({"data": {}})
+        trainer.processor = SimpleNamespace(image_processor=SimpleNamespace(patch_size=14))
+        raw_img = object()
+        resized_img = object()
+        called: list[bool] = []
+
+        class _FakeDataset:
+            @classmethod
+            async def process_multi_modal_info(cls, messages, image_patch_size, config):
+                called.append(True)
+                return [resized_img], None, None
+
+        raw_prompt = [{"role": "user", "content": [{"type": "image", "image": raw_img}, {"type": "text", "text": "q"}]}]
+        with patch("verl.utils.dataset.rl_dataset.get_dataset_class", return_value=_FakeDataset):
+            result = asyncio.run(trainer._resolve_self_teacher_multimodal_data(raw_prompt, None))
+        assert called == [True]
+        assert result == {"images": [resized_img]}
