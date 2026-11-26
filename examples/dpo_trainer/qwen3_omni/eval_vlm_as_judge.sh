@@ -1,8 +1,12 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
 CKPT_ROOT=${CKPT_ROOT:-checkpoints/omni-preference-dpo/qwen3-omni-offline-dpo-lora}
 DATA_DIR=${DATA_DIR:-data/omni-preference/parquet_dpo}
 MODEL_PATH=${MODEL_PATH:-Qwen/Qwen3-Omni-30B-A3B-Instruct}
 OUT_DIR=${OUT_DIR:-outputs/qwen3_omni_judge_eval}
 MAX_SAMPLES=60
+PYTHON=${PYTHON:-python3}
 
 CUDA_DEVICES=${CUDA_DEVICES:-0}
 STEPS=(50 100 150 200)
@@ -12,7 +16,7 @@ mkdir -p "${OUT_DIR}"
 
 HF_ENABLE_PARALLEL_LOADING=true \
 HF_PARALLEL_LOADING_WORKERS=8 \
-CUDA_VISIBLE_DEVICES="${CUDA_DEVICES}" .venv/bin/python examples/dpo_trainer/qwen3_omni/vlm_as_judge.py \
+CUDA_VISIBLE_DEVICES="${CUDA_DEVICES}" "${PYTHON}" examples/dpo_trainer/qwen3_omni/vlm_as_judge.py \
   --data-dir "${DATA_DIR}" \
   --modalities "${MODALITIES[@]}" \
   --output-jsonl "${OUT_DIR}/reference.jsonl" \
@@ -24,7 +28,7 @@ CUDA_VISIBLE_DEVICES="${CUDA_DEVICES}" .venv/bin/python examples/dpo_trainer/qwe
 for step in "${STEPS[@]}"; do
   HF_ENABLE_PARALLEL_LOADING=true \
   HF_PARALLEL_LOADING_WORKERS=8 \
-  CUDA_VISIBLE_DEVICES="${CUDA_DEVICES}" .venv/bin/python examples/dpo_trainer/qwen3_omni/vlm_as_judge.py \
+  CUDA_VISIBLE_DEVICES="${CUDA_DEVICES}" "${PYTHON}" examples/dpo_trainer/qwen3_omni/vlm_as_judge.py \
     --data-dir "${DATA_DIR}" \
     --modalities "${MODALITIES[@]}" \
     --output-jsonl "${OUT_DIR}/global_step_${step}.trained.jsonl" \
@@ -38,7 +42,7 @@ done
 for step in "${STEPS[@]}"; do
   HF_ENABLE_PARALLEL_LOADING=true \
   HF_PARALLEL_LOADING_WORKERS=8 \
-  .venv/bin/python examples/dpo_trainer/qwen3_omni/vlm_as_judge.py \
+  "${PYTHON}" examples/dpo_trainer/qwen3_omni/vlm_as_judge.py \
     --data-dir "${DATA_DIR}" \
     --modalities "${MODALITIES[@]}" \
     --output-jsonl "${OUT_DIR}/global_step_${step}.jsonl" \

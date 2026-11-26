@@ -2,11 +2,11 @@
 set -x
 
 # Set WORKSPACE to any writable directory; defaults to $HOME.
+# Pair parquet defaults to $WORKSPACE/data/offline_dpo/. Override with OFFLINE_DPO_*_PATH.
 WORKSPACE=${WORKSPACE:-$HOME}
-SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
-offline_train_path=${OFFLINE_DPO_TRAIN_PATH:-$SCRIPT_DIR/../../datasets/offline_dpo/train.parquet}
-offline_test_path=${OFFLINE_DPO_TEST_PATH:-$SCRIPT_DIR/../../datasets/offline_dpo/test.parquet}
+offline_train_path=${OFFLINE_DPO_TRAIN_PATH:-$WORKSPACE/data/offline_dpo/train.parquet}
+offline_test_path=${OFFLINE_DPO_TEST_PATH:-$WORKSPACE/data/offline_dpo/test.parquet}
 
 model_name=stabilityai/stable-diffusion-3.5-medium
 custom_chat_template='{% for message in messages %}{% if message['\''role'\''] == '\''user'\'' %}{{ message['\''content'\''] }}{% endif %}{% endfor %}'
@@ -18,8 +18,8 @@ python3 -m verl_omni.trainer.main_diffusion \
     algorithm.trainer_type=direct_preference \
     algorithm.sample_source=offline \
     algorithm.paired_preference=true \
-    data.train_files=$offline_train_path \
-    data.val_files=$offline_test_path \
+    data.train_files="$offline_train_path" \
+    data.val_files="$offline_test_path" \
     data.train_batch_size=16 \
     data.max_prompt_length=256 \
     data.custom_cls.path=pkg://verl_omni.utils.dataset.offline_dpo_dataset \

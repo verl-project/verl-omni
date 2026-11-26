@@ -340,7 +340,7 @@ For version requirements and detailed setup instructions, see
 | GSPO (full, VeOmni 0.1.12; text/image) | `examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_veomni.sh` | 2×8 GPU (recipe default) |
 | GSPO (image) | `examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_mmk12_v1.sh` | 4×H100/H200 80GB |
 | GSPO (AVQA, NPU) | `examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_avqa_v1.sh` | 16×NPU (Atlas 800T A3) |
-| Offline DPO (LoRA) | `examples/dpo_trainer/qwen3_omni/qwen3_omni/run_qwen3_omni_omni_preference_lora.sh` | 4×H800 |
+| Offline DPO (LoRA) | `examples/dpo_trainer/qwen3_omni/run_qwen3_omni_omni_preference_lora.sh` | 4×H800 |
 | [GSPO OPD (image, NPU)](../algo/omni_opd.md) | `examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_mmk12_v1_opd_npu.sh` | 32×NPU (2 x Atlas 800T A3) |
 | GSPO (AudioMCQ, Megatron, separate-async) | `examples/gspo_trainer/qwen3_omni/run_qwen3_omni_megatron_audiomcq_separate_async.sh` | 32×A100 80GB (4 train + 4 rollout GPUs/node). Experimental; not reproducible from the current public pins. See the [AudioMCQ recipe](../examples/qwen3_omni/gspo_trainer_qwen3_omni.md). |
 | GSPO (AVQA image+audio, Megatron, separate-async) | `examples/gspo_trainer/qwen3_omni/run_qwen3_omni_megatron_avqa_separate_async.sh` | 8 GPUs by default (4 actor + 4 rollout); optional 6-GPU layout. Validated on H200 with development dependencies; experimental, public-pin reproducibility remains unverified. See the [AVQA recipe](../examples/qwen3_omni/gspo_trainer_qwen3_omni.md). |
