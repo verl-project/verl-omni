@@ -860,8 +860,12 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
                 self._ema_teacher_state = EMATeacherState(decay=distillation_config.self_teacher.ema_decay)
                 actor_module = self._get_actor_ema_module()
-                if actor_module is not None:
-                    self._ema_teacher_state.initialize(actor_module)
+                if actor_module is None:
+                    raise RuntimeError(
+                        "distillation.self_teacher.teacher_source='ema' requires the actor engine to expose "
+                        "a torch.nn.Module (or sequence of nn.Module chunks), but none was found."
+                    )
+                self._ema_teacher_state.initialize(actor_module)
             self.set_dispatch_collect(mesh_name="actor", **self.actor.get_dispatch_collect())
 
         # 2.5 build frozen teachers for diffusion on-policy distillation
@@ -1027,6 +1031,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         module = getattr(engine, "module", None)
         if isinstance(module, torch.nn.Module):
             return module
+        if isinstance(module, list | tuple) and module and all(isinstance(chunk, torch.nn.Module) for chunk in module):
+            return torch.nn.ModuleList(module)
         return None
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)

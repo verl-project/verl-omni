@@ -426,7 +426,7 @@ class OmniPPOTrainer(PPOTrainer):
                     images, videos = await dataset_cls.process_vision_info(
                         raw_prompt, image_patch_size=image_patch_size, config=self.config.data
                     )
-                    audios = None
+                    audios = inline_mm.get("audios") or None
                 loaded: dict[str, Any] = {}
                 if images is not None:
                     loaded["images"] = images
@@ -454,6 +454,7 @@ class OmniPPOTrainer(PPOTrainer):
                 "Use teacher_source='policy' for omni_separate_async or switch to omni_sync for EMA."
             )
 
+        fb_key = self_cfg.environment_feedback_key
         desired_fields = [
             "prompts",
             "responses",
@@ -469,6 +470,8 @@ class OmniPPOTrainer(PPOTrainer):
             "mm_processor_kwargs",
             "multi_modal_inputs",
         ]
+        if fb_key and fb_key not in desired_fields:
+            desired_fields.append(fb_key)
         if batch.fields is not None:
             available = set(batch.fields)
             select_fields = [f for f in desired_fields if f in available]
@@ -504,8 +507,9 @@ class OmniPPOTrainer(PPOTrainer):
         extra_infos = _extract_non_tensor_list(data, "extra_info", batch_size)
         extra_fields_list = _extract_non_tensor_list(data, "extra_fields", batch_size)
         top_reward_extra_infos = _extract_non_tensor_list(data, "reward_extra_info", batch_size)
+        flat_feedbacks = _extract_non_tensor_list(data, fb_key, batch_size) if fb_key else None
         reward_extra_infos: list[Any] | None = None
-        if top_reward_extra_infos is not None or extra_fields_list is not None:
+        if top_reward_extra_infos is not None or extra_fields_list is not None or flat_feedbacks is not None:
             merged_reward_extra: list[Any] = []
             for i in range(batch_size):
                 merged_entry: dict[str, Any] = {}
@@ -515,6 +519,8 @@ class OmniPPOTrainer(PPOTrainer):
                         merged_entry.update(nested_rei)
                 if top_reward_extra_infos is not None and isinstance(top_reward_extra_infos[i], dict):
                     merged_entry.update(top_reward_extra_infos[i])
+                if flat_feedbacks is not None and flat_feedbacks[i] is not None and fb_key not in merged_entry:
+                    merged_entry[fb_key] = flat_feedbacks[i]
                 merged_reward_extra.append(merged_entry if merged_entry else None)
             if any(entry is not None for entry in merged_reward_extra):
                 reward_extra_infos = merged_reward_extra
@@ -606,23 +612,16 @@ class OmniPPOTrainer(PPOTrainer):
                     sample_raw_prompt = turn_messages
                 elif raw_prompts is not None:
                     if isinstance(turn_index, int) and turn_index > 0:
-                        # Subsequent multi-turn step without turn-specific messages: keep the actual
-                        # decoded student prefix for text-only turns, or fall back when media is present.
-                        existing_mm = multi_modal_datas[i] if multi_modal_datas is not None else None
-                        if _raw_prompt_has_media_blocks(raw_prompts[i]) or (
-                            isinstance(existing_mm, dict)
-                            and any(existing_mm.get(k) for k in ("images", "videos", "audios"))
-                        ):
-                            neutral_ids, neutral_lps = build_neutral_teacher_outputs(
-                                student_prompt_len=student_prompt_len,
-                                response_len=response_len,
-                                topk=width,
-                                pad_token_id=pad_token_id,
-                            )
-                            return neutral_ids, neutral_lps, None, False
-                        sample_raw_prompt = self.tokenizer.decode(student_prompt_ids, skip_special_tokens=False)
-                    else:
-                        sample_raw_prompt = raw_prompts[i]
+                        # Later multi-turn step without structured turn messages: route to fallback
+                        # rather than appending privileged context after an assistant header.
+                        neutral_ids, neutral_lps = build_neutral_teacher_outputs(
+                            student_prompt_len=student_prompt_len,
+                            response_len=response_len,
+                            topk=width,
+                            pad_token_id=pad_token_id,
+                        )
+                        return neutral_ids, neutral_lps, None, False
+                    sample_raw_prompt = raw_prompts[i]
                 else:
                     sample_raw_prompt = self.tokenizer.decode(student_prompt_ids, skip_special_tokens=False)
 
@@ -682,19 +681,21 @@ class OmniPPOTrainer(PPOTrainer):
 
             return await asyncio.gather(*[_score_one(i) for i in range(batch_size)])
 
-        ema_swapped = False
         if self_cfg.teacher_source == "ema" and has_any_teacher_query:
-            self.actor_rollout_wg.swap_ema_weights(use_ema=True)
-            ema_swapped = True
             try:
+                swap_res = self.actor_rollout_wg.swap_ema_weights(use_ema=True)
+                swap_flags = list(swap_res) if isinstance(swap_res, list | tuple) else [swap_res]
+                if not swap_flags or not all(bool(flag) for flag in swap_flags):
+                    raise RuntimeError(
+                        f"EMA self-teacher swap failed on one or more actor ranks (swap_ema_weights={swap_res!r})."
+                    )
                 self.checkpoint_manager.update_weights(getattr(self, "global_steps", 0))
                 resume_fn = getattr(self.checkpoint_manager, "resume_generation_replicas", None)
                 if callable(resume_fn):
                     resume_fn()
                 results = _run_coro_sync(_score_all())
             finally:
-                if ema_swapped:
-                    self.actor_rollout_wg.swap_ema_weights(use_ema=False)
+                self.actor_rollout_wg.swap_ema_weights(use_ema=False)
         else:
             results = _run_coro_sync(_score_all())
 
