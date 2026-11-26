@@ -434,6 +434,7 @@ def test_live_repo_baseline_respects_precision_bounds() -> None:
         "EX002",
         "EX003",
         "EX004",
+        "EX007",
     }
     unexpected = {code: counts[code] for code in sorted(zero_false_positive_rules) if counts[code]}
     assert not unexpected, f"Unexpected live-repo hits: {unexpected}"
@@ -442,8 +443,10 @@ def test_live_repo_baseline_respects_precision_bounds() -> None:
     assert counts["VO015"] <= 4
     assert counts["CM001"] <= 7
     assert counts["CM003"] <= 15
-    assert counts["EX005"] <= 81
+    assert counts["EX005"] <= 84
     assert counts["EX006"] <= 5
+    assert counts["EX008"] <= 1
+    assert counts["EX007"] == 0
 
 
 RULE_MATRIX: dict[str, tuple[str, bytes, str, bytes]] = {
@@ -583,6 +586,18 @@ RULE_MATRIX: dict[str, tuple[str, bytes, str, bytes]] = {
         b"x = 1\n",
         "examples/demo/data_process/prepare.py",
         b"x = 1\n",
+    ),
+    "EX007": (
+        "examples/demo/run_train.sh",
+        b'#!/usr/bin/env bash\nset -euo pipefail\npython train.py trainer.total_epochs=1 trainer.total_epochs=2 "$@"\n',
+        "examples/demo/run_train.sh",
+        b'#!/usr/bin/env bash\nset -euo pipefail\npython train.py trainer.total_epochs=1 "$@"\n',
+    ),
+    "EX008": (
+        "examples/demo/run_train.sh",
+        b'#!/usr/bin/env bash\nset -euo pipefail\npkill -9 ray\npython train.py "$@"\n',
+        "examples/demo/run_train.sh",
+        b'#!/usr/bin/env bash\nset -euo pipefail\npython train.py "$@"\n',
     ),
 }
 

@@ -28,8 +28,7 @@ thing, the guide wins and the file links to it.
 
 | Rule                              | Applies to                                                    | Key point |
 | --------------------------------- | ------------------------------------------------------------- | --------- |
-| [code-style](rules/code-style.md) | everywhere                                                    | automated scope versus conventions; runtime boundaries, contextual reuse and performance |
-| [examples](rules/examples.md)     | `examples/**`                                                 | canonical layout, `run_*.sh` template, thin wrappers, README symlinks, `EX001`–`EX006` |
+| [code-style](rules/code-style.md) | everywhere                                                    | automated scope versus conventions; runtime boundaries, shell recipes, contextual reuse and performance |
 | [trainer](rules/trainer.md)     | `verl_omni/trainer/**`, `verl_omni/workers/**`, `verl_omni/agent_loop/**` | the shared core is model- and algorithm-agnostic; extend via registries, not trainer forks |
 | [pipelines](rules/pipelines.md)   | `verl_omni/pipelines/**`                                      | dispatch is by registry key and registration is an import side effect; training adapters are never instantiated |
 | [reward](rules/reward.md)         | `verl_omni/utils/reward_score/**`, `verl_omni/reward_loop/**` | scorers are selected by config, not by the `data_source` dispatcher; managers call by keyword |

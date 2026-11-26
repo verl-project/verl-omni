@@ -84,6 +84,8 @@ def test_python_path_literals(source: str, expected: list[str]) -> None:
         ('cat <<-"EOF"\n\tpython trainer.py "$@"\n\tEOF\npython trainer.py', ["EX002"]),
         ('cat <<EOF\n/home/alice/weights\nEOF\npython trainer.py "$@"', []),
         ('read -r -a ARGS <<< "$INPUT"\npython trainer.py "$@"', []),
+        ('python trainer.py \\ \n    "$@"', ["EX001"]),
+        ('python trainer.py "$@" trainer.total_epochs=1', ["EX002"]),
         ('if true; then\npython trainer.py "$@"', ["EX001"]),
     ],
 )
@@ -157,10 +159,11 @@ def test_shell_syntax_inspection_never_executes_commands(tmp_path: Path, monkeyp
         ("examples/model/run_train.sh", 'set -euo pipefail\npython trainer.py "$@"\n', ["EX005"]),
         ("examples/model/run_train.sh", '#!/bin/bash\nset -euo pipefail\npython trainer.py "$@"\n', ["EX005"]),
         ("examples/model/run_train.sh", '#!/usr/bin/env bash\nset -x\npython trainer.py "$@"\n', ["EX005"]),
+        ("examples/model/run_train.sh", '#!/usr/bin/env bash\nset -e\npython trainer.py "$@"\n', ["EX005"]),
+        ("examples/model/run_train.sh", '#!/usr/bin/env bash\nset -ex\npython trainer.py "$@"\n', ["EX005"]),
         ("examples/model/run_train.sh", '#!/usr/bin/env bash\nset -euo pipefail\npython trainer.py "$@"\n', []),
         ("examples/model/run_train.sh", '#!/usr/bin/env bash\nset -xeuo pipefail\npython trainer.py "$@"\n', []),
-        ("examples/model/run_train.sh", '#!/usr/bin/env bash\nset -ex\npython trainer.py "$@"\n', []),
-        ("examples/model/run_train.sh", '#!/usr/bin/env bash\nset -o errexit\npython trainer.py "$@"\n', []),
+        ("examples/model/run_train.sh", '#!/usr/bin/env bash\nset -e\nset -o pipefail\npython trainer.py "$@"\n', []),
         ("examples/model/setup.sh", "echo ok\n", []),
     ],
 )
@@ -185,4 +188,74 @@ def test_run_shell_recipes_require_bash_shebang_and_errexit(path: str, source: s
     ],
 )
 def test_example_layout_and_portable_python_hygiene(path: str, source: str, expected: list[str]) -> None:
+    assert [code for _line, code, _message in findings(path, source.encode())] == expected
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        (
+            'python3 -m verl_omni.trainer.main_omni \\\n    data.train_batch_size=8\n    trainer.total_epochs=1 "$@"\n',
+            ["EX007"],
+        ),
+        (
+            "python3 -m verl_omni.trainer.main_omni \\\n    trainer.total_epochs=1 \\\n"
+            '    trainer.total_epochs=2 "$@"\n',
+            ["EX007"],
+        ),
+        (
+            'if [ "$MODE" = "a" ]; then\n    python3 t.py trainer.total_epochs=1 "$@"\n'
+            'else\n    python3 t.py trainer.total_epochs=2 "$@"\nfi\n',
+            [],
+        ),
+        ('EXTRA_ARGS=(\n    +reward.x=1\n    +reward.y=2\n)\npython3 t.py "${EXTRA_ARGS[@]}" "$@"\n', []),
+        ('case "$arg" in\n    data.max_prompt_length=*)\n        shift\n        ;;\nesac\npython3 t.py "$@"\n', []),
+    ],
+)
+def test_shell_hydra_launcher_integrity(source: str, expected: list[str]) -> None:
+    assert [
+        code for _line, code, _message in findings("examples/model/run_train.sh", (VALID_HEADER + source).encode())
+    ] == expected
+
+
+@pytest.mark.parametrize(
+    ("path", "source", "expected"),
+    [
+        ("examples/model/run_train.sh", f'{VALID_HEADER}WANDB_API_KEY="secret123456"\npython3 t.py "$@"\n', ["EX008"]),
+        ("examples/model/run_train.sh", f'{VALID_HEADER}export HF_TOKEN=hf_abcdefghij\npython3 t.py "$@"\n', ["EX008"]),
+        ("examples/model/run_train.sh", f'{VALID_HEADER}CUDA_VISIBLE_DEVICES=0,1\npython3 t.py "$@"\n', ["EX008"]),
+        (
+            "examples/model/run_train.sh",
+            f'{VALID_HEADER}export ASCEND_RT_VISIBLE_DEVICES="0,1"\npython3 t.py "$@"\n',
+            ["EX008"],
+        ),
+        (
+            "examples/model/run_train.sh",
+            f'{VALID_HEADER}ENDPOINT="http://10.12.34.56:8000"\npython3 t.py "$@"\n',
+            ["EX008"],
+        ),
+        ("examples/model/run_train.sh", f'{VALID_HEADER}cd /workspace/verl-omni\npython3 t.py "$@"\n', ["EX008"]),
+        ("examples/model/run_train.sh", f'{VALID_HEADER}pkill -9 ray\npython3 t.py "$@"\n', ["EX008"]),
+        ("examples/model/run_train.sh", f'{VALID_HEADER}ray stop --force\npython3 t.py "$@"\n', ["EX008"]),
+        ("examples/model/run_train.sh", f'{VALID_HEADER}pip install vllm\npython3 t.py "$@"\n', ["EX008"]),
+        ("examples/model/run_train.sh", f'{VALID_HEADER}uv pip install -e .\npython3 t.py "$@"\n', ["EX008"]),
+        (
+            "examples/model/run_train.sh",
+            f'{VALID_HEADER}CUDA_VISIBLE_DEVICES=${{CUDA_VISIBLE_DEVICES:-0,1}}\npython3 t.py "$@"\n',
+            [],
+        ),
+        ("examples/model/run_train.sh", f'{VALID_HEADER}WANDB_API_KEY="${{WANDB_API_KEY:-}}"\npython3 t.py "$@"\n', []),
+        (
+            "examples/model/run_train.sh",
+            f'{VALID_HEADER}SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd)"\npython3 t.py "$@"\n',
+            [],
+        ),
+        (
+            "examples/model/run_train.sh",
+            f'{VALID_HEADER}# pkill -9 ray\ncat <<EOF\nray stop --force\nEOF\npython3 t.py "$@"\n',
+            [],
+        ),
+    ],
+)
+def test_shell_safety_and_portability_guards(path: str, source: str, expected: list[str]) -> None:
     assert [code for _line, code, _message in findings(path, source.encode())] == expected

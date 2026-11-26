@@ -99,13 +99,15 @@ remain intact. In addition, the PR `Lint` workflow runs Ruff plus
 `check-license`, `validate-structure`, `check-device-api-usage`,
 `check-dataproto-usage`, `check-naming-conventions`, and `compileall`.
 
-Example shell changes are parsed with `bash -n` (`EX001`). `run_*.sh` scripts must
-use `#!/usr/bin/env bash` with `set -e` (`EX005`) and double-quoted caller
-argument forwarding (`EX002`; comments, printed text and heredocs do not count).
-This checks syntax and recipe shape, not whether an actual trainer receives
-every argument. Example media belongs in PR evidence (`EX003`), example pages
-use `README.md` instead of `README_*.md` (`EX004`), and `examples/` rejects
-`dataprocess/`, duplicate nested folders, and `.venv/bin/python` (`EX006`).
+Example shell changes are parsed with `bash -n` and checked for trailing spaces
+after `\` continuations (`EX001`). `run_*.sh` scripts must use
+`#!/usr/bin/env bash` with `set -e` and `set -o pipefail` (`EX005`) and forward
+caller overrides with trailing double-quoted `"$@"` (`EX002`; comments, printed
+text and heredocs do not count). Shell recipes also catch orphaned or duplicate
+Hydra overrides (`EX007`), hardcoded tokens/device lists/private IPs/host-wide
+`pkill` or `pip install` (`EX008`), and disallow committed example media (`EX003`),
+`README_*.md` (`EX004`), or `dataprocess/`, duplicate folders, and
+`.venv/bin/python` (`EX006`).
 
 The checker reads staged Git objects or the PR snapshots without importing
 candidate Python or executing recipes. Historical findings are compared by

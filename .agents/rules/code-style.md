@@ -226,8 +226,32 @@ Two caveats, so this is not applied blindly:
 
 ## Example shell recipes
 
-See [examples.md](examples.md) for canonical layout, shell recipe templates, and
-`EX001`–`EX006` / `VO014` checks.
+These are review conventions, not new lint gates. Keep recipes in the existing
+algorithm/model directory and match the neighboring `run_*.sh` entrypoints.
+
+- Group environment defaults near the top; document required paths and what each
+  path points to. Do not embed local model, dataset, venv, or credential paths.
+  Use the existing entrypoint and plain Hydra overrides for declared fields;
+  reserve `+` for new keys (see [config.md](config.md)).
+- Preserve caller overrides with `"$@"` last and quote each path-bearing argument,
+  e.g. `"actor_rollout_ref.model.path=$MODEL_PATH"`. Keep output directories
+  attributable to the recipe and overridable rather than sharing a fixed run path.
+- For new scripts use a Bash shebang and `set -euo pipefail`, with explicit handling
+  of intentionally recoverable commands. Debug tracing is optional; do not expose
+  credentials. Preserve the trainer's failure status, including through `tee`.
+- Validate positive parallel degrees and GPU divisibility before shell arithmetic.
+  Derived replica/worker counts must agree with runtime topology; an engine flag
+  alone does not allocate GPUs. State prerequisite patches or unsupported modes.
+- Reuse the base recipe when a variant only selects a few overrides. Resolve that
+  recipe relative to the script; document whether data/reward paths require a
+  repo-root working directory. Do not build a new launcher framework.
+- Let the scheduler or parent launcher own log redirection when it already does;
+  avoid nesting process-substitution `tee` redirection in that case. Cleanup must
+  target only the launched job, not every Ray or GPU process on the host.
+- Check `bash -n` and capture argv with a stub trainer to verify defaults, quoting,
+  caller precedence and exit propagation without launching GPUs. That does not
+  establish runtime correctness; use the [testing guide](../../docs/contributing/testing_guide.md)
+  for the required acceptance layer.
 
 ## Performance Patterns
 

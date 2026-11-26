@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Check example recipes and local paths without executing candidate code."""
+"""Check example recipes, bash safety, and local paths without executing code."""
 
 import ast
 import os
@@ -27,7 +27,26 @@ LOCAL_PATH = re.compile(r"^/(?:Users|home|nfs|mnt|root)(?:/|$)")
 SHELL_LOCAL_PATH = re.compile(r"(?:^|=|:-|:=)[\"']?(/(?:Users|home|nfs|mnt|root)(?:/|$))")
 YAML_LOCAL_PATH = re.compile(r"(?:^|:\s+|-\s+|[,\[{]\s*)[\"']?(/(?:Users|home|nfs|mnt|root)(?:/|$))")
 SET_ERREXIT = re.compile(r"^\s*set\s+(?:-[a-zA-Z]*e[a-zA-Z]*\b|-o\s+errexit\b)", re.MULTILINE)
+SET_PIPEFAIL = re.compile(r"^\s*set\s+(?:-[a-zA-Z]*o\s+pipefail|-o\s+pipefail)\b", re.MULTILINE)
 HARDCODED_VENV_PYTHON = re.compile(r"(?:^|/)\.venv/bin/python")
+TRAILING_BACKSLASH_SPACE = re.compile(r"\\[ \t]+$")
+HYDRA_DOTTED_KEY = re.compile(r"^\+?([a-zA-Z_][a-zA-Z0-9_]*(?:\.[a-zA-Z_][a-zA-Z0-9_]*)+)=")
+SECRET_ENV_NAMES = {
+    "WANDB_API_KEY",
+    "HF_TOKEN",
+    "HUGGING_FACE_HUB_TOKEN",
+    "OPENAI_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "DASHSCOPE_API_KEY",
+}
+DEVICE_ENV_NAMES = {"CUDA_VISIBLE_DEVICES", "ASCEND_RT_VISIBLE_DEVICES"}
+SECRET_VALUE = re.compile(r"^[A-Za-z0-9_\-\.]{8,}$")
+DEVICE_LIST_VALUE = re.compile(r"^[0-9]+(?:,[0-9]+)*$")
+PRIVATE_IPV4 = re.compile(
+    r"(?<![0-9.])(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|"
+    r"172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})(?![0-9.])"
+)
+COMMAND_PREFIXES = {"if", "then", "elif", "else", "do", "!", "env", "exec", "command", "builtin"}
 
 
 def _python_paths(source: bytes) -> Iterator[int]:
@@ -93,6 +112,33 @@ def _shell_tokens(source: str) -> list[tuple[int, str]]:
     return tokens
 
 
+def _iter_commands(tokens: list[tuple[int, str]]) -> Iterator[tuple[list[tuple[int, str]], str]]:
+    command: list[tuple[int, str]] = []
+    in_array = False
+    for line, token in [*tokens, (0, "\n")]:
+        if token == "(" and len(command) == 1 and re.fullmatch(r"[a-zA-Z_][a-zA-Z_0-9]*\+?-?=", command[0][1]):
+            in_array = True
+            command = []
+            continue
+        if in_array:
+            if token == ")":
+                in_array = False
+            continue
+        if token in {"\n", ";", ";;", "&&", "||", "|", "&", "(", ")"}:
+            if command:
+                yield command, token
+                command = []
+        else:
+            command.append((line, token))
+
+
+def _strip_command_prefixes(command: list[tuple[int, str]]) -> list[tuple[int, str]]:
+    work = list(command)
+    while work and (work[0][1] in COMMAND_PREFIXES or re.match(r"^[a-zA-Z_][a-zA-Z_0-9]*=", work[0][1])):
+        work.pop(0)
+    return work
+
+
 def _forwards_args(tokens: list[tuple[int, str]]) -> bool:
     command = []
     argument_arrays = set()
@@ -110,10 +156,7 @@ def _forwards_args(tokens: list[tuple[int, str]]) -> bool:
             continue
         if token in {"\n", ";", ";;", "&&", "||", "|", "&", "(", ")"}:
             if command:
-                while command and (
-                    command[0] in {"if", "then", "elif", "else", "do", "!", "env", "exec", "command", "builtin"}
-                    or re.match(r"^[a-zA-Z_][a-zA-Z_0-9]*=", command[0])
-                ):
+                while command and (command[0] in COMMAND_PREFIXES or re.match(r"^[a-zA-Z_][a-zA-Z_0-9]*=", command[0])):
                     command.pop(0)
             if command:
                 executable = command[0]
@@ -125,6 +168,113 @@ def _forwards_args(tokens: list[tuple[int, str]]) -> bool:
         else:
             command.append(token)
     return False
+
+
+def _shell_findings(source_path: PurePosixPath, source: bytes, text: str) -> Iterator[tuple[int, str, str]]:
+    for line_no, raw_line in enumerate(text.splitlines(), 1):
+        if raw_line.lstrip().startswith("#"):
+            continue
+        if TRAILING_BACKSLASH_SPACE.search(raw_line):
+            yield line_no, "EX001", "Remove trailing spaces after backslash line continuation."
+            return
+
+    environment = {
+        key: value for key, value in os.environ.items() if key not in {"BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS"}
+    }
+    result = subprocess.run(
+        ["bash", "--noprofile", "--norc", "-n"],
+        input=source,
+        capture_output=True,
+        env=environment,
+        timeout=5,
+        check=False,
+    )
+    if result.returncode:
+        yield 1, "EX001", "Fix the shell syntax reported by bash -n."
+        return
+
+    tokens = _shell_tokens(text)
+    is_run = source_path.name.startswith("run_")
+    for line, token in tokens:
+        stripped = token.strip("\"'")
+        if SHELL_LOCAL_PATH.search(stripped):
+            yield line, "VO014", "Pass local model and data paths through configuration."
+        if HARDCODED_VENV_PYTHON.search(stripped):
+            yield line, "EX006", "Use python3 or ${PYTHON_BIN:-python3} instead of a hardcoded .venv/bin/python path."
+        if PRIVATE_IPV4.search(stripped):
+            yield (
+                line,
+                "EX008",
+                "Do not hardcode private cluster IP addresses; pass endpoints via environment variables.",
+            )
+        if "=" in token:
+            key, raw_value = token.split("=", 1)
+            value = raw_value.strip("\"'")
+            if key in SECRET_ENV_NAMES and not value.startswith("$") and SECRET_VALUE.fullmatch(value):
+                yield line, "EX008", f"Do not hardcode {key} in example scripts; read it from the environment."
+            if key in DEVICE_ENV_NAMES and DEVICE_LIST_VALUE.fullmatch(value):
+                yield line, "EX008", f"Use overridable ${{{key}:-...}} instead of hardcoding {key}={value}."
+
+    for command, delimiter in _iter_commands(tokens):
+        work = _strip_command_prefixes(command)
+        if not work:
+            continue
+        head_line, head_tok = work[0]
+        if (
+            delimiter != ")"
+            and HYDRA_DOTTED_KEY.match(head_tok.strip("\"'"))
+            and not head_tok.strip("\"'").endswith("=*")
+        ):
+            yield (
+                head_line,
+                "EX007",
+                f"Orphaned Hydra override '{head_tok.split('=')[0]}' (missing trailing backslash on previous line).",
+            )
+            continue
+        if head_tok == "cd" and len(work) >= 2 and work[1][1].strip("\"'").startswith("/"):
+            yield head_line, "EX008", "Avoid hardcoded absolute 'cd /...' paths; resolve relative to SCRIPT_DIR."
+        if is_run:
+            if head_tok in {"pkill", "killall"} or (head_tok == "ray" and len(work) >= 2 and work[1][1] == "stop"):
+                yield head_line, "EX008", "Do not kill host-wide processes (pkill/killall/ray stop) inside run_*.sh."
+            if (head_tok in {"pip", "pip3"} and len(work) >= 2 and work[1][1] == "install") or (
+                head_tok == "uv" and len(work) >= 3 and work[1][1] == "pip" and work[2][1] == "install"
+            ):
+                yield head_line, "EX008", "Do not run pip install inside run_*.sh; document dependencies in README.md."
+
+        hydra_positions: list[tuple[int, int, str]] = []
+        at_positions: list[tuple[int, int]] = []
+        for idx, (cln, ctok) in enumerate(work[1:], 1):
+            if ctok in {'"$@"', '"${@}"'}:
+                at_positions.append((idx, cln))
+            match = HYDRA_DOTTED_KEY.match(ctok.strip("\"'"))
+            if match:
+                hydra_positions.append((idx, cln, match.group(1)))
+        seen_keys: dict[str, int] = {}
+        for _idx, cln, key in hydra_positions:
+            if key in seen_keys:
+                yield (
+                    cln,
+                    "EX007",
+                    f"Duplicate Hydra override '{key}' in the same command (previously set on line {seen_keys[key]}).",
+                )
+            seen_keys[key] = cln
+        if is_run and at_positions and hydra_positions:
+            last_hydra_idx = hydra_positions[-1][0]
+            for at_idx, at_line in at_positions:
+                if at_idx < last_hydra_idx:
+                    yield at_line, "EX002", 'Place "$@" after Hydra overrides so caller arguments take precedence.'
+
+    if is_run:
+        lines = text.splitlines()
+        has_shebang = bool(lines) and lines[0].strip() == "#!/usr/bin/env bash"
+        if not (has_shebang and SET_ERREXIT.search(text) and SET_PIPEFAIL.search(text)):
+            yield (
+                1,
+                "EX005",
+                "Start run_*.sh with #!/usr/bin/env bash and enable set -e + set -o pipefail (e.g. set -euo pipefail).",
+            )
+        if not _forwards_args(tokens):
+            yield 1, "EX002", 'Forward caller overrides as a double-quoted "$@" command argument.'
 
 
 def findings(path: str, source: bytes) -> Iterator[tuple[int, str, str]]:
@@ -165,35 +315,4 @@ def findings(path: str, source: bytes) -> Iterator[tuple[int, str, str]]:
             if YAML_LOCAL_PATH.search(value):
                 yield line_number, "VO014", "Pass local model and data paths through configuration."
         return
-    environment = {
-        key: value for key, value in os.environ.items() if key not in {"BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS"}
-    }
-    result = subprocess.run(
-        ["bash", "--noprofile", "--norc", "-n"],
-        input=source,
-        capture_output=True,
-        env=environment,
-        timeout=5,
-        check=False,
-    )
-    if result.returncode:
-        yield 1, "EX001", "Fix the shell syntax reported by bash -n."
-        return
-    tokens = _shell_tokens(text)
-    for line, token in tokens:
-        stripped = token.strip("\"'")
-        if SHELL_LOCAL_PATH.search(stripped):
-            yield line, "VO014", "Pass local model and data paths through configuration."
-        if HARDCODED_VENV_PYTHON.search(stripped):
-            yield line, "EX006", "Use python3 or ${PYTHON_BIN:-python3} instead of a hardcoded .venv/bin/python path."
-    if source_path.name.startswith("run_"):
-        lines = text.splitlines()
-        has_shebang = bool(lines) and lines[0].strip() == "#!/usr/bin/env bash"
-        if not (has_shebang and SET_ERREXIT.search(text)):
-            yield (
-                1,
-                "EX005",
-                "Start run_*.sh recipes with #!/usr/bin/env bash and enable set -e (e.g. set -euo pipefail).",
-            )
-        if not _forwards_args(tokens):
-            yield 1, "EX002", 'Forward caller overrides as a double-quoted "$@" command argument.'
+    yield from _shell_findings(source_path, source, text)
