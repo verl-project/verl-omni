@@ -89,8 +89,7 @@ def launch(tmp_path):
     return run
 
 
-@pytest.mark.parametrize("version", ["v0", "v1"])
-def test_collector_waits_for_new_sessions_and_ignores_existing_sessions(launch, tmp_path, version):
+def test_collector_waits_for_new_sessions_and_ignores_existing_sessions(launch, tmp_path):
     old = {"name": "profile-1-python", "state": "Generating"}
     result = launch(
         [
@@ -102,7 +101,7 @@ def test_collector_waits_for_new_sessions_and_ignores_existing_sessions(launch, 
                 {"name": "profile-3-python", "state": "Launched"},
             ],
         ],
-        version,
+        version="v0",
     )
 
     assert result.returncode == 0, result.stderr
@@ -116,13 +115,6 @@ def test_collector_waits_for_new_sessions_and_ignores_existing_sessions(launch, 
         '+global_profiler.global_tool_config.nsys.worker_nsight_options.o="worker.run-trial.rank%q{RANK}.%h.pid%p"'
         in argv
     )
-    if version == "v1":
-        assert '++global_profiler.global_tool_config.nsys.gpu_metrics_nsight_options.gpu-metrics-devices="0"' in argv
-        assert "++global_profiler.global_tool_config.nsys.gpu_metrics_nsight_options.gpu-metrics-frequency=10" in argv
-        assert (
-            '++global_profiler.global_tool_config.nsys.gpu_metrics_nsight_options.o="gpu_metrics.run-trial.%h.pid%p"'
-            in argv
-        )
     assert {p.name: p.read_text() for p in (tmp_path / "run/nsight").iterdir()} == {
         "worker.run-trial.rank0.host.pid123.1.nsys-rep": "report",
         "gpu_metrics.run-trial.host.pid456.1.qdstrm": "raw",
@@ -196,7 +188,15 @@ def test_v1_metrics_defaults_preserve_caller_overrides(launch, tmp_path):
     result = launch([[], []], hydra_overrides=overrides)
 
     assert result.returncode == 0, result.stderr
-    assert (tmp_path / "argv").read_text().splitlines()[-2:] == overrides
+    argv = (tmp_path / "argv").read_text().splitlines()
+    assert '++global_profiler.global_tool_config.nsys.gpu_metrics_nsight_options.gpu-metrics-devices="0"' in argv
+    assert "++global_profiler.global_tool_config.nsys.gpu_metrics_nsight_options.gpu-metrics-frequency=10" in argv
+    assert (
+        '++global_profiler.global_tool_config.nsys.gpu_metrics_nsight_options.o="gpu_metrics.run-trial.%h.pid%p"'
+        in argv
+    )
+    assert not any("session-new" in arg for arg in argv)
+    assert argv[-2:] == overrides
 
 
 @pytest.mark.parametrize(
