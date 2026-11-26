@@ -40,7 +40,7 @@ def compute_score(
     untagged ``ground_truth`` falls back to its raw text so a bare label
     like ``"B"`` still matches a properly tagged prediction.  Without the
     fallback, both ``extract_answer`` calls return ``""`` and an empty or
-    malformed response was silently scored as correct (issue #643).
+    malformed response was silently scored as correct.
     """
     del kwargs
     prediction = extract_answer(solution_str)

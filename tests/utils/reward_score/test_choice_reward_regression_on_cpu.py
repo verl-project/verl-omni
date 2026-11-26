@@ -1,4 +1,4 @@
-"""Tests for choice_reward.compute_score, covering issue #643."""
+"""Regression tests for choice_reward.compute_score: empty or malformed responses must never score 1.0."""
 
 from __future__ import annotations
 
@@ -39,8 +39,8 @@ class TestCorrectBehavior:
         assert compute_score("<answer>A</answer> <answer>B</answer>", "<answer>A</answer>")["score"] == 1.0
 
 
-class TestIssue643Regression:
-    """Empty or malformed responses must never score 1.0 (the bug from issue #643)."""
+class TestEmptyResponseRegression:
+    """Empty or malformed responses must never score 1.0 against untagged ground truths."""
 
     def test_empty_response_bare_label_gt(self):
         assert compute_score("", "B")["score"] == 0.0
