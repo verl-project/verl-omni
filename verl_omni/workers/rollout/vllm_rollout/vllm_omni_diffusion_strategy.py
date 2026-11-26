@@ -24,7 +24,7 @@ from vllm_omni.inputs.data import OmniDiffusionSamplingParams
 from vllm_omni.lora.request import LoRARequest
 from vllm_omni.outputs import OmniRequestOutput
 
-from verl_omni.pipelines.model_base import VllmOmniPipelineBase
+from verl_omni.pipelines.model_base import VllmOmniDiffusersPipelineBase, VllmOmniPipelineBase
 from verl_omni.pipelines.rollout_media import (
     ARTIFACT_PREFIX,
     ARTIFACT_SPECS,
@@ -38,7 +38,7 @@ from verl_omni.pipelines.rollout_media import (
     select_artifact,
 )
 from verl_omni.pipelines.rollout_request import OmniRolloutRequest, _alias_values_match
-from verl_omni.utils.config import coerce_expert_parallel_size
+from verl_omni.utils.config import coerce_expert_parallel_size, resolve_lora_config
 from verl_omni.workers.config import DiffusionModelConfig, DiffusionRolloutConfig
 from verl_omni.workers.rollout.replica import DiffusionOutput
 from verl_omni.workers.rollout.vllm_rollout.vllm_omni_strategy_base import OmniStrategyBase
@@ -221,6 +221,8 @@ class DiffusionStrategy(OmniStrategyBase):
 
     rollout_config_cls = DiffusionRolloutConfig
     model_config_cls = DiffusionModelConfig
+    # Set by prepare_engine_args from engine_kwargs.vllm_omni.diffusion_load_format.
+    _pipeline_registry: type[VllmOmniPipelineBase] = VllmOmniPipelineBase
 
     def worker_extension_cls(self, device_type: str) -> str:
         if device_type == "npu":
@@ -345,15 +347,18 @@ class DiffusionStrategy(OmniStrategyBase):
 
         import_external_libs(self.server.config.external_lib)
 
-        pipeline_path = VllmOmniPipelineBase.get_pipeline_path(
+        self._pipeline_registry = registry = self._select_pipeline_registry()
+        pipeline_path = registry.get_pipeline_path(
             architecture=self.server.model_config.architecture,
             algorithm=self.server.model_config.algorithm,
         )
+        if registry is VllmOmniDiffusersPipelineBase:
+            self._validate_diffusers_backend(pipeline_path)
         # TODO (mike): read custom_pipeline from engine_args.
         if pipeline_path is not None:
             engine_args["custom_pipeline_args"] = {"pipeline_class": pipeline_path}
 
-            pipeline_cls = VllmOmniPipelineBase.get_class(
+            pipeline_cls = registry.get_class(
                 architecture=self.server.model_config.architecture,
                 algorithm=self.server.model_config.algorithm,
             )
@@ -381,6 +386,35 @@ class DiffusionStrategy(OmniStrategyBase):
             del engine_args[key]
         if dropped:
             logger.info("Dropping LLM-only engine args rejected by diffusion ingress: %s", dropped)
+
+    def _select_pipeline_registry(self) -> type[VllmOmniPipelineBase]:
+        """Return the rollout pipeline registry for the configured vLLM-Omni load format."""
+        omni_kwargs = self.server.config.engine_kwargs.get("vllm_omni", {}) or {}
+        load_format = {key.replace("-", "_"): value for key, value in omni_kwargs.items()}.get("diffusion_load_format")
+        return VllmOmniDiffusersPipelineBase if load_format == "diffusers" else VllmOmniPipelineBase
+
+    def _validate_diffusers_backend(self, pipeline_path: Optional[str]) -> None:
+        """Refuse a diffusers-backend rollout that would serve no trajectories or drop LoRA syncs.
+
+        Raises:
+            NotImplementedError: If no diffusers-backend pipeline is registered for the model.
+            ValueError: If LoRA adapters would be synced unmerged.
+        """
+        model_config = self.server.model_config
+        if pipeline_path is None:
+            raise NotImplementedError(
+                "No rollout pipeline for vLLM-Omni's diffusers backend is registered for "
+                f"({model_config.architecture!r}, {model_config.algorithm!r}). Registered: "
+                f"{sorted(VllmOmniDiffusersPipelineBase._registry)}. Remove "
+                "engine_kwargs.vllm_omni.diffusion_load_format to use the native pipeline."
+            )
+        lora = resolve_lora_config(model_config)
+        if lora.enabled and not lora.merge:
+            # vLLM-Omni's LoRA manager only wraps its own linear layers, not diffusers' nn.Linear.
+            raise ValueError(
+                "vLLM-Omni's diffusers backend takes LoRA only as merged weights. "
+                "Set actor_rollout_ref.model.lora.merge=True."
+            )
 
     def preprocess_input(
         self,
@@ -447,7 +481,7 @@ class DiffusionStrategy(OmniStrategyBase):
         model_config = self.server.model_config
         if model_config is None:
             return None
-        pipeline_cls = VllmOmniPipelineBase.get_class(
+        pipeline_cls = self._pipeline_registry.get_class(
             architecture=model_config.architecture,
             algorithm=model_config.algorithm,
         )
