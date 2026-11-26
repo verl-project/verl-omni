@@ -89,22 +89,25 @@ def _duplex_deploy_config_path(args: argparse.Namespace) -> str:
     )
 
 
+def _build_engine(args: argparse.Namespace):
+    """A ``DuplexOmni`` with the duplex KV window's cache settings."""
+    from verl_omni.utils.dataset.duplex.deploy_config import build_duplex_gate_engine
+
+    return build_duplex_gate_engine(
+        model=args.model,
+        deploy_config=_duplex_deploy_config_path(args),
+        tensor_parallel_size=args.tensor_parallel_size,
+        gpu_memory_utilization=args.gpu_memory_utilization,
+        stage_init_timeout=args.stage_init_timeout,
+    )
+
+
 def _roll_episodes(args: argparse.Namespace) -> list[dict]:
     """Roll the fixed episode set twice (same seeds) and return the results."""
-    from verl_omni.pipelines.minicpm.duplex_rollout_adapter import require_duplex_vllm_omni
     from verl_omni.utils.dataset.duplex.duplex_rl_dataset import DuplexEpisodeDataset
     from verl_omni.workers.rollout.vllm_rollout.vllm_omni_duplex_strategy import DuplexStrategy
 
-    duplex_omni_cls = require_duplex_vllm_omni()
-    engine = duplex_omni_cls(
-        model=args.model,
-        trust_remote_code=True,
-        tensor_parallel_size=args.tensor_parallel_size,
-        gpu_memory_utilization=args.gpu_memory_utilization,
-        enforce_eager=True,
-        deploy_config=_duplex_deploy_config_path(args),
-        stage_init_timeout=args.stage_init_timeout,
-    )
+    engine = _build_engine(args)
     dataset = DuplexEpisodeDataset([args.episodes])
     driver = DuplexStrategy.__new__(DuplexStrategy)
     driver.server = type("S", (), {"engine": engine})()
@@ -138,12 +141,27 @@ def _roll_episodes(args: argparse.Namespace) -> list[dict]:
     return list(zip(first, second, strict=True))
 
 
-def _actor_model_data(replay) -> dict:
-    """The actor model call for one replayed episode, as ``prepare_model_inputs`` builds it.
+def _to_device(value, device):
+    """Move tensors inside the prepared batch onto ``device``; lists of clips included."""
+    import torch
+
+    if isinstance(value, torch.Tensor):
+        return value.to(device)
+    if isinstance(value, dict):
+        return {key: _to_device(item, device) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_to_device(item, device) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_to_device(item, device) for item in value)
+    return value
+
+
+def _actor_model_data(replay, *, device) -> dict:
+    """The actor model call for one replayed episode, on ``device``.
 
     The batch goes through the thinker adapter's duplex media branch (explicit
     bounds from the replay payload, so no marker scan or model config is
-    involved).
+    involved), then onto the same device as the model.
     """
     import torch
 
@@ -152,11 +170,12 @@ def _actor_model_data(replay) -> dict:
 
     input_ids = torch.tensor([replay.prompt_ids + replay.response_ids], dtype=torch.long)
     position_ids = torch.arange(input_ids.shape[1])[None]
-    return MiniCPMThinkerAdapter.prepare_model_inputs(
+    prepared = MiniCPMThinkerAdapter.prepare_model_inputs(
         {"input_ids": input_ids, "position_ids": position_ids},
         micro_batch={DUPLEX_REPLAY_KEY: [replay.to_extra_fields(include_pcm=False)]},
         model_config=None,
     )
+    return _to_device(prepared, device)
 
 
 def _actor_logits(model, model_inputs: dict, replay):
@@ -177,8 +196,16 @@ def _actor_logits(model, model_inputs: dict, replay):
     """
     import torch
 
+    from verl_omni.pipelines.minicpm.thinker_training_adapter import split_minicpm_forward_kwargs
+
+    # The training forward normalizes media before the remote call. A caller
+    # that already holds raw module inputs is forwarded unchanged.
     with torch.no_grad():
-        output = model(**model_inputs)
+        if "input_ids" in model_inputs or "data" in model_inputs:
+            data, llm_kwargs = split_minicpm_forward_kwargs(model_inputs)
+            output = model(data, **llm_kwargs)
+        else:
+            output = model(**model_inputs)
     logits = output.logits[0].float()
     prompt_length = len(replay.prompt_ids)
     positions = [prompt_length + position for layout in replay.unit_layouts for position in layout.action_positions]
@@ -348,7 +375,7 @@ def main(argv: list[str] | None = None) -> int:
                 for action in record.actions:
                     if action.action_kind != ACTION_REEMIT:
                         actions.append((action.token_id, action.action_kind, temperature, action.logprob))
-        model_inputs = _actor_model_data(replay)
+        model_inputs = _actor_model_data(replay, device=next(model.parameters()).device)
         logits = _actor_logits(model, model_inputs, replay)
         parity = _parity_rows(
             logits,

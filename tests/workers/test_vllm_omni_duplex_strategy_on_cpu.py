@@ -223,6 +223,7 @@ async def test_turn_episode_feeds_chunks_and_drains_records():
     # native duplex pipeline).
     assert engine.open_configs[0]["action_capture"] is True
     assert engine.open_configs[0]["seed"] == 11
+    assert engine.open_configs[0]["extra_body"] == {"auto_response": True}
     assert "instructions" not in engine.open_configs[0]
     # The scopes arrive through the post-close terminal drain only.
     assert handle.collect_calls == 0

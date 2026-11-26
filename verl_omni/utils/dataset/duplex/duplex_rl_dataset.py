@@ -79,6 +79,10 @@ def build_episode_chunks(
     """
     start_sample = int(round(start_s * sample_rate))
     end_sample = int(round(end_s * sample_rate))
+    if start_sample < 0:
+        raise ValueError(
+            f"duplex episode window starts at {start_s}s, before the track; a negative index would read the file's tail"
+        )
     if end_sample <= start_sample:
         raise ValueError(f"duplex episode window [{start_s}, {end_s}) is empty")
     if start_sample >= waveform.shape[-1]:

@@ -46,8 +46,18 @@ def test_only_the_duplex_mode_is_accepted():
         MiniCPMODuplexRolloutAdapter.get_stage_engine_extras(1, "duplex")
 
 
-def test_deploy_config_declares_duplex_session_mode():
-    assert MiniCPMODuplexRolloutAdapter.deploy_config_overrides("duplex") == {"session_mode": "duplex"}
+def test_deploy_config_declares_duplex_session_mode(monkeypatch):
+    monkeypatch.delenv("VERL_OMNI_DUPLEX_MAX_SESSIONS", raising=False)
+    assert MiniCPMODuplexRolloutAdapter.deploy_config_overrides("duplex") == {
+        "session_mode": "duplex",
+        "model_runner": "v2",
+        "duplex_session": {"max_sessions": 16},
+    }
+    monkeypatch.setenv("VERL_OMNI_DUPLEX_MAX_SESSIONS", "4")
+    assert MiniCPMODuplexRolloutAdapter.deploy_config_overrides("duplex")["duplex_session"] == {"max_sessions": 4}
+    monkeypatch.setenv("VERL_OMNI_DUPLEX_MAX_SESSIONS", "nope")
+    with pytest.raises(ValueError, match="VERL_OMNI_DUPLEX_MAX_SESSIONS"):
+        MiniCPMODuplexRolloutAdapter.deploy_config_overrides("duplex")
 
 
 def test_thinker_only_stage_extras_stay_clean():

@@ -28,6 +28,7 @@ required upstream revision.
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from vllm_omni.config.pipeline_registry import register_pipeline
@@ -43,6 +44,11 @@ from verl_omni.utils.dataset.duplex.replay import (
     extract_unit_mels,
     resolve_duplex_vocabulary,
 )
+
+#: The recipe exports this to match ``rollout.agent.num_workers``. The adapter
+#: has no rollout config at the deploy-override call.
+DUPLEX_MAX_SESSIONS_ENV = "VERL_OMNI_DUPLEX_MAX_SESSIONS"
+DUPLEX_MAX_SESSIONS_DEFAULT = 16
 
 __all__ = [
     "MINICPMO_4_5_DUPLEX_PIPELINE",
@@ -150,9 +156,25 @@ class MiniCPMODuplexRolloutAdapter(MiniCPMORolloutAdapter):
 
     @classmethod
     def deploy_config_overrides(cls, pipeline_mode: str = "duplex") -> dict:
-        """Serve the rollout engine in duplex session mode."""
+        """Serve duplex on MRv2, with one session slot per agent worker.
+
+        Capture publishes only on model runner v2. The session cap is the
+        engine's admission limit; ``DUPLEX_MAX_SESSIONS_ENV`` is how the recipe
+        passes ``rollout.agent.num_workers``, which this call cannot see.
+        """
         cls.build_stage_configs(pipeline_mode)
-        return {"session_mode": "duplex"}
+        raw = os.environ.get(DUPLEX_MAX_SESSIONS_ENV, str(DUPLEX_MAX_SESSIONS_DEFAULT))
+        try:
+            max_sessions = int(raw)
+        except ValueError as exc:
+            raise ValueError(f"{DUPLEX_MAX_SESSIONS_ENV} must be an integer, got {raw!r}") from exc
+        if max_sessions < 1:
+            raise ValueError(f"{DUPLEX_MAX_SESSIONS_ENV} must be >= 1, got {max_sessions}")
+        return {
+            "session_mode": "duplex",
+            "model_runner": "v2",
+            "duplex_session": {"max_sessions": max_sessions},
+        }
 
     @classmethod
     def build_duplex_replay(

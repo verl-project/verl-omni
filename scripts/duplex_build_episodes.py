@@ -25,7 +25,9 @@ speakers on separate channels; ``user_audio`` must already be the user
 channel as a mono file — split the stereo mix first). Output rows are what
 ``DuplexEpisodeDataset`` reads: the mined episode spec, the user words
 inside each window (track-absolute — the dataset relativizes), the source
-``dialogue_id``, and the sample's base seed. Run on CPU, before any training.
+``dialogue_id``, the sample's base seed, and ``commit=true``. This checkpoint
+does not open a response on its own; the dataset reads that column and the
+driver commits only when it is true. Run on CPU, before any training.
 
 The val split is by dialogue, on ``crc32(dialogue_id)`` (stable across
 processes). ``--per-axis-cap auto`` then balances the axes inside each split
@@ -134,6 +136,7 @@ def build_rows(manifest_path: Path, args: argparse.Namespace) -> list[dict[str, 
                     "duplex_seed": args.seed,
                     "data_source": str(dialogue.get("data_source", "dailytalk")),
                     "dialogue_id": dialogue_id,
+                    "commit": True,
                     # Held-out split by dialogue, not by episode, so no
                     # dialogue straddles train and val.
                     "is_val": _is_val(dialogue_id, args.val_fraction),

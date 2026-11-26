@@ -270,8 +270,12 @@ def episode_spec(
     user_audio_ref: str,
     episode_id: str,
 ) -> DuplexEpisodeSpec:
-    """Lift one candidate into a driver-facing episode spec (episode-relative windows)."""
-    offset = candidate.start_s
+    """Lift one candidate into a driver-facing episode spec (episode-relative windows).
+
+    A lead-in before the track is clamped to 0. Event anchors stay relative to
+    that clamped window, so a negative index never slices the track's tail.
+    """
+    offset = max(0.0, candidate.start_s)
     if candidate.axis == AXIS_PAUSE:
         event = DuplexEpisodeEvent(
             axis=AXIS_PAUSE,
@@ -292,7 +296,7 @@ def episode_spec(
         episode_id=episode_id,
         axis=candidate.axis,
         user_audio_ref=user_audio_ref,
-        start_s=candidate.start_s,
+        start_s=offset,
         end_s=candidate.end_s,
         event=event,
         interrupt_speech_s=(

@@ -340,26 +340,83 @@ class MiniCPMThinkerAdapter(OmniModelBase):
         return forbidden_ids[-1], torch.tensor(forbidden_ids, dtype=torch.long, device=device)
 
 
+def _unwrap_non_tensor(value: Any) -> Any:
+    """``NonTensorData.data`` when wrapped; otherwise the value itself."""
+    from tensordict import NonTensorData
+
+    if isinstance(value, NonTensorData):
+        return value.data
+    return value
+
+
+def _as_entries(payloads: Any) -> list[Any]:
+    """One list of unwrapped values, whether the column is a stack, a slice, or a mapping."""
+    payloads = _unwrap_non_tensor(payloads)
+    if isinstance(payloads, list | tuple) and not isinstance(payloads, dict):
+        return [_unwrap_non_tensor(entry) for entry in payloads]
+    if hasattr(payloads, "tolist") and not isinstance(payloads, dict):
+        return [_unwrap_non_tensor(entry) for entry in payloads.tolist()]
+    return [payloads]
+
+
+def _lookup_column(micro_batch: Any, key: str) -> Any:
+    """A micro-batch column, including one nested under ``non_tensor_batch``."""
+    from collections.abc import Mapping
+
+    if isinstance(micro_batch, Mapping):
+        if key in micro_batch:
+            return micro_batch[key]
+        nested = micro_batch.get("non_tensor_batch")
+        if isinstance(nested, Mapping) and key in nested:
+            return nested[key]
+        return None
+    keys = micro_batch.keys() if hasattr(micro_batch, "keys") else ()
+    if key in keys:
+        from verl.utils.tensordict_utils import get_non_tensor_data
+
+        return get_non_tensor_data(micro_batch, key, None)
+    nested = micro_batch.get("non_tensor_batch") if hasattr(micro_batch, "get") else None
+    if isinstance(nested, Mapping) and key in nested:
+        return nested[key]
+    return None
+
+
 def _duplex_replay_payloads(micro_batch: Any) -> list[dict[str, Any]] | None:
     """The micro-batch's duplex replay payloads, or ``None`` when not duplex.
 
-    ``AgentLoopWorker`` exposes agent-loop ``extra_fields`` keys at the top
-    level of the actor micro-batch; a duplex rollout puts its replay under
-    the namespaced ``duplex_replay`` key, one payload per sample.
+    The replay is keyed ``duplex_replay``. verl sometimes spreads that key as
+    its own column and sometimes keeps the agent loop's ``extra_fields``
+    mapping as one column, with the replay inside each sample.
     """
+    from collections.abc import Mapping
+
     from verl_omni.utils.dataset.duplex.replay import DUPLEX_REPLAY_KEY
 
     if micro_batch is None:
         return None
-    payloads = micro_batch.get(DUPLEX_REPLAY_KEY)
-    if payloads is None:
-        return None
-    if isinstance(payloads, list | tuple) and not isinstance(payloads, dict):
-        entries = list(payloads)
-    elif hasattr(payloads, "tolist"):
-        entries = list(payloads.tolist())  # np object column from DataProto
+    column = _lookup_column(micro_batch, DUPLEX_REPLAY_KEY)
+    if column is None:
+        extra = _lookup_column(micro_batch, "extra_fields")
+        if extra is None:
+            return None
+        entries = []
+        saw_replay = False
+        saw_other = False
+        for item in _as_entries(extra):
+            if isinstance(item, Mapping) and DUPLEX_REPLAY_KEY in item:
+                saw_replay = True
+                entries.append(_unwrap_non_tensor(item[DUPLEX_REPLAY_KEY]))
+            else:
+                saw_other = True
+        if saw_replay and saw_other:
+            raise ValueError(
+                "duplex extra_fields column is missing duplex_replay on some samples; "
+                "the batch mixes duplex and non-duplex rows"
+            )
+        if not saw_replay:
+            return None
     else:
-        entries = [payloads]
+        entries = _as_entries(column)
     if not all(isinstance(entry, dict) and entry for entry in entries):
         raise ValueError(
             f"{DUPLEX_REPLAY_KEY!r} entries must be non-empty replay payload mappings; "
@@ -437,8 +494,9 @@ def _apply_duplex_media(data: dict[str, Any], replays: list[dict[str, Any]]) -> 
             )
         offset = packed_offsets[sample]
         shifted = [[int(start) + offset, int(end) + offset] for start, end in bounds]
-        audio_features.append([np.asarray(mel) for mel in mels])
-        audio_feature_lens.append([int(value) for value in mel_lens])
+        device = data["input_ids"].device
+        audio_features.append([torch.as_tensor(np.asarray(mel), dtype=torch.float32, device=device) for mel in mels])
+        audio_feature_lens.append([torch.tensor([int(value)], dtype=torch.long, device=device) for value in mel_lens])
         audio_bounds.append(shifted)
         kinds = ["unit"] * len(mels)
         if payload.get("ref_audio") is not None and kinds:

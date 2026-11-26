@@ -169,6 +169,8 @@ class DuplexStrategy(ARStrategy):
                     "action_capture": True,
                     "seed": int(run_spec["seed"]),
                     "temperature": float(run_spec.get("temperature", 0.7)),
+                    # One unit per append. Without this the feed buffers until commit.
+                    "extra_body": {"auto_response": True},
                 },
             )
             speak_onset: dict[str, float] = {}

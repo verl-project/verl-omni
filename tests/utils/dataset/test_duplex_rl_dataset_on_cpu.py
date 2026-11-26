@@ -137,6 +137,12 @@ def test_dataset_emits_episode_columns(user_track, tmp_path):
     assert interruption["dialogue_id"] is None
 
 
+def test_build_episode_chunks_rejects_a_start_before_the_track():
+    waveform = np.zeros(16000, dtype=np.float32)
+    with pytest.raises(ValueError, match="before the track"):
+        build_episode_chunks(waveform, start_s=-0.1, end_s=1.0)
+
+
 def test_dataset_rejects_rows_without_the_mining_columns(tmp_path):
     parquet = tmp_path / "bad.parquet"
     pd.DataFrame([{"foo": 1}]).to_parquet(parquet)

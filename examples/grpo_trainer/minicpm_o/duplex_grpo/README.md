@@ -67,7 +67,7 @@ design; this README covers running it.
    Defaults: 5 % of dialogues held out by `crc32(dialogue_id)` (a stable,
    per-dialogue split), axes balanced to ≈1:1:1 inside each split
    (`--per-axis-cap auto`), pauses mined from 0.6–1.8 s same-speaker
-   silences, interrupting clips ≥ 1.5 s.
+   silences, interrupting clips ≥ 1.5 s. Each row sets `commit=true`.
 3. **The M0 entry gate** — before any gradient step, run the calibration
    audit (`scripts/duplex_calibration_audit.py`) and the parity check
    (`scripts/duplex_m0_parity_check.py`) on the unmodified checkpoint. The
@@ -108,7 +108,9 @@ group.
 ## Validation status
 
 CPU-tested at contract level (`tests/utils/dataset/duplex/`, the strategy and
-agent-loop suites); GPU parity (actor-recomputed logprobs vs captured records)
-is the M0 gate script, and end-to-end training is **to be** validated on the
-GPU servers with this recipe — neither has run yet at PR time. This is PoC
-scope: capability verification, not SOTA.
+agent-loop suites). A 4×H800 run completed steps (about 6 min/step; see
+`docs/algo/duplex_grpo.md`). Pause calibration passed (0.367 on 146
+balanced val episodes); turn (0.098) and interruption (0.000) sit on the
+reward floors and are an open geometry choice, not a loop failure. M0
+tolerances stay 0.05 / 0.01 nats and are the next measurement. This is
+PoC scope: capability verification, not SOTA.

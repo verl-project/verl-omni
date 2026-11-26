@@ -79,6 +79,19 @@ def _duplex_deploy_config_path(args: argparse.Namespace) -> str:
     )
 
 
+def _build_engine(args: argparse.Namespace):
+    """A ``DuplexOmni`` with the duplex KV window's cache settings."""
+    from verl_omni.utils.dataset.duplex.deploy_config import build_duplex_gate_engine
+
+    return build_duplex_gate_engine(
+        model=args.model,
+        deploy_config=_duplex_deploy_config_path(args),
+        tensor_parallel_size=args.tensor_parallel_size,
+        gpu_memory_utilization=args.gpu_memory_utilization,
+        stage_init_timeout=args.stage_init_timeout,
+    )
+
+
 def roll_rewards(args: argparse.Namespace) -> dict[str, list[float]]:
     """Drive the base policy over the event set and collect per-axis rewards.
 
@@ -91,21 +104,11 @@ def roll_rewards(args: argparse.Namespace) -> dict[str, list[float]]:
 
     from transformers import AutoProcessor
 
-    from verl_omni.pipelines.minicpm.duplex_rollout_adapter import require_duplex_vllm_omni
     from verl_omni.utils.dataset.duplex.duplex_rl_dataset import DuplexEpisodeDataset
     from verl_omni.utils.reward_score.duplex_turn_taking import compute_score_duplex_turn_taking
 
     processor = AutoProcessor.from_pretrained(args.model, trust_remote_code=True)
-    duplex_omni_cls = require_duplex_vllm_omni()
-    engine = duplex_omni_cls(
-        model=args.model,
-        trust_remote_code=True,
-        tensor_parallel_size=args.tensor_parallel_size,
-        gpu_memory_utilization=args.gpu_memory_utilization,
-        enforce_eager=True,
-        deploy_config=_duplex_deploy_config_path(args),
-        stage_init_timeout=args.stage_init_timeout,
-    )
+    engine = _build_engine(args)
     dataset = DuplexEpisodeDataset([args.episodes])
     rewards: dict[str, list[float]] = defaultdict(list)
     try:

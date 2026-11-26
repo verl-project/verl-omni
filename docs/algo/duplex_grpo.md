@@ -1,6 +1,6 @@
 # Streaming duplex GRPO (MiniCPM-o 4.5)
 
-Last updated: 11/25/2026.
+Last updated: 11/26/2026.
 
 Streaming **full-duplex GRPO** over real duplex sessions — the trainer side of
 [RFC #905](https://github.com/verl-project/verl-omni/issues/905), consuming
@@ -172,7 +172,11 @@ caps every axis to the smallest one inside each split, so train and val are
 both ≈1:1:1 across pause / turn / interruption (`0` keeps the natural,
 turn-heavy mix; an integer caps during mining). The pause band is
 `--min-pause-s 0.6` to `--max-pause-s 1.8`, the interrupting clip at least
-`--min-interrupt-s 1.5`, and every row carries its `dialogue_id`.
+`--min-interrupt-s 1.5`, and every row carries its `dialogue_id` and
+`commit=true`. This checkpoint does not open a response on its own; the
+dataset reads `commit` and the driver commits only when it is true. A
+lead-in that would start before the track is clamped to 0, and event
+anchors stay relative to that clamped window.
 
 ## Entry gates and validation
 
@@ -216,6 +220,38 @@ turn-heavy mix; an integer caps during mining). The pause band is
    (verl's `actor/kl_loss`) stays bounded; and a 10–20-episode transcript
    spot-check of dumped replays after the run finds no silence collapse or
    repetitive speech.
+
+A 4×H800 run of this loop (two consecutive steps, balanced episodes, the
+capture branch) measured cold start ≈ 10 min and step time 324 s then
+350 s (`gen` 210/272 s, `ref` 12 s, `update_actor` 27/32 s). Rewards sat
+at mean −0.668 (min −1, max 0); `actor/kl_loss` 0; advantages mean
++0.0014; `response_length/mean` 85.1; old-logprob mismatch count 0.
+Budget about 6 min/step, so 100 steps is about 10–11 h on that node,
+plus about 0.5–1 min per eval. The script default remains
+`TOTAL_TRAINING_STEPS=200`; override it per launch. Use the balanced
+parquet (`--per-axis-cap auto`), not the 94 % turn-skewed full mine.
+
+Calibration on 146 balanced val episodes: pause `normalized_mean` 0.367
+(inside [0.30, 0.80]), turn 0.098, interruption 0.000. Turn was 46/51
+exactly −1 and interruption 46/46 exactly −1. Under per-unit
+auto-response the base policy speaks through the user's utterance, so
+the turn floor (speech before the user's turn ends) and the interruption
+floor (not speaking at the onset) both fire. The bands stay as specified.
+The axes are not a learning signal until one of these lands: grade an
+early barge-in instead of flooring it; keep today's bands as a yield
+axis and add a speak-through axis; or mine turn episodes whose user
+utterance is followed by silence. The M0 tolerances stay max |Δ| ≤ 0.05
+nats and mean ≤ 0.01. The gate scripts now build an engine with
+`enable_prefix_caching=false` and score through the same media
+normalization as training. A uniform residual, if one remains, is the
+bf16 engine tower versus the fp32 training tower, and that chooses
+whether the tolerance or the cast changes.
+
+`VERL_OMNI_DUPLEX_MAX_SESSIONS` is the engine admission cap. The rollout
+adapter cannot see `rollout.agent.num_workers`, so the recipe exports the
+same count (default 16). The reward manager is the registered
+`minicpm_naive` (`reward.reward_manager.source=register`); the importlib
+default looks the name up as a module attribute and misses it.
 
 CPU tests cover the whole contract surface
 (`tests/utils/dataset/duplex/`, the strategy / agent-loop / adapter suites);

@@ -52,12 +52,15 @@ def _load_script(name: str):
 # ---------------------------------------------------------------------------
 
 
-def test_write_duplex_deploy_config_produces_the_thinker_only_duplex_layout(tmp_path):
+def test_write_duplex_deploy_config_produces_the_thinker_only_duplex_layout(tmp_path, monkeypatch):
+    monkeypatch.delenv("VERL_OMNI_DUPLEX_MAX_SESSIONS", raising=False)
     path = write_duplex_deploy_config(tmp_path / "nested" / "deploy.yaml")
     assert Path(path).exists()
     deploy = yaml.safe_load(Path(path).read_text())
     assert deploy["pipeline"] == "minicpmo_4_5_duplex"
     assert deploy["session_mode"] == "duplex"
+    assert deploy["model_runner"] == "v2"
+    assert deploy["duplex_session"] == {"max_sessions": 16}
     assert [stage["stage_id"] for stage in deploy["stages"]] == [0]
     assert deploy["stages"][0]["tensor_parallel_size"] == 1
     # The engine's own parser must accept it (stage layout round-trip).
@@ -78,6 +81,28 @@ def test_script_stage_init_timeout_defaults_are_env_overridable(script_name, mon
     assert args.tensor_parallel_size == 1  # bare top-level TP>1 is rejected by the multi-stage layout
     monkeypatch.setenv("VERL_OMNI_DUPLEX_STAGE_INIT_TIMEOUT", "900")
     assert script._parse_args(argv).stage_init_timeout == 900
+
+
+@pytest.mark.parametrize("script_name", ["duplex_calibration_audit", "duplex_m0_parity_check"])
+def test_build_engine_disables_prefix_caching(script_name, monkeypatch, tmp_path):
+    script = _load_script(script_name)
+    seen: dict = {}
+
+    def recorder(**kwargs):
+        seen.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(
+        "verl_omni.pipelines.minicpm.duplex_rollout_adapter.require_duplex_vllm_omni",
+        lambda: recorder,
+    )
+    args = script._parse_args(
+        ["--model", "unused-model", "--episodes", "unused", "--output", str(tmp_path / "out.json")]
+    )
+    assert script._build_engine(args) is not None
+    assert seen["enable_prefix_caching"] is False
+    assert seen["model"] == "unused-model"
+    assert seen["enforce_eager"] is True
 
 
 @pytest.mark.parametrize("script_name", ["duplex_calibration_audit", "duplex_m0_parity_check"])
@@ -145,6 +170,8 @@ def test_build_rows_split_by_dialogue_and_carry_the_dialogue_id(tmp_path):
         flags_by_dialogue[row["dialogue_id"]].add(row["is_val"])
     assert all(len(flags) == 1 for flags in flags_by_dialogue.values())  # no dialogue straddles the split
     assert {row["dialogue_id"] for row in rows if row["is_val"]} == _VAL_DIALOGUES
+    assert all(row["commit"] is True for row in rows)
+    assert all(row["episode"]["start_s"] >= 0 for row in rows)
     # Miner defaults thread through: the 0.6 s and 0.7 s pauses, the 2 s clips.
     assert script._parse_args(["--manifest", "x", "--output", "y"]).per_axis_cap is None  # auto
     assert script._parse_args(["--manifest", "x", "--output", "y", "--per-axis-cap", "0"]).per_axis_cap == 0

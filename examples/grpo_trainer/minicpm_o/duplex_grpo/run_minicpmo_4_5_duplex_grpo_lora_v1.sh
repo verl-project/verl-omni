@@ -32,6 +32,8 @@ mkdir -p "${OUTPUT_DIR}"
 export PYTHONHASHSEED="${SEED}"
 export TOKENIZERS_PARALLELISM=false
 export VERL_USE_EXTERNAL_MODULES=verl_omni
+NUM_AGENT_WORKERS="${NUM_AGENT_WORKERS:-16}"
+export VERL_OMNI_DUPLEX_MAX_SESSIONS="${VERL_OMNI_DUPLEX_MAX_SESSIONS:-${NUM_AGENT_WORKERS}}"
 
 # Non-obvious settings (kept out of the arg block: a comment line inside a
 # backslash-continued command would split it):
@@ -62,10 +64,14 @@ export VERL_USE_EXTERNAL_MODULES=verl_omni
 #   a cold duplex stage needs far more than the engine's 300 s init default
 #   (the orchestrator forwards this to OmniConfig.stage_init_timeout and
 #   raises init_timeout to match).
-# - reward.reward_manager.name=minicpm_naive: the default visual manager
-#   expects image-reward payloads; minicpm_naive feeds the rule scorer
-#   directly (and demotes MiniCPM-o's special answer tags so choice scores
-#   decode).
+# - reward.reward_manager.source=register and name=minicpm_naive: the default
+#   source is importlib, which looks the name up as a module attribute and
+#   misses the registered manager. minicpm_naive is NaiveRewardManager plus
+#   the checkpoint's answer-tag demotion; the duplex scorer does not decode
+#   those tags, and a separate manager would only duplicate naive.
+# - VERL_OMNI_DUPLEX_MAX_SESSIONS: the engine admits this many duplex sessions.
+#   The adapter cannot see rollout.agent.num_workers, so the recipe exports
+#   the same count. A larger worker pool exhausts admission again.
 
 "${PYTHON_BIN}" -m verl_omni.trainer.main_omni \
     "data.train_files=${TRAIN_FILE}" \
@@ -88,7 +94,7 @@ export VERL_USE_EXTERNAL_MODULES=verl_omni
     actor_rollout_ref.model.lora_alpha=64 \
     actor_rollout_ref.model.lora_dtype=float32 \
     actor_rollout_ref.model.lora.merge=True \
-    actor_rollout_ref.model.exclude_modules='(apm|vpm|resampler)\..*' \
+    "actor_rollout_ref.model.exclude_modules='(apm|vpm|resampler)\..*'" \
     actor_rollout_ref.actor.strategy=fsdp2 \
     actor_rollout_ref.actor.ppo_mini_batch_size=16 \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=2 \
@@ -122,7 +128,6 @@ export VERL_USE_EXTERNAL_MODULES=verl_omni
     actor_rollout_ref.actor.fsdp_config.use_torch_compile=false \
     actor_rollout_ref.actor.fsdp_config.wrap_policy.min_num_params=0 \
     actor_rollout_ref.rollout.name=vllm_omni \
-    actor_rollout_ref.rollout.mode=sync \
     actor_rollout_ref.rollout.n=16 \
     actor_rollout_ref.rollout.temperature=0.7 \
     actor_rollout_ref.rollout.top_p=0.8 \
@@ -140,7 +145,7 @@ export VERL_USE_EXTERNAL_MODULES=verl_omni
     actor_rollout_ref.rollout.layered_summon=true \
     actor_rollout_ref.rollout.enforce_eager=true \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=2 \
-    actor_rollout_ref.rollout.agent.num_workers=16 \
+    "actor_rollout_ref.rollout.agent.num_workers=${NUM_AGENT_WORKERS}" \
     actor_rollout_ref.rollout.agent.default_agent_loop=omni_duplex_agent \
     "+actor_rollout_ref.rollout.engine_kwargs.vllm_omni.seed=${SEED}" \
     +actor_rollout_ref.rollout.engine_kwargs.vllm_omni.output_mode=duplex \
@@ -164,6 +169,7 @@ export VERL_USE_EXTERNAL_MODULES=verl_omni
     algorithm.norm_adv_by_std_in_grpo=false \
     algorithm.use_kl_in_reward=false \
     reward.num_workers=1 \
+    reward.reward_manager.source=register \
     reward.reward_manager.name=minicpm_naive \
     reward.custom_reward_function.path=verl_omni/utils/reward_score/duplex_turn_taking.py \
     reward.custom_reward_function.name=compute_score_duplex_turn_taking \

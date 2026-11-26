@@ -91,6 +91,18 @@ def test_mined_specs_roundtrip_through_the_dataset_row():
     assert DuplexEpisodeSpec.from_dict(interruption.to_dict()).event == interruption.event
 
 
+def test_negative_lead_clamps_to_the_track_start():
+    # A 2 s lead before a pause at 0.62 s would start at -1.38 s.
+    words = [
+        WordTimestamp(text="a", start_s=0.0, end_s=0.62),
+        WordTimestamp(text="b", start_s=1.24, end_s=2.0),
+    ]
+    specs = mine_episodes(words, [], user_audio_ref="a.wav", dialogue_id="d", axes=(AXIS_PAUSE,))
+    pause = specs[0]
+    assert pause.start_s == 0.0
+    assert pause.event.pause_window_s == (pytest.approx(0.62), pytest.approx(1.24))
+
+
 def test_pause_mining_skips_short_silences():
     words = [WordTimestamp("a", 0.0, 0.5), WordTimestamp("b", 1.0, 1.5)]  # 0.5 s gap only
     specs = mine_episodes(words, [], user_audio_ref="a.wav", dialogue_id="dd", axes=[AXIS_PAUSE])

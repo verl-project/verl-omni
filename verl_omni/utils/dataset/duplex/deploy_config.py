@@ -35,10 +35,69 @@ STAGE_INIT_TIMEOUT_ENV = "VERL_OMNI_DUPLEX_STAGE_INIT_TIMEOUT"
 __all__ = [
     "STAGE_INIT_TIMEOUT_DEFAULT",
     "STAGE_INIT_TIMEOUT_ENV",
+    "build_duplex_gate_engine",
+    "duplex_engine_kwargs",
     "stage_init_timeout_from_env",
     "write_deploy_config_for",
     "write_duplex_deploy_config",
 ]
+
+
+def duplex_engine_kwargs(
+    *,
+    model: str,
+    deploy_config: str,
+    tensor_parallel_size: int,
+    gpu_memory_utilization: float,
+    stage_init_timeout: int,
+) -> dict[str, Any]:
+    """Engine-client kwargs for a standalone duplex gate.
+
+    The duplex KV window refuses a prefix-cached cache config. The training
+    recipe sets ``enable_prefix_caching=false``; the gates must too.
+
+    Args:
+        model: Checkpoint directory.
+        deploy_config: Path written by :func:`write_duplex_deploy_config`.
+        tensor_parallel_size: Per-stage tensor parallel size.
+        gpu_memory_utilization: Fraction of GPU memory the engine may use.
+        stage_init_timeout: Seconds to wait for a cold duplex stage.
+
+    Returns:
+        Keyword arguments for ``DuplexOmni``.
+    """
+    return {
+        "model": model,
+        "trust_remote_code": True,
+        "tensor_parallel_size": tensor_parallel_size,
+        "gpu_memory_utilization": gpu_memory_utilization,
+        "enforce_eager": True,
+        "enable_prefix_caching": False,
+        "deploy_config": deploy_config,
+        "stage_init_timeout": stage_init_timeout,
+    }
+
+
+def build_duplex_gate_engine(
+    *,
+    model: str,
+    deploy_config: str,
+    tensor_parallel_size: int,
+    gpu_memory_utilization: float,
+    stage_init_timeout: int,
+):
+    """Construct the standalone gate ``DuplexOmni`` from :func:`duplex_engine_kwargs`."""
+    from verl_omni.pipelines.minicpm.duplex_rollout_adapter import require_duplex_vllm_omni
+
+    return require_duplex_vllm_omni()(
+        **duplex_engine_kwargs(
+            model=model,
+            deploy_config=deploy_config,
+            tensor_parallel_size=tensor_parallel_size,
+            gpu_memory_utilization=gpu_memory_utilization,
+            stage_init_timeout=stage_init_timeout,
+        )
+    )
 
 
 def stage_init_timeout_from_env() -> int:

@@ -83,6 +83,44 @@ def test_padded_duplex_batch_receives_explicit_bounds(batch_size):
         assert set(data["input_ids"][sample][start:end].tolist()) == {PLACEHOLDER}
 
 
+def test_duplex_clips_are_tensors_on_the_batch_device_including_nested_extra_fields():
+    prompt_len = 4
+    input_ids = _padded_ids(1, prompt_len, [[(5, 15)]])
+    payload = _payload([[prompt_len + 1, prompt_len + 11]])
+    batches = [
+        {DUPLEX_REPLAY_KEY: [payload]},
+        {"extra_fields": [{"duplex_replay": payload}]},
+        {"non_tensor_batch": {"extra_fields": [{"duplex_replay": payload}]}},
+    ]
+    stack = TensorDict({}, batch_size=[1])
+    stack["extra_fields"] = NonTensorStack.from_list([NonTensorData({"duplex_replay": payload})])
+    batches.append(stack)
+    for micro_batch in batches:
+        result = MiniCPMThinkerAdapter.prepare_model_inputs(
+            {"input_ids": input_ids, "position_ids": torch.arange(input_ids.shape[1])[None]},
+            micro_batch,
+            model_config=None,
+        )
+        data = result["data"]
+        clip = data["audio_features"][0][0]
+        lens = data["audio_feature_lens"][0][0]
+        assert isinstance(clip, torch.Tensor) and clip.device == input_ids.device
+        assert isinstance(lens, torch.Tensor) and lens.device == input_ids.device and lens.dtype == torch.long
+
+
+def test_mixed_extra_fields_fail_closed_in_either_order():
+    input_ids = _padded_ids(2, 4, [[(5, 15)], [(5, 15)]])
+    payload = _payload([[5, 15]])
+    position_ids = torch.arange(input_ids.shape[1]).expand(2, -1).contiguous()
+    for extra in ([{}, {"duplex_replay": payload}], [{"duplex_replay": payload}, {}]):
+        with pytest.raises(ValueError, match="mixes duplex and non-duplex"):
+            MiniCPMThinkerAdapter.prepare_model_inputs(
+                {"input_ids": input_ids, "position_ids": position_ids},
+                {"extra_fields": extra},
+                model_config=None,
+            )
+
+
 def test_packed_duplex_batch_shifts_bounds_by_packed_offsets():
     prompt_len = 2
     spans = [[(3, 5)], [(3, 5)]]
