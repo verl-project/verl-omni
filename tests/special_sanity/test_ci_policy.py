@@ -62,6 +62,8 @@ def repo(tmp_path: Path) -> Path:
         ({SOURCE_PATH: "feature\n"}, None),
         ({SANITY_CHECK: "updated\n"}, None),
         ({SOURCE_PATH: "feature\n", "tests/special_sanity/check_new.py": "new\n"}, None),
+        ({SOURCE_PATH: "feature\n", "tests/special_sanity/test_new.py": "def test_ok(): pass\n"}, None),
+        ({SOURCE_PATH: "feature\n", "tests/workers/conftest.py": "# local fixture\n"}, None),
         ({SOURCE_PATH: "feature\n", SANITY_CHECK: "weakened\n"}, SANITY_CHECK),
         ({SOURCE_PATH: "feature\n", SANITY_CHECK: None}, SANITY_CHECK),
         (
@@ -69,14 +71,45 @@ def repo(tmp_path: Path) -> Path:
             SANITY_CHECK,
         ),
         ({SOURCE_PATH: "feature\n", WORKFLOW: "changed\n"}, WORKFLOW),
+        ({SOURCE_PATH: "feature\n", ".github/workflows/evil.yml": "on: pull_request\n"}, ".github/workflows/evil.yml"),
+        (
+            {SOURCE_PATH: "feature\n", ".github/actions/evil/action.yml": "runs: {}\n"},
+            ".github/actions/evil/action.yml",
+        ),
+        (
+            {
+                SOURCE_PATH: "feature\n",
+                "tests/special_sanity/conftest.py": "def pytest_collection_modifyitems(): pass\n",
+            },
+            "tests/special_sanity/conftest.py",
+        ),
+        (
+            {SOURCE_PATH: "feature\n", "tests/special_sanity/check_ast_rules/__init__.py": "def findings(): pass\n"},
+            "tests/special_sanity/check_ast_rules/__init__.py",
+        ),
+        (
+            {SOURCE_PATH: "feature\n", "tests/special_sanity/subprocess.py": "pass\n"},
+            "tests/special_sanity/subprocess.py",
+        ),
         ({SOURCE_PATH: "feature\n", ".pre-commit-config.yaml": "repos: []\n"}, ".pre-commit-config.yaml"),
         ({SOURCE_PATH: "feature\n", "ruff.toml": "lint.ignore = ['F401']\n"}, "ruff.toml"),
+        ({SOURCE_PATH: "feature\n", "verl_omni/ruff.toml": "lint.ignore = ['ALL']\n"}, "verl_omni/ruff.toml"),
+        ({SOURCE_PATH: "feature\n", "verl_omni/.ruff.toml": "lint.ignore = ['ALL']\n"}, "verl_omni/.ruff.toml"),
+        ({SOURCE_PATH: "feature\n", "verl_omni/pyproject.toml": "[tool.ruff]\n"}, "verl_omni/pyproject.toml"),
         ({SOURCE_PATH: "feature\n", ".ruff.toml": "lint.ignore = ['F401']\n"}, ".ruff.toml"),
         ({SOURCE_PATH: "feature\n", "mypy.ini": "[mypy]\nignore_errors = True\n"}, "mypy.ini"),
+        ({SOURCE_PATH: "feature\n", "setup.cfg": "[tool:pytest]\n"}, "setup.cfg"),
+        ({SOURCE_PATH: "feature\n", "pytest.ini": "[pytest]\n"}, "pytest.ini"),
+        ({SOURCE_PATH: "feature\n", "conftest.py": "pass\n"}, "conftest.py"),
         ({"tests/workers/test_example_on_cpu.py": "def test_ok(): pass\n", WORKFLOW: "updated\n"}, None),
         ({SANITY_CHECK: "updated\n", "tests/special_sanity/test_existing.py": "def test_ok(): pass\n"}, None),
         ({SOURCE_PATH: "feature\n", "pyproject.toml": RUFF_CONFIG.replace('"F"', '"E"')}, "pyproject.toml"),
         ({SOURCE_PATH: "feature\n", "pyproject.toml": RUFF_CONFIG + "[tool.mypy]\nignore_errors = true\n"}, "mypy"),
+        (
+            {SOURCE_PATH: "feature\n", "pyproject.toml": RUFF_CONFIG + "[tool.pytest.ini_options]\n"},
+            "pyproject.toml",
+        ),
+        ({SOURCE_PATH: "feature\n", "pyproject.toml": "not valid toml ===\n"}, "pyproject.toml"),
         ({SOURCE_PATH: "feature\n", "pyproject.toml": RUFF_CONFIG.replace('"example"', '"other"')}, None),
     ],
 )
@@ -170,3 +203,28 @@ def test_lint_workflow_runs_fast_native_sanity_hooks() -> None:
         "compileall",
     ):
         assert hook in lint_run
+
+
+def test_ci_workflow_safety_and_coverage_guards() -> None:
+    protect = _workflow("protect-ci-checks.yml")
+    assert "concurrency" in protect
+    assert "edited" in protect["on"]["pull_request_target"]["types"]
+    checkout = protect["jobs"]["protect-ci-checks"]["steps"][0]
+    assert checkout["with"]["ref"] == "${{ github.sha }}"
+
+    gpu_smoke = _workflow("gpu_smoke.yml")
+    gpu_pr_lint_if = gpu_smoke["jobs"]["pr_lint"]["if"]
+    for label in ("ready-for-ci", "ci-core", "ci-e2e-omni", "ci-e2e-diffusion"):
+        assert label in gpu_pr_lint_if
+
+    sanity = _workflow("sanity.yml")
+    sanity_install = next(
+        step["run"]
+        for step in sanity["jobs"]["sanity"]["steps"]
+        if step.get("name") == "Install the current repository"
+    )
+    assert "ruff==0.12.2" in sanity_install
+
+    cpu_tests = _workflow("cpu_unit_tests.yml")
+    for event_name in ("push", "pull_request"):
+        assert "tests/special_e2e/check_diffusion_numerical_health.py" in cpu_tests["on"][event_name]["paths"]

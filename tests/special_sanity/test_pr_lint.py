@@ -221,6 +221,7 @@ def test_ruff_keeps_reward_cache_and_test_scopes_distinct() -> None:
     assert not list(_ruff_findings(SMOKE_PATH, b"def test_example():\n    assert work() == 1\n"))
 
 
+@pytest.mark.skipif(shutil.which("ruff") is None, reason="The CI workflow supplies pinned Ruff.")
 @pytest.mark.parametrize(
     ("root_import", "expected"),
     [
@@ -230,6 +231,7 @@ def test_ruff_keeps_reward_cache_and_test_scopes_distinct() -> None:
         ('import verl_omni.pipelines.example as example\n__all__ = ["example"]\n', set()),
         ("from verl_omni.pipelines import example as example\n", set()),
         ("from .example.training import Adapter as Adapter\n", set()),
+        ("try:\n    from . import example as example\nexcept ImportError:\n    pass\n", set()),
         ("def unused():\n    from . import example\n    return example\n", {"VO010"}),
         ("if TYPE_CHECKING:\n    from . import example as example\n", {"VO010"}),
         ('"from . import example"\n', {"VO010"}),
@@ -254,6 +256,7 @@ def test_pipeline_package_must_be_imported_from_entrypoint(
     assert {line.split()[1] for line in result.stdout.splitlines() if "VO010" in line} == expected
 
 
+@pytest.mark.skipif(shutil.which("ruff") is None, reason="The CI workflow supplies pinned Ruff.")
 def test_pipeline_registration_checks_deletion_and_legacy_baselines(tmp_path: Path) -> None:
     _git(tmp_path, "init", "-q")
     pipelines = tmp_path / "verl_omni/pipelines"
@@ -272,6 +275,7 @@ def test_pipeline_registration_checks_deletion_and_legacy_baselines(tmp_path: Pa
     assert "/legacy/" not in result.stdout and "/schedulers/" not in result.stdout
 
 
+@pytest.mark.skipif(shutil.which("ruff") is None, reason="The CI workflow supplies pinned Ruff.")
 def test_pipeline_scan_never_imports_candidate_packages(tmp_path: Path) -> None:
     _git(tmp_path, "init", "-q")
     (tmp_path / "base.txt").write_text("base", encoding="utf-8")
@@ -321,7 +325,7 @@ def test_one_pr_reports_all_layers_and_turns_green_after_fixes(tmp_path: Path) -
         "verl_omni/pipelines/__init__.py": ("", "from . import example as example\n"),
         "verl_omni/workers/config/example.py": (
             "@dataclass\nclass ExampleConfig:\n    pass\n",
-            "@dataclass\nclass ExampleConfig(BaseConfig):\n    pass\n",
+            '__all__ = ["ExampleConfig"]\n@dataclass\nclass ExampleConfig(BaseConfig):\n    pass\n',
         ),
         "verl_omni/reward_loop/reward_manager/example.py": (
             "import httpx\nhttpx.get(endpoint)\n",
@@ -447,7 +451,6 @@ def test_live_repo_baseline_respects_precision_bounds() -> None:
     assert counts["EX005"] <= 84
     assert counts["EX006"] <= 5
     assert counts["EX008"] <= 1
-    assert counts["EX007"] == 0
     tracked_set = set(tracked)
     variant_copies = 0
     for rel in tracked:
@@ -460,6 +463,22 @@ def test_live_repo_baseline_respects_precision_bounds() -> None:
         if base_rel in tracked_set and not delegates_to_base_script((root / rel).read_bytes(), base_name):
             variant_copies += 1
     assert variant_copies <= 17
+
+    test_files = subprocess.check_output(["git", "-C", str(root), "ls-files", "tests"], text=True).splitlines()
+    test_counts: Counter[str] = Counter()
+    for rel in test_files:
+        if not rel.endswith(".py"):
+            continue
+        raw = (root / rel).read_bytes()
+        test_counts.update(code for _ln, code, _msg in example_findings(rel, raw))
+        tree = ast.parse(raw)
+        test_counts.update(code for _ln, code, _msg in ast_findings(rel, tree))
+        test_counts.update(code for _ln, code, _msg in comment_findings(rel, raw, tree=tree))
+    assert not {
+        code: test_counts[code] for code in ("VO006", "VO007", "VO013", "VO014", "CM001", "CM005") if test_counts[code]
+    }
+    assert test_counts["CM004"] <= 7
+    assert test_counts["CM002"] <= 170
 
 
 RULE_MATRIX: dict[str, tuple[str, bytes, str, bytes]] = {
@@ -517,7 +536,7 @@ RULE_MATRIX: dict[str, tuple[str, bytes, str, bytes]] = {
         "verl_omni/workers/config/diffusion/ex.py",
         b"@dataclass\nclass Cfg:\n    pass\n",
         "verl_omni/workers/config/diffusion/ex.py",
-        b"@dataclass\nclass Cfg(BaseConfig):\n    steps: int = 1\n",
+        b'__all__ = ["Cfg"]\n@dataclass\nclass Cfg(BaseConfig):\n    steps: int = 1\n',
     ),
     "VO012": (
         "verl_omni/reward_loop/reward_manager/ex.py",
@@ -638,6 +657,8 @@ def test_rule_matrix_covers_every_declared_code() -> None:
 def test_every_declared_rule_code_triggers_and_clears_on_minimal_fix(tmp_path: Path, code: str) -> None:
     bad_path, bad_bytes, good_path, good_bytes = RULE_MATRIX[code]
     if code == "VO010":
+        if shutil.which("ruff") is None:
+            pytest.skip("The CI workflow supplies pinned Ruff.")
         _git(tmp_path, "init", "-q")
         init_file = tmp_path / good_path
         init_file.parent.mkdir(parents=True, exist_ok=True)
@@ -733,3 +754,80 @@ def test_accelerator_variant_recipes_must_wrap_existing_gpu_base(tmp_path: Path)
     head = _commit(tmp_path)
     good = subprocess.run([sys.executable, str(CHECKER), base, head], cwd=tmp_path, capture_output=True, text=True)
     assert good.returncode == 0, good.stdout + good.stderr
+
+
+@pytest.mark.skipif(shutil.which("ruff") is None, reason="The CI workflow supplies pinned Ruff.")
+def test_baseline_preserves_line_shifted_duplicates_subdir_cwd_latin1_unborn_and_renames(tmp_path: Path) -> None:
+    _git(tmp_path, "init", "-q")
+    sub = tmp_path / "tests"
+    sub.mkdir(parents=True)
+    # Staged mode works on an unborn HEAD before any commit exists.
+    (sub / "test_unborn_cpu.py").write_text("", encoding="utf-8")
+    _git(tmp_path, "add", "tests/test_unborn_cpu.py")
+    unborn = subprocess.run([sys.executable, str(CHECKER)], cwd=sub, capture_output=True, text=True)
+    assert unborn.returncode == 1
+    assert "VO007" in unborn.stdout
+    (sub / "test_unborn_cpu.py").unlink()
+    _git(tmp_path, "reset", "-q")
+
+    recipe = tmp_path / "examples/demo/run_dup.sh"
+    recipe.parent.mkdir(parents=True)
+    recipe.write_text(
+        "#!/usr/bin/env bash\nset -euo pipefail\npython3 t.py \\\n"
+        '    trainer.total_epochs=1 \\\n    trainer.total_epochs=2 "$@"\n',
+        encoding="utf-8",
+    )
+    legacy_npu = tmp_path / "examples/old/run_legacy_npu.sh"
+    legacy_npu.parent.mkdir(parents=True)
+    (tmp_path / "examples/old/run_legacy.sh").write_text(
+        '#!/usr/bin/env bash\nset -euo pipefail\npython3 t.py "$@"\n', encoding="utf-8"
+    )
+    legacy_npu.write_text('#!/usr/bin/env bash\nset -euo pipefail\npython3 t.py "$@"\n', encoding="utf-8")
+    core = tmp_path / CORE_PATH
+    core.parent.mkdir(parents=True)
+    core.write_text("import os\nimport os\n", encoding="utf-8")
+    base = _commit(tmp_path)
+
+    # Line shifts above EX007/F811 preserve baseline; latin-1 yields E999 cleanly; renames keep legacy EX009 quiet.
+    recipe.write_text(
+        "#!/usr/bin/env bash\nset -euo pipefail\n# comment shift\npython3 t.py \\\n"
+        '    trainer.total_epochs=1 \\\n    trainer.total_epochs=2 "$@"\n',
+        encoding="utf-8",
+    )
+    core.write_text("# shift\nimport os\nimport os\n", encoding="utf-8")
+    moved = tmp_path / "examples/new/run_legacy_npu.sh"
+    moved.parent.mkdir(parents=True)
+    _git(tmp_path, "mv", "examples/old/run_legacy_npu.sh", "examples/new/run_legacy_npu.sh")
+    latin1 = tmp_path / "verl_omni/trainer/diffusion/latin1_file.py"
+    latin1.write_bytes(b"# -*- coding: latin-1 -*-\nx = 'caf\xe9'\n")
+    head = _commit(tmp_path)
+
+    # Running from subdirectory catches latin-1 E999 without spurious EX007/F811/EX009.
+    res = subprocess.run([sys.executable, str(CHECKER), base, head], cwd=sub, capture_output=True, text=True)
+    assert res.returncode == 1, res.stdout + res.stderr
+    lines = res.stdout.splitlines()
+    assert len(lines) == 1 and "latin1_file.py" in lines[0] and "E999" in lines[0]
+
+
+@pytest.mark.skipif(shutil.which("ruff") is None, reason="The CI workflow supplies pinned Ruff.")
+def test_moved_decorated_skipif_is_not_masked_by_baseline(tmp_path: Path) -> None:
+    _git(tmp_path, "init", "-q")
+    test_file = tmp_path / "tests/workers/test_dec_on_cpu.py"
+    test_file.parent.mkdir(parents=True)
+    test_file.write_text(
+        "import pytest\nimport torch\n\n"
+        '@pytest.mark.skipif(not torch.cuda.is_available(), reason="gpu")\n'
+        "def test_a():\n    pass\n\ndef test_b():\n    pass\n",
+        encoding="utf-8",
+    )
+    base = _commit(tmp_path)
+    test_file.write_text(
+        "import pytest\nimport torch\n\ndef test_a():\n    pass\n\n"
+        '@pytest.mark.skipif(not torch.cuda.is_available(), reason="gpu")\n'
+        "def test_b():\n    pass\n",
+        encoding="utf-8",
+    )
+    head = _commit(tmp_path)
+    res = subprocess.run([sys.executable, str(CHECKER), base, head], cwd=tmp_path, capture_output=True, text=True)
+    assert res.returncode == 1
+    assert "VO013" in res.stdout

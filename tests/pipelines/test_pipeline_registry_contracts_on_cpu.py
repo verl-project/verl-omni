@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import ast
+import inspect
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -30,6 +31,15 @@ _STATELESS_BASES = frozenset(
         "DiffusionI2IModelBase",
         "DiffusionModelARBase",
         "OmniModelBase",
+        "OmniRolloutPipelineBase",
+    }
+)
+_OFFLINE_ONLY_DIFFUSION_KEYS = frozenset({("StableDiffusion3Pipeline", "dpo")})
+_OPTIONAL_VLLM_OMNI_ROLLOUT_KEYS = frozenset(
+    {
+        ("MiniMaxH3ImagePipeline", "diffusion_nft"),
+        ("MiniMaxH3ImagePipeline", "flow_grpo"),
+        ("WanPipeline", "dance_grpo"),
     }
 )
 _ALLOWED_METHOD_DECORATORS = frozenset(
@@ -65,6 +75,62 @@ def _class_leaf_bases(node: ast.ClassDef) -> set[str]:
     return {_qualified_name(base).rsplit(".", 1)[-1] for base in node.bases if _qualified_name(base)}
 
 
+def _extract_register_key(decorator: ast.expr, expected_base: str) -> tuple[str, str] | None:
+    if not (
+        isinstance(decorator, ast.Call)
+        and isinstance(decorator.func, ast.Attribute)
+        and decorator.func.attr == "register"
+        and _qualified_name(decorator.func.value).rsplit(".", 1)[-1] == expected_base
+    ):
+        return None
+    if (
+        not decorator.args
+        or not isinstance(decorator.args[0], ast.Constant)
+        or not isinstance(decorator.args[0].value, str)
+    ):
+        return None
+    arch = decorator.args[0].value
+    algo = ""
+    if (
+        len(decorator.args) >= 2
+        and isinstance(decorator.args[1], ast.Constant)
+        and isinstance(decorator.args[1].value, str)
+    ):
+        algo = decorator.args[1].value
+    else:
+        for kw in decorator.keywords:
+            if kw.arg == "algorithm" and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
+                algo = kw.value.value
+                break
+    return (arch, algo) if algo else None
+
+
+def _ast_register_keys(expected_base: str) -> dict[tuple[str, str], tuple[str, str]]:
+    found: dict[tuple[str, str], tuple[str, str]] = {}
+    for pkg in _concrete_pipeline_packages():
+        for py_file in sorted((_PIPELINES_DIR / pkg).rglob("*.py")):
+            tree = ast.parse(py_file.read_text(encoding="utf-8"), filename=str(py_file))
+            for node in tree.body:
+                if not isinstance(node, ast.ClassDef):
+                    continue
+                for decorator in node.decorator_list:
+                    key = _extract_register_key(decorator, expected_base)
+                    if key is not None:
+                        found[key] = (pkg, node.name)
+    return found
+
+
+def _assert_stateless_class(registry_name: str, key: object, adapter_cls: type) -> None:
+    assert "__init__" not in adapter_cls.__dict__, f"{registry_name}{key} defines __init__"
+    for attr_name, raw_attr in adapter_cls.__dict__.items():
+        if attr_name.startswith("__") and attr_name.endswith("__"):
+            continue
+        if isinstance(raw_attr, classmethod | staticmethod | property):
+            continue
+        if inspect.isfunction(raw_attr):
+            pytest.fail(f"{registry_name} adapter {key} defines plain instance method {attr_name!r}")
+
+
 def test_every_pipeline_package_is_imported_and_exported_at_entrypoint() -> None:
     packages = _concrete_pipeline_packages()
     assert packages, "Expected at least one concrete pipeline package under verl_omni/pipelines/"
@@ -75,7 +141,9 @@ def test_every_pipeline_package_is_imported_and_exported_at_entrypoint() -> None
     for node in tree.body:
         if isinstance(node, ast.ImportFrom) and node.level == 1 and node.module is None:
             imported.update(alias.name for alias in node.names)
-        elif isinstance(node, ast.Assign | ast.AugAssign):
+        elif (
+            isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "__all__" for t in node.targets)
+        ) or (isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name) and node.target.id == "__all__"):
             source = ast.unparse(node)
             for pkg in packages:
                 if f"{pkg}.__all__" in source:
@@ -134,34 +202,40 @@ def test_every_training_adapter_in_tree_is_stateless() -> None:
 
 def test_every_registered_vllm_rollout_adapter_declares_or_inherits_io_spec() -> None:
     classes: dict[str, tuple[str, set[str], bool]] = {}
+    registered: list[tuple[str, str]] = []
     for pkg in _concrete_pipeline_packages():
-        rollout_file = _PIPELINES_DIR / pkg / "vllm_omni_rollout_adapter.py"
-        if not rollout_file.is_file():
-            continue
-        tree = ast.parse(rollout_file.read_text(encoding="utf-8"), filename=str(rollout_file))
-        for node in tree.body:
-            if not isinstance(node, ast.ClassDef):
-                continue
-            is_registered = any(
-                isinstance(dec, ast.Call)
-                and isinstance(dec.func, ast.Attribute)
-                and dec.func.attr == "register"
-                and _qualified_name(dec.func.value).rsplit(".", 1)[-1] == "VllmOmniPipelineBase"
-                for dec in node.decorator_list
-            )
-            if not is_registered:
-                continue
-            declares_spec = any(
-                isinstance(stmt, ast.Assign)
-                and any(isinstance(t, ast.Name) and t.id == "diffusion_io_spec" for t in stmt.targets)
-                or isinstance(stmt, ast.AnnAssign)
-                and isinstance(stmt.target, ast.Name)
-                and stmt.target.id == "diffusion_io_spec"
-                for stmt in node.body
-            )
-            classes[node.name] = (pkg, _class_leaf_bases(node), declares_spec)
+        for py_file in sorted((_PIPELINES_DIR / pkg).rglob("*.py")):
+            tree = ast.parse(py_file.read_text(encoding="utf-8"), filename=str(py_file))
+            for node in tree.body:
+                if not isinstance(node, ast.ClassDef):
+                    continue
+                is_registered = any(
+                    isinstance(dec, ast.Call)
+                    and isinstance(dec.func, ast.Attribute)
+                    and dec.func.attr == "register"
+                    and _qualified_name(dec.func.value).rsplit(".", 1)[-1] == "VllmOmniPipelineBase"
+                    for dec in node.decorator_list
+                )
+                declares_spec = any(
+                    (
+                        isinstance(stmt, ast.Assign)
+                        and any(isinstance(t, ast.Name) and t.id == "diffusion_io_spec" for t in stmt.targets)
+                        and not (isinstance(stmt.value, ast.Constant) and stmt.value.value is None)
+                    )
+                    or (
+                        isinstance(stmt, ast.AnnAssign)
+                        and isinstance(stmt.target, ast.Name)
+                        and stmt.target.id == "diffusion_io_spec"
+                        and stmt.value is not None
+                        and not (isinstance(stmt.value, ast.Constant) and stmt.value.value is None)
+                    )
+                    for stmt in node.body
+                )
+                classes[node.name] = (pkg, _class_leaf_bases(node), declares_spec)
+                if is_registered:
+                    registered.append((pkg, node.name))
 
-    assert classes, "Expected registered VllmOmniPipelineBase adapters under verl_omni/pipelines/"
+    assert registered, "Expected registered VllmOmniPipelineBase adapters under verl_omni/pipelines/"
 
     def _has_spec(name: str, seen: set[str]) -> bool:
         if name in seen or name not in classes:
@@ -170,10 +244,40 @@ def test_every_registered_vllm_rollout_adapter_declares_or_inherits_io_spec() ->
         _pkg, bases, declares = classes[name]
         return declares or any(_has_spec(base, seen) for base in bases)
 
-    missing = sorted(
-        f"{pkg}:{name}" for name, (pkg, _bases, _declares) in classes.items() if not _has_spec(name, set())
-    )
+    missing = sorted(f"{pkg}:{name}" for pkg, name in registered if not _has_spec(name, set()))
     assert not missing, f"Registered rollout adapters missing diffusion_io_spec declaration: {missing}"
+
+
+def test_every_rollout_adapter_module_is_imported_by_package_init() -> None:
+    missing_init_imports: list[str] = []
+    for pkg in _concrete_pipeline_packages():
+        rollout_file = _PIPELINES_DIR / pkg / "vllm_omni_rollout_adapter.py"
+        if not rollout_file.is_file():
+            continue
+        init_tree = ast.parse((_PIPELINES_DIR / pkg / "__init__.py").read_text(encoding="utf-8"))
+        imports_rollout = any(
+            (isinstance(node, ast.ImportFrom) and node.module == "vllm_omni_rollout_adapter")
+            or (
+                isinstance(node, ast.Import)
+                and any(alias.name.endswith(".vllm_omni_rollout_adapter") for alias in node.names)
+            )
+            for node in ast.walk(init_tree)
+        )
+        if not imports_rollout:
+            missing_init_imports.append(pkg)
+    assert not missing_init_imports, (
+        f"Pipeline packages with vllm_omni_rollout_adapter.py not imported in __init__.py: {missing_init_imports}"
+    )
+
+
+def test_online_diffusion_adapters_pair_with_vllm_rollout_registrations() -> None:
+    train_keys = _ast_register_keys("DiffusionModelBase")
+    rollout_keys = _ast_register_keys("VllmOmniPipelineBase")
+    assert train_keys and rollout_keys
+    missing_rollout = set(train_keys) - set(rollout_keys) - _OFFLINE_ONLY_DIFFUSION_KEYS
+    extra_rollout = set(rollout_keys) - set(train_keys)
+    assert not missing_rollout, f"Online DiffusionModelBase adapters missing rollout registration: {missing_rollout}"
+    assert not extra_rollout, f"Rollout adapters missing DiffusionModelBase registration: {extra_rollout}"
 
 
 def test_runtime_registries_satisfy_stateless_and_io_spec_contracts() -> None:
@@ -183,28 +287,33 @@ def test_runtime_registries_satisfy_stateless_and_io_spec_contracts() -> None:
         DiffusionModelARBase,
         DiffusionModelBase,
         OmniModelBase,
+        OmniRolloutPipelineBase,
         VllmOmniPipelineBase,
     )
     from verl_omni.pipelines.rollout_media import DiffusionIOSpec
 
     assert DiffusionModelBase._registry, "Expected built-in DiffusionModelBase registrations"
     for key, adapter_cls in DiffusionModelBase._registry.items():
-        assert "__init__" not in adapter_cls.__dict__, f"{key} defines __init__"
-        for attr_name, raw_attr in adapter_cls.__dict__.items():
-            if attr_name.startswith("__") and attr_name.endswith("__"):
-                continue
-            if callable(raw_attr):
-                pytest.fail(f"DiffusionModelBase adapter {key} defines plain instance method {attr_name!r}")
+        _assert_stateless_class("DiffusionModelBase", key, adapter_cls)
         for required_hook in ("build_scheduler", "set_timesteps", "prepare_model_inputs"):
-            assert callable(getattr(adapter_cls, required_hook, None)), f"{key} missing {required_hook}"
+            hook = getattr(adapter_cls, required_hook, None)
+            assert callable(hook), f"{key} missing {required_hook}"
+            assert not getattr(hook, "__isabstractmethod__", False), f"{key} leaves {required_hook} abstract"
 
     for registry_name, registry in (
         ("DiffusionModelARBase", DiffusionModelARBase._registry),
         ("OmniModelBase", OmniModelBase._registry),
+        ("OmniRolloutPipelineBase", OmniRolloutPipelineBase._registry),
     ):
         for key, adapter_cls in registry.items():
-            assert "__init__" not in adapter_cls.__dict__, f"{registry_name}{key} defines __init__"
+            _assert_stateless_class(registry_name, key, adapter_cls)
 
+    assert VllmOmniPipelineBase._registry, "Expected built-in VllmOmniPipelineBase registrations"
+    expected_rollout = set(_ast_register_keys("VllmOmniPipelineBase")) - _OPTIONAL_VLLM_OMNI_ROLLOUT_KEYS
+    missing_runtime_rollout = expected_rollout - set(VllmOmniPipelineBase._registry)
+    assert not missing_runtime_rollout, (
+        f"Unconditional rollout adapters missing from VllmOmniPipelineBase._registry: {missing_runtime_rollout}"
+    )
     for key, rollout_cls in VllmOmniPipelineBase._registry.items():
         spec = getattr(rollout_cls, "diffusion_io_spec", None)
         assert isinstance(spec, DiffusionIOSpec), f"VllmOmniPipelineBase{key} must declare DiffusionIOSpec"
@@ -215,6 +324,7 @@ def test_unseen_pipeline_fields_and_artifacts_traverse_real_tq_paths_without_cor
 ) -> None:
     """A new pipeline declaring unseen dense, ragged, and artifact fields needs no shared trainer edits."""
     pytest.importorskip("verl")
+    pytest.importorskip("transfer_queue")
     import torch
     from tensordict import NonTensorStack, TensorDict
     from transfer_queue import KVBatchMeta

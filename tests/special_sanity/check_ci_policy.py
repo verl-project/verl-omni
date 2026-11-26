@@ -15,19 +15,30 @@
 """Keep changes to existing CI checks out of implementation PRs."""
 
 import os
+import re
 import subprocess
 import tomllib
 from argparse import ArgumentParser
+from pathlib import PurePosixPath
 
-PROTECTED_DIRECTORIES = ("tests/special_sanity/", ".github/workflows/", ".github/actions/")
+STRICT_PROTECTED_DIRECTORIES = (".github/workflows/", ".github/actions/")
+SANITY_DIRECTORY = "tests/special_sanity/"
+NEW_SANITY_FILE_RE = re.compile(r"tests/special_sanity/(?:check|test)_[a-z0-9_]+\.py")
 PROTECTED_FILES = {
     ".pre-commit-config.yaml",
     ".github/CODEOWNERS",
     "scripts/generate_trainer_config.sh",
+    "conftest.py",
+    "tests/conftest.py",
+}
+PROTECTED_ANY_DEPTH_FILENAMES = {
     "ruff.toml",
     ".ruff.toml",
     "mypy.ini",
     ".mypy.ini",
+    "setup.cfg",
+    "pytest.ini",
+    "tox.ini",
 }
 IMPLEMENTATION_DIRECTORIES = ("verl_omni/", "examples/")
 
@@ -36,9 +47,24 @@ def _git(*args: str) -> bytes:
     return subprocess.check_output(["git", *args])
 
 
-def _lint_config(revision: str) -> tuple[dict | None, dict | None]:
-    tools = tomllib.loads(_git("show", f"{revision}:pyproject.toml").decode("utf-8")).get("tool", {})
-    return tools.get("ruff"), tools.get("mypy")
+def _lint_config(revision: str) -> tuple[dict | None, dict | None, dict | None] | object:
+    try:
+        tools = tomllib.loads(_git("show", f"{revision}:pyproject.toml").decode("utf-8")).get("tool", {})
+    except (tomllib.TOMLDecodeError, UnicodeDecodeError):
+        return object()
+    return tools.get("ruff"), tools.get("mypy"), tools.get("pytest")
+
+
+def _is_protected_check(status: str, path: str) -> str | None:
+    if path in PROTECTED_FILES or path.startswith(STRICT_PROTECTED_DIRECTORIES):
+        return path
+    basename = PurePosixPath(path).name
+    if basename in PROTECTED_ANY_DEPTH_FILENAMES or (basename == "pyproject.toml" and path != "pyproject.toml"):
+        return path
+    if path.startswith(SANITY_DIRECTORY):
+        if status != "A" or not NEW_SANITY_FILE_RE.fullmatch(path):
+            return path
+    return None
 
 
 def mixed_changes(base: str, head: str) -> tuple[list[str], list[str]]:
@@ -52,10 +78,11 @@ def mixed_changes(base: str, head: str) -> tuple[list[str], list[str]]:
 
     checks = []
     for status, path in zip(fields[::2], fields[1::2], strict=True):
-        if path in PROTECTED_FILES or (status != "A" and path.startswith(PROTECTED_DIRECTORIES)):
-            checks.append(path)
+        protected = _is_protected_check(status, path)
+        if protected is not None:
+            checks.append(protected)
         elif path == "pyproject.toml" and (status != "M" or _lint_config(ancestor) != _lint_config(head)):
-            checks.append("pyproject.toml (Ruff or mypy config)")
+            checks.append("pyproject.toml (Ruff, mypy, or pytest config)")
     return (sorted(checks), implementation) if checks else ([], [])
 
 

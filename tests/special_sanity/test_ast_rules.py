@@ -58,7 +58,7 @@ def test_ast_allows_shared_interfaces_and_public_adapter_reuse() -> None:
 @pytest.mark.parametrize(
     ("path", "statement", "expected_codes"),
     [
-        ("verl_omni/utils/diffusion_tq.py", ADAPTER_IMPORT, {"VO001"}),
+        ("verl_omni/workers/diffusion_tq.py", ADAPTER_IMPORT, {"VO001"}),
         ("verl_omni/pipelines/rollout_media.py", ADAPTER_IMPORT, {"VO001"}),
         ("verl_omni/pipelines/__init__.py", ADAPTER_IMPORT, set()),
         ("verl_omni/workers/rollout/strategy.py", "from .. import engine", {"VO002"}),
@@ -178,8 +178,11 @@ def test_cpu_marker_cannot_hide_a_misnamed_cpu_test(source: str, expected: list[
         (ADAPTER, "from verl_omni.pipelines.sibling.common import prepare", []),
         (ADAPTER, "from external import _prepare", []),
         ("verl_omni/utils/reward_score/desync.py", "from .clap import _get_audio", ["VO003"]),
+        ("verl_omni/utils/reward_score/desync.py", "from . import _clap", ["VO003"]),
         ("verl_omni/utils/reward_score/scorers/first.py", "from .second import _Scorer", ["VO003"]),
+        ("verl_omni/utils/reward_score/scorers/first.py", "from ..reward_utils import _get_audio", []),
         ("verl_omni/utils/reward_score/desync.py", "from .reward_utils import _get_audio", []),
+        ("verl_omni/pipelines/foo/sub/mod.py", "from ..common import _helper", []),
         (TEST, "from verl_omni.utils.tracking import _export_video", []),
     ],
 )
@@ -254,6 +257,12 @@ def test_shared_model_dispatch_uses_known_literal_names(path: str, source: str, 
             "class Model(DiffusionModelBase):\n    @staticmethod\n    def __init__():\n        pass",
             ["VO009"],
         ),
+        (
+            "class Model(DiffusionModelBase):\n"
+            "    def __init_subclass__(cls, **kwargs):\n        super().__init_subclass__(**kwargs)\n"
+            "    def __class_getitem__(cls, item):\n        return cls\n",
+            [],
+        ),
     ],
 )
 def test_training_adapters_remain_stateless(source: str, expected: list[str]) -> None:
@@ -266,19 +275,34 @@ def test_training_adapters_remain_stateless(source: str, expected: list[str]) ->
         ("@dataclass\nclass ExampleConfig:\n    pass", ["VO011"]),
         ("@dataclass\nclass ExampleConfig(object):\n    pass", ["VO011"]),
         ("@dataclass(frozen=True)\nclass ExampleConfig(BaseConfig):\n    pass", ["VO011"]),
-        ("@dataclass(frozen=False)\nclass ExampleConfig(ExistingConfig):\n    pass", []),
+        ('__all__ = ["ExampleConfig"]\n@dataclass(frozen=False)\nclass ExampleConfig(ExistingConfig):\n    pass', []),
+        ("@dataclass\nclass ExampleConfig(BaseConfig):\n    steps: int = 1\n", ["VO011"]),
         ("from dataclasses import dataclass as dc\n@dc\nclass ExampleConfig:\n    pass", ["VO011"]),
         ("import dataclasses as dc\n@dc.dataclass\nclass ExampleConfig:\n    pass", ["VO011"]),
         ("__all__ = []\n@dataclass\nclass ExampleConfig(BaseConfig):\n    pass", ["VO011"]),
         ("__all__: list[str] = []\n@dataclass\nclass ExampleConfig(BaseConfig):\n    pass", ["VO011"]),
         ('__all__ = ["ExampleConfig"]\n@dataclass\nclass ExampleConfig(BaseConfig):\n    pass', []),
         ('__all__ = []\n__all__ += ["ExampleConfig"]\n@dataclass\nclass ExampleConfig(BaseConfig):\n    pass', []),
+        ('__all__ = ["Other"] + ["ExampleConfig"]\n@dataclass\nclass ExampleConfig(BaseConfig):\n    pass', []),
+        (
+            '__all__ = ["Other"]\n__all__.append("ExampleConfig")\n'
+            "@dataclass\nclass ExampleConfig(BaseConfig):\n    pass",
+            [],
+        ),
+        (
+            '__all__ = ["Other"]\n__all__.append("Other2")\n@dataclass\nclass ExampleConfig(BaseConfig):\n    pass',
+            ["VO011"],
+        ),
         ("__all__ = list(parent.__all__)\n@dataclass\nclass ExampleConfig(BaseConfig):\n    pass", []),
         ("__all__ = [*parent.__all__]\n@dataclass\nclass ExampleConfig(BaseConfig):\n    pass", []),
         ("__all__ = []\n__all__ += parent.__all__\n@dataclass\nclass ExampleConfig(BaseConfig):\n    pass", []),
         ("__all__ = []\n@dataclass\nclass _PrivateConfig(BaseConfig):\n    pass", []),
         ("class ExampleConfig:\n    pass", []),
-        ("@dataclass\nclass ExampleConfig(BaseConfig):\n    def __post_init__(self):\n        pass", []),
+        (
+            '__all__ = ["ExampleConfig"]\n@dataclass\nclass ExampleConfig(BaseConfig):\n'
+            "    def __post_init__(self):\n        pass",
+            [],
+        ),
     ],
 )
 def test_config_dataclass_contract_has_precise_scope(source: str, expected: list[str]) -> None:
@@ -334,22 +358,64 @@ def test_cuda_skips_use_topology_helpers(source: str, expected: list[str]) -> No
     assert not list(findings("verl_omni/utils/example.py", ast.parse(source)))
 
 
+def test_tests_conftest_with_cpu_mark_is_not_flagged_and_nested_import_does_not_shadow() -> None:
+    assert not list(findings("tests/workers/conftest.py", ast.parse("import pytest\nCPU_MARK = pytest.mark.cpu\n")))
+    shadowed = (
+        "import pytest\nimport torch\n"
+        '@pytest.mark.skipif(not torch.cuda.is_available(), reason="gpu")\n'
+        "def test_gpu():\n    from unittest.mock import MagicMock as torch\n    return torch\n"
+    )
+    assert [code for _ln, code, _msg in findings(TEST, ast.parse(shadowed))] == ["VO013"]
+
+
 @pytest.mark.parametrize(
     ("source", "expected"),
     [
-        ("@dataclass\nclass ExampleConfig(BaseConfig):\n    steps: int\n", ["VO011"]),
-        ("@dataclass\nclass ExampleConfig(BaseConfig):\n    steps: int = field(metadata={'a': 1})\n", ["VO011"]),
-        ("@dataclass\nclass ExampleConfig(BaseConfig):\n    steps: int = field(default=MISSING)\n", ["VO011"]),
-        ("@dataclass\nclass ExampleConfig(BaseConfig):\n    mode: Literal['a', 'b'] = 'a'\n", ["VO011"]),
-        ("@dataclass\nclass ExampleConfig(BaseConfig):\n    TAG: ClassVar[str]\n", []),
+        ('__all__ = ["ExampleConfig"]\n@dataclass\nclass ExampleConfig(BaseConfig):\n    steps: int\n', ["VO011"]),
         (
-            "@dataclass\nclass ExampleConfig(BaseConfig):\n    steps: int = 1\n"
+            '__all__ = ["ExampleConfig"]\n@dataclass\nclass ExampleConfig(BaseConfig):\n'
+            "    steps: int = field(metadata={'a': 1})\n",
+            ["VO011"],
+        ),
+        (
+            '__all__ = ["ExampleConfig"]\n@dataclass\nclass ExampleConfig(BaseConfig):\n'
+            "    steps: int = field(default=MISSING)\n",
+            ["VO011"],
+        ),
+        (
+            '__all__ = ["ExampleConfig"]\n@dataclass\nclass ExampleConfig(BaseConfig):\n'
+            "    steps: int = field(default_factory=MISSING)\n",
+            ["VO011"],
+        ),
+        (
+            '__all__ = ["ExampleConfig"]\nfrom omegaconf import MISSING\n@dataclass\n'
+            "class ExampleConfig(BaseConfig):\n    path: str = MISSING\n",
+            [],
+        ),
+        (
+            '__all__ = ["ExampleConfig"]\n@dataclass\nclass ExampleConfig(BaseConfig):\n'
+            "    mode: Literal['a', 'b'] = 'a'\n",
+            ["VO011"],
+        ),
+        (
+            '__all__ = ["ExampleConfig"]\n@dataclass\nclass ExampleConfig(BaseConfig):\n'
+            "    mode: \"Literal['a', 'b']\" = \"a\"\n",
+            ["VO011"],
+        ),
+        ('__all__ = ["ExampleConfig"]\n@dataclass\nclass ExampleConfig(BaseConfig):\n    TAG: ClassVar[str]\n', []),
+        ('__all__ = ["ExampleConfig"]\n@dataclass\nclass ExampleConfig(BaseConfig):\n    TAG: "ClassVar[str]"\n', []),
+        (
+            '__all__ = ["ExampleConfig"]\n@dataclass\nclass ExampleConfig(BaseConfig):\n    steps: int = 1\n'
             "    def __post_init__(self):\n        pass\n",
             [],
         ),
-        ("@dataclass\nclass SubConfig(ParentConfig):\n    def __post_init__(self):\n        self.x = 1\n", ["VO011"]),
         (
-            "@dataclass\nclass SubConfig(ParentConfig):\n"
+            '__all__ = ["SubConfig"]\n@dataclass\nclass SubConfig(ParentConfig):\n'
+            "    def __post_init__(self):\n        self.x = 1\n",
+            ["VO011"],
+        ),
+        (
+            '__all__ = ["SubConfig"]\n@dataclass\nclass SubConfig(ParentConfig):\n'
             "    def __post_init__(self):\n        super().__post_init__()\n",
             [],
         ),
@@ -363,6 +429,18 @@ def test_config_dataclass_rules_cover_defaults_literal_and_super(source: str, ex
     ("path", "source", "expected"),
     [
         ("verl_omni/pipelines/rollout_request.py", "def build_request():\n    return None\n", ["VO015"]),
+        (
+            "verl_omni/pipelines/rollout_request.py",
+            "from typing import overload\n@overload\ndef build(x: int) -> int: ...\n"
+            '@overload\ndef build(x: str) -> str: ...\ndef build(x):\n    """Build."""\n    return x\n',
+            [],
+        ),
+        (
+            "verl_omni/pipelines/rollout_request.py",
+            'class Request:\n    """Contract."""\n    @property\n    def size(self):\n        return 1\n'
+            "    @size.setter\n    def size(self, v):\n        self._v = v\n",
+            [],
+        ),
         (
             "verl_omni/pipelines/rollout_request.py",
             "class Request:\n    @property\n    def size(self):\n        return 1\n",
@@ -464,6 +542,49 @@ def test_public_api_docstrings_have_zero_private_noise(path: str, source: str, e
             [],
         ),
         ("verl_omni/utils/reward_score/ex.py", "try:\n    run()\nexcept ValueError:\n    return 0.0\n", []),
+        (
+            "verl_omni/utils/reward_score/ex.py",
+            "try:\n    run()\nexcept:\n    if required:\n        raise\n    score = 0.0\n",
+            ["VO016"],
+        ),
+        (
+            "verl_omni/utils/reward_score/ex.py",
+            "try:\n    run()\nexcept ArtifactContractError:\n    if debug:\n        raise\n    return 0.0\n",
+            ["VO016"],
+        ),
+        (
+            "verl_omni/utils/reward_score/ex.py",
+            "try:\n    run()\nexcept Exception:\n    if fallback:\n        return 0.0\n    raise\n",
+            ["VO016"],
+        ),
+        (
+            "verl_omni/utils/reward_score/ex.py",
+            "try:\n    run()\nexcept Exception as exc:\n"
+            "    if not isinstance(exc, ArtifactContractError):\n        raise\n    return 0.0\n",
+            ["VO016"],
+        ),
+        (
+            "verl_omni/utils/reward_score/ex.py",
+            "try:\n    run()\nexcept Exception as exc:\n"
+            "    if isinstance(exc, ArtifactContractError) and strict:\n        raise\n    return 0.0\n",
+            ["VO016"],
+        ),
+        (
+            "verl_omni/utils/reward_score/ex.py",
+            "try:\n    run()\nexcept Exception:\n    score: float = 0.0\n",
+            ["VO016"],
+        ),
+        ("verl_omni/utils/reward_score/ex.py", "try:\n    run()\nexcept Exception:\n    return 0.0, {}\n", ["VO016"]),
+        (
+            "verl_omni/utils/reward_score/ex.py",
+            "try:\n    run()\nexcept Exception:\n    scores.append(0.0)\n",
+            ["VO016"],
+        ),
+        (
+            "verl_omni/utils/reward_score/ex.py",
+            "def _parse_timeout(raw):\n    try:\n        return int(raw)\n    except Exception:\n        return 30\n",
+            [],
+        ),
         ("verl_omni/utils/other.py", "try:\n    run()\nexcept Exception:\n    return 0.0\n", []),
     ],
 )

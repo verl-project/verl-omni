@@ -87,6 +87,19 @@ def test_python_path_literals(source: str, expected: list[str]) -> None:
         ('python trainer.py \\ \n    "$@"', ["EX001"]),
         ('python trainer.py "$@" trainer.total_epochs=1', ["EX002"]),
         ('if true; then\npython trainer.py "$@"', ["EX001"]),
+        ('args=(\n    data.dir=$(pwd)/out\n    "$@"\n)\npython trainer.py "${args[@]}"', []),
+        ('args+=("$@")\npython trainer.py "${args[@]}"', []),
+        ('for arg in "$@"; do echo "$arg"; done\npython trainer.py', ["EX002"]),
+        ('X=$((1 << 2))\nWANDB_API_KEY="secret123456"\npython trainer.py "$@"', ["EX008"]),
+        ('cat <<\\EOF\nhello\nEOF\nWANDB_API_KEY="secret123456"\npython trainer.py "$@"', ["EX008"]),
+        ('cat <<- EOF\n\thello\n\tEOF\nWANDB_API_KEY="secret123456"\npython trainer.py "$@"', ["EX008"]),
+        ('# comment ends with \\\nexec bash "$SCRIPT_DIR/run_base.sh" "$@"', []),
+        ('echo \\\\\npkill -9 ray\npython trainer.py "$@"', ["EX008"]),
+        ("awk '\nBEGIN { a.b=1 }\n' input.txt\npython trainer.py \"$@\"", []),
+        ('echo "Example: MODEL=/home/alice/weights"\npython trainer.py "$@"', []),
+        ('X=${X-/home/alice/weights}\npython trainer.py "$@"', ["VO014"]),
+        ('X=${X:+/home/alice/weights}\npython trainer.py "$@"', ["VO014"]),
+        ('PYTHONPATH="/opt:/home/alice/lib"\npython trainer.py "$@"', ["VO014"]),
     ],
 )
 def test_shell_recipe_checks(source: str, expected: list[str]) -> None:
@@ -106,6 +119,7 @@ def test_shell_recipe_checks(source: str, expected: list[str]) -> None:
         ("# model_path: /home/alice/weights", []),
         ('model_path: "org/model"', []),
         ('description: "Store weights at /home/alice/weights"', []),
+        ('description: "Example: /home/alice/weights"', []),
     ],
 )
 def test_yaml_path_literals(source: str, expected: list[str]) -> None:
@@ -117,9 +131,13 @@ def test_yaml_path_literals(source: str, expected: list[str]) -> None:
     [
         ("examples/model/reward.PNG", ["EX003"]),
         ("examples/model/video.mp4", ["EX003"]),
+        ("examples/model/clip.mov", ["EX003"]),
         ("examples/model/audio.wav", ["EX003"]),
+        ("examples/model/audio.flac", ["EX003"]),
         ("docs/model/reward.png", []),
         ("examples/model/README_training.md", ["EX004"]),
+        ("examples/model/README-en.md", ["EX004"]),
+        ("examples/model/readme_en.MD", ["EX004"]),
         ("examples/model/README.md", []),
         ("docs/model/README_training.md", []),
     ],
@@ -164,6 +182,32 @@ def test_shell_syntax_inspection_never_executes_commands(tmp_path: Path, monkeyp
         ("examples/model/run_train.sh", '#!/usr/bin/env bash\nset -euo pipefail\npython trainer.py "$@"\n', []),
         ("examples/model/run_train.sh", '#!/usr/bin/env bash\nset -xeuo pipefail\npython trainer.py "$@"\n', []),
         ("examples/model/run_train.sh", '#!/usr/bin/env bash\nset -e\nset -o pipefail\npython trainer.py "$@"\n', []),
+        (
+            "examples/model/run_train.sh",
+            '#!/usr/bin/env bash\nset -e -o pipefail\npython trainer.py "$@"\n',
+            [],
+        ),
+        (
+            "examples/model/run_train.sh",
+            '#!/usr/bin/env bash\nset -o errexit -o pipefail\npython trainer.py "$@"\n',
+            [],
+        ),
+        (
+            "examples/model/run_train.sh",
+            '#!/usr/bin/env bash\nset -o pipefail -e\npython trainer.py "$@"\n',
+            [],
+        ),
+        (
+            "examples/model/run_train.sh",
+            '#!/usr/bin/env bash\ncat <<EOF\nset -euo pipefail\nEOF\npython trainer.py "$@"\n',
+            ["EX005"],
+        ),
+        (
+            "examples/model/run_train.sh",
+            '#!/usr/bin/env bash\r\nset -euo pipefail\r\npython trainer.py "$@"\r\n',
+            ["EX001", "EX005"],
+        ),
+        ("examples/model/RUN_UPPER.SH", 'set -euo pipefail\npython trainer.py "$@"\n', ["EX005"]),
         ("examples/model/setup.sh", "echo ok\n", []),
     ],
 )
@@ -181,6 +225,7 @@ def test_run_shell_recipes_require_bash_shebang_and_errexit(path: str, source: s
             ["EX006"],
         ),
         ("examples/dpo_trainer/qwen3_omni/eval.sh", ".venv/bin/python eval.py\n", ["EX006"]),
+        ("examples/dpo_trainer/qwen3_omni/eval.sh", "PYTHON_BIN=.venv/bin/python\n$PYTHON_BIN eval.py\n", ["EX006"]),
         ("examples/dancegrpo_trainer/data_process/prepare_prompts.py", "x = 1\n", []),
         ("examples/dpo_trainer/qwen3_omni/run_demo.sh", f'{VALID_HEADER}python trainer.py "$@"\n', []),
         ("examples/dpo_trainer/qwen3_omni/eval.sh", "# .venv/bin/python\npython3 eval.py\n", []),
@@ -210,6 +255,23 @@ def test_example_layout_and_portable_python_hygiene(path: str, source: str, expe
         ),
         ('EXTRA_ARGS=(\n    +reward.x=1\n    +reward.y=2\n)\npython3 t.py "${EXTRA_ARGS[@]}" "$@"\n', []),
         ('case "$arg" in\n    data.max_prompt_length=*)\n        shift\n        ;;\nesac\npython3 t.py "$@"\n', []),
+        (
+            'case "$arg" in\n    trainer.device=npu|trainer.device=mlu)\n        shift\n        ;;\nesac\n'
+            'python3 t.py "$@"\n',
+            [],
+        ),
+        (
+            "python3 -m verl_omni.trainer.main_omni \\\n    data.train_batch_size=8\n"
+            '    ++trainer.total_epochs=1 "$@"\n',
+            ["EX007"],
+        ),
+        (
+            "python3 -m verl_omni.trainer.main_omni \\\n    ++trainer.total_epochs=1 \\\n"
+            '    trainer.total_epochs=2 "$@"\n',
+            ["EX007"],
+        ),
+        ('python3 t.py \\\n    data.x=1\n    ~data.y "$@"\n', ["EX007"]),
+        ('local -a args=(\n    +reward.x=1\n    data.dir=$(pwd)/out\n)\npython3 t.py "${args[@]}" "$@"\n', []),
     ],
 )
 def test_shell_hydra_launcher_integrity(source: str, expected: list[str]) -> None:
@@ -285,6 +347,19 @@ def test_shell_hydra_launcher_integrity(source: str, expected: list[str]) -> Non
             f'{VALID_HEADER}# pkill -9 ray\ncat <<EOF\nray stop --force\nEOF\npython3 t.py "$@"\n',
             [],
         ),
+        (
+            "examples/model/run_train.sh",
+            f'{VALID_HEADER}export "WANDB_API_KEY=secret123456"\npython3 t.py "$@"\n',
+            ["EX008"],
+        ),
+        ("examples/model/run_train.sh", f'{VALID_HEADER}cd -- /workspace/verl-omni\npython3 t.py "$@"\n', ["EX008"]),
+        ("examples/model/run_train.sh", f'{VALID_HEADER}python3 -m pip install vllm\npython3 t.py "$@"\n', ["EX008"]),
+        (
+            "examples/model/run_train.sh",
+            f'{VALID_HEADER}IMAGE="v10.1.2.3"\nX="10.300.400.500"\npython3 t.py "$@"\n',
+            [],
+        ),
+        ("examples/model/run_train.sh", f'{VALID_HEADER}pkill -P $$\npython3 t.py "$@"\n', []),
     ],
 )
 def test_shell_safety_and_portability_guards(path: str, source: str, expected: list[str]) -> None:
@@ -295,7 +370,14 @@ def test_shell_safety_and_portability_guards(path: str, source: str, expected: l
     ("source", "expected"),
     [
         ('exec bash "$SCRIPT_DIR/run_foo.sh" trainer.device=npu "$@"\n', True),
+        ('exec "$SCRIPT_DIR/run_foo.sh" trainer.device=npu "$@"\n', True),
+        ('source "$SCRIPT_DIR/run_foo.sh" "$@"\n', True),
+        ('/bin/bash "$SCRIPT_DIR/run_foo.sh" "$@"\n', True),
         ('base_recipe="$SCRIPT_DIR/run_foo.sh"\nbash "$base_recipe" "$@"\n', True),
+        ('BASE=${BASE:-"$SCRIPT_DIR/run_foo.sh"}\nexec bash "$BASE" "$@"\n', True),
+        ('bash -n "$SCRIPT_DIR/run_foo.sh"\n', False),
+        ('bash "$SCRIPT_DIR/other.sh" --ref "$SCRIPT_DIR/run_foo.sh"\n', False),
+        ('bash "$SCRIPT_DIR/../other/run_foo.sh" "$@"\n', False),
         ('python3 -m verl_omni.trainer.main_diffusion trainer.device=npu "$@"\n', False),
         ('# exec bash "$SCRIPT_DIR/run_foo.sh" "$@"\npython3 -m verl_omni.trainer.main_diffusion "$@"\n', False),
         ('cat <<EOF\nbash "$SCRIPT_DIR/run_foo.sh"\nEOF\npython3 -m verl_omni.trainer.main_diffusion "$@"\n', False),

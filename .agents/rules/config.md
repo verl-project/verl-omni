@@ -59,8 +59,9 @@ def __post_init__(self):
 ```
 
 Don't reach for `Literal[...]` — it appears nowhere in these directories (`VO011`
-rejects it, missing field defaults / `MISSING`, and subclass `__post_init__`
-omitting `super().__post_init__()` alongside parent-config and `frozen=True` rules);
+rejects it, missing field defaults / `dataclasses.MISSING`, and subclass `__post_init__`
+omitting `super().__post_init__()` alongside parent-config, `frozen=True`, and `__all__`
+export rules; `omegaconf.MISSING` remains valid for required fields);
 plain `str` plus a `valid_*` set is the established pattern.
 
 `__post_init__` also does real I/O in places (tokenizer loading, path resolution,

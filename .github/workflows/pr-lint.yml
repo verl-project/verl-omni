@@ -4,6 +4,10 @@ on:
   pull_request:
   workflow_call:
 
+concurrency:
+  group: pr-lint-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 

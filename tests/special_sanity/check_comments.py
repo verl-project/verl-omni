@@ -23,12 +23,13 @@ from collections.abc import Iterator
 
 NARRATION = re.compile(
     r"^(?:(?:added|updated|changed|modified|removed|renamed|refactored|introduced|implemented)\s+"
-    r"(?:(?:handling|support)\s+for\b|(?:a|an|the|this|these|to|for)\b)|"
+    r"(?:(?:handling|support)\s+for\b|(?:a|an|the|this|these)\b|"
+    r"to\s+(?:use|support|handle|return|pass|run|make|ensure|match|mirror)\b)|"
     r"(?:we|i)\s+(?:added|updated|changed|modified|removed|renamed|refactored|introduced|implemented)\b|"
     r"(?:here|now|first|next|finally|then)[,:]?\s+we\b|"
     r"let's\s+|"
     r"this\s+(?:function|method|helper|class|block|loop|step)\s+"
-    r"(?:is|will|does|handles|computes|returns|checks|converts)\b|"
+    r"(?:is\s+(?:a\s+helper|used\s+to|responsible\s+for)|will|does|handles|computes|returns|checks|converts)\b|"
     r"fixed\s+(?:the|this|a|an|bug|issue|error|crash|race|leak|mismatch)\b|"
     r"bugfix\s*:|fix\s+for\s+#\d+\b|"
     r"previously[,:\s]+(?:we|this|it|the)\b|before\s+this\s+change\b|old\s+code\b|"
@@ -55,7 +56,7 @@ AI_DOC_FILLER = re.compile(
     re.IGNORECASE,
 )
 ENCODING = re.compile(r"coding[:=]\s*[-\w.]+")
-DIRECTIVE_PREFIXES = (
+TOOLING_DIRECTIVE_PREFIXES = (
     "noqa",
     "type:",
     "pyright:",
@@ -66,17 +67,19 @@ DIRECTIVE_PREFIXES = (
     "fmt:",
     "isort:",
     "pragma:",
+    "copyright",
+    "licensed",
+    "spdx-",
+    "http://",
+    "https://",
+)
+PROSE_DIRECTIVE_PREFIXES = (
     "todo",
     "fixme",
     "note:",
     "xxx",
     "warning:",
     "hack:",
-    "copyright",
-    "licensed",
-    "spdx-",
-    "http://",
-    "https://",
 )
 ECHO_STOPWORDS = {
     "a",
@@ -136,16 +139,26 @@ def _is_echo_comment(text: str, code_line: str) -> bool:
 def _license_lines(tokens: list[tokenize.TokenInfo]) -> set[int]:
     lines: set[int] = set()
     started = False
+    last_comment_line = 0
     for token in tokens:
-        if token.type == tokenize.ENCODING:
+        if token.type in {tokenize.ENCODING, tokenize.NL}:
             continue
         if token.type != tokenize.COMMENT:
             break
+        line_no = token.start[0]
         text = token.string.removeprefix("#").strip().lower()
-        if not started and not any(key in text for key in ("copyright", "spdx-", "licensed under")):
+        if not started:
+            if line_no == 1 and token.string.startswith("#!"):
+                continue
+            if line_no <= 2 and ENCODING.search(text):
+                continue
+            if not any(key in text for key in ("copyright", "spdx-", "licensed under")):
+                break
+            started = True
+        elif line_no > last_comment_line + 1:
             break
-        started = True
-        lines.add(token.start[0])
+        lines.add(line_no)
+        last_comment_line = line_no
     return lines
 
 
@@ -156,7 +169,11 @@ def _is_trivial_private_docstring(node: ast.FunctionDef | ast.AsyncFunctionDef, 
     words = {_norm_word(word) for word in re.findall(r"[a-z0-9]+", stripped.lower()) if word not in DOC_ECHO_STOPWORDS}
     if not words or len(words) > 5:
         return False
-    sig_args = node.args.posonlyargs + node.args.args + node.args.kwonlyargs
+    sig_args = list(node.args.posonlyargs) + list(node.args.args) + list(node.args.kwonlyargs)
+    if node.args.vararg is not None:
+        sig_args.append(node.args.vararg)
+    if node.args.kwarg is not None:
+        sig_args.append(node.args.kwarg)
     sig_words = _identifier_words(node.name)
     for arg in sig_args:
         sig_words.update(_identifier_words(arg.arg))
@@ -197,43 +214,61 @@ def findings(path: str, source: bytes, tree: ast.AST | None = None) -> Iterator[
     except (tokenize.TokenError, SyntaxError, UnicodeError, LookupError):
         return
 
+    ignored_token_types = {
+        tokenize.COMMENT,
+        tokenize.STRING,
+        tokenize.NL,
+        tokenize.NEWLINE,
+        tokenize.INDENT,
+        tokenize.DEDENT,
+        tokenize.ENCODING,
+        tokenize.ENDMARKER,
+    }
+    for name in ("FSTRING_START", "FSTRING_MIDDLE", "FSTRING_END"):
+        tok_type = getattr(tokenize, name, None)
+        if tok_type is not None:
+            ignored_token_types.add(tok_type)
+
     license_lines = _license_lines(tokens)
     standalone_lines: dict[int, str] = {}
+    code_tokens_by_line: dict[int, list[str]] = {}
     for token in tokens:
+        if token.type not in ignored_token_types:
+            code_tokens_by_line.setdefault(token.start[0], []).append(token.string)
         if token.type != tokenize.COMMENT:
             continue
         line_no = token.start[0]
         text = token.string.removeprefix("#").strip()
         if line_no <= 2 and ENCODING.search(text):
             continue
-        if NARRATION.match(text):
+        if line_no not in license_lines and NARRATION.match(text):
             yield line_no, "CM001", "Remove edit/step narration; keep only necessary contract or rationale."
             continue
         standalone = not token.line[: token.start[1]].strip()
-        if standalone and BANNER.fullmatch(text):
+        if standalone and line_no not in license_lines and BANNER.fullmatch(text):
             yield line_no, "CM002", "Remove decorative comment banners; use concise API documentation."
             continue
         lower = text.lower()
-        is_directive = lower.startswith(DIRECTIVE_PREFIXES)
-        if line_no not in license_lines and not is_directive and PR_REF.search(text):
+        is_tooling_directive = lower.startswith(TOOLING_DIRECTIVE_PREFIXES)
+        is_any_directive = is_tooling_directive or lower.startswith(PROSE_DIRECTIVE_PREFIXES)
+        if line_no not in license_lines and not is_tooling_directive and PR_REF.search(text):
             yield line_no, "CM005", "Remove PR references from code comments; cite issues or explain the rationale."
-        if standalone and line_no not in license_lines and not is_directive:
+        if standalone and line_no not in license_lines and not is_any_directive:
             standalone_lines[line_no] = text
 
     if path.startswith("verl_omni/") and "/config/" not in path and standalone_lines:
-        raw_lines = source.decode("utf-8", errors="replace").splitlines()
         for line_no, text in standalone_lines.items():
             if (line_no - 1) in standalone_lines or (line_no + 1) in standalone_lines:
                 continue
-            next_line = raw_lines[line_no].strip() if line_no < len(raw_lines) else ""
-            if next_line and not next_line.startswith("#") and _is_echo_comment(text, next_line):
+            next_code = " ".join(code_tokens_by_line.get(line_no + 1, ()))
+            if next_code and _is_echo_comment(text, next_code):
                 yield (
                     line_no,
                     "CM003",
                     "Remove redundant comment repeating the next line; only keep non-obvious rationale.",
                 )
 
-    if path.startswith(("verl_omni/", "tests/")):
+    if path.startswith(("verl_omni/", "tests/", "examples/")):
         if tree is None:
             try:
                 tree = ast.parse(source)

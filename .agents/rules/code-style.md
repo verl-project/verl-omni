@@ -70,14 +70,13 @@ in a hardcoded file list — read it off the hook rather than guessing:
 grep -n 'verl_omni/' tests/special_sanity/check_docstrings.py
 ```
 
-It does **not** check docstring style, and does **not** cover the rest of the
-repo. The following are therefore **conventions** (follow them; they are what
-reviewers ask for), not automated gates:
+`check-pr-lint` additionally enforces `VO015` (public API/`__all__`/contract/`compute_score*`
+docstrings) and `CM004` (boilerplate/filler/signature-echo docstrings). Style details
+below are **review conventions**:
 
-- Preserve docstrings required by the existing gate. Document `__all__` exports,
-  shared pipeline contracts, and `compute_score*` scorers with concise
-  docstrings (`VO015`). Omit trivial internal docstrings that only echo a
-  signature (`CM004`), and never add a `_` prefix just to bypass a gate.
+- Document `__all__` exports, shared pipeline contracts, and `compute_score*`
+  scorers with concise docstrings (`VO015`). Omit trivial internal docstrings that
+  only echo a signature (`CM004`), and never add a `_` prefix just to bypass a gate.
 - Use concise Google-style `Args:` / `Returns:` / `Raises:` sections only when
   they convey necessary contracts; omit empty or repetitive template sections.
 - Document tensor shapes and dtypes explicitly, e.g. `(C, H, W)` or `(N, C, H, W)`.
@@ -226,7 +225,10 @@ Two caveats, so this is not applied blindly:
 
 ## Example shell recipes
 
-These are review conventions, not new lint gates. Keep recipes in the existing
+`check-pr-lint` enforces `EX001`–`EX009` and `VO014` (`bash -n`, trailing `"$@"`,
+no committed media, `README.md` naming, `bash` + `set -e` + `pipefail`, layout/portable
+Python, Hydra overrides, secrets/devices/host safety, sibling GPU delegation, and no
+local paths). Remaining items are review conventions. Keep recipes in the existing
 algorithm/model directory and match the neighboring `run_*.sh` entrypoints.
 
 - Group environment defaults near the top; document required paths and what each

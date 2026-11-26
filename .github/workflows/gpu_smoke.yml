@@ -57,7 +57,13 @@ env:
 
 jobs:
   pr_lint:
-    if: github.repository_owner == 'verl-project' && github.event_name == 'pull_request'
+    if: >-
+      github.repository_owner == 'verl-project' &&
+      github.event_name == 'pull_request' &&
+      (contains(github.event.pull_request.labels.*.name, 'ready-for-ci') ||
+       contains(github.event.pull_request.labels.*.name, 'ci-core') ||
+       contains(github.event.pull_request.labels.*.name, 'ci-e2e-omni') ||
+       contains(github.event.pull_request.labels.*.name, 'ci-e2e-diffusion'))
     uses: ./.github/workflows/pr-lint.yml
 
   setup_runner:

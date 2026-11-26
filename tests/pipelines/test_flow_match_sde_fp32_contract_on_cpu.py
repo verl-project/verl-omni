@@ -40,19 +40,21 @@ def _load_scheduler_cls():
 FlowMatchSDEDiscreteScheduler = _load_scheduler_cls()
 
 
-def _make_scheduler(num_inference_steps: int) -> FlowMatchSDEDiscreteScheduler:
-    scheduler = FlowMatchSDEDiscreteScheduler(num_train_timesteps=1000, shift=1.0)
+def _make_scheduler(num_inference_steps: int, shift: float = 1.0) -> FlowMatchSDEDiscreteScheduler:
+    scheduler = FlowMatchSDEDiscreteScheduler(num_train_timesteps=1000, shift=shift)
     scheduler.set_timesteps(num_inference_steps, device="cpu")
     return scheduler
 
 
 @pytest.mark.parametrize("sde_type", ["sde", "cps", "dance_sde"])
 @pytest.mark.parametrize("sample_dtype", [torch.bfloat16, torch.float16, torch.float32])
+@pytest.mark.parametrize("step_idx", [0, 1, -1])
+@pytest.mark.parametrize(("num_inference_steps", "shift"), [(6, 1.0), (20, 3.0)])
 def test_step_preserves_fp32_trajectory_tensors_regardless_of_sample_dtype(
-    sde_type: str, sample_dtype: torch.dtype
+    sde_type: str, sample_dtype: torch.dtype, step_idx: int, num_inference_steps: int, shift: float
 ) -> None:
-    scheduler = _make_scheduler(num_inference_steps=6)
-    timestep = scheduler.timesteps[1]
+    scheduler = _make_scheduler(num_inference_steps=num_inference_steps, shift=shift)
+    timestep = scheduler.timesteps[step_idx]
     sample = torch.randn(2, 4, 8, dtype=sample_dtype)
     model_output = torch.randn(2, 4, 8, dtype=torch.float32)
     generator = torch.Generator(device="cpu").manual_seed(1234)
@@ -72,6 +74,43 @@ def test_step_preserves_fp32_trajectory_tensors_regardless_of_sample_dtype(
     assert out.log_prob is not None and out.log_prob.dtype == torch.float32
     assert torch.isfinite(out.prev_sample).all()
     assert torch.isfinite(out.log_prob).all()
+
+
+@pytest.mark.parametrize("sde_type", ["sde", "cps", "dance_sde"])
+@pytest.mark.parametrize("step_idx", [0, 1, -1])
+def test_sample_previous_step_returns_finite_fp32_sqrt_dt(sde_type: str, step_idx: int) -> None:
+    scheduler = _make_scheduler(num_inference_steps=20, shift=3.0)
+    prev_sample, log_prob, prev_sample_mean, std_dev_t, sqrt_dt = scheduler.sample_previous_step(
+        sample=torch.randn(2, 4, 8, dtype=torch.float32),
+        model_output=torch.randn(2, 4, 8, dtype=torch.float32),
+        timestep=scheduler.timesteps[step_idx].expand(2),
+        generator=torch.Generator(device="cpu").manual_seed(1234),
+        noise_level=0.7,
+        sde_type=sde_type,
+        return_logprobs=True,
+        return_sqrt_dt=True,
+    )
+    assert prev_sample.dtype == torch.float32
+    assert prev_sample_mean.dtype == torch.float32
+    assert log_prob is not None and log_prob.dtype == torch.float32
+    assert std_dev_t.dtype == torch.float32
+    assert sqrt_dt.dtype == torch.float32
+    assert torch.isfinite(prev_sample).all()
+    assert torch.isfinite(log_prob).all()
+    assert torch.isfinite(sqrt_dt).all()
+
+
+@pytest.mark.parametrize("bad_dtype", [torch.bfloat16, torch.float16])
+def test_step_rejects_non_fp32_model_output(bad_dtype: torch.dtype) -> None:
+    scheduler = _make_scheduler(num_inference_steps=6)
+    with pytest.raises(AssertionError):
+        scheduler.step(
+            model_output=torch.randn(2, 4, 8, dtype=bad_dtype),
+            timestep=scheduler.timesteps[1],
+            sample=torch.randn(2, 4, 8, dtype=torch.bfloat16),
+            noise_level=0.7,
+            return_logprobs=True,
+        )
 
 
 @pytest.mark.parametrize("bad_arg", ["sample", "model_output", "prev_sample"])

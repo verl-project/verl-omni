@@ -24,14 +24,16 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\r")
 _STEP_RE = re.compile(r"\b(?:global_step|step)\s*[:=]\s*(\d+)\b")
 _NUMERIC_RE = re.compile(
-    r"^\s*(?:np\.\w+\()?("
+    r"^\s*(?:(?:np\.\w+|(?:torch\.)?tensor)\()?("
     r"nan|[-+]?inf|[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?"
     r")\)?\s*$",
     re.IGNORECASE,
 )
+_NP_WRAPPER_RE = re.compile(r"(?:np\.\w+|(?:torch\.)?tensor)\(([^()]+)\)")
+_BARE_NONFINITE_RE = re.compile(r"(?<=[:,\s\[])(nan|[-+]?inf)(?=[,\]}\s]|$)", re.IGNORECASE)
 _FP32_DTYPE_TOKENS = frozenset({"float32", "torch.float32", "fp32"})
 _LATENT_DTYPE_KEYS = ("rollout/latents_dtype", "trajectory_latents_dtype", "rollout/trajectory_latents_dtype")
 
@@ -55,16 +57,29 @@ def _coerce_number(value: Any) -> float | None:
     return None
 
 
+def _is_nonfinite_or_null(value: Any) -> bool:
+    return value is None or (isinstance(value, float) and not math.isfinite(value))
+
+
+def _store_metric(target: dict[str, Any], key: str, value: Any) -> None:
+    if key in target and _is_nonfinite_or_null(target[key]):
+        return
+    target[key] = value
+
+
 def _merge_step_metrics(target: dict[str, Any], payload: Mapping[str, Any]) -> None:
     for raw_key, raw_value in payload.items():
         if not isinstance(raw_key, str):
             continue
         key = normalize_metric_key(raw_key.strip())
+        if raw_value is None:
+            _store_metric(target, key, None)
+            continue
         number = _coerce_number(raw_value)
         if number is not None:
-            target[key] = number
+            _store_metric(target, key, number)
         elif isinstance(raw_value, str):
-            target[key] = raw_value.strip()
+            _store_metric(target, key, raw_value.strip())
 
 
 def load_jsonl_metrics(path: Path) -> dict[int, dict[str, Any]]:
@@ -85,6 +100,19 @@ def load_jsonl_metrics(path: Path) -> dict[int, dict[str, Any]]:
     return steps
 
 
+def _parse_console_dict(raw_dict: str) -> Mapping[str, Any] | None:
+    try:
+        payload = ast.literal_eval(raw_dict)
+    except (SyntaxError, ValueError):
+        sanitized = _NP_WRAPPER_RE.sub(r"\1", raw_dict)
+        sanitized = _BARE_NONFINITE_RE.sub(lambda m: repr(m.group(1)), sanitized)
+        try:
+            payload = ast.literal_eval(sanitized)
+        except (SyntaxError, ValueError):
+            return None
+    return payload if isinstance(payload, Mapping) else None
+
+
 def _parse_console_line(line: str) -> tuple[int, dict[str, Any]] | None:
     step_match = _STEP_RE.search(line)
     if step_match is None:
@@ -92,25 +120,27 @@ def _parse_console_line(line: str) -> tuple[int, dict[str, Any]] | None:
     step = int(step_match.group(1))
     if "{" in line and "}" in line:
         start, end = line.index("{"), line.rindex("}") + 1
-        try:
-            payload = ast.literal_eval(line[start:end])
-        except (SyntaxError, ValueError):
-            payload = None
-        if isinstance(payload, Mapping):
+        payload = _parse_console_dict(line[start:end])
+        if payload is not None:
             metrics: dict[str, Any] = {}
             _merge_step_metrics(metrics, payload)
-            return step, metrics
+            return (step, metrics) if metrics else None
+        return None
     metrics = {}
-    for part in line.split(" - "):
+    suffix = line[step_match.end() :]
+    for part in suffix.split(" - "):
         if ":" not in part:
             continue
         raw_key, raw_value = part.split(":", 1)
-        key = raw_key.strip().split()[-1] if raw_key.strip() else ""
-        if not key or key in {"step", "global_step"}:
+        key_parts = raw_key.strip().split()
+        if len(key_parts) != 1:
+            continue
+        key = key_parts[0]
+        if not key or key in {"step", "global_step"} or key.endswith(".py"):
             continue
         value = raw_value.strip().rstrip(",")
         number = _coerce_number(value)
-        metrics[normalize_metric_key(key)] = number if number is not None else value
+        _store_metric(metrics, normalize_metric_key(key), number if number is not None else value)
     return (step, metrics) if metrics else None
 
 
@@ -124,7 +154,9 @@ def load_console_metrics(path: Path) -> tuple[dict[int, dict[str, Any]], bool]:
         if parsed is None:
             continue
         step, metrics = parsed
-        steps.setdefault(step, {}).update(metrics)
+        target = steps.setdefault(step, {})
+        for key, value in metrics.items():
+            _store_metric(target, key, value)
     return steps, skipped_step
 
 
@@ -165,6 +197,8 @@ def _check_step1_invariants(
     step1_metrics: Mapping[str, Any],
     step1_ratio_tol: float | None,
     step1_kl_tol: float | None,
+    step1_rollout_logprob_diff_tol: float | None,
+    step1_rollout_kl_tol: float | None,
     require_fp32_latents: bool,
 ) -> dict[str, Any]:
     summary: dict[str, Any] = {}
@@ -180,6 +214,19 @@ def _check_step1_invariants(
         summary["actor/ppo_kl"] = ppo_kl
         if abs(ppo_kl) > step1_kl_tol:
             raise ValueError(f"Step-1 actor/ppo_kl={ppo_kl:.6g} exceeds tolerance {step1_kl_tol}.")
+    if step1_rollout_logprob_diff_tol is not None:
+        logprob_diff = _require_finite(step1_metrics, "rollout_corr/logprob_abs_diff_mean", 1)
+        summary["rollout_corr/logprob_abs_diff_mean"] = logprob_diff
+        if abs(logprob_diff) > step1_rollout_logprob_diff_tol:
+            raise ValueError(
+                "Step-1 rollout_corr/logprob_abs_diff_mean="
+                f"{logprob_diff:.6g} exceeds tolerance {step1_rollout_logprob_diff_tol}."
+            )
+    if step1_rollout_kl_tol is not None:
+        rollout_kl = _require_finite(step1_metrics, "rollout_corr/kl", 1)
+        summary["rollout_corr/kl"] = rollout_kl
+        if abs(rollout_kl) > step1_rollout_kl_tol:
+            raise ValueError(f"Step-1 rollout_corr/kl={rollout_kl:.6g} exceeds tolerance {step1_rollout_kl_tol}.")
     if require_fp32_latents:
         dtype_value = next((step1_metrics[key] for key in _LATENT_DTYPE_KEYS if key in step1_metrics), None)
         if not isinstance(dtype_value, str) or dtype_value.lower() not in _FP32_DTYPE_TOKENS:
@@ -196,6 +243,8 @@ def check_diffusion_numerical_health(
     loss_keys: Sequence[str] = ("actor/loss",),
     step1_ratio_tol: float | None = None,
     step1_kl_tol: float | None = None,
+    step1_rollout_logprob_diff_tol: float | None = None,
+    step1_rollout_kl_tol: float | None = None,
     require_positive_grad_norm: bool = False,
     check_all_losses: bool = True,
     require_fp32_latents: bool = False,
@@ -203,7 +252,12 @@ def check_diffusion_numerical_health(
     """Validate numerical health across JSONL and/or console training logs."""
     if jsonl_path is None and log_path is None:
         raise ValueError("Provide at least one of jsonl_path or log_path.")
-    for name, value in (("step1_ratio_tol", step1_ratio_tol), ("step1_kl_tol", step1_kl_tol)):
+    for name, value in (
+        ("step1_ratio_tol", step1_ratio_tol),
+        ("step1_kl_tol", step1_kl_tol),
+        ("step1_rollout_logprob_diff_tol", step1_rollout_logprob_diff_tol),
+        ("step1_rollout_kl_tol", step1_rollout_kl_tol),
+    ):
         if value is not None and (not math.isfinite(value) or value < 0.0):
             raise ValueError(f"{name} must be a finite non-negative number, got {value!r}.")
 
@@ -215,7 +269,9 @@ def check_diffusion_numerical_health(
         recorded.update(console_metrics)
     if jsonl_path is not None:
         for step, metrics in load_jsonl_metrics(jsonl_path).items():
-            recorded.setdefault(step, {}).update(metrics)
+            target = recorded.setdefault(step, {})
+            for key, value in metrics.items():
+                _store_metric(target, key, value)
 
     missing_steps = [step for step in steps if step not in recorded]
     if missing_steps:
@@ -232,13 +288,21 @@ def check_diffusion_numerical_health(
         )
 
     step1_summary: dict[str, Any] = {}
-    if step1_ratio_tol is not None or step1_kl_tol is not None or require_fp32_latents:
+    if (
+        step1_ratio_tol is not None
+        or step1_kl_tol is not None
+        or step1_rollout_logprob_diff_tol is not None
+        or step1_rollout_kl_tol is not None
+        or require_fp32_latents
+    ):
         if 1 not in recorded:
             raise ValueError("Step 1 metrics are required for step-1 numerical invariant checks.")
         step1_summary = _check_step1_invariants(
             recorded[1],
             step1_ratio_tol=step1_ratio_tol,
             step1_kl_tol=step1_kl_tol,
+            step1_rollout_logprob_diff_tol=step1_rollout_logprob_diff_tol,
+            step1_rollout_kl_tol=step1_rollout_kl_tol,
             require_fp32_latents=require_fp32_latents,
         )
 
@@ -259,6 +323,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--loss-keys", nargs="*", default=["actor/loss"], help="Required finite loss metric keys.")
     parser.add_argument("--step1-ratio-tol", type=float, default=None, help="Max |actor/ratio_mean - 1.0| at step 1.")
     parser.add_argument("--step1-kl-tol", type=float, default=None, help="Max |actor/ppo_kl| at step 1.")
+    parser.add_argument(
+        "--step1-rollout-logprob-diff-tol",
+        type=float,
+        default=None,
+        help="Max |rollout_corr/logprob_abs_diff_mean| at step 1.",
+    )
+    parser.add_argument(
+        "--step1-rollout-kl-tol",
+        type=float,
+        default=None,
+        help="Max |rollout_corr/kl| at step 1.",
+    )
     parser.add_argument("--require-positive-grad-norm", action="store_true", help="Fail if actor/grad_norm <= 0.")
     parser.add_argument("--require-fp32-latents", action="store_true", help="Fail if stored latents dtype != float32.")
     parser.add_argument("--summary-json", type=Path, default=None, help="Optional path to write structured summary.")
@@ -271,6 +347,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         loss_keys=args.loss_keys,
         step1_ratio_tol=args.step1_ratio_tol,
         step1_kl_tol=args.step1_kl_tol,
+        step1_rollout_logprob_diff_tol=args.step1_rollout_logprob_diff_tol,
+        step1_rollout_kl_tol=args.step1_rollout_kl_tol,
         require_positive_grad_norm=args.require_positive_grad_norm,
         require_fp32_latents=args.require_fp32_latents,
     )

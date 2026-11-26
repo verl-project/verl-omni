@@ -207,6 +207,8 @@ def test_cli_writes_summary_json_and_exits_nonzero_on_failure(tmp_path: Path) ->
                     "actor/grad_norm": 0.9,
                     "actor/ratio_mean": 1.001,
                     "actor/ppo_kl": 0.002,
+                    "rollout_corr/logprob_abs_diff_mean": 0.0004,
+                    "rollout_corr/kl": 0.0002,
                 },
             }
         ],
@@ -224,6 +226,10 @@ def test_cli_writes_summary_json_and_exits_nonzero_on_failure(tmp_path: Path) ->
             "0.05",
             "--step1-kl-tol",
             "0.05",
+            "--step1-rollout-logprob-diff-tol",
+            "0.01",
+            "--step1-rollout-kl-tol",
+            "0.01",
             "--summary-json",
             str(summary_path),
         ],
@@ -235,6 +241,8 @@ def test_cli_writes_summary_json_and_exits_nonzero_on_failure(tmp_path: Path) ->
     saved = json.loads(summary_path.read_text(encoding="utf-8"))
     assert saved["passed"] is True
     assert saved["step1_invariants"]["actor/ratio_mean"] == pytest.approx(1.001)
+    assert saved["step1_invariants"]["rollout_corr/logprob_abs_diff_mean"] == pytest.approx(0.0004)
+    assert saved["step1_invariants"]["rollout_corr/kl"] == pytest.approx(0.0002)
 
     bad = subprocess.run(
         [
@@ -253,3 +261,91 @@ def test_cli_writes_summary_json_and_exits_nonzero_on_failure(tmp_path: Path) ->
     )
     assert bad.returncode != 0
     assert "actor/ratio_mean" in bad.stderr
+
+
+def test_jsonl_null_from_orjson_nan_is_rejected_and_unrelated_null_ignored(tmp_path: Path) -> None:
+    jsonl = _write_jsonl(
+        tmp_path / "metrics.jsonl",
+        [
+            {
+                "step": 1,
+                "data": {
+                    "actor/loss": 0.12,
+                    "actor/grad_norm": 0.9,
+                    "timing/step": None,
+                },
+            }
+        ],
+    )
+    summary = _checker.check_diffusion_numerical_health(jsonl_path=jsonl, steps=[1])
+    assert summary["passed"] is True
+
+    for key in ("actor/kl_loss", "actor/weighted_kl_loss", "actor/loss", "actor/grad_norm"):
+        bad_jsonl = _write_jsonl(
+            tmp_path / "bad.jsonl",
+            [
+                {
+                    "step": 1,
+                    "data": {
+                        "actor/loss": 0.12,
+                        "actor/grad_norm": 0.9,
+                        key: None,
+                    },
+                }
+            ],
+        )
+        with pytest.raises(ValueError, match=key):
+            _checker.check_diffusion_numerical_health(jsonl_path=bad_jsonl, steps=[1])
+
+
+def test_nonfinite_metric_cannot_be_overwritten_by_normalized_collision_or_merge(tmp_path: Path) -> None:
+    log = tmp_path / "train.log"
+    log.write_text(
+        "step:1 - actor/loss:nan - actor/actor/loss:0.12 - actor/grad_norm:0.9\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="actor/loss"):
+        _checker.check_diffusion_numerical_health(log_path=log, steps=[1])
+
+    log.write_text("step:1 - actor/loss:nan - actor/grad_norm:0.9\n", encoding="utf-8")
+    jsonl = _write_jsonl(
+        tmp_path / "metrics.jsonl",
+        [{"step": 1, "data": {"actor/loss": 0.12, "actor/grad_norm": 0.9}}],
+    )
+    with pytest.raises(ValueError, match="actor/loss"):
+        _checker.check_diffusion_numerical_health(jsonl_path=jsonl, log_path=log, steps=[1])
+
+
+def test_rollout_parity_tolerances_fail_closed_on_drift_or_missing_keys(tmp_path: Path) -> None:
+    jsonl = _write_jsonl(
+        tmp_path / "metrics.jsonl",
+        [
+            {
+                "step": 1,
+                "data": {
+                    "actor/loss": 0.1,
+                    "actor/grad_norm": 1.0,
+                    "rollout_corr/logprob_abs_diff_mean": 0.08,
+                    "rollout_corr/kl": 0.06,
+                },
+            }
+        ],
+    )
+    with pytest.raises(ValueError, match="rollout_corr/logprob_abs_diff_mean"):
+        _checker.check_diffusion_numerical_health(jsonl_path=jsonl, steps=[1], step1_rollout_logprob_diff_tol=0.05)
+    with pytest.raises(ValueError, match="rollout_corr/kl"):
+        _checker.check_diffusion_numerical_health(jsonl_path=jsonl, steps=[1], step1_rollout_kl_tol=0.05)
+
+
+def test_console_parser_handles_csi_erase_tensor_repr_and_non_metric_step_lines(tmp_path: Path) -> None:
+    log = tmp_path / "train.log"
+    log.write_text(
+        "(DiffusionTaskRunnerV1 pid=123) INFO trainer_base.py:2044 -- Train step=1: 16 trajectories.\n"
+        "step:1 - actor/loss:torch.tensor(0.05) - actor/grad_norm:0.8\x1b[K\n",
+        encoding="utf-8",
+    )
+    summary = _checker.check_diffusion_numerical_health(log_path=log, steps=[1], require_positive_grad_norm=True)
+    assert summary["checked_steps"]["1"]["actor/loss"] == pytest.approx(0.05)
+    assert summary["checked_steps"]["1"]["actor/grad_norm"] == pytest.approx(0.8)
+    parsed, _skipped = _checker.load_console_metrics(log)
+    assert "trainer_base.py" not in parsed[1]

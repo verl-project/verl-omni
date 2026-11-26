@@ -147,6 +147,15 @@ def test_decorative_comment_banners_are_rejected(comment: str) -> None:
         "# Normalize latents before scaling\nlatents = latents / scale\n",
         "# Keep fp32 here\nlatents = latents.float()\n",
         "# Copyright 2026 Bytedance\n# Encode prompts\n",
+        (
+            "#!/usr/bin/env python3\n# Copyright 2026 Bytedance Ltd.\n#\n"
+            "# Licensed under Apache 2.0\n# Adapted from PR #123\nx = 1\n"
+        ),
+        "# Added to prevent NaN when sigma == 1.0\n",
+        "# Changed to fp32 for rollout parity\n",
+        "# Removed to avoid OOM during rollout\n",
+        "# This loop is intentionally unbatched because shapes vary\n",
+        '# Disable gradient checkpointing\nlogger.warning("Disable gradient checkpointing when using LoRA")\n',
         "def compute():\n    # Line 1 why\n    # Line 2 why\n    # Line 3 why\n    pass\n",
         (
             "def step():\n    # DanceGRPO SDE step from https://github.com/XueZeyue/DanceGRPO\n"
@@ -236,7 +245,14 @@ def test_checker_preserves_its_own_license_and_source_literals() -> None:
             'def _encode_prompts(prompts):\n    """Encode the prompts."""\n    return prompts\n',
             [(2, "CM004")],
         ),
+        (
+            COMMENT_PATH,
+            'def _run(**kwargs):\n    """Run kwargs."""\n    return kwargs\n',
+            [(2, "CM004")],
+        ),
         (COMMENT_PATH, "# Keep workaround from PR #942 until upstream fix\nvalue = 1\n", [(1, "CM005")]),
+        (COMMENT_PATH, "# TODO: remove workaround from PR #942\nvalue = 1\n", [(1, "CM005")]),
+        (COMMENT_PATH, "# NOTE: added in PR #942\nvalue = 1\n", [(1, "CM005")]),
         (COMMENT_PATH, "# TODO: remove after upstream issue #942 is fixed\nvalue = 1\n", []),
     ],
 )

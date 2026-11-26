@@ -17,6 +17,7 @@
 import ast
 import json
 import os
+import re
 import subprocess
 from argparse import ArgumentParser
 from collections import Counter
@@ -38,6 +39,10 @@ RUFF_RULES = (
 TEST_RUFF_RULES = "PT015,T100"
 
 
+_EMPTY_TREE_SHA = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+_LINE_NUMBER_RE = re.compile(r"\bline \d+\b")
+
+
 class Finding(NamedTuple):
     """A diagnostic in one source snapshot."""
 
@@ -47,21 +52,39 @@ class Finding(NamedTuple):
     scope: tuple[str, ...] = ()
 
 
-def _git(*args: str) -> bytes:
-    return subprocess.check_output(["git", *args])
+def _repo_root() -> str:
+    return subprocess.check_output(["git", "rev-parse", "--show-toplevel"], text=True).strip()
 
 
-def _changed_files(ancestor: str, head: str) -> Iterator[tuple[str | None, str]]:
+def _git(*args: str, root: str | None = None) -> bytes:
+    target_root = root or _repo_root()
+    return subprocess.check_output(["git", "-C", target_root, *args])
+
+
+def _changed_files(ancestor: str, head: str, root: str | None = None) -> Iterator[tuple[str | None, str]]:
     diff = _git(
-        "diff", "--name-status", "--find-renames", "-z", ancestor, head, "--", "verl_omni/", "tests/", "examples/"
+        "diff",
+        "--raw",
+        "--find-renames",
+        "-z",
+        ancestor,
+        head,
+        "--",
+        ":(top)verl_omni/",
+        ":(top)tests/",
+        ":(top)examples/",
+        root=root,
     )
     fields = iter(os.fsdecode(diff).split("\0")[:-1])
-    for status, path in zip(fields, fields, strict=True):
-        previous = path
-        if status.startswith("R"):
-            path = next(fields)
-        if status != "D" and (path.endswith(".py") or path.startswith("examples/")):
-            yield (None if status == "A" else previous), path
+    for header in fields:
+        old_mode, new_mode, _old_sha, _new_sha, status = header.removeprefix(":").split()
+        previous = next(fields)
+        path = next(fields) if status.startswith(("R", "C")) else previous
+        if status == "D" or new_mode in {"000000", "160000"}:
+            continue
+        if path.endswith(".py") or path.startswith("examples/"):
+            prev_path = None if status.startswith(("A", "C")) or old_mode in {"000000", "160000"} else previous
+            yield prev_path, path
 
 
 def _scopes(tree: ast.AST) -> dict[int, tuple[str, ...]]:
@@ -70,7 +93,8 @@ def _scopes(tree: ast.AST) -> dict[int, tuple[str, ...]]:
     def visit(node: ast.AST, scope: tuple[str, ...]) -> None:
         if isinstance(node, ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef):
             scope = (*scope, node.name)
-            for line in range(node.lineno, (node.end_lineno or node.lineno) + 1):
+            start_line = min((decorator.lineno for decorator in node.decorator_list), default=node.lineno)
+            for line in range(start_line, (node.end_lineno or node.lineno) + 1):
                 scopes[line] = scope
         for child in ast.iter_child_nodes(node):
             visit(child, scope)
@@ -80,30 +104,41 @@ def _scopes(tree: ast.AST) -> dict[int, tuple[str, ...]]:
 
 
 def _ruff_findings(path: str, source: bytes) -> Iterator[Finding]:
+    try:
+        source.decode("utf-8")
+    except UnicodeDecodeError:
+        yield Finding(1, "E999", "Source file is not valid UTF-8.")
+        return
+
     rules = RUFF_RULES if path.startswith("verl_omni/") else TEST_RUFF_RULES
     if path.startswith("verl_omni/") and not path.startswith("verl_omni/utils/reward_score/"):
         rules += ",PLW0603"
-    lint = subprocess.run(
-        [
-            "ruff",
-            "check",
-            "--no-cache",
-            "--isolated",
-            "--ignore-noqa",
-            "--target-version=py311",
-            "--config",
-            "lint.mccabe.max-complexity=15",
-            "--select",
-            rules,
-            "--output-format=json",
-            "--stdin-filename",
-            path,
-            "-",
-        ],
-        input=source,
-        stdout=subprocess.PIPE,
-        check=False,
-    )
+    try:
+        lint = subprocess.run(
+            [
+                "ruff",
+                "check",
+                "--no-cache",
+                "--isolated",
+                "--ignore-noqa",
+                "--target-version=py311",
+                "--config",
+                "lint.mccabe.max-complexity=15",
+                "--select",
+                rules,
+                "--output-format=json",
+                "--stdin-filename",
+                path,
+                "-",
+            ],
+            input=source,
+            stdout=subprocess.PIPE,
+            check=False,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            "ruff executable not found on PATH; install ruff==0.12.2 or run via uv --with ruff==0.12.2."
+        ) from exc
     if lint.returncode not in (0, 1):
         lint.check_returncode()
     for item in json.loads(lint.stdout):
@@ -129,41 +164,64 @@ def _findings(path: str, source: bytes) -> list[Finding]:
     return [finding._replace(scope=scopes.get(finding.line, ())) for finding in findings]
 
 
-def _pipeline_findings(snapshot: str) -> Iterator[tuple[str, Finding]]:
-    paths = _git("ls-tree", "-r", "--name-only", "-z", snapshot, "--", "verl_omni/pipelines/")
-    names = set(os.fsdecode(paths).split("\0")[:-1])
-    packages = {
-        PurePosixPath(path).parts[2]
-        for path in names
-        if len(PurePosixPath(path).parts) == 4 and path.endswith("/__init__.py")
-    } - SHARED_PIPELINE_MODULES
-    if not packages:
-        return
-    entrypoint = "verl_omni/pipelines/__init__.py"
-    try:
-        tree = ast.parse(_git("show", f"{snapshot}:{entrypoint}")) if entrypoint in names else ast.Module(body=[])
-    except SyntaxError:
-        return
-    imports = set()
-    for node in tree.body:
+def _ls_tree_blobs(snapshot: str, directory: str, root: str | None = None) -> set[str]:
+    raw = _git("ls-tree", "-r", "-z", snapshot, "--", f":(top){directory}", root=root)
+    paths: set[str] = set()
+    for entry in os.fsdecode(raw).split("\0")[:-1]:
+        meta, path = entry.split("\t", 1)
+        if meta.split()[0].startswith("100"):
+            paths.add(path)
+    return paths
+
+
+def _collect_module_imports(statements: list[ast.stmt], imports: set[str]) -> None:
+    for node in statements:
         if isinstance(node, ast.Import):
             imports.update(alias.name for alias in node.names)
         elif isinstance(node, ast.ImportFrom) and node.level <= 1:
             parent = resolve_name("." * node.level + (node.module or ""), "verl_omni.pipelines")
             imports.add(parent)
             imports.update(f"{parent}.{alias.name}" for alias in node.names)
+        elif isinstance(node, ast.Try | ast.TryStar):
+            _collect_module_imports(node.body, imports)
+            _collect_module_imports(node.orelse, imports)
+
+
+def _pipeline_findings(snapshot: str, root: str | None = None) -> Iterator[tuple[str, Finding]]:
+    names = _ls_tree_blobs(snapshot, "verl_omni/pipelines/", root=root)
+    entrypoint = "verl_omni/pipelines/__init__.py"
+    if entrypoint not in names and not any(path.endswith("/__init__.py") for path in names):
+        return
+    packages = {
+        PurePosixPath(path).parts[2] for path in names if len(PurePosixPath(path).parts) >= 4 and path.endswith(".py")
+    } - SHARED_PIPELINE_MODULES
+    if not packages:
+        return
+    try:
+        tree = (
+            ast.parse(_git("show", f"{snapshot}:{entrypoint}", root=root))
+            if entrypoint in names
+            else ast.Module(body=[])
+        )
+    except SyntaxError:
+        return
+    imports: set[str] = set()
+    _collect_module_imports(tree.body, imports)
     for package in sorted(packages):
         module = f"verl_omni.pipelines.{package}"
         if not any(imported == module or imported.startswith(module + ".") for imported in imports):
             yield (
                 f"verl_omni/pipelines/{package}/__init__.py",
-                Finding(1, "VO010", f"Import {module} in {entrypoint} so its adapters can register."),
+                Finding(
+                    1,
+                    "VO010",
+                    f"Import and re-export {module} (e.g. via __all__) in {entrypoint} so its adapters can register.",
+                ),
             )
 
 
-def _example_variant_findings(snapshot: str) -> Iterator[tuple[str, Finding]]:
-    raw = _git("ls-tree", "-r", "--name-only", "-z", snapshot, "--", "examples/")
-    names = set(os.fsdecode(raw).split("\0")[:-1])
+def _example_variant_findings(snapshot: str, root: str | None = None) -> Iterator[tuple[str, Finding]]:
+    names = _ls_tree_blobs(snapshot, "examples/", root=root)
     for path in sorted(names):
         path_obj = PurePosixPath(path)
         match = ACCEL_VARIANT_SCRIPT.match(path_obj.name)
@@ -173,7 +231,7 @@ def _example_variant_findings(snapshot: str) -> Iterator[tuple[str, Finding]]:
         base_path = str(path_obj.parent / base_name)
         if base_path not in names:
             continue
-        source = _git("show", f"{snapshot}:{path}")
+        source = _git("show", f"{snapshot}:{path}", root=root)
         if not delegates_to_base_script(source, base_name):
             yield (
                 path,
@@ -186,30 +244,42 @@ def _example_variant_findings(snapshot: str) -> Iterator[tuple[str, Finding]]:
             )
 
 
-def _new_findings(ancestor: str, head: str) -> Iterator[tuple[str, Finding]]:
-    for previous, path in _changed_files(ancestor, head):
-        source = _git("show", f"{head}:{path}")
+def _baseline_key(finding: Finding) -> tuple[str, str, tuple[str, ...]]:
+    return (finding.code, _LINE_NUMBER_RE.sub("line <N>", finding.message), finding.scope)
+
+
+def _new_findings(ancestor: str, head: str, root: str | None = None) -> Iterator[tuple[str, Finding]]:
+    changed = list(_changed_files(ancestor, head, root=root))
+    for previous, path in changed:
+        source = _git("show", f"{head}:{path}", root=root)
         current = _findings(path, source)
         if not current:
             continue
         baseline = Counter()
         if previous:
-            old_source = _git("show", f"{ancestor}:{previous}")
-            baseline.update(finding[1:] for finding in _findings(previous, old_source))
+            old_source = _git("show", f"{ancestor}:{previous}", root=root)
+            baseline.update(_baseline_key(finding) for finding in _findings(previous, old_source))
         for finding in current:
-            key = finding[1:]
+            key = _baseline_key(finding)
             if baseline[key]:
                 baseline[key] -= 1
             else:
                 yield path, finding
-    legacy_pipelines = set(_pipeline_findings(ancestor))
-    for diagnostic in _pipeline_findings(head):
+    legacy_pipelines = set(_pipeline_findings(ancestor, root=root))
+    for diagnostic in _pipeline_findings(head, root=root):
         if diagnostic not in legacy_pipelines:
             yield diagnostic
-    legacy_variants = set(_example_variant_findings(ancestor))
-    for diagnostic in _example_variant_findings(head):
-        if diagnostic not in legacy_variants:
-            yield diagnostic
+    changed_head_paths = {path for _previous, path in changed}
+    rename_map = {path: previous for previous, path in changed if previous and previous != path}
+    legacy_variant_paths = {path for path, _finding in _example_variant_findings(ancestor, root=root)}
+    for path, finding in _example_variant_findings(head, root=root):
+        if (
+            path in legacy_variant_paths
+            or rename_map.get(path) in legacy_variant_paths
+            or path not in changed_head_paths
+        ):
+            continue
+        yield path, finding
 
 
 def main() -> int:
@@ -222,12 +292,22 @@ def main() -> int:
     head = args.head or os.environ.get("PRE_COMMIT_TO_REF")
     if bool(base) != bool(head):
         parser.error("provide both base and head, or neither to check staged changes")
+    root = _repo_root()
     if base and head:
-        ancestor = _git("merge-base", base, head).decode("ascii").strip()
+        ancestor = _git("merge-base", base, head, root=root).decode("ascii").strip()
     else:
-        ancestor = "HEAD"
-        head = _git("write-tree").decode("ascii").strip()
-    findings = list(_new_findings(ancestor, head))
+        head_exists = (
+            subprocess.run(
+                ["git", "-C", root, "rev-parse", "--verify", "--quiet", "HEAD"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            ).returncode
+            == 0
+        )
+        ancestor = "HEAD" if head_exists else _EMPTY_TREE_SHA
+        head = _git("write-tree", root=root).decode("ascii").strip()
+    findings = list(_new_findings(ancestor, head, root=root))
     for path, finding in findings:
         print(f"{path!r}:{finding.line}: {finding.code} {finding.message!r}")
     if not findings:

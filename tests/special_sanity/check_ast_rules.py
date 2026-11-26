@@ -43,12 +43,13 @@ SHARED_CONTRACT_FILES = {
 LITERAL_TYPES = {"Literal", "typing.Literal", "typing_extensions.Literal"}
 CLASSVAR_TYPES = {"ClassVar", "typing.ClassVar", "typing_extensions.ClassVar"}
 ROOT_CONFIG_BASES = {"BaseConfig", "object", "builtins.object"}
+OVERLOAD_DECORATORS = {"overload", "typing.overload", "typing_extensions.overload"}
 DOCSTRING_SKIP_DECORATORS = {
     "property",
     "builtins.property",
-    "overload",
-    "typing.overload",
-    "typing_extensions.overload",
+    "cached_property",
+    "functools.cached_property",
+    *OVERLOAD_DECORATORS,
 }
 MODEL_NAME = re.compile(
     r"(?<![a-z0-9])(?:qwen[-_]?image|qwen3[-_]?(?:omni|tts)|minimax[-_]?h3|h3[-_]?image|"
@@ -79,16 +80,35 @@ def _imports(tree: ast.AST, package: tuple[str, ...]) -> Iterator[tuple[ast.AST,
 
 
 def _aliases(tree: ast.AST, package: tuple[str, ...]) -> dict[str, str]:
-    aliases = {}
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                if alias.asname:
-                    aliases[alias.asname] = alias.name
-        elif isinstance(node, ast.ImportFrom) and node.level <= len(package):
-            parent = resolve_name("." * node.level + (node.module or ""), ".".join(package))
-            for alias in node.names:
-                aliases[alias.asname or alias.name] = f"{parent}.{alias.name}"
+    aliases: dict[str, str] = {}
+
+    def visit(statements: list[ast.stmt]) -> None:
+        for node in statements:
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.asname:
+                        aliases[alias.asname] = alias.name
+            elif isinstance(node, ast.ImportFrom) and node.level <= len(package):
+                parent = resolve_name("." * node.level + (node.module or ""), ".".join(package))
+                for alias in node.names:
+                    aliases[alias.asname or alias.name] = f"{parent}.{alias.name}"
+            elif isinstance(node, ast.If):
+                visit(node.body)
+                visit(node.orelse)
+            elif isinstance(node, ast.Try | ast.TryStar):
+                visit(node.body)
+                for handler in node.handlers:
+                    visit(handler.body)
+                visit(node.orelse)
+                visit(node.finalbody)
+            elif isinstance(node, ast.With | ast.AsyncWith):
+                visit(node.body)
+            elif isinstance(node, ast.Match):
+                for case in node.cases:
+                    visit(case.body)
+
+    if isinstance(tree, ast.Module):
+        visit(tree.body)
     return aliases
 
 
@@ -102,7 +122,7 @@ def _import_boundaries(path: str, tree: ast.AST) -> Iterator[tuple[int, str, str
     in_pipelines = package[:2] == ("verl_omni", "pipelines")
     pipeline = package[2] if in_pipelines and len(package) > 2 else None
     shared_pipeline = in_pipelines and (pipeline or source_path.stem) in SHARED_PIPELINE_MODULES
-    is_core = path.startswith(CORE_DIRECTORIES) or shared_pipeline or path == "verl_omni/utils/diffusion_tq.py"
+    is_core = path.startswith(CORE_DIRECTORIES) or shared_pipeline
     is_adapter = pipeline is not None and not shared_pipeline
     is_rollout = path.startswith("verl_omni/workers/rollout/") or (
         is_adapter
@@ -207,9 +227,11 @@ def _cpu_test_names(path: str, tree: ast.AST) -> Iterator[tuple[int, str, str]]:
         )
         for node in ast.walk(tree)
     )
+    is_test_module = source_path.name.startswith("test_") or source_path.name.endswith("_test.py")
     if (
         not source_path.parts[1].startswith("special_")
-        and (cpu_marked or source_path.name.startswith("test_") and source_path.name.endswith("_cpu.py"))
+        and is_test_module
+        and (cpu_marked or source_path.name.endswith("_cpu.py"))
         and not source_path.name.endswith("_on_cpu.py")
     ):
         yield 1, "VO007", "Name CPU tests test_*_on_cpu.py so the L1 workflow collects them."
@@ -247,10 +269,23 @@ def _private_imports(path: str, tree: ast.AST) -> Iterator[tuple[int, str, str]]
         full_parts = (*parts, symbol) if symbol else parts
         if not any(_private(part) for part in full_parts[1:]):
             continue
-        same_package = parts == package or parts[:-1] == package
+        is_reward_utils = package[:3] == ("verl_omni", "utils", "reward_score") and (
+            parts == ("verl_omni", "utils", "reward_score", "reward_utils")
+            or (parts == ("verl_omni", "utils", "reward_score") and symbol == "reward_utils")
+        )
+        if is_reward_utils:
+            continue
+        same_pipeline = (
+            len(package) >= 3
+            and len(parts) >= 3
+            and package[:2] == parts[:2] == ("verl_omni", "pipelines")
+            and package[2] == parts[2]
+            and package[2] not in SHARED_PIPELINE_MODULES
+        )
+        same_package = parts == package or parts[:-1] == package or same_pipeline
         sibling_scorer = (
             package[:3] == parts[:3] == ("verl_omni", "utils", "reward_score")
-            and parts != package
+            and (parts != package or (bool(symbol) and _private(symbol)))
             and parts[-1] != "reward_utils"
         )
         if not same_package or sibling_scorer:
@@ -302,6 +337,8 @@ def _training_adapters(tree: ast.AST, aliases: dict[str, str]) -> Iterator[tuple
         for method in node.body:
             if not isinstance(method, ast.FunctionDef | ast.AsyncFunctionDef):
                 continue
+            if method.name in {"__init_subclass__", "__class_getitem__"}:
+                continue
             decorators = {_qualified(decorator, aliases) for decorator in method.decorator_list}
             if method.name == "__init__" or not decorators.intersection(
                 {
@@ -320,6 +357,19 @@ def _training_adapters(tree: ast.AST, aliases: dict[str, str]) -> Iterator[tuple
                 )
 
 
+def _declares_all(tree: ast.AST) -> bool:
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "__all__" for t in node.targets):
+            return True
+        if (
+            isinstance(node, ast.AnnAssign | ast.AugAssign)
+            and isinstance(node.target, ast.Name)
+            and node.target.id == "__all__"
+        ):
+            return True
+    return False
+
+
 def _static_exports(tree: ast.AST) -> set[str] | None:
     exported = None
     for node in tree.body:
@@ -335,16 +385,49 @@ def _static_exports(tree: ast.AST) -> set[str] | None:
                 exported.update(additions)
             else:
                 exported = None
+        elif (
+            isinstance(node, ast.Expr)
+            and isinstance(node.value, ast.Call)
+            and isinstance(node.value.func, ast.Attribute)
+            and isinstance(node.value.func.value, ast.Name)
+            and node.value.func.value.id == "__all__"
+            and node.value.func.attr in {"append", "extend"}
+        ):
+            if node.value.func.attr == "append" and len(node.value.args) == 1 and not node.value.keywords:
+                arg = node.value.args[0]
+                if exported is not None and isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                    exported.add(arg.value)
+                else:
+                    exported = None
+            elif node.value.func.attr == "extend" and len(node.value.args) == 1 and not node.value.keywords:
+                additions = _literal_exports(node.value.args[0])
+                if exported is not None and additions is not None:
+                    exported.update(additions)
+                else:
+                    exported = None
+            else:
+                exported = None
     return exported
 
 
+def _parse_annotation(annotation: ast.AST) -> ast.AST:
+    if isinstance(annotation, ast.Constant) and isinstance(annotation.value, str):
+        try:
+            return ast.parse(annotation.value, mode="eval").body
+        except SyntaxError:
+            return annotation
+    return annotation
+
+
 def _is_classvar(annotation: ast.AST, aliases: dict[str, str]) -> bool:
-    target = annotation.value if isinstance(annotation, ast.Subscript) else annotation
+    parsed = _parse_annotation(annotation)
+    target = parsed.value if isinstance(parsed, ast.Subscript) else parsed
     return _qualified(target, aliases) in CLASSVAR_TYPES
 
 
 def _uses_literal(annotation: ast.AST, aliases: dict[str, str]) -> bool:
-    for sub in ast.walk(annotation):
+    parsed = _parse_annotation(annotation)
+    for sub in ast.walk(parsed):
         target = sub.value if isinstance(sub, ast.Subscript) else sub
         if _qualified(target, aliases) in LITERAL_TYPES:
             return True
@@ -361,7 +444,11 @@ def _has_default_value(stmt: ast.AnnAssign, aliases: dict[str, str]) -> bool:
             keyword.arg == "default" and _qualified(keyword.value, aliases) not in {"MISSING", "dataclasses.MISSING"}
             for keyword in stmt.value.keywords
         )
-        has_factory = any(keyword.arg == "default_factory" for keyword in stmt.value.keywords)
+        has_factory = any(
+            keyword.arg == "default_factory"
+            and _qualified(keyword.value, aliases) not in {"MISSING", "dataclasses.MISSING"}
+            for keyword in stmt.value.keywords
+        )
         return has_default or has_factory
     return True
 
@@ -378,6 +465,7 @@ def _calls_super_post_init(method: ast.FunctionDef, aliases: dict[str, str]) -> 
 
 
 def _config_dataclasses(tree: ast.AST, aliases: dict[str, str]) -> Iterator[tuple[int, str, str]]:
+    has_all = _declares_all(tree)
     exported = _static_exports(tree)
     for node in tree.body:
         if not isinstance(node, ast.ClassDef):
@@ -403,7 +491,7 @@ def _config_dataclasses(tree: ast.AST, aliases: dict[str, str]) -> Iterator[tupl
             for decorator in dataclasses
         ):
             reasons.append("use BaseConfig mutability instead of frozen=True")
-        if exported is not None and not node.name.startswith("_") and node.name not in exported:
+        if not node.name.startswith("_") and (not has_all or (exported is not None and node.name not in exported)):
             reasons.append("export the public config in __all__")
         missing_defaults = [
             stmt.target.id
@@ -434,10 +522,20 @@ def _has_docstring(node: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef) 
     return bool(ast.get_docstring(node))
 
 
+def _is_property_accessor(decorator: ast.expr) -> bool:
+    return isinstance(decorator, ast.Attribute) and decorator.attr in {"setter", "deleter"}
+
+
+def _has_decorator(node: ast.FunctionDef | ast.AsyncFunctionDef, aliases: dict[str, str], names: set[str]) -> bool:
+    return any(_qualified(decorator, aliases) in names for decorator in node.decorator_list)
+
+
 def _skip_method_docstring(node: ast.FunctionDef | ast.AsyncFunctionDef, aliases: dict[str, str]) -> bool:
     if node.name.startswith("_"):
         return True
-    return any(_qualified(decorator, aliases) in DOCSTRING_SKIP_DECORATORS for decorator in node.decorator_list)
+    return _has_decorator(node, aliases, DOCSTRING_SKIP_DECORATORS) or any(
+        _is_property_accessor(decorator) for decorator in node.decorator_list
+    )
 
 
 def _public_api_docstrings(path: str, tree: ast.AST, aliases: dict[str, str]) -> Iterator[tuple[int, str, str]]:
@@ -448,6 +546,9 @@ def _public_api_docstrings(path: str, tree: ast.AST, aliases: dict[str, str]) ->
     for node in tree.body:
         if not isinstance(node, ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef):
             continue
+        is_overload = isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and _has_decorator(
+            node, aliases, OVERLOAD_DECORATORS
+        )
         is_exported = exported is not None and not node.name.startswith("_") and node.name in exported
         is_contract_symbol = in_contract and not node.name.startswith("_")
         is_scorer = (
@@ -455,7 +556,7 @@ def _public_api_docstrings(path: str, tree: ast.AST, aliases: dict[str, str]) ->
             and isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
             and (node.name == "compute_score" or node.name.startswith("compute_score_"))
         )
-        if (is_exported or is_contract_symbol or is_scorer) and not _has_docstring(node):
+        if not is_overload and (is_exported or is_contract_symbol or is_scorer) and not _has_docstring(node):
             yield node.lineno, "VO015", f"Document public API '{node.name}' with a concise contract docstring."
         if in_contract and isinstance(node, ast.ClassDef) and not node.name.startswith("_"):
             for member in node.body:
@@ -489,73 +590,135 @@ def _is_numeric_literal(node: ast.AST) -> bool:
     )
 
 
-def _returns_or_sets_fallback_score(body: list[ast.stmt]) -> bool:
-    module = ast.Module(body=body, type_ignores=[])
-    for sub in ast.walk(module):
+def _is_dict_score_expr(node: ast.AST) -> bool:
+    if isinstance(node, ast.Dict):
+        return any(isinstance(key, ast.Constant) and key.value == "score" for key in node.keys)
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "dict"
+        and any(keyword.arg == "score" for keyword in node.keywords)
+    )
+
+
+def _node_contains_fallback_score(node: ast.AST) -> bool:
+    for sub in ast.walk(node):
         if isinstance(sub, ast.Return) and sub.value is not None:
-            if _is_numeric_literal(sub.value):
+            if _is_numeric_literal(sub.value) or _is_dict_score_expr(sub.value):
                 return True
-            if isinstance(sub.value, ast.Dict) and any(
-                isinstance(key, ast.Constant) and key.value == "score" for key in sub.value.keys
+            if isinstance(sub.value, ast.Tuple) and any(_is_numeric_literal(el) for el in sub.value.elts):
+                return True
+        elif isinstance(sub, ast.Assign) and sub.value is not None:
+            if _is_numeric_literal(sub.value) and any(
+                isinstance(target, ast.Name) and target.id == "score" for target in sub.targets
             ):
                 return True
-        elif isinstance(sub, ast.Assign) and _is_numeric_literal(sub.value):
-            if any(isinstance(target, ast.Name) and target.id == "score" for target in sub.targets):
+            if _is_dict_score_expr(sub.value):
                 return True
+        elif isinstance(sub, ast.AnnAssign) and sub.value is not None:
+            if _is_numeric_literal(sub.value) and isinstance(sub.target, ast.Name) and sub.target.id == "score":
+                return True
+            if _is_dict_score_expr(sub.value):
+                return True
+        elif (
+            isinstance(sub, ast.Call)
+            and isinstance(sub.func, ast.Attribute)
+            and sub.func.attr == "append"
+            and isinstance(sub.func.value, ast.Name)
+            and sub.func.value.id == "scores"
+            and sub.args
+            and _is_numeric_literal(sub.args[0])
+        ):
+            return True
+    return False
+
+
+def _returns_or_sets_fallback_score(body: list[ast.stmt]) -> bool:
+    return _node_contains_fallback_score(ast.Module(body=body, type_ignores=[]))
+
+
+def _unconditionally_raises_before_fallback(body: list[ast.stmt]) -> bool:
+    for stmt in body:
+        if _node_contains_fallback_score(stmt):
+            return False
+        if isinstance(stmt, ast.Raise):
+            return True
+    return False
+
+
+def _is_positive_contract_check(test: ast.AST, exc_name: str, aliases: dict[str, str]) -> bool:
+    if isinstance(test, ast.Call):
+        return (
+            _qualified(test.func, aliases) in {"isinstance", "builtins.isinstance"}
+            and len(test.args) >= 2
+            and isinstance(test.args[0], ast.Name)
+            and test.args[0].id == exc_name
+            and any(
+                name.split(".")[-1] == "ArtifactContractError"
+                for name in _caught_exception_names(test.args[1], aliases)
+            )
+        )
+    if isinstance(test, ast.BoolOp) and isinstance(test.op, ast.Or):
+        return any(_is_positive_contract_check(value, exc_name, aliases) for value in test.values)
     return False
 
 
 def _reraises_contract_in_body(handler: ast.ExceptHandler, aliases: dict[str, str]) -> bool:
     if not handler.name:
         return False
-    module = ast.Module(body=handler.body, type_ignores=[])
-    for sub in ast.walk(module):
-        if not isinstance(sub, ast.If):
-            continue
-        checks_contract = any(
-            isinstance(call, ast.Call)
-            and _qualified(call.func, aliases) in {"isinstance", "builtins.isinstance"}
-            and len(call.args) >= 2
-            and isinstance(call.args[0], ast.Name)
-            and call.args[0].id == handler.name
-            and any(
-                name.split(".")[-1] == "ArtifactContractError"
-                for name in _caught_exception_names(call.args[1], aliases)
-            )
-            for call in ast.walk(sub.test)
-        )
-        if checks_contract and any(
-            isinstance(node, ast.Raise) for node in ast.walk(ast.Module(body=sub.body, type_ignores=[]))
+    for stmt in handler.body:
+        if _node_contains_fallback_score(stmt):
+            return False
+        if (
+            isinstance(stmt, ast.If)
+            and _is_positive_contract_check(stmt.test, handler.name, aliases)
+            and _unconditionally_raises_before_fallback(stmt.body)
         ):
             return True
     return False
+
+
+def _is_trivial_scalar_parse_try(try_node: ast.Try | ast.TryStar) -> bool:
+    if len(try_node.body) != 1 or try_node.orelse:
+        return False
+    sole = try_node.body[0]
+    call = None
+    if isinstance(sole, ast.Return):
+        call = sole.value
+    elif isinstance(sole, ast.Assign):
+        call = sole.value
+    return (
+        isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Name)
+        and call.func.id in {"int", "float", "bool", "complex"}
+    )
 
 
 def _artifact_contract_errors(tree: ast.AST, aliases: dict[str, str]) -> Iterator[tuple[int, str, str]]:
     try_nodes = [node for node in ast.walk(tree) if isinstance(node, ast.Try | ast.TryStar)]
     for try_node in try_nodes:
         handled_contract = False
+        trivial_scalar = _is_trivial_scalar_parse_try(try_node)
         for handler in try_node.handlers:
-            module = ast.Module(body=handler.body, type_ignores=[])
-            has_unconditional_raise = any(isinstance(stmt, ast.Raise) for stmt in handler.body)
-            has_any_raise = any(isinstance(sub, ast.Raise) for sub in ast.walk(module))
+            unconditional_raise = _unconditionally_raises_before_fallback(handler.body)
             if handler.type is None:
-                if not handled_contract and not has_any_raise and _returns_or_sets_fallback_score(handler.body):
+                if not handled_contract and not unconditional_raise and _returns_or_sets_fallback_score(handler.body):
                     yield handler.lineno, "VO016", "Propagate ArtifactContractError before bare except score fallback."
                 continue
             caught = _caught_exception_names(handler.type, aliases)
             if any(name.split(".")[-1] == "ArtifactContractError" for name in caught):
-                if has_any_raise:
+                if unconditional_raise:
                     handled_contract = True
                 else:
                     yield handler.lineno, "VO016", "Propagate ArtifactContractError instead of swallowing it."
             elif (
-                any(
+                not trivial_scalar
+                and any(
                     name in {"Exception", "BaseException", "builtins.Exception", "builtins.BaseException"}
                     for name in caught
                 )
                 and not handled_contract
-                and not has_unconditional_raise
+                and not unconditional_raise
                 and not _reraises_contract_in_body(handler, aliases)
                 and _returns_or_sets_fallback_score(handler.body)
             ):
@@ -567,6 +730,11 @@ def _literal_exports(node: ast.AST) -> set[str] | None:
         isinstance(element, ast.Constant) and isinstance(element.value, str) for element in node.elts
     ):
         return set(_literals(node))
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left = _literal_exports(node.left)
+        right = _literal_exports(node.right)
+        if left is not None and right is not None:
+            return left | right
     return None
 
 

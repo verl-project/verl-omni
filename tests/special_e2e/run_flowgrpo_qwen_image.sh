@@ -11,8 +11,11 @@
 #   tiny qwen3-vl  at ~/models/tiny-random/qwen3-vl
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # Override via env: NUM_GPUS, MODEL_PATH, REWARD_MODEL_PATH, DATA_DIR, TOTAL_TRAIN_STEPS,
-#                   TRAIN_FILES, VAL_FILES, STEP1_RATIO_TOL, STEP1_KL_TOL
+#                   TRAIN_FILES, VAL_FILES, STEP1_RATIO_TOL, STEP1_KL_TOL,
+#                   STEP1_ROLLOUT_LOGPROB_DIFF_TOL, STEP1_ROLLOUT_KL_TOL
 NUM_GPUS=${NUM_GPUS:-4}
 MODEL_PATH=${MODEL_PATH:-${HOME}/models/tiny-random/Qwen-Image}
 TOKENIZER_PATH=${TOKENIZER_PATH:-${MODEL_PATH}/tokenizer}
@@ -24,6 +27,8 @@ dummy_test_path=${VAL_FILES:-${DATA_DIR}/test.parquet}
 TOTAL_TRAIN_STEPS=${TOTAL_TRAIN_STEPS:-2}
 STEP1_RATIO_TOL=${STEP1_RATIO_TOL:-0.05}
 STEP1_KL_TOL=${STEP1_KL_TOL:-0.05}
+STEP1_ROLLOUT_LOGPROB_DIFF_TOL=${STEP1_ROLLOUT_LOGPROB_DIFF_TOL:-0.05}
+STEP1_ROLLOUT_KL_TOL=${STEP1_ROLLOUT_KL_TOL:-0.05}
 
 ENGINE=vllm_omni
 max_prompt_length=256
@@ -119,6 +124,7 @@ VERL_FILE_LOGGER_PATH="${_METRICS_FILE}" python3 -m verl_omni.trainer.main_diffu
     actor_rollout_ref.rollout.pipeline.height=256 \
     actor_rollout_ref.rollout.pipeline.width=256 \
     actor_rollout_ref.rollout.enforce_eager=True \
+    actor_rollout_ref.rollout.calculate_log_probs=True \
     actor_rollout_ref.rollout.pipeline.true_cfg_scale=4.0 \
     actor_rollout_ref.rollout.pipeline.max_sequence_length=${max_prompt_length} \
     actor_rollout_ref.rollout.algo.noise_level=1.0 \
@@ -160,19 +166,35 @@ VERL_FILE_LOGGER_PATH="${_METRICS_FILE}" python3 -m verl_omni.trainer.main_diffu
     trainer.total_training_steps=${TOTAL_TRAIN_STEPS} \
     trainer.use_v1=true \
     trainer.v1.trainer_mode=sync \
+    ++ray_kwargs.ray_init.runtime_env.env_vars.VERL_FILE_LOGGER_PATH="${_METRICS_FILE}" \
     "$@" 2>&1 | tee "${_SMOKE_LOG}"
 check_leak_monitor
 
+effective_train_steps="${TOTAL_TRAIN_STEPS}"
+for arg in "$@"; do
+    case "${arg}" in
+        trainer.total_training_steps=*|+trainer.total_training_steps=*|++trainer.total_training_steps=*)
+            effective_train_steps="${arg#*=}"
+            ;;
+    esac
+done
+if [[ ! "${effective_train_steps}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "FAIL: effective trainer.total_training_steps must be a positive integer, got '${effective_train_steps}'." >&2
+    exit 2
+fi
+
 expected_steps=()
-for ((step = 1; step <= TOTAL_TRAIN_STEPS; step++)); do
+for ((step = 1; step <= effective_train_steps; step++)); do
     expected_steps+=("${step}")
 done
-python3 tests/special_e2e/check_diffusion_numerical_health.py \
+python3 "${SCRIPT_DIR}/check_diffusion_numerical_health.py" \
     --jsonl "${_METRICS_FILE}" \
     --log "${_SMOKE_LOG}" \
     --steps "${expected_steps[@]}" \
     --step1-ratio-tol "${STEP1_RATIO_TOL}" \
     --step1-kl-tol "${STEP1_KL_TOL}" \
+    --step1-rollout-logprob-diff-tol "${STEP1_ROLLOUT_LOGPROB_DIFF_TOL}" \
+    --step1-rollout-kl-tol "${STEP1_ROLLOUT_KL_TOL}" \
     --require-positive-grad-norm
 
 echo "FlowGRPO diffusion e2e test passed (training and numerical health checks succeeded)."

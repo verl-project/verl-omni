@@ -49,23 +49,23 @@ The AST rules follow module responsibilities rather than treating all Python
 files alike ([RFC #942](https://github.com/verl-project/verl-omni/issues/942)):
 
 - Shared trainers, workers, agent loops, and pipeline contracts use the registry
-  or shared interfaces, not concrete pipeline imports.
-- Rollout adapters and workers use shared contracts instead of training engine internals.
+  or shared interfaces, not concrete pipeline imports (`VO001`).
+- Rollout adapters and workers use shared contracts instead of training engine internals (`VO002`).
 - Reuse public APIs across directories and sibling reward scorers. Keep private
   helpers within their owning package; `reward_utils` remains a shared scorer helper (`VO003`).
-- Use an explicit sampling seed, not a request ID hash, when seeding pipeline RNGs.
-- For Qwen-Image RoPE lengths, use `txt_seq_lens_from_embeds()` rather than summing the attention mask.
+- Use an explicit sampling seed, not a request ID hash, when seeding pipeline RNGs (`VO004`).
+- For Qwen-Image RoPE lengths, use `txt_seq_lens_from_embeds()` rather than summing the attention mask (`VO005`).
 - Do not silently discard broad exceptions with `pass` or `continue` in production code ([RFC #388](https://github.com/verl-project/verl-omni/issues/388)).
-- Test scripts that call `pytest.main()` must check or propagate its exit status ([PR #814](https://github.com/verl-project/verl-omni/pull/814#discussion_r4452763469)). Name L1 CPU tests `test_*_on_cpu.py`, not `test_*_cpu.py` ([PR #409](https://github.com/verl-project/verl-omni/pull/409#discussion_r3965752859)).
+- Test scripts that call `pytest.main()` must check or propagate its exit status (`VO006`, [PR #814](https://github.com/verl-project/verl-omni/pull/814#discussion_r4452763469)). Name L1 CPU tests `test_*_on_cpu.py`, not `test_*_cpu.py` ([PR #409](https://github.com/verl-project/verl-omni/pull/409#discussion_r3965752859)).
 - CPU-marked tests also need the `_on_cpu.py` suffix (`VO007`). GPU tests use
   topology helpers instead of bare `torch.cuda.is_available()` skip conditions (`VO013`).
 - Shared trainers, workers and agent loops must not dispatch on known concrete
   model-name literals (`VO008`). Training adapters keep stateless class/static
   hooks (`VO009`); pipeline packages must be imported at the pipeline entrypoint (`VO010`).
-- Config dataclasses need a parent config, non-frozen mutability, field defaults,
-  no `Literal[...]`, subclass `super().__post_init__()`, and `__all__` export
-  (`VO011`). Reward managers leave HTTP client imports to scorers (`VO012`) and
-  propagate `ArtifactContractError` (`VO016`).
+- Config dataclasses need a parent config, non-frozen mutability, field defaults
+  (or `omegaconf.MISSING`, never `dataclasses.MISSING`), no `Literal[...]`, subclass
+  `super().__post_init__()`, and `__all__` export (`VO011`). Reward managers leave
+  HTTP client imports to scorers (`VO012`) and propagate `ArtifactContractError` (`VO016`).
 - Public API contracts (`__all__` exports, shared pipeline contract modules,
   and `compute_score*` entrypoints) require concise docstrings (`VO015`).
 - Pass personal model/data paths through configuration or temporary fixtures
@@ -109,7 +109,7 @@ Hydra overrides (`EX007`), hardcoded tokens/device lists (`CUDA`/`ASCEND_RT`/
 or `pip install` (`EX008`), disallow committed example media (`EX003`),
 `README_*.md` (`EX004`), or `dataprocess/`, duplicate folders, and
 `.venv/bin/python` (`EX006`), and require new `_npu`/`_mlu`/`_amd`/`_rocm`
-variants with an existing GPU sibling recipe to delegate via `exec bash`
+variants with an existing GPU sibling recipe to delegate via `exec bash` / `bash` / `source`
 instead of duplicating it (`EX009`).
 
 The checker reads staged Git objects or the PR snapshots without importing
