@@ -17,7 +17,7 @@ Looking for ways to dive in? Check out these issues:
 - [Good first issues](https://github.com/verl-project/verl-omni/issues?q=is%3Aissue%20state%3Aopen%20label%3A%22good%20first%20issue%22)
 - [Call for contribution](https://github.com/verl-project/verl-omni/issues?q=is%3Aissue%20state%3Aopen%20label%3A%22call%20for%20contribution%22)
 
-Furthermore, you can learn the development plan and roadmap via the [RFC: Multi-modal Generation RL 2026Q2 Roadmap](https://github.com/verl-project/verl/issues/5755) and the [RFC: Q3 Road Map](https://github.com/verl-project/verl-omni/issues/97).
+Furthermore, you can learn the development plan and roadmap via the [RFC: Multi-modal Generation RL 2026Q2 Roadmap](https://github.com/verl-project/verl/issues/5755) and the [Q4 Road Map](https://github.com/verl-project/verl-omni/issues/700).
 
 ## Developing
 
@@ -61,8 +61,10 @@ If possible, please add CI test(s) for your new feature:
 
 ## Building the Docs
 
+The doc CI job is [`.github/workflows/doc.yml`](.github/workflows/doc.yml). Locally, with [`uv`](docs/start/install.md) already installed:
+
 ```bash
-pip install -e .
+uv pip install --python "$(command -v python)" --constraint .github/triton_cpu_pin.txt -e .
 pip install -r docs/requirements-docs.txt
 
 cd docs

@@ -122,11 +122,9 @@ def use_composite_policy_gradient(config) -> bool:
     """Return whether this run trains an AR and a diffusion together.
 
     Joint-training sets ``trainer.train_ar=True``.
-    TODO: use ``trainer.freeze_diffusion`` for AR training only.
     """
     train_ar = bool(OmegaConf.select(config, "trainer.train_ar", default=False))
-    freeze_diffusion = bool(OmegaConf.select(config, "trainer.freeze_diffusion", default=False))
-    return train_ar and not freeze_diffusion
+    return train_ar
 
 
 def validate_separate_config(config) -> None:
@@ -1067,9 +1065,6 @@ class BaseRayDiffusionTrainer(ABC):
         )
 
         # create async rollout manager and request scheduler
-        # Note: mode is always "async" since sync mode is deprecated
-        self.async_rollout_mode = True
-
         # Support custom AgentLoopManager via config
         manager_class_fqn = self.config.actor_rollout_ref.rollout.get("agent", {}).get("agent_loop_manager_class")
         if manager_class_fqn:
@@ -1113,6 +1108,20 @@ class BaseRayDiffusionTrainer(ABC):
         # sleep all replicas to load checkpoint
         if not self.separate:
             self.checkpoint_manager.sleep_replicas()
+
+    def _maybe_save_checkpoint(self, is_last_step: bool, timing_raw: dict) -> None:
+        """Save when ``save_freq`` is positive and this step, the period, or ESI requires it."""
+        esi_close_to_expiration = should_save_ckpt_esi(
+            max_steps_duration=self.max_steps_duration,
+            redundant_time=self.config.trainer.esi_redundant_time,
+        )
+        if self.config.trainer.save_freq > 0 and (
+            is_last_step or self.global_steps % self.config.trainer.save_freq == 0 or esi_close_to_expiration
+        ):
+            if esi_close_to_expiration:
+                print("Force saving checkpoint: ESI instance expiration approaching.")
+            with marked_timer("save_checkpoint", timing_raw, color="green"):
+                self._save_checkpoint()
 
     def _save_checkpoint(self):
         from verl.utils.fs import local_mkdir_safe
@@ -1552,27 +1561,7 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
                     with marked_timer("update_actor", timing_raw, color="red"):
                         actor_output = self._update_actor(batch)
 
-                    # Check if the ESI (Elastic Server Instance)/training plan is close to expiration.
-                    esi_close_to_expiration = should_save_ckpt_esi(
-                        max_steps_duration=self.max_steps_duration,
-                        redundant_time=self.config.trainer.esi_redundant_time,
-                    )
-                    # Check if the conditions for saving a checkpoint are met.
-                    # The conditions include a mandatory condition (1) and
-                    # one of the following optional conditions (2/3/4):
-                    # 1. The save frequency is set to a positive value.
-                    # 2. It's the last training step.
-                    # 3. The current step number is a multiple of the save frequency.
-                    # 4. The ESI(Elastic Server Instance)/training plan is close to expiration.
-                    if self.config.trainer.save_freq > 0 and (
-                        is_last_step
-                        or self.global_steps % self.config.trainer.save_freq == 0
-                        or esi_close_to_expiration
-                    ):
-                        if esi_close_to_expiration:
-                            print("Force saving checkpoint: ESI instance expiration approaching.")
-                        with marked_timer("save_checkpoint", timing_raw, color="green"):
-                            self._save_checkpoint()
+                    self._maybe_save_checkpoint(is_last_step, timing_raw)
 
                     # update weights from trainer to rollout
                     with marked_timer("update_weights", timing_raw, color="red"):
@@ -1966,27 +1955,7 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
                             if self._has_old_adapter:
                                 metrics.update(compute_old_policy_metrics(self._update_old_policy()))
 
-                    # Check if the ESI (Elastic Server Instance)/training plan is close to expiration.
-                    esi_close_to_expiration = should_save_ckpt_esi(
-                        max_steps_duration=self.max_steps_duration,
-                        redundant_time=self.config.trainer.esi_redundant_time,
-                    )
-                    # Check if the conditions for saving a checkpoint are met.
-                    # The conditions include a mandatory condition (1) and
-                    # one of the following optional conditions (2/3/4):
-                    # 1. The save frequency is set to a positive value.
-                    # 2. It's the last training step.
-                    # 3. The current step number is a multiple of the save frequency.
-                    # 4. The ESI(Elastic Server Instance)/training plan is close to expiration.
-                    if self.config.trainer.save_freq > 0 and (
-                        is_last_step
-                        or self.global_steps % self.config.trainer.save_freq == 0
-                        or esi_close_to_expiration
-                    ):
-                        if esi_close_to_expiration:
-                            print("Force saving checkpoint: ESI instance expiration approaching.")
-                        with marked_timer("save_checkpoint", timing_raw, color="green"):
-                            self._save_checkpoint()
+                    self._maybe_save_checkpoint(is_last_step, timing_raw)
 
                     # update weights from trainer to rollout
                     with marked_timer("update_weights", timing_raw, color="red"):
@@ -2183,20 +2152,6 @@ class CompositePolicyGradientRayTrainer(PolicyGradientRayTrainer):
         calculate_entropy = self.config.actor_rollout_ref.actor.ar.calculate_entropy or (
             self.config.actor_rollout_ref.actor.ar.entropy_coeff != 0.0
         )
-        distillation_use_topk = False
-        # distillation_use_topk = (
-        #     self.distillation_config.distillation_loss.loss_settings.use_topk
-        #     if is_distillation_enabled(self.config.get("distillation"))
-        #     else False
-        # )
-        distillation_only = False  # distillation_only flag means we can skip policy loss and reduce mem footprint
-        # if is_distillation_enabled(self.config.get("distillation")):
-        #     distillation_loss_cfg = self.distillation_config.distillation_loss
-        #     distillation_only = (
-        #         distillation_use_topk
-        #         and not distillation_loss_cfg.use_task_rewards
-        #         and not distillation_loss_cfg.use_policy_gradient
-        #     )
         ppo_mini_batch_size = self.config.actor_rollout_ref.actor.ppo_mini_batch_size
         ppo_mini_batch_size = ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.m
         ppo_epochs = self.config.actor_rollout_ref.actor.ppo_epochs
@@ -2205,8 +2160,6 @@ class CompositePolicyGradientRayTrainer(PolicyGradientRayTrainer):
         tu.assign_non_tensor(
             batch_td,
             calculate_entropy=calculate_entropy,
-            distillation_use_topk=distillation_use_topk,
-            distillation_only=distillation_only,
             global_batch_size=ppo_mini_batch_size,
             mini_batch_size=ppo_mini_batch_size,
             epochs=ppo_epochs,
@@ -2665,18 +2618,6 @@ class CompositePolicyGradientRayTrainer(PolicyGradientRayTrainer):
                             )
                             metrics.update(rollout_corr_metrics)
 
-                    # TODO: add reference policy and teacher policy computation
-                    # if self.use_reference_policy:
-                    #     # compute reference log_prob
-                    #     with marked_timer(str(Role.RefPolicy), timing_raw, color="olive"):
-                    #         ref_log_prob = self._compute_ref_log_prob(batch)
-                    #         batch = batch.union(ref_log_prob)
-
-                    # if self.use_teacher_policy:
-                    #     # score the rollout trajectories with the frozen teacher
-                    #     with marked_timer("teacher", timing_raw, color="olive"):
-                    #         batch = batch.union(self.teacher_model_manager.compute_prev_sample_mean(batch))
-
                     with marked_timer("adv", timing_raw, color="brown"):
                         # we combine with rule-based rm
                         reward_extra_infos_dict: dict[str, list]
@@ -2732,27 +2673,7 @@ class CompositePolicyGradientRayTrainer(PolicyGradientRayTrainer):
                         ar_actor_output = self._update_ar_actor(ar_batch)
                         actor_output = self._update_actor(batch)
 
-                    # Check if the ESI (Elastic Server Instance)/training plan is close to expiration.
-                    esi_close_to_expiration = should_save_ckpt_esi(
-                        max_steps_duration=self.max_steps_duration,
-                        redundant_time=self.config.trainer.esi_redundant_time,
-                    )
-                    # Check if the conditions for saving a checkpoint are met.
-                    # The conditions include a mandatory condition (1) and
-                    # one of the following optional conditions (2/3/4):
-                    # 1. The save frequency is set to a positive value.
-                    # 2. It's the last training step.
-                    # 3. The current step number is a multiple of the save frequency.
-                    # 4. The ESI(Elastic Server Instance)/training plan is close to expiration.
-                    if self.config.trainer.save_freq > 0 and (
-                        is_last_step
-                        or self.global_steps % self.config.trainer.save_freq == 0
-                        or esi_close_to_expiration
-                    ):
-                        if esi_close_to_expiration:
-                            print("Force saving checkpoint: ESI instance expiration approaching.")
-                        with marked_timer("save_checkpoint", timing_raw, color="green"):
-                            self._save_checkpoint()
+                    self._maybe_save_checkpoint(is_last_step, timing_raw)
 
                     # update weights from trainer to rollout
                     with marked_timer("update_weights", timing_raw, color="red"):
