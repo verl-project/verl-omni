@@ -77,7 +77,7 @@ This produces:
 Override `WORKSPACE` when launching if your data is elsewhere:
 
 ```bash
-WORKSPACE=/path/to/workspace bash examples/diffusionnft_trainer/qwen_image/run_qwen_image_ocr_lora.sh
+WORKSPACE=/path/to/workspace bash examples/diffusionnft_trainer/qwen_image/run_qwen_image_ocr_lora_v1.sh
 ```
 
 ## Prepare the models
@@ -90,17 +90,8 @@ WORKSPACE=/path/to/workspace bash examples/diffusionnft_trainer/qwen_image/run_q
 
 ### NVIDIA GPU
 
-Launch the example from the repository root:
-
-```bash
-bash examples/diffusionnft_trainer/qwen_image/run_qwen_image_ocr_lora.sh
-```
-
-### NVIDIA GPU: V1 sync
-
-The V1 counterpart uses TransferQueue and ReplayBuffer with the synchronous
-trainer. Launch it from the repository root with the same prepared data and
-model dependencies:
+Launch the example from the repository root. The default is the V1 script
+(TransferQueue and ReplayBuffer, synchronous trainer):
 
 ```bash
 bash examples/diffusionnft_trainer/qwen_image/run_qwen_image_ocr_lora_v1.sh
@@ -121,9 +112,14 @@ check without launching training:
 bash examples/diffusionnft_trainer/qwen_image/run_qwen_image_ocr_lora_v1.sh --cfg job --resolve
 ```
 
-Keep the V0 entrypoint for matched comparisons. The performance table below
-reports the existing V0 measurements; it does not establish V1 convergence or
-throughput. A tiny-checkpoint smoke also does not reproduce the full OCR setup.
+The legacy v0 script is **deprecated**. Keep it for matched comparisons. The
+performance table below reports the existing V0 measurements; it does not
+establish V1 convergence or throughput. A tiny-checkpoint smoke also does not
+reproduce the full OCR setup.
+
+```bash
+bash examples/diffusionnft_trainer/qwen_image/run_qwen_image_ocr_lora.sh
+```
 
 ### NPU
 
@@ -139,13 +135,13 @@ This script uses a 16-NPU global distribution strategy with:
 - `reward.reward_model.rollout.tensor_model_parallel_size=4`
 - `trainer.n_gpus_per_node=16`
 
-The script accepts normal Hydra overrides after the command:
+The deprecated v0 script accepts normal Hydra overrides after the command:
 
 ```bash
 bash examples/diffusionnft_trainer/qwen_image/run_qwen_image_ocr_lora.sh trainer.total_training_steps=100
 ```
 
-The script runs `python3 -m verl_omni.trainer.main_diffusion` with DiffusionNFT-specific settings:
+The deprecated v0 script runs `python3 -m verl_omni.trainer.main_diffusion` with DiffusionNFT-specific settings:
 
 - `actor_rollout_ref.model.algorithm=diffusion_nft`
 - `algorithm.trainer_type=direct_preference`

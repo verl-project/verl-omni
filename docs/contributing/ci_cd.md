@@ -6,8 +6,8 @@ VeRL-Omni uses layered CI/CD checks so fast CPU feedback and expensive GPU or co
 
 | Layer | Purpose | Trigger | Hardware | Blocking scope | Output |
 | --- | --- | --- | --- | --- | --- |
-| L1 CPU API tests | Validate CPU-only APIs, configs, data utilities, adapters, rewards, and unit behavior | Pull requests with `ready-for-ci`, pushes to `main` and release branches | CPU | Required before merge | Pass/fail and coverage artifacts |
-| L2 GPU smoke tests | Validate tiny-random GPU end-to-end training paths | Pull requests with `ready-for-ci`, usually after L1 is green | GPU | Required before merge for GPU-touching changes | Smoke logs and summaries |
+| L1 CPU API tests | Validate CPU-only APIs, configs, data utilities, adapters, rewards, and unit behavior | Pull requests with a label whose name contains `ci`; pushes to `main` and `v0.*` | CPU | Required before merge | Pass/fail and coverage artifacts |
+| L2 GPU smoke tests | Validate tiny-random GPU end-to-end training paths | Pull requests labeled `ready-for-ci`, `ci-core`, `ci-e2e-omni`, or `ci-e2e-diffusion`; pushes to `main` and `v0.*` | GPU | Required before merge for GPU-touching changes | Smoke logs and summaries |
 | L3 nightly regression | Detect numerical drift and performance regressions | Scheduled or manual | Fixed GPU runners | Nightly regression signal | Metrics, baseline comparisons, and the dashboard |
 | L4 convergence tests | Validate real recipe convergence | Weekly, release candidate, or manual | Production GPU cluster | Release readiness gate | Reward/loss curves and convergence reports |
 
