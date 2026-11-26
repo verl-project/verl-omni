@@ -143,6 +143,13 @@ The conditioning span is the text between the last `<|tts_bos|>` and the last
 - E2E smoke (8xH100): rollout → replay → adapter → LoRA update on `tts.*`
   with `distillation.enabled=false` (GRPO + KL to reference), driven by
   `verl_omni/utils/reward_score/talker_codec_reward.py`.
+- Learning demonstration (8xH100): a length-control reward
+  (`verl_omni/utils/reward_score/talker_length_control_reward.py`) peaks at
+  60 codec frames while the untrained talker emits ~115, so the score starts
+  at ~0.30 with headroom. Point
+  `reward.custom_reward_function.path` at it and the train/val reward climbs
+  as the policy learns to emit EOS earlier — the learning curve is attached
+  to the PR description.
 
 ### Notes and limits
 
