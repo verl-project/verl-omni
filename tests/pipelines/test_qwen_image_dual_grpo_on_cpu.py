@@ -16,10 +16,16 @@
 import logging
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 from verl_omni.pipelines.model_base import DiffusionModelARBase
-from verl_omni.pipelines.qwen_image_dual_grpo.ar_training_adapter import QwenImageDualGRPOAR
+from verl_omni.pipelines.qwen_image_dual_grpo.ar_training_adapter import (
+    QwenImageDualGRPOAR,
+    _patch_qwen2_vl_attn_rotary,
+    _transformers_needs_qwen2_vl_rotary_patch,
+    qwen2_vl_attn_forward_tf5,
+)
 
 
 def _module_with_nested_visual() -> torch.nn.Module:
@@ -86,3 +92,37 @@ def test_unregistered_pipelines_leave_the_ar_module_alone():
         DiffusionModelARBase.maybe_configure_module(module, cfg)
         assert module.model.visual is visual
         assert module.model.forward.__func__ is torch.nn.Module.forward
+
+
+def test_configure_module_rebinds_qwen2_vl_attn_to_tf5_rotary():
+    """verl's attn patch still imports apply_multimodal_rotary_pos_emb; rebind on 5.19+."""
+    if not _transformers_needs_qwen2_vl_rotary_patch():
+        pytest.skip("transformers still exports apply_multimodal_rotary_pos_emb")
+
+    import verl.models.transformers.qwen2_vl as verl_qwen2_vl
+    from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VLAttention
+    from transformers.models.qwen2_vl.modeling_qwen2_vl import Qwen2VLAttention
+
+    def stock_forward(self, *args, **kwargs):  # noqa: ARG001
+        raise AssertionError("stock verl forward should have been rebound")
+
+    stock_forward.__name__ = "qwen2_vl_attn_forward"
+    prior_module_forward = verl_qwen2_vl.qwen2_vl_attn_forward
+    prior_qwen2 = Qwen2VLAttention.forward
+    prior_qwen25 = Qwen2_5_VLAttention.forward
+    # Simulate apply_monkey_patch installing verl's pre-5.19 attention forward.
+    verl_qwen2_vl.qwen2_vl_attn_forward = stock_forward
+    Qwen2VLAttention.forward = stock_forward
+    Qwen2_5_VLAttention.forward = stock_forward
+    try:
+        module = _module_with_nested_visual()
+        QwenImageDualGRPOAR.configure_module(module, _dual_grpo_config())
+
+        assert verl_qwen2_vl.qwen2_vl_attn_forward is qwen2_vl_attn_forward_tf5
+        assert Qwen2VLAttention.forward is qwen2_vl_attn_forward_tf5
+        assert Qwen2_5_VLAttention.forward is qwen2_vl_attn_forward_tf5
+        assert _patch_qwen2_vl_attn_rotary() is True  # idempotent
+    finally:
+        verl_qwen2_vl.qwen2_vl_attn_forward = prior_module_forward
+        Qwen2VLAttention.forward = prior_qwen2
+        Qwen2_5_VLAttention.forward = prior_qwen25
