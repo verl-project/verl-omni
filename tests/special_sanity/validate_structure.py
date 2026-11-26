@@ -19,11 +19,11 @@ Validate that test file subfolders mirror the top-level package layout.
 Usage examples
 --------------
 
-# Typical run (defaults: impl_root=my_project, tests_root=tests)
-python check_tests_structure.py
+# Typical run (defaults: impl_root=verl_omni, tests_root=tests)
+python tests/special_sanity/validate_structure.py
 
 # Custom layout and extra allowed folders
-python check_tests_structure.py \
+python tests/special_sanity/validate_structure.py \
     --impl-root verl_omni \
     --tests-root tests \
     --allow-dirs special_e2e special_sanity special_standalone special_distributed
@@ -86,12 +86,8 @@ def main() -> None:
     parser.add_argument(
         "--allow-files",
         nargs="*",
-        default=[
-            "tests/test_protocol_on_cpu.py",
-            "tests/test_base_config_on_cpu.py",
-            "tests/test_protocol_v2_on_cpu.py",
-        ],
-        help="Extra top-level test folders that are exempt from the rule",
+        default=[],
+        help="Extra test files that are exempt from the layout rule",
     )
     args = parser.parse_args()
 
