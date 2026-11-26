@@ -9,13 +9,12 @@ vision-language model served behind an OpenAI-compatible router). Reward
 computation is dispatched per sample by reward managers. The input-agnostic
 :class:`~verl_omni.reward_loop.reward_manager.MultiRewardManager` provides the
 shared named-term dispatch, per-term outputs, failure handling, and weighted
-aggregation used by input-specific subclasses. Modality-specific managers include
-:class:`~verl_omni.reward_loop.reward_manager.VisualRewardManager` (deprecated
-since v0.4.0; use
-:class:`~verl_omni.reward_loop.reward_manager.MultiVisualRewardManager` with
-``reward.reward_functions``) and
-:class:`~verl_omni.reward_loop.reward_manager.AudioRewardManager`. They plug
-into :class:`~verl_omni.reward_loop.reward_loop.OmniRewardLoopManager` — verl's
+aggregation used by :class:`~verl_omni.reward_loop.reward_manager.MultiVisualRewardManager`
+and :class:`~verl_omni.reward_loop.reward_manager.MultiAudioRewardManager`.
+The single-scorer :class:`~verl_omni.reward_loop.reward_manager.VisualRewardManager`
+and :class:`~verl_omni.reward_loop.reward_manager.AudioRewardManager` are
+deprecated since v0.4.0. These managers plug into
+:class:`~verl_omni.reward_loop.reward_loop.OmniRewardLoopManager` — verl's
 :class:`~verl.experimental.reward_loop.RewardLoopManager` extended with
 profiler control over the reward-model rollout servers.
 
@@ -24,6 +23,8 @@ profiler control over the reward-model rollout servers.
 
    verl_omni.reward_loop.reward_loop.OmniRewardLoopManager
    verl_omni.reward_loop.reward_manager.MultiRewardManager
+   verl_omni.reward_loop.reward_manager.MultiAudioRewardManager
+   verl_omni.reward_loop.reward_manager.MultiVisualRewardManager
    verl_omni.reward_loop.reward_manager.VisualRewardManager
    verl_omni.reward_loop.reward_manager.AudioRewardManager
    verl_omni.utils.reward_score.default_compute_score_image
@@ -47,6 +48,10 @@ Reward Manager
 
 .. autoclass:: verl_omni.reward_loop.reward_manager.MultiRewardManager
    :members: __init__, run_single
+
+.. autoclass:: verl_omni.reward_loop.reward_manager.MultiAudioRewardManager
+
+.. autoclass:: verl_omni.reward_loop.reward_manager.MultiVisualRewardManager
 
 .. autoclass:: verl_omni.reward_loop.reward_manager.VisualRewardManager
    :members: __init__, run_single

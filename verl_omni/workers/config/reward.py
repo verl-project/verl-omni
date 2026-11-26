@@ -27,6 +27,11 @@ from verl.base_config import BaseConfig
 from verl.utils.device import get_device_name
 
 # Shared verbatim so the launch notices and the manager-level warning cannot drift.
+DEPRECATED_AUDIO_MANAGER_MESSAGE = (
+    "AudioRewardManager is deprecated since v0.4.0 and will be removed in a future release. "
+    "Set reward.reward_manager.name=MultiAudioRewardManager and configure scorers under "
+    "reward.reward_functions. See docs/algo/named_reward_models.md."
+)
 DEPRECATED_USE_ACCELERATOR_MESSAGE = (
     "reward.custom_reward_function.use_accelerator is deprecated since v0.4.0 and will be removed "
     "in a future release. Set reward.accelerator_workers.enabled instead."
@@ -38,6 +43,7 @@ DEPRECATED_VISUAL_MANAGER_MESSAGE = (
 )
 
 __all__ = [
+    "DEPRECATED_AUDIO_MANAGER_MESSAGE",
     "DEPRECATED_USE_ACCELERATOR_MESSAGE",
     "DEPRECATED_VISUAL_MANAGER_MESSAGE",
     "EngineRewardModelConfig",
@@ -537,9 +543,12 @@ def warn_deprecated_reward_config(config) -> None:
     reward_model = reward.get("reward_model", {}) or {}
     if custom_reward.get("use_accelerator", False):
         warnings.warn(DEPRECATED_USE_ACCELERATOR_MESSAGE, DeprecationWarning, stacklevel=3)
-    visual_manager = reward_manager.get("name") == "VisualRewardManager"
+    manager_name = reward_manager.get("name")
+    visual_manager = manager_name == "VisualRewardManager"
     if visual_manager:
         warnings.warn(DEPRECATED_VISUAL_MANAGER_MESSAGE, DeprecationWarning, stacklevel=3)
+    elif manager_name == "AudioRewardManager":
+        warnings.warn(DEPRECATED_AUDIO_MANAGER_MESSAGE, DeprecationWarning, stacklevel=3)
     if visual_manager and reward_model.get("enable", False) and not reward.get("reward_functions"):
         warnings.warn(
             "The single global reward model (reward.reward_model.enable=true with one "

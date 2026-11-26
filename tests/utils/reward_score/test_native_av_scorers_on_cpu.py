@@ -91,7 +91,11 @@ async def test_clap_native_named_audio_is_authoritative():
         },
     }
     result = await clap.compute_score(
-        "test", None, "prompt", info, reward_model=model, batch=_batch(audio=torch.zeros(2, 16))
+        data_source="test",
+        ground_truth="prompt",
+        extra_info=info,
+        reward_model=model,
+        batch=_batch(audio=torch.zeros(2, 16)),
     )
     assert result == {"score": pytest.approx(1.0), "source_sample_rate": 48000}
     assert model.infer.await_args.args[0][0].tolist() == pytest.approx([1.0] * 16)

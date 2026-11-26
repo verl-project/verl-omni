@@ -20,11 +20,13 @@ import math
 from abc import ABC, abstractmethod
 from collections import ChainMap
 
+import numpy as np
 import torch
 from verl import DataProto
 from verl.experimental.reward_loop.reward_manager.base import RewardManagerBase
 
-from verl_omni.pipelines.rollout_media import ArtifactContractError
+from verl_omni.pipelines.rollout_media import PRIMARY_ARTIFACT, ArtifactContractError
+from verl_omni.utils.reward_score.reward_utils import get_audio
 from verl_omni.utils.reward_score.scorers.registry import load_reward_object as load_extern_object
 from verl_omni.workers.config.reward import (
     get_reward_model_entries,
@@ -32,6 +34,7 @@ from verl_omni.workers.config.reward import (
     validate_reward_weight_sum,
 )
 
+from .audio import _audio_reward_kwargs, _extract_legacy_mono_audio
 from .media import _reward_extra_info
 from .visual import _sampling_params_from_rollout, _validate_visual_response
 
@@ -58,6 +61,28 @@ def _filter_kwargs(all_kwargs: dict, sig: inspect.Signature) -> dict:
             return all_kwargs
     # Only pass declared parameters
     return {k: v for k, v in all_kwargs.items() if k in params}
+
+
+def _extract_solution_audio(extra_info: dict, *, use_named_audio: bool) -> tuple[np.ndarray, int]:
+    if use_named_audio:
+        waveform, sample_rate = get_audio(extra_info)
+        return waveform.numpy(), sample_rate
+
+    try:
+        media_kind = extra_info.get("media_kind")
+        primary = (extra_info.get("media_artifacts") or {}).get(extra_info.get(PRIMARY_ARTIFACT))
+        if media_kind is None and primary is not None:
+            media_kind = primary.spec.modality
+        if media_kind not in ("image", "video"):
+            return _extract_legacy_mono_audio(extra_info)
+
+        waveform, sample_rate = get_audio(
+            {"audio": extra_info.get("audio"), "audio_sample_rate": extra_info.get("audio_sample_rate")},
+            audio_layout=extra_info.get("audio_layout", "CT"),
+        )
+    except (KeyError, TypeError, ValueError, RuntimeError, OverflowError) as exc:
+        raise ArtifactContractError(f"Invalid solution_audio: {exc}") from exc
+    return waveform.numpy(), sample_rate
 
 
 class MultiRewardManager(RewardManagerBase, ABC):
@@ -122,6 +147,8 @@ class MultiRewardManager(RewardManagerBase, ABC):
             if model_name is not None and path is None:
                 raise ValueError(f"Model-backed reward function {key!r} requires path/name")
             weight = float(entry.get("weight", 1.0))
+            if not math.isfinite(weight):
+                raise ValueError(f"Reward function {key!r} weight must be finite, got {weight!r}.")
             required_value = entry.get("required", False)
             if isinstance(required_value, str):
                 normalized = required_value.lower()
@@ -143,6 +170,12 @@ class MultiRewardManager(RewardManagerBase, ABC):
 
             fn = load_extern_object(path, name) if path is not None else None
             sig = inspect.signature(fn) if fn is not None else None
+            audio_param = sig.parameters.get("solution_audio") if sig is not None else None
+            if audio_param is not None and audio_param.kind not in (
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                inspect.Parameter.KEYWORD_ONLY,
+            ):
+                audio_param = None
             is_async = inspect.iscoroutinefunction(fn) if fn is not None else True
             if independent and (
                 not is_async
@@ -161,6 +194,7 @@ class MultiRewardManager(RewardManagerBase, ABC):
                     "required": required,
                     "independent": independent,
                     "sig": sig,
+                    "audio_param": audio_param,
                     "is_async": is_async,
                     "extra_args": extra_args,
                     "model": model_name,
@@ -185,8 +219,29 @@ class MultiRewardManager(RewardManagerBase, ABC):
     async def _build_reward_kwargs(self, data_item: DataProto) -> dict:
         """Build scorer kwargs for one sample in a modality-specific subclass."""
 
+    async def _select_solution_audio(self, all_kwargs: dict) -> tuple[np.ndarray, int] | None:
+        """With no shared key, extract for keyword opt-ins lacking overrides if audio exists or any lacks a default."""
+        if "solution_audio" in all_kwargs:
+            return None
+        params = [
+            sub["audio_param"]
+            for sub in self._sub_rewards
+            if sub["audio_param"] is not None and "solution_audio" not in sub["extra_args"]
+        ]
+        if not params:
+            return None
+        extra_info = all_kwargs.get("extra_info", {})
+        use_named_audio = "audio" in (extra_info.get("media_artifacts") or {})
+        has_audio = (
+            use_named_audio or extra_info.get("audio") is not None or extra_info.get("audio_sample_rate") is not None
+        )
+        if has_audio or any(param.default is inspect.Parameter.empty for param in params):
+            return await asyncio.to_thread(_extract_solution_audio, extra_info, use_named_audio=use_named_audio)
+        return None
+
     async def _run_multi_reward(self, all_kwargs: dict, data: DataProto) -> dict:
         """Execute configured reward terms and preserve their weighted outputs."""
+        solution_audio = await self._select_solution_audio(all_kwargs)
         combined_score = 0.0
         reward_extra_info = {}
         admitted_tasks = []
@@ -203,6 +258,8 @@ class MultiRewardManager(RewardManagerBase, ABC):
             # Do not change kwargs received by existing **kwargs-only scorers.
             if sig is not None and "batch" in sig.parameters:
                 sub_kwargs["batch"] = data
+            if solution_audio is not None and sub["audio_param"] is not None:
+                sub_kwargs.setdefault("solution_audio", solution_audio)
             filtered_kwargs = _filter_kwargs(sub_kwargs, sig) if sig is not None else {}
 
             if model_name is not None:
@@ -319,13 +376,13 @@ class MultiRewardManager(RewardManagerBase, ABC):
                         score = 0.0
                     else:
                         try:
+                            score = float(result["score"] if isinstance(result, dict) else result)
+                            if not math.isfinite(score):
+                                raise ValueError(f"Reward score must be finite, got {score!r}.")
                             if isinstance(result, dict):
-                                score = float(result["score"])
-                                for rk, rv in result.items():
-                                    if rk != "score":
-                                        reward_extra_info[f"reward/{key}/{rk}"] = rv
-                            else:
-                                score = float(result)
+                                reward_extra_info.update(
+                                    {f"reward/{key}/{rk}": rv for rk, rv in result.items() if rk != "score"}
+                                )
                         except ArtifactContractError:
                             raise
                         except Exception as exc:
@@ -355,7 +412,7 @@ class MultiRewardManager(RewardManagerBase, ABC):
 
 
 class MultiVisualRewardManager(MultiRewardManager):
-    """Visual input contract backed by the shared multi-reward aggregator."""
+    """Aggregate visual rollout rewards with optional generated audio."""
 
     @classmethod
     def assemble_rm_scores(cls, data: DataProto, scores: list[float]) -> torch.Tensor:
@@ -390,5 +447,19 @@ class MultiVisualRewardManager(MultiRewardManager):
                 reward_model_tokenizer=self.reward_model_tokenizer,
                 model_name=self.config.reward.reward_model.model_path,
                 sampling_params=sampling_params,
+            )
+        return reward_kwargs
+
+
+class MultiAudioRewardManager(MultiRewardManager):
+    """Aggregate waveform rewards for token rollouts with per-token score placement."""
+
+    async def _build_reward_kwargs(self, data_item: DataProto) -> dict:
+        reward_kwargs = _audio_reward_kwargs(data_item)
+        if self.reward_router_address is not None:
+            reward_kwargs.update(
+                reward_router_address=self.reward_router_address,
+                reward_model_tokenizer=self.reward_model_tokenizer,
+                model_name=self.config.reward.reward_model.model_path,
             )
         return reward_kwargs

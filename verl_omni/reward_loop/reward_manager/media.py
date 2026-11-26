@@ -24,6 +24,7 @@ from verl_omni.pipelines.rollout_media import (
     ARTIFACT_SPECS,
     PREVIEW_ARTIFACT,
     PRIMARY_ARTIFACT,
+    ArtifactContractError,
     artifacts_from_fields,
 )
 
@@ -41,6 +42,7 @@ def _metadata_mapping(value):
 def _reward_extra_info(data_item) -> dict:
     """Copy metadata and project generated media, rejecting conflicting sources."""
     extra_info = _metadata_mapping(data_item.non_tensor_batch.get("extra_info"))
+    audio_layout = extra_info.get("audio_layout")
     tool_extra_fields = _metadata_mapping(data_item.non_tensor_batch.get("tool_extra_fields"))
     tensor_fields = data_item.batch if data_item.batch is not None else {}
     artifact_keys = {
@@ -82,4 +84,14 @@ def _reward_extra_info(data_item) -> dict:
     artifacts = artifacts_from_fields(extra_info, context="reward entry")
     if artifacts:
         extra_info["media_artifacts"] = artifacts
+    if "audio" not in artifacts and extra_info.get("audio") is not None:
+        for fields in (tensor_fields, data_item.non_tensor_batch, tool_extra_fields):
+            declared_layout = fields.get("audio_layout")
+            if declared_layout is None:
+                continue
+            if audio_layout is not None and not np.array_equal(audio_layout, declared_layout):
+                raise ArtifactContractError("Conflicting rollout media field 'audio_layout'")
+            audio_layout = declared_layout
+        if audio_layout is not None:
+            extra_info["audio_layout"] = audio_layout
     return extra_info

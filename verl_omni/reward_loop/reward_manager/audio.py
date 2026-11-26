@@ -16,6 +16,7 @@
 import asyncio
 import inspect
 import math
+import warnings
 from functools import partial
 
 import numpy as np
@@ -25,10 +26,67 @@ from verl.experimental.reward_loop.reward_manager.base import RewardManagerBase
 from verl.utils.reward_score import default_compute_score as _upstream_default_compute_score
 
 from verl_omni.reward_loop.reward_manager.media import _reward_extra_info
+from verl_omni.workers.config.reward import DEPRECATED_AUDIO_MANAGER_MESSAGE
+
+
+def _audio_reward_kwargs(item) -> dict:
+    batch = item.non_tensor_batch
+    extra_info = _reward_extra_info(item)
+    if "__num_turns__" in batch:
+        extra_info["num_turns"] = batch["__num_turns__"]
+    if "global_steps" in batch:
+        extra_info["global_steps"] = batch["global_steps"]
+    return {
+        "data_source": batch["data_source"],
+        "ground_truth": batch["reward_model"]["ground_truth"],
+        "extra_info": extra_info,
+    }
+
+
+def _extract_legacy_mono_audio(extra_info: dict) -> tuple[np.ndarray, int]:
+    """Extract the validated mono waveform and sample rate from legacy rollout fields."""
+    audio = extra_info.get("audio")
+    sample_rate = extra_info.get("audio_sample_rate")
+    if audio is None:
+        raise KeyError("Audio reward requires extra_info['audio'] from the rollout.")
+    if sample_rate is None:
+        raise KeyError("Audio reward requires extra_info['audio_sample_rate'] from the rollout.")
+
+    try:
+        if isinstance(audio, np.ndarray) and audio.dtype == object:
+            audio = np.asarray(audio, dtype=np.float32)
+        waveform = torch.as_tensor(audio).detach().float().cpu()
+    except (TypeError, ValueError, RuntimeError) as exc:
+        raise ValueError("Audio reward could not convert the waveform to numeric samples.") from exc
+    while waveform.ndim > 1 and waveform.shape[0] == 1:
+        waveform = waveform[0]
+    if waveform.ndim != 1:
+        raise ValueError(
+            f"Expected one mono waveform with shape (T,) or leading singleton dimensions, got {tuple(waveform.shape)}."
+        )
+    if waveform.numel() == 0:
+        raise ValueError("Audio reward received an empty waveform.")
+    if not torch.isfinite(waveform).all():
+        raise ValueError("Audio reward received a waveform containing NaN or infinity.")
+
+    if isinstance(sample_rate, np.ndarray | torch.Tensor):
+        sample_rate_count = sample_rate.size if isinstance(sample_rate, np.ndarray) else sample_rate.numel()
+        if sample_rate_count != 1:
+            raise ValueError("Audio reward requires one scalar sample rate per waveform.")
+        sample_rate = sample_rate.item()
+    if isinstance(sample_rate, bool) or not isinstance(sample_rate, int | float):
+        raise TypeError(f"Audio sample rate must be numeric, got {type(sample_rate).__name__}.")
+    if not math.isfinite(float(sample_rate)) or float(sample_rate) <= 0 or float(sample_rate) != int(sample_rate):
+        raise ValueError(f"Audio sample rate must be a positive integer, got {sample_rate!r}.")
+    return waveform.numpy().astype(np.float32, copy=False), int(sample_rate)
 
 
 class AudioRewardManager(RewardManagerBase):
-    """Route one validated waveform per rollout to a custom reward function."""
+    """Route one validated waveform per rollout to a custom reward function.
+
+    Deprecated since v0.4.0. Use :class:`MultiAudioRewardManager` with
+    ``reward.reward_functions``.
+    """
 
     def __init__(self, config, tokenizer, compute_score, reward_router_address=None, reward_model_tokenizer=None):
         if (
@@ -37,67 +95,17 @@ class AudioRewardManager(RewardManagerBase):
             or (isinstance(compute_score, partial) and compute_score.func is _upstream_default_compute_score)
         ):
             raise ValueError("AudioRewardManager requires reward.custom_reward_function.")
+        warnings.warn(DEPRECATED_AUDIO_MANAGER_MESSAGE, DeprecationWarning, stacklevel=2)
         super().__init__(config, tokenizer, compute_score)
         self.is_async_reward_score = inspect.iscoroutinefunction(compute_score)
         self.reward_router_address = reward_router_address
         self.reward_model_tokenizer = reward_model_tokenizer
 
-    @classmethod
-    def _extract_audio(cls, extra_info):
-        audio = extra_info.get("audio")
-        sample_rate = extra_info.get("audio_sample_rate")
-        if audio is None:
-            raise KeyError("Audio reward requires extra_info['audio'] from the rollout.")
-        if sample_rate is None:
-            raise KeyError("Audio reward requires extra_info['audio_sample_rate'] from the rollout.")
-
-        try:
-            if isinstance(audio, np.ndarray) and audio.dtype == object:
-                audio = np.asarray(audio, dtype=np.float32)
-            waveform = torch.as_tensor(audio).detach().float().cpu()
-        except (TypeError, ValueError, RuntimeError) as exc:
-            raise ValueError("Audio reward could not convert the waveform to numeric samples.") from exc
-        while waveform.ndim > 1 and waveform.shape[0] == 1:
-            waveform = waveform[0]
-        if waveform.ndim != 1:
-            raise ValueError(
-                f"Expected one mono waveform with shape (T,) or leading singleton dimensions, "
-                f"got {tuple(waveform.shape)}."
-            )
-        if waveform.numel() == 0:
-            raise ValueError("Audio reward received an empty waveform.")
-        if not torch.isfinite(waveform).all():
-            raise ValueError("Audio reward received a waveform containing NaN or infinity.")
-
-        if isinstance(sample_rate, np.ndarray | torch.Tensor):
-            sample_rate_count = sample_rate.size if isinstance(sample_rate, np.ndarray) else sample_rate.numel()
-            if sample_rate_count != 1:
-                raise ValueError("Audio reward requires one scalar sample rate per waveform.")
-            sample_rate = sample_rate.item()
-        if isinstance(sample_rate, bool) or not isinstance(sample_rate, int | float):
-            raise TypeError(f"Audio sample rate must be numeric, got {type(sample_rate).__name__}.")
-        if not math.isfinite(float(sample_rate)) or float(sample_rate) <= 0 or float(sample_rate) != int(sample_rate):
-            raise ValueError(f"Audio sample rate must be a positive integer, got {sample_rate!r}.")
-        return waveform.numpy().astype(np.float32, copy=False), int(sample_rate)
-
     async def run_single(self, data: DataProto) -> dict:
         if len(data) != 1:
             raise ValueError(f"AudioRewardManager scores one sample at a time, got batch size {len(data)}.")
-        item = data[0]
-        batch = item.non_tensor_batch
-        extra_info = _reward_extra_info(item)
-        if "__num_turns__" in batch:
-            extra_info["num_turns"] = batch["__num_turns__"]
-        if "global_steps" in batch:
-            extra_info["global_steps"] = batch["global_steps"]
-        ground_truth = batch["reward_model"]["ground_truth"]
-        audio = await asyncio.to_thread(self._extract_audio, extra_info)
-        kwargs = {
-            "data_source": batch["data_source"],
-            "solution_audio": audio,
-            "ground_truth": ground_truth,
-            "extra_info": extra_info,
-        }
+        kwargs = _audio_reward_kwargs(data[0])
+        kwargs["solution_audio"] = await asyncio.to_thread(_extract_legacy_mono_audio, kwargs["extra_info"])
         if self.reward_router_address is not None:
             kwargs.update(
                 reward_router_address=self.reward_router_address,

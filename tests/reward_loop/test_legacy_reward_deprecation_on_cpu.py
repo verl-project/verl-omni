@@ -17,6 +17,7 @@ import os
 import warnings
 from unittest.mock import MagicMock
 
+import pytest
 from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
 
@@ -79,12 +80,17 @@ def test_shared_router_hybrid_config_stays_silent():
     assert _launch_notices(_config(hybrid)) == []
 
 
-def test_named_reward_config_stays_silent():
+@pytest.mark.parametrize(
+    ("manager", "path"),
+    [
+        ("MultiVisualRewardManager", "pkg://verl_omni.utils.reward_score.jpeg_compressibility"),
+        ("MultiAudioRewardManager", "pkg://verl_omni.utils.reward_score.audio_http_scorer_client"),
+    ],
+)
+def test_named_reward_config_stays_silent(manager, path):
     def named(config):
-        config.reward.reward_manager.name = "MultiVisualRewardManager"
-        config.reward.reward_functions = OmegaConf.create(
-            {"jpeg": {"path": "verl_omni/utils/reward_score/jpeg_compressibility.py", "name": "compute_score"}}
-        )
+        config.reward.reward_manager.name = manager
+        config.reward.reward_functions = OmegaConf.create({"quality": {"path": path, "name": "compute_score"}})
 
     assert _launch_notices(_config(named)) == []
 
@@ -96,12 +102,14 @@ def test_text_manager_config_stays_silent():
     assert _launch_notices(_config(text_manager)) == []
 
 
-def test_audio_manager_with_legacy_engine_stays_silent():
+def test_audio_manager_with_legacy_engine_warns_only_for_manager():
     def audio_engine(config):
         config.reward.reward_manager.name = "AudioRewardManager"
         config.reward.reward_model.enable = True
 
-    assert _launch_notices(_config(audio_engine)) == []
+    notices = _launch_notices(_config(audio_engine))
+    assert len(notices) == 1
+    assert "AudioRewardManager is deprecated" in notices[0]
 
 
 def test_null_custom_reward_function_does_not_crash():
@@ -126,3 +134,13 @@ def test_manager_warning_shares_the_launch_notice_text():
         VisualRewardManager(config, MagicMock(), compute_score=None)
     assert DEPRECATED_VISUAL_MANAGER_MESSAGE in [str(item.message) for item in caught]
     assert DEPRECATED_VISUAL_MANAGER_MESSAGE in _launch_notices(config)
+
+
+def test_audio_manager_warning_shares_the_launch_notice_text():
+    from verl_omni.reward_loop.reward_manager.audio import AudioRewardManager
+
+    config = _config()
+    config.reward.reward_manager.name = "AudioRewardManager"
+    with pytest.warns(DeprecationWarning, match=r"MultiAudioRewardManager.*reward\.reward_functions") as caught:
+        AudioRewardManager(config, MagicMock(), compute_score=lambda **kwargs: 0.0)
+    assert _launch_notices(config) == [str(item.message) for item in caught]
