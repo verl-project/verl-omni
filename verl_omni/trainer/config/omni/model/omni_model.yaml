@@ -52,6 +52,9 @@ enable_activation_offload: False
 # whether to use remove padding
 use_remove_padding: True
 
+# Make the actor recompute the rollout log-probs bitwise; only for model adapters that support it
+true_on_policy: False
+
 # Set to positive value to enable LoRA (e.g., 32)
 lora_rank: 0
 

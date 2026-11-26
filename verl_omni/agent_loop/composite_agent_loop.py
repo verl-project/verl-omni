@@ -46,7 +46,7 @@ from verl_omni.agent_loop.diffusion_agent_loop import (
     DiffusionAgentLoopWorker,
     _InternalDiffusionAgentLoopOutput,
 )
-from verl_omni.agent_loop.utils import maybe_per_rollout_seeds
+from verl_omni.agent_loop.utils import maybe_per_rollout_seeds, per_rollout_seeds_or_entropy
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
 
 AR_REWARD_KEY = "reward/ar"
@@ -201,7 +201,13 @@ class CompositeAgentLoopWorker(DiffusionAgentLoopWorker):
             if global_indices is not None:
                 ar_global_indices = np.asarray(global_indices, dtype=np.int64).reshape(-1)
                 dit_global_indices = (ar_global_indices[:, None] * diffusion_n + np.arange(diffusion_n)).reshape(-1)
-            per_rollout_seeds = maybe_per_rollout_seeds(batch.meta_info, len(batch) * diffusion_n, dit_global_indices)
+            # Unseeded DiT rows fall back to per-row entropy seeds so engine-side
+            # default seeding cannot collide across replicas; AR sampling keeps the
+            # trainer-seeded-or-unseeded behavior (AR rollout diversity does not go
+            # through vLLM-Omni's request seeding).
+            per_rollout_seeds = per_rollout_seeds_or_entropy(
+                batch.meta_info, len(batch) * diffusion_n, dit_global_indices
+            )
             ar_seeds = maybe_per_rollout_seeds(batch.meta_info, len(batch), ar_global_indices)
 
         if "agent_name" not in batch.non_tensor_batch:
@@ -391,7 +397,7 @@ class CompositeAgentLoopWorker(DiffusionAgentLoopWorker):
     ) -> None:
         """Populate AR ``rm_scores`` from per-image ``reward/ar`` in diffusion reward extras.
 
-        Mirrors ``PolicyGradientRayTrainer._extract_ar_reward_tensor`` for a single AR row
+        Mirrors ``CompositePolicyGradientRayTrainer._extract_ar_reward_tensor`` for a single AR row
         and ``len(diffusion_internals)`` diffusion samples.
         """
         if output.ar_reward_score is not None or self.reward_loop_worker_handles is None or not diffusion_internals:

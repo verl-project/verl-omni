@@ -103,14 +103,16 @@ def compute_data_metrics_diffusion(batch: DataProto) -> dict[str, Any]:
 
 def compute_old_policy_metrics(
     update_result: tuple[bool, float, Literal["none", "copy", "ema"]],
+    *,
+    prefix: str = "old_policy",
 ) -> dict[str, Any]:
-    """Build metrics for old-policy adapter refreshes."""
+    """Build adapter-refresh metrics under the given policy prefix."""
     update_applied, decay, update_type = update_result
     return {
-        "old_policy/update_applied": float(update_applied),
-        "old_policy/copy_update": float(update_type == "copy"),
-        "old_policy/ema_update": float(update_type == "ema"),
-        "old_policy/decay": float(decay),
+        f"{prefix}/update_applied": float(update_applied),
+        f"{prefix}/copy_update": float(update_type == "copy"),
+        f"{prefix}/ema_update": float(update_type == "ema"),
+        f"{prefix}/decay": float(decay),
     }
 
 
@@ -173,17 +175,26 @@ def compute_throughput_metrics_diffusion(batch: DataProto, timing_raw: dict[str,
 
 
 def compute_reward_extra_metrics_diffusion(reward_extra_infos_dict: dict) -> dict[str, Any]:
-    """Computes per-sub-reward mean metrics for multi-reward tracking."""
+    """Average observed diagnostics and report optional-term failure counts and rates over the whole batch."""
     metrics = {}
-    if not reward_extra_infos_dict:
-        return metrics
     for key, values in reward_extra_infos_dict.items():
-        if isinstance(values, np.ndarray):
-            if not np.issubdtype(values.dtype, np.number):
+        error_flag = key.startswith("reward/") and key.endswith("/errors")
+        if isinstance(values, np.ndarray) and values.dtype == object:
+            values = values.tolist()
+        if isinstance(values, list):
+            if error_flag:
+                values = [0 if value is None else value for value in values]
+            else:
+                values = [value for value in values if value is not None]
+            if not values or not all(
+                isinstance(value, int | float) or (isinstance(value, np.generic) and value.dtype.kind in "iuf")
+                for value in values
+            ):
                 continue
-            metrics[f"critic/{key}/mean"] = float(values.mean())
-        elif isinstance(values, list) and len(values) > 0:
-            if not isinstance(values[0], int | float):
-                continue
-            metrics[f"critic/{key}/mean"] = float(np.mean(values))
+        elif not isinstance(values, np.ndarray) or not values.size or not np.issubdtype(values.dtype, np.number):
+            continue
+
+        if error_flag:
+            metrics[f"critic/{key}/count"] = int(np.sum(values))
+        metrics[f"critic/{key}/mean"] = float(np.mean(values))
     return metrics

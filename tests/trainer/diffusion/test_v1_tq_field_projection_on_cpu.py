@@ -13,11 +13,12 @@
 # limitations under the License.
 
 import logging
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 
 import numpy as np
 import pytest
 import torch
+from omegaconf import OmegaConf
 from transfer_queue import KVBatchMeta
 from verl import DataProto
 
@@ -168,12 +169,82 @@ def test_fetch_one_gen_batch_stamps_monotonic_gen_batch_seq():
     assert [int(v) for v in second["gen_batch_seq"]] == [1]
 
 
+@pytest.mark.parametrize("gen_batch_size", [1, 2])
+def test_next_train_batch_rollout_seed_index_is_unique_within_a_step(gen_batch_size):
+    cls = trainer_base_module.PolicyGradientDiffusionTrainerV1
+    trainer = SimpleNamespace(
+        config=OmegaConf.create({"data": {"train_batch_size": 2}, "actor_rollout_ref": {"rollout": {"seed": 7}}}),
+        train_dataloader_it=iter(
+            [{"raw_prompt": np.array([f"p{i}_{j}" for j in range(gen_batch_size)], dtype=object)} for i in range(5)]
+        ),
+        _gen_batch_seq=0,
+        _effective_generation_batch_size=gen_batch_size,
+        _rollout_seed_step=None,
+        _rollout_seed_next_index=0,
+        global_steps=3,
+    )
+    trainer._generation_batch_size = MethodType(cls._generation_batch_size, trainer)
+    trainer._fetch_one_gen_batch = MethodType(cls._fetch_one_gen_batch, trainer)
+    trainer._assign_rollout_seed = MethodType(cls._assign_rollout_seed, trainer)
+
+    first = cls._next_train_batch(trainer)
+    refill = cls._next_train_batch(trainer, gen_batch_size)
+    trainer.global_steps = 4
+    next_step = cls._next_train_batch(trainer)
+
+    # ``index`` restarts per generation batch; the seed position must not repeat
+    # within a step (multi-batch fetches and same-step refills) and restarts with
+    # the next step's seed base. With one batch per step it equals ``index``.
+    assert [int(v) for v in first["rollout_seed_index"]] == [0, 1]
+    assert [int(v) for v in refill["rollout_seed_index"]] == list(range(2, 2 + gen_batch_size))
+    assert [int(v) for v in next_step["rollout_seed_index"]] == [0, 1]
+    if gen_batch_size == 2:
+        assert [int(v) for v in first["index"]] == [0, 1]
+
+
+def test_next_train_batch_without_rollout_seed_stays_unseeded():
+    cls = trainer_base_module.PolicyGradientDiffusionTrainerV1
+    trainer = SimpleNamespace(
+        config=OmegaConf.create({"data": {"train_batch_size": 2}, "actor_rollout_ref": {"rollout": {"seed": None}}}),
+        train_dataloader_it=iter([{"raw_prompt": np.array(["p0", "p1"], dtype=object)}]),
+        _gen_batch_seq=0,
+        _effective_generation_batch_size=2,
+        global_steps=3,
+    )
+    trainer._generation_batch_size = MethodType(cls._generation_batch_size, trainer)
+    trainer._fetch_one_gen_batch = MethodType(cls._fetch_one_gen_batch, trainer)
+    trainer._assign_rollout_seed = MethodType(cls._assign_rollout_seed, trainer)
+
+    batch = cls._next_train_batch(trainer)
+
+    assert "rollout_seed" not in batch.keys()
+    assert "rollout_seed_index" not in batch.keys()
+
+
 @pytest.mark.parametrize("algorithm", ["policy_gradient", "direct_preference"])
 def test_metric_projection_is_subset_of_persisted_and_rollout_fields(algorithm):
     rollout_fields = {"uid", "extra_fields"}
     available_fields = set(tq_utils.diffusion_persisted_tq_fields(algorithm)) | rollout_fields
 
     assert set(tq_utils.diffusion_metric_tq_fields(algorithm)).issubset(available_fields)
+
+
+@pytest.mark.parametrize(
+    ("columns", "error"),
+    [
+        ({}, "missing non_tensor_batch column 'reward/clap/errors'"),
+        ({"reward/clap/errors": [None]}, "column 'reward/clap/errors': expected 2 rows, got 1"),
+    ],
+)
+def test_put_reward_extra_info_names_invalid_column(columns, error):
+    key = "reward/clap/errors"
+    meta = KVBatchMeta(keys=["a_0_0", "b_0_0"], tags=[{}, {}], partition_id="train")
+    data = DataProto.from_dict(tensors={"rm_scores": torch.tensor([0.0, 1.0])}, meta_info={"reward_extra_keys": [key]})
+    for name, values in columns.items():
+        data.non_tensor_batch[name] = np.array(values, dtype=object)
+
+    with pytest.raises(ValueError, match=error):
+        tq_utils.put_dataproto_fields_to_tq(meta, data, ["reward_extra_info"])
 
 
 def test_rollout_dump_fetches_only_dump_fields(monkeypatch):
@@ -302,6 +373,7 @@ def test_metrics_fetches_only_metric_fields_and_preserves_outputs(monkeypatch, c
         "sample_level_scores",
         "uid",
         "extra_fields",
+        "reward_extra_info",
     }
     if policy_gradient:
         expected_fields.update({"advantages", "returns"})

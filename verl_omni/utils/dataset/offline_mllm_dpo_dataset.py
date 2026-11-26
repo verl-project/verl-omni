@@ -414,6 +414,51 @@ def _collate_no_padding_values(key: str, values: Sequence[Any]) -> Any:
     return torch.stack([NonTensorData(value) for value in values], dim=0)
 
 
+_MEDIA_MASK_KEYS = ("image_mask", "video_mask", "audio_mask")
+
+
+def _media_placeholder_counts(branch: dict[str, Any]) -> dict[str, int]:
+    """Count the media placeholder tokens a branch still carries.
+
+    ``process_qwen3_omni_sample`` leaves the original token ids in ``input_ids``, so the
+    placeholder positions are only recoverable from the modality masks it emits alongside.
+    """
+    counts: dict[str, int] = {}
+    for key in _MEDIA_MASK_KEYS:
+        mask = branch.get(key)
+        if isinstance(mask, torch.Tensor) and mask.dtype == torch.bool:
+            counts[key] = int(mask.sum())
+    return counts
+
+
+def _media_placeholders_dropped(before: dict[str, int], after: dict[str, int]) -> str:
+    dropped = []
+    for key, count in before.items():
+        remaining = after.get(key, 0)
+        if remaining != count:
+            dropped.append(f"{key}: {count} -> {remaining}")
+    return ", ".join(dropped)
+
+
+def _has_media_features(multi_modal_inputs: dict[str, Any]) -> bool:
+    """Whether the branch actually carries a media payload.
+
+    MiniCPM always emits an empty ``image_bound`` tensor, text-only rows included, so
+    checking for non-``None`` values alone would block text-only truncation.
+    """
+    for value in multi_modal_inputs.values():
+        if value is None:
+            continue
+        if isinstance(value, torch.Tensor):
+            if value.numel() > 0:
+                return True
+            continue
+        if isinstance(value, list | tuple | dict) and not value:
+            continue
+        return True
+    return False
+
+
 def _pad_mode_value(pad_mode: DatasetPadMode | str) -> str:
     return str(getattr(pad_mode, "value", pad_mode))
 
@@ -726,9 +771,30 @@ class OfflineMLLMDPODataset(MultiTurnSFTDataset):
         if sequence_length > self.max_length and self.truncation == "error":
             raise ValueError(f"sequence_length={sequence_length} is larger than self.max_length={self.max_length}")
         if sequence_length > self.max_length:
+            media_tokens_before = _media_placeholder_counts(res)
+            multi_modal_inputs = res.get("multi_modal_inputs") or {}
+            if not media_tokens_before and _has_media_features(multi_modal_inputs):
+                # This transform emits no bool modality masks (e.g. ``process_minicpm_sample``),
+                # so a placeholder cut cannot be detected. Fail closed instead of skipping the
+                # check and letting a desynchronised sample through.
+                raise ValueError(
+                    f"truncation={self.truncation!r} to max_length={self.max_length} may cut placeholder "
+                    f"runs of the media inputs: this transform emits no bool image_mask/video_mask/audio_mask, "
+                    f"so the cut cannot be verified while multi_modal_inputs keeps their features, and the "
+                    f"sample would reach the model desynchronised. Raise max_length, shorten the "
+                    f"prompt/response, or use truncation='error'."
+                )
             for key in _TEXT_MODEL_KEYS:
                 if key in res:
                     res[key] = self._truncate_sequence_value(key, res[key], self.max_length, self.truncation)
+            dropped = _media_placeholders_dropped(media_tokens_before, _media_placeholder_counts(res))
+            if dropped:
+                raise ValueError(
+                    f"truncation={self.truncation!r} to max_length={self.max_length} would cut placeholder "
+                    f"runs of the media inputs ({dropped}) while multi_modal_inputs keeps their features, "
+                    f"so the sample would reach the model desynchronised. Raise max_length, shorten the "
+                    f"prompt/response, or use truncation='error'."
+                )
         return res
 
     def _build_preference_branch(self, sample: dict[str, Any], answer: Any) -> dict[str, Any]:

@@ -186,8 +186,9 @@ def test_tracking_explicit_layout_bypasses_legacy_normalizer(monkeypatch):
     canonical = torch.arange(3 * 3 * 2 * 5, dtype=torch.uint8).reshape(3, 3, 2, 5)
     preview = MediaArtifact(MediaSpec("video", "decoded", "TCHW", fps=24), canonical)
     frames, width, height = tracking._video_tensor_to_rgb24(preview)
+    frames = torch.stack([torch.from_numpy(frame) for frame in frames])
     assert frames.shape == (3, 2, 5, 3) and (width, height) == (5, 2)
-    torch.testing.assert_close(torch.from_numpy(frames).permute(0, 3, 1, 2), canonical)
+    torch.testing.assert_close(frames.permute(0, 3, 1, 2), canonical)
 
 
 @pytest.mark.parametrize("version", [0, 1])
@@ -211,8 +212,8 @@ def test_intentionally_absent_previews_skip_validation_logging(monkeypatch, vers
     media_logger = Mock()
     validate_outputs = Mock()
     monkeypatch.setattr(tracking, "_export_video", encoder)
-    monkeypatch.setattr(v0, "wrap_val_samples_for_wandb", wrapper)
-    monkeypatch.setattr(v0, "log_wandb_media", media_logger)
+    monkeypatch.setattr(tracking, "wrap_val_samples_for_wandb", wrapper)
+    monkeypatch.setattr(tracking, "log_wandb_media", media_logger)
     monkeypatch.setattr(v0, "_validate_generation_outputs", validate_outputs)
     log = v0.BaseRayDiffusionTrainer._maybe_log_val_generations if version == 0 else V1._maybe_log_val_generations
     latents = torch.zeros(2, 16, 2, 2, dtype=torch.bfloat16)

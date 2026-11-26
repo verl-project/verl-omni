@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ci-e2e-diffusion GPU smoke tests (4-GPU): end-to-end diffusion training paths.
 # Models with a landed v1 recipe run on the V1 sync trainer (Qwen-Image-Edit,
-# FlowGRPO, online DPO, DiffusionNFT, MiniMax-H3 T2VA) and the async V1
+# FlowGRPO, online DPO, DiffusionNFT, MiniMax-H3 T2VA/FL2VA/Ref2VA) and the async V1
 # trainers keep their dedicated tests (FlowGRPO separate_async, two-teacher
 # OPD). Bagel PickScore stays on v0 until its v1 recipe lands (#511); the
 # sync-separate smoke keeps the deprecated v0 distributed path covered
@@ -32,10 +32,12 @@ run_qwen_image_edit_flowgrpo_e2e() {
         return 1
     fi
     env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" MODEL_PATH="${model_path}" \
-        bash tests/special_e2e/run_flowgrpo_qwen_image_edit.sh "${diffusion_trainer_args[@]}"
+        bash tests/special_e2e/run_flowgrpo_qwen_image_edit.sh "${diffusion_trainer_args[@]}" \
+        trainer.v1.worker_side_trajectory=true \
+        'actor_rollout_ref.model.trajectory_fields.required=[all_latents,condition_image_latents,prompt_embeds,prompt_embeds_mask,negative_prompt_embeds,negative_prompt_embeds_mask]'
 }
 
-run_test 0 "Qwen-Image-Edit FlowGRPO v1 sync trainer e2e" \
+run_test 0 "Qwen-Image-Edit FlowGRPO v1 sync with worker-side trajectories" \
     run_qwen_image_edit_flowgrpo_e2e
 
 run_test 1 "FlowGRPO v1 sync trainer e2e" \
@@ -62,9 +64,9 @@ run_test 6 "FlowGRPO synchronous separate trainer e2e" \
     env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" \
     bash tests/special_e2e/run_flowgrpo_qwen_image_separate.sh "${diffusion_trainer_args[@]}"
 
-run_test 7 "MiniMax-H3 FlowGRPO T2VA FSDP-SP v1 sync trainer e2e" \
+run_test 7 "MiniMax-H3 FlowGRPO T2VA FSDP-SP with managed ImageBind v1 sync trainer e2e" \
     env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" ACTOR_SP=2 ROLLOUT_TP=2 \
-    TOTAL_TRAINING_STEPS=1 python3 tests/special_e2e/run_flowgrpo_minimax_h3_tiny.py --task t2va
+    bash tests/special_e2e/run_minimax_h3_imagebind_smoke.sh cuda "${diffusion_trainer_args[@]}"
 
 run_test 8 "Diffusion OPD v1 sync colocated teachers e2e" \
     env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" SMOKE=sync \
@@ -81,5 +83,17 @@ run_test 10 "Boogu-Image DiffusionNFT trainer e2e" \
 run_test 11 "Named image previews and MiniMax-H3 offload placeholders" \
     env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" \
     pytest -q tests/trainer/diffusion/test_artifact_preview_dump.py tests/pipelines/test_minimax_h3_meta_output.py
+
+run_test 12 "CRD SD3 v1 sync trainer and checkpoint e2e" \
+    env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" \
+    bash tests/special_e2e/run_crd_sd35.sh "${diffusion_trainer_args[@]}"
+
+run_test 13 "MiniMax-H3 FlowGRPO FL2VA FSDP-SP v1 sync trainer e2e" \
+    env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" ACTOR_SP=2 ROLLOUT_TP=2 \
+    TOTAL_TRAINING_STEPS=1 python3 tests/special_e2e/run_flowgrpo_minimax_h3_tiny.py --task fl2va
+
+run_test 14 "MiniMax-H3 FlowGRPO Ref2VA FSDP-SP v1 sync trainer e2e" \
+    env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" ACTOR_SP=2 ROLLOUT_TP=2 \
+    TOTAL_TRAINING_STEPS=1 python3 tests/special_e2e/run_flowgrpo_minimax_h3_tiny.py --task ref2va
 
 gpu_smoke_summary

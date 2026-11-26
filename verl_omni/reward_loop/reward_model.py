@@ -24,6 +24,7 @@ from omegaconf import OmegaConf
 from verl.experimental.reward_loop.reward_model import RewardModelManager
 from verl.single_controller.ray.base import split_resource_pool
 
+from verl_omni.utils.asyncio_utils import await_owned
 from verl_omni.workers.config.reward import (
     EngineRewardModelConfig,
     NativeRewardModelConfig,
@@ -35,7 +36,6 @@ from verl_omni.workers.config.reward import (
 )
 
 from .accelerator_reward_workers import _IndexedResourcePool
-from .reward_model_executor import _await_owned
 
 __all__ = [
     "EngineManagedRewardModel",
@@ -78,6 +78,10 @@ class MultiRewardModelManager:
                 self.models[name] = EngineManagedRewardModel(
                     name, model, base_config, engine_pools.get(name), fallback_model
                 )
+            elif model.placement.replica_groups:
+                from .native_fsdp import NativeFSDPManagedRewardModel
+
+                self.models[name] = NativeFSDPManagedRewardModel(name, model)
             else:
                 self.models[name] = NativeManagedRewardModel(name, model)
 
@@ -122,7 +126,7 @@ class MultiRewardModelManager:
 
     async def close_native_models(self) -> None:
         """Release native models permanently without changing engine lifecycle."""
-        await _await_owned(self._close_native_models())
+        await await_owned(self._close_native_models())
 
     async def _close_native_models(self) -> None:
         models = [model for model in self.models.values() if isinstance(model, NativeManagedRewardModel)]
@@ -141,14 +145,14 @@ class MultiRewardModelManager:
         for name, model in native_entries:
             if model.placement.is_cpu:
                 continue
-            for device in model.placement.devices:
+            for device in model.placement.bundle_indices:
                 if device in claimed_devices:
                     raise ValueError(
                         f"Native reward model {name!r} placement.devices overlaps parent-pool index {device} "
                         f"already assigned to {claimed_devices[device]!r}"
                     )
                 claimed_devices[device] = name
-            assignments[name] = tuple(model.placement.devices)
+            assignments[name] = tuple(model.placement.bundle_indices)
         return assignments
 
     def _split_engine_resource_pool(self, engine_entries, base_config) -> dict[str, Any]:
@@ -298,7 +302,7 @@ class NativeManagedRewardModel(ManagedRewardModel):
                 raise result
 
     async def wake_up(self) -> None:
-        await _await_owned(self._wake_up())
+        await await_owned(self._wake_up())
 
     async def _wake_up(self) -> None:
         async with self._lifecycle_lock:
@@ -310,7 +314,7 @@ class NativeManagedRewardModel(ManagedRewardModel):
             self._resident = True
 
     async def sleep(self) -> None:
-        await _await_owned(self._sleep())
+        await await_owned(self._sleep())
 
     async def _sleep(self) -> None:
         async with self._lifecycle_lock:
@@ -322,7 +326,7 @@ class NativeManagedRewardModel(ManagedRewardModel):
             self._resident = False
 
     async def close(self) -> None:
-        await _await_owned(self._close())
+        await await_owned(self._close())
 
     async def _close(self) -> None:
         async with self._lifecycle_lock:

@@ -18,8 +18,9 @@ The checkpoint is suitable for T2VA, image-conditioned FL2VA, and
 reference-conditioned Ref2VA GPU smoke runs. It never reads, copies, or
 symlinks a real MiniMax-H3 checkpoint.
 
-It starts from a pinned ``tiny-random/minimax-h3`` snapshot for the tiny DiT
-weights and processor metadata. vLLM-Omni's native MiniMax-H3 pipeline differs
+By default it starts from a pinned ``tiny-random/minimax-h3`` snapshot. With
+``--offline`` it initializes the tiny DiT and processor metadata locally.
+vLLM-Omni's native MiniMax-H3 pipeline differs
 from that Diffusers checkpoint in three relevant ways:
 
 * it consumes 24 video-latent channels and 32 audio-latent channels, while the
@@ -72,6 +73,7 @@ import argparse
 import json
 import os
 import shutil
+import tempfile
 from pathlib import Path
 
 import torch
@@ -95,7 +97,7 @@ _SEED = 42
 _VIDEO_LATENT_CHANNELS = 24
 _AUDIO_LATENT_CHANNELS = 32
 _PATCH_VOLUME = 4  # MiniMax-H3 uses a (1, 2, 2) video patch.
-_CHECKPOINT_FORMAT_VERSION = 5
+_CHECKPOINT_FORMAT_VERSION = 6
 _VLLM_TEXT_VOCAB_SIZE = 512
 _VLLM_TEXT_NUM_LAYERS = 1
 
@@ -171,6 +173,11 @@ class _TinyVideoCore(nn.Module):
     def split_tiles(self, input_len: int, is_decoder: bool = False):
         del is_decoder
         return [0], [input_len], []
+
+    def _all_gather_tiled_results(self, tasks: list[torch.Tensor], num_tiles: int) -> list[torch.Tensor]:
+        # Part of the native VAE contract: on Intel GPU the vLLM-Omni adapter rebinds this method
+        # at load time. The tiny core decodes a single tile, so nothing may call it.
+        raise NotImplementedError("the tiny H3 VAE decodes a single tile and never gathers tiles")
 
     def encode_images(self, image, *, use_fp16_latent: bool = True):
         del use_fp16_latent
@@ -459,6 +466,75 @@ def _download_hf_tiny(cache_dir: str | None) -> Path:
     )
 
 
+def _write_offline_source(root: Path) -> None:
+    """Initialize the small Diffusers components used by the NPU smoke on CPU."""
+    from diffusers import MiniMaxH3Transformer3DModel
+
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(_SEED)
+        dit = MiniMaxH3Transformer3DModel(
+            in_channels=_VIDEO_LATENT_CHANNELS,
+            audio_in_channels=_AUDIO_LATENT_CHANNELS,
+            hidden_size=64,
+            num_attention_heads=2,
+            attention_head_dim=32,
+            num_layers=2,
+            num_refiner_layers=1,
+            ffn_dim=128,
+            text_dim=32,
+            freq_dim=64,
+            time_embed_hidden_dim=64,
+            time_embed_dim=32,
+            rope_freq_dim=4,
+        )
+        dit.save_pretrained(root / "transformer")
+    _copy_tree(root / "transformer", root / "transformer_ref")
+    config = Qwen3VLConfig(
+        text_config={
+            "hidden_size": 32,
+            "intermediate_size": 64,
+            "num_hidden_layers": 1,
+            "num_attention_heads": 4,
+            "num_key_value_heads": 2,
+            "head_dim": 8,
+            "rope_parameters": {
+                "rope_type": "default",
+                "rope_theta": 5000000,
+                "mrope_section": [2, 1, 1],
+                "mrope_interleaved": True,
+            },
+        },
+        vision_config={
+            "depth": 1,
+            "hidden_size": 64,
+            "intermediate_size": 128,
+            "num_heads": 4,
+            "patch_size": 16,
+            "out_hidden_size": 32,
+            "deepstack_visual_indexes": [],
+        },
+    )
+    config.save_pretrained(root / "text_encoder")
+    (root / "tokenizer").mkdir()
+    (root / "tokenizer/chat_template.jinja").write_text(
+        "{% for m in messages %}{{ '<|im_start|>' + m.role + '\\n' }}"
+        "{% if m.content is string %}{{ m.content }}{% else %}{% for c in m.content %}"
+        "{% if c.type == 'text' %}{{ c.text }}{% elif c.type == 'image' %}<|vision_start|><|image_pad|><|vision_end|>"
+        "{% elif c.type == 'video' %}<|vision_start|><|video_pad|><|vision_end|>{% endif %}{% endfor %}{% endif %}"
+        "{{ '<|im_end|>\\n' }}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>assistant\\n' }}{% endif %}"
+    )
+    (root / "processor").mkdir()
+    (root / "processor/processor_config.json").write_text(
+        json.dumps(
+            {
+                "processor_class": "Qwen3VLProcessor",
+                "image_processor": {"image_processor_type": "Qwen2VLImageProcessor", "patch_size": 16},
+                "video_processor": {"video_processor_type": "Qwen3VLVideoProcessor", "patch_size": 16},
+            }
+        )
+    )
+
+
 def _expanded_transformer_config(source: Path, *, text_hidden_size: int) -> dict:
     config = json.loads(source.read_text())
     config["in_channels"] = _VIDEO_LATENT_CHANNELS
@@ -611,7 +687,7 @@ def _write_partition(
     return component_dir
 
 
-def _checkpoint_is_complete(output_dir: Path) -> bool:
+def _checkpoint_is_complete(output_dir: Path, *, offline: bool = False) -> bool:
     required = (
         output_dir / "tiny_checkpoint.json",
         output_dir / "FL2VA" / "model_index.json",
@@ -637,11 +713,26 @@ def _checkpoint_is_complete(output_dir: Path) -> bool:
     )
     if not all(path.is_file() for path in required):
         return False
+    if offline:
+        runtime_files = (
+            "tokenizer/tokenizer_config.json",
+            "tokenizer/chat_template.jinja",
+            "processor/config.json",
+            "processor/processor_config.json",
+            "processor/tokenizer_config.json",
+            "processor/chat_template.jinja",
+            "video_vae/tiny_h3_video_vae.py",
+            "video_vae/tiny_video_vae.pt",
+            "audio_vae/tiny_h3_audio_vae.py",
+            "audio_vae/tiny_audio_vae.pt",
+        )
+        if not all((output_dir / part / file).is_file() for part in ("FL2VA", "Ref2VA") for file in runtime_files):
+            return False
     try:
         metadata = json.loads((output_dir / "tiny_checkpoint.json").read_text())
     except (OSError, ValueError):
         return False
-    return metadata.get("format_version") == _CHECKPOINT_FORMAT_VERSION
+    return isinstance(metadata, dict) and metadata.get("format_version") == _CHECKPOINT_FORMAT_VERSION
 
 
 def ensure_tiny_minimax_h3_checkpoint(
@@ -650,6 +741,7 @@ def ensure_tiny_minimax_h3_checkpoint(
     source_fl2va: str | None = None,
     hf_cache_dir: str | None = None,
     skip_if_exists: bool = True,
+    offline: bool = False,
 ) -> str:
     """Build the self-contained checkpoint, or return an existing complete one.
 
@@ -658,11 +750,30 @@ def ensure_tiny_minimax_h3_checkpoint(
     """
     del source_fl2va
     output = Path(os.path.expanduser(output_dir))
-    if skip_if_exists and _checkpoint_is_complete(output):
+    if skip_if_exists and _checkpoint_is_complete(output, offline=offline):
         print(f"tiny MiniMax-H3 checkpoint already present at {output}", flush=True)
         return str(output)
 
-    hf_root = _download_hf_tiny(hf_cache_dir)
+    if offline:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=output.parent) as tmp:
+            staging = Path(tmp)
+            _write_offline_source(staging)
+            built = staging / "checkpoint"
+            _assemble_checkpoint(built, staging)
+            # Publish only complete checkpoints and never overwrite a shared cache.
+            try:
+                built.rename(output)
+            except OSError:
+                if not _checkpoint_is_complete(output, offline=True):
+                    raise
+    else:
+        _assemble_checkpoint(output, _download_hf_tiny(hf_cache_dir))
+    print(f"self-contained tiny MiniMax-H3 checkpoint assembled at {output}", flush=True)
+    return str(output)
+
+
+def _assemble_checkpoint(output: Path, hf_root: Path) -> None:
     source_qwen_config = Qwen3VLConfig.from_pretrained(
         hf_root / "text_encoder",
         local_files_only=True,
@@ -714,20 +825,32 @@ def ensure_tiny_minimax_h3_checkpoint(
         + "\n"
     )
 
-    print(f"self-contained tiny MiniMax-H3 checkpoint assembled at {output}", flush=True)
-    return str(output)
-
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--hf-cache-dir", default=None)
-    parser.add_argument("--force", action="store_true", help="Rebuild even if the checkpoint is complete.")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--offline", action="store_true", help="Initialize tiny weights locally without Hub access.")
+    mode.add_argument("--offline-cache", type=Path, help="Use this shared cache for an offline run-local output.")
+    mode.add_argument("--force", action="store_true", help="Rebuild even if the checkpoint is complete.")
     args = parser.parse_args()
+    output = Path(args.output_dir).expanduser()
+    cache = args.offline_cache
+    if cache is not None:
+        cache = cache.expanduser()
+        # Use run-local storage if the shared path contains an incomplete checkpoint.
+        if _checkpoint_is_complete(cache, offline=True) or not (cache.exists() or cache.is_symlink()):
+            built = ensure_tiny_minimax_h3_checkpoint(str(cache), offline=True)
+            if output.resolve() != Path(built).resolve():
+                output.parent.mkdir(parents=True, exist_ok=True)
+                output.symlink_to(Path(built).resolve(), target_is_directory=True)
+            return
     ensure_tiny_minimax_h3_checkpoint(
-        args.output_dir,
+        str(output),
         hf_cache_dir=args.hf_cache_dir,
         skip_if_exists=not args.force,
+        offline=args.offline or cache is not None,
     )
 
 

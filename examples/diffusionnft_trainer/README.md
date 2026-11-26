@@ -17,6 +17,12 @@ They use the dedicated token-ID-native H3 AgentLoop; see the
 [MiniMax H3 recipe README](https://github.com/verl-project/verl-omni/blob/main/examples/diffusionnft_trainer/minimax_h3/README.md) for model staging, data
 preparation, and launch instructions.
 
+MiniMax-H3-Image (6-step PDD text-to-image and edit) has a dense-text OCR LoRA recipe:
+[`minimax_h3_image/run_minimax_h3_image_ocr_lora.sh`](https://github.com/verl-project/verl-omni/blob/main/examples/diffusionnft_trainer/minimax_h3_image/run_minimax_h3_image_ocr_lora.sh).
+See the
+[MiniMax H3 image recipe README](https://github.com/verl-project/verl-omni/blob/main/examples/diffusionnft_trainer/minimax_h3_image/README.md)
+for checkpoint conversion, dense-text data preparation, and the PickScore + guarded-OCR + HPSv2.1 reward setup.
+
 Boogu-Image-0.1-Base has a DiffusionNFT recipe as well:
 [`boogu_image/run_boogu_image_ocr_lora.sh`](https://github.com/verl-project/verl-omni/blob/main/examples/diffusionnft_trainer/boogu_image/run_boogu_image_ocr_lora.sh),
 and a CFG-free HPSv2.1 + PickScore + CLIPScore recipe on Pick-a-Pic prompts:

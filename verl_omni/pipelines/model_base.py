@@ -115,6 +115,14 @@ class DiffusionModelBase(ABC):
             noise = noise[:, step]
         return {"x0": x0, "xt": (1.0 - t) * x0 + t * noise, "t_expanded": t}
 
+    # Adapter used for the detached loss-reference prediction.
+    old_policy_adapter: str = "old"
+
+    @classmethod
+    def forward_reference(cls, module, model_config, model_inputs, negative_model_inputs):
+        """Forward for the adapter-disabled pretrained reference."""
+        return cls.forward(module, model_config, model_inputs, negative_model_inputs)
+
     @classmethod
     def validate_engine_config(cls, engine_config) -> None:
         """Validate adapter requirements before NFT engine initialization."""
@@ -159,6 +167,11 @@ class DiffusionModelBase(ABC):
         Return ``None`` to use the default ``AutoModel`` path.
         Override this for models that diffusers cannot load.
         """
+        return None
+
+    @classmethod
+    def diffusers_model_class(cls, model_config: DiffusionModelConfig):
+        """Optionally select a concrete Diffusers class for the standard FSDP loader."""
         return None
 
     @classmethod
@@ -757,6 +770,16 @@ class OmniModelBase(ABC):
         return
 
     @classmethod
+    def register_true_on_policy_implementations(cls) -> dict[str, str]:
+        """Register the Transformers kernels used under ``true_on_policy``.
+
+        Returns:
+            The ``*_implementation`` names to build the HF config with, e.g.
+            ``{"attn_implementation": ..., "experts_implementation": ...}``.
+        """
+        raise NotImplementedError(f"{cls.__name__} does not support true_on_policy.")
+
+    @classmethod
     @abstractmethod
     def get_strip_modules(cls, model_config) -> list[str]:
         """Return submodule prefixes to strip before FSDP init.
@@ -994,6 +1017,37 @@ class OmniRolloutPipelineBase:
         return None
 
     @classmethod
+    def expert_parallel_stage_ids(cls, pipeline_mode="thinker_only") -> frozenset[int]:
+        """Return stages whose MoE layers may run under expert parallelism.
+
+        vLLM-Omni takes EP as a per-stage flag over the ranks that stage already
+        spans, so the deploy config carries a flag rather than a size. The default
+        empty set keeps dense pipelines on the fail-closed path.
+
+        Args:
+            pipeline_mode: The mode used to build the stages.
+
+        Returns:
+            frozenset[int]: Stage IDs that may receive ``enable_expert_parallel``.
+        """
+        return frozenset()
+
+    @classmethod
+    def expert_parallel_pipelines(cls) -> dict[str, frozenset[int]]:
+        """Return registered pipelines that opt into expert parallelism.
+
+        Returns:
+            dict[str, frozenset[int]]: Pipeline model_type to its EP stage IDs,
+            omitting pipelines that opt out.
+        """
+        supported: dict[str, frozenset[int]] = {}
+        for model_type, adapter_cls in cls._registry.items():
+            stage_ids = adapter_cls.expert_parallel_stage_ids()
+            if stage_ids:
+                supported[model_type] = stage_ids
+        return supported
+
+    @classmethod
     def policy_stage_id(cls, pipeline_mode="thinker_only") -> int:
         """Return the stage whose sampling parameters and logprobs define the policy."""
         return 0
@@ -1041,12 +1095,13 @@ class OmniRolloutPipelineBase:
         return {}
 
     @classmethod
-    def get_stage_engine_extras(cls, stage_id: int, pipeline_mode: str = "thinker_only") -> dict:
+    def get_stage_engine_extras(cls, stage_id: int, pipeline_mode: str = "thinker_only", *, model_config) -> dict:
         """Return per-stage ``engine_extras`` to inject into the deploy config.
 
         Args:
             stage_id: The pipeline stage ID.
             pipeline_mode: The mode used to build the stages.
+            model_config: The ``OmniModelConfig``.
 
         Returns:
             dict: Extra key-value pairs merged into the stage's engine args.
@@ -1079,3 +1134,77 @@ class OmniRolloutPipelineBase:
                 "An omni rollout adapter with multiple final outputs must implement combine_engine_outputs()."
             )
         return outputs[0], {}
+
+
+class DiffusionModelARBase:
+    """Base class for composite AR training adapters.
+
+    Used only when ``model_type=diffusion_composite_model``. DiT setup stays on
+    ``DiffusionModelBase``; this class configures the AR module built by
+    ``CompositeARFSDPEngineWithLMHead``. Packages that do not train the AR must
+    not register a subclass — ``peek_class`` returns ``None`` and the engine
+    skips AR setup.
+
+    Register with ``@DiffusionModelARBase.register(architecture, algorithm)``.
+    The worked example is Qwen-Image Dual-GRPO's ``ar_training_adapter.py``.
+
+    Note that ``model_config`` here reuses diffusion model configurations.
+    """
+
+    _registry: dict[tuple[str, str], type["DiffusionModelARBase"]] = {}
+
+    @classmethod
+    def register(cls, architecture: str, algorithm: str):
+        """Class decorator that registers a subclass for ``(architecture, algorithm)``."""
+
+        def decorator(subclass: type["DiffusionModelARBase"]) -> type["DiffusionModelARBase"]:
+            cls._registry[(architecture, algorithm)] = subclass
+            return subclass
+
+        return decorator
+
+    @classmethod
+    def peek_class(cls, model_config) -> Optional[type["DiffusionModelARBase"]]:
+        """Return the registered AR adapter, or ``None`` when AR is not trained."""
+        external_lib: Optional[str] = getattr(model_config, "external_lib", None)
+        if external_lib is not None:
+            from verl.utils.import_utils import import_external_libs
+
+            import_external_libs(external_lib)
+        return cls._registry.get((model_config.architecture, model_config.algorithm))
+
+    @classmethod
+    def get_class(cls, model_config) -> type["DiffusionModelARBase"]:
+        """Return the registered AR adapter, or raise when none is registered."""
+        adapter = cls.peek_class(model_config)
+        if adapter is None:
+            registered = sorted(cls._registry.keys())
+            raise NotImplementedError(
+                f"No composite AR adapter registered for "
+                f"(architecture={model_config.architecture!r}, "
+                f"algorithm={model_config.algorithm!r}). Registered: {registered}. "
+                f"Add ``ar_training_adapter.py`` only when the text encoder is trained."
+            )
+        return adapter
+
+    @classmethod
+    def configure_module(cls, module: torch.nn.Module, model_config) -> None:
+        """Post-build AR setup before FSDP wrap. Default is a no-op."""
+        return
+
+    @classmethod
+    def maybe_configure_module(cls, module: torch.nn.Module, model_config) -> None:
+        """Run ``configure_module`` when an AR adapter is registered; otherwise no-op."""
+        adapter = cls.peek_class(model_config)
+        if adapter is not None:
+            adapter.configure_module(module, model_config)
+
+    @classmethod
+    def get_fsdp_ignored_module_names(cls, model_config) -> list[str]:
+        """Submodule name components to leave unsharded under FSDP2 (default: none).
+
+        FSDP2 only. Declare a frozen subtree whose forward is skipped on some
+        micro-batches so the skip cannot desync ranks. Ignored parameters must
+        stay frozen — FSDP2 does not synchronize their gradients.
+        """
+        return []

@@ -1,6 +1,6 @@
 # Config Explanation
 
-Last updated: 10/21/2026
+Last updated: 11/19/2026
 
 VeRL-Omni builds on [verl](https://github.com/verl-project/verl) and reuses the
 same Hydra config surface for shared RL trainer fields (`data`, FSDP actor /
@@ -67,12 +67,15 @@ algorithm:
 - `algorithm.adv_estimator`: Advantage estimator name; defaults to `actor_rollout_ref.model.algorithm` (e.g. `flow_grpo`).
 - `algorithm.norm_adv_by_std_in_grpo`: Normalize advantages by within-group std (GRPO-style).
 - `algorithm.global_std`: Use a global (cross-group) std for advantage normalization.
-- `algorithm.old_policy_decay_schedule`: DiffusionNFT/DGPO/AWM old-policy EMA schedule. One of `copy`, `linear_to_0_5`, `linear_to_0_3`, `delayed_linear_to_0_999`.
+- `algorithm.old_policy_decay_schedule`: DiffusionNFT/DGPO/AWM/CRD sampling-policy EMA schedule. One of `copy`, `linear_to_0_5`, `linear_to_0_3`, `linear_from_0_25_to_0_5`, `delayed_linear_to_0_999`.
 - `algorithm.old_policy_decay`: Fixed old-policy EMA decay in `[0, 1]`. When set, overrides `old_policy_decay_schedule`.
-- `algorithm.old_policy_update_interval`: DiffusionNFT optimizer steps between old-policy adapter refreshes (must be `> 0`).
+- `algorithm.old_policy_update_interval`: Trainer iterations between sampling-policy adapter refreshes (must be `> 0`).
+- `algorithm.reference_policy_decay_schedule`: Independent EMA schedule for CRD's `moving_reference` adapter (default `linear_from_0_25_to_0_5`).
+- `algorithm.reference_policy_decay`: Optional fixed moving-reference decay in `[0, 1]`.
+- `algorithm.reference_policy_update_interval`: Trainer iterations between moving-reference refreshes.
 - `algorithm.timestep_fraction`: Fraction of rollout timesteps used for forward-process training, in `(0, 1]`.
-- `algorithm.train_timestep_range`: DGPO and AWM only. Rollout schedule indices `[start, end)` that training timesteps are drawn from; `null` uses the whole schedule.
-- `algorithm.train_timestep_count`: DGPO and AWM only. Number of schedule indices drawn per step and shared by the batch; `null` applies `timestep_fraction`.
+- `algorithm.train_timestep_range`: DGPO/AWM/CRD. Rollout schedule indices `[start, end)` that training timesteps are drawn from; `null` uses the whole schedule.
+- `algorithm.train_timestep_count`: DGPO/AWM/CRD. Number of schedule indices drawn per step and shared by the batch; `null` applies `timestep_fraction`.
 - `algorithm.adv_mode`: Advantage mapping before reward-probability scaling. One of `continuous`, `positive_only`, `negative_only`, `one_only`, `binary`.
 - `algorithm.paired_preference`: `true` for pair-based algorithms (e.g. offline DPO); doubles actor batch size and disables shuffle.
 - `algorithm.rollout_correction.*`: Experimental IS / RS correction. Schema mirrors upstream verl; see {doc}`../algo/rollout_correction` and [verl Rollout Correction](https://verl.readthedocs.io/en/latest/algo/rollout_corr.html).
@@ -255,13 +258,16 @@ actor_rollout_ref:
 
 #### `diffusion_loss` — `DiffusionLossConfig`
 
-- `actor_rollout_ref.actor.diffusion_loss.loss_mode`: Loss registry key. One of `flow_grpo`, `flow_dppo`, `grpo_guard`, `diffusion_nft`, `omni_nft`, `dgpo`, `awm`, `dpo`, `dmd2`, `dance_grpo`, `distill_kl`, `distill_fm_mse`.
+- `actor_rollout_ref.actor.diffusion_loss.loss_mode`: Loss registry key. One of `flow_grpo`, `flow_dppo`, `grpo_guard`, `diffusion_nft`, `omni_nft`, `dgpo`, `crd`, `awm`, `dpo`, `dmd2`, `dance_grpo`, `distill_kl`, `distill_fm_mse`.
 - `actor_rollout_ref.actor.diffusion_loss.clip_ratio`: PPO-style clip ratio for diffusion policy loss (FlowGRPO default is very small, e.g. `1e-4`).
 - `actor_rollout_ref.actor.diffusion_loss.adv_clip_max`: Max absolute advantage before computing the policy loss (must be `> 0`).
 - `actor_rollout_ref.actor.diffusion_loss.mix_beta`: DiffusionNFT β for positive / implicit-negative prediction mixing (must be `> 0`).
 - `actor_rollout_ref.actor.diffusion_loss.ref_kl_coef`: DiffusionNFT prediction-space reference MSE coefficient.
 - `actor_rollout_ref.actor.diffusion_loss.adaptive_weight_min`: DiffusionNFT minimum adaptive denominator for x0 reconstruction losses (must be `> 0`).
 - `actor_rollout_ref.actor.diffusion_loss.dpo_beta`: DPO inverse temperature for pairwise flow-matching preference loss.
+- `actor_rollout_ref.actor.diffusion_loss.crd_beta`: CRD implicit reward scale (finite, positive; default `1.0`).
+- `actor_rollout_ref.actor.diffusion_loss.crd_kl_min`: Minimum reward-adaptive anchor coefficient, between zero and `ref_kl_coef`.
+- `actor_rollout_ref.model.pipeline.reference_guidance_scale`: CRD pretrained-anchor CFG, independent of sampling CFG (default `4.5`).
 - `actor_rollout_ref.actor.diffusion_loss.dgpo_beta`: DGPO β in the group preference score (must be `> 0`).
 - `actor_rollout_ref.actor.diffusion_loss.dgpo_clip_range`: DGPO old-policy ratio clip range; `0` disables clipping (must be `>= 0`).
 - `actor_rollout_ref.actor.diffusion_loss.awm_clip_range`: AWM PPO-style clip range on the old-policy flow-matching ratio `exp(old_dsm - dsm)`; `0` disables clipping (must be `>= 0`).
@@ -450,7 +456,7 @@ actor_rollout_ref:
 
 These sit on the diffusion trainer YAML (in addition to shared verl trainer fields):
 
-- `trainer.video_fps`: FPS for videos written to `rollout_data_dir` / `validation_data_dir` and logged to W&B (image runs ignore this).
+- `trainer.video_fps`: FPS for videos written to `rollout_data_dir` / `validation_data_dir` and logged to W&B or SwanLab (image runs ignore this).
 - `trainer.rollout_data_save_freq`: Dump train rollout every N steps (`1` = every step, `<= 0` = never).
 - `trainer.rollout_data_max_samples` / `validation_data_max_samples`: Cap samples dumped per train / val run (`null` = all).
 - `trainer.use_v1`: Use the V1 trainer (TransferQueue + ReplayBuffer). Defaults
@@ -458,6 +464,9 @@ These sit on the diffusion trainer YAML (in addition to shared verl trainer fiel
   v0 diffusion trainer for every model. Wan2.2 DanceGRPO on CUDA defaults to V1
   via `run_wan22_5b_t2v_hpsv3_v1.sh`; the v0 auto-detect launcher is deprecated
   for CUDA.
+- `trainer.train_ar`: Jointly train an AR text encoder with the DiT.
+  Defaults to `false`; `true` selects `CompositePolicyGradientRayTrainer` on the
+  v0 `main_diffusion` path.
 - `trainer.v1.*`: V1 mode / sampler / async placeholders (`trainer_mode`, `max_off_policy_threshold`, …). See {doc}`../start/diffusion_v1`.
 
 ### `reward` — visual reward manager
@@ -532,11 +541,38 @@ actor_rollout_ref:
 - `actor_rollout_ref.model.model_stage`: Which stage to train: `thinker`, `talker`, or `all`.
 - `actor_rollout_ref.model.hf_config_name`: Sub-config key for the trainable component (e.g. `thinker_config`, `talker_config`).
 - `actor_rollout_ref.model.override_config`: Dict merged into HF config load (e.g. `attn_implementation`).
+- Qwen3-Omni Thinker on Ascend can select verl's grouped expert matrix multiplication for BF16
+  FSDP/FSDP2 training with `+actor_rollout_ref.model.override_config.experts_implementation=ascend_grouped_mm`.
+  The same override enables the Thinker RMSNorm and RoPE fusions. It requires SiLU experts, applies to
+  training and the Thinker policy's log-probability forward, and is unsupported by the Megatron engine.
 - `actor_rollout_ref.model.enable_activation_offload` / `use_remove_padding`: Memory / packing flags for the FSDP actor.
 - `actor_rollout_ref.model.lora_*` / `target_modules` / `policy_state_adapters` / `fsdp_layer_prefixes`: Same LoRA roles as diffusion (defaults differ slightly, e.g. `lora_alpha: 16`).
 - `actor_rollout_ref.model.use_liger` / `use_fused_kernels`: Unsupported by omni FSDP/FSDP2 and must remain `false`; enabling either fails before model loading. The adjacent `fused_kernel_options` / `tiled_mlp` fields are backend-specific.
 - `actor_rollout_ref.model.max_image_tokens` / `max_audio_tokens` / `max_video_tokens`: Multimodal token budgets (`null` = unset).
 - `actor_rollout_ref.model.lora` / `mtp`: Megatron-style LoRA block and multi-token prediction (speculative decoding) configs; see the YAML comments in `omni/model/omni_model.yaml`.
+
+### AVQA performance defaults on Ascend 950DT
+
+The Qwen3-Omni AVQA recipe selects FlashAttention 2 for training by default.
+On an eight-device Ascend 950DT host, the recipe also defaults to eight devices,
+`ascend_grouped_mm` for training, and `FULL_AND_PIECEWISE` for rollout.
+The generated Thinker-only deployment uses the V1 model runner.
+The 950DT launcher sets `VLLM_USE_V2_MODEL_RUNNER=0` so vLLM-Ascend reads the V1
+capture context when registering attention tasks for FULL decode.
+The recipe uses capture sizes `[1,16,128,1536]`, a batched-token limit of `1536`,
+and rollout memory utilization of `0.45`. Actor parameter offload is enabled and optimizer
+offload is disabled. The eight-device configuration was benchmarked with CANN 9.3.0.
+GPU and other Ascend setups default to `PIECEWISE` rollout.
+
+Export `ASCEND_HOME_PATH`, `MODEL_PATH`, `TRAIN_FILE`, and `VAL_FILE` for your setup,
+then run the recipe from the repository root.
+
+```bash
+bash -o pipefail examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_avqa_v1.sh
+```
+
+Use `VLLM_OMNI_CUDAGRAPH_MODE=PIECEWISE` to select PIECEWISE rollout.
+Hydra arguments passed to the script can override the recipe defaults.
 
 ### `actor_rollout_ref.actor` — `OmniActorConfig` / `omni_loss`
 

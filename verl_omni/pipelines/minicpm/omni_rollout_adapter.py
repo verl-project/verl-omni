@@ -25,6 +25,7 @@ from vllm_omni.config.pipeline_registry import register_pipeline
 from vllm_omni.config.stage_config import PipelineConfig
 from vllm_omni.model_executor.models.minicpmo_4_5.pipeline import MINICPMO_4_5_PIPELINE
 
+from verl_omni.pipelines.minicpm.prompt_parity import resolve_media_tokens
 from verl_omni.pipelines.model_base import OmniRolloutPipelineBase
 
 MINICPMO_4_5_THINKER_ONLY_PIPELINE = PipelineConfig(
@@ -102,12 +103,13 @@ class MiniCPMORolloutAdapter(OmniRolloutPipelineBase):
         return {}
 
     @classmethod
-    def get_stage_engine_extras(cls, stage_id: int, pipeline_mode: str = "thinker_only") -> dict:
+    def get_stage_engine_extras(cls, stage_id: int, pipeline_mode: str = "thinker_only", *, model_config) -> dict:
         """Return per-stage engine overrides for *pipeline_mode*.
 
         Args:
             stage_id: Zero-based pipeline stage index.
             pipeline_mode (str): Pipeline mode selector; ``thinker_only`` only.
+            model_config: The ``OmniModelConfig``; unused.
 
         Returns:
             dict: Engine kwargs for the stage, empty when nothing is overridden.
@@ -125,3 +127,34 @@ class MiniCPMORolloutAdapter(OmniRolloutPipelineBase):
                 "async_scheduling": False,
             }
         return {}
+
+    @classmethod
+    def prepare_engine_prompt(cls, prompt_ids, model_config, multi_modal_data, mm_processor_kwargs=None):
+        """Collapse the request's expanded media spans into the slots vLLM-Omni re-expands.
+
+        Rollout and teacher requests both carry processor-expanded ids; a teacher
+        request also carries the student's response after the prompt. Only as many
+        spans as the request has media are collapsed, so the response passes
+        through verbatim.
+
+        Args:
+            prompt_ids: Processor-expanded ids, optionally followed by response ids.
+            model_config: The server's ``OmniModelConfig`` carrying the processor.
+            multi_modal_data: Engine media keyed by ``image`` / ``audio``.
+            mm_processor_kwargs: Processor options forwarded to the engine.
+
+        Returns:
+            The engine prompt, or None for a text-only request.
+        """
+        if not multi_modal_data:
+            return None
+        prompt = {
+            "prompt_token_ids": resolve_media_tokens(model_config.processor).collapse_ids_to_slots(
+                prompt_ids,
+                num_images=len(multi_modal_data.get("image") or []),
+                num_audios=len(multi_modal_data.get("audio") or []),
+            )
+        }
+        if mm_processor_kwargs:
+            prompt["mm_processor_kwargs"] = mm_processor_kwargs
+        return prompt

@@ -195,3 +195,115 @@ def test_collect_strips_nested_fsdp_wrapper_tokens_for_vllm(monkeypatch):
     assert list(params) == ["transformer_blocks.0.attn.to_q.lora_A.weight"]
     assert all("_fsdp_wrapped_module" not in name for name in params)
     assert all(".default." not in name for name in params)
+
+
+class _FakeFsdp1Wrap(nn.Module):
+    """Nested FSDP1 leaf stand-in: module tree keeps ``_fsdp_wrapped_module``.
+
+    ``state_dict()`` keys drop the wrapper token (real FSDP1 leaf state dicts do);
+    ``named_parameters()`` keeps it — the asymmetry the layered collector must bridge.
+    """
+
+    def __init__(self, block: nn.Module):
+        super().__init__()
+        self._fsdp_wrapped_module = block
+
+    def state_dict(self, *args, **kwargs):
+        return {
+            name.replace("_fsdp_wrapped_module.", ""): tensor
+            for name, tensor in self._fsdp_wrapped_module.state_dict(*args, **kwargs).items()
+        }
+
+
+def _inplace_lora_dit(num_blocks: int = 2) -> nn.Module:
+    """Two-block DiT with in-place LoRA injection, per-block filled adapters."""
+    from peft import LoraConfig as _LoraConfig
+    from peft import inject_adapter_in_model
+
+    class _Attn(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.to_q = nn.Linear(4, 4, bias=False)
+
+    class _Block(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.attn = _Attn()
+
+    class _DiT(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.transformer_blocks = nn.ModuleList(_FakeFsdp1Wrap(_Block()) for _ in range(num_blocks))
+
+    model = _DiT()
+    inject_adapter_in_model(_LoraConfig(r=2, lora_alpha=4, target_modules=["to_q"], bias="none"), model)
+    for i, block in enumerate(model.transformer_blocks):
+        block._fsdp_wrapped_module.attn.to_q.lora_A["default"].weight.data.fill_(float(i + 1))
+        block._fsdp_wrapped_module.attn.to_q.lora_B["default"].weight.data.fill_(float(i + 11))
+    return model
+
+
+def test_layered_fsdp1_collect_keeps_block_prefix_per_peft_prefix_rules(monkeypatch):
+    """peft >= 0.22 derives tuner prefixes from wrapper-free module paths; the
+    per-block state dict must be keyed the same way or every block falls to the
+    block-local fallback and later blocks silently overwrite earlier ones
+    (the gpu_smoke ``LoRA adapter binding is incomplete`` regression)."""
+    from contextlib import nullcontext
+
+    import verl_omni.utils.fsdp_utils as fsdp_utils
+
+    module = _inplace_lora_dit()
+    monkeypatch.setattr(fsdp_utils, "fsdp_version", lambda _: 1)
+    monkeypatch.setattr(
+        "torch.distributed.fsdp.FullyShardedDataParallel.summon_full_params",
+        lambda *args, **kwargs: nullcontext(),
+    )
+
+    params = collect_lora_params(
+        module,
+        layered_summon=True,
+        base_sync_done=True,
+        is_diffusers=True,
+    )
+
+    assert sorted(params) == [
+        "transformer_blocks.0.attn.to_q.lora_A.weight",
+        "transformer_blocks.0.attn.to_q.lora_B.weight",
+        "transformer_blocks.1.attn.to_q.lora_A.weight",
+        "transformer_blocks.1.attn.to_q.lora_B.weight",
+    ]
+    torch.testing.assert_close(params["transformer_blocks.0.attn.to_q.lora_A.weight"], torch.full((2, 4), 1.0))
+    torch.testing.assert_close(params["transformer_blocks.1.attn.to_q.lora_A.weight"], torch.full((2, 4), 2.0))
+    torch.testing.assert_close(params["transformer_blocks.0.attn.to_q.lora_B.weight"], torch.full((4, 2), 11.0))
+    torch.testing.assert_close(params["transformer_blocks.1.attn.to_q.lora_B.weight"], torch.full((4, 2), 12.0))
+
+
+def test_layered_fsdp1_fallback_names_carry_block_prefix(monkeypatch):
+    """When PEFT's own state-dict lookup misses, the per-block fallback must still
+    emit root-relative names; block-local names collide across blocks."""
+    from contextlib import nullcontext
+
+    import verl_omni.utils.fsdp_utils as fsdp_utils
+
+    module = _inplace_lora_dit()
+    monkeypatch.setattr(fsdp_utils, "fsdp_version", lambda _: 1)
+    monkeypatch.setattr(fsdp_utils, "get_peft_model_state_dict", lambda *args, **kwargs: {})
+    monkeypatch.setattr(
+        "torch.distributed.fsdp.FullyShardedDataParallel.summon_full_params",
+        lambda *args, **kwargs: nullcontext(),
+    )
+
+    params = collect_lora_params(
+        module,
+        layered_summon=True,
+        base_sync_done=True,
+        is_diffusers=True,
+    )
+
+    assert sorted(params) == [
+        "transformer_blocks.0.attn.to_q.lora_A.weight",
+        "transformer_blocks.0.attn.to_q.lora_B.weight",
+        "transformer_blocks.1.attn.to_q.lora_A.weight",
+        "transformer_blocks.1.attn.to_q.lora_B.weight",
+    ]
+    torch.testing.assert_close(params["transformer_blocks.1.attn.to_q.lora_A.weight"], torch.full((2, 4), 2.0))

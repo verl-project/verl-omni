@@ -60,6 +60,9 @@ if [ "$DEVICE" = "npu" ]; then
     source $ASCEND_HOME_PATH/set_env.sh
     source $ASCEND_HOME_PATH/../nnal/atb/set_env.sh
 
+    # Ascend cannot unpickle the default DataProto payloads across Ray actors.
+    export VERL_DATAPROTO_SERIALIZATION_METHOD=numpy
+
     NUM_GPUS=${NUM_GPUS:-16}
     ROLLOUT_TP=${ROLLOUT_TP:-4}
     REWARD_DEVICE="npu"
@@ -68,6 +71,7 @@ if [ "$DEVICE" = "npu" ]; then
     FSDP_STRATEGY="fsdp"
     ATTN_BACKEND="native"
     ROLLOUT_ATTN_BACKEND="TORCH_SDPA"
+    RESUME_MODE=disable
 else
     DETECTED_GPUS=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | wc -l)
     NUM_GPUS=${NUM_GPUS:-${DETECTED_GPUS:-8}}
@@ -78,6 +82,7 @@ else
     FSDP_STRATEGY="fsdp2"
     ATTN_BACKEND="_flash_3_varlen_hub"
     ROLLOUT_ATTN_BACKEND="FLASH_ATTN_3_HUB"
+    RESUME_MODE=auto
 fi
 
 CLAP_MODEL_PATH=${CLAP_MODEL_PATH:-laion/larger_clap_general}
@@ -163,11 +168,15 @@ python3 -m verl_omni.trainer.main_diffusion_v1 \
     '+reward.reward_functions.clap.weight=1.0' \
     "+reward.reward_functions.clap.device=${REWARD_DEVICE}:0" \
     "+reward.reward_functions.clap.model_name_or_path=$CLAP_MODEL_PATH" \
-    "+reward.reward_functions.imagebind.path=$repo_root/verl_omni/utils/reward_score/imagebind.py" \
-    '+reward.reward_functions.imagebind.name=compute_score' \
+    '+reward.models.imagebind.backend=native' \
+    "+reward.models.imagebind.model_path=$IMAGEBIND_MODEL_PATH" \
+    '+reward.models.imagebind.offload=false' \
+    '+reward.models.imagebind.placement.devices=[1]' \
+    '+reward.models.imagebind.executor.model=verl_omni.utils.reward_score.imagebind:ImageBindModel' \
+    '+reward.reward_functions.imagebind.path=pkg://verl_omni.utils.reward_score.imagebind' \
+    '+reward.reward_functions.imagebind.name=compute_score_native' \
     '+reward.reward_functions.imagebind.weight=1.0' \
-    "+reward.reward_functions.imagebind.device=${REWARD_DEVICE}:1" \
-    "+reward.reward_functions.imagebind.model_name_or_path=$IMAGEBIND_MODEL_PATH" \
+    '+reward.reward_functions.imagebind.model=imagebind' \
     '+reward.reward_functions.imagebind.mode=audio_video' \
     reward.aggregation=weighted_sum \
     trainer.logger='["console","wandb"]' \
@@ -179,6 +188,7 @@ python3 -m verl_omni.trainer.main_diffusion_v1 \
     trainer.val_before_train=True \
     trainer.n_gpus_per_node=$NUM_GPUS \
     trainer.nnodes=1 \
+    trainer.resume_mode=$RESUME_MODE \
     trainer.save_freq=20 \
     trainer.test_freq=20 \
     trainer.total_epochs=15 \

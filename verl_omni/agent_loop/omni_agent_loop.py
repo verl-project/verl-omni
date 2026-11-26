@@ -25,14 +25,11 @@ from verl.experimental.agent_loop.agent_loop import AgentLoopWorker
 from verl.utils import hf_tokenizer
 
 from verl_omni.tools.trajectory import (
-    active_user_prompt,
-    bind_agentic_image_gen,
-    bind_run_artifacts,
-    build_trajectory_relpath,
-    clear_good_enough_yes_reached,
-    reset_active_trajectory_relpath,
-    set_active_trajectory_relpath,
+    EpisodeState,
+    episode_scope,
 )
+from verl_omni.utils.agentic.artifacts import bind_run_artifacts, build_trajectory_relpath, rollout_id_from_relpath
+from verl_omni.utils.agentic.config import bind_agentic_image_gen
 from verl_omni.utils.agentic.image_gen_rollout_dump import discard_invalid_rollouts, dump_raw_rollouts
 from verl_omni.utils.agentic.image_gen_rollout_parse import (
     last_user_prompt,
@@ -76,8 +73,8 @@ def _stamp_reward_context(batch, config) -> None:
     """
     import numpy as np
 
-    from verl_omni.tools.trajectory import resolve_rollout_images_root
-    from verl_omni.tools.trajectory.hydra_env import agentic_scorer_knobs_from_config
+    from verl_omni.utils.agentic.artifacts import resolve_rollout_images_root
+    from verl_omni.utils.agentic.config import agentic_scorer_knobs_from_config
 
     knobs = agentic_scorer_knobs_from_config(config)
     # Same root the frozen tool writes under; reward fallback only accepts PNGs
@@ -165,13 +162,12 @@ class OmniAgentLoopWorker(AgentLoopWorker):
         )
         raw_prompt = kwargs.get("raw_prompt")
         user_prompt = last_user_prompt(raw_prompt) if raw_prompt is not None else ""
-        path_token = set_active_trajectory_relpath(relpath)
-        prompt_token = active_user_prompt.set(user_prompt)
-        clear_good_enough_yes_reached()
         kwargs["_agentic_step"] = trajectory["step"]
         kwargs["_agentic_validate"] = trajectory["validate"]
         kwargs["_agentic_trajectory_relpath"] = relpath
-        try:
+        with episode_scope(
+            EpisodeState(episode_id=rollout_id_from_relpath(relpath), artifact_relpath=relpath, user_prompt=user_prompt)
+        ):
             return await super()._run_agent_loop(
                 sampling_params,
                 trajectory,
@@ -179,9 +175,6 @@ class OmniAgentLoopWorker(AgentLoopWorker):
                 trace=trace,
                 **kwargs,
             )
-        finally:
-            active_user_prompt.reset(prompt_token)
-            reset_active_trajectory_relpath(path_token)
 
 
 class OmniAgentLoopManager(AgentLoopManager):

@@ -37,6 +37,18 @@ def test_diffusion_config_defaults_to_v1():
     assert config.trainer.v1.trainer_mode == "sync"
 
 
+def test_diffusion_rollout_standalone_budget_overrides_without_struct_error():
+    # The standalone replicas' memory budget must be a listed key of the diffusion
+    # tree (it lives in DiffusionRolloutConfig), not verl's rollout yaml: a plain
+    # override reaches the separate-async trainer's budget lookup instead of
+    # failing Hydra struct mode.
+    config = compose_diffusion_config(["actor_rollout_ref.rollout.standalone_gpu_memory_utilization=0.85"])
+    assert config.actor_rollout_ref.rollout.standalone_gpu_memory_utilization == 0.85
+
+    default = compose_diffusion_config()
+    assert default.actor_rollout_ref.rollout.standalone_gpu_memory_utilization == 0.5
+
+
 @pytest.mark.parametrize(
     ("sample_source", "trainer_type", "expected"),
     [
@@ -77,8 +89,18 @@ def test_offline_dpo_v0_launch_stays_silent():
 
 @pytest.mark.parametrize(
     "overrides",
-    [[], ["+ray_kwargs.ray_init.runtime_env.env_vars.OMP_NUM_THREADS='8'"]],
-    ids=["default", "user_env_vars"],
+    [
+        [],
+        ["+ray_kwargs.ray_init.runtime_env.env_vars.OMP_NUM_THREADS='8'"],
+        [
+            "+ray_kwargs.ray_init.runtime_env.env_vars.OMP_NUM_THREADS='8'",
+            "+ray_kwargs.ray_init.runtime_env.worker_process_setup_hook="
+            "verl_omni.tools.consistency_capture.install_trainer_capture",
+            "+ray_kwargs.ray_init.runtime_env.env_vars.DIFFUSION_CAPTURE_DIR=/tmp/trainer-capture",
+            "+ray_kwargs.ray_init.runtime_env.env_vars.DIFFUSION_CAPTURE_STEPS='1'",
+        ],
+    ],
+    ids=["default", "user_env_vars", "capture_hook"],
 )
 def test_run_diffusion_v1_force_enables_transfer_queue_before_ray_init(monkeypatch, overrides):
     import verl_omni.trainer.main_diffusion_v1 as main_v1
@@ -117,3 +139,26 @@ def test_run_diffusion_v1_force_enables_transfer_queue_before_ray_init(monkeypat
     assert env_vars.get("TRANSFER_QUEUE_ENABLE") == "1"
     if overrides:
         assert env_vars.get("OMP_NUM_THREADS") == "8"
+
+    if any("worker_process_setup_hook=" in value for value in overrides):
+        assert captured["runtime_env"]["worker_process_setup_hook"] == (
+            "verl_omni.tools.consistency_capture.install_trainer_capture"
+        )
+        assert env_vars["DIFFUSION_CAPTURE_DIR"] == "/tmp/trainer-capture"
+        assert env_vars["DIFFUSION_CAPTURE_STEPS"] == "1"
+    else:
+        assert "worker_process_setup_hook" not in captured["runtime_env"]
+        assert "DIFFUSION_CAPTURE_DIR" not in env_vars
+
+
+def test_capture_hook_addition_rejects_an_existing_callback():
+    from hydra.errors import ConfigCompositionException
+
+    with pytest.raises(ConfigCompositionException, match="already|append"):
+        compose_diffusion_config(
+            [
+                "+ray_kwargs.ray_init.runtime_env.worker_process_setup_hook=existing_project.setup",
+                "+ray_kwargs.ray_init.runtime_env.worker_process_setup_hook="
+                "verl_omni.tools.consistency_capture.install_trainer_capture",
+            ]
+        )

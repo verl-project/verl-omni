@@ -37,7 +37,7 @@ from verl.workers.rollout.llm_server import LLMServerManager
 
 from verl_omni.agent_loop.composite_agent_loop import CompositeAgentLoopManager
 
-from ..utils.gpu_test_topology import resolve_diffusion_agent_loop_gpu_topology
+from ..utils.gpu_test_topology import empty_gpu_cache, resolve_diffusion_agent_loop_gpu_topology
 
 
 class _FakeRemoteComputeScore:
@@ -386,5 +386,4 @@ def test_single_turn(init_config, agent_reward_loop: bool):
     finally:
         ray.shutdown()
         gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        empty_gpu_cache()

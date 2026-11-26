@@ -1,6 +1,6 @@
 # Profiling FlowGRPO / diffusion training in VeRL-Omni
 
-Last updated: 10/24/2026.
+Last updated: 11/12/2026.
 
 VeRL-Omni reuses the profiler subsystem from upstream
 [verl](https://github.com/verl-project/verl) (`verl.utils.profiler`) and exposes
@@ -92,6 +92,12 @@ The same block exists under `actor_rollout_ref.ref.profiler` and
 server processes, not in the actor worker, so it has its own profiler driven
 by `actor_rollout_ref.rollout.profiler` (see recipe 5).
 
+In diffusion V1, distillation teachers participate in the training-worker
+profiling lifecycle. Standalone teachers (`distillation.nnodes > 0`) use
+`actor_rollout_ref.ref.profiler`; teachers colocated with the actor use the
+actor's profiler configuration. Shared worker groups are started and stopped
+once per profiling window.
+
 Global values for `save_path`, `relocate_results`, and `finish_hook_*` provide
 defaults for the per-role configs. Set a field under
 `actor_rollout_ref.actor.profiler.<field>` to override it for the actor.
@@ -165,8 +171,11 @@ actor_rollout_ref.actor.profiler.tool=torch_memory
 
 ### 4. NVIDIA Nsight Systems (`nsys`)
 
-Nsight requires `nsys` to be installed on every node and the `nvtx` Python
-package available in the training environment (`pip install nvtx`).
+Nsight requires `nsys` to be installed on every node and the `nvtx` and
+`matplotlib` Python packages available in the training environment
+(`pip install nvtx matplotlib`). The trainer's timing ranges use named colors
+such as `brown`, which `nvtx` can only resolve through `matplotlib`; without it
+the first profiled step fails with `Invalid color brown`.
 
 ```bash
 global_profiler.tool=nsys \
@@ -197,10 +206,13 @@ discrete profiled steps or contiguous step groups before Ray starts the
 TaskRunner.
 
 Diffusion V1 profiling has been validated with the NPU and PyTorch
-(`tool=torch`) backends. Nsight (`tool=nsys`) is unverified for V1. V1 does
-not implement controller capture start/stop calls, so controller
-`capture-range=cudaProfilerApi` is rejected when Nsight profiling steps are
-configured. This restriction does not apply to worker-side capture settings.
+(`tool=torch`) backends. Nsight (`tool=nsys`) has been validated on V1 for
+worker-side capture only: the actor ranks record the configured steps and
+write one report each. V1 does not implement controller capture start/stop
+calls, so controller `capture-range=cudaProfilerApi` is rejected when Nsight
+profiling steps are configured; the controller report covers the whole
+TaskRunner lifetime. This restriction does not apply to worker-side capture
+settings.
 
 `*.nsys-rep` files are written by Ray under
 `/tmp/ray/session_latest/logs/nsight/` on each node (this path is fixed by
@@ -343,13 +355,6 @@ Set `global_profiler.tool=npu` and configure each role under
 #### Before you start
 
 - Set up the [NPU environment](../start/install_npu.md) and the training data.
-- For Omni PPO V1 with colocated actor and rollout, install a verl revision
-  containing [#7722](https://github.com/verl-project/verl/pull/7722)
-  (`0d3f56a8980a55bfbbf1214ea54fa1b32ca1405c`) before collecting both roles.
-  The fix stops rollout collection before training computation begins.
-  The repository's current verl pin (`fefb080`) predates this fix.
-  <!-- TODO: Remove the manual verl revision requirement above once
-  .github/verl_pin.txt includes verl-project/verl#7722. -->
 - Install `torch-npu>=2.10.0.post6` with a compatible PyTorch and CANN environment.
   Start with `contents='[npu,cpu]'` and add `module` or `stack` as needed;
   rollout collection options also depend on the inference backend.
@@ -487,7 +492,7 @@ the actor's `analysis=True` does not configure rollout parsing.
 
 #### Further reading
 
-- [verl NPU profiling examples](https://github.com/verl-project/verl/blob/fefb080262e1c015a0ea05f958822a6a512dc795/examples/profile/README.md#npu-profiling)
+- [verl NPU profiling examples](https://github.com/verl-project/verl/blob/2b4ed6826a39205838d0ca004bdd942334dbe4b6/examples/profile/README.md#npu-profiling)
   cover continuous and discrete collection. Their `PROFILE_*` environment
   variables apply to the upstream scripts; use the Hydra overrides above with
   VeRL-Omni launchers.
@@ -497,58 +502,57 @@ the actor's `analysis=True` does not configure rollout parsing.
 ## Lightweight profiling recipe
 
 Profiling a full FlowGRPO step produces a large trace that is slow to open.
-This recipe uses a `main_diffusion` (v0) launcher on purpose: the diffusion
-V1 trainer (`main_diffusion_v1`) does not yet support step-based profiling,
-so keep profiling recipes on the v0 launchers until V1 gains
-`global_profiler.steps` support. The `main_diffusion` launchers under
-`examples/` pass `"$@"` through to Hydra, which resolves duplicate overrides
-last-wins — so appending overrides to any recipe shrinks its footprint
-without editing the script. The following profiles a single lightweight step
-of the SD3.5 OCR recipe (2 rollouts instead of 8, 4 denoising steps instead
-of 10, 256px instead of 384px, train batch 4 instead of 8), capturing the
-actor train phase, the rollout servers and the reward-model servers
-(recipes 1, 5 and 6 combined):
+The SD3.5-Medium V1 launcher below profiles lightweight FlowGRPO OCR steps —
+4 prompts, 2 rollouts per prompt, 4 denoising steps, and 256px images — after
+a warmup: it runs 5 training steps, leaves steps 1-2 unprofiled as warmup, and
+records only steps 3 and 4. It reuses
+the existing V1 sync recipe and collects actor rank 0 and rollout rank 0 using
+PyTorch. It needs two actor/rollout GPUs and one OCR reward-model GPU; reward
+inference still runs, but this launcher does not collect reward-model traces.
+
+Run from the repository root in an installed CUDA training environment. Prepare
+the OCR parquet files with
+`examples/flowgrpo_trainer/data_process/sd3_ocr.py` and obtain access to
+`stabilityai/stable-diffusion-3.5-medium` (or set `MODEL_PATH` to a local copy).
+`OCR_WORKSPACE` points to the directory containing
+`data/ocr/sd3/{train,test}.parquet`. It defaults to `WORKSPACE`, then `$HOME`.
 
 ```bash
-bash examples/flowgrpo_trainer/sd35/run_sd35_medium_ocr_lora.sh \
-    data.train_batch_size=4 \
-    actor_rollout_ref.rollout.n=2 \
-    actor_rollout_ref.rollout.pipeline.num_inference_steps=4 \
-    actor_rollout_ref.rollout.pipeline.height=256 \
-    actor_rollout_ref.rollout.pipeline.width=256 \
-    actor_rollout_ref.rollout.algo.sde_window_range=[0,4] \
-    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=2 \
-    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=2 \
-    actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=2 \
-    trainer.total_training_steps=1 \
-    trainer.save_freq=-1 \
-    trainer.test_freq=-1 \
-    trainer.resume_mode=disable \
-    trainer.logger='["console"]' \
-    global_profiler.tool=torch \
-    global_profiler.steps=[1] \
-    global_profiler.save_path=./outputs/profile_sd35 \
-    actor_rollout_ref.actor.profiler.enable=True \
-    actor_rollout_ref.actor.profiler.ranks=[0] \
-    actor_rollout_ref.actor.profiler.tool=torch \
-    actor_rollout_ref.actor.profiler.tool_config.torch.contents=[cpu,cuda] \
-    actor_rollout_ref.actor.profiler.tool_config.torch.discrete=False \
-    actor_rollout_ref.rollout.profiler.enable=True \
-    actor_rollout_ref.rollout.profiler.ranks=[0] \
-    actor_rollout_ref.rollout.profiler.tool=torch \
-    actor_rollout_ref.rollout.profiler.tool_config.torch.contents=[cpu,cuda] \
-    actor_rollout_ref.rollout.profiler.tool_config.torch.discrete=True \
-    reward.reward_model.rollout.profiler.enable=True \
-    reward.reward_model.rollout.profiler.ranks=[0] \
-    reward.reward_model.rollout.profiler.tool=torch \
-    reward.reward_model.rollout.profiler.tool_config.torch.contents=[cpu,cuda] \
-    reward.reward_model.rollout.profiler.tool_config.torch.discrete=True
+OCR_WORKSPACE=/path/to/workspace \
+PROFILE_DIR=./outputs/profile_sd35_v1 \
+bash examples/flowgrpo_trainer/sd35/profile_sd35_medium_ocr_lora_v1.sh
 ```
 
-Measured on 3×RTX 4090 against the v0 recipe defaults: traces 163 MB → 32 MB,
-profiled step 616 s → 70 s.
+Traces are written under `PROFILE_DIR` (default `./outputs/profile_sd35_v1`);
+each recorded step writes its own trace. Open an actor Chrome trace in Perfetto
+or `chrome://tracing`; it should contain
+`actor_update` and `mini_batch0`/`mini_batch1` ranges. Rollout traces come from
+the inference engine in separate processes. Check that both actor and rollout
+artifacts contain CPU/CUDA events. A successful training exit alone does not
+establish that a trace was collected.
 
-The `trainer.*` lines are not optional: the run's last step force-triggers
+Hydra overrides passed after the script name take precedence. For a single
+cold sample, use `trainer.total_training_steps=1 'global_profiler.steps=[1]'`.
+For actor-only collection, use `actor_rollout_ref.rollout.profiler.enable=False`.
+
+### Selecting update mini-batches
+
+By default the actor trace contains the whole selected RL step. To collect only
+the second update mini-batch while keeping each log-prob stage in its own trace:
+
+```bash
+bash examples/flowgrpo_trainer/sd35/profile_sd35_medium_ocr_lora_v1.sh \
+    actor_rollout_ref.actor.profiler.tool_config.torch.discrete=True \
+    '+actor_rollout_ref.actor.profiler.tool_config.torch.schedule={_target_:verl.utils.profiler.config.TorchProfilerScheduleConfig,skip_first:1,wait:0,warmup:0,active:1,repeat:1}'
+```
+
+The schedule advances once per update mini-batch, including across PPO epochs.
+The lightweight defaults have two mini-batches per update. The `+` appends the
+optional schedule block; the other profiler keys are already declared. With
+`discrete=False`, skipping early mini-batches also drops earlier log-prob stages
+from the shared trace. Schedules never select diffusion denoising timesteps.
+
+The launcher's `trainer.*` overrides are intentional: the run's last step force-triggers
 checkpoint saving and validation when `save_freq`/`test_freq` > 0, and a
 leftover checkpoint auto-resumes past the profiled step, silently skipping
 profiling.
@@ -576,22 +580,31 @@ recipe's own values, minding two couplings:
   exposes `start_profile`/`stop_profile` Ray methods. The diffusion trainer
   invokes them around each profiled step, mirroring
   [`verl/trainer/ppo/ray_trainer.py`](https://github.com/verl-project/verl/blob/main/verl/trainer/ppo/ray_trainer.py).
-* `global_profiler.profile_continuous_steps=True` keeps a single profiling
-  database open across consecutive steps in `global_profiler.steps`, which is
-  helpful for analysing inter-step behaviour. Diffusion V1 follows
-  `verl/trainer/ppo/v1/trainer_base.py`: use continuous windows for actor-only
-  collection, and non-continuous windows when collecting rollout traces.
+  The nested actor/reference training workers receive the typed per-role profiler
+  config. Actor updates label and advance each mini-batch following the pinned
+  `verl/workers/engine_workers.py`, so PyTorch schedules can sub-sample updates.
+* `global_profiler.profile_continuous_steps=True` keeps one profiling window
+  open across consecutive steps in `global_profiler.steps`, which is helpful
+  for analysing inter-step behaviour. Diffusion V1 closes the window at the
+  final training step even if the configured range extends beyond the
+  training limit. Use continuous windows for training-worker collection with
+  rollout profiling disabled, and non-continuous windows when collecting
+  rollout traces.
 * In the legacy diffusion trainer, for the rollout servers, the trainer calls
   `llm_server_manager.start_profile()`/`stop_profile()` around the generation
   phase of profiled steps; the servers record through vLLM's built-in torch
   profiler (recipe 5). The reward-model servers are driven the same way
   through `verl_omni.reward_loop.OmniRewardLoopManager` (recipe 6).
 * `relocate_results` and `finish_hook_*` are forwarded to upstream workers.
-  Diffusion V1 follows upstream finish-hook scheduling: a closing training-worker
-  window runs the hook on the largest configured profile step, or on the final
-  training step if that step is profiled. Keep selected steps within the run's
-  step and epoch limits.
+  In diffusion V1, a training-worker finish command runs when closing the
+  window containing the last selected step within the training limit. For
+  example, `steps=[1,100]` with four training steps runs the command at step 1.
   Rollout-only collection does not run a training-worker finish hook.
+* If profiling startup or training fails, diffusion V1 attempts to stop all
+  active targets, including a target that raised during startup. Cleanup does
+  not run finish commands or replace the original exception. During normal
+  window closure, all remaining stop calls are attempted before the first
+  stop error is reported.
 
 ## Further reading
 

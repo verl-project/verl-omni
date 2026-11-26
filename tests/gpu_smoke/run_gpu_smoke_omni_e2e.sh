@@ -36,4 +36,9 @@ run_test 4 "MiniCPM-o 4.5 Thinker GSPO LoRA e2e (collocated sync, V1)" \
     env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS=2 \
     bash tests/special_e2e/run_gspo_minicpmo_thinker_lora_v1_smoke.sh "${omni_trainer_args[@]}"
 
+# Bitwise rollout-vs-actor log-probs; skips itself (exit 5) unless the GPUs are Hopper.
+run_test 5 "Qwen3-Omni Thinker true on-policy gate" \
+    env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" \
+    bash tests/special_e2e/run_qwen3_omni_true_on_policy_gate.sh "${omni_trainer_args[@]}"
+
 gpu_smoke_summary
