@@ -37,6 +37,7 @@ from verl_omni.utils.config import resolve_lora_config, validate_config
 from verl_omni.utils.diffusion_attention import validate_attention_consistency
 from verl_omni.utils.rl_insight import enable_rl_insight
 from verl_omni.workers.config.reward import (
+    normalize_reward_config,
     reward_pool_is_separate,
     reward_role_required,
     warn_deprecated_reward_config,
@@ -141,6 +142,7 @@ def run_diffusion(config, task_runner_class=None) -> None:
                 settings, model paths, and training hyperparameters.
         task_runner_class: For recipe to change TaskRunner.
     """
+    config = normalize_reward_config(config)
     OmegaConf.resolve(config)
     _deprecate_v0_trainer(config)
     warn_deprecated_reward_config(config)

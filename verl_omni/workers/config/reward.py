@@ -18,11 +18,12 @@ from __future__ import annotations
 import math
 import warnings
 from collections.abc import Mapping
+from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any
 
 import torch
-from omegaconf import OmegaConf
+from omegaconf import DictConfig, OmegaConf, open_dict
 from verl.base_config import BaseConfig
 from verl.utils.device import get_device_name
 
@@ -54,6 +55,7 @@ __all__ = [
     "has_fsdp_reward_models",
     "has_reward_models",
     "is_engine_backend",
+    "normalize_reward_config",
     "parse_reward_model_placement",
     "parse_reward_model_config",
     "resolve_reward_model_name",
@@ -69,6 +71,100 @@ __all__ = [
 
 _ENGINE_BACKENDS = {"engine"}
 _NATIVE_BACKENDS = {"native"}
+_SCORER_FIELDS = {
+    "path",
+    "name",
+    "model",
+    "weight",
+    "required",
+    "independent",
+    "routing_weights",
+    "use_rollout_sampling_params",
+    "kwargs",
+}
+
+
+def normalize_reward_config(config: DictConfig | dict[str, Any]) -> DictConfig | dict[str, Any]:
+    """Project explicit scorer entries onto the existing multi-reward manager config.
+
+    Resolve the selected subtree while it is still attached to its original parent,
+    so both relative and absolute interpolations retain their Hydra meaning.
+    Legacy configurations are returned unchanged.
+    """
+    reward = config.get("reward")
+    if reward is None or "scorers" not in reward or reward.get("scorers") is None:
+        return config
+
+    scorers = reward.get("scorers")
+    if not isinstance(scorers, DictConfig | Mapping) or not scorers:
+        raise ValueError("reward.scorers must be a non-empty mapping")
+    manager = reward.get("reward_manager") or {}
+    module = manager.get("module") if isinstance(manager, Mapping) else None
+    if (
+        not isinstance(manager, Mapping)
+        or not isinstance(module, Mapping)
+        or manager.get("name") != "MultiVisualRewardManager"
+        or manager.get("source") != "importlib"
+        or module.get("path") != "pkg://verl_omni.reward_loop.reward_manager"
+    ):
+        raise ValueError(
+            "reward.scorers requires reward.reward_manager.name=MultiVisualRewardManager, "
+            "reward.reward_manager.source=importlib, and "
+            "reward.reward_manager.module.path=pkg://verl_omni.reward_loop.reward_manager"
+        )
+    custom = reward.get("custom_reward_function") or {}
+    if custom.get("path"):
+        raise ValueError("reward.scorers conflicts with reward.custom_reward_function.path")
+
+    entries = (
+        OmegaConf.to_container(scorers, resolve=True, throw_on_missing=True)
+        if isinstance(scorers, DictConfig)
+        else deepcopy(scorers)
+    )
+    projected = {}
+    for term, entry in entries.items():
+        if not isinstance(term, str) or not term:
+            raise ValueError("reward.scorers names must be non-empty strings")
+        if not isinstance(entry, Mapping):
+            raise ValueError(f"reward.scorers.{term} must be a mapping")
+        unknown = set(entry) - _SCORER_FIELDS
+        if unknown:
+            raise ValueError(f"reward.scorers.{term} has unknown fields: {sorted(unknown)}")
+        for field_name in ("path", "name"):
+            if not isinstance(entry.get(field_name), str) or not entry[field_name]:
+                raise ValueError(f"reward.scorers.{term}.{field_name} must be a non-empty string")
+        kwargs = entry.get("kwargs")
+        if kwargs is None:
+            kwargs = {}
+        if not isinstance(kwargs, Mapping):
+            raise ValueError(f"reward.scorers.{term}.kwargs must be a mapping or null")
+        reserved = set(kwargs) & _SCORER_FIELDS
+        if reserved:
+            raise ValueError(f"reward.scorers.{term}.kwargs contains reserved fields: {sorted(reserved)}")
+        projected[term] = {**{key: value for key, value in entry.items() if key != "kwargs"}, **kwargs}
+
+    existing = reward.get("reward_functions")
+    if existing:
+        existing_entries = (
+            OmegaConf.to_container(existing, resolve=True, throw_on_missing=True)
+            if isinstance(existing, DictConfig)
+            else existing
+        )
+        if (
+            not isinstance(existing_entries, Mapping)
+            or list(existing_entries) != list(projected)
+            or existing_entries != projected
+        ):
+            raise ValueError("reward.scorers conflicts with reward.reward_functions")
+        return config
+
+    normalized = deepcopy(config)
+    if isinstance(normalized, DictConfig):
+        with open_dict(normalized.reward):
+            normalized.reward.reward_functions = projected
+    else:
+        normalized["reward"]["reward_functions"] = projected
+    return normalized
 
 
 @dataclass
