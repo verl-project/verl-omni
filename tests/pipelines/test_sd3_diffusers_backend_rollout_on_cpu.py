@@ -186,12 +186,14 @@ def test_load_weights_copies_synced_tensors(pipeline):
 
 def test_load_weights_rejects_unknown_or_misshaped_tensors(pipeline):
     name, tensor = next(iter(pipeline.transformer.state_dict().items()))
+    before = tensor.clone()
     with pytest.raises(KeyError, match="no matching transformer parameter"):
         pipeline.load_weights([(name, tensor)])
     with pytest.raises(KeyError, match="no matching transformer parameter"):
-        pipeline.load_weights([("transformer.not_a_param.weight", tensor)])
+        pipeline.load_weights([(f"transformer.{name}", tensor + 1), ("transformer.not_a_param.weight", tensor)])
     with pytest.raises(ValueError, match="expected"):
-        pipeline.load_weights([(f"transformer.{name}", tensor.flatten()[:1])])
+        pipeline.load_weights([(f"transformer.{name}", tensor + 1), (f"transformer.{name}", tensor.flatten()[:1])])
+    torch.testing.assert_close(pipeline.transformer.state_dict()[name], before, rtol=0.0, atol=0.0)
 
 
 def test_text_prompt_requests_still_generate(pipeline):

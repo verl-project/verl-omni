@@ -102,6 +102,8 @@ class StableDiffusion3DiffusersPipelineWithLogProb(SD3TokenIdPromptMixin, CFGPar
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> None:
         """Copy synced transformer weights in place.
 
+        Every pair is checked before any tensor is copied, so a bad bucket leaves the weights unchanged.
+
         Args:
             weights: ``(name, tensor)`` pairs named ``transformer.<diffusers parameter name>``,
                 as the trainer exports them.
@@ -112,13 +114,16 @@ class StableDiffusion3DiffusersPipelineWithLogProb(SD3TokenIdPromptMixin, CFGPar
         """
         targets = dict(self.transformer.named_parameters())
         targets.update(self.transformer.named_buffers())
+        copies = []
+        for name, tensor in weights:
+            target = targets.get(name[len(_TRANSFORMER_PREFIX) :]) if name.startswith(_TRANSFORMER_PREFIX) else None
+            if target is None:
+                raise KeyError(f"Synced weight {name!r} has no matching transformer parameter.")
+            if target.shape != tensor.shape:
+                raise ValueError(
+                    f"Synced weight {name!r} has shape {tuple(tensor.shape)}, expected {tuple(target.shape)}."
+                )
+            copies.append((target, tensor))
         with torch.no_grad():
-            for name, tensor in weights:
-                target = targets.get(name[len(_TRANSFORMER_PREFIX) :]) if name.startswith(_TRANSFORMER_PREFIX) else None
-                if target is None:
-                    raise KeyError(f"Synced weight {name!r} has no matching transformer parameter.")
-                if target.shape != tensor.shape:
-                    raise ValueError(
-                        f"Synced weight {name!r} has shape {tuple(tensor.shape)}, expected {tuple(target.shape)}."
-                    )
+            for target, tensor in copies:
                 target.copy_(tensor)

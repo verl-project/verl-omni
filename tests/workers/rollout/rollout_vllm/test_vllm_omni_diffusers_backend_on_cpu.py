@@ -27,6 +27,7 @@ from verl_omni.pipelines.sd3_flow_grpo import (
     StableDiffusion3PipelineWithLogProb,
 )
 from verl_omni.workers.config import DiffusionRolloutConfig
+from verl_omni.workers.rollout.vllm_rollout import vllm_omni_async_server as server_module
 from verl_omni.workers.rollout.vllm_rollout import vllm_omni_diffusion_strategy as strategy_module
 
 
@@ -49,9 +50,12 @@ def _strategy(omni_kwargs, *, algorithm="flow_grpo", lora_rank=0, lora=None):
 
 
 def _prepare(monkeypatch, strategy) -> dict:
+    """Build engine args the way ``vLLMOmniHttpServer.run_server`` does, then let the strategy prepare them."""
     monkeypatch.setattr(strategy_module, "import_external_libs", lambda _: None)
-    args = Namespace(tensor_parallel_size=1, max_num_seqs=4)
-    engine_args = asdict(OmniEngineArgs.from_cli_args(args))
+    raw = strategy.server.config.engine_kwargs["vllm_omni"]
+    omni_kwargs = {key.replace("-", "_"): value for key, value in raw.items()}
+    args = Namespace(tensor_parallel_size=1, max_num_seqs=4, **omni_kwargs)
+    engine_args = server_module._drop_defaulted_engine_args(asdict(OmniEngineArgs.from_cli_args(args)))
     strategy.prepare_engine_args(engine_args, args)
     return engine_args
 
@@ -70,6 +74,10 @@ def test_load_format_selects_the_rollout_pipeline(monkeypatch, omni_kwargs, expe
     engine_args = _prepare(monkeypatch, strategy)
     assert engine_args["custom_pipeline_args"] == {"pipeline_class": _path(expected)}
     assert engine_args["max_num_seqs"] == 4  # both pipelines batch requests
+    # The engine must load the selected pipeline in the same format.
+    assert engine_args.get("diffusion_load_format", "default") == omni_kwargs.get(
+        "diffusion_load_format", omni_kwargs.get("diffusion-load-format", "default")
+    )
     assert strategy._diffusion_io_spec() is expected.diffusion_io_spec
 
 
