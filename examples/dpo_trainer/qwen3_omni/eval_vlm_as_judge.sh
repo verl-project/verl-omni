@@ -6,7 +6,15 @@ DATA_DIR=${DATA_DIR:-data/omni-preference/parquet_dpo}
 MODEL_PATH=${MODEL_PATH:-Qwen/Qwen3-Omni-30B-A3B-Instruct}
 OUT_DIR=${OUT_DIR:-outputs/qwen3_omni_judge_eval}
 MAX_SAMPLES=60
-PYTHON=${PYTHON:-python3}
+# Prefer the project venv when it exists. An explicit PYTHON still wins.
+# A missing venv falls back to python3 instead of failing on a hardcoded path.
+if [ -z "${PYTHON:-}" ]; then
+  if [ -e .venv/bin/python ]; then
+    PYTHON=.venv/bin/python
+  else
+    PYTHON=python3
+  fi
+fi
 
 CUDA_DEVICES=${CUDA_DEVICES:-0}
 STEPS=(50 100 150 200)
