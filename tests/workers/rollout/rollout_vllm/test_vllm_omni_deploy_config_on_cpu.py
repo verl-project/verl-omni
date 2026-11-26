@@ -39,6 +39,7 @@ def _run_write_deploy_config(
         config_kwargs["text_encoder_tp_size"] = text_encoder_tp_size
     fake_self = types.SimpleNamespace(
         config=types.SimpleNamespace(**config_kwargs),
+        model_config=types.SimpleNamespace(lora={}, lora_rank=0, true_on_policy=False),
     )
 
     class Adapter(OmniRolloutPipelineBase):
@@ -410,7 +411,10 @@ def test_diffusion_trainers_select_local_manager(module_name):
 
 def _run_ar_write_deploy_config(monkeypatch, *, expert_parallel_stage_ids):
     """Generate a deploy config for a two-stage AR pipeline (Thinker-like)."""
-    fake_self = types.SimpleNamespace(config=types.SimpleNamespace(tensor_model_parallel_size=2))
+    fake_self = types.SimpleNamespace(
+        config=types.SimpleNamespace(tensor_model_parallel_size=2),
+        model_config=types.SimpleNamespace(lora={}, lora_rank=0, true_on_policy=False),
+    )
 
     class Adapter(OmniRolloutPipelineBase):
         @classmethod

@@ -29,9 +29,18 @@ from verl_omni.utils.fs import resolve_model_local_dir
 
 from .rollout import DiffusionPipelineConfig, DiffusionRolloutAlgoConfig
 
-__all__ = ["DiffusionModelAROptimizerConfig", "DiffusionModelARConfig", "DiffusionModelConfig"]
+__all__ = [
+    "DiffusionModelAROptimizerConfig",
+    "DiffusionModelARConfig",
+    "DiffusionModelConfig",
+    "DiffusionTrajectoryFieldsConfig",
+]
 
 logger = logging.getLogger(__name__)
+
+DIFFUSION_TQ_KEYS = "_diffusion_tq_keys"
+DIFFUSION_TQ_DRIVER_REQUIRED = frozenset({"prompts", "uid", "rm_scores", "all_timesteps"})
+DIFFUSION_TQ_DRIVER_FIELDS = tuple(sorted(DIFFUSION_TQ_DRIVER_REQUIRED | {"rollout_log_probs", "extra_fields"}))
 
 
 @dataclass
@@ -77,6 +86,24 @@ class DiffusionModelARConfig(BaseConfig):
 
     # Partial optimizer overlay. Unset fields inherit actor.optim.
     optim: DiffusionModelAROptimizerConfig = field(default_factory=DiffusionModelAROptimizerConfig)
+
+
+@dataclass
+class DiffusionTrajectoryFieldsConfig(BaseConfig):
+    """Pipeline tensors read from TransferQueue by actor/ref workers in V1."""
+
+    # Fields that must be present on every sampled row.
+    required: list[str] = field(default_factory=list)
+
+    # Additional fields read when present on all sampled rows.
+    optional: list[str] = field(default_factory=list)
+
+    def __post_init__(self):
+        fields = self.required + self.optional
+        if any(not name.strip() for name in fields) or len(set(fields)) != len(fields):
+            raise ValueError("Trajectory fields must be distinct non-empty names across required and optional")
+        if overlap := set(fields).intersection((*DIFFUSION_TQ_DRIVER_FIELDS, DIFFUSION_TQ_KEYS)):
+            raise ValueError(f"Trajectory fields cannot include driver-owned fields: {sorted(overlap)}")
 
 
 @dataclass
@@ -170,6 +197,9 @@ class DiffusionModelConfig(BaseConfig):
     mtp: Optional[MtpConfig] = field(default_factory=MtpConfig)
 
     pipeline: DiffusionPipelineConfig = field(default_factory=DiffusionPipelineConfig)
+
+    # Worker-side V1 replay fields; set by the training recipe.
+    trajectory_fields: DiffusionTrajectoryFieldsConfig = field(default_factory=DiffusionTrajectoryFieldsConfig)
 
     algo: Optional[DiffusionRolloutAlgoConfig] = field(default_factory=DiffusionRolloutAlgoConfig)
 

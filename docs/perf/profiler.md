@@ -100,6 +100,12 @@ profiling lifecycle. Standalone teachers (`distillation.nnodes > 0`) use
 actor's profiler configuration. Shared worker groups are started and stopped
 once per profiling window.
 
+In diffusion V1, distillation teachers participate in the training-worker
+profiling lifecycle. Standalone teachers (`distillation.nnodes > 0`) use
+`actor_rollout_ref.ref.profiler`; teachers colocated with the actor use the
+actor's profiler configuration. Shared worker groups are started and stopped
+once per profiling window.
+
 Global values for `save_path`, `relocate_results`, and `finish_hook_*` provide
 defaults for the per-role configs. Set a field under
 `actor_rollout_ref.actor.profiler.<field>` to override it for the actor.
