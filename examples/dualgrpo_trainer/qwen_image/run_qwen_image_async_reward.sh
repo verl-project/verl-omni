@@ -1,3 +1,4 @@
+#!/usr/bin/env bash
 # Qwen-Image full-weight DualGRPO RL with async reward, vllm_omni rollout.
 #
 # UnifiedReward runs on its own GPU pool and composite_single_turn_agent streams
@@ -6,6 +7,7 @@
 #
 # Visible GPUs must cover both pools:
 #   NUM_GPUS_ACTOR_ROLLOUT (default 4) + NUM_GPUS_REWARD (default 2).
+set -eo pipefail
 set -x
 
 export FLASHINFER_DISABLE_VERSION_CHECK=1
