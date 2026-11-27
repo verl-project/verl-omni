@@ -81,11 +81,6 @@ MINICPMO_4_5_TALKER_PIPELINE = PipelineConfig(
 
 @OmniRolloutPipelineBase.register("minicpmo_4_5")
 class MiniCPMORolloutAdapter(OmniRolloutPipelineBase):
-    # thinker_talker rejects async_chunk: the engine's prewarm submits
-    # unconditioned placeholder requests to the talker stage (its preprocess
-    # requires the thinker bridge tensors). thinker_only keeps the default
-    # behavior; the thinker_talker recipe sets async_chunk=false explicitly.
-    supports_async_chunk = True
     """Rollout pipeline topology adapter for MiniCPM-o 4.5.
 
     Registered under ``model_type="minicpmo_4_5"``. Stage topology comes from
@@ -95,6 +90,12 @@ class MiniCPMORolloutAdapter(OmniRolloutPipelineBase):
     - ``thinker_talker`` — stages 0-1 (Thinker latent bridge + Talker codec
       output); the Talker is the trained policy stage.
     """
+
+    # thinker_talker rejects async_chunk: the engine's prewarm submits
+    # unconditioned placeholder requests to the talker stage (its preprocess
+    # requires the thinker bridge tensors). thinker_only keeps the default
+    # behavior; the thinker_talker recipe sets async_chunk=false explicitly.
+    supports_async_chunk = True
 
     @classmethod
     def _check_mode(cls, pipeline_mode):
@@ -111,8 +112,9 @@ class MiniCPMORolloutAdapter(OmniRolloutPipelineBase):
         thinker_talker requires serial execution: an absent value defaults
         to False (the engine's async-chunk prewarm submits unconditioned
         placeholder requests to the talker stage), and an explicit True
-        is rejected.
+        is rejected. Unknown modes fail fast instead of falling back.
         """
+        cls._check_mode(pipeline_mode)
         if pipeline_mode != "thinker_talker":
             return async_chunk if async_chunk is not None else True
         if async_chunk is True:

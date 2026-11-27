@@ -2,7 +2,7 @@
 # MiniCPM-o 4.5 Talker on-policy distillation (OPD): train the TTS AR policy
 # over speech codec tokens while the thinker is frozen.
 #
-# This recipe implements the talker milestone of verl-omni#565. The student's
+# This recipe trains the talker stage of MiniCPM-o 4.5. The student's
 # rollout runs the thinker→talker pipeline (pipeline_mode="thinker_talker"):
 # the frozen thinker writes the text response on-policy and the trainable
 # talker speaks it as codec frames. The batch's response tokens are the codec
@@ -11,23 +11,23 @@
 # verl_omni/pipelines/minicpm/talker_forward.py).
 #
 # Prerequisites:
-#   - The thinker OPD recipe (PR #858) — its adapter registration, FSDP
-#     engine, and weight-sync patterns are reused here.
+#   - The thinker OPD recipe — its adapter registration, FSDP engine, and
+#     weight-sync patterns are reused here.
 #   - The teacher must be a MiniCPM-o 4.5 checkpoint sharing the student's
 #     codec vocabulary (num_vq=1, num_audio_tokens=6562).
 #
-# Hyperparameters follow the thinker OPD recipe (which follows the GSPO AVQA
-# recipe) with talker-specific stage selection and LoRA targeting.
+# Hyperparameters follow the thinker OPD recipe with talker-specific stage
+# selection and LoRA targeting.
 
-set -x
+set -euxo pipefail
 
 export VERL_USE_EXTERNAL_MODULES=verl_omni
 
-STUDENT_MODEL=${STUDENT_MODEL:-"/user/yangzhongyu/models/MiniCPM-o-4_5"}
-TEACHER_MODEL=${TEACHER_MODEL:-"/user/yangzhongyu/models/MiniCPM-o-4_5"}
+STUDENT_MODEL=${STUDENT_MODEL:-"$HOME/models/MiniCPM-o-4_5"}
+TEACHER_MODEL=${TEACHER_MODEL:-"$HOME/models/MiniCPM-o-4_5"}
 REPO_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../../.." && pwd)
-TRAIN_FILE=${TRAIN_FILE:-"/user/yangzhongyu/data/talker_opd/train_prompts.parquet"}
-VAL_FILE=${VAL_FILE:-"/user/yangzhongyu/data/talker_opd/val_prompts.parquet"}
+TRAIN_FILE=${TRAIN_FILE:-"$HOME/data/talker_opd/train_prompts.parquet"}
+VAL_FILE=${VAL_FILE:-"$HOME/data/talker_opd/val_prompts.parquet"}
 
 # The talker OPD teacher requires teacher-forced codec scoring in the vLLM-Omni
 # engine (not yet available for MiniCPM-o); the default runs the supported
@@ -73,7 +73,6 @@ python3 -m verl_omni.trainer.main_omni \
     actor_rollout_ref.actor.ppo_mini_batch_size=8 \
     actor_rollout_ref.actor.use_dynamic_bsz=True \
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=16384 \
-    actor_rollout_ref.actor.use_kl_loss=false \
     actor_rollout_ref.actor.policy_loss.loss_mode=gspo \
     actor_rollout_ref.actor.fsdp_config.model_dtype=bfloat16 \
     actor_rollout_ref.actor.fsdp_config.param_offload=true \

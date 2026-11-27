@@ -37,11 +37,6 @@ def _frames(n, value=1234):
     return " ".join([str(value)] * n)
 
 
-# ---------------------------------------------------------------------------
-# Frame counting
-# ---------------------------------------------------------------------------
-
-
 def test_count_frames_reads_codec_ids():
     assert count_frames("356 4221 18") == 3
 
@@ -49,11 +44,6 @@ def test_count_frames_reads_codec_ids():
 def test_count_frames_falls_back_for_non_numeric_decode():
     assert count_frames("a" * 240) == 60
     assert count_frames("") == 1
-
-
-# ---------------------------------------------------------------------------
-# Verification preset (target_frames=None)
-# ---------------------------------------------------------------------------
 
 
 def test_verification_preset_saturates_at_full_frames():
@@ -70,11 +60,6 @@ def test_verification_preset_ramps_from_floor():
 def test_verification_preset_is_bounded():
     for n in (0, 1, 10, 60, 120, 1000):
         assert 0.0 <= compute_score("x", _frames(n))["score"] <= 1.0
-
-
-# ---------------------------------------------------------------------------
-# Length-control preset (target_frames=<int>)
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -104,11 +89,6 @@ def test_length_control_overshoot_punished_harder_than_approach():
 def test_length_control_near_empty_speech_scores_near_zero():
     assert compute_score("x", _frames(10), target_frames=70)["score"] < 0.05
     assert compute_score("x", _frames(20), target_frames=70)["score"] < 0.1
-
-
-# ---------------------------------------------------------------------------
-# Config-key contract
-# ---------------------------------------------------------------------------
 
 
 def test_forwarded_config_keys_do_not_crash():

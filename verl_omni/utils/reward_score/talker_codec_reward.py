@@ -55,7 +55,7 @@ DEFAULT_SIGMA_ABOVE = 45
 DEFAULT_SIGMA_BELOW = 30
 
 
-def count_frames(solution_str) -> int:
+def count_frames(solution_str: str | None) -> int:
     """Count the codec frames in a decoded talker response.
 
     The response decodes to whitespace-separated integer codec ids; anything
@@ -74,10 +74,10 @@ def count_frames(solution_str) -> int:
 
 
 def compute_score(
-    data_source,
-    solution_str,
-    ground_truth=None,
-    extra_info=None,
+    data_source: str,
+    solution_str: str | None,
+    ground_truth: str | None = None,
+    extra_info: dict | None = None,
     *,
     target_frames: int | None = None,
     floor_frames: int = DEFAULT_FLOOR_FRAMES,

@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""MiniCPM-o talker (TTS) training adapter for verl-omni (#565).
+"""MiniCPM-o talker (TTS) training adapter.
 
 Train the talker stage on speech codec tokens while the thinker is frozen:
 
@@ -154,8 +154,8 @@ def _minicpm_talker_forward(
     if missing:
         raise RuntimeError(f"MiniCPM talker forward is missing fields: {missing}. present={sorted(llm_kwargs)}")
 
-    # ---- Stage 1: Thinker forward (frozen) over the text sequence ----
-    # ``_ORIGINAL_FORWARD`` is the remote class-level forward, captured before
+    # Stage 1: thinker forward (frozen) over the text sequence.
+    # ``_TALKER_STATE['original_forward']`` is the remote class-level forward, captured before
     # this instance-level rebinding, and is called as a plain function.
     tts_proj_layer = int(self.config.tts_config.tts_proj_layer)
     # verl's engine passes embed-style inputs the remote forward re-derives
@@ -165,10 +165,10 @@ def _minicpm_talker_forward(
     for key in ("input_ids", "position_ids", "inputs_embeds", "output_hidden_states"):
         llm_kwargs.pop(key, None)
     with torch.no_grad():
-        thinker_outputs = _ORIGINAL_FORWARD(self, data=data, output_hidden_states=True, **llm_kwargs)
+        thinker_outputs = _TALKER_STATE["original_forward"](self, data=data, output_hidden_states=True, **llm_kwargs)
         hidden_states = thinker_outputs.hidden_states[tts_proj_layer]  # [b, text_len, llm_hidden]
 
-    # ---- Stage 2: per-sample response spans + teacher-forced talker ----
+    # Stage 2: per-sample response spans and the teacher-forced talker.
     batch_size = tts_policy_ids.shape[0]
     text_rows, hidden_rows, code_rows = [], [], []
     for index in range(batch_size):
@@ -196,7 +196,7 @@ def _minicpm_talker_forward(
 
 # The remote forward, captured at configure time (the class-level attribute
 # survives the instance-level rebinding verl calls).
-_ORIGINAL_FORWARD: Any = None
+_TALKER_STATE: dict = {"original_forward": None}
 
 
 def _get_input_embeddings(self):
@@ -213,9 +213,7 @@ class MiniCPMTalkerAdapter(OmniModelBase):
 
     auto_model_class = MiniCPMOWithTTS
 
-    # ------------------------------------------------------------------
     # Module stripping and freezing
-    # ------------------------------------------------------------------
 
     @classmethod
     def get_strip_modules(cls, model_config) -> list[str]:
@@ -268,8 +266,7 @@ class MiniCPMTalkerAdapter(OmniModelBase):
         _apply_remote_code_patches(module)
 
         # verl calls module(**kwargs); install the two-stage talker forward.
-        global _ORIGINAL_FORWARD
-        _ORIGINAL_FORWARD = module.__class__.forward
+        _TALKER_STATE["original_forward"] = module.__class__.forward
         module.forward = types.MethodType(_minicpm_talker_forward, module)
         # The talker's policy vocabulary is the codec table.
         module.get_input_embeddings = types.MethodType(_get_input_embeddings, module)
@@ -278,9 +275,7 @@ class MiniCPMTalkerAdapter(OmniModelBase):
         module._no_split_modules = ["LlamaDecoderLayer"]
         return module
 
-    # ------------------------------------------------------------------
     # Processor / tokenizer: shared with the thinker stage
-    # ------------------------------------------------------------------
 
     @classmethod
     def configure_processor(cls, model_path: str, model_config) -> Any:
@@ -296,9 +291,7 @@ class MiniCPMTalkerAdapter(OmniModelBase):
 
         return MiniCPMThinkerAdapter.configure_tokenizer(model_path, model_config)
 
-    # ------------------------------------------------------------------
     # Input preparation
-    # ------------------------------------------------------------------
 
     @classmethod
     def prepare_model_inputs(cls, model_inputs: dict[str, Any], micro_batch, model_config) -> dict[str, Any]:
@@ -322,7 +315,7 @@ class MiniCPMTalkerAdapter(OmniModelBase):
         model_inputs.pop("audio_bounds", None)
         model_inputs.pop("image_sizes", None)
 
-        # ---- replay payload ----
+        # Replay payload.
         sample_extra_fields = tu.get(micro_batch, "extra_fields")
         if sample_extra_fields is None:
             raise RuntimeError(
@@ -356,7 +349,7 @@ class MiniCPMTalkerAdapter(OmniModelBase):
         if any(c.min() < 0 or c.max() >= model_config.hf_config.tts_config.num_audio_tokens for c in codes):
             raise ValueError("MiniCPM-o talker replay codec ids are outside the codec vocabulary.")
 
-        # ---- verify the batch response tokens are the codec frames ----
+        # Verify the batch response tokens are the codec frames.
         input_ids = model_inputs["input_ids"]
         attention_mask = model_inputs["attention_mask"]
         for index, code in enumerate(codes):
@@ -377,7 +370,7 @@ class MiniCPMTalkerAdapter(OmniModelBase):
         policy_ids = model_inputs.get("input_ids")
         policy_attention_mask = model_inputs.get("attention_mask")
 
-        # ---- rebuild the thinker input from the replay text ----
+        # Rebuild the thinker input from the replay text.
         batch_size = len(texts)
         max_text_len = max(int(t.numel()) for t in texts)
         max_code_len = max(int(c.numel()) for c in codes)
