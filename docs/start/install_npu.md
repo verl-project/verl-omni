@@ -294,9 +294,7 @@ actor_rollout_ref.model.attn_backend=_native_npu
 
 The script launches `python3 -m verl_omni.trainer.main_diffusion` (the
 deprecated v0 trainer — this NPU launcher keeps v0 until an NPU V1 recipe for
-Qwen-Image FlowGRPO lands, tracked in
-[verl-project/verl-omni#389](https://github.com/verl-project/verl-omni/issues/389);
-expect a `DeprecationWarning` at launch) with FlowGRPO + `vllm_omni` rollout and OCR reward (`compute_score_ocr`). Checkpoints are written to:
+Qwen-Image FlowGRPO lands; expect a `DeprecationWarning` at launch) with FlowGRPO + `vllm_omni` rollout and OCR reward (`compute_score_ocr`). Checkpoints are written to:
 
 ```bash
 checkpoints/flow_grpo/qwen_image_ocr_lora

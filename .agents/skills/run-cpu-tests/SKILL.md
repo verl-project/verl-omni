@@ -14,10 +14,11 @@ the steps for adding a test. Follow it. This skill adds what it does not cover.
 - The CPU job exports `TORCH_COMPILE_DISABLE=1` and `TORCHINDUCTOR_DISABLE=1`
   (`.github/workflows/cpu_unit_tests.yml`). Set both locally when reproducing a
   failure that only CI sees.
-- On pull requests the job triggers on `types: [labeled]` **and only when the label
-  is `ci`** — a green checks page on an unlabelled PR means the tests never ran. The
-  label is single-use: `drop-ci-labels.yml` removes it on every `synchronize`, so a
-  new push does **not** re-run the job until you re-add `ci`.
+- On pull requests the job triggers on `types: [labeled]` **and only when a label
+  name contains `ci`** — a green checks page on an unlabelled PR means the tests never ran. The
+  label is single-use: `drop-ci-labels.yml` removes every label whose name contains
+  `ci` on every `synchronize`, so a new push does **not** re-run the job until you
+  re-add a label whose name contains `ci`.
 - `tests/special_sanity/` runs as its own job; those files are `test_*.py`, so the
   CPU job's `python_files` override deliberately skips them.
 

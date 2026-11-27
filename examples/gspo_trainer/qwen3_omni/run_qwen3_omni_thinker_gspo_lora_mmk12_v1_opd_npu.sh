@@ -22,7 +22,7 @@
 set -x
 
 # Make verl_omni available to Ray workers
-export VERL_USE_EXTERNAL_MODULES=verl_omni
+export VERL_USE_EXTERNAL_MODULES=${VERL_USE_EXTERNAL_MODULES:+${VERL_USE_EXTERNAL_MODULES},}verl_omni
 
 STUDENT_MODEL=${STUDENT_MODEL:-"$HOME/models/Qwen/Qwen3-Omni-30B-A3B-Instruct-Noised"}
 TEACHER_MODEL=${TEACHER_MODEL:-"$HOME/models/Qwen/Qwen3-Omni-30B-A3B-Instruct"}

@@ -196,9 +196,9 @@ Visit our [documentation](https://verl-omni.readthedocs.io/en/latest/index.html)
     <td>✅</td>
   </tr>
   <tr>
-    <td rowspan="6">SD3.5</td>
-    <td rowspan="6">Diffusion generator</td>
-    <td rowspan="6">Text → Image</td>
+    <td rowspan="7">SD3.5</td>
+    <td rowspan="7">Diffusion generator</td>
+    <td rowspan="7">Text → Image</td>
     <td>DPO</td>
     <td>✅</td>
   </tr>
@@ -221,6 +221,8 @@ Visit our [documentation](https://verl-omni.readthedocs.io/en/latest/index.html)
   <tr>
     <td><a href="docs/algo/crd.md">CRD</a></td>
     <td>✅ (SD3.5-Medium LoRA)</td>
+  </tr>
+  <tr>
     <td><a href="examples/awm_trainer/README.md">AWM</a></td>
     <td>✅</td>
   </tr>
@@ -243,7 +245,7 @@ Visit our [documentation](https://verl-omni.readthedocs.io/en/latest/index.html)
     <td>✅</td>
   </tr>
     <tr>
-    <td>GSPO</td>
+    <td>GSPO (optional <a href="docs/algo/true_on_policy.md">true on-policy</a> log-probs, text-only)</td>
     <td>✅</td>
   </tr>
   <tr>

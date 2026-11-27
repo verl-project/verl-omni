@@ -84,6 +84,21 @@ def test_shared_omni_veomni_engine_and_adapters_select_omni_smoke():
         assert "ci-e2e-omni" in selector.select_group_names([path]), path
 
 
+def test_true_on_policy_files_select_the_groups_that_run_their_gpu_tests():
+    selector = _load_selector()
+
+    for path in (
+        "verl_omni/models/transformers/qwen3_omni.py",
+        "tests/models/test_qwen3_omni_vllm_fused_moe_experts_gpu.py",
+    ):
+        assert "ci-core" in selector.select_group_names([path]), path
+    for path in (
+        "verl_omni/models/transformers/qwen3_omni.py",
+        "tests/special_e2e/run_qwen3_omni_true_on_policy_gate.sh",
+    ):
+        assert "ci-e2e-omni" in selector.select_group_names([path]), path
+
+
 def test_omni_e2e_runner_forwards_trainer_args_to_every_run_test():
     # A run_test that drops the trainer args silently loses the configured
     # rendezvous port range, so every launched command must forward them.
@@ -140,6 +155,6 @@ def test_diffusion_e2e_support_files_select_diffusion_group():
         "tests/special_e2e/build_boogu_image_tiny_random.py",
         "tests/special_e2e/build_minimax_h3_tiny_random.py",
         "tests/special_e2e/create_dummy_h3_data.py",
-        "tests/special_e2e/minimax_h3_tiny_patch/patch.py",
+        "tests/special_e2e/minimax_h3_tiny_patch/sitecustomize.py",
     ):
         assert "ci-e2e-diffusion" in selector.select_group_names([path]), path

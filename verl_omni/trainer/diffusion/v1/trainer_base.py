@@ -2052,8 +2052,8 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         metrics.update(compute_throughput_metrics_diffusion(batch=data, timing_raw=timing_raw, n_gpus=n_gpus))
         reward_extra_infos_dict = {}
         if "reward_extra_info" in data.non_tensor_batch:
-            infos = data.non_tensor_batch["reward_extra_info"].tolist()
-            keys = infos[0].keys() if infos and isinstance(infos[0], dict) else []
+            infos = [info if isinstance(info, dict) else {} for info in data.non_tensor_batch["reward_extra_info"]]
+            keys = dict.fromkeys(key for info in infos for key in info)
             for key in keys:
                 reward_extra_infos_dict[key] = [info.get(key) for info in infos]
         metrics.update(compute_reward_extra_metrics_diffusion(reward_extra_infos_dict))

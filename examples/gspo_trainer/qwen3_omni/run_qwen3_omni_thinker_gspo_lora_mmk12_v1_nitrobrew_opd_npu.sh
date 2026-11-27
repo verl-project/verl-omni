@@ -27,7 +27,7 @@
 set -x
 
 # Make verl_omni available to Ray workers
-export VERL_USE_EXTERNAL_MODULES=verl_omni
+export VERL_USE_EXTERNAL_MODULES=${VERL_USE_EXTERNAL_MODULES:+${VERL_USE_EXTERNAL_MODULES},}verl_omni
 # Nitrobrew loss mode requires the omni loss-fn init + the agent-loop
 # hidden-state manager; both are enabled by the config below.
 

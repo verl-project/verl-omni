@@ -642,6 +642,7 @@ reward:
   accelerator_workers:
     enabled: false
   reward_functions: {}
+  scorers: null
   multi_reward_concurrency: 1
   models: {}
   aggregation: weighted_sum
@@ -758,6 +759,7 @@ trainer:
   ray_master_port_range: null
   device: cuda
   use_v1: true
+  train_ar: false
   v1:
     worker_side_trajectory: false
     watchdog:

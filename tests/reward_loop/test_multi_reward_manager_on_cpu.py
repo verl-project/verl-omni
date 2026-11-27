@@ -1149,7 +1149,8 @@ _CLAP_RECIPES = [
 @pytest.mark.asyncio
 @pytest.mark.parametrize("recipe", _CLAP_RECIPES, ids=lambda path: str(path.relative_to(_REPO_ROOT)))
 async def test_existing_clap_recipe_config_accepts_stereo_without_layout(recipe, monkeypatch):
-    entry = dict(re.findall(r"reward\.reward_functions\.clap\.(\w+)=([^'\"\s]+)", recipe.read_text()))
+    pattern = r"reward\.(?:reward_functions\.clap\.|scorers\.clap\.(?:kwargs\.)?)(\w+)=([^'\"\s]+)"
+    entry = dict(re.findall(pattern, recipe.read_text()))
     assert "audio_layout" not in entry
     entry["path"] = entry["path"].replace("$repo_root", str(_REPO_ROOT))
     entry["device"] = "cpu"

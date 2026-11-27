@@ -35,7 +35,7 @@
 set -x
 
 # Make verl_omni visible to Ray workers.
-export VERL_USE_EXTERNAL_MODULES=verl_omni
+export VERL_USE_EXTERNAL_MODULES=${VERL_USE_EXTERNAL_MODULES:+${VERL_USE_EXTERNAL_MODULES},}verl_omni
 export VERL_DATAPROTO_SERIALIZATION_METHOD=numpy
 
 # Set WORKSPACE to any writable directory; defaults to $HOME.

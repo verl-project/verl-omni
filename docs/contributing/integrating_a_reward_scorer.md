@@ -1,7 +1,7 @@
 (integrating_a_reward_scorer)=
 # How to Integrate a Reward Scorer
 
-Last updated: 11/19/2026.
+Last updated: 11/24/2026.
 
 This guide covers adding a **reward scorer** to VeRL-Omni: the function or class
 that turns one generated sample into a score. Most scorers are a single
@@ -95,6 +95,66 @@ registered.
   [named media contract](../advanced/diffusion_media_artifacts.md) — select
   streams by name from `extra_info["media_artifacts"]`, never by position or
   rank; contract violations are fatal, not zero scores.
+
+(native-scorer-runtime-statistics)=
+## Inspecting native scorer runtime statistics
+
+Native scorer runtime counters can be read explicitly with
+`NativeRewardExecutor.get_runtime_stats()` or `ScorerMicrobatcher.get_runtime_stats()`.
+On a reward worker, `get_native_scorer_stats()` returns model-name to snapshot;
+on `OmniRewardLoopManager`, it returns group-name to an ordered list of worker
+snapshots. A legacy `infer()` executor returns `{}`. The query does not wake a
+scorer or add values to per-sample `reward_extra_info`.
+Before a scorer's first wake, its class has not been resolved: its executor
+returns `{}`, and its worker omits that model's key. Querying stats does not load
+the model just to identify its type.
+
+Each snapshot is a detached dictionary of cumulative values for one executor
+instance. Counts include enqueued, accepted, withdrawn, discarded, and
+capacity-waiting requests; executed batches and batch requests; failed batches
+and accepted requests settled with exceptions; and peak queue and batch sizes.
+`capacity_wait_seconds` covers time waiting for queue capacity, including
+cancelled or rejected calls. `queue_wait_seconds` covers only requests accepted
+by the consumer. `forward_seconds` measures host elapsed time around the
+scorer call, including errors and cancellation; it is not GPU kernel time.
+Counters survive sleep and wake within an executor, but do not persist across
+worker restarts. Counts describe actual scorer work, including padding requests
+from static replica dispatch; they are not counts of distinct evaluation rows.
+Worker snapshots are kept separate because their clocks and lifetimes need not
+align.
+
+For a synchronous, non-streaming scoring phase, query the existing manager before
+and after `compute_rm_score` returns. Do not recreate workers between snapshots
+or overlap this phase with other scoring calls:
+
+```python
+before = manager.get_native_scorer_stats()
+scored = manager.compute_rm_score(batch)  # batch is a DataProto
+after = manager.get_native_scorer_stats()
+
+for group, workers in after.items():
+    previous_workers = before.get(group, [])
+    for replica, models in enumerate(workers):
+        previous_models = previous_workers[replica] if replica < len(previous_workers) else {}
+        for model_name, counters in models.items():
+            previous = previous_models.get(model_name, {})
+            delta = {
+                key: counters[key] - previous.get(key, 0)
+                for key in ("batch_requests", "batches", "queue_wait_seconds", "forward_seconds")
+            }
+            mean_batch_size = delta["batch_requests"] / delta["batches"] if delta["batches"] else 0
+            print(group, replica, model_name, mean_batch_size, delta)
+```
+
+An absent pre-wake model snapshot starts at zero. Only subtract snapshots from
+the same worker and executor instance; a worker restart invalidates that phase
+comparison. Peak fields are lifetime maxima, not additive counters. All duration
+fields are seconds: queue wait is summed over accepted requests, whereas forward
+time is counted once per executed batch, including failed batches. Their sums
+across replicas are not phase wall time. The example's mean batch size includes
+padding requests and does not measure distinct samples or GPU utilization.
+The manager query is a blocking Ray fan-out, not an atomic cross-worker snapshot;
+use it at an explicit phase boundary, outside the hot scoring path.
 
 ## Recovery from a non-returning forward
 

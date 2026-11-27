@@ -78,6 +78,7 @@ algo/mixgrpo.md
 algo/diffusion_opd.md
 algo/omni_opd.md
 algo/deterministic_post_training.md
+algo/true_on_policy.md
 algo/performance.md
 ```
 
@@ -103,6 +104,7 @@ examples/omninft_trainer.md
 examples/dgpo_trainer.md
 examples/crd_trainer.md
 examples/awm_trainer.md
+examples/dualgrpo_trainer.md
 examples/diffusionopd_trainer.md
 examples/flowgrpo_trainer_sd35_drm.md
 examples/qwen_image/flowgrpo_trainer_qwen_image.md
@@ -161,6 +163,7 @@ api/utils.rst
 
 contributing/editing-agent-instructions.md
 contributing/ci_cd.md
+contributing/pr_lint_checks.md
 contributing/testing_guide.md
 contributing/integrating_prompt_embedding_cache.md
 contributing/integrating_an_omni_model.md
@@ -193,36 +196,17 @@ See the [project roadmap](https://github.com/verl-project/verl-omni/issues/700) 
 
 ### Code Linting and Formatting
 
-We use pre-commit to help improve code quality. To initialize pre-commit, run:
-
-```bash
-pip install pre-commit
-pre-commit install
-```
-
-To resolve CI errors locally, you can also manually run pre-commit by:
-
-```bash
-pre-commit run
-```
+Lint setup and the commands to run it are in [CONTRIBUTING.md](https://github.com/verl-project/verl-omni/blob/main/CONTRIBUTING.md#code-linting-and-formatting).
 
 ### Adding CI tests
 
-If possible, please add CI test(s) for your new feature. See {doc}`contributing/testing_guide` for the L1-L4 test taxonomy, placement rules, and coverage policy.
-
-Pick the most relevant workflow from [`.github/workflows/`](https://github.com/verl-project/verl-omni/tree/main/.github/workflows):
+If possible, please add CI test(s) for your new feature. See {doc}`contributing/testing_guide` for the L1-L4 test taxonomy, placement rules, and coverage policy. Add the test as described in [CONTRIBUTING.md](https://github.com/verl-project/verl-omni/blob/main/CONTRIBUTING.md#adding-ci-tests). Do not edit workflow YAML.
 
 | Workflow | When to use |
 |---|---|
 | `cpu_unit_tests.yml` | New tests that run without a GPU (file name must end with `_on_cpu.py`) |
 | `gpu_smoke.yml` | GPU-requiring tests for trainer, worker, rollout, or agent-loop changes |
 | `sanity.yml` | Static / import-level checks under `tests/special_sanity/` |
-
-Steps:
-
-1. Place your test file in the appropriate directory under `tests/` (e.g. `tests/trainer/`, `tests/workers/`, `tests/agent_loop/`).
-2. Open the chosen workflow yml and add any missing path patterns to its `paths` section so the workflow triggers on your changes.
-3. Keep the test as lightweight as possible — use small models, reduced steps, and CPU where feasible (see existing `*_on_cpu.py` scripts for examples).
 
 For GPU smoke tests, see {doc}`contributing/gpu_smoke_tests` for how to register
 tests in the right group and run them locally.

@@ -38,8 +38,10 @@ from verl.utils.device import auto_set_device, is_cuda_available
 
 import verl_omni.trainer.omni  # noqa: F401  — registers @register_trainer("omni_sync")
 from verl_omni.trainer.diffusion.ray_diffusion_trainer import (
+    CompositePolicyGradientRayTrainer,
     DirectPreferenceRayTrainer,
     PolicyGradientRayTrainer,
+    use_composite_policy_gradient,
 )
 from verl_omni.utils.config import (
     resolve_lora_config,
@@ -50,6 +52,7 @@ from verl_omni.utils.config import (
 from verl_omni.utils.fs import resolve_model_local_dir
 from verl_omni.utils.rl_insight import enable_rl_insight
 from verl_omni.workers.config.reward import (
+    normalize_reward_config,
     reward_pool_is_separate,
     reward_role_required,
     warn_deprecated_reward_config,
@@ -67,9 +70,14 @@ __all__ = [
 
 
 def get_ray_trainer_cls(config):
-    """Return the trainer class selected by ``algorithm.trainer_type`` and model type."""
+    """Return the trainer class selected by ``algorithm.trainer_type`` and model type.
+
+    ``trainer.train_ar`` selects ``CompositePolicyGradientRayTrainer`` for DualGRPO.
+    """
     trainer_type = config.algorithm.trainer_type
     if trainer_type == "policy_gradient":
+        if use_composite_policy_gradient(config):
+            return CompositePolicyGradientRayTrainer
         return PolicyGradientRayTrainer
     if trainer_type == "direct_preference":
         if config.actor_rollout_ref.model.get("model_type", "language_model") == "omni_model":
@@ -345,6 +353,7 @@ def uses_v1_trainer(config) -> bool:
 
 def run_omni(config, task_runner_class=None) -> None:
     """Initialize Ray and run distributed Omni training."""
+    config = normalize_reward_config(config)
     warn_deprecated_reward_config(config)
     enable_rl_insight(config)
 

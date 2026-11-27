@@ -31,6 +31,7 @@ from verl_omni.utils.rl_insight import enable_rl_insight
 from verl_omni.workers.config.reward import (
     get_reward_model_entries,
     has_fsdp_reward_models,
+    normalize_reward_config,
     parse_reward_model_config,
     validate_reward_model_terms,
     warn_deprecated_reward_config,
@@ -49,6 +50,7 @@ def run_diffusion_v1(config, task_runner_class=None) -> None:
                 settings, model paths, and training hyperparameters.
         task_runner_class: For recipe to change TaskRunner.
     """
+    config = normalize_reward_config(config)
     warn_deprecated_reward_config(config)
     # Reject unsupported profiling combinations before starting Ray or workers.
     if OmegaConf.select(config, "global_profiler.steps"):
@@ -205,6 +207,7 @@ def main(config):
     # Automatically set `config.trainer.device = npu` when running on Ascend NPU.
     auto_set_device(config)
     OmegaConf.resolve(config)
+    config = normalize_reward_config(config)
     validate_config(config)
     validate_attention_consistency(config)
 

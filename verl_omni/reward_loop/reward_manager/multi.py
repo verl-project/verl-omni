@@ -26,7 +26,12 @@ from verl.experimental.reward_loop.reward_manager.base import RewardManagerBase
 
 from verl_omni.pipelines.rollout_media import ArtifactContractError
 from verl_omni.utils.reward_score.scorers.registry import load_reward_object as load_extern_object
-from verl_omni.workers.config.reward import get_reward_model_entries, resolve_reward_model_name
+from verl_omni.workers.config.reward import (
+    REWARD_TERM_METADATA_KEYS,
+    get_reward_model_entries,
+    resolve_reward_model_name,
+    validate_reward_weight_sum,
+)
 
 from .media import _reward_extra_info
 from .visual import _sampling_params_from_rollout, _validate_visual_response
@@ -87,17 +92,9 @@ class MultiRewardManager(RewardManagerBase, ABC):
             raise ValueError("MultiRewardManager requires non-empty reward.reward_functions config")
 
         self._sub_rewards = []
-        total_weight = 0.0
-        _reserved_keys = {
-            "path",
-            "name",
-            "weight",
-            "required",
-            "model",
-            "independent",
-            "routing_weights",
-            "use_rollout_sampling_params",
-        }
+        # Named deployments validate the complete recipe before dispatching worker-local subsets.
+        if not reward_models_cfg:
+            validate_reward_weight_sum(reward_functions_cfg)
         for key, entry in reward_functions_cfg.items():
             model_name = resolve_reward_model_name(key, entry, reward_models_cfg)
             use_rollout_sampling_params = entry.get("use_rollout_sampling_params", False)
@@ -131,10 +128,9 @@ class MultiRewardManager(RewardManagerBase, ABC):
                 raise TypeError(f"Reward function {key!r} independent must be a boolean")
             if config.reward.get("aggregation") == "preserve_components" and (not required or weight != 1.0):
                 raise ValueError("Component rewards require required=true and weight=1.0; use routing_weights instead.")
-            total_weight += weight
 
             # Collect non-manager fields to pass to compute_score.
-            extra_args = {k: v for k, v in entry.items() if k not in _reserved_keys}
+            extra_args = {k: v for k, v in entry.items() if k not in REWARD_TERM_METADATA_KEYS}
 
             fn = load_extern_object(path, name) if path is not None else None
             sig = inspect.signature(fn) if fn is not None else None
@@ -169,12 +165,6 @@ class MultiRewardManager(RewardManagerBase, ABC):
                 weight,
                 required,
                 is_async,
-            )
-
-        if total_weight <= 0:
-            raise ValueError(
-                f"Total weight of reward functions must be > 0, got {total_weight}. "
-                f"Check reward.reward_functions config."
             )
 
     def set_reward_executors(self, engine_reward_executors: dict | None, native_reward_executors: dict | None) -> None:

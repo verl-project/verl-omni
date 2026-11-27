@@ -11,19 +11,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Lightweight deterministic reward for the Wan2.2 NPU smoke test."""
+"""Deterministic reward with variance across responses, so the smoke's policy update is nonzero."""
 
-import numpy as np
-import torch
+import hashlib
 
 
-def compute_score(solution_image, **kwargs) -> float:
-    """Return a deterministic content-dependent score without model weights."""
-    del kwargs
-    if isinstance(solution_image, torch.Tensor):
-        values = solution_image.detach().to(dtype=torch.float32)
-    else:
-        values = torch.as_tensor(np.asarray(solution_image), dtype=torch.float32)
-    if values.numel() == 0:
-        return 0.0
-    return float(values.mean().item() / 255.0)
+def compute_score(data_source, solution_str, ground_truth, extra_info=None):
+    """Map the response text to a fixed pseudo-random score in ``[0, 1)``."""
+    digest = hashlib.sha1(solution_str.encode("utf-8")).hexdigest()
+    return (int(digest[:8], 16) % 1000) / 1000.0

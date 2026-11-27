@@ -19,7 +19,11 @@ from unittest.mock import MagicMock
 import pytest
 from omegaconf import OmegaConf
 
-from verl_omni.trainer.diffusion.ray_diffusion_trainer import DirectPreferenceRayTrainer, PolicyGradientRayTrainer
+from verl_omni.trainer.diffusion.ray_diffusion_trainer import (
+    CompositePolicyGradientRayTrainer,
+    DirectPreferenceRayTrainer,
+    PolicyGradientRayTrainer,
+)
 from verl_omni.trainer.main_omni import RayTrainerTaskRunner, get_ray_trainer_cls, uses_v1_trainer
 from verl_omni.trainer.omni.ray_omni_trainer import OmniDirectPreferenceRayTrainer
 
@@ -70,6 +74,13 @@ class TestGetRayTrainerCls:
     def test_policy_gradient_returns_policy_gradient_trainer(self):
         config = _make_config(algorithm={"trainer_type": "policy_gradient"})
         assert get_ray_trainer_cls(config) is PolicyGradientRayTrainer
+
+    def test_train_ar_returns_composite_policy_gradient_trainer(self):
+        config = _make_config(
+            algorithm={"trainer_type": "policy_gradient"},
+            trainer={"train_ar": True},
+        )
+        assert get_ray_trainer_cls(config) is CompositePolicyGradientRayTrainer
 
     def test_direct_preference_omni_returns_omni_trainer(self):
         config = _make_config(

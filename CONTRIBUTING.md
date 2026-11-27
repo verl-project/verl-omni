@@ -17,7 +17,7 @@ Looking for ways to dive in? Check out these issues:
 - [Good first issues](https://github.com/verl-project/verl-omni/issues?q=is%3Aissue%20state%3Aopen%20label%3A%22good%20first%20issue%22)
 - [Call for contribution](https://github.com/verl-project/verl-omni/issues?q=is%3Aissue%20state%3Aopen%20label%3A%22call%20for%20contribution%22)
 
-Furthermore, you can learn the development plan and roadmap via the [RFC: Multi-modal Generation RL 2026Q2 Roadmap](https://github.com/verl-project/verl/issues/5755) and the [RFC: Q3 Road Map](https://github.com/verl-project/verl-omni/issues/97).
+Furthermore, you can learn the development plan and roadmap via the [RFC: Multi-modal Generation RL 2026Q2 Roadmap](https://github.com/verl-project/verl/issues/5755) and the [Q4 Road Map](https://github.com/verl-project/verl-omni/issues/700).
 
 ## Developing
 
@@ -38,6 +38,12 @@ pre-commit run --all-files
 # pre-commit run --all-files --show-diff-on-failure --color=always <hook-id>
 pre-commit run --all-files --show-diff-on-failure --color=always ruff
 ```
+
+Every pull request automatically runs the `Lint` workflow (Ruff lint/format,
+sanity hooks, and incremental `check-pr-lint`) before GPU or NPU runners start.
+Stage your changes and run `uvx pre-commit run check-pr-lint` locally; see
+[PR Lint Checks](docs/contributing/pr_lint_checks.md) for the rule catalog,
+baseline semantics, and checker regression command.
 
 ## Testing
 
@@ -61,8 +67,10 @@ If possible, please add CI test(s) for your new feature:
 
 ## Building the Docs
 
+The doc CI job is [`.github/workflows/doc.yml`](.github/workflows/doc.yml). Locally, with [`uv`](docs/start/install.md) already installed:
+
 ```bash
-pip install -e .
+uv pip install --python "$(command -v python)" --constraint .github/triton_cpu_pin.txt -e .
 pip install -r docs/requirements-docs.txt
 
 cd docs
@@ -105,6 +113,7 @@ Additional guides:
 - [GPU Smoke Tests](docs/contributing/gpu_smoke_tests.md)
 - [NPU Smoke Tests](docs/contributing/npu_smoke_tests.md)
 - [CI/CD Layers](docs/contributing/ci_cd.md)
+- [PR Lint Checks](docs/contributing/pr_lint_checks.md)
 - [Common Pitfalls](docs/contributing/common_pitfalls.md)
 - [Integrating the Diffusion Prompt-Embedding Cache](docs/contributing/integrating_prompt_embedding_cache.md)
 

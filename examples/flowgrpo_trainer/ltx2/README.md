@@ -1,6 +1,6 @@
 # LTX-2.3 audio-video FlowGRPO
 
-Last updated: 09/06/2026
+Last updated: 11/26/2026
 
 These recipes train `dg845/LTX-2.3-Diffusers` LoRA adapters for text-to-audio-video
 (T2AV) or single-first-frame text-and-image-to-audio-video (TI2VA) generation with
@@ -85,6 +85,23 @@ Review the ImageBind license before enabling this reward in your environment.
 
 ## Launch
 
+### V1 scorer configuration
+
+The V1 T2AV and TI2VA launchers configure CLAP and ImageBind under
+`reward.scorers`. They use the built-in `MultiVisualRewardManager`. Use
+`reward.scorers.clap.kwargs.model_name_or_path` and
+`reward.scorers.clap.kwargs.device` for CLAP scorer overrides, and
+`reward.scorers.imagebind.kwargs.mode` for the ImageBind scoring mode.
+The ImageBind deployment still uses `reward.models.imagebind`.
+
+Existing commands can continue to pass flat `reward.reward_functions` overrides.
+The launchers use the legacy reward defaults when a command passes a key in
+that section. For new commands, use `reward.scorers` overrides, such as
+`reward.scorers.clap.kwargs.model_name_or_path=/path/to/clap`. Use one form
+per command. See
+[Explicit scorer entries](../../../docs/algo/named_reward_models.md#explicit-scorer-entries)
+for the supported fields.
+
 ### T2AV GPU
 
 ```bash
@@ -97,9 +114,10 @@ bash examples/flowgrpo_trainer/ltx2/run_ltx2_3_t2av_lora.sh
 bash examples/flowgrpo_trainer/ltx2/run_ltx2_3_ti2va_lora.sh
 ```
 
-Both GPU recipes default to 8 GPUs and one reward worker. The rollout tensor
-parallel size defaults to 2 for T2AV and 1 for TI2VA. CLAP and ImageBind run on
-`cuda:0` and `cuda:1`, respectively.
+Both GPU recipes default to 8 GPUs. The rollout tensor parallel size defaults
+to 2 for T2AV and 1 for TI2VA. CLAP uses `cuda:0` in the shared reward worker.
+The separate native ImageBind worker uses bundle 1
+of the trainer-selected reward pool and keeps its weights resident between steps.
 The TI2VA recipe supports exactly one first-frame image and does not train the
 fixed condition frame as part of the stochastic policy transition.
 
