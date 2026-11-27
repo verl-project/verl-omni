@@ -33,10 +33,40 @@ def compose_config(overrides=()):
 
 
 class TestDMDConfig:
+    @pytest.mark.parametrize("value", [True, 0, -1, 1.5])
+    def test_generator_step_count_is_a_positive_integer(self, value):
+        with pytest.raises(ValueError, match="num_inference_steps"):
+            DiffusionDMDConfig(num_inference_steps=value)
+
+    @pytest.mark.parametrize(
+        "shifts,weights",
+        [
+            ({"image": 2.0}, {}),
+            ({"image": 0.5}, {"image": 1.0}),
+            ({"image": True}, {"image": 1.0}),
+            ({"image": "2"}, {"image": 1.0}),
+            ({"image": float("inf")}, {"image": 1.0}),
+            ({"image": 2.0}, {"image": 0.0}),
+            ({"image": 2.0}, {"image": float("nan")}),
+            ({"image": 2.0}, {"image": True}),
+        ],
+    )
+    def test_invalid_modality_settings_are_rejected(self, shifts, weights):
+        with pytest.raises(ValueError, match="modality"):
+            DiffusionDMDConfig(modality_shifts=shifts, modality_weights=weights)
+
+    def test_modality_defaults_are_not_shared(self):
+        first, second = DiffusionDMDConfig(), DiffusionDMDConfig()
+        first.modality_shifts["image"] = 2.0
+        assert second.modality_shifts == {}
+
     def test_defaults_are_dmd2_without_opd_activation(self):
         config = DiffusionDMDConfig()
         assert config.fake_update_ratio == 2
         assert config.export_role == "student"
+        assert config.score_discrete_steps == 1000
+        assert (config.score_sigma_min, config.score_sigma_max) == (0.02, 0.98)
+        assert (config.score_time_min, config.score_time_max) == (0.02, 0.98)
         assert isinstance(config.fake_score_optim, FSDPOptimizerConfig)
         assert config.fake_score_optim.lr == pytest.approx(2e-5)
         assert not DiffusionDistillationConfig().enabled
@@ -70,6 +100,14 @@ class TestDMDConfig:
             {"score_sigma_min": 0},
             {"score_sigma_min": 0.9, "score_sigma_max": 0.2},
             {"score_sigma_max": 1.1},
+            {"score_time_min": 0},
+            {"score_time_min": 0.9, "score_time_max": 0.2},
+            {"score_time_min": 0.5, "score_time_max": 0.5},
+            {"score_time_max": 1.1},
+            {"score_time_min": True},
+            {"score_time_max": "0.98"},
+            {"score_time_min": float("nan")},
+            {"score_time_max": float("inf")},
             {"ema_decay": -0.1},
             {"ema_decay": float("nan")},
             {"export_role": "fake_score"},
@@ -103,6 +141,24 @@ class TestDMDConfig:
         loss = omega_conf_to_dataclass(config.actor_rollout_ref.actor.diffusion_loss)
         assert loss.loss_mode == "dmd2"
         assert omega_conf_to_dataclass(config.dmd).fake_update_ratio == 3
+
+    def test_continuous_program_overrides_compose_without_reinterpreting_sigma_bounds(self):
+        from verl_omni.pipelines.dmd2.program import DMD2Program
+
+        config = compose_config(
+            [
+                "dmd.score_discrete_steps=0",
+                "+dmd.modality_shifts.image=3.0",
+                "+dmd.modality_weights.image=1.0",
+                "dmd.score_time_min=0.15",
+                "dmd.score_time_max=0.6",
+            ]
+        )
+        dmd = omega_conf_to_dataclass(config.dmd)
+        assert (dmd.score_time_min, dmd.score_time_max) == (0.15, 0.6)
+        assert (dmd.score_sigma_min, dmd.score_sigma_max) == (0.02, 0.98)
+        program = DMD2Program(dmd, lambda role, latents, sigmas, negative: latents, seed=42)
+        assert program.config is dmd
 
     @pytest.mark.parametrize("schedule", ["inline", "one_step_off"])
     def test_opd_group_is_unchanged(self, schedule):
