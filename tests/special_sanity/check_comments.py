@@ -207,7 +207,7 @@ def _docstring_findings(path: str, tree: ast.AST) -> Iterator[tuple[int, str, st
             yield first.lineno, "CM005", "Remove PR references from docstrings; cite issues or explain the rationale."
 
 
-_HEREDOC_DELIM_RE = re.compile(r"(-?)\s*\\?(?:'([A-Za-z0-9_]+)'|\"([A-Za-z0-9_]+)\"|([A-Za-z0-9_]+))")
+_HEREDOC_DELIM_RE = re.compile(r"(-?)\s*\\?(?:'([^']+)'|\"([^\"]+)\"|([A-Za-z0-9_.-]+))")
 
 
 def _shell_comment_findings(source: bytes) -> Iterator[tuple[int, str, str]]:
@@ -371,15 +371,15 @@ def findings(path: str, source: bytes, tree: ast.AST | None = None) -> Iterator[
             yield line_no, "CM001", "Remove edit/step narration; keep only necessary contract or rationale."
             continue
         standalone = not token.line[: token.start[1]].strip()
-        if standalone and line_no not in license_lines and BANNER.fullmatch(text):
+        is_banner = standalone and line_no not in license_lines and bool(BANNER.fullmatch(text))
+        if is_banner:
             yield line_no, "CM002", "Remove decorative comment banners; use concise API documentation."
-            continue
         lower = text.lower()
         is_tooling_directive = lower.startswith(TOOLING_DIRECTIVE_PREFIXES)
         is_any_directive = is_tooling_directive or lower.startswith(PROSE_DIRECTIVE_PREFIXES)
         if line_no not in license_lines and not is_tooling_directive and PR_REF.search(text):
             yield line_no, "CM005", "Remove PR references from code comments; cite issues or explain the rationale."
-        if standalone and line_no not in license_lines and not is_any_directive:
+        if standalone and not is_banner and line_no not in license_lines and not is_any_directive:
             standalone_lines[line_no] = text
 
     if path.startswith("verl_omni/") and "/config/" not in path and standalone_lines:

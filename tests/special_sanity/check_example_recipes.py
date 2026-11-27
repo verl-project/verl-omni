@@ -97,7 +97,7 @@ def _python_paths(source: bytes) -> Iterator[int]:
             yield node.lineno
 
 
-def _scan_shell_line(line: str, quote: str | None, ansi_single: bool) -> tuple[str | None, bool, bool]:
+def _scan_shell_line(line: str, quote: str | None, ansi_single: bool) -> tuple[str | None, bool, bool, int | None]:
     i = 0
     length = len(line)
     while i < length:
@@ -114,7 +114,7 @@ def _scan_shell_line(line: str, quote: str | None, ansi_single: bool) -> tuple[s
         if quote == '"':
             if ch == "\\":
                 if i == length - 1:
-                    return quote, ansi_single, True
+                    return quote, ansi_single, True, None
                 i += 2
                 continue
             if ch == '"':
@@ -122,10 +122,10 @@ def _scan_shell_line(line: str, quote: str | None, ansi_single: bool) -> tuple[s
             i += 1
             continue
         if ch == "#" and (i == 0 or line[i - 1].isspace()):
-            return None, False, False
+            return None, False, False, i
         if ch == "\\":
             if i == length - 1:
-                return None, False, True
+                return None, False, True, None
             i += 2
             continue
         if ch == "$" and i + 1 < length and line[i + 1] == "'":
@@ -136,7 +136,7 @@ def _scan_shell_line(line: str, quote: str | None, ansi_single: bool) -> tuple[s
         if ch in {"'", '"'}:
             quote = ch
         i += 1
-    return quote, ansi_single, False
+    return quote, ansi_single, False, None
 
 
 def _consume_heredoc_tokens(line_tokens: list[str], heredocs: list[tuple[str, bool]]) -> None:
@@ -185,14 +185,16 @@ def _shell_tokens(source: str) -> list[tuple[int, str]]:
             continue
         if not continued and quote is None:
             start_line = line_number
-        quote, ansi_single, has_cont = _scan_shell_line(line, quote, ansi_single)
+        quote, ansi_single, has_cont, comment_start = _scan_shell_line(line, quote, ansi_single)
         if quote is not None:
             continued += line[:-1] if has_cont else line + "\n"
             continue
-        segment = line[:-1] if has_cont else line
+        code_line = line[:comment_start] if comment_start is not None else line
+        segment = code_line[:-1] if has_cont else code_line
         full_line = continued + segment
         continued = ""
         lexer = shlex.shlex(full_line, posix=False, punctuation_chars=";&|()<>")
+        lexer.commenters = ""
         lexer.whitespace_split = True
         lexer.wordchars += "${}:"
         try:
@@ -247,8 +249,12 @@ def _iter_arrays(tokens: list[tuple[int, str]]) -> Iterator[list[tuple[int, str]
             command.append((line, token))
 
 
-def _iter_commands(tokens: list[tuple[int, str]]) -> Iterator[tuple[list[tuple[int, str]], str]]:
+def _iter_commands_with_forwarding(
+    tokens: list[tuple[int, str]],
+) -> Iterator[tuple[list[tuple[int, str]], str, frozenset[str]]]:
     command: list[tuple[int, str]] = []
+    argument_arrays: set[str] = set()
+    array_name: str | None = None
     array_depth = 0
     case_depth = 0
     in_case_pattern = False
@@ -258,8 +264,15 @@ def _iter_commands(tokens: list[tuple[int, str]]) -> Iterator[tuple[list[tuple[i
                 array_depth += 1 if token == "(" else 2
             elif token in {")", "))"}:
                 array_depth = max(0, array_depth - (1 if token == ")" else 2))
+                if array_depth == 0:
+                    array_name = None
+            elif array_name is not None and token in {'"$@"', '"${@}"'}:
+                argument_arrays.add(array_name)
             continue
-        if token == "(" and _is_array_start(command) is not None:
+        if token == "(" and (started := _is_array_start(command)) is not None:
+            if not command[-1][1].endswith("+="):
+                argument_arrays.discard(started)
+            array_name = started
             array_depth = 1
             command = []
             continue
@@ -281,12 +294,17 @@ def _iter_commands(tokens: list[tuple[int, str]]) -> Iterator[tuple[list[tuple[i
                     case_depth = max(0, case_depth - 1)
                     in_case_pattern = False
                 else:
-                    yield command, token
+                    yield command, token, frozenset(argument_arrays)
                 command = []
             if case_depth > 0 and token == ";;":
                 in_case_pattern = True
         else:
             command.append((line, token))
+
+
+def _iter_commands(tokens: list[tuple[int, str]]) -> Iterator[tuple[list[tuple[int, str]], str]]:
+    for command, delimiter, _arrays in _iter_commands_with_forwarding(tokens):
+        yield command, delimiter
 
 
 def _strip_command_prefixes(command: list[tuple[int, str]]) -> list[tuple[int, str]]:
@@ -296,38 +314,50 @@ def _strip_command_prefixes(command: list[tuple[int, str]]) -> list[tuple[int, s
     return work
 
 
+def _forwarding_tokens(argument_arrays: frozenset[str]) -> set[str]:
+    return {'"$@"', '"${@}"'} | {f'"${{{name}[@]}}"' for name in argument_arrays}
+
+
 def _forwards_args(tokens: list[tuple[int, str]]) -> bool:
-    command: list[tuple[int, str]] = []
-    argument_arrays: set[str] = set()
-    array_name: str | None = None
-    array_depth = 0
     excluded = {"echo", "printf", ":", "test", "[", "[[", "local", "declare", "export", "for"}
-    for line, token in [*tokens, (0, "\n")]:
-        if array_depth > 0:
-            if token in {"(", "(("}:
-                array_depth += 1 if token == "(" else 2
-            elif token in {")", "))"}:
-                array_depth = max(0, array_depth - (1 if token == ")" else 2))
-                if array_depth == 0:
-                    array_name = None
-            elif array_name is not None and token in {'"$@"', '"${@}"'}:
-                argument_arrays.add(array_name)
-            continue
-        if token == "(" and (started := _is_array_start(command)) is not None:
-            array_name = started
-            array_depth = 1
-            command = []
-            continue
-        if token in {"\n", ";", ";;", "&&", "||", "|", "&", "(", ")"}:
-            work = [tok for _ln, tok in _strip_command_prefixes(command)]
-            if work and work[0] not in excluded:
-                allowed = {'"$@"', '"${@}"'} | {f'"${{{name}[@]}}"' for name in argument_arrays}
-                if any(argument in allowed for argument in work[1:]):
-                    return True
-            command = []
-        else:
-            command.append((line, token))
+    for command, _delimiter, active_arrays in _iter_commands_with_forwarding(tokens):
+        work = [tok for _ln, tok in _strip_command_prefixes(command)]
+        if work and work[0] not in excluded:
+            allowed = _forwarding_tokens(active_arrays)
+            if any(argument in allowed for argument in work[1:]):
+                return True
     return False
+
+
+def _set_option_flag(opt: str, enabled: bool, has_errexit: bool, has_pipefail: bool) -> tuple[bool, bool]:
+    if opt == "errexit":
+        return enabled, has_pipefail
+    if opt == "pipefail":
+        return has_errexit, enabled
+    return has_errexit, has_pipefail
+
+
+def _apply_set_args(args: list[str], has_errexit: bool, has_pipefail: bool) -> tuple[bool, bool]:
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "--":
+            break
+        if arg in {"-o", "+o"} and i + 1 < len(args):
+            has_errexit, has_pipefail = _set_option_flag(args[i + 1], arg[0] == "-", has_errexit, has_pipefail)
+            i += 2
+            continue
+        if len(arg) > 1 and arg[0] in {"-", "+"} and not arg.startswith("--"):
+            enabled = arg[0] == "-"
+            flags = arg[1:]
+            if "e" in flags:
+                has_errexit = enabled
+            if "o" in flags and i + 1 < len(args):
+                has_errexit, has_pipefail = _set_option_flag(args[i + 1], enabled, has_errexit, has_pipefail)
+                i += 2
+                continue
+        i += 1
+    return has_errexit, has_pipefail
 
 
 def _has_errexit_and_pipefail(tokens: list[tuple[int, str]]) -> bool:
@@ -335,34 +365,8 @@ def _has_errexit_and_pipefail(tokens: list[tuple[int, str]]) -> bool:
     has_pipefail = False
     for command, _delimiter in _iter_commands(tokens):
         work = [tok for _ln, tok in _strip_command_prefixes(command)]
-        if not work or work[0] != "set":
-            continue
-        args = work[1:]
-        i = 0
-        while i < len(args):
-            arg = args[i]
-            if arg == "--":
-                break
-            if arg == "-o" and i + 1 < len(args):
-                opt = args[i + 1]
-                if opt == "errexit":
-                    has_errexit = True
-                elif opt == "pipefail":
-                    has_pipefail = True
-                i += 2
-                continue
-            if arg.startswith("-") and not arg.startswith("--") and len(arg) > 1:
-                flags = arg[1:]
-                if "e" in flags:
-                    has_errexit = True
-                if "o" in flags and i + 1 < len(args):
-                    if args[i + 1] == "errexit":
-                        has_errexit = True
-                    elif args[i + 1] == "pipefail":
-                        has_pipefail = True
-                    i += 2
-                    continue
-            i += 1
+        if work and work[0] == "set":
+            has_errexit, has_pipefail = _apply_set_args(work[1:], has_errexit, has_pipefail)
     return has_errexit and has_pipefail
 
 
@@ -420,6 +424,36 @@ def _command_safety_findings(work: list[tuple[int, str]], is_run: bool) -> Itera
         yield head_line, "EX008", "Do not run pip install inside run_*.sh; document dependencies in README.md."
 
 
+_BASH_LINE_ERR_RE = re.compile(r"line\s+(\d+):\s*(.+)")
+
+
+def _parse_bash_syntax_error(stderr: bytes) -> tuple[int, str]:
+    text = stderr.decode("utf-8", errors="replace")
+    for raw in text.splitlines():
+        match = _BASH_LINE_ERR_RE.search(raw)
+        if match:
+            return int(match.group(1)), f"Fix the shell syntax reported by bash -n: {match.group(2).strip()}"
+    return 1, "Fix the shell syntax reported by bash -n."
+
+
+def _clean_continuation_whitespace(text_lf: str) -> tuple[list[str], list[tuple[int, str, str]]]:
+    cleaned_lines: list[str] = []
+    hits: list[tuple[int, str, str]] = []
+    quote: str | None = None
+    ansi_single = False
+    for line_no, raw_line in enumerate(text_lf.splitlines(), 1):
+        was_unquoted = quote is None
+        quote, ansi_single, _has_cont, comment_start = _scan_shell_line(raw_line, quote, ansi_single)
+        code_part = raw_line[:comment_start] if comment_start is not None else raw_line
+        suffix = raw_line[comment_start:] if comment_start is not None else ""
+        if was_unquoted and code_part.strip() and TRAILING_BACKSLASH_SPACE.search(code_part):
+            hits.append((line_no, "EX001", "Remove trailing spaces after backslash line continuation."))
+            cleaned_lines.append(TRAILING_BACKSLASH_SPACE.sub("\\\\", code_part) + suffix)
+        else:
+            cleaned_lines.append(raw_line)
+    return cleaned_lines, hits
+
+
 def _shell_findings(source_path: PurePosixPath, source: bytes, text: str) -> Iterator[tuple[int, str, str]]:
     raw_lines = text.split("\n")
     has_crlf = "\r\n" in text
@@ -427,13 +461,8 @@ def _shell_findings(source_path: PurePosixPath, source: bytes, text: str) -> Ite
         yield 1, "EX001", "Use LF (Unix) line endings in example shell scripts."
     text_lf = text.replace("\r\n", "\n")
 
-    cleaned_lines: list[str] = []
-    for line_no, raw_line in enumerate(text_lf.splitlines(), 1):
-        if not raw_line.lstrip().startswith("#") and TRAILING_BACKSLASH_SPACE.search(raw_line):
-            yield line_no, "EX001", "Remove trailing spaces after backslash line continuation."
-            cleaned_lines.append(TRAILING_BACKSLASH_SPACE.sub("\\\\", raw_line))
-        else:
-            cleaned_lines.append(raw_line)
+    cleaned_lines, cont_hits = _clean_continuation_whitespace(text_lf)
+    yield from cont_hits
 
     environment = {
         key: value for key, value in os.environ.items() if key not in {"BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS"}
@@ -448,7 +477,8 @@ def _shell_findings(source_path: PurePosixPath, source: bytes, text: str) -> Ite
             check=False,
         )
         if result.returncode:
-            yield 1, "EX001", "Fix the shell syntax reported by bash -n."
+            err_line, err_msg = _parse_bash_syntax_error(result.stderr)
+            yield err_line, "EX001", err_msg
     except subprocess.TimeoutExpired:
         yield 1, "EX001", "Shell syntax check timed out."
 
@@ -467,7 +497,7 @@ def _shell_findings(source_path: PurePosixPath, source: bytes, text: str) -> Ite
                     yield ln, "EX007", f"Duplicate Hydra override '{key}' in the same array."
                 seen_array_keys.add(key)
 
-    for command, delimiter in _iter_commands(tokens):
+    for command, delimiter, active_arrays in _iter_commands_with_forwarding(tokens):
         work = _strip_command_prefixes(command)
         if not work or work[0][1] not in {"echo", "printf", ":"}:
             for ln, tok in command:
@@ -487,8 +517,9 @@ def _shell_findings(source_path: PurePosixPath, source: bytes, text: str) -> Ite
 
         hydra_positions: list[tuple[int, int, str]] = []
         at_positions: list[tuple[int, int]] = []
+        forward_toks = _forwarding_tokens(active_arrays)
         for idx, (cln, ctok) in enumerate(work[1:], 1):
-            if ctok in {'"$@"', '"${@}"'}:
+            if ctok in forward_toks:
                 at_positions.append((idx, cln))
             if (key := _hydra_key(ctok)) is not None:
                 hydra_positions.append((idx, cln, key))
@@ -520,6 +551,8 @@ def _shell_findings(source_path: PurePosixPath, source: bytes, text: str) -> Ite
 
 
 def _matches_base_ref(raw_arg: str, base_name: str, base_vars: set[str]) -> bool:
+    if raw_arg.startswith("'") and raw_arg.endswith("'") and "$" in raw_arg:
+        return False
     stripped = raw_arg.strip("\"'")
     if ".." in PurePosixPath(stripped).parts:
         return False

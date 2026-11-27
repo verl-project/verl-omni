@@ -253,6 +253,7 @@ def test_checker_preserves_its_own_license_and_source_literals() -> None:
         (COMMENT_PATH, "# Keep workaround from PR #942 until upstream fix\nvalue = 1\n", [(1, "CM005")]),
         (COMMENT_PATH, "# TODO: remove workaround from PR #942\nvalue = 1\n", [(1, "CM005")]),
         (COMMENT_PATH, "# NOTE: added in PR #942\nvalue = 1\n", [(1, "CM005")]),
+        (COMMENT_PATH, "# === PR #942 ===\nvalue = 1\n", [(1, "CM002"), (1, "CM005")]),
         (COMMENT_PATH, "# TODO: remove after upstream issue #942 is fixed\nvalue = 1\n", []),
         (
             "verl_omni/pipelines/demo.py",
@@ -279,6 +280,11 @@ def test_checker_preserves_its_own_license_and_source_literals() -> None:
             "examples/demo/run_train.sh",
             '#!/usr/bin/env bash\necho "<<EOF"\ncat <<< "PR #858"\n# Reused from PR #858\n',
             [(4, "CM005")],
+        ),
+        (
+            "examples/demo/run_train.sh",
+            "#!/usr/bin/env bash\ncat <<'END-DATA'\n# PR #858\nEND-DATA\n",
+            [],
         ),
     ],
 )

@@ -106,6 +106,7 @@ def test_ast_applies_rules_by_module_role(path: str, statement: str, expected_co
         (QWEN_ROLLOUT, MASK_LENGTH, "VO005"),
         (QWEN_ROLLOUT, "state.negative_txt_seq_lens = [int(mask.sum()) for mask in masks]", "VO005"),
         (QWEN_ROLLOUT, "txt_seq_lens = [int(m.sum()) for m in prompt_embeds_mask]", "VO005"),
+        (QWEN_ROLLOUT, "txt_seq_lens = [int(m.sum()) for m in prompt_embeds_masks]", "VO005"),
         (QWEN_ROLLOUT, "encode(txt_seq_lens=attention_mask.sum(dim=-1))", "VO005"),
         (QWEN_ROLLOUT, "txt_seq_lens = txt_seq_lens_from_embeds(prompt_embeds)", None),
         (QWEN_ROLLOUT, "valid_token_count = prompt_embeds_mask.sum(dim=1)", None),
@@ -124,6 +125,12 @@ def test_ast_flags_known_rollout_pitfalls(path: str, statement: str, expected_co
         ("import pytest\npytest.main()", ["VO006"]),
         ("import pytest as runner\nrunner.main()", ["VO006"]),
         ("from pytest import main as run_tests\nrun_tests()", ["VO006"]),
+        ("import pytest\nstatus = pytest.main([__file__])", ["VO006"]),
+        ("import pytest\n_ = pytest.main([__file__])", ["VO006"]),
+        ("import pytest\nstatus: int = pytest.main([__file__])", ["VO006"]),
+        ("import pytest\ndef smoke():\n    status = pytest.main([__file__])\n", ["VO006"]),
+        ("import pytest\nstatus = pytest.main([__file__])\nraise SystemExit(status)", []),
+        ("import pytest\nstatus = pytest.main([__file__])\nassert status == 0", []),
         ("import pytest\nraise SystemExit(pytest.main())", []),
         ("import pytest\nassert pytest.main() == 0", []),
         ("from another_module import main\nmain()", []),
@@ -433,6 +440,17 @@ def test_tests_conftest_with_cpu_mark_is_not_flagged_and_nested_import_does_not_
         (
             '__all__ = ["SubConfig"]\n@dataclass\nclass SubConfig(ParentConfig):\n'
             "    def __post_init__(self):\n        super().__post_init__()\n",
+            [],
+        ),
+        (
+            '__all__ = ["SubConfig"]\n@dataclass\nclass SubConfig(ParentConfig):\n'
+            "    def __post_init__(self):\n        if self.debug:\n            super().__post_init__()\n",
+            ["VO011"],
+        ),
+        (
+            '__all__ = ["SubConfig"]\n@dataclass\nclass SubConfig(ParentConfig):\n'
+            "    def __post_init__(self):\n        if self.debug:\n            super().__post_init__()\n"
+            "        else:\n            super().__post_init__()\n",
             [],
         ),
     ],
@@ -753,6 +771,23 @@ def test_public_api_type_annotations_cover_exported_contract_and_scorer_apis(
             "def _parse_timeout(raw):\n    try:\n        return int(raw)\n    except Exception:\n        return 30\n",
             [],
         ),
+        (
+            "verl_omni/utils/reward_score/ex.py",
+            "def _parse_score():\n    try:\n        return float(read_artifact())\n"
+            "    except Exception:\n        return 0.0\n",
+            ["VO016"],
+        ),
+        (
+            "verl_omni/utils/reward_score/ex.py",
+            "try:\n    run()\nexcept* Exception as exc:\n"
+            "    if isinstance(exc, ArtifactContractError):\n        raise\n    return 0.0\n",
+            ["VO016"],
+        ),
+        (
+            "verl_omni/utils/reward_score/ex.py",
+            "try:\n    run()\nexcept* ArtifactContractError:\n    raise\nexcept* Exception:\n    return 0.0\n",
+            [],
+        ),
         ("verl_omni/utils/other.py", "try:\n    run()\nexcept Exception:\n    return 0.0\n", []),
     ],
 )
@@ -801,6 +836,15 @@ def test_artifact_contract_error_must_propagate_in_rewards(path: str, source: st
             "def test_ast():\n    src = Path('verl_omni/pipelines/demo/a.py').read_text()\n"
             "    assert 'foo' in ast.unparse(ast.parse(src))\n",
             [],
+        ),
+        (
+            TEST,
+            "import ast\nfrom pathlib import Path\n"
+            "def test_ast():\n    src = Path('verl_omni/pipelines/demo/a.py').read_text()\n"
+            "    assert ast.parse(src) is not None\n"
+            "def test_grep():\n    src = Path('verl_omni/pipelines/demo/a.py').read_text()\n"
+            "    assert 'foo' in src\n",
+            ["VO017"],
         ),
         (
             TEST,

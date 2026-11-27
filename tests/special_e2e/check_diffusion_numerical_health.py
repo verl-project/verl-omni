@@ -80,6 +80,8 @@ def _merge_step_metrics(target: dict[str, Any], payload: Mapping[str, Any]) -> N
             _store_metric(target, key, number)
         elif isinstance(raw_value, str):
             _store_metric(target, key, raw_value.strip())
+        else:
+            _store_metric(target, key, raw_value)
 
 
 def load_jsonl_metrics(path: Path) -> dict[int, dict[str, Any]]:

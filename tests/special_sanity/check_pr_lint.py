@@ -22,6 +22,7 @@ import subprocess
 from argparse import ArgumentParser
 from collections import Counter
 from collections.abc import Iterator
+from difflib import SequenceMatcher
 from importlib.util import resolve_name
 from pathlib import PurePosixPath
 from typing import NamedTuple
@@ -81,10 +82,10 @@ def _changed_files(ancestor: str, head: str, root: str | None = None) -> Iterato
         old_mode, new_mode, _old_sha, _new_sha, status = header.removeprefix(":").split()
         previous = next(fields)
         path = next(fields) if status.startswith(("R", "C")) else previous
-        if status == "D" or new_mode in {"000000", "160000"}:
+        if status == "D" or not new_mode.startswith("100"):
             continue
         if path.endswith(".py") or path.startswith("examples/"):
-            prev_path = None if status.startswith(("A", "C")) or old_mode in {"000000", "160000"} else previous
+            prev_path = None if status.startswith(("A", "C")) or not old_mode.startswith("100") else previous
             yield prev_path, path
 
 
@@ -154,6 +155,8 @@ def _findings(path: str, source: bytes) -> list[Finding]:
         return hygiene
     try:
         tree = ast.parse(source, filename=path)
+        if path.startswith("examples/"):
+            compile(tree, path, "exec")
     except SyntaxError as error:
         return [Finding(error.lineno or 1, "E999", error.msg)]
 
@@ -191,6 +194,7 @@ def _collect_module_imports(
         elif isinstance(node, ast.Try | ast.TryStar):
             _collect_module_imports(node.body, imports, package=package)
             _collect_module_imports(node.orelse, imports, package=package)
+            _collect_module_imports(node.finalbody, imports, package=package)
 
 
 def _defines_registered_adapter(source: bytes) -> bool:
@@ -275,7 +279,7 @@ def _pipeline_findings(snapshot: str, root: str | None = None) -> Iterator[tuple
                 )
 
 
-def _example_variant_findings(snapshot: str, root: str | None = None) -> Iterator[tuple[str, Finding]]:
+def _example_variant_findings(snapshot: str, root: str | None = None) -> Iterator[tuple[str, str, Finding]]:
     names = _ls_tree_blobs(snapshot, "examples/", root=root)
     for path in sorted(names):
         path_obj = PurePosixPath(path)
@@ -290,6 +294,7 @@ def _example_variant_findings(snapshot: str, root: str | None = None) -> Iterato
         if not delegates_to_base_script(source, base_name):
             yield (
                 path,
+                base_path,
                 Finding(
                     1,
                     "EX009",
@@ -395,42 +400,119 @@ def _dead_function_findings(
             yield path, Finding(lineno, "VO019", message)
 
 
+_FILE_LEVEL_EX001_MESSAGES = frozenset(
+    {
+        "Use LF (Unix) line endings in example shell scripts.",
+        "Save example shell scripts and YAML as UTF-8 text.",
+        "Shell syntax check timed out.",
+    }
+)
+
+
+def _tree_object_id(snapshot: str, subpath: str, root: str | None = None) -> str | None:
+    target_root = root or _repo_root()
+    result = subprocess.run(
+        ["git", "-C", target_root, "rev-parse", "--quiet", "--verify", f"{snapshot}:{subpath}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        check=False,
+    )
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
 def _baseline_key(finding: Finding) -> tuple[str, str, tuple[str, ...]]:
     return (finding.code, _LINE_NUMBER_RE.sub("line <N>", finding.message), finding.scope)
+
+
+def _is_file_level_finding(finding: Finding) -> bool:
+    if finding.line != 1:
+        return False
+    if finding.code in {"EX003", "EX004", "EX005", "VO007"}:
+        return True
+    if finding.code == "EX002":
+        return finding.message.startswith("Forward caller")
+    if finding.code == "EX006":
+        return ".venv/bin/python" not in finding.message
+    if finding.code == "EX001":
+        return finding.message in _FILE_LEVEL_EX001_MESSAGES
+    return finding.code == "E999" and finding.message == "Source file is not valid UTF-8."
+
+
+def _equal_line_ids(old_source: bytes, new_source: bytes) -> tuple[dict[int, int], dict[int, int]]:
+    old_ids: dict[int, int] = {}
+    new_ids: dict[int, int] = {}
+    pair_id = 0
+    matcher = SequenceMatcher(None, old_source.splitlines(), new_source.splitlines(), autojunk=False)
+    for tag, i1, i2, j1, _j2 in matcher.get_opcodes():
+        if tag != "equal":
+            continue
+        for offset in range(i2 - i1):
+            pair_id += 1
+            old_ids[i1 + offset + 1] = pair_id
+            new_ids[j1 + offset + 1] = pair_id
+    return old_ids, new_ids
+
+
+def _scoped_baseline_key(finding: Finding, equal_ids: dict[int, int] | None, side: str) -> tuple[object, ...]:
+    base = _baseline_key(finding)
+    if finding.scope or _is_file_level_finding(finding) or equal_ids is None:
+        return base
+    pair_id = equal_ids.get(finding.line)
+    location = ("eq", pair_id) if pair_id is not None else (side, finding.line)
+    return (*base, location)
+
+
+def _new_file_findings(
+    ancestor: str,
+    head: str,
+    previous: str | None,
+    path: str,
+    root: str | None = None,
+) -> Iterator[tuple[str, Finding]]:
+    source = _git("show", f"{head}:{path}", root=root)
+    current = _findings(path, source)
+    if not current:
+        return
+    if not previous:
+        for finding in current:
+            yield path, finding
+        return
+    old_source = _git("show", f"{ancestor}:{previous}", root=root)
+    needs_line_map = any(not finding.scope and not _is_file_level_finding(finding) for finding in current)
+    old_ids, new_ids = _equal_line_ids(old_source, source) if needs_line_map else (None, None)
+    baseline = Counter(_scoped_baseline_key(finding, old_ids, "old") for finding in _findings(previous, old_source))
+    for finding in current:
+        key = _scoped_baseline_key(finding, new_ids, "new")
+        if baseline[key]:
+            baseline[key] -= 1
+        else:
+            yield path, finding
 
 
 def _new_findings(ancestor: str, head: str, root: str | None = None) -> Iterator[tuple[str, Finding]]:
     changed = list(_changed_files(ancestor, head, root=root))
     for previous, path in changed:
-        source = _git("show", f"{head}:{path}", root=root)
-        current = _findings(path, source)
-        if not current:
-            continue
-        baseline = Counter()
-        if previous:
-            old_source = _git("show", f"{ancestor}:{previous}", root=root)
-            baseline.update(_baseline_key(finding) for finding in _findings(previous, old_source))
-        for finding in current:
-            key = _baseline_key(finding)
-            if baseline[key]:
-                baseline[key] -= 1
-            else:
-                yield path, finding
-    legacy_pipelines = set(_pipeline_findings(ancestor, root=root))
-    for diagnostic in _pipeline_findings(head, root=root):
-        if diagnostic not in legacy_pipelines:
-            yield diagnostic
-    changed_head_paths = {path for _previous, path in changed}
-    rename_map = {path: previous for previous, path in changed if previous and previous != path}
-    legacy_variant_paths = {path for path, _finding in _example_variant_findings(ancestor, root=root)}
-    for path, finding in _example_variant_findings(head, root=root):
-        if (
-            path in legacy_variant_paths
-            or rename_map.get(path) in legacy_variant_paths
-            or path not in changed_head_paths
-        ):
-            continue
-        yield path, finding
+        yield from _new_file_findings(ancestor, head, previous, path, root=root)
+    if _tree_object_id(ancestor, "verl_omni/pipelines", root=root) != _tree_object_id(
+        head, "verl_omni/pipelines", root=root
+    ):
+        legacy_pipelines = set(_pipeline_findings(ancestor, root=root))
+        for diagnostic in _pipeline_findings(head, root=root):
+            if diagnostic not in legacy_pipelines:
+                yield diagnostic
+    if _tree_object_id(ancestor, "examples", root=root) != _tree_object_id(head, "examples", root=root):
+        changed_head_paths = {path for _previous, path in changed}
+        rename_map = {path: previous for previous, path in changed if previous and previous != path}
+        legacy_variant_paths = {path for path, _base_path, _finding in _example_variant_findings(ancestor, root=root)}
+        for path, base_path, finding in _example_variant_findings(head, root=root):
+            if (
+                path in legacy_variant_paths
+                or rename_map.get(path) in legacy_variant_paths
+                or (path not in changed_head_paths and base_path not in changed_head_paths)
+            ):
+                continue
+            yield path, finding
     yield from _dead_function_findings(ancestor, head, changed, root=root)
 
 
@@ -448,16 +530,14 @@ def main() -> int:
     if base and head:
         ancestor = _git("merge-base", base, head, root=root).decode("ascii").strip()
     else:
-        head_exists = (
-            subprocess.run(
-                ["git", "-C", root, "rev-parse", "--verify", "--quiet", "HEAD"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                check=False,
-            ).returncode
-            == 0
+        head_rev = subprocess.run(
+            ["git", "-C", root, "rev-parse", "--verify", "--quiet", "HEAD"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            check=False,
         )
-        ancestor = "HEAD" if head_exists else _EMPTY_TREE_SHA
+        ancestor = head_rev.stdout.strip() if head_rev.returncode == 0 else _EMPTY_TREE_SHA
         head = _git("write-tree", root=root).decode("ascii").strip()
     findings = list(_new_findings(ancestor, head, root=root))
     for path, finding in findings:

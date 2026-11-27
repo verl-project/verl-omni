@@ -15,6 +15,7 @@
 """Verify Ruff rules and the combined checker on real PR diffs."""
 
 import ast
+import os
 import re
 import shutil
 import subprocess
@@ -48,6 +49,10 @@ def _commit(repo: Path) -> str:
     _git(repo, "add", "--all")
     _git(repo, "-c", "user.name=CI Test", "-c", "user.email=ci@example.invalid", "commit", "-qm", "fixture")
     return _git(repo, "rev-parse", "HEAD")
+
+
+def _staged_env() -> dict[str, str]:
+    return {key: value for key, value in os.environ.items() if key not in {"PRE_COMMIT_FROM_REF", "PRE_COMMIT_TO_REF"}}
 
 
 def _branching_function(branches: int) -> str:
@@ -103,7 +108,9 @@ def test_check_without_refs_reads_the_index_not_the_worktree(tmp_path: Path) -> 
     source_path.write_text("import os\n", encoding="utf-8")
     _git(tmp_path, "add", CORE_PATH)
     source_path.write_text("", encoding="utf-8")
-    result = subprocess.run([sys.executable, str(CHECKER)], cwd=tmp_path, capture_output=True, text=True)
+    result = subprocess.run(
+        [sys.executable, str(CHECKER)], cwd=tmp_path, env=_staged_env(), capture_output=True, text=True
+    )
     assert result.returncode == 1, result.stdout + result.stderr
     assert "F401" in result.stdout
 
@@ -232,6 +239,7 @@ def test_ruff_keeps_reward_cache_and_test_scopes_distinct() -> None:
         ("from verl_omni.pipelines import example as example\n", set()),
         ("from .example.training import Adapter as Adapter\n", set()),
         ("try:\n    from . import example as example\nexcept ImportError:\n    pass\n", set()),
+        ("try:\n    pass\nfinally:\n    from . import example as example\n", set()),
         ("def unused():\n    from . import example\n    return example\n", {"VO010"}),
         ("if TYPE_CHECKING:\n    from . import example as example\n", {"VO010"}),
         ('"from . import example"\n', {"VO010"}),
@@ -300,7 +308,9 @@ def test_staged_example_is_checked_without_executing_head_code(tmp_path: Path) -
     recipe.write_text('touch executed\necho "no forwarding"\n', encoding="utf-8")
     _git(tmp_path, "add", "examples/")
     recipe.write_text('touch executed\ntrainer "$@"\n', encoding="utf-8")
-    result = subprocess.run([sys.executable, str(CHECKER)], cwd=tmp_path, capture_output=True, text=True)
+    result = subprocess.run(
+        [sys.executable, str(CHECKER)], cwd=tmp_path, env=_staged_env(), capture_output=True, text=True
+    )
     assert result.returncode == 1, result.stdout + result.stderr
     assert "EX002" in result.stdout
     assert not (tmp_path / "executed").exists()
@@ -407,10 +417,8 @@ def test_comment_checks_preserve_history_and_reject_new_noise_in_a_pr(tmp_path: 
 
 def test_live_repo_baseline_respects_precision_bounds() -> None:
     root = CHECKER.parents[2]
-    tracked = subprocess.check_output(
-        ["git", "-C", str(root), "ls-files", "verl_omni", "examples"],
-        text=True,
-    ).splitlines()
+    tracked_raw = subprocess.check_output(["git", "-C", str(root), "ls-files", "-z", "verl_omni", "examples"])
+    tracked = [rel for rel in os.fsdecode(tracked_raw).split("\0")[:-1] if not (root / rel).is_symlink()]
     counts: Counter[str] = Counter()
     for rel in tracked:
         raw = (root / rel).read_bytes()
@@ -455,10 +463,13 @@ def test_live_repo_baseline_respects_precision_bounds() -> None:
     assert counts["EX006"] <= 5
     assert counts["EX008"] <= 1
     dead_hits = []
-    for rel in tracked:
-        if not (rel.startswith("verl_omni/") and rel.endswith(".py") and not rel.endswith("/__init__.py")):
+    head_tree_raw = subprocess.check_output(["git", "-C", str(root), "ls-tree", "-r", "-z", "HEAD", "--", "verl_omni"])
+    for entry in os.fsdecode(head_tree_raw).split("\0")[:-1]:
+        meta, rel = entry.split("\t", 1)
+        if not (meta.split()[0].startswith("100") and rel.endswith(".py") and not rel.endswith("/__init__.py")):
             continue
-        for ln, name, kind in _dead_function_candidates((root / rel).read_bytes()):
+        blob = subprocess.check_output(["git", "-C", str(root), "show", f"HEAD:{rel}"])
+        for ln, name, kind in _dead_function_candidates(blob):
             if not _has_external_reference("HEAD", rel, name, root=str(root)):
                 dead_hits.append((rel, ln, name, kind))
     assert not dead_hits, f"Unexpected live-repo dead functions: {dead_hits}"
@@ -475,7 +486,8 @@ def test_live_repo_baseline_respects_precision_bounds() -> None:
             variant_copies += 1
     assert variant_copies <= 17
 
-    test_files = subprocess.check_output(["git", "-C", str(root), "ls-files", "tests"], text=True).splitlines()
+    test_files_raw = subprocess.check_output(["git", "-C", str(root), "ls-files", "-z", "tests"])
+    test_files = [rel for rel in os.fsdecode(test_files_raw).split("\0")[:-1] if not (root / rel).is_symlink()]
     test_counts: Counter[str] = Counter()
     for rel in test_files:
         if not rel.endswith(".py"):
@@ -798,7 +810,7 @@ def test_accelerator_variant_recipes_must_wrap_existing_gpu_base(tmp_path: Path)
 
     for suffix in ("npu", "mlu", "amd", "rocm"):
         (demo / f"run_demo_{suffix}.sh").write_text(
-            "#!/usr/bin/env bash\nset -euo pipefail\n"
+            '#!/usr/bin/env bash\nset -euo pipefail\nSCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd)"\n'
             f'exec bash "$SCRIPT_DIR/run_demo.sh" trainer.device={suffix} "$@"\n',
             encoding="utf-8",
         )
@@ -810,6 +822,18 @@ def test_accelerator_variant_recipes_must_wrap_existing_gpu_base(tmp_path: Path)
     good = subprocess.run([sys.executable, str(CHECKER), base, head], cwd=tmp_path, capture_output=True, text=True)
     assert good.returncode == 0, good.stdout + good.stderr
 
+    # Adding a sibling GPU base next to an existing solo variant requires converting the variant to wrap it.
+    (demo / "run_solo.sh").write_text(
+        '#!/usr/bin/env bash\nset -euo pipefail\npython3 -m verl_omni.trainer.main_diffusion "$@"\n',
+        encoding="utf-8",
+    )
+    added_base = _commit(tmp_path)
+    missing_wrap = subprocess.run(
+        [sys.executable, str(CHECKER), head, added_base], cwd=tmp_path, capture_output=True, text=True
+    )
+    assert missing_wrap.returncode == 1, missing_wrap.stdout + missing_wrap.stderr
+    assert "EX009" in missing_wrap.stdout and "run_solo_npu.sh" in missing_wrap.stdout
+
 
 @pytest.mark.skipif(shutil.which("ruff") is None, reason="The CI workflow supplies pinned Ruff.")
 def test_baseline_preserves_line_shifted_duplicates_subdir_cwd_latin1_unborn_and_renames(tmp_path: Path) -> None:
@@ -819,7 +843,7 @@ def test_baseline_preserves_line_shifted_duplicates_subdir_cwd_latin1_unborn_and
     # Staged mode works on an unborn HEAD before any commit exists.
     (sub / "test_unborn_cpu.py").write_text("", encoding="utf-8")
     _git(tmp_path, "add", "tests/test_unborn_cpu.py")
-    unborn = subprocess.run([sys.executable, str(CHECKER)], cwd=sub, capture_output=True, text=True)
+    unborn = subprocess.run([sys.executable, str(CHECKER)], cwd=sub, env=_staged_env(), capture_output=True, text=True)
     assert unborn.returncode == 1
     assert "VO007" in unborn.stdout
     (sub / "test_unborn_cpu.py").unlink()
@@ -852,6 +876,7 @@ def test_baseline_preserves_line_shifted_duplicates_subdir_cwd_latin1_unborn_and
     core.write_text("# shift\nimport os\nimport os\n", encoding="utf-8")
     moved = tmp_path / "examples/new/run_legacy_npu.sh"
     moved.parent.mkdir(parents=True)
+    _git(tmp_path, "mv", "examples/old/run_legacy.sh", "examples/new/run_legacy.sh")
     _git(tmp_path, "mv", "examples/old/run_legacy_npu.sh", "examples/new/run_legacy_npu.sh")
     latin1 = tmp_path / "verl_omni/trainer/diffusion/latin1_file.py"
     latin1.write_bytes(b"# -*- coding: latin-1 -*-\nx = 'caf\xe9'\n")
@@ -1014,6 +1039,57 @@ def test_vo019_baseline_rename_last_caller_removal_and_staged_mode(tmp_path: Pat
     staged = pkg / "staged.py"
     staged.write_text("def _staged_dead() -> None:\n    pass\n", encoding="utf-8")
     _git(tmp_path, "add", "verl_omni/utils/staged.py")
-    staged_res = subprocess.run([sys.executable, str(CHECKER)], cwd=tmp_path, capture_output=True, text=True)
+    staged_res = subprocess.run(
+        [sys.executable, str(CHECKER)], cwd=tmp_path, env=_staged_env(), capture_output=True, text=True
+    )
     assert staged_res.returncode == 1, staged_res.stdout + staged_res.stderr
     assert "VO019" in staged_res.stdout and "_staged_dead" in staged_res.stdout
+
+
+def test_cross_command_ex007_is_not_masked_by_fixing_another_command(tmp_path: Path) -> None:
+    _git(tmp_path, "init", "-q")
+    recipe = tmp_path / "examples/demo/run_multi.sh"
+    recipe.parent.mkdir(parents=True)
+    recipe.write_text(
+        "#!/usr/bin/env bash\nset -euo pipefail\n"
+        'python3 train_a.py trainer.total_epochs=1 trainer.total_epochs=2 "$@"\n'
+        'python3 train_b.py trainer.total_epochs=1 "$@"\n',
+        encoding="utf-8",
+    )
+    base = _commit(tmp_path)
+
+    recipe.write_text(
+        "#!/usr/bin/env bash\nset -euo pipefail\n"
+        'python3 train_a.py trainer.total_epochs=1 "$@"\n'
+        'python3 train_b.py trainer.total_epochs=1 trainer.total_epochs=2 "$@"\n',
+        encoding="utf-8",
+    )
+    head = _commit(tmp_path)
+    res = subprocess.run([sys.executable, str(CHECKER), base, head], cwd=tmp_path, capture_output=True, text=True)
+    assert res.returncode == 1, res.stdout + res.stderr
+    assert ":4: EX007" in res.stdout
+
+
+def test_symlink_ignored_and_example_python_compile_errors_caught(tmp_path: Path) -> None:
+    _git(tmp_path, "init", "-q")
+    target = tmp_path / "examples/other/target.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("VALUE = 1\n", encoding="utf-8")
+    base = _commit(tmp_path)
+
+    link = tmp_path / "examples/demo/link.py"
+    link.parent.mkdir(parents=True)
+    os.symlink("../other/target.py", link)
+    head_link = _commit(tmp_path)
+    ok = subprocess.run([sys.executable, str(CHECKER), base, head_link], cwd=tmp_path, capture_output=True, text=True)
+    assert ok.returncode == 0, ok.stdout + ok.stderr
+
+    # Replacing a symlink with a regular file containing a compile-time SyntaxError catches E999.
+    link.unlink()
+    link.write_text("return 1\n", encoding="utf-8")
+    head_bad = _commit(tmp_path)
+    bad = subprocess.run(
+        [sys.executable, str(CHECKER), head_link, head_bad], cwd=tmp_path, capture_output=True, text=True
+    )
+    assert bad.returncode == 1, bad.stdout + bad.stderr
+    assert "E999" in bad.stdout and "examples/demo/link.py" in bad.stdout

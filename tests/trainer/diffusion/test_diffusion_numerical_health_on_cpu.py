@@ -349,3 +349,22 @@ def test_console_parser_handles_csi_erase_tensor_repr_and_non_metric_step_lines(
     assert summary["checked_steps"]["1"]["actor/grad_norm"] == pytest.approx(0.8)
     parsed, _skipped = _checker.load_console_metrics(log)
     assert "trainer_base.py" not in parsed[1]
+
+
+@pytest.mark.parametrize("bad_value", [False, [None], "invalid"])
+def test_non_numeric_jsonl_loss_values_are_rejected(tmp_path: Path, bad_value: object) -> None:
+    jsonl = _write_jsonl(
+        tmp_path / "metrics.jsonl",
+        [
+            {
+                "step": 1,
+                "data": {
+                    "actor/loss": 0.12,
+                    "actor/grad_norm": 0.9,
+                    "actor/kl_loss": bad_value,
+                },
+            }
+        ],
+    )
+    with pytest.raises(ValueError, match="actor/kl_loss"):
+        _checker.check_diffusion_numerical_health(jsonl_path=jsonl, steps=[1])

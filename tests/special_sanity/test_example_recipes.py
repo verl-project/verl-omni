@@ -92,6 +92,11 @@ def test_python_path_literals(source: str, expected: list[str]) -> None:
         ('cat <<EOF\n/home/alice/weights\nEOF\npython trainer.py "$@"', []),
         ('read -r -a ARGS <<< "$INPUT"\npython trainer.py "$@"', []),
         ('python trainer.py \\ \n    "$@"', ["EX001"]),
+        ('echo ok # trailing backslash \\   \npython trainer.py "$@"', []),
+        ('python trainer.py experiment.name="trial#1" "$@"', []),
+        ('args=("$@")\nargs=(trainer.total_epochs=1)\npython trainer.py "${args[@]}"', ["EX002"]),
+        ('args=("$@")\nargs+=(trainer.total_epochs=1)\npython trainer.py "${args[@]}"', []),
+        ('args=("$@")\npython trainer.py "${args[@]}" trainer.total_epochs=1', ["EX002"]),
         ('python trainer.py "$@" trainer.total_epochs=1', ["EX002"]),
         ('if true; then\npython trainer.py "$@"', ["EX001"]),
         ('args=(\n    data.dir=$(pwd)/out\n    "$@"\n)\npython trainer.py "${args[@]}"', []),
@@ -224,6 +229,16 @@ def test_shell_syntax_inspection_never_executes_commands(tmp_path: Path, monkeyp
             "examples/model/run_train.sh",
             '#!/usr/bin/env bash\r\nset -euo pipefail\r\npython trainer.py "$@"\r\n',
             ["EX001", "EX005"],
+        ),
+        (
+            "examples/model/run_train.sh",
+            '#!/usr/bin/env bash\nset -euo pipefail\nset +o pipefail\npython trainer.py "$@"\n',
+            ["EX005"],
+        ),
+        (
+            "examples/model/run_train.sh",
+            '#!/usr/bin/env bash\nset -euo pipefail\nset +e\npython trainer.py "$@"\n',
+            ["EX005"],
         ),
         ("examples/model/RUN_UPPER.SH", 'set -euo pipefail\npython trainer.py "$@"\n', ["EX005"]),
         ("examples/model/setup.sh", "echo ok\n", []),
@@ -396,6 +411,7 @@ def test_shell_safety_and_portability_guards(path: str, source: str, expected: l
         ('bash -n "$SCRIPT_DIR/run_foo.sh"\n', False),
         ('bash "$SCRIPT_DIR/other.sh" --ref "$SCRIPT_DIR/run_foo.sh"\n', False),
         ('bash "$SCRIPT_DIR/../other/run_foo.sh" "$@"\n', False),
+        ("bash '$SCRIPT_DIR/run_foo.sh' \"$@\"\n", False),
         ('python3 -m verl_omni.trainer.main_diffusion trainer.device=npu "$@"\n', False),
         ('# exec bash "$SCRIPT_DIR/run_foo.sh" "$@"\npython3 -m verl_omni.trainer.main_diffusion "$@"\n', False),
         ('cat <<EOF\nbash "$SCRIPT_DIR/run_foo.sh"\nEOF\npython3 -m verl_omni.trainer.main_diffusion "$@"\n', False),
@@ -419,3 +435,12 @@ def test_multiline_shell_findings_report_exact_line_numbers() -> None:
     )
     hits = [(line, code) for line, code, _msg in findings("examples/model/run_train.sh", source.encode())]
     assert hits == [(3, "VO014"), (7, "VO014"), (8, "EX007")]
+
+
+def test_bash_syntax_error_reports_line_and_detail() -> None:
+    source = '#!/usr/bin/env bash\nset -euo pipefail\necho ok\nfi\npython3 t.py "$@"\n'
+    hits = [item for item in findings("examples/model/run_train.sh", source.encode()) if item[1] == "EX001"]
+    assert len(hits) == 1
+    line, _code, message = hits[0]
+    assert line == 4
+    assert "bash -n:" in message and "fi" in message

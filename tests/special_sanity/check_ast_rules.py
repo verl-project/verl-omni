@@ -161,7 +161,7 @@ def _reference_name(node: ast.AST) -> str:
 def _mask_loop_vars(node: ast.AST) -> set[str]:
     names = set()
     for child in ast.walk(node):
-        if isinstance(child, ast.comprehension) and _reference_name(child.iter).split("_")[-1] == "mask":
+        if isinstance(child, ast.comprehension) and _reference_name(child.iter).split("_")[-1] in {"mask", "masks"}:
             if isinstance(child.target, ast.Name):
                 names.add(child.target.id)
     return names
@@ -242,6 +242,41 @@ def _cpu_test_names(path: str, tree: ast.AST) -> Iterator[tuple[int, str, str]]:
         yield 1, "VO007", "Name CPU tests test_*_on_cpu.py so the L1 workflow collects them."
 
 
+def _is_pytest_main_call(node: ast.AST | None, pytest_modules: set[str], pytest_mains: set[str]) -> bool:
+    if not isinstance(node, ast.Call):
+        return False
+    function = node.func
+    direct = isinstance(function, ast.Name) and function.id in pytest_mains
+    qualified = (
+        isinstance(function, ast.Attribute)
+        and function.attr == "main"
+        and isinstance(function.value, ast.Name)
+        and function.value.id in pytest_modules
+    )
+    return direct or qualified
+
+
+def _assigned_name_targets(stmt: ast.Assign | ast.AnnAssign) -> list[str] | None:
+    if isinstance(stmt, ast.Assign):
+        if all(isinstance(target, ast.Name) for target in stmt.targets):
+            return [target.id for target in stmt.targets if isinstance(target, ast.Name)]
+        return None
+    if isinstance(stmt.target, ast.Name):
+        return [stmt.target.id]
+    return None
+
+
+def _iter_scope_statements(scope: ast.AST) -> Iterator[ast.stmt]:
+    stack = list(ast.iter_child_nodes(scope))
+    while stack:
+        node = stack.pop()
+        if isinstance(node, ast.stmt):
+            yield node
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+            continue
+        stack.extend(ast.iter_child_nodes(node))
+
+
 def _smoke_exit_status(tree: ast.AST) -> Iterator[tuple[int, str, str]]:
     pytest_modules = set()
     pytest_mains = set()
@@ -250,19 +285,24 @@ def _smoke_exit_status(tree: ast.AST) -> Iterator[tuple[int, str, str]]:
             pytest_modules.update(alias.asname or alias.name for alias in node.names if alias.name == "pytest")
         elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module == "pytest":
             pytest_mains.update(alias.asname or alias.name for alias in node.names if alias.name == "main")
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Expr) or not isinstance(node.value, ast.Call):
-            continue
-        function = node.value.func
-        direct = isinstance(function, ast.Name) and function.id in pytest_mains
-        qualified = (
-            isinstance(function, ast.Attribute)
-            and function.attr == "main"
-            and isinstance(function.value, ast.Name)
-            and function.value.id in pytest_modules
-        )
-        if direct or qualified:
-            yield node.lineno, "VO006", "Check the pytest exit status or propagate it with SystemExit."
+    if not pytest_modules and not pytest_mains:
+        return
+    scopes = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Module | ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef)
+    ]
+    for scope in scopes:
+        loaded = {sub.id for sub in ast.walk(scope) if isinstance(sub, ast.Name) and isinstance(sub.ctx, ast.Load)}
+        for stmt in _iter_scope_statements(scope):
+            if isinstance(stmt, ast.Expr) and _is_pytest_main_call(stmt.value, pytest_modules, pytest_mains):
+                yield stmt.lineno, "VO006", "Check the pytest exit status or propagate it with SystemExit."
+            elif isinstance(stmt, ast.Assign | ast.AnnAssign) and _is_pytest_main_call(
+                stmt.value, pytest_modules, pytest_mains
+            ):
+                targets = _assigned_name_targets(stmt)
+                if targets is not None and all(name == "_" or name not in loaded for name in targets):
+                    yield stmt.lineno, "VO006", "Check the pytest exit status or propagate it with SystemExit."
 
 
 def _private_imports(path: str, tree: ast.AST) -> Iterator[tuple[int, str, str]]:
@@ -462,15 +502,47 @@ def _has_default_value(stmt: ast.AnnAssign, aliases: dict[str, str]) -> bool:
     return True
 
 
-def _calls_super_post_init(method: ast.FunctionDef, aliases: dict[str, str]) -> bool:
+def _expr_calls_super_post_init(node: ast.AST, aliases: dict[str, str]) -> bool:
     return any(
         isinstance(call, ast.Call)
         and isinstance(call.func, ast.Attribute)
         and call.func.attr == "__post_init__"
         and isinstance(call.func.value, ast.Call)
         and _qualified(call.func.value.func, aliases) in {"super", "builtins.super"}
-        for call in ast.walk(method)
+        for call in ast.walk(node)
     )
+
+
+def _stmts_always_call_super_post_init(stmts: list[ast.stmt], aliases: dict[str, str]) -> bool:
+    for stmt in stmts:
+        if isinstance(stmt, ast.Expr | ast.Assign | ast.AnnAssign | ast.Return):
+            if _expr_calls_super_post_init(stmt, aliases):
+                return True
+        elif isinstance(stmt, ast.If):
+            if (
+                stmt.orelse
+                and _stmts_always_call_super_post_init(stmt.body, aliases)
+                and _stmts_always_call_super_post_init(stmt.orelse, aliases)
+            ):
+                return True
+        elif isinstance(stmt, ast.With | ast.AsyncWith):
+            if _stmts_always_call_super_post_init(stmt.body, aliases):
+                return True
+        elif isinstance(stmt, ast.Try | ast.TryStar):
+            if _stmts_always_call_super_post_init(stmt.finalbody, aliases) or (
+                _stmts_always_call_super_post_init(stmt.body, aliases)
+                and all(
+                    _stmts_always_call_super_post_init(handler.body, aliases)
+                    or any(isinstance(sub, ast.Raise) for sub in handler.body)
+                    for handler in stmt.handlers
+                )
+            ):
+                return True
+    return False
+
+
+def _calls_super_post_init(method: ast.FunctionDef, aliases: dict[str, str]) -> bool:
+    return _stmts_always_call_super_post_init(method.body, aliases)
 
 
 def _config_dataclasses(tree: ast.AST, aliases: dict[str, str]) -> Iterator[tuple[int, str, str]]:
@@ -788,11 +860,14 @@ def _is_trivial_scalar_parse_try(try_node: ast.Try | ast.TryStar) -> bool:
         call = sole.value
     elif isinstance(sole, ast.Assign):
         call = sole.value
-    return (
+    if not (
         isinstance(call, ast.Call)
         and isinstance(call.func, ast.Name)
         and call.func.id in {"int", "float", "bool", "complex"}
-    )
+    ):
+        return False
+    arg_nodes = [*call.args, *(keyword.value for keyword in call.keywords)]
+    return not any(isinstance(sub, ast.Call) for arg in arg_nodes for sub in ast.walk(arg))
 
 
 def _artifact_contract_errors(tree: ast.AST, aliases: dict[str, str]) -> Iterator[tuple[int, str, str]]:
@@ -800,6 +875,7 @@ def _artifact_contract_errors(tree: ast.AST, aliases: dict[str, str]) -> Iterato
     for try_node in try_nodes:
         handled_contract = False
         trivial_scalar = _is_trivial_scalar_parse_try(try_node)
+        is_star = isinstance(try_node, ast.TryStar)
         for handler in try_node.handlers:
             unconditional_raise = _unconditionally_raises_before_fallback(handler.body)
             if handler.type is None:
@@ -820,7 +896,7 @@ def _artifact_contract_errors(tree: ast.AST, aliases: dict[str, str]) -> Iterato
                 )
                 and not handled_contract
                 and not unconditional_raise
-                and not _reraises_contract_in_body(handler, aliases)
+                and (is_star or not _reraises_contract_in_body(handler, aliases))
                 and _returns_or_sets_fallback_score(handler.body)
             ):
                 yield handler.lineno, "VO016", "Propagate ArtifactContractError before fallback score handling."
@@ -1036,10 +1112,12 @@ def _test_has_source_grep(
     return False
 
 
+def _uses_ast_parse(node: ast.AST, aliases: dict[str, str]) -> bool:
+    return any(isinstance(sub, ast.Call) and _qualified(sub.func, aliases) == "ast.parse" for sub in ast.walk(node))
+
+
 def _source_grep_tests(path: str, tree: ast.AST, aliases: dict[str, str]) -> Iterator[tuple[int, str, str]]:
     if path.startswith("tests/special_sanity/"):
-        return
-    if any(isinstance(node, ast.Call) and _qualified(node.func, aliases) == "ast.parse" for node in ast.walk(tree)):
         return
     py_path_vars: set[str] = set()
     dir_vars: set[str] = set()
@@ -1053,9 +1131,12 @@ def _source_grep_tests(path: str, tree: ast.AST, aliases: dict[str, str]) -> Ite
 
     all_funcs = [node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)]
     helper_names: set[str] = set()
+    ast_parse_helpers: set[str] = set()
     for fn in all_funcs:
         if fn.name.startswith("test_"):
             continue
+        if _uses_ast_parse(fn, aliases):
+            ast_parse_helpers.add(fn.name)
         local_py, local_dirs, file_vars, src_vars = _collect_fn_source_state(
             fn, py_path_vars, dir_vars, helper_names, aliases
         )
@@ -1069,6 +1150,10 @@ def _source_grep_tests(path: str, tree: ast.AST, aliases: dict[str, str]) -> Ite
 
     for fn in all_funcs:
         if not fn.name.startswith("test_"):
+            continue
+        if _uses_ast_parse(fn, aliases) or any(
+            isinstance(sub, ast.Call) and _reference_name(sub.func) in ast_parse_helpers for sub in ast.walk(fn)
+        ):
             continue
         local_py, local_dirs, file_vars, src_vars = _collect_fn_source_state(
             fn, py_path_vars, dir_vars, helper_names, aliases
