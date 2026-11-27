@@ -1,6 +1,6 @@
 # Named Reward Models
 
-Last updated: 11/26/2026
+Last updated: 11/27/2026
 
 This guide describes how to configure and extend named model-backed rewards
 under `reward.models` in `verl-omni`. For the general Reward Loop interface and
@@ -75,6 +75,23 @@ the latter exactly matches the projected entries, including order; an explicit
 `reward.custom_reward_function.path` conflicts. Unknown entry fields and
 manager metadata inside `kwargs` are rejected. The fragment above is a
 configuration example, not a completed training run.
+
+To migrate a launcher already using the built-in visual multi-reward manager,
+keep the manager, named deployments, and reward-pool settings. Rewrite the
+overrides for each term in its existing order:
+
+| Flat override | Explicit override |
+| --- | --- |
+| `reward.reward_functions.<term>.path` and `.name` | `reward.scorers.<term>.path` and `.name` |
+| `reward.reward_functions.<term>.model`, `.weight`, and `.required` | The same fields under `reward.scorers.<term>` |
+| `reward.reward_functions.<term>.independent`, `.routing_weights`, and `.use_rollout_sampling_params` | The same fields under `reward.scorers.<term>` |
+| `reward.reward_functions.<term>.<scorer_arg>` | `reward.scorers.<term>.kwargs.<scorer_arg>` |
+
+For example, move the MiniMax H3 CLAP model override to
+`reward.scorers.clap.kwargs.model_name_or_path`, while the ImageBind
+`model=imagebind` binding stays at `reward.scorers.imagebind.model`.
+Remove the old flat overrides and the `_multi_reward_placeholder` override
+if present. Keep a real custom reward function on its existing manager.
 
 ## Native replica scheduling
 
