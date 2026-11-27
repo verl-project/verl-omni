@@ -27,7 +27,7 @@ from vllm_omni.diffusion.models.minimax_h3.pipeline_minimax_h3_image import (
 
 from verl_omni.pipelines.minimax_h3_diffusion_nft.common import prepare_h3_processor_files, validate_lora_target_modules
 from verl_omni.pipelines.minimax_h3_flow_grpo.common import configure_flow_scheduler, sample_h3_transition
-from verl_omni.pipelines.minimax_h3_image_flow_grpo.common import parse_image_latent_meta
+from verl_omni.pipelines.minimax_h3_image_diffusion_nft.common import parse_image_latent_meta
 from verl_omni.pipelines.model_base import DiffusionModelBase
 from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
 

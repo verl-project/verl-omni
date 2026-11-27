@@ -33,9 +33,7 @@ from verl_omni.pipelines.minimax_h3_diffusion_nft.common import (
     _PromptTokenOverride,
 )
 from verl_omni.pipelines.minimax_h3_flow_grpo.common import configure_flow_scheduler, sample_h3_transition
-from verl_omni.pipelines.minimax_h3_image_flow_grpo.common import (
-    image_latent_meta,
-)
+from verl_omni.pipelines.minimax_h3_image_diffusion_nft.common import image_latent_meta
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
 from verl_omni.pipelines.request_batch import sample_per_sample_sde_windows
 from verl_omni.pipelines.rollout_media import DiffusionIOSpec, MediaSpec

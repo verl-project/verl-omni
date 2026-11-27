@@ -33,7 +33,6 @@ from torch import nn
 __all__ = ["install_rollout_kernels", "rollout_kernels_enabled"]
 
 _FLAG = "_minimax_h3_rollout_kernels"
-SWITCHES = {"adaln": True, "qk_norm_rope": True, "rms_norm": True, "lora_addmm": True, "attention": "TORCH_SDPA"}
 CALLS = {"kernel": 0, "stock": 0}
 ATTENTION_SEGMENTS: dict[int, list[tuple[int, int]]] = {}
 
@@ -41,18 +40,15 @@ ATTENTION_SEGMENTS: dict[int, list[tuple[int, int]]] = {}
 def _rollout_attention_kernel(sequence_length: int, padded: bool):
     """The SDPA kernel the rollout ends up on for one packed image document.
 
-    The rollout pads the packed sequence and, on its ``TORCH_SDPA`` backend, masks the padding keys; torch then
-    leaves the flash kernel for the memory-efficient one. Its ``CUDNN_ATTN`` backend slices the padding off.
-    The token refiner runs on the unpadded text rows (``padded=False``).
+    The rollout pads the packed sequence and masks the padding keys; torch then
+    leaves the flash kernel for the memory-efficient one. The token refiner runs
+    on the unpadded text rows (``padded=False``).
     """
     from contextlib import nullcontext
 
     from torch.nn.attention import SDPBackend, sdpa_kernel
 
-    backend = SWITCHES["attention"]
-    if backend == "CUDNN_ATTN":
-        return sdpa_kernel([SDPBackend.CUDNN_ATTENTION])
-    if backend == "TORCH_SDPA" and padded:
+    if padded:
         from vllm_omni.diffusion.models.minimax_h3.pipeline_minimax_h3_image import _image_packed_seq_len
 
         if _image_packed_seq_len(sequence_length) != sequence_length:
@@ -81,7 +77,7 @@ def _kernel_ready(x: torch.Tensor) -> bool:
 
 def _rms_norm(norm: nn.RMSNorm, x: torch.Tensor) -> torch.Tensor:
     """RMSNorm over the last axis with the rollout's fused kernel."""
-    if not (SWITCHES["rms_norm"] and _kernel_ready(x)):
+    if not _kernel_ready(x):
         return norm._stock_forward(x) if hasattr(norm, "_stock_forward") else norm(x)
     from vllm._custom_ops import rms_norm
 
@@ -98,7 +94,7 @@ def _modulate_reference(normalized: torch.Tensor, shift, scale, indices) -> torc
 
 
 def _block_forward(self, hidden_states, temb, adaln_indices, rotary_emb, attention_mask=None):
-    if not (SWITCHES["adaln"] and _kernel_ready(hidden_states) and hidden_states.shape[0] == 1):
+    if not (_kernel_ready(hidden_states) and hidden_states.shape[0] == 1):
         CALLS["stock"] += 1
         return self._stock_forward(hidden_states, temb, adaln_indices, rotary_emb, attention_mask)
     from vllm_omni.diffusion.layers.indexed_modulation import (
@@ -162,7 +158,7 @@ def _norm_forward(self, hidden_states):
 
 
 def _norm_out_forward(self, hidden_states, temb, timestep_indices):
-    if not (SWITCHES["adaln"] and _kernel_ready(hidden_states) and hidden_states.shape[0] == 1):
+    if not (_kernel_ready(hidden_states) and hidden_states.shape[0] == 1):
         return self._stock_forward(hidden_states, temb, timestep_indices)
     from diffusers.models.modeling_utils import get_parameter_dtype
     from vllm_omni.diffusion.layers.indexed_modulation import indexed_scale_shift_
@@ -200,7 +196,7 @@ class MiniMaxH3RolloutKernelAttnProcessor:
         key = attn.to_k(hidden_states).unflatten(-1, (attn.heads, -1))
         value = attn.to_v(hidden_states).unflatten(-1, (attn.heads, -1))
 
-        fused = SWITCHES["qk_norm_rope"] and _kernel_ready(query) and query.shape[0] == 1
+        fused = _kernel_ready(query) and query.shape[0] == 1
         if rotary_emb is None:
             query = _rms_norm(attn.norm_q, query) if fused else attn.norm_q(query)
             key = _rms_norm(attn.norm_k, key) if fused else attn.norm_k(key)
@@ -263,8 +259,7 @@ def _lora_linear_forward(self, x, *args, **kwargs):
     """PEFT LoRA linear with the rollout's expand step: one ``addmm`` into the base output."""
     adapters = [name for name in self.active_adapters if name in self.lora_A]
     plain = (
-        SWITCHES["lora_addmm"]
-        and not args
+        not args
         and not kwargs
         and not self.disable_adapters
         and not self.merged

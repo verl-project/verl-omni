@@ -862,13 +862,6 @@ class MiniMaxH3WeightSyncBase:
         if missing:
             transformer.stacked_params_mapping = [*existing, *missing]
 
-
-class MiniMaxH3RolloutWeightSyncMixin(MiniMaxH3WeightSyncBase):
-    """Keep NFT's prompt encoding, transformer selection and first-sync RoPE policy."""
-
-    _h3_sync_components = ("transformer",)
-    _h3_initialize_rope = True
-
     def encode_prompt(self, prepared):
         """Encode Agent Loop IDs while letting vLLM-Omni build reference vision spans.
 
@@ -885,6 +878,13 @@ class MiniMaxH3RolloutWeightSyncMixin(MiniMaxH3WeightSyncBase):
             finally:
                 self.tokenizer = tokenizer
         return super().encode_prompt(prepared)
+
+
+class MiniMaxH3RolloutWeightSyncMixin(MiniMaxH3WeightSyncBase):
+    """Keep NFT's prompt encoding, transformer selection and first-sync RoPE policy."""
+
+    _h3_sync_components = ("transformer",)
+    _h3_initialize_rope = True
 
     def _install_lora_layout(self) -> None:
         self.install_h3_lora_layout()
