@@ -267,7 +267,9 @@ class ARStrategy(OmniStrategyBase):
         )
         stage_extras = {
             stage.stage_id: dict(
-                adapter_cls.get_stage_engine_extras(stage.stage_id, pipeline_mode=pipeline_mode, model_config=self.server.model_config)
+                adapter_cls.get_stage_engine_extras(
+                    stage.stage_id, pipeline_mode=pipeline_mode, model_config=self.server.model_config
+                )
             )
             for stage in stages
         }

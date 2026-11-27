@@ -113,6 +113,7 @@ class TestConditioningConstruction(unittest.TestCase):
 
     def test_normalize_projected_hidden(self):
         import torch.nn.functional as F
+
         hidden_embeds = torch.randn(1, 5, 768)
         normalized = F.normalize(hidden_embeds, p=2, dim=-1)
         norms = normalized.norm(dim=-1)
@@ -177,7 +178,6 @@ class TestThinkerStageForward(unittest.TestCase):
         self.assertIn('model_inputs["input_ids"] = text_buffer', src)
 
 
-
 class TestCodecPaddingSlice(unittest.TestCase):
     """The padded codec row must be sliced to its true length before scoring."""
 
@@ -199,7 +199,6 @@ class TestAsyncChunkValidation:
     """async_chunk is validated per pipeline mode."""
 
     def _load_adapter(self):
-        import importlib.util
         path = Path(__file__).parent.parent.parent / "verl_omni" / "pipelines" / "minicpm" / "omni_rollout_adapter.py"
         src = path.read_text()
         # Verify validate_async_chunk exists in the source (can't import the
@@ -217,8 +216,9 @@ class TestAsyncChunkValidation:
 
     def test_thinker_only_default_true(self):
         src = self._load_adapter()
-        assert "return async_chunk if async_chunk is not None else True" in src, \
+        assert "return async_chunk if async_chunk is not None else True" in src, (
             "thinker_only absent async_chunk defaults to true"
+        )
 
     def test_validate_method_exists(self):
         src = self._load_adapter()

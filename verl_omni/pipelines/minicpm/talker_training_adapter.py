@@ -132,10 +132,25 @@ def _minicpm_talker_forward(
         tts_audio_codes,
         tts_codec_lens,
     )
-    missing = [name for name, value in zip(
-        ("tts_policy_ids", "attention_mask", "data", "tts_text_ids", "tts_text_lens",
-         "tts_response_starts", "tts_response_ends", "tts_audio_codes", "tts_codec_lens"),
-        required) if value is None]
+    missing = [
+        name
+        for name, value in zip(
+            (
+                "tts_policy_ids",
+                "attention_mask",
+                "data",
+                "tts_text_ids",
+                "tts_text_lens",
+                "tts_response_starts",
+                "tts_response_ends",
+                "tts_audio_codes",
+                "tts_codec_lens",
+            ),
+            required,
+            strict=True,
+        )
+        if value is None
+    ]
     if missing:
         raise RuntimeError(f"MiniCPM talker forward is missing fields: {missing}. present={sorted(llm_kwargs)}")
 
@@ -161,9 +176,7 @@ def _minicpm_talker_forward(
         end = int(tts_response_ends[index])
         codec_len = int(tts_codec_lens[index])
         if not 0 <= start < end <= int(tts_text_lens[index]):
-            raise ValueError(
-                f"MiniCPM talker replay span is invalid for sample {index}: [{start}, {end})."
-            )
+            raise ValueError(f"MiniCPM talker replay span is invalid for sample {index}: [{start}, {end}).")
         text_rows.append(tts_text_ids[index, start:end])
         hidden_rows.append(hidden_states[index, start:end, :])
         # Slice the padding off: the padded row would teacher-force zeros
@@ -324,10 +337,7 @@ class MiniCPMTalkerAdapter(OmniModelBase):
                 f"MiniCPM-o talker actor inputs require the {MINICPM_TALKER_REPLAY_KEY!r} replay payload."
             )
         fields = [item[MINICPM_TALKER_REPLAY_KEY] for item in sample_extra_fields]
-        if any(
-            "text_ids" not in item or "audio_codes" not in item or "response_start" not in item
-            for item in fields
-        ):
+        if any("text_ids" not in item or "audio_codes" not in item or "response_start" not in item for item in fields):
             raise RuntimeError(
                 "MiniCPM-o talker replay payloads must contain text_ids, response_start and audio_codes."
             )
@@ -353,9 +363,7 @@ class MiniCPMTalkerAdapter(OmniModelBase):
             response_len = int(code.numel())
             response_start = int(attention_mask[index].sum()) - response_len
             if response_start < 1 or response_start + response_len > input_ids.shape[1]:
-                raise ValueError(
-                    f"Invalid MiniCPM-o talker response alignment for sample {index}."
-                )
+                raise ValueError(f"Invalid MiniCPM-o talker response alignment for sample {index}.")
             if not torch.equal(
                 input_ids[index, response_start : response_start + response_len].long(), code.to(input_ids.device)
             ):

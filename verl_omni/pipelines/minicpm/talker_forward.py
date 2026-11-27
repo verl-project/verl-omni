@@ -54,7 +54,7 @@ class TalkerTokens:
     normalize_projected_hidden: bool
 
     @classmethod
-    def from_config(cls, config) -> "TalkerTokens":
+    def from_config(cls, config) -> TalkerTokens:
         tts = config.tts_config
         return cls(
             int(tts.text_eos_token_id),
@@ -146,9 +146,7 @@ def build_talker_batch(
             raise ValueError("MiniCPM talker codec ids are outside the codec vocabulary.")
         conditioning = build_conditioning(model, text.unsqueeze(0), hidden.unsqueeze(0))[0]
         codec_embeds = model.tts.emb_code[0](codes)
-        rows.append(
-            torch.cat([conditioning, text_eos, audio_bos, codec_embeds[:-1]], dim=0)
-        )
+        rows.append(torch.cat([conditioning, text_eos, audio_bos, codec_embeds[:-1]], dim=0))
         cond_lens.append(int(conditioning.shape[0]))
         codec_lens.append(int(codes.numel()))
 
@@ -158,7 +156,12 @@ def build_talker_batch(
     for index, row in enumerate(rows):
         input_embeds[index, : row.shape[0]] = row
         attention_mask[index, : row.shape[0]] = 1
-    return TalkerBatch(input_embeds=input_embeds, attention_mask=attention_mask, cond_lens=cond_lens, codec_lens=codec_lens)
+    return TalkerBatch(
+        input_embeds=input_embeds,
+        attention_mask=attention_mask,
+        cond_lens=cond_lens,
+        codec_lens=codec_lens,
+    )
 
 
 def talker_logits(model, batch: TalkerBatch) -> torch.Tensor:
@@ -210,11 +213,10 @@ def minicpm_talker_actor_logits(
 
     batch_size, output_len = input_ids.shape
     if logits.shape[2] != tokens.num_audio_tokens:
-        raise RuntimeError(
-            f"Talker head produced vocab {logits.shape[2]}, expected {tokens.num_audio_tokens}."
-        )
+        raise RuntimeError(f"Talker head produced vocab {logits.shape[2]}, expected {tokens.num_audio_tokens}.")
     aligned = logits.new_zeros((batch_size, output_len, tokens.num_audio_tokens))
     import logging
+
     for index in range(batch_size):
         response_len = int(batch.codec_lens[index])
         response_start = int(attention_mask[index].sum()) - response_len
@@ -225,7 +227,8 @@ def minicpm_talker_actor_logits(
             # right-most response span instead of failing the step.
             logging.getLogger(__name__).warning(
                 "MiniCPM talker response_start=%d from mask arithmetic; using right-aligned span of %d",
-                response_start, response_len,
+                response_start,
+                response_len,
             )
             response_start = max(1, output_len - response_len)
         policy_ids = input_ids[index, response_start : response_start + response_len].long()
@@ -233,7 +236,8 @@ def minicpm_talker_actor_logits(
         if not torch.equal(policy_ids, codec_ids):
             logging.getLogger(__name__).warning(
                 "MiniCPM talker codec trajectory mismatch at sample=%d (engine pipeline owns alignment; "
-                "continuing with right-aligned positions)", index,
+                "continuing with right-aligned positions)",
+                index,
             )
         # audio_bos at position cond_len + 1 predicts codec_0; position
         # cond_len + 1 + j predicts codec_j.
