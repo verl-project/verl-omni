@@ -23,14 +23,7 @@ from pathlib import Path
 # === CONFIGURATION ===
 
 # Relative paths (to docs/) or glob patterns to skip checking
-ALLOW_LIST = {
-    "docs/README.md",  # you can list individual files
-    "docs/legacy/*.rst",  # or glob patterns
-    "docs/index.rst",
-    "docs/start/install.rst",
-    "docs/start/quickstart.rst",
-    "docs/README_vllm0.7.md",
-}
+ALLOW_LIST = set()
 
 # The folder to scan
 DOCS_DIR = Path("docs")

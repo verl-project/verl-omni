@@ -18,8 +18,8 @@ things here are enforcement facts rather than guidance.
 (the hook discovers them automatically — `agent_loop`, `models`, `pipelines`,
 `reward_loop`, `trainer`, `utils`, `workers`, `experimental`, `tools`,
 `model_merger`, `version`, and later additions) or
-one of `special_{e2e,standalone,sanity,distributed}`. A test at the `tests/` root
-fails — three legacy root files are explicitly allowlisted.
+one of `special_{e2e,sanity,standalone,distributed}`. A test at the `tests/` root
+fails.
 
 Nested directories are fine (`tests/utils/reward_score/`). `check-pr-lint` additionally
 enforces `test_*_on_cpu.py` naming for CPU tests (`VO007`), topology helpers instead of

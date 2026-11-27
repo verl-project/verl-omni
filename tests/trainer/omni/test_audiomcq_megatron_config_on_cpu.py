@@ -28,6 +28,7 @@ LAUNCHER = REPO_ROOT / "examples/gspo_trainer/qwen3_omni/run_qwen3_omni_megatron
 def public_recipe_config(tmp_path_factory):
     output_dir = tmp_path_factory.mktemp("audiomcq-config") / "artifacts"
     env = os.environ.copy()
+    env.pop("VERL_USE_EXTERNAL_MODULES", None)  # the default case is asserted below
     env.update(
         {
             "AUDIO_MCQ_CONFIG_ONLY": "1",

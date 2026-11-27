@@ -40,9 +40,7 @@ python3 -m verl_omni.trainer.main_diffusion
 
 The V1 trainer (TransferQueue) is the default since v0.3.0, but this NPU
 launcher still uses the **deprecated** v0 trainer until an NPU V1 recipe for
-Qwen-Image FlowGRPO lands (tracked in
-[verl-project/verl-omni#389](https://github.com/verl-project/verl-omni/issues/389));
-expect a `DeprecationWarning` at launch. CUDA users should start from the V1
+Qwen-Image FlowGRPO lands; expect a `DeprecationWarning` at launch. CUDA users should start from the V1
 recipe instead — see {doc}`flowgrpo_quickstart`.
 
 Checkpoints are saved to:

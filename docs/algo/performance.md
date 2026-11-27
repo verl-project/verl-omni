@@ -84,10 +84,6 @@ The run was resumed from step 50 and continued through step 235 without changing
 or tuning the training configuration. The recorded full-validation curve extends
 through step 220; each point is the mean choice reward over the same validation set.
 
-<div align="center">
-<img width="800" alt="Single-seed AVQA validation reward from step 0 to 220: 0.728414 initially, best 0.869702 at step 180, and 0.866039 at step 220" src="https://raw.githubusercontent.com/WenzheWang/verl-omni/e956f8f5f15b0124681ac1f8d2dc0e4cacdc02fb/.github/pr-assets/456/qwen3-omni-thinker-dapo-avqa-validation-long-curve.png" />
-</div>
-
 | Checkpoint | Step | Validation reward |
 |------------|------|-------------------|
 | Initial | 0 | 0.728414 |
@@ -97,7 +93,7 @@ through step 220; each point is the mean choice reward over the same validation 
 
 Validation reward improved by 14.1287 percentage points from the initial to the
 best checkpoint. At steps 150–220, it fluctuated between `0.858189` and `0.869702`.
-The curve shows observed values without smoothing or interpolation; it does not
+These are observed values without smoothing or interpolation; they do not
 reach the GSPO+LoRA reference value of `0.88` in this window.
 
 The GSPO reference uses a different validation sampling configuration
