@@ -154,7 +154,6 @@ def launch(monkeypatch):
 def _launch_config(tool):
     cfg = config(tool=tool, rollout=False)
     cfg.ray_kwargs = {"ray_init": {}}
-    cfg.reward = {"reward_model": {"enable": False}}
     return cfg
 
 

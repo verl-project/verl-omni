@@ -33,7 +33,6 @@ from verl_omni.workers.config.reward import (
     has_fsdp_reward_models,
     normalize_reward_config,
     parse_reward_model_config,
-    reward_determinism_env,
     validate_reward_model_terms,
     warn_deprecated_reward_config,
 )
@@ -79,7 +78,6 @@ def run_diffusion_v1(config, task_runner_class=None) -> None:
     # TRANSFER_QUEUE_ENABLE is exported to every worker through the runtime env.
     config.transfer_queue.enable = True
     enable_rl_insight(config)
-    os.environ.update(reward_determinism_env(config))
 
     ray_init_kwargs = config.ray_kwargs.get("ray_init", {})
     # Merge into a fresh config: user-provided env_vars may be in struct mode.

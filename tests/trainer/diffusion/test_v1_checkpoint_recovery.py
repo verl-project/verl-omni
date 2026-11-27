@@ -90,23 +90,22 @@ def test_typed_empty_pool_survives_ray_and_recovers(initialized_tq):
         ray.kill(router)
 
 
-def test_preinitialized_ray_forwards_reward_environment(initialized_tq, tmp_path, monkeypatch):
-    """An existing Ray job passes startup settings to the runner and its child tasks."""
+def test_preinitialized_ray_forwards_transfer_queue_environment(initialized_tq, tmp_path, monkeypatch):
+    """An existing Ray job passes the required TransferQueue flag to runner descendants."""
     from verl_omni.trainer.main_diffusion_v1 import run_diffusion_v1
 
-    keys = ("VERL_FULL_DETERMINISM", "VLLM_BATCH_INVARIANT", "PYTHONHASHSEED", "TRANSFER_QUEUE_ENABLE")
-    for key in keys:
-        monkeypatch.setenv(key, "0")
+    keys = ("TRANSFER_QUEUE_ENABLE", "OMP_NUM_THREADS")
+    monkeypatch.setenv("TRANSFER_QUEUE_ENABLE", "0")
 
     @ray.remote(num_cpus=0)
     class EnvironmentRunner:
         def run(self, config):
             @ray.remote(num_cpus=0)
             def environment():
-                return {key: os.environ.get(key) for key in (*keys, "OMP_NUM_THREADS")}
+                return {key: os.environ.get(key) for key in keys}
 
             result = {
-                "runner": {key: os.environ.get(key) for key in (*keys, "OMP_NUM_THREADS")},
+                "runner": {key: os.environ.get(key) for key in keys},
                 "child": ray.get(environment.remote()),
             }
             (tmp_path / "environment.json").write_text(json.dumps(result))
@@ -116,13 +115,10 @@ def test_preinitialized_ray_forwards_reward_environment(initialized_tq, tmp_path
             "trainer": {"logger": []},
             "transfer_queue": {"enable": False},
             "ray_kwargs": {"ray_init": {"runtime_env": {"env_vars": {"OMP_NUM_THREADS": "2"}}}},
-            "reward": {
-                "reward_model": {"enable": True, "rollout": {"full_determinism": True, "seed": 17}},
-            },
         }
     )
     run_diffusion_v1(config, task_runner_class=EnvironmentRunner)
-    expected = dict(zip(keys, ("1", "1", "17", "1"), strict=True), OMP_NUM_THREADS="2")
+    expected = {"TRANSFER_QUEUE_ENABLE": "1", "OMP_NUM_THREADS": "2"}
     assert json.loads((tmp_path / "environment.json").read_text()) == {"runner": expected, "child": expected}
 
 
