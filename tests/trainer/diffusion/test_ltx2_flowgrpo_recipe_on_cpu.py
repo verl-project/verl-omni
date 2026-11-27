@@ -35,8 +35,9 @@ _EXAMPLES = _ROOT / "examples/flowgrpo_trainer/ltx2"
 
 
 @pytest.mark.parametrize(("recipe", "device"), [("t2av", "cuda"), ("t2av", "npu"), ("ti2va", "cuda")])
-def test_ltx2_v1_recipe_projects_explicit_scorers(tmp_path, recipe, device):
-    """Pass the launcher's real Hydra arguments through the scorer normalizer."""
+@pytest.mark.parametrize("override_form", ["default", "explicit", "legacy"])
+def test_ltx2_v1_recipe_reward_overrides(tmp_path, recipe, device, override_form):
+    """Compose the real launch arguments and load the configured reward manager."""
     commands = tmp_path / "bin"
     commands.mkdir()
     capture = tmp_path / "trainer-argv"
@@ -65,8 +66,20 @@ def test_ltx2_v1_recipe_projects_explicit_scorers(tmp_path, recipe, device):
         "CLAP_MODEL_PATH": model_path,
         "CAPTURE": str(capture),
     }
+    overrides = []
+    if override_form == "explicit":
+        overrides = [
+            'reward.scorers.clap.kwargs.model_name_or_path="test/override=clap"',
+            "reward.scorers.imagebind.kwargs.mode=text_video",
+        ]
+    elif override_form == "legacy":
+        overrides = [
+            'reward.reward_functions.clap.model_name_or_path="test/override=clap"',
+            "++reward.reward_functions.imagebind.mode=text_video",
+            "+reward.reward_functions.imagebind.required=true",
+        ]
     subprocess.run(
-        ["bash", str(_EXAMPLES / f"run_ltx2_3_{recipe}_lora_v1.sh")],
+        ["bash", str(_EXAMPLES / f"run_ltx2_3_{recipe}_lora_v1.sh"), *overrides],
         cwd=_ROOT,
         env=env,
         check=True,
@@ -78,15 +91,26 @@ def test_ltx2_v1_recipe_projects_explicit_scorers(tmp_path, recipe, device):
     with initialize_config_dir(config_dir=str(_CONFIG_DIR), version_base=None):
         config = compose(config_name="diffusion_trainer", overrides=argv[2:])
 
-    assert config.reward.custom_reward_function.path is None
-    assert not config.reward.reward_functions
+    if override_form == "legacy":
+        assert config.reward.custom_reward_function.name == "_multi_reward_placeholder"
+        assert config.reward.get("scorers") is None
+    else:
+        assert config.reward.custom_reward_function.path is None
+        assert not config.reward.reward_functions
     normalized = normalize_reward_config(config)
     validate_reward_model_terms(normalized)
     expected_clap_kwargs = {
         "device": f"{device}:0",
         "model_name_or_path": model_path if recipe == "t2av" else "laion/larger_clap_general",
     }
-    assert OmegaConf.to_container(normalized.reward.scorers.clap.kwargs) == expected_clap_kwargs
+    expected_imagebind = {"mode": "audio_video"}
+    if overrides:
+        expected_clap_kwargs["model_name_or_path"] = "test/override=clap"
+        expected_imagebind["mode"] = "text_video"
+    if override_form == "legacy":
+        expected_imagebind["required"] = True
+    else:
+        assert OmegaConf.to_container(normalized.reward.scorers.clap.kwargs) == expected_clap_kwargs
     projected = OmegaConf.to_container(normalized.reward.reward_functions)
     assert list(projected) == ["clap", "imagebind"]
     assert projected == {
@@ -101,7 +125,7 @@ def test_ltx2_v1_recipe_projects_explicit_scorers(tmp_path, recipe, device):
             "name": "compute_score_native",
             "weight": 1.0,
             "model": "imagebind",
-            "mode": "audio_video",
+            **expected_imagebind,
         },
     }
     assert resolve_reward_model_name("imagebind", projected["imagebind"], normalized.reward.models) == "imagebind"

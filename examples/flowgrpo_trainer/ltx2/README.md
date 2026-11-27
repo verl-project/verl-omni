@@ -94,10 +94,13 @@ The V1 T2AV and TI2VA launchers configure CLAP and ImageBind under
 `reward.scorers.imagebind.kwargs.mode` for the ImageBind scoring mode.
 The ImageBind deployment still uses `reward.models.imagebind`.
 
-When adapting these launchers, use the `reward.scorers` overrides above in
-place of the old flat `reward.reward_functions` overrides. See
+Existing commands can continue to pass flat `reward.reward_functions` overrides.
+The launchers use the legacy reward defaults when a command passes a key in
+that section. For new commands, use `reward.scorers` overrides, such as
+`reward.scorers.clap.kwargs.model_name_or_path=/path/to/clap`. Use one form
+per command. See
 [Explicit scorer entries](../../../docs/algo/named_reward_models.md#explicit-scorer-entries)
-for the supported fields and the rules for combining the two forms.
+for the supported fields.
 
 ### T2AV GPU
 

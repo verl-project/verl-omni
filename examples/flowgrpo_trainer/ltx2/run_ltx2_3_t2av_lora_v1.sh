@@ -88,6 +88,21 @@ fi
 CLAP_MODEL_PATH=${CLAP_MODEL_PATH:-laion/larger_clap_general}
 IMAGEBIND_MODEL_PATH=${IMAGEBIND_MODEL_PATH:-$repo_root/.checkpoints/imagebind_huge.pth}
 
+reward_scorer_args=(
+    "+reward.scorers.clap.path=$repo_root/verl_omni/utils/reward_score/clap.py"
+    '+reward.scorers.clap.name=compute_score'
+    '+reward.scorers.clap.weight=1.0'
+    "+reward.scorers.clap.kwargs.device=${REWARD_DEVICE}:0"
+    "+reward.scorers.clap.kwargs.model_name_or_path=$CLAP_MODEL_PATH"
+    '+reward.scorers.imagebind.path=pkg://verl_omni.utils.reward_score.imagebind'
+    '+reward.scorers.imagebind.name=compute_score_native'
+    '+reward.scorers.imagebind.weight=1.0'
+    '+reward.scorers.imagebind.model=imagebind'
+    '+reward.scorers.imagebind.kwargs.mode=audio_video'
+)
+source "${script_path%/*}/reward_overrides.sh" || exit 1
+apply_legacy_reward_overrides "$@"
+
 python3 -m verl_omni.trainer.main_diffusion_v1 \
     trainer.device=$DEVICE \
     data.train_files=$train_path \
@@ -161,21 +176,12 @@ python3 -m verl_omni.trainer.main_diffusion_v1 \
     reward.reward_model.enable=False \
     reward.reward_manager.name=MultiVisualRewardManager \
     reward.reward_manager.module.path=pkg://verl_omni.reward_loop.reward_manager \
-    "+reward.scorers.clap.path=$repo_root/verl_omni/utils/reward_score/clap.py" \
-    '+reward.scorers.clap.name=compute_score' \
-    '+reward.scorers.clap.weight=1.0' \
-    "+reward.scorers.clap.kwargs.device=${REWARD_DEVICE}:0" \
-    "+reward.scorers.clap.kwargs.model_name_or_path=$CLAP_MODEL_PATH" \
+    "${reward_scorer_args[@]}" \
     '+reward.models.imagebind.backend=native' \
     "+reward.models.imagebind.model_path=$IMAGEBIND_MODEL_PATH" \
     '+reward.models.imagebind.offload=false' \
     '+reward.models.imagebind.placement.devices=[1]' \
     '+reward.models.imagebind.executor.model=verl_omni.utils.reward_score.imagebind:ImageBindModel' \
-    '+reward.scorers.imagebind.path=pkg://verl_omni.utils.reward_score.imagebind' \
-    '+reward.scorers.imagebind.name=compute_score_native' \
-    '+reward.scorers.imagebind.weight=1.0' \
-    '+reward.scorers.imagebind.model=imagebind' \
-    '+reward.scorers.imagebind.kwargs.mode=audio_video' \
     reward.aggregation=weighted_sum \
     trainer.logger='["console","wandb"]' \
     trainer.project_name=flow_grpo \
