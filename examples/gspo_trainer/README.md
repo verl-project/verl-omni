@@ -688,6 +688,17 @@ Keep `flash_attention_2`: sdpa breaks train/rollout consistency. See the
 [integrating guide](../../docs/contributing/integrating_an_omni_model.md) for
 the rollout memory-sizing knobs the script sets.
 
+### Experimental: GSM8K with vLLM kernel parity
+
+Opt-in train/rollout kernel alignment for text-only LoRA (eager, TP=1). Sets
+`VERL_OMNI_VLLM_PARITY=1` and `VLLM_BATCH_INVARIANT=1`. Do not point the
+production AVQA script at this mode. See
+[MiniCPM-o vLLM kernel parity](../../docs/algo/minicpm_vllm_parity.md).
+
+```bash
+bash examples/gspo_trainer/minicpm/run_minicpmo_4_5_thinker_gspo_lora_gsm8k_vllm_parity_v1.sh
+```
+
 ### Run disaggregated (separate-async)
 
 ```bash
@@ -824,7 +835,8 @@ examples/gspo_trainer/
 │   └── nextqa.py                                     ← NExT-QA → verl RL parquet converter
 ├── minicpm/
 │   ├── run_minicpmo_4_5_thinker_gspo_lora_avqa_v1.sh ← V1 launch script (MiniCPM-o 4.5, LoRA r=32, audio + image)
-│   └── run_minicpmo_4_5_thinker_gspo_lora_avqa_separate_async_v1.sh ← V1 launch script (same, disaggregated 2+2 GPUs)
+│   ├── run_minicpmo_4_5_thinker_gspo_lora_avqa_separate_async_v1.sh ← V1 launch script (same, disaggregated 2+2 GPUs)
+│   └── run_minicpmo_4_5_thinker_gspo_lora_gsm8k_vllm_parity_v1.sh ← experimental GSM8K LoRA with vLLM kernel parity (eager, TP=1)
 └── README.md                                         ← (this file)
 ```
 
