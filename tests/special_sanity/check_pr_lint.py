@@ -26,7 +26,7 @@ from importlib.util import resolve_name
 from pathlib import PurePosixPath
 from typing import NamedTuple
 
-from check_ast_rules import SHARED_PIPELINE_MODULES
+from check_ast_rules import SHARED_PIPELINE_MODULES, _static_exports
 from check_ast_rules import findings as python_findings
 from check_comments import findings as comment_findings
 from check_example_recipes import ACCEL_VARIANT_SCRIPT, delegates_to_base_script
@@ -298,6 +298,102 @@ def _example_variant_findings(snapshot: str, root: str | None = None) -> Iterato
             )
 
 
+def _dead_function_kind(node: ast.stmt, exported: set[str] | None) -> str | None:
+    if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) or node.decorator_list:
+        return None
+    name = node.name
+    if (name.startswith("__") and name.endswith("__")) or name == "main":
+        return None
+    if name.startswith("_"):
+        return "private"
+    if exported is not None and name not in exported:
+        return "unexported"
+    return None
+
+
+def _is_symbol_referenced_in_module(tree: ast.Module, owner: ast.AST, name: str) -> bool:
+    word_re = re.compile(rf"\b{re.escape(name)}\b")
+    for stmt in tree.body:
+        if stmt is owner:
+            continue
+        for sub in ast.walk(stmt):
+            if isinstance(sub, ast.Name) and isinstance(sub.ctx, ast.Load) and sub.id == name:
+                return True
+            if isinstance(sub, ast.Attribute) and sub.attr == name:
+                return True
+            if isinstance(sub, ast.Constant) and isinstance(sub.value, str) and word_re.search(sub.value):
+                return True
+    return False
+
+
+def _dead_function_candidates(source: bytes) -> list[tuple[int, str, str]]:
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+    if not isinstance(tree, ast.Module):
+        return []
+    exported = _static_exports(tree)
+    candidates: list[tuple[int, str, str]] = []
+    for node in tree.body:
+        kind = _dead_function_kind(node, exported)
+        if kind is not None and not _is_symbol_referenced_in_module(tree, node, node.name):
+            candidates.append((node.lineno, node.name, kind))
+    return candidates
+
+
+def _has_external_reference(snapshot: str, own_path: str, name: str, root: str | None = None) -> bool:
+    target_root = root or _repo_root()
+    result = subprocess.run(
+        ["git", "-C", target_root, "grep", "-I", "-F", "-w", "-l", "-z", "-e", name, snapshot],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    if result.returncode not in (0, 1):
+        result.check_returncode()
+    if result.returncode == 1 or not result.stdout:
+        return False
+    prefix = f"{snapshot}:"
+    for entry in os.fsdecode(result.stdout).split("\0")[:-1]:
+        rel = entry.removeprefix(prefix) if entry.startswith(prefix) else entry.split(":", 1)[-1]
+        if rel != own_path:
+            return True
+    return False
+
+
+def _dead_function_findings(
+    ancestor: str,
+    head: str,
+    changed: list[tuple[str | None, str]],
+    root: str | None = None,
+) -> Iterator[tuple[str, Finding]]:
+    for previous, path in changed:
+        if not (path.startswith("verl_omni/") and path.endswith(".py") and not path.endswith("/__init__.py")):
+            continue
+        head_candidates = _dead_function_candidates(_git("show", f"{head}:{path}", root=root))
+        if not head_candidates:
+            continue
+        old_keys: set[tuple[str, str]] | None = None
+        for lineno, name, kind in head_candidates:
+            if _has_external_reference(head, path, name, root=root):
+                continue
+            if previous is not None:
+                if old_keys is None:
+                    old_source = _git("show", f"{ancestor}:{previous}", root=root)
+                    old_keys = {
+                        (old_name, old_kind) for _ln, old_name, old_kind in _dead_function_candidates(old_source)
+                    }
+                if (name, kind) in old_keys and not _has_external_reference(ancestor, previous, name, root=root):
+                    continue
+            message = (
+                f"Remove unused private function '{name}' or wire it into a caller."
+                if kind == "private"
+                else f"Remove unused unexported function '{name}', call it, or export it in __all__."
+            )
+            yield path, Finding(lineno, "VO019", message)
+
+
 def _baseline_key(finding: Finding) -> tuple[str, str, tuple[str, ...]]:
     return (finding.code, _LINE_NUMBER_RE.sub("line <N>", finding.message), finding.scope)
 
@@ -334,6 +430,7 @@ def _new_findings(ancestor: str, head: str, root: str | None = None) -> Iterator
         ):
             continue
         yield path, finding
+    yield from _dead_function_findings(ancestor, head, changed, root=root)
 
 
 def main() -> int:

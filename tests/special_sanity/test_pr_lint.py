@@ -27,7 +27,7 @@ from check_ast_rules import findings as ast_findings
 from check_comments import findings as comment_findings
 from check_example_recipes import ACCEL_VARIANT_SCRIPT, delegates_to_base_script
 from check_example_recipes import findings as example_findings
-from check_pr_lint import _ruff_findings
+from check_pr_lint import _dead_function_candidates, _has_external_reference, _ruff_findings
 
 CHECKER = Path(__file__).with_name("check_pr_lint.py").resolve()
 CORE_PATH = "verl_omni/trainer/diffusion/example.py"
@@ -448,11 +448,20 @@ def test_live_repo_baseline_respects_precision_bounds() -> None:
     assert counts["VO001"] <= 2
     assert counts["VO011"] <= 2
     assert counts["VO015"] <= 6
+    assert counts["VO018"] <= 96
     assert counts["CM001"] <= 7
     assert counts["CM003"] <= 15
     assert counts["EX005"] <= 84
     assert counts["EX006"] <= 5
     assert counts["EX008"] <= 1
+    dead_hits = []
+    for rel in tracked:
+        if not (rel.startswith("verl_omni/") and rel.endswith(".py") and not rel.endswith("/__init__.py")):
+            continue
+        for ln, name, kind in _dead_function_candidates((root / rel).read_bytes()):
+            if not _has_external_reference("HEAD", rel, name, root=str(root)):
+                dead_hits.append((rel, ln, name, kind))
+    assert not dead_hits, f"Unexpected live-repo dead functions: {dead_hits}"
     tracked_set = set(tracked)
     variant_copies = 0
     for rel in tracked:
@@ -562,9 +571,9 @@ RULE_MATRIX: dict[str, tuple[str, bytes, str, bytes]] = {
     ),
     "VO015": (
         "verl_omni/utils/reward_score/custom.py",
-        b"def compute_score_demo():\n    return 0.0\n",
+        b"def compute_score_demo() -> float:\n    return 0.0\n",
         "verl_omni/utils/reward_score/custom.py",
-        b'def compute_score_demo():\n    """Score demo sample."""\n    return 0.0\n',
+        b'def compute_score_demo() -> float:\n    """Score demo sample."""\n    return 0.0\n',
     ),
     "VO016": (
         "verl_omni/utils/reward_score/custom.py",
@@ -578,6 +587,18 @@ RULE_MATRIX: dict[str, tuple[str, bytes, str, bytes]] = {
         b"def test_flag():\n    assert 'foo' in ADAPTER.read_text()\n",
         SMOKE_PATH,
         b"def test_flag():\n    assert build_flag() == 'foo'\n",
+    ),
+    "VO018": (
+        "verl_omni/utils/custom.py",
+        b'__all__ = ["scale"]\ndef scale(x):\n    """Scale input."""\n    return x\n',
+        "verl_omni/utils/custom.py",
+        b'__all__ = ["scale"]\ndef scale(x: float) -> float:\n    """Scale input."""\n    return x\n',
+    ),
+    "VO019": (
+        "verl_omni/utils/demo.py",
+        b"def _unused_helper() -> None:\n    pass\n",
+        "verl_omni/utils/demo.py",
+        b"def _unused_helper() -> None:\n    pass\n\ndef run() -> None:\n    _unused_helper()\n",
     ),
     "CM001": (
         CORE_PATH,
@@ -685,6 +706,29 @@ def test_every_declared_rule_code_triggers_and_clears_on_minimal_fix(tmp_path: P
         assert bad_run.returncode == 1
         assert "VO010" in bad_run.stdout
         init_file.write_bytes(good_bytes)
+        head = _commit(tmp_path)
+        good_run = subprocess.run(
+            [sys.executable, str(CHECKER), base, head], cwd=tmp_path, capture_output=True, text=True
+        )
+        assert good_run.returncode == 0, good_run.stdout + good_run.stderr
+        return
+    if code == "VO019":
+        if shutil.which("ruff") is None:
+            pytest.skip("The CI workflow supplies pinned Ruff.")
+        _git(tmp_path, "init", "-q")
+        init_file = tmp_path / "verl_omni/utils/__init__.py"
+        init_file.parent.mkdir(parents=True, exist_ok=True)
+        init_file.write_text("", encoding="utf-8")
+        base = _commit(tmp_path)
+        target = tmp_path / bad_path
+        target.write_bytes(bad_bytes)
+        head = _commit(tmp_path)
+        bad_run = subprocess.run(
+            [sys.executable, str(CHECKER), base, head], cwd=tmp_path, capture_output=True, text=True
+        )
+        assert bad_run.returncode == 1, bad_run.stdout + bad_run.stderr
+        assert "VO019" in bad_run.stdout
+        target.write_bytes(good_bytes)
         head = _commit(tmp_path)
         good_run = subprocess.run(
             [sys.executable, str(CHECKER), base, head], cwd=tmp_path, capture_output=True, text=True
@@ -877,3 +921,96 @@ def test_package_init_adapter_import_and_shell_pr_ref_caught_end_to_end(tmp_path
     head = _commit(tmp_path)
     good = subprocess.run([sys.executable, str(CHECKER), base, head], cwd=tmp_path, capture_output=True, text=True)
     assert good.returncode == 0, good.stdout + good.stderr
+
+
+@pytest.mark.skipif(shutil.which("ruff") is None, reason="The CI workflow supplies pinned Ruff.")
+def test_vo019_detects_unused_private_and_unexported_functions_across_repo(tmp_path: Path) -> None:
+    _git(tmp_path, "init", "-q")
+    pkg = tmp_path / "verl_omni/utils"
+    pkg.mkdir(parents=True)
+    (pkg / "__init__.py").write_text("def _init_helper() -> None:\n    pass\n", encoding="utf-8")
+    base = _commit(tmp_path)
+
+    mod = pkg / "parity.py"
+    mod.write_text(
+        '__all__ = ["kept"]\n'
+        'def kept() -> None:\n    """Keep."""\n    pass\n'
+        "def iter_merged_lora_state_dict() -> None:\n    pass\n"
+        "def _dead_private() -> None:\n    pass\n"
+        'def _self_rec(n: int) -> int:\n    """Recurse _self_rec."""\n    return n if n <= 0 else _self_rec(n - 1)\n'
+        '@register("hook")\ndef _decorated() -> None:\n    pass\n'
+        "def __custom_dunder__() -> None:\n    pass\n"
+        "def main() -> None:\n    pass\n",
+        encoding="utf-8",
+    )
+    open_mod = pkg / "open_api.py"
+    open_mod.write_text("def unreferenced_public_without_all() -> None:\n    pass\n", encoding="utf-8")
+    dyn_mod = pkg / "dyn.py"
+    dyn_mod.write_text(
+        "__all__ = list(other.__all__)\ndef unreferenced_with_dynamic_all() -> None:\n    pass\n",
+        encoding="utf-8",
+    )
+    head = _commit(tmp_path)
+    bad = subprocess.run([sys.executable, str(CHECKER), base, head], cwd=tmp_path, capture_output=True, text=True)
+    assert bad.returncode == 1, bad.stdout + bad.stderr
+    lines = bad.stdout.splitlines()
+    assert len(lines) == 3, bad.stdout
+    assert any("VO019" in ln and "iter_merged_lora_state_dict" in ln for ln in lines)
+    assert any("VO019" in ln and "_dead_private" in ln for ln in lines)
+    assert any("VO019" in ln and "_self_rec" in ln for ln in lines)
+
+    # Wiring callers locally, from tests/, or adding to __all__ clears VO019.
+    mod.write_text(
+        '__all__ = ["iter_merged_lora_state_dict", "kept"]\n'
+        'def kept() -> None:\n    """Keep."""\n    _self_rec(1)\n'
+        'def iter_merged_lora_state_dict() -> None:\n    """Export."""\n    pass\n'
+        "def _dead_private() -> None:\n    pass\n"
+        "def _self_rec(n: int) -> int:\n    return n if n <= 0 else _self_rec(n - 1)\n"
+        '@register("hook")\ndef _decorated() -> None:\n    pass\n',
+        encoding="utf-8",
+    )
+    test_file = tmp_path / "tests/utils/test_parity_on_cpu.py"
+    test_file.parent.mkdir(parents=True)
+    test_file.write_text(
+        "from verl_omni.utils.parity import _dead_private\ndef test_dead():\n    _dead_private()\n",
+        encoding="utf-8",
+    )
+    head = _commit(tmp_path)
+    good = subprocess.run([sys.executable, str(CHECKER), base, head], cwd=tmp_path, capture_output=True, text=True)
+    assert good.returncode == 0, good.stdout + good.stderr
+
+
+@pytest.mark.skipif(shutil.which("ruff") is None, reason="The CI workflow supplies pinned Ruff.")
+def test_vo019_baseline_rename_last_caller_removal_and_staged_mode(tmp_path: Path) -> None:
+    _git(tmp_path, "init", "-q")
+    pkg = tmp_path / "verl_omni/utils"
+    pkg.mkdir(parents=True)
+    legacy = pkg / "legacy.py"
+    legacy.write_text(
+        "def _old_dead() -> None:\n    pass\ndef _orphaned() -> None:\n    pass\ndef run() -> None:\n    _orphaned()\n",
+        encoding="utf-8",
+    )
+    base = _commit(tmp_path)
+
+    # Unrelated edit + rename preserves suppression for _old_dead, while removing last caller catches _orphaned.
+    moved = pkg / "renamed.py"
+    _git(tmp_path, "mv", "verl_omni/utils/legacy.py", "verl_omni/utils/renamed.py")
+    moved.write_text(
+        "# shift comment\ndef _old_dead() -> None:\n    pass\n"
+        "def _orphaned() -> None:\n    pass\n"
+        "def run() -> None:\n    pass\n",
+        encoding="utf-8",
+    )
+    head = _commit(tmp_path)
+    res = subprocess.run([sys.executable, str(CHECKER), base, head], cwd=tmp_path, capture_output=True, text=True)
+    assert res.returncode == 1, res.stdout + res.stderr
+    assert len(res.stdout.splitlines()) == 1
+    assert "_orphaned" in res.stdout and "_old_dead" not in res.stdout
+
+    # Staged mode (via write-tree) also detects newly added unused helpers.
+    staged = pkg / "staged.py"
+    staged.write_text("def _staged_dead() -> None:\n    pass\n", encoding="utf-8")
+    _git(tmp_path, "add", "verl_omni/utils/staged.py")
+    staged_res = subprocess.run([sys.executable, str(CHECKER)], cwd=tmp_path, capture_output=True, text=True)
+    assert staged_res.returncode == 1, staged_res.stdout + staged_res.stderr
+    assert "VO019" in staged_res.stdout and "_staged_dead" in staged_res.stdout

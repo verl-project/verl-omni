@@ -444,7 +444,7 @@ def test_config_dataclass_rules_cover_defaults_literal_and_super(source: str, ex
 @pytest.mark.parametrize(
     ("path", "source", "expected"),
     [
-        ("verl_omni/pipelines/rollout_request.py", "def build_request():\n    return None\n", ["VO015"]),
+        ("verl_omni/pipelines/rollout_request.py", "def build_request() -> None:\n    return None\n", ["VO015"]),
         (
             "verl_omni/pipelines/rollout_request.py",
             "from typing import overload\n@overload\ndef build(x: int) -> int: ...\n"
@@ -464,24 +464,29 @@ def test_config_dataclass_rules_cover_defaults_literal_and_super(source: str, ex
         ),
         (
             "verl_omni/pipelines/rollout_request.py",
-            'class Request:\n    """Contract."""\n    def run(self):\n        pass\n'
+            'class Request:\n    """Contract."""\n    def run(self) -> None:\n        pass\n'
             "    @property\n    def size(self):\n        return 1\n",
             ["VO015"],
         ),
         (
             "verl_omni/pipelines/rollout_request.py",
-            'class Request:\n    """Contract."""\n    def run(self):\n        """Run request."""\n        pass\n',
+            'class Request:\n    """Contract."""\n    def run(self) -> None:\n'
+            '        """Run request."""\n        pass\n',
             [],
         ),
-        ("verl_omni/utils/reward_score/custom.py", "def compute_score_custom():\n    return 0.0\n", ["VO015"]),
         (
             "verl_omni/utils/reward_score/custom.py",
-            'def compute_score_custom():\n    """Score one sample."""\n    return 0.0\n',
+            "def compute_score_custom() -> float:\n    return 0.0\n",
+            ["VO015"],
+        ),
+        (
+            "verl_omni/utils/reward_score/custom.py",
+            'def compute_score_custom() -> float:\n    """Score one sample."""\n    return 0.0\n',
             [],
         ),
         (
             "verl_omni/utils/custom.py",
-            '__all__ = ["PublicFn"]\ndef PublicFn():\n    pass\ndef internal_unlisted():\n    pass\n',
+            '__all__ = ["PublicFn"]\ndef PublicFn() -> None:\n    pass\ndef internal_unlisted():\n    pass\n',
             ["VO015"],
         ),
         (
@@ -505,6 +510,136 @@ def test_config_dataclass_rules_cover_defaults_literal_and_super(source: str, ex
     ],
 )
 def test_public_api_docstrings_have_zero_private_noise(path: str, source: str, expected: list[str]) -> None:
+    assert [code for _line, code, _message in findings(path, ast.parse(source))] == expected
+
+
+@pytest.mark.parametrize(
+    ("path", "source", "expected"),
+    [
+        (
+            "verl_omni/utils/custom.py",
+            '__all__ = ["scale"]\ndef scale(x):\n    """Scale input."""\n    return x\n',
+            ["VO018"],
+        ),
+        (
+            "verl_omni/utils/custom.py",
+            '__all__ = ["scale"]\ndef scale(x: float) -> float:\n    """Scale input."""\n    return x\n',
+            [],
+        ),
+        (
+            "verl_omni/utils/custom.py",
+            '__all__ = ["run"]\n'
+            'async def run(x: int, /, y, *, flag: bool = True) -> None:\n    """Run."""\n    return None\n',
+            ["VO018"],
+        ),
+        (
+            "verl_omni/utils/custom.py",
+            '__all__ = ["run"]\n'
+            'async def run(x: int, /, y: str, *, flag: bool = True) -> None:\n    """Run."""\n    return None\n',
+            [],
+        ),
+        (
+            "verl_omni/utils/custom.py",
+            '__all__ = ["wrap"]\ndef wrap(x: int, *args, **kwargs) -> int:\n    """Wrap."""\n    return x\n',
+            [],
+        ),
+        (
+            "verl_omni/utils/custom.py",
+            '__all__ = ["wrap"]\ndef wrap(x, *args, **kwargs) -> int:\n    """Wrap."""\n    return x\n',
+            ["VO018"],
+        ),
+        (
+            "verl_omni/utils/custom.py",
+            '__all__ = ["build"]\nfrom typing import overload\n'
+            "@overload\ndef build(x: int) -> int: ...\n"
+            "@overload\ndef build(x: str) -> str: ...\n"
+            'def build(x):\n    """Build."""\n    return x\n',
+            [],
+        ),
+        (
+            "verl_omni/utils/custom.py",
+            '__all__ = ["build"]\nfrom typing import overload\n'
+            '@overload\ndef build(x):\n    """Build."""\n    return x\n',
+            ["VO018"],
+        ),
+        (
+            "verl_omni/pipelines/rollout_request.py",
+            'def build_request(x):\n    """Build."""\n    return x\n',
+            ["VO018"],
+        ),
+        (
+            "verl_omni/pipelines/rollout_request.py",
+            'class Request:\n    """Contract."""\n    def run(self, x):\n        """Run."""\n        pass\n',
+            ["VO018"],
+        ),
+        (
+            "verl_omni/pipelines/rollout_request.py",
+            'class Request:\n    """Contract."""\n    def run(self, x: int) -> None:\n'
+            '        """Run."""\n        pass\n',
+            [],
+        ),
+        (
+            "verl_omni/pipelines/rollout_request.py",
+            'class Request:\n    """Contract."""\n    @classmethod\n'
+            '    def from_cfg(cls, cfg):\n        """Build."""\n        pass\n',
+            ["VO018"],
+        ),
+        (
+            "verl_omni/pipelines/rollout_request.py",
+            'class Request:\n    """Contract."""\n    @classmethod\n'
+            '    def from_cfg(cls, cfg: object) -> None:\n        """Build."""\n        pass\n',
+            [],
+        ),
+        (
+            "verl_omni/pipelines/rollout_request.py",
+            'class Request:\n    """Contract."""\n    @staticmethod\n'
+            '    def build(cfg) -> None:\n        """Build."""\n        pass\n',
+            ["VO018"],
+        ),
+        (
+            "verl_omni/pipelines/rollout_request.py",
+            'class Request:\n    """Contract."""\n    @staticmethod\n'
+            '    def build(cfg: object) -> None:\n        """Build."""\n        pass\n',
+            [],
+        ),
+        (
+            "verl_omni/pipelines/rollout_request.py",
+            'class Request:\n    """Contract."""\n    @property\n    def size(self):\n        return 1\n'
+            "    @size.setter\n    def size(self, v):\n        self._v = v\n"
+            "    def _helper(self, x):\n        return x\n",
+            [],
+        ),
+        (
+            "verl_omni/utils/reward_score/custom.py",
+            'def compute_score(data_source, solution_str) -> float:\n    """Score."""\n    return 0.0\n',
+            ["VO018"],
+        ),
+        (
+            "verl_omni/utils/reward_score/custom.py",
+            'def compute_score_custom(x: str):\n    """Score."""\n    return 0.0\n',
+            ["VO018"],
+        ),
+        (
+            "verl_omni/utils/reward_score/custom.py",
+            'def compute_score_custom(x: str) -> float:\n    """Score."""\n    return 0.0\n',
+            [],
+        ),
+        (
+            "verl_omni/trainer/config/example.py",
+            '__all__ = ["build_cfg"]\ndef build_cfg(x):\n    return x\n',
+            [],
+        ),
+        (
+            "verl_omni/utils/custom.py",
+            '__all__ = ["Public"]\nclass Public:\n    """Public."""\n    pass\n'
+            "def unlisted(x):\n    return x\ndef _priv(x):\n    return x\n",
+            [],
+        ),
+    ],
+)
+def test_public_api_type_annotations_cover_exported_contract_and_scorer_apis(
+    path: str, source: str, expected: list[str]
+) -> None:
     assert [code for _line, code, _message in findings(path, ast.parse(source))] == expected
 
 

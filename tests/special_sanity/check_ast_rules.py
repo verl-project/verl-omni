@@ -50,11 +50,10 @@ LITERAL_TYPES = {"Literal", "typing.Literal", "typing_extensions.Literal"}
 CLASSVAR_TYPES = {"ClassVar", "typing.ClassVar", "typing_extensions.ClassVar"}
 ROOT_CONFIG_BASES = {"BaseConfig", "object", "builtins.object"}
 OVERLOAD_DECORATORS = {"overload", "typing.overload", "typing_extensions.overload"}
+STATICMETHOD_DECORATORS = {"staticmethod", "builtins.staticmethod"}
+PROPERTY_DECORATORS = {"property", "builtins.property", "cached_property", "functools.cached_property"}
 DOCSTRING_SKIP_DECORATORS = {
-    "property",
-    "builtins.property",
-    "cached_property",
-    "functools.cached_property",
+    *PROPERTY_DECORATORS,
     *OVERLOAD_DECORATORS,
 }
 MODEL_NAME = re.compile(
@@ -560,11 +559,89 @@ def _is_registered_class(node: ast.ClassDef) -> bool:
     return False
 
 
-def _public_api_docstrings(path: str, tree: ast.AST, aliases: dict[str, str]) -> Iterator[tuple[int, str, str]]:
+def _public_api_scope(path: str, tree: ast.AST) -> tuple[set[str] | None, bool, bool]:
     in_config = path.startswith(("verl_omni/trainer/config/", "verl_omni/workers/config/"))
     exported = None if in_config else _static_exports(tree)
-    in_contract = path in SHARED_CONTRACT_FILES
-    in_reward_score = path.startswith("verl_omni/utils/reward_score/")
+    return (
+        exported,
+        path in SHARED_CONTRACT_FILES,
+        path.startswith("verl_omni/utils/reward_score/"),
+    )
+
+
+def _is_public_api_function(
+    node: ast.FunctionDef | ast.AsyncFunctionDef,
+    exported: set[str] | None,
+    *,
+    in_contract: bool,
+    in_reward_score: bool,
+) -> bool:
+    is_exported = exported is not None and not node.name.startswith("_") and node.name in exported
+    is_contract_symbol = in_contract and not node.name.startswith("_")
+    is_scorer = in_reward_score and (node.name == "compute_score" or node.name.startswith("compute_score_"))
+    return is_exported or is_contract_symbol or is_scorer
+
+
+def _overloaded_names(body: list[ast.stmt], aliases: dict[str, str]) -> set[str]:
+    return {
+        node.name
+        for node in body
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+        and _has_decorator(node, aliases, OVERLOAD_DECORATORS)
+    }
+
+
+def _missing_public_annotations(
+    node: ast.FunctionDef | ast.AsyncFunctionDef,
+    *,
+    is_method: bool,
+    is_static: bool,
+) -> bool:
+    args = list(node.args.posonlyargs) + list(node.args.args)
+    if is_method and not is_static and args and args[0].arg in {"self", "cls"}:
+        args = args[1:]
+    args.extend(node.args.kwonlyargs)
+    return node.returns is None or any(arg.annotation is None for arg in args)
+
+
+def _contract_method_annotations(cls: ast.ClassDef, aliases: dict[str, str]) -> Iterator[tuple[int, str, str]]:
+    overloaded = _overloaded_names(cls.body, aliases)
+    for member in cls.body:
+        if not isinstance(member, ast.FunctionDef | ast.AsyncFunctionDef) or member.name.startswith("_"):
+            continue
+        if _has_decorator(member, aliases, PROPERTY_DECORATORS) or any(
+            _is_property_accessor(decorator) for decorator in member.decorator_list
+        ):
+            continue
+        if not _has_decorator(member, aliases, OVERLOAD_DECORATORS) and member.name in overloaded:
+            continue
+        is_static = _has_decorator(member, aliases, STATICMETHOD_DECORATORS)
+        if _missing_public_annotations(member, is_method=True, is_static=is_static):
+            yield (
+                member.lineno,
+                "VO018",
+                f"Annotate shared contract method '{cls.name}.{member.name}' parameters and return type.",
+            )
+
+
+def _public_api_annotations(path: str, tree: ast.AST, aliases: dict[str, str]) -> Iterator[tuple[int, str, str]]:
+    exported, in_contract, in_reward_score = _public_api_scope(path, tree)
+    body = tree.body if isinstance(tree, ast.Module) else []
+    overloaded = _overloaded_names(body, aliases)
+    for node in body:
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            if not _has_decorator(node, aliases, OVERLOAD_DECORATORS) and node.name in overloaded:
+                continue
+            if _is_public_api_function(
+                node, exported, in_contract=in_contract, in_reward_score=in_reward_score
+            ) and _missing_public_annotations(node, is_method=False, is_static=False):
+                yield node.lineno, "VO018", f"Annotate public API '{node.name}' parameters and return type."
+        elif in_contract and isinstance(node, ast.ClassDef) and not node.name.startswith("_"):
+            yield from _contract_method_annotations(node, aliases)
+
+
+def _public_api_docstrings(path: str, tree: ast.AST, aliases: dict[str, str]) -> Iterator[tuple[int, str, str]]:
+    exported, in_contract, in_reward_score = _public_api_scope(path, tree)
     for node in tree.body:
         if not isinstance(node, ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef):
             continue
@@ -1033,4 +1110,5 @@ def findings(path: str, tree: ast.AST) -> Iterator[tuple[int, str, str]]:
     if path.startswith("verl_omni/pipelines/"):
         yield from _rollout_findings(path, tree)
     yield from _public_api_docstrings(path, tree, aliases)
+    yield from _public_api_annotations(path, tree, aliases)
     yield from _import_boundaries(path, tree)
