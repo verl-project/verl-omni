@@ -65,6 +65,8 @@ jobs:
        contains(github.event.pull_request.labels.*.name, 'ci-e2e-omni') ||
        contains(github.event.pull_request.labels.*.name, 'ci-e2e-diffusion'))
     uses: ./.github/workflows/pr-lint.yml
+    with:
+      bypass_label_gate: true
 
   setup_runner:
     # Pull request label mapping:

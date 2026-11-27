@@ -97,6 +97,8 @@ jobs:
     needs: resolve_groups
     if: github.event_name == 'pull_request'
     uses: ./.github/workflows/pr-lint.yml
+    with:
+      bypass_label_gate: true
 
   npu_smoke:
     needs: [resolve_groups, pr_lint]
