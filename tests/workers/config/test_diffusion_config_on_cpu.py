@@ -118,9 +118,7 @@ class TestDiffusionLossConfig:
         assert cfg.loss_mode == "dual_grpo"
 
 
-# ---------------------------------------------------------------------------
 # DiffusionARConfig / DiffusionModelARConfig / DiffusionActorARConfig
-# ---------------------------------------------------------------------------
 
 
 class TestDiffusionARConfig:

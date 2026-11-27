@@ -1,4 +1,6 @@
+#!/usr/bin/env bash
 # Qwen-Image LoRA DualGRPO RL, vllm_omni rollout
+set -eo pipefail
 set -x
 
 export FLASHINFER_DISABLE_VERSION_CHECK=1
