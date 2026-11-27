@@ -621,6 +621,7 @@ def test_nightly_flowgrpo_trajectory_ab_uses_rollout_rule_reward(tmp_path: Path)
         assert cfg.reward.reward_functions.jpeg.path == JPEG_SCORER_PATH
         assert cfg.reward.reward_functions.jpeg.name == "compute_score"
         assert cfg.reward.reward_functions.jpeg.weight == pytest.approx(1.0)
+        assert cfg.reward.reward_functions.jpeg.required is True
         with warnings.catch_warnings(record=True) as recorded:
             warnings.simplefilter("always")
             warn_deprecated_reward_config(cfg)

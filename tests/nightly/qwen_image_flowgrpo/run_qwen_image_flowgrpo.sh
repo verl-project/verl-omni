@@ -142,6 +142,7 @@ for projected in false true; do
             +reward.reward_functions.jpeg.path=pkg://verl_omni.utils.reward_score.jpeg_compressibility \
             +reward.reward_functions.jpeg.name=compute_score \
             +reward.reward_functions.jpeg.weight=1.0 \
+            +reward.reward_functions.jpeg.required=True \
             actor_rollout_ref.rollout.algo.noise_level=0.7 \
             'actor_rollout_ref.model.trajectory_fields.required=[all_latents,prompt_embeds,prompt_embeds_mask]' \
             'actor_rollout_ref.model.trajectory_fields.optional=[negative_prompt_embeds,negative_prompt_embeds_mask]' \
