@@ -41,6 +41,7 @@ TEST_RUFF_RULES = "PT015,T100"
 
 _EMPTY_TREE_SHA = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 _LINE_NUMBER_RE = re.compile(r"\bline \d+\b")
+_VO019_NON_CALLER_PREFIXES = ("tests/special_sanity/", ".agents/", ".github/")
 
 
 class Finding(NamedTuple):
@@ -357,7 +358,7 @@ def _has_external_reference(snapshot: str, own_path: str, name: str, root: str |
     prefix = f"{snapshot}:"
     for entry in os.fsdecode(result.stdout).split("\0")[:-1]:
         rel = entry.removeprefix(prefix) if entry.startswith(prefix) else entry.split(":", 1)[-1]
-        if rel != own_path:
+        if rel != own_path and not rel.startswith(_VO019_NON_CALLER_PREFIXES):
             return True
     return False
 

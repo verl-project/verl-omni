@@ -935,7 +935,7 @@ def test_vo019_detects_unused_private_and_unexported_functions_across_repo(tmp_p
     mod.write_text(
         '__all__ = ["kept"]\n'
         'def kept() -> None:\n    """Keep."""\n    pass\n'
-        "def iter_merged_lora_state_dict() -> None:\n    pass\n"
+        "def unused_unexported_helper() -> None:\n    pass\n"
         "def _dead_private() -> None:\n    pass\n"
         'def _self_rec(n: int) -> int:\n    """Recurse _self_rec."""\n    return n if n <= 0 else _self_rec(n - 1)\n'
         '@register("hook")\ndef _decorated() -> None:\n    pass\n'
@@ -943,6 +943,9 @@ def test_vo019_detects_unused_private_and_unexported_functions_across_repo(tmp_p
         "def main() -> None:\n    pass\n",
         encoding="utf-8",
     )
+    meta_test = tmp_path / "tests/special_sanity/test_meta.py"
+    meta_test.parent.mkdir(parents=True)
+    meta_test.write_text('SAMPLE = "unused_unexported_helper _dead_private"\n', encoding="utf-8")
     open_mod = pkg / "open_api.py"
     open_mod.write_text("def unreferenced_public_without_all() -> None:\n    pass\n", encoding="utf-8")
     dyn_mod = pkg / "dyn.py"
@@ -955,15 +958,15 @@ def test_vo019_detects_unused_private_and_unexported_functions_across_repo(tmp_p
     assert bad.returncode == 1, bad.stdout + bad.stderr
     lines = bad.stdout.splitlines()
     assert len(lines) == 3, bad.stdout
-    assert any("VO019" in ln and "iter_merged_lora_state_dict" in ln for ln in lines)
+    assert any("VO019" in ln and "unused_unexported_helper" in ln for ln in lines)
     assert any("VO019" in ln and "_dead_private" in ln for ln in lines)
     assert any("VO019" in ln and "_self_rec" in ln for ln in lines)
 
     # Wiring callers locally, from tests/, or adding to __all__ clears VO019.
     mod.write_text(
-        '__all__ = ["iter_merged_lora_state_dict", "kept"]\n'
+        '__all__ = ["kept", "unused_unexported_helper"]\n'
         'def kept() -> None:\n    """Keep."""\n    _self_rec(1)\n'
-        'def iter_merged_lora_state_dict() -> None:\n    """Export."""\n    pass\n'
+        'def unused_unexported_helper() -> None:\n    """Export."""\n    pass\n'
         "def _dead_private() -> None:\n    pass\n"
         "def _self_rec(n: int) -> int:\n    return n if n <= 0 else _self_rec(n - 1)\n"
         '@register("hook")\ndef _decorated() -> None:\n    pass\n',
