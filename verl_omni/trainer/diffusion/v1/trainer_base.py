@@ -20,7 +20,6 @@ import uuid
 from abc import ABC, abstractmethod
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import nullcontext
 from dataclasses import replace
 from functools import cached_property
 from numbers import Integral
@@ -698,44 +697,32 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         if data is None:
             data = self._read_training_batch(batch_meta)
 
+        # [OPTIONAL] colocated reward model
+        if self.reward_loop_manager.reward_loop_worker_handles is None and self.use_rm:
+            with marked_timer("reward", timing_raw, color="yellow"):
+                # The mode hooks (sync on_sample_end, separate_async switch_to_trainer)
+                # already put the colocated replicas to sleep; they stay asleep through
+                # training (~55GB of Qwen-Image weights at rollout TP=1 would OOM next to
+                # the actor update), and the hook that next hands them to generation
+                # wakes and weight-syncs them.
+                data = data.union(self._compute_reward_colocate(data))
+
+        if self._is_direct_preference:
+            return self._train_direct_preference_batch(metrics, timing_raw, batch_meta, data)
+
+        data = self._balance_batch(data, metrics=metrics)
+
+        # Bypass mode: skip old_log_prob recompute (2 policies).
         rollout_corr_config = self.config.algorithm.get("rollout_correction", None)
         bypass_recomputing_logprobs = bool(rollout_corr_config and rollout_corr_config.get("bypass_mode", False))
-        recompute_logprobs = not bypass_recomputing_logprobs and not self.skip_old_log_prob
-        compute_reward = self.reward_loop_manager.reward_loop_worker_handles is None and self.use_rm
-        overlap_reward = (
-            compute_reward
-            and self.trainer_mode == "colocate_async"
-            and reward_pool_is_separate(self.config)
-            and not self._is_direct_preference
-            and recompute_logprobs
-        )
-        # Both phases read the rollout snapshot. Join the step-local worker
-        # before advantage computation, including when either phase fails.
-        with ThreadPoolExecutor(max_workers=1) if overlap_reward else nullcontext() as reward_executor:
-            reward_future = None
-            if compute_reward:
-                if overlap_reward:
-                    reward_future = reward_executor.submit(self._compute_training_reward, data, timing_raw)
-                else:
-                    data = data.union(self._compute_training_reward(data, timing_raw))
-
-            if self._is_direct_preference:
-                return self._train_direct_preference_batch(metrics, timing_raw, batch_meta, data)
-
-            data = self._balance_batch(data, metrics=metrics)
-            if bypass_recomputing_logprobs:
-                apply_bypass_mode_to_diffusion_batch(data)
-            elif recompute_logprobs:
-                with marked_timer("old_log_prob", timing_raw, color="blue"):
-                    old_log_prob = self._compute_old_log_prob(data)
-                    metrics.update(old_log_prob.meta_info.pop("metrics", {}))
-
-            if reward_future is not None:
-                reward, _ = pad_dataproto_to_divisor(reward_future.result(), len(data))
-                data = data.union(reward)
-            if recompute_logprobs:
+        if bypass_recomputing_logprobs:
+            apply_bypass_mode_to_diffusion_batch(data)
+        elif not self.skip_old_log_prob:
+            with marked_timer("old_log_prob", timing_raw, color="blue"):
+                old_log_prob = self._compute_old_log_prob(data)
+                metrics.update(old_log_prob.meta_info.pop("metrics", {}))
                 data = data.union(old_log_prob)
-                assert "old_log_probs" in data.batch, f'"old_log_probs" not in {data.batch.keys()}'
+            assert "old_log_probs" in data.batch, f'"old_log_probs" not in {data.batch.keys()}'
 
         metrics.update(
             compute_rollout_corr_metrics_from_batch(
@@ -791,11 +778,6 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             fields=diffusion_persisted_tq_fields("policy_gradient"),
         )
         return batch_meta
-
-    def _compute_training_reward(self, data: DataProto, timing_raw: dict) -> DataProto:
-        """Score the original rows while the trainer owns the GPU."""
-        with marked_timer("reward", timing_raw, color="yellow"):
-            return self._compute_reward_colocate(data)
 
     def _validate_old_adapter_config(self):
         """Require the NFT old-adapter rollout/loss contract."""
