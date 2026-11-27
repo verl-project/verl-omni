@@ -8,6 +8,7 @@ on:
     paths:
       - "verl_omni/**"
       - "tests/**/*_on_cpu.py"
+      - "tests/special_e2e/check_diffusion_numerical_health.py"
       - "pyproject.toml"
       - .github/workflows/cpu_unit_tests.yml
       - .github/qwen_tts_pin.txt
@@ -22,6 +23,7 @@ on:
     paths:
       - "verl_omni/**"
       - "tests/**/*_on_cpu.py"
+      - "tests/special_e2e/check_diffusion_numerical_health.py"
       - "pyproject.toml"
       - .github/workflows/cpu_unit_tests.yml
       - .github/qwen_tts_pin.txt
