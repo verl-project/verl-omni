@@ -141,15 +141,18 @@ The conditioning span is the text between the last `<|tts_bos|>` and the last
   with zero difference, and the model assigns its own sampled codec frames a
   mean logprob of -0.295 (uniform baseline -8.789, 94%+ of frames above 0.5).
 - E2E smoke (8xH100): rollout → replay → adapter → LoRA update on `tts.*`
-  with `distillation.enabled=false` (GRPO + KL to reference), driven by
-  `verl_omni/utils/reward_score/talker_codec_reward.py`.
-- Learning demonstration (8xH100): a length-control reward
-  (`verl_omni/utils/reward_score/talker_length_control_reward.py`) peaks at
-  60 codec frames while the untrained talker emits ~115, so the score starts
-  at ~0.30 with headroom. Point
-  `reward.custom_reward_function.path` at it and the train/val reward climbs
-  as the policy learns to emit EOS earlier — the learning curve is attached
-  to the PR description.
+  with `distillation.enabled=false` (GRPO + KL to reference), driven by the
+  verification preset of
+  `verl_omni/utils/reward_score/talker_codec_reward.py`
+  (`target_frames=None`: a saturating length floor that an untrained talker
+  scores ~1.0 on).
+- Learning demonstration (8xH100): the same scorer's length-control preset
+  (`target_frames=70`, an asymmetric window peaked at the target) starts at
+  ~0.3 for the untrained talker's ~115 frames. The train/val reward climbs
+  as the policy learns to emit its stop token earlier — the learning curve
+  is attached to the PR description. Under the multi-reward managers the
+  preset is selectable from the run config
+  (`reward.reward_functions.<key>.target_frames=70`).
 
 ### Notes and limits
 
