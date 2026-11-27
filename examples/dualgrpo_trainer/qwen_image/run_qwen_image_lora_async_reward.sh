@@ -135,7 +135,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     '+reward.reward_functions.dit.weight=1.0' \
     '+reward.reward_functions.dit.on_malformed=zero' \
     trainer.train_ar=True \
-    trainer.logger='["console", "tensorboard", "swanlab"]' \
+    trainer.logger='["console", "swanlab"]' \
     trainer.project_name=dual_grpo \
     trainer.experiment_name=qwen_image_dualgrpo_async_reward_${CURRENT_TIMESTAMP} \
     trainer.validation_data_dir=validation_data_async_reward_${CURRENT_TIMESTAMP} \

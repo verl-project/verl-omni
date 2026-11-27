@@ -180,10 +180,10 @@ reward.reward_manager.module.path=pkg://verl_omni.reward_loop.reward_manager
 
 ## Logging
 
-The scripts log to console, TensorBoard, and SwanLab by default:
+The scripts log to console, and SwanLab by default:
 
 ```bash
-trainer.logger='["console", "tensorboard", "swanlab"]'
+trainer.logger='["console", "swanlab"]'
 trainer.project_name=dual_grpo
 trainer.experiment_name=qwen_image_dualgrpo
 ```

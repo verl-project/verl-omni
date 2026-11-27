@@ -61,7 +61,7 @@ def _strip_vision_tower(module: torch.nn.Module) -> bool:
 
 
 def _transformers_needs_qwen2_vl_rotary_patch() -> bool:
-    """True when transformers dropped ``apply_multimodal_rotary_pos_emb`` (5.19+)."""
+    """True when transformers dropped ``apply_multimodal_rotary_pos_emb`` (5.17+)."""
     import transformers.models.qwen2_vl.modeling_qwen2_vl as modeling
 
     return not hasattr(modeling, "apply_multimodal_rotary_pos_emb")
@@ -183,7 +183,7 @@ class QwenImageDualGRPOAR(DiffusionModelARBase):
         verl's ``apply_monkey_patch`` installs ``qwen2_vl_base_forward`` /
         ``qwen2_vl_attn_forward`` on the model class inside ``_build_module``.
         The dummy visual path unpacks the plain tensor the stripped tower returns.
-        On transformers >=5.19, rebind attention to ``apply_rotary_pos_emb``.
+        On transformers >=5.17.0, rebind attention to ``apply_rotary_pos_emb``.
         """
         _patch_qwen2_vl_attn_rotary()
         _strip_vision_tower(module)
