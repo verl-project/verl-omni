@@ -1276,3 +1276,119 @@ class TestCodeRabbitReviewFixes:
             result = asyncio.run(trainer._resolve_self_teacher_multimodal_data(raw_prompt, None))
         assert called == [True]
         assert result == {"images": [resized_img]}
+
+    def test_ema_skips_frozen_base_weights_and_preserves_them_during_swap(self):
+        from verl_omni.workers.engine_workers import ActorRolloutRefWorker
+
+        class _LoRAModel(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.base = torch.nn.Linear(4, 4, bias=False)
+                self.base.weight.requires_grad_(False)
+                self.lora_a = torch.nn.Linear(4, 2, bias=False)
+                self.lora_b = torch.nn.Linear(2, 4, bias=False)
+
+        model = _LoRAModel()
+        with torch.no_grad():
+            model.base.weight.fill_(7.0)
+            model.lora_a.weight.fill_(1.0)
+            model.lora_b.weight.fill_(2.0)
+
+        ema = EMATeacherState(decay=0.5)
+        ema.initialize(model)
+        assert set(ema.shadow.keys()) == {"lora_a.weight", "lora_b.weight"}
+        assert "base.weight" not in ema.shadow
+
+        with torch.no_grad():
+            model.lora_a.weight.fill_(3.0)
+            model.lora_b.weight.fill_(4.0)
+        updated = ema.update(model)
+        assert updated == 2
+        assert "base.weight" not in ema.shadow
+        assert torch.allclose(ema.shadow["lora_a.weight"], torch.full_like(model.lora_a.weight, 2.0))
+        assert torch.allclose(ema.shadow["lora_b.weight"], torch.full_like(model.lora_b.weight, 3.0))
+
+        with ema.swap_into(model):
+            assert torch.allclose(model.base.weight, torch.full_like(model.base.weight, 7.0))
+            assert torch.allclose(model.lora_a.weight, torch.full_like(model.lora_a.weight, 2.0))
+            assert torch.allclose(model.lora_b.weight, torch.full_like(model.lora_b.weight, 3.0))
+        assert torch.allclose(model.base.weight, torch.full_like(model.base.weight, 7.0))
+        assert torch.allclose(model.lora_a.weight, torch.full_like(model.lora_a.weight, 3.0))
+        assert torch.allclose(model.lora_b.weight, torch.full_like(model.lora_b.weight, 4.0))
+
+        # Worker swap also backs up only trainable weights and preserves frozen base weights.
+        worker = ActorRolloutRefWorker.__new__(ActorRolloutRefWorker)
+        worker.role = "actor"
+        worker.actor = SimpleNamespace(engine=SimpleNamespace(module=model))
+        worker._ema_teacher_state = ema
+        worker._ema_live_backups = None
+
+        assert worker.swap_ema_weights(use_ema=True) is True
+        assert set(worker._ema_live_backups.keys()) == {"lora_a.weight", "lora_b.weight"}
+        assert torch.allclose(model.base.weight, torch.full_like(model.base.weight, 7.0))
+        assert torch.allclose(model.lora_a.weight, torch.full_like(model.lora_a.weight, 2.0))
+        assert worker.swap_ema_weights(use_ema=False) is True
+        assert torch.allclose(model.lora_a.weight, torch.full_like(model.lora_a.weight, 3.0))
+
+        # Entry failure mid-swap inside swap_into must also roll back already-swapped weights.
+        ema.shadow["lora_b.weight"] = torch.zeros(9, 9)
+        with pytest.raises(RuntimeError):
+            with ema.swap_into(model):
+                pass
+        assert torch.allclose(model.lora_a.weight, torch.full_like(model.lora_a.weight, 3.0))
+        assert torch.allclose(model.base.weight, torch.full_like(model.base.weight, 7.0))
+
+    def test_preserve_multimodal_inputs_false_string_prompt_placeholder_routes_to_fallback(self):
+        tok = _DummyTokenizer()
+        res_with_placeholder = build_multimodal_teacher_prompt(
+            raw_prompt="transcribe <audio>",
+            student_prompt_ids=tok.encode("transcribe <audio>"),
+            privileged_text="Correct answer: hello",
+            tokenizer=tok,
+            multi_modal_data={"audios": ["wav"]},
+            config=SelfDistillationConfig(enabled=True, preserve_multimodal_inputs=False),
+        )
+        assert res_with_placeholder.context_retained is False
+        assert res_with_placeholder.multi_modal_data == {}
+
+        res_plain_text = build_multimodal_teacher_prompt(
+            raw_prompt="What is 2 + 2?",
+            student_prompt_ids=tok.encode("What is 2 + 2?"),
+            privileged_text="Correct answer: 4",
+            tokenizer=tok,
+            config=SelfDistillationConfig(enabled=True, preserve_multimodal_inputs=False),
+        )
+        assert res_plain_text.context_retained is True
+        assert res_plain_text.multi_modal_data == {}
+
+    def test_self_distillation_task_runner_preserves_custom_ray_actor_options(self):
+        import ray
+
+        @ray.remote(num_cpus=2, resources={"custom_runner_res": 1}, max_concurrency=4)
+        class _CustomRemoteRunner:
+            def __init__(self, config):
+                self.config = config
+
+            def init_agent_loop_manager(self):
+                return bool(self.config.distillation.enabled)
+
+        wrapped = _build_self_distillation_task_runner_v1(_CustomRemoteRunner)
+        assert wrapped._default_options == {"num_cpus": 2, "resources": {"custom_runner_res": 1}, "max_concurrency": 4}
+        assert wrapped.__ray_metadata__.num_cpus == 2
+        assert wrapped.__ray_metadata__.resources == {"custom_runner_res": 1}
+
+        runner_cls = wrapped.__ray_metadata__.modified_class
+        cfg = OmegaConf.create({"distillation": {"enabled": True, "self_teacher": {"enabled": True}}})
+        runner = runner_cls(cfg)
+        assert runner.init_agent_loop_manager() is False
+        assert runner.config.distillation.enabled is True
+
+        @ray.remote
+        class _DefaultRemoteRunner:
+            pass
+
+        wrapped_default = _build_self_distillation_task_runner_v1(_DefaultRemoteRunner)
+        assert wrapped_default._default_options == {}
+
+        with pytest.raises(TypeError, match="options"):
+            _build_self_distillation_task_runner_v1(_CustomRemoteRunner.options(num_cpus=3))

@@ -409,6 +409,16 @@ def reprompt_multimodal_messages(
     return messages
 
 
+_FALLBACK_MEDIA_PLACEHOLDER_STRINGS = (
+    "<image>",
+    "<video>",
+    "<audio>",
+    "<|image_pad|>",
+    "<|video_pad|>",
+    "<|audio_pad|>",
+)
+
+
 def _collect_media_token_ids(tokenizer: Any, processor: Any = None) -> tuple[int, ...]:
     """Discover image/audio/video placeholder token IDs configured on processor/tokenizer."""
     ids: list[int] = []
@@ -426,6 +436,22 @@ def _collect_media_token_ids(tokenizer: Any, processor: Any = None) -> tuple[int
                 if isinstance(tid, int) and tid >= 0 and tid not in ids:
                     ids.append(tid)
     return tuple(ids)
+
+
+def _collect_media_token_strings(tokenizer: Any, processor: Any = None) -> tuple[str, ...]:
+    """Discover recognized image/audio/video placeholder token strings."""
+    tokens: list[str] = []
+    for obj in (processor, tokenizer):
+        if obj is None:
+            continue
+        for token_attr in ("image_token", "video_token", "audio_token"):
+            tok = getattr(obj, token_attr, None)
+            if isinstance(tok, str) and tok and tok not in tokens:
+                tokens.append(tok)
+    for tok in _FALLBACK_MEDIA_PLACEHOLDER_STRINGS:
+        if tok not in tokens:
+            tokens.append(tok)
+    return tuple(tokens)
 
 
 def _count_media_tokens(token_ids: Sequence[int], media_token_ids: Sequence[int]) -> dict[int, int]:
@@ -558,6 +584,21 @@ def build_multimodal_teacher_prompt(
     media_token_ids = _collect_media_token_ids(tokenizer, processor)
     expected_media_counts = _count_media_tokens(student_prompt_ids, media_token_ids)
 
+    if not cfg.preserve_multimodal_inputs and isinstance(raw_prompt, str):
+        has_media_placeholder_ids = bool(expected_media_counts and any(expected_media_counts.values()))
+        has_media_placeholder_str = any(tok in raw_prompt for tok in _collect_media_token_strings(tokenizer, processor))
+        if has_media_placeholder_ids or has_media_placeholder_str:
+            return RepromptedTeacherSample(
+                teacher_messages=raw_prompt,
+                teacher_prompt_ids=list(student_prompt_ids),
+                multi_modal_data={},
+                mm_processor_kwargs={},
+                multi_modal_inputs={},
+                added_prompt_tokens=0,
+                trimmed_context=False,
+                context_retained=False,
+            )
+
     current_text = privileged_text
     trimmed = False
     context_retained = bool(current_text.strip())
@@ -612,6 +653,10 @@ def build_multimodal_teacher_prompt(
             else:
                 context_retained = False
                 trimmed = True
+
+    if context_retained and not cfg.preserve_multimodal_inputs and isinstance(raw_prompt, str) and media_token_ids:
+        if any(_count_media_tokens(teacher_prompt_ids, media_token_ids).values()):
+            context_retained = False
 
     if context_retained and cfg.preserve_multimodal_inputs and media_token_ids:
         actual_media_counts = _count_media_tokens(teacher_prompt_ids, media_token_ids)
@@ -756,37 +801,50 @@ def summarize_self_distillation_metrics(
 class EMATeacherState:
     """CPU-offloaded exponential moving average shadow weights for self-teacher scoring."""
 
-    def __init__(self, decay: float = 0.99) -> None:
+    def __init__(self, decay: float = 0.99, trainable_only: bool = True) -> None:
         if not (0.0 < float(decay) < 1.0):
             raise ValueError(f"ema_decay must be in (0, 1), got {decay!r}.")
         self.decay = float(decay)
+        self.trainable_only = bool(trainable_only)
         self.shadow: dict[str, torch.Tensor] = {}
         self.num_updates: int = 0
+        self._initialized: bool = False
+
+    def _should_track(self, param: nn.Parameter) -> bool:
+        return param.is_floating_point() and (param.requires_grad or not self.trainable_only)
 
     @torch.no_grad()
     def initialize(self, model: nn.Module) -> None:
-        """Snapshot all floating-point parameters of ``model`` onto CPU."""
+        """Snapshot tracked floating-point parameters of ``model`` onto CPU.
+
+        When ``trainable_only=True`` (the default), frozen parameters such as
+        LoRA base weights are excluded from the CPU shadow and remain untouched
+        on ``model`` during EMA swaps.
+        """
         self.shadow = {
-            name: param.detach().to(device="cpu", dtype=torch.float32).clone()
+            name: param.detach().to(device="cpu", dtype=torch.float32, copy=True)
             for name, param in model.named_parameters()
-            if param.is_floating_point()
+            if self._should_track(param)
         }
         self.num_updates = 0
+        self._initialized = True
 
     @torch.no_grad()
     def update(self, model: nn.Module) -> int:
         """Update EMA shadow parameters in place from ``model``."""
-        if not self.shadow:
+        if not self._initialized:
             self.initialize(model)
             return len(self.shadow)
         updated = 0
         for name, param in model.named_parameters():
             if not param.is_floating_point():
                 continue
-            src = param.detach().to(device="cpu", dtype=torch.float32)
+            if self.trainable_only and not param.requires_grad and name not in self.shadow:
+                continue
             if name not in self.shadow:
-                self.shadow[name] = src.clone()
+                self.shadow[name] = param.detach().to(device="cpu", dtype=torch.float32, copy=True)
             else:
+                src = param.detach().to(device="cpu", dtype=torch.float32)
                 self.shadow[name].mul_(self.decay).add_(src, alpha=1.0 - self.decay)
             updated += 1
         self.num_updates += 1
@@ -799,15 +857,19 @@ class EMATeacherState:
             yield model
             return
         backups: dict[str, torch.Tensor] = {}
-        with torch.no_grad():
-            for name, param in model.named_parameters():
-                if name in self.shadow:
-                    backups[name] = param.data.detach().to(device="cpu").clone()
-                    param.data.copy_(self.shadow[name].to(device=param.device, dtype=param.dtype))
+        named_params = dict(model.named_parameters())
         try:
+            with torch.no_grad():
+                for name, shadow_tensor in self.shadow.items():
+                    param = named_params.get(name)
+                    if param is None:
+                        continue
+                    backups[name] = param.data.detach().to(device="cpu", copy=True)
+                    param.data.copy_(shadow_tensor.to(device=param.device, dtype=param.dtype))
             yield model
         finally:
             with torch.no_grad():
-                for name, param in model.named_parameters():
-                    if name in backups:
-                        param.data.copy_(backups[name].to(device=param.device, dtype=param.dtype))
+                for name, backup in backups.items():
+                    param = named_params.get(name)
+                    if param is not None:
+                        param.data.copy_(backup.to(device=param.device, dtype=param.dtype))

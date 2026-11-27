@@ -353,7 +353,13 @@ def uses_v1_trainer(config) -> bool:
 
 def _build_self_distillation_task_runner_v1(base_task_runner_cls):
     """Build a ``TaskRunnerV1`` actor class that skips external teacher lookup in agent loops."""
-    base_cls = getattr(getattr(base_task_runner_cls, "__ray_metadata__", None), "modified_class", base_task_runner_cls)
+    ray_meta = getattr(base_task_runner_cls, "__ray_metadata__", None)
+    base_cls = getattr(ray_meta, "modified_class", base_task_runner_cls)
+    if not isinstance(base_cls, type):
+        raise TypeError(
+            "Self-distillation requires task_runner_class to be a class or @ray.remote ActorClass "
+            f"(not an .options(...) wrapper), got {type(base_task_runner_cls).__name__}."
+        )
     if getattr(base_cls, "_omni_self_distillation_wrapped", False):
         return base_task_runner_cls
 
@@ -375,6 +381,11 @@ def _build_self_distillation_task_runner_v1(base_task_runner_cls):
                     self.config = orig_config
             return super().init_agent_loop_manager()
 
+    if ray_meta is not None:
+        default_options = dict(getattr(base_task_runner_cls, "_default_options", None) or {})
+        if default_options:
+            return ray.remote(**default_options)(OmniSelfDistillationTaskRunnerV1)
+        return ray.remote(OmniSelfDistillationTaskRunnerV1)
     return ray.remote(num_cpus=1)(OmniSelfDistillationTaskRunnerV1)
 
 

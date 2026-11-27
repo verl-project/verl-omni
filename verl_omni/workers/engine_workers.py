@@ -1055,18 +1055,18 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             if self._ema_live_backups is not None:
                 # Already swapped to EMA; keep existing live backup intact.
                 return True
-            if not self._ema_teacher_state.shadow:
+            if not getattr(self._ema_teacher_state, "_initialized", bool(self._ema_teacher_state.shadow)):
                 self._ema_teacher_state.initialize(actor_module)
             backups: dict[str, torch.Tensor] = {}
             named_params = dict(actor_module.named_parameters())
             try:
                 with torch.no_grad():
-                    for name, param in named_params.items():
-                        if name in self._ema_teacher_state.shadow:
-                            backups[name] = param.data.detach().to(device="cpu").clone()
-                            param.data.copy_(
-                                self._ema_teacher_state.shadow[name].to(device=param.device, dtype=param.dtype)
-                            )
+                    for name, shadow_tensor in self._ema_teacher_state.shadow.items():
+                        param = named_params.get(name)
+                        if param is None:
+                            continue
+                        backups[name] = param.data.detach().to(device="cpu", copy=True)
+                        param.data.copy_(shadow_tensor.to(device=param.device, dtype=param.dtype))
             except Exception:
                 with torch.no_grad():
                     for name, backup in backups.items():
@@ -1079,10 +1079,12 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         if self._ema_live_backups is None:
             return False
         backups = self._ema_live_backups
+        named_params = dict(actor_module.named_parameters())
         with torch.no_grad():
-            for name, param in actor_module.named_parameters():
-                if name in backups:
-                    param.data.copy_(backups[name].to(device=param.device, dtype=param.dtype))
+            for name, backup in backups.items():
+                param = named_params.get(name)
+                if param is not None:
+                    param.data.copy_(backup.to(device=param.device, dtype=param.dtype))
         self._ema_live_backups = None
         return True
 
@@ -1244,6 +1246,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 saved = torch.load(ema_path, map_location="cpu", weights_only=True)
                 ema_state.shadow = dict(saved.get("shadow", {}))
                 ema_state.num_updates = int(saved.get("num_updates", 0))
+                ema_state._initialized = True
             else:
                 actor_module = self._get_actor_ema_module()
                 if actor_module is not None:
