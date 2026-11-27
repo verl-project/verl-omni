@@ -131,7 +131,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     trainer.train_ar=True \
     trainer.logger='["console", "swanlab"]' \
     trainer.project_name=dual_grpo \
-    trainer.experiment_name=qwen_image_dualgrpo_async_reward \
+    trainer.experiment_name=qwen_image_dualgrpo_lora_async_reward \
     trainer.validation_data_dir=validation_data_async_reward \
     trainer.log_val_generations=8 \
     trainer.val_before_train=False \
