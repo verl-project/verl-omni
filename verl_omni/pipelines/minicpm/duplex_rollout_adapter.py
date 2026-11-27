@@ -225,9 +225,18 @@ class MiniCPMODuplexRolloutAdapter(MiniCPMORolloutAdapter):
             raise TypeError(f"duplex replay payload must be a DuplexReplay, got {type(payload).__name__}.")
         if DUPLEX_REPLAY_KEY in output.extra_fields:
             raise RuntimeError(f"duplex rollout unexpectedly returned reserved field {DUPLEX_REPLAY_KEY!r}.")
-        output.prompt_ids = list(payload.prompt_ids)
-        output.response_ids = list(payload.response_ids)
-        output.response_mask = list(payload.response_mask)
+        if payload.response_ids:
+            output.prompt_ids = list(payload.prompt_ids)
+            output.response_ids = list(payload.response_ids)
+            output.response_mask = list(payload.response_mask)
+        else:
+            # An empty response cannot hold rm_scores[-1]. One masked token
+            # keeps the reward write and stays out of the loss.
+            output.prompt_ids = list(payload.prompt_ids) or [0]
+            output.response_ids = [0]
+            output.response_mask = [0]
+            if not output.extra_fields.get("advantage_mask"):
+                output.extra_fields["advantage_mask"] = [0]
         # ``response_logprobs`` stays unexported: verl pops it into the
         # ``rollout_log_probs`` column and engages rollout-correction /
         # debug metrics against the trainer-recomputed ``old_log_probs`` —

@@ -313,14 +313,14 @@ class OmniDuplexAgentLoop(AgentLoopBase):
     ) -> AgentLoopOutput:
         """The mask-0 episode the loop emits instead of a trainable one.
 
-        Bounded episodes must not poison the whole rollout group: the output
-        carries an empty (zero-unit) replay payload, a zero loss mask, a zero
-        reward score — which also keeps the scorer off the empty payload — and
-        ``reward_extra_info``, whose ``duplex_episode_failed`` = 1.0 marks the
-        episode as dropped (the trainer's per-step mean is the dropped share)
-        alongside the cause's own column. The advantage-gate columns mark it
-        excluded from its group's baseline (``advantage_exclude``) under an
-        all-zero ``advantage_mask``.
+        Bounded episodes must not poison the whole rollout group. The replay
+        payload is empty. Postprocess places one masked token so the reward
+        write has a slot, and the score is the axis floor. ``reward_extra_info``
+        carries ``duplex_episode_failed`` = 1.0, which marks the episode as
+        dropped (the trainer's per-step mean is the dropped share) alongside
+        the cause's own column. The advantage-gate columns mark it excluded
+        from its group's baseline (``advantage_exclude``) under an all-zero
+        ``advantage_mask``.
 
         Args:
             episode: The dataset episode the drive failed on.
@@ -347,13 +347,17 @@ class OmniDuplexAgentLoop(AgentLoopBase):
             sampling_params=(),
             instructions=instructions,
         )
+        logger.warning(
+            "duplex episode %s: emitting a degenerate mask-0 episode with the axis-floor reward",
+            episode.get("episode_id"),
+        )
         output = AgentLoopOutput(
             prompt_ids=[0],
             response_ids=[],
             response_mask=[],
             num_turns=2,
             metrics=metrics,
-            reward_score=0.0,
+            reward_score=-1.0,
             extra_fields={
                 "duplex_replay_payload": replay,
                 "min_global_steps": step,

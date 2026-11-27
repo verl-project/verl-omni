@@ -233,10 +233,10 @@ async def test_episode_failure_is_re_driven_with_a_fresh_seed():
 async def test_double_failure_is_a_degenerate_mask_zero_episode():
     loop, server = _loop(_server_result(), failures=2)
     output = await loop.run({}, duplex_episode=_episode(), duplex_seed=5, global_steps=9)
-    # The rollout batch is not poisoned: a valid, empty, mask-0 episode.
-    assert output.response_ids == []
-    assert output.response_mask == []
-    assert output.reward_score == 0.0  # keeps the scorer off the broken payload
+    # One masked token so the reward tensor can be written. The score is the axis floor.
+    assert output.response_ids == [0]
+    assert output.response_mask == [0]
+    assert output.reward_score == -1.0
     assert output.response_logprobs is None
     payload = output.extra_fields[DUPLEX_REPLAY_KEY]
     assert payload["unit_layouts"] == [] and payload["audio_bounds"] == []
@@ -245,7 +245,7 @@ async def test_double_failure_is_a_degenerate_mask_zero_episode():
     assert output.extra_fields["min_global_steps"] == 9
     assert output.extra_fields["max_global_steps"] == 9
     # Dropped episodes leave their group's baseline under an all-zero gate.
-    assert output.extra_fields["advantage_mask"] == [0] * len(output.response_mask) == []
+    assert output.extra_fields["advantage_mask"] == [0]
     assert output.extra_fields["advantage_exclude"] is True
     assert len(server.episodes) == 2  # the original drive plus the retry
     assert loop.server_manager._load_balancer.released_count == 1
@@ -339,15 +339,15 @@ async def test_engine_silence_inside_the_scored_window_drops_the_episode():
     # of the column is the drop rate.
     loop, _ = _loop(_server_result(engine_silence_units=1))
     output = await loop.run({}, duplex_episode=_episode(), duplex_seed=3, global_steps=9)
-    assert output.response_ids == []
-    assert output.response_mask == []
-    assert output.reward_score == 0.0
+    assert output.response_ids == [0]
+    assert output.response_mask == [0]
+    assert output.reward_score == -1.0
     assert output.extra_fields["reward_extra_info"] == {"duplex_episode_failed": 1.0, "duplex_pacing_corrupted": 1.0}
     payload = output.extra_fields[DUPLEX_REPLAY_KEY]
     assert payload["unit_layouts"] == [] and payload["status"] == "failed"
     assert output.extra_fields["min_global_steps"] == 9
     # The dropped episode leaves its peers' baseline: all-zero gate, excluded.
-    assert output.extra_fields["advantage_mask"] == [0] * len(output.response_mask) == []
+    assert output.extra_fields["advantage_mask"] == [0]
     assert output.extra_fields["advantage_exclude"] is True
 
 

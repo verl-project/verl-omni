@@ -76,6 +76,15 @@ class DuplexEpisodeError(RuntimeError):
     """A duplex episode failed; the episode is a rollout failure, not data."""
 
 
+def speak_wait_seconds(run_spec: Mapping[str, Any]) -> float:
+    """Wait for the first speak: the episode feed plus its tail, capped by the requested horizon."""
+    requested = float(run_spec.get("speak_wait_horizon_s", 30.0))
+    chunks = run_spec.get("chunks") or []
+    feed_s = len(chunks) * _DUPLEX_CHUNK_SECONDS
+    tail_s = float(run_spec.get("tail_horizon_s", _DEFAULT_TAIL_HORIZON_S))
+    return min(requested, feed_s + tail_s)
+
+
 def _pcm_f32le_bytes(samples: Any) -> bytes:
     """Little-endian float32 PCM bytes of one chunk (list or ndarray)."""
     return struct.pack(f"<{len(samples)}f", *[float(value) for value in samples])
@@ -157,6 +166,7 @@ class DuplexStrategy(ARStrategy):
         record_wires: list[dict[str, Any]] = []
         speech_chunk_span: tuple[int, int] | None = None
         session = None
+        consumer: asyncio.Task | None = None
         try:
             # No ``instructions`` key: an explicit value silences the engine's
             # native duplex pipeline (zero ``response.listen`` events, empty
@@ -188,12 +198,22 @@ class DuplexStrategy(ARStrategy):
             record_wires.extend(await asyncio.to_thread(self._drain_terminal, duplex_omni, session.session_id))
             record_wires.sort(key=_record_sort_key)
         except Exception as error:
-            if session is not None and not session.closed:
+            raise DuplexEpisodeError(f"duplex episode {episode_id} failed: {error}") from error
+        finally:
+            if consumer is not None and not consumer.done():
+                consumer.cancel()
+            if session is not None and not getattr(session, "closed", True):
                 try:
                     await session.close(reason="rollout_error")
                 except Exception:  # noqa: BLE001 - the original error wins
                     logger.exception("duplex episode %s: session close failed", episode_id)
-            raise DuplexEpisodeError(f"duplex episode {episode_id} failed: {error}") from error
+            # A failure before the success-path drain must still collect sealed
+            # sets, or the engine expires them while the slot stays taken.
+            if session is not None and not record_wires:
+                try:
+                    await asyncio.to_thread(self._drain_terminal, duplex_omni, session.session_id)
+                except Exception:
+                    logger.exception("duplex episode %s: terminal drain failed", episode_id)
         if not record_wires:
             raise DuplexEpisodeError(
                 f"duplex episode {episode_id} produced no action-record scopes; capture must be on"
@@ -353,7 +373,7 @@ class DuplexStrategy(ARStrategy):
 
     async def _await_speak_onset(self, speak_onset: dict[str, float], run_spec: Mapping[str, Any]) -> float:
         """Wait for the policy's first speak decision, bounded by the horizon."""
-        horizon = float(run_spec.get("speak_wait_horizon_s", 30.0))
+        horizon = speak_wait_seconds(run_spec)
         deadline = asyncio.get_running_loop().time() + horizon
         while "at" not in speak_onset:
             if asyncio.get_running_loop().time() >= deadline:

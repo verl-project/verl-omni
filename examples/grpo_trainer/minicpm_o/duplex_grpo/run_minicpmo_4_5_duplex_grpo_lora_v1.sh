@@ -68,9 +68,9 @@ export VERL_OMNI_DUPLEX_MAX_SESSIONS="${VERL_OMNI_DUPLEX_MAX_SESSIONS:-${NUM_AGE
 #   is importlib, which looks the name up as a module attribute. naive is
 #   verl's registered rule-reward manager. The duplex scorer reads timestamps
 #   from the replay.
-# - The rollout strategy sets duplex_session.max_sessions from
-#   rollout.agent.num_workers. VERL_OMNI_DUPLEX_MAX_SESSIONS is the fallback
-#   the standalone deploy writer uses when no rollout config is in scope.
+# - The rollout strategy sets duplex_session.max_sessions to twice
+#   rollout.agent.num_workers, one slot for the live episode and one for the
+#   next open. VERL_OMNI_DUPLEX_MAX_SESSIONS is the standalone-writer fallback.
 
 "${PYTHON_BIN}" -m verl_omni.trainer.main_omni \
     "data.train_files=${TRAIN_FILE}" \

@@ -451,12 +451,12 @@ def test_duplex_session_capacity_follows_agent_workers():
     )
 
     config = SimpleNamespace(agent=SimpleNamespace(num_workers=16))
-    assert duplex_session_capacity(config) == 16
+    assert duplex_session_capacity(config) == 32
     assert duplex_session_capacity(SimpleNamespace(agent=SimpleNamespace(num_workers=0))) is None
     assert duplex_session_capacity(SimpleNamespace(agent=SimpleNamespace(num_workers=True))) is None
     deploy = {"session_mode": "duplex", "duplex_session": {"max_sessions": 1}}
     apply_duplex_session_capacity(deploy, config)
-    assert deploy["duplex_session"]["max_sessions"] == 16
+    assert deploy["duplex_session"]["max_sessions"] == 32
     turn = {"session_mode": "turn", "duplex_session": {"max_sessions": 1}}
     apply_duplex_session_capacity(turn, config)
     assert turn["duplex_session"]["max_sessions"] == 1

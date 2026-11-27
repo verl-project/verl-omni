@@ -209,7 +209,9 @@ anchors stay relative to that clamped window.
    rate; the dropped episode leaves its group's baseline and takes advantage
    0 (`advantage/excluded_sample_share` reports the excluded share,
    `advantage/gated_token_share` the share of response-masked positions the
-   pause/interruption gate zeroed).
+   pause/interruption gate zeroed). A drive that fails before any response
+   exists returns that same mask-0 shape with one placeholder token and
+   reward −1, so the reward write is not an empty-tensor index.
 4. **FDB-v1 rule metrics** over dumped replays
    (`python -m verl_omni.utils.dataset.duplex.fdb_metrics dump.jsonl`).
 5. **Exit criteria** (English duplex non-regression against the base
@@ -242,10 +244,13 @@ tolerances stay max |Δ| ≤ 0.05 nats and mean ≤ 0.01. The gate scripts
 build an engine with `enable_prefix_caching=false` and score through the
 same media normalization as training.
 
-The rollout strategy sets `duplex_session.max_sessions` from
-`rollout.agent.num_workers`. `VERL_OMNI_DUPLEX_MAX_SESSIONS` remains the
-cap the standalone deploy writer uses. The reward manager is verl's
-registered `naive` (`reward.reward_manager.source=register`).
+The rollout strategy sets `duplex_session.max_sessions` to twice
+`rollout.agent.num_workers`, so a worker can open the next episode while
+the previous session is still closing. `VERL_OMNI_DUPLEX_MAX_SESSIONS`
+remains the cap the standalone deploy writer uses. The reward manager is
+verl's registered `naive` (`reward.reward_manager.source=register`).
+An interruption episode waits for the first speak for at most its feed
+plus tail.
 
 CPU tests cover the whole contract surface
 (`tests/utils/dataset/duplex/`, the strategy / agent-loop / adapter suites);

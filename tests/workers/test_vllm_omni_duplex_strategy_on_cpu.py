@@ -455,6 +455,10 @@ async def test_engine_error_closes_the_session_and_fails_the_episode():
     finally:
         _restore(strategy)
     assert engine.handles[0].closed
+    # The failure path still drains the sealed cache after close.
+    assert engine.terminal_wires == []
+    assert engine.terminal_collect_log
+    assert all(closed for _, closed in engine.terminal_collect_log)
 
 
 @pytest.mark.asyncio
@@ -561,6 +565,14 @@ async def test_earlier_epoch_sorts_first_regardless_of_cache_order():
     finally:
         _restore(strategy)
     assert [wire["epoch"] for wire in result["record_sets"]] == [0, 1]
+
+
+def test_speak_wait_is_the_episode_horizon():
+    from verl_omni.workers.rollout.vllm_rollout.vllm_omni_duplex_strategy import speak_wait_seconds
+
+    # Five 1 s chunks plus the 8 s tail, under the 30 s request.
+    assert speak_wait_seconds({"chunks": [None] * 5}) == pytest.approx(13.0)
+    assert speak_wait_seconds({"chunks": [None] * 5, "speak_wait_horizon_s": 2.0}) == pytest.approx(2.0)
 
 
 @pytest.mark.asyncio

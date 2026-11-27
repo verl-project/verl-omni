@@ -72,20 +72,20 @@ def lora_engine_extras(model_config: OmniModelConfig) -> dict[str, Any]:
 
 
 def duplex_session_capacity(config: Any) -> int | None:
-    """``rollout.agent.num_workers`` when it is a positive int, else ``None``."""
+    """Two session slots per ``rollout.agent.num_workers``, or ``None`` when the count is missing."""
     agent = getattr(config, "agent", None)
     workers = getattr(agent, "num_workers", None)
     if isinstance(workers, bool) or not isinstance(workers, int) or workers < 1:
         return None
-    return workers
+    return workers * 2
 
 
 def apply_duplex_session_capacity(deploy: dict[str, Any], config: Any) -> None:
     """Set a duplex deploy's admission cap from the rollout worker count.
 
     The engine admits one session unless the deploy says otherwise, and a
-    duplex session holds its slot for the whole episode. The worker count is
-    the concurrency the rollout actually runs.
+    duplex session holds its slot for the whole episode. The cap is two slots
+    per worker so the next open does not wait out the previous close.
     """
     if deploy.get("session_mode") != "duplex":
         return
