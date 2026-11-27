@@ -1,0 +1,48 @@
+name: Lint
+
+on:
+  pull_request:
+  workflow_call:
+
+concurrency:
+  group: pr-lint-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78
+        with:
+          enable-cache: false
+      - name: Run pre-commit lint hooks
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          status=0
+          uv run --no-project --python 3.12 python tests/special_sanity/check_ci_policy.py "$BASE_SHA" "$HEAD_SHA" || status=1
+          uvx --python 3.12 pre-commit run check-pr-lint --from-ref "$BASE_SHA" --to-ref "$HEAD_SHA" || status=1
+          uvx --python 3.12 pre-commit run ruff --all-files --show-diff-on-failure || status=1
+          uvx --python 3.12 pre-commit run ruff-format --all-files --show-diff-on-failure || status=1
+          uvx --python 3.12 pre-commit run check-license --all-files || status=1
+          uvx --python 3.12 pre-commit run validate-structure --all-files || status=1
+          uvx --python 3.12 pre-commit run check-device-api-usage --all-files || status=1
+          uvx --python 3.12 pre-commit run check-dataproto-usage --all-files || status=1
+          uvx --python 3.12 pre-commit run check-naming-conventions --all-files || status=1
+          uvx --python 3.12 pre-commit run compileall --all-files || status=1
+          exit "$status"
+      - name: Exercise checker regressions
+        run: >-
+          uv run --no-project --python 3.12 --with pytest --with pyyaml --with ruff==0.12.2 pytest -q
+          tests/special_sanity/test_ci_policy.py tests/special_sanity/test_pr_lint.py
+          tests/special_sanity/test_ast_rules.py tests/special_sanity/test_comments.py
+          tests/special_sanity/test_example_recipes.py
