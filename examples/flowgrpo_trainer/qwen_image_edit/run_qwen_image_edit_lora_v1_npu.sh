@@ -33,6 +33,21 @@ mkdir -p "$checkpoint_dir" "$(dirname "$log_file")"
 exec > >(tee -a "$log_file") 2>&1
 echo "Logging to $log_file"
 
+# An existing flat Hydra key selects the previous PickScore defaults.
+pickscore_config=reward.scorers.pickscore
+for override in "$@"; do
+    key=${override%%=*}
+    key=${key#++}
+    key=${key#+}
+    key=${key#"~"}
+    case "$key" in
+        reward.reward_functions|reward.reward_functions.*)
+            pickscore_config=reward.reward_functions.pickscore
+            break
+            ;;
+    esac
+done
+
 python3 -m verl_omni.trainer.main_diffusion_v1 \
     data.train_files=$train_path \
     data.val_files=$test_path \
@@ -92,8 +107,8 @@ python3 -m verl_omni.trainer.main_diffusion_v1 \
     +reward.models.pickscore.model_path=$pickscore_model_path \
     +reward.models.pickscore.placement.devices="$NATIVE_REWARD_DEVICES" \
     +reward.models.pickscore.executor.model=verl_omni.utils.reward_score.pickscore_reward:PickScoreNativeModel \
-    +reward.reward_functions.pickscore.path=pkg://verl_omni.utils.reward_score.pickscore_reward \
-    +reward.reward_functions.pickscore.name=compute_score_pickscore_native \
+    "+${pickscore_config}.path=pkg://verl_omni.utils.reward_score.pickscore_reward" \
+    "+${pickscore_config}.name=compute_score_pickscore_native" \
     trainer.logger='["console", "tensorboard"]' \
     trainer.project_name=flow_grpo \
     trainer.experiment_name=qwen_image_edit_lora_pickscore \
