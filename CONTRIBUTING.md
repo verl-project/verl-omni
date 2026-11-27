@@ -39,6 +39,12 @@ pre-commit run --all-files
 pre-commit run --all-files --show-diff-on-failure --color=always ruff
 ```
 
+Every pull request automatically runs the `Lint` workflow (Ruff lint/format,
+sanity hooks, and incremental `check-pr-lint`) before GPU or NPU runners start.
+Stage your changes and run `uvx pre-commit run check-pr-lint` locally; see
+[PR Lint Checks](docs/contributing/pr_lint_checks.md) for the rule catalog,
+baseline semantics, and checker regression command.
+
 ## Testing
 
 Our test suites run on GitHub Actions. Check these [workflows](https://github.com/verl-project/verl-omni/tree/main/.github/workflows) for details.
@@ -107,6 +113,7 @@ Additional guides:
 - [GPU Smoke Tests](docs/contributing/gpu_smoke_tests.md)
 - [NPU Smoke Tests](docs/contributing/npu_smoke_tests.md)
 - [CI/CD Layers](docs/contributing/ci_cd.md)
+- [PR Lint Checks](docs/contributing/pr_lint_checks.md)
 - [Common Pitfalls](docs/contributing/common_pitfalls.md)
 - [Integrating the Diffusion Prompt-Embedding Cache](docs/contributing/integrating_prompt_embedding_cache.md)
 

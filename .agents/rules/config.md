@@ -59,7 +59,8 @@ def __post_init__(self):
 ```
 
 Don't reach for `Literal[...]` — it appears nowhere in these directories; plain
-`str` plus a `valid_*` set is the established pattern.
+`str` plus a `valid_*` set is the established pattern. `check-pr-lint` (`VO011`)
+enforces these dataclass shape, `super().__post_init__()`, and `__all__` rules.
 
 `__post_init__` also does real I/O in places (tokenizer loading, path resolution,
 `import kernels` in `workers/config/diffusion/model.py`), so it is not free to call.
