@@ -24,7 +24,7 @@ done
 mkdir -p "${OUTPUT_DIR}"
 export PYTHONHASHSEED="${SEED}"
 export TOKENIZERS_PARALLELISM=false
-export VERL_USE_EXTERNAL_MODULES=verl_omni
+export VERL_USE_EXTERNAL_MODULES=${VERL_USE_EXTERNAL_MODULES:+${VERL_USE_EXTERNAL_MODULES},}verl_omni
 export VLLM_USE_FLASHINFER_SAMPLER=0
 
 "${PYTHON_BIN}" -m verl_omni.trainer.main_omni \

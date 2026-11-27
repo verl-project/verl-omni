@@ -19,7 +19,7 @@ things here are enforcement facts rather than guidance.
 `reward_loop`, `trainer`, `utils`, `workers`, `experimental`, `tools`,
 `model_merger`, `version`, and later additions) or
 one of `special_{e2e,sanity,standalone,distributed}`. A test at the `tests/` root
-fails — three legacy root files are explicitly allowlisted.
+fails.
 
 Nested directories are fine (`tests/utils/reward_score/`). The hook checks nothing
 else: not naming, not docstrings, not that the path mirrors the source. So the

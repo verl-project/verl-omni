@@ -20,7 +20,7 @@ export CPATH=/usr/include${CPATH:+:$CPATH}
 export RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO=0
 
 # V1 path: verl_omni only — pipeline registration is automatic.
-export VERL_USE_EXTERNAL_MODULES=verl_omni
+export VERL_USE_EXTERNAL_MODULES=${VERL_USE_EXTERNAL_MODULES:+${VERL_USE_EXTERNAL_MODULES},}verl_omni
 
 NUM_TRAIN_GPUS=${NUM_TRAIN_GPUS:-1}
 NUM_ROLLOUT_GPUS=${NUM_ROLLOUT_GPUS:-1}

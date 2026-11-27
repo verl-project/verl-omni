@@ -12,7 +12,7 @@ OUTPUT_DIR=$(cd "${OUTPUT_DIR}" && pwd)
 # Each invocation gets a separate log and resolved configuration.
 RUN_DIR=$(mktemp -d "${OUTPUT_DIR}/run.XXXXXX")
 echo "AudioMCQ artifacts: ${RUN_DIR}"
-export VERL_USE_EXTERNAL_MODULES=verl_omni
+export VERL_USE_EXTERNAL_MODULES=${VERL_USE_EXTERNAL_MODULES:+${VERL_USE_EXTERNAL_MODULES},}verl_omni
 export TENSORBOARD_DIR="${RUN_DIR}/tensorboard"
 export CUDA_DEVICE_MAX_CONNECTIONS=${CUDA_DEVICE_MAX_CONNECTIONS:-1}
 export RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO=0
@@ -84,7 +84,7 @@ args=(
   algorithm.rollout_correction.bypass_mode=false
   reward.custom_reward_function.path=pkg://verl_omni.utils.reward_score.audio_mcq
   reward.custom_reward_function.name=compute_score
-  +ray_kwargs.ray_init.runtime_env.env_vars.VERL_USE_EXTERNAL_MODULES=verl_omni
+  '+ray_kwargs.ray_init.runtime_env.env_vars.VERL_USE_EXTERNAL_MODULES=${oc.env:VERL_USE_EXTERNAL_MODULES,verl_omni}'
   '+ray_kwargs.ray_init.runtime_env.env_vars.TENSORBOARD_DIR=${oc.env:TENSORBOARD_DIR}'
   '+ray_kwargs.ray_init.runtime_env.env_vars.CUDA_DEVICE_MAX_CONNECTIONS=${oc.env:CUDA_DEVICE_MAX_CONNECTIONS,1}'
   '+ray_kwargs.ray_init.runtime_env.env_vars.RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO="0"'

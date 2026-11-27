@@ -19,11 +19,7 @@ env:
 
 jobs:
   setup:
-    if: >-
-      github.repository_owner == 'verl-project' && (
-        github.event_name != 'pull_request' ||
-        contains(github.event.pull_request.labels.*.name, 'ready-for-ci')
-      )
+    if: github.repository_owner == 'verl-project'
     runs-on: ubuntu-latest
     outputs:
       runner-label: ${{ steps.create-runner.outputs.runner-label }}
