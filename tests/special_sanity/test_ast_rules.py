@@ -453,6 +453,35 @@ def test_tests_conftest_with_cpu_mark_is_not_flagged_and_nested_import_does_not_
             "        else:\n            super().__post_init__()\n",
             [],
         ),
+        (
+            '__all__ = ["SubConfig"]\n@dataclass\nclass SubConfig(ParentConfig):\n'
+            "    def __post_init__(self):\n        self.debug and super().__post_init__()\n",
+            ["VO011"],
+        ),
+        (
+            '__all__ = ["SubConfig"]\n@dataclass\nclass SubConfig(ParentConfig):\n'
+            "    def __post_init__(self):\n        if self.skip:\n            return\n"
+            "        super().__post_init__()\n",
+            ["VO011"],
+        ),
+        (
+            '__all__ = ["SubConfig"]\n@dataclass\nclass SubConfig(ParentConfig):\n'
+            "    def __post_init__(self):\n        if self.invalid:\n            raise ValueError('bad')\n"
+            "        super().__post_init__()\n",
+            [],
+        ),
+        (
+            '__all__ = ["SubConfig"]\n@dataclass\nclass SubConfig(ParentConfig):\n'
+            "    def __post_init__(self):\n        super().__post_init__()\n"
+            "        if self.skip:\n            return\n",
+            [],
+        ),
+        (
+            '__all__ = ["SubConfig"]\n@dataclass\nclass SubConfig(ParentConfig):\n'
+            "    def __post_init__(self):\n"
+            "        super().__post_init__() if self.debug else super().__post_init__()\n",
+            [],
+        ),
     ],
 )
 def test_config_dataclass_rules_cover_defaults_literal_and_super(source: str, expected: list[str]) -> None:

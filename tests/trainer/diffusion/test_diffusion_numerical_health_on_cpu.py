@@ -368,3 +368,16 @@ def test_non_numeric_jsonl_loss_values_are_rejected(tmp_path: Path, bad_value: o
     )
     with pytest.raises(ValueError, match="actor/kl_loss"):
         _checker.check_diffusion_numerical_health(jsonl_path=jsonl, steps=[1])
+
+
+@pytest.mark.parametrize("bad_value", [False, [None], "invalid"])
+def test_duplicate_record_cannot_mask_non_numeric_jsonl_loss(tmp_path: Path, bad_value: object) -> None:
+    jsonl = _write_jsonl(
+        tmp_path / "metrics.jsonl",
+        [
+            {"step": 1, "data": {"actor/loss": 0.12, "actor/grad_norm": 0.9, "actor/kl_loss": bad_value}},
+            {"step": 1, "data": {"actor/loss": 0.12, "actor/grad_norm": 0.9, "actor/kl_loss": 0.1}},
+        ],
+    )
+    with pytest.raises(ValueError, match="actor/kl_loss"):
+        _checker.check_diffusion_numerical_health(jsonl_path=jsonl, steps=[1])

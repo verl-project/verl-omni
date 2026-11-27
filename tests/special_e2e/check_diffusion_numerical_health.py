@@ -62,8 +62,12 @@ def _is_nonfinite_or_null(value: Any) -> bool:
 
 
 def _store_metric(target: dict[str, Any], key: str, value: Any) -> None:
-    if key in target and _is_nonfinite_or_null(target[key]):
-        return
+    if key in target:
+        existing = target[key]
+        if _is_nonfinite_or_null(existing):
+            return
+        if _coerce_number(existing) is None and _coerce_number(value) is not None:
+            return
     target[key] = value
 
 

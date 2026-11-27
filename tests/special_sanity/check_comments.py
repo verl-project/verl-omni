@@ -36,10 +36,7 @@ NARRATION = re.compile(
     r"(?:changed|moved|extracted)\s+from\b|replaced\s+(?:the|this|old)\b|"
     r"(?:helper|utility)\s+(?:function|method|class)\s+(?:to|for)\b|"
     r"new\s+(?:helper|function|method|class|code|implementation)\s*(?::|for\b|to\b)|"
-    r"step\s+\d+(?:\.\d+)*\s*[:.)-]|"
-    r"(?:新增|修改|更新|添加|移除|重命名|重构|修复|修正|解决|替换|调整|优化)"
-    r"(?:了|：|:|(?:代码|处理|支持|函数|方法|类|逻辑|校验|检查)(?:以|来|用于|：|:))|"
-    r"步骤\s*\d+\s*[:：.)、-])",
+    r"step\s+\d+(?:\.\d+)*\s*[:.)-])",
     re.IGNORECASE,
 )
 BANNER = re.compile(
@@ -47,7 +44,17 @@ BANNER = re.compile(
     r"(?:imports?|constants?|helpers?|utilities|end\s+of\s+\S.*))$",
     re.IGNORECASE,
 )
-PR_REF = re.compile(r"\bPR\s*#\d+\b", re.IGNORECASE)
+TRACKER_REF = re.compile(
+    r"(?:\b(?:PR|RFC|Issue)\s*#\d+\b"
+    r"|\[(?:RFC|Issue|PR)(?:\s*#?\d+)?\]"
+    r"|\[#\d+\]"
+    r"|\(\s*#\d+\s*\)"
+    r"|\b(?:see|from|in|for|per|fixed\s+in|added\s+in|introduced\s+in|tracked\s+in|follow-?up\s+to|pull|issues?)\s+#\d+\b)",
+    re.IGNORECASE,
+)
+_MD_FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})")
+_MD_INLINE_CODE_RE = re.compile(r"`[^`]*`")
+_CM005_MSG = "Remove PR/RFC/issue references; make comments, docstrings, and docs self-explanatory."
 DOCSTRING_TEMPLATE = re.compile(r"^\s*(?:Necessity|Motivation)\s*:", re.MULTILINE | re.IGNORECASE)
 AI_DOC_FILLER = re.compile(
     r"^(?:(?:a\s+|an\s+)?(?:helper|utility|convenience|internal|private)\s+"
@@ -203,8 +210,8 @@ def _docstring_findings(path: str, tree: ast.AST) -> Iterator[tuple[int, str, st
             and _is_trivial_private_docstring(node, doc)
         ):
             yield first.lineno, "CM004", "Omit trivial private docstring that only repeats the function signature."
-        elif not path.startswith("tests/special_") and PR_REF.search(doc):
-            yield first.lineno, "CM005", "Remove PR references from docstrings; cite issues or explain the rationale."
+        elif not path.startswith("tests/special_") and TRACKER_REF.search(doc):
+            yield first.lineno, "CM005", _CM005_MSG
 
 
 _HEREDOC_DELIM_RE = re.compile(r"(-?)\s*\\?(?:'([^']+)'|\"([^\"]+)\"|([A-Za-z0-9_.-]+))")
@@ -324,14 +331,51 @@ def _shell_comment_findings(source: bytes) -> Iterator[tuple[int, str, str]]:
                 license_done = True
         if lower.startswith(TOOLING_DIRECTIVE_PREFIXES):
             continue
-        if PR_REF.search(comment_text):
-            yield line_no, "CM005", "Remove PR references from code comments; cite issues or explain the rationale."
+        if TRACKER_REF.search(comment_text):
+            yield line_no, "CM005", _CM005_MSG
+
+
+def _doc_tracker_findings(source: bytes, *, is_markdown: bool) -> Iterator[tuple[int, str, str]]:
+    try:
+        text = source.decode("utf-8")
+    except UnicodeDecodeError:
+        return
+    fence_char = ""
+    fence_len = 0
+    for line_no, raw_line in enumerate(text.splitlines(), 1):
+        if is_markdown:
+            if match := _MD_FENCE_RE.match(raw_line):
+                marker = match.group(1)
+                if not fence_char:
+                    fence_char, fence_len = marker[0], len(marker)
+                    continue
+                if marker[0] == fence_char and len(marker) >= fence_len and not raw_line[match.end() :].strip():
+                    fence_char, fence_len = "", 0
+                    continue
+            if fence_char:
+                continue
+            scan_line = _MD_INLINE_CODE_RE.sub("", raw_line)
+        else:
+            scan_line = raw_line
+        if TRACKER_REF.search(scan_line):
+            yield line_no, "CM005", _CM005_MSG
+
+
+def _is_checked_doc(path: str) -> bool:
+    if path.startswith("docs/") and path.endswith((".md", ".rst")):
+        return True
+    if path.startswith("examples/") and path.endswith(".md"):
+        return True
+    return "/" not in path and path.endswith(".md")
 
 
 def findings(path: str, source: bytes, tree: ast.AST | None = None) -> Iterator[tuple[int, str, str]]:
     """Yield comment-shape and docstring-boilerplate violations without inferring authorship."""
     if path.startswith("examples/") and path.endswith(".sh"):
         yield from _shell_comment_findings(source)
+        return
+    if _is_checked_doc(path):
+        yield from _doc_tracker_findings(source, is_markdown=path.endswith(".md"))
         return
     if not path.startswith(("verl_omni/", "tests/", "examples/")) or not path.endswith(".py"):
         return
@@ -377,8 +421,8 @@ def findings(path: str, source: bytes, tree: ast.AST | None = None) -> Iterator[
         lower = text.lower()
         is_tooling_directive = lower.startswith(TOOLING_DIRECTIVE_PREFIXES)
         is_any_directive = is_tooling_directive or lower.startswith(PROSE_DIRECTIVE_PREFIXES)
-        if line_no not in license_lines and not is_tooling_directive and PR_REF.search(text):
-            yield line_no, "CM005", "Remove PR references from code comments; cite issues or explain the rationale."
+        if line_no not in license_lines and not is_tooling_directive and TRACKER_REF.search(text):
+            yield line_no, "CM005", _CM005_MSG
         if standalone and not is_banner and line_no not in license_lines and not is_any_directive:
             standalone_lines[line_no] = text
 

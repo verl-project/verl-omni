@@ -162,6 +162,7 @@ api/utils.rst
 
 contributing/editing-agent-instructions.md
 contributing/ci_cd.md
+contributing/pr_lint_checks.md
 contributing/testing_guide.md
 contributing/integrating_prompt_embedding_cache.md
 contributing/integrating_an_omni_model.md

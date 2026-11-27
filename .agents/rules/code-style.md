@@ -16,7 +16,7 @@ mechanically detectable parts. Formatting is handled by the tools below.
 | Hook                       | What it actually enforces                                                  |
 | -------------------------- | -------------------------------------------------------------------------- |
 | `ruff` / `ruff-format`     | Lint + format, `line-length = 120` (scope below)                           |
-| `check-pr-lint`            | Incremental AST contracts, example recipes, comments, and Ruff; see `check_pr_lint.py` |
+| `check-pr-lint`            | Incremental AST contracts, example recipes, comments, docs, and Ruff ([pr_lint_checks.md](../../docs/contributing/pr_lint_checks.md)) |
 | `mypy`                     | Errors enabled only in configured module overrides; global `ignore_errors = true` |
 | `check-license`            | Accepted copyright text in tracked `.py` files; does not validate the full license header |
 | `autogen-trainer-cfg`      | `_generated_*.yaml` matches flattened Hydra source configs |
@@ -70,9 +70,9 @@ in a hardcoded file list — read it off the hook rather than guessing:
 grep -n 'verl_omni/' tests/special_sanity/check_docstrings.py
 ```
 
-`check-pr-lint` additionally enforces `VO015` (public API/`__all__`/contract/`compute_score*`
-docstrings) and `CM004` (boilerplate/filler/signature-echo docstrings). Style details
-below are **review conventions**:
+`check-pr-lint` enforces public API docstrings (`VO015`), type annotations
+(`VO018`), and rejects boilerplate docstrings (`CM004`). Style details below are
+**review conventions**:
 
 - Document `__all__` exports, shared pipeline contracts, and `compute_score*`
   scorers with concise docstrings (`VO015`). Omit trivial internal docstrings that
@@ -97,12 +97,10 @@ Do not generate line-by-line narration, numbered step commentary, edit history
 code. Rename or simplify code that needs a comment merely to restate what it does.
 Long explanations belong in `docs/`; do not move noise into a docstring instead.
 
-`check_comments.py` rejects edit/step/chatty narration (`CM001`), banners
-(`CM002`), echo comments (`CM003`), `Necessity:`/`Motivation:` headers, helper
-filler, or signature-echo private docstrings (`CM004`), and `PR #...` comments
-(`CM005`); isolated Ruff `ERA001` rejects commented-out code. These checks
-classify syntax, not authorship. Preserve license headers, tooling directives,
-and required config documentation ([config.md](config.md)).
+`check-pr-lint` enforces these rules (`CM001`–`CM005`, Ruff `ERA001`), including
+rejecting PR/RFC/issue tracker references across code and docs (see
+[pr_lint_checks.md](../../docs/contributing/pr_lint_checks.md)). Preserve
+license headers, tooling directives, and required config comments ([config.md](config.md)).
 
 ## Imports and lint scope
 
@@ -225,10 +223,9 @@ Two caveats, so this is not applied blindly:
 
 ## Example shell recipes
 
-`check-pr-lint` enforces `EX001`–`EX009` and `VO014` (`bash -n`, trailing `"$@"`,
-no committed media, `README.md` naming, `bash` + `set -e` + `pipefail`, layout/portable
-Python, Hydra overrides, secrets/devices/host safety, sibling GPU delegation, and no
-local paths). Remaining items are review conventions. Keep recipes in the existing
+`check-pr-lint` enforces core recipe hygiene (`EX001`–`EX009`, `VO014`; see
+[pr_lint_checks.md](../../docs/contributing/pr_lint_checks.md)). Remaining
+items are review conventions. Keep recipes in the existing
 algorithm/model directory and match the neighboring `run_*.sh` entrypoints.
 
 - Group environment defaults near the top; document required paths and what each

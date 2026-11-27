@@ -502,47 +502,99 @@ def _has_default_value(stmt: ast.AnnAssign, aliases: dict[str, str]) -> bool:
     return True
 
 
-def _expr_calls_super_post_init(node: ast.AST, aliases: dict[str, str]) -> bool:
-    return any(
-        isinstance(call, ast.Call)
-        and isinstance(call.func, ast.Attribute)
-        and call.func.attr == "__post_init__"
-        and isinstance(call.func.value, ast.Call)
-        and _qualified(call.func.value.func, aliases) in {"super", "builtins.super"}
-        for call in ast.walk(node)
+def _is_super_post_init_call(node: ast.AST, aliases: dict[str, str]) -> bool:
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "__post_init__"
+        and isinstance(node.func.value, ast.Call)
+        and _qualified(node.func.value.func, aliases) in {"super", "builtins.super"}
     )
 
 
-def _stmts_always_call_super_post_init(stmts: list[ast.stmt], aliases: dict[str, str]) -> bool:
+def _expr_always_calls_super_post_init(node: ast.expr | None, aliases: dict[str, str]) -> bool:
+    if node is None:
+        return False
+    if _is_super_post_init_call(node, aliases):
+        return True
+    if isinstance(node, ast.Call):
+        parts = [node.func, *node.args, *(keyword.value for keyword in node.keywords)]
+        return any(_expr_always_calls_super_post_init(part, aliases) for part in parts)
+    if isinstance(node, ast.BoolOp):
+        return bool(node.values) and _expr_always_calls_super_post_init(node.values[0], aliases)
+    if isinstance(node, ast.IfExp):
+        return _expr_always_calls_super_post_init(node.test, aliases) or (
+            _expr_always_calls_super_post_init(node.body, aliases)
+            and _expr_always_calls_super_post_init(node.orelse, aliases)
+        )
+    if isinstance(node, ast.Compare):
+        return _expr_always_calls_super_post_init(node.left, aliases) or (
+            bool(node.comparators) and _expr_always_calls_super_post_init(node.comparators[0], aliases)
+        )
+    if isinstance(node, ast.Lambda | ast.ListComp | ast.SetComp | ast.DictComp | ast.GeneratorExp):
+        return False
+    return any(
+        _expr_always_calls_super_post_init(child, aliases)
+        for child in ast.iter_child_nodes(node)
+        if isinstance(child, ast.expr)
+    )
+
+
+def _try_missing_paths(stmt: ast.Try | ast.TryStar, aliases: dict[str, str]) -> tuple[bool, bool]:
+    body_fall, body_ret = _stmts_missing_paths(stmt.body, aliases)
+    if stmt.orelse and body_fall:
+        orelse_fall, orelse_ret = _stmts_missing_paths(stmt.orelse, aliases)
+        try_fall, try_ret = orelse_fall, body_ret or orelse_ret
+    else:
+        try_fall, try_ret = body_fall, body_ret
+    handler_paths = [_stmts_missing_paths(handler.body, aliases) for handler in stmt.handlers]
+    pre_fall = try_fall or any(fall for fall, _ret in handler_paths)
+    pre_ret = try_ret or any(ret for _fall, ret in handler_paths)
+    if not stmt.finalbody:
+        return pre_fall, pre_ret
+    fin_fall, fin_ret = _stmts_missing_paths(stmt.finalbody, aliases)
+    if not fin_fall and not fin_ret:
+        return False, False
+    return pre_fall and fin_fall, pre_ret or fin_ret
+
+
+def _stmt_missing_paths(stmt: ast.stmt, aliases: dict[str, str]) -> tuple[bool, bool]:
+    if isinstance(stmt, ast.Expr | ast.Assign | ast.AnnAssign):
+        return (not _expr_always_calls_super_post_init(stmt.value, aliases), False)
+    if isinstance(stmt, ast.Return):
+        return (False, not _expr_always_calls_super_post_init(stmt.value, aliases))
+    if isinstance(stmt, ast.Raise):
+        return (False, False)
+    if isinstance(stmt, ast.If):
+        if _expr_always_calls_super_post_init(stmt.test, aliases):
+            return (False, False)
+        body_fall, body_ret = _stmts_missing_paths(stmt.body, aliases)
+        else_fall, else_ret = _stmts_missing_paths(stmt.orelse, aliases) if stmt.orelse else (True, False)
+        return (body_fall or else_fall, body_ret or else_ret)
+    if isinstance(stmt, ast.With | ast.AsyncWith):
+        return _stmts_missing_paths(stmt.body, aliases)
+    if isinstance(stmt, ast.Try | ast.TryStar):
+        return _try_missing_paths(stmt, aliases)
+    if isinstance(stmt, ast.For | ast.AsyncFor | ast.While):
+        return (True, _stmts_missing_paths(stmt.body, aliases)[1])
+    return (True, False)
+
+
+def _stmts_missing_paths(stmts: list[ast.stmt], aliases: dict[str, str]) -> tuple[bool, bool]:
+    fall_missing = True
+    return_missing = False
     for stmt in stmts:
-        if isinstance(stmt, ast.Expr | ast.Assign | ast.AnnAssign | ast.Return):
-            if _expr_calls_super_post_init(stmt, aliases):
-                return True
-        elif isinstance(stmt, ast.If):
-            if (
-                stmt.orelse
-                and _stmts_always_call_super_post_init(stmt.body, aliases)
-                and _stmts_always_call_super_post_init(stmt.orelse, aliases)
-            ):
-                return True
-        elif isinstance(stmt, ast.With | ast.AsyncWith):
-            if _stmts_always_call_super_post_init(stmt.body, aliases):
-                return True
-        elif isinstance(stmt, ast.Try | ast.TryStar):
-            if _stmts_always_call_super_post_init(stmt.finalbody, aliases) or (
-                _stmts_always_call_super_post_init(stmt.body, aliases)
-                and all(
-                    _stmts_always_call_super_post_init(handler.body, aliases)
-                    or any(isinstance(sub, ast.Raise) for sub in handler.body)
-                    for handler in stmt.handlers
-                )
-            ):
-                return True
-    return False
+        if not fall_missing:
+            break
+        stmt_fall, stmt_ret = _stmt_missing_paths(stmt, aliases)
+        return_missing = return_missing or stmt_ret
+        fall_missing = stmt_fall
+    return fall_missing, return_missing
 
 
 def _calls_super_post_init(method: ast.FunctionDef, aliases: dict[str, str]) -> bool:
-    return _stmts_always_call_super_post_init(method.body, aliases)
+    fall_missing, return_missing = _stmts_missing_paths(method.body, aliases)
+    return not fall_missing and not return_missing
 
 
 def _config_dataclasses(tree: ast.AST, aliases: dict[str, str]) -> Iterator[tuple[int, str, str]]:

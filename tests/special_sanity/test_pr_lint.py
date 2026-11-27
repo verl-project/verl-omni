@@ -424,7 +424,7 @@ def test_live_repo_baseline_respects_precision_bounds() -> None:
         raw = (root / rel).read_bytes()
         if rel.startswith("examples/") or rel.endswith((".py", ".sh", ".yaml", ".yml")):
             counts.update(code for _ln, code, _msg in example_findings(rel, raw))
-        if rel.startswith("examples/") and rel.endswith(".sh"):
+        if rel.startswith("examples/") and rel.endswith((".sh", ".md")):
             counts.update(code for _ln, code, _msg in comment_findings(rel, raw))
         if not rel.endswith(".py"):
             continue
@@ -444,7 +444,6 @@ def test_live_repo_baseline_respects_precision_bounds() -> None:
         "VO014",
         "VO016",
         "CM004",
-        "CM005",
         "EX001",
         "EX002",
         "EX003",
@@ -454,11 +453,12 @@ def test_live_repo_baseline_respects_precision_bounds() -> None:
     unexpected = {code: counts[code] for code in sorted(zero_false_positive_rules) if counts[code]}
     assert not unexpected, f"Unexpected live-repo hits: {unexpected}"
     assert counts["VO001"] <= 2
-    assert counts["VO011"] <= 2
+    assert counts["VO011"] <= 3
     assert counts["VO015"] <= 6
     assert counts["VO018"] <= 96
     assert counts["CM001"] <= 7
     assert counts["CM003"] <= 15
+    assert counts["CM005"] <= 28
     assert counts["EX005"] <= 84
     assert counts["EX006"] <= 5
     assert counts["EX008"] <= 1
@@ -498,12 +498,19 @@ def test_live_repo_baseline_respects_precision_bounds() -> None:
         test_counts.update(code for _ln, code, _msg in ast_findings(rel, tree))
         test_counts.update(code for _ln, code, _msg in comment_findings(rel, raw, tree=tree))
     assert not {
-        code: test_counts[code]
-        for code in ("VO006", "VO007", "VO013", "VO014", "VO017", "CM001", "CM005")
-        if test_counts[code]
+        code: test_counts[code] for code in ("VO006", "VO007", "VO013", "VO014", "VO017", "CM001") if test_counts[code]
     }
     assert test_counts["CM004"] <= 7
+    assert test_counts["CM005"] <= 7
     assert test_counts["CM002"] <= 170
+
+    doc_files_raw = subprocess.check_output(["git", "-C", str(root), "ls-files", "-z", "docs"])
+    doc_cm005 = 0
+    for rel in os.fsdecode(doc_files_raw).split("\0")[:-1]:
+        if (root / rel).is_symlink() or not rel.endswith((".md", ".rst")):
+            continue
+        doc_cm005 += sum(1 for _ln, code, _msg in comment_findings(rel, (root / rel).read_bytes()) if code == "CM005")
+    assert doc_cm005 <= 13
 
 
 RULE_MATRIX: dict[str, tuple[str, bytes, str, bytes]] = {
@@ -635,7 +642,7 @@ RULE_MATRIX: dict[str, tuple[str, bytes, str, bytes]] = {
         CORE_PATH,
         b"# Workaround for PR #942\nvalue = 1\n",
         CORE_PATH,
-        b"# Workaround for issue #942\nvalue = 1\n",
+        b"# Keep fp32 latents for rollout parity.\nvalue = 1\n",
     ),
     "EX001": (
         "examples/demo/run_train.sh",
@@ -1093,3 +1100,31 @@ def test_symlink_ignored_and_example_python_compile_errors_caught(tmp_path: Path
     )
     assert bad.returncode == 1, bad.stdout + bad.stderr
     assert "E999" in bad.stdout and "examples/demo/link.py" in bad.stdout
+
+
+def test_doc_tracker_refs_are_flagged_incrementally(tmp_path: Path) -> None:
+    _git(tmp_path, "init", "-q")
+    guide = tmp_path / "docs/contributing/guide.md"
+    guide.parent.mkdir(parents=True)
+    guide.write_text("# Guide\n\nLegacy note (RFC #38).\n", encoding="utf-8")
+    contrib = tmp_path / "CONTRIBUTING.md"
+    contrib.write_text("# Contributing\n", encoding="utf-8")
+    base = _commit(tmp_path)
+
+    guide.write_text("# Guide\n\nLegacy note (RFC #38).\n\nNew detail [Issue].\n", encoding="utf-8")
+    contrib.write_text("# Contributing\n\nSee [RFC #942](https://example.invalid/942).\n", encoding="utf-8")
+    head = _commit(tmp_path)
+    bad = subprocess.run([sys.executable, str(CHECKER), base, head], cwd=tmp_path, capture_output=True, text=True)
+    assert bad.returncode == 1, bad.stdout + bad.stderr
+    lines = bad.stdout.splitlines()
+    assert len(lines) == 2, bad.stdout
+    assert any("docs/contributing/guide.md" in ln and "CM005" in ln for ln in lines)
+    assert any("CONTRIBUTING.md" in ln and "CM005" in ln for ln in lines)
+
+    guide.write_text("# Guide\n\nLegacy note (RFC #38).\n\nSelf-explanatory detail.\n", encoding="utf-8")
+    contrib.write_text("# Contributing\n\nSelf-explanatory guide.\n", encoding="utf-8")
+    head_clean = _commit(tmp_path)
+    good = subprocess.run(
+        [sys.executable, str(CHECKER), base, head_clean], cwd=tmp_path, capture_output=True, text=True
+    )
+    assert good.returncode == 0, good.stdout + good.stderr

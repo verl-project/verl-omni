@@ -92,6 +92,7 @@ def test_python_path_literals(source: str, expected: list[str]) -> None:
         ('cat <<EOF\n/home/alice/weights\nEOF\npython trainer.py "$@"', []),
         ('read -r -a ARGS <<< "$INPUT"\npython trainer.py "$@"', []),
         ('python trainer.py \\ \n    "$@"', ["EX001"]),
+        ("cat <<'EOF'\nliteral trailing backslash \\   \nEOF\npython trainer.py \"$@\"", []),
         ('echo ok # trailing backslash \\   \npython trainer.py "$@"', []),
         ('python trainer.py experiment.name="trial#1" "$@"', []),
         ('args=("$@")\nargs=(trainer.total_epochs=1)\npython trainer.py "${args[@]}"', ["EX002"]),

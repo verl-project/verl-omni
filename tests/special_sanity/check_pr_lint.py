@@ -75,6 +75,8 @@ def _changed_files(ancestor: str, head: str, root: str | None = None) -> Iterato
         ":(top)verl_omni/",
         ":(top)tests/",
         ":(top)examples/",
+        ":(top)docs/",
+        ":(glob,top)*.md",
         root=root,
     )
     fields = iter(os.fsdecode(diff).split("\0")[:-1])
@@ -84,7 +86,11 @@ def _changed_files(ancestor: str, head: str, root: str | None = None) -> Iterato
         path = next(fields) if status.startswith(("R", "C")) else previous
         if status == "D" or not new_mode.startswith("100"):
             continue
-        if path.endswith(".py") or path.startswith("examples/"):
+        if (
+            path.endswith(".py")
+            or path.startswith(("examples/", "docs/"))
+            or (path.endswith(".md") and "/" not in path)
+        ):
             prev_path = None if status.startswith(("A", "C")) or not old_mode.startswith("100") else previous
             yield prev_path, path
 
@@ -150,8 +156,7 @@ def _ruff_findings(path: str, source: bytes) -> Iterator[Finding]:
 def _findings(path: str, source: bytes) -> list[Finding]:
     hygiene = [Finding(*finding) for finding in example_findings(path, source)]
     if not path.endswith(".py"):
-        if path.startswith("examples/") and path.endswith(".sh"):
-            hygiene.extend(Finding(*finding) for finding in comment_findings(path, source))
+        hygiene.extend(Finding(*finding) for finding in comment_findings(path, source))
         return hygiene
     try:
         tree = ast.parse(source, filename=path)

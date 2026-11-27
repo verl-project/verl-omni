@@ -425,6 +425,7 @@ def _command_safety_findings(work: list[tuple[int, str]], is_run: bool) -> Itera
 
 
 _BASH_LINE_ERR_RE = re.compile(r"line\s+(\d+):\s*(.+)")
+_HEREDOC_OPEN_RE = re.compile(r"(-?)\s*\\?(?:'([^']+)'|\"([^\"]+)\"|([A-Za-z0-9_.-]+))")
 
 
 def _parse_bash_syntax_error(stderr: bytes) -> tuple[int, str]:
@@ -436,21 +437,102 @@ def _parse_bash_syntax_error(stderr: bytes) -> tuple[int, str]:
     return 1, "Fix the shell syntax reported by bash -n."
 
 
+def _collect_line_heredocs(code_part: str, pending: list[tuple[str, bool]]) -> None:
+    quote: str | None = None
+    ansi_single = False
+    arith_depth = 0
+    i = 0
+    length = len(code_part)
+    while i < length:
+        ch = code_part[i]
+        if quote == "'":
+            if ansi_single and ch == "\\":
+                i += 2
+                continue
+            if ch == "'":
+                quote = None
+                ansi_single = False
+            i += 1
+            continue
+        if quote == '"':
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == '"':
+                quote = None
+            i += 1
+            continue
+        if ch == "\\":
+            i += 2
+            continue
+        if ch == "$" and i + 1 < length and code_part[i + 1] == "'":
+            quote = "'"
+            ansi_single = True
+            i += 2
+            continue
+        if ch in {"'", '"'}:
+            quote = ch
+            i += 1
+            continue
+        if code_part[i : i + 2] == "((":
+            arith_depth += 2
+            i += 2
+            continue
+        if code_part[i : i + 2] == "))" and arith_depth:
+            arith_depth = max(0, arith_depth - 2)
+            i += 2
+            continue
+        if ch == "(" and arith_depth:
+            arith_depth += 1
+            i += 1
+            continue
+        if ch == ")" and arith_depth:
+            arith_depth -= 1
+            i += 1
+            continue
+        if code_part[i : i + 3] == "<<<":
+            i += 3
+            continue
+        if code_part[i : i + 2] == "<<" and arith_depth == 0:
+            if match := _HEREDOC_OPEN_RE.match(code_part, i + 2):
+                marker = match.group(2) or match.group(3) or match.group(4)
+                pending.append((marker, bool(match.group(1))))
+                i = match.end()
+                continue
+        i += 1
+
+
 def _clean_continuation_whitespace(text_lf: str) -> tuple[list[str], list[tuple[int, str, str]]]:
     cleaned_lines: list[str] = []
     hits: list[tuple[int, str, str]] = []
+    heredocs: list[tuple[str, bool]] = []
+    pending_heredocs: list[tuple[str, bool]] = []
     quote: str | None = None
     ansi_single = False
     for line_no, raw_line in enumerate(text_lf.splitlines(), 1):
+        if heredocs:
+            marker, strip_tabs = heredocs[0]
+            if (raw_line.lstrip("\t") if strip_tabs else raw_line) == marker:
+                heredocs.pop(0)
+            cleaned_lines.append(raw_line)
+            continue
         was_unquoted = quote is None
-        quote, ansi_single, _has_cont, comment_start = _scan_shell_line(raw_line, quote, ansi_single)
+        quote, ansi_single, has_cont, comment_start = _scan_shell_line(raw_line, quote, ansi_single)
         code_part = raw_line[:comment_start] if comment_start is not None else raw_line
         suffix = raw_line[comment_start:] if comment_start is not None else ""
+        cleaned_cont = False
         if was_unquoted and code_part.strip() and TRAILING_BACKSLASH_SPACE.search(code_part):
             hits.append((line_no, "EX001", "Remove trailing spaces after backslash line continuation."))
-            cleaned_lines.append(TRAILING_BACKSLASH_SPACE.sub("\\\\", code_part) + suffix)
+            code_part = TRAILING_BACKSLASH_SPACE.sub("\\\\", code_part)
+            cleaned_lines.append(code_part + suffix)
+            cleaned_cont = True
         else:
             cleaned_lines.append(raw_line)
+        if was_unquoted:
+            _collect_line_heredocs(code_part, pending_heredocs)
+        if quote is None and not has_cont and not cleaned_cont and pending_heredocs:
+            heredocs.extend(pending_heredocs)
+            pending_heredocs.clear()
     return cleaned_lines, hits
 
 
