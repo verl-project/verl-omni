@@ -509,14 +509,16 @@ class PolicyGradientDiffusionTrainerV1(ABC):
                     self.on_step_begin()
                     self._on_profiling_step_start()
                     batch = self.step(metrics, self.timing_raw)
-                    self._on_profiling_step_end()
                     if self.config.trainer.save_freq > 0 and (
                         is_step_limit_reached or self.global_steps % self.config.trainer.save_freq == 0
                     ):
                         with marked_timer("save_checkpoint", self.timing_raw, color="green"):
                             self._save_checkpoint()
+                    # Weight synchronization runs in this hook; keep this step's
+                    # profiler window active until the update has completed.
                     self.on_step_end()
                     metrics.update(self._consume_sync_metrics())
+                    self._on_profiling_step_end()
 
                 if self.config.trainer.test_freq > 0 and (
                     is_step_limit_reached or self.global_steps % self.config.trainer.test_freq == 0
