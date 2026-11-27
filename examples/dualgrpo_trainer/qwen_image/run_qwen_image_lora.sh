@@ -16,8 +16,8 @@ WORKSPACE=${WORKSPACE:-$HOME}
 data_train_path=$WORKSPACE/data/r2i_bench/qwen_image/train.parquet
 data_test_path=$WORKSPACE/data/r2i_bench/qwen_image/test.parquet
 
-model_name=$WORKSPACE/models/Qwen/Qwen-Image
-DIT_REWARD_MODEL_NAME=$WORKSPACE/models/CodeGoat24/UnifiedReward-2.0-qwen3vl-2b
+model_name=Qwen/Qwen-Image
+DIT_REWARD_MODEL_NAME=CodeGoat24/UnifiedReward-2.0-qwen3vl-2b
 
 NUM_GPUS_ACTOR_ROLLOUT_REWARD=${NUM_GPUS:-4}
 NUM_NODES=${NUM_NODES:-1}
@@ -31,18 +31,12 @@ REWARD_ENGINE=vllm
 # Step-wise continuous batching (mutually exclusive with request-level packing).
 MAX_NUM_SEQS=${MAX_NUM_SEQS:-256}
 
-
-# ATTN_BACKEND=native
-# ROLLOUT_ATTN_BACKEND=TORCH_SDPA
 ATTN_BACKEND=_flash_3_varlen_hub
 ROLLOUT_ATTN_BACKEND=FLASH_ATTN
 if ! python3 -c 'from verl_omni.utils.diffusion_attention import fa_available; raise SystemExit(0 if fa_available() else 1)' >/dev/null 2>&1; then
     ATTN_BACKEND=native
     ROLLOUT_ATTN_BACKEND=TORCH_SDPA
 fi
-
-CURRENT_TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-# TODO:(susan) now ar and dit shares identical scheduler config, to set different lr
 
 python3 -m verl_omni.trainer.main_diffusion \
     algorithm.adv_estimator=flow_grpo \
@@ -127,8 +121,8 @@ python3 -m verl_omni.trainer.main_diffusion \
     trainer.train_ar=True \
     trainer.logger='["console", "swanlab"]' \
     trainer.project_name=dual_grpo \
-    trainer.experiment_name=qwen_image_dualgrpo_lora_${CURRENT_TIMESTAMP} \
-    trainer.validation_data_dir=validation_data_lora_${CURRENT_TIMESTAMP} \
+    trainer.experiment_name=qwen_image_dualgrpo_lora \
+    trainer.validation_data_dir=validation_data_lora \
     trainer.log_val_generations=8 \
     trainer.val_before_train=False \
     trainer.n_gpus_per_node=$((NUM_GPUS_ACTOR_ROLLOUT_REWARD / NUM_NODES)) \
