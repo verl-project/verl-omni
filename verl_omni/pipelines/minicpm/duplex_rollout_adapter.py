@@ -154,14 +154,20 @@ class MiniCPMODuplexRolloutAdapter(MiniCPMORolloutAdapter):
     def get_engine_hf_overrides(cls, pipeline_mode: str = "duplex") -> dict:
         return {}
 
+    #: A training client feeds audio while one task reads events, so the
+    #: realtime defaults (512 events / 2 MiB) close a long spoken episode.
+    _TRAINING_PENDING_OUTPUT_EVENTS = 8192
+    _TRAINING_PENDING_OUTPUT_BYTES = 32 * 1024 * 1024
+
     @classmethod
     def deploy_config_overrides(cls, pipeline_mode: str = "duplex") -> dict:
-        """Serve duplex on MRv2 and set the standalone session cap.
+        """Serve duplex on MRv2, with the training session cap and output budget.
 
         Capture publishes only on model runner v2. ``DUPLEX_MAX_SESSIONS_ENV``
         is the admission cap when no rollout config is in scope. The AR
-        strategy overwrites ``duplex_session.max_sessions`` from
-        ``rollout.agent.num_workers`` when it writes the training deploy.
+        strategy overwrites only ``duplex_session.max_sessions`` to twice
+        ``rollout.agent.num_workers`` when it writes the training deploy; the
+        pending-output budget keys stay as written here.
         """
         cls.build_stage_configs(pipeline_mode)
         raw = os.environ.get(DUPLEX_MAX_SESSIONS_ENV, str(DUPLEX_MAX_SESSIONS_DEFAULT))
@@ -174,7 +180,11 @@ class MiniCPMODuplexRolloutAdapter(MiniCPMORolloutAdapter):
         return {
             "session_mode": "duplex",
             "model_runner": "v2",
-            "duplex_session": {"max_sessions": max_sessions},
+            "duplex_session": {
+                "max_sessions": max_sessions,
+                "max_pending_output_events_per_session": cls._TRAINING_PENDING_OUTPUT_EVENTS,
+                "max_pending_output_bytes_per_session": cls._TRAINING_PENDING_OUTPUT_BYTES,
+            },
         }
 
     @classmethod

@@ -250,7 +250,8 @@ the previous session is still closing. `VERL_OMNI_DUPLEX_MAX_SESSIONS`
 remains the cap the standalone deploy writer uses. The reward manager is
 verl's registered `naive` (`reward.reward_manager.source=register`).
 An interruption episode waits for the first speak for at most its feed
-plus tail.
+plus tail. The generated deploy raises the per-session output budget above the
+realtime default, so a long spoken episode is not closed for backpressure.
 
 CPU tests cover the whole contract surface
 (`tests/utils/dataset/duplex/`, the strategy / agent-loop / adapter suites);

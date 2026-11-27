@@ -43,10 +43,16 @@ from verl_omni.workers.rollout.vllm_rollout.vllm_omni_duplex_strategy import (
 )
 
 
+@dataclass
+class _Event:
+    type: str
+    code: str | None = None
+
+
 class FakeHandle:
     """A duplex session handle fake with a scriptable event timeline."""
 
-    def __init__(self, engine: FakeDuplexOmni, session_id: str, *, script: list[str]):
+    def __init__(self, engine: FakeDuplexOmni, session_id: str, *, script: list):
         self.session_id = session_id
         self._engine = engine
         self._script = list(script)
@@ -60,13 +66,15 @@ class FakeHandle:
         self.commit_log: list[int] = []
         #: In-flight collection attempts — the driver must make none.
         self.collect_calls = 0
-        for event_type in self._script:
-            self._queue.put_nowait(_Event(event_type))
+        for item in self._script:
+            self._queue.put_nowait(item if isinstance(item, _Event) else _Event(item))
 
     async def submit(self, command):  # noqa: ARG002 - the fake records via helpers
         return None
 
     async def append_audio(self, audio: bytes, *, format: str, sample_rate_hz: int, is_speech=None, **kwargs):
+        if self.closed:
+            raise _SessionError(f"duplex session {self.session_id} is closed")
         assert format == "pcm_f32le" and sample_rate_hz == 16000
         self.appends.append((audio, bool(is_speech)))
         self.append_times.append(asyncio.get_running_loop().time())
@@ -89,15 +97,12 @@ class FakeHandle:
     async def events(self):
         while True:
             event = await self._queue.get()
+            if event.type == "error":
+                self.closed = True
             self.event_times[event.type] = asyncio.get_running_loop().time()
             yield event
             if event.type == "session.closed":
                 return
-
-
-@dataclass
-class _Event:
-    type: str
 
 
 @dataclass
@@ -446,15 +451,19 @@ async def test_open_session_deadline_raises():
 
 
 @pytest.mark.asyncio
-async def test_engine_error_closes_the_session_and_fails_the_episode():
-    engine = FakeDuplexOmni(script=["error", "session.closed"])
-    strategy = _strategy(engine)
+async def test_engine_error_cancels_the_feed_and_surfaces_once():
+    # Many chunks: without cancelling the feed, later appends would raise
+    # "session is closed" and hide the engine's output_backpressure.
+    engine = FakeDuplexOmni(script=[_Event("error", code="output_backpressure")])
+    strategy = _strategy(engine, cadence=0.01)
     try:
-        with pytest.raises(DuplexEpisodeError, match="engine error"):
-            await strategy.run_duplex_episode(_run_spec())
+        with pytest.raises(DuplexEpisodeError, match="output_backpressure"):
+            await strategy.run_duplex_episode(_run_spec(chunks=_chunks(20, speech_from=0)))
     finally:
         _restore(strategy)
-    assert engine.handles[0].closed
+    handle = engine.handles[0]
+    assert handle.closed
+    assert len(handle.appends) < 20
     # The failure path still drains the sealed cache after close.
     assert engine.terminal_wires == []
     assert engine.terminal_collect_log

@@ -51,10 +51,16 @@ def test_deploy_config_declares_duplex_session_mode(monkeypatch):
     assert MiniCPMODuplexRolloutAdapter.deploy_config_overrides("duplex") == {
         "session_mode": "duplex",
         "model_runner": "v2",
-        "duplex_session": {"max_sessions": 16},
+        "duplex_session": {
+            "max_sessions": 16,
+            "max_pending_output_events_per_session": 8192,
+            "max_pending_output_bytes_per_session": 32 * 1024 * 1024,
+        },
     }
     monkeypatch.setenv("VERL_OMNI_DUPLEX_MAX_SESSIONS", "4")
-    assert MiniCPMODuplexRolloutAdapter.deploy_config_overrides("duplex")["duplex_session"] == {"max_sessions": 4}
+    session = MiniCPMODuplexRolloutAdapter.deploy_config_overrides("duplex")["duplex_session"]
+    assert session["max_sessions"] == 4
+    assert session["max_pending_output_events_per_session"] == 8192
     monkeypatch.setenv("VERL_OMNI_DUPLEX_MAX_SESSIONS", "nope")
     with pytest.raises(ValueError, match="VERL_OMNI_DUPLEX_MAX_SESSIONS"):
         MiniCPMODuplexRolloutAdapter.deploy_config_overrides("duplex")

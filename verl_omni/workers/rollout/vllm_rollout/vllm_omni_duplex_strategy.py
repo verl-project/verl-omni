@@ -43,6 +43,7 @@ cross-process transport; the agent loop makes one Ray call per episode batch.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import struct
 from collections.abc import Mapping
@@ -186,7 +187,26 @@ class DuplexStrategy(ARStrategy):
             speak_onset: dict[str, float] = {}
             consumer = asyncio.create_task(self._consume_events(session, speak_onset, episode_id))
             fed_chunks: list[list[float]] = []
-            speech_chunk_span = await self._feed_episode(session, run_spec, speak_onset, fed_chunks)
+            feed_task = asyncio.create_task(self._feed_episode(session, run_spec, speak_onset, fed_chunks))
+            await asyncio.wait({feed_task, consumer}, return_when=asyncio.FIRST_COMPLETED)
+            cause = consumer.exception() if consumer.done() else None
+            if cause is not None:
+                if not feed_task.done():
+                    feed_task.cancel()
+                # Drain any feed outcome (cancel or closed-session append); the
+                # consumer's engine error is the one the caller must see.
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await feed_task
+                raise cause
+            try:
+                speech_chunk_span = await feed_task
+            except Exception as feed_error:
+                if not consumer.done():
+                    await asyncio.wait({consumer}, timeout=1.0)
+                cause = consumer.exception() if consumer.done() else None
+                if cause is not None:
+                    raise cause from feed_error
+                raise
             # Let the tail play out; the consumer stops at close.
             await asyncio.sleep(float(run_spec.get("tail_horizon_s", _DEFAULT_TAIL_HORIZON_S)))
             await session.close(reason="client_close")

@@ -60,7 +60,11 @@ def test_write_duplex_deploy_config_produces_the_thinker_only_duplex_layout(tmp_
     assert deploy["pipeline"] == "minicpmo_4_5_duplex"
     assert deploy["session_mode"] == "duplex"
     assert deploy["model_runner"] == "v2"
-    assert deploy["duplex_session"] == {"max_sessions": 16}
+    assert deploy["duplex_session"] == {
+        "max_sessions": 16,
+        "max_pending_output_events_per_session": 8192,
+        "max_pending_output_bytes_per_session": 32 * 1024 * 1024,
+    }
     assert [stage["stage_id"] for stage in deploy["stages"]] == [0]
     assert deploy["stages"][0]["tensor_parallel_size"] == 1
     # The engine's own parser must accept it (stage layout round-trip).

@@ -454,9 +454,17 @@ def test_duplex_session_capacity_follows_agent_workers():
     assert duplex_session_capacity(config) == 32
     assert duplex_session_capacity(SimpleNamespace(agent=SimpleNamespace(num_workers=0))) is None
     assert duplex_session_capacity(SimpleNamespace(agent=SimpleNamespace(num_workers=True))) is None
-    deploy = {"session_mode": "duplex", "duplex_session": {"max_sessions": 1}}
+    deploy = {
+        "session_mode": "duplex",
+        "duplex_session": {
+            "max_sessions": 1,
+            "max_pending_output_events_per_session": 8192,
+            "max_pending_output_bytes_per_session": 32 * 1024 * 1024,
+        },
+    }
     apply_duplex_session_capacity(deploy, config)
     assert deploy["duplex_session"]["max_sessions"] == 32
+    assert deploy["duplex_session"]["max_pending_output_events_per_session"] == 8192
     turn = {"session_mode": "turn", "duplex_session": {"max_sessions": 1}}
     apply_duplex_session_capacity(turn, config)
     assert turn["duplex_session"]["max_sessions"] == 1
