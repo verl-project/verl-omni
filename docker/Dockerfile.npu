@@ -188,7 +188,7 @@ RUN git clone \
 # --no-deps skips verl-omni's own pins; install the repo's transformers
 # window and TransferQueue explicitly (verl's extras are not installed).
 RUN python3 -m pip install \
-        'transformers>=5.16.1,<5.20.0' \
+        'transformers>=5.18.0,<5.20.0' \
         'TransferQueue==0.1.11'
 
 RUN python3 -m pip install --force-reinstall \
