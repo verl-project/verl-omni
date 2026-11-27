@@ -86,14 +86,15 @@ class OmniFSDPEngine(FSDPEngineWithLMHead):
             del inplace_backward, batch_invariant
             return parity_logprobs(logits, labels, temperature)
 
-        transformer_impl.logprobs_from_logits = _parity_logprobs
-        # Parent selects unscaled logits + temperature when batch_invariant is set.
-        self.engine_config.batch_invariant = True
         try:
+            transformer_impl.logprobs_from_logits = _parity_logprobs
+            # FSDPEngineConfig.batch_invariant is frozen. The parent reads it to
+            # select unscaled logits plus temperature. Bypass BaseConfig.__setattr__.
+            object.__setattr__(self.engine_config, "batch_invariant", True)
             return super().prepare_model_outputs(output, output_args, micro_batch, logits_processor_func)
         finally:
             transformer_impl.logprobs_from_logits = original_logprobs
-            self.engine_config.batch_invariant = previous_batch_invariant
+            object.__setattr__(self.engine_config, "batch_invariant", previous_batch_invariant)
 
     def get_per_tensor_param(self, layered_summon=False, base_sync_done=False, **kwargs):
         from verl.utils.torch_dtypes import PrecisionType

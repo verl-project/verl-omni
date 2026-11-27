@@ -1,6 +1,6 @@
 # MiniCPM-o vLLM kernel parity (experimental)
 
-Last updated: 11/26/2026.
+Last updated: 11/27/2026.
 
 Opt-in mode so the FSDP2 actor and the eager vLLM-Omni rollout compute the same
 log-probs for the same MiniCPM-o thinker weights and tokens. This is **kernel
@@ -34,7 +34,10 @@ training is unchanged.
 ## Scope and honesty about measurements
 
 Supported intent: MiniCPM-o 4.5 thinker, text-only LoRA (GSM8K-style), FSDP2,
-eager rollout, TP=1.
+eager rollout, TP=1, on Hopper (compute capability 9.x) with FlashAttention 3.
+The actor attention path hardcodes ``fa_version=3``. Pinned vLLM 0.33.0 accepts
+FA3 only on SM90, so A100 (8.x) and Blackwell (10.x) are not supported for this
+recipe. The launcher scores GSM8K answers in the ``#### <number>`` form.
 
 A private RSI release on older pins
 (`verl-omni@3ce6010d`, `verl@b0e665e5`, `vllm-omni@9ec1efe5`) reported

@@ -17,7 +17,7 @@
 # treating a run as zero-mismatch; the RSI acceptance numbers were on older
 # pins. See docs/algo/minicpm_vllm_parity.md.
 #
-# Data (once):
+# Data (once). The reward reads the number after "####", matching this preprocessor:
 #   python <verl>/examples/data_preprocess/gsm8k.py --local_save_dir ~/data/gsm8k
 
 set -x
@@ -83,7 +83,7 @@ python3 -m verl_omni.trainer.main_omni \
     algorithm.use_kl_in_reward=False \
     reward.reward_manager.source=register \
     reward.reward_manager.name=minicpm_naive \
-    reward.custom_reward_function.path=verl_omni/utils/reward_score/choice_reward.py \
+    reward.custom_reward_function.path=verl_omni/utils/reward_score/gsm8k.py \
     reward.custom_reward_function.name=compute_score \
     trainer.val_before_train=false \
     trainer.balance_batch=False \

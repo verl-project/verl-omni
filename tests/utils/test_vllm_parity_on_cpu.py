@@ -271,8 +271,11 @@ def test_omni_prepare_model_outputs_routes_logprobs_under_parity(monkeypatch):
     monkeypatch.setattr(vllm_parity, "logprobs_from_logits", _fake_parity_lp)
     monkeypatch.setattr(vllm_parity, "parity_enabled", lambda: True)
 
+    from verl.workers.config.engine import FSDPEngineConfig
+
     engine = object.__new__(OmniFSDPEngine)
-    engine.engine_config = SimpleNamespace(batch_invariant=False)
+    engine.engine_config = FSDPEngineConfig()
+    original_logprobs = transformer_impl.logprobs_from_logits
 
     def _super_prepare(self, output, output_args, micro_batch, logits_processor_func):
         assert self.engine_config.batch_invariant is True
@@ -293,7 +296,21 @@ def test_omni_prepare_model_outputs_routes_logprobs_under_parity(monkeypatch):
     result = OmniFSDPEngine.prepare_model_outputs(engine, None, {}, {}, None)
     assert seen["parity"] == ((2, 8), (2,), (2,))
     assert engine.engine_config.batch_invariant is False
+    assert transformer_impl.logprobs_from_logits is original_logprobs
     assert result["log_probs"].shape == (2,)
+
+    def _super_fails(self, output, output_args, micro_batch, logits_processor_func):
+        raise RuntimeError("parent failed")
+
+    monkeypatch.setattr(
+        transformer_impl.FSDPEngineWithLMHead,
+        "prepare_model_outputs",
+        _super_fails,
+    )
+    with pytest.raises(RuntimeError, match="parent failed"):
+        OmniFSDPEngine.prepare_model_outputs(engine, None, {}, {}, None)
+    assert engine.engine_config.batch_invariant is False
+    assert transformer_impl.logprobs_from_logits is original_logprobs
 
 
 def test_omni_prepare_model_outputs_unchanged_when_parity_off(monkeypatch):
