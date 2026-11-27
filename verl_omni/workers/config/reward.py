@@ -60,6 +60,7 @@ __all__ = [
     "parse_reward_model_placement",
     "parse_reward_model_config",
     "resolve_reward_model_name",
+    "reward_determinism_env",
     "reward_is_enabled",
     "reward_pool_is_separate",
     "reward_role_required",
@@ -200,6 +201,27 @@ def normalize_reward_config(config: DictConfig | dict[str, Any]) -> DictConfig |
     else:
         normalized["reward"]["reward_functions"] = projected
     return normalized
+
+
+def reward_determinism_env(config) -> dict[str, str]:
+    """Return worker environment flags requested by deterministic reward inference."""
+    legacy = config.reward.reward_model
+    models = [legacy] if legacy.get("enable", False) else []
+    models.extend(
+        model for model in get_reward_model_entries(config).values() if is_engine_backend(model.get("backend"))
+    )
+    for model in models:
+        rollout = model.get("rollout", {})
+        if rollout.get("full_determinism", legacy.rollout.get("full_determinism", False)):
+            seed = rollout.get("seed", legacy.rollout.get("seed", 42))
+            if isinstance(seed, bool) or not isinstance(seed, int):
+                raise ValueError("Deterministic reward rollout.seed must be an integer")
+            return {
+                "VERL_FULL_DETERMINISM": "1",
+                "VLLM_BATCH_INVARIANT": "1",
+                "PYTHONHASHSEED": str(seed % (2**32)),
+            }
+    return {}
 
 
 @dataclass

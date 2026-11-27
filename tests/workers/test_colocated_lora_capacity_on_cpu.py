@@ -221,6 +221,83 @@ def test_offloaded_lora_ipc_failure_sleeps_the_rollout_again():
     worker.rollout.server_handle.clear_kv_cache.remote.assert_not_awaited()
 
 
+@pytest.mark.parametrize("free_cache", [True, False])
+@pytest.mark.parametrize("failure", [None, "ipc", "version"])
+def test_lora_commit_holds_queued_requests_until_explicit_resume(free_cache, failure):
+    from verl.workers.rollout.replica import RolloutMode
+
+    from verl_omni.workers.rollout.vllm_rollout.vllm_omni_async_server import vLLMOmniHttpServer
+
+    worker, events, _, _ = _worker(free_cache=free_cache)
+    server = object.__new__(vLLMOmniHttpServer)
+    server.node_rank = server.replica_rank = server.global_steps = 0
+    server.rollout_mode = RolloutMode.HYBRID
+    server.config = worker.config.rollout
+    server._lora_request_cache = None
+    server._submission_paused = server._rejecting = False
+    server._resume_event = asyncio.Event()
+    server._resume_event.set()
+    server.engine = SimpleNamespace(
+        request_states={},
+        abort=AsyncMock(),
+        pause_generation=AsyncMock(),
+        wake_up=AsyncMock(return_value=[]),
+        is_sleeping=AsyncMock(return_value=False),
+        resume_generation=AsyncMock(),
+    )
+    server._generate_strategy = SimpleNamespace(generate=AsyncMock(side_effect=lambda **kwargs: server.global_steps))
+    worker.rollout.resume.side_effect = server.wake_up
+    worker.rollout.server_handle.set_global_steps.remote.side_effect = (
+        RuntimeError("version failed") if failure == "version" else server.set_global_steps
+    )
+    sender = MagicMock()
+
+    async def drive():
+        entered, finish = asyncio.Event(), asyncio.Event()
+
+        async def send(weights):
+            entered.set()
+            await finish.wait()
+            if failure == "ipc":
+                raise RuntimeError("ipc failed")
+
+        sender.async_send_weights = AsyncMock(side_effect=send)
+        await server.abort_all_requests()
+        update = asyncio.create_task(ew.ActorRolloutRefWorker.update_weights(worker, mode="naive", global_steps=7))
+        request = None
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=5)
+            server.engine.resume_generation.assert_not_awaited()
+            request = asyncio.create_task(server.generate(prompt_ids=[1], sampling_params={}, request_id="late"))
+            await asyncio.sleep(0)
+            assert not request.done(), "request entered before adapter installation"
+            finish.set()
+            if failure:
+                with pytest.raises(RuntimeError, match=f"{failure} failed"):
+                    await update
+                assert not request.done()
+                assert server.global_steps == 0
+            else:
+                await update
+                assert server.global_steps == 7
+                assert not request.done(), "weight sync reopened admission before its owner resumed"
+                await server.resume_generation()
+                assert await asyncio.wait_for(request, timeout=1) == 7
+        finally:
+            for task in (update, request):
+                if task is not None and not task.done():
+                    task.cancel()
+            await asyncio.gather(*[task for task in (update, request) if task is not None], return_exceptions=True)
+
+    with (
+        patch.object(ew, "BucketedWeightSender", return_value=sender),
+        patch.object(ew, "log_gpu_memory_usage"),
+        patch.object(ew, "set_expandable_segments"),
+        patch.object(ew, "get_torch_device", return_value=_device(events)),
+    ):
+        asyncio.run(drive())
+
+
 def test_offloaded_lora_worker_uses_callers_device():
     worker, events, _, _ = _worker()
     device_local = threading.local()

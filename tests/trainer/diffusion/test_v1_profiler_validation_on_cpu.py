@@ -154,6 +154,7 @@ def launch(monkeypatch):
 def _launch_config(tool):
     cfg = config(tool=tool, rollout=False)
     cfg.ray_kwargs = {"ray_init": {}}
+    cfg.reward = {"reward_model": {"enable": False}}
     return cfg
 
 
@@ -161,19 +162,15 @@ def test_default_runner_reserves_one_cpu_on_the_class():
     assert entrypoint.DiffusionTaskRunnerV1.__ray_metadata__.num_cpus == 1
 
 
-def test_nsys_runner_adds_only_the_nsight_runtime_env(launch):
-    entrypoint.run_diffusion_v1(_launch_config("nsys"))
-    assert launch.calls == [{"runtime_env": {"nsight": {"trace": "nvtx"}}}]
-
-
-def test_non_nsys_runner_is_launched_directly(launch):
-    entrypoint.run_diffusion_v1(_launch_config("torch"))
-    assert launch.calls == [None]
-
-
-@pytest.mark.parametrize("tool,expected", [("torch", None), ("nsys", {"runtime_env": {"nsight": {"trace": "nvtx"}}})])
-def test_custom_runner_follows_the_same_launch_path(launch, tool, expected):
-    custom = _ActorClass()
+@pytest.mark.parametrize("tool", ["torch", "nsys"])
+@pytest.mark.parametrize("custom_runner", [False, True])
+def test_runner_gets_transfer_queue_env_and_optional_nsight(launch, tool, custom_runner):
+    custom = _ActorClass() if custom_runner else None
     entrypoint.run_diffusion_v1(_launch_config(tool), task_runner_class=custom)
-    assert custom.calls == [expected]
-    assert launch.calls == []
+    actor = custom if custom_runner else launch
+    (options,) = actor.calls
+    runtime_env = options["runtime_env"]
+    assert runtime_env["env_vars"]["TRANSFER_QUEUE_ENABLE"] == "1"
+    assert runtime_env.get("nsight") == ({"trace": "nvtx"} if tool == "nsys" else None)
+    if custom_runner:
+        assert launch.calls == []
