@@ -187,9 +187,9 @@
     <td>✅ 已支持</td>
   </tr>
   <tr>
-    <td rowspan="6">SD3.5</td>
-    <td rowspan="6">扩散生成模型</td>
-    <td rowspan="6">文本 → 图像</td>
+    <td rowspan="7">SD3.5</td>
+    <td rowspan="7">扩散生成模型</td>
+    <td rowspan="7">文本 → 图像</td>
     <td>DPO</td>
     <td>✅ 已支持</td>
   </tr>
@@ -208,6 +208,10 @@
   <tr>
     <td><a href="docs/algo/dgpo.md">DGPO</a></td>
     <td>✅ 已支持</td>
+  </tr>
+  <tr>
+    <td><a href="docs/algo/crd.md">CRD</a></td>
+    <td>✅ 已支持 (SD3.5-Medium LoRA)</td>
   </tr>
   <tr>
     <td><a href="examples/awm_trainer/README.md">AWM</a></td>

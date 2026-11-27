@@ -1,6 +1,6 @@
 # Named Reward Models
 
-Last updated: 11/22/2026
+Last updated: 11/26/2026
 
 This guide describes how to configure and extend named model-backed rewards
 under `reward.models` in `verl-omni`. For the general Reward Loop interface and
@@ -35,6 +35,46 @@ reward:
 Consolidating audio, text, and other input contracts behind the shared manager
 is separate follow-up work. Until then, modality-specific managers and their
 existing recipes remain unchanged.
+
+## Explicit scorer entries
+
+`reward.scorers` is an optional authoring form for the existing multi-reward
+manager. Set it to a non-empty mapping and select the built-in
+`MultiVisualRewardManager` with `source: importlib` and
+`module.path: pkg://verl_omni.reward_loop.reward_manager`. This first slice
+supports that manager's image/video input contract; adapters for other custom,
+text, and audio managers are deferred. Each named entry needs a `path` and
+`name`; optional manager metadata includes `model`, `weight`, `required`, `independent`,
+`routing_weights`, and `use_rollout_sampling_params`. Put arguments passed to
+the scorer in `kwargs`. Merge the following fragment into an existing FlowGRPO
+diffusion trainer config; it is not a complete training recipe:
+
+```yaml
+reward:
+  reward_manager:
+    name: MultiVisualRewardManager
+    source: importlib
+    module:
+      path: pkg://verl_omni.reward_loop.reward_manager
+  scorers:
+    jpeg:
+      path: verl_omni/utils/reward_score/jpeg_compressibility.py
+      name: compute_score
+      weight: 1.0
+      required: true
+      kwargs: {}
+```
+
+The trainer resolves this subtree in its original Hydra config and projects it
+onto `reward.reward_functions` before worker startup. The `scorers` subtree
+remains available to other Hydra references. It does not change the
+manager, model backend, resources, aggregation, or sampling settings. Existing
+`reward.reward_functions` configurations continue to work. A non-null
+`reward.scorers` can coexist with non-empty `reward.reward_functions` only when
+the latter exactly matches the projected entries, including order; an explicit
+`reward.custom_reward_function.path` conflicts. Unknown entry fields and
+manager metadata inside `kwargs` are rejected. The fragment above is a
+configuration example, not a completed training run.
 
 ## Native replica scheduling
 

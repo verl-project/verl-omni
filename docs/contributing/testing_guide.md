@@ -15,7 +15,7 @@ This guide explains the test hierarchy for `verl_omni`, starting with L1 CPU tes
   - [Coverage](#coverage)
   - [Local Commands](#local-commands)
   - [Adding a New L1 Test](#adding-a-new-l1-test)
-- [Future Layers](#future-layers)
+- [Higher Layers](#higher-layers)
 
 ## Test Hierarchy
 

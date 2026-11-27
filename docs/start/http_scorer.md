@@ -89,7 +89,7 @@ The default port is configured in each service's `gunicorn.conf.py`. You can als
 In your training launch script, configure the reward function to point to `http_scorer_client` and pass the `server_url`:
 
 ```bash
-python3 -m verl_omni.trainer.main_diffusion \
+python3 -m verl_omni.trainer.main_diffusion_v1 \
     ...
     "+reward.reward_functions.my_reward.path=pkg://verl_omni.utils.reward_score.http_scorer_client" \
     '+reward.reward_functions.my_reward.name=compute_score' \
@@ -117,7 +117,7 @@ Any extra key-value pairs added under the same reward function config are forwar
 
 ## Full example
 
-See the example script: `examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_reward_server.sh`
+See the example script: `examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_reward_server.sh`. That script still launches the deprecated v0 entry (`main_diffusion` with `trainer.use_v1=false`).
 
 This script trains Qwen-Image with FlowGRPO using an external OCR reward server.
 

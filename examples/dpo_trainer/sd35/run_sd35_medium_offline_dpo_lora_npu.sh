@@ -5,11 +5,11 @@ export TORCH_COMPILE_DISABLE=1
 export VERL_DATAPROTO_SERIALIZATION_METHOD=numpy
 
 # Set WORKSPACE to any writable directory; defaults to $HOME.
+# Pair parquet defaults to $WORKSPACE/data/offline_dpo/. Override with OFFLINE_DPO_*_PATH.
 WORKSPACE=${WORKSPACE:-$HOME}
-SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
-offline_train_path=${OFFLINE_DPO_TRAIN_PATH:-$SCRIPT_DIR/../../datasets/offline_dpo/train.parquet}
-offline_test_path=${OFFLINE_DPO_TEST_PATH:-$SCRIPT_DIR/../../datasets/offline_dpo/test.parquet}
+offline_train_path=${OFFLINE_DPO_TRAIN_PATH:-$WORKSPACE/data/offline_dpo/train.parquet}
+offline_test_path=${OFFLINE_DPO_TEST_PATH:-$WORKSPACE/data/offline_dpo/test.parquet}
 
 model_name=stabilityai/stable-diffusion-3.5-medium
 
@@ -17,8 +17,8 @@ NUM_NPUS_ACTOR=1
 
 python3 -m verl_omni.trainer.main_diffusion --config-name=offline_dpo_trainer \
     trainer.use_v1=false \
-    data.train_files=$offline_train_path \
-    data.val_files=$offline_test_path \
+    data.train_files="$offline_train_path" \
+    data.val_files="$offline_test_path" \
     trainer.resume_mode=enable \
     data.train_batch_size=16 \
     data.max_prompt_length=256 \

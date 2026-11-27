@@ -131,7 +131,7 @@ Run the LoRA DPO example:
 ```bash
 DATA_DIR=/path/to/Omni-Preference/parquet_dpo \
 MODEL_PATH=/path/to/Qwen3-Omni-30B-A3B-Instruct \
-bash examples/dpo_trainer/qwen3_omni/qwen3_omni/run_qwen3_omni_omni_preference_lora.sh
+bash examples/dpo_trainer/qwen3_omni/run_qwen3_omni_omni_preference_lora.sh
 ```
 
 Common overrides:
@@ -141,7 +141,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 \
 TOTAL_TRAINING_STEPS=200 \
 TRAIN_BATCH_SIZE=32 \
 VAL_BATCH_SIZE=32 \
-bash examples/dpo_trainer/qwen3_omni/qwen3_omni/run_qwen3_omni_omni_preference_lora.sh
+bash examples/dpo_trainer/qwen3_omni/run_qwen3_omni_omni_preference_lora.sh
 ```
 
 
@@ -174,7 +174,7 @@ Key settings:
 
 | Script | Model | Algorithm | # Cards | Reward Model | Training Samples per Step | `ppo_micro_batch_size_per_gpu` | Throughput (Samples / Card / Seconds) | Time per Step (Seconds) | Val Accuracy | Val Reward Margin | W&B Report |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `examples/dpo_trainer/qwen3_omni/qwen3_omni/run_qwen3_omni_omni_preference_lora.sh` | Qwen3-Omni-30B-A3B-Instruct | Offline DPO + LoRA | 4 | None | 32×2=64 | 2 | 1.35 | 14.07 | 0.90742 | 0.843 | [W&B report](https://api.wandb.ai/links/didan/iumxl2zr) |
+| `examples/dpo_trainer/qwen3_omni/run_qwen3_omni_omni_preference_lora.sh` | Qwen3-Omni-30B-A3B-Instruct | Offline DPO + LoRA | 4 | None | 32×2=64 | 2 | 1.35 | 14.07 | 0.90742 | 0.843 | [W&B report](https://api.wandb.ai/links/didan/iumxl2zr) |
 
 ### Validation
 

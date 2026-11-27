@@ -28,7 +28,7 @@ set -xeuo pipefail
 export NCCL_IB_DISABLE=1
 export CPATH=/usr/include${CPATH:+:$CPATH}
 export RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO=0
-export VERL_USE_EXTERNAL_MODULES=verl_omni
+export VERL_USE_EXTERNAL_MODULES=${VERL_USE_EXTERNAL_MODULES:+${VERL_USE_EXTERNAL_MODULES},}verl_omni
 
 capability=$(python3 -c "import torch; print(torch.cuda.get_device_capability())")
 if [ "${capability}" != "(9, 0)" ]; then
