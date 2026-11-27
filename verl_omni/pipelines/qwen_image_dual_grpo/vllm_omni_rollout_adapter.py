@@ -27,19 +27,14 @@ from vllm_omni.diffusion.data import DiffusionOutput
 from vllm_omni.diffusion.request import OmniDiffusionRequest
 from vllm_omni.diffusion.worker.request_batch import DiffusionRequestBatch
 
-from verl_omni.pipelines.diffusion_rollout_output import rollout_output, with_visual_artifacts
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
-from verl_omni.pipelines.qwen_image_flow_grpo.common import build_img_shapes, coalesce_not_none
+from verl_omni.pipelines.qwen_image_flow_grpo.common import coalesce_not_none
 from verl_omni.pipelines.qwen_image_flow_grpo.vllm_omni_rollout_adapter import QwenImagePipelineWithLogProb
 from verl_omni.pipelines.request_batch import (
     collate_prompt_mask as _collate_prompt_mask,
 )
 from verl_omni.pipelines.request_batch import (
     collate_prompt_rows as _collate_prompt_rows,
-)
-from verl_omni.pipelines.request_batch import requested_outputs_for_batch
-from verl_omni.pipelines.request_batch import (
-    sample_per_sample_sde_windows as _sample_per_sample_sde_windows,
 )
 from verl_omni.pipelines.request_batch import (
     split_diffusion_output_by_request as _split_diffusion_output_by_request,
@@ -208,17 +203,6 @@ class QwenImagePipelineWithDualLogProb(QwenImagePipelineWithLogProb):
             return_logprobs (bool): Whether to calculate log-probabilities for generated tokens.
             dtype (torch.dtype, *optiional*): Data type for text encoder.
             ar_kwargs: Additional argmuents for text generation.
-
-        Returns:
-            TextEncoderGenerationResult: containing
-            ``ar_full_response_ids``: tensor of shape ``(B * num_responses_per_prompt, input_len+response_length)``
-            ``ar_full_response_mask``: tensor of shape ``(B * num_responses_per_prompt, input_len+response_length)``
-            ``ar_position_ids``: tensor of shape ``(B * num_responses_per_prompt, input_len+response_length)``
-            ``ar_response_ids``: tensor of shape ``(B * num_responses_per_prompt, response_length)``
-            ``ar_response_mask``: tensor of shape ``(B * num_responses_per_prompt, response_length)``
-            ``ar_all_log_probs``: tensor of shape ``(B * num_responses_per_prompt, response_length)``
-            ``text_encoder_responses``: a list of ``B * num_responses_per_prompt`` CoT + refined prompt texts
-
         """
         # prepare input tensors
         dtype = dtype or self.text_encoder.dtype
@@ -311,37 +295,34 @@ class QwenImagePipelineWithDualLogProb(QwenImagePipelineWithLogProb):
         in rollout metadata, with an empty media payload.
 
         Diffusion image generation:
-        Encodes the prompt, prepares latents, runs the SDE diffusion loop via
-        :meth:`diffuse`, and decodes the final latents through the VAE.  Sampling
-        parameters in *req* take precedence over the keyword arguments.
+        Calls :meth:`QwenImagePipelineWithLogProb.forward` with the diffusion
+        arguments. Sampling parameters in *req* take precedence over the keyword
+        arguments.
         """
 
-        # input and args preparation
         request_batch = req if isinstance(req, DiffusionRequestBatch) else DiffusionRequestBatch(requests=[req])
         return_batch = isinstance(req, DiffusionRequestBatch)
-        prompts = request_batch.prompts
-        prompt_token_ids, prompt_token_lengths = _collate_prompt_rows(
-            prompts,
-            ("prompt_ids",),
-            prompt_token_ids,
-            device=self.device,
-            field_name="prompt_token_ids",
-        )
-        prompt_mask = _collate_prompt_mask(
-            prompts,
-            ("prompt_mask",),
-            prompt_mask,
-            device=self.device,
-            field_name="prompt_mask",
-            token_lengths=prompt_token_lengths,
-            target_seq_len=None if prompt_token_ids is None else int(prompt_token_ids.shape[1]),
-        )
         sampling_params = request_batch.sampling_params_list[0]
         stage = coalesce_not_none(sampling_params.extra_args.get("stage", None), stage)
 
-        # Stage 1: Agent LLM generation
         if stage == "ar":
-            # input and args preparation
+            prompts = request_batch.prompts
+            prompt_token_ids, prompt_token_lengths = _collate_prompt_rows(
+                prompts,
+                ("prompt_ids",),
+                prompt_token_ids,
+                device=self.device,
+                field_name="prompt_token_ids",
+            )
+            prompt_mask = _collate_prompt_mask(
+                prompts,
+                ("prompt_mask",),
+                prompt_mask,
+                device=self.device,
+                field_name="prompt_mask",
+                token_lengths=prompt_token_lengths,
+                target_seq_len=None if prompt_token_ids is None else int(prompt_token_ids.shape[1]),
+            )
             ar_logprobs = coalesce_not_none(sampling_params.extra_args.get("ar_logprobs", None), ar_logprobs)
             temperature = coalesce_not_none(sampling_params.extra_args.get("temperature", None), temperature)
             top_p = coalesce_not_none(sampling_params.extra_args.get("top_p", None), top_p)
@@ -407,198 +388,32 @@ class QwenImagePipelineWithDualLogProb(QwenImagePipelineWithLogProb):
             )
             return outputs if return_batch else outputs[0]
 
-        # Stage 2: DiT image generation
-        # input and args preparation
-        negative_prompt_ids, negative_prompt_lengths = _collate_prompt_rows(
-            prompts,
-            ("negative_prompt_ids",),
-            negative_prompt_ids,
-            device=self.device,
-            field_name="negative_prompt_ids",
-        )
-        negative_prompt_mask = _collate_prompt_mask(
-            prompts,
-            ("negative_prompt_mask",),
-            negative_prompt_mask,
-            device=self.device,
-            field_name="negative_prompt_mask",
-            token_lengths=negative_prompt_lengths,
-            target_seq_len=None if negative_prompt_ids is None else int(negative_prompt_ids.shape[1]),
-        )
-
-        requested_outputs = requested_outputs_for_batch(request_batch)
-        height = sampling_params.height or self.default_sample_size * self.vae_scale_factor
-        width = sampling_params.width or self.default_sample_size * self.vae_scale_factor
-        num_inference_steps = sampling_params.num_inference_steps or num_inference_steps
-        sigmas = sampling_params.sigmas or sigmas
-        max_sequence_length = sampling_params.max_sequence_length or max_sequence_length
-        output_type = sampling_params.output_type or output_type
-
-        noise_level = coalesce_not_none(sampling_params.extra_args.get("noise_level", None), noise_level)
-        sde_window_size = coalesce_not_none(sampling_params.extra_args.get("sde_window_size", None), sde_window_size)
-        sde_window_range = coalesce_not_none(sampling_params.extra_args.get("sde_window_range", None), sde_window_range)
-        sde_type = coalesce_not_none(sampling_params.extra_args.get("sde_type", None), sde_type)
-        logprobs = coalesce_not_none(sampling_params.extra_args.get("logprobs", None), logprobs)
-
-        for request in request_batch.requests:
-            request_sampling_params = request.sampling_params
-            if request_sampling_params.generator is None and request_sampling_params.seed is not None:
-                request_sampling_params.generator = torch.Generator(device=self.device).manual_seed(
-                    request_sampling_params.seed
-                )
-        true_cfg_scale = coalesce_not_none(sampling_params.true_cfg_scale, true_cfg_scale)
-        if getattr(sampling_params, "guidance_scale_provided", False):
-            guidance_scale = sampling_params.guidance_scale
-        req_num_outputs = getattr(sampling_params, "num_outputs_per_prompt", None)
-        if req_num_outputs and req_num_outputs > 0:
-            num_images_per_prompt = req_num_outputs
-        generator = request_batch.collate_request_generators(num_images_per_prompt, generator)
-        latents = request_batch.collate_request_tensors("latents", latents)
-
-        self._guidance_scale = guidance_scale
-        self._attention_kwargs = attention_kwargs
-        self._current_timestep = None
-        self._interrupt = False
-
-        if prompt_token_ids is not None:
-            if isinstance(prompt_token_ids, list):
-                prompt_token_ids = torch.tensor(prompt_token_ids, device=self.device)
-            batch_size = prompt_token_ids.shape[0] if prompt_token_ids.ndim == 2 else 1
-        elif prompt_embeds is not None:
-            batch_size = prompt_embeds.shape[0]
-        else:
-            # Both prompt_token_ids and prompt_embeds are None (e.g. during warmup/dummy run).
-            # Return a minimal dummy output to avoid crashing.
-            outputs = [DiffusionOutput(output=None) for _ in range(request_batch.num_reqs)]
-            return outputs if return_batch else outputs[0]
-
-        has_neg_prompt = negative_prompt_ids is not None or (
-            negative_prompt_embeds is not None and negative_prompt_embeds_mask is not None
-        )
-        do_true_cfg = true_cfg_scale > 1 and has_neg_prompt
-
-        # encode refined prompt
-        prompt_embeds, prompt_embeds_mask = self.encode_prompt(
-            prompt_ids=prompt_token_ids,
-            attention_mask=prompt_mask,
+        return super().forward(
+            req,
+            prompt_token_ids=prompt_token_ids,
+            prompt_mask=prompt_mask,
+            negative_prompt_ids=negative_prompt_ids,
+            negative_prompt_mask=negative_prompt_mask,
+            true_cfg_scale=true_cfg_scale,
+            height=height,
+            width=width,
+            num_inference_steps=num_inference_steps,
+            sigmas=sigmas,
+            guidance_scale=guidance_scale,
+            num_images_per_prompt=num_images_per_prompt,
+            generator=generator,
+            latents=latents,
             prompt_embeds=prompt_embeds,
             prompt_embeds_mask=prompt_embeds_mask,
-            num_images_per_prompt=num_images_per_prompt,
-            max_sequence_length=max_sequence_length,
-        )
-        if do_true_cfg:
-            negative_prompt_embeds, negative_prompt_embeds_mask = self.encode_prompt(
-                prompt_ids=negative_prompt_ids,
-                attention_mask=negative_prompt_mask,
-                prompt_embeds=negative_prompt_embeds,
-                prompt_embeds_mask=negative_prompt_embeds_mask,
-                num_images_per_prompt=num_images_per_prompt,
-                max_sequence_length=max_sequence_length,
-            )
-
-        num_channels_latents = self.transformer.in_channels // 4
-        latents = self.prepare_latents(
-            batch_size * num_images_per_prompt,
-            num_channels_latents,
-            height,
-            width,
-            prompt_embeds.dtype,
-            self.device,
-            generator,
-            latents,
-        )
-        img_shapes = build_img_shapes(height, width, batch_size, self.vae_scale_factor)
-
-        timesteps, num_inference_steps = self.prepare_timesteps(num_inference_steps, sigmas, latents.shape[1])
-        self._num_timesteps = len(timesteps)
-
-        if self.transformer.guidance_embeds:
-            guidance = torch.full([1], guidance_scale, dtype=torch.float32)
-            guidance = guidance.expand(latents.shape[0])
-        else:
-            guidance = None
-
-        if self.attention_kwargs is None:
-            self._attention_kwargs = {}
-
-        txt_seq_lens = prompt_embeds_mask.sum(dim=1).tolist() if prompt_embeds_mask is not None else None
-        negative_txt_seq_lens = (
-            negative_prompt_embeds_mask.sum(dim=1).tolist() if negative_prompt_embeds_mask is not None else None
-        )
-
-        sde_window = _sample_per_sample_sde_windows(
-            sde_window_size=sde_window_size,
-            sde_window_range=sde_window_range if sde_window_range is not None else (0, 5),
-            num_timesteps=len(timesteps),
-            batch_size=latents.shape[0],
-            generator=generator,
-            device=self.device,
-        )
-
-        # diffusion rollout, image generation
-        latents, all_latents, all_log_probs, all_timesteps = self.diffuse(
-            prompt_embeds,
-            prompt_embeds_mask,
-            negative_prompt_embeds,
-            negative_prompt_embeds_mask,
-            latents,
-            img_shapes,
-            txt_seq_lens,
-            negative_txt_seq_lens,
-            timesteps,
-            do_true_cfg,
-            guidance,
-            true_cfg_scale,
-            noise_level,
-            sde_window,
-            sde_type,
-            generator,
-            logprobs,
-        )
-
-        self._current_timestep = None
-        native_latents = latents
-        if output_type == "latent" and "image_preview" not in requested_outputs:
-            image = None
-        else:
-            latents = self._unpack_latents(latents, height, width, self.vae_scale_factor)
-            latents = latents.to(self.vae.dtype)
-            latents_mean = (
-                torch.tensor(self.vae.config.latents_mean)
-                .view(1, self.vae.config.z_dim, 1, 1, 1)
-                .to(latents.device, latents.dtype)
-            )
-            latents_std = 1.0 / torch.tensor(self.vae.config.latents_std).view(1, self.vae.config.z_dim, 1, 1, 1).to(
-                latents.device, latents.dtype
-            )
-            latents = latents / latents_std + latents_mean
-            image = self.vae.decode(latents, return_dict=False)[0][:, :, 0]
-
-        result = rollout_output(
-            media=image,
-            trajectory_latents=all_latents,
-            trajectory_log_probs=all_log_probs,
-            trajectory_timesteps=all_timesteps,
-            prompt_embeddings={
-                "prompt_embeds": prompt_embeds,
-                "prompt_embeds_mask": prompt_embeds_mask,
-                "negative_prompt_embeds": negative_prompt_embeds,
-                "negative_prompt_embeds_mask": negative_prompt_embeds_mask,
-            },
-            to_cpu=True,
-        )
-        result = with_visual_artifacts(
-            result,
-            decoded=image,
-            latents=native_latents,
-            latent_layout="LC",
+            negative_prompt_embeds=negative_prompt_embeds,
+            negative_prompt_embeds_mask=negative_prompt_embeds_mask,
             output_type=output_type,
-            context=f"pipeline={type(self).__name__}, request_id={[r.request_id for r in request_batch.requests]}",
-            requested=requested_outputs,
+            attention_kwargs=attention_kwargs,
+            callback_on_step_end_tensor_inputs=callback_on_step_end_tensor_inputs,
+            max_sequence_length=max_sequence_length,
+            noise_level=noise_level,
+            sde_window_size=sde_window_size,
+            sde_window_range=sde_window_range,
+            sde_type=sde_type,
+            logprobs=logprobs,
         )
-        outputs = _split_diffusion_output_by_request(
-            result,
-            request_batch,
-            num_outputs_per_prompt=num_images_per_prompt,
-        )
-        return outputs if return_batch else outputs[0]

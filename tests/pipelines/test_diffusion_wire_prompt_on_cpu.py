@@ -62,21 +62,20 @@ def test_conflicting_token_spellings_fail():
 
 
 @pytest.mark.parametrize(
-    "architecture,algorithm,method",
+    "architecture,algorithm",
     [
-        ("QwenImagePipeline", "flow_grpo", "_extract_prompt_ids"),
-        ("QwenImagePipeline", "dual_grpo", "_extract_prompt_ids"),
-        ("QwenImagePipeline", "mix_grpo", "_extract_prompt_ids"),
-        ("BooguImagePipeline", "flow_grpo", "_extract_prompt_ids"),
-        ("QwenImagePipeline", "dpo", "_extract_step_prompt_ids"),
-        ("QwenImagePipeline", "diffusion_nft", "_extract_step_prompt_ids"),
+        ("QwenImagePipeline", "flow_grpo"),
+        ("QwenImagePipeline", "dual_grpo"),
+        ("QwenImagePipeline", "mix_grpo"),
+        ("BooguImagePipeline", "flow_grpo"),
+        ("QwenImagePipeline", "dpo"),
+        ("QwenImagePipeline", "diffusion_nft"),
     ],
 )
-def test_image_adapters_consume_canonical_ids(architecture, algorithm, method):
+def test_image_adapters_consume_canonical_ids(architecture, algorithm):
     cls = VllmOmniPipelineBase.get_class(architecture, algorithm)
     pipeline = object.__new__(cls)
-    payload = _prompt()
-    result = getattr(pipeline, method)(payload if method == "_extract_step_prompt_ids" else [payload])
+    result = pipeline._extract_prompt_ids([_prompt()])
     assert result == ([1, 2], [1, 1], [3], None)
 
 

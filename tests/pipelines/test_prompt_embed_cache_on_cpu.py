@@ -149,6 +149,8 @@ def test_qwen_encode_prompt_preserves_previous_tensor_inputs():
     from verl_omni.pipelines.qwen_image_flow_grpo.vllm_omni_rollout_adapter import QwenImagePipelineWithLogProb
 
     assert QwenImageDiffusionNFTPipeline.encode_prompt is QwenImageTokenIdPromptMixin.encode_prompt
+    assert QwenImagePipelineWithLogProb.encode_prompt is QwenImageTokenIdPromptMixin.encode_prompt
+    assert QwenImageDPOPipeline.encode_prompt is QwenImageTokenIdPromptMixin.encode_prompt
 
     def make_get_prompt_embeds(encoded_inputs):
         def get_prompt_embeds(prompt_ids, attention_mask=None):
@@ -334,6 +336,7 @@ def test_step_prompt_tokenizers_follow_prompt_cache_mode(cache_enabled):
         QwenImageDiffusionNFTPipeline,
     )
     from verl_omni.pipelines.qwen_image_dpo.vllm_omni_rollout_adapter import QwenImageDPOPipeline
+    from verl_omni.pipelines.qwen_image_flow_grpo.common import QwenImageTokenIdPromptMixin
     from verl_omni.pipelines.qwen_image_flow_grpo.vllm_omni_rollout_adapter import QwenImagePipelineWithLogProb
 
     class Tokenizer:
@@ -360,10 +363,11 @@ def test_step_prompt_tokenizers_follow_prompt_cache_mode(cache_enabled):
             return encoding
 
     tokenizers = (
-        QwenImageDiffusionNFTPipeline._tokenize_step_prompt,
-        QwenImageDPOPipeline._tokenize_step_prompt,
+        QwenImageDiffusionNFTPipeline._tokenize_text_prompt,
+        QwenImageDPOPipeline._tokenize_text_prompt,
         QwenImagePipelineWithLogProb._tokenize_text_prompt,
     )
+    assert tokenizers == (QwenImageTokenIdPromptMixin._tokenize_text_prompt,) * 3
     for tokenize_prompt in tokenizers:
         tokenizer = Tokenizer()
         pipeline = SimpleNamespace(
@@ -424,7 +428,7 @@ def test_dpo_prepare_encode_preserves_input_path_and_batch_size(use_tensors):
         default_sample_size=2,
         vae_scale_factor=8,
         transformer=SimpleNamespace(in_channels=4),
-        _extract_step_prompt_ids=lambda _prompt: (prompt_ids, prompt_mask, None, None),
+        _extract_prompt_ids=lambda _prompts: (prompt_ids, prompt_mask, None, None),
         encode_prompt=encode_prompt,
         prepare_latents=prepare_latents,
     )

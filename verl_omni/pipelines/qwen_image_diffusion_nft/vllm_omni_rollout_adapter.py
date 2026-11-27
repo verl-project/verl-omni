@@ -65,43 +65,6 @@ class QwenImageDiffusionNFTPipeline(QwenImageLoRAMixin, QwenImageTokenIdPromptMi
         super().__init__(*args, **kwargs)
         self.set_progress_bar_config(disable=True)
 
-    def _extract_step_prompt_ids(self, prompt):
-        """Extract tokenized prompts, with a raw-text warm-up fallback."""
-        prompt_ids = None
-        prompt_mask = None
-        negative_prompt_ids = None
-        negative_prompt_mask = None
-        if isinstance(prompt, dict):
-            prompt_ids = prompt_ids_from_payload(prompt)
-            prompt_mask = prompt.get("prompt_mask")
-            negative_prompt_ids = prompt.get("negative_prompt_ids")
-            negative_prompt_mask = prompt.get("negative_prompt_mask")
-            if prompt_ids is None and prompt.get("prompt"):
-                prompt_ids, prompt_mask = self._tokenize_step_prompt(prompt["prompt"])
-            if negative_prompt_ids is None and prompt.get("negative_prompt"):
-                negative_prompt_ids, negative_prompt_mask = self._tokenize_step_prompt(prompt["negative_prompt"])
-        elif isinstance(prompt, str):
-            prompt_ids, prompt_mask = self._tokenize_step_prompt(prompt)
-        return prompt_ids, prompt_mask, negative_prompt_ids, negative_prompt_mask
-
-    def _tokenize_step_prompt(self, text: str | list[str]):
-        """Tokenize raw text for the step-execution warm-up request."""
-        prompt = [text] if isinstance(text, str) else text
-        formatted = [self.prompt_template_encode.format(item) for item in prompt]
-        prompt_embed_cache = getattr(self, "_prompt_embed_cache", None)
-        use_prompt_embed_cache = bool(prompt_embed_cache is not None and prompt_embed_cache.enabled)
-        tokenizer_kwargs = {} if use_prompt_embed_cache else {"return_tensors": "pt"}
-        tokens = self.tokenizer(
-            formatted,
-            max_length=self.tokenizer_max_length + self.prompt_template_encode_start_idx,
-            padding=True,
-            truncation=True,
-            **tokenizer_kwargs,
-        )
-        if not use_prompt_embed_cache:
-            tokens = tokens.to(self.device)
-        return tokens.input_ids, tokens.attention_mask
-
     def prepare_encode(
         self,
         state: StepRequestState,
@@ -109,7 +72,9 @@ class QwenImageDiffusionNFTPipeline(QwenImageLoRAMixin, QwenImageTokenIdPromptMi
     ) -> StepRequestState:
         """Initialize request-local state for step execution."""
         sampling = state.sampling
-        prompt_ids, prompt_mask, negative_prompt_ids, negative_prompt_mask = self._extract_step_prompt_ids(state.prompt)
+        prompt_ids, prompt_mask, negative_prompt_ids, negative_prompt_mask = self._extract_prompt_ids(
+            [state.prompt] if state.prompt is not None else []
+        )
         if prompt_ids is None:
             raise ValueError(
                 f"{self.__class__.__name__}.prepare_encode requires either "

@@ -50,7 +50,7 @@ from verl_omni.pipelines.request_batch import (
     split_diffusion_output_by_request as _split_diffusion_output_by_request,
 )
 from verl_omni.pipelines.rollout_media import DiffusionIOSpec, MediaSpec
-from verl_omni.pipelines.rollout_request import condition_images_from_payload, prompt_ids_from_payload
+from verl_omni.pipelines.rollout_request import condition_images_from_payload
 from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
 
 from .common import (
@@ -321,29 +321,6 @@ class BooguImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, BooguImagePipel
             return_dict=True,
         )
         return vlm_inputs["input_ids"], vlm_inputs["attention_mask"]
-
-    def _extract_prompt_ids(self, prompts):
-        """Extract positive/negative prompt IDs and masks from the request prompts."""
-        prompt_ids = None
-        prompt_mask = None
-        negative_prompt_ids = None
-        negative_prompt_mask = None
-        if prompts:
-            p0 = prompts[0]
-            if isinstance(p0, dict):
-                prompt_ids = prompt_ids_from_payload(p0)
-                prompt_mask = p0.get("prompt_mask", None)
-                negative_prompt_ids = p0.get("negative_prompt_ids", None)
-                negative_prompt_mask = p0.get("negative_prompt_mask", None)
-
-                # Fallback: tokenize raw text prompt (covers the dummy-run path).
-                if prompt_ids is None and p0.get("prompt"):
-                    prompt_ids, prompt_mask = self._tokenize_text_prompt(p0["prompt"])
-                if negative_prompt_ids is None and p0.get("negative_prompt"):
-                    negative_prompt_ids, negative_prompt_mask = self._tokenize_text_prompt(p0["negative_prompt"])
-            elif isinstance(p0, str):
-                prompt_ids, prompt_mask = self._tokenize_text_prompt(p0)
-        return prompt_ids, prompt_mask, negative_prompt_ids, negative_prompt_mask
 
     def _collate_prompt_batch(self, prompts):
         """Pack every request's pre-tokenised prompt into one padded ``(N, L)`` grid.
