@@ -393,6 +393,43 @@ def test_actor_logits_reads_every_action_token_of_each_unit():
     assert rows.shape[0] == 8  # 1 + 1 listen tokens, 3 + 3 tokens of the two spoken units
 
 
+def _barge_in_search(statuses_by_index, axes, **kwargs):
+    """Run ``_select_and_roll`` over fake episodes; each index's first roll ends with its scripted status."""
+    rolled: list[int] = []
+    dataset = [{"duplex_episode": {"axis": axis}} for axis in axes]
+
+    def roll_pair(sample, index):
+        rolled.append(index)
+        result = {"episode_id": f"ep-{index}", "status": statuses_by_index.get(index, "completed")}
+        return result, result
+
+    pairs = _parity_script()._select_and_roll(dataset, roll_pair, **kwargs)
+    return rolled, pairs
+
+
+def test_barge_in_search_rolls_turn_and_interruption_episodes_until_one_barges_in():
+    axes = ["pause"] * 4 + ["pause", "turn", "pause", "interruption", "turn", "turn"]
+    rolled, pairs = _barge_in_search(
+        {7: "truncated_interruption"}, axes, num_episodes=4, max_episodes=64, require_barge_in=True
+    )
+    # The pause episodes past the first four are skipped; the search ends at the barge-in.
+    assert rolled == [0, 1, 2, 3, 5, 7]
+    assert pairs[-1][0]["episode_id"] == "ep-7"
+
+
+def test_barge_in_search_is_bounded_and_off_without_the_flag():
+    axes = ["turn"] * 10
+    rolled, _ = _barge_in_search({}, axes, num_episodes=2, max_episodes=5, require_barge_in=True)
+    assert rolled == [0, 1, 2, 3, 4]
+    rolled, _ = _barge_in_search({}, axes, num_episodes=2, max_episodes=5, require_barge_in=False)
+    assert rolled == [0, 1]
+    # A barge-in inside the first episodes ends the search right after them.
+    rolled, _ = _barge_in_search(
+        {1: "truncated_interruption"}, axes, num_episodes=2, max_episodes=5, require_barge_in=True
+    )
+    assert rolled == [0, 1]
+
+
 def test_audio_embedding_parity_reports_per_unit_streaming_vs_offline_gaps():
     """The diagnostic reads every clip twice through the patched audio path —
 

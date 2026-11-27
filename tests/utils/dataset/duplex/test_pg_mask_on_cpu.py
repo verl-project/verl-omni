@@ -29,6 +29,7 @@ from verl_omni.utils.dataset.duplex.replay import (
     build_replay,
     resolve_duplex_vocabulary,
 )
+from verl_omni.utils.dataset.duplex.telemetry import pause_window_overlaps_unit
 from verl_omni.utils.dataset.duplex.trajectory import (
     AXIS_INTERRUPTION,
     AXIS_PAUSE,
@@ -40,13 +41,18 @@ from verl_omni.utils.dataset.duplex.trajectory import (
 _UNIT_NS = 1_000_000_000
 
 
-def _replay(event: DuplexEpisodeEvent, *, engine_silence_at: int | None = None) -> DuplexReplay:
-    """Replay units listening at t = 0, 1, 2 and speaking at t = 3, 4 (one scope).
+def _replay(
+    event: DuplexEpisodeEvent,
+    *,
+    engine_silence_at: int | None = None,
+    unit_times: tuple[float, ...] = (0, 1, 2, 3, 4),
+) -> DuplexReplay:
+    """Replay units listening at the first three ``unit_times`` and speaking at the last two (one scope).
 
     ``engine_silence_at`` appends an engine-injected forced listen unit at that time.
     """
-    units = [listen_unit(emission_ns=(time_s + 1) * _UNIT_NS) for time_s in (0, 1, 2)]
-    units += [spoken_unit(emission_ns=(time_s + 1) * _UNIT_NS) for time_s in (3, 4)]
+    units = [listen_unit(emission_ns=int((time_s + 1) * _UNIT_NS)) for time_s in unit_times[:3]]
+    units += [spoken_unit(emission_ns=int((time_s + 1) * _UNIT_NS)) for time_s in unit_times[3:]]
     if engine_silence_at is not None:
         units.append(
             listen_unit(
@@ -72,21 +78,47 @@ def _unit_positions(replay: DuplexReplay, time_s: float) -> list[int]:
     ]
 
 
-def test_pause_episode_gates_units_before_the_window_start():
+def test_pause_episode_keeps_only_the_units_overlapping_the_window():
     replay = _replay(DuplexEpisodeEvent(axis=AXIS_PAUSE, pause_window_s=(2.0, 3.0)))
     assert [layout.time_s for layout in replay.unit_layouts] == [0.0, 1.0, 2.0, 3.0, 4.0]
-    # The two listen units before the window opened are gated; the unit at the
-    # window start and everything after it keep the full response mask.
-    gated = _unit_positions(replay, 0.0) + _unit_positions(replay, 1.0)
-    kept = [position for layout in replay.unit_layouts[2:] for position in layout.action_positions]
-    assert replay.response_mask[gated[0]] == 1 and replay.pg_mask[gated[0]] == 0
-    assert all(replay.pg_mask[position] == 0 for position in gated)
-    assert [replay.pg_mask[position] for position in kept] == [replay.response_mask[position] for position in kept]
-    assert sum(replay.response_mask) == 9 and sum(replay.pg_mask) == 7
-    # A later window start gates the unit at t = 2 too.
+    # The two listen units that ended before the window opened and the two speak
+    # units that start after it closed are gated; the unit covering the window keeps its token.
+    gated = [position for time_s in (0.0, 1.0, 3.0, 4.0) for position in _unit_positions(replay, time_s)]
+    kept = _unit_positions(replay, 2.0)
+    assert all(replay.response_mask[position] == 1 and replay.pg_mask[position] == 0 for position in gated)
+    assert [replay.pg_mask[position] for position in kept] == [1]
+    assert sum(replay.response_mask) == 9 and sum(replay.pg_mask) == 1
+    # A window straddling two units keeps both.
     later = _replay(DuplexEpisodeEvent(axis=AXIS_PAUSE, pause_window_s=(2.5, 3.5)))
-    assert sum(later.pg_mask) == 6 and all(later.pg_mask[position] == 0 for position in _unit_positions(later, 2.0))
-    assert sum(_replay(DuplexEpisodeEvent(axis=AXIS_PAUSE, pause_window_s=(3.5, 4.5))).pg_mask) == 3
+    assert sum(later.pg_mask) == 1 + 3  # the listen unit at 2 and the first spoken unit
+    assert sum(_replay(DuplexEpisodeEvent(axis=AXIS_PAUSE, pause_window_s=(3.5, 4.5))).pg_mask) == 6
+
+
+def test_pause_window_inside_a_unit_keeps_the_covering_unit_gradient():
+    # No unit starts inside [2.2, 2.8), but the unit at t = 2 covers it: it decides the reward.
+    replay = _replay(DuplexEpisodeEvent(axis=AXIS_PAUSE, pause_window_s=(2.2, 2.8)))
+    assert [replay.pg_mask[position] for position in _unit_positions(replay, 2.0)] == [1]
+    assert sum(replay.pg_mask) == 1
+
+
+@pytest.mark.parametrize(
+    "window",
+    [(0.0, 1.0), (0.4, 0.6), (1.5, 2.5), (2.0, 3.0), (2.9, 4.2), (3.2, 3.8), (4.0, 6.0)],
+)
+def test_pause_gate_keeps_exactly_the_units_the_reward_measures(window):
+    event = DuplexEpisodeEvent(axis=AXIS_PAUSE, pause_window_s=window)
+    replay = _replay(event)
+    for layout in replay.unit_layouts:
+        kept = any(replay.pg_mask[position] for position in layout.action_positions)
+        assert kept == pause_window_overlaps_unit(event, unit_times=[layout.time_s])
+
+
+def test_pause_window_in_a_unit_gap_gates_every_unit():
+    # Units cover [0, 1), [1, 2), [2, 3), [4, 5), [5, 6); the window [3.2, 3.8) falls between them.
+    event = DuplexEpisodeEvent(axis=AXIS_PAUSE, pause_window_s=(3.2, 3.8))
+    replay = _replay(event, unit_times=(0, 1, 2, 4, 5))
+    assert sum(replay.pg_mask) == 0
+    assert sum(replay.response_mask) > 0
 
 
 def test_interruption_episode_gates_units_before_the_speech_onset():
@@ -103,6 +135,15 @@ def test_interruption_episode_gates_units_before_the_speech_onset():
     ]
 
 
+def test_interruption_onset_inside_a_unit_keeps_the_covering_unit():
+    replay = _replay(
+        DuplexEpisodeEvent(axis=AXIS_INTERRUPTION, interrupt_speech_onset_s=2.5, interrupt_speech_end_s=4.0)
+    )
+    assert [replay.pg_mask[position] for position in _unit_positions(replay, 2.0)] == [1]
+    assert all(replay.pg_mask[position] == 0 for time_s in (0.0, 1.0) for position in _unit_positions(replay, time_s))
+    assert sum(replay.pg_mask) == 1 + 6
+
+
 def test_turn_episode_keeps_the_full_mask():
     replay = _replay(DuplexEpisodeEvent(axis=AXIS_TURN, user_turn_end_s=3.0))
     # An early floor-take is scored on this axis and sits before the turn end, so those units stay in the mask.
@@ -111,7 +152,7 @@ def test_turn_episode_keeps_the_full_mask():
 
 def test_framing_positions_and_forced_tokens_stay_zero_on_every_axis():
     events = [
-        DuplexEpisodeEvent(axis=AXIS_PAUSE, pause_window_s=(0.0, 1.0)),
+        DuplexEpisodeEvent(axis=AXIS_PAUSE, pause_window_s=(0.0, 10.0)),
         DuplexEpisodeEvent(axis=AXIS_INTERRUPTION, interrupt_speech_onset_s=0.0, interrupt_speech_end_s=1.0),
         DuplexEpisodeEvent(axis=AXIS_TURN, user_turn_end_s=0.0),
     ]
@@ -124,7 +165,7 @@ def test_framing_positions_and_forced_tokens_stay_zero_on_every_axis():
         assert all(pg <= mask for pg, mask in zip(replay.pg_mask, replay.response_mask, strict=True))
         assert replay.response_mask[_unit_positions(replay, 5.0)[0]] == 0
         assert replay.pg_mask[_unit_positions(replay, 5.0)[0]] == 0
-        assert sum(replay.pg_mask) == 9  # nothing pre-event on any of the three events
+        assert sum(replay.pg_mask) == 9  # nothing outside the scored window on any of the three events
 
 
 def test_pg_mask_rides_the_payload_beside_response_mask():

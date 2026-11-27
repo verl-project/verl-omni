@@ -52,6 +52,7 @@ from verl_omni.utils.dataset.duplex.records import (
     ORIGIN_ENGINE,
     RecordSetError,
 )
+from verl_omni.utils.dataset.duplex.telemetry import UNIT_DURATION_S
 from verl_omni.utils.dataset.duplex.trajectory import (
     AXIS_INTERRUPTION,
     AXIS_PAUSE,
@@ -355,9 +356,11 @@ class DuplexReplay:
     response_ids: list[int]
     response_mask: list[int]
     #: Policy-gradient gate, a subset of ``response_mask``: on pause and
-    #: interruption episodes the action tokens of units that decided strictly
-    #: before the scored event's start are 0. Turn episodes keep the full mask
-    #: (the premature-barge-in decision the reward scores precedes the turn end).
+    #: interruption episodes the action tokens of units whose audio ended before
+    #: the scored event's start are 0, and on pause episodes so are the units
+    #: that start after the window closes. A unit whose audio overlaps the window
+    #: keeps its tokens. Turn episodes keep the full mask (the premature-barge-in
+    #: decision the reward scores precedes the turn end).
     pg_mask: list[int]
     audio_bounds: list[list[int]]
     unit_layouts: list[DuplexUnitLayout]
@@ -513,8 +516,8 @@ def build_replay(
 
     Returns:
         The replay with prompt/response ids, the validity mask over the
-        response, the policy-gradient gate ``pg_mask`` (pre-event action tokens
-        of pause and interruption episodes zeroed), explicit audio bounds, and
+        response, the policy-gradient gate ``pg_mask`` (action tokens outside
+        the scored window of pause and interruption episodes zeroed), explicit audio bounds, and
         the per-unit PCM stream.
 
     Raises:
@@ -546,7 +549,7 @@ def build_replay(
     pg_mask: list[int] = []
     response_logprobs: list[float] = []
     audio_bounds: list[list[int]] = []
-    event_start_s = _policy_gradient_event_start_s(trajectory.event)
+    event_start_s, event_end_s = _policy_gradient_event_window_s(trajectory.event)
     if reference_ids:
         # The reference block's placeholder run is the first span the tower splices into.
         audio_bounds.append([len(prefix_ids), len(prefix_ids) + len(reference_ids)])
@@ -585,7 +588,10 @@ def build_replay(
         response_ids.extend([vocabulary.audio_placeholder_token_id] * num_audio_tokens)
         audio_bounds.append([audio_start, audio_start + num_audio_tokens])
         action_position = len(response_ids)
-        gated = event_start_s is not None and decision.time_s < event_start_s
+        gated = event_start_s is not None and (
+            decision.time_s + UNIT_DURATION_S <= event_start_s
+            or (event_end_s is not None and decision.time_s >= event_end_s)
+        )
         # <unit> and its audio placeholders are structural context, never loss positions.
         response_mask.extend([0] * (1 + num_audio_tokens))
         pg_mask.extend([0] * (1 + num_audio_tokens))
@@ -653,13 +659,16 @@ def build_replay(
     )
 
 
-def _policy_gradient_event_start_s(event: DuplexEpisodeEvent) -> float | None:
-    """The scored event's start on the axes that gate pre-event action tokens, else ``None``."""
+def _policy_gradient_event_window_s(event: DuplexEpisodeEvent) -> tuple[float | None, float | None]:
+    """The scored window ``(start, end)`` on the axes that gate action tokens, else ``(None, None)``.
+
+    ``end`` is ``None`` when the axis scores everything after the start.
+    """
     if event.axis == AXIS_PAUSE:
-        return float(event.pause_window_s[0])
+        return float(event.pause_window_s[0]), float(event.pause_window_s[1])
     if event.axis == AXIS_INTERRUPTION:
-        return float(event.interrupt_speech_onset_s)
-    return None
+        return float(event.interrupt_speech_onset_s), None
+    return None, None
 
 
 def _episode_streaming_processor(processor: Any) -> Any:

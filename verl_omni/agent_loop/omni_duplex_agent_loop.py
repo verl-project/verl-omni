@@ -34,8 +34,8 @@ trainer's per-step mean of ``reward/duplex_pacing_corrupted``.
 Two generic ``extra_fields`` columns are the trainer's advantage-gate
 contract (``OmniPPOTrainer._compute_advantage`` → ``apply_advantage_gates``):
 ``advantage_mask`` gates policy-gradient credit per response position (the
-replay's ``pg_mask``: the action tokens a pause or interruption episode
-decided before its scored event), and ``advantage_exclude`` drops the episode
+replay's ``pg_mask``: the action tokens of the units overlapping a pause or
+interruption episode's scored window), and ``advantage_exclude`` drops the episode
 from its GRPO group's baseline, which every degenerate output sets.
 """
 

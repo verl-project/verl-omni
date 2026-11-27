@@ -39,8 +39,8 @@ design; this README covers running it.
   per step, so silence collapse, repetitive speech, or a rising drop rate
   shows up in the logged metrics. The agent loop drops a pacing-corrupted
   episode (mask 0, flagged the same way) and keeps it out of its group's
-  baseline; the advantage is gated per token to the scored event's units on
-  pause and interruption episodes.
+  baseline; the advantage is gated per token to the units overlapping the scored
+  event on pause and interruption episodes.
 
 ## Prerequisites
 
@@ -110,6 +110,7 @@ group.
 CPU-tested at contract level (`tests/utils/dataset/duplex/`, the strategy and
 agent-loop suites). A 4×H800 run completed steps (about 6 min/step; the
 recipe default is 100 steps). The engine keeps a sampled listen during
-user speech. Speech before the turn end scores −1. Speech on the
-interruption's onset unit is scored as a yield. M0 tolerances stay
+user speech. Turn speech scores 0 from 0.3 s to 1 s after the turn
+end, ramps to −1 at 1 s before it, and falls to −1 at 3 s after it; never
+speaking scores −1. Speech on the interruption's onset unit is scored as a yield. M0 tolerances stay
 0.05 / 0.01 nats. This is PoC scope: capability verification, not SOTA.

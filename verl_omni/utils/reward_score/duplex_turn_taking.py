@@ -14,13 +14,12 @@
 """Per-axis temporal rule rewards for streaming duplex GRPO (RFC #905 §3.5).
 
 CPU rule rewards computed from timestamps only — no VAD model, no judge: the
-pause axis penalizes speaking inside the tagged pause window; the turn axis
-scores the delay after the user's turn end on the 1 s full-credit band and
-the 3 s deadline, and speech before that end scores the same miss as never
-speaking;
-the interruption axis penalizes the delay from the interrupting speech onset
-to the return to silence. Speech on the onset unit counts as interrupted. A
-policy that never spoke, or first speaks after that unit, takes the floor.
+pause axis penalizes the share of the tagged pause window the policy talked
+through; the turn axis scores the delay after the user's turn end (full credit
+from 0.3 s to 1 s, -1 past 3 s) and grades speech starting before that end by its
+depth. The interruption axis penalizes the delay from the interrupting speech
+onset to the return to silence. Speech on the onset unit counts as interrupted.
+A policy that never spoke, or first speaks after that unit, takes the floor.
 Each episode carries exactly one axis; the score is that axis's reward, and
 the raw measurements ride the returned dict as metrics.
 
@@ -40,13 +39,17 @@ from verl_omni.utils.dataset.duplex.records import ORIGIN_ENGINE
 from verl_omni.utils.dataset.duplex.replay import DUPLEX_REPLAY_KEY
 from verl_omni.utils.dataset.duplex.telemetry import (
     TRIP_WIRE_DEFAULTS,
+    TURN_BARGE_IN_SPAN_S,
     TURN_DEADLINE_S,
+    TURN_EARLY_BAND_S,
     TURN_FULL_CREDIT_BAND_S,
     YIELD_DEADLINE_S,
     YIELD_FULL_CREDIT_BAND_S,
     duplicate_ngram_share,
     interruption_yield_latency,
     pacing_corrupted,
+    pause_speaking_fraction,
+    pause_window_overlaps_unit,
     turn_take_latency,
 )
 from verl_omni.utils.dataset.duplex.trajectory import DuplexEpisodeEvent
@@ -61,6 +64,20 @@ def _linear_penalty(latency_s: float, full_credit_band_s: float, deadline_s: flo
     if latency_s >= deadline_s or math.isinf(latency_s):
         return -1.0
     return -(latency_s - full_credit_band_s) / (deadline_s - full_credit_band_s)
+
+
+def _turn_take_penalty(latency_s: float, early_band_s: float, full_credit_band_s: float, deadline_s: float) -> float:
+    """Penalty for the signed delay from the turn end to the first speak.
+
+    Speech earlier than ``early_band_s`` after the turn end is graded by its
+    depth below that band, reaching -1 at a barge-in of ``TURN_BARGE_IN_SPAN_S``
+    before the turn end. From the band on, the usual credit band and deadline apply.
+    """
+    if math.isinf(latency_s) or latency_s >= deadline_s:
+        return -1.0
+    if latency_s < early_band_s:
+        return -min(1.0, (early_band_s - latency_s) / (early_band_s + TURN_BARGE_IN_SPAN_S))
+    return _linear_penalty(latency_s, full_credit_band_s, deadline_s)
 
 
 def compute_score_duplex_turn_taking(
@@ -80,9 +97,9 @@ def compute_score_duplex_turn_taking(
             ``extra_info["duplex_replay"]`` (the namespaced agent-loop
             ``extra_fields`` key), with the event annotation and the
             per-unit decision timeline.
-        **kwargs: ``turn_full_credit_band_s`` / ``turn_deadline_s`` /
-            ``yield_full_credit_band_s`` / ``yield_deadline_s`` override the
-            defaults (forwarded config keys).
+        **kwargs: ``turn_early_band_s`` / ``turn_full_credit_band_s`` /
+            ``turn_deadline_s`` / ``yield_full_credit_band_s`` /
+            ``yield_deadline_s`` override the defaults (forwarded config keys).
 
     Returns:
         ``{"score": float, ...raw measurements}`` — the raw keys become
@@ -110,6 +127,7 @@ def compute_score_duplex_turn_taking(
         raise ValueError(f"{DUPLEX_REPLAY_KEY!r} carries no unit timeline; refusing to score a broken episode")
     event = DuplexEpisodeEvent.from_mapping(event_payload)
     turn_band = float(kwargs.get("turn_full_credit_band_s", TURN_FULL_CREDIT_BAND_S))
+    turn_early_band = min(float(kwargs.get("turn_early_band_s", TURN_EARLY_BAND_S)), turn_band)
     turn_deadline = float(kwargs.get("turn_deadline_s", TURN_DEADLINE_S))
     yield_band = float(kwargs.get("yield_full_credit_band_s", YIELD_FULL_CREDIT_BAND_S))
     yield_deadline = float(kwargs.get("yield_deadline_s", YIELD_DEADLINE_S))
@@ -118,20 +136,21 @@ def compute_score_duplex_turn_taking(
     speaking_times = [layout["time_s"] for layout in layouts if layout["speaking"]]
     silent_times = [layout["time_s"] for layout in layouts if not layout["speaking"]]
     if event.axis == "pause":
-        start, end = event.pause_window_s
-        violated = any(start <= time_s < end for time_s in speaking_times)
-        metrics["duplex_pause_violation"] = float(violated)
-        score = -1.0 if violated else 0.0
+        spoken_share = pause_speaking_fraction(event, speaking_times=speaking_times)
+        metrics["duplex_pause_spoken_share"] = spoken_share
+        metrics["duplex_pause_violation"] = float(spoken_share > 0.0)
+        metrics["duplex_pause_ungraded"] = float(
+            not pause_window_overlaps_unit(event, unit_times=[layout["time_s"] for layout in layouts])
+        )
+        score = -spoken_share
     elif event.axis == "turn":
         turn_end = event.user_turn_end_s
         first_speak = speaking_times[0] if speaking_times else None
         latency = turn_take_latency(first_speak, turn_end)
-        # A speak before the turn end is a barge-in: the same miss as never speaking.
-        if latency < 0:
-            latency = float("inf")
-        score = _linear_penalty(latency, turn_band, turn_deadline)
+        score = _turn_take_penalty(latency, turn_early_band, turn_band, turn_deadline)
         metrics["duplex_turn_latency_s"] = latency
         metrics["duplex_turn_took_floor"] = float(first_speak is not None)
+        metrics["duplex_turn_barge_in"] = float(latency < 0)
     elif event.axis == "interruption":
         latency = interruption_yield_latency(event, speaking_times=speaking_times, silent_times=silent_times)
         score = -1.0 if latency is None else _linear_penalty(latency, yield_band, yield_deadline)

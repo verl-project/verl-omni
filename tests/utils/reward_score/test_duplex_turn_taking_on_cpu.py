@@ -57,43 +57,67 @@ def _score(axis: str, speaking, times=None, event=None, origins=None, **kwargs):
     return compute_score_duplex_turn_taking("dailytalk", "", "", extra_info={"duplex_replay": replay}, **kwargs)
 
 
-def test_pause_axis_penalizes_speaking_in_the_window():
-    violated = compute_score_duplex_turn_taking(
-        "dailytalk", "", "", extra_info={"duplex_replay": _replay("pause", [False, True, False])}
-    )
-    assert violated["score"] == -1.0
-    assert violated["duplex_pause_violation"] == 1.0
-    clean = compute_score_duplex_turn_taking(
-        "dailytalk", "", "", extra_info={"duplex_replay": _replay("pause", [False, False, False, True])}
-    )
-    assert clean["score"] == 0.0  # speaking starts at 3.0 s, past the [1, 3) window
+def test_pause_axis_grades_the_share_of_the_window_spoken_through():
+    # Window [1, 3): unit 1 covers [1, 2), unit 2 covers [2, 3).
+    half = _score("pause", [False, True, False])
+    assert half["score"] == pytest.approx(-0.5)
+    assert half["duplex_pause_spoken_share"] == pytest.approx(0.5)
+    assert half["duplex_pause_violation"] == 1.0
+    full = _score("pause", [False, True, True])
+    assert full["score"] == pytest.approx(-1.0)
+    clean = _score("pause", [False, False, False, True])
+    assert clean["score"] == 0.0  # the speaking unit starts at the window end
     assert clean["duplex_pause_violation"] == 0.0
+    assert clean["duplex_pause_ungraded"] == 0.0
+
+
+def test_pause_window_inside_one_unit_is_graded_by_that_unit():
+    # No unit starts inside [0.2, 0.8), but unit 0 covers it entirely.
+    event = {"axis": "pause", "pause_window_s": [0.2, 0.8]}
+    spoken = _score("pause", [True, False], event=event)
+    assert spoken["score"] == pytest.approx(-1.0)
+    assert spoken["duplex_pause_ungraded"] == 0.0
+    assert _score("pause", [False, False], event=event)["score"] == 0.0
+
+
+def test_pause_window_in_a_unit_gap_is_reported_ungraded():
+    # Units cover [0, 1) and [3, 4); the window [1.2, 1.8) falls between them.
+    event = {"axis": "pause", "pause_window_s": [1.2, 1.8]}
+    result = _score("pause", [True, True], times=[0.0, 3.0], event=event)
+    assert result["score"] == 0.0
+    assert result["duplex_pause_ungraded"] == 1.0
+    assert result["duplex_pause_violation"] == 0.0
 
 
 def test_turn_axis_full_credit_band_and_deadline():
-    fast = compute_score_duplex_turn_taking(
-        "dailytalk", "", "", extra_info={"duplex_replay": _replay("turn", [False, False, True])}
-    )
-    assert fast["score"] == 0.0  # onset at 2.0 s, turn end 2.0 s -> inside the band
-    mid = compute_score_duplex_turn_taking(
-        "dailytalk", "", "", extra_info={"duplex_replay": _replay("turn", [False, False, False, False, True])}
-    )
+    # Full credit starts 0.3 s after the turn end (2.0 s) and lasts to 1 s.
+    fast = _score("turn", [False, False, True], times=[0.0, 1.0, 2.5])
+    assert fast["score"] == 0.0
+    mid = _score("turn", [False, False, False, False, True])
     assert mid["score"] == pytest.approx(-0.5)  # onset 2 s after the turn end: half the deadline span
-    never = compute_score_duplex_turn_taking(
-        "dailytalk", "", "", extra_info={"duplex_replay": _replay("turn", [False, False])}
-    )
+    never = _score("turn", [False, False])
     assert never["score"] == -1.0
     assert never["duplex_turn_latency_s"] == float("inf")
+    assert never["duplex_turn_barge_in"] == 0.0
 
 
-def test_turn_axis_penalizes_speaking_before_the_turn_ends():
-    # Speech before the turn end is a barge-in, the same miss as never speaking.
-    early = compute_score_duplex_turn_taking(
-        "dailytalk", "", "", extra_info={"duplex_replay": _replay("turn", [False, True, False, True])}
-    )
-    assert early["score"] == -1.0
-    assert early["duplex_turn_latency_s"] == float("inf")
-    assert early["duplex_turn_took_floor"] == 1.0
+def test_turn_axis_grades_a_barge_in_by_its_depth():
+    # Turn end 2.0 s, early band 0.3 s, span 1.0 s: the penalty is depth / 1.3.
+    on_the_last_frame = _score("turn", [False, False, True])  # latency 0.0
+    assert on_the_last_frame["score"] == pytest.approx(-0.3 / 1.3)
+    # A narrower early band (0.25 s): onset 0.3 s after the turn end clears it.
+    at_band_edge = _score("turn", [False, True], times=[0.0, 2.3], turn_early_band_s=0.25)
+    assert at_band_edge["score"] == 0.0
+    shallow = _score("turn", [False, True], times=[0.0, 1.7])  # 0.3 s before the turn end
+    assert shallow["score"] == pytest.approx(-0.6 / 1.3)
+    assert shallow["duplex_turn_latency_s"] == pytest.approx(-0.3)
+    assert shallow["duplex_turn_barge_in"] == 1.0
+    assert shallow["duplex_turn_took_floor"] == 1.0
+    deep = _score("turn", [False, True, False, True], times=[0.0, 1.0, 2.0, 3.0])  # 1.0 s deep: saturated
+    assert deep["score"] == -1.0
+    assert deep["duplex_turn_latency_s"] == pytest.approx(-1.0)
+    shallower = _score("turn", [False, True], times=[0.0, 1.9])
+    assert shallow["score"] < shallower["score"] < 0.0
 
 
 def test_interruption_axis_anchors_the_yield_latency_to_the_speech_onset():

@@ -265,10 +265,13 @@ class DuplexStrategy(ARStrategy):
         Batch waves transiently exceed one engine's session slots; the open
         is retried every :data:`_DUPLEX_OPEN_RETRY_S` up to
         :data:`_DUPLEX_OPEN_WAIT_S` and any other error (or the deadline)
-        raises into the episode failure path.
+        raises into the episode failure path. Only the first retry logs at
+        INFO; a full engine would otherwise log every waiting worker every
+        retry.
         """
         loop = asyncio.get_running_loop()
         deadline = loop.time() + _DUPLEX_OPEN_WAIT_S
+        retries = 0
         while True:
             try:
                 return await duplex_omni.open_session(dict(config))
@@ -278,7 +281,9 @@ class DuplexStrategy(ARStrategy):
                     raise
                 if loop.time() >= deadline:
                     raise
-                logger.info("duplex open: engine session slots exhausted; retrying in %.0fs", _DUPLEX_OPEN_RETRY_S)
+                retries += 1
+                log = logger.info if retries == 1 else logger.debug
+                log("duplex open: engine session slots exhausted; retrying in %.0fs", _DUPLEX_OPEN_RETRY_S)
                 await asyncio.sleep(_DUPLEX_OPEN_RETRY_S)
 
     async def _consume_events(

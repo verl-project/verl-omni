@@ -23,6 +23,7 @@ suite runs at the pin.
 from __future__ import annotations
 
 import asyncio
+import logging
 import struct
 from dataclasses import dataclass
 from typing import Any
@@ -429,6 +430,22 @@ async def test_open_session_retries_capacity_exhausted():
         _restore(strategy)
     assert len(engine.handles) == 1  # the retried open succeeded
     assert result["session_id"] == engine.handles[0].session_id
+
+
+@pytest.mark.asyncio
+async def test_slot_wait_logs_the_first_retry_at_info_only(caplog):
+    engine = FakeDuplexOmni(script=["session.closed"], open_errors=[_SessionError("capacity_exhausted")] * 4)
+    retry_s = strategy_module._DUPLEX_OPEN_RETRY_S
+    strategy_module._DUPLEX_OPEN_RETRY_S = 0.001
+    strategy = _strategy(engine)
+    try:
+        with caplog.at_level(logging.DEBUG, logger=strategy_module.logger.name):
+            await strategy.run_duplex_episode(_run_spec())
+    finally:
+        strategy_module._DUPLEX_OPEN_RETRY_S = retry_s
+        _restore(strategy)
+    waits = [record for record in caplog.records if "slots exhausted" in record.getMessage()]
+    assert [record.levelno for record in waits] == [logging.INFO] + [logging.DEBUG] * 3
 
 
 @pytest.mark.asyncio

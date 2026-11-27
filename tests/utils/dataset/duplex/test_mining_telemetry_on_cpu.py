@@ -34,6 +34,7 @@ from verl_omni.utils.dataset.duplex.telemetry import (
     episode_rule_metrics,
     interruption_yield_latency,
     pacing_corrupted,
+    pause_speaking_fraction,
 )
 from verl_omni.utils.dataset.duplex.trajectory import (
     AXIS_INTERRUPTION,
@@ -228,10 +229,11 @@ def test_interruption_yield_latency_is_onset_anchored_with_a_silence_floor():
 @pytest.mark.parametrize(
     ("axis", "engine_times", "corrupted"),
     [
-        # Pause window [1.0, 3.0).
+        # Pause window [1.0, 3.0): an engine unit counts when its 1 s of audio overlaps it.
         (AXIS_PAUSE, [1.0], True),
         (AXIS_PAUSE, [2.999], True),
-        (AXIS_PAUSE, [0.999], False),
+        (AXIS_PAUSE, [0.5], True),
+        (AXIS_PAUSE, [0.0], False),
         (AXIS_PAUSE, [3.0], False),
         # Turn window [2.0, 2.0 + 3.0).
         (AXIS_TURN, [2.0], True),
@@ -257,11 +259,11 @@ def test_pacing_corrupted_window_follows_the_deadline_kwargs():
     assert pacing_corrupted(_event(AXIS_INTERRUPTION), [3.5], yield_deadline_s=2.0) is False  # window [1.0, 3.0)
 
 
-def test_turn_axis_latency_saturates_for_pre_turn_end_speech():
-    # Speaking before the turn end is a barge-in, the same miss as never speaking.
+def test_turn_axis_latency_is_signed_for_pre_turn_end_speech():
+    # A barge-in reports its depth as a negative latency, the scorer's value; only never speaking is inf.
     early = episode_rule_metrics(_trajectory(AXIS_TURN, [True, False, False]), listen_token_id=LISTEN_TOKEN_ID)
-    assert early["turn_latency_s"] == float("inf")
-    # The boundary stays full credit: onset exactly at the turn end.
+    assert early["turn_latency_s"] == pytest.approx(-2.0)
+    # Onset exactly at the turn end reports a zero latency.
     on_time = episode_rule_metrics(_trajectory(AXIS_TURN, [False, False, True, True]), listen_token_id=LISTEN_TOKEN_ID)
     assert on_time["turn_latency_s"] == pytest.approx(0.0)
 
@@ -332,3 +334,13 @@ def test_fdb_rule_metrics_over_dumped_replays():
     assert metrics["fdb/yield_rate"] == pytest.approx(1 / 3)
     assert metrics["fdb/yield_latency_s_median"] == pytest.approx(1.0)
     assert metrics["fdb/pause_episodes"] == 2.0
+
+
+def test_pause_speaking_fraction_counts_audio_overlap_and_rejects_empty_windows():
+    event = DuplexEpisodeEvent(axis=AXIS_PAUSE, pause_window_s=(1.2, 1.8))
+    assert pause_speaking_fraction(event, speaking_times=[1.0]) == pytest.approx(1.0)  # the unit covers the window
+    assert pause_speaking_fraction(event, speaking_times=[0.0, 2.0]) == 0.0
+    wide = DuplexEpisodeEvent(axis=AXIS_PAUSE, pause_window_s=(1.0, 3.0))
+    assert pause_speaking_fraction(wide, speaking_times=[0.5, 2.5]) == pytest.approx(0.5)  # 0.5 s + 0.5 s of 2 s
+    with pytest.raises(ValueError, match="positive length"):
+        pause_speaking_fraction(DuplexEpisodeEvent(axis=AXIS_PAUSE, pause_window_s=(1.0, 1.0)), speaking_times=[1.0])

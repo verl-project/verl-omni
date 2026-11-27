@@ -48,7 +48,14 @@ from pathlib import Path
 
 from verl_omni.utils.dataset.duplex.deploy_config import stage_init_timeout_from_env, write_deploy_config_for
 from verl_omni.utils.dataset.duplex.policy_measure import resolve_forbidden_token_ids, two_stage_logprob
-from verl_omni.utils.dataset.duplex.records import ACTION_FORCED, ACTION_REEMIT, ACTION_SAMPLED, RecordSetError
+from verl_omni.utils.dataset.duplex.records import (
+    ACTION_FORCED,
+    ACTION_REEMIT,
+    ACTION_SAMPLED,
+    STATUS_TRUNCATED_INTERRUPTION,
+    RecordSetError,
+)
+from verl_omni.utils.dataset.duplex.trajectory import AXIS_INTERRUPTION, AXIS_TURN
 
 _MAX_ABS_NATS_DEFAULT = 0.05
 _MEAN_ABS_NATS_DEFAULT = 0.01
@@ -59,6 +66,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--model", required=True, help="MiniCPM-o 4.5 checkpoint directory")
     parser.add_argument("--episodes", required=True, help="mined duplex episode parquet")
     parser.add_argument("--num-episodes", type=int, default=8)
+    parser.add_argument(
+        "--max-episodes",
+        type=int,
+        default=64,
+        help="dataset-index bound for the --require-barge-in search (pause episodes are skipped)",
+    )
     parser.add_argument("--max-abs-nats", type=float, default=_MAX_ABS_NATS_DEFAULT)
     parser.add_argument("--mean-abs-nats", type=float, default=_MEAN_ABS_NATS_DEFAULT)
     parser.add_argument("--tensor-parallel-size", type=int, default=1)
@@ -76,7 +89,10 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "(default: next to --output with a .deploy.yaml suffix)",
     )
     parser.add_argument(
-        "--require-barge-in", action="store_true", help="fail unless a truncated_interruption episode was checked"
+        "--require-barge-in",
+        action="store_true",
+        help="after --num-episodes, keep rolling turn and interruption episodes (up to --max-episodes) until a "
+        "truncated_interruption episode was checked; fail if none was",
     )
     parser.add_argument("--output", default="duplex_m0_parity.json")
     return parser.parse_args(argv)
@@ -102,8 +118,41 @@ def _build_engine(args: argparse.Namespace):
     )
 
 
+_BARGE_IN_AXES = (AXIS_TURN, AXIS_INTERRUPTION)
+
+
+def _select_and_roll(dataset, roll_pair, *, num_episodes: int, max_episodes: int, require_barge_in: bool) -> list:
+    """Roll the first ``num_episodes``; with ``require_barge_in`` keep going until one barges in.
+
+    Past ``num_episodes`` only turn and interruption episodes are rolled, up to
+    ``max_episodes`` in dataset order, and the search stops at the first episode
+    whose first roll ended ``truncated_interruption``.
+
+    Args:
+        dataset: Indexable samples carrying ``sample["duplex_episode"]["axis"]``.
+        roll_pair: ``(sample, index) -> (first_result, second_result)``.
+        num_episodes: Episodes rolled unconditionally.
+        max_episodes: Dataset index bound of the barge-in search.
+        require_barge_in: Whether to search beyond ``num_episodes``.
+
+    Returns:
+        The ``(first, second)`` result pairs, in dataset order.
+    """
+    pairs: list = []
+    for index in range(len(dataset)):
+        if index >= num_episodes:
+            saw_barge_in = any(first.get("status") == STATUS_TRUNCATED_INTERRUPTION for first, _ in pairs)
+            if not require_barge_in or saw_barge_in or index >= max_episodes:
+                break
+        sample = dataset[index]
+        if index >= num_episodes and sample["duplex_episode"]["axis"] not in _BARGE_IN_AXES:
+            continue
+        pairs.append(roll_pair(sample, index))
+    return pairs
+
+
 def _roll_episodes(args: argparse.Namespace) -> list[dict]:
-    """Roll the fixed episode set twice (same seeds) and return the results."""
+    """Roll the episode set twice per episode (same seeds) and return the results."""
     from verl_omni.utils.dataset.duplex.duplex_rl_dataset import DuplexEpisodeDataset
     from verl_omni.workers.rollout.vllm_rollout.vllm_omni_duplex_strategy import DuplexStrategy
 
@@ -112,33 +161,34 @@ def _roll_episodes(args: argparse.Namespace) -> list[dict]:
     driver = DuplexStrategy.__new__(DuplexStrategy)
     driver.server = type("S", (), {"engine": engine})()
 
-    def run_once() -> list[dict]:
-        results = []
-        for index in range(min(args.num_episodes, len(dataset))):
-            sample = dataset[index]
-            episode = sample["duplex_episode"]
-            run_spec = {
-                "episode_id": episode["episode_id"],
-                "axis": episode["axis"],
-                "seed": sample["duplex_seed"] + index,
-                "chunks": episode["chunks"],
-                "event": episode["event"],
-                "commit": bool(episode.get("commit")),
-                "tail_horizon_s": episode.get("tail_horizon_s", 8.0),
+    def roll_pair(sample: dict, index: int) -> tuple[dict, dict]:
+        episode = sample["duplex_episode"]
+        run_spec = {
+            "episode_id": episode["episode_id"],
+            "axis": episode["axis"],
+            "seed": sample["duplex_seed"] + index,
+            "chunks": episode["chunks"],
+            "event": episode["event"],
+            "commit": bool(episode.get("commit")),
+            "tail_horizon_s": episode.get("tail_horizon_s", 8.0),
+        }
+        if episode["axis"] == AXIS_INTERRUPTION:
+            run_spec["inject"] = {
+                "delay_s": episode.get("inject_delay_s", 0.6),
+                "tail_silence_chunks": episode.get("tail_silence_chunks", 2),
             }
-            if episode["axis"] == "interruption":
-                run_spec["inject"] = {
-                    "delay_s": episode.get("inject_delay_s", 0.6),
-                    "tail_silence_chunks": episode.get("tail_silence_chunks", 2),
-                }
-            results.append(asyncio.run(driver.run_duplex_episode(run_spec)))
-        return results
+        return asyncio.run(driver.run_duplex_episode(run_spec)), asyncio.run(driver.run_duplex_episode(run_spec))
 
     try:
-        first, second = run_once(), run_once()
+        return _select_and_roll(
+            dataset,
+            roll_pair,
+            num_episodes=args.num_episodes,
+            max_episodes=args.max_episodes,
+            require_barge_in=args.require_barge_in,
+        )
     finally:
         engine.shutdown()
-    return list(zip(first, second, strict=True))
 
 
 def _to_device(value, device):
@@ -182,7 +232,7 @@ def _actor_logits(model, model_inputs: dict, replay):
     """One forward over the replayed sequence; returns per-action-token logits.
 
     Args:
-        model: The trainer-side MiniCPM-o.
+        model: The trainer-side MiniCPM-o after ``MiniCPMThinkerAdapter.configure_model``.
         model_inputs: The episode's prepared call (``_actor_model_data``), built
             once per episode and shared with the embedding-parity diagnostic.
         replay: The replayed episode, for the action positions.
@@ -196,16 +246,10 @@ def _actor_logits(model, model_inputs: dict, replay):
     """
     import torch
 
-    from verl_omni.pipelines.minicpm.thinker_training_adapter import split_minicpm_forward_kwargs
-
-    # The training forward normalizes media before the remote call. A caller
-    # that already holds raw module inputs is forwarded unchanged.
+    # The model carries the thinker adapter's wrapped forward, which splits the
+    # kwargs itself; calling the remote signature directly would split them twice.
     with torch.no_grad():
-        if "input_ids" in model_inputs or "data" in model_inputs:
-            data, llm_kwargs = split_minicpm_forward_kwargs(model_inputs)
-            output = model(data, **llm_kwargs)
-        else:
-            output = model(**model_inputs)
+        output = model(**model_inputs)
     logits = output.logits[0].float()
     prompt_length = len(replay.prompt_ids)
     positions = [prompt_length + position for layout in replay.unit_layouts for position in layout.action_positions]
@@ -312,12 +356,13 @@ def _parity_rows(
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     from verl_omni.pipelines.minicpm.duplex_rollout_adapter import MiniCPMODuplexRolloutAdapter
-    from verl_omni.pipelines.minicpm.thinker_training_adapter import MiniCPMO
+    from verl_omni.pipelines.minicpm.thinker_training_adapter import MiniCPMO, MiniCPMThinkerAdapter
     from verl_omni.utils.dataset.duplex.trajectory import DuplexEpisodeEvent, DuplexTrajectory
 
     pairs = _roll_episodes(args)
     report: dict = {"episodes": [], "max_abs_nats": args.max_abs_nats, "mean_abs_nats": args.mean_abs_nats}
     saw_barge_in = False
+    barge_in_episode_id = None
     all_match = True
 
     # Trainer-side model: remote-code MiniCPM-o with the TTS stage stripped.
@@ -328,6 +373,8 @@ def main(argv: list[str] | None = None) -> int:
     config.use_cache = False
     config.stream_input = False
     model = MiniCPMO.from_pretrained(args.model, config=config, trust_remote_code=True, torch_dtype="bfloat16")
+    # The gate must forward the model the trainer runs: remote-code patches and the verl forward wrapper.
+    model = MiniCPMThinkerAdapter.configure_model(model, None)
     model.eval().cuda()
     processor = model.processor if hasattr(model, "processor") else None
     from transformers import AutoProcessor
@@ -358,8 +405,9 @@ def main(argv: list[str] | None = None) -> int:
         first_tokens = [wire["token_ids"] for wire in first["record_sets"]]
         second_tokens = [wire["token_ids"] for wire in second["record_sets"]]
         episode_report["deterministic"] = first_tokens == second_tokens
-        if first["status"] == "truncated_interruption":
+        if first["status"] == STATUS_TRUNCATED_INTERRUPTION and not saw_barge_in:
             saw_barge_in = True
+            barge_in_episode_id = first["episode_id"]
         # Mask taxonomy: forced and re-emitted actions carry mask 0.
         kinds = trajectory.action_kinds
         mask = trajectory.action_mask
@@ -400,6 +448,7 @@ def main(argv: list[str] | None = None) -> int:
         report["episodes"].append(episode_report)
 
     report["saw_barge_in"] = saw_barge_in
+    report["barge_in_episode_id"] = barge_in_episode_id
     report["overall_pass"] = bool(all_match and (saw_barge_in or not args.require_barge_in))
     Path(args.output).write_text(json.dumps(report, indent=2), encoding="utf-8")
     print(json.dumps(report, indent=2))

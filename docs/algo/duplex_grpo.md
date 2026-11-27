@@ -1,6 +1,6 @@
 # Streaming duplex GRPO (MiniCPM-o 4.5)
 
-Last updated: 11/26/2026.
+Last updated: 11/27/2026.
 
 Streaming **full-duplex GRPO** over real duplex sessions — the trainer side of
 [RFC #905](https://github.com/verl-project/verl-omni/issues/905), consuming
@@ -54,10 +54,10 @@ dataset (mined episodes) ──▶ omni_duplex_agent ──▶ rollout server (D
 | Trajectory assembly | `.../duplex/trajectory.py` | Scopes in order; validity mask (`sampled`→1, `forced`/`reemit`→0); unit decision timeline |
 | Unit-window replay | `.../duplex/replay.py` | `<unit>` + 10 bare audio placeholders + the unit's action tokens + `</unit>` per record (one record per 1 s unit); engine silent units replay as 1 s of digital silence; mel via the processor's `process_audio_streaming` |
 | Event mining | `.../duplex/mining.py` | pause / turn / interruption from word-level timestamps |
-| Rule rewards | `verl_omni/utils/reward_score/duplex_turn_taking.py` | Per-axis, timestamp-only, tuned bands: the turn axis measures the delay after the user's turn end (1 s full credit, −1 past 3 s); speech before that end scores the same miss as never speaking. The engine keeps a sampled listen on a unit marked user speech and ends the turn, so that miss is the policy's barge-in. The interruption axis measures from the interrupting speech onset (full credit within 1 s, −1 past 3 s). Speaking on the onset unit counts as interrupted; a policy that never spoke, or first speaks strictly after the onset, takes −1. Emits the trip-wire columns, `duplex_pacing_corrupted`, and the per-episode `duplex_episode_failed` flag |
+| Rule rewards | `verl_omni/utils/reward_score/duplex_turn_taking.py` | Per-axis, timestamp-only, tuned bands: the pause axis scores `−(share of the window the policy spoke through)`, each speaking unit counting the overlap of its 1 s audio with the window; the turn axis measures the delay after the user's turn end (full credit from 0.3 s to 1 s, −1 past 3 s). Speech earlier than 0.3 s after the turn end is a graded floor-take: the penalty grows with its depth and reaches −1 at 1 s before the end, so a barge-in 1 s or more before the turn end, or never speaking, scores −1. The engine keeps a sampled listen on a unit marked user speech and ends the turn, so that speech is the policy's barge-in. The interruption axis measures from the interrupting speech onset (full credit within 1 s, −1 past 3 s). Speaking on the onset unit counts as interrupted; a policy that never spoke, or first speaks strictly after the onset, takes −1. Emits the trip-wire columns, `duplex_pause_spoken_share`, `duplex_pause_ungraded` (the pause window overlaps no unit), `duplex_turn_barge_in`, `duplex_pacing_corrupted`, and the per-episode `duplex_episode_failed` flag |
 | Trip-wire definitions | `.../duplex/telemetry.py` | The shared threshold set (`TRIP_WIRE_DEFAULTS`), the reward bands, and the timing definitions every consumer calls — `speak_ratio`, `silence_share`, `duplicate_ngram_share`, the onset-anchored `interruption_yield_latency`, and the pacing predicate `pacing_corrupted` (an engine-injected silent unit inside the scored window); the scorer, the FDB metrics and the agent loop share them |
 | Calibration gate | `.../duplex/calibration.py` + `scripts/duplex_calibration_audit.py` | Two-sided mid-band entry gate before any gradient: each axis's normalized mean must land in [0.30, 0.80] of the axis band |
-| FDB-v1 rule metrics | `.../duplex/fdb_metrics.py` | static-protocol timing metrics over dumped replays |
+| FDB-v1 rule metrics | `.../duplex/fdb_metrics.py` | static-protocol timing metrics over dumped replays; the pause violation stays unit-start based (FDB-v1), unlike the overlap-based reward and gate |
 | Rollout bridge | `verl_omni/pipelines/minicpm/duplex_rollout_adapter.py` | `pipeline_mode="duplex"`; `minicpmo_4_5_duplex` |
 | Session driver | `verl_omni/workers/rollout/vllm_rollout/vllm_omni_duplex_strategy.py` | 1 s-cadence submits next to the engine; per-response draining; close before weight sync; reports the fed-chunk indices bracketing the interrupting speech |
 | Agent loop | `verl_omni/agent_loop/omni_duplex_agent_loop.py` | `omni_duplex_agent`; one Ray call per episode; re-anchors interruption episodes onto the unit clock and drops pacing-corrupted episodes (mask 0, out of the group baseline) |
@@ -83,10 +83,13 @@ the bounds on the position-id resets). The prompt is the session's
 system-context prefix; the response is the interleaved unit-window sequence
 with mask 1 only at sampled action positions. The payload also carries
 **`pg_mask`**, the policy-gradient gate over the response: on pause and
-interruption episodes the action tokens of units that decided strictly before
-the scored event's start (`pause_window_s[0]` / `interrupt_speech_onset_s`)
-are 0, so a yield failure does not penalize what the policy said beforehand.
-Turn episodes are not gated — an early floor-take is scored on that axis and
+interruption episodes the action tokens of units whose 1 s of audio ended
+before the scored event's start (`pause_window_s[0]` /
+`interrupt_speech_onset_s`) are 0, and on pause episodes so are the units that
+start after the window closes. A unit whose audio overlaps the window keeps its
+tokens even when the window opens inside it; the pause reward measures the same
+overlap. A pause window that overlaps no unit leaves every token gated and is
+reported as `duplex_pause_ungraded`. Turn episodes are not gated — an early floor-take is scored on that axis and
 sits before the turn end. Only the advantage takes the gate; the KL term rides
 the full `response_mask`. Unit mels are re-derived through
 the streaming processor and encoded through the streaming Whisper encoder
@@ -238,7 +241,7 @@ on 146 balanced val episodes) used a turn score that saturated at −1 for
 any speech before the turn end, and an interruption score that saturated
 when the first speak fell on the onset unit. The engine now keeps a
 sampled listen during user speech, so speech before the turn end is the
-policy's barge-in and still scores −1. Speech on the onset unit is an
+policy's barge-in, graded by its depth. Speech on the onset unit is an
 interruption whose yield latency is scored. The M0
 tolerances stay max |Δ| ≤ 0.05 nats and mean ≤ 0.01. The gate scripts
 build an engine with `enable_prefix_caching=false` and score through the

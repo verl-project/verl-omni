@@ -40,8 +40,11 @@ from verl_omni.utils.dataset.duplex.trajectory import (
 
 __all__ = [
     "TRIP_WIRE_DEFAULTS",
+    "TURN_BARGE_IN_SPAN_S",
     "TURN_DEADLINE_S",
+    "TURN_EARLY_BAND_S",
     "TURN_FULL_CREDIT_BAND_S",
+    "UNIT_DURATION_S",
     "DuplexTripWires",
     "YIELD_DEADLINE_S",
     "YIELD_FULL_CREDIT_BAND_S",
@@ -49,6 +52,8 @@ __all__ = [
     "episode_rule_metrics",
     "interruption_yield_latency",
     "pacing_corrupted",
+    "pause_speaking_fraction",
+    "pause_window_overlaps_unit",
     "turn_take_latency",
 ]
 
@@ -56,6 +61,13 @@ __all__ = [
 #: the penalty saturates at -1 past the deadline.
 TURN_FULL_CREDIT_BAND_S = 1.0
 TURN_DEADLINE_S = 3.0
+#: Speech earlier than this after the turn end is graded as an early floor-take,
+#: so nothing pulls the policy onto the user's last frame.
+TURN_EARLY_BAND_S = 0.3
+#: A barge-in deeper than this before the turn end takes the full -1.
+TURN_BARGE_IN_SPAN_S = 1.0
+#: Audio carried by one decision unit.
+UNIT_DURATION_S = 1.0
 #: The yield latency anchors to the interrupting speech *onset*. At the 1 Hz
 #: decision cadence the first unit after the anchor decides a second later,
 #: so a shorter band would be unreachable.
@@ -104,7 +116,8 @@ def episode_rule_metrics(
         ``duplicate_ngram_share``, and the per-axis latency family the rewards
         share (``pause_violations``, ``turn_latency_s``, ``yield_latency_s``;
         ``nan`` when the episode's axis does not measure one, ``inf`` for a
-        saturated latency).
+        saturated latency). ``turn_latency_s`` is signed: negative for a
+        barge-in before the turn end.
     """
     decisions = trajectory.unit_decisions(listen_token_id=listen_token_id)
     num_units = len(decisions)
@@ -133,13 +146,16 @@ def _axis_latencies(trajectory: DuplexTrajectory, decisions: Sequence[Any]) -> d
         "yield_latency_s": float("nan"),
     }
     if event.axis == AXIS_PAUSE and event.pause_window_s is not None:
-        start, end = event.pause_window_s
         metrics["pause_violations"] = float(
-            sum(1 for decision in decisions if decision.speaking and start <= decision.time_s < end)
+            sum(
+                1
+                for decision in decisions
+                if decision.speaking and pause_window_overlaps_unit(event, unit_times=[decision.time_s])
+            )
         )
     elif event.axis == AXIS_TURN and event.user_turn_end_s is not None:
         latency = turn_take_latency(None if first_speak is None else first_speak.time_s, event.user_turn_end_s)
-        metrics["turn_latency_s"] = float("inf") if latency < 0 else latency
+        metrics["turn_latency_s"] = latency
     elif event.axis == AXIS_INTERRUPTION:
         latency = interruption_yield_latency(
             event,
@@ -159,6 +175,32 @@ def turn_take_latency(first_speak_s: float | None, turn_end_s: float) -> float:
     if first_speak_s is None:
         return float("inf")
     return first_speak_s - turn_end_s
+
+
+def _overlap_s(unit_time_s: float, window: tuple[float, float]) -> float:
+    """Seconds of the unit's audio interval ``[t, t + UNIT_DURATION_S)`` inside ``window``."""
+    return max(0.0, min(unit_time_s + UNIT_DURATION_S, window[1]) - max(unit_time_s, window[0]))
+
+
+def pause_speaking_fraction(event: DuplexEpisodeEvent, *, speaking_times: Sequence[float]) -> float:
+    """Share of the pause window the policy talked through, in ``[0, 1]``.
+
+    Each speaking unit contributes the overlap of its audio interval with the
+    window, so a window that opens inside a unit still counts that unit.
+    """
+    window = event.pause_window_s
+    length = window[1] - window[0]
+    if length <= 0:
+        raise ValueError(f"pause window {window} must have positive length")
+    return min(1.0, sum(_overlap_s(time_s, window) for time_s in speaking_times) / length)
+
+
+def pause_window_overlaps_unit(event: DuplexEpisodeEvent, *, unit_times: Sequence[float]) -> bool:
+    """Whether any unit's audio interval overlaps the pause window.
+
+    A window that falls entirely into a gap between units cannot be graded.
+    """
+    return any(_overlap_s(time_s, event.pause_window_s) > 0.0 for time_s in unit_times)
 
 
 def interruption_yield_latency(
@@ -224,12 +266,13 @@ def pacing_corrupted(
 
     Returns:
         True when any engine unit's time lies in the scored window
-        (``[pause_start, pause_end)``, ``[user_turn_end_s, +turn_deadline_s)``
-        or ``[interrupt_speech_onset_s, +yield_deadline_s)``).
+        (``[user_turn_end_s, +turn_deadline_s)`` or
+        ``[interrupt_speech_onset_s, +yield_deadline_s)``), or, on a pause
+        episode, when its 1 s of audio overlaps the pause window.
     """
     if event.axis == AXIS_PAUSE:
-        window = event.pause_window_s
-    elif event.axis == AXIS_TURN:
+        return pause_window_overlaps_unit(event, unit_times=engine_unit_times)
+    if event.axis == AXIS_TURN:
         window = (event.user_turn_end_s, event.user_turn_end_s + turn_deadline_s)
     elif event.axis == AXIS_INTERRUPTION:
         window = (event.interrupt_speech_onset_s, event.interrupt_speech_onset_s + yield_deadline_s)
