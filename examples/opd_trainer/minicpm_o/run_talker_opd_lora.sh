@@ -33,6 +33,17 @@ VAL_FILE=${VAL_FILE:-"/user/yangzhongyu/data/talker_opd/val_prompts.parquet"}
 # engine (not yet available for MiniCPM-o); the default runs the supported
 # GSPO + KL-to-reference smoke scored by talker_codec_reward. Enable the
 # distillation group once the engine supports it.
+#
+# GSPO training-dynamics guidance (measured on the length-control demo, 8xH100):
+#  - rollout.n=1 degenerates GRPO advantages to the raw score (uncentered, all
+#    positive): every sampled sequence is reinforced, entropy climbs, and long
+#    runs eventually destabilize the codec distribution.
+#  - rollout.n>1 groups and centers the advantages, but with the default
+#    token-mean aggregation the longest suppressed samples dominate the
+#    gradient (the loss is weighted by token count) and training drifts away
+#    from the reward optimum. loss_agg_mode=seq-mean-token-mean — the GSPO
+#    paper's recommended aggregation — restores stable, correctly-directed
+#    learning, so keep the two settings together when raising rollout.n.
 python3 -m verl_omni.trainer.main_omni \
     data.train_files="${TRAIN_FILE}" \
     data.val_files="${VAL_FILE}" \
@@ -68,6 +79,7 @@ python3 -m verl_omni.trainer.main_omni \
     actor_rollout_ref.actor.fsdp_config.param_offload=true \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=true \
     actor_rollout_ref.rollout.n=1 \
+    actor_rollout_ref.actor.loss_agg_mode=token-mean \
     actor_rollout_ref.rollout.tensor_model_parallel_size=2 \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.30 \
     actor_rollout_ref.rollout.load_format=safetensors \

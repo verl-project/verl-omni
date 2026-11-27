@@ -158,6 +158,18 @@ The conditioning span is the text between the last `<|tts_bos|>` and the last
 
 - `use_remove_padding` must stay false: rmpad flattening invalidates the
   replay span coordinates.
+- GSPO loss aggregation and group sampling interact strongly on talker
+  rollouts (lengths vary widely per sample). Measured on the
+  length-control demo (8xH100, 32 steps each): with `rollout.n=1` the GRPO
+  advantages degenerate to the raw score — every sampled sequence is
+  reinforced and the codec entropy climbs until long runs destabilize;
+  with `rollout.n=4` and the default `loss_agg_mode=token-mean`, the
+  longest suppressed samples dominate the gradient (loss weighted by token
+  count) and training drifts away from the reward optimum (response length
+  115 → 280+, validation reward 0.29 → 0.03). Keeping
+  `loss_agg_mode=seq-mean-token-mean` — the GSPO paper's recommended
+  aggregation — alongside `rollout.n>1` trains stably and in the right
+  direction (validation reward 0.20 → 0.43, no collapse).
 - MiniCPM-o 4.5 ships a single-codebook talker (`num_vq=1`,
   `num_audio_tokens=6562`); the multi-codebook layout is rejected explicitly.
 - The OPD teacher pool scores a request by prefilling its prompt-plus-response
