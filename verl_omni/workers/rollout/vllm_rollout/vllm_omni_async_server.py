@@ -238,8 +238,10 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         if getattr(self.config, "full_determinism", False):
             from verl.workers.engine.utils import enable_full_determinism
 
-            rollout_seed = getattr(self.config, "seed", 42)
+            rollout_seed = getattr(self.config, "seed", None)
+            rollout_seed = 42 if rollout_seed is None else int(rollout_seed)
             enable_full_determinism(seed=rollout_seed)
+            os.environ["VERL_FULL_DETERMINISM"] = "1"
             os.environ["VERL_SEED"] = str(rollout_seed)
             os.environ["VLLM_BATCH_INVARIANT"] = "1"
         # Set before vllm-omni narrows per-stage visible devices; stage workers

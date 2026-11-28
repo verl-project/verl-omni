@@ -274,14 +274,38 @@ class RayTrainerTaskRunner:
         trainer.fit()
 
 
+def _iter_deterministic_rollouts(config):
+    actor_rollout = OmegaConf.select(config, "actor_rollout_ref.rollout", default=None)
+    if actor_rollout is not None and actor_rollout.get("full_determinism", False):
+        yield actor_rollout
+
+    rm_cfg = OmegaConf.select(config, "reward.reward_model", default=None)
+    if rm_cfg is not None and rm_cfg.get("enable", False):
+        rm_rollout = rm_cfg.get("rollout", None)
+        if rm_rollout is not None and rm_rollout.get("full_determinism", False):
+            yield rm_rollout
+
+    models = OmegaConf.select(config, "reward.models", default=None) or {}
+    for model_cfg in models.values():
+        model_rollout = model_cfg.get("rollout", None) if model_cfg is not None else None
+        if model_rollout is not None and model_rollout.get("full_determinism", False):
+            yield model_rollout
+
+
 def maybe_set_determinism_env(config) -> None:
     """Propagate determinism env vars before ``ray.init()`` when configured."""
-    rollout_cfg = config.actor_rollout_ref.rollout
-    rm_rollout_cfg = config.reward.reward_model.rollout
-    if rollout_cfg.full_determinism or (config.reward.reward_model.enable and rm_rollout_cfg.full_determinism):
-        os.environ["VERL_FULL_DETERMINISM"] = "1"
-        os.environ["VLLM_BATCH_INVARIANT"] = "1"
-        os.environ["PYTHONHASHSEED"] = str(rollout_cfg.seed)
+    deterministic_rollouts = list(_iter_deterministic_rollouts(config))
+    if not deterministic_rollouts:
+        return
+    seed = 42
+    for rollout_cfg in deterministic_rollouts:
+        configured_seed = rollout_cfg.get("seed", None)
+        if configured_seed is not None:
+            seed = int(configured_seed)
+            break
+    os.environ["VERL_FULL_DETERMINISM"] = "1"
+    os.environ["VLLM_BATCH_INVARIANT"] = "1"
+    os.environ["PYTHONHASHSEED"] = str(seed)
 
 
 def _resolve_ppo_runtime_env(config) -> dict[str, Any]:
@@ -368,7 +392,7 @@ def run_omni(config, task_runner_class=None) -> None:
 
     if task_runner_class is None:
         task_runner_class = ray.remote(num_cpus=1)(RayTrainerTaskRunner)
-    launch_ray_task_runner(config, task_runner_class)
+    launch_ray_task_runner(config, task_runner_class, propagate_determinism=True)
 
 
 @hydra.main(config_path="./config", config_name="omni_trainer", version_base=None)

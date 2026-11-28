@@ -266,3 +266,58 @@ def test_rollout_seeds_unique_across_agent_loop_workers(multi_worker_seed_rollou
         run_rollout_seed_reproducibility(multi_worker_seed_rollout_config)
     finally:
         ray.shutdown()
+
+
+def _run_full_determinism_rollout_once(config: DictConfig) -> tuple[torch.Tensor, torch.Tensor]:
+    """Spin up a fresh Ray cluster and rollout server, returning full trajectory latents and responses."""
+    ray.init(
+        runtime_env={
+            "env_vars": {
+                "TOKENIZERS_PARALLELISM": "true",
+                "NCCL_DEBUG": "WARN",
+                "VLLM_LOGGING_LEVEL": "INFO",
+                "VERL_FULL_DETERMINISM": "1",
+                "VLLM_BATCH_INVARIANT": "1",
+                "PYTHONHASHSEED": str(config.actor_rollout_ref.rollout.seed),
+            }
+        }
+    )
+    try:
+        AgentLoopManager.agent_loop_workers_class = ray.remote(DiffusionAgentLoopWorker)
+        llm_server_manager = LLMServerManager.create(config=config)
+        agent_loop_manager = AgentLoopManager.create(
+            config=config,
+            llm_client=llm_server_manager.get_client(),
+        )
+
+        n = config.actor_rollout_ref.rollout.n
+        batch = _make_prompt_batch(num_prompts=1).repeat(n)
+        batch.non_tensor_batch["_rollout_seed_global_idx"] = np.arange(len(batch), dtype=np.int64)
+        batch.meta_info["global_steps"] = 1
+        batch.meta_info["rollout_seed"] = int(config.actor_rollout_ref.rollout.seed)
+
+        result = agent_loop_manager.generate_sequences(prompts=batch)
+        return (
+            result.batch["all_latents"].detach().cpu(),
+            result.batch["responses"].detach().cpu(),
+        )
+    finally:
+        ray.shutdown()
+
+
+def test_rollout_full_determinism_bitwise_replay(multi_worker_seed_rollout_config):
+    """Two independent server spawns with ``full_determinism=True`` bit-reproduce latents and decoded outputs."""
+    multi_worker_seed_rollout_config.actor_rollout_ref.rollout.full_determinism = True
+    multi_worker_seed_rollout_config.actor_rollout_ref.rollout.seed = 42
+
+    latents_first, responses_first = _run_full_determinism_rollout_once(multi_worker_seed_rollout_config)
+    latents_second, responses_second = _run_full_determinism_rollout_once(multi_worker_seed_rollout_config)
+
+    assert torch.equal(latents_first, latents_second), (
+        "independent full_determinism runs must bit-reproduce all denoising latents "
+        f"(max abs diff={(latents_first - latents_second).abs().max().item():.4g})"
+    )
+    assert torch.equal(responses_first, responses_second), (
+        "independent full_determinism runs must bit-reproduce decoded rollout responses "
+        f"(max abs diff={(responses_first.to(torch.int32) - responses_second.to(torch.int32)).abs().max().item()})"
+    )

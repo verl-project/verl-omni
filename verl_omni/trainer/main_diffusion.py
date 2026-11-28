@@ -79,17 +79,40 @@ def main(config):
     run_diffusion(config)
 
 
+def _iter_deterministic_rollouts(config):
+    actor_rollout = OmegaConf.select(config, "actor_rollout_ref.rollout", default=None)
+    if actor_rollout is not None and actor_rollout.get("full_determinism", False):
+        yield actor_rollout
+
+    rm_cfg = OmegaConf.select(config, "reward.reward_model", default=None)
+    if rm_cfg is not None and rm_cfg.get("enable", False):
+        rm_rollout = rm_cfg.get("rollout", None)
+        if rm_rollout is not None and rm_rollout.get("full_determinism", False):
+            yield rm_rollout
+
+    models = OmegaConf.select(config, "reward.models", default=None) or {}
+    for model_cfg in models.values():
+        model_rollout = model_cfg.get("rollout", None) if model_cfg is not None else None
+        if model_rollout is not None and model_rollout.get("full_determinism", False):
+            yield model_rollout
+
+
 def _determinism_requested(config) -> bool:
-    """Whether reward inference determinism is requested."""
-    rm_rollout = config.reward.reward_model.rollout
-    return bool(config.reward.reward_model.get("enable", False) and rm_rollout.get("full_determinism", False))
+    """Whether actor rollout or reward inference determinism is requested."""
+    return any(_iter_deterministic_rollouts(config))
 
 
 def _export_full_determinism_env(config) -> None:
     """Set determinism switch env vars before ray.init() so actors inherit them."""
+    seed = 42
+    for rollout_cfg in _iter_deterministic_rollouts(config):
+        configured_seed = rollout_cfg.get("seed", None)
+        if configured_seed is not None:
+            seed = int(configured_seed)
+            break
     os.environ["VERL_FULL_DETERMINISM"] = "1"
     os.environ["VLLM_BATCH_INVARIANT"] = "1"
-    os.environ["PYTHONHASHSEED"] = str(config.reward.reward_model.rollout.get("seed", 42))
+    os.environ["PYTHONHASHSEED"] = str(seed)
 
 
 def _validate_grm_reward_function(config) -> None:

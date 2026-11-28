@@ -100,6 +100,13 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
     def __new__(cls, **kwargs):
         set_death_signal()
 
+        if os.environ.get("VERL_FULL_DETERMINISM", "0") == "1":
+            verl_seed = os.environ.get("VERL_SEED")
+            if verl_seed is not None:
+                from verl.workers.engine.utils import enable_full_determinism
+
+                enable_full_determinism(seed=int(verl_seed))
+
         # 1. patch for Lora
         VLLMOmniHijack.hijack()
         # 2. Teach the AR runners to return the thinker's last-layer hidden states

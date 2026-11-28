@@ -79,6 +79,12 @@ def run_diffusion_v1(config, task_runner_class=None) -> None:
     config.transfer_queue.enable = True
     enable_rl_insight(config)
 
+    from verl_omni.trainer.main_diffusion import _determinism_requested, _export_full_determinism_env
+
+    # Export before ray.init() so actors inherit determinism switch vars via runtime_env.
+    if _determinism_requested(config):
+        _export_full_determinism_env(config)
+
     if not ray.is_initialized():
         default_runtime_env = get_ppo_ray_runtime_env()
         ray_init_kwargs = config.ray_kwargs.get("ray_init", {})
