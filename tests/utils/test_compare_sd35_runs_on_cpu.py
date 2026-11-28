@@ -91,3 +91,14 @@ def test_declared_tolerance_accepts_float_drift(tmp_path: Path) -> None:
     assert tolerated.returncode == 0, tolerated.stderr
     report = json.loads(tolerated.stdout)
     assert report["tensors"]["old_log_probs"]["atol"] == 1e-6
+
+
+def test_unknown_tolerance_key_fails(tmp_path: Path) -> None:
+    batch = _batch()
+    first = _save_batch(tmp_path / "run-a", batch)
+    second = _save_batch(tmp_path / "run-b", batch)
+
+    result = _run(first, second, "--atol", "reward=1e-6")
+
+    assert result.returncode == 1
+    assert "reward" in result.stderr

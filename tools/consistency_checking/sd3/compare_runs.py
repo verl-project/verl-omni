@@ -96,7 +96,13 @@ def main() -> int:
         help="absolute tolerance for one tensor key; repeatable",
     )
     args = parser.parse_args()
-    report = compare(_load(_resolve(args.first)), _load(_resolve(args.second)), _parse_atol(args.atol))
+    first = _load(_resolve(args.first))
+    second = _load(_resolve(args.second))
+    tolerances = _parse_atol(args.atol)
+    unknown = sorted(set(tolerances) - (set(first) & set(second)))
+    if unknown:
+        raise ValueError(f"--atol keys not present in both captures: {unknown}")
+    report = compare(first, second, tolerances)
     print(json.dumps(report, indent=2))
     return 0 if report["equal"] else 1
 

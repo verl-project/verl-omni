@@ -16,7 +16,11 @@
 
 import torch
 
-from verl_omni.pipelines.request_batch import sample_per_sample_sde_windows, sde_window_seed_for_step
+from verl_omni.pipelines.request_batch import (
+    sample_per_sample_sde_windows,
+    sde_window_generator_for_step,
+    sde_window_seed_for_step,
+)
 from verl_omni.pipelines.schedulers.flow_match_sde import FlowMatchSDEDiscreteScheduler
 
 
@@ -52,6 +56,34 @@ def test_prompt_group_shares_one_window_per_step():
 def test_window_is_replayable_across_runs_and_batch_sizes():
     assert _window_for_step(7, 5) == _window_for_step(7, 5)
     assert _window_for_step(7, 5, batch_size=1) == _window_for_step(7, 5, batch_size=8)[:1]
+
+
+def test_window_generator_draws_from_the_step_seed_on_cpu():
+    generator, device = sde_window_generator_for_step(
+        {"sde_window_seed": 7, "global_steps": 5},
+        fallback=[torch.Generator().manual_seed(1)],
+        fallback_device="cuda:0",
+    )
+    expected = torch.Generator().manual_seed(11)
+
+    assert device == "cpu"
+    assert (
+        torch.randint(0, 100, (4,), generator=generator).tolist()
+        == torch.randint(0, 100, (4,), generator=expected).tolist()
+    )
+
+
+def test_window_generator_keeps_the_fallback_without_an_explicit_seed():
+    fallback = [torch.Generator().manual_seed(1)]
+
+    for extra_args in ({"sde_window_seed": None}, {}):
+        generator, device = sde_window_generator_for_step(
+            extra_args,
+            fallback=fallback,
+            fallback_device="cuda:0",
+        )
+        assert generator is fallback
+        assert device == "cuda:0"
 
 
 def _rollout_once(
