@@ -725,27 +725,3 @@ class Wan22DanceGRPOPipelineWithLogProb(Wan22Pipeline):
             context=f"pipeline={type(self).__name__}, request_id={req.request_id}",
             requested=(sampling_params.extra_args or {}).get("requested_outputs"),
         )
-
-    def check_inputs(
-        self,
-        prompt_ids,
-        negative_prompt_ids,
-        image,
-        height,
-        width,
-        prompt_embeds=None,
-        negative_prompt_embeds=None,
-    ):
-        if height % 16 != 0 or width % 16 != 0:
-            raise ValueError(f"`height` and `width` have to be divisible by 16 but are {height} and {width}.")
-
-        if prompt_ids is not None and prompt_embeds is not None:
-            raise ValueError("Cannot forward both `prompt` and `prompt_embeds`. Please provide only one.")
-
-        if negative_prompt_ids is not None and negative_prompt_embeds is not None:
-            raise ValueError(
-                "Cannot forward both `negative_prompt` and `negative_prompt_embeds`. Please provide only one."
-            )
-
-        if prompt_ids is None and prompt_embeds is None:
-            raise ValueError("Provide either `prompt` or `prompt_embeds`.")

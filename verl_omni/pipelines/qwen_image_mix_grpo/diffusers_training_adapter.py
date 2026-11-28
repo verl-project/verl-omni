@@ -12,11 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""
-Qwen-Image training-side adapter for MixGRPO algorithm.
-Inherits model-specific forward/sampling behavior from FlowGRPO but provides
-the sliding-window scheduler for MixGRPO.
-"""
+"""Qwen-Image training-side adapter for the MixGRPO algorithm."""
 
 from verl_omni.pipelines.model_base import DiffusionModelBase
 from verl_omni.pipelines.qwen_image_flow_grpo.diffusers_training_adapter import QwenImage

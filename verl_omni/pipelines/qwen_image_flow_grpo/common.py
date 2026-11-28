@@ -14,6 +14,8 @@
 
 import torch
 
+from verl_omni.pipelines.rollout_request import prompt_ids_from_payload
+
 QWEN_IMAGE_VAE_SCALE_FACTOR = 8
 
 
@@ -108,6 +110,27 @@ class QwenImageTokenIdPromptMixin:
         prompt_embeds_mask: torch.Tensor | None = None,
         max_sequence_length: int = 1024,
     ):
+        """Encode text prompt token IDs into dense embeddings.
+
+        Args:
+            prompt_ids (torch.Tensor | list): Token IDs of shape ``(B, L)`` or ``(L,)``.
+            attention_mask (torch.Tensor | list, *optional*): Boolean mask of shape
+                ``(B, L)`` for *prompt_ids*; inferred as all-ones when ``None``.
+            num_images_per_prompt (int): Number of images to generate per prompt;
+                embeddings are repeated accordingly.
+            prompt_embeds (torch.Tensor, *optional*): Pre-computed embeddings;
+                when provided *prompt_ids* is ignored.
+            prompt_embeds_mask (torch.Tensor, *optional*): Attention mask for
+                pre-computed *prompt_embeds*.
+            max_sequence_length (int): Maximum sequence length; embeddings are
+                truncated to this value.
+
+        Returns:
+            tuple[torch.Tensor, torch.Tensor]: A pair of
+                ``(prompt_embeds, prompt_embeds_mask)`` tensors of shape
+                ``(B * num_images_per_prompt, L, D)`` and
+                ``(B * num_images_per_prompt, L)`` respectively.
+        """
         if prompt_embeds is None:
             if prompt_ids is None:
                 raise ValueError("`prompt_ids` must be provided when `prompt_embeds` is None.")
@@ -139,3 +162,47 @@ class QwenImageTokenIdPromptMixin:
             prompt_embeds_mask = prompt_embeds_mask.repeat_interleave(num_images_per_prompt, dim=0)
 
         return prompt_embeds, prompt_embeds_mask
+
+    def _tokenize_text_prompt(self, text: str | list[str]):
+        """Tokenize a text prompt using the Qwen chat template."""
+        prompt = [text] if isinstance(text, str) else text
+        txt = [self.prompt_template_encode.format(e) for e in prompt]
+        prompt_embed_cache = getattr(self, "_prompt_embed_cache", None)
+        use_prompt_embed_cache = bool(prompt_embed_cache is not None and prompt_embed_cache.enabled)
+        tokenizer_kwargs = {} if use_prompt_embed_cache else {"return_tensors": "pt"}
+        tokens = self.tokenizer(
+            txt,
+            max_length=self.tokenizer_max_length + self.prompt_template_encode_start_idx,
+            padding=True,
+            truncation=True,
+            **tokenizer_kwargs,
+        )
+        if not use_prompt_embed_cache:
+            tokens = tokens.to(self.device)
+        return tokens.input_ids, tokens.attention_mask
+
+    def _extract_prompt_ids(self, prompts):
+        """Extract prompt ids, masks, and negatives from the first prompt.
+
+        Falls back to tokenizing ``prompt`` / ``negative_prompt`` text when
+        ``prompt_ids`` is absent, which is the engine dummy warm-up path.
+        """
+        prompt_ids = None
+        prompt_mask = None
+        negative_prompt_ids = None
+        negative_prompt_mask = None
+        if prompts:
+            p0 = prompts[0]
+            if isinstance(p0, dict):
+                prompt_ids = prompt_ids_from_payload(p0)
+                prompt_mask = p0.get("prompt_mask", None)
+                negative_prompt_ids = p0.get("negative_prompt_ids", None)
+                negative_prompt_mask = p0.get("negative_prompt_mask", None)
+
+                if prompt_ids is None and p0.get("prompt"):
+                    prompt_ids, prompt_mask = self._tokenize_text_prompt(p0["prompt"])
+                if negative_prompt_ids is None and p0.get("negative_prompt"):
+                    negative_prompt_ids, negative_prompt_mask = self._tokenize_text_prompt(p0["negative_prompt"])
+            elif isinstance(p0, str):
+                prompt_ids, prompt_mask = self._tokenize_text_prompt(p0)
+        return prompt_ids, prompt_mask, negative_prompt_ids, negative_prompt_mask

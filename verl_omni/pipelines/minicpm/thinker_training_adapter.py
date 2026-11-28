@@ -21,6 +21,7 @@ media normalization for the packed (rmpad) layout.
 
 from __future__ import annotations
 
+import os
 import types
 from typing import Any
 
@@ -128,6 +129,12 @@ class MiniCPMThinkerAdapter(OmniModelBase):
         _apply_remote_code_patches(module)
         # verl calls module(**hf_kwargs); the remote forward takes (data, **kwargs).
         _wrap_forward_for_verl(module)
+        # Opt-in: route the HF Qwen3 text decoder through vLLM batch-invariant kernels
+        # so actor log-probs match the eager vLLM-Omni rollout (VERL_OMNI_VLLM_PARITY=1).
+        if os.environ.get("VERL_OMNI_VLLM_PARITY", "0") == "1":
+            from verl_omni.utils.vllm_parity import install_qwen3_parity
+
+            install_qwen3_parity(module.llm)
         # The inner text model carries the embedding and generation hooks.
         module.get_input_embeddings = module.llm.get_input_embeddings
         module.set_input_embeddings = module.llm.set_input_embeddings

@@ -20,9 +20,6 @@ import hashlib
 
 import torch
 
-WAN_VAE_SCALE_FACTOR_SPATIAL = 8
-WAN_VAE_SCALE_FACTOR_TEMPORAL = 4
-
 
 def sd3_time_shift(shift: float, t: torch.Tensor) -> torch.Tensor:
     """

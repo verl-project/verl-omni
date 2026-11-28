@@ -23,7 +23,6 @@ from verl_omni.pipelines.minimax_h3_diffusion_nft.common import (
     H3_LORA_TARGETS,
     MINIMAX_H3_TOKEN_ID_NATIVE_KEY,
     MiniMaxH3WeightSyncBase,
-    _PromptTokenOverride,
     map_lora_tensors,
 )
 from verl_omni.pipelines.rollout_request import prompt_ids_from_payload
@@ -40,23 +39,6 @@ class MiniMaxH3WeightSyncMixin(MiniMaxH3WeightSyncBase):
         if getattr(self, "partition", None) == "combined" and hasattr(self, "transformers_ref"):
             return "transformers_ref"
         return "transformer"
-
-    def encode_prompt(self, prepared):
-        """Encode Agent Loop IDs while letting vLLM-Omni build reference vision spans.
-
-        Newer vllm-omni passes a single ``PreparedEncoderInputs`` (prompt text +
-        media + condition labels) instead of ``(task, prompt, image, images)``.
-        """
-        prompt_ids = getattr(self, "_h3_prompt_ids", None)
-        prompt = getattr(prepared, "prompt", None)
-        if prompt_ids is not None and prompt is not None:
-            tokenizer = self.tokenizer
-            self.tokenizer = _PromptTokenOverride(tokenizer, prompt, prompt_ids)
-            try:
-                return super().encode_prompt(prepared)
-            finally:
-                self.tokenizer = tokenizer
-        return super().encode_prompt(prepared)
 
     def _ensure_prompt_text(self, request: Any) -> None:
         """Expose Agent Loop IDs while satisfying upstream's text check."""

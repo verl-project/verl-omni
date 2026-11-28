@@ -73,8 +73,23 @@ def _merged_lora_stream(
     FSDP2 modules whose LoRA layers are all vanilla ``lora.Linear`` compute each
     merged weight per tensor while streaming; everything else goes through
     ``merged_lora_context``.
+
+    Under ``VERL_OMNI_VLLM_PARITY=1`` the per-tensor path is required so each
+    base weight is built by ``merge_lora_weight`` (shared with the actor forward);
+    PEFT's in-place merge is refused.
     """
+    from verl_omni.utils.vllm_parity import parity_enabled
+
     lora_merges = _vanilla_lora_linears(module) if fsdp_version(module) == 2 else None
+    if parity_enabled():
+        if lora_merges is None or not (lora_merges.keys() <= module.state_dict().keys()):
+            raise RuntimeError(
+                "VERL_OMNI_VLLM_PARITY requires FSDP2 with vanilla PEFT lora.Linear "
+                "layers so weight sync can share merge_lora_weight with the actor forward."
+            )
+        return _merged_lora_stream_per_tensor(
+            module, lora_merges, key_prefix=key_prefix, offload_fn=offload_fn, full_weight_dtype=full_weight_dtype
+        )
     if lora_merges is not None and lora_merges.keys() <= module.state_dict().keys():
         return _merged_lora_stream_per_tensor(
             module, lora_merges, key_prefix=key_prefix, offload_fn=offload_fn, full_weight_dtype=full_weight_dtype
@@ -93,11 +108,44 @@ class _LoraMerge:
     layers: list[tuple[torch.nn.Module, list[str]]] = field(default_factory=list)
 
     def merge(self) -> torch.Tensor:
+        # Under VERL_OMNI_VLLM_PARITY the actor forward multiplies by
+        # merge_lora_weight(...); the sync must stream that same tensor.
+        from verl_omni.utils.vllm_parity import merge_lora_weight, parity_enabled
+
+        if parity_enabled():
+            return self._parity_merge(merge_lora_weight)
         weight = self.weight.data.clone()
         for layer, adapters in self.layers:
             for adapter in adapters:
                 weight += layer.get_delta_weight(adapter)
         return weight
+
+    def _parity_merge(self, merge_lora_weight) -> torch.Tensor:
+        """bf16(W + s B@A) via the same GEMM the parity actor forward uses."""
+
+        def full(t: torch.Tensor) -> torch.Tensor:
+            t = t.detach()
+            if isinstance(t, DTensor):
+                t = t.to(get_device_id(), non_blocking=True).full_tensor()
+            return t
+
+        if len(self.layers) != 1:
+            raise NotImplementedError(
+                "VERL_OMNI_VLLM_PARITY LoRA merge supports one owner layer per base weight "
+                f"(tied bases included); got {len(self.layers)} layers."
+            )
+        layer, adapters = self.layers[0]
+        if len(adapters) != 1:
+            raise NotImplementedError(
+                f"VERL_OMNI_VLLM_PARITY LoRA merge supports one active adapter; got {adapters!r}."
+            )
+        adapter = adapters[0]
+        return merge_lora_weight(
+            full(self.weight.data),
+            full(layer.lora_A[adapter].weight),
+            full(layer.lora_B[adapter].weight),
+            layer.scaling[adapter],
+        )
 
 
 def _vanilla_lora_linears(module) -> dict[str, _LoraMerge] | None:
