@@ -2,17 +2,27 @@ name: Lint
 
 on:
   pull_request:
+    types: [opened, labeled, synchronize, reopened]
   workflow_call:
-
-concurrency:
-  group: pr-lint-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+    inputs:
+      bypass_label_gate:
+        description: "Skip the auto-lint label check when invoked by a caller workflow"
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
 
 jobs:
   lint:
+    if: >-
+      inputs.bypass_label_gate == true ||
+      (contains(github.event.pull_request.labels.*.name, 'auto-lint') &&
+       (github.event.action != 'labeled' || github.event.label.name == 'auto-lint'))
+    concurrency:
+      group: pr-lint-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+      cancel-in-progress: true
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
