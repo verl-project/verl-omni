@@ -16,6 +16,7 @@ import gc
 import logging
 import os
 from contextlib import contextmanager, nullcontext
+from copy import copy
 from dataclasses import fields
 from typing import Callable, Optional
 
@@ -24,6 +25,7 @@ import torch.distributed
 from tensordict import TensorDict
 from torch.distributed.tensor import DTensor
 from veomni.distributed.offloading import (
+    build_activation_offloading_context,
     load_model_to_gpu,
     load_optimizer,
     offload_model_to_cpu,
@@ -40,21 +42,21 @@ from verl.utils.torch_dtypes import PrecisionType
 from verl.workers.engine.base import BaseEngine, BaseEngineCtx, EngineRegistry
 from verl.workers.engine.utils import enable_full_determinism, prepare_micro_batches
 
+from verl_omni.pipelines.model_base import DiffusionModelBase
 from verl_omni.pipelines.utils import build_scheduler, forward_and_sample_previous_step, prepare_model_inputs
 from verl_omni.workers.config import (
     DiffusionModelConfig,
     VeOmniDiffusionEngineConfig,
     VeOmniDiffusionOptimizerConfig,
 )
-from verl_omni.workers.engine.veomni.lora_utils import _reject_veomni_moe_expert_lora, _validate_veomni_lora_support
-from verl_omni.workers.engine.veomni.patch import _apply_attention_backend, _veomni_attn_implementation
+from verl_omni.workers.engine.veomni.lora_utils import _validate_veomni_lora_support
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 device_name = get_device_name()
 
 
-@EngineRegistry.register(model_type="diffusion_model", backend=["veomni"], device=["cuda"])
+@EngineRegistry.register(model_type="diffusion_model", backend=["veomni"], device=["cuda", "npu"])
 class VeOmniDiffusionEngine(BaseEngine):
     """VeOmni-backed diffusion training engine for verl-omni RL loops."""
 
@@ -71,7 +73,8 @@ class VeOmniDiffusionEngine(BaseEngine):
         if is_lora:
             _validate_veomni_lora_support(model_config)
 
-        self.model_config = model_config
+        self.model_config = copy(model_config)
+        self.model_config.training_backend = engine_config.strategy
         self.engine_config = engine_config
         self.optimizer_config = optimizer_config
         self.checkpoint_config = checkpoint_config
@@ -96,10 +99,10 @@ class VeOmniDiffusionEngine(BaseEngine):
         return self._is_offload_optimizer
 
     def _init_device_mesh(self):
-        from veomni.distributed import parallel_state
+        from veomni.distributed.parallel_state import init_parallel_state_from_config
 
         if self.engine_config.ulysses_parallel_size != 1:
-            raise NotImplementedError("VeOmni Qwen-Image diffusion backend does not support Ulysses SP yet.")
+            raise NotImplementedError("VeOmni diffusion replay requires ulysses_parallel_size=1.")
 
         world_size = torch.distributed.get_world_size()
         dp_size = world_size // self.engine_config.ulysses_parallel_size
@@ -117,20 +120,14 @@ class VeOmniDiffusionEngine(BaseEngine):
         self.dp_replicate_size = dp_replicate_size
         self.dp_shard_size = dp_shard_size
 
-        parallel_state.init_parallel_state(
-            dp_size=dp_size,
-            dp_replicate_size=dp_replicate_size,
-            dp_shard_size=dp_shard_size,
-            extra_parallel_sizes=(self.engine_config.expert_parallel_size,),
-            ulysses_size=self.engine_config.ulysses_parallel_size,
-            dp_mode="fsdp2",
-        )
-
-        ps = parallel_state.get_parallel_state()
-        self.device_mesh = ps.device_mesh
+        config = self.engine_config
+        self.accelerator = self._build_accelerator_config()
+        self.runtime_name = "diffusion_ref" if config.forward_only else "diffusion_actor"
+        self.parallel_state = init_parallel_state_from_config(self.accelerator, self.runtime_name)
+        self.device_mesh = self.parallel_state.device_mesh
         self.ulysses_device_mesh = None
-        self.ulysses_sequence_parallel_size = self.engine_config.ulysses_parallel_size
-        self.use_ulysses_sp = ps.sp_enabled
+        self.ulysses_sequence_parallel_size = config.ulysses_parallel_size
+        self.use_ulysses_sp = self.parallel_state.sp_enabled
 
     def _build_ops_config(self):
         from veomni.arguments import OpsImplementationConfig
@@ -139,7 +136,6 @@ class VeOmniDiffusionEngine(BaseEngine):
         ops_kwargs = {
             name: getattr(self.engine_config, name) for name in ops_fields if hasattr(self.engine_config, name)
         }
-        ops_kwargs["attn_implementation"] = _veomni_attn_implementation(self.engine_config.attn_implementation)
         return OpsImplementationConfig(**ops_kwargs)
 
     def _get_veomni_model_paths(self) -> tuple[str, str]:
@@ -154,13 +150,6 @@ class VeOmniDiffusionEngine(BaseEngine):
         """Translate the verl-omni LoRA fields into VeOmni's ``lora_config`` dict (empty: no LoRA)."""
         if not self._is_lora:
             return {}
-
-        try:
-            __import__("veomni.lora")
-        except ModuleNotFoundError as e:
-            if e.name != "veomni.lora":
-                raise
-            raise RuntimeError("VeOmni diffusion LoRA requires veomni>=0.1.12.") from e
 
         target_modules = self.model_config.target_modules
         # VeOmni has no "all-linear" shorthand and otherwise injects zero adapters.
@@ -186,15 +175,55 @@ class VeOmniDiffusionEngine(BaseEngine):
             lora_config["lora_adapter"] = self.model_config.lora_adapter_path
         return lora_config
 
-    def _build_veomni_dit_args(self):
+    def _build_accelerator_config(self):
         from veomni.arguments import (
             AcceleratorConfig,
             FSDPConfig,
             GradientCheckpointingConfig,
             MixedPrecisionConfig,
             OffloadConfig,
-            OptimizerConfig,
         )
+
+        config = self.engine_config
+
+        gradient_checkpointing = GradientCheckpointingConfig(
+            enable=self.model_config.enable_gradient_checkpointing,
+            enable_reentrant=config.enable_reentrant,
+        )
+
+        mixed_precision = MixedPrecisionConfig(
+            enable=config.mixed_precision,
+            param_dtype=config.mixed_precision_param_dtype,
+            reduce_dtype=config.mixed_precision_reduce_dtype,
+            output_dtype=config.mixed_precision_output_dtype,
+            cast_forward_inputs=config.mixed_precision_cast_forward_inputs,
+        )
+
+        fsdp_config = FSDPConfig(
+            fsdp_mode="fsdp2",
+            reshard_after_forward=config.reshard_after_forward,
+            forward_prefetch=config.forward_prefetch,
+            mixed_precision=mixed_precision,
+        )
+
+        offload_config = OffloadConfig(
+            enable_activation=config.enable_activation_offload,
+            activation_gpu_limit=config.activation_gpu_limit,
+        )
+
+        return AcceleratorConfig(
+            dp_replicate_size=self.dp_replicate_size,
+            dp_shard_size=self.dp_shard_size,
+            ep_size=config.expert_parallel_size,
+            ulysses_size=config.ulysses_parallel_size,
+            init_device=config.init_device,
+            gradient_checkpointing=gradient_checkpointing,
+            fsdp_config=fsdp_config,
+            offload_config=offload_config,
+        )
+
+    def _build_veomni_dit_args(self):
+        from veomni.arguments import OptimizerConfig
         from veomni.trainer.dit_trainer import (
             DiTDataArguments,
             DiTModelArguments,
@@ -203,120 +232,73 @@ class VeOmniDiffusionEngine(BaseEngine):
         )
 
         config_path, weights_path = self._get_veomni_model_paths()
-        dp_size = self.dp_size
-        dp_replicate_size = self.dp_replicate_size
-        dp_shard_size = self.dp_shard_size
-
-        mixed_precision = MixedPrecisionConfig(
-            enable=self.engine_config.mixed_precision,
-            param_dtype=self.engine_config.mixed_precision_param_dtype,
-            reduce_dtype=self.engine_config.mixed_precision_reduce_dtype,
-            output_dtype=self.engine_config.mixed_precision_output_dtype,
-            cast_forward_inputs=self.engine_config.mixed_precision_cast_forward_inputs,
-        )
-        fsdp_config = FSDPConfig(
-            fsdp_mode="fsdp2",
-            reshard_after_forward=self.engine_config.reshard_after_forward,
-            forward_prefetch=self.engine_config.forward_prefetch,
-            mixed_precision=mixed_precision,
-        )
-        accelerator = AcceleratorConfig(
-            dp_replicate_size=dp_replicate_size,
-            dp_shard_size=dp_shard_size,
-            ep_size=self.engine_config.expert_parallel_size,
-            ulysses_size=self.engine_config.ulysses_parallel_size,
-            fsdp_config=fsdp_config,
-            offload_config=OffloadConfig(
-                enable_activation=self.engine_config.enable_activation_offload,
-                activation_gpu_limit=self.engine_config.activation_gpu_limit,
-            ),
-        )
+        opt = self.optimizer_config
         optimizer = OptimizerConfig(
-            type=self.optimizer_config.optimizer,
-            lr=self.optimizer_config.lr,
-            lr_min=self.optimizer_config.lr_min,
-            lr_start=self.optimizer_config.lr_start,
-            lr_warmup_ratio=self.optimizer_config.lr_warmup_steps_ratio,
-            lr_decay_style=self.optimizer_config.lr_scheduler_type,
-            lr_decay_ratio=self.optimizer_config.lr_decay_ratio,
-            weight_decay=self.optimizer_config.weight_decay,
-            max_grad_norm=self.optimizer_config.clip_grad,
+            type=opt.optimizer,
+            lr=opt.lr,
+            betas=tuple(opt.betas),
+            lr_min=opt.lr_min,
+            lr_start=opt.lr_start,
+            lr_warmup_ratio=opt.lr_warmup_steps_ratio,
+            lr_decay_style=opt.lr_scheduler_type,
+            lr_decay_ratio=opt.lr_decay_ratio,
+            weight_decay=opt.weight_decay,
+            max_grad_norm=opt.clip_grad,
         )
+
+        model_args = DiTModelArguments(
+            model_path=weights_path,
+            config_path=config_path,
+            tokenizer_path=self.model_config.local_tokenizer_path or self.model_config.tokenizer_path or config_path,
+            accelerator=self.accelerator,
+            ops_implementation=self._build_ops_config(),
+            optimizer=optimizer,
+            lora_config=self._build_veomni_lora_config() or None,
+            basic_modules=[],
+            broadcast_model_weights_from_rank0=True,
+        )
+        data_args = DiTDataArguments(train_path=self.model_config.local_path, text_keys="messages")
         train_args = DiTTrainingArguments(
             dyn_bsz=False,
+            global_batch_size=self.dp_size,
             micro_batch_size=1,
-            global_batch_size=dp_size,
             num_train_epochs=1,
-            init_device=self.engine_config.init_device,
-            broadcast_model_weights_from_rank0=True,
-            enable_full_determinism=self.engine_config.full_determinism,
             seed=self.engine_config.seed,
-            optimizer=optimizer,
-            gradient_checkpointing=GradientCheckpointingConfig(
-                enable=self.model_config.enable_gradient_checkpointing,
-                enable_reentrant=self.engine_config.enable_reentrant,
-            ),
-            accelerator=accelerator,
+            enable_full_determinism=self.engine_config.full_determinism,
             training_task="offline_training",
         )
-        train_args._train_steps = self.optimizer_config.total_training_steps
-
-        args = VeOmniDiTArguments(
-            model=DiTModelArguments(
-                config_path=config_path,
-                model_path=weights_path,
-                model_config={},
-                tokenizer_path=(
-                    self.model_config.local_tokenizer_path or self.model_config.tokenizer_path or config_path
-                ),
-                basic_modules=[],
-                lora_config=self._build_veomni_lora_config(),
-                ops_implementation=self._build_ops_config(),
-            ),
-            data=DiTDataArguments(train_path=self.model_config.local_path, text_keys="messages"),
-            train=train_args,
-        )
-        args._train_steps = self.optimizer_config.total_training_steps
+        train_args._train_steps = opt.total_training_steps
+        args = VeOmniDiTArguments(model=model_args, data=data_args, train=train_args)
+        args._train_steps = opt.total_training_steps
         return args
 
-    def _build_veomni_dit_trainer(self):
-        from veomni.trainer.base import BaseTrainer
-        from veomni.trainer.dit_trainer import DiTTrainer
-
-        trainer = DiTTrainer.__new__(DiTTrainer)
-        trainer.base = BaseTrainer.__new__(BaseTrainer)
-        trainer.base.args = self._build_veomni_dit_args()
-        trainer.training_task = "offline_training"
-        trainer.base.device = torch.device(device_name)
-        return trainer
-
     def _build_model_optimizer(self):
-        from veomni.trainer.base import BaseTrainer
+        from .diffusion_runtime import VeOmniDiffusionRuntime
 
-        self.veomni_trainer = self._build_veomni_dit_trainer()
-        veomni_base = self.veomni_trainer.base
-        BaseTrainer._build_model(veomni_base)
-        _apply_attention_backend(veomni_base.model, self.engine_config.attn_implementation)
+        self.model_adapter = DiffusionModelBase.get_class(self.model_config)
         if self._is_lora:
-            # Wrap the model before parallelization; otherwise no adapter is injected.
-            BaseTrainer._freeze_model_module(veomni_base)
-            _reject_veomni_moe_expert_lora(veomni_base.model)
-        BaseTrainer._build_parallelized_model(veomni_base)
-        scheduler = self._build_scheduler()
+            self.model_adapter.validate_lora_config(self.model_config)
+        self._fp32_modules = getattr(self.model_adapter, "veomni_fp32_modules", ())
+        args = self._build_veomni_dit_args()
+        self.runtime = VeOmniDiffusionRuntime(
+            args.model,
+            self.runtime_name,
+            train=args.train,
+            forward_only=self.engine_config.forward_only,
+            fp32_modules=self._fp32_modules,
+            configure_lora=getattr(self.model_adapter, "configure_veomni_lora", None),
+            optimizer_config=self.optimizer_config,
+        )
+        self.module = self.runtime.model
+        self.optimizer = self.runtime.optimizer
+        self.scheduler = self._build_scheduler()
         if not self.engine_config.forward_only:
-            BaseTrainer._build_optimizer(veomni_base)
-            BaseTrainer._build_lr_scheduler(veomni_base)
-        else:
-            veomni_base.optimizer = None
-            veomni_base.lr_scheduler = None
-        BaseTrainer._build_training_context(veomni_base)
-
-        self.module = veomni_base.model
-        self.scheduler = scheduler
-        self.optimizer = veomni_base.optimizer
-        self.lr_scheduler = veomni_base.lr_scheduler
-        self.model_fwd_context = veomni_base.model_fwd_context
-        self.model_bwd_context = veomni_base.model_bwd_context
+            self.runtime._build_lr_scheduler(args.train_steps)
+        self.lr_scheduler = self.runtime.lr_scheduler
+        offload = self.accelerator.offload_config
+        self.model_fwd_context, self.model_bwd_context = build_activation_offloading_context(
+            offload.enable_activation, self.accelerator.gradient_checkpointing.enable, offload.activation_gpu_limit
+        )
 
     def initialize(self):
         self._build_model_optimizer()
@@ -342,25 +324,16 @@ class VeOmniDiffusionEngine(BaseEngine):
         return EngineEvalModeCtx(self, **kwargs)
 
     def get_data_parallel_rank(self):
-        from veomni.distributed import parallel_state
-
-        return parallel_state.get_parallel_state().dp_rank
+        return self.parallel_state.dp_rank
 
     def get_data_parallel_size(self):
-        from veomni.distributed import parallel_state
-
-        return parallel_state.get_parallel_state().dp_size
+        return self.parallel_state.dp_size
 
     def get_data_parallel_group(self):
-        from veomni.distributed import parallel_state
-
-        return parallel_state.get_parallel_state().dp_group
+        return self.parallel_state.dp_group
 
     def is_mp_src_rank_with_outputs(self):
-        from veomni.distributed import parallel_state
-
-        ps = parallel_state.get_parallel_state()
-        return ps.sp_rank == 0 if ps.sp_enabled else True
+        return self.parallel_state.sp_rank == 0 if self.use_ulysses_sp else True
 
     @staticmethod
     def _unpad_nested_embeds(embeds: torch.Tensor, mask: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -386,8 +359,8 @@ class VeOmniDiffusionEngine(BaseEngine):
         timesteps = micro_batch["all_timesteps"]
         prompt_embeds = micro_batch["prompt_embeds"]
         prompt_embeds_mask = micro_batch["prompt_embeds_mask"]
-        negative_prompt_embeds = micro_batch["negative_prompt_embeds"]
-        negative_prompt_embeds_mask = micro_batch["negative_prompt_embeds_mask"]
+        negative_prompt_embeds = micro_batch.get("negative_prompt_embeds")
+        negative_prompt_embeds_mask = micro_batch.get("negative_prompt_embeds_mask")
         sp_size = self.ulysses_sequence_parallel_size if self.use_ulysses_sp else 1
 
         if prompt_embeds.is_nested:
@@ -486,6 +459,8 @@ class VeOmniDiffusionEngine(BaseEngine):
     def forward_backward_batch(
         self, data: TensorDict, loss_function: Callable, forward_only: bool = False
     ) -> list[TensorDict]:
+        from veomni.distributed.parallel_state import use_parallel_state
+
         num_timesteps = int(data["all_timesteps"].shape[1])
         tu.assign_non_tensor(data, sp_size=self.ulysses_sequence_parallel_size)
         tu.assign_non_tensor(data, use_dynamic_bsz=False)
@@ -502,7 +477,7 @@ class VeOmniDiffusionEngine(BaseEngine):
             micro_batch = micro_batch.to(get_device_id())
             tu.assign_non_tensor(micro_batch, gradient_accumulation_steps=gradient_accumulation_steps)
             meta_info_lst = {"model_output": [], "loss": [], "metrics": []}
-            with ctx:
+            with use_parallel_state(self.parallel_state), ctx:
                 for step in range(num_timesteps):
                     loss, meta_info = self.forward_step(
                         micro_batch, loss_function=loss_function, forward_only=forward_only, step=step
@@ -678,7 +653,7 @@ class VeOmniDiffusionEngine(BaseEngine):
                 if "lora_" not in name
             }
 
-        return convert_weight_keys(params, peft_model), lora_config.to_peft_dict()
+        return params, lora_config.to_peft_dict()
 
     def get_per_tensor_param(self, **kwargs):
         load_model_to_gpu(self.module, get_device_id())
@@ -691,7 +666,16 @@ class VeOmniDiffusionEngine(BaseEngine):
             )
         else:
             params = self.module.state_dict()
-            params = convert_weight_keys(params, getattr(self.module, "_fsdp_wrapped_module", self.module))
+
+        module = getattr(self.module, "_fsdp_wrapped_module", self.module)
+        export_weight_keys = getattr(self.model_adapter, "veomni_export_weight_keys", convert_weight_keys)
+        fp32_keys = set()
+        if self._fp32_modules:
+            fp32_params = {
+                name: param for name, param in params.items() if name.rpartition(".")[0] in self._fp32_modules
+            }
+            fp32_keys.update(export_weight_keys(fp32_params, module))
+        params = export_weight_keys(params, module)
 
         if self._is_offload_param:
             offload_model_to_cpu(self.module)
@@ -701,10 +685,13 @@ class VeOmniDiffusionEngine(BaseEngine):
 
         def param_generator():
             for name, param in params.items():
-                tensor = param.full_tensor() if isinstance(param, DTensor) else param
-                tensor = tensor.to(device, non_blocking=True)
-                if tensor.is_floating_point() and tensor.dtype != export_dtype:
-                    tensor = tensor.to(export_dtype, non_blocking=True)
+                # Stage the local shard on the collective device after CPU offload.
+                tensor = param.to(device, non_blocking=True)
+                if isinstance(tensor, DTensor):
+                    tensor = tensor.full_tensor()
+                dtype = torch.float32 if name in fp32_keys else export_dtype
+                if tensor.is_floating_point() and tensor.dtype != dtype:
+                    tensor = tensor.to(dtype, non_blocking=True)
                 yield f"transformer.{name}", tensor
 
         return param_generator(), peft_config_dict

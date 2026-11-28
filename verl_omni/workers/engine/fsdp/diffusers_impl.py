@@ -21,6 +21,7 @@ import os
 import warnings
 from abc import ABC, abstractmethod
 from contextlib import nullcontext
+from copy import copy
 from typing import Any, Callable, Iterator, Optional
 
 import torch
@@ -146,7 +147,8 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
         """
         super().__init__()
 
-        self.model_config = model_config
+        self.model_config = copy(model_config)
+        self.model_config.training_backend = engine_config.strategy
         self.engine_config = engine_config
         self.optimizer_config = optimizer_config
         self.checkpoint_config = checkpoint_config
@@ -164,6 +166,9 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
         self._is_offload_param = self.engine_config.param_offload
         self._is_offload_optimizer = self.engine_config.optimizer_offload
         self._is_lora = self.model_config.lora_rank > 0
+        if self._is_lora and model_config.training_backend not in (None, engine_config.strategy):
+            # Actor and reference can share a model config while using different engines.
+            DiffusionModelBase.get_class(self.model_config).validate_lora_config(self.model_config)
         # FSDP2 CPUOffloadPolicy owns param placement; a manual model.to(device) would
         # leave shards on CPU and crash state_dict()/weight-sync (upstream verl#5995).
         # Set True in _build_fsdp_module to skip that manual load.

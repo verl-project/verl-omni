@@ -8,9 +8,7 @@
 #   actor_rollout_ref.actor.veomni_config.*          # VeOmni-specific knobs
 #   actor_rollout_ref.ref.veomni_config.strategy=veomni
 #
-# Requires VeOmni installed alongside the verl-omni base environment; see
-# docs/start/engine_backends.md for the install workaround
-# (veomni 0.1.12's `[gpu]` extra pins torch 2.11 and conflicts with vllm 0.33.0).
+# Install VeOmni 0.1.14 in the training environment as described in docs/start/engine_backends.md.
 set -x
 
 # Set WORKSPACE to any writable directory; defaults to $HOME

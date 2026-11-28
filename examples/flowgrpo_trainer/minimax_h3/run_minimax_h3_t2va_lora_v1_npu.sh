@@ -12,14 +12,48 @@ ASCEND_HOME_PATH=${ASCEND_HOME_PATH:-/usr/local/Ascend/ascend-toolkit}
 source "$ASCEND_HOME_PATH/set_env.sh"
 source "$ASCEND_HOME_PATH/../nnal/atb/set_env.sh"
 
+TRAIN_ENGINE=${TRAIN_ENGINE:-fsdp2}
 WORKSPACE=${WORKSPACE:-$HOME}
 MODEL_PATH=${MODEL_PATH:-$WORKSPACE/models/MiniMax-H3/FL2VA}
 DATA_DIR=${DATA_DIR:-$WORKSPACE/data/vid_prompt/verl_omni}
 CLAP_MODEL_PATH=${CLAP_MODEL_PATH:-laion/larger_clap_general}
 IMAGEBIND_MODEL_PATH=${IMAGEBIND_MODEL_PATH:-.checkpoints/imagebind_huge.pth}
-ACTOR_CONFIG_PATH=${ACTOR_CONFIG_PATH:-$(dirname "$MODEL_PATH")/transformer}
 NUM_GPUS=${NUM_GPUS:-16}
 ACTOR_SP=${ACTOR_SP:-1}
+case "$TRAIN_ENGINE" in
+    fsdp2)
+        ACTOR_CONFIG_PATH=${ACTOR_CONFIG_PATH:-$(dirname "$MODEL_PATH")/transformer}
+        h3_lora_targets="['to_q','to_k','to_v','to_out.0','ff.net.0.proj','ff.net.2']"
+        engine_args=(
+            actor_rollout_ref.model.fsdp_layer_prefixes="['transformer_blocks.','token_refiner.refiner_blocks.']"
+            '+actor_rollout_ref.actor.fsdp_config.wrap_policy.transformer_layer_cls_to_wrap=[MiniMaxH3TransformerBlock,MiniMaxH3TokenRefinerBlock]'
+            actor_rollout_ref.actor.strategy=fsdp2
+            actor_rollout_ref.actor.fsdp_config.param_offload=True
+            actor_rollout_ref.actor.fsdp_config.optimizer_offload=True
+            actor_rollout_ref.actor.fsdp_config.model_dtype=bfloat16
+            actor_rollout_ref.actor.fsdp_config.ulysses_sequence_parallel_size="$ACTOR_SP"
+        )
+        ;;
+    veomni)
+        if [[ "$ACTOR_SP" != 1 ]]; then
+            echo "VeOmni H3 replay requires ACTOR_SP=1." >&2
+            exit 2
+        fi
+        ACTOR_CONFIG_PATH=${VEOMNI_ACTOR_CONFIG_PATH:-$MODEL_PATH/transformer}
+        h3_lora_targets="['qkv_proj','out_proj','fc1','fc2']"
+        engine_args=(
+            diffusion/model_engine=veomni_diffusion
+            actor_rollout_ref.model.lora_init_weights=true
+            actor_rollout_ref.actor.veomni_config.attn_implementation=veomni_sdpa
+            actor_rollout_ref.actor.veomni_config.param_offload=True
+            actor_rollout_ref.actor.veomni_config.optimizer_offload=True
+            actor_rollout_ref.actor.veomni_config.mixed_precision_cast_forward_inputs=False
+            actor_rollout_ref.ref.veomni_config.mixed_precision_cast_forward_inputs=False
+            actor_rollout_ref.actor.veomni_config.ulysses_parallel_size=1
+        )
+        ;;
+    *) echo "Unknown TRAIN_ENGINE=$TRAIN_ENGINE" >&2; exit 2 ;;
+esac
 if (( NUM_GPUS <= 0 || ACTOR_SP <= 0 || NUM_GPUS % ACTOR_SP != 0 )); then
     echo "NUM_GPUS (${NUM_GPUS}) must be a positive multiple of ACTOR_SP ($ACTOR_SP)." >&2
     exit 1
@@ -56,15 +90,15 @@ if [[ ! -f "$repo_root/LICENSE" ]]; then
 fi
 
 output_dir=${OUTPUT_DIR:-$repo_root/outputs/$script_name}
+if [[ "$TRAIN_ENGINE" == veomni && -z "${OUTPUT_DIR:-}" ]]; then output_dir+=_veomni; fi
 checkpoint_dir=$output_dir/checkpoints
 run_timestamp=$(date +"%Y%m%d_%H%M")
 log_file=$output_dir/logs/$run_timestamp/${NODE_RANK:-0}.log
 mkdir -p "$checkpoint_dir" "$(dirname "$log_file")"
 exec > >(tee -a "$log_file") 2>&1
 
-h3_lora_targets="['to_q','to_k','to_v','to_out.0','ff.net.0.proj','ff.net.2']"
-
 python3 -m verl_omni.trainer.main_diffusion_v1 \
+    "${engine_args[@]}" \
     trainer.device=npu \
     data.train_files=$train_path \
     data.val_files=$test_path \
@@ -84,18 +118,11 @@ python3 -m verl_omni.trainer.main_diffusion_v1 \
     actor_rollout_ref.model.lora_rank=64 \
     actor_rollout_ref.model.lora_alpha=128 \
     actor_rollout_ref.model.target_modules="$h3_lora_targets" \
-    actor_rollout_ref.model.fsdp_layer_prefixes="['transformer_blocks.','token_refiner.refiner_blocks.']" \
-    '+actor_rollout_ref.actor.fsdp_config.wrap_policy.transformer_layer_cls_to_wrap=[MiniMaxH3TransformerBlock,MiniMaxH3TokenRefinerBlock]' \
-    actor_rollout_ref.actor.strategy=fsdp2 \
     actor_rollout_ref.actor.optim.lr=3e-4 \
     actor_rollout_ref.actor.optim.weight_decay=0.0001 \
     actor_rollout_ref.actor.ppo_mini_batch_size=16 \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
     actor_rollout_ref.actor.use_kl_loss=False \
-    actor_rollout_ref.actor.fsdp_config.param_offload=True \
-    actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
-    actor_rollout_ref.actor.fsdp_config.model_dtype=bfloat16 \
-    actor_rollout_ref.actor.fsdp_config.ulysses_sequence_parallel_size=$ACTOR_SP \
     actor_rollout_ref.rollout.name=vllm_omni \
     actor_rollout_ref.rollout.rollout_attn_backend=TORCH_SDPA \
     actor_rollout_ref.rollout.tensor_model_parallel_size=$ROLLOUT_TP \

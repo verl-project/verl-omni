@@ -53,8 +53,10 @@ class _NativePipeline(torch.nn.Module):
         self.transformer = MiniMaxH3DiTModel(config).to(device)
         self.transformers_ref = MiniMaxH3DiTModel(config).to(device)
         self.video_vae = self.audio_vae = None
-        # Newer vLLM-Omni's load_weights reads these; None means no FastH3 adapter or checkpoint.
+        # This fixture loads base weights with all optional checkpoint adapters disabled.
         self._fasth3 = self._fasth3_checkpoint = None
+        self._vdn = None
+        self._regenerate = None
         with torch.no_grad():
             for parameter in self.parameters():
                 parameter.fill_(-1)

@@ -121,6 +121,7 @@ class DiffusionModelConfig(BaseConfig):
         "transformer_config",
         "extra_tokenizer_map",
         "hf_config",
+        "training_backend",
     }
 
     path: str = MISSING
@@ -217,6 +218,9 @@ class DiffusionModelConfig(BaseConfig):
 
     # Trainable AR config
     ar: DiffusionModelARConfig = field(default_factory=DiffusionModelARConfig)
+
+    # Actor strategy during config validation. Each engine binds its own strategy for replay.
+    training_backend: Optional[str] = None
 
     def __post_init__(self):
         import_external_libs(self.external_lib)

@@ -12,14 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Diffusers Actor adapter for MiniMax H3 T2VA, FL2VA, and Ref2VA FlowGRPO."""
+"""Actor trajectory replay for MiniMax H3 FlowGRPO."""
 
 from __future__ import annotations
 
 from typing import Optional
 
 import torch
-from diffusers import ModelMixin
 from tensordict import TensorDict
 from verl.utils import tensordict_utils as tu
 from verl.utils.device import get_device_name
@@ -29,8 +28,8 @@ from vllm_omni.diffusion.models.minimax_h3.denoise_loop import (
 )
 
 from verl_omni.pipelines.minimax_h3_diffusion_nft.common import (
+    H3_LORA_TARGETS,
     build_ref2va_layout_from_meta,
-    h3_ulysses_forward,
     prepare_h3_processor_files,
 )
 from verl_omni.pipelines.model_base import DiffusionModelBase
@@ -45,11 +44,25 @@ from .common import (
     sample_h3_transition,
     split_joint_latents,
 )
-from .weight_sync import H3_LORA_TARGETS
+from .veomni import MiniMaxH3VeOmniMixin, validate_veomni_lora_targets
 
 __all__ = ["MiniMaxH3FlowGRPO"]
 
 H3SchedulerPair = tuple[FlowMatchSDEDiscreteScheduler, FlowMatchSDEDiscreteScheduler]
+
+
+def _validate_diffusers_lora_targets(requested: set[str]) -> None:
+    unsupported = {
+        target
+        for target in requested
+        if not any(target == supported or target.endswith("." + supported) for supported in H3_LORA_TARGETS)
+    }
+    if not requested or unsupported:
+        raise ValueError(
+            "MiniMax H3 LoRA supports only transformer/refiner attention and MLP projections "
+            f"{sorted(H3_LORA_TARGETS)}, got unsupported targets {sorted(unsupported or requested)}. "
+            "Other targets cannot be synchronized to the rollout model."
+        )
 
 
 def _shared_int(value: torch.Tensor, name: str) -> int:
@@ -70,7 +83,7 @@ def _shared_layout(value: torch.Tensor, length: int, name: str) -> torch.Tensor:
 
 
 @DiffusionModelBase.register("MiniMaxH3Pipeline", algorithm="flow_grpo")
-class MiniMaxH3FlowGRPO(DiffusionModelBase):
+class MiniMaxH3FlowGRPO(MiniMaxH3VeOmniMixin, DiffusionModelBase):
     """Replay flattened joint video/audio transitions with the H3 DiT."""
 
     @classmethod
@@ -86,17 +99,13 @@ class MiniMaxH3FlowGRPO(DiffusionModelBase):
 
         target_modules = model_config.target_modules
         requested = {target_modules} if isinstance(target_modules, str) else set(target_modules or [])
-        unsupported = {
-            target
-            for target in requested
-            if not any(target == supported or target.endswith("." + supported) for supported in H3_LORA_TARGETS)
-        }
-        if not requested or unsupported:
-            raise ValueError(
-                "MiniMax H3 LoRA supports only transformer/refiner attention and MLP projections "
-                f"{sorted(H3_LORA_TARGETS)}, got unsupported targets {sorted(unsupported or requested)}. "
-                "Other targets cannot be synchronized to the rollout model."
-            )
+        backend = model_config.training_backend
+        if backend in (None, "fsdp", "fsdp2"):
+            _validate_diffusers_lora_targets(requested)
+        elif backend == "veomni":
+            validate_veomni_lora_targets(requested)
+        else:
+            raise ValueError(f"Unsupported H3 FlowGRPO training backend: {backend!r}")
 
     @classmethod
     def build_scheduler(cls, model_config: DiffusionModelConfig) -> H3SchedulerPair:
@@ -121,7 +130,7 @@ class MiniMaxH3FlowGRPO(DiffusionModelBase):
     @classmethod
     def prepare_model_inputs(
         cls,
-        module: ModelMixin,
+        module: torch.nn.Module,
         model_config: DiffusionModelConfig,
         latents: torch.Tensor,
         timesteps: torch.Tensor,
@@ -259,7 +268,7 @@ class MiniMaxH3FlowGRPO(DiffusionModelBase):
     @classmethod
     def forward_and_sample_previous_step(
         cls,
-        module: ModelMixin,
+        module: torch.nn.Module,
         scheduler: H3SchedulerPair,
         model_config: DiffusionModelConfig,
         model_inputs: dict[str, torch.Tensor],
@@ -267,6 +276,7 @@ class MiniMaxH3FlowGRPO(DiffusionModelBase):
         scheduler_inputs: Optional[TensorDict | dict[str, torch.Tensor]],
         step: int,
     ):
+        """Replay one joint video/audio transition and compute its log probability."""
         del negative_model_inputs
         if scheduler_inputs is None:
             raise ValueError("MiniMax H3 replay requires rollout scheduler inputs.")
@@ -276,7 +286,13 @@ class MiniMaxH3FlowGRPO(DiffusionModelBase):
         audio_update_mask = model_inputs.pop("_h3_audio_update_mask")
         target_only_trajectory = bool(model_inputs.pop("_h3_target_only_trajectory"))
         sp_size = model_inputs.pop("_h3_sp_size", 1)
-        video_velocity, audio_velocity = h3_ulysses_forward(module, model_inputs, sp_size)
+        video_velocity, audio_velocity = cls._predict_velocities(
+            module,
+            model_inputs,
+            training_backend=getattr(model_config, "training_backend", None),
+            sp_size=sp_size,
+            target_only_trajectory=target_only_trajectory,
+        )
         video = model_inputs["hidden_states"].float()
         audio = model_inputs["audio_hidden_states"].float()
         if target_only_trajectory:

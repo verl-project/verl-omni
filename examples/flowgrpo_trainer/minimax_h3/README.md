@@ -1,12 +1,13 @@
 # MiniMax H3 T2VA, FL2VA, and Ref2VA FlowGRPO
 
-Last updated: 11/20/2026
+Last updated: 11/27/2026
 
 These recipes train `MiniMaxAI/MiniMax-H3` LoRA adapters with FlowGRPO for
 text-to-audio-video (T2VA), first-frame image-to-audio-video (FL2VA), and
 reference-to-audio-video (Ref2VA) generation. The launchers configure a
 Diffusers H3 Actor and vLLM-Omni rollout for joint video and audio generation,
-with CLAP and ImageBind as the default rewards.
+with CLAP and ImageBind as the default rewards. Both Ascend T2VA launchers also
+support a native VeOmni Actor.
 
 | Platform | T2VA | FL2VA | Ref2VA |
 | --- | --- | --- | --- |
@@ -51,7 +52,7 @@ export MODEL_PATH="$MODEL_ROOT/FL2VA"
 export ACTOR_CONFIG_PATH="$MODEL_ROOT/transformer"
 ```
 
-The scripts derive `ACTOR_CONFIG_PATH` as `$(dirname "$MODEL_PATH")/transformer`
+The Diffusers T2VA scripts derive `ACTOR_CONFIG_PATH` as `$(dirname "$MODEL_PATH")/transformer`
 when it is not set explicitly. The Ref2VA launcher takes the repository root
 as `MODEL_PATH` and resolves `Ref2VA/` and `transformer_ref/` separately. Do not
 replace either official rollout transformer with a symlink to a Diffusers
@@ -299,10 +300,27 @@ IMAGEBIND_MODEL_PATH=/path/to/imagebind_huge.pth \
 bash examples/flowgrpo_trainer/minimax_h3/run_minimax_h3_t2va_lora_npu.sh
 ```
 
-The NPU launcher uses Actor `_native_npu`, rollout `TORCH_SDPA`, and Actor
+The default FSDP2 recipe uses Actor `_native_npu`, rollout `TORCH_SDPA`, and Actor
 parameter and optimizer offload. It sources the Ascend toolkit and ATB
 environments from `ASCEND_HOME_PATH`, which defaults to
 `/usr/local/Ascend/ascend-toolkit`.
+
+To use VeOmni, install `veomni==0.1.14` following the [diffusion backend instructions](../../../docs/start/engine_backends.md)
+on every worker and set `TRAIN_ENGINE=veomni`. The actor loads the native
+transformer weights from `$MODEL_PATH/transformer`. Set `VEOMNI_ACTOR_CONFIG_PATH`
+to override the configuration directory. Actor sequence
+parallelism is 1. This example uses the synchronous V1 trainer on eight NPUs.
+
+```bash
+TRAIN_ENGINE=veomni MODEL_PATH="$MODEL_ROOT/FL2VA" \
+DATA_DIR="$HOME/data/vid_prompt/verl_omni" IMAGEBIND_MODEL_PATH=/path/to/imagebind_huge.pth \
+NUM_GPUS=8 ROLLOUT_TP=4 TEXT_ENCODER_TP=4 ACTOR_SP=1 \
+bash examples/flowgrpo_trainer/minimax_h3/run_minimax_h3_t2va_lora_v1_npu.sh
+```
+
+The V1 launcher defaults to 16 NPUs. The V0 VeOmni launcher
+(`run_minimax_h3_t2va_lora_npu.sh`) defaults to eight. Set `NUM_GPUS` explicitly
+to use the same topology with either trainer.
 
 For two eight-device FSDP groups on a 16-NPU node, explicitly enable the
 FSDP2 CPU-offload policy:
@@ -398,6 +416,7 @@ Common environment overrides are:
 | `WORKSPACE` | Base directory for default model and data paths |
 | `MODEL_PATH` | Official `MiniMax-H3/FL2VA` rollout pipeline |
 | `ACTOR_CONFIG_PATH` | Root Diffusers Actor weights and config directory |
+| `VEOMNI_ACTOR_CONFIG_PATH` | Native VeOmni T2VA Actor configuration on Ascend, default `$MODEL_PATH/transformer` |
 | `DATA_DIR` | Directory containing `train.parquet` and `test.parquet` |
 | `OUTPUT_DIR` | Checkpoint and log root |
 | `NUM_GPUS` | Devices per node |

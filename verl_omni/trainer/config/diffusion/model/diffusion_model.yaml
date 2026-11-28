@@ -13,6 +13,9 @@ path: ~/models/Qwen/Qwen-Image
 # RL algorithm name
 algorithm: flow_grpo
 
+# Actor strategy used to validate the model's LoRA targets.
+training_backend: ${oc.select:actor_rollout_ref.actor.strategy,null}
+
 # path to the huggingface tokenizer. In case it is not the same as path
 tokenizer_path: null
 

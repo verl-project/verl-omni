@@ -5,7 +5,7 @@
 #   parquet load -> vllm_omni rollout -> jpeg_compressibility rule reward ->
 #   flow_grpo -> VeOmni LoRA actor update -> adapter weight sync.
 #
-# Requires: veomni>=0.1.12 (veomni.lora), tiny Qwen-Image at
+# Requires VeOmni 0.1.14 (see docs/start/engine_backends.md) and tiny Qwen-Image at
 #   ~/models/tiny-random/Qwen-Image (hf: tiny-random/Qwen-Image)
 set -euo pipefail
 
