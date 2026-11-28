@@ -26,6 +26,7 @@ import yaml
 CHECKER = Path(__file__).with_name("check_ci_policy.py").resolve()
 WORKFLOWS = CHECKER.parents[2] / ".github" / "workflows"
 LINT_WORKFLOW = "pr-lint.yml"
+AUTO_LINT_LABEL = "auto-lint"
 SANITY_CHECK = "tests/special_sanity/check_existing.py"
 WORKFLOW = ".github/workflows/sanity.yml"
 RUFF_CONFIG = '[project]\nname = "example"\n[tool.ruff.lint]\nselect = ["F"]\n'
@@ -137,10 +138,25 @@ def _workflow(name: str) -> dict:
     return yaml.load((WORKFLOWS / name).read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
 
 
-def test_lint_runs_on_every_pr() -> None:
+def test_lint_uses_persistent_auto_lint_label() -> None:
     lint = _workflow(LINT_WORKFLOW)
-    assert lint["on"]["pull_request"] == ""
-    assert "if" not in lint["jobs"]["lint"]
+    assert set(lint["on"]["pull_request"]["types"]) == {"opened", "labeled", "synchronize", "reopened"}
+    bypass_input = lint["on"]["workflow_call"]["inputs"]["bypass_label_gate"]
+    assert bypass_input["type"] == "boolean"
+    assert bypass_input["default"] == "false"
+    assert "concurrency" not in lint
+
+    lint_job = lint["jobs"]["lint"]
+    assert "concurrency" in lint_job
+    lint_if = lint_job["if"]
+    assert "inputs.bypass_label_gate == true" in lint_if
+    assert f"'{AUTO_LINT_LABEL}'" in lint_if
+    assert f"github.event.label.name == '{AUTO_LINT_LABEL}'" in lint_if
+
+    drop_labels = _workflow("drop-ci-labels.yml")
+    drop_run = drop_labels["jobs"]["drop_label"]["steps"][0]["run"]
+    assert 'select(contains("ci"))' in drop_run
+    assert "ci" not in AUTO_LINT_LABEL
 
 
 def test_lint_workflow_collects_every_checker_regression_module() -> None:
@@ -184,6 +200,7 @@ def test_pr_lint_checker_is_wired_into_local_and_trusted_ci_entries() -> None:
 def test_accelerator_jobs_wait_for_lint(workflow: str, accelerator_job: str) -> None:
     jobs = _workflow(workflow)["jobs"]
     assert jobs["pr_lint"]["uses"] == f"./.github/workflows/{LINT_WORKFLOW}"
+    assert jobs["pr_lint"]["with"]["bypass_label_gate"] == "true"
     assert "pr_lint" in jobs[accelerator_job]["needs"]
     assert "needs.pr_lint.result == 'success'" in jobs[accelerator_job]["if"]
 
@@ -214,11 +231,16 @@ def test_ci_workflow_safety_and_coverage_guards() -> None:
     assert 'exit "$status"' in lint_hooks
 
     protect = _workflow("protect-ci-checks.yml")
-    assert "concurrency" in protect
-    assert "edited" in protect["on"]["pull_request_target"]["types"]
-    checkout = protect["jobs"]["protect-ci-checks"]["steps"][0]
+    assert "concurrency" not in protect
+    protect_types = set(protect["on"]["pull_request_target"]["types"])
+    assert {"opened", "labeled", "synchronize", "reopened", "edited"}.issubset(protect_types)
+    protect_job = protect["jobs"]["protect-ci-checks"]
+    assert "concurrency" in protect_job
+    assert f"'{AUTO_LINT_LABEL}'" in protect_job["if"]
+    assert "'ci'" in protect_job["if"]
+    checkout = protect_job["steps"][0]
     assert checkout["with"]["ref"] == "${{ github.sha }}"
-    protect_run = protect["jobs"]["protect-ci-checks"]["steps"][2]["run"]
+    protect_run = protect_job["steps"][2]["run"]
     assert "status=0" in protect_run
     assert 'exit "$status"' in protect_run
 

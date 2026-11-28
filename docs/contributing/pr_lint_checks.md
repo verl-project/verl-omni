@@ -2,12 +2,17 @@
 
 Last updated: 11/27/2026.
 
-Every pull request runs the `Lint` workflow (`.github/workflows/pr-lint.yml`)
-without requiring a CI label, and labeled GPU/NPU workflows wait for it before
-allocating accelerator runners. It runs repository Ruff lint/format, fast
-sanity hooks (`check-license`, `validate-structure`, `check-device-api-usage`,
-`check-dataproto-usage`, `check-naming-conventions`, `compileall`), CI-policy
-enforcement (`check_ci_policy.py`), and incremental `check-pr-lint`.
+Apply the persistent `auto-lint` label to run the `Lint` workflow
+(`.github/workflows/pr-lint.yml`) and `Protect CI checks`
+(`.github/workflows/protect-ci-checks.yml`) on a pull request and re-run them
+automatically on every subsequent push (`drop-ci-labels.yml` only strips labels
+containing `ci`, so `auto-lint` stays attached). Labeled GPU and NPU workflows
+also call `pr-lint.yml` directly (bypassing the `auto-lint` label gate) before
+allocating accelerator runners. The workflow runs repository Ruff lint/format,
+fast sanity hooks (`check-license`, `validate-structure`,
+`check-device-api-usage`, `check-dataproto-usage`, `check-naming-conventions`,
+`compileall`), CI-policy enforcement (`check_ci_policy.py`), and incremental
+`check-pr-lint`.
 
 ## Running Locally
 

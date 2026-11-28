@@ -3,17 +3,22 @@ name: Protect CI checks
 on:
   pull_request_target:
     branches: [main, 'v0.*']
-    types: [opened, synchronize, reopened, edited]
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
+    types: [opened, labeled, synchronize, reopened, edited]
 
 permissions:
   contents: read
 
 jobs:
   protect-ci-checks:
+    if: >-
+      (contains(github.event.pull_request.labels.*.name, 'auto-lint') ||
+       contains(join(github.event.pull_request.labels.*.name, ','), 'ci')) &&
+      (github.event.action != 'labeled' ||
+       github.event.label.name == 'auto-lint' ||
+       contains(github.event.label.name, 'ci'))
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
