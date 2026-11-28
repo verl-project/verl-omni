@@ -661,6 +661,16 @@ class FSDPModelMerger(BaseModelMerger):
         has_lora, lora_only = detect_lora_checkpoint(rank_paths[0])
         if self.config.fuse_lora and not has_lora:
             raise ValueError("--fuse-lora requires a LoRA checkpoint")
+        lora_metadata_path = source / LORA_METADATA_NAME
+        lora_metadata = read_json(lora_metadata_path) if self.config.fuse_lora or lora_only else {}
+        # Preserve export compatibility for legacy LoRA-only checkpoints with no marker.
+        base_weights_modified = lora_metadata.get("base_weights_modified", False)
+        if lora_only and base_weights_modified is not False:
+            reason = "modified base weights" if base_weights_modified is True else "unknown base-weight provenance"
+            raise ValueError(
+                f"Cannot export a LoRA-only checkpoint with {reason}. "
+                "Export a full checkpoint saved with actor_rollout_ref.actor.checkpoint.save_lora_only=false."
+            )
         if lora_only and not self.config.fuse_lora:
             target = Path(self.config.target_dir).resolve()
             with publication_directory(target) as staging:
@@ -689,8 +699,7 @@ class FSDPModelMerger(BaseModelMerger):
             raise ValueError("Actor config and target directories must not overlap")
         if (source / "merge_source.json").exists():
             raise ValueError("Save-time merge_source schemas are not supported by this initial exporter")
-        lora_metadata_path = source / LORA_METADATA_NAME
-        lora_metadata = read_json(lora_metadata_path) if self.config.fuse_lora else None
+        fusion_metadata = lora_metadata if self.config.fuse_lora else None
         source_files = rank_paths + [source / "fsdp_config.json"]
         if has_lora:
             source_files.append(lora_metadata_path)
@@ -732,7 +741,7 @@ class FSDPModelMerger(BaseModelMerger):
                 source_config_path, model_root
             )
             raw_weights = self.iter_h3_native_weights(
-                source_shapes, source_config, native_mapping, native_shapes, lora_metadata
+                source_shapes, source_config, native_mapping, native_shapes, fusion_metadata
             )
             trained_weight_files = set(native_mapping.values())
             native_weight_name = "model.safetensors"
@@ -741,7 +750,7 @@ class FSDPModelMerger(BaseModelMerger):
                 _check_pipeline(base, architecture, component)
             source_shapes, keep_fp32 = _transformer_schema(model_root, source_config_path, architecture)
             base_mapping = weight_files(model_root)
-            raw_weights = self.iter_merged_weights(source_shapes, lora_metadata, base_mapping)
+            raw_weights = self.iter_merged_weights(source_shapes, fusion_metadata, base_mapping)
             trained_weight_files = set(base_mapping.values())
 
         for suffix in ("diffusion_pytorch_model.safetensors.index.json", "model.safetensors.index.json"):

@@ -32,7 +32,6 @@ from torch.distributed.fsdp.api import FullStateDictConfig, ShardedStateDictConf
 from torch.distributed.tensor import DTensor
 from verl.trainer.config import CheckpointConfig
 from verl.utils import tensordict_utils as tu
-from verl.utils.checkpoint.fsdp_checkpoint_manager import FSDPCheckpointManager
 from verl.utils.debug import log_gpu_memory_usage
 from verl.utils.device import get_device_id, get_device_name
 from verl.utils.fsdp_utils import (
@@ -72,6 +71,7 @@ from verl_omni.utils.config import resolve_lora_config
 from verl_omni.utils.diffusion_compile import _maybe_compile_repeated_blocks
 from verl_omni.utils.fsdp_utils import apply_fsdp2
 from verl_omni.workers.config import DiffusionModelConfig
+from verl_omni.workers.engine.fsdp.checkpoint import DiffusersFSDPCheckpointManager
 from verl_omni.workers.engine.lora_adapter_mixin import LoRAAdapterMixin
 from verl_omni.workers.engine.lora_export import export_lora_for_sync
 
@@ -194,7 +194,7 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
         # This is used to import external_lib into the huggingface systems
         self._build_model_optimizer()
 
-        self.checkpoint_manager = FSDPCheckpointManager(
+        self.checkpoint_manager = DiffusersFSDPCheckpointManager(
             model=self.module,
             optimizer=self.optimizer,
             lr_scheduler=self.lr_scheduler,
