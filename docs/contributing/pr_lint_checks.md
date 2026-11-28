@@ -1,13 +1,14 @@
 # PR Lint Checks
 
-Last updated: 11/27/2026.
+Last updated: 11/28/2026.
 
-Apply the persistent `auto-lint` label to run the `Lint` workflow
+Apply the `ready-for-ci` label to run the `Lint` workflow
 (`.github/workflows/pr-lint.yml`) and `Protect CI checks`
-(`.github/workflows/protect-ci-checks.yml`) on a pull request and re-run them
-automatically on every subsequent push (`drop-ci-labels.yml` only strips labels
-containing `ci`, so `auto-lint` stays attached). Labeled GPU and NPU workflows
-also call `pr-lint.yml` directly (bypassing the `auto-lint` label gate) before
+(`.github/workflows/protect-ci-checks.yml`) as part of full PR CI (single-use;
+`drop-ci-labels.yml` removes labels containing `ci` on push), or apply the
+persistent `auto-lint` label to run them and re-run them automatically on every
+subsequent push (`auto-lint` stays attached across pushes). Labeled GPU and NPU
+workflows also call `pr-lint.yml` directly (bypassing the label gate) before
 allocating accelerator runners. The workflow runs repository Ruff lint/format,
 fast sanity hooks (`check-license`, `validate-structure`,
 `check-device-api-usage`, `check-dataproto-usage`, `check-naming-conventions`,

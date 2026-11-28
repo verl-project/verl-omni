@@ -18,8 +18,11 @@ jobs:
   lint:
     if: >-
       inputs.bypass_label_gate == true ||
-      (contains(github.event.pull_request.labels.*.name, 'auto-lint') &&
-       (github.event.action != 'labeled' || github.event.label.name == 'auto-lint'))
+      (github.event.action == 'labeled' &&
+       (github.event.label.name == 'auto-lint' ||
+        github.event.label.name == 'ready-for-ci')) ||
+      (github.event.action != 'labeled' &&
+       contains(github.event.pull_request.labels.*.name, 'auto-lint'))
     concurrency:
       group: pr-lint-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
       cancel-in-progress: true
