@@ -37,6 +37,7 @@ from verl_omni.workers.config import OmniModelConfig
 from verl_omni.workers.rollout.vllm_rollout.process_hidden_states import (
     RETURN_FLAG_KEY,
     extract_hidden_states,
+    hidden_states_transport,
 )
 from verl_omni.workers.rollout.vllm_rollout.vllm_omni_strategy_base import OmniStrategyBase
 
@@ -448,6 +449,15 @@ class ARStrategy(OmniStrategyBase):
         if getattr(self.server.config, "full_determinism", False):
             sampling_params.setdefault("seed", getattr(self.server.config, "seed", 42))
         return_hidden = bool(sampling_params.pop("return_hidden_states", False))
+        if return_hidden and hidden_states_transport() is None:
+            # Fail here, with the cause, instead of later in the trainer with
+            # "Teacher returned no teacher_hidden_states".
+            raise RuntimeError(
+                "return_hidden_states was requested, but the installed vllm-omni cannot return teacher hidden "
+                "states: it has neither the native per-request opt-in (OmniEngineCoreRequest.return_hidden_states "
+                "on its worker-v2 AR runner) nor the V1 AR runners that verl_omni patches. Use a vllm-omni build "
+                "with the native opt-in, or the revision verl_omni pins."
+            )
         policy_params = SamplingParams(max_tokens=max_tokens, **sampling_params)
         if self._rollout_output_modalities is not None:
             default_stage_sampling_params = self.server.engine.default_sampling_params_list

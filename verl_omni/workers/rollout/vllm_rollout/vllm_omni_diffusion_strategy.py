@@ -51,17 +51,23 @@ _NPU_WORKER_EXTENSION = "verl_omni.workers.rollout.vllm_rollout.npu_utils.vLLMOm
 
 
 def _diffusion_ingress_allowed_fields() -> frozenset[str]:
-    """Mirror vllm-omni's diffusion ingress allowlist.
+    """vllm-omni's diffusion ingress allowlist.
 
     The ingress validator rejects every field without an owner, and LLM-only
-    OmniEngineArgs fields have none on diffusion stages — this mirror is what
-    strips them. TODO (mike): drop the hand-copy once upstream exposes the
-    diffusion ingress allowlist as a public getter.
+    OmniEngineArgs fields have none on diffusion stages — this set is what
+    strips them. vllm-omni builds that expose the validator's allowlist as the
+    public ``diffusion_ingress_allowed_fields`` getter are asked directly; the
+    hand-copy stays for the pinned revision, which has no such getter.
     """
+    import vllm_omni.config.omni_config as omni_config_mod
+
+    public_getter = getattr(omni_config_mod, "diffusion_ingress_allowed_fields", None)
+    if callable(public_getter):
+        return frozenset(public_getter())
+
     from dataclasses import fields
     from typing import Any, cast
 
-    import vllm_omni.config.omni_config as omni_config_mod
     from vllm.entrypoints.common.cli_args import FrontendArgs
     from vllm_omni.config import VllmOmniOrchestratorConfig
     from vllm_omni.diffusion.data import OmniDiffusionConfig
