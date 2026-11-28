@@ -74,7 +74,7 @@ from verl_omni.workers.config import (
     OmniModelConfig,
 )
 from verl_omni.workers.config.diffusion import DiffusionDistillationTeacherModelConfig
-from verl_omni.workers.config.omni.distillation import HIDDEN_STATE_LOSS_MODES
+from verl_omni.workers.config.omni.distillation import HIDDEN_STATE_LOSS_MODES, is_self_distillation_enabled
 from verl_omni.workers.diffusion_tq import materialize_diffusion_trajectory
 from verl_omni.workers.lora_sync import SyncExport, resolve_lora_sync_plan
 from verl_omni.workers.rollout.base import get_rollout_sequence_parallel_size
@@ -651,6 +651,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         self.teachers: dict[str, TrainingWorker] = {}
         self.rollout: BaseRollout = None
         self._trajectory_materializer: Callable[[TensorDict], TensorDict] | None = None
+        self._ema_teacher_state = None
+        self._ema_live_backups: dict[str, torch.Tensor] | None = None
         assert self.role in ["actor", "rollout", "ref", "teacher", "actor_rollout", "actor_rollout_ref"]
         self._is_actor = self.role in ["actor", "actor_rollout", "actor_rollout_ref"]
         self._is_rollout = self.role in ["rollout", "actor_rollout", "actor_rollout_ref"]
@@ -832,7 +834,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 self.loss_fn = partial(omni_loss, config=actor_config)
             elif self.distillation_enabled:
                 loss_mode = distillation_config.distillation_loss.loss_mode
-                if loss_mode in HIDDEN_STATE_LOSS_MODES:
+                if loss_mode in HIDDEN_STATE_LOSS_MODES or is_self_distillation_enabled(distillation_config):
                     from verl_omni.trainer.distillation.losses import omni_distillation_ppo_loss
 
                     self.loss_fn = partial(
@@ -849,6 +851,21 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             self.actor = TrainingWorker(config=actor_training_config)
             self.actor.reset()
             self.actor.set_loss_fn(self.loss_fn)
+            if (
+                distillation_config is not None
+                and is_self_distillation_enabled(distillation_config)
+                and distillation_config.self_teacher.teacher_source == "ema"
+            ):
+                from verl_omni.trainer.distillation.self_distillation import EMATeacherState
+
+                self._ema_teacher_state = EMATeacherState(decay=distillation_config.self_teacher.ema_decay)
+                actor_module = self._get_actor_ema_module()
+                if actor_module is None:
+                    raise RuntimeError(
+                        "distillation.self_teacher.teacher_source='ema' requires the actor engine to expose "
+                        "a torch.nn.Module (or sequence of nn.Module chunks), but none was found."
+                    )
+                self._ema_teacher_state.initialize(actor_module)
             self.set_dispatch_collect(mesh_name="actor", **self.actor.get_dispatch_collect())
 
         # 2.5 build frozen teachers for diffusion on-policy distillation
@@ -1008,6 +1025,69 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         }
         self._teacher_key_vocab: list[str] = sorted(teacher_unembeds.keys())
 
+    def _get_actor_ema_module(self) -> torch.nn.Module | None:
+        """Return the underlying actor ``nn.Module`` tracked by ``EMATeacherState``."""
+        engine = getattr(self.actor, "engine", None)
+        module = getattr(engine, "module", None)
+        if isinstance(module, torch.nn.Module):
+            return module
+        if isinstance(module, list | tuple) and module and all(isinstance(chunk, torch.nn.Module) for chunk in module):
+            return torch.nn.ModuleList(module)
+        return None
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def swap_ema_weights(self, use_ema: bool) -> bool:
+        """Swap EMA self-teacher weights into or out of the actor module for rollout sync.
+
+        When ``use_ema=True``, live actor parameters are backed up on CPU and
+        replaced in place by the EMA shadow weights so the standard checkpoint
+        engine syncs EMA weights to rollout replicas. When ``use_ema=False``,
+        the backed-up live parameters are restored in place.
+        """
+        assert "actor" in self.role, "swap_ema_weights is only valid for actor workers"
+        if self._ema_teacher_state is None:
+            return False
+        actor_module = self._get_actor_ema_module()
+        if actor_module is None:
+            return False
+
+        if use_ema:
+            if self._ema_live_backups is not None:
+                # Already swapped to EMA; keep existing live backup intact.
+                return True
+            if not getattr(self._ema_teacher_state, "_initialized", bool(self._ema_teacher_state.shadow)):
+                self._ema_teacher_state.initialize(actor_module)
+            backups: dict[str, torch.Tensor] = {}
+            named_params = dict(actor_module.named_parameters())
+            try:
+                with torch.no_grad():
+                    for name, shadow_tensor in self._ema_teacher_state.shadow.items():
+                        param = named_params.get(name)
+                        if param is None:
+                            continue
+                        backups[name] = param.data.detach().to(device="cpu", copy=True)
+                        param.data.copy_(shadow_tensor.to(device=param.device, dtype=param.dtype))
+            except Exception:
+                with torch.no_grad():
+                    for name, backup in backups.items():
+                        param = named_params[name]
+                        param.data.copy_(backup.to(device=param.device, dtype=param.dtype))
+                raise
+            self._ema_live_backups = backups
+            return True
+
+        if self._ema_live_backups is None:
+            return False
+        backups = self._ema_live_backups
+        named_params = dict(actor_module.named_parameters())
+        with torch.no_grad():
+            for name, backup in backups.items():
+                param = named_params.get(name)
+                if param is not None:
+                    param.data.copy_(backup.to(device=param.device, dtype=param.dtype))
+        self._ema_live_backups = None
+        return True
+
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
     @DistProfiler.annotate(color="red", role="actor_update", scheduled=True)
     @_with_materialized_trajectory
@@ -1022,6 +1102,11 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             data["teacher_unembeds"] = NonTensorData(self._teacher_unembeds)
             data["teacher_key_to_id"] = NonTensorData({key: i for i, key in enumerate(self._teacher_key_vocab)})
         output = self.actor.train_mini_batch(data=data)
+        ema_state = getattr(self, "_ema_teacher_state", None)
+        if ema_state is not None:
+            actor_module = self._get_actor_ema_module()
+            if actor_module is not None:
+                ema_state.update(actor_module)
         return output.cpu() if output is not None else None
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
@@ -1146,15 +1231,38 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             timings["get_per_tensor_param"] = time.perf_counter() - gather_start
         return lora_weights, peft_config
 
+    def _ema_checkpoint_path(self, local_path: str) -> str:
+        rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+        return os.path.join(local_path, f"ema_teacher_state_rank_{rank}.pt")
+
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def load_checkpoint(self, local_path, hdfs_path=None, del_local_after_load=False):
         assert "actor" in self.role, "load_checkpoint only support actor role"
         self.actor.load_checkpoint(local_path, hdfs_path, del_local_after_load)
+        ema_state = getattr(self, "_ema_teacher_state", None)
+        if ema_state is not None:
+            ema_path = self._ema_checkpoint_path(local_path)
+            if os.path.isfile(ema_path):
+                saved = torch.load(ema_path, map_location="cpu", weights_only=True)
+                ema_state.shadow = dict(saved.get("shadow", {}))
+                ema_state.num_updates = int(saved.get("num_updates", 0))
+                ema_state._initialized = True
+            else:
+                actor_module = self._get_actor_ema_module()
+                if actor_module is not None:
+                    ema_state.initialize(actor_module)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def save_checkpoint(self, local_path, hdfs_path=None, global_step=0, max_ckpt_to_keep=None):
         assert "actor" in self.role, "save_checkpoint only support actor role"
         self.actor.save_checkpoint(local_path, hdfs_path, global_step, max_ckpt_to_keep)
+        ema_state = getattr(self, "_ema_teacher_state", None)
+        if ema_state is not None and ema_state.shadow:
+            os.makedirs(local_path, exist_ok=True)
+            torch.save(
+                {"shadow": ema_state.shadow, "num_updates": ema_state.num_updates},
+                self._ema_checkpoint_path(local_path),
+            )
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     async def update_weights(self, global_steps: int = None, mode: str = "auto"):

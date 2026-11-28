@@ -11,3 +11,32 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Omni distillation helpers (hidden-state nitrobrew and multimodal SDPO/OPSD self-distillation)."""
+
+from verl_omni.trainer.distillation.self_distillation import (
+    EMATeacherState,
+    RepromptedTeacherSample,
+    TeacherContextDecision,
+    align_teacher_sequence_outputs,
+    build_multimodal_teacher_prompt,
+    build_neutral_teacher_outputs,
+    extract_sequence_rewards,
+    format_privileged_context,
+    reprompt_multimodal_messages,
+    select_teacher_contexts,
+    summarize_self_distillation_metrics,
+)
+
+__all__ = [
+    "EMATeacherState",
+    "RepromptedTeacherSample",
+    "TeacherContextDecision",
+    "align_teacher_sequence_outputs",
+    "build_multimodal_teacher_prompt",
+    "build_neutral_teacher_outputs",
+    "extract_sequence_rewards",
+    "format_privileged_context",
+    "reprompt_multimodal_messages",
+    "select_teacher_contexts",
+    "summarize_self_distillation_metrics",
+]

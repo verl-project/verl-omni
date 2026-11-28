@@ -51,6 +51,7 @@ from verl_omni.utils.config import (
 )
 from verl_omni.utils.fs import resolve_model_local_dir
 from verl_omni.utils.rl_insight import enable_rl_insight
+from verl_omni.workers.config.omni.distillation import is_self_distillation_enabled
 from verl_omni.workers.config.reward import (
     normalize_reward_config,
     reward_pool_is_separate,
@@ -351,6 +352,44 @@ def uses_v1_trainer(config) -> bool:
     return not (sample_source == "offline" and trainer_type == "direct_preference")
 
 
+def _build_self_distillation_task_runner_v1(base_task_runner_cls):
+    """Build a ``TaskRunnerV1`` actor class that skips external teacher lookup in agent loops."""
+    ray_meta = getattr(base_task_runner_cls, "__ray_metadata__", None)
+    base_cls = getattr(ray_meta, "modified_class", base_task_runner_cls)
+    if not isinstance(base_cls, type):
+        raise TypeError(
+            "Self-distillation requires task_runner_class to be a class or @ray.remote ActorClass "
+            f"(not an .options(...) wrapper), got {type(base_task_runner_cls).__name__}."
+        )
+    if getattr(base_cls, "_omni_self_distillation_wrapped", False):
+        return base_task_runner_cls
+
+    class OmniSelfDistillationTaskRunnerV1(base_cls):
+        """``TaskRunnerV1`` subclass that keeps agent loops teacher-free for self-distillation."""
+
+        _omni_self_distillation_wrapped = True
+
+        def init_agent_loop_manager(self):
+            if is_self_distillation_enabled(self.config.get("distillation")):
+                agent_config = OmegaConf.create(OmegaConf.to_container(self.config, resolve=False))
+                with open_dict(agent_config):
+                    agent_config.distillation.enabled = False
+                orig_config = self.config
+                self.config = agent_config
+                try:
+                    return super().init_agent_loop_manager()
+                finally:
+                    self.config = orig_config
+            return super().init_agent_loop_manager()
+
+    if ray_meta is not None:
+        default_options = dict(getattr(base_task_runner_cls, "_default_options", None) or {})
+        if default_options:
+            return ray.remote(**default_options)(OmniSelfDistillationTaskRunnerV1)
+        return ray.remote(OmniSelfDistillationTaskRunnerV1)
+    return ray.remote(num_cpus=1)(OmniSelfDistillationTaskRunnerV1)
+
+
 def run_omni(config, task_runner_class=None) -> None:
     """Initialize Ray and run distributed Omni training."""
     config = normalize_reward_config(config)
@@ -361,9 +400,10 @@ def run_omni(config, task_runner_class=None) -> None:
         from verl.trainer.main_ppo import TaskRunnerV1, run_ppo
 
         config.trainer.use_v1 = True
-        if task_runner_class is None:
-            task_runner_class = TaskRunnerV1
-        run_ppo(config, task_runner_class=task_runner_class)
+        resolved_runner = task_runner_class if task_runner_class is not None else TaskRunnerV1
+        if is_self_distillation_enabled(config.get("distillation")):
+            resolved_runner = _build_self_distillation_task_runner_v1(resolved_runner)
+        run_ppo(config, task_runner_class=resolved_runner)
         return
 
     if task_runner_class is None:

@@ -23,10 +23,17 @@ Covers:
 import pytest
 from hydra import compose, initialize_config_module
 from hydra.errors import InstantiationException
+from omegaconf import OmegaConf
 from verl.utils.config import omega_conf_to_dataclass
 from verl.workers.config import DistillationConfig
 
-from verl_omni.workers.config.omni.distillation import OmniDistillationTeacherModelConfig
+from verl_omni.workers.config.omni.distillation import (
+    OmniDistillationConfig,
+    OmniDistillationTeacherModelConfig,
+    SelfDistillationConfig,
+    is_self_distillation_enabled,
+    validate_self_teacher_rollout_topk,
+)
 
 OPD_OVERRIDES = [
     "distillation.enabled=true",
@@ -83,11 +90,12 @@ class TestOmniDistillationTeacherConfig:
 
 class TestOmniDistillationComposition:
     def test_yaml_override_materializes_omni_teacher(self):
-        # The _target_ override in omni_trainer.yaml routes teacher materialization
-        # through the omni subclass, so the vllm_omni engine is accepted.
+        # The _target_ override in omni_trainer.yaml routes top-level and teacher
+        # materialization through the omni subclasses, so vllm_omni is accepted.
         # __post_init__ already resolved the single-teacher pool math.
         obj: DistillationConfig = _materialize_distillation(OPD_OVERRIDES)
-        assert type(obj) is DistillationConfig
+        assert isinstance(obj, OmniDistillationConfig)
+        assert isinstance(obj, DistillationConfig)
 
         assert set(obj.teacher_models.keys()) == {"default"}
         tm = obj.teacher_models["default"]
@@ -170,3 +178,101 @@ class TestOmniHiddenStateLossConfig:
         obj: DistillationConfig = _materialize_distillation(overrides)
         assert isinstance(obj.distillation_loss, OmniDistillationLossConfig)
         assert obj.distillation_loss.kd_temperature == 2.0
+
+
+SDPO_OVERRIDES = [
+    "distillation.enabled=true",
+    "distillation.nnodes=0",
+    "distillation.n_gpus_per_node=0",
+    "distillation.self_teacher.enabled=true",
+    "distillation.self_teacher.mode=sdpo",
+    "distillation.distillation_loss.loss_mode=kl",
+    "distillation.distillation_loss.topk=32",
+    "distillation.distillation_loss.use_policy_gradient=true",
+]
+
+
+class TestSelfDistillationConfig:
+    def test_self_distillation_config_validation(self):
+        cfg = SelfDistillationConfig(enabled=True, mode="opsd", teacher_source="ema", ema_decay=0.995)
+        assert cfg.enabled is True
+        assert cfg.mode == "opsd"
+
+        with pytest.raises(ValueError, match="self_teacher.mode"):
+            SelfDistillationConfig(enabled=True, mode="invalid")
+        with pytest.raises(ValueError, match="self_teacher.teacher_source"):
+            SelfDistillationConfig(enabled=True, teacher_source="external")
+        with pytest.raises(ValueError, match="self_teacher.ema_decay"):
+            SelfDistillationConfig(enabled=True, ema_decay=1.0)
+        with pytest.raises(ValueError, match="max_demonstration_chars"):
+            SelfDistillationConfig(enabled=True, max_demonstration_chars=0)
+        with pytest.raises(ValueError, match="max_feedback_chars"):
+            SelfDistillationConfig(enabled=True, max_feedback_chars=-1)
+        with pytest.raises(ValueError, match="max_reprompt_tokens"):
+            SelfDistillationConfig(enabled=True, max_reprompt_tokens=0)
+        with pytest.raises(ValueError, match="placeholder"):
+            SelfDistillationConfig(enabled=True, reprompt_template="missing placeholder")
+
+    def test_hydra_composition_single_pool_self_distillation(self):
+        obj = _materialize_distillation(SDPO_OVERRIDES)
+        assert isinstance(obj, OmniDistillationConfig)
+        assert obj.enabled is True
+        assert obj.nnodes == 0
+        assert obj.n_gpus_per_node == 0
+        assert obj.self_teacher.enabled is True
+        assert obj.self_teacher.mode == "sdpo"
+        assert obj.teacher_models == {}
+        assert is_self_distillation_enabled(obj) is True
+
+    def test_self_distillation_rejects_disabled_parent(self):
+        with pytest.raises(InstantiationException, match="distillation.enabled must be True"):
+            _materialize_distillation(
+                [
+                    "distillation.enabled=false",
+                    "distillation.self_teacher.enabled=true",
+                ]
+            )
+
+    def test_self_distillation_rejects_nonzero_teacher_pool(self):
+        with pytest.raises(InstantiationException, match="does not allocate a separate teacher pool"):
+            _materialize_distillation(SDPO_OVERRIDES + ["distillation.n_gpus_per_node=4"])
+
+    def test_self_distillation_rejects_hidden_state_loss(self):
+        with pytest.raises(InstantiationException, match="does not support hidden-state"):
+            _materialize_distillation(
+                SDPO_OVERRIDES
+                + [
+                    "distillation.distillation_loss.loss_mode=nitrobrew",
+                    "distillation.distillation_loss.use_policy_gradient=false",
+                ]
+            )
+
+    def test_validate_self_teacher_rollout_topk(self):
+        topk_obj = _materialize_distillation(
+            SDPO_OVERRIDES
+            + [
+                "distillation.distillation_loss.loss_mode=forward_kl_topk",
+                "distillation.distillation_loss.use_policy_gradient=false",
+            ]
+        )
+        rollout_cfg = OmegaConf.create({"name": "vllm_omni", "engine_kwargs": {}})
+        OmegaConf.set_struct(rollout_cfg, True)
+        validate_self_teacher_rollout_topk(rollout_cfg, topk_obj)
+        assert rollout_cfg.engine_kwargs["vllm_omni"]["max_logprobs"] == 32
+
+        bad_rollout = OmegaConf.create({"name": "vllm_omni", "engine_kwargs": {"vllm_omni": {"max_logprobs": 16}}})
+        with pytest.raises(ValueError, match="max_logprobs"):
+            validate_self_teacher_rollout_topk(bad_rollout, topk_obj)
+
+        # Estimator mode (use_topk=False) must not touch max_logprobs.
+        est_obj = _materialize_distillation(SDPO_OVERRIDES)
+        untouched = OmegaConf.create({"name": "vllm_omni", "engine_kwargs": {}})
+        validate_self_teacher_rollout_topk(untouched, est_obj)
+        assert "vllm_omni" not in untouched.engine_kwargs
+
+    def test_is_self_distillation_enabled_variants(self):
+        assert is_self_distillation_enabled(None) is False
+        assert is_self_distillation_enabled({"enabled": True}) is False
+        assert is_self_distillation_enabled({"enabled": False, "self_teacher": {"enabled": True}}) is False
+        assert is_self_distillation_enabled({"enabled": True, "self_teacher": {"enabled": False}}) is False
+        assert is_self_distillation_enabled({"enabled": True, "self_teacher": {"enabled": True}}) is True
