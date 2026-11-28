@@ -15,6 +15,7 @@
 
 import os
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import pytest
 
@@ -74,7 +75,13 @@ def npu_reward_checkpoint(monkeypatch, npu_reward_inspection_cache):
     return requested, model_path
 
 
-def test_standalone_reward_engine_npu(npu_reward_checkpoint):
+@pytest.fixture
+def standalone_rendezvous_dir():
+    with TemporaryDirectory(prefix="verl-gloo-", dir="/tmp") as directory:
+        yield directory
+
+
+def test_standalone_reward_engine_npu(npu_reward_checkpoint, standalone_rendezvous_dir):
     """Start dedicated TP=2 reward replicas and score three synthetic images.
 
     Check every /v1/models endpoint, finite (3, 1) OCR scores in [0, 1], and one
@@ -138,13 +145,14 @@ def test_standalone_reward_engine_npu(npu_reward_checkpoint):
             "ASCEND_RT_VISIBLE_DEVICES",
             "ASCEND_VISIBLE_DEVICES",
             "VLLM_CACHE_ROOT",
-            "PYTHONPATH",
             "HCCL_NPU_SOCKET_PORT_RANGE",
         )
         if key in os.environ
     }
     env_vars.update(
         {
+            "VERL_SMOKE_FILESTORE_DIR": standalone_rendezvous_dir,
+            "PYTHONPATH": os.pathsep.join(filter(None, (str(repo_root), os.getenv("PYTHONPATH")))),
             "DEVICE_NAME": "npu",
             "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES": os.environ.get(
                 "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES", "1"
@@ -159,7 +167,10 @@ def test_standalone_reward_engine_npu(npu_reward_checkpoint):
         address="local",
         num_cpus=min(os.cpu_count() or 16, 32),
         include_dashboard=False,
-        runtime_env={"env_vars": env_vars},
+        runtime_env={
+            "env_vars": env_vars,
+            "worker_process_setup_hook": "tests.smoke_rendezvous.configure_gloo_file_store",
+        },
     )
     try:
         assert ray.cluster_resources().get("NPU", 0) >= requested
