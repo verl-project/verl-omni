@@ -1498,9 +1498,11 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         self._submit_batch_to_rollout(batch)
 
     @SkipManager.annotate(role="reward")
-    def _compute_reward_colocate(self, data: DataProto) -> DataProto:
+    def _compute_reward_colocate(self, data: DataProto, *, on_release=None) -> DataProto:
         """Compute reward score with a colocated reward model on a DataProto batch."""
         assert self.reward_loop_manager is not None, "RewardLoopManager is None"
+        if on_release is not None:
+            return self.reward_loop_manager.compute_rm_score(data, on_release=on_release)
         return self.reward_loop_manager.compute_rm_score(data)
 
     @cached_property
@@ -1681,6 +1683,12 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             actor_output["perf/mfu/actor"] = actor_mfu
         return DataProto.from_single_dict(data={}, meta_info={"metrics": actor_output})
 
+    def _score_validation_batch(self, data: DataProto) -> DataProto:
+        self.checkpoint_manager.sleep_replicas()
+        data = data.union(self._compute_reward_colocate(data))
+        self.checkpoint_manager.update_weights(self.global_steps)
+        return data
+
     def _validate(self) -> dict:
         """Validation via TransferQueue: dispatch, sample, convert, reward, dump media."""
         sample_inputs: list[str] = []
@@ -1735,9 +1743,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             data.meta_info["validate"] = True
 
             if self.use_rm and self.reward_loop_manager.reward_loop_worker_handles is None:
-                self.checkpoint_manager.sleep_replicas()
-                data = data.union(self._compute_reward_colocate(data))
-                self.checkpoint_manager.update_weights(self.global_steps)
+                data = self._score_validation_batch(data)
 
             input_ids = data.batch["prompts"]
             input_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in input_ids]

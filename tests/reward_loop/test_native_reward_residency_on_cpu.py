@@ -15,6 +15,7 @@
 
 import asyncio
 import threading
+import weakref
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -210,6 +211,84 @@ async def test_default_sleep_reconstructs_and_final_close(monkeypatch):
     assert executor._model is not first
     await executor.close()
     assert executor._closed
+
+
+@pytest.mark.asyncio
+async def test_reconstruction_sleep_releases_model_after_inflight_inference(monkeypatch):
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class Model:
+        def __init__(self, **kwargs):
+            self.cycle = self
+
+        async def infer(self):
+            started.set()
+            await release.wait()
+            return 1
+
+    executor = _executor(monkeypatch, Model)
+    await executor.wake_up()
+    model_ref = weakref.ref(executor._model)
+    model_alive_at_flush = []
+    monkeypatch.setattr(
+        executor_module, "_empty_accelerator_cache", lambda: model_alive_at_flush.append(model_ref() is not None)
+    )
+    inference = asyncio.create_task(executor.infer())
+    await asyncio.wait_for(started.wait(), 2)
+    sleep = asyncio.create_task(executor.sleep())
+
+    async def wait_for_sleep():
+        while executor._awake:
+            await asyncio.sleep(0)
+
+    try:
+        await asyncio.wait_for(wait_for_sleep(), 2)
+        assert not model_alive_at_flush
+    finally:
+        release.set()
+        await sleep
+        assert await inference == 1
+    assert model_alive_at_flush == [False]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fail_closed", [False, True])
+async def test_terminal_cleanup_collects_model_before_flushing_cache(monkeypatch, fail_closed):
+    class Model:
+        supports_cpu_offload = True
+
+        def __init__(self, **kwargs):
+            self.cycle = self
+
+        async def sleep(self):
+            pass
+
+        async def wake_up(self):
+            pass
+
+        async def close(self):
+            pass
+
+    executor = _executor(monkeypatch, Model)
+    await executor.wake_up()
+    model_ref = weakref.ref(executor._model)
+    model_alive_at_flush = []
+
+    def flush_cache():
+        model_alive_at_flush.append(model_ref() is not None)
+        if fail_closed and len(model_alive_at_flush) == 1:
+            raise OSError("cache flush failed")
+
+    monkeypatch.setattr(executor_module, "_empty_accelerator_cache", flush_cache)
+    if fail_closed:
+        with pytest.raises(OSError, match="cache flush failed"):
+            await executor.sleep()
+        assert model_alive_at_flush == [True, False]
+    else:
+        await executor.close()
+        assert model_alive_at_flush == [False]
+    assert executor._model is None and executor._closed
 
 
 @pytest.mark.asyncio
