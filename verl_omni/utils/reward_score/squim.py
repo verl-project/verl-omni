@@ -45,6 +45,7 @@ Configure from a recipe through the scorer keyword contract:
 from __future__ import annotations
 
 import math
+import numbers
 import threading
 
 import torch
@@ -98,12 +99,21 @@ def _extract_waveform(solution_audio) -> tuple[torch.Tensor, int]:
     if not isinstance(solution_audio, tuple | list) or len(solution_audio) != 2:
         raise TypeError("SQUIM scorer expects solution_audio=(waveform, sample_rate).")
     waveform, sample_rate = solution_audio
-    tensor = torch.as_tensor(waveform).detach().float().cpu().reshape(-1)
+    tensor = torch.as_tensor(waveform).detach().float().cpu()
+    while tensor.ndim > 1 and tensor.shape[0] == 1:
+        tensor = tensor[0]
+    if tensor.ndim != 1:
+        raise ValueError(
+            f"SQUIM scorer expects a mono waveform with shape (T,) or leading singleton dimensions, "
+            f"got {tuple(tensor.shape)}."
+        )
     if tensor.numel() < _MIN_WAVEFORM_SAMPLES:
         raise ValueError(f"SQUIM scorer received too short a waveform ({tensor.numel()} samples).")
     if not torch.isfinite(tensor).all():
         raise ValueError("SQUIM scorer received a waveform containing NaN or infinity.")
-    if isinstance(sample_rate, bool) or not isinstance(sample_rate, int | float) or int(sample_rate) != sample_rate:
+    if isinstance(sample_rate, bool) or not isinstance(sample_rate, numbers.Real):
+        raise TypeError(f"SQUIM scorer sample rate must be an integer, got {sample_rate!r}.")
+    if int(sample_rate) != sample_rate:
         raise TypeError(f"SQUIM scorer sample rate must be an integer, got {sample_rate!r}.")
     if int(sample_rate) <= 0:
         raise ValueError(f"SQUIM scorer sample rate must be positive, got {sample_rate!r}.")

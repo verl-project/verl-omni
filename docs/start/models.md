@@ -1,6 +1,6 @@
 # Supported Models
 
-Last updated: 11/24/2026.
+Last updated: 11/28/2026.
 
 VeRL-Omni supports RL post-training for generative models across image, video,
 audio, and omni modalities. This page catalogues every model with a ready-to-run
@@ -446,8 +446,24 @@ reward (`avqa`, `mmk12` rule-based, or `gsm8k` via `data_source="openai/gsm8k"`)
 | SpeechJudge-BTRM | `RMSnow/SpeechJudge-BTRM` | Audio quality | Qwen3-TTS example | External service; CC-BY-NC-4.0 |
 | Whisper large-v3-turbo | `openai/whisper-large-v3-turbo` | Audio (ASR CER) | Qwen3-TTS Hindi GRPO | External JSON audio scorer |
 | JPEG incompressibility | Rule-based | Image stats | Any diffusion model | No model process needed |
-| SQUIM objective | torchaudio bundle (28 MB), wideband P.862.2 PESQ range | Audio (no-reference quality) | Any TTS rollout via `AudioRewardManager` (`solution_audio=(waveform, sample_rate)`) | In-process load, torchaudio cache (`TORCH_HOME`); zero new dependencies |
+| SQUIM objective | torchaudio bundle (28 MB); weights CC-BY 4.0 | Audio (no-reference quality: STOI, PESQ, SI-SDR) | Qwen3-TTS GRPO via `AudioRewardManager` (`solution_audio=(waveform, sample_rate)`) | In-process load; requires the `omni` extra (torchaudio); cache via `TORCH_HOME` |
 
+To use SQUIM with the Qwen3-TTS GRPO recipe, replace the HTTP scorer overrides with:
+
+```bash
+reward.reward_manager.source=importlib \
+reward.reward_manager.name=AudioRewardManager \
+reward.reward_manager.module.path=pkg://verl_omni.reward_loop.reward_manager \
+reward.custom_reward_function.path=pkg://verl_omni.utils.reward_score.squim \
+reward.custom_reward_function.name=compute_score \
++reward.custom_reward_function.reward_kwargs.device=cpu
+```
+
+`AudioRewardManager` forwards a mono `(T,)` waveform and its integer sample rate;
+the scorer resamples to 16 kHz and maps STOI/PESQ/SI-SDR into `[0, 1]` (uniform
+weights by default; override with `reward_kwargs.weights.{stoi,pesq,sisdr}`). The
+28 MB bundle downloads into the torch cache on first use; set `TORCH_HOME` on
+air-gapped clusters.
 
 For end-to-end instructions on setting up each reward, see the respective
 trainer's README in `examples/`.

@@ -87,6 +87,11 @@ def test_extracts_channel_singleton_dimensions():
     assert rate == 24_000
 
 
+def test_rejects_stereo_waveform():
+    with pytest.raises(ValueError, match="mono waveform"):
+        squim._extract_waveform((np.zeros((2, 64), dtype=np.float32), 16_000))
+
+
 def test_rejects_malformed_solution_audio():
     with pytest.raises(TypeError):
         squim._extract_waveform("not-a-tuple")
@@ -107,9 +112,22 @@ def test_rejects_short_nonfinite_or_bad_rate():
         squim._extract_waveform((np.zeros(64, dtype=np.float32), 0))
 
 
+def test_accepts_numpy_scalar_sample_rate():
+    tensor, rate = squim._extract_waveform((np.zeros(64, dtype=np.float32), np.int64(16_000)))
+    assert tensor.shape == (64,)
+    assert rate == 16_000
+
+
+def test_rejects_non_integer_numpy_sample_rate():
+    with pytest.raises(TypeError):
+        squim._extract_waveform((np.zeros(64, dtype=np.float32), np.float64(16_000.5)))
+
+
 def test_normalizes_each_metric_over_its_range():
     pesq_low, pesq_high = squim._PESQ_RANGE  # wideband P.862.2 bounds from the bundle
     assert pesq_high > pesq_low > 0.0
+    assert pesq_low == pytest.approx(1.0)
+    assert pesq_high > 4.5
     assert squim._normalize_metric("stoi", 0.0) == 0.0
     assert squim._normalize_metric("stoi", 1.0) == 1.0
     assert squim._normalize_metric("pesq", pesq_low) == pytest.approx(0.0)
@@ -191,9 +209,10 @@ def test_silent_audio_returns_floor_score_without_model():
 
 def test_too_short_after_resampling_rejected(stub_model):
     stub_model(stoi=1.0, pesq=1.0, sisdr=1.0)
-    # 8 samples at 48 kHz resample to far below the 64-sample model window.
+    # 64 samples at 48 kHz pass the 16-sample pre-check but resample to ~21
+    # samples, below the model's 64-sample window.
     with pytest.raises(ValueError, match="too short"):
-        squim.compute_score((np.linspace(-1, 1, 8, dtype=np.float32), 48_000))
+        squim.compute_score((np.linspace(-1, 1, 64, dtype=np.float32), 48_000))
 
 
 def test_weight_sum_overflow_rejected(stub_model):

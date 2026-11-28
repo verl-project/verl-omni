@@ -307,3 +307,23 @@ def test_reward_dictionary_requires_score():
 
     with pytest.raises(ValueError, match="missing 'score'"):
         manager.loop.run_until_complete(manager.run_single(_data([0.0])))
+
+
+def test_run_single_routes_squim_scorer(monkeypatch):
+    pytest.importorskip("torchaudio")
+    import verl_omni.utils.reward_score.squim as squim
+
+    class _StubModel:
+        def __call__(self, waveform):
+            return (
+                torch.tensor([1.0]),
+                torch.tensor([squim._PESQ_RANGE[1]]),
+                torch.tensor([30.0]),
+            )
+
+    monkeypatch.setattr(squim, "_cached_model", lambda device: (_StubModel(), None))
+    manager = _manager(squim.compute_score)
+    result = manager.loop.run_until_complete(manager.run_single(_data(np.ones(24_000, dtype=np.float32))))
+
+    assert result["reward_score"] == pytest.approx(1.0)
+    assert set(result["reward_extra_info"]) == {"squim_stoi", "squim_pesq", "squim_sisdr"}
