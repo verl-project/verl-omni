@@ -638,7 +638,7 @@ def test_merge_packed_media_stashes_per_example_slice_counts():
             torch.zeros(0, 2, dtype=torch.int32),
             torch.tensor([[1, 1]] * 3, dtype=torch.int32),
         ],
-        "audio_feature_lens": [[], [], []],
+        "audio_feature_lens": [[10], [], [6, 8]],
         "image_bound": [[[0, 2]], [], [[2, 5]]],
         "audio_bounds": [[], [], []],
     }
@@ -647,6 +647,8 @@ def test_merge_packed_media_stashes_per_example_slice_counts():
     _merge_packed_media(data)
 
     assert data["packed_vision_slices"] == [2, 0, 3]
+    assert data["packed_audio_clips"] == [1, 0, 2]
+    assert data["audio_feature_lens"] == [[10, 6, 8]]
     assert len(data["pixel_values"]) == 1  # folded into one pseudo-row
     assert len(data["pixel_values"][0]) == 5
 

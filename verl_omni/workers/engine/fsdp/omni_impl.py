@@ -63,6 +63,15 @@ class OmniFSDPEngine(FSDPEngineWithLMHead):
             )
         return model_inputs, output_args
 
+    def prepare_model_outputs(self, output, output_args, micro_batch, logits_processor_func, **kwargs):
+        """Run verl's output preparation, then the adapter's optional ``prepare_model_outputs`` hook,
+        which may replace per-position log-probabilities (adapters without it are unchanged)."""
+        model_output = super().prepare_model_outputs(output, output_args, micro_batch, logits_processor_func, **kwargs)
+        hook = getattr(self.model_adapter_cls, "prepare_model_outputs", None)
+        if callable(hook):
+            return hook(model_output, output, output_args, micro_batch, self.model_config)
+        return model_output
+
     def get_per_tensor_param(self, layered_summon=False, base_sync_done=False, **kwargs):
         from verl.utils.torch_dtypes import PrecisionType
 

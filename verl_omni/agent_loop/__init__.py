@@ -25,6 +25,7 @@ from .diffusion_agent_loop_tq import (
     DiffusionAgentLoopWorkerTQ,
     create_diffusion_agent_loop_manager,
 )
+from .omni_duplex_agent_loop import OmniDuplexAgentLoop
 from .single_turn_agent_loop import CompositeSingleTurnAgentLoop, DiffusionSingleTurnAgentLoop, OmniSingleTurnAgentLoop
 
 __all__ = [
@@ -37,6 +38,7 @@ __all__ = [
     "CompositeSingleTurnAgentLoop",
     "DiffusionSingleTurnAgentLoop",
     "OmniSingleTurnAgentLoop",
+    "OmniDuplexAgentLoop",
     "LTX2DiffusionSingleTurnAgentLoop",
     "MiniMaxH3DiffusionSingleTurnAgentLoop",
 ]

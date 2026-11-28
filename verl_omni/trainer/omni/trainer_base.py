@@ -13,34 +13,85 @@
 # limitations under the License.
 """Base class of the omni v1 trainers (``omni_sync``/``omni_separate_async``).
 
-``PPOTrainer._setup`` exposes no rendezvous-port hook; ``_setup`` below is a faithful
-copy of the pinned verl body with the port-range wiring DIFF-marked — re-diff it
-against the verl pin whenever the pin moves.
+``PPOTrainer._setup`` exposes no rendezvous-port hook and ``_compute_advantage``
+no post-scoring hook; both below are faithful copies of the pinned verl bodies
+with their deltas DIFF-marked — re-diff them against the verl pin whenever the
+pin moves.
 """
 
 from __future__ import annotations
 
 import logging
+import math
+import numbers
+from collections import defaultdict
+from collections.abc import Mapping
 from functools import partial
+from typing import Any
 
+import numpy as np
+import transfer_queue as tq
 from omegaconf import OmegaConf
+from tensordict import TensorDict
+from transfer_queue import KVBatchMeta
 from verl.checkpoint_engine import CheckpointEngineManager
 from verl.experimental.reward_loop import RewardLoopManager
 from verl.experimental.teacher_loop import MultiTeacherModelManager
+from verl.protocol import DataProto
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup, create_colocated_worker_cls
+from verl.trainer.ppo.ray_trainer import apply_kl_penalty
+from verl.trainer.ppo.rollout_corr_helper import compute_rollout_correction_and_add_to_batch
 from verl.trainer.ppo.utils import Role
 from verl.trainer.ppo.v1.trainer_base import PPOTrainer
+from verl.trainer.ppo.v1.utils import compute_advantage_for_multi_trajectories
 from verl.utils.config import omega_conf_to_dataclass
 from verl.workers.config import CriticConfig, DistillationConfig, TrainingWorkerConfig
 from verl.workers.rollout.llm_server import LLMServerManager
 from verl.workers.utils.losses import value_loss
+from verl.workers.utils.padding import response_to_nested
 
+from verl_omni.trainer.omni.advantage_gates import apply_advantage_gates
 from verl_omni.utils.config import resolve_lora_config
 from verl_omni.utils.net_utils import worker_group_port_ranges
 
 __all__ = ["OmniPPOTrainer"]
 
 logger = logging.getLogger(__name__)
+
+
+def _reward_extra_step_metrics(reward_extra_infos: list[Mapping[str, Any] | None]) -> dict[str, float]:
+    """Per-step aggregation of every numeric reward-extra column.
+
+    Args:
+        reward_extra_infos: One scorer-returned metrics mapping per episode
+            (``extra_fields["reward_extra_info"]``), or ``None`` where a
+            sample carries none.
+
+    Returns:
+        ``reward/<key>``: the column's mean over its finite values (columns
+        are per-axis and sparse — a key exists only on the episodes that
+        measured it — so missing and non-finite entries are skipped), and
+        ``reward/<key>_never_share``: the non-finite share when any value is
+        NaN or inf, so an ``inf`` latency (never spoke / never yielded) or
+        an all-NaN column surfaces instead of silently averaging away.
+    """
+    columns: dict[str, list[float]] = defaultdict(list)
+    for info in reward_extra_infos:
+        if not isinstance(info, Mapping):
+            continue
+        for key, value in info.items():
+            if isinstance(value, bool) or not isinstance(value, numbers.Real):
+                continue
+            columns[str(key)].append(float(value))
+    metrics: dict[str, float] = {}
+    for key, values in sorted(columns.items()):
+        finite = [value for value in values if math.isfinite(value)]
+        non_finite = len(values) - len(finite)
+        if finite:
+            metrics[f"reward/{key}"] = sum(finite) / len(finite)
+        if non_finite:
+            metrics[f"reward/{key}_never_share"] = non_finite / len(values)
+    return metrics
 
 
 class OmniPPOTrainer(PPOTrainer):
@@ -222,3 +273,125 @@ class OmniPPOTrainer(PPOTrainer):
         self._load_checkpoint()
 
         logger.info("all initialize finished, ready to fit")
+
+    # ------------------------------ metrics ------------------------------
+
+    def _compute_metrics(self, batch: KVBatchMeta, metrics: dict, timing_raw: dict, global_steps: int, epoch) -> None:
+        """verl's per-step metrics plus the reward scorer's numeric extras."""
+        super()._compute_metrics(batch, metrics, timing_raw, global_steps=global_steps, epoch=epoch)
+        metrics.update(self._reward_extra_metrics(batch))
+
+    def _reward_extra_metrics(self, batch: KVBatchMeta) -> dict[str, float]:
+        """Aggregate every numeric reward-extra column of this step's batch.
+
+        verl's ``_compute_metrics`` reports only its fixed column set; the
+        reward scorer's numeric extras (model-agnostic — any scorer's
+        returned keys) ride each sample's ``extra_fields["reward_extra_info"]``
+        in the TransferQueue store and are folded into the step metrics here
+        (see :func:`_reward_extra_step_metrics` for the aggregation).
+        """
+        data = tq.kv_batch_get(keys=batch.keys, partition_id=batch.partition_id, select_fields=["extra_fields"])
+        extra_fields = data.pop("extra_fields").tolist()
+        non_padding = [not tag.get("is_padding", False) for tag in batch.tags]
+        reward_extra_infos = [
+            extra_field.get("reward_extra_info") if isinstance(extra_field, Mapping) else None
+            for extra_field, keep in zip(extra_fields, non_padding, strict=True)
+            if keep
+        ]
+        return _reward_extra_step_metrics(reward_extra_infos)
+
+    # ------------------------------ advantage ------------------------------
+
+    def _compute_advantage(self, batch: KVBatchMeta, metrics: dict) -> KVBatchMeta:
+        """verl's advantage computation, then the agent loop's advantage gates.
+
+        MiniCPM-o 4.5 under duplex GRPO is the only pipeline whose agent loop
+        exports the ``advantage_mask`` / ``advantage_exclude`` columns; every
+        other pipeline carries neither, gets verl's batch unchanged, and only
+        gains the two zero-valued ``advantage/*`` step metrics.
+        """
+        # Faithful copy of verl's PPOTrainer._compute_advantage; the delta is DIFF-marked.
+        fields = ["uid", "response_mask", "rm_scores", "rollout_log_probs", "old_log_probs", "ref_log_prob"]
+        if self.use_critic:
+            fields.append("values")
+        data = tq.kv_batch_get(keys=batch.keys, partition_id=batch.partition_id, select_fields=fields)
+
+        response_mask = data["response_mask"]
+        data = DataProto(batch=data.to_padded_tensor())
+        data.batch["token_level_scores"] = data.batch["rm_scores"]
+        data.non_tensor_batch["uid"] = np.array(data.batch.pop("uid").tolist(), dtype=object)
+
+        # 1. apply kl penalty to rewards
+        if self.config.algorithm.use_kl_in_reward:
+            data, kl_metrics = apply_kl_penalty(
+                data, kl_ctrl=self.kl_ctrl_in_reward, kl_penalty=self.config.algorithm.kl_penalty
+            )
+            metrics.update(kl_metrics)
+        else:
+            data.batch["token_level_rewards"] = data.batch["token_level_scores"]
+
+        # 2. Compute rollout correction: IS weights, rejection sampling, and metrics
+        # Only runs in decoupled mode (computes once per batch using stable π_old)
+        # In bypass mode, this is skipped - actor computes metrics from evolving π_θ vs π_rollout
+        rollout_corr_config = self.config.algorithm.get("rollout_correction", None)
+        bypass_recomputing_logprobs = rollout_corr_config and rollout_corr_config.get("bypass_mode", False)
+        rollout_correction = (
+            rollout_corr_config is not None and "rollout_log_probs" in data.batch and not bypass_recomputing_logprobs
+        )
+        if rollout_correction:
+            data, is_metrics = compute_rollout_correction_and_add_to_batch(data, rollout_corr_config)
+            metrics.update(is_metrics)
+
+        # 3. compute advantages
+        data = compute_advantage_for_multi_trajectories(
+            data,
+            batch_keys=batch.keys,
+            adv_estimator=self.config.algorithm.adv_estimator,
+            gamma=self.config.algorithm.gamma,
+            lam=self.config.algorithm.lam,
+            num_repeat=self.config.actor_rollout_ref.rollout.n,
+            norm_adv_by_std_in_grpo=self.config.algorithm.get("norm_adv_by_std_in_grpo", True),
+            config=self.config.algorithm,
+        )
+
+        # DIFF vs upstream: the agent loop's advantage gates (verl has no equivalent).
+        metrics.update(self._apply_advantage_gates(batch, data))
+
+        # 4. write nested advantages and returns back to TransferQueue
+        fields = ["advantages", "returns"]
+        if self.config.algorithm.use_kl_in_reward:
+            fields.append("token_level_rewards")
+        if rollout_correction:
+            fields.append("response_mask")
+            if "rollout_is_weights" in data.batch:
+                fields.append("rollout_is_weights")
+
+        output = {}
+        for field in fields:
+            output[field] = response_to_nested(data.batch[field], response_mask)
+        output = TensorDict(output, batch_size=len(batch))
+
+        batch = tq.kv_batch_put(keys=batch.keys, partition_id=batch.partition_id, fields=output)
+
+        return batch
+
+    def _apply_advantage_gates(self, batch: KVBatchMeta, data: DataProto) -> dict[str, float]:
+        """Apply the batch's ``extra_fields`` advantage-gate columns to the scored batch.
+
+        A padded row carries a deep copy of a real sample's ``extra_fields``;
+        it is nulled here so the sequence stays aligned with ``data``'s rows
+        while only real samples gate.
+        """
+        extras = tq.kv_batch_get(keys=batch.keys, partition_id=batch.partition_id, select_fields=["extra_fields"])
+        extra_fields = extras.pop("extra_fields").tolist()
+        non_padding = [not tag.get("is_padding", False) for tag in batch.tags]
+        aligned = [
+            extra_field if keep and isinstance(extra_field, Mapping) else None
+            for extra_field, keep in zip(extra_fields, non_padding, strict=True)
+        ]
+        return apply_advantage_gates(
+            data,
+            aligned,
+            adv_estimator=self.config.algorithm.adv_estimator,
+            norm_adv_by_std_in_grpo=self.config.algorithm.get("norm_adv_by_std_in_grpo", True),
+        )

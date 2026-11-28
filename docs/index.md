@@ -77,6 +77,7 @@ algo/grpo_guard.md
 algo/mixgrpo.md
 algo/diffusion_opd.md
 algo/omni_opd.md
+algo/duplex_grpo.md
 algo/deterministic_post_training.md
 algo/true_on_policy.md
 algo/performance.md

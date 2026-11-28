@@ -442,3 +442,29 @@ def test_deploy_config_marks_only_opted_in_stages_with_expert_parallel(monkeypat
 def test_deploy_config_omits_expert_parallel_by_default(monkeypatch):
     deploy = _run_ar_write_deploy_config(monkeypatch, expert_parallel_stage_ids=frozenset())
     assert all("enable_expert_parallel" not in stage for stage in deploy["stages"])
+
+
+def test_duplex_session_capacity_follows_agent_workers():
+    from verl_omni.workers.rollout.vllm_rollout.vllm_omni_ar_strategy import (
+        apply_duplex_session_capacity,
+        duplex_session_capacity,
+    )
+
+    config = SimpleNamespace(agent=SimpleNamespace(num_workers=16))
+    assert duplex_session_capacity(config) == 32
+    assert duplex_session_capacity(SimpleNamespace(agent=SimpleNamespace(num_workers=0))) is None
+    assert duplex_session_capacity(SimpleNamespace(agent=SimpleNamespace(num_workers=True))) is None
+    deploy = {
+        "session_mode": "duplex",
+        "duplex_session": {
+            "max_sessions": 1,
+            "max_pending_output_events_per_session": 8192,
+            "max_pending_output_bytes_per_session": 32 * 1024 * 1024,
+        },
+    }
+    apply_duplex_session_capacity(deploy, config)
+    assert deploy["duplex_session"]["max_sessions"] == 32
+    assert deploy["duplex_session"]["max_pending_output_events_per_session"] == 8192
+    turn = {"session_mode": "turn", "duplex_session": {"max_sessions": 1}}
+    apply_duplex_session_capacity(turn, config)
+    assert turn["duplex_session"]["max_sessions"] == 1

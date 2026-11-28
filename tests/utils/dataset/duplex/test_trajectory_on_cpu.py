@@ -1,0 +1,307 @@
+# Copyright 2026 Bytedance Ltd. and/or its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""CPU tests for DuplexTrajectory assembly over synthetic engine scopes."""
+
+import numpy as np
+import pytest
+
+from tests.utils.dataset.duplex._duplex_fixtures import (
+    CHUNK_EOS_TOKEN_ID,
+    LISTEN_TOKEN_ID,
+    SPEAK_CONTENT_TOKEN_ID,
+    listen_unit,
+    listening_then_speaking_wires,
+    record_set_wire,
+    reemit_variant_wires,
+    spoken_unit,
+)
+from verl_omni.utils.dataset.duplex.records import ACTION_REEMIT, RecordSetError
+from verl_omni.utils.dataset.duplex.trajectory import (
+    AXIS_INTERRUPTION,
+    AXIS_PAUSE,
+    AXIS_TURN,
+    DuplexEpisodeEvent,
+    DuplexTrajectory,
+)
+
+
+def _chunks(count: int, samples: int = 16000) -> list[np.ndarray]:
+    rng = np.random.default_rng(0)
+    return [rng.standard_normal(samples).astype(np.float32) for _ in range(count)]
+
+
+def _pause_event() -> DuplexEpisodeEvent:
+    return DuplexEpisodeEvent(axis=AXIS_PAUSE, pause_window_s=(1.0, 3.0))
+
+
+def _turn_event() -> DuplexEpisodeEvent:
+    return DuplexEpisodeEvent(axis=AXIS_TURN, user_turn_end_s=2.0)
+
+
+def _interruption_event() -> DuplexEpisodeEvent:
+    return DuplexEpisodeEvent(axis=AXIS_INTERRUPTION, interrupt_speech_onset_s=1.0, interrupt_speech_end_s=4.0)
+
+
+def test_assemble_flattens_scopes_in_order_and_masks_forced_tokens():
+    wires = listening_then_speaking_wires(engine_silence_units=1)
+    trajectory = DuplexTrajectory.assemble(
+        session_id="duplex-abc",
+        seed=7,
+        event=_pause_event(),
+        record_set_wires=wires,
+        client_audio_chunks=_chunks(4),  # 2 listen + 2 spoken units are client-fed; the engine unit is not
+    )
+    # Listening scope: listen, listen, forced engine listen, each with its
+    # re-emitted terminator; response: two spoken units, each two content
+    # tokens, the boundary chunk_eos and its re-emission.
+    assert trajectory.token_ids == (
+        LISTEN_TOKEN_ID,
+        LISTEN_TOKEN_ID,
+        LISTEN_TOKEN_ID,
+        LISTEN_TOKEN_ID,
+        LISTEN_TOKEN_ID,
+        LISTEN_TOKEN_ID,
+        SPEAK_CONTENT_TOKEN_ID,
+        SPEAK_CONTENT_TOKEN_ID,
+        CHUNK_EOS_TOKEN_ID,
+        CHUNK_EOS_TOKEN_ID,
+        SPEAK_CONTENT_TOKEN_ID,
+        SPEAK_CONTENT_TOKEN_ID,
+        CHUNK_EOS_TOKEN_ID,
+        CHUNK_EOS_TOKEN_ID,
+    )
+    assert trajectory.action_mask == (1, 0, 1, 0, 0, 0, 1, 1, 1, 0, 1, 1, 1, 0)
+    assert trajectory.action_kinds.count("forced") == 1
+    assert trajectory.action_kinds.count("reemit") == 5
+    assert trajectory.token_scope_indices == (0,) * 6 + (1,) * 8
+    # Cumulative unit indices continue across the scope boundary.
+    assert trajectory.token_unit_indices == (0, 0, 1, 1, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4)
+    assert trajectory.record_sets[0].num_units() == 3
+    assert trajectory.status == "completed"
+    assert not trajectory.barge_in
+
+
+def test_unit_decisions_timeline_uses_emission_clock():
+    wires = listening_then_speaking_wires()
+    trajectory = DuplexTrajectory.assemble(
+        session_id="duplex-abc",
+        seed=7,
+        event=_turn_event(),
+        record_set_wires=wires,
+        client_audio_chunks=_chunks(4),
+    )
+    decisions = trajectory.unit_decisions(listen_token_id=LISTEN_TOKEN_ID)
+    assert [decision.speaking for decision in decisions] == [False, False, True, True]
+    assert [decision.origin for decision in decisions] == ["client"] * 4
+    # Emission timestamps start at the first unit and advance at the unit cadence.
+    assert decisions[0].time_s == pytest.approx(0.0)
+    assert decisions[3].time_s == pytest.approx(3.0)
+    # One decision per record, carrying the unit's non-reemit actions; the
+    # first is the unit's decision.
+    assert decisions[2].action_token_id == SPEAK_CONTENT_TOKEN_ID
+    assert decisions[2].action_token_ids == (SPEAK_CONTENT_TOKEN_ID, SPEAK_CONTENT_TOKEN_ID, CHUNK_EOS_TOKEN_ID)
+    assert decisions[2].action_kinds == ("sampled", "sampled", "sampled")
+    assert decisions[2].logprobs == (pytest.approx(-1.3), pytest.approx(-1.2), pytest.approx(-0.4))
+    assert decisions[2].logprob == pytest.approx(-1.3)
+    # The speech onset the turn-latency reward measures.
+    first_speak = next(decision for decision in decisions if decision.speaking)
+    assert first_speak.time_s == pytest.approx(2.0)
+
+
+def test_barge_in_episode_flags_truncated_interruption():
+    wires = listening_then_speaking_wires(barge_in=True)
+    trajectory = DuplexTrajectory.assemble(
+        session_id="duplex-abc",
+        seed=7,
+        event=_interruption_event(),
+        record_set_wires=wires,
+        client_audio_chunks=_chunks(4),
+    )
+    assert trajectory.barge_in
+    assert trajectory.status == "truncated_interruption"
+
+
+def test_client_chunk_misalignment_is_a_rollout_failure():
+    wires = listening_then_speaking_wires()
+    with pytest.raises(RecordSetError, match="client chunks"):
+        DuplexTrajectory.assemble(
+            session_id="duplex-abc",
+            seed=7,
+            event=_pause_event(),
+            record_set_wires=wires,
+            client_audio_chunks=_chunks(3),
+        )
+
+
+def test_engine_silent_units_replay_but_do_not_consume_client_chunks():
+    wires = listening_then_speaking_wires(engine_silence_units=2)
+    trajectory = DuplexTrajectory.assemble(
+        session_id="duplex-abc",
+        seed=7,
+        event=_pause_event(),
+        record_set_wires=wires,
+        client_audio_chunks=_chunks(4),
+    )
+    decisions = trajectory.unit_decisions(listen_token_id=LISTEN_TOKEN_ID)
+    engine_units = [decision for decision in decisions if decision.origin == "engine"]
+    assert len(engine_units) == 2
+    assert all(not decision.speaking for decision in engine_units)
+
+
+def test_a_unit_speaking_through_several_decode_steps_is_one_decision():
+    # The ledger folds a unit's decode steps into one record: a spoken unit's
+    # content tokens and its boundary chunk_eos are one unit's actions.
+    wire = record_set_wire(
+        units=[
+            spoken_unit(token_ids=[SPEAK_CONTENT_TOKEN_ID, SPEAK_CONTENT_TOKEN_ID]),
+            listen_unit(emission_ns=2_000_000_000),
+        ]
+    )
+    wire["input_origins"] = ["client", "engine"]
+    trajectory = DuplexTrajectory.assemble(
+        session_id="duplex-abc",
+        seed=7,
+        event=_pause_event(),
+        record_set_wires=[wire],
+        client_audio_chunks=_chunks(1),
+    )
+    decisions = trajectory.unit_decisions(listen_token_id=LISTEN_TOKEN_ID)
+    assert [(decision.unit_index, decision.action_token_ids) for decision in decisions] == [
+        (0, (SPEAK_CONTENT_TOKEN_ID, SPEAK_CONTENT_TOKEN_ID, CHUNK_EOS_TOKEN_ID)),
+        (1, (LISTEN_TOKEN_ID,)),
+    ]
+    assert [decision.speaking for decision in decisions] == [True, False]
+    # The re-emitted terminators are restatements: never part of a decision.
+    assert all(ACTION_REEMIT not in decision.action_kinds for decision in decisions)
+
+
+@pytest.mark.parametrize(
+    ("axis", "kwargs"),
+    [
+        (AXIS_PAUSE, {}),
+        (AXIS_TURN, {}),
+        (AXIS_INTERRUPTION, {}),
+    ],
+)
+def test_event_annotation_requires_its_axis_window(axis, kwargs):
+    with pytest.raises(ValueError, match="require"):
+        DuplexEpisodeEvent(axis=axis, **kwargs)
+
+
+def test_interruption_annotation_requires_the_onset_and_the_end():
+    # The yield latency anchors to the onset; the end alone no longer suffices.
+    with pytest.raises(ValueError, match="require interrupt_speech_onset_s"):
+        DuplexEpisodeEvent(axis=AXIS_INTERRUPTION, interrupt_speech_end_s=4.0)
+    with pytest.raises(ValueError, match="require interrupt_speech_end_s"):
+        DuplexEpisodeEvent(axis=AXIS_INTERRUPTION, interrupt_speech_onset_s=1.0)
+
+
+def test_event_annotation_rebuilds_from_its_stored_mapping():
+    # The parquet struct and the replay payload carry the same keys; numpy
+    # scalars and arrays round-trip like plain floats.
+    interruption = DuplexEpisodeEvent.from_mapping(
+        {
+            "axis": "interruption",
+            "pause_window_s": None,
+            "user_turn_end_s": None,
+            "interrupt_speech_onset_s": np.float32(1.0),
+            "interrupt_speech_end_s": np.float64(4.5),
+        }
+    )
+    assert interruption == DuplexEpisodeEvent(
+        axis=AXIS_INTERRUPTION, interrupt_speech_onset_s=1.0, interrupt_speech_end_s=4.5
+    )
+    pause = DuplexEpisodeEvent.from_mapping({"axis": "pause", "pause_window_s": np.array([1.0, 3.0])})
+    assert pause == DuplexEpisodeEvent(axis=AXIS_PAUSE, pause_window_s=(1.0, 3.0))
+    assert DuplexEpisodeEvent.from_mapping({"axis": "turn", "user_turn_end_s": 2}) == _turn_event()
+    with pytest.raises(ValueError, match="require user_turn_end_s"):
+        DuplexEpisodeEvent.from_mapping({"axis": "turn"})
+    with pytest.raises(ValueError, match=r"\[start, end\] pair"):
+        DuplexEpisodeEvent.from_mapping({"axis": "pause", "pause_window_s": [1.0, 2.0, 3.0]})
+    with pytest.raises(KeyError):
+        DuplexEpisodeEvent.from_mapping({})
+
+
+def test_scopes_may_carry_different_seeds():
+    # One seed per scope (engine contract): the listening scope sealed at bind and the
+    # response scope derive their own; cross-scope equality must not be enforced.
+    listening, speaking = listening_then_speaking_wires()
+    speaking["effective_seed"] = 8
+    trajectory = DuplexTrajectory.assemble(
+        session_id="duplex-abc",
+        seed=7,
+        event=_turn_event(),
+        record_set_wires=[listening, speaking],
+        client_audio_chunks=_chunks(4),
+    )
+    assert [record_set.effective_seed for record_set in trajectory.record_sets] == [7, 8]
+
+
+def _listening_only_wires(units: int) -> list[dict]:
+    return [
+        record_set_wire(
+            response_id=None,
+            status="truncated_close",
+            units=[
+                {"action": (LISTEN_TOKEN_ID, "sampled", -0.2), "emission_ns": 1_000_000_000 + unit * 1_000_000_000}
+                for unit in range(units)
+            ],
+        )
+    ]
+
+
+def test_last_window_close_flush_is_tolerated():
+    # The engine's 1035 ms first-chunk window makes the close flush of the final
+    # residual nondeterministic: 14 fed chunks may yield 13 client units.
+    trajectory = DuplexTrajectory.assemble(
+        session_id="duplex-abc",
+        seed=7,
+        event=_pause_event(),
+        record_set_wires=_listening_only_wires(13),
+        client_audio_chunks=_chunks(14),
+    )
+    assert len(trajectory.client_audio_chunks) == 14  # the tail chunk stays, unconsumed by any unit
+    assert len(trajectory.unit_decisions(listen_token_id=LISTEN_TOKEN_ID)) == 13
+
+
+@pytest.mark.parametrize(
+    "units,chunks,message", [(13, 15, "more than the final window"), (14, 13, "only 13 client chunks")]
+)
+def test_ingestion_mismatch_beyond_the_last_window_is_a_rollout_failure(units, chunks, message):
+    with pytest.raises(RecordSetError, match=message):
+        DuplexTrajectory.assemble(
+            session_id="duplex-abc",
+            seed=7,
+            event=_pause_event(),
+            record_set_wires=_listening_only_wires(units),
+            client_audio_chunks=_chunks(chunks),
+        )
+
+
+def test_reemit_rows_are_restatements_not_decisions():
+    wires = reemit_variant_wires()
+    # Six flat tokens (two of them reemit restatements), four client chunks:
+    # the reemit rows consumed no fed audio.
+    trajectory = DuplexTrajectory.assemble(
+        session_id="duplex-abc",
+        seed=7,
+        event=_pause_event(),
+        record_set_wires=wires,
+        client_audio_chunks=_chunks(4),
+    )
+    assert len(trajectory.token_ids) == 6
+    assert trajectory.action_mask == (1, 1, 0, 1, 1, 0)
+    decisions = trajectory.unit_decisions(listen_token_id=LISTEN_TOKEN_ID)
+    assert len(decisions) == 4  # only the decision units open unit windows
+    assert all(decision.action_token_id != CHUNK_EOS_TOKEN_ID or decision.speaking for decision in decisions)

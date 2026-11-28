@@ -27,6 +27,8 @@ import sys
 import types
 from typing import Any
 
+from transformers.cache_utils import DynamicCache, EncoderDecoderCache
+
 logger = logging.getLogger(__name__)
 
 __all__ = [
@@ -231,11 +233,19 @@ def patch_minicpm_get_audio_embedding(module) -> None:
     mel-frame lengths against post-conv2 positions (under-masking by ~2x), so
     batched clips deviate from the single-clip output. Audio-free training
     batches skip the frozen tower and return one zero token.
+
+    Duplex batches (``data["audio_clip_kinds"]``) encode their unit clips
+    through the remote streaming encoder exactly as the engine does —
+    ``get_audio_embedding_streaming(use_extra_context=True,
+    prefix_extra_frames=0 for a row's first unit else 2, suffix_extra_frames=2)``
+    with the KV history carried across a row's units and reset at each row —
+    and keep the offline path for the reference clip. One tower call per unit.
     """
     marker = "_verl_omni_get_audio_embedding_patched"
     if getattr(module, marker, False):
         return
     original = module.get_audio_embedding
+    _ensure_dynamic_cache_usable_length()
 
     def get_audio_embedding(self, data, chunk_length=-1, dummy=True, **kwargs):
         # Mirrors the remote get_omni_embedding emptiness test (post-split
@@ -272,15 +282,37 @@ def patch_minicpm_get_audio_embedding(module) -> None:
         flat_lens = [int(length) for row in lens_raw for length in torch.as_tensor(row).reshape(-1).tolist()]
         if len(flat_lens) != len(features):
             raise ValueError(f"Audio clips ({len(features)}) and audio_feature_lens ({len(flat_lens)}) disagree.")
-        with torch.no_grad():
-            clip_embeddings = []
-            for index, length in enumerate(flat_lens):
-                clip_data = dict(data)
-                clip_data["audio_features"] = features[index : index + 1, :, :length].contiguous()
-                # The remote hstacks per-sample 1-D tensors; nested python
-                # lists raise TypeError inside get_audio_embedding.
-                clip_data["audio_feature_lens"] = [torch.tensor([length], dtype=torch.long, device=features.device)]
-                clip_embeddings.append(original(clip_data, chunk_length=chunk_length, dummy=dummy, **kwargs)[0][0])
+        clip_kinds = data.get("audio_clip_kinds")
+        if clip_kinds is None:
+            unit_indices = [None] * len(flat_lens)
+        else:
+            # The pack folds the per-episode clip rows into one pseudo-row.
+            episode_clip_counts = data.get("packed_audio_clips")
+            if episode_clip_counts is None:
+                episode_clip_counts = [len(torch.as_tensor(row).reshape(-1)) for row in lens_raw]
+            unit_indices = _streaming_unit_indices(clip_kinds, episode_clip_counts, len(flat_lens))
+        duplex = clip_kinds is not None
+        history = self.audio_past_key_values if duplex else None
+        try:
+            with torch.no_grad():
+                clip_embeddings = []
+                for index, length in enumerate(flat_lens):
+                    clip_data = dict(data)
+                    clip_data["audio_features"] = features[index : index + 1, :, :length].contiguous()
+                    # The remote hstacks per-sample 1-D tensors; nested python
+                    # lists raise TypeError inside get_audio_embedding.
+                    clip_data["audio_feature_lens"] = [torch.tensor([length], dtype=torch.long, device=features.device)]
+                    unit_index = unit_indices[index]
+                    if unit_index is None:
+                        clip_embeddings.append(
+                            original(clip_data, chunk_length=chunk_length, dummy=dummy, **kwargs)[0][0]
+                        )
+                    else:
+                        clip_embeddings.append(_stream_unit_embedding(self, clip_data, unit_index))
+        finally:
+            if duplex:
+                # The last row's history is per-forward scratch, not session state.
+                self.audio_past_key_values = history
         grouped = []
         offset = 0
         for row in lens_raw:
@@ -446,3 +478,116 @@ def _has_pixel_slices(pixel_values) -> bool:
     if isinstance(pixel_values, (list | tuple)):
         return any(_has_pixel_slices(sample) for sample in pixel_values)
     return True
+
+
+class _LegacyIndexableDynamicCache(DynamicCache):
+    """``DynamicCache`` indexed like the legacy tuple cache the remote streaming method reads.
+
+    ``get_audio_embedding_streaming`` reads its history as ``history[0][0].shape[2]``
+    (layer 0's keys) and hands the object back to the encoder, which accepts a
+    ``DynamicCache``.
+    """
+
+    def __getitem__(self, layer_idx: int) -> tuple:
+        layer = self.layers[layer_idx]
+        return layer.keys, layer.values
+
+
+def _ensure_dynamic_cache_usable_length() -> None:
+    """Give ``DynamicCache`` the ``get_usable_length`` the remote streaming encoder reads.
+
+    Current transformers removed the method; the remote ``MiniCPMWhisperEncoder.forward``
+    asks its cache for it whenever ``use_cache`` is set, so a row's first unit
+    would fail before the tower runs. The engine installs the same shim.
+    """
+    if hasattr(DynamicCache, "get_usable_length"):
+        return
+
+    def get_usable_length(self, new_seq_length=None, layer_idx=0):
+        return int(self.get_seq_length(layer_idx))  # a growing cache has no maximum to budget against
+
+    DynamicCache.get_usable_length = get_usable_length
+
+
+def _streaming_unit_indices(clip_kinds: list[str], episode_clip_counts: list[int], clip_count: int) -> list[int | None]:
+    """Per stacked clip, its unit index within the episode, or ``None`` for an offline (reference) clip.
+
+    Args:
+        clip_kinds: The duplex marker, one ``"reference"`` / ``"unit"`` per clip in row order.
+        episode_clip_counts: Clips per episode (row), in order.
+        clip_count: Number of stacked clips.
+
+    Returns:
+        One entry per clip: ``None`` routes offline, ``k`` streams as unit ``k`` of its episode.
+
+    Raises:
+        ValueError: When the kinds do not cover the clips one-to-one, or carry
+            another value.
+    """
+    if len(clip_kinds) != clip_count or sum(episode_clip_counts) != clip_count:
+        raise ValueError(
+            f"Audio clips ({clip_count}), audio_clip_kinds ({len(clip_kinds)}) and the episode "
+            f"clip counts (sum {sum(episode_clip_counts)}) disagree."
+        )
+    unit_indices: list[int | None] = []
+    offset = 0
+    for count in episode_clip_counts:
+        unit_index = 0
+        for kind in clip_kinds[offset : offset + count]:
+            if kind == "reference":
+                unit_indices.append(None)
+            elif kind == "unit":
+                unit_indices.append(unit_index)
+                unit_index += 1
+            else:
+                raise ValueError(f"audio_clip_kinds carries {kind!r}; expected only 'reference' or 'unit'.")
+        offset += count
+    return unit_indices
+
+
+def _stream_unit_embedding(module, clip_data: dict, unit_index: int):
+    """One unit clip through the remote streaming encoder with the engine's call convention.
+
+    The KV history rides ``module.audio_past_key_values`` across an episode's
+    units: empty for the first unit, the previous units' keys otherwise.
+    Returns the clip's ``(rows, hidden)`` embedding, as the offline path does.
+    """
+    module.audio_past_key_values = None if unit_index == 0 else _streaming_history(module.audio_past_key_values)
+    return module.get_audio_embedding_streaming(
+        clip_data,
+        use_extra_context=True,
+        prefix_extra_frames=0 if unit_index == 0 else 2,  # the first chunk's mel carries no prefix context
+        suffix_extra_frames=2,
+    )[0][0]
+
+
+def _streaming_history(history):
+    """The between-unit KV history in the form the remote streaming method reads.
+
+    ``get_audio_embedding_streaming`` indexes its history like a legacy tuple
+    cache and hands it to the encoder, which accepts a ``DynamicCache``; the
+    ``EncoderDecoderCache`` the previous call left behind offers neither on
+    current transformers.
+
+    Args:
+        history: ``audio_past_key_values`` after a streaming call — the
+            encoder's ``EncoderDecoderCache``.
+
+    Returns:
+        Its self-attention layers as a :class:`_LegacyIndexableDynamicCache`.
+
+    Raises:
+        TypeError: On any other history object.
+    """
+    if not isinstance(history, EncoderDecoderCache):
+        raise TypeError(
+            f"MiniCPM streaming audio history is a {type(history).__name__}; "
+            "expected the remote encoder's EncoderDecoderCache."
+        )
+    self_attention = history.self_attention_cache
+    if isinstance(self_attention, _LegacyIndexableDynamicCache):
+        return self_attention
+    cache = _LegacyIndexableDynamicCache()
+    for layer_idx, layer in enumerate(self_attention.layers):
+        cache.update(layer.keys, layer.values, layer_idx)
+    return cache

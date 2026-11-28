@@ -71,6 +71,32 @@ def lora_engine_extras(model_config: OmniModelConfig) -> dict[str, Any]:
     return extras
 
 
+def duplex_session_capacity(config: Any) -> int | None:
+    """Two session slots per ``rollout.agent.num_workers``, or ``None`` when the count is missing."""
+    agent = getattr(config, "agent", None)
+    workers = getattr(agent, "num_workers", None)
+    if isinstance(workers, bool) or not isinstance(workers, int) or workers < 1:
+        return None
+    return workers * 2
+
+
+def apply_duplex_session_capacity(deploy: dict[str, Any], config: Any) -> None:
+    """Set a duplex deploy's admission cap from the rollout worker count.
+
+    The engine admits one session unless the deploy says otherwise, and a
+    duplex session holds its slot for the whole episode. The cap is two slots
+    per worker so the next open does not wait out the previous close.
+    """
+    if deploy.get("session_mode") != "duplex":
+        return
+    capacity = duplex_session_capacity(config)
+    if capacity is None:
+        return
+    session = dict(deploy.get("duplex_session") or {})
+    session["max_sessions"] = capacity
+    deploy["duplex_session"] = session
+
+
 def _drop_none_mapping_values(value: Any) -> Any:
     if isinstance(value, dict):
         return {key: _drop_none_mapping_values(item) for key, item in value.items() if item is not None}
@@ -89,6 +115,9 @@ class ARStrategy(OmniStrategyBase):
 
     rollout_config_cls = RolloutConfig
     model_config_cls = OmniModelConfig
+    #: The server monkey-patches the model runner for this mode
+    #: (``collective_rpc("monkey_patch_model")`` after engine start).
+    patches_model_runner = True
 
     def __init__(self, server: Any) -> None:
         super().__init__(server)
@@ -292,6 +321,12 @@ class ARStrategy(OmniStrategyBase):
         tp_size = self.server.config.tensor_model_parallel_size
 
         deploy_dict: dict[str, object] = {"pipeline": pipeline_id}
+        # Tolerant like the other adapter hooks: out-of-tree/test adapters
+        # may predate this one.
+        overrides_hook = getattr(adapter_cls, "deploy_config_overrides", None)
+        if callable(overrides_hook):
+            deploy_dict.update(overrides_hook(pipeline_mode))
+        apply_duplex_session_capacity(deploy_dict, self.server.config)
         async_chunk = engine_kwargs.get("async_chunk", engine_kwargs.get("async-chunk"))
         if async_chunk is not None:
             deploy_dict["async_chunk"] = async_chunk
