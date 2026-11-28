@@ -46,7 +46,12 @@ from verl_omni.agent_loop.diffusion_agent_loop import (
     DiffusionAgentLoopWorker,
     _InternalDiffusionAgentLoopOutput,
 )
-from verl_omni.agent_loop.utils import maybe_per_rollout_seeds, per_rollout_seeds_or_entropy
+from verl_omni.agent_loop.utils import (
+    derive_validation_seed,
+    maybe_per_rollout_seeds,
+    maybe_validation_seeds,
+    per_rollout_seeds_or_entropy,
+)
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
 
 AR_REWARD_KEY = "reward/ar"
@@ -191,6 +196,20 @@ class CompositeAgentLoopWorker(DiffusionAgentLoopWorker):
             sampling_params["repetition_penalty"] = config.val_kwargs.ar.repetition_penalty
             sampling_params["response_length"] = config.val_kwargs.ar.response_length
             sampling_params["ar_logprobs"] = False
+
+            if config.val_kwargs.seed is not None:
+                repeat_indices = batch.non_tensor_batch.get("_val_repeat_idx")
+                if repeat_indices is not None:
+                    ar_repeat_indices = np.asarray(repeat_indices, dtype=np.int64).reshape(-1)
+                else:
+                    ar_repeat_indices = np.zeros(len(batch), dtype=np.int64)
+                ar_seeds = maybe_validation_seeds(config.val_kwargs.seed, len(batch), ar_repeat_indices)
+                dit_repeat_indices = (ar_repeat_indices[:, None] * diffusion_n + np.arange(diffusion_n)).reshape(-1)
+                per_rollout_seeds = [
+                    derive_validation_seed(config.val_kwargs.seed, int(idx)) for idx in dit_repeat_indices
+                ]
+            elif diffusion_n > 1 or getattr(config.val_kwargs, "m", 1) > 1:
+                per_rollout_seeds = maybe_validation_seeds(None, len(batch) * diffusion_n, val_n=2)
         else:
             sampling_params["global_steps"] = batch.meta_info["global_steps"]
             # Trainer sets one global id per AR row. Expand to diffusion_n DiT rows so

@@ -32,7 +32,7 @@ from verl.utils.dataset.rl_dataset import get_dataset_class
 from verl.utils.profiler import simple_timer
 from verl.workers.rollout.llm_server import LLMServerClient
 
-from verl_omni.agent_loop.utils import per_rollout_seeds_or_entropy
+from verl_omni.agent_loop.utils import maybe_validation_seeds, per_rollout_seeds_or_entropy
 from verl_omni.workers.config import DiffusionModelConfig, DiffusionRolloutConfig
 
 
@@ -223,6 +223,15 @@ class DiffusionAgentLoopWorker:
             sampling_params.update(_config_to_sampling_dict(config.val_kwargs.algo))
             sampling_params["seed"] = config.val_kwargs.seed
             sampling_params["logprobs"] = False
+            repeat_indices = batch.non_tensor_batch.get("_val_repeat_idx")
+            if repeat_indices is not None:
+                repeat_indices = np.asarray(repeat_indices, dtype=np.int64).reshape(-1)
+            per_rollout_seeds = maybe_validation_seeds(
+                config.val_kwargs.seed,
+                len(batch),
+                repeat_indices,
+                val_n=config.val_kwargs.n,
+            )
         else:
             sampling_params["global_steps"] = batch.meta_info["global_steps"]
             # Prefer trainer-assigned global indices so chunked workers derive the
