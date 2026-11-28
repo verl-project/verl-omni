@@ -1,5 +1,5 @@
 # Qwen-Image LoRA RL with the VeOmni actor engine and vllm_omni rollout.
-# Requires veomni>=0.1.12 for native LoRA support.
+# Install VeOmni 0.1.14 as described in docs/start/engine_backends.md.
 set -x
 
 # Set WORKSPACE to any writable directory; defaults to $HOME.

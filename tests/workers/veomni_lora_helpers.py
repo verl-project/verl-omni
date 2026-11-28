@@ -18,6 +18,7 @@ from unittest.mock import MagicMock
 import torch
 
 import verl_omni.workers.engine.veomni.diffusion_impl as veomni_impl
+from verl_omni.pipelines.model_base import DiffusionModelBase
 from verl_omni.workers.config.diffusion import DiffusionModelConfig
 from verl_omni.workers.engine.veomni.diffusion_impl import VeOmniDiffusionEngine
 
@@ -33,6 +34,8 @@ def make_veomni_engine(
 ) -> VeOmniDiffusionEngine:
     """Build an engine without running ``__init__`` (which needs torch.distributed)."""
     engine = object.__new__(VeOmniDiffusionEngine)
+    engine.model_adapter = DiffusionModelBase
+    engine._fp32_modules = ()
     engine.module = module
     engine._is_offload_param = False
     engine._is_lora = lora_rank > 0 or lora_adapter_path is not None

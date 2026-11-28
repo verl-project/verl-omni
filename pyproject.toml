@@ -97,7 +97,7 @@ ocr = [
 ]
 
 [dependency-groups]
-veomni-diffusion = ["veomni==0.1.12"]
+veomni-diffusion = ["veomni==0.1.14"]
 
 # -------------------------------
 # tool.ruff - Linting configuration

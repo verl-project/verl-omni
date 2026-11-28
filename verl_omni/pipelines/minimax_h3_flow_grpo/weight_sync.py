@@ -28,6 +28,8 @@ from verl_omni.pipelines.minimax_h3_diffusion_nft.common import (
 )
 from verl_omni.pipelines.rollout_request import prompt_ids_from_payload
 
+from .veomni import FUSED_TARGETS, map_fused_lora
+
 
 def _lora_target_suffix(target: str) -> str | None:
     return next((suffix for suffix in H3_LORA_TARGETS if target == suffix or target.endswith("." + suffix)), None)
@@ -98,6 +100,12 @@ class MiniMaxH3WeightSyncMixin(MiniMaxH3WeightSyncBase):
             requested_targets = {str(target) for target in target_modules}
         else:
             raise ValueError(f"MiniMax H3 LoRA sync requires explicit target_modules, got {target_modules!r}.")
+
+        if requested_targets and requested_targets <= FUSED_TARGETS.keys():
+            component = self._h3_weight_component_name()
+            mapped = map_fused_lora(tensors, requested_targets, component, getattr(self, component).arch)
+            logical = sorted(name for target in requested_targets for name in FUSED_TARGETS[target])
+            return mapped, {**peft_config, "target_modules": logical}
 
         target_suffixes = {target: _lora_target_suffix(target) for target in requested_targets}
         unsupported = sorted(target for target, suffix in target_suffixes.items() if suffix is None)

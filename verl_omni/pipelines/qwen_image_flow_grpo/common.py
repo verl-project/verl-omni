@@ -40,6 +40,14 @@ def apply_true_cfg(
     return comb_pred * (cond_norm / noise_norm)
 
 
+class QwenImageVeOmniMixin:
+    @staticmethod
+    def configure_veomni_lora(transformer: torch.nn.Module) -> None:
+        from .veomni import configure_lora_queries
+
+        configure_lora_queries(transformer)
+
+
 class QwenImageLoRAMixin:
     """Map Qwen-Image live LoRA names to the rollout layout."""
 

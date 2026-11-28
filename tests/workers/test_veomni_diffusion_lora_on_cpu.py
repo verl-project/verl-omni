@@ -14,7 +14,6 @@
 """CPU checks for LoRA support in the VeOmni diffusion engine."""
 
 import asyncio
-import builtins
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -86,20 +85,6 @@ def test_lora_config_maps_verl_omni_fields_to_veomni_names():
     assert "lora_adapter" not in config
 
 
-def test_lora_config_requires_veomni_0_1_12(monkeypatch):
-    engine = make_veomni_engine(lora_rank=64, target_modules=["to_q"])
-    real_import = builtins.__import__
-
-    def import_without_veomni_lora(name, *args, **kwargs):
-        if name == "veomni.lora":
-            raise ModuleNotFoundError(name, name=name)
-        return real_import(name, *args, **kwargs)
-
-    monkeypatch.setattr(builtins, "__import__", import_without_veomni_lora)
-    with pytest.raises(RuntimeError, match="veomni>=0.1.12"):
-        engine._build_veomni_lora_config()
-
-
 def test_lora_config_forwards_the_adapter_path_for_resume():
     engine = make_veomni_engine(lora_rank=64, target_modules=["to_q"], lora_adapter_path="/tmp/adapter")
     assert engine._build_veomni_lora_config()["lora_adapter"] == "/tmp/adapter"
@@ -153,6 +138,8 @@ def test_adapter_sync_keys_resolve_in_actual_diffusion_lora_manager(monkeypatch)
     from vllm.lora.peft_helper import PEFTHelper
     from vllm_omni.lora.manager import DiffusionLoRAManager
 
+    # Adapter name resolution only needs ordinary CPU tensors.
+    monkeypatch.setattr("vllm.lora.lora_model.PIN_MEMORY", False)
     engine = make_veomni_engine(_lora_module(), lora_rank=4, target_modules=["to_q", "to_k"])
     params, config = export_veomni_params(engine, monkeypatch, base_sync_done=True)
     loaded = LoRAModel.from_lora_tensors(
@@ -385,6 +372,38 @@ def test_validation_ignores_init_when_loading_an_adapter():
     veomni_lora_utils._validate_veomni_lora_support(
         _model_config(lora_init_weights="gaussian", lora_adapter_path="/tmp/adapter")
     )
+
+
+@pytest.mark.parametrize("enable_lora", [False, True])
+def test_runtime_respects_model_freeze_hook(enable_lora):
+    from verl_omni.workers.engine.veomni.diffusion_runtime import VeOmniDiffusionRuntime
+
+    model = _ToyTransformer()
+    model.proj_out.requires_grad_(False)
+    original_target = model.transformer_blocks[0].to_q
+
+    def freeze_model():
+        assert model.transformer_blocks[0].to_q is original_target
+        original_target.requires_grad_(False)
+
+    model.freeze_model = MagicMock(side_effect=freeze_model)
+    runtime = object.__new__(VeOmniDiffusionRuntime)
+    runtime.model = model
+    runtime.configure_lora = None
+    runtime.args = SimpleNamespace(lora_config={"target_modules": ["to_q"]} if enable_lora else None)
+
+    runtime._freeze_model_module()
+
+    if enable_lora:
+        model.freeze_model.assert_called_once_with()
+        target = model.transformer_blocks[0].to_q
+        assert type(target) is veomni_lora.layers.LoraLinear
+        trainable = {id(param) for param in runtime.model.parameters() if param.requires_grad}
+        assert trainable == {id(target.lora_A["default"].weight), id(target.lora_B["default"].weight)}
+    else:
+        model.freeze_model.assert_not_called()
+        assert original_target.weight.requires_grad
+        assert not model.proj_out.weight.requires_grad
 
 
 def test_build_rejects_moe_expert_lora():

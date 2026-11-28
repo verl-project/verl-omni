@@ -345,14 +345,15 @@ def test_both_algorithms_use_the_same_weight_loader_and_layout_helpers():
     from verl_omni.pipelines.minimax_h3_diffusion_nft import diffusers_training_adapter as nft_actor
     from verl_omni.pipelines.minimax_h3_diffusion_nft import vllm_omni_rollout_adapter as nft_rollout
     from verl_omni.pipelines.minimax_h3_flow_grpo import diffusers_training_adapter as flow_actor
+    from verl_omni.pipelines.minimax_h3_flow_grpo import veomni as flow_forward
     from verl_omni.pipelines.minimax_h3_flow_grpo import vllm_omni_rollout_adapter as flow_rollout
 
     assert MiniMaxH3RolloutWeightSyncMixin.load_weights is MiniMaxH3WeightSyncBase.load_weights
     assert MiniMaxH3WeightSyncMixin.load_weights is MiniMaxH3WeightSyncBase.load_weights
     for actor in (nft_actor, flow_actor):
         assert actor.build_ref2va_layout_from_meta is nft_common.build_ref2va_layout_from_meta
-        assert actor.h3_ulysses_forward is nft_common.h3_ulysses_forward
         assert actor.prepare_h3_processor_files is nft_common.prepare_h3_processor_files
+    assert nft_actor.h3_ulysses_forward is flow_forward.h3_ulysses_forward is nft_common.h3_ulysses_forward
     for rollout in (nft_rollout, flow_rollout):
         assert rollout.serialize_ref_blocks is nft_common.serialize_ref_blocks
         assert rollout.ref2va_reference_image_short_edge is nft_common.ref2va_reference_image_short_edge

@@ -113,9 +113,8 @@ def _iter_actor_lora_peft_models(engine, adapter_name: str = "default"):
     def get_peft_model_from_engine(engine: BaseEngine) -> torch.nn.Module | None:
         module = getattr(engine, "module", None)
         peft_model = getattr(module, "_fsdp_wrapped_module", module) if module is not None else None
-        if peft_model is not None and getattr(peft_model, "peft_config", None):
-            if peft_model.peft_config.get(adapter_name) is not None:
-                return peft_model
+        if peft_model is not None and _get_engine_lora_config(engine, adapter_name) is not None:
+            return peft_model
         return None
 
     if engine is None:

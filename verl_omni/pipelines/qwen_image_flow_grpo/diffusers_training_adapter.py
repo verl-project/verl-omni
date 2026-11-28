@@ -30,7 +30,7 @@ from verl_omni.pipelines.model_base import DiffusionModelBase
 from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
 from verl_omni.workers.config import DiffusionModelConfig
 
-from .common import QWEN_IMAGE_VAE_SCALE_FACTOR, apply_true_cfg, build_img_shapes
+from .common import QWEN_IMAGE_VAE_SCALE_FACTOR, QwenImageVeOmniMixin, apply_true_cfg, build_img_shapes
 
 __all__ = ["QwenImage"]
 
@@ -64,7 +64,7 @@ def _configure_qwen_image_scheduler(
 
 
 @DiffusionModelBase.register("QwenImagePipeline", algorithm="flow_grpo")
-class QwenImage(DiffusionModelBase):
+class QwenImage(QwenImageVeOmniMixin, DiffusionModelBase):
     """Training adapter for the Qwen-Image diffusion model.
 
     Implements the :class:`~verl_omni.pipelines.model_base.DiffusionModelBase`

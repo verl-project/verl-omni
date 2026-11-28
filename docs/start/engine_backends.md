@@ -8,18 +8,37 @@ reference recipes opt into. The diffusion trainer and Qwen3-Omni Thinker can alt
 
 ## Installing VeOmni alongside vLLM
 
+The Qwen-Image and MiniMax H3 diffusion recipes use the native DiT runtime in
+`veomni==0.1.14` (Python 3.11 or 3.12). From the verl-omni checkout, install
+the pinned wheel on each diffusion worker in its existing torch/vLLM environment:
+
+```bash
+uv pip install --no-deps --group veomni-diffusion
+python -c "from veomni.models.model_runtime import VeOmniModelRuntime"
+```
+
+The shared GPU smoke job installs the same wheel with `--no-deps`.
+For CUDA, the `veomni-diffusion` target includes this release:
+
+```bash
+docker build -f docker/Dockerfile.cuda --target veomni-diffusion -t verl-omni:veomni-diffusion .
+```
+
+The `veomni` Docker target and the Qwen3-Omni Thinker recipe use 0.1.12.
+The pinned verl Thinker engine imports `veomni.models.checkpoint_tensor_loading`,
+which is absent from 0.1.14. Use separate environments for the two backends.
+
+## Installing VeOmni for the Qwen3-Omni Thinker
+
 VeOmni 0.1.12's `gpu` extra pins `torch==2.11.0+cu130`, which conflicts with the `torch==2.14.0` pulled in by `vllm==0.33.0`. A plain `uv pip install veomni[gpu]==0.1.12` therefore fails dependency resolution.
 
 Install the base VeOmni package without dependency resolution so the existing
-torch/vLLM stack is preserved, then add its media runtime dependencies
-(CI runs the image-only VeOmni smoke and pulls `librosa`/`soundfile`/`av`/`audioread`
-from the `[audio]`/`[omni]` extras; `torchcodec` is only needed when the VeOmni
-engine decodes video). This is the shared CI install; Qwen3-Omni Thinker also
-needs the kernels listed below.
+torch/vLLM stack is preserved, then add the Thinker media dependencies.
+`torchcodec` is only needed when the VeOmni engine decodes video.
+The Thinker also needs the kernels listed below.
 
 ```bash
-# Run from the verl-omni checkout to use its pinned release.
-uv pip install --no-deps --group veomni-diffusion
+uv pip install veomni==0.1.12 --no-deps
 uv pip install torchcodec librosa soundfile av audioread
 ```
 

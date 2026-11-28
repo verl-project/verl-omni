@@ -1,14 +1,14 @@
 # Qwen-Image FlowGRPO
 
-Last updated: 11/09/2026
+Last updated: 11/19/2026
 
 See the [FlowGRPO trainer guide](../../../docs/examples/flowgrpo_trainer.md) for installation, OCR data and
 reward-model setup.
 
 ## VeOmni LoRA
 
-VeOmni 0.1.12 or newer is required for native LoRA injection and adapter-to-rollout synchronization. Install it
-as described in [Installing VeOmni alongside vLLM](../../../docs/start/engine_backends.md#installing-veomni-alongside-vllm):
+Install `veomni==0.1.14` in the diffusion training environment.
+See [Installing VeOmni alongside vLLM](../../../docs/start/engine_backends.md#installing-veomni-alongside-vllm).
 
 ```bash
 bash examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora_veomni.sh
@@ -17,10 +17,8 @@ bash examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora_veomni.sh
 The recipe mirrors `run_qwen_image_ocr_lora.sh` and replaces the actor and reference backends with VeOmni.
 It keeps vLLM-Omni for rollout and uses explicit LoRA target modules because VeOmni does not support the
 `all-linear` shorthand. It runs the legacy (v0) trainer; VeOmni LoRA has not been validated with the V1 trainer.
-With VeOmni, actor and reference attention come from `veomni_config.attn_implementation`, not
-`model.attn_backend`. The VeOmni engine accepts `eager`, `flash_attention_2_hub`, and
-`flash_attention_3_hub` for every model (the recipe uses `flash_attention_3_hub`, matching the rollout's
-`FLASH_ATTN_3_HUB`).
+VeOmni resolves actor and reference attention from `veomni_config.attn_implementation`.
+The GPU recipe selects `flash_attention_3_hub` to match the rollout's `FLASH_ATTN_3_HUB`.
 
 The tiny LoRA smoke is a standalone script and is not part of the GPU smoke CI:
 

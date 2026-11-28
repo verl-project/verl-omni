@@ -22,6 +22,7 @@ from diffusers.models.transformers.transformer_qwenimage import QwenImageTransfo
 from tensordict import TensorDict
 
 from verl_omni.pipelines.model_base import DiffusionModelBase
+from verl_omni.pipelines.qwen_image_flow_grpo.common import QwenImageVeOmniMixin
 from verl_omni.workers.config import DiffusionModelConfig
 
 __all__ = ["QwenImageDPO"]
@@ -50,7 +51,7 @@ def _apply_true_cfg(
 
 
 @DiffusionModelBase.register("QwenImagePipeline", algorithm="dpo")
-class QwenImageDPO(DiffusionModelBase):
+class QwenImageDPO(QwenImageVeOmniMixin, DiffusionModelBase):
     """Training adapter for Qwen-Image Diffusion-DPO."""
 
     @classmethod
