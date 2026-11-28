@@ -20,12 +20,15 @@ three no-reference quality impairments — STOI, PESQ and SI-SDR — from the
 audio alone (the subjective variant needs a clean reference, which reward
 time does not have).
 
-Each metric is mapped into [0, 1] over its standard range and the score is
-the weighted mean (uniform by default):
+Each metric is mapped into [0, 1] over its standard range (the PESQ range
+follows the bundle's wideband P.862.2 bounds) and the score is the weighted
+mean (uniform by default). Silent audio never reaches the model: it returns
+the floors (score 0.0) because the model's RMS normalization is undefined
+on silence:
 
-    STOI   [0, 1]         -> STOI
-    PESQ   [-0.5, 4.5]   -> (PESQ + 0.5) / 5
-    SI-SDR [-20, 30] dB   -> (SI-SDR + 20) / 50
+    STOI   [0, 1]                  -> STOI
+    PESQ   wideband [1.0, ~4.64]   -> (PESQ - 1.0) / (upper - 1.0)
+    SI-SDR [-20, 30] dB           -> (SI-SDR + 20) / 50
 
 The raw predictions ride along as ``squim_stoi`` / ``squim_pesq`` /
 ``squim_sisdr`` so the reward stays interpretable. The model is a torchaudio
@@ -46,14 +49,18 @@ import threading
 
 import torch
 import torchaudio
+from torchaudio.models.squim.objective import PESQRange
 
 __all__ = ["compute_score"]
 
 _TARGET_SAMPLE_RATE = 16_000
-_MIN_WAVEFORM_SAMPLES = 16
+_MIN_WAVEFORM_SAMPLES = 16  # rejects garbage before resampling
+_MODEL_MIN_SAMPLES = 64  # the bundle's convolution window
 
 _STOI_RANGE = (0.0, 1.0)
-_PESQ_RANGE = (-0.5, 4.5)
+# SQUIM predicts wideband PESQ (ITU-T P.862.2), whose range differs from the
+# narrowband [-0.5, 4.5]; read it from the bundle instead of hardcoding it.
+_PESQ_RANGE = (float(PESQRange[0]), float(PESQRange[1]))
 _SISDR_RANGE_DB = (-20.0, 30.0)
 
 _METRIC_RANGES = {
@@ -142,12 +149,25 @@ def compute_score(
         if float(weight) < 0.0:
             raise ValueError(f"SQUIM weight for {name!r} must be non-negative, got {weight!r}.")
     total = sum(float(weight) for weight in weights.values())
-    if total <= 0.0:
-        raise ValueError(f"SQUIM weights must sum to a positive value, got {total}.")
+    if not math.isfinite(total) or total <= 0.0:
+        raise ValueError(f"SQUIM weights must sum to a finite positive value, got {total}.")
 
     waveform, sample_rate = _extract_waveform(solution_audio)
     if sample_rate != _TARGET_SAMPLE_RATE:
         waveform = torchaudio.functional.resample(waveform, sample_rate, _TARGET_SAMPLE_RATE)
+    # The model's convolutions use a 64-sample window; shorter inputs (which
+    # resampling can also produce) fail deep inside the bundle.
+    if waveform.numel() < _MODEL_MIN_SAMPLES:
+        raise ValueError(f"SQUIM scorer received too short a waveform ({waveform.numel()} samples at 16 kHz).")
+    # The model's RMS normalization divides by the waveform energy, so pure
+    # silence is undefined; score it as the range floors instead of crashing.
+    if not waveform.any():
+        return {
+            "score": 0.0,
+            "squim_stoi": _STOI_RANGE[0],
+            "squim_pesq": _PESQ_RANGE[0],
+            "squim_sisdr": _SISDR_RANGE_DB[0],
+        }
 
     model, _ = _cached_model(device)
     with torch.inference_mode(), _MODEL_CACHE_LOCK:

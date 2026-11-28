@@ -23,6 +23,10 @@ import numpy as np
 import pytest
 import torch
 
+# A deterministic non-silent waveform: pure silence short-circuits to the
+# floor score before the (stubbed) model runs.
+_WAVE = np.linspace(-0.5, 0.5, 1600, dtype=np.float32)
+
 pytest.importorskip("torchaudio")
 
 
@@ -104,10 +108,12 @@ def test_rejects_short_nonfinite_or_bad_rate():
 
 
 def test_normalizes_each_metric_over_its_range():
+    pesq_low, pesq_high = squim._PESQ_RANGE  # wideband P.862.2 bounds from the bundle
+    assert pesq_high > pesq_low > 0.0
     assert squim._normalize_metric("stoi", 0.0) == 0.0
     assert squim._normalize_metric("stoi", 1.0) == 1.0
-    assert squim._normalize_metric("pesq", -0.5) == pytest.approx(0.0)
-    assert squim._normalize_metric("pesq", 4.5) == pytest.approx(1.0)
+    assert squim._normalize_metric("pesq", pesq_low) == pytest.approx(0.0)
+    assert squim._normalize_metric("pesq", pesq_high) == pytest.approx(1.0)
     assert squim._normalize_metric("sisdr", -20.0) == pytest.approx(0.0)
     assert squim._normalize_metric("sisdr", 30.0) == pytest.approx(1.0)
     assert squim._normalize_metric("stoi", 2.0) == 1.0  # clamped
@@ -115,24 +121,26 @@ def test_normalizes_each_metric_over_its_range():
 
 
 def test_compute_score_uniform_weights(stub_model):
-    stub_model(stoi=1.0, pesq=4.5, sisdr=30.0)
-    result = squim.compute_score((np.zeros(1600, dtype=np.float32), 16_000))
+    pesq_top = squim._PESQ_RANGE[1]
+    stub_model(stoi=1.0, pesq=pesq_top, sisdr=30.0)
+    result = squim.compute_score((_WAVE, 16_000))
     assert result["score"] == pytest.approx(1.0)
     assert result["squim_stoi"] == pytest.approx(1.0)
-    assert result["squim_pesq"] == pytest.approx(4.5)
+    assert result["squim_pesq"] == pytest.approx(pesq_top)
     assert result["squim_sisdr"] == pytest.approx(30.0)
 
 
 def test_compute_score_averages_normalized_metrics(stub_model):
     stub_model(stoi=0.5, pesq=2.0, sisdr=5.0)
-    result = squim.compute_score((np.zeros(1600, dtype=np.float32), 16_000))
-    expected = (0.5 + (2.0 + 0.5) / 5 + (5.0 + 20.0) / 50) / 3
+    result = squim.compute_score((_WAVE, 16_000))
+    pesq_part = (2.0 - squim._PESQ_RANGE[0]) / (squim._PESQ_RANGE[1] - squim._PESQ_RANGE[0])
+    expected = (0.5 + pesq_part + (5.0 + 20.0) / 50) / 3
     assert result["score"] == pytest.approx(expected)
 
 
 def test_compute_score_resamples_to_16k(stub_model):
     model = stub_model(stoi=1.0, pesq=4.5, sisdr=30.0)
-    squim.compute_score((np.zeros(2400, dtype=np.float32), 24_000))
+    squim.compute_score((np.linspace(-0.5, 0.5, 2400, dtype=np.float32), 24_000))
     assert model.calls, "the scorer must run the model"
     batch_shape = model.calls[0]
     assert batch_shape[0] == 1  # one mono waveform
@@ -142,7 +150,7 @@ def test_compute_score_resamples_to_16k(stub_model):
 def test_compute_score_custom_weights(stub_model):
     stub_model(stoi=0.0, pesq=4.5, sisdr=30.0)
     result = squim.compute_score(
-        (np.zeros(1600, dtype=np.float32), 16_000),
+        (_WAVE, 16_000),
         weights={"stoi": 1.0, "pesq": 0.0, "sisdr": 0.0},
     )
     assert result["score"] == pytest.approx(0.0)
@@ -157,13 +165,13 @@ def test_compute_score_rejects_bad_weights(stub_model):
         {"stoi": 0.0, "pesq": 0.0, "sisdr": 0.0},
     ):
         with pytest.raises(ValueError):
-            squim.compute_score((np.zeros(1600, dtype=np.float32), 16_000), weights=weights)
+            squim.compute_score((_WAVE, 16_000), weights=weights)
 
 
 def test_compute_score_absorbs_forwarded_kwargs(stub_model):
     stub_model(stoi=1.0, pesq=4.5, sisdr=30.0)
     result = squim.compute_score(
-        (np.zeros(1600, dtype=np.float32), 16_000),
+        (_WAVE, 16_000),
         data_source="tts",
         ground_truth="unused",
         extra_info={"num_turns": 2},
@@ -171,3 +179,28 @@ def test_compute_score_absorbs_forwarded_kwargs(stub_model):
         some_unrelated_forwarded_key="ignored",
     )
     assert 0.0 <= result["score"] <= 1.0
+
+
+def test_silent_audio_returns_floor_score_without_model():
+    result = squim.compute_score((np.zeros(1600, dtype=np.float32), 16_000))
+    assert result["score"] == 0.0
+    assert result["squim_stoi"] == squim._STOI_RANGE[0]
+    assert result["squim_pesq"] == squim._PESQ_RANGE[0]
+    assert result["squim_sisdr"] == squim._SISDR_RANGE_DB[0]
+
+
+def test_too_short_after_resampling_rejected(stub_model):
+    stub_model(stoi=1.0, pesq=1.0, sisdr=1.0)
+    # 8 samples at 48 kHz resample to far below the 64-sample model window.
+    with pytest.raises(ValueError, match="too short"):
+        squim.compute_score((np.linspace(-1, 1, 8, dtype=np.float32), 48_000))
+
+
+def test_weight_sum_overflow_rejected(stub_model):
+    stub_model(stoi=1.0, pesq=1.0, sisdr=1.0)
+    huge = 1e308
+    with pytest.raises(ValueError, match="finite positive"):
+        squim.compute_score(
+            (_WAVE, 16_000),
+            weights={"stoi": huge, "pesq": huge, "sisdr": huge},
+        )
