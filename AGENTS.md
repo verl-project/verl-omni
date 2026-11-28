@@ -44,6 +44,13 @@ The agent-instruction layer itself — `AGENTS.md`/`CLAUDE.md` and `.agents/`
 asks for that change, then follow
 [`docs/contributing/editing-agent-instructions.md`](docs/contributing/editing-agent-instructions.md).
 
+The checks are protected the same way. When a pre-commit hook, a
+`tests/special_sanity/` check, or a Ruff or mypy check fails, fix the code it
+flags. Do not change check logic, allowlists, hook arguments, file scope, or
+rule selections to make CI pass. Do not add suppressions or skip hooks in
+place of a fix. If the check itself is wrong, report it and change it only
+when the user explicitly asks, separately and with the reason stated.
+
 ### Fail-closed behavior
 
 If work is duplicate/trivial busywork, **do not proceed**. Return a short explanation of what is missing.

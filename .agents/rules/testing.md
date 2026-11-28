@@ -11,7 +11,7 @@ paths:
 the commands. Step-by-step: [run-cpu-tests](../skills/run-cpu-tests/SKILL.md). Two
 things here are enforcement facts rather than guidance.
 
-## Placement is a commit gate, and it is the only one
+## Placement and CPU-test naming are commit gates
 
 `validate-structure` fails the commit unless every `test*.py` sits in
 `tests/<module>/`, where `<module>` is a first-level directory of `verl_omni/`
@@ -21,10 +21,11 @@ things here are enforcement facts rather than guidance.
 one of `special_{e2e,sanity,standalone,distributed}`. A test at the `tests/` root
 fails.
 
-Nested directories are fine (`tests/utils/reward_score/`). The hook checks nothing
-else: not naming, not docstrings, not that the path mirrors the source. So the
-guide's `_on_cpu.py` rule is *not* gated — a misnamed test commits cleanly and then
-never runs.
+Nested directories are fine (`tests/utils/reward_score/`). `check-pr-lint` additionally
+enforces `test_*_on_cpu.py` naming for CPU tests (`VO007`), topology helpers instead of
+bare `torch.cuda.is_available()` skips (`VO013`), exit-status propagation for
+`pytest.main()` (`VO006`), and behavioral assertions instead of asserting substrings on
+`verl_omni/` source text (`VO017`).
 
 ## GPU tests are gated by scripts, not by `skipif`
 

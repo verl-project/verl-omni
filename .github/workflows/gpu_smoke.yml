@@ -56,6 +56,18 @@ env:
   DYNAMIC_RUNNER_ENDPOINT: "https://sd7upeujs1b9g1a958pn0.apigateway-cn-beijing.volceapi.com/runner"
 
 jobs:
+  pr_lint:
+    if: >-
+      github.repository_owner == 'verl-project' &&
+      github.event_name == 'pull_request' &&
+      (contains(github.event.pull_request.labels.*.name, 'ready-for-ci') ||
+       contains(github.event.pull_request.labels.*.name, 'ci-core') ||
+       contains(github.event.pull_request.labels.*.name, 'ci-e2e-omni') ||
+       contains(github.event.pull_request.labels.*.name, 'ci-e2e-diffusion'))
+    uses: ./.github/workflows/pr-lint.yml
+    with:
+      bypass_label_gate: true
+
   setup_runner:
     # Pull request label mapping:
     #   ready-for-ci               -> diff-selected GPU smoke groups in parallel, up to 8 GPUs
@@ -63,7 +75,10 @@ jobs:
     #   ci-e2e-omni                -> omni trainer e2e coverage on one 2-GPU runner
     #   ci-e2e-diffusion           -> diffusion trainer e2e coverage on one 4-GPU runner
     # Push events also run all groups on one 8-GPU runner.
-    if: github.repository_owner == 'verl-project'
+    needs: pr_lint
+    if: >-
+      !cancelled() && github.repository_owner == 'verl-project' &&
+      (github.event_name == 'push' || needs.pr_lint.result == 'success')
     runs-on: ubuntu-latest
     outputs:
       mode: ${{ steps.resolve-mode.outputs.mode }}

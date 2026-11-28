@@ -93,9 +93,18 @@ jobs:
               output.write(f"jobs={json.dumps(jobs)}\n")
           PY
 
-  npu_smoke:
+  pr_lint:
     needs: resolve_groups
-    if: needs.resolve_groups.result == 'success'
+    if: github.event_name == 'pull_request'
+    uses: ./.github/workflows/pr-lint.yml
+    with:
+      bypass_label_gate: true
+
+  npu_smoke:
+    needs: [resolve_groups, pr_lint]
+    if: >-
+      !cancelled() && needs.resolve_groups.result == 'success' &&
+      (github.event_name == 'push' || needs.pr_lint.result == 'success')
     strategy:
       fail-fast: false
       max-parallel: 2

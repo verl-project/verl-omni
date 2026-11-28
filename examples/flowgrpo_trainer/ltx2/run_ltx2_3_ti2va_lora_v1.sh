@@ -40,6 +40,21 @@ exec > >(tee -a "$log_file") 2>&1
 
 ltx_lora_targets="['attn1.to_q','attn1.to_k','attn1.to_v','attn1.to_out.0','attn2.to_q','attn2.to_k','attn2.to_v','attn2.to_out.0','audio_attn1.to_q','audio_attn1.to_k','audio_attn1.to_v','audio_attn1.to_out.0','audio_attn2.to_q','audio_attn2.to_k','audio_attn2.to_v','audio_attn2.to_out.0','audio_to_video_attn.to_q','audio_to_video_attn.to_k','audio_to_video_attn.to_v','audio_to_video_attn.to_out.0','video_to_audio_attn.to_q','video_to_audio_attn.to_k','video_to_audio_attn.to_v','video_to_audio_attn.to_out.0','ff.net.0.proj','ff.net.2','audio_ff.net.0.proj','audio_ff.net.2']"
 
+reward_scorer_args=(
+    "+reward.scorers.clap.path=$repo_root/verl_omni/utils/reward_score/clap.py"
+    '+reward.scorers.clap.name=compute_score'
+    '+reward.scorers.clap.weight=1.0'
+    '+reward.scorers.clap.kwargs.device=cuda:0'
+    '+reward.scorers.clap.kwargs.model_name_or_path=laion/larger_clap_general'
+    '+reward.scorers.imagebind.path=pkg://verl_omni.utils.reward_score.imagebind'
+    '+reward.scorers.imagebind.name=compute_score_native'
+    '+reward.scorers.imagebind.weight=1.0'
+    '+reward.scorers.imagebind.model=imagebind'
+    '+reward.scorers.imagebind.kwargs.mode=audio_video'
+)
+source "${script_path%/*}/reward_overrides.sh" || exit 1
+apply_legacy_reward_overrides "$@"
+
 python3 -m verl_omni.trainer.main_diffusion_v1 \
     data.train_files=$train_path \
     data.val_files=$test_path \
@@ -112,25 +127,14 @@ python3 -m verl_omni.trainer.main_diffusion_v1 \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=16 \
     reward.num_workers=1 \
     reward.reward_model.enable=False \
-    reward.custom_reward_function.path=pkg://verl_omni.reward_loop.reward_manager.multi \
-    reward.custom_reward_function.name=_multi_reward_placeholder \
     reward.reward_manager.name=MultiVisualRewardManager \
     reward.reward_manager.module.path=pkg://verl_omni.reward_loop.reward_manager \
-    "+reward.reward_functions.clap.path=$repo_root/verl_omni/utils/reward_score/clap.py" \
-    '+reward.reward_functions.clap.name=compute_score' \
-    '+reward.reward_functions.clap.weight=1.0' \
-    '+reward.reward_functions.clap.device=cuda:0' \
-    '+reward.reward_functions.clap.model_name_or_path=laion/larger_clap_general' \
+    "${reward_scorer_args[@]}" \
     '+reward.models.imagebind.backend=native' \
     '+reward.models.imagebind.model_path=.checkpoints/imagebind_huge.pth' \
     '+reward.models.imagebind.offload=false' \
     '+reward.models.imagebind.placement.devices=[1]' \
     '+reward.models.imagebind.executor.model=verl_omni.utils.reward_score.imagebind:ImageBindModel' \
-    '+reward.reward_functions.imagebind.path=pkg://verl_omni.utils.reward_score.imagebind' \
-    '+reward.reward_functions.imagebind.name=compute_score_native' \
-    '+reward.reward_functions.imagebind.weight=1.0' \
-    '+reward.reward_functions.imagebind.model=imagebind' \
-    '+reward.reward_functions.imagebind.mode=audio_video' \
     reward.aggregation=weighted_sum \
     trainer.logger='["console","tensorboard","wandb"]' \
     trainer.project_name=flow_grpo \

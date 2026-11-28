@@ -1,0 +1,49 @@
+name: Protect CI checks
+
+on:
+  pull_request_target:
+    branches: [main, 'v0.*']
+    types: [opened, labeled, synchronize, reopened, edited]
+
+permissions:
+  contents: read
+
+jobs:
+  protect-ci-checks:
+    if: >-
+      (contains(github.event.pull_request.labels.*.name, 'auto-lint') ||
+       contains(join(github.event.pull_request.labels.*.name, ','), 'ci')) &&
+      (github.event.action != 'labeled' ||
+       github.event.label.name == 'auto-lint' ||
+       contains(github.event.label.name, 'ci'))
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78
+        with:
+          enable-cache: false
+      - name: Check PR changes using target-branch policy
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          git fetch --no-tags origin "refs/pull/${PR_NUMBER}/head"
+          if ! git cat-file -e "${HEAD_SHA}^{commit}" 2>/dev/null; then
+            git fetch --no-tags origin "$HEAD_SHA"
+          fi
+          if ! git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
+            BASE_SHA="HEAD"
+          fi
+          status=0
+          uv run --no-project --python 3.12 python tests/special_sanity/check_ci_policy.py "$BASE_SHA" "$HEAD_SHA" || status=1
+          uv run --no-project --python 3.12 --with ruff==0.12.2 python tests/special_sanity/check_pr_lint.py "$BASE_SHA" "$HEAD_SHA" || status=1
+          exit "$status"

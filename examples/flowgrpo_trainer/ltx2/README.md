@@ -1,6 +1,6 @@
 # LTX-2.3 audio-video FlowGRPO
 
-Last updated: 11/20/2026
+Last updated: 11/26/2026
 
 These recipes train `dg845/LTX-2.3-Diffusers` LoRA adapters for text-to-audio-video
 (T2AV) or single-first-frame text-and-image-to-audio-video (TI2VA) generation with
@@ -84,6 +84,23 @@ pip install 'git+https://github.com/facebookresearch/pytorchvideo.git'
 Review the ImageBind license before enabling this reward in your environment.
 
 ## Launch
+
+### V1 scorer configuration
+
+The V1 T2AV and TI2VA launchers configure CLAP and ImageBind under
+`reward.scorers`. They use the built-in `MultiVisualRewardManager`. Use
+`reward.scorers.clap.kwargs.model_name_or_path` and
+`reward.scorers.clap.kwargs.device` for CLAP scorer overrides, and
+`reward.scorers.imagebind.kwargs.mode` for the ImageBind scoring mode.
+The ImageBind deployment still uses `reward.models.imagebind`.
+
+Existing commands can continue to pass flat `reward.reward_functions` overrides.
+The launchers use the legacy reward defaults when a command passes a key in
+that section. For new commands, use `reward.scorers` overrides, such as
+`reward.scorers.clap.kwargs.model_name_or_path=/path/to/clap`. Use one form
+per command. See
+[Explicit scorer entries](../../../docs/algo/named_reward_models.md#explicit-scorer-entries)
+for the supported fields.
 
 ### T2AV GPU
 
