@@ -32,10 +32,46 @@ from verl_omni.agent_loop.diffusion_agent_loop import (
     _InternalDiffusionAgentLoopOutput,
 )
 from verl_omni.agent_loop.utils import derive_rollout_seed
-from verl_omni.pipelines.rollout_media import ARTIFACT_CONTEXT, ARTIFACT_SPECS, PREVIEW_ARTIFACT, PRIMARY_ARTIFACT
+from verl_omni.pipelines.rollout_media import (
+    ARTIFACT_CONTEXT,
+    ARTIFACT_PREFIX,
+    ARTIFACT_SPECS,
+    PREVIEW_ARTIFACT,
+    PRIMARY_ARTIFACT,
+)
+from verl_omni.workers.config.reward import reward_is_enabled
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
+
+
+def _tensor_bytes(tensor: Any) -> int:
+    return int(tensor.numel()) * int(tensor.element_size()) if isinstance(tensor, torch.Tensor) else 0
+
+
+def _strip_train_media_requested(config: Any) -> bool:
+    """Opt-in decoded-media strip for train rows; off unless every consumer is absent.
+
+    The decoded media of a train row (``responses`` and the decoded artifact
+    copy) only feeds the rollout dump and the reward manager — the training
+    legs read trajectory tensors, prompt embeds and scores, and reward scoring
+    with a custom function runs inside this worker before the put. Keep the
+    media whenever either consumer is configured; validation rows always keep
+    it. ``trainer.strip_train_media`` (default false) opts in, so the default
+    row schema is unchanged.
+    """
+    trainer_cfg = getattr(config, "trainer", None)
+    if trainer_cfg is None or not trainer_cfg.get("strip_train_media", False):
+        return False
+    try:
+        if trainer_cfg.get("rollout_data_dir", None):
+            return False
+        if reward_is_enabled(config):
+            return False
+    except (AttributeError, KeyError):
+        # Reward config unreadable → consumers can't be ruled out; keep media.
+        return False
+    return True
 
 
 @ray.remote
@@ -226,6 +262,8 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
     ) -> None:
         """Write the finished sessions of one prompt as batched TransferQueue rows."""
         partition_id = "val" if validate else "train"
+        strip_train_media = not validate and _strip_train_media_requested(getattr(self, "config", None))
+        dropped_bytes = 0
         # Track the rollout model version this trajectory was generated against.
         step = trajectory["step"] if trajectory else global_steps
 
@@ -306,6 +344,26 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
             gen_batch_seq = kwargs.get("gen_batch_seq")
             if gen_batch_seq is not None:
                 tag["gen_batch_seq"] = int(gen_batch_seq)
+            if strip_train_media:
+                # ``responses`` and the decoded artifact are two copies of the
+                # same visual media (image and video alike — the decoded test
+                # matches is_decoded_visual); drop both, the tag keeps
+                # response_shape for telemetry. Non-visual rows keep everything:
+                # their ``responses`` is the media payload (audio waveform), and
+                # a decoded preview may be its only visual companion.
+                media_kind = extra.get("media_kind")
+                if media_kind in (None, "image", "video"):
+                    specs = extra.get(ARTIFACT_SPECS) or {}
+                    decoded_artifacts = [
+                        ARTIFACT_PREFIX + name
+                        for name, spec in specs.items()
+                        if isinstance(spec, dict)
+                        and spec.get("representation") == "decoded"
+                        and spec.get("modality") in ("image", "video")
+                    ]
+                    for media_key in ("responses", *decoded_artifacts):
+                        media_value = field.pop(media_key, None)
+                        dropped_bytes += _tensor_bytes(media_value)
             rows.setdefault(tuple(field.keys()), []).append((key, field, tag))
 
         for group_rows in rows.values():
@@ -314,6 +372,12 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
                 fields=list_of_dict_to_tensordict([field for _key, field, _tag in group_rows]),
                 tags=[tag for _key, _field, tag in group_rows],
                 partition_id=partition_id,
+            )
+        if strip_train_media and dropped_bytes:
+            logger.info(
+                "[PixelLean] train rows for %s: dropped decoded media, ~%.1f MB not stored",
+                uid,
+                dropped_bytes / 1e6,
             )
 
 
