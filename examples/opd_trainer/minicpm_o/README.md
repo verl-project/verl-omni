@@ -132,44 +132,20 @@ The conditioning span is the text between the last `<|tts_bos|>` and the last
 
 ### Verification evidence
 
-- GPU unit checks (real weights, H100): model load with TTS, thinker frozen /
-  talker trainable, the official conditioning math, the teacher-forced
-  forward through `head_code`, gradient flow to `tts.*` only, codec logprob
-  sanity (7/7).
-- Precision alignment against the official inference path: the rebuilt
-  conditioning matches `_generate_speech_non_streaming`'s `inputs_embeds`
-  with zero difference, and the model assigns its own sampled codec frames a
-  mean logprob of -0.295 (uniform baseline -8.789, 94%+ of frames above 0.5).
-- E2E smoke (8xH100): rollout → replay → adapter → LoRA update on `tts.*`
-  with `distillation.enabled=false` (GRPO + KL to reference), driven by the
-  verification preset of
-  `verl_omni/utils/reward_score/talker_codec_reward.py`
-  (`target_frames=None`: a saturating length floor that an untrained talker
-  scores ~1.0 on).
-- Learning demonstration (8xH100): the same scorer's length-control preset
-  (`target_frames=70`, an asymmetric window peaked at the target) starts at
-  ~0.3 for the untrained talker's ~115 frames. The train/val reward climbs
-  as the policy learns to emit its stop token earlier — the learning curve
-  is attached to the PR description. Under the multi-reward managers the
-  preset is selectable from the run config
-  (`reward.reward_functions.<key>.target_frames=70`).
+- GPU unit checks (real weights, H100): model load with TTS, thinker frozen / talker trainable, the conditioning math, the teacher-forced forward through `head_code`, gradient flow to `tts.*` only (7/7).
+- Precision alignment: the rebuilt conditioning matches `_generate_speech_non_streaming`'s `inputs_embeds` bit-exactly.
+- E2E smoke (8xH100): full rollout → replay → LoRA update loop under the reward's verification preset; a length-control learning curve is attached to the PR description.
 
 ### Notes and limits
 
 - `use_remove_padding` must stay false: rmpad flattening invalidates the
   replay span coordinates.
-- GSPO loss aggregation and group sampling interact strongly on talker
-  rollouts (lengths vary widely per sample). Measured on the
-  length-control demo (8xH100, 32 steps each): with `rollout.n=1` the GRPO
-  advantages degenerate to the raw score — every sampled sequence is
-  reinforced and the codec entropy climbs until long runs destabilize;
-  with `rollout.n=4` and the default `loss_agg_mode=token-mean`, the
-  longest suppressed samples dominate the gradient (loss weighted by token
-  count) and training drifts away from the reward optimum (response length
-  115 → 280+, validation reward 0.29 → 0.03). Keeping
-  `loss_agg_mode=seq-mean-token-mean` — the GSPO paper's recommended
-  aggregation — alongside `rollout.n>1` trains stably and in the right
-  direction (validation reward 0.20 → 0.43, no collapse).
+- GSPO aggregation and group sampling interact strongly on talker rollouts:
+  `rollout.n=1` degenerates GRPO advantages to the raw score, and
+  `rollout.n>1` with the default `loss_agg_mode=token-mean` lets the longest
+  suppressed samples dominate the gradient. Keep
+  `loss_agg_mode=seq-mean-token-mean` when raising `rollout.n` (details in
+  the GSPO trainer README).
 - MiniCPM-o 4.5 ships a single-codebook talker (`num_vq=1`,
   `num_audio_tokens=6562`); the multi-codebook layout is rejected explicitly.
 - The OPD teacher pool scores a request by prefilling its prompt-plus-response

@@ -1,21 +1,7 @@
 #!/usr/bin/env bash
-# MiniCPM-o 4.5 Talker on-policy distillation (OPD): train the TTS AR policy
-# over speech codec tokens while the thinker is frozen.
-#
-# This recipe trains the talker stage of MiniCPM-o 4.5. The student's
-# rollout runs the thinker→talker pipeline (pipeline_mode="thinker_talker"):
-# the frozen thinker writes the text response on-policy and the trainable
-# talker speaks it as codec frames. The batch's response tokens are the codec
-# frames themselves; the real prompt and the thinker's text response travel
-# in the per-sample replay payload (see
-# verl_omni/pipelines/minicpm/talker_forward.py).
-#
-# Prerequisites:
-#   - The thinker OPD recipe — its adapter registration, FSDP engine, and
-#     weight-sync patterns are reused here.
-#   - The teacher must be a MiniCPM-o 4.5 checkpoint sharing the student's
-#     codec vocabulary (num_vq=1, num_audio_tokens=6562).
-#
+# MiniCPM-o 4.5 talker-stage training: train the TTS AR policy over speech
+# codec tokens while the thinker stays frozen. Requires a teacher checkpoint
+# sharing the student's codec vocabulary (num_vq=1, num_audio_tokens=6562).
 # Hyperparameters follow the thinker OPD recipe with talker-specific stage
 # selection and LoRA targeting.
 

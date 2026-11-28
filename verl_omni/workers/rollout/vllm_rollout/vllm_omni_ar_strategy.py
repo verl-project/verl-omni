@@ -292,13 +292,9 @@ class ARStrategy(OmniStrategyBase):
 
         deploy_dict: dict[str, object] = {"pipeline": pipeline_id}
         # RL rollouts drive the pipeline serially (turn mode). The engine
-        # defaults multi-stage pipelines with async-chunk connectors to
-        # async_chunk=True, whose orchestrator prewarm submits placeholder
-        # requests to downstream LLM stages BEFORE their bridge conditioning
-        # arrives -- stages whose preprocess requires those tensors (e.g.
-        # MiniCPM-o's talker: tts_token_ids/tts_hidden_states) crash on the
-        # unconditioned placeholder. Disable async chunk unless explicitly
-        # requested.
+        # Default to serial execution: the orchestrator's async-chunk prewarm
+        # submits unconditioned placeholder requests that crash downstream
+        # stages whose preprocess needs bridge tensors (e.g. MiniCPM-o's talker).
         async_chunk = engine_kwargs.get("async_chunk", engine_kwargs.get("async-chunk"))
         deploy_dict["async_chunk"] = bool(async_chunk) if async_chunk is not None else False
 

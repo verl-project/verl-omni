@@ -15,30 +15,19 @@
 
 The talker rollout's response tokens are speech codec frames — the response
 decodes to a whitespace-separated string of integer codec ids — so text
-scoring is meaningless. The frame count is the one signal every talker
-experiment can use, and this scorer shapes it in two presets:
+scoring is meaningless. Two presets shape the frame count:
 
-* **Verification preset** (``target_frames=None``, the default): a
-  saturating length floor. The score grows linearly from ``floor_frames``
-  to 1.0 at ``full_frames``. An untrained talker already emits ~115 frames,
-  so an E2E smoke run starts at ~1.0 and stays flat — exactly what a
-  pipeline-verification run wants (shorter rollouts still spread below 1.0,
-  keeping GRPO advantages non-degenerate without needing a task reward).
-* **Length-control preset** (``target_frames=<int>``): an asymmetric
-  Gaussian window that peaks at the target. Wide above the target (smooth
-  approach from the natural length), steep below (an overshoot into
-  near-empty speech is punished hard). The untrained talker emits ~115
-  frames per turn (measured on the verification set), so ``target_frames=70``
-  starts around 0.3 with headroom to climb — the policy must learn to emit
-  its stop token earlier to raise the score.
+* ``target_frames=None`` (default) — a saturating length floor: the score
+  grows linearly from ``floor_frames`` to 1.0 at ``full_frames``; an
+  untrained talker's ~115 frames already score ~1.0 (E2E smoke preset).
+* ``target_frames=<int>`` — an asymmetric window peaked at the target
+  (wide above for a smooth approach, steep below to punish near-empty
+  speech), so the policy must learn to emit its stop token earlier.
 
-Parameters arrive as keyword arguments, following the repo's scorer
-contract (``.agents/rules/reward.md``): the multi-reward managers forward
-every non-reserved ``reward_functions.<key>.*`` config entry, so
-``reward.reward_functions.talker.target_frames=70`` selects the
-length-control preset from the run config. Single-reward runs
-(``reward.custom_reward_function.path``) get the defaults.
-"""
+Parameters arrive as keyword arguments per the scorer contract
+(``.agents/rules/reward.md``): the multi-reward managers forward every
+non-reserved ``reward_functions.<key>.*`` config entry; single-reward runs
+get the defaults."""
 
 from __future__ import annotations
 

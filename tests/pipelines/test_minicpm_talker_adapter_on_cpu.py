@@ -13,10 +13,9 @@
 # limitations under the License.
 """CPU behavior tests for the MiniCPM-o talker training pipeline.
 
-The teacher-forced forward math is exercised against small torch stubs with
-the real functions loaded by file path (no package dependencies). The
-adapter and rollout-contract tests import the full verl_omni stack and are
-skipped when it is not installed.
+The teacher-forced math and the adapter/rollout contracts import the full
+verl_omni stack (the forward lives in talker_training_adapter since the
+merge) and are skipped when it is not installed.
 """
 
 from __future__ import annotations
@@ -31,27 +30,14 @@ import torch
 REPO = Path(__file__).parent.parent.parent
 
 
-def _load_module(relpath: str):
-    """Load a module by file path, bypassing the package import chain."""
-    import sys
-
-    path = REPO / relpath
-    spec = importlib.util.spec_from_file_location(path.stem, path)
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
+_STACK_MISSING = importlib.util.find_spec("verl") is None or importlib.util.find_spec("vllm_omni") is None
 
 
 def _load_stack_module(name: str):
     """Import a verl_omni module, skipping the test when the stack is absent."""
-    if importlib.util.find_spec("verl") is None or importlib.util.find_spec("vllm_omni") is None:
+    if _STACK_MISSING:
         raise unittest.SkipTest("requires the verl_omni dependency stack")
     return importlib.import_module(name)
-
-
-forward = _load_module("verl_omni/pipelines/minicpm/talker_forward.py")
 
 
 class _StubTTS(torch.nn.Module):
@@ -94,11 +80,25 @@ def _stub_model(normalize_projected_hidden: bool = True):
     )
 
 
-class TestTalkerTokens(unittest.TestCase):
+class _ForwardCase(unittest.TestCase):
+    """Base for the teacher-forced math tests: loads the merged adapter."""
+
+    forward = None
+
+    @classmethod
+    def setUpClass(cls):
+        cls.forward = _load_stack_module("verl_omni.pipelines.minicpm.talker_training_adapter")
+
+    @property
+    def mod(self):
+        return self.__class__.forward
+
+
+class TestTalkerTokens(_ForwardCase):
     """TalkerTokens.from_config extracts the scalar constants."""
 
     def test_from_config(self):
-        tokens = forward.TalkerTokens.from_config(_stub_model().config)
+        tokens = self.mod.TalkerTokens.from_config(_stub_model().config)
         self.assertEqual(tokens.text_eos_token_id, 11)
         self.assertEqual(tokens.audio_bos_token_id, 12)
         self.assertEqual(tokens.num_vq, 1)
@@ -107,14 +107,14 @@ class TestTalkerTokens(unittest.TestCase):
         self.assertTrue(tokens.normalize_projected_hidden)
 
 
-class TestConditioning(unittest.TestCase):
+class TestConditioning(_ForwardCase):
     """The hidden_text_merge conditioning follows the official math."""
 
     def test_sum_without_normalization(self):
         model = _stub_model(normalize_projected_hidden=False)
         text = torch.randint(0, 50, (1, 4))
         hidden = torch.randn(1, 4, 16)
-        got = forward.build_conditioning(model, text, hidden)
+        got = self.mod.build_conditioning(model, text, hidden)
         expected = model.tts.emb_text(text) + model.tts.projector_semantic(hidden)
         self.assertTrue(torch.allclose(got, expected))
 
@@ -122,21 +122,21 @@ class TestConditioning(unittest.TestCase):
         model = _stub_model(normalize_projected_hidden=True)
         text = torch.randint(0, 50, (1, 4))
         hidden = torch.randn(1, 4, 16)
-        got = forward.build_conditioning(model, text, hidden)
+        got = self.mod.build_conditioning(model, text, hidden)
         projected = torch.nn.functional.normalize(model.tts.projector_semantic(hidden), p=2, dim=-1)
         self.assertTrue(torch.allclose(got, model.tts.emb_text(text) + projected))
 
 
-class TestBuildTalkerBatch(unittest.TestCase):
+class TestBuildTalkerBatch(_ForwardCase):
     """The teacher-forced prefix is [conditioning, text_eos, audio_bos, codec[:-1]]."""
 
     def _build(self, codec_len: int = 5, span: int = 4):
         model = _stub_model()
-        tokens = forward.TalkerTokens.from_config(model.config)
+        tokens = self.mod.TalkerTokens.from_config(model.config)
         text = torch.randint(0, 50, (span,))
         hidden = torch.randn(span, 16)
         codes = torch.randint(0, 100, (codec_len,))
-        batch = forward.build_talker_batch(model, [text], [hidden], [codes], tokens)
+        batch = self.mod.build_talker_batch(model, [text], [hidden], [codes], tokens)
         return model, tokens, text, hidden, codes, batch
 
     def test_prefix_length(self):
@@ -147,7 +147,7 @@ class TestBuildTalkerBatch(unittest.TestCase):
 
     def test_prefix_content(self):
         model, tokens, text, hidden, codes, batch = self._build(codec_len=5, span=4)
-        conditioning = forward.build_conditioning(model, text.unsqueeze(0), hidden.unsqueeze(0))[0]
+        conditioning = self.mod.build_conditioning(model, text.unsqueeze(0), hidden.unsqueeze(0))[0]
         text_eos = model.tts.emb_text(torch.tensor([tokens.text_eos_token_id]))
         audio_bos = model.tts.emb_text(torch.tensor([tokens.audio_bos_token_id]))
         codec_embeds = model.tts.emb_code[0](codes)
@@ -157,65 +157,65 @@ class TestBuildTalkerBatch(unittest.TestCase):
 
     def test_mismatched_batches_rejected(self):
         model = _stub_model()
-        tokens = forward.TalkerTokens.from_config(model.config)
+        tokens = self.mod.TalkerTokens.from_config(model.config)
         with self.assertRaises(ValueError):
-            forward.build_talker_batch(model, [torch.ones(3)], [], [torch.ones(2)], tokens)
+            self.mod.build_talker_batch(model, [torch.ones(3)], [], [torch.ones(2)], tokens)
 
     def test_multi_codebook_rejected(self):
         model = _stub_model()
         model.config.tts_config.num_vq = 2
-        tokens = forward.TalkerTokens.from_config(model.config)
+        tokens = self.mod.TalkerTokens.from_config(model.config)
         with self.assertRaises(NotImplementedError):
-            forward.build_talker_batch(model, [torch.ones(3)], [torch.randn(3, 16)], [torch.ones(2)], tokens)
+            self.mod.build_talker_batch(model, [torch.ones(3)], [torch.randn(3, 16)], [torch.ones(2)], tokens)
 
     def test_out_of_vocab_codec_rejected(self):
         model = _stub_model()
-        tokens = forward.TalkerTokens.from_config(model.config)
+        tokens = self.mod.TalkerTokens.from_config(model.config)
         with self.assertRaises(ValueError):
-            forward.build_talker_batch(model, [torch.ones(3)], [torch.randn(3, 16)], [torch.tensor([999])], tokens)
+            self.mod.build_talker_batch(model, [torch.ones(3)], [torch.randn(3, 16)], [torch.tensor([999])], tokens)
 
     def test_empty_codec_rejected(self):
         model = _stub_model()
-        tokens = forward.TalkerTokens.from_config(model.config)
+        tokens = self.mod.TalkerTokens.from_config(model.config)
         with self.assertRaises(ValueError):
-            forward.build_talker_batch(
+            self.mod.build_talker_batch(
                 model, [torch.ones(3)], [torch.randn(3, 16)], [torch.tensor([], dtype=torch.long)], tokens
             )
 
     def test_padding_across_rows(self):
         model = _stub_model()
-        tokens = forward.TalkerTokens.from_config(model.config)
+        tokens = self.mod.TalkerTokens.from_config(model.config)
         texts = [torch.randint(0, 50, (4,)), torch.randint(0, 50, (2,))]
         hiddens = [torch.randn(4, 16), torch.randn(2, 16)]
         codes = [torch.randint(0, 100, (5,)), torch.randint(0, 100, (3,))]
-        batch = forward.build_talker_batch(model, texts, hiddens, codes, tokens)
+        batch = self.mod.build_talker_batch(model, texts, hiddens, codes, tokens)
         self.assertEqual(batch.input_embeds.shape[0], 2)
         short_len = 2 + 2 + 2
         self.assertEqual(int(batch.attention_mask[1, :short_len].sum()), short_len)
         self.assertEqual(int(batch.attention_mask[1, short_len:].sum()), 0)
 
 
-class TestTalkerLogits(unittest.TestCase):
+class TestTalkerLogits(_ForwardCase):
     """talker_logits routes the backbone output through head_code[0]."""
 
     def test_shape_and_source(self):
         model = _stub_model()
-        tokens = forward.TalkerTokens.from_config(model.config)
-        batch = forward.build_talker_batch(
+        tokens = self.mod.TalkerTokens.from_config(model.config)
+        batch = self.mod.build_talker_batch(
             model,
             [torch.randint(0, 50, (4,))],
             [torch.randn(4, 16)],
             [torch.randint(0, 100, (5,))],
             tokens,
         )
-        logits = forward.talker_logits(model, batch)
+        logits = self.mod.talker_logits(model, batch)
         self.assertEqual(logits.shape, (1, batch.input_embeds.shape[1], tokens.num_audio_tokens))
         # The stub backbone returns inputs_embeds, so head_code[0] applied to
         # the first row must match.
         self.assertTrue(torch.allclose(logits[0, 0], model.tts.head_code[0](batch.input_embeds[0, 0]), atol=1e-5))
 
 
-class TestActorLogitsAlignment(unittest.TestCase):
+class TestActorLogitsAlignment(_ForwardCase):
     """minicpm_talker_actor_logits scatters codec distributions onto responses."""
 
     def _run(self, codec_len: int = 5, span: int = 4):
@@ -226,7 +226,7 @@ class TestActorLogitsAlignment(unittest.TestCase):
         input_ids = torch.zeros(1, 1 + codec_len, dtype=torch.long)
         input_ids[0, 1:] = codes
         attention_mask = torch.ones_like(input_ids)
-        aligned = forward.minicpm_talker_actor_logits(model, input_ids, attention_mask, [text], [hidden], [codes])
+        aligned = self.mod.minicpm_talker_actor_logits(model, input_ids, attention_mask, [text], [hidden], [codes])
         return model, codes, aligned
 
     def test_response_region_filled(self):
@@ -245,14 +245,14 @@ class TestActorLogitsAlignment(unittest.TestCase):
         codes = torch.randint(0, 100, (codec_len,))
         input_ids = torch.zeros(1, 1 + codec_len, dtype=torch.long)
         input_ids[0, 1:] = codes
-        aligned = forward.minicpm_talker_actor_logits(
+        aligned = self.mod.minicpm_talker_actor_logits(
             model, input_ids, torch.ones_like(input_ids), [text], [hidden], [codes]
         )
-        tokens = forward.TalkerTokens.from_config(model.config)
+        tokens = self.mod.TalkerTokens.from_config(model.config)
         cond_len = span  # conditioning length equals the text span
-        logits = forward.talker_logits(
+        logits = self.mod.talker_logits(
             model,
-            forward.build_talker_batch(model, [text], [hidden], [codes], tokens),
+            self.mod.build_talker_batch(model, [text], [hidden], [codes], tokens),
         )
         self.assertTrue(torch.equal(aligned[0, 1], logits[0, cond_len + 1]))
         self.assertTrue(torch.equal(aligned[0, 5], logits[0, cond_len + 5]))
@@ -265,7 +265,7 @@ class TestActorLogitsAlignment(unittest.TestCase):
         hidden = torch.randn(4, 16)
         codes = torch.randint(0, 100, (5,))
         input_ids = torch.zeros(1, 1 + 5, dtype=torch.long)  # all zeros != codes
-        aligned = forward.minicpm_talker_actor_logits(
+        aligned = self.mod.minicpm_talker_actor_logits(
             model, input_ids, torch.ones_like(input_ids), [text], [hidden], [codes]
         )
         self.assertEqual(aligned.shape, (1, 6, 100))
@@ -282,7 +282,7 @@ class TestTalkerAdapterContract(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.adapter = importlib.import_module("verl_omni.pipelines.minicpm.talker_training_adapter")
-        cls.forward = importlib.import_module("verl_omni.pipelines.minicpm.talker_forward")
+        cls.forward = importlib.import_module("verl_omni.pipelines.minicpm.talker_training_adapter")
 
     def test_replay_key_constant(self):
         self.assertEqual(self.forward.MINICPM_TALKER_REPLAY_KEY, "minicpm_talker_replay")

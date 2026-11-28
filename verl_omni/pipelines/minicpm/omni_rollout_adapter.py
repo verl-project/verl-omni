@@ -23,7 +23,7 @@ stage-0 latent bridge and promotes the Talker to the final codec-output stage:
 the Thinker generates the text response on-policy, the Talker speaks it, and
 the batch's response tokens are the codec frames themselves (the real prompt
 travels in the per-sample replay payload — see
-``verl_omni.pipelines.minicpm.talker_forward``).
+``verl_omni.pipelines.minicpm.talker_training_adapter``).
 """
 
 from dataclasses import replace
@@ -35,7 +35,7 @@ from vllm_omni.config.stage_config import PipelineConfig
 from vllm_omni.model_executor.models.minicpmo_4_5.pipeline import MINICPMO_4_5_PIPELINE
 
 from verl_omni.pipelines.minicpm.prompt_parity import resolve_media_tokens
-from verl_omni.pipelines.minicpm.talker_forward import MINICPM_TALKER_REPLAY_KEY
+from verl_omni.pipelines.minicpm.talker_training_adapter import MINICPM_TALKER_REPLAY_KEY
 from verl_omni.pipelines.model_base import OmniRolloutPipelineBase
 
 MINICPMO_4_5_THINKER_ONLY_PIPELINE = PipelineConfig(
@@ -63,11 +63,7 @@ MINICPMO_4_5_TALKER_PIPELINE = PipelineConfig(
     hf_config_predicate=lambda config: str(getattr(config, "version", "")) == "4.5",
     stages=(
         # Stage 0: the thinker, final as text. Both stages are final: the
-        # engine runs the serial bridge (thinker -> llm2tts -> talker) and the
-        # rollout adapter combines the text response with the codec frames.
-        # This requires async_chunk=false (see below): the engine's async-chunk
-        # prewarm otherwise submits unconditioned placeholder requests to the
-        # talker stage, whose preprocess requires the bridge tensors.
+        # Stage 0: the thinker (serial bridge to the talker).
         MINICPMO_4_5_PIPELINE.stages[0],
         # Stage 1: the talker, promoted to the pipeline's final codec output.
         replace(
@@ -297,11 +293,6 @@ class MiniCPMORolloutAdapter(OmniRolloutPipelineBase):
                 raise RuntimeError("MiniCPM-o talker rollout logprobs are shorter than the policy trajectory.")
             output.response_logprobs = output.response_logprobs[: len(policy_ids)]
 
-        # The replayed thinker sequence: the processor-expanded prompt ids
-        # followed by the Thinker's text response. The conditioning span
-        # follows the official chat convention: the text between the last
-        # <|tts_bos|> and the last <|tts_eos|> marker (or the end when the
-        # model did not emit the closing marker).
         prompt_ids = [int(token) for token in (output.prompt_ids or [])]
         full_text_ids = prompt_ids + text_response_ids
         tts_bos = tokenizer.convert_tokens_to_ids("<|tts_bos|>")
