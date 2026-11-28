@@ -222,7 +222,7 @@ the matching checks:
 | `ci-core` | Core GPU smoke (2 GPUs) (training, reward, rollout modules) |
 | `ci-e2e-omni` | Omni trainer e2e GPU smoke (2 GPUs) |
 | `ci-e2e-diffusion` | Diffusion trainer e2e GPU smoke (4 GPUs) |
-| `ready-for-ci` | PR lint (`pr-lint.yml`), CI-policy (`protect-ci-checks.yml`), CPU checks, selective GPU smoke suite in parallel (Up to 8 GPUs), plus the full NPU smoke suite when the PR matches the NPU path filter |
+| `ready-for-ci` | PR lint (`pr-lint.yml`), CI-policy (`protect-ci-checks.yml`), plus CPU checks, selective GPU smoke suite in parallel (Up to 8 GPUs), and full NPU smoke suite when the PR matches each workflow's path filter |
 | `ci-npu` | Full NPU smoke suite (8 NPUs) |
 | `ci-npu-core` | Core NPU smoke tests; currently the rollout test |
 | `ci-npu-e2e` | NPU end-to-end smoke tests for FlowGRPO and DanceGRPO |
