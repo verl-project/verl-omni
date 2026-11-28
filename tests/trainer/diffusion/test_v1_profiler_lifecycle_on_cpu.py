@@ -76,9 +76,14 @@ def make_trainer(monkeypatch, *, mode="sync", continuous=False, fail_at=None, re
     trainer._reissue_inflight_prompts = lambda: events.append(("reissue", trainer.global_steps))
     trainer.on_train_begin = lambda: events.append(("warmup", trainer.global_steps))
     trainer.on_step_begin = lambda: None
-    trainer.checkpoint_manager.update_weights = Mock(return_value={})
+
+    def record_update_weights(global_steps):
+        events.append(("update_weights", global_steps))
+        return {}
+
+    trainer.checkpoint_manager.update_weights = Mock(side_effect=record_update_weights)
     trainer.standalone_checkpoint_manager = SimpleNamespace(
-        update_weights=Mock(return_value={}),
+        update_weights=Mock(side_effect=record_update_weights),
         wait_for_weight_update=lambda: trainer.lifecycle.append(("wait_weight_update", trainer.global_steps)),
     )
     trainer.on_validate_begin = lambda: None
@@ -151,6 +156,15 @@ def test_fit_profiles_each_distinct_worker_group(monkeypatch):
             call.start_profile(role=role, profile_step=4),
             call.stop_profile(run_command=True),
         ]
+
+
+@pytest.mark.parametrize("mode", ["sync", "separate_async"])
+def test_stop_profiling_follows_weight_sync(monkeypatch, mode):
+    trainer, events = make_trainer(monkeypatch, mode=mode)
+    trainer.fit(Mock())
+    for step in (1, 2, 4):
+        sync_index = events.index(("update_weights", step))
+        assert events[sync_index + 1] == ("actor", "stop")
 
 
 @pytest.mark.parametrize("mode", ["sync", "separate_async"])

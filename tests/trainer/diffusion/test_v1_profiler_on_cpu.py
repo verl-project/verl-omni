@@ -13,6 +13,7 @@
 # limitations under the License.
 """Profiling configuration and V1 trainer RPC contracts."""
 
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -20,6 +21,7 @@ from unittest.mock import Mock
 import pytest
 from omegaconf import OmegaConf
 
+from verl_omni.trainer.diffusion.v1 import trainer_separate_async
 from verl_omni.trainer.diffusion.v1.trainer_separate_async import PolicyGradientDiffusionTrainerV1SeparateAsync
 from verl_omni.trainer.diffusion.v1.trainer_sync import PolicyGradientDiffusionTrainerV1Sync
 
@@ -118,6 +120,24 @@ def test_training_windows_and_shared_reference_group(continuous, expected):
     assert [call.kwargs["run_command"] for call in trainer.actor_rollout_wg.stop_profile.call_args_list] == (
         [False] * (len(expected) - 1) + [True]
     )
+
+
+@pytest.mark.parametrize("current,expected_stops", [(False, 0), (True, 1)])
+def test_async_step_end_uses_current_step_profile_flag(monkeypatch, current, expected_stops):
+    trainer = object.__new__(PolicyGradientDiffusionTrainerV1SeparateAsync)
+    trainer.curr_step_profile = current
+    trainer.prev_step_profile = not current
+    trainer.global_steps = 1
+    trainer.hybrid_rollout_config = SimpleNamespace(enable_switch=False)
+    trainer.sync_compatible = False
+    trainer.timing_raw = {}
+    trainer.standalone_checkpoint_manager = SimpleNamespace(update_weights=Mock(return_value={}))
+    trainer._stop_rollout_profiling = Mock()
+    monkeypatch.setattr(trainer_separate_async, "marked_timer", lambda *args, **kwargs: nullcontext())
+
+    trainer.on_step_end()
+
+    assert trainer._stop_rollout_profiling.call_count == expected_stops
 
 
 @pytest.mark.parametrize("engine", ["dp_diffusion", "veomni_diffusion"])
