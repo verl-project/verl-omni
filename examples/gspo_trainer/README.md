@@ -143,6 +143,49 @@ Healthy signals (gsm8k, 4×H800, LoRA r=32):
   (`actor/perf/max_memory_allocated_gb` < 45).
 - `val-core/openai/gsm8k/acc/mean@1` rising with steps.
 
+## GSPO loss aggregation and group sampling
+
+`actor_rollout_ref.actor.loss_agg_mode` interacts strongly with
+`actor_rollout_ref.rollout.n` — the actor-config default
+`loss_agg_mode=token-mean`, when combined with `rollout.n>1` and not
+overridden, is a silent destabilizer on workloads whose response lengths
+have a heavy tail (long generations, speech codec streams, multi-turn
+trajectories):
+
+- **`rollout.n=1`** — each `uid` group holds a single sample, so GRPO
+  advantages degenerate to the raw score (uncentered; for
+  positive-outcome rewards such as 0/1 accuracy or length-shaped scores,
+  every sample's advantage is positive). Every sampled sequence is
+  reinforced, per-token entropy climbs, and long runs eventually
+  destabilize the policy.
+- **`rollout.n>1` + `token-mean`** — advantages are correctly group-centered,
+  but the loss is weighted by token count, so the longest *suppressed*
+  samples dominate the gradient and training can drift away from the reward
+  optimum.
+- **`rollout.n>1` + `seq-mean-token-mean`** — each sequence's loss is
+  normalized by its own length (the aggregation the
+  [GSPO paper](https://arxiv.org/abs/2507.18071) recommends, and which
+  `compute_policy_loss_gspo` documents as differing from the default). The
+  heavy tail stops dominating.
+
+Measured on a MiniCPM-o 4.5 talker length-control run (8×H100, LoRA + GSPO,
+32 steps per arm; see [#982](https://github.com/verl-project/verl-omni/issues/982)
+for the full experiment matrix):
+
+| Config | Response length | Validation reward | Entropy |
+|---|---|---|---|
+| `n=1` | 116 → 68 (learns) | 0.29 → 0.52 | 4.1 → 6.7 climbing |
+| `n=4`, `token-mean` | 124 → **282 (drifts)** | 0.29 → **0.03 (crashes)** | 4.2 → 2.8 collapsing |
+| `n=4`, `seq-mean-token-mean` | 115 → 129 (stable) | **0.20 → 0.43 (rises)** | 3.9 → 4.9 flat |
+
+These measurements establish the contrast over 32 steps on one workload;
+neither aggregation mode can rescue a degenerate group (all samples with the
+same reward have zero centered advantages either way).
+
+**Guidance:** when raising `rollout.n` on a heavy-tailed workload, set
+`actor_rollout_ref.actor.loss_agg_mode=seq-mean-token-mean` in the same
+change. The two settings travel together.
+
 ## Training with `math_dapo`
 
 Pure-text math data with the built-in `math_dapo` reward, `+1` correct / `-1`
