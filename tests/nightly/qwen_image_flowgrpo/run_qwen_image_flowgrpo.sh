@@ -78,20 +78,28 @@ run_flowgrpo() {
     actor_rollout_ref.rollout.val_kwargs.algo.noise_level=0.0 \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=${MICRO_BSZ_PER_GPU} \
     reward.num_workers=$((NUM_GPUS / REWARD_TP)) \
-    reward.reward_model.enable=True \
-    reward.reward_model.model_path="${REWARD_MODEL_PATH:-${HOME}/models/tiny-random/qwen3-vl}" \
-    reward.reward_model.rollout.name=${REWARD_ENGINE} \
-    reward.reward_model.rollout.tensor_model_parallel_size=${REWARD_TP} \
-    reward.reward_model.rollout.gpu_memory_utilization=0.4 \
-    reward.reward_model.rollout.enforce_eager=True \
-    reward.reward_model.rollout.do_sample=False \
-    reward.reward_model.rollout.temperature=0.0 \
-    reward.reward_model.rollout.full_determinism=True \
-    reward.reward_model.rollout.seed=${NIGHTLY_DETERMINISTIC_SEED:-42} \
-    reward.reward_model.rollout.prompt_length=${MAX_PROMPT_LENGTH} \
-    reward.reward_model.rollout.response_length=32 \
-    reward.custom_reward_function.path=verl_omni/utils/reward_score/genrm_ocr.py \
-    reward.custom_reward_function.name=compute_score_ocr \
+    reward.reward_model.enable=False \
+    reward.reward_manager.name=MultiVisualRewardManager \
+    +reward.models.ocr.backend=engine \
+    +reward.models.ocr.offload=True \
+    +reward.models.ocr.model_path="${REWARD_MODEL_PATH:-${HOME}/models/tiny-random/qwen3-vl}" \
+    +reward.models.ocr.n_gpus_per_node=${NUM_GPUS} \
+    +reward.models.ocr.nnodes=1 \
+    +reward.models.ocr.rollout.name=${REWARD_ENGINE} \
+    +reward.models.ocr.rollout.tensor_model_parallel_size=${REWARD_TP} \
+    +reward.models.ocr.rollout.gpu_memory_utilization=0.4 \
+    +reward.models.ocr.rollout.enforce_eager=True \
+    +reward.models.ocr.rollout.do_sample=False \
+    +reward.models.ocr.rollout.temperature=0.0 \
+    +reward.models.ocr.rollout.full_determinism=True \
+    +reward.models.ocr.rollout.seed=${NIGHTLY_DETERMINISTIC_SEED:-42} \
+    +reward.models.ocr.rollout.prompt_length=${MAX_PROMPT_LENGTH} \
+    +reward.models.ocr.rollout.response_length=32 \
+    +reward.reward_functions.ocr.path=pkg://verl_omni.utils.reward_score.genrm_ocr \
+    +reward.reward_functions.ocr.name=compute_score_ocr \
+    +reward.reward_functions.ocr.weight=1.0 \
+    +reward.reward_functions.ocr.required=True \
+    +reward.reward_functions.ocr.use_rollout_sampling_params=True \
     trainer.logger=console \
     trainer.project_name=verl-nightly \
     trainer.experiment_name=qwen-image-flowgrpo-nightly \
@@ -129,9 +137,12 @@ for projected in false true; do
         export TOTAL_TRAIN_STEPS="${ab_steps}" L3_METRICS_ONLY=1
         export DEBUG_DUMP_STEPS="" DEBUG_DUMP_TQ_TRAINING_READ=1
         run_flowgrpo \
-            reward.reward_model.enable=false \
-            reward.custom_reward_function.path=null \
-            reward.custom_reward_function.name=compute_score \
+            '~reward.models.ocr' \
+            '~reward.reward_functions.ocr' \
+            +reward.reward_functions.jpeg.path=pkg://verl_omni.utils.reward_score.jpeg_compressibility \
+            +reward.reward_functions.jpeg.name=compute_score \
+            +reward.reward_functions.jpeg.weight=1.0 \
+            +reward.reward_functions.jpeg.required=True \
             actor_rollout_ref.rollout.algo.noise_level=0.7 \
             'actor_rollout_ref.model.trajectory_fields.required=[all_latents,prompt_embeds,prompt_embeds_mask]' \
             'actor_rollout_ref.model.trajectory_fields.optional=[negative_prompt_embeds,negative_prompt_embeds_mask]' \

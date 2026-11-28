@@ -40,7 +40,7 @@ ocr_test_path=$WORKSPACE/data/ocr/sd3/test.parquet
 
 model_name=stabilityai/stable-diffusion-3.5-medium
 reward_model_name=Qwen/Qwen2.5-VL-3B-Instruct
-reward_function_path=verl_omni/utils/reward_score/genrm_ocr.py
+reward_function_path=pkg://verl_omni.utils.reward_score.genrm_ocr
 custom_chat_template='{% for message in messages %}{% if message['\''role'\''] == '\''user'\'' %}{{ message['\''content'\''] }}{% endif %}{% endfor %}'
 
 # --- GPU / parallelism layout (override via env) ---
@@ -165,19 +165,26 @@ python3 -m verl_omni.trainer.main_diffusion_v1 \
     actor_rollout_ref.rollout.val_kwargs.algo.noise_level=0.0 \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=4 \
     reward.num_workers=$((NUM_GPUS_REWARD / REWARD_TP)) \
-    reward.reward_model.enable=True \
-    reward.reward_model.model_path=$reward_model_name \
-    reward.reward_model.rollout.name=$REWARD_ENGINE \
-    reward.reward_model.rollout.response_length=256 \
+    reward.reward_model.enable=False \
     reward.reward_model.enable_resource_pool=True \
     reward.reward_model.nnodes=1 \
     reward.reward_model.n_gpus_per_node=$NUM_GPUS_REWARD \
-    reward.reward_model.rollout.gpu_memory_utilization=0.9 \
-    reward.reward_model.rollout.free_cache_engine=False \
-    reward.reward_model.rollout.tensor_model_parallel_size=$REWARD_TP \
-    reward.reward_model.rollout.enforce_eager=False \
-    reward.custom_reward_function.path=$reward_function_path \
-    reward.custom_reward_function.name=compute_score_ocr \
+    reward.reward_manager.name=MultiVisualRewardManager \
+    +reward.models.ocr.backend=engine \
+    +reward.models.ocr.offload=False \
+    +reward.models.ocr.model_path=$reward_model_name \
+    +reward.models.ocr.n_gpus_per_node=$NUM_GPUS_REWARD \
+    +reward.models.ocr.nnodes=1 \
+    +reward.models.ocr.rollout.name=$REWARD_ENGINE \
+    +reward.models.ocr.rollout.response_length=256 \
+    +reward.models.ocr.rollout.gpu_memory_utilization=0.9 \
+    +reward.models.ocr.rollout.tensor_model_parallel_size=$REWARD_TP \
+    +reward.models.ocr.rollout.enforce_eager=False \
+    +reward.reward_functions.ocr.path=$reward_function_path \
+    +reward.reward_functions.ocr.name=compute_score_ocr \
+    +reward.reward_functions.ocr.weight=1.0 \
+    +reward.reward_functions.ocr.required=True \
+    +reward.reward_functions.ocr.use_rollout_sampling_params=True \
     trainer.logger='["console", "wandb"]' \
     trainer.project_name=flow_grpo \
     trainer.experiment_name=sd35_medium_ocr_v1_separate_async_${CKPT_BACKEND} \

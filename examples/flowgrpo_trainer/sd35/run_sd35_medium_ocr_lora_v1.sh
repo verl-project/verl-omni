@@ -20,7 +20,7 @@ ocr_test_path=$WORKSPACE/data/ocr/sd3/test.parquet
 
 model_name=stabilityai/stable-diffusion-3.5-medium
 reward_model_name=Qwen/Qwen2.5-VL-3B-Instruct
-reward_function_path=verl_omni/utils/reward_score/genrm_ocr.py
+reward_function_path=pkg://verl_omni.utils.reward_score.genrm_ocr
 custom_chat_template='{% for message in messages %}{% if message['\''role'\''] == '\''user'\'' %}{{ message['\''content'\''] }}{% endif %}{% endfor %}'
 
 NUM_GPUS_ACTOR_ROLLOUT=2
