@@ -14,6 +14,7 @@
 
 """Exercise the CI policy against pull request diffs in temporary Git repositories."""
 
+import re
 import subprocess
 import sys
 from fnmatch import fnmatch
@@ -27,6 +28,7 @@ CHECKER = Path(__file__).with_name("check_ci_policy.py").resolve()
 WORKFLOWS = CHECKER.parents[2] / ".github" / "workflows"
 LINT_WORKFLOW = "pr-lint.yml"
 AUTO_LINT_LABEL = "auto-lint"
+READY_FOR_CI_LABEL = "ready-for-ci"
 SANITY_CHECK = "tests/special_sanity/check_existing.py"
 WORKFLOW = ".github/workflows/sanity.yml"
 RUFF_CONFIG = '[project]\nname = "example"\n[tool.ruff.lint]\nselect = ["F"]\n'
@@ -134,6 +136,142 @@ def test_check_ignores_changes_only_on_target_branch(repo: Path) -> None:
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+_GHA_TOKEN_RE = re.compile(r"\s*(?:(\|\||&&|==|!=|[(),!])|'([^']*)'|([A-Za-z_][A-Za-z0-9_.*-]*))")
+
+
+def _tokenize_gha_expr(expr: str) -> list[tuple[str, str]]:
+    tokens: list[tuple[str, str]] = []
+    pos = 0
+    while pos < len(expr):
+        if expr[pos].isspace():
+            pos += 1
+            continue
+        match = _GHA_TOKEN_RE.match(expr, pos)
+        if not match:
+            raise AssertionError(f"Unsupported GitHub Actions expression syntax near {expr[pos:]!r}")
+        op, string, ident = match.groups()
+        if op is not None:
+            tokens.append(("OP", op))
+        elif string is not None:
+            tokens.append(("STR", string))
+        else:
+            tokens.append(("IDENT", ident))
+        pos = match.end()
+    return tokens
+
+
+def _gha_equals(left: object, right: object) -> bool:
+    if isinstance(left, str) and isinstance(right, str):
+        return left.lower() == right.lower()
+    return left == right
+
+
+def _eval_gha_if(
+    expr: str,
+    *,
+    action: str,
+    labels: tuple[str, ...],
+    event_label: str = "",
+    bypass_label_gate: bool | None = None,
+) -> bool:
+    tokens = _tokenize_gha_expr(expr)
+    env: dict[str, object] = {
+        "true": True,
+        "false": False,
+        "inputs.bypass_label_gate": bypass_label_gate,
+        "github.event.action": action,
+        "github.event.label.name": event_label,
+        "github.event.pull_request.labels.*.name": list(labels),
+    }
+    pos = 0
+
+    def peek() -> tuple[str, str] | None:
+        return tokens[pos] if pos < len(tokens) else None
+
+    def consume(expected: str | None = None) -> tuple[str, str]:
+        nonlocal pos
+        if pos >= len(tokens):
+            raise AssertionError(f"Unexpected end of expression in {expr!r}")
+        token = tokens[pos]
+        if expected is not None and token[1] != expected:
+            raise AssertionError(f"Expected {expected!r}, got {token!r} in {expr!r}")
+        pos += 1
+        return token
+
+    def parse_or() -> object:
+        val = parse_and()
+        while peek() == ("OP", "||"):
+            consume("||")
+            rhs = parse_and()
+            val = bool(val) or bool(rhs)
+        return val
+
+    def parse_and() -> object:
+        val = parse_eq()
+        while peek() == ("OP", "&&"):
+            consume("&&")
+            rhs = parse_eq()
+            val = bool(val) and bool(rhs)
+        return val
+
+    def parse_eq() -> object:
+        val = parse_unary()
+        while peek() in {("OP", "=="), ("OP", "!=")}:
+            op = consume()[1]
+            rhs = parse_unary()
+            eq = _gha_equals(val, rhs)
+            val = eq if op == "==" else not eq
+        return val
+
+    def parse_unary() -> object:
+        if peek() == ("OP", "!"):
+            consume("!")
+            return not bool(parse_unary())
+        return parse_primary()
+
+    def parse_primary() -> object:
+        kind, value = consume()
+        if kind == "OP" and value == "(":
+            inner = parse_or()
+            consume(")")
+            return inner
+        if kind == "STR":
+            return value
+        if kind == "IDENT":
+            if peek() == ("OP", "("):
+                return parse_call(value)
+            if value not in env:
+                raise AssertionError(f"Unknown context key {value!r} in {expr!r}")
+            return env[value]
+        raise AssertionError(f"Unexpected token {(kind, value)!r} in {expr!r}")
+
+    def parse_call(name: str) -> object:
+        consume("(")
+        args = [parse_or()]
+        while peek() == ("OP", ","):
+            consume(",")
+            args.append(parse_or())
+        consume(")")
+        if name == "contains" and len(args) == 2:
+            haystack, needle = args
+            if isinstance(haystack, list):
+                return any(_gha_equals(item, needle) for item in haystack)
+            if isinstance(haystack, str) and isinstance(needle, str):
+                return needle.lower() in haystack.lower()
+            raise AssertionError(f"Unsupported contains() args {args!r}")
+        if name == "join" and len(args) == 2:
+            items, sep = args
+            if isinstance(items, list) and isinstance(sep, str):
+                return sep.join(str(item) for item in items)
+            raise AssertionError(f"Unsupported join() args {args!r}")
+        raise AssertionError(f"Unsupported function call {name}({len(args)} args) in {expr!r}")
+
+    result = parse_or()
+    if pos != len(tokens):
+        raise AssertionError(f"Trailing tokens {tokens[pos:]!r} in {expr!r}")
+    return bool(result)
+
+
 def _workflow(name: str) -> dict:
     return yaml.load((WORKFLOWS / name).read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
 
@@ -149,14 +287,40 @@ def test_lint_uses_persistent_auto_lint_label() -> None:
     lint_job = lint["jobs"]["lint"]
     assert "concurrency" in lint_job
     lint_if = lint_job["if"]
-    assert "inputs.bypass_label_gate == true" in lint_if
-    assert f"'{AUTO_LINT_LABEL}'" in lint_if
-    assert f"github.event.label.name == '{AUTO_LINT_LABEL}'" in lint_if
+    lint_cases = [
+        ("labeled", ("ci-core",), "ci-core", True, True),
+        ("labeled", (), "", True, True),
+        ("labeled", (AUTO_LINT_LABEL,), AUTO_LINT_LABEL, None, True),
+        ("labeled", (READY_FOR_CI_LABEL,), READY_FOR_CI_LABEL, None, True),
+        ("labeled", (AUTO_LINT_LABEL, "bug"), "bug", None, False),
+        ("labeled", (READY_FOR_CI_LABEL, "bug"), "bug", None, False),
+        ("labeled", ("ci-core",), "ci-core", None, False),
+        ("synchronize", (AUTO_LINT_LABEL,), "", None, True),
+        ("synchronize", (AUTO_LINT_LABEL, READY_FOR_CI_LABEL), "", None, True),
+        ("synchronize", (READY_FOR_CI_LABEL,), "", None, False),
+        ("reopened", (AUTO_LINT_LABEL,), "", None, True),
+        ("reopened", (READY_FOR_CI_LABEL,), "", None, False),
+        ("opened", (AUTO_LINT_LABEL,), "", None, True),
+        ("opened", (READY_FOR_CI_LABEL,), "", None, False),
+        ("opened", (), "", None, False),
+    ]
+    for action, labels, event_label, bypass, expected in lint_cases:
+        assert (
+            _eval_gha_if(
+                lint_if,
+                action=action,
+                labels=labels,
+                event_label=event_label,
+                bypass_label_gate=bypass,
+            )
+            is expected
+        ), (action, labels, event_label, bypass)
 
     drop_labels = _workflow("drop-ci-labels.yml")
     drop_run = drop_labels["jobs"]["drop_label"]["steps"][0]["run"]
     assert 'select(contains("ci"))' in drop_run
     assert "ci" not in AUTO_LINT_LABEL
+    assert "ci" in READY_FOR_CI_LABEL
 
 
 def test_lint_workflow_collects_every_checker_regression_module() -> None:
@@ -236,8 +400,36 @@ def test_ci_workflow_safety_and_coverage_guards() -> None:
     assert {"opened", "labeled", "synchronize", "reopened", "edited"}.issubset(protect_types)
     protect_job = protect["jobs"]["protect-ci-checks"]
     assert "concurrency" in protect_job
-    assert f"'{AUTO_LINT_LABEL}'" in protect_job["if"]
-    assert "'ci'" in protect_job["if"]
+    protect_if = protect_job["if"]
+    protect_cases = [
+        ("labeled", (AUTO_LINT_LABEL,), AUTO_LINT_LABEL, True),
+        ("labeled", (READY_FOR_CI_LABEL,), READY_FOR_CI_LABEL, True),
+        ("labeled", ("ci-core",), "ci-core", True),
+        ("labeled", (AUTO_LINT_LABEL, READY_FOR_CI_LABEL, "bug"), "bug", False),
+        ("edited", (AUTO_LINT_LABEL,), "", True),
+        ("edited", (READY_FOR_CI_LABEL,), "", True),
+        ("edited", ("ci-core",), "", True),
+        ("edited", ("bug",), "", False),
+        ("synchronize", (AUTO_LINT_LABEL,), "", True),
+        ("synchronize", (AUTO_LINT_LABEL, READY_FOR_CI_LABEL), "", True),
+        ("synchronize", (READY_FOR_CI_LABEL,), "", False),
+        ("synchronize", ("ci-core",), "", False),
+        ("reopened", (AUTO_LINT_LABEL,), "", True),
+        ("reopened", (READY_FOR_CI_LABEL,), "", False),
+        ("opened", (AUTO_LINT_LABEL,), "", True),
+        ("opened", (READY_FOR_CI_LABEL,), "", False),
+        ("opened", (), "", False),
+    ]
+    for action, labels, event_label, expected in protect_cases:
+        assert (
+            _eval_gha_if(
+                protect_if,
+                action=action,
+                labels=labels,
+                event_label=event_label,
+            )
+            is expected
+        ), (action, labels, event_label)
     checkout = protect_job["steps"][0]
     assert checkout["with"]["ref"] == "${{ github.sha }}"
     protect_run = protect_job["steps"][2]["run"]

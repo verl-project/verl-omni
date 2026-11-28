@@ -1,6 +1,6 @@
 # Welcome to VeRL-Omni's documentation!
 
-Last updated: 11/13/2026
+Last updated: 11/28/2026
 
 [VeRL-Omni](https://github.com/verl-project/verl-omni) is a general RL training framework focused on multimodal generative models, built on top of [verl](https://github.com/verl-project/verl). It originated from the multi-modal generation RL effort in `verl`, and now has a dedicated home so it can evolve in a more focused way.
 
@@ -218,13 +218,14 @@ the matching checks:
 
 | Label | Effect |
 |---|---|
+| `auto-lint` | Persistent PR lint (`pr-lint.yml`) and CI-policy (`protect-ci-checks.yml`) checks on every push (not removed on push) |
 | `ci-core` | Core GPU smoke (2 GPUs) (training, reward, rollout modules) |
 | `ci-e2e-omni` | Omni trainer e2e GPU smoke (2 GPUs) |
 | `ci-e2e-diffusion` | Diffusion trainer e2e GPU smoke (4 GPUs) |
-| `ready-for-ci` | Selective GPU smoke suite in parallel (Up to 8 GPUs), plus the full NPU smoke suite when the PR matches the NPU path filter |
+| `ready-for-ci` | PR lint (`pr-lint.yml`), CI-policy (`protect-ci-checks.yml`), plus CPU checks, selective GPU smoke suite in parallel (Up to 8 GPUs), and full NPU smoke suite when the PR matches each workflow's path filter |
 | `ci-npu` | Full NPU smoke suite (8 NPUs) |
 | `ci-npu-core` | Core NPU smoke tests; currently the rollout test |
 | `ci-npu-e2e` | NPU end-to-end smoke tests for FlowGRPO and DanceGRPO |
 
-Labels are removed automatically when new commits are pushed; re-apply the
-label after each update. 
+Labels containing `ci` are removed automatically when new commits are pushed; re-apply the
+label after each update.

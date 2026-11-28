@@ -11,11 +11,15 @@ permissions:
 jobs:
   protect-ci-checks:
     if: >-
-      (contains(github.event.pull_request.labels.*.name, 'auto-lint') ||
-       contains(join(github.event.pull_request.labels.*.name, ','), 'ci')) &&
-      (github.event.action != 'labeled' ||
-       github.event.label.name == 'auto-lint' ||
-       contains(github.event.label.name, 'ci'))
+      (github.event.action == 'labeled' &&
+       (github.event.label.name == 'auto-lint' ||
+        contains(github.event.label.name, 'ci'))) ||
+      (github.event.action == 'edited' &&
+       (contains(github.event.pull_request.labels.*.name, 'auto-lint') ||
+        contains(join(github.event.pull_request.labels.*.name, ','), 'ci'))) ||
+      (github.event.action != 'labeled' &&
+       github.event.action != 'edited' &&
+       contains(github.event.pull_request.labels.*.name, 'auto-lint'))
     concurrency:
       group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
       cancel-in-progress: true
