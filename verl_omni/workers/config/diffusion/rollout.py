@@ -45,9 +45,10 @@ class DiffusionRolloutAlgoConfig(BaseConfig):
     sde_window_range: Optional[list[int]] = None
     sde_contiguous: bool = True
 
-    # MixGRPO-only configs
+    # Sliding-window scheduler configs (MixGRPO; sde_window_seed also drives MiniMax-H3 and SD3.5)
     sample_strategy: str = "random"
     iters_per_group: int = 1
+    # Base seed for per-step SDE window draws
     sde_window_seed: int = 0
 
     def __post_init__(self):

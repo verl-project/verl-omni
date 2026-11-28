@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 import numpy as np
@@ -27,6 +28,8 @@ __all__ = [
     "collate_prompt_mask",
     "collate_prompt_rows",
     "sample_per_sample_sde_windows",
+    "sde_window_generator_for_step",
+    "sde_window_seed_for_step",
     "split_diffusion_output_by_request",
 ]
 
@@ -68,6 +71,31 @@ def sample_per_sample_sde_windows(
             raise ValueError(f"Expected {batch_size} generators for SDE windows, got {len(generator)}.")
         return [_one(gen) for gen in generator]
     return [_one(generator)] * batch_size
+
+
+def sde_window_seed_for_step(base_seed: int | None, global_steps: int) -> int | None:
+    """Window seed for one training step, or ``None`` to keep per-request seeds.
+
+    Advancing the launcher seed by the step gives every request in a prompt group
+    the same window and replays it across runs, matching the MixGRPO /
+    MiniMax-H3 ``seed + (step - 1)`` convention.
+    """
+    if base_seed is None:
+        return None
+    return int(base_seed) + max(int(global_steps) - 1, 0)
+
+
+def sde_window_generator_for_step(
+    extra_args: Mapping[str, Any],
+    *,
+    fallback: torch.Generator | list[torch.Generator] | None,
+    fallback_device: torch.device | str,
+) -> tuple[torch.Generator | list[torch.Generator] | None, torch.device | str]:
+    """Window draw source for one step, or the per-request ``fallback`` when unseeded."""
+    seed = sde_window_seed_for_step(extra_args.get("sde_window_seed"), extra_args.get("global_steps", 1))
+    if seed is None:
+        return fallback, fallback_device
+    return torch.Generator().manual_seed(seed), "cpu"
 
 
 def _to_prompt_row(value: Any, *, device: torch.device, field_name: str) -> torch.Tensor | None:
