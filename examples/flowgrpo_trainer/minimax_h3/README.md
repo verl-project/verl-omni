@@ -1,6 +1,6 @@
 # MiniMax H3 T2VA, FL2VA, and Ref2VA FlowGRPO
 
-Last updated: 11/20/2026
+Last updated: 11/27/2026
 
 These recipes train `MiniMaxAI/MiniMax-H3` LoRA adapters with FlowGRPO for
 text-to-audio-video (T2VA), first-frame image-to-audio-video (FL2VA), and
@@ -258,9 +258,18 @@ defaults to the training value.
 
 ### NVIDIA GPU (V1 sync)
 
+The V1 T2VA, FL2VA, and Ref2VA launchers use
+[explicit scorer entries](../../../docs/algo/named_reward_models.md#explicit-scorer-entries).
+For V1 reward overrides, use `reward.scorers.<term>.<field>` for manager settings
+such as `weight` and `required`, and `reward.scorers.<term>.kwargs.<arg>` for
+scorer arguments such as `reward.scorers.clap.kwargs.model_name_or_path`.
+Existing commands can still pass flat `reward.reward_functions` overrides.
+The V1 launchers select the legacy reward defaults when a command uses that
+section. Use one reward override form per command.
+
 The V1 recipes use TransferQueue and ReplayBuffer synchronously. They preserve
 the corresponding V0 model, LoRA, reward, pipeline, and CPS FlowGRPO settings;
-they only select `main_diffusion_v1`, `trainer.use_v1=true`, and
+they select `main_diffusion_v1`, `trainer.use_v1=true`, and
 `trainer.v1.trainer_mode=sync`:
 
 ```bash

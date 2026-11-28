@@ -100,7 +100,7 @@ reward_scorer_args=(
     '+reward.scorers.imagebind.model=imagebind'
     '+reward.scorers.imagebind.kwargs.mode=audio_video'
 )
-source "${script_path%/*}/reward_overrides.sh" || exit 1
+source "$repo_root/examples/flowgrpo_trainer/reward_overrides.sh" || exit 1
 apply_legacy_reward_overrides "$@"
 
 python3 -m verl_omni.trainer.main_diffusion_v1 \
