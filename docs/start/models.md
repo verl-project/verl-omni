@@ -446,6 +446,8 @@ reward (`avqa`, `mmk12` rule-based, or `gsm8k` via `data_source="openai/gsm8k"`)
 | SpeechJudge-BTRM | `RMSnow/SpeechJudge-BTRM` | Audio quality | Qwen3-TTS example | External service; CC-BY-NC-4.0 |
 | Whisper large-v3-turbo | `openai/whisper-large-v3-turbo` | Audio (ASR CER) | Qwen3-TTS Hindi GRPO | External JSON audio scorer |
 | JPEG incompressibility | Rule-based | Image stats | Any diffusion model | No model process needed |
+| SQUIM objective | torchaudio bundle (28 MB) | Audio (no-reference quality) | Any TTS rollout via `AudioRewardManager` | In-process load, torchaudio cache |
+
 
 For end-to-end instructions on setting up each reward, see the respective
 trainer's README in `examples/`.
