@@ -38,12 +38,7 @@ from verl_omni.pipelines.model_base import OmniModelBase
 __all__ = ["MiniCPMTalkerAdapter", "MiniCPMOWithTTS"]
 
 
-# --- Teacher-forced talker forward (mirrors MiniCPMO._generate_speech_non_streaming) ---
-# conditioning = emb_text(text[span]) + projector_semantic(hidden[span]) (optionally
-# L2-normalized); input_embeds = [conditioning, text_eos, audio_bos, codec[:-1]];
-# logits = head_code[q](backbone(input_embeds)), scattered back onto the batch's
-# response positions so the standard logprob machinery needs no shifting.
-
+# Teacher-forced forward mirroring MiniCPMO._generate_speech_non_streaming.
 MINICPM_TALKER_REPLAY_KEY = "minicpm_talker_replay"
 
 
