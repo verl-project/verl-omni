@@ -1,6 +1,6 @@
 # Optional Engine Backends
 
-Last updated: 11/10/2026
+Last updated: 11/28/2026
 
 VeRL-Omni trains the policy and reference models with FSDP — the shipped config
 default is `actor.strategy: fsdp`, with `fsdp2` a selectable strategy that many
@@ -18,7 +18,8 @@ engine decodes video). This is the shared CI install; Qwen3-Omni Thinker also
 needs the kernels listed below.
 
 ```bash
-uv pip install veomni==0.1.12 --no-deps
+# Run from the verl-omni checkout to use its pinned release.
+uv pip install --no-deps --group veomni-diffusion
 uv pip install torchcodec librosa soundfile av audioread
 ```
 

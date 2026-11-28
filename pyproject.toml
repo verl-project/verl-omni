@@ -96,6 +96,9 @@ ocr = [
     "Levenshtein",
 ]
 
+[dependency-groups]
+veomni-diffusion = ["veomni==0.1.12"]
+
 # -------------------------------
 # tool.ruff - Linting configuration
 # -------------------------------
