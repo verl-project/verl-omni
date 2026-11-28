@@ -887,6 +887,11 @@ class OmniModelBase(ABC):
         raise NotImplementedError(f"{cls.__name__} does not provide a Megatron forward.")
 
     @classmethod
+    def bind_megatron_forward(cls, model_config) -> Callable:
+        """Bind per-run input metadata while preserving existing stateless forwards."""
+        return cls.get_megatron_forward()
+
+    @classmethod
     def get_fsdp_ignored_module_names(cls, model_config) -> list[str]:
         """Submodule name components to leave unsharded under FSDP2 (default: none).
 
