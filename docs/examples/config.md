@@ -1,6 +1,6 @@
 # Config Explanation
 
-Last updated: 11/19/2026
+Last updated: 11/26/2026
 
 VeRL-Omni builds on [verl](https://github.com/verl-project/verl) and reuses the
 same Hydra config surface for shared RL trainer fields (`data`, FSDP actor /
@@ -451,6 +451,7 @@ actor_rollout_ref:
 - `actor_rollout_ref.rollout.rollout_adapter`: Named adapter for generation: `default` or `old`.
 - `actor_rollout_ref.rollout.agent.default_agent_loop`: Default `diffusion_single_turn_agent`.
 - `actor_rollout_ref.rollout.engine_kwargs.vllm_omni`: Extra vLLM-Omni engine kwargs (dict).
+- `actor_rollout_ref.rollout.engine_kwargs.vllm_omni.diffusion_load_format`: Set to `diffusers` to roll out on vLLM-Omni's diffusers backend with the pipeline registered on `VllmOmniDiffusersPipelineBase` (SD3.5 FlowGRPO has one). It denoises with the same diffusers transformer the trainer updates. LoRA is synced as merged weights only (`model.lora.merge=True`), and the backend rejects `enforce_eager=True`, tensor, CFG or sequence parallelism and cache backends.
 
 ### `trainer` — diffusion-only dump / video knobs
 

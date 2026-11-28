@@ -65,6 +65,8 @@ Model Base
 .. autoclass:: verl_omni.pipelines.model_base.VllmOmniPipelineBase
    :members: register, get_class, get_pipeline_path
 
+.. autoclass:: verl_omni.pipelines.model_base.VllmOmniDiffusersPipelineBase
+
 Pipeline Helpers
 ~~~~~~~~~~~~~~~~~
 

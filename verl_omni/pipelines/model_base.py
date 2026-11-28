@@ -637,6 +637,18 @@ class VllmOmniPipelineBase:
         return builder(attention_mask)
 
 
+class VllmOmniDiffusersPipelineBase(VllmOmniPipelineBase):
+    """Registry of rollout pipelines for vLLM-Omni's diffusers backend.
+
+    The rollout uses this registry instead of :class:`VllmOmniPipelineBase` when
+    ``engine_kwargs.vllm_omni.diffusion_load_format`` is ``diffusers``. Its
+    pipelines subclass vLLM-Omni's ``DiffusersAdapterPipeline``, so the denoiser
+    is the diffusers module the trainer optimizes.
+    """
+
+    _registry: dict[tuple[str, str], type] = {}
+
+
 class OmniModelBase(ABC):
     """Abstract base class for omni model training adapters.
 
