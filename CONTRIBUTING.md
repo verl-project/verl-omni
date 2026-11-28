@@ -39,11 +39,12 @@ pre-commit run --all-files
 pre-commit run --all-files --show-diff-on-failure --color=always ruff
 ```
 
-Pull requests labeled `auto-lint` automatically run the `Lint` workflow (Ruff
-lint/format, sanity hooks, and incremental `check-pr-lint`) on every push, and
-labeled GPU or NPU workflows also run it before allocating accelerator runners.
-Stage your changes and run `uvx pre-commit run check-pr-lint` locally; see
-[PR Lint Checks](docs/contributing/pr_lint_checks.md) for the rule catalog,
+Pull requests labeled `ready-for-ci` run the `Lint` workflow (Ruff lint/format,
+sanity hooks, and incremental `check-pr-lint`) and `Protect CI checks`, while
+the persistent `auto-lint` label re-runs them automatically on every push;
+labeled GPU or NPU workflows also run `Lint` before allocating accelerator
+runners. Stage your changes and run `uvx pre-commit run check-pr-lint` locally;
+see [PR Lint Checks](docs/contributing/pr_lint_checks.md) for the rule catalog,
 baseline semantics, and checker regression command.
 
 ## Testing
