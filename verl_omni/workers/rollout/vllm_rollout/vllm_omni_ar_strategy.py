@@ -99,6 +99,9 @@ class ARStrategy(OmniStrategyBase):
         self._policy_stage_index = 0
         self._policy_sampling_constraints: dict[str, Any] = {}
         self._expert_parallel_stage_ids: frozenset[int] = frozenset()
+        # Default for strategies whose engine kwargs are never preprocessed
+        # (e.g. tests constructing the strategy directly).
+        self._num_stages = 1
 
     def validate_configs(self) -> None:
         config = self.server.config
@@ -175,8 +178,6 @@ class ARStrategy(OmniStrategyBase):
 
     def preprocess_engine_kwargs(self, engine_kwargs: dict[str, Any]) -> None:
         super().preprocess_engine_kwargs(engine_kwargs)
-        # Default for requests without a registered rollout adapter.
-        self._num_stages = getattr(self, "_num_stages", 1)
 
         engine_kwargs.pop("custom_pipeline", None)
         # TODO (mike): drop this later. It should be inferred from the model config.
