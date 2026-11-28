@@ -1,10 +1,10 @@
 # Deterministic Post-Training
 
-Last updated: 08/15/2026.
+Last updated: 11/28/2026.
 
 By default, verl-omni RL training is **not bitwise reproducible**: identical configs run twice can produce different reward curves due to nondeterminism in GPU kernels, batch composition, request routing, and sampling. This page documents the effort to make post-training deterministic across multiple aspects (reward inference, rollout generation, diffusion sampling, and eventually end-to-end bitwise-aligned reward curves).
 
-**Supported: reward inference determinism** (VLM reward-model / GRM scoring). The remaining aspects are tracked as future work — see [Scope](#scope).
+**Supported: reward inference determinism** (VLM reward-model / GRM scoring) and **seeded diffusion-sampling determinism** for the V1 `sync` trainer (SD3.5-Medium LoRA fixture; boundary below). The remaining aspects are tracked as future work — see [Scope](#scope).
 
 ## Scope
 
@@ -15,7 +15,7 @@ By default, verl-omni RL training is **not bitwise reproducible**: identical con
 | GRM inference — deterministic multi-replica routing (`NaiveRouter` crc32) | ✅ Supported |
 | GRM inference — per-request sampling seed | ✅ Supported |
 | Actor-rollout generation determinism | 🚧 Future |
-| Diffusion sampling determinism | 🚧 Future |
+| Diffusion sampling determinism — V1 `sync`, seeded SDE windows | ✅ Supported |
 | End-to-end bitwise-aligned reward curves | 🚧 Future |
 
 For the upstream full-determinism feature (actor rollout, FSDP/Megatron, trainer backend), see verl's [`docs/advance/determinism.md`](https://github.com/verl-project/verl/blob/main/docs/advance/determinism.md). verl-omni will adopt those layers incrementally, and a single top-level determinism switch (covering both rollout and reward) will replace the current per-component `full_determinism` flags.
@@ -119,6 +119,47 @@ The reward router (verl's `NaiveRouter`) is least-loaded; under `VERL_FULL_DETER
 
 Enabling the RM requires an explicit `reward.custom_reward_function` — the trainer raises `ValueError` when `reward.reward_model.enable=true` without one. Use the OCR GRM scorer (`verl_omni/utils/reward_score/genrm_ocr.py::compute_score_ocr`) or provide your own scorer via `path`/`name`.
 
+## Diffusion sampling determinism (V1 sync)
+
+Scope: the V1 `sync` diffusion trainer with SD3.5-Medium LoRA, a fixed `actor_rollout_ref.rollout.seed`, and a fixed `actor_rollout_ref.rollout.algo.sde_window_seed`. Identical prompts, step index, and sampling settings produce identical SDE windows, trajectory latents, and log-probs; rewards agree within the declared tolerance. Cross-hardware bitwise equality and full training determinism are out of scope.
+
+### Window seeding
+
+Per-row rollout seeds derive from the launcher seed and the trainer's global row index, so request packing and worker chunking cannot remap them. The SDE window has one explicit source:
+
+- SD3.5 draws one window per training step from `sde_window_seed + (global_steps - 1)` on a CPU generator, and every rollout in the prompt group shares it.
+- This path never reads `LOCAL_RANK` or hashes prompt ids to place a window.
+- Setting `sde_window_seed=null` restores the per-request-seed window draw; replay then depends on the per-request seeds alone.
+
+Other diffusion pipelines still seed windows from placement (`BAGEL` reads `LOCAL_RANK`) or from prompt ids (Flux / Wan2.2 Dance), so they remain outside this boundary.
+
+### Required settings
+
+| Setting | Value |
+|---|---|
+| `actor_rollout_ref.rollout.seed` | fixed integer, identical across runs |
+| `actor_rollout_ref.rollout.algo.sde_window_seed` | fixed integer (not null) |
+| `actor_rollout_ref.rollout.algo.sde_window_size` / `sde_window_range` | fixed |
+| `actor_rollout_ref.rollout.algo.noise_level` / `sde_type` | fixed |
+| scheduler and noise schedule | checkpoint defaults, no per-run overrides |
+| topology | same device count and placement for both runs |
+
+### Replay check
+
+The seeding contract runs on CPU in CI:
+
+```bash
+pytest tests/pipelines/test_sd3_sde_window_seed_on_cpu.py -v
+```
+
+For an end-to-end replay, run the SD3.5 V1 recipe twice with separate output roots and identical overrides (including the seeds above), capture each run's first forward with `tools/consistency_checking/sd3/run.sh`, then compare the saved rollout batches:
+
+```bash
+python tools/consistency_checking/sd3/compare_runs.py /path/run-a /path/run-b
+```
+
+Each argument is a run directory (containing `actor_batch.pt`) or the file itself. Trajectory latents and log-probs must be bitwise equal. Pass `--atol KEY=VALUE` for tensors allowed to drift within a declared tolerance instead of bitwise equality. A differing `sde_window` is a seeding bug, not kernel nondeterminism. Compare the two runs' logged rewards separately, within the tolerance declared for the run.
+
 ## Side Effects
 
 - **Performance**: deterministic kernels are slower and cuDNN benchmarking is disabled; expect throughput loss.
@@ -130,7 +171,7 @@ Enabling the RM requires an explicit `reward.custom_reward_function` — the tra
 - **Nondeterministic fallbacks**: some GPU ops have no deterministic implementation. `warn_only=True` emits warnings; these are expected.
 - **Multi-replica routing not asserted**: every replica uses the same seed, so replica outputs are identical regardless of routing, and crc32 routing (gated on `VERL_FULL_DETERMINISM`) cannot be distinguished from least-loaded routing by the assertions. Routing correctness is guaranteed by code, not by the test suite.
 - **Hardware**: deterministic ops and batch invariance require specific hardware — see the [vLLM batch invariance docs](https://docs.vllm.ai/en/latest/features/batch_invariance/). On unsupported hardware, set `max_num_seqs=1`.
-- **Generative GRM only**: this covers the generative VLM reward path. Full E2E determinism (rollout + diffusion sampling) is future work.
+- **Generative GRM only**: this covers the generative VLM reward path. Diffusion sampling is covered only within the V1 `sync` boundary above; full E2E determinism (rollout + diffusion sampling together with training) is future work.
 
 ## Verify
 

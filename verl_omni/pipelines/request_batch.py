@@ -27,6 +27,7 @@ __all__ = [
     "collate_prompt_mask",
     "collate_prompt_rows",
     "sample_per_sample_sde_windows",
+    "sde_window_seed_for_step",
     "split_diffusion_output_by_request",
 ]
 
@@ -68,6 +69,18 @@ def sample_per_sample_sde_windows(
             raise ValueError(f"Expected {batch_size} generators for SDE windows, got {len(generator)}.")
         return [_one(gen) for gen in generator]
     return [_one(generator)] * batch_size
+
+
+def sde_window_seed_for_step(base_seed: int | None, global_steps: int) -> int | None:
+    """Window seed for one training step, or ``None`` to keep per-request seeds.
+
+    Advancing the launcher seed by the step gives every request in a prompt group
+    the same window and replays it across runs, matching the MixGRPO /
+    MiniMax-H3 ``seed + (step - 1)`` convention.
+    """
+    if base_seed is None:
+        return None
+    return int(base_seed) + max(int(global_steps) - 1, 0)
 
 
 def _to_prompt_row(value: Any, *, device: torch.device, field_name: str) -> torch.Tensor | None:

@@ -34,7 +34,7 @@ from verl_omni.pipelines.diffusion_rollout_output import (
     with_visual_artifacts,
 )
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
-from verl_omni.pipelines.request_batch import requested_outputs_for_batch
+from verl_omni.pipelines.request_batch import requested_outputs_for_batch, sde_window_seed_for_step
 from verl_omni.pipelines.request_batch import (
     sample_per_sample_sde_windows as _sample_per_sample_sde_windows,
 )
@@ -482,13 +482,21 @@ class StableDiffusion3PipelineWithLogProb(SD3TokenIdPromptMixin, StableDiffusion
         )
         self._num_timesteps = len(timesteps)
 
+        window_seed = sde_window_seed_for_step(
+            sampling_params.extra_args.get("sde_window_seed"),
+            sampling_params.extra_args.get("global_steps", 1),
+        )
+        if window_seed is None:
+            window_generator, window_device = generator, self.device
+        else:
+            window_generator, window_device = torch.Generator().manual_seed(window_seed), "cpu"
         sde_window = _sample_per_sample_sde_windows(
             sde_window_size=sde_window_size,
             sde_window_range=sde_window_range,
             num_timesteps=len(timesteps),
             batch_size=latents.shape[0],
-            generator=generator,
-            device=self.device,
+            generator=window_generator,
+            device=window_device,
         )
 
         if request_batch.requests[0].request_id == DUMMY_DIFFUSION_REQUEST_ID and sde_window[0][0] == sde_window[0][1]:
