@@ -121,7 +121,7 @@ def _extract_waveform(solution_audio) -> tuple[torch.Tensor, int]:
 
 
 def compute_score(
-    solution_audio,
+    solution_audio: tuple | list,
     ground_truth: str | None = None,
     extra_info: dict | None = None,
     data_source: str | None = None,
