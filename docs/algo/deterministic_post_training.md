@@ -1,10 +1,10 @@
 # Deterministic Post-Training
 
-Last updated: 08/15/2026.
+Last updated: 11/28/2026.
 
-By default, verl-omni RL training is **not bitwise reproducible**: identical configs run twice can produce different reward curves due to nondeterminism in GPU kernels, batch composition, request routing, and sampling. This page documents the effort to make post-training deterministic across multiple aspects (reward inference, rollout generation, diffusion sampling, and eventually end-to-end bitwise-aligned reward curves).
+By default, verl-omni RL training is **not bitwise reproducible**: identical configs run twice can produce different reward curves due to nondeterminism in GPU kernels, batch composition, request routing, and sampling. This page documents the effort to make post-training deterministic across multiple aspects (reward inference, actor-rollout generation, diffusion sampling, and eventually end-to-end bitwise-aligned reward curves).
 
-**Supported: reward inference determinism** (VLM reward-model / GRM scoring). The remaining aspects are tracked as future work — see [Scope](#scope).
+**Supported: reward inference determinism** (VLM reward-model / GRM scoring) and **actor-rollout generation determinism** (vLLM-Omni server + worker subprocess determinism and pre-`ray.init()` env propagation; serial `max_num_seqs=1` for diffusion). The remaining aspects are tracked as future work — see [Scope](#scope).
 
 ## Scope
 
@@ -14,8 +14,8 @@ By default, verl-omni RL training is **not bitwise reproducible**: identical con
 | GRM inference — batch invariance (`VLLM_BATCH_INVARIANT`) | ✅ Supported |
 | GRM inference — deterministic multi-replica routing (`NaiveRouter` crc32) | ✅ Supported |
 | GRM inference — per-request sampling seed | ✅ Supported |
-| Actor-rollout generation determinism | 🚧 Future |
-| Diffusion sampling determinism | 🚧 Future |
+| Actor-rollout generation determinism (worker subprocess + env propagation; serial `max_num_seqs=1` for diffusion) | ✅ Supported |
+| Diffusion sampling determinism (unified SDE window seeding) | 🚧 Future |
 | End-to-end bitwise-aligned reward curves | 🚧 Future |
 
 For the upstream full-determinism feature (actor rollout, FSDP/Megatron, trainer backend), see verl's [`docs/advance/determinism.md`](https://github.com/verl-project/verl/blob/main/docs/advance/determinism.md). verl-omni will adopt those layers incrementally, and a single top-level determinism switch (covering both rollout and reward) will replace the current per-component `full_determinism` flags.
@@ -29,6 +29,8 @@ For the upstream full-determinism feature (actor rollout, FSDP/Megatron, trainer
 Leave determinism off for production training — deterministic kernels are slower, cuDNN benchmarking is disabled, and batch invariance can serialize.
 
 ## Enable
+
+### Reward inference determinism
 
 Set `reward.reward_model.rollout.full_determinism=true` and a `seed` under the `reward_model.rollout` block:
 
@@ -45,10 +47,24 @@ reward:
 Or via Hydra overrides:
 
 ```bash
-python -m verl_omni.trainer.main_diffusion \
+python -m verl_omni.trainer.main_diffusion_v1 \
   reward.reward_model.enable=true \
   reward.reward_model.rollout.full_determinism=true \
   reward.reward_model.rollout.seed=42 \
+  [other config overrides...]
+```
+
+### Actor-rollout generation determinism
+
+Set `actor_rollout_ref.rollout.full_determinism=true` and a fixed `actor_rollout_ref.rollout.seed`. For diffusion rollouts, also serialize per-replica execution (`max_num_seqs=1`, `step_execution=false`) until vLLM-Omni supports batch-invariant packed diffusion execution:
+
+```bash
+python -m verl_omni.trainer.main_diffusion_v1 \
+  actor_rollout_ref.rollout.name=vllm_omni \
+  actor_rollout_ref.rollout.full_determinism=true \
+  actor_rollout_ref.rollout.seed=42 \
+  actor_rollout_ref.rollout.max_num_seqs=1 \
+  actor_rollout_ref.rollout.step_execution=false \
   [other config overrides...]
 ```
 
@@ -58,6 +74,8 @@ Sampling params (`temperature`, `top_k`, `top_p`) remain user-configured under `
 
 | Parameter | Default | Description |
 |---|---|---|
+| `actor_rollout_ref.rollout.full_determinism` | `false` | Enables actor-rollout determinism in `vLLMOmniHttpServer` and spawned worker subprocesses |
+| `actor_rollout_ref.rollout.seed` | `42` | Base seed for actor-rollout floating-point determinism, worker RNGs, and fallback request seeding |
 | `reward_model.rollout.full_determinism` | `false` | Enables reward inference determinism (all layers below) |
 | `reward_model.rollout.seed` | `42` | Floating-point + per-request sampling seed |
 | `reward_model.rollout.name` | — | Use `vllm_omni` (the server with the `_post_init` determinism hook) |
@@ -67,11 +85,11 @@ Sampling params (`temperature`, `top_k`, `top_p`) remain user-configured under `
 
 ## How it works
 
-verl-omni's GRM scores images via `/v1/chat/completions` (a VLM such as Qwen3-VL transcribes the image). Reproducibility is enforced at three layers.
+Both actor rollouts and GRM scoring run on `vLLMOmniHttpServer` (`rollout.name=vllm_omni`). Reproducibility is enforced across the driver, server actor, and spawned worker subprocesses.
 
 ### Env export before `ray.init()`
 
-When determinism is requested (currently `reward.reward_model.rollout.full_determinism=true`; a single top-level switch covering rollout + reward is future work — see [Scope](#scope)), `main_diffusion.run_diffusion` calls `_export_full_determinism_env` in the main process **before** `ray.init()` to set the determinism **switch** env vars:
+When determinism is requested by `actor_rollout_ref.rollout.full_determinism=true`, legacy `reward.reward_model.rollout.full_determinism=true`, or any named `reward.models.<name>.rollout.full_determinism=true`, both `main_diffusion_v1.run_diffusion_v1` and `main_diffusion.run_diffusion` call `_export_full_determinism_env` in the main process **before** `ray.init()` to set the determinism **switch** env vars:
 
 - `VERL_FULL_DETERMINISM=1`, `VLLM_BATCH_INVARIANT=1`, `PYTHONHASHSEED=<seed>`
 
@@ -87,7 +105,7 @@ Coverage is model- and hardware-dependent — see the [vLLM batch invariance doc
 
 ### 2. Floating-point determinism
 
-The RM server (`vLLMOmniHttpServer`, reached via `rollout.name=vllm_omni`) applies `enable_full_determinism(seed)` in `_post_init`, before model load:
+Each deterministic server (`vLLMOmniHttpServer`, reached via `rollout.name=vllm_omni`) applies `enable_full_determinism(seed)` in `_post_init`, before spawning `AsyncOmni`, and exports `VERL_FULL_DETERMINISM=1`, `VERL_SEED=<seed>`, and `VLLM_BATCH_INVARIANT=1` for its child worker processes. Inside each spawned GPU/NPU worker subprocess, `vLLMOmniColocateWorkerExtension.__new__` (and its NPU subclass `vLLMOmniNPUColocateWorkerExtension`) reads `VERL_FULL_DETERMINISM` and `VERL_SEED` and applies `enable_full_determinism(seed)` per worker before model load:
 
 | Setting | Effect |
 |---|---|
@@ -96,14 +114,14 @@ The RM server (`vLLMOmniHttpServer`, reached via `rollout.name=vllm_omni`) appli
 | `FLASH_ATTENTION_DETERMINISTIC=1` | deterministic flash-attn |
 | `NCCL_DETERMINISTIC=1` / `NCCL_ALGO=Ring` / `NCCL_PROTO=Simple` | deterministic NCCL |
 | `VERL_DISABLE_FLASH_ATTN_CE=1` | bypass the non-deterministic flash-attn Triton cross-entropy kernel in `logprobs_from_logits` (pure-PyTorch `log_softmax+gather`); not covered by `FLASH_ATTENTION_DETERMINISTIC` (attention backward only) or `torch.use_deterministic_algorithms` (Triton custom ops skip `warn_only`) |
-| `VERL_SEED` | read by rollout worker subprocesses (verl `vllm_rollout/utils.py`) to apply `enable_full_determinism` per worker |
+| `VERL_SEED` | read by `vLLMOmniColocateWorkerExtension.__new__` in spawned rollout worker subprocesses to apply `enable_full_determinism` per worker |
 | seeded `random` / `numpy` / `torch` / `cuda` RNGs | fixed RNG state |
 | `torch.use_deterministic_algorithms(True, warn_only=True)` | deterministic ops |
-| `cudnn.deterministic=True, benchmark=False` | deterministic cuDNN |
+| `cudnn.deterministic=True, benchmark=False, enabled=False` | deterministic cuDNN |
 
-`full_determinism`/`seed` live on the `reward_model` block (a non-structured config node), so the trainer propagates them onto `reward_model.rollout` via `OmegaConf.open_dict` — the server process's `self.config` is the rollout config and can read them.
+Because `VERL_SEED` is set only by a server whose own `full_determinism` is `true` (and is not forwarded globally via Ray `runtime_env`), enabling determinism on only one component (for example, GRM only) does not force deterministic kernels onto non-deterministic rollout workers.
 
-Each RM replica uses the same `seed` (not `replica_rank + seed`), so every replica starts from identical state.
+Each replica uses the same `seed` (not `replica_rank + seed`), so every replica starts from identical state. When `full_determinism=true`, both `ARStrategy` and `DiffusionStrategy` fall back to `rollout.seed` (default `42`) if an incoming request omits `seed`.
 
 ### 3. Deterministic routing
 
@@ -130,11 +148,20 @@ Enabling the RM requires an explicit `reward.custom_reward_function` — the tra
 - **Nondeterministic fallbacks**: some GPU ops have no deterministic implementation. `warn_only=True` emits warnings; these are expected.
 - **Multi-replica routing not asserted**: every replica uses the same seed, so replica outputs are identical regardless of routing, and crc32 routing (gated on `VERL_FULL_DETERMINISM`) cannot be distinguished from least-loaded routing by the assertions. Routing correctness is guaranteed by code, not by the test suite.
 - **Hardware**: deterministic ops and batch invariance require specific hardware — see the [vLLM batch invariance docs](https://docs.vllm.ai/en/latest/features/batch_invariance/). On unsupported hardware, set `max_num_seqs=1`.
-- **Generative GRM only**: this covers the generative VLM reward path. Full E2E determinism (rollout + diffusion sampling) is future work.
+- **Packed diffusion batch invariance pending**: cross-request batch invariance under request packing (`max_num_seqs > 1` or `step_execution=true`) is not yet supported in vLLM-Omni diffusion stages; set `actor_rollout_ref.rollout.max_num_seqs=1` and `actor_rollout_ref.rollout.step_execution=false` for bitwise-aligned diffusion replay.
+- **Full E2E training**: unified per-pipeline SDE window seeding and full E2E bitwise-aligned training curves remain future work.
 
 ## Verify
 
 ```bash
+# CPU contract tests (worker subprocess hook, server/strategy defaults, V0/V1 entrypoint env export)
+pytest tests/workers/rollout/rollout_vllm/test_vllm_omni_determinism_on_cpu.py \
+  tests/trainer/diffusion/test_diffusion_determinism_env_on_cpu.py -v
+
+# GPU actor-rollout two-run replay (2 GPUs)
+pytest tests/agent_loop/test_diffusion_rollout_seed_gpu.py -v -s -k full_determinism
+
+# GPU GRM reward determinism
 pytest tests/reward_loop/test_visual_reward_manager.py -v -s -k deterministic_reward_reproducibility
 ```
 

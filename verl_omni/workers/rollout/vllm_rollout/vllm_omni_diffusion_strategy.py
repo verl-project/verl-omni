@@ -412,6 +412,13 @@ class DiffusionStrategy(OmniStrategyBase):
                 sampling_kwargs[key] = value
             else:
                 extra_args[key] = value
+        if (
+            getattr(self.server.config, "full_determinism", False)
+            and sampling_kwargs.get("seed") is None
+            and extra_args.get("seed") is None
+        ):
+            rollout_seed = getattr(self.server.config, "seed", None)
+            sampling_kwargs["seed"] = 42 if rollout_seed is None else int(rollout_seed)
         requested = requested_artifact_names(extra_args.get("requested_outputs"), context="diffusion request")
         if requested:
             io_spec = self._diffusion_io_spec()

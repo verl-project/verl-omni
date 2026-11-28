@@ -445,8 +445,9 @@ class ARStrategy(OmniStrategyBase):
         else:
             sampling_params["logprobs"] = None
         sampling_params.setdefault("repetition_penalty", getattr(self.server.config, "repetition_penalty", 1.0))
-        if getattr(self.server.config, "full_determinism", False):
-            sampling_params.setdefault("seed", getattr(self.server.config, "seed", 42))
+        if getattr(self.server.config, "full_determinism", False) and sampling_params.get("seed") is None:
+            rollout_seed = getattr(self.server.config, "seed", None)
+            sampling_params["seed"] = 42 if rollout_seed is None else int(rollout_seed)
         return_hidden = bool(sampling_params.pop("return_hidden_states", False))
         policy_params = SamplingParams(max_tokens=max_tokens, **sampling_params)
         if self._rollout_output_modalities is not None:
