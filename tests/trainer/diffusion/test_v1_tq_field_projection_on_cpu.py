@@ -115,6 +115,42 @@ def test_canonicalize_orders_rows_prompt_major_and_keeps_tag_alignment():
     assert meta.keys[0] == "aaa_2_0"
 
 
+def test_tq_read_and_write_keep_canonical_prompt_order(monkeypatch):
+    # UUID order disagrees with submission order; actor mini-batches must
+    # follow the prompt positions, and computed rows must return to those keys.
+    """Submission order wins over UUID order for both trajectory reads and score writes."""
+    meta = tq_utils.canonicalize_diffusion_tq_meta(
+        KVBatchMeta(
+            partition_id="train",
+            keys=["aaa_1_0", "zzz_0_0", "aaa_0_0", "zzz_1_0"],
+            tags=[
+                {"gen_batch_seq": 1, "prompt_index": 0},
+                {"gen_batch_seq": 0, "prompt_index": 0},
+                {"gen_batch_seq": 1, "prompt_index": 0},
+                {"gen_batch_seq": 0, "prompt_index": 0},
+            ],
+        )
+    )
+    expected = ["zzz_0_0", "zzz_1_0", "aaa_0_0", "aaa_1_0"]
+    values = {key: index for index, key in enumerate(expected)}
+
+    def read(*, keys, **kwargs):
+        return {"row_id": torch.tensor([values[key] for key in keys])}
+
+    stored = {}
+
+    def write(*, keys, fields, **kwargs):
+        stored.update(zip(keys, fields["sample_level_rewards"].tolist(), strict=True))
+
+    monkeypatch.setattr(tq_utils.tq, "kv_batch_get", read)
+    monkeypatch.setattr(tq_utils.tq, "kv_batch_put", write)
+    data = tq_utils.diffusion_tq_batch_to_dataproto(meta)
+    assert data.batch["row_id"].tolist() == [0, 1, 2, 3]
+    data.batch["sample_level_rewards"] = torch.tensor([10, 11, 12, 13])
+    tq_utils.put_dataproto_fields_to_tq(meta, data, ["sample_level_rewards"])
+    assert stored == {key: index + 10 for index, key in enumerate(expected)}
+
+
 def test_canonicalize_breaks_prompt_index_ties_by_gen_batch_seq_not_uid():
     # Two generation batches selected into one sample: both number their first
     # prompt prompt_index=0, and uid order disagrees with dispatch order.
@@ -148,6 +184,7 @@ def test_canonicalize_passthrough_for_singleton_batches():
 
 
 def test_fetch_one_gen_batch_stamps_monotonic_gen_batch_seq():
+    """Generation-batch identity disambiguates repeated batch-local prompt positions."""
     trainer = SimpleNamespace(
         train_dataloader_it=iter(
             [
@@ -161,7 +198,7 @@ def test_fetch_one_gen_batch_stamps_monotonic_gen_batch_seq():
     first = trainer_base_module.PolicyGradientDiffusionTrainerV1._fetch_one_gen_batch(trainer)
     second = trainer_base_module.PolicyGradientDiffusionTrainerV1._fetch_one_gen_batch(trainer)
 
-    # index stays batch-local (v0 seed semantics); gen_batch_seq is unique per
+    # index stays batch-local; gen_batch_seq is unique per
     # generation batch so (gen_batch_seq, index) identifies every prompt.
     assert [int(v) for v in first["index"]] == [0, 1]
     assert [int(v) for v in first["gen_batch_seq"]] == [0, 0]
@@ -171,6 +208,7 @@ def test_fetch_one_gen_batch_stamps_monotonic_gen_batch_seq():
 
 @pytest.mark.parametrize("gen_batch_size", [1, 2])
 def test_next_train_batch_rollout_seed_index_is_unique_within_a_step(gen_batch_size):
+    """Refills continue seed positions until the next trainer step."""
     cls = trainer_base_module.PolicyGradientDiffusionTrainerV1
     trainer = SimpleNamespace(
         config=OmegaConf.create({"data": {"train_batch_size": 2}, "actor_rollout_ref": {"rollout": {"seed": 7}}}),
@@ -198,8 +236,7 @@ def test_next_train_batch_rollout_seed_index_is_unique_within_a_step(gen_batch_s
     assert [int(v) for v in first["rollout_seed_index"]] == [0, 1]
     assert [int(v) for v in refill["rollout_seed_index"]] == list(range(2, 2 + gen_batch_size))
     assert [int(v) for v in next_step["rollout_seed_index"]] == [0, 1]
-    if gen_batch_size == 2:
-        assert [int(v) for v in first["index"]] == [0, 1]
+    assert [int(v) for v in first["index"]] == ([0, 0] if gen_batch_size == 1 else [0, 1])
 
 
 def test_next_train_batch_without_rollout_seed_stays_unseeded():

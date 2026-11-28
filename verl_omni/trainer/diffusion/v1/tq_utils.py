@@ -179,7 +179,7 @@ def diffusion_tq_batch_to_dataproto(
     """Read TQ rows and assemble a diffusion ``DataProto``.
 
     Args:
-        batch_meta: ``KVBatchMeta`` returned by ``ReplayBuffer.sample``.
+        batch_meta: ``KVBatchMeta`` in the row order used by the trainer.
         pad_token_id: Padding token id for variable-length prompt token tensors.
         select_fields: Optional TQ fields to retrieve. ``None`` preserves the
             full-payload behavior required by training and validation.
@@ -188,8 +188,7 @@ def diffusion_tq_batch_to_dataproto(
         ``DataProto`` whose ``batch`` carries the retrieved diffusion tensors and
         whose ``non_tensor_batch`` carries row metadata and ``extra_fields``.
     """
-    sort_idx = sort_diffusion_tq_keys(list(batch_meta.keys))
-    keys = [batch_meta.keys[i] for i in sort_idx]
+    keys = list(batch_meta.keys)
     partition_id = batch_meta.partition_id
 
     data = tq.kv_batch_get(
@@ -265,10 +264,8 @@ def put_dataproto_fields_to_tq(
             output[field] = [dict(zip(keys, row, strict=True)) for row in zip(*columns, strict=True)]
     if not output:
         return
-    sort_idx = sort_diffusion_tq_keys(list(batch_meta.keys))
-    sorted_keys = [batch_meta.keys[i] for i in sort_idx]
     tq.kv_batch_put(
-        keys=sorted_keys,
+        keys=list(batch_meta.keys),
         partition_id=batch_meta.partition_id,
         fields=tu.get_tensordict(output),
     )
