@@ -41,7 +41,8 @@ adapter. The Qwen3-Omni pipeline owns the support checks, config mapping and
 explicit BSHD model call that passes audio tensors and lets the Thinker build M-RoPE.
 It uses BSHD, PP1 and CP1;
 the development audio bridge does not implement packed sequences, dynamic
-micro-batching is disabled, and MTP, dynamic CP and router replay are rejected.
+micro-batching is disabled, MTP and dynamic CP are rejected, and router replay
+supports `mode=R3` only.
 Optimizer, old-policy snapshots, losses and weight export remain
 upstream implementations.
 An engine-private config view exposes the nested Thinker text dimensions to
