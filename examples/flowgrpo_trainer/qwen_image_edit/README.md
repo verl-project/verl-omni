@@ -167,11 +167,16 @@ Set `TRAIN_FILES` and `VAL_FILES` to use different parquet files.
 | `REWARD_OFFLOAD` | `true` | `true` wakes/sleeps around scoring; `false` keeps the reward model resident. The meaning is identical for engine and native models. |
 
 The launcher configures `reward.models.pickscore.backend=native`; the same-name
-`reward.reward_functions.pickscore` entry binds automatically. Native workers
+`reward.scorers.pickscore` entry binds automatically and is normalized to the
+manager's reward-function term. Native workers
 preserve the PickScore model's local inference queue; they are not TP shards.
 The launcher explicitly configures the PickScore model class through
 `executor.model`; the generic native backend does not select model-specific
 behavior.
+
+The V1 NPU launcher also accepts existing flat
+`reward.reward_functions.pickscore` overrides. Use that form or
+`reward.scorers.pickscore` for a given command.
 
 See [Named Reward Models](../../../docs/algo/named_reward_models.md)
 for native-only and engine-only configurations, mixed-model resource placement,
