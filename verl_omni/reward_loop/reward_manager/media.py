@@ -63,6 +63,18 @@ def _reward_extra_info(data_item) -> dict:
         extra_info.pop(key, None)
     extra_info.update({key: value for key, value in tool_extra_fields.items() if key not in generated_media_keys})
     for key in generated_media_keys:
+        if key == PREVIEW_ARTIFACT:
+            # None is an explicit selection, not missing metadata.
+            selectors = [
+                source[key]
+                for source in (tensor_fields, data_item.non_tensor_batch, tool_extra_fields)
+                if key in source
+            ]
+            if selectors:
+                if any(value != selectors[0] for value in selectors[1:]):
+                    raise ValueError(f"Conflicting rollout media field {key!r} in batch and tool_extra_fields")
+                extra_info[key] = selectors[0]
+            continue
         tool_value = tool_extra_fields.get(key)
         value = tensor_fields.get(key)
         if value is None:

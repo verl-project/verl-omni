@@ -219,13 +219,17 @@ def test_trainer_cleanup_closes_fsdp_and_queue_even_on_fit_or_close_failure():
     def queue():
         calls.append("queue")
 
+    def close_agent_loops():
+        calls.append("agent loops")
+        raise RuntimeError("agent close failed")
+
     trainer = SimpleNamespace(
         reward_loop_manager=SimpleNamespace(multi_reward_model_manager=SimpleNamespace(close_native_models=close))
     )
     with pytest.raises(BaseExceptionGroup) as error:
-        finish_training_resources(trainer, config(), queue, ValueError("fit failed"))
-    assert [str(exc) for exc in error.value.exceptions] == ["fit failed", "model close failed"]
-    assert calls == ["models", "queue"]
+        finish_training_resources(trainer, config(), queue, ValueError("fit failed"), close_agent_loops)
+    assert [str(exc) for exc in error.value.exceptions] == ["fit failed", "agent close failed", "model close failed"]
+    assert calls == ["agent loops", "models", "queue"]
 
 
 @pytest.mark.asyncio

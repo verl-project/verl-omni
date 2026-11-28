@@ -20,10 +20,14 @@ from types import SimpleNamespace
 import pytest
 import torch
 from hydra import compose, initialize_config_dir
+from transfer_queue import KVBatchMeta
 from verl import DataProto
 from verl.utils import tensordict_utils as tu
 
 import verl_omni
+from verl_omni.trainer.diffusion.v1 import trainer_base as base_module
+from verl_omni.trainer.diffusion.v1 import trainer_colocate_async as module
+from verl_omni.trainer.diffusion.v1.trainer_colocate_async import PolicyGradientDiffusionTrainerV1ColocateAsync
 
 CONFIG_DIR = os.path.join(os.path.dirname(os.path.abspath(verl_omni.__file__)), "trainer", "config")
 
@@ -74,19 +78,22 @@ def test_colocate_reward_keeps_trajectory_fields(monkeypatch):
     assert checkpoint_calls == []
 
 
-def test_colocate_reward_keeps_rollout_asleep_through_actor_update(monkeypatch):
-    """In sync mode the colocated-RM block must not wake the rollout engine.
+@pytest.mark.parametrize("trainer_mode", ["sync", "colocate_async"])
+def test_colocate_reward_keeps_rollout_asleep_through_actor_update(monkeypatch, trainer_mode):
+    """Both colocated modes keep rollout asleep through the actor update.
 
     ``update_weights`` resumes the rollout replicas' GPU weights (~55GB for
     Qwen-Image at rollout TP=1). If it runs between the reward phase and the
     actor update, every training phase (old log-prob, ref, advantage, actor
-    update) executes next to the resident rollout weights and OOMs. In sync
-    mode, waking and weight-syncing belongs to ``on_step_end``, after the
+    update) executes next to the resident rollout weights and OOMs. In both
+    colocated modes, waking and weight-syncing belongs to ``on_step_end``, after the
     actor update.
     """
-    from verl_omni.trainer.diffusion.v1.trainer_sync import PolicyGradientDiffusionTrainerV1Sync
+    from verl_omni.trainer.diffusion.v1 import get_diffusion_trainer_cls
 
-    trainer = PolicyGradientDiffusionTrainerV1Sync(compose_cfg(["reward.reward_model.enable=true"]))
+    trainer = get_diffusion_trainer_cls(trainer_mode)(
+        compose_cfg(["reward.reward_model.enable=true", f"trainer.v1.trainer_mode={trainer_mode}"])
+    )
     assert trainer.use_rm
 
     data = DataProto.from_tensordict(tu.get_tensordict({"all_timesteps": torch.zeros(2, 4)}))
@@ -123,6 +130,218 @@ def test_colocate_reward_keeps_rollout_asleep_through_actor_update(monkeypatch):
         trainer._train_sampled_batch({}, {}, object())
 
     assert calls == ["reward", "old_log_prob", "advantage", "update_actor"]
+
+
+@pytest.mark.parametrize("bypass", [False, True])
+def test_dedicated_reward_is_joined_before_logprob_work(monkeypatch, bypass):
+    from verl_omni.trainer.diffusion.v1 import get_diffusion_trainer_cls
+
+    trainer = get_diffusion_trainer_cls("colocate_async")(
+        compose_cfg(
+            [
+                "trainer.v1.trainer_mode=colocate_async",
+                "reward.reward_model.enable=true",
+                "reward.reward_model.enable_resource_pool=true",
+                "data.train_batch_size=4",
+                "actor_rollout_ref.actor.ppo_mini_batch_size=2",
+                "actor_rollout_ref.rollout.calculate_log_probs=true",
+                f"algorithm.rollout_correction.bypass_mode={str(bypass).lower()}",
+            ]
+        )
+    )
+    trainer.reward_loop_manager = SimpleNamespace(reward_loop_worker_handles=None)
+    trainer.actor_rollout_wg = SimpleNamespace(_query_dispatch_info=lambda mesh: {i: i for i in range(3)})
+    data = DataProto.from_dict(
+        tensors={
+            "all_timesteps": torch.arange(4).unsqueeze(1),
+            "rollout_log_probs": torch.arange(4, dtype=torch.float32).unsqueeze(1),
+        },
+    )
+    calls = []
+    reward = DataProto.from_dict(tensors={"rm_scores": torch.arange(1, 5, dtype=torch.float32).unsqueeze(1)})
+
+    def score(original):
+        calls.append("reward")
+        assert original is data
+        return reward
+
+    def old_log_prob(balanced):
+        calls.append("old_log_prob")
+        expected = balanced.batch["all_timesteps"].float()
+        torch.testing.assert_close(balanced.batch["rm_scores"], expected + 1)
+        return DataProto.from_dict(tensors={"old_log_probs": expected})
+
+    monkeypatch.setattr(trainer, "_compute_reward_colocate", score)
+    monkeypatch.setattr(trainer, "_compute_old_log_prob", old_log_prob)
+    monkeypatch.setattr(base_module, "compute_rollout_corr_metrics_from_batch", lambda data, bypass_mode: {})
+
+    def advantage(joined):
+        joined.batch["advantages"] = torch.ones(len(joined), 1)
+        return joined
+
+    monkeypatch.setattr(trainer, "_compute_advantage", advantage)
+
+    def update(joined):
+        expected = joined.batch["all_timesteps"].float()
+        assert len(joined) == 6
+        torch.testing.assert_close(joined.batch["rm_scores"], expected + 1)
+        torch.testing.assert_close(joined.batch["old_log_probs"], expected)
+        assert joined.batch["advantages"].flatten().tolist() == [1.0] * 4 + [0.0] * 2
+        raise _Stop
+
+    monkeypatch.setattr(trainer, "_update_actor", update)
+    with pytest.raises(_Stop):
+        trainer._train_sampled_batch({}, {}, object(), data=data)
+    assert calls == (["reward"] if bypass else ["reward", "old_log_prob"])
+
+
+def _remote(fn):
+    return SimpleNamespace(remote=fn)
+
+
+@pytest.mark.parametrize("profile", [False, True])
+def test_routing_stays_closed_from_abort_through_weight_commit(monkeypatch, profile):
+    """Failed weight commits never expose rollout replicas to new requests."""
+    trainer = PolicyGradientDiffusionTrainerV1ColocateAsync(
+        compose_cfg(
+            [
+                "trainer.v1.trainer_mode=colocate_async",
+                "data.train_batch_size=4",
+                "actor_rollout_ref.actor.ppo_mini_batch_size=2",
+            ]
+        )
+    )
+    events = []
+    trainer.global_steps = 3
+    trainer.curr_step_profile = profile
+    trainer._stop_rollout_profiling = lambda: events.append("stop profile")
+    trainer.timing_raw = {}
+    trainer.llm_server_manager = SimpleNamespace(
+        server_addresses=["server"],
+        server_handles=["handle"],
+        global_load_balancer=SimpleNamespace(
+            remove_servers=_remote(lambda servers: events.append(("remove", servers))),
+            add_servers=_remote(lambda servers: events.append(("add", servers))),
+        ),
+    )
+    trainer.checkpoint_manager = SimpleNamespace(
+        abort_replicas=lambda: events.append("abort"),
+        sleep_replicas=lambda: events.append("sleep"),
+        update_weights=lambda step: events.append(("commit", step)),
+        resume_generation_replicas=lambda: events.append("resume"),
+    )
+    monkeypatch.setattr(module.ray, "get", lambda result: result)
+    trainer.on_sample_end()
+    events.append("actor update")
+    trainer.on_step_end()
+    assert events == [
+        ("remove", ["server"]),
+        "abort",
+        "sleep",
+        *(["stop profile"] if profile else []),
+        "actor update",
+        ("commit", 3),
+        "resume",
+        ("add", {"server": "handle"}),
+    ]
+
+    # A failed sync never reopens routing.
+    events.clear()
+    trainer.checkpoint_manager.update_weights = lambda step: (_ for _ in ()).throw(RuntimeError("sync failed"))
+    with pytest.raises(RuntimeError, match="sync failed"):
+        trainer.on_step_end()
+    assert events == []
+
+
+@pytest.mark.parametrize("scenario", ["dedicated", "colocated", "drain_timeout", "reward_failure", "wake_failure"])
+def test_validation_reclaims_rollout_only_for_colocated_reward(monkeypatch, scenario):
+    """Dedicated reward GPUs do not require a rollout ownership switch during validation."""
+    separate_reward = scenario == "dedicated"
+    trainer = PolicyGradientDiffusionTrainerV1ColocateAsync(
+        compose_cfg(
+            [
+                "trainer.v1.trainer_mode=colocate_async",
+                "data.train_batch_size=4",
+                "actor_rollout_ref.actor.ppo_mini_batch_size=2",
+                "reward.reward_model.enable=true",
+                f"reward.reward_model.enable_resource_pool={str(separate_reward).lower()}",
+            ]
+        )
+    )
+    trainer.global_steps = 0
+    trainer._gen_batch_seq = 0
+    trainer.val_dataloader = [{"raw_prompt": [[{"role": "user", "content": "prompt"}]]}]
+    trainer.agent_loop_manager = SimpleNamespace(generate_sequences=lambda batch: None)
+    trainer.reward_loop_manager = SimpleNamespace(reward_loop_worker_handles=None)
+    batch = KVBatchMeta(partition_id="val", keys=["sample_0_0"], tags=[{}])
+    trainer.replay_buffer.sample = lambda **kwargs: (batch, {})
+    events = []
+    trainer.curr_step_profile = False
+    trainer.timing_raw = {"colocate_handoff_to_actor": 1.0, "update_weights": 2.0}
+
+    def operation(name, *, failure=None):
+        def invoke(*args):
+            events.append(name)
+            if failure is not None:
+                raise failure
+
+        return invoke
+
+    drain_error = TimeoutError("drain timed out") if scenario == "drain_timeout" else None
+    wake_error = RuntimeError("wake failed") if scenario == "wake_failure" else None
+    server = SimpleNamespace(quiesce_generation=_remote(operation("drain", failure=drain_error)))
+    trainer.llm_server_manager = SimpleNamespace(
+        server_addresses=["server"],
+        server_handles=[server],
+        global_load_balancer=SimpleNamespace(
+            remove_servers=_remote(operation("remove")),
+            add_servers=_remote(operation("add")),
+        ),
+    )
+    trainer.checkpoint_manager = SimpleNamespace(
+        abort_replicas=operation("abort"),
+        sleep_replicas=operation("sleep"),
+        update_weights=operation("commit"),
+        wake_up_replicas=operation("wake", failure=wake_error),
+        resume_generation_replicas=operation("resume"),
+    )
+    monkeypatch.setattr(module.ray, "get", lambda result, **kwargs: result)
+    data = DataProto.from_dict(tensors={"prompts": torch.ones(1, 2), "responses": torch.ones(1, 3, 2, 2)})
+
+    def score(value):
+        events.append("reward")
+        if scenario == "reward_failure":
+            raise RuntimeError("reward failed")
+        return value
+
+    trainer._compute_reward_colocate = score
+    monkeypatch.setattr(base_module, "canonicalize_diffusion_tq_meta", lambda value: value)
+    monkeypatch.setattr(base_module, "diffusion_tq_batch_to_dataproto", lambda *args, **kwargs: data)
+    monkeypatch.setattr(base_module.tq, "kv_batch_put", lambda **kwargs: None)
+
+    class StopAfterReward(Exception):
+        pass
+
+    def decode(*args, **kwargs):
+        raise StopAfterReward
+
+    trainer.tokenizer = SimpleNamespace(pad_token_id=0, decode=decode)
+    if scenario == "drain_timeout":
+        with pytest.raises(TimeoutError, match="drain timed out"):
+            trainer._validate()
+        assert events == ["remove", "drain"]
+    elif scenario in {"reward_failure", "wake_failure"}:
+        failed_phase = scenario.removesuffix("_failure")
+        with pytest.raises(RuntimeError, match=f"{failed_phase} failed"):
+            trainer._validate()
+        assert events == ["remove", "drain", "sleep", "reward", *(["wake"] if failed_phase == "wake" else [])]
+    else:
+        with pytest.raises(StopAfterReward):
+            trainer._validate()
+        assert events == (
+            ["reward"] if separate_reward else ["remove", "drain", "sleep", "reward", "wake", "resume", "add"]
+        )
+    assert trainer.timing_raw == {"colocate_handoff_to_actor": 1.0, "update_weights": 2.0}
 
 
 SEPARATE_ASYNC = [

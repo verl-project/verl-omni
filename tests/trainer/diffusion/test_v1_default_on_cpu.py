@@ -19,8 +19,11 @@ from pathlib import Path
 import pytest
 from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
+from verl.trainer.ppo.v1.replay_buffer import ReplayBufferAsync
 
 import verl_omni
+from verl_omni.trainer.diffusion.v1 import get_diffusion_trainer_cls
+from verl_omni.trainer.diffusion.v1.trainer_colocate_async import PolicyGradientDiffusionTrainerV1ColocateAsync
 from verl_omni.trainer.main_diffusion import _deprecate_v0_trainer, uses_v1_trainer
 
 
@@ -85,6 +88,60 @@ def test_offline_dpo_v0_launch_stays_silent():
         warnings.simplefilter("error")
         _deprecate_v0_trainer(config)
     assert config.trainer.use_v1 is False
+
+
+def test_registered_trainer_uses_async_groups_and_exact_refill():
+    trainer = get_diffusion_trainer_cls("colocate_async")(
+        compose_diffusion_config(
+            [
+                "trainer.v1.trainer_mode=colocate_async",
+                "data.train_batch_size=4",
+                "actor_rollout_ref.actor.ppo_mini_batch_size=2",
+                "+data.gen_batch_size=4",
+            ]
+        )
+    )
+    assert isinstance(trainer, PolicyGradientDiffusionTrainerV1ColocateAsync)
+    assert isinstance(trainer.replay_buffer, ReplayBufferAsync)
+    assert trainer.parameter_sync_step == 1
+    assert trainer._generation_batch_size() == 1
+
+
+def test_resident_step_batch_rejected_only_by_colocate_mode():
+    overrides = ["actor_rollout_ref.rollout.free_cache_engine=false", "actor_rollout_ref.rollout.step_execution=true"]
+    with pytest.raises(ValueError, match="resident colocate_async requires request-level execution"):
+        get_diffusion_trainer_cls("colocate_async")(compose_diffusion_config(overrides))
+    get_diffusion_trainer_cls("sync")(compose_diffusion_config(overrides))
+
+
+@pytest.mark.parametrize(
+    ("override", "message"),
+    [
+        ("actor_rollout_ref.rollout.nnodes=1", "colocated rollout"),
+        ("actor_rollout_ref.rollout.checkpoint_engine.backend=nccl", "backend=naive"),
+        ("trainer.v1.colocate_async.num_warmup_batches=-1", "nonnegative integer"),
+        ("trainer.v1.colocate_async.num_warmup_batches=1.5", "nonnegative integer"),
+        ("+trainer.v1.colocate_async.parameter_sync_step=2", "one parameter sync"),
+        ("actor_rollout_ref.model.algorithm=diffusion_nft", "FlowGRPO"),
+        ("data.train_batch_size=0", "positive integer"),
+        ("data.train_batch_size=-2", "positive integer"),
+        ("actor_rollout_ref.actor.ppo_mini_batch_size=0", "positive integer"),
+        ("actor_rollout_ref.actor.ppo_mini_batch_size=1.5", "positive integer"),
+        ("data.train_batch_size=3", "divisible by ppo_mini_batch_size"),
+    ],
+)
+def test_invalid_config_fails_before_workers_start(override, message):
+    with pytest.raises(ValueError, match=message):
+        PolicyGradientDiffusionTrainerV1ColocateAsync(
+            compose_diffusion_config(
+                [
+                    "trainer.v1.trainer_mode=colocate_async",
+                    "data.train_batch_size=4",
+                    "actor_rollout_ref.actor.ppo_mini_batch_size=2",
+                    override,
+                ]
+            )
+        )
 
 
 @pytest.mark.parametrize(

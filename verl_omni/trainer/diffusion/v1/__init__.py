@@ -23,6 +23,7 @@ from verl_omni.trainer.diffusion.v1.trainer_base import (
     get_diffusion_trainer_cls,
     register_diffusion_trainer,
 )
+from verl_omni.trainer.diffusion.v1.trainer_colocate_async import PolicyGradientDiffusionTrainerV1ColocateAsync
 from verl_omni.trainer.diffusion.v1.trainer_separate_async import (
     PolicyGradientDiffusionTrainerV1SeparateAsync,
 )
@@ -31,6 +32,7 @@ from verl_omni.trainer.diffusion.v1.trainer_sync import PolicyGradientDiffusionT
 __all__ = [
     "DIFFUSION_TRAINER_REGISTRY",
     "PolicyGradientDiffusionTrainerV1",
+    "PolicyGradientDiffusionTrainerV1ColocateAsync",
     "PolicyGradientDiffusionTrainerV1SeparateAsync",
     "PolicyGradientDiffusionTrainerV1Sync",
     "get_diffusion_trainer_cls",
