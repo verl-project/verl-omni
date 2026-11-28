@@ -434,6 +434,7 @@ actor_rollout_ref:
 ```
 
 - `actor_rollout_ref.rollout.val_kwargs.n`: Generations per prompt during validation.
+- `actor_rollout_ref.rollout.val_kwargs.seed`: Base validation seed (default `42`). Repeat `k` in `0 .. val_kwargs.n - 1` uses `seed + k`, keeping `val_kwargs.n=1` unchanged while avoiding duplicate generations when `val_kwargs.n > 1`.
 - `actor_rollout_ref.rollout.val_kwargs.pipeline.*`: Validation pipeline overrides (often more steps / ODE).
 - `actor_rollout_ref.rollout.val_kwargs.algo.*`: Validation SDE settings (`noise_level: 0.0` by default).
 

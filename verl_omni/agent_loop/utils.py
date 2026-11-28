@@ -25,7 +25,9 @@ from typing import Any, Optional
 
 __all__ = [
     "derive_rollout_seed",
+    "derive_validation_seed",
     "maybe_per_rollout_seeds",
+    "maybe_validation_seeds",
     "per_rollout_seeds_or_entropy",
     "messages_to_text",
 ]
@@ -59,6 +61,41 @@ def derive_rollout_seed(base_seed: int, rollout_index: int) -> int:
     Row index is 0 .. num_prompts * rollout.n - 1 after interleaved repeat."""
     max_seed = (1 << 63) - 1
     return (int(base_seed) * 1_000_003 + int(rollout_index)) % max_seed
+
+
+def derive_validation_seed(base_seed: int, repeat_index: int) -> int:
+    """Derive a per-repeat validation seed from ``base_seed`` and ``repeat_index``.
+
+    Preserves ``base_seed`` at repeat 0 so ``val_kwargs.n == 1`` is unchanged while
+    ``val_kwargs.n > 1`` receives distinct deterministic seeds per repeat.
+    """
+    max_seed = (1 << 63) - 1
+    return (int(base_seed) + int(repeat_index)) % max_seed
+
+
+def maybe_validation_seeds(
+    val_seed: Optional[int],
+    batch_size: int,
+    repeat_indices: Any = None,
+    *,
+    val_n: int = 1,
+) -> Optional[list[int]]:
+    """Build per-row validation seeds from ``val_seed`` and repeat indices.
+
+    When ``val_seed`` is ``None`` and ``val_n > 1``, draws fresh per-row entropy
+    seeds so unseeded multi-repeat validation cannot collide across Ray-forked
+    vLLM-Omni replicas.
+    """
+    if val_seed is None:
+        if int(val_n) > 1:
+            return [secrets.randbits(63) for _ in range(batch_size)]
+        return None
+    if repeat_indices is None:
+        return None
+    indices = [int(idx) for idx in list(repeat_indices)]
+    if len(indices) != batch_size:
+        raise ValueError(f"Expected {batch_size} validation repeat indices, got {len(indices)}")
+    return [derive_validation_seed(val_seed, idx) for idx in indices]
 
 
 def maybe_per_rollout_seeds(meta_info: dict, batch_size: int, global_indices=None) -> Optional[list[int]]:

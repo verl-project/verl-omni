@@ -31,7 +31,7 @@ from verl_omni.agent_loop.diffusion_agent_loop import (
     _config_to_sampling_dict,
     _InternalDiffusionAgentLoopOutput,
 )
-from verl_omni.agent_loop.utils import derive_rollout_seed
+from verl_omni.agent_loop.utils import derive_rollout_seed, derive_validation_seed
 from verl_omni.pipelines.rollout_media import ARTIFACT_CONTEXT, ARTIFACT_SPECS, PREVIEW_ARTIFACT, PRIMARY_ARTIFACT
 
 logger = logging.getLogger(__name__)
@@ -141,13 +141,18 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
             n = config.val_kwargs.n if trajectory["validate"] else config.n
             for session_id in range(n):
                 run_sampling_params = dict(sampling_params)
-                if rollout_base_seed is not None and not trajectory["validate"]:
+                if trajectory["validate"]:
+                    if run_sampling_params.get("seed") is not None:
+                        run_sampling_params["seed"] = derive_validation_seed(run_sampling_params["seed"], session_id)
+                    elif n > 1:
+                        run_sampling_params["seed"] = secrets.randbits(63)
+                elif rollout_base_seed is not None:
                     # Seed from the position among the step's prompts (v0
                     # semantics): each worker only sees a chunk of the batch, so
                     # a chunk-local position would reuse the same seed offsets
                     # in every worker and roll out duplicated noise.
                     run_sampling_params["seed"] = derive_rollout_seed(rollout_base_seed, prompt_index * n + session_id)
-                elif not trajectory["validate"]:
+                else:
                     # Unseeded training sessions still need explicit, diverse
                     # seeds: vLLM-Omni fills absent request seeds with
                     # random.randint in the engine-server process, where

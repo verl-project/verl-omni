@@ -579,7 +579,12 @@ async def test_unseeded_training_gets_entropy_seeds_validation_keeps_val_seed(mo
     seeds = list(captured_seeds.values())
     assert set(captured_seeds) == {(uid, session) for uid in "ab" for session in range(2)}
     if validate:
-        assert seeds == [123] * 4
+        assert captured_seeds == {
+            ("a", 0): 123,
+            ("a", 1): 124,
+            ("b", 0): 123,
+            ("b", 1): 124,
+        }
     else:
         assert all(isinstance(seed, int) and 0 <= seed < 2**63 for seed in seeds)
         assert len(set(seeds)) == 4  # per-session entropy: no duplicated noise across replicas

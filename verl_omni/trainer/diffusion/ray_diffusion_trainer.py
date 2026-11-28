@@ -756,9 +756,10 @@ class BaseRayDiffusionTrainer(ABC):
                 )
 
             # repeat test batch
-            test_batch = test_batch.repeat(
-                repeat_times=self.config.actor_rollout_ref.rollout.val_kwargs.n, interleave=True
-            )
+            val_n = self.config.actor_rollout_ref.rollout.val_kwargs.n
+            num_prompts = len(test_batch)
+            test_batch = test_batch.repeat(repeat_times=val_n, interleave=True)
+            test_batch.non_tensor_batch["_val_repeat_idx"] = np.tile(np.arange(val_n, dtype=np.int64), num_prompts)
 
             ground_truths = [
                 item.non_tensor_batch.get("reward_model", {}).get("ground_truth", None) for item in test_batch
@@ -2266,7 +2267,9 @@ class CompositePolicyGradientRayTrainer(PolicyGradientRayTrainer):
                 )
 
             # One AR trace group, then ``val_n`` images per trace for the diffusion metrics.
+            num_prompts = len(test_batch)
             test_batch = test_batch.repeat(repeat_times=val_m, interleave=True)
+            test_batch.non_tensor_batch["_val_repeat_idx"] = np.tile(np.arange(val_m, dtype=np.int64), num_prompts)
             ar_sample_gts.extend(
                 [item.non_tensor_batch.get("reward_model", {}).get("ground_truth", None) for item in test_batch]
             )
