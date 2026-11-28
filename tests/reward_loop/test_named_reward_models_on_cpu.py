@@ -229,8 +229,8 @@ def test_multi_reward_model_manager_binds_each_engine_to_its_sub_pool(monkeypatc
         return ["pickscore-pool", "ocr-pool"]
 
     class FakeEngineModel:
-        def __init__(self, name, model, base_config, resource_pool, fallback_model):
-            del model, base_config, fallback_model
+        def __init__(self, name, config, resource_pool, *, offload):
+            del config, offload
             observed.append((name, resource_pool))
             self._spec = RewardModelSpec(name=name, backend="engine", router_address=f"{name}:8000")
 
@@ -1833,3 +1833,38 @@ async def test_model_wake_failure_drains_other_model_before_sleep():
     finally:
         release.set()
         await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), timeout=5)
+
+
+def test_named_engine_resolves_profiler_after_model_overrides(monkeypatch):
+    config = _config(
+        {
+            "ocr": {
+                "backend": "engine",
+                "model_path": "/models/ocr",
+                "rollout": {"profiler": {"tool": "nsys", "save_path": "model-reward-profile"}},
+            }
+        }
+    )
+    config.reward.reward_model.rollout.profiler = {"tool": "torch", "save_path": "base-reward-profile"}
+    resolved = OmegaConf.create({"tool": "nsys", "save_path": "resolved-reward-profile"})
+    calls = []
+    observed = []
+
+    def resolve(profiler, global_config):
+        calls.append((profiler, global_config))
+        return resolved
+
+    def create_manager(model_config, pool):
+        observed.append(model_config)
+        return SimpleNamespace(get_router_address=lambda: "router")
+
+    monkeypatch.setattr(reward_model_module, "resolve_ray_actor_profiler_config", resolve)
+    monkeypatch.setattr(reward_model_module, "RewardModelManager", create_manager)
+    monkeypatch.setattr(reward_model_module, "split_resource_pool", lambda pool, sizes: [pool])
+
+    MultiRewardModelManager(config, resource_pool=SimpleNamespace(world_size=2))
+
+    assert len(calls) == 1
+    assert calls[0][0] == {"tool": "nsys", "save_path": "model-reward-profile"}
+    assert calls[0][1] is config
+    assert observed[0].rollout.profiler == resolved

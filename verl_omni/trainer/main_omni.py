@@ -34,7 +34,7 @@ import ray
 from omegaconf import OmegaConf, open_dict
 from verl.trainer.constants_ppo import batch_invariant_requested, export_batch_invariant_env, get_ppo_ray_runtime_env
 from verl.trainer.ppo.utils import need_reference_policy
-from verl.utils.device import auto_set_device, is_cuda_available
+from verl.utils.device import auto_set_device
 
 import verl_omni.trainer.omni  # noqa: F401  — registers @register_trainer("omni_sync")
 from verl_omni.trainer.diffusion.ray_diffusion_trainer import (
@@ -50,6 +50,7 @@ from verl_omni.utils.config import (
     validate_config as validate_omni_config,
 )
 from verl_omni.utils.fs import resolve_model_local_dir
+from verl_omni.utils.profiler import build_controller_runner_options
 from verl_omni.utils.rl_insight import enable_rl_insight
 from verl_omni.workers.config.reward import (
     normalize_reward_config,
@@ -322,21 +323,8 @@ def launch_ray_task_runner(
         print(f"ray init kwargs: {ray_init_kwargs}")
         ray.init(**OmegaConf.to_container(ray_init_kwargs))
 
-    if (
-        is_cuda_available
-        and OmegaConf.select(config, "global_profiler.tool") == "nsys"
-        and OmegaConf.select(config, "global_profiler.steps") is not None
-        and len(OmegaConf.select(config, "global_profiler.steps")) > 0
-    ):
-        from verl.utils.import_utils import is_nvtx_available
-
-        assert is_nvtx_available(), "nvtx is not available in CUDA platform. Please 'pip3 install nvtx'"
-        nsight_options = OmegaConf.to_container(
-            config.global_profiler.global_tool_config.nsys.controller_nsight_options
-        )
-        runner = task_runner_class.options(runtime_env={"nsight": nsight_options}).remote()
-    else:
-        runner = task_runner_class.remote()
+    runner_options = build_controller_runner_options(config)
+    runner = task_runner_class.options(**runner_options).remote() if runner_options else task_runner_class.remote()
     ray.get(runner.run.remote(config))
 
     timeline_json_file = config.ray_kwargs.get("timeline_json_file", None)

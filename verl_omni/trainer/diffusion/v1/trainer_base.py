@@ -56,6 +56,11 @@ from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.debug import marked_timer
 from verl.utils.metric import reduce_metrics
+from verl.utils.profiler import (
+    build_worker_group_profile_kwargs,
+    create_gpu_metrics_profiler,
+    is_controller_nsys_api_control_enabled,
+)
 from verl.utils.py_functional import rename_dict
 from verl.utils.skip import SkipManager
 from verl.utils.tracking import Tracking, ValidationGenerationsLogger
@@ -109,6 +114,7 @@ from verl_omni.trainer.diffusion.v1.tq_utils import (
 )
 from verl_omni.utils.config import resolve_lora_config
 from verl_omni.utils.net_utils import worker_group_port_ranges
+from verl_omni.utils.profiler import ControllerNsightProfiler
 from verl_omni.utils.skip import init_skip_manager, log_skip_summary
 from verl_omni.utils.tracking import batch_items, validate_audio_batch
 from verl_omni.workers.config.diffusion.model import (
@@ -240,10 +246,13 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         self.ref_in_actor = resolve_lora_config(config.actor_rollout_ref.model).enabled
 
         self.checkpoint_manager = None
+        self.reward_loop_manager = None
+        self.ref_policy_wg = None
         self.global_steps = 0
         # Local update index within the parameter-sync cycle.
         self.local_trigger_step = 0
         self._nonfinite_grad_streak = 0
+        self.gpu_metrics_profiler = None
         self._init_profile_state()
         watchdog_config = dict(config.trainer.v1.get("watchdog", {}))
         watchdog_enabled = watchdog_config.pop("enabled", False)
@@ -284,6 +293,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         """Initialize workers, rollout server, reward loop, checkpoint engine."""
         self._setup()
         self.on_init_end()
+        self.gpu_metrics_profiler = create_gpu_metrics_profiler(self.config)
 
     def _policy_adapter_specs(self) -> tuple[tuple[str, str], ...]:
         """Return adapter names and their algorithm config prefixes."""
@@ -312,7 +322,10 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         return [manager for manager in managers if manager is not None]
 
     def _init_profile_state(self) -> None:
-        """Initialize state for worker and rollout profiling targets."""
+        """Initialize profiling targets without changing installed auxiliary managers."""
+        self._controller_profiler = ControllerNsightProfiler(
+            enabled=is_controller_nsys_api_control_enabled(self.config)
+        )
         self._profile_window_active = False
         self._active_profile_targets: list[object] = []
         self._active_rollout_profile_targets: list[object] = []
@@ -369,15 +382,21 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         return distinct_groups
 
     def _open_profile_window(self) -> None:
-        """Open one worker profiling window."""
+        """Open one controller/worker profiling window."""
         if self._profile_window_active:
             raise RuntimeError("Profiling window is already active")
 
         try:
+            self._controller_profiler.start()
+
             for worker_group, kwargs in self._profile_worker_groups():
                 self._start_profile_target(worker_group, **kwargs)
 
             self._start_rollout_profiling()
+
+            for manager in (self.reward_loop_manager, self.gpu_metrics_profiler):
+                if manager is not None:
+                    self._start_profile_target(manager, profile_step=self.global_steps)
 
             self._profile_window_active = True
         except BaseException:
@@ -388,7 +407,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         """Close all targets opened for the current profiling window."""
         first_error = None
 
-        # Drain worker targets in reverse startup order.
+        # Stop metrics first by draining worker targets in reverse startup order.
         try:
             self._stop_profile_targets(self._active_profile_targets, run_command=run_command)
         except BaseException as exc:
@@ -401,6 +420,11 @@ class PolicyGradientDiffusionTrainerV1(ABC):
                 self._stop_profile_targets(self._active_rollout_profile_targets)
             except BaseException as exc:
                 first_error = first_error or exc
+
+        try:
+            self._controller_profiler.stop()
+        except BaseException as exc:
+            first_error = first_error or exc
 
         self._profile_window_active = False
 
@@ -1222,19 +1246,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
                 }
 
         all_wg = {}
-        wg_kwargs = {}  # Setting up kwargs for RayWorkerGroup
-        if OmegaConf.select(self.config.global_profiler, "steps") is not None:
-            wg_kwargs["profile_steps"] = OmegaConf.select(self.config.global_profiler, "steps")
-            # Only require nsight worker options when tool is nsys
-            if OmegaConf.select(self.config.global_profiler, "tool") == "nsys":
-                assert (
-                    OmegaConf.select(self.config.global_profiler.global_tool_config.nsys, "worker_nsight_options")
-                    is not None
-                ), "worker_nsight_options must be set when using nsys with profile_steps"
-                wg_kwargs["worker_nsight_options"] = OmegaConf.to_container(
-                    OmegaConf.select(self.config.global_profiler.global_tool_config.nsys, "worker_nsight_options")
-                )
-        wg_kwargs["device_name"] = self.config.trainer.device
+        wg_kwargs = build_worker_group_profile_kwargs(self.config, device_name=self.config.trainer.device)
         pools = [(pool, class_dict) for pool, class_dict in self.resource_pool_to_cls.items() if class_dict]
         master_port_range = OmegaConf.select(self.config.trainer, "ray_master_port_range")
         port_ranges = worker_group_port_ranges(master_port_range, len(pools))

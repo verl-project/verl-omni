@@ -539,3 +539,28 @@ class TestFSDPDiffusionActorConfig:
             )
         actor_cfg: FSDPDiffusionActorConfig = omega_conf_to_dataclass(cfg)
         assert actor_cfg.diffusion_loss.clip_ratio == pytest.approx(0.05)
+
+    def test_nsys_launch_options_do_not_break_actor_config_instantiation(self):
+        import os
+
+        from hydra import compose, initialize_config_dir
+        from verl.utils.config import omega_conf_to_dataclass
+
+        import verl_omni
+
+        config_dir = os.path.join(os.path.dirname(verl_omni.__file__), "trainer/config")
+        with initialize_config_dir(config_dir=config_dir, version_base=None):
+            config = compose(
+                config_name="diffusion_trainer",
+                overrides=[
+                    "global_profiler.tool=nsys",
+                    'global_profiler.global_tool_config.nsys.worker_nsight_options.trace="nvtx,cuda,osrt"',
+                    "actor_rollout_ref.actor.profiler.tool=nsys",
+                    "actor_rollout_ref.actor.profiler.enable=True",
+                ],
+            )
+
+        actor_config = omega_conf_to_dataclass(config.actor_rollout_ref.actor)
+
+        assert actor_config.profiler.global_tool_config is None
+        assert actor_config.profiler.ray_actor_nsight_options["trace"] == "nvtx,cuda,osrt"

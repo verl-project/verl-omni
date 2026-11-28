@@ -17,6 +17,7 @@ import copy
 import os
 import sys
 import types
+from unittest.mock import Mock
 
 import pytest
 import verl.trainer.ppo.ray_trainer as upstream_ray_trainer
@@ -274,3 +275,50 @@ def test_rollout_stack_selects_manager_arguments_and_sleep(
     assert events[1][1]["rollout_resource_pool"] == expected_pool
     assert trainer.checkpoint_manager.sleep_count == expected_sleep_count
     assert events[3][1]["replicas"] is replicas
+
+
+def test_separate_task_runner_forwards_controller_nsight_options(monkeypatch, separate_config):
+    separate_config.trainer.use_v1 = False
+    separate_config.global_profiler.tool = "nsys"
+    separate_config.global_profiler.steps = [1]
+    options = {"trace": "nvtx", "o": "resolved-controller-profile"}
+    build_options = Mock(return_value=options)
+    runner_class = Mock()
+    monkeypatch.setattr("verl_omni.utils.profiler.build_controller_nsight_launch_options", build_options)
+    monkeypatch.setattr(main_diffusion, "enable_rl_insight", Mock())
+    monkeypatch.setattr("verl_omni.utils.profiler.is_cuda_available", True)
+    monkeypatch.setattr(main_diffusion.ray, "is_initialized", lambda: True)
+    monkeypatch.setattr(main_diffusion.ray, "get", Mock())
+    monkeypatch.setattr("verl.utils.import_utils.is_nvtx_available", lambda: True)
+
+    main_diffusion.run_diffusion(separate_config, task_runner_class=runner_class)
+
+    build_options.assert_called_once_with(separate_config)
+    runner_class.options.assert_called_once_with(runtime_env={"nsight": options})
+
+
+def test_separate_actor_group_forwards_profile_kwargs(monkeypatch, separate_config):
+    trainer = object.__new__(ray_diffusion_trainer.PolicyGradientRayTrainer)
+    trainer.config = separate_config
+    trainer.hybrid_engine = False
+    trainer.role_worker_mapping = {Role.Actor: object}
+    trainer.use_reference_policy = False
+    trainer.ref_in_actor = False
+    trainer.use_teacher_policy = False
+    trainer.device_name = "cpu"
+    pool = object()
+    trainer.resource_pool_manager = Mock(resource_pool_dict={"global_pool": pool})
+    trainer.resource_pool_manager.get_resource_pool.return_value = pool
+    worker_group = Mock()
+    worker_group.spawn.return_value = {str(Role.Actor): worker_group}
+    trainer.ray_worker_group_cls = Mock(return_value=worker_group)
+    profile_kwargs = {"profile_steps": [7], "worker_nsight_options": {"o": "resolved-worker-profile"}}
+    build_kwargs = Mock(return_value=profile_kwargs)
+    monkeypatch.setattr(ray_diffusion_trainer, "build_worker_group_profile_kwargs", build_kwargs)
+    monkeypatch.setattr(ray_diffusion_trainer, "create_colocated_worker_cls", Mock(return_value=object()))
+
+    trainer._init_colocated_workers()
+
+    build_kwargs.assert_called_once_with(separate_config, device_name="cpu")
+    for key, value in profile_kwargs.items():
+        assert trainer.ray_worker_group_cls.call_args.kwargs[key] == value

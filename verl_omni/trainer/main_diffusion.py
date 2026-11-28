@@ -24,7 +24,7 @@ from omegaconf import OmegaConf
 from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
 from verl.trainer.distillation import is_distillation_enabled
 from verl.trainer.ppo.utils import need_reference_policy
-from verl.utils.device import auto_set_device, is_cuda_available
+from verl.utils.device import auto_set_device
 
 from verl_omni.trainer.diffusion.ray_diffusion_trainer import (
     CompositePolicyGradientRayTrainer,
@@ -35,6 +35,7 @@ from verl_omni.trainer.diffusion.ray_diffusion_trainer import (
 )
 from verl_omni.utils.config import resolve_lora_config, validate_config
 from verl_omni.utils.diffusion_attention import validate_attention_consistency
+from verl_omni.utils.profiler import build_controller_runner_options
 from verl_omni.utils.rl_insight import enable_rl_insight
 from verl_omni.workers.config.reward import (
     normalize_reward_config,
@@ -42,26 +43,6 @@ from verl_omni.workers.config.reward import (
     reward_role_required,
     warn_deprecated_reward_config,
 )
-
-
-def _count_controller_capture_ranges(profile_steps: list[int], profile_continuous_steps: bool) -> int:
-    """Return the number of CUDA profiler capture ranges emitted by the controller."""
-    steps = sorted(set(profile_steps))
-    if not profile_continuous_steps:
-        return len(steps)
-    return sum(index == 0 or step != steps[index - 1] + 1 for index, step in enumerate(steps))
-
-
-def _resolve_controller_nsight_options(config) -> dict:
-    """Resolve controller Nsight options for the configured profiling steps."""
-    nsight_options = OmegaConf.to_container(config.global_profiler.global_tool_config.nsys.controller_nsight_options)
-    if nsight_options.get("capture-range") == "cudaProfilerApi" and nsight_options.get("capture-range-end") is None:
-        capture_count = _count_controller_capture_ranges(
-            OmegaConf.select(config, "global_profiler.steps"),
-            OmegaConf.select(config, "global_profiler.profile_continuous_steps", default=False),
-        )
-        nsight_options["capture-range-end"] = f"repeat-shutdown:{capture_count}"
-    return nsight_options
 
 
 @hydra.main(config_path="./config", config_name="diffusion_trainer", version_base=None)
@@ -171,21 +152,8 @@ def run_diffusion(config, task_runner_class=None) -> None:
     if task_runner_class is None:
         task_runner_class = ray.remote(num_cpus=1)(TaskRunner)  # please make sure main_task is not scheduled on head
 
-    # When NVIDIA Nsight Systems is selected for the controller, launch the TaskRunner under nsys
-    # using the Ray runtime env, mirroring verl/trainer/main_ppo.py.
-    if (
-        is_cuda_available
-        and OmegaConf.select(config, "global_profiler.tool") == "nsys"
-        and OmegaConf.select(config, "global_profiler.steps") is not None
-        and len(OmegaConf.select(config, "global_profiler.steps")) > 0
-    ):
-        from verl.utils.import_utils import is_nvtx_available
-
-        assert is_nvtx_available(), "nvtx is not available in CUDA platform. Please 'pip3 install nvtx'"
-        nsight_options = _resolve_controller_nsight_options(config)
-        runner = task_runner_class.options(runtime_env={"nsight": nsight_options}).remote()
-    else:
-        runner = task_runner_class.remote()
+    runner_options = build_controller_runner_options(config)
+    runner = task_runner_class.options(**runner_options).remote() if runner_options else task_runner_class.remote()
     ray.get(runner.run.remote(config))
 
     # [Optional] get the path of the timeline trace file from the configuration, default to None

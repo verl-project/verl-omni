@@ -259,6 +259,7 @@ def _launch_server(*, step_execution: bool = False, algorithm: str = "flow_grpo"
                 "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
                 "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES": "1",
                 "NCCL_CUMEM_ENABLE": "0",
+                "CUDA_VISIBLE_DEVICES": "0",
             }
         },
         max_concurrency=16,
@@ -271,7 +272,6 @@ def _launch_server(*, step_execution: bool = False, algorithm: str = "flow_grpo"
         node_rank=0,
         gpus_per_node=1,
         nnodes=1,
-        cuda_visible_devices="0",
     )
     ray.get(server.launch_server.remote())
     return server

@@ -223,8 +223,8 @@ class vLLMOmniHttpServer(vLLMHttpServer):
     def _validate_configs(self) -> None:
         self._generate_strategy.validate_configs()
 
-    def _post_init(self, cuda_visible_devices: str) -> None:
-        """Run strategy post-init and preserve the replica device list."""
+    def _post_init(self) -> None:
+        """Initialize backend state."""
         _normalize_rollout_logging_level()
         if get_rollout_sequence_parallel_size(self.config) > 1:
             self.replica_world_size = get_rollout_world_size(self.config)
@@ -242,16 +242,12 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             enable_full_determinism(seed=rollout_seed)
             os.environ["VERL_SEED"] = str(rollout_seed)
             os.environ["VLLM_BATCH_INVARIANT"] = "1"
-        # Set before vllm-omni narrows per-stage visible devices; stage workers
-        # remap their ZMQ ranks through this replica-level list.
-        os.environ["VERL_ZMQ_BASE_VISIBLE_DEVICES"] = cuda_visible_devices
-        self._generate_strategy.post_init(cuda_visible_devices)
         self._lora_request_cache: LoRARequest | None | object = _LORA_REQUEST_CACHE_MISS
         self._lora_resolve_lock = asyncio.Lock()
         # Mirrors the workers' set_pending stash: the bare follow-up
         # update_weights_from_ipc routes as an adapter-delta sync.
         self._pending_lora_delta = False
-        super()._post_init(cuda_visible_devices)
+        super()._post_init()
 
     # -----------------------------------------------------------------------
     # launch_server hooks
@@ -823,3 +819,9 @@ class vLLMOmniReplica(vLLMReplica):
 
     def _get_server_name_prefix(self) -> str:
         return "vllm_omni_"
+
+    def _build_server_runtime_env(self, node_rank: int, cuda_visible_devices: str, node_ids: list[str]) -> dict:
+        runtime_env = super()._build_server_runtime_env(node_rank, cuda_visible_devices, node_ids)
+        # Stage workers narrow visibility but need the full replica list for ZMQ rank mapping.
+        runtime_env["env_vars"]["VERL_ZMQ_BASE_VISIBLE_DEVICES"] = cuda_visible_devices
+        return runtime_env

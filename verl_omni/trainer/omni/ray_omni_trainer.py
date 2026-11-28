@@ -43,6 +43,7 @@ from verl.utils.dataset.dataset_utils import DatasetPadMode
 from verl.utils.debug import marked_timer
 from verl.utils.fs import local_mkdir_safe
 from verl.utils.metric import reduce_metrics
+from verl.utils.profiler import build_worker_group_profile_kwargs
 from verl.utils.py_functional import rename_dict
 from verl.utils.tracking import Tracking
 
@@ -347,21 +348,9 @@ class OmniDirectPreferenceRayTrainer:
             self.resource_pool_to_cls[resource_pool][str(Role.RefPolicy)] = ref_policy_cls
 
         all_wg = {}
-        wg_kwargs = {}
+        wg_kwargs = build_worker_group_profile_kwargs(self.config, device_name=self.device_name)
         if OmegaConf.select(self.config.trainer, "ray_wait_register_center_timeout") is not None:
             wg_kwargs["ray_wait_register_center_timeout"] = self.config.trainer.ray_wait_register_center_timeout
-        if OmegaConf.select(self.config, "global_profiler.steps") is not None:
-            wg_kwargs["profile_steps"] = OmegaConf.select(self.config.global_profiler, "steps")
-            if OmegaConf.select(self.config.global_profiler, "tool") == "nsys":
-                worker_nsight_options = OmegaConf.select(
-                    self.config.global_profiler.global_tool_config.nsys, "worker_nsight_options"
-                )
-                assert worker_nsight_options is not None, (
-                    "global_profiler.global_tool_config.nsys.worker_nsight_options must be set "
-                    "when using nsys with global_profiler.steps"
-                )
-                wg_kwargs["worker_nsight_options"] = OmegaConf.to_container(worker_nsight_options)
-        wg_kwargs["device_name"] = self.device_name
 
         pools = [(pool, class_dict) for pool, class_dict in self.resource_pool_to_cls.items() if class_dict]
         master_port_range = OmegaConf.select(self.config.trainer, "ray_master_port_range")

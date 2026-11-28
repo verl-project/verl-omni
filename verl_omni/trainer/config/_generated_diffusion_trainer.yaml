@@ -49,6 +49,7 @@ actor_rollout_ref:
       all_ranks: false
       ranks: []
       save_path: ${oc.select:global_profiler.save_path,outputs/profile}
+      ray_actor_nsight_options: ${oc.select:global_profiler.global_tool_config.nsys.worker_nsight_options,null}
       relocate_results: ${oc.select:global_profiler.relocate_results,false}
       finish_hook_cmd: ${oc.select:global_profiler.finish_hook_cmd,null}
       finish_hook_all_ranks: ${oc.select:global_profiler.finish_hook_all_ranks,false}
@@ -171,6 +172,7 @@ actor_rollout_ref:
       all_ranks: false
       ranks: []
       save_path: ${oc.select:global_profiler.save_path,outputs/profile}
+      ray_actor_nsight_options: ${oc.select:global_profiler.global_tool_config.nsys.worker_nsight_options,null}
       relocate_results: ${oc.select:global_profiler.relocate_results,false}
       finish_hook_cmd: ${oc.select:global_profiler.finish_hook_cmd,null}
       finish_hook_all_ranks: ${oc.select:global_profiler.finish_hook_all_ranks,false}
@@ -208,6 +210,7 @@ actor_rollout_ref:
       all_ranks: false
       ranks: []
       save_path: ${oc.select:global_profiler.save_path,outputs/profile}
+      ray_actor_nsight_options: ${oc.select:global_profiler.global_tool_config.nsys.worker_nsight_options,null}
       relocate_results: ${oc.select:global_profiler.relocate_results,false}
       finish_hook_cmd: ${oc.select:global_profiler.finish_hook_cmd,null}
       finish_hook_all_ranks: ${oc.select:global_profiler.finish_hook_all_ranks,false}
@@ -504,6 +507,42 @@ data:
     name: null
   apply_chat_template_kwargs: {}
 reward:
+  profiler:
+    _target_: verl.utils.profiler.ProfilerConfig
+    tool: torch
+    enable: false
+    all_ranks: false
+    ranks: []
+    save_path: ${oc.select:global_profiler.save_path,outputs/profile}
+    ray_actor_nsight_options: ${oc.select:global_profiler.global_tool_config.nsys.worker_nsight_options,null}
+    relocate_results: ${oc.select:global_profiler.relocate_results,false}
+    finish_hook_cmd: ${oc.select:global_profiler.finish_hook_cmd,null}
+    finish_hook_all_ranks: ${oc.select:global_profiler.finish_hook_all_ranks,false}
+    finish_hook_ranks: ${oc.select:global_profiler.finish_hook_ranks,[]}
+    tool_config:
+      npu:
+        _target_: verl.utils.profiler.config.NPUToolConfig
+        contents: []
+        level: level0
+        analysis: true
+        discrete: false
+        profile_token_start: null
+        profile_token_end: null
+        name: npu
+      nsys:
+        _target_: verl.utils.profiler.config.NsightToolConfig
+        discrete: ${oc.select:global_profiler.global_tool_config.nsys.discrete,false}
+        name: nsight
+      torch:
+        _target_: verl.utils.profiler.config.TorchProfilerToolConfig
+        contents: []
+        discrete: false
+        name: torch
+      torch_memory:
+        _target_: verl.utils.profiler.config.TorchMemoryToolConfig
+        trace_alloc_max_entries: ${oc.select:global_profiler.global_tool_config.torch_memory.trace_alloc_max_entries,100000}
+        stack_depth: ${oc.select:global_profiler.global_tool_config.torch_memory.stack_depth,32}
+        name: torch_memory
   reward_model:
     rollout:
       profiler:
@@ -513,6 +552,7 @@ reward:
         all_ranks: false
         ranks: []
         save_path: ${oc.select:global_profiler.save_path,outputs/profile}/reward_model
+        ray_actor_nsight_options: ${oc.select:global_profiler.global_tool_config.nsys.worker_nsight_options,null}
         relocate_results: ${oc.select:global_profiler.relocate_results,false}
         finish_hook_cmd: ${oc.select:global_profiler.finish_hook_cmd,null}
         finish_hook_all_ranks: ${oc.select:global_profiler.finish_hook_all_ranks,false}
@@ -778,6 +818,7 @@ global_profiler:
         trace: cuda,nvtx,cublas,ucx
         cuda-memory-usage: 'true'
         cuda-graph-trace: graph
+      gpu_metrics_nsight_options: {}
       worker_nsight_options:
         trace: cuda,nvtx,cublas,ucx
         cuda-memory-usage: 'true'

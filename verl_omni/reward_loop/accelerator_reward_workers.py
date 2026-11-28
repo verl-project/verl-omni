@@ -23,6 +23,7 @@ from typing import Any
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from verl.plugin.platform import get_platform
 from verl.utils.device import get_device_name
+from verl.utils.profiler import build_ray_actor_nsight_launch_options, resolve_ray_actor_profiler_config
 
 
 class _IndexedResourcePool:
@@ -48,6 +49,7 @@ def build_accelerator_reward_workers(
     reward_model_specs=None,
     bundle_indices=None,
     worker_name_prefix="reward_loop_worker",
+    profile_rank_offset=0,
 ):
     """Create reward workers bound one-per-bundle in an accelerator pool.
 
@@ -60,6 +62,7 @@ def build_accelerator_reward_workers(
         bundle_indices: Optional pool-relative bundle indices. When omitted,
             the first ``reward.num_workers`` bundles are selected.
         worker_name_prefix: Prefix for Ray actor names.
+        profile_rank_offset: First profiler rank in the flattened reward worker list.
 
     Returns:
         A list of Ray reward-worker actor handles.
@@ -137,14 +140,23 @@ def build_accelerator_reward_workers(
         raise ValueError(f"reward.num_workers ({num_workers}) exceeds accelerator pool size ({len(bundles)})")
 
     accelerator_options = get_platform().ray_resource_options(1 / accelerator_resource_pool.max_colocate_count)
-    return [
-        reward_loop_workers_class.options(
-            **accelerator_options,
-            name=f"{worker_name_prefix}_{worker_index}",
-            scheduling_strategy=PlacementGroupSchedulingStrategy(
-                placement_group=placement_group,
-                placement_group_bundle_index=bundle_index,
-            ),
-        ).remote(config, reward_router_address, reward_model_specs or {})
-        for worker_index, (placement_group, bundle_index) in enumerate(selected_bundles)
-    ]
+    workers = []
+    profiler_config = resolve_ray_actor_profiler_config(config.reward.profiler, config)
+    for worker_index, (placement_group, bundle_index) in enumerate(selected_bundles):
+        options = dict(accelerator_options)
+        nsight_options = build_ray_actor_nsight_launch_options(
+            profiler_config, rank=profile_rank_offset + worker_index, role="reward_loop"
+        )
+        if nsight_options is not None:
+            options["runtime_env"] = {"nsight": nsight_options}
+        workers.append(
+            reward_loop_workers_class.options(
+                **options,
+                name=f"{worker_name_prefix}_{worker_index}",
+                scheduling_strategy=PlacementGroupSchedulingStrategy(
+                    placement_group=placement_group,
+                    placement_group_bundle_index=bundle_index,
+                ),
+            ).remote(config, reward_router_address, reward_model_specs or {})
+        )
+    return workers

@@ -1,4 +1,4 @@
-# Copyright 2026 Bytedance Ltd. and/or its affiliates
+# Copyright (c) 2026, NVIDIA CORPORATION. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -11,176 +11,188 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""CPU contracts for accelerator-bound reward worker placement."""
+"""Omni reward-manager wiring to the shared worker profiler lifecycle."""
 
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
+from omegaconf import OmegaConf
+from verl.experimental.reward_loop.reward_loop import RewardLoopManager
 
-from verl_omni.reward_loop import accelerator_reward_workers as worker_module
-
-
-class _FakeActorClass:
-    def options(self, **options):
-        class _ConfiguredActor:
-            def remote(self, *args):
-                return SimpleNamespace(options=options, args=args)
-
-        return _ConfiguredActor()
+from verl_omni.reward_loop import reward_loop as omni_module
+from verl_omni.reward_loop.reward_loop import OmniRewardLoopManager
 
 
-class _FakeResourcePool:
-    store = [2, 1]
-    max_colocate_count = 3
+def test_accelerator_manager_initializes_profilers_after_workers(monkeypatch):
+    config = OmegaConf.create({"reward": {"reward_model": {"enable": False}}})
+    workers = [object()]
+    events = []
+    monkeypatch.setattr(omni_module.ray, "remote", Mock())
+    monkeypatch.setattr(omni_module, "resolve_reward_manager_cls", Mock())
+    monkeypatch.setattr(omni_module, "accelerator_workers_enabled", lambda _: True)
+    monkeypatch.setattr(omni_module, "has_reward_models", lambda _: False)
+    monkeypatch.setattr(omni_module, "MultiRewardModelManager", lambda *args, **kwargs: SimpleNamespace(models={}))
 
-    def __init__(self):
-        self.device_name = None
+    def create_workers(manager):
+        manager.reward_loop_workers = workers
+        events.append("workers")
 
-    def get_placement_groups(self, device_name):
-        self.device_name = device_name
-        return ["pg0", "pg1"]
+    def initialize_profilers(manager):
+        assert manager.reward_loop_workers is workers
+        events.append("profilers")
 
+    monkeypatch.setattr(OmniRewardLoopManager, "_init_reward_loop_workers", create_workers)
+    monkeypatch.setattr(RewardLoopManager, "_init_reward_loop_profilers", initialize_profilers)
 
-class _FakeSubResourcePool(_FakeResourcePool):
-    store = [4, 4]
-    start_bundle_index = 2
-    world_size = 3
+    OmniRewardLoopManager(config)
 
-
-def _config(num_workers):
-    return SimpleNamespace(reward=SimpleNamespace(num_workers=num_workers))
+    assert events == ["workers", "profilers"]
 
 
-def _build_workers(num_workers, resource_pool):
-    return worker_module.build_accelerator_reward_workers(
-        config=_config(num_workers),
-        reward_loop_workers_class=_FakeActorClass(),
-        accelerator_resource_pool=resource_pool,
-        reward_router_address="router",
-        reward_model_specs={"native": "spec"},
+def test_replica_stop_failure_still_stops_workers(monkeypatch):
+    manager = object.__new__(OmniRewardLoopManager)
+    stop = Mock()
+    monkeypatch.setattr(RewardLoopManager, "stop_profile", stop)
+    manager._run_on_replicas = Mock(side_effect=RuntimeError("replica stop failed"))
+
+    with pytest.raises(RuntimeError, match="replica stop"):
+        manager.stop_profile(run_command=False)
+
+    stop.assert_called_once_with(run_command=False)
+
+
+def test_serving_profiler_ranks_use_flattened_group_offset(monkeypatch, reward_worker_class):
+    from omegaconf import OmegaConf
+
+    from verl_omni.reward_loop import reward_loop as reward_module
+
+    config = OmegaConf.create(
+        {
+            "reward": {
+                "num_workers": 2,
+                "profiler": {
+                    "tool": "nsys",
+                    "enable": True,
+                    "ranks": [3],
+                    "ray_actor_nsight_options": {"trace": "cuda", "o": "{role}_rank_{rank}"},
+                },
+            }
+        }
     )
-
-
-def _build_selected_workers(bundle_indices, resource_pool, prefix="native_reward_loop_worker_pickscore"):
-    return worker_module.build_accelerator_reward_workers(
-        config=_config(99),
-        reward_loop_workers_class=_FakeActorClass(),
-        accelerator_resource_pool=resource_pool,
-        reward_router_address="router",
-        reward_model_specs={"pickscore": "spec"},
-        bundle_indices=bundle_indices,
-        worker_name_prefix=prefix,
-    )
-
-
-def test_accelerator_reward_workers_use_distinct_resource_pool_bundles(monkeypatch):
-    resource_pool = _FakeResourcePool()
-    monkeypatch.setattr(worker_module, "get_device_name", lambda: "npu")
+    manager = object.__new__(reward_module.OmniRewardLoopManager)
+    manager._reward_worker_groups = {"shared": [object(), object()]}
+    manager.reward_loop_workers_class = reward_worker_class
+    manager.reward_router_address = None
     monkeypatch.setattr(
-        worker_module,
+        reward_module.ray, "nodes", lambda: [{"NodeID": "01" * 28, "Alive": True, "Resources": {"CPU": 1}}]
+    )
+    monkeypatch.setattr(
+        reward_module,
         "get_platform",
-        lambda: SimpleNamespace(ray_resource_options=lambda count: {"resources": {"NPU": count}}),
-    )
-    monkeypatch.setattr(
-        worker_module,
-        "PlacementGroupSchedulingStrategy",
-        lambda placement_group, placement_group_bundle_index: (placement_group, placement_group_bundle_index),
+        lambda: SimpleNamespace(ray_noset_envvars=lambda: ["RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES"]),
     )
 
-    workers = _build_workers(3, resource_pool)
+    workers = manager._create_node_affinity_workers(config, {}, "reward-worker")
 
-    assert resource_pool.device_name == "npu"
-    assert len(workers) == 3
-    assert [worker.options["scheduling_strategy"] for worker in workers] == [
-        ("pg0", 0),
-        ("pg1", 0),
-        ("pg0", 1),
-    ]
-    assert all(worker.options["resources"] == {"NPU": 1 / 3} for worker in workers)
-    assert all(worker.args[1:] == ("router", {"native": "spec"}) for worker in workers)
+    assert "runtime_env" not in workers[0].options
+    assert workers[1].options["runtime_env"]["nsight"]["o"] == "reward_loop_rank_3"
+    assert workers[1].options["runtime_env"]["env_vars"] == {"RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1"}
 
 
-def test_accelerator_reward_workers_require_enough_bundles():
-    with pytest.raises(ValueError, match="exceeds accelerator pool size"):
-        _build_workers(4, _FakeResourcePool())
+@pytest.mark.parametrize(
+    "method,kwargs",
+    [
+        ("start_profile", {"profile_step": 2}),
+        (
+            "start_profile",
+            {
+                "profile_step": 2,
+                "role": "reward",
+                "profile_prefix": "reward",
+                "delay_iterations": 1,
+                "max_iterations": 4,
+                "profiler_kwargs": {"record_shapes": True},
+            },
+        ),
+        ("stop_profile", {"run_command": False}),
+    ],
+    ids=["start-with-step", "start-with-step-and-engine-options", "stop"],
+)
+def test_manager_delegates_to_workers_and_rollout_replicas(monkeypatch, method, kwargs):
+    manager = object.__new__(OmniRewardLoopManager)
+    events = []
+
+    class Replica:
+        def __init__(self, name):
+            self.name = name
+
+        async def start_profile(self, **kwargs):
+            events.append((self.name, kwargs))
+
+        async def stop_profile(self):
+            events.append((self.name, {}))
+
+    manager.reward_model_manager = SimpleNamespace(rollout_replicas=[Replica("legacy")])
+    manager.multi_reward_model_manager = SimpleNamespace(
+        models={
+            "engine": SimpleNamespace(reward_model_manager=SimpleNamespace(rollout_replicas=[Replica("engine")])),
+            "native": SimpleNamespace(),
+        }
+    )
+    workers = Mock(side_effect=lambda **kwargs: events.append(("workers", kwargs)))
+    monkeypatch.setattr(RewardLoopManager, method, workers)
+
+    getattr(manager, method)(**kwargs)
+
+    if method == "start_profile":
+        assert events == [("workers", kwargs), ("legacy", kwargs), ("engine", kwargs)]
+    else:
+        assert events == [("legacy", {}), ("engine", {}), ("workers", kwargs)]
 
 
-def test_accelerator_reward_workers_require_colocation_capacity():
-    resource_pool = _FakeResourcePool()
-    resource_pool.max_colocate_count = 1
-
-    with pytest.raises(ValueError, match="max_colocate_count >= 2"):
-        _build_workers(1, resource_pool)
-
-
-def test_accelerator_reward_workers_respect_subpool_bundle_offset(monkeypatch):
-    resource_pool = _FakeSubResourcePool()
-    monkeypatch.setattr(worker_module, "get_device_name", lambda: "npu")
+@pytest.mark.parametrize(
+    "profiler,profiled_indices",
+    [
+        (None, []),
+        (
+            {
+                "tool": "nsys",
+                "enable": True,
+                "ranks": [3],
+                "ray_actor_nsight_options": {"trace": "cuda", "o": "{role}_rank_{rank}"},
+            },
+            [1],
+        ),
+    ],
+    ids=["disabled", "selected-cpu-native-rank"],
+)
+def test_cpu_native_workers_receive_ranked_nsight_options(monkeypatch, reward_worker_class, profiler, profiled_indices):
+    config = OmegaConf.create({"reward": {"profiler": profiler}})
+    specs = {"cpu": "model-spec"}
+    manager = object.__new__(OmniRewardLoopManager)
+    manager._reward_worker_groups = {"shared": [object(), object()]}
+    manager.reward_loop_workers_class = reward_worker_class
+    manager.multi_reward_model_manager = SimpleNamespace(
+        models={"cpu": SimpleNamespace(placement=SimpleNamespace(is_cpu=True, num_replicas=2, cpus_per_worker=4))}
+    )
     monkeypatch.setattr(
-        worker_module,
+        omni_module,
         "get_platform",
-        lambda: SimpleNamespace(ray_resource_options=lambda count: {"resources": {"NPU": count}}),
-    )
-    monkeypatch.setattr(
-        worker_module,
-        "PlacementGroupSchedulingStrategy",
-        lambda placement_group, placement_group_bundle_index: (placement_group, placement_group_bundle_index),
+        lambda: SimpleNamespace(ray_noset_envvars=lambda: ["RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES"]),
     )
 
-    workers = _build_workers(3, resource_pool)
+    workers = manager._create_native_workers(config, specs, "cpu", "native_cpu")
 
-    assert [worker.options["scheduling_strategy"] for worker in workers] == [
-        ("pg0", 2),
-        ("pg0", 3),
-        ("pg1", 0),
-    ]
-
-
-def test_accelerator_reward_workers_allow_explicit_native_bundle_indices(monkeypatch):
-    resource_pool = _FakeSubResourcePool()
-    monkeypatch.setattr(worker_module, "get_device_name", lambda: "npu")
-    monkeypatch.setattr(
-        worker_module,
-        "get_platform",
-        lambda: SimpleNamespace(ray_resource_options=lambda count: {"resources": {"NPU": count}}),
-    )
-    monkeypatch.setattr(
-        worker_module,
-        "PlacementGroupSchedulingStrategy",
-        lambda placement_group, placement_group_bundle_index: (placement_group, placement_group_bundle_index),
-    )
-
-    workers = _build_selected_workers([0, 2], resource_pool)
-
-    assert [worker.options["scheduling_strategy"] for worker in workers] == [("pg0", 2), ("pg1", 0)]
-    assert [worker.options["name"] for worker in workers] == [
-        "native_reward_loop_worker_pickscore_0",
-        "native_reward_loop_worker_pickscore_1",
-    ]
-    assert all(worker.args[1:] == ("router", {"pickscore": "spec"}) for worker in workers)
-
-
-def test_accelerator_reward_workers_respect_indexed_pool_global_bundles(monkeypatch):
-    parent_pool = _FakeResourcePool()
-    resource_pool = worker_module._IndexedResourcePool(parent_pool, [0, 2])
-    monkeypatch.setattr(worker_module, "get_device_name", lambda: "npu")
-    monkeypatch.setattr(
-        worker_module,
-        "get_platform",
-        lambda: SimpleNamespace(ray_resource_options=lambda count: {"resources": {"NPU": count}}),
-    )
-    monkeypatch.setattr(
-        worker_module,
-        "PlacementGroupSchedulingStrategy",
-        lambda placement_group, placement_group_bundle_index: (placement_group, placement_group_bundle_index),
-    )
-
-    workers = _build_workers(2, resource_pool)
-
-    assert resource_pool.world_size == 2
-    assert [worker.options["scheduling_strategy"] for worker in workers] == [("pg0", 0), ("pg1", 0)]
-
-
-def test_accelerator_reward_workers_reject_invalid_explicit_bundle_indices():
-    with pytest.raises(ValueError, match="bundle index 3 exceeds"):
-        _build_selected_workers([3], _FakeResourcePool())
+    assert len(workers) == 2
+    for index, worker in enumerate(workers):
+        assert worker.options["num_cpus"] == 4
+        assert worker.options["name"] == f"native_cpu_{index}"
+        assert worker.args == (config, None, specs)
+        if index in profiled_indices:
+            assert worker.options["runtime_env"] == {
+                "nsight": {"trace": "cuda", "o": "reward_loop_rank_3"},
+                "env_vars": {"RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1"},
+            }
+        else:
+            assert "runtime_env" not in worker.options

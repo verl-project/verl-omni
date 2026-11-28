@@ -27,6 +27,7 @@ from verl.utils.import_utils import load_class_from_fqn
 
 from verl_omni.utils.config import validate_config
 from verl_omni.utils.diffusion_attention import validate_attention_consistency
+from verl_omni.utils.profiler import build_controller_runner_options
 from verl_omni.utils.rl_insight import enable_rl_insight
 from verl_omni.workers.config.reward import (
     get_reward_model_entries,
@@ -52,28 +53,6 @@ def run_diffusion_v1(config, task_runner_class=None) -> None:
     """
     config = normalize_reward_config(config)
     warn_deprecated_reward_config(config)
-    # Reject unsupported profiling combinations before starting Ray or workers.
-    if OmegaConf.select(config, "global_profiler.steps"):
-        if (
-            OmegaConf.select(config, "global_profiler.tool") == "nsys"
-            and OmegaConf.select(
-                config, "global_profiler.global_tool_config.nsys.controller_nsight_options.capture-range"
-            )
-            == "cudaProfilerApi"
-        ):
-            raise ValueError(
-                "Diffusion V1 does not support controller-side Nsight capture-range=cudaProfilerApi. "
-                "Remove global_profiler.global_tool_config.nsys.controller_nsight_options.capture-range; "
-                "worker-side capture-range settings are unaffected."
-            )
-        if OmegaConf.select(config, "actor_rollout_ref.rollout.profiler.enable", default=False) and OmegaConf.select(
-            config, "global_profiler.profile_continuous_steps", default=False
-        ):
-            raise ValueError(
-                "Diffusion V1 rollout profiling requires global_profiler.profile_continuous_steps=False. "
-                "Disable actor_rollout_ref.rollout.profiler.enable for actor-only continuous profiling."
-            )
-
     # TransferQueue is required for v1; force-enable it before ray.init() so
     # TRANSFER_QUEUE_ENABLE is exported to every worker through the runtime env.
     config.transfer_queue.enable = True
@@ -96,21 +75,8 @@ def run_diffusion_v1(config, task_runner_class=None) -> None:
     if task_runner_class is None:
         task_runner_class = DiffusionTaskRunnerV1
 
-    if (
-        is_cuda_available
-        and OmegaConf.select(config, "global_profiler.tool") == "nsys"
-        and OmegaConf.select(config, "global_profiler.steps") is not None
-        and len(OmegaConf.select(config, "global_profiler.steps")) > 0
-    ):
-        from verl.utils.import_utils import is_nvtx_available
-
-        assert is_nvtx_available(), "nvtx is not available in CUDA platform. Please 'pip3 install nvtx'"
-        from verl_omni.trainer.main_diffusion import _resolve_controller_nsight_options
-
-        nsight_options = _resolve_controller_nsight_options(config)
-        runner = task_runner_class.options(runtime_env={"nsight": nsight_options}).remote()
-    else:
-        runner = task_runner_class.remote()
+    runner_options = build_controller_runner_options(config)
+    runner = task_runner_class.options(**runner_options).remote() if runner_options else task_runner_class.remote()
     ray.get(runner.run.remote(config))
 
     timeline_json_file = config.ray_kwargs.get("timeline_json_file", None)

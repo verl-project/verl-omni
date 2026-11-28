@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Reject unsupported V1 profiling combinations before distributed startup."""
+"""Check accepted V1 profiling configurations before distributed startup."""
 
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -60,53 +60,17 @@ def config(*, tool="torch", mode="sync", steps=(1, 2), continuous=False, rollout
     )
 
 
-@pytest.mark.parametrize("mode", ["sync", "separate_async"])
-def test_reject_controller_cuda_capture_before_startup(startup, mode):
-    cfg = config(tool="nsys", mode=mode)
-    cfg.global_profiler.global_tool_config.nsys.controller_nsight_options["capture-range"] = "cudaProfilerApi"
-    with pytest.raises(ValueError, match="controller-side Nsight capture-range=cudaProfilerApi"):
-        entrypoint.run_diffusion_v1(cfg)
-    startup.assert_not_called()
-
-
-@pytest.mark.parametrize("mode", ["sync", "separate_async"])
-@pytest.mark.parametrize("tool", ["nsys", "npu", "torch"])
-def test_allow_default_worker_capture_and_noncontinuous_profiling(startup, mode, tool):
-    with pytest.raises(StartupReached):
-        entrypoint.run_diffusion_v1(config(tool=tool, mode=mode))
-    startup.assert_called_once()
-
-
-@pytest.mark.parametrize("tool", ["npu", "torch"])
-def test_inactive_nsight_options_do_not_reject_other_tools(startup, tool):
-    cfg = config(tool=tool)
+def test_allow_controller_cuda_capture_before_startup(startup):
+    cfg = config(tool="nsys")
     cfg.global_profiler.global_tool_config.nsys.controller_nsight_options["capture-range"] = "cudaProfilerApi"
     with pytest.raises(StartupReached):
         entrypoint.run_diffusion_v1(cfg)
     startup.assert_called_once()
 
 
-@pytest.mark.parametrize("mode", ["sync", "separate_async"])
-@pytest.mark.parametrize("tool", ["npu", "torch"])
-def test_reject_continuous_rollout_before_startup(startup, mode, tool):
-    with pytest.raises(ValueError, match="global_profiler.profile_continuous_steps=False"):
-        entrypoint.run_diffusion_v1(config(tool=tool, mode=mode, continuous=True))
-    startup.assert_not_called()
-
-
-@pytest.mark.parametrize("tool", ["npu", "torch"])
-def test_allow_actor_only_continuous_profiling(startup, tool):
+def test_allow_continuous_rollout_before_startup(startup):
     with pytest.raises(StartupReached):
-        entrypoint.run_diffusion_v1(config(tool=tool, continuous=True, rollout=False))
-    startup.assert_called_once()
-
-
-@pytest.mark.parametrize("steps", [None, []])
-def test_inactive_profiling_does_not_reject_unused_options(startup, steps):
-    cfg = config(tool="nsys", steps=steps, continuous=True)
-    cfg.global_profiler.global_tool_config.nsys.controller_nsight_options["capture-range"] = "cudaProfilerApi"
-    with pytest.raises(StartupReached):
-        entrypoint.run_diffusion_v1(cfg)
+        entrypoint.run_diffusion_v1(config(tool="torch", continuous=True))
     startup.assert_called_once()
 
 
@@ -142,12 +106,11 @@ def launch(monkeypatch):
     monkeypatch.setattr(entrypoint, "enable_rl_insight", Mock())
     monkeypatch.setattr(entrypoint.ray, "is_initialized", lambda: True)
     monkeypatch.setattr(entrypoint.ray, "get", lambda ref: ref)
-    monkeypatch.setattr(entrypoint, "is_cuda_available", True)
+    monkeypatch.setattr("verl_omni.utils.profiler.is_cuda_available", True)
     monkeypatch.setattr(entrypoint, "DiffusionTaskRunnerV1", actor)
     monkeypatch.setattr("verl.utils.import_utils.is_nvtx_available", lambda: True)
-    monkeypatch.setattr(
-        "verl_omni.trainer.main_diffusion._resolve_controller_nsight_options", lambda cfg: {"trace": "nvtx"}
-    )
+    actor.build_options = Mock(return_value={"trace": "nvtx"})
+    monkeypatch.setattr("verl_omni.utils.profiler.build_controller_nsight_launch_options", actor.build_options)
     return actor
 
 
@@ -162,12 +125,22 @@ def test_default_runner_reserves_one_cpu_on_the_class():
 
 
 def test_nsys_runner_adds_only_the_nsight_runtime_env(launch):
-    entrypoint.run_diffusion_v1(_launch_config("nsys"))
+    cfg = _launch_config("nsys")
+    entrypoint.run_diffusion_v1(cfg)
+    launch.build_options.assert_called_once_with(cfg)
     assert launch.calls == [{"runtime_env": {"nsight": {"trace": "nvtx"}}}]
 
 
-def test_non_nsys_runner_is_launched_directly(launch):
-    entrypoint.run_diffusion_v1(_launch_config("torch"))
+@pytest.mark.parametrize(
+    "cuda_available,tool,steps",
+    [(True, "torch", [1]), (False, "nsys", [1]), (True, "nsys", []), (True, "nsys", None)],
+    ids=["other-tool", "no-cuda", "empty-steps", "unset-steps"],
+)
+def test_runner_without_nsys_capture_is_launched_directly(launch, monkeypatch, cuda_available, tool, steps):
+    monkeypatch.setattr("verl_omni.utils.profiler.is_cuda_available", cuda_available)
+    cfg = _launch_config(tool)
+    cfg.global_profiler.steps = steps
+    entrypoint.run_diffusion_v1(cfg)
     assert launch.calls == [None]
 
 

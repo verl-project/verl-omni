@@ -430,6 +430,11 @@ global_profiler:
         # CUDA graphs will be traced as a whole.
         cuda-graph-trace: "graph"
 
+      # Dedicated system-wide GPU metrics session. An empty mapping disables it.
+      # Never add GPU metrics to controller_nsight_options or worker_nsight_options:
+      # multiple Ray processes would then contend for the same device counters.
+      gpu_metrics_nsight_options: {}
+
       # Worker-side Nsight Systems options. Must be set when using nsys with profile steps.
       worker_nsight_options:
 

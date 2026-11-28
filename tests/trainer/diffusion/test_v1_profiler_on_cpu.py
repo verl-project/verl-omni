@@ -120,6 +120,169 @@ def test_training_windows_and_shared_reference_group(continuous, expected):
     )
 
 
+def _make_trainer(monkeypatch, *, steps=(1,), continuous=True, controller_enabled=True):
+    events = []
+    trainer = object.__new__(PolicyGradientDiffusionTrainerV1Sync)
+    trainer.config = OmegaConf.create(
+        {
+            "trainer": {"total_epochs": 1},
+            "global_profiler": {
+                "tool": "nsys",
+                "steps": list(steps),
+                "profile_continuous_steps": continuous,
+                "global_tool_config": {
+                    "nsys": {
+                        "controller_nsight_options": {
+                            "capture-range": "cudaProfilerApi" if controller_enabled else None
+                        }
+                    }
+                },
+            },
+        }
+    )
+    trainer.global_steps = 1
+    trainer.total_training_steps = max(steps)
+    trainer.steps_per_epoch = max(steps)
+    trainer.prev_step_profile = False
+    trainer.curr_step_profile = 1 in steps
+    trainer.next_step_profile = False
+    trainer.use_reference_policy = False
+    trainer.use_teacher_policy = False
+    trainer.ref_policy_wg = None
+
+    def target(role):
+        return SimpleNamespace(
+            start_profile=Mock(side_effect=lambda **kwargs: events.append((f"{role}_start", kwargs))),
+            stop_profile=Mock(side_effect=lambda **kwargs: events.append((f"{role}_stop", kwargs))),
+        )
+
+    trainer.actor_rollout_wg = target("actor")
+    trainer.llm_server_manager = target("rollout")
+    trainer.reward_loop_manager = target("reward")
+    trainer.gpu_metrics_profiler = target("metrics")
+    platform = SimpleNamespace(
+        profiler_start=lambda: events.append("controller_start"),
+        profiler_stop=lambda: events.append("controller_stop"),
+    )
+    monkeypatch.setattr("verl_omni.utils.profiler.get_platform", lambda: platform)
+    trainer._init_profile_state()
+    return trainer, events
+
+
+@pytest.mark.parametrize(
+    "steps,continuous,window_starts",
+    [([1, 2], False, [1, 2]), ([1, 2, 4, 5], True, [1, 4])],
+    ids=["per-step", "continuous-with-gap"],
+)
+def test_added_roles_follow_configured_windows(monkeypatch, steps, continuous, window_starts):
+    trainer, events = _make_trainer(monkeypatch, steps=steps, continuous=continuous)
+
+    for step in range(1, max(steps) + 1):
+        trainer.global_steps = step
+        trainer._on_profiling_step_start()
+        trainer._stop_rollout_profiling()
+        trainer._on_profiling_step_end()
+
+    expected = []
+    for start in window_starts:
+        expected.extend(
+            [
+                "controller_start",
+                ("actor_start", {"role": "train", "profile_step": start}),
+                ("rollout_start", {}),
+                ("reward_start", {"profile_step": start}),
+                ("metrics_start", {"profile_step": start}),
+            ]
+        )
+        if not continuous:
+            expected.append(("rollout_stop", {}))
+        expected.extend(
+            (f"{role}_stop", {"run_command": start == window_starts[-1]}) for role in ("metrics", "reward", "actor")
+        )
+        if continuous:
+            expected.append(("rollout_stop", {}))
+        expected.append("controller_stop")
+    assert events == expected
+
+
+def test_controller_api_control_can_be_disabled_without_disabling_workers(monkeypatch):
+    trainer, events = _make_trainer(monkeypatch, controller_enabled=False)
+
+    trainer._open_profile_window()
+    trainer._close_profile_window(run_command=True)
+
+    assert [event[0] for event in events] == [
+        "actor_start",
+        "rollout_start",
+        "reward_start",
+        "metrics_start",
+        "metrics_stop",
+        "reward_stop",
+        "actor_stop",
+        "rollout_stop",
+    ]
+
+
+def test_cleanup_closes_added_roles_without_running_finish_commands(monkeypatch):
+    trainer, events = _make_trainer(monkeypatch, steps=[1, 2])
+    trainer._on_profiling_step_start()
+
+    trainer._cleanup_active_profiling()
+
+    assert events[-5:] == [
+        ("metrics_stop", {"run_command": False}),
+        ("reward_stop", {"run_command": False}),
+        ("actor_stop", {"run_command": False}),
+        ("rollout_stop", {}),
+        "controller_stop",
+    ]
+    assert not trainer._controller_profiler.active
+
+
+@pytest.mark.parametrize("role", ["actor", "reward", "metrics"])
+@pytest.mark.parametrize("action", ["start", "stop"])
+def test_target_failure_still_closes_controller_and_started_roles(monkeypatch, role, action):
+    trainer, events = _make_trainer(monkeypatch)
+    targets = {
+        "actor": trainer.actor_rollout_wg,
+        "reward": trainer.reward_loop_manager,
+        "metrics": trainer.gpu_metrics_profiler,
+    }
+    getattr(targets[role], f"{action}_profile").side_effect = RuntimeError(f"{role} {action} failed")
+
+    with pytest.raises(RuntimeError, match=f"{role} {action}"):
+        trainer._on_profiling_step_start()
+        trainer._on_profiling_step_end()
+
+    assert events[0] == "controller_start"
+    assert events[-1] == "controller_stop"
+    started_roles = ["actor", "reward", "metrics"]
+    if action == "start":
+        started_roles = started_roles[: started_roles.index(role) + 1]
+    for started_role in started_roles:
+        targets[started_role].stop_profile.assert_called_once_with(run_command=action == "stop")
+    assert not trainer._controller_profiler.active
+    assert not trainer._profile_window_active
+    assert not trainer._active_profile_targets
+    assert not trainer._active_rollout_profile_targets
+
+
+def test_trainer_init_creates_metrics_profiler(monkeypatch):
+    trainer = object.__new__(PolicyGradientDiffusionTrainerV1Sync)
+    trainer.config = OmegaConf.create({})
+    trainer._setup = Mock()
+    trainer._has_old_adapter = False
+    trainer.on_init_end = Mock()
+    metrics = object()
+    create_metrics = Mock(return_value=metrics)
+    monkeypatch.setattr("verl_omni.trainer.diffusion.v1.trainer_base.create_gpu_metrics_profiler", create_metrics)
+
+    trainer.init()
+
+    create_metrics.assert_called_once_with(trainer.config)
+    assert trainer.gpu_metrics_profiler is metrics
+
+
 @pytest.mark.parametrize("engine", ["dp_diffusion", "veomni_diffusion"])
 @pytest.mark.parametrize("mode,hybrid", [("sync", False), ("separate_async", False), ("separate_async", True)])
 @pytest.mark.parametrize("actor,rollout", [(True, False), (False, True), (True, True)])

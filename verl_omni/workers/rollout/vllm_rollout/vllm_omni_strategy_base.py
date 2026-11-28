@@ -113,16 +113,6 @@ class OmniStrategyBase(ABC):
         """
         return None
 
-    def post_init(self, cuda_visible_devices: str) -> None:
-        """Run at the end of ``vLLMOmniHttpServer`` post-initialization.
-
-        Default no-op. Override to set up mode-specific server state.
-
-        Args:
-            cuda_visible_devices: The device string visible to this server.
-        """
-        return None
-
     def apply_quantization(self) -> dict[str, Any]:
         """Return the ``hf_overrides`` mapping for the engine.
 
