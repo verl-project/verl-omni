@@ -79,6 +79,16 @@ def _validate_collective_rpc_reply(method: str, result: Any) -> None:
             raise RuntimeError(f"{method} failed: {result}")
 
 
+def _flatten_bool_replies(result: Any) -> list[bool]:
+    """Flatten nested stage/worker boolean replies from a collective RPC."""
+    if isinstance(result, list | tuple):
+        flat: list[bool] = []
+        for item in result:
+            flat.extend(_flatten_bool_replies(item))
+        return flat
+    return [bool(result)]
+
+
 def _is_defaulted_value(key: str, value: Any, default: Any) -> bool:
     """Return True if *value* matches the upstream default for *key*."""
     if value == default:
@@ -443,6 +453,43 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             _validate_collective_rpc_reply(method, results)
             replies.extend(results)
         return replies
+
+    # -----------------------------------------------------------------------
+    # Weight-transfer session control (AsyncOmni four-phase + abort surface)
+    # -----------------------------------------------------------------------
+
+    async def init_weight_transfer_engine(self, init_info: dict[str, Any]) -> None:
+        """Initialize the weight-transfer engine on enabled rollout stages."""
+        await self.engine.init_weight_transfer_engine(init_info)
+
+    async def start_weight_update(self, update_id: str | None = None) -> None:
+        """Open a weight-update session on enabled rollout stages."""
+        if update_id is None:
+            await self.engine.start_weight_update()
+        else:
+            await self.engine.start_weight_update(update_id=update_id)
+
+    async def update_weights(self, update_info: dict[str, Any]) -> None:
+        """Deliver one weight-update chunk to enabled rollout stages."""
+        await self.engine.update_weights(update_info)
+
+    async def finish_weight_update(self, weight_version: str | None = None) -> None:
+        """Commit the active weight-update session on enabled rollout stages."""
+        if weight_version is None:
+            await self.engine.finish_weight_update()
+        else:
+            await self.engine.finish_weight_update(weight_version)
+
+    async def abort_weight_update(self, update_id: str | None = None) -> bool:
+        """Abort an active weight-update session on enabled stages without committing."""
+        args: tuple[Any, ...] = (update_id,) if update_id is not None else ()
+        weight_transfer_rpc = getattr(self.engine, "_weight_transfer_rpc", None)
+        if callable(weight_transfer_rpc):
+            results = await weight_transfer_rpc("abort_weight_update", args)
+            _validate_collective_rpc_reply("abort_weight_update", results)
+        else:
+            results = await self.collective_rpc(method="abort_weight_update", args=args, require_ack=True)
+        return any(_flatten_bool_replies(results))
 
     # -----------------------------------------------------------------------
     # wake_up hook: full wake must include kv_cache

@@ -100,9 +100,7 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
     def __new__(cls, **kwargs):
         set_death_signal()
 
-        # 1. patch for Lora
-        VLLMOmniHijack.hijack()
-        # 2. Teach the AR runners to return the thinker's last-layer hidden states
+        # 1. Teach the AR runners to return the thinker's last-layer hidden states
         # (full-vocab OPD teacher signal). The patch targets the runner inside
         # the StageEngineCoreProc sub-process, where server-actor installs do
         # not propagate; the worker extension materializes there.
@@ -197,6 +195,8 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
         )
 
         if peft_config and base_sync_done:
+            # Lazy: engine-merge mode never routes through add_lora and must not carry the patch.
+            VLLMOmniHijack.hijack()
             # In async mode, make sure the old lora is removed before adding the new one
             t0 = time.perf_counter()
             self.remove_lora(VLLM_LORA_INT_ID)

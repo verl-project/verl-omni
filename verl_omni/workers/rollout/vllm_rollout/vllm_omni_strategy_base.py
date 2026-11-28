@@ -23,6 +23,7 @@ from verl.utils.tracking import RLInsightLogger
 from vllm_omni.lora.request import LoRARequest
 
 from verl_omni.pipelines.rollout_request import OmniRolloutRequest
+from verl_omni.utils.config import resolve_lora_config
 
 if TYPE_CHECKING:
     from argparse import Namespace
@@ -169,6 +170,54 @@ class OmniStrategyBase(ABC):
         AR adapters can narrow actor weight synchronization to trainable stages.
         """
         return None
+
+    def _is_engine_merge(self) -> bool:
+        """Return True when ``model.lora.merge='engine'`` is configured."""
+        model_config = getattr(self.server, "model_config", None)
+        if model_config is None:
+            return False
+        nested = getattr(model_config, "lora", None)
+        if nested is None and hasattr(model_config, "get"):
+            nested = model_config.get("lora", None)
+        raw_merge = nested.get("merge", False) if hasattr(nested, "get") else False
+        if not isinstance(raw_merge, str):
+            return False
+        return resolve_lora_config(model_config).engine_merge
+
+    def _validate_engine_merge_overrides(self, engine_args: dict[str, Any], *, diffusion: bool) -> None:
+        """Reject conflicting ``weight_transfer_config`` or ``lora_application`` overrides."""
+        config = getattr(self.server, "config", None)
+        omni_kwargs = (getattr(config, "engine_kwargs", None) or {}).get("vllm_omni", {}) or {}
+        for source_name, mapping in (("engine_args", engine_args), ("engine_kwargs.vllm_omni", omni_kwargs)):
+            wt = mapping.get("weight_transfer_config")
+            if wt is not None:
+                backend = wt.get("backend") if isinstance(wt, dict) else getattr(wt, "backend", None)
+                if backend != "omni_lora_ipc":
+                    raise ValueError(
+                        f"Conflicting weight_transfer_config in {source_name} ({wt!r}): "
+                        "actor_rollout_ref.model.lora.merge='engine' requires backend='omni_lora_ipc'."
+                    )
+            if diffusion:
+                lora_app = mapping.get("lora_application")
+                if lora_app is not None and lora_app != "merged":
+                    raise ValueError(
+                        f"Conflicting lora_application in {source_name} ({lora_app!r}): "
+                        "actor_rollout_ref.model.lora.merge='engine' requires lora_application='merged'."
+                    )
+
+    def _apply_engine_merge_engine_args(self, engine_args: dict[str, Any], *, diffusion: bool) -> None:
+        """Select engine-side LoRA merge on the rollout engine args.
+
+        Arms the weight-transfer session with the ``omni_lora_ipc`` backend
+        (diffusion additionally switches ``lora_application``); the engine
+        validates the rest fail-closed at construction.
+        """
+        if not self._is_engine_merge():
+            return
+        self._validate_engine_merge_overrides(engine_args, diffusion=diffusion)
+        engine_args["weight_transfer_config"] = {"backend": "omni_lora_ipc"}
+        if diffusion:
+            engine_args["lora_application"] = "merged"
 
     @abstractmethod
     def prepare_engine_args(self, engine_args: dict[str, Any], args: Namespace) -> None:

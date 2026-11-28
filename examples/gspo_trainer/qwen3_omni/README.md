@@ -1,11 +1,23 @@
 # Qwen3-Omni Thinker GSPO recipes
 
-Last updated: 11/15/2026
+Last updated: 11/25/2026
 
 This directory contains both FSDP2 and Megatron recipes. For non-Megatron
 setup, data preparation and training instructions, see the
 [parent GSPO guide](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/README.md). The launchers below contain each recipe's
 defaults and accept CLI overrides.
+
+To run the colocated Thinker LoRA recipe with engine-side LoRA merge instead of
+actor-side merge (requires vLLM-Omni commit `95513b53` or newer on vLLM 0.34),
+override `lora.merge`:
+
+```bash
+bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_v1.sh \
+    actor_rollout_ref.model.lora.merge=Engine
+```
+
+See [LoRA rollout merge modes](../../../docs/examples/config.md#lora-rollout-merge-modes)
+for details.
 
 | Recipe | Backend / platform | Launcher |
 | --- | --- | --- |
