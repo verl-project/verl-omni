@@ -1,6 +1,6 @@
 # NPU Smoke Tests
 
-Last updated: 11/11/2026.
+Last updated: 11/25/2026.
 
 This guide explains how to add CI test cases for Huawei Ascend devices in verl-omni.
 
@@ -38,6 +38,8 @@ into these runners:
 | 21 | e2e | Qwen-Image DiffusionNFT V1 sync | tests/special_e2e/run_diffusionnft_qwen_image_npu.sh | 8 |
 | 22 | e2e | Qwen-Image FlowGRPO V1 separate-async | tests/special_e2e/run_flowgrpo_qwen_image_v1_separate_async_npu.sh | 8 |
 | 23 | e2e | MiniMax-H3 T2VA with managed ImageBind | tests/special_e2e/run_minimax_h3_imagebind_smoke.sh npu | 8 |
+| 29 | e2e | Qwen3-TTS full-parameter GRPO | tests/special_e2e/run_qwen3_tts_grpo_npu.sh | 8 |
+| 35 | e2e | SD3 CRD, independent EMA and checkpoint restore | tests/special_e2e/run_crd_sd35_npu.sh | 8 |
 
 Test IDs stay stable across companion PRs, so gaps are intentional. Core
 entries collect pytest cases; e2e entries run trainer workloads. These are
@@ -135,6 +137,30 @@ MODEL_PATH=/path/to/Qwen-Image-Edit NUM_NPUS=8 \
 Single-group runs retain the eight-NPU allocation. Full-CI shards use four
 NPUs per group; launchers derive their batches from that allocation and retain
 the training steps.
+
+### Qwen3-TTS
+
+Requires SoX, Qwen3-TTS at `.github/qwen_tts_pin.txt`, and the audio packages
+in `tests/npu_smoke/requirements_tts_smoke.txt`. The current CI image needs a
+temporary install step. Remove it after CI switches to an image built and
+verified with the same SDK revision, audio pins, and SoX.
+
+After installing the prerequisites, cache the tiny source configs and
+tokenizer files before an offline run:
+
+```bash
+bash tests/npu_smoke/prepare_tts_smoke.sh
+```
+
+Use `--check-only` to check SoX, audio imports, and the compatibility of
+the CI pins with the project dependency bounds without downloading the source.
+The launcher runs two full-parameter updates with the existing duration reward.
+
+### SD3 CRD
+
+The launcher builds its tiny SD3 checkpoint offline. Set `CRD_MODEL_PATH` to
+reuse an existing SD3 pipeline. It runs two updates and the distributed EMA
+and checkpoint-restore checks.
 
 ## Add a New NPU Smoke Test
 

@@ -60,9 +60,18 @@ run_test 5 "Bagel PickScore LoRA FlowGRPO e2e" \
     env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" \
     bash tests/special_e2e/run_flowgrpo_bagel_pickscore.sh "${diffusion_trainer_args[@]}"
 
-run_test 6 "FlowGRPO synchronous separate trainer e2e" \
-    env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" \
-    bash tests/special_e2e/run_flowgrpo_qwen_image_separate.sh "${diffusion_trainer_args[@]}"
+run_separate_flowgrpo_e2e() (
+    local store_dir
+    store_dir=$(mktemp -d /tmp/verl-gloo.XXXXXXXX) || return 1
+    trap 'rm -rf -- "${store_dir}"' EXIT
+    PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+        CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" \
+        bash tests/special_e2e/run_flowgrpo_qwen_image_separate.sh "${diffusion_trainer_args[@]}" \
+        +ray_kwargs.ray_init.address=local \
+        +ray_kwargs.ray_init.runtime_env.worker_process_setup_hook=tests.smoke_rendezvous.configure_gloo_file_store \
+        "+ray_kwargs.ray_init.runtime_env.env_vars.VERL_SMOKE_FILESTORE_DIR=${store_dir}"
+)
+run_test 6 "FlowGRPO synchronous separate trainer e2e" run_separate_flowgrpo_e2e
 
 run_test 7 "MiniMax-H3 FlowGRPO T2VA FSDP-SP with managed ImageBind v1 sync trainer e2e" \
     env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" ACTOR_SP=2 ROLLOUT_TP=2 \

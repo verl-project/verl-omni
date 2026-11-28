@@ -239,11 +239,15 @@ def assert_distributed_update(engine, actor, device):
 
 
 def main():
-    """Initialize one FSDP2 rank per GPU; fail if any checkpoint/update assertion fails."""
+    """Initialize one FSDP2 rank per accelerator and preserve every update/restore assertion."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", required=True)
     parser.add_argument("--checkpoint-dir", required=True)
     args = parser.parse_args()
+    if get_device_name() == "npu":
+        # The bitwise resume oracle requires deterministic NPU kernels and reductions.
+        os.environ["HCCL_DETERMINISTIC"] = "true"
+        torch.use_deterministic_algorithms(True)
     get_torch_device().set_device(int(os.environ["LOCAL_RANK"]))
     torch.distributed.init_process_group(get_nccl_backend())
     try:

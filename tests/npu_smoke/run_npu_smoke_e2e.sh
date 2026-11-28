@@ -44,5 +44,12 @@ run_test 22 "FlowGRPO V1 separate-async trainer e2e" \
 run_test 23 "MiniMax-H3 FlowGRPO T2VA with managed ImageBind v1 sync trainer e2e" \
     env -u MODEL_PATH NUM_NPUS="${NUM_NPUS}" ACTOR_SP=2 ROLLOUT_TP=2 \
     bash tests/special_e2e/run_minimax_h3_imagebind_smoke.sh npu
+run_test 29 "Qwen3-TTS full-parameter GRPO" \
+    env -u MODEL_PATH -u TOKENIZER_PATH -u TRAIN_FILES -u VAL_FILES \
+        WORK_DIR="${LOG_DIR}/test29_work" \
+    bash tests/special_e2e/run_qwen3_tts_grpo_npu.sh
+run_test 35 "SD3 CRD training, EMA and checkpoint restore" \
+    env -u MODEL_PATH -u TOKENIZER_PATH -u TRAIN_FILES -u VAL_FILES \
+    bash tests/special_e2e/run_crd_sd35_npu.sh
 cleanup_runtime
 print_summary
