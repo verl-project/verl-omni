@@ -16,11 +16,15 @@
 import re
 from typing import Any
 
-_ANSWER_TAG_RE = re.compile(r"<answer>\s*(.*?)\s*</answer>", re.DOTALL)
+_ANSWER_TAG_RE = re.compile(r"<answer>\s*(.*?)\s*</answer>", re.DOTALL | re.IGNORECASE)
 
 
 def extract_answer(text: Any) -> str:
-    """Return the first answer-tag payload, matching Relax's AVQA reward."""
+    """Return the first answer-tag payload, matching Relax's AVQA reward.
+
+    Tag matching is case-insensitive: the AVQA converter preserves
+    upper-case ``<ANSWER>`` ground truths alongside lower-case ones.
+    """
     match = _ANSWER_TAG_RE.search(str(text or ""))
     return match.group(1).strip() if match else ""
 
@@ -30,11 +34,20 @@ def compute_score(
     ground_truth: str,
     **kwargs,
 ) -> dict[str, float]:
-    """Return binary exact-match reward for content inside ``<answer>``."""
+    """Return binary exact-match reward for content inside ``<answer>``.
+
+    An untagged response (no ``<answer>`` payload) always scores 0; an
+    untagged ``ground_truth`` falls back to its raw text so a bare label
+    like ``"B"`` still matches a properly tagged prediction.  Without the
+    fallback, both ``extract_answer`` calls return ``""`` and an empty or
+    malformed response was silently scored as correct.
+    """
     del kwargs
     prediction = extract_answer(solution_str)
     target = extract_answer(ground_truth)
-    accuracy = float(prediction == target)
+    if not target:
+        target = str(ground_truth or "").strip()
+    accuracy = float(prediction == target) if prediction else 0.0
     return {
         "score": accuracy,
         "accuracy": accuracy,
